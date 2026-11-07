@@ -66,6 +66,48 @@ feedback. Tests cover actual source T/p, original claims and pair identity,
 independent molecular transport, strip refinement, source/domain refusal,
 cancellation and conserved deposition onto a bare substrate.
 
+### Live original gas films in resistive and growing deposition histories
+
+The mass_transfer::chamber adapter prepares a sparse, bounded roster of
+SourceLaminarPlateChamberFilms. It pins each actual binary diffusivity selection
+once, then re-evaluates that same D(T,p) law on every original full/half physical
+trial and zero-time admission. Actual bulk total pressure is queried; volatile
+partial pressure is not substituted. An explicit convention selects bulk
+temperature or the arithmetic mean of the current deposit and bulk temperatures.
+The current parcel's original model supplies viscosity/density at its evolving
+composition. Bulk/equal-temperature evaluations reuse the parcel's existing
+resolved state; a different film temperature evaluates that model at the bulk
+pressure without heating or reconstructing a fictitious parcel.
+
+The original material film-resolver seam drives fixed-conductance, arbitrary
+enthalpy-chart conductivity and integrated conductivity-curve histories. It
+retains the existing adaptive controller, molecular streams, separate condensed
+heat stores, prescribed powers, gas reconstruction and acceptance accounts.
+Film-bound growing layers must be the original planar shape: whole spherical
+and cylindrical layers refuse. Strip positions remain measured from the same
+authored physical leading edge; changing exposed area never invents a new
+streamwise length.
+
+A binary pair must contain the bound volatile and actual carrier; the carrier
+must remain positive and foreign active gas species refuse. A carrier-only
+initial state is accepted without adding a vapor seed. Only canonical T/p
+coordinates are allowed in the binary source context, so a composition or other
+state coordinate cannot silently remain frozen. Each binding declares a maximum
+volatile mole fraction in (0,0.05]. Every source evaluation checks the actual
+bulk mole fraction, saturation pressure divided by total pressure, and the
+original two-temperature kinetic-equilibrium pressure divided by total pressure.
+This five-percent cap is a conservative implementation admission policy, not a
+published universal accuracy bound or proof of weak blowing/Stefan flow.
+
+The prepared source owner is immutable during trial evolution. Coefficients
+reuse the material owner's scratch map, and each bound key is overwritten on
+every invocation. Source/domain/correlation/dilute-limit failures preserve their
+typed error and abort without a physical candidate. Cancellation is polled per
+bounded row and between original constitutive queries. The existing continuum,
+attached laminar, dilute weak-transfer and frozen-strip approximations remain;
+no turbulence, Stefan/Soret correction, nucleation, moving velocity field or
+additional gas-side heat law is inferred.
+
 ## Original coolant inlet and wall linearization
 
 `CaloricAirPath::linearize` prepares the complete inlet/wall temperature

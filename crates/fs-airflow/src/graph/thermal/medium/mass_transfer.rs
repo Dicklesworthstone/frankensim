@@ -24,6 +24,9 @@
 //! is a frozen-property, dilute binary continuum approximation. It does not
 //! model Stefan flow, turbulence, buoyancy, nucleation or a resolved plume.
 
+/// Live binary films inside the original finite-gas, two-temperature histories.
+pub mod chamber;
+
 /// Original laminar plate/strip physics with explicitly authored transport.
 pub mod laminar_plate;
 
@@ -64,8 +67,17 @@ pub struct LaminarPlateFilmConditions {
 pub enum GasFilmError {
     Invalid(&'static str),
     Material(MaterialError),
+    /// Original coating-temperature inversion failure in a live film resolver.
+    Surface(fs_thermal::sublimation::SublimationError),
     Query(MatDbError),
     Source(MaterialStatePointError),
+    /// Actual volatile loading leaves the live adapter's authored dilute domain.
+    OutsideDilute {
+        bulk_vapor_mole_fraction: f64,
+        saturation_pressure_fraction: f64,
+        kinetic_equilibrium_pressure_fraction: f64,
+        maximum_vapor_mole_fraction: f64,
+    },
     /// No extrapolation across transition or below the admitted Schmidt range.
     OutsideCorrelation {
         reynolds: f64,

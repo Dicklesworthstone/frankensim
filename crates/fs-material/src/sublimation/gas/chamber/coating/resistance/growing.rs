@@ -352,6 +352,48 @@ pub fn advance_growing_integrated_chamber<'catalog>(
     )
 }
 
+/// Evolve an original enthalpy-chart conductivity law with live gas films.
+///
+/// This retains the frozen-within-interval conductivity model while refreshing
+/// gas-film transport after each mass-owned area rebound. Optional prescribed
+/// powers use the same accepted-history accounting as the integrated path.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_growing_resistive_chamber_resolved<'catalog, F, E>(
+    surfaces: &[GasResistiveSurface<'_>],
+    layers: &BTreeMap<u64, GasGrowingCoating<'_>>,
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    mut resolver: F,
+    powers: Option<&BTreeMap<u64, GasResistivePower<'_>>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasGrowingCoatingSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasGrowingCoatingCandidate<'catalog>, super::film::GasResistiveFilmError<E>>
+where
+    F: FnMut(
+        &[GasResistiveSurface<'_>],
+        &ClosedGasParcel,
+        &mut BTreeMap<u64, f64>,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<(), E>,
+{
+    super::film::with_resolved_films(&mut resolver, |films| {
+        advance_growing(
+            surfaces,
+            layers,
+            accommodation,
+            films,
+            powers,
+            gas,
+            catalog,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    })
+}
+
 /// Evolve a growing source-integrated coating with live gas-film transport.
 ///
 /// The resolver runs AFTER the original geometry has rebound each trial's

@@ -3,8 +3,9 @@ use super::*;
 use super::super::{
     GasSurfaceError, GasSupportedChamberSolve, advance_resistive_chamber_with_films,
     growing::{
-        GasGrowingCoatingSolve, GasIntegratedGrowingCoating,
+        GasGrowingCoating, GasGrowingCoatingSolve, GasIntegratedGrowingCoating,
         advance_growing_integrated_chamber_resolved,
+        advance_growing_resistive_chamber_resolved,
     },
 };
 use crate::sublimation::gas::{
@@ -313,5 +314,79 @@ fn growing_resolver_observes_the_actual_mass_owned_area() {
         1e-4
     );
     assert_eq!(initial.state.deposit.area_m2, 7.0);
+    assert_eq!(result.gas(), &gas);
+}
+
+#[test]
+fn original_conductivity_laws_keep_live_films_and_separate_power_histories() {
+    struct Constant;
+    impl fs_thermal::enthalpy::conduction::ConductivityLaw for Constant {
+        fn conductivity_w_m_k(
+            &self,
+            _: f64,
+        ) -> Result<f64, fs_thermal::enthalpy::DepositionError> {
+            Ok(1e-3)
+        }
+    }
+    let catalog = fixture::catalog(0.0);
+    let gas = fixture::gas(&catalog, 400.0, 3000.0);
+    let law = fixture::phase();
+    let binding = fixture::binding(0.0);
+    let chart = fixture::chart(&catalog, &binding);
+    let deposit = |h| fixture::temperature(h, chart);
+    let initial = row(&law, &binding, &deposit, chart);
+    let conductivity = Constant;
+    let layers = BTreeMap::from([(
+        7,
+        GasGrowingCoating {
+            geometry: ConductiveCoatingGeometry::planar(917.0, 1e-4).unwrap(),
+            conductivity: &conductivity,
+            contact_resistance_m2_k_w: 2e-4,
+        },
+    )]);
+    let powers = BTreeMap::from([(
+        7,
+        GasResistivePower {
+            substrate_power_w: 1.0,
+            deposit_power_w: -0.5,
+            interface: None,
+        },
+    )]);
+    let result = advance_growing_resistive_chamber_resolved(
+        &[initial],
+        &layers,
+        None,
+        |_: &[GasResistiveSurface<'_>],
+         _: &ClosedGasParcel,
+         output: &mut BTreeMap<u64, f64>,
+         _: &mut dyn FnMut() -> bool| {
+            output.insert(7, 0.0);
+            Ok::<(), u32>(())
+        },
+        Some(&powers),
+        &gas,
+        &catalog,
+        0.02,
+        GasGrowingCoatingSolve {
+            advance: controls(),
+            maximum_deposit_volume_fraction: 0.01,
+            absolute_extent_tolerance_m: 1.0,
+            absolute_conductance_tolerance_w_k: 1e4,
+        },
+        || false,
+    )
+    .unwrap();
+    let thermal = result.history().audit().thermal[0];
+    fixture::near(thermal.supplied_substrate_heat_j, 0.02, 1e-12);
+    fixture::near(thermal.supplied_deposit_heat_j, -0.01, 1e-12);
+    fixture::near(
+        result.history().audit().chamber.solid_energy_change_j,
+        0.01,
+        1e-7,
+    );
+    assert_eq!(
+        result.history().endpoint().surfaces()[0].state.deposit.mass_kg,
+        initial.state.deposit.mass_kg
+    );
     assert_eq!(result.gas(), &gas);
 }
