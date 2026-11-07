@@ -257,9 +257,10 @@ impl NonlinearBore {
                 )?)
             }
         };
-        let solver = Euler1d::new_on_mesh(
+        let solver = Euler1d::new_on_stepped_mesh(
             gas.clone(),
             geometry.mesh,
+            &geometry.steps,
             cells,
             Boundaries::Ends {
                 left: Boundary::Reflecting,
@@ -430,10 +431,15 @@ struct BoreMesh {
     mesh: Mesh1d,
     wall_radii: Vec<f64>,
     centers_m: Vec<f64>,
+    /// `(face, area seen by the cell on the right)` of every abrupt radius step.
+    steps: Vec<(usize, f64)>,
 }
 
-// Equal cells over the whole bore, faces moved a quarter cell off radius steps,
-// exact piecewise volumes, face areas from the original geometry.
+// Equal cells over each stretch of bore between radius steps (one stretch, and the
+// same equal cells as always, when there is no step), a junction face exactly at every
+// radius step so no cell contains one, exact piecewise volumes, face areas from the
+// original geometry (at a step: the outlet area of the segment before it; the inlet
+// area of the segment after it travels in `steps`).
 fn bore_mesh(
     duct: &Duct,
     maximum_cell_m: f64,
@@ -461,45 +467,70 @@ fn bore_mesh(
         starts.push(end);
     }
     let length = starts[duct.segments.len()];
-    let cells = (length / maximum_cell_m).ceil();
+    // Radius steps: the segments whose inlet radius differs from the outlet radius before them.
+    let mut step_segments: Vec<usize> = reserved(duct.segments.len())?;
+    for k in 1..duct.segments.len() {
+        let before = duct.segments[k - 1].outlet_radius();
+        let after = duct.segments[k].inlet_radius();
+        if (before - after).abs() > 64.0 * f64::EPSILON * before.max(after) {
+            step_segments.push(k);
+        }
+    }
+    // Equal cells over each stretch between steps, none longer than `maximum_cell_m`.
+    let stretches = step_segments.len() + 1;
+    let bounds = |j: usize| -> (f64, f64) {
+        (
+            if j == 0 { 0.0 } else { starts[step_segments[j - 1]] },
+            if j + 1 == stretches { length } else { starts[step_segments[j]] },
+        )
+    };
+    let mut counts: Vec<f64> = reserved(stretches)?;
+    let mut cells = 0.0_f64;
+    for j in 0..stretches {
+        let (a, b) = bounds(j);
+        let count = ((b - a) / maximum_cell_m).ceil().max(1.0);
+        counts.push(count);
+        cells += count;
+    }
     if !(1.0..=super::MAX_NONLINEAR_DUCT_CELLS as f64).contains(&cells) {
         return Err(unsupported("cell count exceeds MAX_NONLINEAR_DUCT_CELLS"));
     }
     let n = cells as usize;
-    let h = length / cells;
     let mut faces = reserved(n + 1)?;
-    for i in 0..=n {
-        faces.push(if i == n {
-            length
-        } else {
-            length * (i as f64 / cells)
-        });
-    }
-    for k in 1..duct.segments.len() {
-        let before = duct.segments[k - 1].outlet_radius();
-        let after = duct.segments[k].inlet_radius();
-        if (before - after).abs() <= 64.0 * f64::EPSILON * before.max(after) {
-            continue;
+    let mut steps: Vec<(usize, f64)> = reserved(step_segments.len())?;
+    for j in 0..stretches {
+        let (a, b) = bounds(j);
+        let m = counts[j] as usize;
+        if j > 0 {
+            let k = step_segments[j - 1];
+            steps.push((faces.len(), area(duct.segments[k].inlet_radius())?));
         }
-        let step = starts[k];
-        let i = (step / h).round() as usize;
-        if i > 0 && i < n && (faces[i] - step).abs() < 0.25 * h {
-            faces[i] = if faces[i] <= step {
-                step - 0.25 * h
+        for i in 0..(if j + 1 == stretches { m + 1 } else { m }) {
+            faces.push(if i == m {
+                b
             } else {
-                step + 0.25 * h
-            };
+                a + (b - a) * (i as f64 / counts[j])
+            });
         }
     }
-    if faces.windows(2).any(|w| !(w[1] - w[0] >= 0.4 * h)) {
-        return Err(unsupported("two radius steps lie within one cell"));
+    if stretches > 1
+        && faces
+            .windows(2)
+            .any(|w| !(w[1] - w[0] >= 0.4 * maximum_cell_m))
+    {
+        return Err(unsupported("a stretch between radius steps is shorter than 0.4 cell"));
     }
     let locate = |x: f64| -> usize {
         let k = starts.partition_point(|&s| s <= x);
         k.saturating_sub(1).min(duct.segments.len() - 1)
     };
     let mut areas = reserved(n + 1)?;
-    for &x in &faces {
+    for (i, &x) in faces.iter().enumerate() {
+        if let Some(j) = steps.iter().position(|&(face, _)| face == i) {
+            // The cell on the left of a step sees the outlet of the segment before it.
+            areas.push(area(duct.segments[step_segments[j] - 1].outlet_radius())?);
+            continue;
+        }
         let k = locate(x);
         areas.push(area(radius(
             &duct.segments[k],
@@ -545,6 +576,7 @@ fn bore_mesh(
         mesh: Mesh1d::new(faces, areas, volumes)?,
         wall_radii,
         centers_m,
+        steps,
     })
 }
 

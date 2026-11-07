@@ -743,7 +743,7 @@ fn radiation_pressure_refuses_a_root_outside_the_original_caloric_path_without_c
 }
 
 #[test]
-fn step_mesh_keeps_exact_volume_and_moves_faces_off_the_step() {
+fn step_mesh_keeps_exact_volume_and_puts_a_junction_face_on_the_step() {
     let state = air();
     let duct = Duct {
         segments: vec![
@@ -786,22 +786,28 @@ fn step_mesh_keeps_exact_volume_and_moves_faces_off_the_step() {
         + core::f64::consts::PI * 5.0e-3 * 5.0e-3 * 0.3;
     let total: f64 = mesh.volumes().iter().sum();
     assert!((total - exact).abs() <= 1e-12 * exact, "{total} {exact}");
-    let n = mesh.volumes().len();
-    let h = 0.42097 / n as f64;
+    // A junction face lies exactly on the step, so no cell holds it: the cell on its left sees
+    // the first cone's outlet area, the cell on its right the second cone's inlet area, and the
+    // cells of each stretch are equal and none is longer than the declared maximum.
     let step = 0.06597;
-    assert!(
-        mesh.positions()
-            .iter()
-            .all(|&x| (x - step).abs() >= 0.25 * h * (1.0 - 1e-12))
-    );
-    let cell = mesh.positions().partition_point(|&x| x < step) - 1;
-    let areas = mesh.face_areas();
+    let face = mesh.positions().iter().position(|&x| x == step).unwrap();
     let a = |r: f64| core::f64::consts::PI * r * r;
-    assert!(areas[cell] < a(4.2e-3) && areas[cell + 1] > a(4.64e-3));
-    println!(
-        "step cell {cell} of {n}, faces {:?}",
-        &mesh.positions()[cell..cell + 2]
+    assert!((mesh.face_areas()[face] / a(4.2e-3) - 1.0).abs() <= 1e-15);
+    let steps = bore.solver().radius_steps();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0].0, face);
+    assert!((steps[0].1 / a(4.64e-3) - 1.0).abs() <= 1e-15);
+    let widths: Vec<f64> = mesh.positions().windows(2).map(|w| w[1] - w[0]).collect();
+    assert!(widths.iter().all(|&w| w <= 2.4e-3));
+    assert!(widths[..face].windows(2).all(|w| (w[0] - w[1]).abs() <= 1e-15));
+    assert!(widths[face..].windows(2).all(|w| (w[0] - w[1]).abs() <= 1e-15));
+    // The cells beside the step carry exact piecewise volumes: the cone's own frustum.
+    let left_cell = frustum(
+        1.825e-3 + (4.2e-3 - 1.825e-3) * (mesh.positions()[face - 1] / 0.06597),
+        4.2e-3,
+        step - mesh.positions()[face - 1],
     );
+    assert!((mesh.volumes()[face - 1] / left_cell - 1.0).abs() <= 1e-12);
 }
 
 fn multiply(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
@@ -1465,4 +1471,146 @@ fn a_refusal_that_is_not_a_source_domain_failure_is_not_retried() {
     assert!(!text.contains("after first-order retry"), "{text}");
     assert_eq!(bore.first_order_fallbacks(), 0);
     assert_eq!(bits(&bore), field);
+}
+
+// ---- the radius-step junction face (MagentaBadger 7918, option A) ----
+
+fn half_cosine(t: f64, width: f64, peak: f64) -> f64 {
+    if t < width {
+        peak * 0.5 * (1.0 - det::cos(core::f64::consts::TAU * t / width))
+    } else {
+        0.0
+    }
+}
+
+fn junction_bore(duct: &Duct) -> NonlinearBore {
+    let state = air();
+    NonlinearBore::new(
+        duct,
+        air_source(&state),
+        293.15,
+        101_325.0,
+        None,
+        BoreSpec {
+            maximum_cell_m: 2.4e-3,
+            inlet_volume_m3: 0.0,
+            step_s: STEP_S,
+            cfl: 0.45,
+            wall: None,
+        },
+    )
+    .unwrap()
+}
+
+// Drive the inlet face with a prescribed volume flow [m^3/s] for `steps` fixed steps; the
+// inlet-face pressure above the room pressure after each step.
+fn drive_and_record(bore: &mut NonlinearBore, steps: usize, flow: impl Fn(f64) -> f64) -> Vec<f64> {
+    let source = bore.gas().clone();
+    let inlet_area = bore.inlet_area_m2();
+    let room = bore.room().pressure;
+    let mut guess = room;
+    let mut record = Vec::with_capacity(steps);
+    for _ in 0..steps {
+        let mut face_pressure = room;
+        bore.step(|stage| {
+            let (flux, pressure) =
+                velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess)?;
+            face_pressure = pressure;
+            Ok(Some(flux))
+        })
+        .unwrap();
+        record.push(face_pressure - room);
+    }
+    record
+}
+
+#[test]
+fn a_radius_step_reflects_a_pulse_with_the_transfer_matrix_coefficient() {
+    // Bound fixed before the first run (brasstap/predictions-step-junction.txt, T1): a 6 -> 7 mm step
+    // at x = 0.5 m in a 2.0 m walls-off bore, 2.4 mm cells, a half-cosine inlet flow of 1e-6 m^3/s and
+    // 1e-4 s. The time integral of the pressure the step sends back, over that of the pressure sent,
+    // is (A1 - A2) / (A1 + A2) within 2e-3 absolute. The returning pulse meets the driven face with
+    // its velocity held at zero after the pulse (a rigid end), where the pressure doubles.
+    let duct = Duct {
+        segments: vec![
+            Segment::Cylinder {
+                radius: 6.0e-3,
+                length: 0.5,
+            },
+            Segment::Cylinder {
+                radius: 7.0e-3,
+                length: 1.5,
+            },
+        ],
+    };
+    let mut bore = junction_bore(&duct);
+    let pressure = drive_and_record(&mut bore, 4300, |t| half_cosine(t, 1.0e-4, 1.0e-6));
+    let integral = |from: f64, to: f64| {
+        let first = (from / STEP_S).round() as usize;
+        let last = (to / STEP_S).round() as usize;
+        pressure[first..last].iter().sum::<f64>() * STEP_S
+    };
+    let sent = integral(0.0, 5.0e-4);
+    let returned = 0.5 * integral(2.5e-3, 3.5e-3);
+    let (a1, a2) = (6.0e-3_f64.powi(2), 7.0e-3_f64.powi(2));
+    let expected = (a1 - a2) / (a1 + a2);
+    let ratio = returned / sent;
+    println!("T1: returned / sent = {ratio:.6}, (A1 - A2)/(A1 + A2) = {expected:.6}");
+    assert!((ratio - expected).abs() <= 2.0e-3, "{ratio} against {expected}");
+}
+
+// The states and every recorded pressure of a driven bore, as one hash.
+fn digest(bore: &NonlinearBore, pressure: &[f64]) -> String {
+    let mut bytes = Vec::new();
+    for cell in bits(bore) {
+        for word in cell {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+    }
+    bytes.extend_from_slice(&bore.solver().time().value().to_bits().to_le_bytes());
+    for p in pressure {
+        bytes.extend_from_slice(&p.to_bits().to_le_bytes());
+    }
+    fs_blake3::hash_bytes(&bytes).to_hex()
+}
+
+fn driven_digest(duct: &Duct) -> String {
+    let mut bore = junction_bore(duct);
+    let pressure = drive_and_record(&mut bore, 2000, |t| half_cosine(t, 2.0e-4, 2.0e-5));
+    digest(&bore, &pressure)
+}
+
+#[test]
+fn a_bore_without_a_radius_step_is_the_scheme_before_the_junction_face_bit_for_bit() {
+    // Stamped before the first run (T5): the digests were recorded from the scheme of d1de01bf6, which
+    // has no junction face, by this same test; the new scheme must reproduce them bit for bit.
+    let cylinder = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 5.0e-3,
+            length: 0.5,
+        }],
+    };
+    let taper = Duct {
+        segments: vec![
+            Segment::Cone {
+                inlet_radius: 4.0e-3,
+                outlet_radius: 9.0e-3,
+                length: 0.4,
+            },
+            Segment::Cylinder {
+                radius: 9.0e-3,
+                length: 0.1,
+            },
+        ],
+    };
+    let (got_cylinder, got_taper) = (driven_digest(&cylinder), driven_digest(&taper));
+    println!("T5 digests: cylinder {got_cylinder} taper {got_taper}");
+    assert_eq!(
+        got_cylinder,
+        "543286989ddfaabe01f74d7ee6140136a21c1cecb1fdc590b4598509bd4e655f"
+    );
+    assert_eq!(
+        got_taper,
+        "dec58d42a8060a698ca4d645e22404667e385f66294b07172a4bf6802cd4f09b"
+    );
 }

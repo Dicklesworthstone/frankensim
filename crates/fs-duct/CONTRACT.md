@@ -2400,13 +2400,30 @@ introduced.
 `nonlinear::bore::NonlinearBore` keeps one `Euler1d` field of the original
 NASA-9 source and adds what a played bore needs:
 
-- **Mesh.** Equal axial cells over the whole `Duct` (cylinders, cones and
-  profiles; tone holes refuse). A face within a quarter cell of a radius step is
-  moved a quarter cell off it; two steps inside one cell refuse. Cell volumes are
-  the exact piecewise volumes; an optional compact inlet volume (a cup) is added
-  to the first cell. The step's wall force enters through the same
-  quasi-one-dimensional `p dA` source as a taper; no evanescent step modes are
-  resolved (as in the plane-wave transfer-matrix chain).
+- **Mesh.** Equal axial cells over each stretch of the `Duct` between radius
+  steps, none longer than the declared maximum (cylinders, cones and profiles;
+  tone holes refuse); a bore with no step is one stretch with the same equal
+  cells as ever. A junction face lies exactly on every abrupt radius step, so no
+  cell contains one, and a stretch shorter than 0.4 of the maximum cell refuses.
+  Cell volumes are the exact piecewise volumes; an optional compact inlet volume
+  (a cup) is added to the first cell. The cell on each side of a step sees its
+  own side's area; the face flux is the stationary adiabatic isentropic area
+  change of `Euler1d::new_on_stepped_mesh` between the two cells' wave curves,
+  on the original NASA-9 source: mass and total enthalpy are conserved across
+  the step, the pressure difference is the Bernoulli term of the source's
+  isentrope, and in small signal it is exactly the plane-wave transfer matrix of
+  the step (equal pressure, equal volume flow). The momentum the step annulus
+  gives the gas is part of the reported area impulse. There is no friction or
+  mixing loss (a Borda-Carnot loss at an expansion is a different closure with
+  its own source), no evanescent step modes are resolved (as in the plane-wave
+  transfer-matrix chain), and a step whose junction has no admissible state (the
+  chord iteration does not converge in 100 iterations, or lands within 0.1 percent
+  of sonic; a pressure drop across a contraction that nearly chokes the throat)
+  refuses. A smooth taper keeps the plain
+  quasi-one-dimensional `p dA` source. Before this face existed the step sat
+  inside one cell, and the bore lost about 0.95 Gamma^2 of the acoustic energy per
+  traversal of a step (0.5 to 0.6 Gamma^2 of the 1/Q of the first mode; Gamma the
+  pressure reflection coefficient), linear and independent of the grid.
 - **Wall memory.** Per distinct cell radius, the `fs_phs::ZkDiffusiveBasis`
   binding of the gas's own density, viscosity, gamma and Prandtl number on a
   declared band and error: viscous drag plus series arms on the momentum,

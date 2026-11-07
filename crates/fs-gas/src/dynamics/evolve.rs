@@ -4,6 +4,8 @@ use crate::body_force::{BodyForce, ForceChange, ForceControl};
 use fs_qty::{Length, Time};
 
 pub(super) mod forcing;
+mod junction;
+use junction::StepSet;
 
 /// Physical boundary on one end of a stationary interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -180,6 +182,8 @@ pub(super) struct Workspace {
     pub(super) faces: Vec<FaceFlux>,
     pub(super) stage: Vec<Conserved>,
     pub(super) candidate: Vec<Conserved>,
+    /// Radius steps carrying a two-sided junction face; empty on every other mesh.
+    steps: StepSet,
 }
 
 /// Quasi-one-dimensional finite-volume field of one frozen source-owned mixture.
@@ -249,6 +253,7 @@ impl Euler1d {
             faces: allocated(n + 1, FaceFlux::default())?,
             stage: allocated(n, Conserved::default())?,
             candidate: allocated(n, Conserved::default())?,
+            steps: StepSet::default(),
         };
         poll(&mut cancelled)?;
         Ok(Self {
@@ -262,6 +267,35 @@ impl Euler1d {
             moving: None,
             body_force_stage: None,
         })
+    }
+    /// Construct on a stationary mesh with abrupt radius steps at interior faces.
+    ///
+    /// `steps` lists `(face, area_after)` in increasing face order. At such a face
+    /// `mesh.face_areas()[face]` is the area the cell on the left sees and `area_after`
+    /// the area the cell on the right sees, so no cell contains the step. The face flux
+    /// is a stationary, adiabatic, isentropic area change between the two cells' wave
+    /// curves of this source: mass and total enthalpy are conserved across the step,
+    /// the pressure difference is the Bernoulli term of the isentrope, and in small
+    /// signal it is the plane-wave transfer matrix of the step (equal pressure, equal
+    /// volume flow). There is no friction or mixing loss: a Borda-Carnot expansion loss
+    /// is a different closure. A junction with no admissible state refuses: its chord
+    /// iteration does not converge, or lands within 0.1 percent of sonic. The momentum the
+    /// annulus gives the gas is part of `StepReport::area_momentum_impulse`.
+    ///
+    /// Moving walls, body forces and a gravitational atmosphere refuse on a stepped
+    /// solver. With no steps this is [`Self::new_on_mesh`].
+    pub fn new_on_stepped_mesh(
+        gas: FrozenGas,
+        mesh: Mesh1d,
+        steps: &[(usize, f64)],
+        states: Vec<Conserved>,
+        boundaries: Boundaries,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        let set = StepSet::new(&mesh, steps)?;
+        let mut solver = Self::new_on_mesh(gas, mesh, states, boundaries, &mut cancelled)?;
+        solver.work.steps = set;
+        Ok(solver)
     }
     /// Original frozen-mixture EOS and source.
     pub const fn gas(&self) -> &FrozenGas {
@@ -309,6 +343,12 @@ impl Euler1d {
     /// motion from [`Self::step_with_moving_walls`].
     pub const fn mesh(&self) -> &Mesh1d {
         &self.mesh
+    }
+    /// `(face, area seen by the cell on its right)` of every abrupt radius step built by
+    /// [`Self::new_on_stepped_mesh`]; empty on every other solver. The area the cell on
+    /// the left sees is `mesh().face_areas()[face]`.
+    pub fn radius_steps(&self) -> Vec<(usize, f64)> {
+        self.work.steps.steps()
     }
     /// Uniform mesh cell width [m], or None on a nonuniform mesh.
     pub fn cell_width(&self) -> Option<Length> {
@@ -427,6 +467,9 @@ impl Euler1d {
         {
             return Err(Error::Invalid("time step, CFL or retry controls"));
         }
+        if forcing.is_some() && !self.work.steps.is_empty() {
+            return Err(Error::Invalid("a body force on a stepped mesh is not admitted"));
+        }
         let mut signal_rate = 0.0_f64;
         for (i, &state) in self.states.iter().enumerate() {
             let p = if let Some(balance) =
@@ -442,7 +485,8 @@ impl Euler1d {
                 )?
             };
             self.work.primitive[i] = p;
-            let area = 0.5 * self.mesh.face_areas()[i] + 0.5 * self.mesh.face_areas()[i + 1];
+            let area = 0.5 * self.work.steps.left_area(i, self.mesh.face_areas()[i])
+                + 0.5 * self.mesh.face_areas()[i + 1];
             let rate = (p.velocity.abs() + p.sound_speed) * (area / self.mesh.volumes()[i]);
             signal_rate = signal_rate.max(rate);
         }
@@ -632,7 +676,7 @@ where
         ports.as_deref_mut(),
         cancelled,
     )?;
-    let a = operator(
+    let a = operator_stepped(
         gas,
         states,
         mesh,
@@ -643,6 +687,8 @@ where
         &mut work.slopes,
         &mut work.faces,
         ends,
+        None,
+        &mut work.steps,
         cancelled,
     )?;
     if a.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
@@ -653,7 +699,16 @@ where
     }
     for (i, &q) in states.iter().enumerate() {
         poll(cancelled)?;
-        work.stage[i] = forward(q, i, dt, mesh, &work.primitive, &work.faces, hydrostatic);
+        work.stage[i] = forward_entering(
+            q,
+            i,
+            dt,
+            mesh,
+            &work.primitive,
+            &work.faces,
+            hydrostatic,
+            work.steps.entering(i),
+        );
         if !gas.admissible_state(work.stage[i]) {
             return Err(Error::Invalid("first RK stage outside source domain"));
         }
@@ -667,7 +722,7 @@ where
         ports,
         cancelled,
     )?;
-    let b = operator(
+    let b = operator_stepped(
         gas,
         &work.stage,
         mesh,
@@ -678,6 +733,8 @@ where
         &mut work.slopes,
         &mut work.faces,
         ends,
+        None,
+        &mut work.steps,
         cancelled,
     )?;
     if b.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
@@ -688,7 +745,16 @@ where
     }
     for (i, &q) in work.stage.iter().enumerate() {
         poll(cancelled)?;
-        let second = forward(q, i, dt, mesh, &work.primitive, &work.faces, hydrostatic);
+        let second = forward_entering(
+            q,
+            i,
+            dt,
+            mesh,
+            &work.primitive,
+            &work.faces,
+            hydrostatic,
+            work.steps.entering(i),
+        );
         if !gas.admissible_state(second) {
             return Err(Error::Invalid("second RK stage outside source domain"));
         }
@@ -790,6 +856,41 @@ pub(super) fn operator_with_face_motion(
     face_velocity: Option<&[f64]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, Error> {
+    operator_stepped(
+        gas,
+        states,
+        mesh,
+        boundaries,
+        reconstruction,
+        hydrostatic,
+        primitive,
+        slopes,
+        faces,
+        endpoint_overrides,
+        face_velocity,
+        &mut StepSet::default(),
+        cancelled,
+    )
+}
+
+/// The stage operator; `steps` is empty on every mesh without a junction face, and then
+/// every statement below is the plain operator.
+#[allow(clippy::too_many_arguments)]
+fn operator_stepped(
+    gas: &FrozenGas,
+    states: &[Conserved],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    reconstruction: Reconstruction,
+    hydrostatic: Option<&HydrostaticBalance>,
+    primitive: &mut [Primitive],
+    slopes: &mut [[f64; 3]],
+    faces: &mut [FaceFlux],
+    endpoint_overrides: [Option<FaceFlux>; 2],
+    face_velocity: Option<&[f64]>,
+    steps: &mut StepSet,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Stage, Error> {
     let n = states.len();
     for (i, &q) in states.iter().enumerate() {
         primitive[i] = if let Some(balance) = hydrostatic.filter(|b| b.cells[i].0 == q) {
@@ -830,7 +931,14 @@ pub(super) fn operator_with_face_motion(
         } else {
             (i - 1, i + 1)
         };
-        let (a, b, c) = (deviations(prev), deviations(i), deviations(next));
+        let (mut a, b, mut c) = (deviations(prev), deviations(i), deviations(next));
+        if !steps.is_empty() {
+            // Across a radius step the velocity jumps by the area ratio at equal pressure and
+            // volume flow: compare the neighbour's velocity as the volume flow this cell sees,
+            // or the limiter reads the geometric jump as a discontinuity and drops to first order.
+            a[1] *= steps.neighbour_scale(i, prev, mesh);
+            c[1] *= steps.neighbour_scale(i, next, mesh);
+        }
         let slope = core::array::from_fn(|k| {
             let x = mesh.center(i);
             let length = mesh.positions()[n] - mesh.positions()[0];
@@ -983,6 +1091,17 @@ pub(super) fn operator_with_face_motion(
         } else {
             (reconstruct(face - 1, 0.5)?, reconstruct(face, -0.5)?, false)
         };
+        if !steps.is_empty() {
+            if face_velocity.is_some() {
+                return Err(Error::Invalid("moving faces on a stepped mesh"));
+            }
+            if let Some(flux) =
+                steps.solve(gas, face, left.1, right.1, mesh.face_areas()[face], cancelled)?
+            {
+                faces[face] = flux;
+                continue;
+            }
+        }
         let flux = if wall {
             let (inside, normal) = if face == 0 {
                 (right, -1.0)
@@ -1010,14 +1129,19 @@ pub(super) fn operator_with_face_motion(
     let mut gravity_compensation = [0.0; 2];
     for i in 0..n {
         poll(cancelled)?;
-        let rate = (0.5 * mesh.face_areas()[i] * faces[i].signal_speed
+        // The area and signal speed the cell sees on its left: its own side of a step.
+        let (left_area, left_signal) = steps.entering(i).map_or(
+            (mesh.face_areas()[i], faces[i].signal_speed),
+            |(area, flux)| (area, flux.signal_speed),
+        );
+        let rate = (0.5 * left_area * left_signal
             + 0.5 * mesh.face_areas()[i + 1] * faces[i + 1].signal_speed)
             / mesh.volumes()[i];
         if !positive(rate) {
             return Err(Error::Invalid("unrepresentable geometric face CFL"));
         }
         signal_rate = signal_rate.max(rate);
-        let term = primitive[i].pressure * (mesh.face_areas()[i + 1] - mesh.face_areas()[i]);
+        let term = primitive[i].pressure * (mesh.face_areas()[i + 1] - left_area);
         let y = term - compensation;
         let next = area_force + y;
         compensation = (next - area_force) - y;
@@ -1034,6 +1158,14 @@ pub(super) fn operator_with_face_motion(
             gravity_compensation[1] = (next - gravity_power) - y;
             gravity_power = next;
         }
+    }
+    // The annulus of each radius step pushes on the gas with the difference of the two
+    // sides' momentum fluxes; no cell's area source contains it.
+    for jump in steps.impulses(faces, mesh) {
+        let y = jump - compensation;
+        let next = area_force + y;
+        compensation = (next - area_force) - y;
+        area_force = next;
     }
     Ok(Stage {
         left: faces[0],
@@ -1065,9 +1197,26 @@ pub(super) fn forward(
     faces: &[FaceFlux],
     hydrostatic: Option<&HydrostaticBalance>,
 ) -> Conserved {
-    let left = faces[i].array();
+    forward_entering(q, i, dt, mesh, primitive, faces, hydrostatic, None)
+}
+/// [`forward`] for a cell whose left face is a radius step: `entering` is the area the cell
+/// sees there and the flux it receives; `None` takes both from the shared face arrays.
+#[allow(clippy::too_many_arguments)]
+fn forward_entering(
+    q: Conserved,
+    i: usize,
+    dt: f64,
+    mesh: &Mesh1d,
+    primitive: &[Primitive],
+    faces: &[FaceFlux],
+    hydrostatic: Option<&HydrostaticBalance>,
+    entering: Option<(f64, FaceFlux)>,
+) -> Conserved {
+    let (al, left) = match entering {
+        Some((area, flux)) => (area, flux.array()),
+        None => (mesh.face_areas()[i], faces[i].array()),
+    };
     let right = faces[i + 1].array();
-    let al = mesh.face_areas()[i];
     let ar = mesh.face_areas()[i + 1];
     let ratio = dt / mesh.volumes()[i];
     if let Some(balance) = hydrostatic {
