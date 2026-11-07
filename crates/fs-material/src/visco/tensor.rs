@@ -84,6 +84,23 @@ impl PronyBranch {
         }
     }
 
+    /// Resolve a branch candidate once at law admission. Public coefficient
+    /// edits invalidate cached rows unless their factor-defined source still
+    /// equals the current tensor. Keep explicit source rows, including weak
+    /// channels and their coordinates, when that exact reconstruction matches.
+    /// Accepted laws are immutable, so stepping does not repeat this check.
+    pub(crate) fn admitted_gram_rows(&self) -> Result<Mandel6, ViscoError> {
+        if let Some(rows) = self.gram_rows
+            && crate::visco_tensor::gram(&rows).is_ok_and(|source| source == self.c_pa)
+        {
+            return Ok(rows);
+        }
+        let factor = psd_factor(&self.c_pa)?;
+        Ok(core::array::from_fn(|i| {
+            core::array::from_fn(|j| factor[j][i])
+        }))
+    }
+
     /// Resolved Gram factor rows `B_j` (`B_jᵀ B_j = C_j`) [√Pa].
     #[must_use]
     pub(crate) fn resolved_gram_rows(&self, fallback_l: &Mandel6) -> Mandel6 {
@@ -375,8 +392,8 @@ impl TensorProny {
                     what: "Prony branch relaxation time tau_s must be finite and positive",
                 });
             }
-            let factor = psd_factor(&branch.c_pa)?;
-            let gram_rows = branch.resolved_gram_rows(&factor);
+            let gram_rows = branch.admitted_gram_rows()?;
+            let factor = core::array::from_fn(|i| core::array::from_fn(|j| gram_rows[j][i]));
             for i in 0..6 {
                 for j in 0..6 {
                     instantaneous[i][j] += branch.c_pa[i][j];

@@ -206,21 +206,18 @@ fn g0_random_multiaxial_histories_never_create_energy() {
                     g_mat[r][k] = 2.0e4 * (rng.next_f64() - 0.5);
                 }
             }
-            let mut c_pa = [[0.0f64; 6]; 6];
-            for i in 0..6 {
-                for j in 0..=i {
-                    let mut s = 0.0;
-                    for k in 0..rank {
-                        s += g_mat[i][k] * g_mat[j][k];
-                    }
-                    c_pa[i][j] = s;
-                    c_pa[j][i] = s;
-                }
-            }
+            // These synthetic branches are defined by their original Gram
+            // rows. Rounding a rank-deficient product into a public matrix
+            // can introduce a small active direction; retain the supplied
+            // factors rather than asking matrix admission to repair it.
+            let gram_rows = core::array::from_fn(|i| core::array::from_fn(|j| g_mat[j][i]));
             let log_tau = -4.0 + 4.0 * rng.next_f64();
             let tau_s = det::exp(log_tau * core::f64::consts::LN_10);
             tau_min = tau_min.min(tau_s);
-            branches.push(PronyBranch::unvalidated(c_pa, tau_s));
+            branches.push(
+                PronyBranch::from_gram_rows(gram_rows, tau_s)
+                    .expect("original finite Gram rows define a passive branch"),
+            );
         }
 
         let law = TensorProny::new(c_eq, None, branches, (0.0, 1.0e9))

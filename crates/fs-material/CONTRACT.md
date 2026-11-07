@@ -20483,10 +20483,33 @@ and mean stress still use the source tensors; branch storage and independently
 integrated nonnegative heat use their admitted work factors. The equilibrium
 positive-definite factor and elastic admission path are unchanged.
 
-Five native regressions compiled and demonstrated the original defects,
+Five native regressions demonstrate and now pass against the original defects,
 including threefold Kelvin heat, phantom null-direction work, passive scale
 overflow/underflow and hidden active cross terms. Their independent oracle
 contracts original tensors and integrates physical heat by quadrature. The
-shared replacement factor has passing source and shell coverage; execution
-became unavailable before this final delegation could be rerun, so a corrected
-pass of these five full-tensor tests is not yet claimed.
+shared replacement factor also has passing source and shell coverage. The
+full-tensor native gate covers all five original regressions unchanged.
+
+## Edited Prony branch source coherence
+
+`PronyBranch::c_pa` remains editable before law admission. Both `TensorProny::new`
+and `new_mandel` reuse cached Gram rows only when the existing factor-defined
+source reconstructs exactly to the current coefficients. An unchanged explicit
+Gram source retains its original row coordinates and weak channels. Edited
+coefficients instead pass through the shared passive work factor; an old cache
+cannot restore removed damping or conceal active, asymmetric or nonfinite data.
+
+Each admitted branch supplies the same rows and transposed factor to the
+physical-strain history, factor-coordinate history and strain projection.
+Rotation transports those admitted channels. Source consistency is checked
+once during construction, with no additional factorization or coefficient
+comparison in stepping. Relaxation times, branch order and zero-branch history
+slots remain intact.
+
+Five focused regressions fail with the old cache behavior and pass after this
+repair, including original-source stress, stored energy, integrated heat,
+projection, rotation, harmonic response, zeroing and invalid-source refusal.
+The existing 256-by-512 random-history gate now supplies the original generated
+Gram rows: rounding their rank-deficient product into a matrix can introduce
+an active direction. Its random draws and physical assertions are unchanged;
+matrix-only passivity admission is not weakened to repair synthetic input.

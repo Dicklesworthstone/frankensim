@@ -67,7 +67,7 @@ fn transpose_add(b: &Tangent6, q: &Voigt, out: &mut Voigt) {
 fn mandel(v: &Voigt) -> Voigt { core::array::from_fn(|i| WEIGHTS[i]*v[i]) }
 fn tensor(v: &Voigt) -> Voigt { core::array::from_fn(|i| v[i]/WEIGHTS[i]) }
 fn finite(v: &Voigt) -> bool { v.iter().all(|x| x.is_finite()) }
-fn gram(b: &Tangent6) -> Result<Tangent6> {
+pub(crate) fn gram(b: &Tangent6) -> Result<Tangent6> {
     if b.iter().flatten().any(|v| !v.is_finite()) { return Err(invalid("nonfinite Gram factor")); }
     let mut c = [[0.0;6];6];
     for i in 0..6 { for j in i..6 {
@@ -153,14 +153,8 @@ impl TensorProny {
             if !branch.tau_s.is_finite() || branch.tau_s <= 0.0 {
                 return Err(invalid("relaxation time must be finite and positive"));
             }
-            let gram_rows = match branch.gram_rows {
-                Some(g) => g,
-                None => {
-                    let l = crate::visco::tensor::psd_factor(&branch.c_pa)
-                        .map_err(|_| invalid("branch stiffness must be positive semidefinite"))?;
-                    core::array::from_fn(|i| core::array::from_fn(|j| l[j][i]))
-                }
-            };
+            let gram_rows = branch.admitted_gram_rows()
+                .map_err(|_| invalid("branch stiffness must be positive semidefinite"))?;
             let stiffness = gram(&gram_rows)?;
             let factor = core::array::from_fn(|i| core::array::from_fn(|j| gram_rows[j][i]));
             for i in 0..6 {
