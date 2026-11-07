@@ -1,8 +1,8 @@
 //! A thermally resistive deposit on a separately stored, nonvolatile substrate.
 //!
 //! The two original caloric charts retain distinct temperatures and enthalpy
-//! datums. One caller-supplied conductance represents the admitted contact and
-//! through-layer resistance over the interval. No conductivity, thickness,
+//! datums. A caller-supplied conductance or original nonlinear passive heat law
+//! represents the admitted support/deposit interface. No conductivity, thickness,
 //! porosity, moving area or morphology is inferred from deposited mass.
 //!
 //! Both initial and accepted deposits must have positive mass. Bare nucleation
@@ -20,6 +20,44 @@ use super::super::{
     solve_endpoint_with_scale, transfer, validate_solver, validate_surface,
 };
 use core::cell::Cell;
+
+/// Original constitutive heat flow between the separately stored bodies.
+///
+/// Positive power flows from support to deposit. The law must be continuous,
+/// nondecreasing in support temperature and nonincreasing in deposit temperature
+/// throughout its admitted domain. It must be passive: heat flows down the
+/// temperature difference and is exactly zero at equal temperatures. Each
+/// evaluated finite endpoint is checked for those sign/equality conditions;
+/// finite sampling does not establish global monotonicity or source validity.
+///
+/// The law owns conductivity integrals, contact/radiative physics and any source
+/// query context. Its own inner work and cancellation must be bounded if a query
+/// is nontrivial. The outer solver charges each endpoint trial to its original
+/// work allowance; it neither estimates a conductance nor invokes another
+/// caloric solver. Temperatures are kelvin and the result is watts.
+pub trait ResistiveInterfaceLaw {
+    fn heat_rate_w(
+        &self,
+        substrate_temperature_k: f64,
+        deposit_temperature_k: f64,
+    ) -> Result<f64, SublimationError>;
+}
+
+impl<F: Fn(f64, f64) -> Result<f64, SublimationError> + ?Sized> ResistiveInterfaceLaw for F {
+    fn heat_rate_w(
+        &self,
+        substrate_temperature_k: f64,
+        deposit_temperature_k: f64,
+    ) -> Result<f64, SublimationError> {
+        self(substrate_temperature_k, deposit_temperature_k)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Interface<'a> {
+    Conductance(f64),
+    Nonlinear(&'a dyn ResistiveInterfaceLaw),
+}
 
 /// Independently stored substrate and existing deposit; geometry is caller-owned.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -95,7 +133,7 @@ pub fn heat_resistive_surface<L: SublimationLaw + ?Sized>(
         state,
         None,
         duration_s,
-        conductance_w_k,
+        Interface::Conductance(conductance_w_k),
         substrate_heat_j,
         deposit_heat_j,
         config,
@@ -103,7 +141,47 @@ pub fn heat_resistive_surface<L: SublimationLaw + ?Sized>(
         deposit_temperature,
         checkpoint,
     )?;
-    Ok(ResistiveHeatStep {
+    Ok(heat_step(accepted, evaluations))
+}
+
+/// The same original two-body caloric solve with an endpoint nonlinear heat law.
+///
+/// `q = duration_s * interface.heat_rate_w(T_s1, T_d1)` closes the same separate
+/// energy balances. It does not freeze a secant conductance or differentiate the
+/// supplied law. Total energy still eliminates the support enthalpy, leaving
+/// one bounded scalar solve. At zero duration no interface query is made, and
+/// authored heat impulses are stored independently. Both masses stay positive.
+#[allow(clippy::too_many_arguments)]
+pub fn heat_resistive_surface_with_interface<L: SublimationLaw + ?Sized>(
+    law: &L,
+    state: ResistiveSurfaceState,
+    duration_s: f64,
+    interface: &dyn ResistiveInterfaceLaw,
+    substrate_heat_j: f64,
+    deposit_heat_j: f64,
+    config: SolverConfig,
+    substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    deposit_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<ResistiveHeatStep, SublimationError> {
+    let (accepted, evaluations) = advance(
+        law,
+        state,
+        None,
+        duration_s,
+        Interface::Nonlinear(interface),
+        substrate_heat_j,
+        deposit_heat_j,
+        config,
+        substrate_temperature,
+        deposit_temperature,
+        checkpoint,
+    )?;
+    Ok(heat_step(accepted, evaluations))
+}
+
+fn heat_step(accepted: Balance, evaluations: usize) -> ResistiveHeatStep {
+    ResistiveHeatStep {
         state: accepted.state,
         substrate_temperature_k: accepted.substrate_temperature_k,
         deposit_temperature_k: accepted.endpoint.t,
@@ -114,7 +192,7 @@ pub fn heat_resistive_surface<L: SublimationLaw + ?Sized>(
         deposit_energy_residual_j: accepted.deposit_energy_residual_j,
         energy_residual_j: accepted.energy_residual_j,
         evaluations,
-    })
+    }
 }
 
 /// Phase exchange at the deposit's temperature with finite substrate coupling.
@@ -139,6 +217,76 @@ pub fn advance_resistive_surface_with_heat<L: SublimationLaw + ?Sized>(
     config: SolverConfig,
     substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
     deposit_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<ResistiveSurfaceStep, SublimationError> {
+    advance_phase(
+        law,
+        kinetics,
+        state,
+        reservoir,
+        duration_s,
+        Interface::Conductance(conductance_w_k),
+        substrate_heat_j,
+        deposit_heat_j,
+        config,
+        substrate_temperature,
+        deposit_temperature,
+        checkpoint,
+    )
+}
+
+/// Original phase exchange and nonlinear interfacial heat in the same endpoint.
+///
+/// Mass transfer, complete vapor enthalpy and latent heat retain the meanings of
+/// [`advance_resistive_surface_with_heat`]. Only the contact relation changes to
+/// the original [`ResistiveInterfaceLaw`] evaluated at both accepted material
+/// temperatures. There is one scalar solve and one shared trial budget, with no
+/// frozen/effective heat capacity or fitted conductance. This remains a first-
+/// order two-node approximation; it supplies no spatial temperature profile.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_resistive_surface_with_interface<L: SublimationLaw + ?Sized>(
+    law: &L,
+    kinetics: SurfaceKinetics,
+    state: ResistiveSurfaceState,
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    interface: &dyn ResistiveInterfaceLaw,
+    substrate_heat_j: f64,
+    deposit_heat_j: f64,
+    config: SolverConfig,
+    substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    deposit_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<ResistiveSurfaceStep, SublimationError> {
+    advance_phase(
+        law,
+        kinetics,
+        state,
+        reservoir,
+        duration_s,
+        Interface::Nonlinear(interface),
+        substrate_heat_j,
+        deposit_heat_j,
+        config,
+        substrate_temperature,
+        deposit_temperature,
+        checkpoint,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_phase<L: SublimationLaw + ?Sized>(
+    law: &L,
+    kinetics: SurfaceKinetics,
+    state: ResistiveSurfaceState,
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    interface: Interface<'_>,
+    substrate_heat_j: f64,
+    deposit_heat_j: f64,
+    config: SolverConfig,
+    substrate_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
+    deposit_temperature: impl Fn(f64) -> Result<f64, SublimationError>,
     mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<ResistiveSurfaceStep, SublimationError> {
     let (accepted, evaluations) = advance(
@@ -146,7 +294,7 @@ pub fn advance_resistive_surface_with_heat<L: SublimationLaw + ?Sized>(
         state,
         Some((kinetics, reservoir)),
         duration_s,
-        conductance_w_k,
+        interface,
         substrate_heat_j,
         deposit_heat_j,
         config,
@@ -217,7 +365,7 @@ fn advance<L: SublimationLaw + ?Sized>(
     state: ResistiveSurfaceState,
     phase: Option<(SurfaceKinetics, VaporReservoir)>,
     duration_s: f64,
-    conductance_w_k: f64,
+    interface: Interface<'_>,
     substrate_heat_j: f64,
     deposit_heat_j: f64,
     config: SolverConfig,
@@ -234,7 +382,7 @@ fn advance<L: SublimationLaw + ?Sized>(
     validate_solver(config)?;
     if !positive(state.substrate_mass_kg)
         || !state.substrate_specific_enthalpy_j_kg.is_finite()
-        || !nonnegative(conductance_w_k)
+        || matches!(interface, Interface::Conductance(g) if !nonnegative(g))
         || !substrate_heat_j.is_finite()
         || !deposit_heat_j.is_finite()
     {
@@ -262,10 +410,17 @@ fn advance<L: SublimationLaw + ?Sized>(
         None => 0.0,
     };
     let initial_latent = finite(initial_transfer * initial_properties.latent_heat_j_kg)?;
-    let contact = finite(duration_s * conductance_w_k)?;
+    // Keep the original multiplication order and exact insulated branch for
+    // authored constant conductance. A nonlinear law supplies POWER instead.
+    let contact = match interface {
+        Interface::Conductance(g) => Some(finite(duration_s * g)?),
+        Interface::Nonlinear(_) => None,
+    };
+    let inactive_contact = duration_s == 0.0 || contact == Some(0.0);
     let total_heat = finite(substrate_heat_j + deposit_heat_j)?;
     let evaluations = Cell::new(0usize);
     let last = Cell::new(None::<Balance>);
+    let invalid_interface = Cell::new(None::<SublimationError>);
     let mut evaluate = |h: f64| -> Result<Endpoint, SublimationError> {
         checkpoint()?;
         if evaluations.get() >= config.max_iterations {
@@ -285,7 +440,7 @@ fn advance<L: SublimationLaw + ?Sized>(
         let sensible = finite(state.deposit.mass_kg * (h - state.deposit.specific_enthalpy_j_kg))?;
         let latent = finite(dm * p.latent_heat_j_kg)?;
         let needed = finite(sensible + latent - deposit_heat_j)?;
-        let substrate_heat = if contact == 0.0 {
+        let substrate_heat = if inactive_contact {
             substrate_heat_j
         } else {
             substrate_heat_j - needed
@@ -302,7 +457,31 @@ fn advance<L: SublimationLaw + ?Sized>(
         if !positive(substrate_t) {
             return Err(SublimationError::Invalid("invalid substrate temperature"));
         }
-        let interface = finite(contact * (substrate_t - t))?;
+        let interface = if let Some(contact) = contact {
+            finite(contact * (substrate_t - t))?
+        } else if duration_s == 0.0 {
+            0.0
+        } else {
+            let Interface::Nonlinear(law) = interface else {
+                unreachable!()
+            };
+            let rate = law.heat_rate_w(substrate_t, t)?;
+            if !rate.is_finite()
+                || (substrate_t == t && rate != 0.0)
+                || (substrate_t > t && rate < 0.0)
+                || (substrate_t < t && rate > 0.0)
+            {
+                let error = SublimationError::Invalid(
+                    "nonlinear interface heat must be finite, passive and zero at equal temperatures",
+                );
+                // A broken heat law is not a caloric-domain bracket boundary.
+                // Abort the shared solver immediately, then restore this exact
+                // physical refusal rather than hiding it behind NonConverged.
+                invalid_interface.set(Some(error));
+                return Err(SublimationError::NonConverged);
+            }
+            finite(duration_s * rate)?
+        };
         let substrate_storage = finite(
             state.substrate_mass_kg * (substrate_h - state.substrate_specific_enthalpy_j_kg),
         )?;
@@ -369,7 +548,11 @@ fn advance<L: SublimationLaw + ?Sized>(
                 break;
             }
             Err(SublimationError::Cancelled) => return Err(SublimationError::Cancelled),
-            Err(SublimationError::NonConverged) => return Err(SublimationError::NonConverged),
+            Err(SublimationError::NonConverged) => {
+                return Err(invalid_interface
+                    .get()
+                    .unwrap_or(SublimationError::NonConverged));
+            }
             Err(error) => refusal = error,
         }
     }
@@ -379,13 +562,9 @@ fn advance<L: SublimationLaw + ?Sized>(
         .max(deposit_heat_j.abs())
         .max(initial_latent.abs());
     loop {
-        let endpoint = solve_endpoint_with_scale(
-            initial,
-            state.deposit.mass_kg,
-            scale,
-            config,
-            &mut evaluate,
-        )?;
+        let endpoint =
+            solve_endpoint_with_scale(initial, state.deposit.mass_kg, scale, config, &mut evaluate)
+                .map_err(|error| invalid_interface.get().unwrap_or(error))?;
         let accepted = last.get().ok_or(SublimationError::NonConverged)?;
         debug_assert_eq!(endpoint.h, accepted.endpoint.h);
         let tolerance = finite(
@@ -426,3 +605,7 @@ fn advance<L: SublimationLaw + ?Sized>(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "resistance/nonlinear_tests.rs"]
+mod nonlinear_tests;

@@ -777,6 +777,41 @@ porosity, geometry growth or contact evolution. Independent two-body algebra,
 exponential time refinement, nonlinear calorics, latent/finite-vapor balances
 and vapor-pressure feedback test the numerical and conservation claims.
 
+### Original nonlinear heat laws on a thermally resistive coating
+
+`sublimation::coating::resistance::ResistiveInterfaceLaw` supplies interfacial
+power from the two original material temperatures, positive from support to
+deposit. `heat_resistive_surface_with_interface` and
+`advance_resistive_surface_with_interface` evaluate that law at the accepted
+endpoint in the same separate energy balances as the fixed-conductance APIs.
+The phase path retains the original molecular/finite-vapor/gas-film transfer,
+complete carried vapor enthalpy and latent heat account.
+
+The interface law must be continuous, nondecreasing in support temperature,
+nonincreasing in deposit temperature and passive on its declared domain.
+Every queried endpoint enforces finite heat rate, the down-temperature sign,
+and exactly zero heat at equal temperatures. Violations abort the shared
+bracketer rather than being treated as caloric-domain bounds. These sampled
+checks do not prove global monotonicity or constitutive validity. The law owns
+its conductivity integral, radiation/contact closure and source context;
+internally nontrivial queries also own their bounded work and cancellation.
+
+Total energy still eliminates the support enthalpy, leaving one original
+bounded scalar solve with no fitted conductance, effective heat capacity or
+second caloric solve. Each endpoint trial spends the same work allowance;
+inactive zero-duration contact performs no interface query. Existing authored
+constant-conductance entry points keep their multiplication order and exact
+zero-contact branch. Both condensed masses remain positive; no bare/extinction
+transition or spatially resolved temperature profile is inferred.
+
+Six G0/G1/G3/G4 regressions compare an independent quadratic Kirchhoff solution,
+manufactured nonlinear calorics with fourth-power heat transfer, analytical
+finite-vapor deposition/sublimation, the original constant-conductance limit,
+physical sign/equilibrium refusals, zero-time heat impulses, one trial budget
+and cancellation. The complete resistive/geometry scalar lane passes 23 native
+tests using the original production owners and real `fs_math`.
+
+
 ### Mass-owned thermal resistance of a growing supported coating
 
 `sublimation::coating::resistance::geometry::ConductiveCoatingGeometry`
