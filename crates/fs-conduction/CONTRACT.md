@@ -5529,3 +5529,39 @@ typed floor/cap refusal, cancellation and a scheduled bath outside source
 support that must not be hidden by a smaller interval. These new sources
 passed syntax/API review but native compilation and execution remained blocked
 by the shared implementation environment's exhausted resources.
+
+## Analytic enthalpy response for exact phase exchange
+
+The original phase curve's `linear_heat_exchange_response` and checkpointed
+variant return the same fixed-bath exchange with its analytic enthalpy/heat
+Jacobian. One traversal composes the original sensible-kernel inlet gain,
+stable transferred-heat loss, bath response and positive mean-temperature
+moments. A latent segment contributes unit inlet gain and bath response equal
+to its exposure. Continuous T(h) preserves the variational flow through
+interval transitions without perturbed marches or finite-difference timing.
+
+The exposure derivative retains the attenuated driving temperature even when
+the rounded endpoint equals the bath. Normalized positive moments preserve
+weak mean-temperature response without subtracting nearly equal quantities.
+At positive-time equilibrium, an interior chart knot with unequal one-sided
+caloric slopes has no unique two-sided Jacobian and refuses this response
+entry. The value-only entry still accepts that equilibrium. A latent interior
+retains its actual phase-inventory response; support endpoints have admitted-side
+derivatives.
+
+`lumped::exchange::solve_lumped_linear_exchange_response` applies the original
+body's mass and conductance to return integrated-heat derivatives with respect
+to initial specific enthalpy, bath temperature and duration, in kg, J/K and W.
+It shares the same Biot, radiation-disabled, source-domain, cancellation and
+actual stored-energy residual gate as the value-only operator. These derivatives
+describe the continuous original caloric map, not floating-point quantization
+of absolute h. They do not change geometry, material context or reservoir
+ownership and do not themselves accept a coupled finite-reservoir history.
+
+Four added material and two added native regressions, with existing mushy and
+energy-budget cases extended, check analytical cross-fusion heating/cooling,
+source subdivision/composition, weak and rounded-to-bath response, latent
+equilibrium/corner admission, native chain units and independent three-phase
+finite differences. They passed syntax and bounded arithmetic/API review;
+native compilation and execution remained unverified in the resource-exhausted
+implementation environment.

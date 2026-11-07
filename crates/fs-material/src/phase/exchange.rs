@@ -64,6 +64,34 @@ pub struct PhaseHeatExchange {
     pub mean_temperature_k: f64,
 }
 
+/// Jacobian of the continuous original caloric flow, before absolute h is rounded.
+///
+/// All unmentioned chart data and inputs remain fixed. These are enthalpy and
+/// integrated-heat derivatives; T_out need not be differentiable at a phase edge.
+/// They do not differentiate floating-point state quantization. The exchange's
+/// represented h change and actual energy residual remain separately binding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhaseHeatExchangeJacobian {
+    /// d h_out / d h_in. Nonnegative attenuation; may underflow to zero.
+    pub inlet_enthalpy_gain: f64,
+    /// Stable 1 - gain, so d q / d h_in = -loss for heat per fixed mass.
+    pub inlet_enthalpy_loss: f64,
+    /// d h_out / d T_reservoir = d q / d T_reservoir [J/(kg K)].
+    pub reservoir_enthalpy_derivative_j_kg_k: f64,
+    /// d h_out / d X = d q / d X [K]. Retains the final driving temperature
+    /// through its attenuation even when the absolute T_out rounds to the bath.
+    pub exposure_enthalpy_derivative_k: f64,
+    /// d T_mean / d T_reservoir. A positive moment preserves weak exchange.
+    pub mean_reservoir_derivative: f64,
+}
+
+/// One exact exchange and its analytic response, from the same chart traversal.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PhaseHeatExchangeResponse {
+    pub exchange: PhaseHeatExchange,
+    pub jacobian: PhaseHeatExchangeJacobian,
+}
+
 impl EquilibriumEnthalpyPhaseCurve {
     /// Exchange against a fixed-temperature reservoir through the full chart.
     ///
@@ -98,6 +126,65 @@ impl EquilibriumEnthalpyPhaseCurve {
         initial: EquilibriumPhaseState,
         reservoir_k: f64,
         exposure_j_kg_k: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PhaseHeatExchange, PhaseHeatExchangeError> {
+        self.linear_heat_exchange_impl(initial, reservoir_k, exposure_j_kg_k, None, cancelled)
+    }
+
+    /// Exchange and analytic enthalpy/heat response for implicit coupling.
+    ///
+    /// Sensible response reuses the original affine-Cp kernel. An isothermal
+    /// segment has unit inlet gain and bath derivative X, so changes in latent
+    /// residence are retained across melting or freezing. Continuous T(h)
+    /// makes the switching-event saltation identity: no perturbed marches,
+    /// finite differences, apparent Cp or extra transition source are used.
+    ///
+    /// At positive-time equilibrium, unequal one-sided caloric slopes have no
+    /// unique two-sided Jacobian. Only this response API refuses that corner;
+    /// the value-only exchange remains admissible. At a chart support endpoint
+    /// the derivative is one-sided within the admitted source domain.
+    pub fn linear_heat_exchange_response(
+        &self,
+        initial: EquilibriumPhaseState,
+        reservoir_k: f64,
+        exposure_j_kg_k: f64,
+    ) -> Result<PhaseHeatExchangeResponse, PhaseHeatExchangeError> {
+        self.linear_heat_exchange_response_with_checkpoint(
+            initial,
+            reservoir_k,
+            exposure_j_kg_k,
+            || false,
+        )
+    }
+
+    /// Response with the same bounded work and cancellation points as exchange.
+    pub fn linear_heat_exchange_response_with_checkpoint(
+        &self,
+        initial: EquilibriumPhaseState,
+        reservoir_k: f64,
+        exposure_j_kg_k: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PhaseHeatExchangeResponse, PhaseHeatExchangeError> {
+        let mut response = ResponseAccumulator::new();
+        let exchange = self.linear_heat_exchange_impl(
+            initial,
+            reservoir_k,
+            exposure_j_kg_k,
+            Some(&mut response),
+            cancelled,
+        )?;
+        Ok(PhaseHeatExchangeResponse {
+            exchange,
+            jacobian: response.finish(exchange)?,
+        })
+    }
+
+    fn linear_heat_exchange_impl(
+        &self,
+        initial: EquilibriumPhaseState,
+        reservoir_k: f64,
+        exposure_j_kg_k: f64,
+        mut response: Option<&mut ResponseAccumulator>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PhaseHeatExchange, PhaseHeatExchangeError> {
         if cancelled() {
@@ -116,6 +203,11 @@ impl EquilibriumEnthalpyPhaseCurve {
         let initial_t = initial.temperature_k();
         let initial_h = initial.specific_enthalpy_j_kg();
         if exposure_j_kg_k == 0.0 || initial_t == reservoir_k {
+            if exposure_j_kg_k > 0.0
+                && let Some(response) = response.as_deref_mut()
+            {
+                self.equilibrium_exchange_response(initial, exposure_j_kg_k, response)?;
+            }
             if cancelled() {
                 return Err(PhaseHeatExchangeError::Cancelled);
             }
@@ -195,6 +287,16 @@ impl EquilibriumEnthalpyPhaseCurve {
             let finished = remaining <= to_boundary;
             let local_exposure = if finished { remaining } else { to_boundary };
             let (local_heat, local_mean) = if plateau {
+                if let Some(response) = response.as_deref_mut() {
+                    response.push(
+                        1.0,
+                        0.0,
+                        local_exposure,
+                        0.0,
+                        local_exposure,
+                        exposure_j_kg_k,
+                    )?;
+                }
                 (
                     if !finished || remaining == to_boundary {
                         boundary.specific_enthalpy_j_kg - h
@@ -210,6 +312,16 @@ impl EquilibriumEnthalpyPhaseCurve {
                     reservoir_k,
                     local_exposure,
                 )?;
+                if let Some(response) = response.as_deref_mut() {
+                    response.push(
+                        exchange.inlet_enthalpy_gain,
+                        exchange.inlet_enthalpy_loss,
+                        exchange.reservoir_enthalpy_derivative_j_kg_k,
+                        exchange.mean_reservoir_derivative,
+                        local_exposure,
+                        exposure_j_kg_k,
+                    )?;
+                }
                 (
                     exchange.specific_enthalpy_change_j_kg,
                     exchange.mean_temperature_k,
@@ -301,6 +413,61 @@ impl EquilibriumEnthalpyPhaseCurve {
             "heat exchange exceeds the original enthalpy support",
         ))
     }
+    fn equilibrium_exchange_response(
+        &self,
+        initial: EquilibriumPhaseState,
+        exposure: f64,
+        response: &mut ResponseAccumulator,
+    ) -> Result<(), PhaseHeatExchangeError> {
+        let knots = self.knots();
+        let h = initial.specific_enthalpy_j_kg();
+        let t = initial.temperature_k();
+        let index = knots
+            .partition_point(|k| k.specific_enthalpy_j_kg <= h)
+            .saturating_sub(1)
+            .min(knots.len() - 2);
+        let capacities = |i: usize| {
+            let (a, b) = (knots[i], knots[i + 1]);
+            if a.temperature_k == b.temperature_k {
+                None
+            } else {
+                Some(self.sensible_heat_capacities_on_interval(i).unwrap_or(
+                    [(b.specific_enthalpy_j_kg - a.specific_enthalpy_j_kg)
+                        / (b.temperature_k - a.temperature_k); 2],
+                ))
+            }
+        };
+        let current = capacities(index);
+        if index > 0
+            && h == knots[index].specific_enthalpy_j_kg
+            && capacities(index - 1).map(|cp| cp[1]) != current.map(|cp| cp[0])
+        {
+            return Err(invalid(
+                "equilibrium at unequal one-sided caloric slopes has no unique response",
+            ));
+        }
+        if let Some(cp) = current {
+            let local = source_linear_heat_exchange(
+                &[
+                    [knots[index].temperature_k, cp[0]],
+                    [knots[index + 1].temperature_k, cp[1]],
+                ],
+                t,
+                t,
+                exposure,
+            )?;
+            response.push(
+                local.inlet_enthalpy_gain,
+                local.inlet_enthalpy_loss,
+                local.reservoir_enthalpy_derivative_j_kg_k,
+                local.mean_reservoir_derivative,
+                exposure,
+                exposure,
+            )
+        } else {
+            response.push(1.0, 0.0, exposure, 0.0, exposure, exposure)
+        }
+    }
 }
 
 fn add(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), PhaseHeatExchangeError> {
@@ -312,6 +479,78 @@ fn add(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), PhaseHeatE
     *correction = (next - *sum) - increment;
     *sum = next;
     Ok(())
+}
+
+// Compose the exact local variational flow. T(h) is continuous at every chart
+// boundary, so event-time terms cancel; the saltation multiplier is one.
+struct ResponseAccumulator {
+    gain: f64,
+    loss: f64,
+    reservoir: f64,
+    mean: f64,
+    mean_correction: f64,
+}
+
+impl ResponseAccumulator {
+    fn new() -> Self {
+        Self {
+            gain: 1.0,
+            loss: 0.0,
+            reservoir: 0.0,
+            mean: 0.0,
+            mean_correction: 0.0,
+        }
+    }
+
+    fn push(
+        &mut self,
+        gain: f64,
+        loss: f64,
+        reservoir: f64,
+        mean: f64,
+        local_exposure: f64,
+        total_exposure: f64,
+    ) -> Result<(), PhaseHeatExchangeError> {
+        // X-B is a positive moment. Normalize before multiplying to retain a
+        // representable weak response even if the unnormalized moment underflows.
+        add(
+            &mut self.mean,
+            &mut self.mean_correction,
+            loss * (self.reservoir / total_exposure) + (local_exposure / total_exposure) * mean,
+        )?;
+        self.reservoir = gain.mul_add(self.reservoir, reservoir);
+        self.loss = gain.mul_add(self.loss, loss);
+        self.gain *= gain;
+        if !self.reservoir.is_finite()
+            || self.reservoir < 0.0
+            || !self.loss.is_finite()
+            || self.loss < 0.0
+            || !self.gain.is_finite()
+            || self.gain < 0.0
+            || self.mean < 0.0
+        {
+            return Err(invalid("exchange Jacobian is not representable"));
+        }
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        exchange: PhaseHeatExchange,
+    ) -> Result<PhaseHeatExchangeJacobian, PhaseHeatExchangeError> {
+        let exposure_derivative =
+            (exchange.reservoir_temperature_k - exchange.initial.temperature_k()) * self.gain;
+        if !exposure_derivative.is_finite() {
+            return Err(invalid("exchange exposure derivative is not representable"));
+        }
+        Ok(PhaseHeatExchangeJacobian {
+            inlet_enthalpy_gain: self.gain,
+            inlet_enthalpy_loss: self.loss,
+            reservoir_enthalpy_derivative_j_kg_k: self.reservoir,
+            exposure_enthalpy_derivative_k: exposure_derivative,
+            mean_reservoir_derivative: self.mean,
+        })
+    }
 }
 
 fn invalid(what: &'static str) -> PhaseHeatExchangeError {

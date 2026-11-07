@@ -1,7 +1,9 @@
 //! Native uniform-body exchange through sensible branches and sharp fusion.
 
 use super::*;
-use fs_conduction::lumped::exchange::{LumpedLinearExchangeConfig, solve_lumped_linear_exchange};
+use fs_conduction::lumped::exchange::{
+    LumpedLinearExchangeConfig, solve_lumped_linear_exchange, solve_lumped_linear_exchange_response,
+};
 
 fn body(
     curve: &EquilibriumEnthalpyPhaseCurve,
@@ -222,6 +224,22 @@ fn g0_energy_budget_measures_actual_state_quantization_instead_of_absolute_h() {
         };
         let result =
             solve_lumped_linear_exchange(cx, &body, BiotGate::corpus_default(), cfg).unwrap();
+        let response =
+            solve_lumped_linear_exchange_response(cx, &body, BiotGate::corpus_default(), cfg)
+                .unwrap();
+        assert_eq!(response.exchange, result);
+        assert!(
+            solve_lumped_linear_exchange_response(
+                cx,
+                &body,
+                BiotGate::corpus_default(),
+                LumpedLinearExchangeConfig {
+                    energy_tolerance_j: 1e-6,
+                    ..cfg
+                },
+            )
+            .is_err()
+        );
         assert!(result.heat_residual_j.abs() > 0.1);
         assert!(result.heat_residual_j.abs() < 1.0);
         near(
@@ -253,5 +271,151 @@ fn g0_energy_budget_measures_actual_state_quantization_instead_of_absolute_h() {
             )
             .is_err()
         );
+    });
+}
+
+// Independent closed-form endpoint after all three phases of the manufactured
+// constant-Cp fixture. Its perturbed endpoints stay inside the same final phase.
+fn three_phase_heat(initial_h: f64, bath: f64, duration: f64, heating: bool) -> f64 {
+    let x = duration / 2.0; // G=1 W/K and m=2 kg.
+    let final_h = if heating {
+        let initial_t = 300.0 + initial_h / 100.0;
+        let remaining =
+            x - 100.0 * ((bath - initial_t) / (bath - 600.0)).ln() - 25_000.0 / (bath - 600.0);
+        let final_t = bath - (bath - 600.0) * (-remaining / 200.0).exp();
+        55_000.0 + 200.0 * (final_t - 600.0)
+    } else {
+        let initial_t = 600.0 + (initial_h - 55_000.0) / 200.0;
+        let remaining =
+            x - 200.0 * ((initial_t - bath) / (600.0 - bath)).ln() - 25_000.0 / (600.0 - bath);
+        let final_t = bath + (600.0 - bath) * (-remaining / 100.0).exp();
+        100.0 * (final_t - 300.0)
+    };
+    2.0 * (final_h - initial_h)
+}
+
+#[test]
+fn g1_native_heat_jacobian_matches_independent_cross_phase_derivatives_and_units() {
+    let curve = phase_curve();
+    let body = body(&curve, 100.0, 0.0);
+    let heating =
+        100.0 * (500.0_f64 / 300.0).ln() + 25_000.0 / 300.0 + 200.0 * (300.0_f64 / 200.0).ln();
+    let cooling =
+        200.0 * (600.0_f64 / 400.0).ln() + 25_000.0 / 400.0 + 100.0 * (400.0_f64 / 200.0).ln();
+    with_cx(|cx| {
+        for (initial, bath, duration, is_heating) in [
+            (10_000.0, 900.0, 2.0 * heating, true),
+            (95_000.0, 200.0, 2.0 * cooling, false),
+        ] {
+            let response = solve_lumped_linear_exchange_response(
+                cx,
+                &body,
+                BiotGate::corpus_default(),
+                config(initial, bath, duration),
+            )
+            .unwrap();
+            near(
+                response.exchange.heat_into_body_j,
+                three_phase_heat(initial, bath, duration, is_heating),
+                1e-7,
+            );
+            let derivative_h = (three_phase_heat(initial + 0.01, bath, duration, is_heating)
+                - three_phase_heat(initial - 0.01, bath, duration, is_heating))
+                / 0.02;
+            let derivative_bath = (three_phase_heat(initial, bath + 0.001, duration, is_heating)
+                - three_phase_heat(initial, bath - 0.001, duration, is_heating))
+                / 0.002;
+            let derivative_duration =
+                (three_phase_heat(initial, bath, duration + 0.001, is_heating)
+                    - three_phase_heat(initial, bath, duration - 0.001, is_heating))
+                    / 0.002;
+            near(
+                response.heat_initial_enthalpy_derivative_kg,
+                derivative_h,
+                1e-6,
+            );
+            near(
+                response.heat_reservoir_derivative_j_k,
+                derivative_bath,
+                1e-4,
+            );
+            near(
+                response.heat_duration_derivative_w,
+                derivative_duration,
+                1e-5,
+            );
+            assert_eq!(
+                response.heat_initial_enthalpy_derivative_kg,
+                -2.0 * response.caloric_jacobian.inlet_enthalpy_loss
+            );
+            assert_eq!(
+                response.heat_reservoir_derivative_j_k,
+                2.0 * response
+                    .caloric_jacobian
+                    .reservoir_enthalpy_derivative_j_kg_k
+            );
+            assert_eq!(
+                response.heat_duration_derivative_w,
+                response.caloric_jacobian.exposure_enthalpy_derivative_k
+            ); // G=1.
+            assert_eq!(
+                response.exchange,
+                solve_lumped_linear_exchange(
+                    cx,
+                    &body,
+                    BiotGate::corpus_default(),
+                    config(initial, bath, duration),
+                )
+                .unwrap()
+            );
+        }
+    });
+}
+
+#[test]
+fn g0_native_response_retains_latent_inventory_energy_budget_and_cancellation() {
+    let curve = phase_curve();
+    let coupled = body(&curve, 100.0, 0.0);
+    with_cx(|cx| {
+        let plateau = solve_lumped_linear_exchange_response(
+            cx,
+            &coupled,
+            BiotGate::corpus_default(),
+            config(35_000.0, 600.0, 100.0),
+        )
+        .unwrap();
+        assert_eq!(plateau.exchange.heat_into_body_j, 0.0);
+        assert_eq!(plateau.heat_initial_enthalpy_derivative_kg, 0.0);
+        assert_eq!(plateau.heat_reservoir_derivative_j_k, 100.0); // G*dt while latent.
+        assert_eq!(plateau.heat_duration_derivative_w, 0.0);
+        assert!(
+            solve_lumped_linear_exchange_response(
+                cx,
+                &coupled,
+                BiotGate::corpus_default(),
+                config(30_000.0, 600.0, 100.0),
+            )
+            .is_err()
+        );
+        let zero = solve_lumped_linear_exchange_response(
+            cx,
+            &coupled,
+            BiotGate::corpus_default(),
+            config(10_000.0, 900.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(zero.heat_reservoir_derivative_j_k, 0.0);
+        assert_eq!(zero.heat_duration_derivative_w, 500.0); // Initial physical G*(Tb-T).
+    });
+    support::with_cancelled_cx(|cx| {
+        assert!(matches!(
+            solve_lumped_linear_exchange_response(
+                cx,
+                &coupled,
+                BiotGate::corpus_default(),
+                config(10_000.0, 900.0, 100.0),
+            ),
+            Err(ConductionError::Cancelled { .. }),
+        ));
     });
 }

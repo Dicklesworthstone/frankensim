@@ -192,7 +192,21 @@ fn g1_authored_mushy_intervals_retain_their_total_enthalpy_law() {
     .unwrap();
     let initial = curve.state_at_specific_enthalpy(12_000.0).unwrap();
     let x = 600.0 * (280.0_f64 / 120.0).ln();
-    let result = curve.linear_heat_exchange(initial, 600.0, x).unwrap();
+    let response = curve
+        .linear_heat_exchange_response(initial, 600.0, x)
+        .unwrap();
+    let result = response.exchange;
+    near(response.jacobian.inlet_enthalpy_gain, 3.0 / 7.0, 3e-14);
+    near(
+        response.jacobian.reservoir_enthalpy_derivative_j_kg_k,
+        2400.0 / 7.0,
+        3e-10,
+    );
+    near(
+        response.jacobian.exposure_enthalpy_derivative_k,
+        120.0,
+        3e-11,
+    );
     near(result.state.temperature_k(), 480.0, 2e-10);
     near(result.state.specific_enthalpy_j_kg(), 108_000.0, 2e-8);
     near(result.state.liquid_mass_fraction(), 0.9, 2e-13);
@@ -266,4 +280,244 @@ fn g0_domain_identity_quantization_and_late_cancellation_refuse_transactionally(
     assert_eq!(checks, 3);
     assert_eq!(curve, before);
     assert_eq!(initial, curve.state_at_specific_enthalpy(22_000.0).unwrap());
+}
+
+// Independent derivative of the manufactured exposure primitive with respect
+// to the bath, integrated over the prescribed path rather than perturbed marches.
+fn bath_moment(from: f64, to: f64, bath: f64, intercept: f64, slope: f64) -> f64 {
+    (intercept + slope * bath) * (1.0 / (bath - to) - 1.0 / (bath - from))
+        + slope * ((bath - to) / (bath - from)).ln()
+}
+
+#[test]
+fn g1_source_exact_response_carries_latent_residence_in_both_directions() {
+    let curve = source_curve(0.0, false);
+    for (h0, from, to, bath, first_a, first_b, last_a, last_b, latent) in [
+        (
+            22_000.0, 320.0, 460.0, 550.0, -2000.0, 10.0, -6000.0, 20.0, 20_000.0,
+        ),
+        (
+            470_000.0, 500.0, 330.0, 250.0, -6000.0, 20.0, -2000.0, 10.0, -20_000.0,
+        ),
+    ] {
+        let x = exposure(from, 400.0, bath, first_a, first_b)
+            + latent / (bath - 400.0)
+            + exposure(400.0, to, bath, last_a, last_b);
+        let response = curve
+            .linear_heat_exchange_response(curve.state_at_specific_enthalpy(h0).unwrap(), bath, x)
+            .unwrap();
+        let j = response.jacobian;
+        let bath_derivative = (bath - to)
+            * (bath_moment(from, 400.0, bath, first_a, first_b)
+                + latent / (bath - 400.0).powi(2)
+                + bath_moment(400.0, to, bath, last_a, last_b));
+        near(j.inlet_enthalpy_gain, (bath - to) / (bath - from), 3e-14);
+        near(
+            j.inlet_enthalpy_loss,
+            1.0 - (bath - to) / (bath - from),
+            3e-14,
+        );
+        near(
+            j.reservoir_enthalpy_derivative_j_kg_k,
+            bath_derivative,
+            3e-10,
+        );
+        near(j.exposure_enthalpy_derivative_k, bath - to, 3e-11);
+        near(
+            j.mean_reservoir_derivative,
+            1.0 - bath_derivative / x,
+            3e-13,
+        );
+        assert_eq!(
+            response.exchange,
+            curve
+                .linear_heat_exchange(response.exchange.initial, bath, x)
+                .unwrap(),
+        );
+    }
+}
+
+#[test]
+fn g1_weak_and_rounded_equilibrium_responses_retain_nonzero_derivatives() {
+    let curve = source_curve(0.0, false);
+    let initial = curve.state_at_specific_enthalpy(62_500.0).unwrap(); // T=350, Cp=1500.
+    let x = 1e-200;
+    let weak = curve
+        .linear_heat_exchange_response(initial, 350.0, x)
+        .unwrap();
+    assert_eq!(weak.exchange.state, initial);
+    assert_eq!(weak.jacobian.inlet_enthalpy_gain, 1.0);
+    near(weak.jacobian.inlet_enthalpy_loss / (x / 1500.0), 1.0, 3e-15);
+    near(
+        weak.jacobian.reservoir_enthalpy_derivative_j_kg_k / x,
+        1.0,
+        3e-15,
+    );
+    // Forming X times this mean response first would underflow to zero.
+    near(
+        weak.jacobian.mean_reservoir_derivative / (x / 3000.0),
+        1.0,
+        3e-15,
+    );
+
+    let constant = EquilibriumEnthalpyPhaseCurve::try_new(
+        ContentHash([0xd7; 32]),
+        [(0.0, 300.0), (100_000.0, 800.0)]
+            .into_iter()
+            .map(|(h, t)| EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: h,
+                temperature_k: t,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 1000.0,
+            })
+            .collect(),
+    )
+    .unwrap();
+    for x in [8000.0, 200_000.0] {
+        let response = constant
+            .linear_heat_exchange_response(
+                constant.state_at_specific_enthalpy(0.0).unwrap(),
+                600.0,
+                x,
+            )
+            .unwrap();
+        let gain = (-x / 200.0).exp();
+        assert_eq!(response.exchange.state.temperature_k(), 600.0);
+        assert_eq!(response.jacobian.inlet_enthalpy_gain, gain);
+        assert_eq!(
+            response.jacobian.exposure_enthalpy_derivative_k,
+            300.0 * gain
+        );
+        near(
+            response.jacobian.reservoir_enthalpy_derivative_j_kg_k,
+            200.0,
+            3e-12,
+        );
+        near(
+            response.jacobian.mean_reservoir_derivative,
+            1.0 - 200.0 / x,
+            3e-15,
+        );
+    }
+}
+
+#[test]
+fn g0_equilibrium_latent_interior_has_a_response_but_nondifferentiable_corners_do_not() {
+    let curve = source_curve(0.0, true);
+    let plateau = curve
+        .linear_heat_exchange_response(
+            curve.state_at_specific_enthalpy(160_000.0).unwrap(),
+            400.0,
+            50.0,
+        )
+        .unwrap();
+    assert_eq!(plateau.jacobian.inlet_enthalpy_gain, 1.0);
+    assert_eq!(plateau.jacobian.inlet_enthalpy_loss, 0.0);
+    assert_eq!(plateau.jacobian.reservoir_enthalpy_derivative_j_kg_k, 50.0);
+    assert_eq!(plateau.jacobian.exposure_enthalpy_derivative_k, 0.0);
+    assert_eq!(plateau.jacobian.mean_reservoir_derivative, 0.0);
+    // An ordinary source subdivision with equal Cp on both sides is smooth.
+    assert!(
+        curve
+            .linear_heat_exchange_response(
+                curve.state_at_specific_enthalpy(62_500.0).unwrap(),
+                350.0,
+                50.0,
+            )
+            .is_ok()
+    );
+    for h in [150_000.0, 170_000.0] {
+        let initial = curve.state_at_specific_enthalpy(h).unwrap();
+        assert_eq!(
+            curve
+                .linear_heat_exchange(initial, 400.0, 50.0)
+                .unwrap()
+                .state,
+            initial
+        );
+        assert!(matches!(
+            curve.linear_heat_exchange_response(initial, 400.0, 50.0),
+            Err(PhaseHeatExchangeError::Invalid(_)),
+        ));
+        let zero = curve
+            .linear_heat_exchange_response(initial, 400.0, 0.0)
+            .unwrap();
+        assert_eq!(zero.jacobian.inlet_enthalpy_gain, 1.0);
+        assert_eq!(zero.jacobian.reservoir_enthalpy_derivative_j_kg_k, 0.0);
+        // A nonstationary crossing still has a unique enthalpy response.
+        assert!(
+            curve
+                .linear_heat_exchange_response(initial, 450.0, 20.0)
+                .is_ok()
+        );
+    }
+    let initial = curve.state_at_specific_enthalpy(22_000.0).unwrap();
+    let mut checkpoints = 0;
+    assert!(matches!(
+        curve.linear_heat_exchange_response_with_checkpoint(initial, 550.0, 1200.0, || {
+            checkpoints += 1;
+            checkpoints == 3
+        }),
+        Err(PhaseHeatExchangeError::Cancelled),
+    ));
+    assert_eq!(checkpoints, 3);
+}
+
+#[test]
+fn g3_response_composes_and_preserves_the_original_source_under_subdivision() {
+    for datum in [0.0, 2.0_f64.powi(30)] {
+        let curve = source_curve(datum, false);
+        let subdivided = source_curve(datum, true);
+        let initial_h = datum + 22_000.0;
+        let initial = curve.state_at_specific_enthalpy(initial_h).unwrap();
+        let direct = curve
+            .linear_heat_exchange_response(initial, 550.0, 1200.0)
+            .unwrap();
+        let split = subdivided
+            .linear_heat_exchange_response(
+                subdivided.state_at_specific_enthalpy(initial_h).unwrap(),
+                550.0,
+                1200.0,
+            )
+            .unwrap();
+        near(
+            direct.jacobian.inlet_enthalpy_gain,
+            split.jacobian.inlet_enthalpy_gain,
+            3e-14,
+        );
+        near(
+            direct.jacobian.reservoir_enthalpy_derivative_j_kg_k,
+            split.jacobian.reservoir_enthalpy_derivative_j_kg_k,
+            3e-9,
+        );
+        near(
+            direct.jacobian.mean_reservoir_derivative,
+            split.jacobian.mean_reservoir_derivative,
+            3e-14,
+        );
+        let first = curve
+            .linear_heat_exchange_response(initial, 550.0, 600.0)
+            .unwrap();
+        let second = curve
+            .linear_heat_exchange_response(first.exchange.state, 550.0, 600.0)
+            .unwrap();
+        let (a, b, d) = (first.jacobian, second.jacobian, direct.jacobian);
+        near(
+            d.inlet_enthalpy_gain,
+            b.inlet_enthalpy_gain * a.inlet_enthalpy_gain,
+            3e-12,
+        );
+        near(
+            d.reservoir_enthalpy_derivative_j_kg_k,
+            b.inlet_enthalpy_gain * a.reservoir_enthalpy_derivative_j_kg_k
+                + b.reservoir_enthalpy_derivative_j_kg_k,
+            3e-8,
+        );
+        near(
+            d.mean_reservoir_derivative,
+            0.5 * (a.mean_reservoir_derivative + b.mean_reservoir_derivative)
+                + b.inlet_enthalpy_loss * a.reservoir_enthalpy_derivative_j_kg_k / 1200.0,
+            3e-12,
+        );
+    }
 }
