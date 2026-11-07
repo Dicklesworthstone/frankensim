@@ -11897,3 +11897,26 @@ The thermal adapter reads old Helmholtz storage directly at the accepted old tem
 `Frame2d::thermal_tabulated_fibers` exposes a bounded, cancellable inventory in the original integration order: member/section/fiber identity, reference volume, member reference mass, accepted axial strain and borrowed material/history. It requires complete thermal-fiber coverage and performs no equilibrium solve or constitutive advance. This supplies a direct correspondence to existing caloric cells without reconstructing a second frame.
 
 Three G0/G1 regression sources exercise heated force-controlled extension and permanent shape, unequal-fiber-temperature bending and residual curvature, and heated power-law dynamics with both reference-mass formulations followed by held-strain relaxation. Independent scalar momentum, storage, entropy, heat and work calculations passed, as did scoped Rust syntax/format, whitespace and API checks. Native Cargo execution remains unverified because DSR/RCH are unavailable and shared build storage is full. The existing linear geometry, small-strain source domains, stationary-support and reference-mass assumptions remain binding.
+
+## Full-stick vector adhesion on native P1 faces
+
+`AdhesiveP1Patch3::with_full_stick_tractions` explicitly projects the original
+mixed-mode JKR normal field and both full-stick tangential fields onto the same
+exterior P1 traces. Local components follow the declared x tangent, y tangent
+and inward normal. Exact sector force and first moments supply every nodal
+component; singular edge tractions are integrated rather than sampled.
+Normal-only projection remains the default.
+
+The native transient owner retains the selected vector endpoint atomically,
+including receiver refusal and supported-node motion. Its independent spatial
+work reconstructs all three affine displacement components from the original
+mesh and compares them with the represented nodal work. Existing support
+reaction work stays separate. Tangential radial moments are analytic and
+reuse bounded ring scratch; adding shear introduces no pressure quadrature.
+The reference geometry and original source/full-stick applicability remain
+fixed. Partial slip, follower contact and a new finite-body contact solve are
+outside this explicit prescribed-traction extension.
+
+The focused vector regressions specify independent closed-form nodal forces,
+rotated-frame wrenches, actual Newmark motion under changing shear direction,
+atomic receiver retry and tangential adhesion work on prescribed supports.

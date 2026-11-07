@@ -1,13 +1,15 @@
 //! Original JKR/Maugis pressure on actual exterior P1 tetrahedral faces.
 //! Mixed-mode JKR profiles retain their actual shear-reduced footprint and
-//! normal opening. Their normal pressure follows this same projection path;
-//! the original mixed-mode owner separately retains tangential efforts and
-//! storage. Prescribing that field is not a self-consistent finite-body
-//! normal/shear contact solve.
+//! normal opening. The default projects normal pressure. Explicit
+//! `with_full_stick_tractions` also projects the original mixed-mode tangential
+//! field and its work on the same physical P1 traces. The original source owns
+//! the full-stick constitutive state; prescribing its field is not an implicit
+//! finite-body contact or partial-slip solve.
 //!
 //! Each polar cell belongs wholly to one coplanar exterior face. Its three
 //! barycentric functions come from the ORIGINAL mesh, not caller-authored
-//! weights. Integrating N_i p uses the original force and first moments; the
+//! weights. Integrating each N_i traction component uses its original force
+//! and first moments; the
 //! JKR edge singularity is never sampled or clipped. Positive source pressure
 //! acts inward, so its tensile contribution pulls the receiver outward.
 //!
@@ -29,6 +31,7 @@ use fs_contact::normal_patch::traction::{
     sectors::{
         MAX_POLAR_TRACTION_SECTORS, MAX_RADIAL_MOMENT_EVALUATIONS, PolarRingScratch,
         PolarTractionTransfer, PolarTransferBudget, SectorAdhesiveTraction, SectorTractionError,
+        vector::{SectorAdhesiveVectorTraction, VectorPolarRingScratch, VectorPolarTractionTransfer},
     },
 };
 use fs_exec::{CancelGate, Cx};
@@ -119,6 +122,9 @@ impl From<super::transient::TransientError3> for AdhesiveP1Error3 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdhesiveP1Transfer3 {
     pub source: PolarTractionTransfer,
+    /// Present only when the caller explicitly selected full-stick vector
+    /// projection. Tangential components use the original local x/y axes.
+    pub vector_source: Option<VectorPolarTractionTransfer>,
     pub force_world_n: [f64; 3],
     pub moment_about_centre_n_m: [f64; 3],
     pub force_residual_n: [f64; 3],
@@ -132,6 +138,11 @@ struct Trace {
     coefficient: [[f64; 3]; 3],
 }
 
+struct VectorScratch {
+    cells: Vec<SectorAdhesiveVectorTraction>,
+    rings: Vec<VectorPolarRingScratch>,
+}
+
 /// Immutable original geometry/traces with bounded reusable projection scratch.
 /// A native load case owns only its canonical sparse nodal-force output.
 pub struct AdhesiveP1Patch3<'g, 'm> {
@@ -143,6 +154,7 @@ pub struct AdhesiveP1Patch3<'g, 'm> {
     controls: AdhesiveP1Controls3,
     cells: Vec<SectorAdhesiveTraction>,
     rings: Vec<PolarRingScratch>,
+    vector: Option<VectorScratch>,
     sums: Vec<Dd>,
     represented: Vec<Dd>,
     background: Vec<f64>,
@@ -278,10 +290,30 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
             controls,
             cells: vec![SectorAdhesiveTraction::default(); count],
             rings: vec![PolarRingScratch::default(); rings],
+            vector: None,
             sums: vec![Dd::ZERO; dofs],
             represented: vec![Dd::ZERO; dofs],
             background: vec![0.0; dofs],
         })
+    }
+
+    /// Explicitly include the original full-stick tangential field in every
+    /// subsequent assembly and native transient step. Local force order is
+    /// [x tangent, y tangent, inward normal] in this patch's fixed frame.
+    ///
+    /// The original source supplies each tangential resultant; its singular
+    /// flat-punch traction is integrated over the existing physical traces.
+    /// Setup allocates bounded scratch once. Normal-only profiles contribute
+    /// zero tangential load. This does not infer friction or partial slip.
+    #[must_use]
+    pub fn with_full_stick_tractions(mut self) -> Self {
+        if self.vector.is_none() {
+            self.vector = Some(VectorScratch {
+                cells: vec![SectorAdhesiveVectorTraction::default(); self.cells.len()],
+                rings: vec![VectorPolarRingScratch::default(); self.rings.len()],
+            });
+        }
+        self
     }
 
     /// Integrate the original immutable source and superpose an existing load
@@ -302,17 +334,40 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
                 "background loads belong to another reference mesh",
             ));
         }
-        let source = profile.transfer_polar_grid(
-            &self.grid.radii_m,
-            &self.grid.angles_rad,
-            &mut self.cells,
-            &mut self.rings,
-            self.controls.transfer,
-            gate,
-        )?;
+        let vector_source = if let Some(vector) = &mut self.vector {
+            let source = profile.transfer_vector_polar_grid(
+                &self.grid.radii_m,
+                &self.grid.angles_rad,
+                &mut vector.cells,
+                &mut vector.rings,
+                self.controls.transfer,
+                gate,
+            )?;
+            for (normal, vector) in self.cells.iter_mut().zip(&vector.cells) {
+                poll(gate, cx)?;
+                *normal = vector.normal;
+            }
+            Some(source)
+        } else {
+            None
+        };
+        let source = if let Some(vector) = vector_source {
+            vector.normal
+        } else {
+            profile.transfer_polar_grid(
+                &self.grid.radii_m,
+                &self.grid.angles_rad,
+                &mut self.cells,
+                &mut self.rings,
+                self.controls.transfer,
+                gate,
+            )?
+        };
         self.sums.fill(Dd::ZERO);
         self.background.fill(0.0);
-        for (&Trace { nodes, coefficient }, cell) in self.traces.iter().zip(&self.cells) {
+        for (index, (&Trace { nodes, coefficient }, cell)) in
+            self.traces.iter().zip(&self.cells).enumerate()
+        {
             poll(gate, cx)?;
             for (node, b) in nodes.into_iter().zip(coefficient) {
                 let value = product(b[0], cell.normal_force_n)
@@ -321,6 +376,20 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
                 for (axis, &normal) in self.normal.iter().enumerate() {
                     let d = 3 * node + axis;
                     self.sums[d] = self.sums[d] + value * Dd::from_f64(normal);
+                }
+                if let Some(vector) = &self.vector {
+                    let cell = &vector.cells[index];
+                    for (component, direction) in [self.frame.x_axis, self.frame.y_axis]
+                        .into_iter().enumerate()
+                    {
+                        let shear = product(b[0], cell.tangential_force_n[component])
+                            + product(b[1], cell.tangential_first_moment_n_m[component][0])
+                            + product(b[2], cell.tangential_first_moment_n_m[component][1]);
+                        for (axis, projection) in direction.into_iter().enumerate() {
+                            let d = 3 * node + axis;
+                            self.sums[d] = self.sums[d] + shear * Dd::from_f64(projection);
+                        }
+                    }
                 }
             }
         }
@@ -354,8 +423,12 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
                     moment[axis] + Dd::from_f64(r[j]) * actual[k] - Dd::from_f64(r[k]) * actual[j];
             }
         }
+        let shear = if self.vector.is_some() { profile.tangential_force_n() } else { [0.0; 2] };
         let residual = std::array::from_fn(|i| {
-            (force[i] - product(profile.normal_force_n(), self.normal[i])).to_f64()
+            let expected = product(profile.normal_force_n(), self.normal[i])
+                + product(shear[0], self.frame.x_axis[i])
+                + product(shear[1], self.frame.y_axis[i]);
+            (force[i] - expected).to_f64()
         });
         let moment = moment.map(Dd::to_f64);
         for value in residual.into_iter().chain(moment) {
@@ -371,6 +444,7 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
         }
         let transfer = AdhesiveP1Transfer3 {
             source,
+            vector_source,
             force_world_n: force.map(Dd::to_f64),
             moment_about_centre_n_m: moment,
             force_residual_n: residual,

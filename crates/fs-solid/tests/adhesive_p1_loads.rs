@@ -1,4 +1,6 @@
 //! Original adhesive fields on real exterior P1 traces and native dynamics.
+#[path = "adhesive_p1_loads/vector.rs"]
+mod vector;
 #[path = "../../fs-contact/tests/normal_work_derivative/fixtures.rs"]
 mod sources;
 #[path = "tet10/support.rs"]

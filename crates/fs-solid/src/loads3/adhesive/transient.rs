@@ -1,4 +1,4 @@
-//! Original Newmark motion and independently reconstructed P1 pressure work.
+//! Original Newmark motion and independently reconstructed P1 traction work.
 use super::*;
 use crate::linear3::{TetLinearElasticProblem, TetThermalStrainField};
 use crate::loads3::transient::{
@@ -12,7 +12,8 @@ use crate::loads3::transient::{
 pub struct AdhesiveP1Step3 {
     pub native: TransientStep3,
     pub transfer: AdhesiveP1Transfer3,
-    /// Average endpoint original pressure integrated against actual P1 travel.
+    /// Average endpoint original traction integrated against actual P1 travel.
+    /// Explicit full-stick projection includes both tangential components.
     pub spatial_traction_work_j: f64,
     /// Average represented nodal adhesive correction dotted with that travel.
     pub traction_work_on_solid_j: f64,
@@ -42,14 +43,17 @@ pub enum AdhesiveP1SupportEndpoint3<'a> {
 /// Matrices remain shared by the native candidate clone. Projection storage is
 /// reused; the native trajectory keeps its existing bounded vector allocation.
 /// Supports may be stationary or explicitly prescribed. Pressure stays on the
-/// reference material trace with its original fixed normal; support movement
-/// does not create follower loads, contact migration or a new adhesion law.
+/// reference material trace with its original fixed frame. Explicit full-stick
+/// selection carries both tangential components through the same native force
+/// balance and work account. Support movement does not create follower loads,
+/// contact migration or a new adhesion law.
 /// Read-only native access prevents an untracked load/support change; consume
 /// this wrapper to continue elsewhere.
 pub struct AdhesiveP1Transient3<'g, 'm, 'p, 's> {
     patch: AdhesiveP1Patch3<'g, 'm>,
     native: TetTransientRun3<'g, 'm, 'p, 's>,
     cells: Vec<SectorAdhesiveTraction>,
+    vector_cells: Option<Vec<SectorAdhesiveVectorTraction>>,
     represented: Vec<Dd>,
     background: Vec<f64>,
     delta: Vec<f64>,
@@ -175,11 +179,17 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
         std::mem::swap(&mut self.cells, &mut cells);
         std::mem::swap(&mut self.represented, &mut represented);
         std::mem::swap(&mut self.background, &mut background);
+        let vector_cells = self.vector.as_mut().map(|scratch| {
+            let mut accepted = vec![SectorAdhesiveVectorTraction::default(); scratch.cells.len()];
+            std::mem::swap(&mut scratch.cells, &mut accepted);
+            accepted
+        });
         poll(gate, cx)?;
         Ok(AdhesiveP1Transient3 {
             patch: self,
             native,
             cells,
+            vector_cells,
             represented,
             background,
             delta,
@@ -294,6 +304,9 @@ impl<'g, 'm, 'p, 's> AdhesiveP1Transient3<'g, 'm, 'p, 's> {
     fn publish(&mut self, candidate: TetTransientRun3<'g, 'm, 'p, 's>, report: AdhesiveP1Step3) {
         self.native = candidate;
         std::mem::swap(&mut self.cells, &mut self.patch.cells);
+        if let (Some(accepted), Some(scratch)) = (&mut self.vector_cells, &mut self.patch.vector) {
+            std::mem::swap(accepted, &mut scratch.cells);
+        }
         std::mem::swap(&mut self.represented, &mut self.patch.represented);
         std::mem::swap(&mut self.background, &mut self.patch.background);
         self.current = report.transfer;
@@ -373,12 +386,13 @@ impl<'g, 'm, 'p, 's> AdhesiveP1Transient3<'g, 'm, 'p, 's> {
         let mut spatial = Dd::ZERO;
         let mut scale = Dd::ZERO;
         let mut estimate = Dd::ZERO;
-        for ((trace, before), after) in self
+        for (cell_index, ((trace, before), after)) in self
             .patch
             .traces
             .iter()
             .zip(&self.cells)
             .zip(&self.patch.cells)
+            .enumerate()
         {
             poll(gate, cx)?;
             let mut travel = [Dd::ZERO; 3];
@@ -412,6 +426,35 @@ impl<'g, 'm, 'p, 's> AdhesiveP1Transient3<'g, 'm, 'p, 's> {
             let gradient = finite(travel[1].to_f64())?.hypot(finite(travel[2].to_f64())?);
             estimate = estimate
                 + (Dd::from_f64(before[3]) + Dd::from_f64(after[3])) * product(0.5, gradient);
+            if let (Some(accepted), Some(scratch)) = (&self.vector_cells, &self.patch.vector) {
+                let before = &accepted[cell_index];
+                let after = &scratch.cells[cell_index];
+                for (component, direction) in [self.patch.frame.x_axis, self.patch.frame.y_axis]
+                    .into_iter().enumerate()
+                {
+                    let mut travel = [Dd::ZERO; 3];
+                    for (&node, coefficient) in trace.nodes.iter().zip(trace.coefficient) {
+                        let tangential_travel = (0..3).fold(Dd::ZERO, |sum, axis| {
+                            sum + product(direction[axis], self.delta[3 * node + axis])
+                        });
+                        for i in 0..3 {
+                            travel[i] = travel[i] + Dd::from_f64(coefficient[i]) * tangential_travel;
+                        }
+                    }
+                    let before = [before.tangential_force_n[component],
+                        before.tangential_first_moment_n_m[component][0],
+                        before.tangential_first_moment_n_m[component][1]];
+                    let after = [after.tangential_force_n[component],
+                        after.tangential_first_moment_n_m[component][0],
+                        after.tangential_first_moment_n_m[component][1]];
+                    for i in 0..3 {
+                        let work = (Dd::from_f64(before[i]) + Dd::from_f64(after[i]))
+                            * Dd::from_f64(0.5) * travel[i];
+                        spatial = spatial + work;
+                        scale = scale + Dd::from_f64(finite(work.to_f64())?.abs());
+                    }
+                }
+            }
         }
         let config = self.patch.controls;
         let work_residual_j = finite((actual - spatial).to_f64())?;
