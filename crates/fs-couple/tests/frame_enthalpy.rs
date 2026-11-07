@@ -310,7 +310,7 @@ impl Fixture {
             (0..cells)
                 .map(|i| FrameThermalCell {
                     cell: CellId(i as u64),
-                    source: self.source(rate),
+                    source: self.source(rate).into(),
                 })
                 .collect(),
             self.mappings(cells),
@@ -835,7 +835,7 @@ fn mismatched_inventory_and_failed_feedback_cannot_change_accepted_histories() {
                 &wrong_mass,
                 vec![FrameThermalCell {
                     cell: CellId(0),
-                    source: fixture.source(false)
+                    source: fixture.source(false).into()
                 }],
                 fixture.mappings(1),
                 6,
@@ -933,3 +933,6 @@ fn mismatched_inventory_and_failed_feedback_cannot_change_accepted_histories() {
         assert!(retry.frame().frame().displacements()[3] > saved_u[3]);
     });
 }
+
+#[path = "frame_enthalpy/chaboche.rs"]
+mod chaboche;

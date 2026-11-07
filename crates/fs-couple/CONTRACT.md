@@ -4695,3 +4695,34 @@ A source holds an exclusive constructor borrow; prepared tangents and factors re
 `tests/phs_rational_sideband.rs` supplies focused real-owner regressions for singular D and retained dark source states; signed carriers, DC and authored forcing slopes; full mutual real-plus-pair realization with p different from m; manufactured nonlinear frequency conversion and exact source/derivative equations with a single shared Hessian pass; complete-base revalidation, original-band/guard-band limits, cumulative pair budgets and cancellation; and static zero-state realization plus unavailable-Hessian refusal.
 
 Source/API review and exact GitHub blob readback completed for this increment. Native compilation, Rust formatting and test execution remain unverified while the shared workspace is unavailable.
+
+## Heated cyclic frames on the shared enthalpy owner
+
+`frame_enthalpy::FrameThermalSource` admits the original tabulated family and
+one through eight native Chaboche branches through one source-bound cell
+interface. A single frame may mix these families while retaining every original
+fiber history, quadrature volume, member mass and caloric object. Each family
+prepares one immutable physical interval per cell; fiber clones share it during
+the existing equilibrium and backward-Euler iterations.
+
+The complete thermal inventory admits family, branch ordering and accepted
+temperature before any coupled proposal. Original nonlinear branch recovery
+and viscous overstress are physical heat channels already included once in the
+native material total. No branch aggregation, source substitution, recovery
+reset or numerical-inertia heating is introduced. Existing per-cell heat,
+actual-transport-temperature re-evaluation and combined first-law gates publish
+the complete frame, thermal timeline and observer together.
+
+Two G0/G1 regression definitions cover heating, reversal, cooling and unloading
+with independent axial branch recurrences, recovery dissipation and retained
+shape, and a mixed tabulated/rate-dependent cyclic member whose two original
+thermal cells receive different heat. Original-source mismatch and late
+observer failure leave accepted history unchanged and permit retry. Independent
+scalar force/heat calculations checked the cyclic fixture. Rust formatting,
+compilation and native test execution were unavailable after the execution
+host failed; these are authored numerical regressions, not executed or
+experimental validation.
+
+The source family changes no geometry domain: native frames remain small-strain
+and linear-geometry with fixed reference mass and stationary supports. Finite
+plastic pressure forming uses the separate existing finite-solid owner.

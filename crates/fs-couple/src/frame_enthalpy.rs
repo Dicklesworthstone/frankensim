@@ -1,7 +1,7 @@
 //! Source-bound thermal plasticity on the existing frame and caloric owners.
 //!
-//! The original force-based fibers retain permanent strain, Prager memory and
-//! temperature. Each finite caloric cell prepares one actual-temperature law
+//! The original force-based fibers retain permanent strain, Prager memory,
+//! every cyclic backstress branch and temperature. Each finite caloric cell prepares one actual-temperature law
 //! per coupling trial; all fibers in that cell share its immutable interval.
 //! The native frame solver and `DepositionSimulation` still own mechanics and
 //! heat transport. Rejected trials advance neither accepted history nor clocks.
@@ -14,11 +14,13 @@
 //! force; cells represent the caller's explicit thermal spatial approximation.
 
 mod observer;
+mod material;
+
+pub use material::FrameThermalSource;
 
 use fs_exec::Cx;
 use fs_exec::reduce::Compensated;
 use fs_material::phase::{PhaseStateError, ResolvedHeatCapacityCurve};
-use fs_material::plastic::thermal::tabulated::ThermalTabulatedSource;
 use fs_material::plastic::thermal::{FeedbackError, MAX_FEEDBACK_ITERATIONS};
 use fs_solid::frame2d::Frame2d;
 use fs_solid::frame2d::creep::{
@@ -38,7 +40,7 @@ use std::convert::Infallible;
 #[derive(Clone, Debug)]
 pub struct FrameThermalCell<'a> {
     pub cell: CellId,
-    pub source: ThermalTabulatedSource<'a>,
+    pub source: FrameThermalSource<'a>,
 }
 
 /// Explicit correspondence from an original frame fiber to a caloric cell.
@@ -106,7 +108,7 @@ impl<E: std::error::Error + 'static> std::error::Error for FrameEnthalpyError<E>
 
 #[derive(Clone, Debug)]
 struct BoundCell<'a> {
-    source: ThermalTabulatedSource<'a>,
+    source: FrameThermalSource<'a>,
     caloric: &'a ResolvedHeatCapacityCurve,
     accepted: DepositedCell,
 }
@@ -154,7 +156,7 @@ impl<'a> ThermoplasticFrame<'a> {
             ));
         }
         let points = frame
-            .thermal_tabulated_fibers(maximum_fiber_points, || cx.checkpoint().is_err())
+            .thermal_inelastic_fibers(maximum_fiber_points, || cx.checkpoint().is_err())
             .map_err(FrameEnthalpyError::Mechanical)?;
         if mapping.len() != points.len() {
             return Err(FrameEnthalpyError::Invalid(
@@ -176,6 +178,7 @@ impl<'a> ThermoplasticFrame<'a> {
         let mut cells = Vec::with_capacity(sources.len());
         let mut cell_index = BTreeMap::new();
         let mut prepared = Vec::with_capacity(sources.len());
+        let mut temperatures = Vec::with_capacity(sources.len());
         for item in sources {
             poll(cx)?;
             if cell_index.insert(item.cell, cells.len()).is_some() {
@@ -201,9 +204,10 @@ impl<'a> ThermoplasticFrame<'a> {
                 .temperature_k();
             prepared.push(
                 item.source
-                    .at_uniaxial_temperatures(temperature, temperature, 1.0)
+                    .prepare(temperature, temperature, 1.0)
                     .map_err(FrameEnthalpyError::Material)?,
             );
+            temperatures.push(temperature);
             cells.push(BoundCell {
                 source: item.source,
                 caloric,
@@ -230,9 +234,10 @@ impl<'a> ThermoplasticFrame<'a> {
             point
                 .law
                 .admit_successor(law)
-                .map_err(FrameEnthalpyError::Material)?;
-            if point.state.temperature_k() != law.old_temperature_k()
-                || point.law.temperature_k() != law.old_temperature_k()
+                .map_err(FrameEnthalpyError::Mechanical)?;
+            let temperature = temperatures[index];
+            if point.law.temperature_k() != temperature
+                || point.law.law_temperature_k() != temperature
                 || !positive(point.reference_volume_m3)
                 || !positive(point.member_reference_mass_kg)
             {
@@ -240,7 +245,7 @@ impl<'a> ThermoplasticFrame<'a> {
                     "accepted fiber temperature and positive reference geometry must match the caloric cell",
                 ));
             }
-            let mass = finite(point.reference_volume_m3 * law.density_kg_m3())?;
+            let mass = finite(point.reference_volume_m3 * point.law.density_kg_m3())?;
             volumes[index].add(point.reference_volume_m3)?;
             masses[index].add(mass)?;
             let member = member_masses
@@ -384,7 +389,7 @@ impl<'a> ThermoplasticFrame<'a> {
                 .temperature_k();
             prepared.push(
                 cell.source
-                    .at_uniaxial_temperatures(old_temperature, temperature, duration_s)
+                    .prepare(old_temperature, temperature, duration_s)
                     .map_err(FrameEnthalpyError::Material)?,
             );
             temperatures_k.push(temperature);
