@@ -1,5 +1,35 @@
 # fs-material — CONTRACT
 
+## Resistive deposition with a finite nonisothermal gas
+
+`sublimation::gas::chamber::coating::resistance` couples existing two-temperature
+coatings to the original joint molecular/gas owner. Each surface retains its
+nonvolatile support mass and enthalpy, actual deposit mass and enthalpy, two
+original inverse caloric charts, and an explicit finite conductance in W/K.
+The deposit receives molecular/reflected energy at its own temperature. The
+original resistive-storage solve shares that energy with the support through
+equal/opposite endpoint interface heat; substrate mass never enters vapor stock.
+Only one original gas endpoint is reconstructed for the canonical surface set.
+
+Mass-transfer film coefficients and thermal conductance are independent inputs.
+The final represented film mass participates in thermal storage, and fixed
+formation offsets cancel before sensible heat is solved. Separate support and
+deposit residuals must each fit the original energy tolerance. Gas species mass,
+whole condensed/gas mass and energy retain the original joint admission. An
+initial gas/deposit equilibrium cannot bypass gross inventory limits when an
+unequal-temperature support will heat or cool the deposit. Zero thermal
+conductance preserves the genuine insulated limit.
+
+Both condensed masses must remain positive. Bare nucleation and complete film
+extinction require an explicit transition and refuse here. The existing
+isothermal owner continues to admit bare substrates. Frozen gas/molecular rates
+and endpoint thermal exchange are first-order approximations; time refinement
+is required. Conductance is supplied, not inferred from frost porosity or
+thickness. No spatial temperature profile, moving interface or automatic
+morphology is claimed. Focused tests compare independent two-body and ideal-gas
+balances, datum changes, canonical shared-gas exchange, reflection, inventory
+limits and cancellation.
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion

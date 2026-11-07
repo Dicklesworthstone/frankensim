@@ -20,6 +20,9 @@
 //! porous frost, evolving geometry and resolved coating resistance require
 //! their own physical owners and are not silently supplied here.
 
+/// Existing coatings with independent deposit/support temperatures and finite conductance.
+pub mod resistance;
+
 use std::collections::BTreeMap;
 
 use fs_thermal::sublimation::{
@@ -28,7 +31,8 @@ use fs_thermal::sublimation::{
 };
 
 use super::super::{
-    compatibility, invalid, molecular_stream_energy, nonnegative, phase_at, poll, positive,
+    compatibility, condensed_thermal_target, invalid, molecular_stream_energy, nonnegative,
+    phase_at, poll, positive,
     snapshot_surface_at_temperature, snapshot_surface_at_temperature_with_kinetics,
     validate_surface,
 };
@@ -232,11 +236,10 @@ fn prepare(
     // the remaining molecular heat between the ACTUAL final deposit mass and
     // the fixed substrate. This is complete storage conservation, not a latent
     // source applied to the substrate after updating a thermally massless film.
-    let heat_j = dm
-        * (-snapshot.latent_heat_j_kg - snapshot.source_alignment_residual_j_kg
-            + 0.5 * snapshot.gas.specific_gas_constant * snapshot.temperature_k)
-        - snapshot.incoming_mass_kg * energy.difference_j_kg
-        - reflected_heat_into_gas_j;
+    let heat_j = condensed_thermal_target(
+        snapshot, snapshot.solid.specific_enthalpy_j_kg,
+        energy.difference_j_kg, reflected_heat_into_gas_j,
+    );
     let heat = heat_supported_surface(
         surface.law,
         SupportedSurfaceState {
