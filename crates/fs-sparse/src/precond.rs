@@ -234,8 +234,15 @@ pub fn ilu0_controlled<E>(
 impl Precond for Ilu0 {
     /// z = U⁻¹·L⁻¹·r (forward then backward substitution on the pattern).
     fn apply(&self, r: &[f64], z: &mut [f64]) {
-        self.apply_controlled(r, z, || Ok::<(), core::convert::Infallible>(()))
-            .expect("ilu0 non-finite inverse action");
+        if self
+            .apply_controlled(r, z, || Ok::<(), core::convert::Infallible>(()))
+            .is_err()
+        {
+            // The legacy trait cannot return a typed numerical breakdown.
+            // Preserve its callers' nonfinite-action detection, rather than
+            // panicking or leaving an apparently usable partial inverse.
+            z.fill(f64::NAN);
+        }
     }
 }
 

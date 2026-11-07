@@ -676,3 +676,155 @@ fn krylov_work_limits_and_cancellation_publish_no_candidate() {
     assert_eq!(thermal.cells(), &initial);
     assert_eq!(thermal.time_s(), 0.0);
 }
+
+#[test]
+fn cyclic_anisotropic_diffusion_retains_the_original_heat_equations() {
+    let side = 12;
+    let n = side * side;
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let mut initial = Vec::new();
+    let mut edges = Vec::new();
+    for y in 0..side {
+        for x in 0..side {
+            let row = y * side + x;
+            let cx = (core::f64::consts::PI * (x as f64 + 0.5) / side as f64).cos();
+            let cy = (core::f64::consts::PI * (y as f64 + 0.5) / side as f64).cos();
+            initial.push(300.0 + 50.0 * cx + 20.0 * cy);
+            if x + 1 < side {
+                edges.push((row, row + 1, 0.0));
+            }
+            // Series contact resistance 999 gives conductance 1/1000.
+            if y + 1 < side {
+                edges.push((row, row + side, 999.0));
+            }
+        }
+    }
+    let (thermal, observer) = setup(&law, &initial, &vec![1.0; n], &edges);
+    let graph = graph(&thermal, &observer, &law);
+    let dt = 1000.0;
+    let (next, report) = graph
+        .advance_to(
+            &thermal,
+            dt,
+            controls(dt),
+            &mut ImplicitConductionWorkspace::new(n).unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    // Cell-centred cosine modes are exact eigenvectors of the reflecting
+    // finite-volume grid. This checks the actual backward-Euler endpoint, not
+    // an independently reassembled copy of the production matrix.
+    let lambda = 4.0 * (core::f64::consts::PI / (2.0 * side as f64)).sin().powi(2);
+    for y in 0..side {
+        for x in 0..side {
+            let cx = (core::f64::consts::PI * (x as f64 + 0.5) / side as f64).cos();
+            let cy = (core::f64::consts::PI * (y as f64 + 0.5) / side as f64).cos();
+            let expected =
+                300.0 + 50.0 * cx / (1.0 + dt * lambda) + 20.0 * cy / (1.0 + 0.001 * dt * lambda);
+            near(
+                next.temperature_k(id(y * side + x)).unwrap(),
+                expected,
+                2e-8,
+            );
+        }
+    }
+    near(report.energy.residual_j, 0.0, 1e-8);
+    assert_eq!(report.rejected_intervals, 0);
+    assert_eq!(report.energy.substeps, 1);
+}
+
+#[test]
+fn cyclic_incomplete_factor_reduces_iterations_without_changing_true_residual() {
+    let side = 16;
+    let n = side * side;
+    let mut diagonal = vec![1.0; n];
+    let mut entries = Vec::new();
+    for y in 0..side {
+        for x in 0..side {
+            let a = y * side + x;
+            for (b, conductance) in [
+                ((x + 1 < side).then_some(a + 1), 1000.0),
+                ((y + 1 < side).then_some(a + side), 1.0),
+            ] {
+                if let Some(b) = b {
+                    diagonal[a] += conductance;
+                    diagonal[b] += conductance;
+                    // Parallel half-faces exercise original contribution
+                    // coalescing solely inside the approximate inverse.
+                    for _ in 0..2 {
+                        entries.push((a, b, -0.5 * conductance));
+                        entries.push((b, a, -0.5 * conductance));
+                    }
+                }
+            }
+        }
+    }
+    let expected: Vec<_> = (0..n).map(|i| (i * 37 % 103) as f64 / 103.0).collect();
+    let mut rhs: Vec<_> = diagonal.iter().zip(&expected).map(|(d, x)| d * x).collect();
+    for &(row, col, value) in &entries {
+        rhs[row] += value * expected[col];
+    }
+    let solve_with = |use_ilu| {
+        let ilu = if use_ilu {
+            Some(
+                incomplete_factor(&diagonal, &entries, &mut || Ok(()))
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let mut poll = || Ok(());
+        let poll: &mut dyn FnMut() -> Result<(), DepositionError> = &mut poll;
+        let checkpoint = RefCell::new(poll);
+        let error = RefCell::new(None);
+        let operator = GraphOperator {
+            diagonal: &diagonal,
+            entries: &entries,
+            preconditioner: ilu.map(SparsePreconditioner::Incomplete),
+            checkpoint: &checkpoint,
+            error: &error,
+        };
+        let mut state = FgmresState::new(&rhs, 32);
+        let result = state.run_controlled(&operator, &operator, &rhs, 1e-11, 64, &mut || false);
+        assert!(result.report.converged, "{result:?}");
+        assert!(error.borrow().is_none());
+        for (&actual, &target) in state.x.iter().zip(&expected) {
+            near(actual, target, 1e-8);
+        }
+        (state.iters, state.rel_residual())
+    };
+    let (diagonal_iterations, diagonal_residual) = solve_with(false);
+    let (ilu_iterations, ilu_residual) = solve_with(true);
+    assert!(
+        ilu_iterations * 2 < diagonal_iterations,
+        "diagonal {diagonal_iterations} ({diagonal_residual}), ILU {ilu_iterations} ({ilu_residual})"
+    );
+}
+
+#[test]
+fn incomplete_pivot_failure_falls_back_and_cancellation_is_preserved() {
+    // Invertible original matrix with a zero first incomplete pivot.
+    assert!(
+        incomplete_factor(&[0.0, 2.0], &[(0, 1, 1.0), (1, 0, 1.0)], &mut || Ok(()))
+            .unwrap()
+            .is_none()
+    );
+    let mut calls = 0;
+    let result = incomplete_factor(
+        &[4.0; 3],
+        &[(0, 1, -1.0), (1, 2, -1.0), (2, 0, -1.0)],
+        &mut || {
+            calls += 1;
+            if calls == 4 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(matches!(result, Err(DepositionError::Cancelled)));
+}

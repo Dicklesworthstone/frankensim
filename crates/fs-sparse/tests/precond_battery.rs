@@ -10,6 +10,24 @@ use fs_sparse::precond::{
 use fs_sparse::{Coo, Csr};
 
 #[test]
+fn ilu_inverse_overflow_remains_a_structured_pcg_breakdown() {
+    let factor = ilu0(&Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![1e-300])).unwrap();
+    let mut scratch = [0.0];
+    assert!(matches!(
+        factor.apply_controlled(&[1e300], &mut scratch, || Ok::<(), ()>(())),
+        Err(IluControlledError::Breakdown(_))
+    ));
+    // The physical problem and its solution remain finite. An unsuitable
+    // approximate inverse must leave the last finite iterate and a report.
+    let mut x = [0.0];
+    let report = pcg(&Csr::identity(1), &[1e300], &mut x, &factor, 1e-12, 4);
+    assert!(!report.converged);
+    assert_eq!(report.iters, 0);
+    assert_eq!(report.rel_residual, 1.0);
+    assert_eq!(x, [0.0]);
+}
+
+#[test]
 fn controlled_ilu_solves_nonsymmetric_tridiagonal_diffusion_without_fill() {
     let n = 73;
     let mut coo = Coo::new(n, n);
@@ -276,10 +294,17 @@ fn original_and_controlled_ilu_apis_preserve_nonsymmetric_solutions() {
 }
 
 #[test]
-#[should_panic(expected = "ilu0 non-finite inverse action")]
-fn legacy_ilu_apply_retains_its_nonfinite_inverse_panic() {
-    let a = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![f64::from_bits(1)]);
-    ilu0(&a).unwrap().apply(&[1.0], &mut [0.0]);
+fn legacy_ilu_apply_marks_the_complete_failed_inverse_as_nonfinite() {
+    let a = Csr::from_parts(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![1.0, f64::from_bits(1)],
+    );
+    let mut output = [0.0; 2];
+    ilu0(&a).unwrap().apply(&[1.0; 2], &mut output);
+    assert!(output.iter().all(|value| value.is_nan()));
 }
 
 #[test]
