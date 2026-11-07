@@ -5,8 +5,9 @@
 //! extrapolation that could violate positivity, phase or the energy balance.
 //! The discrepancy estimates local time error; it is not a continuum/global
 //! error bound. Solver residual/energy tolerances remain independent and should
-//! be tighter than the requested time accuracy. Any solver refusal is returned
-//! unchanged, not treated as an error estimate or an excuse to widen its gate.
+//! be tighter than the requested time accuracy. Physical owners may explicitly
+//! identify recoverable trial refusals for bounded bisection. No refusal is an
+//! error estimate or a reason to widen the original physical gates.
 
 use super::{boundary_before, next_endpoint, source_before};
 use super::super::{ThermalHistoryMethod, ThermalHistoryRun, ThermalHistoryStep, invalid, poll};
@@ -62,7 +63,7 @@ pub struct AdaptiveHistoryStep<T> {
     /// Maximum scaled step-doubling discrepancy, at most one on success.
     /// Includes the first-order correction for unequal representable half steps.
     pub normalized_error: f64,
-    /// Rejected temporal-error trials; no rejected trial advances physical time.
+    /// Rejected temporal-error or recoverable physical trials. None advances time.
     pub rejected_attempts: usize,
     /// Actual full/half endpoint solves, including discarded coarse/rejected work.
     pub endpoint_solves: usize,
@@ -170,43 +171,80 @@ pub(in crate::bc::history::march) fn component_error(old: f64, coarse: f64, fine
 
 // Only the time controller is shared. Each physical owner supplies its original
 // endpoint solves and error coordinates; no alternative physics is defined here.
-pub(in crate::bc::history::march) fn select_step<T, E>(cx: &Cx<'_>, start: f64, mut end: f64,
+pub(in crate::bc::history::march) fn select_step<T, E>(cx: &Cx<'_>, start: f64, end: f64,
     config: AdaptiveHistoryConfig, convert: impl Fn(ConductionError) -> E,
     mut trial: impl FnMut(f64, f64) -> Result<(T, T, f64), E>)
     -> Result<AdaptiveHistoryStep<T>, E>
 {
+    select_step_with_recovery(cx, start, end, config, convert, |_| false,
+        |middle, end, solves| {
+            let result = trial(middle, end)?;
+            *solves += 3;
+            Ok(result)
+        })
+}
+
+// Enthalpy owners opt into exactly their native recoverable physical errors.
+// Count each attempted interval before entering its original solve: a failed
+// coarse or first half must not be reported as three completed attempts.
+// Existing callers retain immediate typed refusal through select_step above.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::bc::history::march) fn select_step_with_recovery<T, E>(
+    cx: &Cx<'_>, start: f64, mut end: f64, config: AdaptiveHistoryConfig,
+    convert: impl Fn(ConductionError) -> E, recover: impl Fn(&E) -> bool,
+    mut trial: impl FnMut(f64, f64, &mut usize) -> Result<(T, T, f64), E>,
+) -> Result<AdaptiveHistoryStep<T>, E> {
+    let mut endpoint_solves = 0;
     for attempt in 0..config.max_attempts {
         poll(cx, attempt).map_err(&convert)?;
         let middle = f64::midpoint(start, end);
         if !(start < middle && middle < end) {
             return Err(convert(invalid("adaptive interval has no representable interior midpoint")));
         }
-        let (first, second, discrepancy) = trial(middle, end)?;
-        // For first order, fine error / (coarse-fine) is
-        // (h1^2+h2^2)/(2*h1*h2), equal to one for exact halves.
-        let (h1, h2) = (middle - start, end - middle);
-        let error = discrepancy * (0.5 * (h1 / h2 + h2 / h1));
-        if !error.is_finite() || error < 0.0 {
-            return Err(convert(invalid("adaptive discrepancy is not finite and nonnegative")));
-        }
         let dt = end - start;
-        if error <= 1.0 {
-            let next = if error <= 0.125 { dt.min(config.max_step_s / 2.0) * 2.0 } else { dt };
-            poll(cx, attempt).map_err(&convert)?;
-            return Ok(AdaptiveHistoryStep { start_time_s: start, midpoint_time_s: middle,
-                end_time_s: end, first_half: first, second_half: second, normalized_error: error,
-                rejected_attempts: attempt, endpoint_solves: (attempt + 1) * 3,
-                suggested_step_s: next.clamp(config.min_step_s, config.max_step_s) });
-        }
-        if attempt + 1 == config.max_attempts || dt <= config.min_step_s {
-            return Err(convert(invalid(&format!("adaptive local error ratio {error} exceeds one at the attempt limit or step floor"))));
-        }
+        let refusal = match trial(middle, end, &mut endpoint_solves) {
+            Ok((first, second, discrepancy)) => {
+                // For first order, fine error / (coarse-fine) is
+                // (h1^2+h2^2)/(2*h1*h2), equal to one for exact halves.
+                let (h1, h2) = (middle - start, end - middle);
+                let error = discrepancy * (0.5 * (h1 / h2 + h2 / h1));
+                if !error.is_finite() || error < 0.0 {
+                    return Err(convert(invalid("adaptive discrepancy is not finite and nonnegative")));
+                }
+                if error <= 1.0 {
+                    let next = if error <= 0.125 { dt.min(config.max_step_s / 2.0) * 2.0 } else { dt };
+                    poll(cx, attempt).map_err(&convert)?;
+                    return Ok(AdaptiveHistoryStep { start_time_s: start, midpoint_time_s: middle,
+                        end_time_s: end, first_half: first, second_half: second, normalized_error: error,
+                        rejected_attempts: attempt, endpoint_solves,
+                        suggested_step_s: next.clamp(config.min_step_s, config.max_step_s) });
+                }
+                if attempt + 1 == config.max_attempts || dt <= config.min_step_s {
+                    return Err(convert(invalid(&format!("adaptive local error ratio {error} exceeds one at the attempt limit or step floor"))));
+                }
+                None
+            }
+            Err(error) => {
+                // Cancellation discovered after a costly failed trial takes
+                // precedence over recovery. The physical state is still old.
+                poll(cx, attempt).map_err(&convert)?;
+                if !recover(&error) || attempt + 1 == config.max_attempts
+                    || dt <= config.min_step_s
+                {
+                    return Err(error);
+                }
+                Some(error)
+            }
+        };
         let wanted = (0.5 * dt).max(config.min_step_s);
         let mut smaller = start + wanted;
         // Keep the REAL represented interval at or above the refusal floor.
         if smaller - start < config.min_step_s { smaller = smaller.next_up(); }
         if !(start < smaller && smaller < end) {
-            return Err(convert(invalid("adaptive interval cannot be reduced within its represented step floor")));
+            // A bounded physical recovery retains the actual native refusal,
+            // including when clock rounding prevents any smaller interval.
+            return Err(refusal.unwrap_or_else(|| convert(invalid(
+                "adaptive interval cannot be reduced within its represented step floor"))));
         }
         end = smaller;
     }

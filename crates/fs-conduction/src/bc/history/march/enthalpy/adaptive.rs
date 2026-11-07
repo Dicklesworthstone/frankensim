@@ -3,7 +3,7 @@
 use super::{EnthalpyHistoryRun, EnthalpyStepConfig, EnthalpyStepSolution,
     HeterogeneousEnthalpyError, conduction, invalid, poll};
 use super::super::events::{self, adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep,
-    admit_proposal, component_error, select_step, temperature_error}};
+    admit_proposal, component_error, select_step_with_recovery, temperature_error}};
 use fs_exec::Cx;
 use crate::transient::enthalpy::EnthalpyError;
 use crate::transient::enthalpy::adaptive::combine_entropy;
@@ -94,6 +94,27 @@ pub(super) fn accepted_entropy(
     Ok(entropy)
 }
 
+// Match the standalone native adaptive owner's physical recovery policy.
+// Source support, material identity, invalid controls, budgets and cancellation
+// are admissions, not reasons to silently seek a different physical problem.
+fn recoverable_physical(error: &EnthalpyError) -> bool {
+    matches!(error, EnthalpyError::NotConverged(_)
+        | EnthalpyError::EndpointResidual { .. } | EnthalpyError::EnergyBalance { .. })
+}
+
+pub(super) fn recoverable_history(error: &HeterogeneousEnthalpyError) -> bool {
+    matches!(error, HeterogeneousEnthalpyError::Enthalpy(error) if recoverable_physical(error))
+}
+
+pub(super) fn recoverable_entropy_history(error: &EntropyAdaptiveHistoryError) -> bool {
+    match error {
+        EntropyAdaptiveHistoryError::History(error) => recoverable_history(error),
+        EntropyAdaptiveHistoryError::Entropy(EnthalpyEntropyError::Physical(error)) =>
+            recoverable_physical(error),
+        _ => false,
+    }
+}
+
 /// Additional error coordinates for a primary-enthalpy trajectory.
 /// All three gates (temperature, enthalpy, liquid fraction) must pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -130,8 +151,10 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
     ///
     /// This is a local estimator, not a phase-transition-time certificate or a
     /// global error bound. Kinks in constitutive charts need not have smooth
-    /// first-order asymptotics. Original Newton/material/energy refusals propagate
-    /// unchanged; they never cause an untested field to be accepted.
+    /// first-order asymptotics. Native nonlinear nonconvergence and endpoint
+    /// residual/energy refusals bisect within the same attempt and step limits.
+    /// Model/domain, cancellation and budget refusals propagate immediately.
+    /// Exhausted recovery returns the original typed physical refusal.
     ///
     /// # Errors
     /// Invalid policy/time, cancellation, insufficient accepted slots, original
@@ -155,9 +178,13 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
             Ok(self.storage.advance(cx, self.conduction_problem(&boundary, &source)?,
                 self.problem.interfaces, old, to - from, step)?)
         };
-        let selected = select_step(cx, start, end, adaptive, conduction, |middle, end| {
+        let selected = select_step_with_recovery(cx, start, end, adaptive, conduction,
+            recoverable_history, |middle, end, solves| {
+            *solves += 1;
             let coarse = solve(&self.specific_h, start, end)?;
+            *solves += 1;
             let first = solve(&self.specific_h, start, middle)?;
+            *solves += 1;
             let second = solve(&first.specific_enthalpy_j_kg, middle, end)?;
             let error = phase_error(cx, self, &coarse, &second, adaptive, phase)?;
             Ok((first, second, error))
@@ -175,9 +202,10 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
     /// signed temporal/algebraic defects are accumulated only from accepted fine
     /// intervals. Rejected candidates never enter the returned entropy balance.
     ///
-    /// Original physical or entropy refusals propagate without introducing a
-    /// different retry policy. Temporal retries retain the ordinary controller's
-    /// floor, event limits and work budget; every failure preserves history.
+    /// Recoverable physical failures use the same bounded bisection as ordinary
+    /// enthalpy histories; entropy and model/domain refusals still propagate
+    /// immediately. All retries retain the original floor, event limits and
+    /// work budget. Every failure preserves accepted history.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_adaptive_step_with_entropy(
         &mut self, cx: &Cx<'_>, target_s: f64, proposed_step_s: f64,
@@ -210,10 +238,13 @@ impl EnthalpyHistoryRun<'_, '_, '_> {
                     old, to - from, step)?, None))
             }
         };
-        let selected = select_step(cx, start, end, adaptive, entropy_conduction,
-            |middle, end| -> Result<_, EntropyAdaptiveHistoryError> {
+        let selected = select_step_with_recovery(cx, start, end, adaptive, entropy_conduction,
+            recoverable_entropy_history, |middle, end, solves| -> Result<_, EntropyAdaptiveHistoryError> {
+                *solves += 1;
                 let coarse = solve(&self.specific_h, start, end, false)?.0;
+                *solves += 1;
                 let (first, first_entropy) = solve(&self.specific_h, start, middle, true)?;
+                *solves += 1;
                 let (second, second_entropy) = solve(&first.specific_enthalpy_j_kg, middle, end, true)?;
                 let error = phase_error(cx, self, &coarse, &second, adaptive, phase)?;
                 Ok(((first, first_entropy.expect("requested native fine-step entropy")),

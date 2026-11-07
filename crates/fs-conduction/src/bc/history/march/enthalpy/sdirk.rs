@@ -9,11 +9,12 @@ use super::{EnthalpyHistoryRun, EnthalpyStepConfig, HeterogeneousEnthalpyError,
 use super::adaptive::{
     EntropyAdaptiveHistoryError, EntropyAdaptiveHistoryStep, PhaseErrorTolerance, PhaseFields,
     accepted_entropy, admit_entropy_tolerance, entropy_conduction, phase_field_error,
+    recoverable_history, recoverable_entropy_history,
 };
 use crate::transient::enthalpy::entropy::EnthalpyEntropyBalance;
 use super::radiation::enclosure::MaterialEnclosureHistoryBinding;
 use super::super::events::{self, HistoryEventStep,
-    adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step}};
+    adaptive::{AdaptiveHistoryConfig, AdaptiveHistoryStep, admit_proposal, select_step_with_recovery}};
 use crate::interface::temperature::TemperatureContacts;
 use crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig;
 use crate::transient::enthalpy::heterogeneous::EnthalpyRadiation;
@@ -107,7 +108,9 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// second-order factor three: phase and source knots may reduce regularity.
     /// This is local control, not a global or phase-transition-time certificate.
     /// `endpoint_solves` counts SDIRK2 interval solves; each has two implicit
-    /// stage solves. Original stage-domain and solver refusals propagate.
+    /// stage solves. Native nonlinear nonconvergence and residual/energy
+    /// refusals bisect within the same bounded controller. Stage-domain,
+    /// material, budget and cancellation refusals propagate immediately.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_adaptive_step(&mut self, cx: &Cx<'_>, target_s: f64, proposed_step_s: f64,
         config: EnthalpyStepConfig, adaptive: AdaptiveHistoryConfig, phase: PhaseErrorTolerance)
@@ -119,9 +122,13 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let cap = admit_proposal(cx, self.run.accepted_steps, self.run.max_steps,
             proposed_step_s, adaptive).map_err(conduction)?;
         let end = self.next_endpoint(cx, target_s, cap)?;
-        let selected = select_step(cx, start, end, adaptive, conduction, |middle, end| {
+        let selected = select_step_with_recovery(cx, start, end, adaptive, conduction,
+            recoverable_history, |middle, end, solves| {
+            *solves += 1;
             let coarse = self.solve(cx, &self.run.specific_h, start, end, config, true)?;
+            *solves += 1;
             let first = self.solve(cx, &self.run.specific_h, start, middle, config, true)?;
+            *solves += 1;
             let second = self.solve(cx, &first.second_stage.specific_enthalpy_j_kg,
                 middle, end, config, true)?;
             let error = phase_field_error(cx, &self.run,
@@ -142,8 +149,9 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
     /// or stage is counted as an independently accepted physical interval.
     ///
     /// Schedule sampling, material/contact identity and unsupported radiation
-    /// refusals are shared with the native solver. Any physical, entropy or
-    /// temporal refusal preserves all accepted fields, time and counters.
+    /// refusals are shared with the native solver. Recoverable physical
+    /// failures bisect as on the energy-only path; entropy refusals propagate.
+    /// Any final refusal preserves all accepted fields, time and counters.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_adaptive_step_with_entropy(
         &mut self, cx: &Cx<'_>, target_s: f64, proposed_step_s: f64,
@@ -157,11 +165,14 @@ impl<'h, 'm, 'c, 'i> Sdirk2EnthalpyHistoryRun<'h, 'm, 'c, 'i> {
         let cap = admit_proposal(cx, self.run.accepted_steps, self.run.max_steps,
             proposed_step_s, adaptive).map_err(entropy_conduction)?;
         let end = self.next_endpoint(cx, target_s, cap)?;
-        let selected = select_step(cx, start, end, adaptive, entropy_conduction,
-            |middle, end| -> Result<_, EntropyAdaptiveHistoryError> {
+        let selected = select_step_with_recovery(cx, start, end, adaptive, entropy_conduction,
+            recoverable_entropy_history, |middle, end, solves| -> Result<_, EntropyAdaptiveHistoryError> {
+                *solves += 1;
                 let coarse = self.solve(cx, &self.run.specific_h, start, end, config, true)?;
+                *solves += 1;
                 let first = self.solve_with_entropy(cx, &self.run.specific_h, start, middle,
                     config, true, entropy_tolerance_j_k)?;
+                *solves += 1;
                 let second = self.solve_with_entropy(cx, &first.0.second_stage.specific_enthalpy_j_kg,
                     middle, end, config, true, entropy_tolerance_j_k)?;
                 let error = phase_field_error(cx, &self.run,

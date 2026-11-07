@@ -2,6 +2,8 @@
 mod support;
 #[path = "thermal_phase_adaptive/entropy.rs"]
 mod entropy;
+#[path = "thermal_phase_adaptive/recovery.rs"]
+mod recovery;
 
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{HeatSourceHistory, ThermalHistoryProblem, ThermalHistoryRun};

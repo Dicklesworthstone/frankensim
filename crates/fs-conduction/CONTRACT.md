@@ -4915,7 +4915,10 @@ corners. No Richardson-extrapolated state is accepted. The actual fine pair's
 integrated heat reports remain separate, two interval slots are reserved, and
 publication is atomic after the final physical/error/cancellation checks.
 `endpoint_solves` counts SDIRK2 interval attempts, each containing two implicit
-stage solves. Original material/solver refusals propagate unchanged.
+stage solves. Native nonlinear nonconvergence and endpoint residual/energy
+refusals now bisect within the same attempt/step limits. Source-domain,
+material, budget and cancellation refusals propagate immediately; exhausted
+physical recovery retains its original typed refusal.
 
 Five new native history tests compare original P1 conductivity moments and
 source-clock quadrature with independent scalar stages; preserve graded
@@ -5233,9 +5236,12 @@ The declared absolute J/K allowance applies to each fine interval and once to
 the complete accepted pair. It is not doubled for the two intervals. The pair
 must pass before fields, time or accepted-step counters are published.
 Cancellation, material-domain, nonlinear, energy and entropy refusals preserve
-the previously accepted history. Temporal retries retain the existing
-controller's event boundaries, phase coordinates, step floor and attempt
-budget. Discarded trials contribute no entropy to the result.
+the previously accepted history. Native nonlinear nonconvergence and endpoint
+residual/energy failures share the original controller's bounded bisection;
+material/source admission, cancellation, explicit work-budget and entropy
+refusals remain immediate. All retries retain event boundaries, phase
+coordinates, step floors and attempt limits. Discarded trials contribute no
+entropy to the result.
 
 Scheduled SDIRK2 retains its original two-stage quadrature, including genuine
 stage temperatures and interval-end left limits for held sources and boundary
@@ -5495,3 +5501,31 @@ weak heat, original identity/support and cancellation, integrated convection
 means, Biot/radiation admission and the absolute state-quantization budget.
 These definitions were syntax-checked but not natively executed in the
 resource-exhausted implementation environment.
+
+## Recoverable nonlinear trials in scheduled enthalpy adaptation
+
+The native scheduled `EnthalpyHistoryRun` and `Sdirk2EnthalpyHistoryRun`
+adaptive methods, including their entropy variants, opt into the same physical
+recovery classes as the standalone adaptive enthalpy owner:
+`NotConverged`, `EndpointResidual` and `EnergyBalance`. The existing selector
+halves a failed interval within its original limits. It never changes a
+physical tolerance, accepts a failed trial or treats a refusal as a time-error
+estimate. A floor, attempt cap or nonrepresentable smaller clock returns the
+actual last physical error.
+
+Every retry resamples the original scheduled endpoint/stage laws and starts
+from the unchanged accepted enthalpy. Only a complete admitted fine pair
+publishes fields, clock and heat/entropy. Attempt counts include exactly the
+interval solves entered before a failure: one failed coarse interval followed
+by a successful comparison reports four solves. Existing selector callers
+that have not opted into recovery retain immediate refusal. Scheduled SDIRK2
+contact/reflection retain their native owners; separate legacy BE wrappers
+keep their existing policies.
+
+Four focused `thermal_phase_adaptive/recovery.rs` definitions use an independent
+one-free-node sharp-phase spatial equation to exercise melting/freezing,
+authentic SDIRK2 stages, accepted-only heat/entropy, continued history,
+typed floor/cap refusal, cancellation and a scheduled bath outside source
+support that must not be hidden by a smaller interval. These new sources
+passed syntax/API review but native compilation and execution remained blocked
+by the shared implementation environment's exhausted resources.
