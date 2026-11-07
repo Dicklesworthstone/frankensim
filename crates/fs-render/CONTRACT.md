@@ -6841,6 +6841,30 @@ source identity and weak positive enthalpy increments. Spectral batch checks
 compare two-color coating heat and native temperature against independent Airy
 and Beer formulas and preserve heat when weighted histories are split.
 
+`SurfaceOpticalHeating::try_new_from_stateful_mirror_paths` additionally binds
+each object to a `mirror_state::StatefulMirrorReceiver`. Its original conductor
+optics are fixed or read that exact native heat receiver through an existing
+`SurfaceConductorLaw`, including enthalpy-coordinate laws on latent plateaus.
+The native path retains each physical propagation distance and surface-event
+index. Replay admits only consecutive smooth mirrors, optionally ending at a
+detector or opaque object, or at an explicit surface/distance cap. Intervening
+dielectric, rough or diffuse events and extinguished/collision-limited histories
+refuse. Geometry and homogeneous host media remain fixed.
+
+At the accepted thermal interval start, changed n/k invalidate the complete
+affected itinerary. Original Beer propagation and complex polarized reflection
+recompute all downstream incident watts, reference-frame rotations, U/V phase
+and positive absorption. Only local reflectance scaling would be insufficient.
+Immutable receiver/law bindings are deduplicated, unchanged histories reuse
+packets, and darkness checks domains without replay. Source transitions, native
+caloric storage, conduction, endpoint admission and rollback remain unchanged.
+The explicit start-state approximation requires time refinement; no implicit
+optical solve, moving geometry, coherent interference between path visits or
+extra heat from surviving capped light is inferred. Native regressions match
+an independent two-cell Fresnel ODE and its first-order refinement, retain
+enthalpy-driven changes at constant temperature, reproduce freshly traced
+noncoplanar polarized histories and reject unsupported native endpoints.
+
 Native integration checks cover independent conductor/film R/T/A references,
 exact rectangular/triangular pulse fluence into a latent plateau, clear-glass and
 lossless-stack zero heat, polarization, shared receivers, conduction and dark

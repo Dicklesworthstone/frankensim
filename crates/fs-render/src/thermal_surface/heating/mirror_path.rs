@@ -13,6 +13,7 @@ use super::{
     SurfaceHeatingBudget, SurfaceHeatingError, SurfaceHeatingReceiver, SurfaceHeatingTolerance,
     SurfaceIlluminationSource, SurfaceOpticalHeating, SurfacePowerResponse, invalid,
 };
+use crate::polarization::dielectric::mirrors::ConductorBeamBalance;
 use crate::polarization::dielectric::scene::MirrorPathResult;
 use crate::polarization::dielectric::transport::PolarizedBeam;
 use crate::volumes::heating::illumination::schedule::SpectralPowerSegment;
@@ -114,16 +115,7 @@ impl SurfaceIlluminationSource<1> {
             hash.update(hit.hit.frame_identity.as_bytes());
             hash_beam(&mut hash, &reflected);
             hash.update(&incoming.to_bits().to_le_bytes());
-            let absorbed = ratio(hit.balance.absorbed_power_w(), incoming)?;
-            let native_absorbed = hit
-                .balance
-                .absorbed_fraction()
-                .ok_or_else(|| invalid("a dark mirror has no physical power normalization"))?;
-            if (absorbed - native_absorbed).abs() > 128.0 * f64::EPSILON * native_absorbed {
-                return Err(invalid(
-                    "reference mirror loss is unresolved; rescale the launch beam and retrace",
-                ));
-            }
+            let absorbed = checked_absorbed_fraction(&hit.balance)?;
             let response = SurfacePowerResponse::finish(
                 hash,
                 [wavelength],
@@ -305,7 +297,7 @@ impl SurfaceOpticalHeating<1> {
     }
 }
 
-fn packet_lane<const N: usize>(
+pub(super) fn packet_lane<const N: usize>(
     wavelengths_nm: &[f64; N],
     wavelength_nm: f64,
 ) -> Result<usize, SurfaceHeatingError> {
@@ -314,7 +306,7 @@ fn packet_lane<const N: usize>(
         .map_err(|_| invalid("each native launch wavelength must match an explicit packet lane"))
 }
 
-fn packet_schedule<const N: usize>(
+pub(super) fn packet_schedule<const N: usize>(
     original: &SpectralPowerSchedule<1>,
     lane: usize,
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -342,7 +334,22 @@ fn packet_schedule<const N: usize>(
     )?)
 }
 
-fn ratio(numerator: f64, denominator: f64) -> Result<f64, SurfaceHeatingError> {
+pub(super) fn checked_absorbed_fraction(
+    balance: &ConductorBeamBalance,
+) -> Result<f64, SurfaceHeatingError> {
+    let absorbed = ratio(balance.absorbed_power_w(), balance.incident_power_w())?;
+    let native = balance
+        .absorbed_fraction()
+        .ok_or_else(|| invalid("a dark mirror has no physical power normalization"))?;
+    if (absorbed - native).abs() > 128.0 * f64::EPSILON * native {
+        return Err(invalid(
+            "reference mirror loss is unresolved; rescale the launch beam and retrace",
+        ));
+    }
+    Ok(absorbed)
+}
+
+pub(super) fn ratio(numerator: f64, denominator: f64) -> Result<f64, SurfaceHeatingError> {
     let value = numerator / denominator;
     if !value.is_finite() || value < 0.0 || (numerator > 0.0 && value == 0.0) {
         return Err(invalid(
@@ -389,7 +396,7 @@ fn scaled_schedule(
     )?)
 }
 
-fn hash_beam(hash: &mut DomainHasher, beam: &PolarizedBeam) {
+pub(super) fn hash_beam(hash: &mut DomainHasher, beam: &PolarizedBeam) {
     let origin = beam.ray().origin;
     let k = beam.frame().direction();
     let h = beam.frame().horizontal();

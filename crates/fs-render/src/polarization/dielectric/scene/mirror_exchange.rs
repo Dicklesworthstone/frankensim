@@ -10,6 +10,21 @@ use super::super::mirrors::ConductorBeamBalance;
 pub struct MirrorInteraction {
     pub hit: InstanceHit,
     pub balance: ConductorBeamBalance,
+    pub(super) propagation_distance_m: f64,
+    pub(super) surface_event_index: u32,
+}
+
+impl MirrorInteraction {
+    /// Actual distance advanced from the preceding surface or original launch.
+    /// Includes the physical prefix suppressed only in the geometry query.
+    pub const fn propagation_distance_m(&self) -> f64 {
+        self.propagation_distance_m
+    }
+
+    /// Zero-based native surface event; gaps identify non-mirror interactions.
+    pub const fn surface_event_index(&self) -> u32 {
+        self.surface_event_index
+    }
 }
 
 /// The original path plus its ordered smooth-mirror interactions.

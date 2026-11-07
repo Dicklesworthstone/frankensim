@@ -11,6 +11,9 @@ use crate::polarization::dielectric::scene::{
     Interaction, PathTermination, PolarizedScene, SurfaceBinding, TraceSettings,
 };
 use crate::polarization::dielectric::transport::PolarizationFrame;
+use crate::thermal_surface::heating::{
+    SubstrateOpticsModel, feedback::SurfaceConductorLaw, mirror_state::StatefulMirrorReceiver,
+};
 use fs_blake3::ContentHash;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
@@ -18,6 +21,7 @@ use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, Event, MaterialId, StepConfig,
     ThermalLaw, TimedEvent,
 };
+use std::sync::Arc;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -728,4 +732,516 @@ fn g0_spectral_mirror_batches_require_exact_lanes_and_aggregate_budgets() {
     assert_eq!(admitted[0].source_id, u64::MAX);
     assert_eq!(admitted[0].power.peak_power_w(), [0.0, 2.0]);
     assert_eq!(admitted[0].response.absorbed_fraction()[0], 0.0);
+}
+
+fn temperature_mirror_law(high_k: f64, high_eta: f64) -> Arc<SurfaceConductorLaw> {
+    Arc::new(
+        SurfaceConductorLaw::try_temperature(
+            ConductorSource::try_new(ContentHash([91; 32]), ConductorDataStatus::Representative)
+                .unwrap(),
+            &[
+                (300.0, metal(0.2, false, 77)),
+                (high_k, metal(high_eta, false, 77)),
+            ],
+            2,
+        )
+        .unwrap(),
+    )
+}
+
+fn law_receivers(law: &Arc<SurfaceConductorLaw>) -> BTreeMap<u64, StatefulMirrorReceiver> {
+    bindings()
+        .into_iter()
+        .map(|(id, receiver)| {
+            (
+                id,
+                StatefulMirrorReceiver {
+                    receiver,
+                    optics: SubstrateOpticsModel::Law(Arc::clone(law)),
+                },
+            )
+        })
+        .collect()
+}
+
+fn thermal_pair() -> DepositionSimulation<'static> {
+    let first = thermal(1.0, &SENSIBLE).cells()[&CellId(11)].clone();
+    let mut second = first.clone();
+    second.id = CellId(12);
+    second.segment_id = 12;
+    DepositionSimulation::new(
+        vec![
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(first),
+            },
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(second),
+            },
+        ],
+        &[(MaterialId(7), &SENSIBLE as &dyn ThermalLaw)],
+        DepositionBudget {
+            max_cells: 2,
+            max_links: 0,
+            max_events: 2,
+            max_substeps: 64,
+        },
+    )
+    .unwrap()
+    .advance_to(0.0, config(), || Ok(()))
+    .unwrap()
+    .0
+}
+
+fn normal_metal_r(eta: f64) -> f64 {
+    ((eta - 1.0) * (eta - 1.0) + 9.0) / ((eta + 1.0) * (eta + 1.0) + 9.0)
+}
+
+#[test]
+fn g1_stateful_upstream_mirror_changes_downstream_heat_and_converges_to_coupled_fresnel_ode() {
+    let path = trace_path(0.0, 0.2, false, 1.0, true, 77, 7);
+    let power = constant_power(250.0);
+    let law = temperature_mirror_law(500.0, 6.2);
+    let mut receivers = law_receivers(&law);
+    receivers.get_mut(&2).unwrap().receiver.thermal_cell = CellId(12);
+    receivers.get_mut(&2).unwrap().optics = SubstrateOpticsModel::Fixed(metal(0.2, false, 77));
+    // Independent normal-incidence Fresnel ODE, with first/third hits at cell 11
+    // and the intervening reflection at cell 12. Both masses are 1 kg and cp=4.
+    let rates = |h: [f64; 2]| {
+        let r1 = normal_metal_r(0.2 + 0.03 * h[0] / 4.0);
+        let r2 = normal_metal_r(0.2);
+        [
+            250.0 * (1.0 - r1) * (1.0 + r1 * r2),
+            250.0 * r1 * (1.0 - r2),
+        ]
+    };
+    let mut reference = [0.0; 2];
+    let fine_dt = 1.0 / 2048.0;
+    for _ in 0..2048 {
+        let a = rates(reference);
+        let b = rates(core::array::from_fn(|i| {
+            reference[i] + 0.5 * fine_dt * a[i]
+        }));
+        let c = rates(core::array::from_fn(|i| {
+            reference[i] + 0.5 * fine_dt * b[i]
+        }));
+        let d = rates(core::array::from_fn(|i| reference[i] + fine_dt * c[i]));
+        for i in 0..2 {
+            reference[i] += fine_dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0;
+        }
+    }
+    let mut errors = Vec::new();
+    for steps in [8, 16, 32] {
+        let original = thermal_pair();
+        let input = SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+            [550.0],
+            &[MirrorPathIllumination {
+                path: &path,
+                power: &power,
+            }],
+            500,
+            &receivers,
+            &original,
+            limits(),
+            2,
+            SurfaceHeatingTolerance {
+                power_roundoff_w: 1e-8,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        let dt = 1.0 / steps as f64;
+        let (heated, accepted, audit) = original
+            .advance_observed(
+                &input,
+                1.0,
+                StepConfig {
+                    max_dt_s: dt,
+                    ..config()
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        let mut explicit = [0.0; 2];
+        for _ in 0..steps {
+            let rate = rates(explicit);
+            for i in 0..2 {
+                explicit[i] += dt * rate[i];
+            }
+        }
+        for (i, id) in [CellId(11), CellId(12)].into_iter().enumerate() {
+            close(heated.cells()[&id].specific_h_j_kg, explicit[i]);
+        }
+        close(audit.external_heat_j, explicit[0] + explicit[1]);
+        close(accepted.energy().thermal_input_j, explicit[0] + explicit[1]);
+        assert_eq!(accepted.response_evaluations(), 3 * (steps - 1));
+        assert!(explicit[1] < 250.0 * normal_metal_r(0.2) * (1.0 - normal_metal_r(0.2)));
+        errors.push((explicit[0] - reference[0]).abs() + (explicit[1] - reference[1]).abs());
+    }
+    assert!(
+        errors[0] > 1.8 * errors[1] && errors[1] > 1.8 * errors[2],
+        "{errors:?}"
+    );
+}
+
+struct MirrorPlateau(u8);
+impl ThermalLaw for MirrorPlateau {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some([self.0; 32])
+    }
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        if !h.is_finite() || !(0.0..=1000.0).contains(&h) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(310.0)
+    }
+    fn maximum_temperature_slope(&self) -> f64 {
+        0.0
+    }
+}
+static MIRROR_PLATEAU: MirrorPlateau = MirrorPlateau(61);
+static WRONG_MIRROR_PLATEAU: MirrorPlateau = MirrorPlateau(62);
+
+#[test]
+fn g1_full_mirror_itinerary_follows_latent_enthalpy_at_unchanged_temperature() {
+    let path = trace_path(0.0, 0.2, false, 1.0, true, 77, 7);
+    let power = constant_power(250.0);
+    let law = Arc::new(
+        SurfaceConductorLaw::try_enthalpy(
+            ConductorSource::try_new(ContentHash([91; 32]), ConductorDataStatus::Representative)
+                .unwrap(),
+            ContentHash([61; 32]),
+            (310.0, 310.0),
+            &[(0.0, metal(0.2, false, 77)), (200.0, metal(2.2, false, 77))],
+            2,
+        )
+        .unwrap(),
+    );
+    let receivers = law_receivers(&law);
+    let original = thermal(1.0, &MIRROR_PLATEAU);
+    let input = SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+        [550.0],
+        &[MirrorPathIllumination {
+            path: &path,
+            power: &power,
+        }],
+        500,
+        &receivers,
+        &original,
+        limits(),
+        2,
+        SurfaceHeatingTolerance {
+            power_roundoff_w: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let mut state = original.clone();
+    let mut observer = input.clone();
+    let mut expected_h = 0.0;
+    for step in 1..=3 {
+        let r = normal_metal_r(0.2 + 0.01 * expected_h);
+        expected_h += 0.125 * 250.0 * (1.0 - r * r * r);
+        let (next, accepted, _) = state
+            .advance_observed(
+                &observer,
+                step as f64 * 0.125,
+                StepConfig {
+                    max_dt_s: 0.125,
+                    ..config()
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        close(next.cells()[&CellId(11)].specific_h_j_kg, expected_h);
+        assert_eq!(next.temperature_k(CellId(11)).unwrap(), 310.0);
+        assert_eq!(
+            accepted.response_evaluations(),
+            if step == 1 { 0 } else { 3 }
+        );
+        state = next;
+        observer = accepted;
+    }
+    let resumed = SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+        [550.0],
+        &[MirrorPathIllumination {
+            path: &path,
+            power: &power,
+        }],
+        500,
+        &receivers,
+        &state,
+        limits(),
+        2,
+        SurfaceHeatingTolerance {
+            power_roundoff_w: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(input.model_identity(), resumed.model_identity());
+    assert!(
+        SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+            [550.0],
+            &[MirrorPathIllumination {
+                path: &path,
+                power: &power
+            }],
+            500,
+            &receivers,
+            &thermal(1.0, &WRONG_MIRROR_PLATEAU),
+            limits(),
+            2,
+            SurfaceHeatingTolerance {
+                power_roundoff_w: 1e-8
+            },
+            || Ok(()),
+        )
+        .is_err()
+    );
+    assert_eq!(original.cells()[&CellId(11)].specific_h_j_kg, 0.0);
+}
+
+#[test]
+fn g0_stateful_mirror_paths_refuse_missing_events_and_roll_back_unsupported_native_endpoints() {
+    let path = trace_path(0.0, 0.2, false, 1.0, true, 77, 7);
+    let power = constant_power(250.0);
+    let law = temperature_mirror_law(300.01, 0.21);
+    let receivers = law_receivers(&law);
+    let original = thermal(1.0, &SENSIBLE);
+    let input = SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+        [550.0],
+        &[MirrorPathIllumination {
+            path: &path,
+            power: &power,
+        }],
+        500,
+        &receivers,
+        &original,
+        limits(),
+        2,
+        SurfaceHeatingTolerance {
+            power_roundoff_w: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert!(
+        original
+            .advance_observed(
+                &input,
+                0.125,
+                StepConfig {
+                    max_dt_s: 0.125,
+                    ..config()
+                },
+                || Ok(())
+            )
+            .is_err()
+    );
+    assert_eq!(original.time_s(), 0.0);
+    assert_eq!(original.cells()[&CellId(11)].specific_h_j_kg, 0.0);
+    assert_eq!(input.energy().thermal_input_j, 0.0);
+    assert_eq!(input.response_evaluations(), 0);
+    let mut missing_event = path.clone();
+    missing_event.mirrors.remove(1);
+    assert!(
+        SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+            [550.0],
+            &[MirrorPathIllumination {
+                path: &missing_event,
+                power: &power
+            }],
+            500,
+            &receivers,
+            &original,
+            limits(),
+            2,
+            SurfaceHeatingTolerance {
+                power_roundoff_w: 1e-8
+            },
+            || Ok(()),
+        )
+        .is_err()
+    );
+}
+
+fn folded_normals() -> [Vec3; 3] {
+    [
+        Vec3::new(0.6, 0.0, -0.8),
+        Vec3::new(0.1, 0.8, -0.59),
+        Vec3::new(-0.35, 0.2, 0.91),
+    ]
+    .map(|n| n.scale(1.0 / fs_math::det::sqrt(n.dot(n))))
+}
+
+fn trace_folded_path(optics: &[ConductorOptics; 3], polarization: Stokes) -> MirrorPathResult {
+    with_cx(|cx| {
+        let cross = |a: Vec3, b: Vec3| {
+            Vec3::new(
+                a.y * b.z - a.z * b.y,
+                a.z * b.x - a.x * b.z,
+                a.x * b.y - a.y * b.x,
+            )
+        };
+        let mut origin = Point3::new(0.0, 0.0, 0.0);
+        let mut direction = Vec3::new(0.0, 0.0, 1.0);
+        let mut geometry = Vec::new();
+        for (index, normal) in folded_normals().into_iter().enumerate() {
+            origin = Point3::new(
+                origin.x + direction.x,
+                origin.y + direction.y,
+                origin.z + direction.z,
+            );
+            let u = cross(Vec3::new(0.0, 0.0, 1.0), normal);
+            let u = u.scale(1.0 / fs_math::det::sqrt(u.dot(u)));
+            let v = cross(normal, u);
+            let vertices = [[0.1, 0.0], [-0.1, 0.1], [-0.1, -0.1]]
+                .map(|[a, b]| {
+                    [
+                        origin.x + a * u.x + b * v.x,
+                        origin.y + a * u.y + b * v.y,
+                        origin.z + a * u.z + b * v.z,
+                    ]
+                })
+                .to_vec();
+            let object_id = index as u64 + 1;
+            geometry.push(
+                GeometryInstance::try_new(
+                    object_id,
+                    fs_blake3::hash_domain(
+                        "org.frankensim.test.folded-mirror",
+                        &object_id.to_le_bytes(),
+                    ),
+                    SharedGeometry::mesh(TriMesh::new(vertices, vec![[0, 1, 2]])),
+                    RigidTransform::identity(),
+                )
+                .unwrap(),
+            );
+            let d = 2.0 * direction.dot(normal);
+            direction = Vec3::new(
+                direction.x - d * normal.x,
+                direction.y - d * normal.y,
+                direction.z - d * normal.z,
+            );
+        }
+        let geometry = InstanceScene::try_new(geometry).unwrap();
+        let media = [DielectricGlass::new(
+            CauchyIor::try_constant(1.0).unwrap(),
+            BeerLambertAbsorption::try_constant(0.0).unwrap(),
+            GlassProvenance::Custom,
+        )];
+        let scene = PolarizedScene::try_new_with_conductors(
+            &geometry,
+            &media,
+            optics,
+            (0..3)
+                .map(|index| SurfaceBinding {
+                    object_id: index as u64 + 1,
+                    interaction: Interaction::SmoothConductor {
+                        optics: index,
+                        medium: 0,
+                    },
+                })
+                .collect(),
+        )
+        .unwrap();
+        let beam = PolarizedBeam::try_new(
+            Point3::new(0.0, 0.0, 0.0),
+            PolarizationFrame::try_new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0)).unwrap(),
+            550.0,
+            media[0],
+            polarization,
+        )
+        .unwrap();
+        scene
+            .trace_with_mirror_balances(
+                cx,
+                beam,
+                0,
+                TraceSettings {
+                    max_surface_events: 3,
+                    max_distance_m: 10.0,
+                    surface_epsilon_m: 1e-9,
+                    query_offset_m: 1e-8,
+                },
+                31,
+                41,
+            )
+            .unwrap()
+    })
+}
+
+#[test]
+fn g3_stateful_noncoplanar_mirrors_replay_the_complete_polarized_native_path() {
+    let polarization = Stokes::try_new(1.0, 0.1, 0.3, 0.7).unwrap();
+    let path = trace_folded_path(&[metal(0.2, false, 77); 3], polarization);
+    assert_eq!(path.mirrors.len(), 3);
+    let power = constant_power(250.0);
+    let law = temperature_mirror_law(500.0, 6.2);
+    let mut receivers = law_receivers(&law);
+    receivers.insert(3, receivers[&1].clone());
+    let mut thermal = thermal(1.0, &SENSIBLE);
+    let mut observer = SurfaceOpticalHeating::try_new_from_stateful_mirror_paths(
+        [550.0],
+        &[MirrorPathIllumination {
+            path: &path,
+            power: &power,
+        }],
+        500,
+        &receivers,
+        &thermal,
+        limits(),
+        2,
+        SurfaceHeatingTolerance {
+            power_roundoff_w: 1e-8,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    for index in 0..3 {
+        let current = law.resolve(&thermal, CellId(11), MaterialId(7)).unwrap();
+        let fresh = trace_folded_path(&[current; 3], polarization);
+        let expected_heat = 0.05
+            * 250.0
+            * fresh
+                .mirrors
+                .iter()
+                .map(|hit| hit.balance.absorbed_power_w())
+                .sum::<f64>();
+        let expected_incident = 0.05
+            * 250.0
+            * fresh
+                .mirrors
+                .iter()
+                .map(|hit| hit.balance.incident_power_w())
+                .sum::<f64>();
+        let (next, accepted, _) = thermal
+            .advance_observed(
+                &observer,
+                thermal.time_s() + 0.05,
+                StepConfig {
+                    max_dt_s: 0.05,
+                    ..config()
+                },
+                || Ok(()),
+            )
+            .unwrap();
+        close(
+            next.cells()[&CellId(11)].specific_h_j_kg
+                - thermal.cells()[&CellId(11)].specific_h_j_kg,
+            expected_heat,
+        );
+        close(
+            accepted.energy().incident_j[0] - observer.energy().incident_j[0],
+            expected_incident,
+        );
+        assert_eq!(
+            accepted.response_evaluations(),
+            if index == 0 { 0 } else { 3 }
+        );
+        thermal = next;
+        observer = accepted;
+    }
 }

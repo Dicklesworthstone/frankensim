@@ -458,7 +458,10 @@ impl<'a> PolarizedScene<'a> {
                             normal, &self.conductors[optics],
                         )?;
                         let reflected = balance.reflection().beam;
-                        interactions.push(MirrorInteraction { hit, balance });
+                        interactions.push(MirrorInteraction {
+                            hit, balance, propagation_distance_m: distance,
+                            surface_event_index: event,
+                        });
                         reflected
                     } else {
                         result.beam.reflect_conductor(normal, &self.conductors[optics])?.beam

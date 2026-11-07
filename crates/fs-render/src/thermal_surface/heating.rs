@@ -14,6 +14,9 @@
 
 /// Actual smooth-mirror paths bound to the native thermal timeline.
 pub mod mirror_path;
+/// Native mirror itineraries whose full reflected beam follows thermal state.
+pub mod mirror_state;
+use mirror_state::MirrorFeedbackState;
 mod response;
 pub use response::SurfacePowerResponse;
 /// Coherent coating absorption assigned to separate native thermal receivers.
@@ -52,6 +55,8 @@ use diffuse_state::SurfaceDiffuseFeedbackState;
 use super::ThermalSurfaceError;
 use crate::conductor::ConductorError;
 use crate::dielectric::DielectricError;
+use crate::polarization::dielectric::mirrors::ConductorBeamError;
+use crate::polarization::dielectric::transport::BeamError;
 use crate::volumes::heating::feedback::OpticalFeedbackError;
 use crate::volumes::heating::illumination::schedule::SpectralPowerSchedule;
 use crate::volumes::heating::{CheckedSum, OpticalHeatingError};
@@ -107,6 +112,7 @@ pub enum SurfaceHeatingError {
     Budget,
     Optics(ConductorError),
     Dielectric(DielectricError),
+    Beam(BeamError),
     Surface(ThermalSurfaceError),
     Profile(OpticalFeedbackError),
     #[cfg(feature = "material-state")]
@@ -130,6 +136,19 @@ impl From<ConductorError> for SurfaceHeatingError {
 impl From<DielectricError> for SurfaceHeatingError {
     fn from(value: DielectricError) -> Self {
         Self::Dielectric(value)
+    }
+}
+impl From<BeamError> for SurfaceHeatingError {
+    fn from(value: BeamError) -> Self {
+        Self::Beam(value)
+    }
+}
+impl From<ConductorBeamError> for SurfaceHeatingError {
+    fn from(value: ConductorBeamError) -> Self {
+        match value {
+            ConductorBeamError::Optics(error) => Self::Optics(error),
+            ConductorBeamError::Beam(error) => Self::Beam(error),
+        }
     }
 }
 impl From<ThermalSurfaceError> for SurfaceHeatingError {
@@ -250,6 +269,7 @@ pub struct SurfaceOpticalHeating<const N: usize> {
     feedback: Option<SurfaceFeedbackState<N>>,
     diffuse_feedback: Option<SurfaceDiffuseFeedbackState<N>>,
     coating_feedback: Option<CoatingFeedbackState<N>>,
+    mirror_feedback: Option<MirrorFeedbackState<N>>,
     time_s: f64,
     evaluations: usize,
     response_evaluations: usize,
@@ -413,6 +433,7 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
             feedback: None,
             diffuse_feedback: None,
             coating_feedback: None,
+            mirror_feedback: None,
             time_s: thermal.time_s(),
             evaluations: 0,
             response_evaluations: 0,
@@ -494,6 +515,9 @@ impl<const N: usize> SurfaceOpticalHeating<N> {
         if let Some(feedback) = &self.coating_feedback {
             feedback.validate(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &self.mirror_feedback {
+            feedback.validate(thermal, checkpoint)?;
+        }
         Ok(())
     }
 }
@@ -564,15 +588,33 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
         if let Some(feedback) = &mut self.coating_feedback {
             feedback.refresh(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &mut self.mirror_feedback {
+            feedback.refresh(thermal, checkpoint)?;
+        }
         let mut sums = self.sums.clone();
         let mut receiving = BTreeMap::<CellId, CheckedSum>::new();
         let mut absorbed = CheckedSum::default();
         let mut residuals = [CheckedSum::default(); N];
         for (index, source) in self.model.sources.iter().enumerate() {
-            let mean = source
-                .power
-                .mean_power_w(start_s, duration_s, end_s, &mut *checkpoint)?;
+            let mut mean =
+                source
+                    .power
+                    .mean_power_w(start_s, duration_s, end_s, &mut *checkpoint)?;
             let illuminated = mean.iter().any(|watts| *watts > 0.0);
+            let mirror_packet = match &mut self.mirror_feedback {
+                Some(feedback) => feedback.response(
+                    index,
+                    illuminated,
+                    &mut self.response_evaluations,
+                    checkpoint,
+                )?,
+                None => None,
+            };
+            if let Some(packet) = mirror_packet {
+                for watts in &mut mean {
+                    *watts = physical_product(*watts, packet.incident_scale)?;
+                }
+            }
             let coating_packet = match &mut self.coating_feedback {
                 Some(feedback) => feedback.response(
                     index,
@@ -582,7 +624,9 @@ impl<const N: usize> DepositionObserver for SurfaceOpticalHeating<N> {
                 )?,
                 None => None,
             };
-            let response = if let Some(packet) = &coating_packet {
+            let response = if let Some(packet) = mirror_packet {
+                packet.response
+            } else if let Some(packet) = &coating_packet {
                 packet.total
             } else {
                 match &mut self.diffuse_feedback {
