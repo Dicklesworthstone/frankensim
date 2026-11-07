@@ -112,6 +112,13 @@ impl ReservoirLayerGeometry {
         })
     }
 
+    /// Positive geometry C in Q = C integral(k(T) dT), in metres. For uniform
+    /// conductivity the exact solid conductance is C k, including radial area
+    /// variation. This multiplier carries no material or thermal storage.
+    pub const fn conductance_multiplier_m(self) -> f64 {
+        self.multiplier_m
+    }
+
     /// Actual contacted area; distinct from the geometric resistance multiplier.
     pub const fn surface_area_m2(self) -> f64 {
         self.surface_area_m2

@@ -498,3 +498,86 @@ fn later_links_cannot_leave_an_earlier_pinned_material_outside_its_phase_domain(
         assert!(fw.shared_wall_link_reports().is_none());
     }
 }
+
+#[test]
+fn radial_material_conduction_links_keep_one_latent_inventory_in_both_facades() {
+    use fs_material::thermal::conduction::ReservoirLayerGeometry;
+    let g = gas(1, false, 0.0);
+    let source = phase_source(1.0, 1.0, 4.0);
+    let geometry_a = ReservoirLayerGeometry::cylindrical_face(0.1, 0.2, 0.2).unwrap();
+    let geometry_b = ReservoirLayerGeometry::spherical_face(0.2, 0.3)
+        .unwrap()
+        .with_area_fraction(0.25)
+        .unwrap();
+    let (transport, caloric) = temperature_source([0.4, 0.0], [0.7, 0.0], [1.0, 10.0]);
+    let hot = SharedWall {
+        storage: SharedWallStorage {
+            thermal: caloric.contact(8.0, 0.0, WallDrag::None).unwrap().thermal,
+            heat_storage: Some(caloric),
+        },
+        ports: vec![port(0, 0.0)],
+    };
+    let cold = phase_wall(&source, 4.0, vec![port(1, 0.0)]);
+    let layers = [
+        Some(MaterialWallConduction::from_geometry(transport, geometry_a).unwrap()),
+        Some(MaterialWallConduction::from_phase_source_with_geometry(source, geometry_b).unwrap()),
+    ];
+    let connection = link(0, 1, 0.7);
+    let mut mixture = mixture_at(&g, 5.0);
+    let mut frozen = frozen_at(&g, 5.0);
+    let mut mw = bound(
+        &mixture,
+        vec![hot.clone(), cold.clone()],
+        vec![connection],
+        vec![layers.clone()],
+        65_536,
+    );
+    let mut fw = frozen_walls(&frozen, vec![hot, cold])
+        .with_shared_wall_links(vec![connection], || false)
+        .unwrap()
+        .with_shared_wall_link_conduction(vec![layers], || false)
+        .unwrap();
+    let original_gas = fields(&mixture);
+    let (mut ta, mut h) = (8.0, 4.0);
+    for _ in 0..3 {
+        // Independent exact radial resistances. The cold wall stays at Tm=5,
+        // while k(h) refreshes from its one evolving latent inventory each half.
+        let ra = 2.0_f64.ln() / (core::f64::consts::TAU * 0.2 * 0.4);
+        let kb = 0.1 + 0.19 * (h - 4.0);
+        let rb = (1.0 / 0.2 - 1.0 / 0.3) / (4.0 * core::f64::consts::PI * 0.25 * kb);
+        let effective = 1.0 / (1.0 / 0.7 + ra + rb);
+        let q = 0.1 * effective * (ta - 5.0) / (1.0 + 0.1 * effective / 0.7);
+        let mr = mw
+            .advance_for(&mut mixture, Time::new(0.1), controls(), || false)
+            .unwrap();
+        let fr = frozen
+            .step_with_walls(
+                Time::new(0.1),
+                StepControl::default(),
+                &mut fw,
+                controls(),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(fr.elapsed, Time::new(0.1));
+        ta -= q / 0.7;
+        h += q;
+        close(temperature(mw.shared_wall(0).unwrap()), ta, 2e-10);
+        close(temperature(mw.shared_wall(1).unwrap()), 5.0, 0.0);
+        close(enthalpy(mw.shared_wall(1).unwrap()), h, 2e-10);
+        close(temperature(fw.shared_wall(0).unwrap()), ta, 2e-10);
+        close(temperature(fw.shared_wall(1).unwrap()), 5.0, 0.0);
+        close(enthalpy(fw.shared_wall(1).unwrap()), h, 2e-10);
+        close(0.7 * ta + h, 0.7 * 8.0 + 4.0, 2e-10);
+        for receipt in [
+            mw.shared_wall_link_reports().unwrap()[0],
+            fw.shared_wall_link_reports().unwrap()[0],
+        ] {
+            close(receipt.heat_a_to_b_j, q, 2e-10);
+            close(receipt.energy_residual_j, 0.0, 2e-10);
+            close(receipt.flux_residual_j, 0.0, 2e-10);
+        }
+        assert_eq!(fields(&mixture), original_gas);
+        assert_eq!(mr.heat_to_gas_j, 0.0);
+    }
+}

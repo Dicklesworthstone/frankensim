@@ -620,3 +620,96 @@ fn wall_material_changes_reacting_network_pressure_and_composition_with_closed_e
         "actual wall heating must reach the chemical rate law"
     );
 }
+
+#[test]
+fn radial_material_conduction_matches_cylinder_sphere_and_sector_calorimetry() {
+    use fs_material::thermal::conduction::ReservoirLayerGeometry;
+    let g = gas(1, false, 0.0);
+    let k = 0.4;
+    for reverse_face in [false, true] {
+        let (surface, trace) = if reverse_face { (0.3, 0.1) } else { (0.1, 0.3) };
+        let geometries = [
+            (
+                ReservoirLayerGeometry::cylindrical_face(surface, trace, 0.2).unwrap(),
+                core::f64::consts::TAU * 0.2 / 3.0_f64.ln(),
+            ),
+            (
+                ReservoirLayerGeometry::spherical_face(surface, trace).unwrap(),
+                4.0 * core::f64::consts::PI / (1.0 / 0.1 - 1.0 / 0.3),
+            ),
+        ];
+        for (geometry, multiplier) in geometries {
+            for fraction in [0.25, 1.0] {
+                let geometry = geometry.with_area_fraction(fraction).unwrap();
+                let material = MaterialWallConduction::from_geometry(
+                    source([k, 0.0], [1.0, 0.0], [1.0, 10.0]).0,
+                    geometry,
+                )
+                .unwrap();
+                assert_eq!(material.geometry(), Some(geometry));
+                close(material.area().value(), geometry.surface_area_m2(), 0.0);
+                close(
+                    material.length().value(),
+                    geometry.surface_area_m2() / (fraction * multiplier),
+                    2e-16,
+                );
+                let mut n = network(&g, &[0.0], true);
+                let mut wall = bind(uniform_operator(&n, lumped()), &n, &material);
+                let total_g = 1.0 / (1.0 / 0.3 + 1.0 / (k * fraction * multiplier));
+                let (mut tw, mut tg) = (5.0, 2.0);
+                for _ in 0..3 {
+                    let q = 0.2 * total_g * (tw - tg) / (1.0 + 0.2 * total_g * 3.0);
+                    let report = wall
+                        .advance_for(&mut n, Time::new(0.2), controls(), || false)
+                        .unwrap();
+                    tw -= q;
+                    tg += q / 0.5;
+                    for &contact in wall
+                        .branch_contacts(0)
+                        .unwrap()
+                        .iter()
+                        .chain(wall.plenum_contacts())
+                    {
+                        close(wall_temperature(contact), tw, 2e-10);
+                        close(conductance(contact), total_g, 1e-15);
+                    }
+                    close(
+                        g.primitive(n.branches()[0].cell(0).unwrap(), || false)
+                            .unwrap()
+                            .temperature,
+                        tg,
+                        2e-10,
+                    );
+                    close(
+                        g.primitive(n.plenums()[0].state(), || false)
+                            .unwrap()
+                            .temperature,
+                        tg,
+                        2e-10,
+                    );
+                    close(report.heat_to_gas_j, 3.0 * q, 2e-10);
+                    close(report.wall_energy_change_j, -3.0 * q, 2e-10);
+                    close(report.energy_residual_j, 0.0, 2e-10);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn radial_material_conduction_preserves_the_original_planar_numeric_range() {
+    // The original L/A geometry can be representable when its reciprocal is
+    // not. Small but finite k still yields an ordinary finite solid conductance.
+    let layer = MaterialWallConduction::new(
+        source([1e-300, 0.0], [1.0, 0.0], [1.0, 10.0]).0,
+        Length::new(1e-150),
+        Area::new(1e160),
+    )
+    .unwrap();
+    assert_eq!(layer.geometry(), None);
+    assert_eq!(layer.length(), Length::new(1e-150));
+    assert_eq!(layer.area(), Area::new(1e160));
+    let (solid, film) = layer.conductance(lumped().thermal, None).unwrap();
+    close(solid / 1e10, 1.0, 1e-13);
+    assert_eq!(film, 0.3);
+}

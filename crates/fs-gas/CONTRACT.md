@@ -575,9 +575,21 @@ caloric model. Production dependencies remain pure Rust and Franken-owned.
 
 With `experimental-euler,material`, `NetworkWallOperator::with_material_conduction`
 binds original temperature or phase-dependent conductivity sources and explicit
-planar length/area to each selected branch or plenum thermal contact. The gas
-film and solid resistances add in series. Existing source-bound circular gas
-transport still supplies the film from the actual gas mixture, density, T and p;
+planar length/area to each selected branch or plenum thermal contact.
+`MaterialWallConduction::from_geometry` and
+`from_phase_source_with_geometry` also admit the existing
+`ReservoirLayerGeometry`: exact cylindrical or spherical radial resistance,
+either contacted face, and declared angular area fractions. For uniform k,
+the solid conductance is `2*pi*L*k/ln(r_outer/r_inner)` for a cylinder and
+`4*pi*k/(1/r_inner - 1/r_outer)` for a sphere, scaled by the represented fraction.
+The finite-wall trace radius represents its actual stored temperature; radial
+area variation does not add storage or resolve transient through-wall diffusion.
+`geometry()` returns the explicitly admitted multiplier and exposed face area;
+original planar constructors retain their authored length/area and return `None`.
+`length()` is the equivalent planar thickness `A_surface/C` for a radial binding.
+This same binding feeds local walls, shared gas ports and wall-to-wall links.
+The gas film and solid resistances add in series. Existing source-bound circular
+gas transport still supplies the film from the actual gas mixture, density, T and p;
 other contacts retain their originally authored film. The operator preserves
 that separate film so repeated steps do not compound the same solid resistance.
 
@@ -4787,8 +4799,8 @@ With `experimental-euler,material`, both the frozen and evolving-mixture
 network wall owners expose `with_shared_wall_conduction`. Rows follow the
 existing shared-wall order and entries follow each wall's gas-port order.
 Each optional `MaterialWallConduction` retains its original temperature or
-phase-dependent conductivity source and planar length/area geometry. A bound
-port's authored conductance remains the gas-side film; solid resistance is
+phase-dependent conductivity source and planar or radial resistance geometry.
+A bound port's authored conductance remains the gas-side film; solid resistance is
 added once in series. Unbound ports retain their complete authored coefficient.
 The resulting conductance is never written back as the next step's gas film,
 and no material density, heat capacity or latent energy becomes extra storage.

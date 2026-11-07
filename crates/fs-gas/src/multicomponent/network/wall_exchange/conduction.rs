@@ -3,6 +3,7 @@
 use super::{NetworkWallOperator, WallContact, WallExchangeError, WallThermal, poll};
 use crate::multicomponent::{allocated, positive};
 use crate::multicomponent::wall_exchange::MaterialWallCaloric;
+use fs_material::thermal::conduction::ReservoirLayerGeometry;
 use fs_material::thermal::transport::PreparedThermalTransport;
 use fs_qty::{Area, Length};
 use std::sync::Arc;
@@ -13,9 +14,11 @@ pub use phase::PhaseWallConductionSource;
 /// Fixed-geometry conduction between the gas-facing surface and the retained
 /// wall temperature. The original material supplies directional k(T).
 ///
-/// `length / area` is the planar resistance geometry. For a finite uniform
-/// wall whose state represents its centre, supply the distance from surface to
-/// centre, not the complete wall thickness. The existing contact conductance
+/// [`Self::new`] uses planar `length / area` resistance geometry. For a finite
+/// uniform wall whose state represents its centre, supply the distance from
+/// surface to centre, not the complete wall thickness. [`Self::from_geometry`]
+/// admits exact cylindrical and spherical radial resistance, including either
+/// exposed face and explicit area fractions. The existing contact conductance
 /// represents ONLY the gas-side film. This adds their resistances in series;
 /// it never adds a second wall mass, heat supply, or caloric law.
 ///
@@ -38,6 +41,7 @@ pub struct MaterialWallConduction {
     length: Length,
     area: Area,
     length_over_area: f64,
+    geometry: Option<ReservoirLayerGeometry>,
     evaluation: WallConductionEvaluation,
 }
 
@@ -71,6 +75,21 @@ impl MaterialWallConduction {
         Self::with_source(ConductionSource::Temperature(source), length, area)
     }
 
+    /// Retain the original temperature-dependent material with exact source-free
+    /// resistance geometry. Cylindrical radii run from the contacted surface to
+    /// the retained wall-temperature trace, with insulated ends; spherical
+    /// geometry describes the analogous shell. Conductivity must apply along
+    /// the represented radial normals; no directional averaging or lateral
+    /// spreading is inferred. This resolves radial area variation, while
+    /// conductivity still follows the selected time evaluation. It neither
+    /// resolves transient radial diffusion nor adds wall storage.
+    pub fn from_geometry(
+        source: Arc<PreparedThermalTransport>,
+        geometry: ReservoirLayerGeometry,
+    ) -> Result<Self, WallExchangeError> {
+        Self::with_source_geometry(ConductionSource::Temperature(source), geometry)
+    }
+
     /// Use the original phase chart and pinned k(T,phi) source with this same
     /// resistance geometry. Bind the matching `MaterialWallCaloric::from_phase_curve`
     /// before attaching this layer to a network; a different chart refuses.
@@ -80,6 +99,16 @@ impl MaterialWallConduction {
         area: Area,
     ) -> Result<Self, WallExchangeError> {
         Self::with_source(ConductionSource::Phase(source), length, area)
+    }
+
+    /// Use the matching original phase chart with exact planar or radial
+    /// resistance geometry. The phase caloric binding must be attached first,
+    /// as for [`Self::from_phase_source`]; latent heat remains in its original h.
+    pub fn from_phase_source_with_geometry(
+        source: Arc<PhaseWallConductionSource>,
+        geometry: ReservoirLayerGeometry,
+    ) -> Result<Self, WallExchangeError> {
+        Self::with_source_geometry(ConductionSource::Phase(source), geometry)
     }
 
     fn with_source(
@@ -94,6 +123,27 @@ impl MaterialWallConduction {
             length,
             area,
             length_over_area,
+            geometry: None,
+            evaluation: WallConductionEvaluation::InitialState,
+        })
+    }
+
+    fn with_source_geometry(
+        source: ConductionSource,
+        geometry: ReservoirLayerGeometry,
+    ) -> Result<Self, WallExchangeError> {
+        let area = geometry.surface_area_m2();
+        let length_over_area = 1.0 / geometry.conductance_multiplier_m();
+        let equivalent_length = area * length_over_area;
+        if !positive(length_over_area) || !positive(equivalent_length) {
+            return Err(WallExchangeError::Invalid("wall conduction geometry"));
+        }
+        Ok(Self {
+            source,
+            length: Length::new(equivalent_length),
+            area: Area::new(area),
+            length_over_area,
+            geometry: Some(geometry),
             evaluation: WallConductionEvaluation::InitialState,
         })
     }
@@ -125,13 +175,21 @@ impl MaterialWallConduction {
             ConductionSource::Temperature(_) => None,
         }
     }
-    /// Distance from gas-facing surface to the retained wall-temperature state.
+    /// Planar thickness, or equivalent planar length A_surface/C for a radial
+    /// profile. The radial value is generally not the difference of the radii.
     pub const fn length(&self) -> Length {
         self.length
     }
     /// Actual exposed conduction area, counted once for this contact.
     pub const fn area(&self) -> Area {
         self.area
+    }
+
+    /// Explicitly admitted geometric multiplier and actual exposed face area.
+    /// The original planar constructors retain their authored length and area
+    /// directly and return None, preserving their full numerical input range.
+    pub const fn geometry(&self) -> Option<ReservoirLayerGeometry> {
+        self.geometry
     }
 
     pub(crate) fn conductance(
