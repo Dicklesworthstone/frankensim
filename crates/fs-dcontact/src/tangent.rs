@@ -2,6 +2,48 @@
 use super::ContactStorage;
 use fs_math::det;
 
+/// The original continuous effort derivative; the contact contribution adds no
+/// allocation beyond the declared inner action.
+/// Unlike the Newton representative below, alpha=1 contact at zero penetration
+/// has no two-sided derivative along a nonzero normal direction and refuses.
+/// A tangent direction along the contact surface remains differentiable.
+impl fs_phs::ContinuousStorageTangent for ContactStorage {
+    fn apply(&self, x: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        if self.n_modes.checked_mul(2).is_none_or(|n| x.len() < n)
+            || x.len() != direction.len()
+            || out.len() != x.len()
+            || x.iter().chain(direction).any(|v| !v.is_finite())
+        {
+            return false;
+        }
+        let Some(inner) = self.inner.continuous_tangent() else {
+            return false;
+        };
+        for ob in &self.obstacles {
+            if ob.alpha != 1.0 || ob.stiffness == 0.0 {
+                continue;
+            }
+            for i in 0..ob.n_points {
+                if ob.weights[i] == 0.0 || ob.penetration_at(self.n_modes, x, i) != 0.0 {
+                    continue;
+                }
+                let row = &ob.collocation[i * self.n_modes..(i + 1) * self.n_modes];
+                let rate = row
+                    .iter()
+                    .enumerate()
+                    .map(|(k, b)| b * direction[2 * k])
+                    .sum::<f64>();
+                if rate != 0.0 {
+                    return false;
+                }
+            }
+        }
+        self.hessian_vector_with(x, direction, out, |state, rate, result| {
+            inner.apply(state, rate, result)
+        })
+    }
+}
+
 impl ContactStorage {
     /// Compose an inner-storage Hessian action with these exact contact rows.
     /// The callback must describe `inner_storage()` with the same frozen state;
@@ -12,23 +54,50 @@ impl ContactStorage {
     ///
     /// No allocation. Returns false for incompatible/nonfinite data or an
     /// unavailable inner action; `out` is trial scratch and may then be partial.
-    pub fn hessian_vector_with<F>(&self, x: &[f64], direction: &[f64],
-        out: &mut [f64], inner_action: F) -> bool
-    where F: FnOnce(&[f64], &[f64], &mut [f64]) -> bool {
-        if self.n_modes.checked_mul(2).is_none_or(|n|x.len()<n)
-            || x.len()!=direction.len() || out.len()!=x.len()
-            || x.iter().chain(direction).any(|v|!v.is_finite()) { return false; }
-        if !inner_action(x,direction,out) { return false; }
-        if (0..self.n_modes).any(|k|direction[2*k]!=0.0) {
-            for ob in &self.obstacles { for i in 0..ob.n_points {
-                let p=ob.penetration_at(self.n_modes,x,i);
-                if p<=0.0 { continue; }
-                let row=&ob.collocation[i*self.n_modes..(i+1)*self.n_modes];
-                let rate=row.iter().enumerate().map(|(k,b)|b*direction[2*k]).sum::<f64>();
-                let df=ob.weights[i]*ob.stiffness*ob.alpha*det::pow(p,ob.alpha-1.0)*rate;
-                for (k,b) in row.iter().enumerate() { out[2*k]+=df*b; }
-            }}
+    pub fn hessian_vector_with<F>(
+        &self,
+        x: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+        inner_action: F,
+    ) -> bool
+    where
+        F: FnOnce(&[f64], &[f64], &mut [f64]) -> bool,
+    {
+        if self.n_modes.checked_mul(2).is_none_or(|n| x.len() < n)
+            || x.len() != direction.len()
+            || out.len() != x.len()
+            || x.iter().chain(direction).any(|v| !v.is_finite())
+        {
+            return false;
         }
-        out.iter().all(|v|v.is_finite())
+        if !inner_action(x, direction, out) {
+            return false;
+        }
+        if (0..self.n_modes).any(|k| direction[2 * k] != 0.0) {
+            for ob in &self.obstacles {
+                for i in 0..ob.n_points {
+                    let p = ob.penetration_at(self.n_modes, x, i);
+                    if p <= 0.0 {
+                        continue;
+                    }
+                    let row = &ob.collocation[i * self.n_modes..(i + 1) * self.n_modes];
+                    let rate = row
+                        .iter()
+                        .enumerate()
+                        .map(|(k, b)| b * direction[2 * k])
+                        .sum::<f64>();
+                    let df = ob.weights[i]
+                        * ob.stiffness
+                        * ob.alpha
+                        * det::pow(p, ob.alpha - 1.0)
+                        * rate;
+                    for (k, b) in row.iter().enumerate() {
+                        out[2 * k] += df * b;
+                    }
+                }
+            }
+        }
+        out.iter().all(|v| v.is_finite())
     }
 }

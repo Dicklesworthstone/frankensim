@@ -493,6 +493,12 @@ impl ContactStorage {
 }
 
 impl Storage for ContactStorage {
+    fn continuous_tangent(&self) -> Option<&dyn fs_phs::ContinuousStorageTangent> {
+        self.inner
+            .continuous_tangent()
+            .map(|_| self as &dyn fs_phs::ContinuousStorageTangent)
+    }
+
     fn discrete_gradient_rule(&self) -> Option<&dyn fs_phs::ConstitutiveDiscreteGradient> {
         self.has_contact_discrete_gradient().then_some(self)
     }

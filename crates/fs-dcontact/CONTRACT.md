@@ -22,8 +22,9 @@ LCP, no bespoke scheme).
   refuses NaN/non-finite entries, negative weights/stiffness, and
   `alpha < 1` by name. Smoothness, stated precisely: the POTENTIAL is
   C^1 for all `alpha >= 1` (what Gonzalez needs); the force is C^1
-  only for `alpha > 1`, and the contact Hessian is unbounded for
-  `1 < alpha < 2` and discontinuous at `alpha` in {1, 2}.
+  only for `alpha > 1`. The potential Hessian (contact stiffness) jumps at
+  `alpha = 1` and is continuous at entry for `alpha > 1`; its derivative is
+  unbounded for `1 < alpha < 2` and discontinuous at `alpha = 2`.
   A point has measure 1; line and area sites use m and m2. `K` is per unit
   measure, so a line law has units N/m^(alpha+1). Measures are never normalized
   to a probability distribution. In particular, splitting a uniform physical
@@ -34,6 +35,14 @@ LCP, no bespoke scheme).
   active points, max penetration (the authored-ceiling FLAG for
   stiffness inadequacy — deliberately not a refusal), and contact
   energy.
+- `ContactStorage::continuous_tangent` retains a declared inner continuous
+  tangent through boxing and composes the exact elastic contact Hessian action
+  without additional allocation. Momentum and internal-memory rows retain their original
+  inner law. At alpha=1 and exactly zero penetration, a nonzero normal direction
+  refuses because the two-sided continuous derivative does not exist; directions
+  tangent to the surface remain valid. The existing `hessian_vector_with`
+  Newton helper retains its inactive-side convention. Hunt--Crossley loss is
+  still separately owned and is not included in this elastic tangent.
 - `polyline_heights` — linear-interpolated obstacle profiles with
   typed refusals (unsorted, short, out-of-span).
 - `string_collocation` — mass-normalized sine-mode collocation for

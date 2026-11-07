@@ -2880,12 +2880,43 @@ radiation. The observer adds no allocation or sampled derivative history, so
 even partials avoid backward differences' attenuation and half-sample phase lag.
 Material and gas updates evaluate the same expression under their final held law.
 
-The original nonlinear acceleration differences and constrained moving-end
-interval-mean observation retain their clocks. This remains a compact strip
-observer without radiation loading or common propagation delay; ideal force,
-release and parameter-jump impulses require a resolved transition and are not
+Constrained moving-end interval-mean observations retain their clock. This
+remains a compact strip observer without radiation loading or common
+propagation delay; ideal force, release and parameter-jump impulses require a
+resolved transition and are not
 reconstructed. Analytic high-band amplitude/phase, two-grid public-runtime,
 damped held-load and material/gas-update regressions cover the changed behavior.
+
+## Complete nonlinear string endpoint radiation
+
+Fixed-end Kirchhoff--Carrier strings now evaluate acceleration and jerk at the
+proposed accepted endpoint using the original full pHS law. With constant
+structure and held input, `xdot = (J-R) grad H + G u` and
+`xddot = (J-R) D(grad H) xdot`; canonical mass-normalized momentum rows supply
+the observer's modal acceleration and jerk. The storage-owned continuous
+tangent retains shared cubic stretching, bending, elastic distributed contact
+and all Maxwell memory coordinates. Four reusable state buffers and one zero
+input buffer are prepared once; this observation and these admitted borrowed
+storage actions allocate nothing while running. Pressure admission precedes
+mechanical publication and preserves the existing texture rollback.
+
+This differentiates the physical storage at the numerical endpoint, not the
+numerical step map, and does not make nonlinear propagation exact. Existing
+bow, tangential-friction and Hunt--Crossley input forces are held over each
+step: their continuous feedback derivatives and ideal jump impulses are not
+claimed. Alpha=1 contact at exactly zero penetration and nonzero normal
+velocity has no classical two-sided effort derivative and refuses explicitly;
+quiet contact, active/separated contact and alpha>1 entry retain their actual
+derivatives. No finite-difference fallback changes that meaning. Joined
+moving-end reactions remain interval-mean quantities. Compact-strip geometry,
+sampling/aliasing limits and the existing polarization model are unchanged.
+
+Independent force/jerk regressions cover bending dispersion, shared stretching,
+modal damping, held-load changes, mixed active/inactive elastic contact, and
+radiation caused by memory relaxation with zero instantaneous modal velocity
+and acceleration. A renderer regression checks amplitude and phase of an even
+partial at 80% of Nyquist; contact-corner coverage checks the named refusal.
+These native regressions require execution through the real dependency graph.
 
 ### Coupled rod fatigue with bonded layered transverse shear
 
