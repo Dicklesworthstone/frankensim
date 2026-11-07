@@ -3064,6 +3064,28 @@ compare independent reduced FE/RC/RL midpoint equations, numerical-reference
 invariance, motional generation, ideal source and shorted-node topologies,
 recoil-domain refusal and preservation of both histories on rejection.
 
+### Source-backed resistors in linear 3D electrode circuits
+
+`SpatialTerminalCircuit::with_graph_resistors` binds every physical authored
+resistor branch to its complete `GraphResistorMaterial` source and uniform path
+geometry. The shared native resistance reassembly retains graph topology, mutual
+inductance, terminal/private-port ordering and exact accepted flux/charge state;
+it checks unchanged storage before returning. Field A, magnetic source and clock
+also remain unchanged. This explicit source reconfiguration can attach the first
+bindings; a finite-heat consumer separately pins accepted source selections and
+admits their temperature successors. Resistance changes create no stored-energy
+parameter work and never reseed native algebraic efforts.
+
+`graph_resistor_materials` exposes the retained original-branch ordering.
+Identical sorted bindings retain the response cache; changed bindings invalidate
+it before another affine circuit closure. Every accepted candidate, including a
+wholly shorted electrode layout and a simultaneous field-material refresh,
+retains the actual source bindings alongside per-branch physical heat receipts.
+Shared native accounting excludes artificial reference resistors from those
+receipts. Focused regressions check independent R(T)/field/RLC midpoint dynamics,
+old flux/charge preservation, original source work, heat partition, cache reuse
+and invalidation, and complete/unique branch-map and cancellation refusal.
+
 ## Source-backed orthotropic conductivity in native 3D induction
 
 `fs_material::conductor::spatial` supplies a sealed shared conductor boundary

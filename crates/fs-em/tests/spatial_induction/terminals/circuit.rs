@@ -6,6 +6,8 @@ use fs_em::spatial::vector_potential::induction::terminals::circuit::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
+#[path = "circuit/graph_resistors.rs"]
+mod graph_resistors;
 #[path = "circuit/thermal.rs"]
 mod thermal;
 

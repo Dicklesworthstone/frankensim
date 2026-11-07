@@ -201,6 +201,7 @@ pub struct SpatialTerminalCircuit<'m, C: SpatialConductorMaterial = ResolvedCond
     layout: Rc<Layout>,
     state: Vec<f64>,
     response: Option<Rc<Response>>,
+    graph_materials: Vec<GraphResistorMaterial>,
 }
 
 /// Actual first-to-second branch current and absorbed finite-step work.
@@ -388,6 +389,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
             layout,
             state,
             response: None,
+            graph_materials: Vec::new(),
         })
     }
 
@@ -396,6 +398,57 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
     }
     pub fn graph(&self) -> &CircuitGraph {
         &self.layout.graph
+    }
+    /// Original-branch material bindings at the last resistance update.
+    pub fn graph_resistor_materials(&self) -> &[GraphResistorMaterial] {
+        &self.graph_materials
+    }
+
+    /// Rebind every physical graph resistor to complete source-backed material
+    /// and path geometry, retaining this exact field, native flux/charge and time.
+    ///
+    /// This explicit source reconfiguration can attach initial bindings or
+    /// change resistance. Thermal consumers must separately pin the original
+    /// sources and admit their temperature successors. Only dissipative graph
+    /// coefficients change; no circuit storage or magnetic parameter work is
+    /// created. Retained algebraic entries are the old receipt, and the next
+    /// native descriptor solve determines the actual stage efforts.
+    ///
+    /// Identical sorted bindings retain the response cache. Rebinding clears
+    /// it so changed resistance cannot reuse the previous circuit response.
+    pub fn with_graph_resistors(
+        &self,
+        mut sources: Vec<GraphResistorMaterial>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        let count = self
+            .layout
+            .graph
+            .branches
+            .iter()
+            .filter(|(_, _, branch)| matches!(branch, Branch::Resistor { .. }))
+            .count();
+        if sources.len() != count || sources.len() > MAX_TERMINAL_CIRCUIT_BRANCHES {
+            return Err(invalid(
+                "every physical graph resistor requires one bounded source",
+            ));
+        }
+        sources.sort_by_key(|source| source.branch);
+        if sources == self.graph_materials {
+            poll(cancelled)?;
+            return Ok(self.clone());
+        }
+        let layout = native::rebind_resistors(&self.layout, &self.state, &sources, cancelled)?;
+        let next = Self {
+            field: self.field.clone(),
+            layout,
+            state: self.state.clone(),
+            response: None,
+            graph_materials: sources,
+        };
+        poll(cancelled)?;
+        Ok(next)
     }
     pub fn mutual_inductance(&self) -> &[MutualInductance] {
         &self.layout.mutual
@@ -550,6 +603,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
                     layout: Rc::clone(&self.layout),
                     state,
                     response: None,
+                    graph_materials: self.graph_materials.clone(),
                 },
                 step,
             });
@@ -696,6 +750,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
                 layout: Rc::clone(&self.layout),
                 state,
                 response: Some(response),
+                graph_materials: self.graph_materials.clone(),
             },
             step,
         })
@@ -717,7 +772,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
             &self.state,
             native,
             field,
-            &[],
+            &self.graph_materials,
             input,
             external,
             dt,
