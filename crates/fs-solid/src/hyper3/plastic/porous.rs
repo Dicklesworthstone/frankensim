@@ -76,8 +76,9 @@ pub struct FinitePorousPressureEnergy {
     pub work_j: f64,
     /// `work_j - endpoint_work_j`, a signed geometric quadrature correction.
     pub endpoint_work_correction_j: f64,
-    /// Dead/support endpoint work plus exact held-pressure work, minus the
-    /// storage change and physical plastic loss, excluding equilibrium error.
+    /// Dead/support endpoint work plus exact held-pressure work, minus storage
+    /// change, physical plastic loss and any inertial endpoint work, excluding
+    /// equilibrium error.
     pub external_work_defect_j: f64,
 }
 

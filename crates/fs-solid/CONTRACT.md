@@ -11199,3 +11199,27 @@ atomic mechanical/history acceptance remain authoritative. Earlier homogeneous
 and explicitly unassessed modes retain their original behavior. The new
 independent two-layer native regression is in `tests/rod_fatigue.rs`; this
 observation does not alter native stiffness, work, inertia or stored energy.
+
+## Retained porous motion under prescribed follower pressure
+
+`FinitePorousTetMotion::advance_with_pressure` combines the original current-area
+surface load and analytic follower tangent with retained porous compaction and
+consistent reference inertia in one native backward-Euler solve. The same
+physical load fields, exact original mesh binding and declared-path pressure
+work apply. Pressure is held over the requested interval; changing reservoir
+pressure requires resolved successive intervals. Original reference mass and
+accepted plastic history remain unchanged until every solve and work gate passes.
+
+The complete balance keeps storage, physical plastic loss, kinetic change,
+backward-Euler numerical kinetic loss, material endpoint error and pressure
+endpoint correction separate. The original material-work allowance bounds the
+sum of absolute material and pressure corrections; the numerical kinetic-loss
+allowance remains independent. Numerical losses do not become material heat.
+The pressure account's external defect excludes any inertial endpoint work.
+
+The `hyper_porous_retained::dynamics` regressions specify free regular-tet
+pressure compaction against an independent consistent-mass hydrostatic formula,
+a nonsymmetric one-face pressure patch, support reactions with off-diagonal
+mass coupling, retained history, exact pressure work, late refusal and retry.
+The scope is prescribed-pressure motion at fixed material conditions; sealed
+cavity and spatial-gravity inertia remain outside this entry point.

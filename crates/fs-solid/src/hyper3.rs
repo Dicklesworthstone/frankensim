@@ -1459,12 +1459,12 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         if inertia.is_some()
             && (initial_displacement.is_none()
                 || self.settings.load_steps != 1
-                || pressure.is_some()
                 || gravity.is_some()
                 || !cavities.is_empty())
         {
             return Err(HyperTetError::InvalidInput {
-                what: "finite inertia requires one accepted endpoint and held dead loads".into(),
+                what: "finite inertia requires one accepted endpoint with held dead loads and prescribed pressure only"
+                    .into(),
             });
         }
         if let Some(displacement) = initial_displacement {

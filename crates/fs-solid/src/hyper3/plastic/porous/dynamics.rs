@@ -8,23 +8,27 @@
 //!
 //! Original mass is independent of plastic volume: current density is rho0/J,
 //! never rho0/Jp. Physical plastic dissipation, signed material endpoint-work
-//! defect and backward-Euler numerical kinetic loss have separate accounts and
-//! budgets. Numerical kinetic loss is not heat; timestep refinement is still
-//! necessary for time accuracy even when the work identity closes.
+//! defect, pressure endpoint-work correction and backward-Euler numerical
+//! kinetic loss have separate accounts and budgets. Numerical kinetic loss is
+//! not heat; timestep refinement is still necessary for time accuracy even when
+//! the work identity closes.
 //!
 //! Density is an explicit original mass inventory. `FinitePorousMaterial`
 //! currently exposes no sourced density; borrowing a source-resolved law keeps
 //! its card and context but makes no density-calibration claim. Conditions stay
 //! fixed: this path adds no evolving porosity, densification, thermal coupling,
-//! contact, follower loads, mass transfer or pressure stabilization.
+//! contact, mass transfer or pressure stabilization. Held current-area pressure
+//! uses the native surface force, analytic follower tangent and exact declared
+//! path work in the same momentum solve; it is never frozen to reference area.
 
 use std::sync::Arc;
 
 use fs_exec::Cx;
 use fs_material::plastic::finite::porous::{FinitePorous, FinitePorousMaterial};
 
-use super::{FinitePorousTetError, FinitePorousTetSolid};
+use super::{FinitePorousPressureEnergy, FinitePorousTetError, FinitePorousTetSolid};
 use crate::hyper3::plastic::{FinitePlasticTetEnergy, checkpoint, energy_gate, invalid};
+use crate::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
 use crate::hyper3::{HyperTetSettings, HyperTetSolution, inertia_error};
 use crate::inertia::{BackwardEulerInertia, P1ReferenceMass};
 
@@ -55,7 +59,15 @@ pub struct FinitePorousMotionStep<'a, L: FinitePorousMaterial = FinitePorous> {
     pub material_energy: FinitePlasticTetEnergy,
     /// Kinetic change, momentum work and separate numerical kinetic loss.
     pub inertia: InertialEnergy,
-    /// Combined material/momentum and independent kinetic-identity residual.
+    /// Present for held current-area pressure, with the original pressure
+    /// owner's exact work and signed endpoint correction. The combined external
+    /// defect accounts only for material/pressure endpoint integration,
+    /// separately from inertial work and numerical kinetic loss.
+    pub pressure: Option<FinitePorousPressureEnergy>,
+    /// External work minus storage change, plastic dissipation, kinetic change,
+    /// numerical kinetic loss and the signed external endpoint-work defect.
+    /// Computed from the native momentum and independent kinetic identities to
+    /// retain their precision instead of subtracting large absolute energies.
     pub balance_error_j: f64,
 }
 
@@ -260,6 +272,75 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
         controls: FinitePlasticMotionControls,
         cx: &Cx<'_>,
     ) -> Result<FinitePorousMotionStep<'a, L>, FinitePorousTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+    }
+
+    /// Advance momentum and retained compaction under held current-area pressure.
+    ///
+    /// The exact original closed surface, all supported pressure fields, current
+    /// normals and areas, and the complete pressure derivative enter the native
+    /// backward-Euler solve. Positive differential pressure compresses the body.
+    /// The field is held over this interval; time-varying pressure requires
+    /// resolved successive intervals. This prescribes a reservoir load and does
+    /// not add a fluid equation of state or evolve a sealed cavity.
+    ///
+    /// The pressure receipt retains exact declared-path work separately from
+    /// its endpoint-force work. The material work budget bounds the SUM of the
+    /// absolute material and pressure endpoint defects; the kinetic-loss budget
+    /// remains independent. Neither numerical defect is physical plastic heat.
+    /// Free bodies need no artificial supports, and prescribed-motion reactions
+    /// include pressure and the complete original consistent-mass action.
+    ///
+    /// # Errors
+    /// The same transactional gates as `advance`, plus exact surface/pressure
+    /// admission. Any refused trial, final work gate or cancellation leaves
+    /// displacement, velocity, history and original mass unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_pressure<'p>(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        surface: &ClosedTetPressureSurface,
+        pressure: impl Into<TetPressure<'p>>,
+        settings: HyperTetSettings,
+        controls: FinitePlasticMotionControls,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePorousMotionStep<'a, L>, FinitePorousTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            dt_s,
+            settings,
+            controls,
+            Some((surface, pressure.into())),
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_loaded(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        dt_s: f64,
+        settings: HyperTetSettings,
+        controls: FinitePlasticMotionControls,
+        pressure: Option<(&ClosedTetPressureSurface, TetPressure<'_>)>,
+        cx: &Cx<'_>,
+    ) -> Result<FinitePorousMotionStep<'a, L>, FinitePorousTetError> {
         checkpoint(cx)?;
         if !controls.maximum_numerical_kinetic_loss_j.is_finite()
             || controls.maximum_numerical_kinetic_loss_j < 0.0
@@ -283,7 +364,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
             settings,
             controls.material,
             Some(&inertia),
-            None,
+            pressure,
             cx,
         )?;
         let (velocity_mps, inertia) = motion.expect("inertial endpoint returns native motion");
@@ -313,6 +394,7 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetMotion<'a, L> {
             equilibrium: step.equilibrium,
             material_energy: step.energy,
             inertia,
+            pressure: step.pressure,
             balance_error_j,
         })
     }

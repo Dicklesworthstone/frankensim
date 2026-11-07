@@ -441,3 +441,403 @@ fn kinetic_loss_refusal_and_cancellation_keep_full_compacted_motion_retryable() 
         near(motion.reference_mass_kg(), RHO * VOLUME, 1e-14);
     });
 }
+
+// A regular reference tet centered at zero has grad(N_a) = X_a/4 and V0 = 8/3.
+// For uniform contraction, M*X = rho*V0*X/20, so the pressure needed to reach
+// stretch s from rest is -tau(s)/s^3 + rho*(1-s)/(5*dt^2*s^2).
+const PRESSURE_NODES: [[f64; 3]; 4] = [
+    [1.0, 1.0, 1.0],
+    [1.0, -1.0, -1.0],
+    [-1.0, -1.0, 1.0],
+    [-1.0, 1.0, -1.0],
+];
+const PRESSURE_VOLUME: f64 = 8.0 / 3.0;
+
+#[test]
+fn current_area_pressure_drives_free_compaction_with_consistent_inertial_work() {
+    with_cx(|cx, _| {
+        let material = law(A);
+        let stretch = 0.9;
+        let dt = 0.25;
+        let (alpha, plastic_j, tau) = hydrostatic(stretch);
+        let pressure =
+            -tau / stretch.powi(3) + RHO * (1.0 - stretch) / (5.0 * dt * dt * stretch * stretch);
+        let surface = ClosedTetPressureSurface::new(
+            &PRESSURE_NODES,
+            &TETS,
+            TetAssemblyBudget::standard(),
+            4,
+            cx,
+        )
+        .unwrap();
+        let mut face_pressures = vec![0.0; surface.faces().len()];
+        let patch = surface
+            .faces()
+            .iter()
+            .position(|face| !face.contains(&0))
+            .unwrap();
+        face_pressures[patch] = pressure;
+        let expected_kinetic =
+            3.0 * RHO * PRESSURE_VOLUME * (stretch - 1.0).powi(2) / (10.0 * dt * dt);
+        let expected_storage = PRESSURE_VOLUME * (0.5 * tau * tau / K + 0.5 * H * alpha * alpha);
+        let expected_heat = PRESSURE_VOLUME * Y * alpha;
+        let expected_internal = 3.0 * PRESSURE_VOLUME * tau / stretch * (stretch - 1.0);
+
+        // A one-face patch uses the nonsymmetric native pressure Jacobian. Its
+        // independent manufactured dead loads restore the same affine endpoint,
+        // without supports or using the production pressure force as an oracle.
+        for patch_only in [false, true] {
+            let mut dead_loads = Vec::new();
+            if patch_only {
+                let required = PRESSURE_VOLUME * tau / (4.0 * stretch)
+                    + RHO * PRESSURE_VOLUME * (stretch - 1.0) / (20.0 * dt * dt);
+                for (node, x) in PRESSURE_NODES.iter().enumerate() {
+                    // Face opposite X_0 has outward reference area vector -2 X_0.
+                    let patch_force = if node == 0 {
+                        0.0
+                    } else {
+                        2.0 * pressure * stretch * stretch / 3.0
+                    };
+                    for (component, coordinate) in x.iter().enumerate() {
+                        dead_loads
+                            .push((3 * node + component, required * coordinate - patch_force));
+                    }
+                }
+            }
+            let fraction = if patch_only { 0.25 } else { 1.0 };
+            let motion = FinitePorousTetMotion::try_new(
+                solid(&PRESSURE_NODES, &material, cx),
+                &[RHO],
+                &[[0.0; 3]; 4],
+                cx,
+            )
+            .unwrap();
+            let step = motion
+                .advance_with_pressure(
+                    &[],
+                    &dead_loads,
+                    [0.0; 3],
+                    dt,
+                    &surface,
+                    if patch_only {
+                        TetPressure::PerFace(&face_pressures)
+                    } else {
+                        TetPressure::Uniform(pressure)
+                    },
+                    settings(),
+                    motion_controls(),
+                    cx,
+                )
+                .unwrap();
+            assert!(step.equilibrium.reactions_n.is_empty());
+            assert!(step.equilibrium.steps[0].linear_iterations > 0);
+            for (node, x) in PRESSURE_NODES.iter().enumerate() {
+                for (component, coordinate) in x.iter().enumerate() {
+                    near(
+                        step.motion.solid().displacement_m()[node][component],
+                        (stretch - 1.0) * coordinate,
+                        3e-8,
+                    );
+                    near(
+                        step.motion.velocity_mps()[node][component],
+                        (stretch - 1.0) * coordinate / dt,
+                        1e-7,
+                    );
+                }
+            }
+            for (component, value) in step.motion.solid().element_deformation()[0]
+                .iter()
+                .enumerate()
+            {
+                near(*value, if component % 4 == 0 { stretch } else { 0.0 }, 3e-8);
+            }
+            near(step.motion.solid().element_states()[0].alpha, alpha, 3e-8);
+            near(
+                step.motion.solid().element_plastic_jacobians()[0],
+                plastic_j,
+                3e-8,
+            );
+            near(
+                step.motion.current_density_kg_m3(cx).unwrap()[0],
+                RHO / stretch.powi(3),
+                3e-7,
+            );
+            near(
+                step.motion.reference_mass_kg(),
+                RHO * PRESSURE_VOLUME,
+                1e-12,
+            );
+            near(step.material_energy.stored_after_j, expected_storage, 3e-7);
+            near(
+                step.material_energy.plastic_dissipation_j,
+                expected_heat,
+                3e-7,
+            );
+            near(
+                step.material_energy.internal_endpoint_work_j,
+                expected_internal,
+                3e-7,
+            );
+            near(step.inertia.kinetic_change_j, expected_kinetic, 3e-7);
+            near(step.inertia.numerical_loss_j, expected_kinetic, 3e-7);
+            near(step.inertia.inertial_work_j, 2.0 * expected_kinetic, 5e-7);
+            let account = step.pressure.unwrap();
+            let endpoint =
+                -fraction * 3.0 * pressure * PRESSURE_VOLUME * stretch * stretch * (stretch - 1.0);
+            let exact = -fraction * pressure * PRESSURE_VOLUME * (stretch.powi(3) - 1.0);
+            near(account.endpoint_work_j, endpoint, 3e-7);
+            near(account.work_j, exact, 3e-7);
+            near(account.endpoint_work_correction_j, exact - endpoint, 3e-7);
+            assert!(account.endpoint_work_correction_j.abs() > 0.1);
+            near(
+                account.external_work_defect_j,
+                step.material_energy.endpoint_work_defect_j + exact - endpoint,
+                3e-7,
+            );
+            // The combined pressure defect already includes the material defect:
+            // counting both again, or turning the kinetic loss into heat, fails.
+            near(
+                step.material_energy.dead_load_endpoint_work_j
+                    + step.material_energy.support_endpoint_work_j
+                    + account.work_j,
+                step.material_energy.stored_after_j - step.material_energy.stored_before_j
+                    + step.material_energy.plastic_dissipation_j
+                    + step.inertia.kinetic_change_j
+                    + step.inertia.numerical_loss_j
+                    + account.external_work_defect_j
+                    + step.balance_error_j,
+                5e-7,
+            );
+            near(step.balance_error_j, 0.0, 2e-7);
+            assert_eq!(motion.solid().element_states(), [material.initial_state()]);
+            assert_eq!(motion.velocity_mps(), [[0.0; 3]; 4]);
+        }
+    });
+}
+
+#[test]
+fn pressure_motion_supports_and_late_refusal_preserve_full_compacted_history() {
+    with_cx(|cx, gate| {
+        let material = law(A);
+        let old_stretch = 0.95;
+        let stretch = 0.9;
+        let dt = 0.25;
+        let pressure = 5.0;
+        let old_supports = affine(
+            &NODES,
+            [
+                old_stretch,
+                0.0,
+                0.0,
+                0.0,
+                old_stretch,
+                0.0,
+                0.0,
+                0.0,
+                old_stretch,
+            ],
+            [0.0; 3],
+        );
+        let supports = affine(
+            &NODES,
+            [stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, stretch],
+            [0.0; 3],
+        );
+        let compacted = solid(&NODES, &material, cx)
+            .advance(&old_supports, &[], [0.0; 3], settings(), controls(), cx)
+            .unwrap()
+            .solid;
+        let original_history = compacted.element_states().to_vec();
+        let original_u = compacted.displacement_m().to_vec();
+        let original_storage = compacted.stored_energy_j();
+        let old_velocity = [0.2, -0.1, 0.05];
+        let motion =
+            FinitePorousTetMotion::try_new(compacted, &[RHO], &[old_velocity; 4], cx).unwrap();
+        let surface =
+            ClosedTetPressureSurface::new(&NODES, &TETS, TetAssemblyBudget::standard(), 4, cx)
+                .unwrap();
+        let mut face_pressures = vec![0.0; surface.faces().len()];
+        let patch = surface
+            .faces()
+            .iter()
+            .position(|face| !face.contains(&0))
+            .unwrap();
+        face_pressures[patch] = pressure;
+        let field = TetPressure::PerFace(&face_pressures);
+        let (alpha, plastic_j, tau) = hydrostatic(stretch);
+        let (old_alpha, _, _) = hydrostatic(old_stretch);
+        let velocity: Vec<_> = NODES
+            .iter()
+            .map(|x| x.map(|value| (stretch - old_stretch) * value / dt))
+            .collect();
+        let acceleration: Vec<[f64; 3]> = velocity
+            .iter()
+            .map(|v| {
+                core::array::from_fn(|component| (v[component] - old_velocity[component]) / dt)
+            })
+            .collect();
+        let gradients = [[-1.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let step = motion
+            .advance_with_pressure(
+                &supports,
+                &[],
+                [0.0; 3],
+                dt,
+                &surface,
+                field,
+                settings(),
+                motion_controls(),
+                cx,
+            )
+            .unwrap();
+        for &(dof, actual) in &step.equilibrium.reactions_n {
+            let node = dof / 3;
+            let component = dof % 3;
+            let inertia = RHO * VOLUME / 20.0
+                * (acceleration.iter().map(|a| a[component]).sum::<f64>()
+                    + acceleration[node][component]);
+            // The sole loaded face has outward area vector [1,1,1]/2.
+            let pressure_force = if node == 0 {
+                0.0
+            } else {
+                -pressure * stretch * stretch / 6.0
+            };
+            let expected =
+                VOLUME * tau / stretch * gradients[node][component] + inertia - pressure_force;
+            near(actual, expected, 3e-7);
+        }
+        assert_eq!(step.equilibrium.reactions_n.len(), 12);
+        near(step.motion.solid().element_states()[0].alpha, alpha, 3e-8);
+        near(
+            step.motion.solid().element_plastic_jacobians()[0],
+            plastic_j,
+            3e-8,
+        );
+        near(
+            step.material_energy.plastic_dissipation_j,
+            VOLUME * Y * (alpha - old_alpha),
+            3e-8,
+        );
+        near(
+            step.inertia.kinetic_change_j,
+            kinetic(&velocity, RHO * VOLUME) - kinetic(&[old_velocity; 4], RHO * VOLUME),
+            3e-8,
+        );
+        let account = step.pressure.unwrap();
+        near(
+            account.work_j,
+            -pressure * VOLUME * (stretch.powi(3) - old_stretch.powi(3)),
+            3e-8,
+        );
+        near(
+            account.endpoint_work_j,
+            -3.0 * pressure * VOLUME * stretch * stretch * (stretch - old_stretch),
+            3e-8,
+        );
+        near(
+            step.material_energy.support_endpoint_work_j + account.work_j,
+            step.material_energy.stored_after_j - step.material_energy.stored_before_j
+                + step.material_energy.plastic_dissipation_j
+                + step.inertia.kinetic_change_j
+                + step.inertia.numerical_loss_j
+                + account.external_work_defect_j
+                + step.balance_error_j,
+            3e-7,
+        );
+
+        let mut strict = motion_controls();
+        strict.maximum_numerical_kinetic_loss_j = 0.0;
+        let refused = motion
+            .advance_with_pressure(
+                &supports,
+                &[],
+                [0.0; 3],
+                dt,
+                &surface,
+                field,
+                settings(),
+                strict,
+                cx,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            refused,
+            FinitePorousTetError::Solid(FinitePlasticTetError::EnergyGate {
+                quantity: "porous backward-Euler numerical kinetic loss",
+                ..
+            })
+        ));
+        let retry = motion
+            .advance_with_pressure(
+                &supports,
+                &[],
+                [0.0; 3],
+                dt,
+                &surface,
+                field,
+                settings(),
+                motion_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(retry.equilibrium, step.equilibrium);
+        assert_eq!(retry.material_energy, step.material_energy);
+        assert_eq!(retry.pressure, step.pressure);
+        assert_eq!(retry.inertia, step.inertia);
+
+        let dead = motion
+            .advance(
+                &supports,
+                &[],
+                [0.0; 3],
+                dt,
+                settings(),
+                motion_controls(),
+                cx,
+            )
+            .unwrap();
+        let zero = motion
+            .advance_with_pressure(
+                &supports,
+                &[],
+                [0.0; 3],
+                dt,
+                &surface,
+                0.0,
+                settings(),
+                motion_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(zero.equilibrium, dead.equilibrium);
+        assert_eq!(zero.material_energy, dead.material_energy);
+        assert_eq!(zero.inertia, dead.inertia);
+        assert!(dead.pressure.is_none());
+        near(zero.pressure.unwrap().work_j, 0.0, 0.0);
+        near(zero.pressure.unwrap().endpoint_work_correction_j, 0.0, 0.0);
+
+        gate.request();
+        let cancelled = motion
+            .advance_with_pressure(
+                &supports,
+                &[],
+                [0.0; 3],
+                dt,
+                &surface,
+                field,
+                settings(),
+                motion_controls(),
+                cx,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            cancelled,
+            FinitePorousTetError::Solid(FinitePlasticTetError::Native(HyperTetError::Cancelled))
+        ));
+        assert_eq!(motion.solid().element_states(), original_history);
+        assert_eq!(motion.solid().displacement_m(), original_u);
+        assert_eq!(motion.velocity_mps(), [old_velocity; 4]);
+        near(motion.solid().stored_energy_j(), original_storage, 0.0);
+        near(motion.reference_mass_kg(), RHO * VOLUME, 1e-14);
+    });
+}
