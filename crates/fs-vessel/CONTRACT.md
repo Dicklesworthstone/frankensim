@@ -24,6 +24,25 @@ Reynolds number, skipped mode, or invented stable score. The report identifies
 the worst sampled growth in 1/s and the observed nondimensional ranges.
 Evaluation is allocation-free and linear in section count times mode count.
 
+`LaminarFilmTransitStudy` additionally transports one inlet frequency through a
+finite, slowly varying attached-film path. Each section carries an actual length.
+Continuity fixes the Nusselt kinematic-wave speed at `c=dq/dh=3*q/h`; the local
+wavenumber is `omega/c`, and signed log amplification is the sum of `s*L/c`.
+The relative film-height/flow disturbance retains no extra geometric factor,
+because `width*c*h=3*Q`. Liquid residence time is reported separately and is
+three times the wave transit time. The report retains the largest accumulated
+amplification along the path, so downstream decay does not hide prior growth.
+
+This is the leading weak-growth temporal-to-spatial conversion of the same
+Benney dispersion. Every section must pass both native long-wave limits and an
+explicit `|s/omega|` budget. It does not solve the full spatial eigenproblem,
+reflection at abrupt geometry changes, nonlinear saturation or transition to
+turbulence. Geometry must vary slowly enough for the local parallel assumption;
+piecewise sections represent quadrature of that path, not resolved sharp joints.
+Evaluation needs constant storage and work linear in section count. The G1/G3
+transit tests use independent dimensional coefficients, fixed-frequency
+transport, path ordering, length scaling and homogeneous section partitioning.
+
 `robust::robustify_laminar` uses the same physical evaluator over an authored
 width-candidate set and fluid band, then invokes canonical empirical CVaR.
 It returns both candidates' band CVaR and worst sampled growth. Equal nominal
@@ -47,9 +66,8 @@ This route does not replace or calibrate the transient LBM pour, contact-line
 physics, or measured-fluid laws.
 
 `tests/laminar.rs` covers the independent dimensional dispersion relation,
-conserved flux/viscosity scaling, mode-domain refusals, physical CVaR candidate
-selection and the original race integration. Native Rust execution remains
-unavailable in this session; numerical equation checks are distinct evidence.
+conserved flux/viscosity scaling, finite-path disturbance transport, mode-domain
+refusals, physical CVaR candidate selection and the original race integration.
 
 ## Purpose and layer
 

@@ -5,7 +5,7 @@ use fs_vessel::race::{ScreenError, race_base_losses, screen_laminar_lips};
 use fs_vessel::robust::{LaminarRobustError, robustify_laminar};
 use fs_vessel::stability::laminar::{
     LaminarFilmBandStudy, LaminarFilmError, LaminarFilmSection, LaminarFilmStudy,
-    LaminarPourConditions,
+    LaminarFilmTransitStudy, LaminarPourConditions, LaminarTransitSection,
 };
 
 const MATERIAL: FilmMaterial = FilmMaterial {
@@ -301,5 +301,193 @@ fn laminar_screen_drives_the_original_race_with_native_growth_and_refuses_bad_mo
     assert!(matches!(
         screen_laminar_lips(&study, &[1.0], nominal, 0x7E55),
         Err(ScreenError::TooFewCandidates { count: 1 })
+    ));
+}
+
+fn transit(sections: &[LaminarTransitSection]) -> LaminarFilmTransitStudy<'_> {
+    LaminarFilmTransitStudy {
+        sections,
+        angular_frequency_rad_s: 0.5,
+        limits: LongWaveLimits {
+            max_kh: 0.1,
+            max_re_kh: 0.1,
+        },
+        max_growth_frequency_ratio: 0.01,
+    }
+}
+
+/// Independent dimensional Benney coefficients and the kinematic-wave
+/// characteristic dx/dt=dq/dh; no native film/mode query is used.
+fn transit_reference(segment: LaminarTransitSection, omega: f64) -> (f64, f64, f64) {
+    let state = conditions(1.0, 1.0);
+    let q = state.volume_flow_m3_s / segment.film.width_m;
+    let nu = state.material.kinematic_viscosity_m2_s;
+    let gt = segment.film.tangential_acceleration_m_s2;
+    let gn = segment.film.normal_acceleration_m_s2;
+    let h = (3.0 * nu * q / gt).cbrt();
+    let c = gt * h * h / nu;
+    let k = omega / c;
+    let inertia = 2.0 * gt * gt * h.powi(6) / (15.0 * nu.powi(3));
+    let gravity = gn * h.powi(3) / (3.0 * nu);
+    let capillarity =
+        state.material.surface_tension_n_m * h.powi(3) / (3.0 * state.material.density_kg_m3 * nu);
+    let growth = (inertia - gravity) * k * k - capillarity * k.powi(4);
+    (growth * segment.length_m / c, segment.length_m / c, k)
+}
+
+#[test]
+fn g1_film_transit_uses_wave_speed_instead_of_liquid_residence() {
+    let path = [LaminarTransitSection {
+        film: SECTIONS[0],
+        length_m: 0.1,
+    }];
+    let study = transit(&path);
+    let report = study.evaluate(1.0, conditions(1.0, 1.0)).unwrap();
+    let (gain, time, k) = transit_reference(path[0], study.angular_frequency_rad_s);
+    near(report.log_amplification, gain);
+    near(report.wave_transit_time_s, time);
+    near(report.liquid_residence_time_s, 3.0 * time);
+    near(report.wavenumber_range_rad_m[0], k);
+    near(report.wavenumber_range_rad_m[1], k);
+    assert!(gain > 0.0);
+    assert_eq!(report.peak_after_sections, 1);
+    let longer = [LaminarTransitSection {
+        length_m: 0.2,
+        ..path[0]
+    }];
+    let doubled = transit(&longer)
+        .evaluate(1.0, conditions(1.0, 1.0))
+        .unwrap();
+    near(doubled.log_amplification, 2.0 * gain);
+    near(doubled.wave_transit_time_s, 2.0 * time);
+}
+
+#[test]
+fn g1_film_transit_preserves_frequency_and_tracks_peak_before_downstream_decay() {
+    let path = [
+        LaminarTransitSection {
+            film: SECTIONS[0],
+            length_m: 0.1,
+        },
+        LaminarTransitSection {
+            film: SECTIONS[1],
+            length_m: 0.5,
+        },
+    ];
+    let study = transit(&path);
+    let report = study.evaluate(1.0, conditions(1.0, 1.0)).unwrap();
+    let first = transit_reference(path[0], study.angular_frequency_rad_s);
+    let second = transit_reference(path[1], study.angular_frequency_rad_s);
+    assert!(first.0 > 0.0 && second.0 < -first.0);
+    assert!(second.2 > first.2);
+    near(report.log_amplification, first.0 + second.0);
+    near(report.peak_log_amplification, first.0);
+    near(report.wave_transit_time_s, first.1 + second.1);
+    near(report.wavenumber_range_rad_m[0], first.2);
+    near(report.wavenumber_range_rad_m[1], second.2);
+    assert_eq!(report.peak_after_sections, 1);
+    let reversed = [path[1], path[0]];
+    let backwards = transit(&reversed)
+        .evaluate(1.0, conditions(1.0, 1.0))
+        .unwrap();
+    near(backwards.log_amplification, report.log_amplification);
+    assert_eq!(backwards.peak_log_amplification, 0.0);
+    assert_eq!(backwards.peak_after_sections, 0);
+}
+
+#[test]
+fn g3_film_transit_is_invariant_to_homogeneous_section_partition() {
+    let whole = [LaminarTransitSection {
+        film: SECTIONS[0],
+        length_m: 0.3,
+    }];
+    let split = [LaminarTransitSection {
+        film: SECTIONS[0],
+        length_m: 0.1,
+    }; 3];
+    let state = conditions(1.0, 1.0);
+    let reference = transit(&whole).evaluate(1.0, state).unwrap();
+    let partitioned = transit(&split).evaluate(1.0, state).unwrap();
+    near(partitioned.log_amplification, reference.log_amplification);
+    near(
+        partitioned.peak_log_amplification,
+        reference.peak_log_amplification,
+    );
+    near(
+        partitioned.wave_transit_time_s,
+        reference.wave_transit_time_s,
+    );
+    near(
+        partitioned.liquid_residence_time_s,
+        reference.liquid_residence_time_s,
+    );
+}
+
+#[test]
+fn film_transit_refuses_invalid_lengths_and_unsupported_spatial_conversion() {
+    let path = [LaminarTransitSection {
+        film: SECTIONS[0],
+        length_m: 0.1,
+    }];
+    let study = transit(&path);
+    let state = conditions(1.0, 1.0);
+    for length_m in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let bad = [LaminarTransitSection {
+            length_m,
+            ..path[0]
+        }];
+        assert_eq!(
+            transit(&bad).evaluate(1.0, state),
+            Err(LaminarFilmError::InvalidLength { section: 0 })
+        );
+    }
+    for angular_frequency_rad_s in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            LaminarFilmTransitStudy {
+                angular_frequency_rad_s,
+                ..study
+            }
+            .evaluate(1.0, state),
+            Err(LaminarFilmError::InvalidTransitInput)
+        );
+    }
+    for max_growth_frequency_ratio in [0.0, -1.0, 1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            LaminarFilmTransitStudy {
+                max_growth_frequency_ratio,
+                ..study
+            }
+            .evaluate(1.0, state),
+            Err(LaminarFilmError::InvalidTransitInput)
+        );
+    }
+    let report = study.evaluate(1.0, state).unwrap();
+    assert!(
+        LaminarFilmTransitStudy {
+            max_growth_frequency_ratio: report.max_growth_frequency_ratio,
+            ..study
+        }
+        .evaluate(1.0, state)
+        .is_ok()
+    );
+    assert_eq!(
+        LaminarFilmTransitStudy {
+            max_growth_frequency_ratio: report.max_growth_frequency_ratio / 2.0,
+            ..study
+        }
+        .evaluate(1.0, state),
+        Err(LaminarFilmError::OutsideSpatialGrowthRegime { section: 0 })
+    );
+    assert!(matches!(
+        LaminarFilmTransitStudy {
+            angular_frequency_rad_s: 1e5,
+            ..study
+        }
+        .evaluate(1.0, state),
+        Err(LaminarFilmError::Mode {
+            section: 0,
+            source: FilmError::OutsideLongWaveRegime,
+            ..
+        })
     ));
 }

@@ -47,6 +47,66 @@ pub struct LaminarFilmStudy<'a> {
     pub limits: LongWaveLimits,
 }
 
+/// One locally parallel part of a finite lip path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaminarTransitSection {
+    /// The same physical base-flow geometry as the local stability study.
+    pub film: LaminarFilmSection,
+    /// Downstream distance over which this local base state applies, in metres.
+    pub length_m: f64,
+}
+
+/// Leading-order transport of one inlet disturbance along a slowly varying lip.
+///
+/// The steady path preserves the disturbance's angular frequency, not its
+/// wavenumber: locally k = omega/c with the Nusselt kinematic-wave speed
+/// c = d q/d h = 3 q/h. The weak-growth spatial exponent is s/c, so a section
+/// contributes s L/c to the log amplitude. `max_growth_frequency_ratio` bounds
+/// |s/omega|, in addition to the native long-wave restrictions. These are
+/// applicability budgets, not a spatial Orr--Sommerfeld error estimate.
+///
+/// The transported amplitude is relative film thickness (equivalently relative
+/// volume-flow perturbation). Since width*c*h = 3 Q, a gradual width change
+/// introduces no extra relative-amplitude factor at this order. Abrupt section
+/// jumps, reflections, turning points, nonlinear waves, and inlet/exit boundary
+/// layers are outside this local transport model.
+#[derive(Debug, Clone, Copy)]
+pub struct LaminarFilmTransitStudy<'a> {
+    /// Positive-length sections in path order, approximating gradual variation.
+    pub sections: &'a [LaminarTransitSection],
+    /// Positive inlet angular frequency, in rad/s, held fixed along the path.
+    pub angular_frequency_rad_s: f64,
+    /// Native local long-wave budgets, enforced at every section.
+    pub limits: LongWaveLimits,
+    /// Maximum |local temporal growth / angular frequency|, between zero and one.
+    pub max_growth_frequency_ratio: f64,
+}
+
+/// Finite-path linear amplification; no exponential is formed or clipped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LaminarTransitReport {
+    /// Natural log of outlet relative amplitude divided by inlet amplitude.
+    pub log_amplification: f64,
+    /// Largest accumulated log amplification, including the inlet value zero.
+    pub peak_log_amplification: f64,
+    /// Number of completed sections at the first peak; zero denotes the inlet.
+    pub peak_after_sections: usize,
+    /// Transit time of the surface disturbance, sum L/(3*mean speed), in seconds.
+    pub wave_transit_time_s: f64,
+    /// Residence time of the liquid at its mean velocity, in seconds.
+    pub liquid_residence_time_s: f64,
+    /// Smallest and largest local angular wavenumbers, in rad/m.
+    pub wavenumber_range_rad_m: [f64; 2],
+    /// Minimum and maximum mean-speed film Reynolds numbers.
+    pub reynolds_range: [f64; 2],
+    /// Largest local kh.
+    pub max_kh: f64,
+    /// Largest local Re*kh.
+    pub max_re_kh: f64,
+    /// Largest admitted |s/omega| along the path.
+    pub max_growth_frequency_ratio: f64,
+}
+
 /// Growth objective shared by sampled and continuous-band physical studies.
 /// Risk and racing consume this owner without reimplementing film physics.
 pub trait LaminarGrowthObjective {
@@ -118,6 +178,18 @@ pub enum LaminarFilmError {
     InvalidWidthScale,
     /// Total volume flow must be finite and strictly positive.
     InvalidVolumeFlow,
+    /// Frequency must be finite and positive, and the spatial-growth budget in (0,1).
+    InvalidTransitInput,
+    /// A section length is not finite and positive.
+    InvalidLength {
+        /// Path section.
+        section: usize,
+    },
+    /// Temporal-to-spatial conversion exceeds its declared weak-growth budget.
+    OutsideSpatialGrowthRegime {
+        /// Path section.
+        section: usize,
+    },
     /// A declared/scaled section width is not positive and representable.
     InvalidWidth {
         /// Path section.
@@ -155,6 +227,18 @@ impl core::fmt::Display for LaminarFilmError {
             Self::EmptyModes => write!(f, "a laminar film study needs a physical wavenumber"),
             Self::InvalidWidthScale => write!(f, "film width scale must be finite and positive"),
             Self::InvalidVolumeFlow => write!(f, "film volume flow must be finite and positive"),
+            Self::InvalidTransitInput => {
+                write!(f, "invalid film transit frequency or growth budget")
+            }
+            Self::InvalidLength { section } => {
+                write!(f, "film section {section} needs a finite positive length")
+            }
+            Self::OutsideSpatialGrowthRegime { section } => {
+                write!(
+                    f,
+                    "film section {section} exceeds the weak spatial-growth budget"
+                )
+            }
             Self::InvalidWidth { section } => {
                 write!(f, "film section {section} has an invalid scaled width")
             }
@@ -174,6 +258,109 @@ impl core::fmt::Display for LaminarFilmError {
 }
 
 impl std::error::Error for LaminarFilmError {}
+
+impl LaminarFilmTransitStudy<'_> {
+    /// Integrate signed amplification along the finite path in O(sections)
+    /// arithmetic and constant storage, retaining all native physical refusals.
+    pub fn evaluate(
+        &self,
+        width_scale: f64,
+        conditions: LaminarPourConditions,
+    ) -> Result<LaminarTransitReport, LaminarFilmError> {
+        if self.sections.is_empty() {
+            return Err(LaminarFilmError::EmptyPath);
+        }
+        if !width_scale.is_finite() || width_scale <= 0.0 {
+            return Err(LaminarFilmError::InvalidWidthScale);
+        }
+        if !conditions.volume_flow_m3_s.is_finite() || conditions.volume_flow_m3_s <= 0.0 {
+            return Err(LaminarFilmError::InvalidVolumeFlow);
+        }
+        let omega = self.angular_frequency_rad_s;
+        let budget = self.max_growth_frequency_ratio;
+        if !omega.is_finite()
+            || omega <= 0.0
+            || !budget.is_finite()
+            || budget <= 0.0
+            || budget >= 1.0
+        {
+            return Err(LaminarFilmError::InvalidTransitInput);
+        }
+        let mut report = LaminarTransitReport {
+            log_amplification: 0.0,
+            peak_log_amplification: 0.0,
+            peak_after_sections: 0,
+            wave_transit_time_s: 0.0,
+            liquid_residence_time_s: 0.0,
+            wavenumber_range_rad_m: [f64::INFINITY, 0.0],
+            reynolds_range: [f64::INFINITY, 0.0],
+            max_kh: 0.0,
+            max_re_kh: 0.0,
+            max_growth_frequency_ratio: 0.0,
+        };
+        for (section, segment) in self.sections.iter().enumerate() {
+            let length = segment.length_m;
+            if !length.is_finite() || length <= 0.0 {
+                return Err(LaminarFilmError::InvalidLength { section });
+            }
+            let film = section_film(segment.film, width_scale, conditions, section)?;
+            let failure = || LaminarFilmError::Film {
+                section,
+                source: FilmError::NonRepresentable,
+            };
+            let speed = 3.0 * film.mean_velocity_m_s();
+            let k = omega / speed;
+            let liquid_time = length / film.mean_velocity_m_s();
+            let wave_time = liquid_time / 3.0;
+            if [speed, k, liquid_time, wave_time]
+                .iter()
+                .any(|&x| !x.is_finite() || x <= 0.0)
+            {
+                return Err(failure());
+            }
+            let wave =
+                film.long_wave_mode(k, self.limits)
+                    .map_err(|source| LaminarFilmError::Mode {
+                        section,
+                        mode: 0,
+                        source,
+                    })?;
+            let ratio = wave.growth_per_s.abs() / omega;
+            if ratio > budget {
+                return Err(LaminarFilmError::OutsideSpatialGrowthRegime { section });
+            }
+            let increment = wave.growth_per_s * wave_time;
+            if !increment.is_finite() || (increment == 0.0 && wave.growth_per_s != 0.0) {
+                return Err(failure());
+            }
+            report.log_amplification += increment;
+            report.wave_transit_time_s += wave_time;
+            report.liquid_residence_time_s += liquid_time;
+            if [
+                report.log_amplification,
+                report.wave_transit_time_s,
+                report.liquid_residence_time_s,
+            ]
+            .iter()
+            .any(|x| !x.is_finite())
+            {
+                return Err(failure());
+            }
+            if report.log_amplification > report.peak_log_amplification {
+                report.peak_log_amplification = report.log_amplification;
+                report.peak_after_sections = section + 1;
+            }
+            report.wavenumber_range_rad_m[0] = report.wavenumber_range_rad_m[0].min(k);
+            report.wavenumber_range_rad_m[1] = report.wavenumber_range_rad_m[1].max(k);
+            report.reynolds_range[0] = report.reynolds_range[0].min(film.reynolds());
+            report.reynolds_range[1] = report.reynolds_range[1].max(film.reynolds());
+            report.max_kh = report.max_kh.max(wave.kh);
+            report.max_re_kh = report.max_re_kh.max(wave.re_kh);
+            report.max_growth_frequency_ratio = report.max_growth_frequency_ratio.max(ratio);
+        }
+        Ok(report)
+    }
+}
 
 impl LaminarFilmStudy<'_> {
     /// Evaluate a width candidate at one physical operating point.

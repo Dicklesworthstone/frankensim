@@ -23,6 +23,9 @@
 //! [`robustify_laminar`] and [`screen_laminar_lips`]. They share the native
 //! free-surface Nusselt/long-wave owner and refuse unsupported modes. The
 //! historical two-wall growth proxy remains an explicitly separate smoke path.
+//! [`LaminarFilmTransitStudy`] accumulates finite-path amplification at a fixed
+//! inlet frequency, with explicit weak-growth limits and distinct surface-wave
+//! transit and mean liquid residence times.
 //!
 //! [`FreeJetStudy`] adds the cylindrical capillary instability and the actual
 //! free-flight amplification for an explicit radius, flux and disturbance band.
@@ -40,11 +43,11 @@ pub mod stability;
 
 pub use jet::nonlinear::{NonlinearFreeJet, NonlinearFreeJetOutcome, NonlinearFreeJetReport};
 pub use jet::{FreeJetReport, FreeJetStudy};
-pub use pour::{PourError, PourOutcome, PourRig, render_pour};
 pub use pour::material::rheology::{MaterialRheologyPour, MaterialRheologyPourOutcome};
 pub use pour::material::{
     MaterialPour, MaterialPourError, MaterialPourOutcome, MaterialPourReport, MaterialPourSpec,
 };
+pub use pour::{PourError, PourOutcome, PourRig, render_pour};
 pub use race::{
     LipScreenReport, SCREEN_JITTER_WIDTH, SCREEN_SCALE, ScreenError, declared_span,
     race_base_losses, screen_laminar_lips, screen_lips, screening_losses,
@@ -55,7 +58,8 @@ pub use robust::{
 };
 pub use stability::laminar::{
     LaminarBandGrowthReport, LaminarFilmBandStudy, LaminarFilmError, LaminarFilmSection,
-    LaminarFilmStudy, LaminarGrowthObjective, LaminarGrowthReport, LaminarPourConditions,
+    LaminarFilmStudy, LaminarFilmTransitStudy, LaminarGrowthObjective, LaminarGrowthReport,
+    LaminarPourConditions, LaminarTransitReport, LaminarTransitSection,
 };
 pub use stability::{VesselProfile, growth_objective};
 
