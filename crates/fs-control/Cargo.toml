@@ -1,0 +1,20 @@
+[package]
+name = "fs-control"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Sampled synchronous current control with physical three-phase voltage limits, actual-flux decoupling, and retryable anti-windup state."
+
+[package.metadata.frankensim]
+layer = "L3"
+
+[dependencies]
+fs-math = { path = "../fs-math" }
+
+[dev-dependencies]
+fs-phs = { path = "../fs-phs" }
+
+[lints]
+workspace = true

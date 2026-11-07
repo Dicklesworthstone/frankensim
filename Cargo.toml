@@ -90,6 +90,7 @@ members = [
     "crates/fs-duct",
     "crates/fs-vfit",
     "crates/fs-phs",
+    "crates/fs-control",
     "crates/fs-modalid",
     "crates/fs-nlmodal",
     "crates/fs-dcontact",
