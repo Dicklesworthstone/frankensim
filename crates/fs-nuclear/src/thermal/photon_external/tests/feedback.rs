@@ -5,6 +5,8 @@ use crate::radiation::transport::material::temperature::{
     PhotonMassTemperatureKnot, TemperaturePhotonMassMaterial,
 };
 
+mod refinement;
+
 fn temperature_layers(growing: bool, maximum_k: f64) -> Vec<TemperaturePhotonSlabLayer> {
     layers(false)
         .into_iter()

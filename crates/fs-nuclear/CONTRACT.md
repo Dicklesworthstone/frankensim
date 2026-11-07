@@ -3070,3 +3070,32 @@ refinement remains necessary; accounting tolerance and spatial response
 agreement do not certify temporal error. This extension does not infer
 temperature-dependent density, phase mixtures, expansion, photon flight time,
 electron transport or measured material qualification.
+
+## Temporal convergence of external photon absorption
+
+`ExternalPhotonHeating::advance_refined` compares complete native trajectories
+from one accepted input using at least three physical time partitions. Each next
+maximum step halves the prior largest actual native interval, so existing CFL
+or event clipping cannot leave the refinement axis inactive. Native conduction,
+calorics, latent storage, source knots, photon transport, domains and accounting
+gates remain the original owners; the returned result is the finest original
+trajectory, never an extrapolated state.
+
+Componentwise agreement includes specific stored energy and caloric temperature
+of every native cell, each original receiver's accepted photon thermal credit,
+and incident/absorbed/escaped/credited photon accounts. Relative scales use
+changes from the input and this call's energy, not the arbitrary caloric datum
+or old cumulative totals. The finest difference must meet tolerance; successive
+comparisons must show decreasing resolved discrepancy, or both be
+roundoff-limited. Observed order is reported only for resolved differences with
+actual dyadic interval maxima. These are measured endpoint/history-energy
+comparisons, not rigorous global bounds, pathwise extrema, spatial/angular/
+spectral certification or measured-law qualification.
+
+Substeps, response rebuilds and original transport work are bounded across all
+candidate trajectories, including discarded work and nested spatial refinement.
+Temporary remaining-work caps preserve the original per-advance limits and are
+cleared on the returned source. Cancellation, physical-domain and numerical-
+account failures refuse the entire call immediately. No failed trial publishes
+thermal state, source accounts or cached response. Zero-duration calls preserve
+native event semantics without inventing a refinement ladder.

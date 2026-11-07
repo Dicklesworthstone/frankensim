@@ -29,6 +29,9 @@ mod feedback;
 pub use feedback::{PhotonFeedbackBudget, PhotonFeedbackWork, TemperaturePhotonSlabLayer};
 use feedback::{PhotonFeedbackCandidate, PhotonTemperatureFeedback};
 
+mod refinement;
+pub use refinement::{PhotonTimeConvergence, PhotonTimeRefinement};
+
 const MAX_SCHEDULE_VALUES: usize = 1_048_576;
 
 /// One knot of total group powers already entering the declared source geometry.
@@ -317,8 +320,9 @@ impl ExternalPhotonHeating {
             response.group_edges_j(),
             &mut checkpoint,
         )?;
-        let receivers =
-            bind_receivers(thermal, receivers, response.receiver_ids(), &mut checkpoint)?;
+        let receivers = bind_receivers(thermal, receivers, response.receiver_ids(), &mut || {
+            checkpoint().map_err(FissionThermalError::from)
+        })?;
         checkpoint()?;
         Ok(Self {
             time_s: thermal.time_s(),

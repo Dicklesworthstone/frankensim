@@ -43,7 +43,7 @@ mod photon_external;
 pub use photon_external::{
     ExternalPhotonHeating, ExternalPhotonHeatingAudit, PhotonFeedbackBudget, PhotonFeedbackWork,
     PhotonHeatingBudget, PhotonIllumination, PhotonPowerKnot, PhotonPowerSchedule,
-    TemperaturePhotonSlabLayer,
+    PhotonTimeConvergence, PhotonTimeRefinement, TemperaturePhotonSlabLayer,
 };
 mod irradiation;
 pub use irradiation::{
@@ -296,6 +296,14 @@ pub enum FissionThermalError {
         minimum_k: f64,
         /// Source-declared upper supported temperature [K].
         maximum_k: f64,
+    },
+    /// Whole-trajectory photon/thermal time refinement exhausted its timestep
+    /// floor or ladder without tolerance-qualified decreasing differences.
+    PhotonTimeConvergence {
+        /// Largest componentwise discrepancy divided by its time-error scale.
+        normalized_difference: f64,
+        /// Last evaluated maximum native timestep [s].
+        timestep_s: f64,
     },
     /// Independently advanced owners no longer represent the same physical time.
     ClockMismatch {

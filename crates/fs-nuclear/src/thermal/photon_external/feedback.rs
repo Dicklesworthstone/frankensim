@@ -69,6 +69,9 @@ pub(super) struct PhotonTemperatureFeedback {
     model: Arc<FeedbackModel>,
     temperatures_k: Arc<[(CellId, f64)]>,
     work: PhotonFeedbackWork,
+    // Additional resources of one whole-trajectory refinement candidate. The
+    // original model budget stays immutable, including on the returned owner.
+    trial_work_limit: Option<PhotonFeedbackWork>,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +164,7 @@ impl ExternalPhotonHeating {
                 preparations: 1,
                 transport_work: prepared.work,
             },
+            trial_work_limit: None,
         });
         checkpoint()?;
         Ok(heating)
@@ -273,6 +277,10 @@ impl FeedbackModel {
 }
 
 impl PhotonTemperatureFeedback {
+    pub(super) fn limit_trial_work(&mut self, limit: Option<PhotonFeedbackWork>) {
+        self.trial_work_limit = limit;
+    }
+
     pub(super) fn begin(&mut self) {
         self.work = PhotonFeedbackWork::default();
     }
@@ -304,13 +312,24 @@ impl PhotonTemperatureFeedback {
         if !changed {
             return Ok(None);
         }
-        if self.work.preparations >= self.model.budget.max_transport_preparations {
+        let maximum_preparations =
+            self.trial_work_limit
+                .map_or(self.model.budget.max_transport_preparations, |limit| {
+                    limit
+                        .preparations
+                        .min(self.model.budget.max_transport_preparations)
+                });
+        let maximum_work =
+            self.trial_work_limit
+                .map_or(self.model.budget.max_transport_work, |limit| {
+                    limit
+                        .transport_work
+                        .min(self.model.budget.max_transport_work)
+                });
+        if self.work.preparations >= maximum_preparations {
             return Err(RadiationError::Budget("photon feedback preparation count").into());
         }
-        let remaining = self
-            .model
-            .budget
-            .max_transport_work
+        let remaining = maximum_work
             .checked_sub(self.work.transport_work)
             .ok_or(RadiationError::Budget("photon feedback transport work"))?;
         // Keep an arbitrary original thermal callback error exact through the
@@ -338,7 +357,7 @@ impl PhotonTemperatureFeedback {
                 .work
                 .transport_work
                 .checked_add(prepared.work)
-                .filter(|&work| work <= self.model.budget.max_transport_work)
+                .filter(|&work| work <= maximum_work)
                 .ok_or(RadiationError::Budget("photon feedback transport work"))?;
             Ok(Some(PhotonFeedbackCandidate {
                 response: prepared.response,
