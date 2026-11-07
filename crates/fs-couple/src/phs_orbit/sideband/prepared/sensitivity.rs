@@ -143,7 +143,7 @@ impl FactoredPhsPortSidebands<'_, '_> {
     }
 }
 
-pub(super) fn admit_port_tolerances(ports: usize, tolerances: &[f64]) -> Result<()> {
+pub(in crate::phs_orbit) fn admit_port_tolerances(ports: usize, tolerances: &[f64]) -> Result<()> {
     if tolerances.len() != ports || tolerances.iter().any(|x| !x.is_finite() || *x <= 0.0) {
         return Err(PhsPortSidebandError::Invalid(
             "positive original-port tolerances required for every output",
@@ -191,12 +191,40 @@ pub(super) fn observe_pair(
     budget: &mut ObservationBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PhsPortSidebandCarrierDerivativeResponse> {
-    let original = source.problem.original();
+    observe_original_pair(
+        source.problem.original(),
+        source.orbit,
+        carrier,
+        pair,
+        controls,
+        derivative_tolerances,
+        base_residual,
+        tangent_sampling_defect,
+        budget,
+        cancelled,
+    )
+}
+
+// Loaded algebraic boundary variables are solved by the same generic owner,
+// then stripped before this sole original-storage physical observation path.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::phs_orbit) fn observe_original_pair(
+    original: &crate::phs_orbit::PhsOrbitProblem<'_>,
+    orbit: &fs_orbit::HbOrbit,
+    carrier: f64,
+    pair: SidebandCarrierDerivativeResponse,
+    controls: &PhsPortSidebandControls,
+    derivative_tolerances: &[f64],
+    base_residual: f64,
+    tangent_sampling_defect: f64,
+    budget: &mut ObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PhsPortSidebandCarrierDerivativeResponse> {
     let initial_actions = budget.actions;
     let retained = budget.retained_bytes;
     let (port_coefficients, observation_trace, hessian_actions) = observe_with_budget(
         original,
-        source.orbit,
+        orbit,
         &pair.response.coefficients,
         controls,
         &controls.envelope_tolerances,
@@ -210,7 +238,7 @@ pub(super) fn observe_pair(
         + trace_payload(&observation_trace, observation_trace.capacity());
     let (port_angular_derivative, derivative_observation_trace, _) = observe_with_budget(
         original,
-        source.orbit,
+        orbit,
         &pair.angular_derivative.coefficients,
         controls,
         derivative_tolerances,
@@ -227,7 +255,7 @@ pub(super) fn observe_pair(
     budget.retained_bytes = retained;
     Ok(PhsPortSidebandCarrierDerivativeResponse {
         response: PhsPortSidebandResponse {
-            omega_rad_s: source.orbit.omega,
+            omega_rad_s: orbit.omega,
             carrier_angular_frequency: carrier,
             state_harmonics: controls.sideband.harmonics,
             output_harmonics: controls.output_harmonics,

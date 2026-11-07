@@ -21,6 +21,8 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
+pub mod sideband;
+
 /// Bounds for the table, prepared physical maps and independent work audit.
 #[derive(Clone, Copy, Debug)]
 pub struct PortImpedanceLimits {
@@ -59,6 +61,15 @@ pub enum PortImpedanceError {
         /// Unaltered refusal from the shared physical impedance owner.
         source: HarmonicResponseError,
     },
+    /// Pointwise physical admission refused an explicitly supplied probe frequency.
+    FrequencyAdmission {
+        angular_frequency: f64,
+        source: HarmonicResponseError,
+    },
+    /// Original generic sideband or independently refined physical observation refusal.
+    Sideband(super::sideband::PhsPortSidebandError),
+    /// Retained auxiliary flow disagrees with the original physical observation.
+    FlowMismatch { derivative: bool, norms: Vec<f64> },
     /// Original source, tangent or shared HB/AFT/refinement refusal.
     Regime(PhsOrbitError),
 }
@@ -71,6 +82,20 @@ impl std::error::Error for PortImpedanceError {}
 impl From<PhsOrbitError> for PortImpedanceError {
     fn from(value: PhsOrbitError) -> Self {
         Self::Regime(value)
+    }
+}
+impl From<super::sideband::PhsPortSidebandError> for PortImpedanceError {
+    fn from(value: super::sideband::PhsPortSidebandError) -> Self {
+        if value == super::sideband::PhsPortSidebandError::Cancelled {
+            Self::Cancelled
+        } else {
+            Self::Sideband(value)
+        }
+    }
+}
+impl From<fs_orbit::sideband::SidebandError> for PortImpedanceError {
+    fn from(value: fs_orbit::sideband::SidebandError) -> Self {
+        super::sideband::PhsPortSidebandError::from(value).into()
     }
 }
 type Result<T> = core::result::Result<T, PortImpedanceError>;
@@ -227,31 +252,13 @@ impl PeriodicPortImpedance {
         let mut operators = Vec::with_capacity(self.matrices.len());
         for (h, impedance) in self.matrices.iter().enumerate() {
             poll(cx)?;
-            let mut operator = vec![C64::ZERO; d * d];
-            for i in 0..n {
-                operator[i * d + i] = C64::new(0.0, h as f64 * self.omega);
-            }
-            for a in 0..p {
-                operator[(n + a) * d + n + a] = C64::ONE;
-            }
-            for i in 0..n {
-                poll(cx)?;
-                for b in 0..p {
-                    let (mut re, mut im) = (Dd::ZERO, Dd::ZERO);
-                    for a in 0..p {
-                        let map = Dd::from_f64(g[i * p + a]);
-                        let z = impedance[a * p + b];
-                        re = re + map * Dd::from_f64(z.re);
-                        im = im - map * Dd::from_f64(z.im);
-                    }
-                    let value = C64::new(re.to_f64(), im.to_f64());
-                    if !finite(value) {
-                        return Err(invalid("unrepresentable original G*conjugate(Z)"));
-                    }
-                    operator[i * d + n + b] = value;
-                }
-            }
-            operators.push(operator);
+            operators.push(physical_operator(
+                system,
+                h as f64 * self.omega,
+                impedance,
+                false,
+                cx,
+            )?);
         }
         Ok(PreparedPhsImpedance {
             original: forced_problem(system, input)?,
@@ -266,6 +273,40 @@ impl PeriodicPortImpedance {
             zero_input: vec![0.0; p],
         })
     }
+}
+
+// One complete original physical map serves base harmonics, signed probe
+// sidebands and their declared frequency derivatives. Inputs use exp(-iwt).
+fn physical_operator(
+    system: &PortHamiltonian,
+    frequency: f64,
+    impedance: &[C64],
+    derivative: bool,
+    cx: &Cx<'_>,
+) -> Result<Vec<C64>> {
+    let (n, p) = (system.state_dim(), system.port_dim());
+    let d = n + p;
+    let (_, _, g) = system.structure();
+    let mut operator = vec![C64::ZERO; d * d];
+    for i in 0..n {
+        operator[i * d + i] = C64::new(0.0, if derivative { 1.0 } else { frequency });
+    }
+    if !derivative {
+        for a in 0..p {
+            operator[(n + a) * d + n + a] = C64::ONE;
+        }
+    }
+    for i in 0..n {
+        poll(cx)?;
+        for b in 0..p {
+            let mut sum = ComplexSum::default();
+            for a in 0..p {
+                sum.product(C64::from_re(g[i * p + a]), impedance[a * p + b].conj());
+            }
+            operator[i * d + n + b] = sum.value()?;
+        }
+    }
+    Ok(operator)
 }
 
 /// Numerical evidence remains that of the original shared HB implementation.

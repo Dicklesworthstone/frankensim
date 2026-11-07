@@ -26,6 +26,7 @@ use fs_orbit::{
 use fs_phs::PortHamiltonian;
 
 mod prepared;
+pub(super) use prepared::sensitivity::{admit_port_tolerances, observe_original_pair};
 pub use prepared::{
     AdaptivePhsPortResonanceResponse, AdaptivePhsPortSidebandCarrierDerivativeResponse,
     AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsBaseStabilityControls,
@@ -146,7 +147,7 @@ type Result<T> = core::result::Result<T, PhsPortSidebandError>;
 fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(PhsPortSidebandError::Cancelled)
     } else {
@@ -362,7 +363,11 @@ fn admit(
     admit_forcing(system, forcing, c)
 }
 
-fn admit_carrier(orbit: &HbOrbit, carrier: f64, c: &PhsPortSidebandControls) -> Result<()> {
+pub(super) fn admit_carrier(
+    orbit: &HbOrbit,
+    carrier: f64,
+    c: &PhsPortSidebandControls,
+) -> Result<()> {
     if !carrier.is_finite()
         || !((c.output_harmonics as f64).mul_add(orbit.omega, carrier)).is_finite()
         || !(-(c.output_harmonics as f64))
@@ -376,7 +381,7 @@ fn admit_carrier(orbit: &HbOrbit, carrier: f64, c: &PhsPortSidebandControls) -> 
     Ok(())
 }
 
-fn admit_forcing(
+pub(super) fn admit_forcing(
     system: &PortHamiltonian,
     forcing: &[C64],
     c: &PhsPortSidebandControls,
@@ -392,7 +397,7 @@ fn admit_forcing(
     Ok(())
 }
 
-fn admit_source(
+pub(super) fn admit_source(
     system: &PortHamiltonian,
     orbit: &HbOrbit,
     c: &PhsPortSidebandControls,
@@ -454,7 +459,7 @@ fn admit_storage(n: usize, m: usize, c: &PhsPortSidebandControls, samples: usize
     admit_storage_with_retained(n, m, c, samples, 0)
 }
 
-fn admit_storage_with_retained(
+pub(super) fn admit_storage_with_retained(
     n: usize,
     m: usize,
     c: &PhsPortSidebandControls,
@@ -478,7 +483,7 @@ fn admit_storage_with_retained(
     }
 }
 
-fn input_forcing(
+pub(super) fn input_forcing(
     system: &PortHamiltonian,
     forcing: &[C64],
     harmonics: usize,
@@ -514,11 +519,11 @@ fn observation_work(n: usize, m: usize, samples: usize) -> u128 {
     s * (64 * (2 * n + m) * samples.ilog2() as u128 + 64 * n * (2 * n + m) + 64 * (n + m))
 }
 
-fn input_work(n: usize, m: usize, harmonics: usize) -> u128 {
+pub(super) fn input_work(n: usize, m: usize, harmonics: usize) -> u128 {
     128 * n as u128 * m as u128 * (2 * harmonics + 1) as u128
 }
 
-fn minimum_observation_work(n: usize, m: usize, initial_samples: usize) -> u128 {
+pub(super) fn minimum_observation_work(n: usize, m: usize, initial_samples: usize) -> u128 {
     [1, 2, 4]
         .iter()
         .map(|factor| observation_work(n, m, initial_samples * factor))
@@ -528,10 +533,10 @@ fn minimum_observation_work(n: usize, m: usize, initial_samples: usize) -> u128 
 // One operation can observe several related envelopes. Retained results are
 // charged while the next grid is live; work and actions never restart between
 // the primal and its derivative. Single-response calls retain their old costs.
-struct ObservationBudget {
-    actions: usize,
-    work: u128,
-    retained_bytes: u128,
+pub(super) struct ObservationBudget {
+    pub(super) actions: usize,
+    pub(super) work: u128,
+    pub(super) retained_bytes: u128,
 }
 
 fn observe(
@@ -559,7 +564,7 @@ fn observe(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn observe_with_budget(
+pub(super) fn observe_with_budget(
     problem: &PhsOrbitProblem<'_>,
     orbit: &HbOrbit,
     response: &[C64],

@@ -3826,3 +3826,42 @@ original accumulator also passed 12 executable regressions, including the
 three new joint-force cases. Native adapter integration execution
 remains unverified because the unchanged full dependency build is blocked by
 the upstream asupersync memory limit.
+
+### Original-state sidebands of the loaded nonlinear orbit
+
+`phs_orbit::impedance::sideband` binds the same prepared physical source and
+its complete `[x; flow]` base to the existing fs-orbit periodic-linearization,
+signed-sideband LU and analytic carrier-sensitivity owners. A finite admitted
+table must cover every `abs(carrier+k*omega)` for every declared carrier before
+any storage evaluation. Exact shared base frequencies reuse the base load;
+additional supplied values there must agree. There is no interpolation, missing
+load default, constant damping substitution or source-band extension. The full
+native Hessian and all material-memory coordinates remain original.
+
+Nonnegative physical samples use `exp(-iwt)`. Positive-time values at `w>=0`
+are conjugated; at `w<0` the original sample at `abs(w)` is used. Authored
+frequency slopes follow the same convention with the additional derivative of
+`abs(w)`: at negative frequencies the original slope changes sign. Finite DC
+values must be real and a two-sided DC slope purely imaginary. Full mutual and
+nonreciprocal entries survive unchanged in port order. Samples establish only
+their admitted pointwise load; they supply no causal realization or Floquet
+stability evidence. The base orbit and base clock stay fixed in the derivative.
+
+One checked complete tangent is reused across declared carriers, and one
+factorization across physical drives and their exact derivatives. Original
+physical output is independently refined through `G^T Hxx(x_base) dx`, using
+the existing output observer and cumulative primal/derivative budgets. Returned
+auxiliary flow is checked against that observation in original physical units.
+Boundary effort derivatives retain both `Z*dy'` and `Z'*dy`. Returned physical
+state/output spectra feed the existing acoustic observers; their numerical
+residuals still assess all augmented equations. Source identity, base balance,
+coverage, derivative declarations, payload/work limits and cancellation can
+refuse without an unloaded fallback or a partial response.
+
+Five real-owner integration regression definitions cover analytic dispersive
+loads on both sides of DC, same-LU carrier derivatives, full mutual nonreciprocal
+loads under conjugate port-unit changes, native nonlinear Duffing/Maxwell
+sideband mixing, and coverage/base/cancellation refusal. Three tests of the
+actual shared signed-frequency production leaf passed against the real fs-math
+dependency. Full native adapter execution remains unverified while the unchanged
+dependency graph is blocked by the upstream asupersync memory limit.
