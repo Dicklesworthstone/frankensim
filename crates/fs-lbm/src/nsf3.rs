@@ -15,13 +15,15 @@
 //! energy is `E` minus the kinetic energy of the force-corrected velocity, so kinetic energy removed by
 //! viscosity or by a wall becomes internal energy; `theta = (gamma - 1) e` feeds back only through the force.
 //! Time coupling: the trapezoid rule on the flux divergences of the two time levels with a fixed number of
-//! predictor-corrector passes (`COUPLING_PASSES`). Optional uniform physical gravity
+//! predictor-corrector passes (`COUPLING_PASSES`) by default. Explicit
+//! [`NsfCouplingControl`] adds bounded endpoint convergence checks without
+//! changing the native corrector or its conservative flux ownership. Optional uniform physical gravity
 //! supplies rho*g to these same force epochs and rho*g.u to total energy with
 //! the same endpoint trapezoid. Its mechanical work is separate from heat;
 //! see [`NsfGrid3::with_gravity_si`]. No hydrostatic well-balancing is claimed.
 //!
 //! MATERIAL-OWNED GAS. NsfSpec also accepts ThermochemicalNsfGas. The same
-//! collision, pressure force, conservative face flux and fixed coupling passes
+//! collision, pressure force, conservative face flux and selected coupling passes
 //! then use source-owned NASA9 u(T), cv(T), gamma(T), viscosity and conductivity
 //! at each actual density-derived pressure. Temperature is recovered by the
 //! original bounded material energy solve, not by a constant-cv division.
@@ -111,6 +113,8 @@ mod characteristic_trial;
 mod gravity;
 mod body_force;
 mod hydrostatic;
+mod coupling;
+pub use coupling::{NsfCouplingComponent, NsfCouplingControl, NsfCouplingReport};
 /// Unpublished original NSF interval for reciprocal characteristic coupling.
 pub use characteristic_trial::NsfCharacteristicTrial;
 
@@ -120,7 +124,7 @@ pub mod dispersion;
 /// Reference lattice temperature `theta0 = r T0` in lattice units; equals the lattice `c_s^2`.
 pub const THETA0: f64 = 1.0 / 3.0;
 const Q: usize = 27;
-/// Predictor-corrector passes of the energy/force coupling per step.
+/// Default predictor-corrector passes of the energy/force coupling per step.
 pub const COUPLING_PASSES: usize = 3;
 /// Largest lattice viscosity `mu / rho0` of the transport tables for which the Bloch scan of this scheme was run and found
 /// stable at the sourced bulk ratio (|lambda| <= 1.0000 on eight oblique modes for 1e-5 <= nu <= 0.03; 1.146 at nu = 0.1). A
@@ -138,7 +142,9 @@ pub const MAX_QUALIFIED_MACH: f64 = 0.2;
 /// in the full Guo source frame, without density-dependent force-squared stress.
 /// 8: separate wall heat and stress work in the physical energy account; the
 /// native total-energy flux and fluid trajectories are unchanged.
-pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 8;
+/// 9: optional residual-controlled endpoint coupling; the default three-pass
+/// trajectory and its arithmetic are unchanged.
+pub const NSF3_BIT_SEMANTICS_VERSION: u32 = 9;
 
 /// Refusals of the NSF grid. A failed step leaves the published state unchanged.
 #[derive(Clone, Debug, PartialEq)]
@@ -211,6 +217,12 @@ pub enum NsfError {
     NonFinite {
         /// Offending cell index.
         cell: usize,
+    },
+    /// The explicit endpoint budget ended before all four residuals passed.
+    /// The report describes the unaccepted candidate; no state was published.
+    CouplingNotConverged {
+        control: NsfCouplingControl,
+        report: NsfCouplingReport,
     },
 }
 
@@ -649,6 +661,8 @@ pub type SourceFn = Box<dyn Fn([usize; 3], f64) -> (f64, [f64; 3], f64) + Send +
 pub struct NsfGrid3<L: Lattice3<27>> {
     spec: NsfSpec<NsfGasMedium, String>,
     law: NsfLaw,
+    coupling_control: Option<NsfCouplingControl>,
+    last_coupling_report: Option<NsfCouplingReport>,
     /// Local source response only; empty for the bit-preserving GasSpec route.
     material: Vec<Option<NsfCellMaterial>>,
     sgs: Option<NsfSgsConfig>,
@@ -862,6 +876,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let mut grid = NsfGrid3 {
             spec,
             law,
+            coupling_control: None,
+            last_coupling_report: None,
             material,
             n,
             solid: solid_v,
@@ -1660,8 +1676,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         } else {
             Vec::new()
         };
-        let mut result = None;
-        for _ in 0..COUPLING_PASSES {
+        let mut result: Option<coupling::Endpoint> = None;
+        let mut coupling_report = None;
+        let maximum_passes = self.coupling_control
+            .map_or(COUPLING_PASSES, |control| control.maximum_endpoint_evaluations);
+        for pass in 0..maximum_passes {
             body_force::checkpoint(cancelled)?;
             let (faces1, f1, u1, trial_material, trial_transport) = if self.coupled_sgs_contact() {
                 let material = self.material_field(&rho1, &th1)?;
@@ -1707,6 +1726,41 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     self.sgs_field(&rho1, &velocity, &th1, &material, faces.as_ref())?;
                 (faces, force, velocity, material, transport)
             };
+            if let Some(control) = self.coupling_control.filter(|_| pass >= COUPLING_PASSES) {
+                // th1 and the retained candidate describe the SAME endpoint.
+                // Probe its actual force frame, material, stored energy and
+                // physical velocity before changing any candidate history.
+                let candidate = result.as_ref().expect("three original correctors completed");
+                let report = self.probe_coupling_endpoint(
+                    control, pass + 1, candidate, &th1, &next, &rho1, &mom1,
+                    &f1, &u1, faces1.as_ref(), &trial_material,
+                    body_force.field(), &src_next,
+                    |i, divergence, velocity| {
+                        // The original energy update's arithmetic and sampled
+                        // supplies, evaluated at the actual candidate velocity.
+                        // No manufactured callback is sampled by a probe.
+                        let mut energy = self.e[i] - 0.5 * (divergence + self.div[i]);
+                        if have_sources {
+                            energy += 0.5 * (src_next[i].2 + self.src_now[i].2);
+                        }
+                        if let Some(gravity) = self.gravity {
+                            energy += gravity.work(rho0[i], u0[i], rho1[i], velocity);
+                        }
+                        if body_force.active() {
+                            energy += body_force.work(i, rho0[i], u0[i], rho1[i], velocity);
+                        }
+                        energy
+                    },
+                    cancelled,
+                )?;
+                if control.accepts(report) {
+                    coupling_report = Some(report);
+                    break;
+                }
+                if pass + 1 == maximum_passes {
+                    return Err(NsfError::CouplingNotConverged { control, report });
+                }
+            }
             let et_trial: Vec<f64> = (0..n)
                 .map(|i| {
                     let internal = trial_material
@@ -1777,10 +1831,17 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if self.open.is_some() {
                 u_guess.clone_from(&u1);
             }
-            result = Some((f1, u1, e1, div1, wall1, open1, faces1, material_new));
+            result = Some(coupling::Endpoint {
+                force: f1, velocity: u1, energy: e1, divergence: div1,
+                wall_flux: wall1, boundary_flux: open1, faces: faces1,
+                material: material_new,
+            });
         }
-        let (force1, u1, e1, div1, wall1, open1, faces1, mut material_new) =
-            result.expect("at least one coupling pass");
+        let coupling::Endpoint {
+            force: force1, velocity: u1, energy: e1, divergence: div1,
+            wall_flux: wall1, boundary_flux: open1, faces: faces1,
+            material: mut material_new,
+        } = result.expect("at least one coupling pass");
         for i in 0..n {
             if i % 64 == 0 {
                 body_force::checkpoint(cancelled)?;
@@ -2021,6 +2082,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         self.last_reservoir_mass_out_kg = reservoir_mass_out_kg;
         self.last_reservoir_flows = reservoir_flows;
         self.last_reservoir_exchanges = reservoir_exchanges;
+        self.last_coupling_report = coupling_report;
         self.steps += 1;
         self.cumulative.viscous_heating_j += ledger.viscous_heating_j;
         self.cumulative.unresolved_internal_exchange_j += ledger.unresolved_internal_exchange_j;
@@ -2202,6 +2264,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// An attached reservoir contributes its mutable accepted ghost state.
     /// Explicit incoming thermal controls contribute their location and values.
     /// Nonzero physical gravity and held body acceleration contribute their SI components.
+    /// Explicit endpoint convergence controls also contribute; the default adds no bits.
     #[must_use]
     pub fn state_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -2287,6 +2350,14 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             for body in &self.body_acceleration {
                 for value in body.acceleration_m_s2 { feed(value); }
             }
+        }
+        if let Some(control) = self.coupling_control {
+            feed(9.0);
+            feed(control.maximum_endpoint_evaluations as f64);
+            feed(control.force_relative_tolerance);
+            feed(control.velocity_relative_tolerance);
+            feed(control.caloric_relative_tolerance);
+            feed(control.energy_relative_tolerance);
         }
         h
     }

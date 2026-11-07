@@ -3874,6 +3874,52 @@ momentum are the lattice's. The temperature is `(E - KE) / (rho c_v)` and feeds 
 Coupling in time: trapezoid on the flux divergences of the two levels with `COUPLING_PASSES` fixed
 predictor-corrector passes. `NSF3_BIT_SEMANTICS_VERSION` moves with any change of order, coefficient or coupling.
 
+**Optional endpoint accuracy control (`NSF3_BIT_SEMANTICS_VERSION` 9).**
+`with_coupling_control` / `set_coupling_control(Some(NsfCouplingControl))`
+adds four explicit positive tolerances and `maximum_endpoint_evaluations`.
+`None` remains the exact original three-pass default, with no probes or changed
+corrector arithmetic. The minimum budget is four: three original correctors,
+then a probe of that same retained candidate. A failed probe permits another
+original corrector only while a further verification evaluation remains. The
+report exposes `corrector_passes`, `endpoint_evaluations` and `residual_probes`;
+a loose control reports 3/4/1, while total native energy-flux evaluations equal
+correctors plus probes. Mass collision/streaming still occurs exactly once.
+
+The probe evaluates the candidate's actual stored E, temperature, physical
+velocity and Guo force. It checks the thermodynamic/source force and its
+half-force velocity separately, re-evaluates source caloric closure, then
+recomputes the native local conservative energy equation with actual endpoint
+stress, material/SGS transport, boundary data and already sampled supplies.
+Gravity and changing body acceleration use their original work quadratures;
+manufactured callbacks are not resampled. The SGS/enthalpy-contact probe
+resolves its boundary at the retained physical velocity. No candidate force,
+energy, face or divergence history is overwritten by the probe.
+
+All four residuals are infinity norms. Force uses `rho*THETA0`, velocity uses
+`sqrt(THETA0)`, and both caloric and energy defects use
+`rho*THETA0/(gamma_ref-1)`. In physical units these correspond per unit mass
+to `R*T_ref/dx`, `sqrt(R*T_ref)` and `cv_ref*T_ref`. These fixed native reference
+scales remain defined at zero force/velocity and never grow with an arbitrary
+energy datum; unrepresentable scales refuse rather than use an epsilon floor.
+The energy norm is a local equation defect, distinct from the existing global
+telescoping conservation ledger. The accepted conservative candidate retains
+that ledger's exact flux ownership.
+
+`last_coupling_report` gives the four accepted residuals, actual work counts,
+worst component and largest residual/tolerance ratio. Budget exhaustion returns
+`NsfError::CouplingNotConverged` with the requested controls and final unaccepted
+report. Refusal/cancellation publishes no populations, drive, thermal/flux
+history, report, clock or ledger. Characteristic interval copies retain both
+controls and the latest accepted report. Material caloric inversion can impose
+a residual floor; the control does not relax it or widen any physical domain.
+This is an accuracy-control capability, not a finding that the fixed-pass
+method fails, a truncation-error estimator or new physical validation.
+Focused tests cover the published-state residual, untouched three-pass
+acceptance, work-budget/cancellation rollback, unchanged source sampling,
+reference-normalized zero flow, source caloric/formation invariance and
+SGS thermal-contact interval ownership. Their native execution remains pending
+the host dependency-build resource limit.
+
 **Stress of the energy flux (found by the Mach map; `NSF3_BIT_SEMANTICS_VERSION` 3).** Guo's scheme stores the populations half a
 force source behind the physical ones (`f = f_phys - S / 2`, and the source has second moment `F u + u F`), so the viscous
 stress that enters `sigma . u` is `-(1 - w_s / 2)` times the deviatoric part (and `-(1 - w_b / 2)` times the third of the trace)

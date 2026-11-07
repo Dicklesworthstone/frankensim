@@ -281,6 +281,38 @@ fn g3_large_formation_offsets_leave_the_native_thermal_flow_trajectory_unchanged
 }
 
 #[test]
+fn endpoint_accuracy_control_retains_source_caloric_laws_and_formation_invariance() {
+    use fs_lbm::nsf3::NsfCouplingControl;
+    let control = NsfCouplingControl {
+        maximum_endpoint_evaluations: 64,
+        force_relative_tolerance: 1e-8,
+        velocity_relative_tolerance: 1e-8,
+        caloric_relative_tolerance: 1e-8,
+        energy_relative_tolerance: 1e-8,
+    };
+    let mut flows = [
+        NsfGrid3::<D3q27>::new(spec(GasSpec::dry_air_ussa1976()), |_| false, varying).unwrap(),
+        NsfGrid3::<D3q27>::new(named_spec(named_gas()), |_| false, varying).unwrap(),
+        NsfGrid3::<D3q27>::new(spec(gas(0.0, 250000.0, 1.0)), |_| false, varying).unwrap(),
+        NsfGrid3::<D3q27>::new(spec(gas(1e12, 250000.0, 1.0)), |_| false, varying).unwrap(),
+    ];
+    for flow in &mut flows { flow.set_coupling_control(Some(control)).unwrap(); }
+    for _ in 0..4 {
+        for flow in &mut flows {
+            let ledger = flow.step().unwrap();
+            let report = flow.last_coupling_report().unwrap();
+            assert!(report.maximum_tolerance_ratio <= 1.0, "{report:?}");
+            assert!(ledger.residual_rel < 2e-12);
+        }
+        // The convergence norm cannot be relaxed by an arbitrary NASA9 energy
+        // datum. The source's unchanged sensible chart removes that datum,
+        // and the norm uses reference thermal energy rather than |stored E|.
+        assert_eq!(flows[2].state_hash(), flows[3].state_hash());
+        assert_eq!(flows[2].last_coupling_report(), flows[3].last_coupling_report());
+    }
+}
+
+#[test]
 fn g1_small_heat_survives_a_large_material_formation_reference() {
     for heat_per_mass in [-1.0e-3, 1.0e-3] {
         let mut reference_hash = None;

@@ -486,3 +486,33 @@ fn g1_unsteady_body_acceleration_reaches_the_coupled_enthalpy_sgs_predictor() {
     assert!(with.velocity.iter().zip(&without.velocity).any(|(a, b)|
         a.iter().zip(b).any(|(a, b)| (a - b).abs() > 1e-9)));
 }
+
+#[test]
+fn endpoint_control_and_actual_sgs_contact_report_survive_characteristic_trials() {
+    let control = crate::nsf3::NsfCouplingControl {
+        maximum_endpoint_evaluations: 64,
+        force_relative_tolerance: 1e-7,
+        velocity_relative_tolerance: 1e-7,
+        caloric_relative_tolerance: 1e-7,
+        energy_relative_tolerance: 1e-7,
+    };
+    let mut flow = contact_grid(0, false, 1, SgsModel::Wale { cw: 0.5 }, true, false)
+        .with_coupling_control(control).unwrap();
+    let before = flow.state_hash();
+    let drives = flow.boundary_drives().unwrap();
+    let budget = 2 * flow.n;
+    {
+        let trial = flow.preview_boundary_interval(drives, 2, budget, || false).unwrap();
+        assert_eq!(trial.grid().coupling_control(), Some(control));
+        let report = trial.grid().last_coupling_report().unwrap();
+        assert!(report.maximum_tolerance_ratio <= 1.0, "{report:?}");
+        assert!(trial.energy_ledger().residual_rel < 2e-12);
+    }
+    assert_eq!(flow.state_hash(), before);
+    assert_eq!(flow.steps(), 0);
+    assert_eq!(flow.last_coupling_report(), None);
+    flow.preview_boundary_interval(drives, 2, budget, || false).unwrap().accept();
+    assert_eq!(flow.steps(), 2);
+    assert_eq!(flow.coupling_control(), Some(control));
+    assert!(flow.last_coupling_report().unwrap().maximum_tolerance_ratio <= 1.0);
+}
