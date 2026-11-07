@@ -26,6 +26,12 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::special::{SphericalBesselMoments, spherical_bessel_moments};
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod multipole;
+pub use multipole::{
+    CompactMultipolePhasor, MULTIPOLE_IDEAL_BOUNDARY_POWER_SCOPE, MULTIPOLE_POWER_SCOPE,
+    PreparedMultipoleRadiatedPower,
+};
+
 /// Authority of the homogeneous, lossless compact-source power integral.
 pub const COMPACT_POWER_SCOPE: &str = "Cycle-average full-sphere power of prescribed compact 3D volume flow [m^3/s] and force on fluid [N]; homogeneous stationary lossless free space, with no finite-source validation, moving sources, scattering, absorption, mutual loading or measured-SPL qualification.";
 
