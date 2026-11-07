@@ -3689,6 +3689,30 @@ path. Synthetic regressions check independently softened exposed profiles,
 future exact-depth wear, independent body/interface temperatures, cooling,
 no-op identity, force/spring compliance and work, and late atomic refusals.
 
+`wear::sliding::hardness::SourceDepthSlidingWear::refresh_at_temperatures`
+continues the complete depth-hardness sliding owner under the same three native
+boundaries. After original H(T,z), elasticity and k(T) produce a provisional
+normal endpoint, every actual loaded successor pressure must admit the original
+pinned mu(T,p) claims. The shared sampler also serves ordinary sliding temperature
+continuation; equivalent loaded queries share one source, and detached cells make
+no unsupported zero-pressure query. A reference query establishes fixed-coordinate
+agreement only and cannot establish coverage for actual loaded cells.
+
+The complete genuine shear history is retained exactly, including signed travel
+and the temperature of its last actual shear step. The separately held interface
+temperature drives subsequent native friction solves. Refresh removes no material
+and creates no shear increment or frictional work. Both body inventories, exposed
+depths, native normal parameter work and each requested boundary receipt retain
+their existing owners. A late friction-support or cancellation refusal publishes
+none of the provisional thermal state.
+
+Independent affine mu(T,p), H(T,z) and k(T) regressions check refreshed traction,
+actual slip, separate work and subsequent exact-profile removal, retained histories
+under approach/force/spring control and late actual-pressure
+support refusal. This remains a prescribed thermal endpoint with a split sliding
+interval; temperature evolution and frictional heat allocation belong to the
+enclosing physical owners.
+
 ## Accepted bulk-history hardness on surface cells
 
 `plastic_source::history_field::SourceHistoryHardnessWear` binds compact accepted

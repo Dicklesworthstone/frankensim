@@ -76,6 +76,54 @@ pub(super) fn coefficients_at_pressure(
     friction.coefficients_at_query(&query)
 }
 
+pub(super) struct PressureFrictionSamples {
+    pub sources: Vec<ResolvedInterfaceStatePoint>,
+    pub cell_source_indices: Vec<Option<usize>>,
+}
+
+/// Check a thermal endpoint without advancing or rewriting genuine shear history.
+pub(super) fn sample_pressures(
+    friction: &SourceThermalCoulomb,
+    temperature_k: f64,
+    pressure: &[f64],
+    area: f64,
+    cx: &Cx<'_>,
+) -> Result<PressureFrictionSamples, SourcePlasticSlidingError> {
+    let mut sources = Vec::new();
+    let mut cell_source_indices = Vec::with_capacity(pressure.len());
+    let mut sample_indices = BTreeMap::new();
+    for (index, &p) in pressure.iter().enumerate() {
+        checkpoint(cx)?;
+        let error = |error| SourcePlasticSlidingError::Cell { index, error };
+        SourcePlasticSlidingWear::cell_normal_force(p, area).map_err(error)?;
+        let slot = if p == 0.0 {
+            None
+        } else {
+            let key = if friction.axes().nominal_pressure.is_some() {
+                p.to_bits()
+            } else {
+                0
+            };
+            let slot = if let Some(&slot) = sample_indices.get(&key) {
+                slot
+            } else {
+                let (sample, _) =
+                    coefficients_at_pressure(friction, temperature_k, p).map_err(error)?;
+                let slot = sources.len();
+                sources.push(sample);
+                sample_indices.insert(key, slot);
+                slot
+            };
+            Some(slot)
+        };
+        cell_source_indices.push(slot);
+    }
+    Ok(PressureFrictionSamples {
+        sources,
+        cell_source_indices,
+    })
+}
+
 pub(super) struct CellSlidingAdvance {
     pub tangential: Vec<DryTangentialState>,
     pub cells: Vec<PlasticCellSliding>,

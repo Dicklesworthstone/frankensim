@@ -17,7 +17,7 @@ use fs_material::state_point::{
     ScalarPropertyRequirement, resolve_interface_state_point,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Dims, QuantitySpec};
+use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 use fs_tribo::{InputAuthority, TangentialSolveConfig};
 
 pub fn bind(
@@ -29,20 +29,74 @@ pub fn bind(
     ResolvedInterfaceStatePoint,
     SourceThermalCoulomb,
 ) {
+    bind_values(
+        normal,
+        keys,
+        pressure_support,
+        [280.0, 320.0],
+        [0.6, 0.4].map(|value| PropertyValue::Scalar {
+            value,
+            dims: Dims::NONE,
+        }),
+        InterpolationPolicy::ConstantWithinValidity,
+    )
+}
+
+pub fn bind_thermal(
+    normal: &BoundNormalInterfaceState,
+    keys: &[PropertyKey; 2],
+    temperature_support: [f64; 2],
+    pressure_support: [f64; 2],
+) -> (
+    BoundNormalInterfaceState,
+    ResolvedInterfaceStatePoint,
+    SourceThermalCoulomb,
+) {
+    let [cold, hot] = temperature_support;
+    let [low, high] = pressure_support;
+    let values = [0.6, 0.4].map(|base| PropertyValue::Surface2D {
+        axes: ["T".into(), "p".into()],
+        axis_dims: [Temperature::DIMS, Pressure::DIMS],
+        samples: [[cold, low], [hot, low], [hot, high], [cold, high]]
+            .into_iter()
+            .map(|[t, p]| ([t, p], base - 0.005 * (t - cold) + 1.0e-8 * (p - 5.0e5)))
+            .collect(),
+        triangles: vec![[0, 1, 2], [0, 2, 3]],
+        dims: Dims::NONE,
+    });
+    bind_values(
+        normal,
+        keys,
+        pressure_support,
+        temperature_support,
+        values,
+        InterpolationPolicy::LinearInside,
+    )
+}
+
+fn bind_values(
+    normal: &BoundNormalInterfaceState,
+    keys: &[PropertyKey; 2],
+    pressure_support: [f64; 2],
+    temperature_support: [f64; 2],
+    values: [PropertyValue; 2],
+    interpolation: InterpolationPolicy,
+) -> (
+    BoundNormalInterfaceState,
+    ResolvedInterfaceStatePoint,
+    SourceThermalCoulomb,
+) {
     let old = normal.elastic().interface().card();
     let mut claims = old.claims().clone();
     let pressure_quantity =
         QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
-    for (name, value) in [("mu_static", 0.6), ("mu_kinetic", 0.4)] {
+    for (name, value) in ["mu_static", "mu_kinetic"].into_iter().zip(values) {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, Dims::NONE),
-                value: PropertyValue::Scalar {
-                    value,
-                    dims: Dims::NONE,
-                },
+                value,
                 validity: ValidityDomain::unconstrained()
-                    .with("T", 280.0, 320.0)
+                    .with("T", temperature_support[0], temperature_support[1])
                     .with_quantity(
                         "p",
                         pressure_quantity,
@@ -50,7 +104,7 @@ pub fn bind(
                         pressure_support[1],
                     ),
                 uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                interpolation: interpolation.clone(),
                 observations: vec![],
                 provenance: Provenance {
                     source: "synthetic original spatial-hardness sliding fixture".into(),

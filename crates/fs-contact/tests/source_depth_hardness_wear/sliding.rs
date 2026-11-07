@@ -3,6 +3,9 @@
 #[path = "../source_plastic_wear/sliding/field_fixture.rs"]
 mod field_fixture;
 
+#[path = "sliding/temperature.rs"]
+mod temperature;
+
 use super::*;
 use field_fixture::{controls, motion, normal_controls};
 use fs_contact::normal_patch::plastic_source::wear::sliding::PlasticSlidingInput;

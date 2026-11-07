@@ -7,6 +7,8 @@
 //! This is a beginning-pressure split with fixed axes and diagonal external
 //! body compliance, not cross-cell tangential elasticity or a heat model.
 
+pub mod temperature;
+
 use std::sync::Arc;
 
 use fs_blake3::{ContentHash, DomainHasher};

@@ -219,13 +219,6 @@ impl SourcePlasticSlidingWear {
         cells::query_at_temperature(&self.friction, temperature_k)
     }
 
-    fn coefficients_at_pressure(
-        &self,
-        pressure_pa: f64,
-    ) -> Result<(ResolvedInterfaceStatePoint, FrictionLaw), SourceThermalCoulombError> {
-        cells::coefficients_at_pressure(&self.friction, self.temperature_k, pressure_pa)
-    }
-
     fn cell_normal_force(pressure_pa: f64, area_m2: f64) -> Result<f64, SourceThermalCoulombError> {
         let normal_n = pressure_pa * area_m2;
         if !normal_n.is_finite() || (pressure_pa > 0.0 && normal_n == 0.0) {

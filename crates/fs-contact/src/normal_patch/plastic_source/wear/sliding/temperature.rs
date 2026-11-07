@@ -7,8 +7,6 @@
 //! histories. Thermal evolution and heat partition belong to the enclosing
 //! physical owner; normal parameter work is not silently converted into heat.
 
-use std::collections::BTreeMap;
-
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_matdb::MaterialCard;
@@ -21,7 +19,8 @@ use crate::normal_patch::{
 
 use super::{
     SourcePlasticArchardWear, SourcePlasticSlidingError, SourcePlasticSlidingWear,
-    SourcePlasticSlidingWearState, SourcePlasticWearError, SourcePlasticWearState, checkpoint,
+    SourcePlasticSlidingWearState, SourcePlasticWearError, SourcePlasticWearState, cells,
+    checkpoint,
 };
 
 /// Original normal response and friction applicability at prescribed temperatures.
@@ -220,40 +219,14 @@ impl SourcePlasticSlidingWear {
         let pressure = wear_state.contact_state().contact_state().pressure_pa();
         let grid = source.wear.contact().model().config().grid;
         let area = grid.cell_width_m * grid.cell_depth_m;
-        let mut friction_sources = Vec::new();
-        let mut cell_source_indices = Vec::with_capacity(pressure.len());
-        let mut sample_indices = BTreeMap::new();
-        for (index, &p) in pressure.iter().enumerate() {
-            checkpoint(cx)?;
-            let error = |error| SourcePlasticSlidingError::Cell { index, error };
-            Self::cell_normal_force(p, area).map_err(error)?;
-            let slot = if p == 0.0 {
-                None
-            } else {
-                let key = if source.friction.axes().nominal_pressure.is_some() {
-                    p.to_bits()
-                } else {
-                    0
-                };
-                let slot = if let Some(&slot) = sample_indices.get(&key) {
-                    slot
-                } else {
-                    let (sample, _) = source.coefficients_at_pressure(p).map_err(error)?;
-                    let slot = friction_sources.len();
-                    friction_sources.push(sample);
-                    sample_indices.insert(key, slot);
-                    slot
-                };
-                Some(slot)
-            };
-            cell_source_indices.push(slot);
-        }
+        let samples =
+            cells::sample_pressures(&source.friction, source.temperature_k, pressure, area, cx)?;
         let receipt = SourcePlasticSlidingThermalReceipt {
             original_source_identity: self.identity,
             source_identity: source.identity,
             normal,
-            friction_sources,
-            cell_source_indices,
+            friction_sources: samples.sources,
+            cell_source_indices: samples.cell_source_indices,
             boundary,
         };
         let candidate = SourcePlasticSlidingWearState {
