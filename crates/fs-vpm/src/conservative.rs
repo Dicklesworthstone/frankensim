@@ -19,6 +19,10 @@ use super::{
 
 mod viscous;
 pub use viscous::simulate_with_cx as simulate_viscous_with_cx;
+pub use viscous::time_dependent::{
+    TimeDependentVpmError, TimeDependentVpmRun,
+    simulate_with_cx as simulate_time_dependent_viscous_with_cx,
+};
 
 /// Adaptive positive-time inviscid/source and moving viscous particle windows.
 pub mod adaptive;

@@ -55,6 +55,8 @@ pub(crate) mod moving;
 pub use material::{MaterialPseDiffusion, MaterialPseError};
 /// Reusable spatial graphs for fixed-site compact-support diffusion.
 pub mod sparse;
+/// Explicitly interpolated, source-retaining homogeneous viscosity histories.
+pub mod viscosity_history;
 pub use sparse::{PeriodicBox2, PreparationBudget, PreparationReport, PreparedPse};
 
 mod wall;

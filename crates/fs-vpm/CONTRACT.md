@@ -689,6 +689,44 @@ evolving-core model or measured performance claim is added.
 `tests/conservative_viscous.rs` checks zero-viscosity equivalence, analytical
 dipole decay and travel, refinement, signed-cloud behavior and refusals.
 
+### Time-dependent homogeneous viscosity
+
+`diffusion::viscosity_history::PseViscosityHistory::piecewise_linear` admits an
+explicitly authored nonnegative `nu(t)` over finite ordered sample times. It
+keeps the original Gaussian or compact PSE spatial law and refuses extrapolation.
+The local analytical integrals do not subtract cumulative diffusion exposures;
+tiny late windows therefore retain their representable contribution. Half-stage
+means are formed without absolute midpoint times, including clocks where an
+absolute half time would round back to the interval start. A nonzero mean that
+cannot be represented refuses rather than silently becoming inviscid.
+
+`conservative::simulate_time_dependent_viscous_with_cx` cuts at every coefficient
+knot, the requested endpoint and the strict represented-time step ceiling. The
+original conservative Strang map receives each physical half's own integrated
+viscosity, retaining the physical order of changing diffusion and moving
+advection. The interpolant has exact coefficient quadrature; the mechanical
+composition remains second order and requires time and cloud/kernel refinement.
+It is not an adaptive temporal error estimate. Discontinuous coefficient jumps
+are explicit adjacent calls with separate histories. A decimal time ceiling can
+require a small final represented remainder; inability to advance time refuses.
+
+A constant history on the same step partition has the original particle bits,
+pair/work accounting and one-vector live storage. Planning is bounded by the
+existing step cap and cancellation polls, allocates no timeline, and precedes
+one original ambient admission. Every positive half adds `N*(N-1)` pair visits
+to the original advection sweep; work remains `N + steps + pair visits`.
+Original input validation, conservation/range/enstrophy behavior and whole-window
+atomic publication apply. `MaterialPseViscosityHistory` evaluates each original
+fluid source once, retains the owners and complete snapshots, and explicitly
+interpolates their `mu/rho`. All sample densities must match: this homogeneous
+incompressible path does not evolve density, areas or spatial viscosity-stress
+terms. Interpolation does not grant additional source or constitutive authority.
+`tests/time_dependent_viscosity.rs` covers original autonomous reduction, exact
+half-stage chronology and second-order dipole travel against an independent
+scalar integral, exact event segmentation, physical inventory, source retention,
+and atomic refusals. The dependency-free history module also tests difficult
+floating-point time and coefficient ranges directly.
+
 ### Adaptive coupled motion and diffusion
 
 `conservative::adaptive::simulate_viscous_with_cx` completes an explicit

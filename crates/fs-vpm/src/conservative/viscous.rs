@@ -4,6 +4,8 @@ use super::*;
 use crate::diffusion::moving::MovingDiffusion;
 use crate::diffusion::{self, PseDiffusion};
 
+pub(super) mod time_dependent;
+
 /// Evolve viscous planar vortices with `D(dt/2) A(dt) D(dt/2)`, using the
 /// original PSE diffusion and exact-pair conservative advection owners.
 ///
@@ -235,12 +237,49 @@ pub(super) fn weighted_step_with_observed(
         f64,
     ) -> Result<(), VpmError>,
 ) -> Result<(), VpmError> {
-    let diffuse = dt > 0.0 && law.kinematic_viscosity_m2_s() > 0.0;
-    if diffuse {
+    weighted_step_with_laws_observed(
+        state,
+        areas,
+        dt,
+        fraction,
+        core,
+        [law; 2],
+        backend,
+        completed_pairs,
+        meter,
+        accountant,
+        cx,
+        observer,
+    )
+}
+
+// The nonautonomous consumer supplies each physical half's integrated law.
+// The original constant-law entry delegates above without changing its map.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn weighted_step_with_laws_observed(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    dt: f64,
+    fraction: f64,
+    core: f64,
+    laws: [PseDiffusion; 2],
+    backend: &mut MovingDiffusion,
+    completed_pairs: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+    observer: &mut impl FnMut(
+        usize,
+        [VortexParticle; 2],
+        [VortexParticle; 2],
+        f64,
+    ) -> Result<(), VpmError>,
+) -> Result<(), VpmError> {
+    if dt > 0.0 && laws[0].kinematic_viscosity_m2_s() > 0.0 {
         backend.sweep_observed(
             state,
             areas,
-            law,
+            laws[0],
             dt,
             0.25 * fraction,
             completed_pairs,
@@ -264,11 +303,11 @@ pub(super) fn weighted_step_with_observed(
         )?;
         backend.invalidate();
     }
-    if diffuse {
+    if dt > 0.0 && laws[1].kinematic_viscosity_m2_s() > 0.0 {
         backend.sweep_observed(
             state,
             areas,
-            law,
+            laws[1],
             dt,
             0.25 * fraction,
             completed_pairs,
