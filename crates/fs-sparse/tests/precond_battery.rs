@@ -4,9 +4,108 @@
 //! and the cross-ISA golden hash.
 
 use fs_sparse::precond::{
-    Chebyshev, IdentityPrecond, Precond, SaAmg, ilu0, lambda_max_estimate, pcg,
+    Chebyshev, IdentityPrecond, IluControlledError, Precond, SaAmg, ilu0, ilu0_controlled,
+    lambda_max_estimate, pcg,
 };
 use fs_sparse::{Coo, Csr};
+
+#[test]
+fn controlled_ilu_solves_nonsymmetric_tridiagonal_diffusion_without_fill() {
+    let n = 73;
+    let mut coo = Coo::new(n, n);
+    // Energy coordinates with unequal heat capacities make reciprocal
+    // diffusion nonsymmetric. Tridiagonal LU has no omitted fill, so this
+    // independently manufactured solution must be recovered directly.
+    let capacities: Vec<_> = (0..n).map(|i| 1.0 + (i % 7) as f64).collect();
+    for row in 0..n {
+        let degree = usize::from(row > 0) + usize::from(row + 1 < n);
+        coo.push(row, row, 1.0 + 9.0 * degree as f64 / capacities[row]);
+        if row > 0 {
+            coo.push(row, row - 1, -9.0 / capacities[row - 1]);
+        }
+        if row + 1 < n {
+            coo.push(row, row + 1, -9.0 / capacities[row + 1]);
+        }
+    }
+    let matrix = coo.assemble();
+    let expected: Vec<_> = (0..n).map(|i| (i % 11) as f64 - 5.0).collect();
+    let mut b = vec![0.0; n];
+    matrix.spmv(&expected, &mut b);
+    let mut polls = 0;
+    let factor = ilu0_controlled(&matrix, || {
+        polls += 1;
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    assert!(polls > 1);
+    let mut x = vec![0.0; n];
+    factor
+        .apply_controlled(&b, &mut x, || Ok::<(), ()>(()))
+        .unwrap();
+    for (&actual, &target) in x.iter().zip(&expected) {
+        assert!((actual - target).abs() < 5e-14, "{actual} vs {target}");
+    }
+    let mut existing = vec![0.0; n];
+    ilu0(&matrix).unwrap().apply(&b, &mut existing);
+    assert_eq!(x, existing);
+}
+
+#[test]
+fn controlled_ilu_cancels_preparation_and_inverse_action_inside_long_rows() {
+    let mut coo = Coo::new(700, 700);
+    for row in 0..700 {
+        coo.push(row, row, 2.0);
+        if row != 0 {
+            coo.push(0, row, -0.001);
+        }
+    }
+    let matrix = coo.assemble();
+    let mut polls = 0;
+    let result = ilu0_controlled(&matrix, || {
+        polls += 1;
+        if polls == 3 {
+            Err("cancel setup")
+        } else {
+            Ok(())
+        }
+    });
+    assert!(matches!(
+        result,
+        Err(IluControlledError::Checkpoint("cancel setup"))
+    ));
+    let factor = ilu0(&matrix).unwrap();
+    let b = vec![1.0; 700];
+    let mut scratch = vec![0.0; 700];
+    let mut polls = 0;
+    let result = factor.apply_controlled(&b, &mut scratch, || {
+        polls += 1;
+        if polls == 17 {
+            Err("cancel solve")
+        } else {
+            Ok(())
+        }
+    });
+    assert_eq!(result, Err(IluControlledError::Checkpoint("cancel solve")));
+    assert_eq!(b, vec![1.0; 700]);
+}
+
+#[test]
+fn controlled_ilu_refuses_nonfinite_coefficients_pivots_and_inverse_actions() {
+    for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0] {
+        let matrix = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![invalid]);
+        assert!(matches!(
+            ilu0_controlled(&matrix, || Ok::<(), ()>(())),
+            Err(IluControlledError::Breakdown(_))
+        ));
+    }
+    let tiny = Csr::from_parts(1, 1, vec![0, 1], vec![0], vec![1e-300]);
+    let factor = ilu0(&tiny).unwrap();
+    let mut out = [0.0];
+    assert!(matches!(
+        factor.apply_controlled(&[1e300], &mut out, || Ok::<(), ()>(())),
+        Err(IluControlledError::Breakdown(_))
+    ));
+}
 
 /// 2D 5-point Laplacian on a g×g grid.
 fn laplacian_2d(g: usize) -> Csr {

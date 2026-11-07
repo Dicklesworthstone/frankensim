@@ -54,6 +54,16 @@ results are machine-specific, not a universal throughput guarantee.
 - `precond::{Precond, IdentityPrecond, Chebyshev, Ilu0/ilu0/IluBreakdown,
   SaAmg, pcg/PcgReport, lambda_max_estimate, spectral_radius_upper_bound}`
   — the solver-stack toolkit.
+  `ilu0_controlled` and `Ilu0::apply_controlled` preserve caller checkpoint
+  errors and poll within long sparse rows, at most 256 scalar operations apart.
+  Factorization stores one flat copy of the original CSR pattern and values,
+  without per-elimination row clones; inverse application allocates nothing.
+  Missing/zero pivots, nonfinite source coefficients and nonfinite arithmetic
+  refuse without shifting the physical matrix. An incomplete-pivot breakdown
+  does not establish singularity of the original operator. Failed inverse
+  output is scratch and must be discarded or replaced by caller policy.
+  The focused preconditioner battery covers nonsymmetric unequal-capacity
+  diffusion, original-versus-controlled equality and bounded cancellation.
   `Precond::apply(r, z)` is the operator interface. Chebyshev: degree-k
   three-term recurrence on the band [λmax/α, λmax], with the upper endpoint
   at least the outward-rounded maximum absolute row sum. Deterministic power
