@@ -221,6 +221,37 @@ fn original_absorbing_axes_feed_coupled_fields_and_physical_heating() {
         assert!(boundary.absorbed_power_density_w_m3 > 0.0);
         assert!(depth.absorbed_power_density_w_m3 > 0.0);
         assert!(depth.field.poynting_w_m2[2] < boundary.field.poynting_w_m2[2]);
+        let area = 2e-8;
+        let end = wavelength * 1e-9;
+        let absorbed = prepared.slab_absorption(area, 0.0, end).unwrap();
+        assert!(core::ptr::eq(absorbed.prepared_field(), &prepared));
+        assert!(core::ptr::eq(absorbed.source(), &interface));
+        assert_eq!(
+            absorbed.source().crystal_response().material().identity(),
+            law.material().identity()
+        );
+        assert_eq!(absorbed.area_m2(), area);
+        assert_eq!(absorbed.start_depth_m(), 0.0);
+        assert_eq!(absorbed.end_depth_m(), end);
+        assert_eq!(absorbed.volume_m3(), area * end);
+        near(
+            absorbed.absorbed_power_w(),
+            area * (boundary.field.poynting_w_m2[2] - depth.field.poynting_w_m2[2]),
+            3e-12 * absorbed.absorbed_power_w(),
+        );
+        for (area, start, end) in [
+            (0.0, 0.0, end),
+            (-1.0, 0.0, end),
+            (f64::INFINITY, 0.0, end),
+            (area, -end, end),
+            (area, end, end),
+            (area, end, 0.0),
+            (area, 0.0, f64::INFINITY),
+            (area, f64::NAN, end),
+            (f64::MAX, 0.0, f64::MAX),
+        ] {
+            assert!(prepared.slab_absorption(area, start, end).is_err());
+        }
         let by_index = interface
             .prepare_absorbing_field_at_tangential_index(omega, 0.6, electric)
             .unwrap();

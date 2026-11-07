@@ -20,6 +20,9 @@ const C0: f64 = 299_792_458.0;
 type Vector = [C64; 3];
 type Result<T> = core::result::Result<T, &'static str>;
 
+#[path = "kernel/absorption.rs"]
+mod absorption;
+
 /// One actual transmitted mode. An absorbing mode is an inhomogeneous wave;
 /// its complex normal wavevector is not classified as a lossless bulk ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,6 +65,10 @@ pub struct AbsorbingCrystalField {
 }
 
 impl AbsorbingCrystalResponse {
+    pub(super) fn slab_absorbed_power_w(&self, area: f64, start: f64, end: f64) -> Result<f64> {
+        absorption::integrated_heat(self, area, start, end)
+    }
+
     pub const fn omega_rad_s(&self) -> f64 {
         self.omega
     }

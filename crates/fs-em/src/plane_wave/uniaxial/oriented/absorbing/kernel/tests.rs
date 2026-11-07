@@ -351,3 +351,157 @@ fn passive_source_and_physical_half_space_admission_are_explicit() {
     invalid.loss_f_m[0] = 0.0;
     assert!(solve(invalid).is_err());
 }
+
+#[test]
+fn analytic_crystal_volume_heat_matches_independent_depth_quadrature_and_flux() {
+    let response = solve(input(
+        [0.2, 0.7, -0.4],
+        [C64::new(1.5, -0.09), C64::new(1.9, -0.23)],
+        0.65,
+    ))
+    .unwrap();
+    let area = 2.5e-8;
+    let at = |z| {
+        response
+            .field(OrientedCrystalFieldSide::Transmitted, [0.0, 0.0, z])
+            .unwrap()
+    };
+    for [start, end] in [[0.0, 0.01], [0.2, 1.7], [0.1, 20.0]].map(|v| v.map(|z| z * LAMBDA)) {
+        let actual = response.slab_absorbed_power_w(area, start, end).unwrap();
+        let samples = 4096;
+        let dz = (end - start) / samples as f64;
+        let quadrature = (0..=samples)
+            .map(|j| {
+                let weight = if j == 0 || j == samples {
+                    1.0
+                } else if j % 2 == 0 {
+                    2.0
+                } else {
+                    4.0
+                };
+                weight * at(start + j as f64 * dz).absorbed_power_density_w_m3
+            })
+            .sum::<f64>()
+            * area
+            * dz
+            / 3.0;
+        close(actual, quadrature, 3e-10 * actual);
+        let flux_loss = area * (at(start).field.poynting_w_m2[2] - at(end).field.poynting_w_m2[2]);
+        close(actual, flux_loss, 3e-12 * actual);
+    }
+}
+
+#[test]
+fn integrated_heat_retains_ordinary_extraordinary_interference_and_interval_additivity() {
+    let mut data = input(
+        [1.0, 2.0, -0.6],
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        0.8,
+    );
+    data.electric = [C64::ZERO, C64::ONE];
+    let response = solve(data).unwrap();
+    let [start, split, end] = [0.1, 0.6, 2.0].map(|z| z * LAMBDA);
+    let area = 3e-9;
+    let total = response.slab_absorbed_power_w(area, start, end).unwrap();
+    let partial = response.slab_absorbed_power_w(area, start, split).unwrap()
+        + response.slab_absorbed_power_w(area, split, end).unwrap();
+    close(total, partial, 3e-14 * total);
+    close(
+        response
+            .slab_absorbed_power_w(area * 7.0, start, end)
+            .unwrap(),
+        total * 7.0,
+        3e-14 * total,
+    );
+    let modal_sum = (0..2)
+        .map(|m| {
+            let mut single = response;
+            single.transmitted[m].electric_v_m = [C64::ZERO; 3];
+            single.slab_absorbed_power_w(area, start, end).unwrap()
+        })
+        .sum::<f64>();
+    assert!((total - modal_sum).abs() > 1e-3 * total);
+}
+
+#[test]
+fn isotropic_slab_heat_matches_fresnel_beer_lambert_for_both_polarizations() {
+    for extinction in [0.0, 1e-20, 0.2, 3.0] {
+        let n = C64::new(1.6, -extinction);
+        let response = solve(input([1.0, 2.0, 3.0], [n; 2], 0.0)).unwrap();
+        let area = 4e-7;
+        let start = 0.3 * LAMBDA;
+        let width = 1.2 * LAMBDA;
+        let transmitted = C64::from_re(2.0) / (C64::ONE + n);
+        let entering = response
+            .incident_electric_v_m
+            .iter()
+            .map(|&electric| (electric * transmitted).norm_sq())
+            .sum::<f64>()
+            * n.re
+            / (2.0 * MU * C0);
+        let alpha = response.omega_rad_s() / C0 * extinction;
+        let expected =
+            area * entering * (-2.0 * alpha * start).exp() * -(-2.0 * alpha * width).exp_m1();
+        let actual = response
+            .slab_absorbed_power_w(area, start, start + width)
+            .unwrap();
+        close(actual, expected, 8e-14 * expected);
+    }
+}
+
+#[test]
+fn weak_thin_opaque_and_deep_crystal_volumes_keep_physical_heat_limits() {
+    let data = input(
+        [0.2, 0.7, -0.4],
+        [C64::new(1.5, -0.09), C64::new(1.9, -0.23)],
+        0.65,
+    );
+    let response = solve(data).unwrap();
+    let area = 7e-8;
+    let entrance = response
+        .field(OrientedCrystalFieldSide::Transmitted, [0.0; 3])
+        .unwrap();
+    let thin = LAMBDA * 1e-14;
+    close(
+        response.slab_absorbed_power_w(area, 0.0, thin).unwrap(),
+        entrance.absorbed_power_density_w_m3 * area * thin,
+        3e-13 * entrance.absorbed_power_density_w_m3 * area * thin,
+    );
+    let opaque = LAMBDA * 1e6;
+    close(
+        response.slab_absorbed_power_w(area, 0.0, opaque).unwrap(),
+        entrance.field.poynting_w_m2[2] * area,
+        3e-14 * entrance.field.poynting_w_m2[2] * area,
+    );
+    assert_eq!(
+        response
+            .slab_absorbed_power_w(area, opaque, opaque * 2.0)
+            .unwrap(),
+        0.0
+    );
+    let weak = solve(input([1.0, 0.0, 0.0], [C64::new(1.5, -1e-20); 2], 0.0)).unwrap();
+    assert!(weak.slab_absorbed_power_w(area, 0.0, LAMBDA).unwrap() > 0.0);
+    let zero_loss = solve(input(
+        [0.2, 0.7, -0.4],
+        data.indices.map(|n| C64::from_re(n.re)),
+        0.65,
+    ))
+    .unwrap();
+    assert_eq!(
+        zero_loss.slab_absorbed_power_w(area, 0.0, opaque).unwrap(),
+        0.0
+    );
+    let mut evanescent = input(
+        [1.0, 0.0, 0.0],
+        [C64::from_re(0.6), C64::new(1.9, -0.2)],
+        0.8,
+    );
+    evanescent.electric = [C64::ZERO, C64::ONE];
+    assert_eq!(
+        solve(evanescent)
+            .unwrap()
+            .slab_absorbed_power_w(area, 0.0, opaque)
+            .unwrap(),
+        0.0
+    );
+}

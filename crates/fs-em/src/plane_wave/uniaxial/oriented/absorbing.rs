@@ -28,6 +28,53 @@ pub struct PreparedAbsorbingCrystalField<'s, 'm> {
     boundary: AbsorbingCrystalResponse,
 }
 
+/// Cycle-mean dielectric heat in a finite prism of the original crystal
+/// half-space. The face area is measured in the interface plane and depths
+/// are the original Cartesian z coordinates. This control volume introduces
+/// no exit interface or reflected wave. Its material and illumination remain
+/// frozen; a thermal consumer must declare the time over which it uses this
+/// power and bind the volume to the same original material snapshot.
+pub struct AbsorbingCrystalSlabAbsorption<'w, 's, 'm> {
+    prepared_field: &'w PreparedAbsorbingCrystalField<'s, 'm>,
+    area_m2: f64,
+    start_depth_m: f64,
+    end_depth_m: f64,
+    volume_m3: f64,
+    absorbed_power_w: f64,
+}
+
+impl<'w, 's, 'm> AbsorbingCrystalSlabAbsorption<'w, 's, 'm> {
+    pub const fn prepared_field(&self) -> &'w PreparedAbsorbingCrystalField<'s, 'm> {
+        self.prepared_field
+    }
+
+    pub const fn source(&self) -> &'s OrientedUniaxialInterface<'m> {
+        self.prepared_field.source()
+    }
+
+    pub const fn area_m2(&self) -> f64 {
+        self.area_m2
+    }
+
+    pub const fn start_depth_m(&self) -> f64 {
+        self.start_depth_m
+    }
+
+    pub const fn end_depth_m(&self) -> f64 {
+        self.end_depth_m
+    }
+
+    pub const fn volume_m3(&self) -> f64 {
+        self.volume_m3
+    }
+
+    /// Integral of omega/2 E*·[-Im(epsilon)]·E over the declared prism [W].
+    /// Ordinary and extraordinary fields interfere before heat is integrated.
+    pub const fn absorbed_power_w(&self) -> f64 {
+        self.absorbed_power_w
+    }
+}
+
 impl<'s, 'm> PreparedAbsorbingCrystalField<'s, 'm> {
     pub const fn source(&self) -> &'s OrientedUniaxialInterface<'m> {
         self.source
@@ -39,6 +86,43 @@ impl<'s, 'm> PreparedAbsorbingCrystalField<'s, 'm> {
 
     pub const fn boundary_response(&self) -> &AbsorbingCrystalResponse {
         &self.boundary
+    }
+
+    /// Analytically integrate the coherent transmitted dielectric heat over
+    /// a finite positive area and `0 <= start_depth_m < end_depth_m`.
+    /// The two modal self terms and their interference use the original loss
+    /// tensor. Fixed, allocation-free exponential integrals retain weak loss,
+    /// thin intervals and opaque tails without subtracting nearly equal port
+    /// powers, depth quadrature, material queries or another boundary solve.
+    pub fn slab_absorption(
+        &self,
+        area_m2: f64,
+        start_depth_m: f64,
+        end_depth_m: f64,
+    ) -> Result<AbsorbingCrystalSlabAbsorption<'_, 's, 'm>> {
+        positive(area_m2)?;
+        if !start_depth_m.is_finite()
+            || !end_depth_m.is_finite()
+            || start_depth_m < 0.0
+            || end_depth_m <= start_depth_m
+        {
+            return Err(ReflectionError::Invalid(
+                "crystal absorption needs a finite positive depth interval",
+            ));
+        }
+        let volume_m3 = positive(area_m2 * (end_depth_m - start_depth_m))?;
+        let absorbed_power_w = self
+            .boundary
+            .slab_absorbed_power_w(area_m2, start_depth_m, end_depth_m)
+            .map_err(ReflectionError::Invalid)?;
+        Ok(AbsorbingCrystalSlabAbsorption {
+            prepared_field: self,
+            area_m2,
+            start_depth_m,
+            end_depth_m,
+            volume_m3,
+            absorbed_power_w,
+        })
     }
 
     /// Physical Cartesian point [m], with the interface at z=0. The original

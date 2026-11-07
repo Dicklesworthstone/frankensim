@@ -6846,6 +6846,23 @@ bulk absorption. Preparation and each point query have fixed two-mode work and
 allocate nothing; point queries neither resolve material sources nor repeat
 boundary solves.
 
+`PreparedAbsorbingCrystalField::slab_absorption` integrates this same original
+dielectric work over an authored positive face area and finite interval
+`0 <= start_depth_m < end_depth_m`. The returned
+`AbsorbingCrystalSlabAbsorption` borrows the prepared illumination and its
+original interface/material, retaining the area, both depths, physical volume
+and cycle-mean absorbed watts. It introduces no exit interface. The original
+loss tensor weights coherent ordinary/extraordinary cross terms as well as
+modal self terms; a sum of separately attenuated modal powers is insufficient.
+Fixed analytic exponential integrals use relative modal phase and compensated
+products. Thin intervals contract field Taylor coefficients before squaring
+so a coherent node retains its cubic heat, and weak loss never depends on
+subtracting nearly equal Poynting powers. Exactly zero original loss and a
+pure evanescent lossless eigenaxis deposit zero heat. No allocation, material
+query, boundary solve or depth quadrature occurs in a slab query. A receiving
+thermal owner must identify this physical material/volume and supply its own
+hold interval; the prepared monochromatic source remains frozen.
+
 This is a monochromatic passive reciprocal uniaxial half-space with a lossless
 isotropic incident port. It does not advance temperature, infer magnetic loss,
 support an absorbing incident port or finite lossy stack, introduce a biaxial
