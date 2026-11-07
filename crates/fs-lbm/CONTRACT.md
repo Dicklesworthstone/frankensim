@@ -1,5 +1,36 @@
 # CONTRACT: fs-lbm
 
+## Original-law nonlinear full-tensor conduction
+
+`solve_nonlinear_tensor_conduction` accepts one immutable
+`TensorConductivityLaw` per voxel. `RotatedSolidConductivity` binds the
+original native directional tables to explicitly declared principal axes.
+Every cell-to-face heat uses the original conductivity integral across the
+whole temperature interval; Newton derivatives use original endpoint tensors,
+without a duplicate conductivity derivative. Fixed common-factor tensors
+recover the scalar Kirchhoff transformation of native HMM; grid-diagonal
+laws recover each integrated directional half-cell. Arbitrary full K(T) is a
+nonsymmetric columnwise primitive extension with smooth local flux consistency,
+not a general discrete entropy, maximum-principle or unconditional-convergence
+guarantee.
+
+The native face/contact topology and physical heat ledger are shared with
+frozen tensor conduction. Exact local Newton elimination retains only a small
+cell-recovery record; the sparse system contains face increments. Original
+cell/interface/contact/boundary heat must pass at the unchanged endpoint.
+Bounded line search checks positive Kelvin and complete original source support;
+one cumulative Krylov budget and explicit Newton/backtracking budgets bound
+the endpoint. No trial advances material history or replaces original source
+support. The last linear correction residual is reported separately from
+original physical heat acceptance.
+
+Evidence: 25 actual-native selected-source Rust tests passed (13 new
+constitutive/integral/tangent/condensation checks and 12 existing conductance/HMM
+checks). Four public pipeline regressions cover transformed-affine full-tensor
+heat, independent rotated laws with finite contacts, constant-law equivalence,
+and budget/support/cancellation refusal. Full pipeline compilation and
+execution remain unverified in the current dependency/capacity-limited environment.
+
 ## Physical SDIRK2 on the full-tensor conduction operator
 
 `advance_tensor_conduction_sdirk2` provides two-stage, second-order, L-stable

@@ -1,4 +1,4 @@
-//! Frozen full-tensor conduction on the native rectilinear voxel grid.
+//! Full-tensor conduction on the native rectilinear voxel grid.
 //!
 //! The hybrid finite-volume energy retains cell and face temperatures. Cell
 //! unknowns are eliminated locally, leaving one shared trace at perfect
@@ -23,6 +23,11 @@ use super::{
 mod local;
 mod transient;
 mod sdirk;
+mod nonlinear;
+pub use nonlinear::{
+    RotatedSolidConductivity, TensorConductivityLaw, TensorNonlinearConfig,
+    TensorNonlinearSolution, solve_nonlinear_tensor_conduction,
+};
 pub use transient::{TensorConductionStep, advance_tensor_conduction};
 pub use sdirk::{
     TENSOR_SDIRK2_GAMMA, TensorConductionSdirk2Step, advance_tensor_conduction_sdirk2,
@@ -61,7 +66,9 @@ pub struct TensorConductionReport {
     pub nonzeros: usize,
     /// Krylov iterations, including any same-matrix residual refinement.
     pub iterations: usize,
-    /// Recomputed row-scaled residual at the returned face temperatures.
+    /// Recomputed row-scaled linear residual. For frozen conduction this is
+    /// evaluated at the returned trace; for a nonlinear solve it belongs to
+    /// the last Newton correction. Original heat acceptance is reported below.
     pub relative_residual: f64,
     /// Worst local cell, interface/contact or boundary heat defect, after
     /// the native arithmetic roundoff allowance, relative to local throughput.
@@ -175,13 +182,12 @@ fn prepare(
     if tensors.len() != cells {
         return Err(invalid("needs exactly one prepared conductivity tensor per cell"));
     }
-    if solids.iter().any(SolidMaterial::has_temperature_dependent_conductivity)
-        || !setup.source_face_contacts.is_empty()
+    if !setup.source_face_contacts.is_empty()
         || !setup.eddy_conductivity_w_m_k.is_empty()
         || !setup.compact_components.is_empty()
         || !setup.compact_heat_storage.is_empty()
     {
-        return Err(invalid("frozen tensors cannot also own native k(T), source contacts, eddy additions or compact components"));
+        return Err(invalid("tensor conduction does not own source contacts, eddy additions or compact components"));
     }
     if !setup.power_w.is_empty() && setup.power_w.len() != cells {
         return Err(invalid("power needs zero entries or one entry per cell"));
@@ -344,6 +350,10 @@ fn solve_tensor_conduction_stage(
     tensors: &[ConductivityTensor], config: &EnergyConfig,
     step: Option<&PseudoStep<'_>>, carried_power_w: Option<&[f64]>, gate: &CancelGate,
 ) -> Result<TensorConductionSolution, ChtError> {
+    poll(gate)?;
+    if solids.iter().any(SolidMaterial::has_temperature_dependent_conductivity) {
+        return Err(invalid("frozen tensors cannot also own native temperature-dependent conductivity"));
+    }
     let data = prepare(domain, solids, setup, tensors, config, step, gate)?;
     if let Some(carry) = carried_power_w {
         if step.is_none() || carry.len() != domain.cell_count() {
@@ -488,6 +498,21 @@ fn recover(
         outward_heat_w.push(op.outward_heat(t, faces));
         arithmetic.push(op.heat_arithmetic(t, faces));
     }
+    audit_endpoint(domain, setup, data, step, carried_power_w, temperature,
+        face_temperature_k, outward_heat_w, arithmetic, gate)
+}
+
+/// One physical heat owner for frozen and original-law tensor endpoints.
+/// The nonlinear caller supplies its actual integral heat, without recovering
+/// a different temperature from a frozen surrogate.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn audit_endpoint(
+    domain: &VoxelDomain, setup: &ThermalSetup, data: &Prepared,
+    step: Option<&PseudoStep<'_>>, carried_power_w: Option<&[f64]>,
+    temperature: Vec<f64>, face_temperature_k: Vec<[f64; 6]>,
+    outward_heat_w: Vec<[f64; 6]>, arithmetic: Vec<[f64; 6]>, gate: &CancelGate,
+) -> Result<TensorConductionSolution, ChtError> {
+    let cells = domain.cell_count();
     let mut maximum = 0.0_f64;
     let (mut source, mut fixed, mut boundary, mut sinks, mut scale) = (0.0, 0.0, 0.0, 0.0, 0.0);
     let mut solid_fluid = 0.0;
