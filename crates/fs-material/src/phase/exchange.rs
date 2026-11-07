@@ -5,6 +5,9 @@
 //! at its actual constant driving temperature. No apparent heat capacity,
 //! temporal subdivision, extra latent source or extrapolated material is used.
 
+/// Direct isolated exchange between two finite original phase charts.
+pub mod pair;
+
 use super::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState, PhaseStateError};
 use crate::thermal::transport::{
     ThermalTransportError,

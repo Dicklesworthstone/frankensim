@@ -4,6 +4,9 @@
 //! Biot gate remains mandatory. This entry requires radiation to be disabled;
 //! it adds no internal source or second heat-transfer model.
 
+/// Direct isolated fixed-resistance exchange between two finite bodies.
+pub mod pair;
+
 use super::{BiotGate, LumpedEnthalpyBody, lumped_error, phase_state};
 use crate::ConductionError;
 use fs_blake3::ContentHash;

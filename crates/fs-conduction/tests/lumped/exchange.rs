@@ -1,5 +1,7 @@
 //! Native uniform-body exchange through sensible branches and sharp fusion.
 
+mod pair;
+
 use super::*;
 use fs_conduction::lumped::exchange::{
     LumpedLinearExchangeConfig, solve_lumped_linear_exchange, solve_lumped_linear_exchange_response,

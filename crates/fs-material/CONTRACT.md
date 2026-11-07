@@ -21111,3 +21111,48 @@ unchanged plastic accumulation and cancellation/retry. Rustfmt checks passed;
 compilation and native tests remain unverified. This is linear static recovery;
 nonlinear recovery, isotropic annealing, recrystallization, finite cyclic
 deformation and empirical calibration remain outside this implementation.
+
+## Direct reciprocal exchange between finite phase bodies
+
+`phase::exchange::pair::exchange` and `exchange_with_checkpoint` integrate an
+isolated fixed-conductance trajectory between two `FinitePhaseBody` values.
+Each retains its own original chart, state identity, fixed mass, material
+context and enthalpy datum. One signed heat Q debits one body and credits the
+other; requested exposure is G times duration in J/K. The defining integral
+uses the actual evolving hot/cold temperature difference on both original
+enthalpy paths.
+
+Authored affine T(h), constant original Cp and isothermal latent intervals
+advance analytically. Varying affine Cp(T) retains the original sensible
+inverse and uses source-split Simpson quadrature with analytic truncation
+bounds and explicit floating-point allowances, followed by bounded scalar
+inversion. Both heat and exposure accuracy gates apply. Incomplete integral
+lower bounds can reject a trial but can never accept a solution. Original
+source intervals are prepared once; total prepared intervals, root iterations
+and total nonlinear panel visits have explicit caps. Cancellation is polled
+through preparation, integration and final entropy evaluation.
+
+The proposed states retain hot/cold ordering. A source endpoint reached at
+positive temperature gap has finite available exposure; larger requests
+refuse. Thermal equilibrium is approached asymptotically and is never crossed.
+Original latent heat is consumed once, without an apparent heat capacity,
+additional latent source or prescribed phase-front time. Equal initial
+temperatures and zero exposure preserve both accepted states.
+
+`FinitePhaseExchange` reports retained relative heat, both represented
+absolute-enthalpy changes and their individual residuals. Trajectory error
+does not absorb these storage residuals: callers must enforce their physical
+energy budgets. The signed entropy account integrates the original charts
+between the represented states, including latent entropy, and exposes its
+numerical allowance rather than clipping a negative result. The numerical
+bounds are not interval-arithmetic certificates or source uncertainties.
+
+This owner conserves the charts' declared enthalpy account under their original
+pressure/work convention. It introduces no mass transfer, external source,
+changing conductance, spatial approximation, pressure-work source or claim of
+constant-volume internal-energy conservation. Native conduction admission
+and geometry remain with the lumped adapter. Focused regressions exercise
+analytic and nonlinear calorimetry, phase boundaries, reversal, subdivision,
+source support, representation budgets, bounded work and cancellation.
+Pinned Rust parsing was available; native Cargo compilation and test execution
+were unavailable in this resource-exhausted session.

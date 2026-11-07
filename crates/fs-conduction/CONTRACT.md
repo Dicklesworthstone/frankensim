@@ -5629,3 +5629,39 @@ independent radiating faces and baths. Their scalar and eight-coordinate
 references derive stage heat and entropy independently. All six Rust files
 passed the pinned parser; native compilation and test execution remained
 unavailable in this resource-exhausted session.
+
+## Direct finite-body phase exchange on the lumped contact owner
+
+`lumped::exchange::pair::solve_lumped_pair_exchange` integrates one isolated
+fixed-resistance contact between two admitted `LumpedEnthalpyBody` values.
+The existing `SeriesThermalResistance` supplies G=1/R, and each body retains
+its original fixed mass, identity and equilibrium enthalpy/phase chart. The
+original contact Biot check Lc/(R A k_min) uses the body's effective exchange
+area and conservative full-chart conductivity minimum.
+
+The shared material finite-pair kernel follows the original two-body
+trajectory through sensible branches and latent plateaus. Affine T(h)
+intervals advance analytically; varying original Cp uses bounded source-split
+integration and inversion with separate heat/exposure error gates. This
+avoids an endpoint-power temporal approximation for held isolated contact.
+The existing backward-Euler and entropy-conjugate contact APIs continue to
+own their externally supplied-heat models.
+
+`LumpedPairExchangeConfig::energy_tolerance_j` independently gates EACH
+represented stored-energy residual and their sum. A small combined residual
+cannot hide offsetting local errors. The result retains both identities,
+duration, resistance, maximum Biot number, original-chart entropy and all
+material trajectory/representation diagnostics. Cancellation, source
+exhaustion, equilibrium overshoot, unrepresentable heat and either physical
+energy-budget violation refuse the complete proposal without mutating a body
+or accepted history.
+
+The contact has no external bath, radiation law, applied heat or mass flow.
+Callers retain composition with other physical owners and the charts'
+pressure/work convention. Density and volume changes are not added again as
+latent heat or pressure work; spatial spreading is outside the lumped model.
+Focused material/native regressions cover melting and freezing, reciprocal
+transfer, energy and entropy, source limits, original Cp variation, contact
+Biot refusal, representation errors and cancellation. Pinned Rust parsing
+was available; native Cargo compilation and test execution were unavailable
+in this resource-exhausted session.
