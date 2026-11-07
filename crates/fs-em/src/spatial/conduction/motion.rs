@@ -9,6 +9,7 @@
 //! This fixed-domain, nonrelativistic DC approximation prescribes B and motion;
 //! it does not evolve induction, finite moving interfaces or mechanical state.
 
+use super::terminals::{terminal_current, voltage_boundary};
 use super::*;
 
 mod mechanical;
@@ -29,6 +30,15 @@ pub(super) struct PreparedMotion<'a> {
     pub(super) prescribed: SpatialConductionMotion<'a>,
     pub(super) field_v_m: Vec<[f64; 3]>,
     pub(super) load_a: Vec<f64>,
+}
+
+/// One zero-electrode-voltage solve supplies the affine motional source. Its
+/// relative potentials share the original operator and component gauges with
+/// every retained homogeneous terminal basis.
+pub(super) struct TerminalMotion<'a> {
+    prepared: PreparedMotion<'a>,
+    relative: Vec<f64>,
+    pub(super) currents_a: Vec<f64>,
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> Result<[f64; 3]> {
@@ -61,6 +71,18 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialMovingConductionField<'_, C>> {
         check(cancelled)?;
+        let prepared = self.prepare_motion(motion, cancelled)?;
+        let traces = self.prepare_boundary(boundary, controls, cancelled)?;
+        let (relative, report) = self.solve_motion(&traces, &prepared, controls, cancelled)?;
+        self.recover_moving_field(relative, traces, &prepared, controls, report, cancelled)
+    }
+
+    fn prepare_motion<'v>(
+        &self,
+        motion: SpatialConductionMotion<'v>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMotion<'v>> {
+        check(cancelled)?;
         let cells = self.conductors.len();
         if motion.velocity_m_s.len() != cells || motion.flux_density_t.len() != cells {
             return Err(SpatialConductionError::Invalid(
@@ -78,7 +100,6 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 ));
             }
         }
-        let traces = self.prepare_boundary(boundary, controls, cancelled)?;
         let g = &self.geometry;
         let mut prepared = PreparedMotion {
             prescribed: motion,
@@ -117,6 +138,16 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 prepared.load_a[vertex] = finite(prepared.load_a[vertex] + load)?;
             }
         }
+        Ok(prepared)
+    }
+
+    fn solve_motion(
+        &self,
+        traces: &ScalarBoundary,
+        prepared: &PreparedMotion<'_>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, Option<SolveReport>)> {
         let mut rhs = traces.flux_load_wb.clone();
         for (value, &motional) in rhs.iter_mut().zip(&prepared.load_a) {
             check(cancelled)?;
@@ -124,17 +155,28 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
                 *value = finite(*value + motional)?;
             }
         }
-        let (relative, report) = solve_scalar_system(
+        Ok(solve_scalar_system(
             &self.stiffness,
             &rhs,
             &traces.prescribed,
             controls.linear,
             cancelled,
-        )?;
+        )?)
+    }
+
+    fn recover_moving_field(
+        &self,
+        relative: Vec<f64>,
+        traces: ScalarBoundary,
+        prepared: &PreparedMotion<'_>,
+        controls: ConductionControls,
+        report: Option<SolveReport>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialMovingConductionField<'_, C>> {
         let (field, power) = self.recover_field_with_motion(
             relative,
             traces,
-            Some(&prepared),
+            Some(prepared),
             controls.current_tolerance_a,
             controls.power_tolerance_w,
             report,
@@ -146,11 +188,116 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         check(cancelled)?;
         Ok(SpatialMovingConductionField {
             problem: self,
-            velocity_m_s: motion.velocity_m_s.to_vec(),
-            flux_density_t: motion.flux_density_t.to_vec(),
+            velocity_m_s: prepared.prescribed.velocity_m_s.to_vec(),
+            flux_density_t: prepared.prescribed.flux_density_t.to_vec(),
             field,
             power,
         })
+    }
+
+    /// The same native solve as the boundary-driven path, with every actual
+    /// electrode clamped to zero. This response is a computational source;
+    /// its heat and Lorentz work are never added to the accepted actual field.
+    pub(super) fn terminal_motion<'v>(
+        &self,
+        faces: &[Vec<usize>],
+        vertices: &[Vec<usize>],
+        motion: SpatialConductionMotion<'v>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TerminalMotion<'v>> {
+        let prepared = self.prepare_motion(motion, cancelled)?;
+        let boundary = voltage_boundary(faces, &vec![0.0; faces.len()]);
+        let traces = self.prepare_boundary(&boundary, controls, cancelled)?;
+        let (relative, report) = self.solve_motion(&traces, &prepared, controls, cancelled)?;
+        let field = self.recover_moving_field(
+            relative.clone(),
+            traces,
+            &prepared,
+            controls,
+            report,
+            cancelled,
+        )?;
+        let currents_a = vertices
+            .iter()
+            .map(|vertices| terminal_current(&field.field, vertices, cancelled))
+            .collect::<Result<Vec<_>>>()?;
+        check(cancelled)?;
+        Ok(TerminalMotion {
+            prepared,
+            relative,
+            currents_a,
+        })
+    }
+
+    /// Add ONLY potentials, then independently recover original local currents,
+    /// bulk/contact heat and Lorentz work. All cross terms remain present.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn recover_terminal_motion(
+        &self,
+        mut relative: Vec<f64>,
+        source: &TerminalMotion<'_>,
+        faces: &[Vec<usize>],
+        vertices: &[Vec<usize>],
+        voltages: &[f64],
+        expected_currents: &[f64],
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialMovingConductionField<'_, C>> {
+        let boundary = voltage_boundary(faces, voltages);
+        let traces = self.prepare_boundary(&boundary, controls, cancelled)?;
+        for (v, value) in relative.iter_mut().enumerate() {
+            check(cancelled)?;
+            *value = match traces.prescribed[v] {
+                Some(prescribed) => prescribed,
+                None => finite(*value + source.relative[v])?,
+            };
+        }
+        // The source solve's report is not a report for this superposed field.
+        let field = self.recover_moving_field(
+            relative,
+            traces,
+            &source.prepared,
+            controls,
+            None,
+            cancelled,
+        )?;
+        let mut current_residual_a = 0.0_f64;
+        let (mut work, mut correction) = (0.0, 0.0);
+        for ((vertices, &current), &voltage) in vertices.iter().zip(expected_currents).zip(voltages)
+        {
+            check(cancelled)?;
+            let defect = finite(terminal_current(&field.field, vertices, cancelled)? - current)?;
+            if defect.abs() > current_residual_a.abs() {
+                current_residual_a = defect;
+            }
+            let adjusted = finite(finite(voltage * current)? - correction)?;
+            let next = finite(work + adjusted)?;
+            correction = finite(finite(next - work)? - adjusted)?;
+            work = next;
+        }
+        // Signed authored terminal work may vanish at short circuit or be
+        // negative during generation even while conductor-frame heat is positive.
+        let terminal_defect = finite(field.terminal_power_w() - work)?;
+        let physical_defect =
+            finite(finite(field.joule_power_w() + field.mechanical_power_w())? - work)?;
+        let power_residual_w = if terminal_defect.abs() > physical_defect.abs() {
+            terminal_defect
+        } else {
+            physical_defect
+        };
+        if current_residual_a.abs() > controls.current_tolerance_a
+            || power_residual_w.abs() > controls.power_tolerance_w
+        {
+            return Err(SpatialConductionError::Balance {
+                current_residual_a,
+                maximum_free_current_residual_a: field.maximum_free_current_residual_a(),
+                power_residual_w,
+                hodge_power_residual_w: field.hodge_power_residual_w(),
+            });
+        }
+        check(cancelled)?;
+        Ok(field)
     }
 }
 

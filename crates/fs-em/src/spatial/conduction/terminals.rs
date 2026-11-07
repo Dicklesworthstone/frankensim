@@ -4,6 +4,7 @@
 //! Actual drives reuse relative potentials and recover native currents and
 //! bulk/contact heat again, without assuming a uniform injection density.
 
+use super::motion::{SpatialConductionMotion, SpatialMovingConductionField};
 use super::*;
 use crate::conduction::ConductionPowerSource;
 
@@ -439,6 +440,57 @@ impl<C: SpatialConductorMaterial> SpatialResistance<'_, C> {
         }
         check(cancelled)?;
         Ok(field)
+    }
+}
+
+impl<'m, C: SpatialConductorMaterial> SpatialResistance<'m, C> {
+    /// Prescribe signed total current through the original equipotential pair
+    /// while retaining its actual motional EMF. Positive current enters the
+    /// positive faces; the negative electrode remains the voltage reference.
+    /// Zero current resolves the open-circuit voltage rather than grounding
+    /// both electrodes. Short circuit and generation retain separate signed
+    /// terminal/Lorentz work and positive conductor-frame Joule heat.
+    ///
+    /// This performs one additional native zero-voltage motional solve beyond
+    /// the retained resistance probe, then superposes potentials and recovers
+    /// the actual field without another Krylov solve. Caller work budgets must
+    /// charge both solves. Original moving-contact restrictions remain in force.
+    pub fn field_at_current_with_motion(
+        &self,
+        current_a: f64,
+        motion: SpatialConductionMotion<'_>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialMovingConductionField<'m, C>> {
+        check(cancelled)?;
+        if !current_a.is_finite() {
+            return Err(SpatialConductionError::Invalid(
+                "finite total current required",
+            ));
+        }
+        let source = self.problem.terminal_motion(
+            &self.faces,
+            &self.vertices,
+            motion,
+            controls,
+            cancelled,
+        )?;
+        let voltage = finite(finite(current_a - source.currents_a[0])? * self.resistance_ohm)?;
+        let mut relative = Vec::with_capacity(self.relative.len());
+        for &value in &self.relative {
+            check(cancelled)?;
+            relative.push(finite((value / self.reference_voltage_v) * voltage)?);
+        }
+        self.problem.recover_terminal_motion(
+            relative,
+            &source,
+            &self.faces,
+            &self.vertices,
+            &[voltage, 0.0],
+            &[current_a, -current_a],
+            controls,
+            cancelled,
+        )
     }
 }
 

@@ -2,6 +2,7 @@
 //! Only potentials are superposed. Actual E/J and bulk/contact Joule work are
 //! recovered together, retaining every cross term between simultaneous drives.
 
+use super::motion::{SpatialConductionMotion, SpatialMovingConductionField};
 use super::terminals::{positive, terminal_current, voltage_boundary};
 use super::*;
 use fs_la::factor::{Cholesky, cholesky};
@@ -336,18 +337,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
                 "one finite voltage per terminal and positive actual-field tolerances required",
             ));
         }
-        let voltages = voltages_v
-            .iter()
-            .map(|v| finite(v - voltages_v[0]))
-            .collect::<Result<Vec<_>>>()?;
-        let mut relative = vec![0.0; self.problem.mesh().vertex_count];
-        for (vertex, out) in relative.iter_mut().enumerate() {
-            check(cancelled)?;
-            let mut correction = 0.0;
-            for (basis, &voltage) in self.basis.iter().zip(&voltages[1..]) {
-                add(out, &mut correction, finite(basis[vertex] * voltage)?)?;
-            }
-        }
+        let (voltages, mut relative) = self.relative_at_voltages(voltages_v, cancelled)?;
         let boundary = voltage_boundary(&self.faces, &voltages);
         let traces = prepare_scalar_boundary_traces(
             &self.problem.geometry.mesh,
@@ -374,18 +364,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
             None,
             cancelled,
         )?;
-        let mut currents = vec![0.0; n];
-        for (row, current) in currents.iter_mut().enumerate() {
-            check(cancelled)?;
-            let mut correction = 0.0;
-            for (column, &voltage) in voltages.iter().enumerate() {
-                add(
-                    current,
-                    &mut correction,
-                    finite(self.matrix_s[row * n + column] * voltage)?,
-                )?;
-            }
-        }
+        let currents = self.currents_at_voltages(&voltages, cancelled)?;
         self.admit_response(
             &field,
             &voltages,
@@ -410,6 +389,38 @@ impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
         power_tolerance_w: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialConductionField> {
+        self.admit_current_drive(
+            currents_a,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        let voltages = self.current_voltages(currents_a, cancelled)?;
+        let field =
+            self.field_at_voltages(&voltages, current_tolerance_a, power_tolerance_w, cancelled)?;
+        self.admit_response(
+            &field,
+            &voltages,
+            currents_a,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        if currents_a.iter().any(|&i| i != 0.0) && !positive(field.power_w) {
+            return Err(invalid(
+                "nonzero terminal current lost representable Joule work",
+            ));
+        }
+        Ok(field)
+    }
+
+    fn admit_current_drive(
+        &self,
+        currents_a: &[f64],
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
         check(cancelled)?;
         if currents_a.len() != self.faces.len()
             || currents_a.iter().any(|i| !i.is_finite())
@@ -427,6 +438,16 @@ impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
         if sum.abs() > current_tolerance_a {
             return Err(invalid("prescribed terminal currents must sum to zero"));
         }
+        Ok(())
+    }
+
+    // Input admission and final original-terminal reactions independently
+    // check the reference row. The grounded solve uses the other N-1 rows.
+    fn current_voltages(
+        &self,
+        currents_a: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>> {
         let mut rhs = currents_a[1..]
             .iter()
             .zip(&self.scales)
@@ -439,22 +460,95 @@ impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
         for ((voltage, value), &scale) in voltages[1..].iter_mut().zip(rhs).zip(&self.scales) {
             *voltage = finite(value / scale)?;
         }
-        let field =
-            self.field_at_voltages(&voltages, current_tolerance_a, power_tolerance_w, cancelled)?;
-        self.admit_response(
-            &field,
-            &voltages,
+        Ok(voltages)
+    }
+
+    fn relative_at_voltages(
+        &self,
+        voltages_v: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<f64>, Vec<f64>)> {
+        let voltages = voltages_v
+            .iter()
+            .map(|v| finite(v - voltages_v[0]))
+            .collect::<Result<Vec<_>>>()?;
+        let mut relative = vec![0.0; self.problem.mesh().vertex_count];
+        for (vertex, out) in relative.iter_mut().enumerate() {
+            check(cancelled)?;
+            let mut correction = 0.0;
+            for (basis, &voltage) in self.basis.iter().zip(&voltages[1..]) {
+                add(out, &mut correction, finite(basis[vertex] * voltage)?)?;
+            }
+        }
+        Ok((voltages, relative))
+    }
+
+    fn currents_at_voltages(
+        &self,
+        voltages: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>> {
+        let n = self.faces.len();
+        let mut currents = vec![0.0; n];
+        for (row, current) in currents.iter_mut().enumerate() {
+            check(cancelled)?;
+            let mut correction = 0.0;
+            for (column, &voltage) in voltages.iter().enumerate() {
+                add(
+                    current,
+                    &mut correction,
+                    finite(self.matrix_s[row * n + column] * voltage)?,
+                )?;
+            }
+        }
+        Ok(currents)
+    }
+
+    /// Prescribe balanced total currents with the original motional source:
+    /// G V = I_authored - I_motion. Zero-current electrodes float and may pass
+    /// current between their faces. Terminal zero fixes only the voltage gauge.
+    ///
+    /// One additional native field solve supplies I_motion; preparation already
+    /// paid N-1 homogeneous solves. Callers must budget N solves in total.
+    /// Potentials are superposed before native heat/force recovery, so neither
+    /// source heat nor pairwise Joule losses are added as independent sources.
+    pub fn field_at_currents_with_motion(
+        &self,
+        currents_a: &[f64],
+        motion: SpatialConductionMotion<'_>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialMovingConductionField<'m, C>> {
+        self.admit_current_drive(
             currents_a,
-            current_tolerance_a,
-            power_tolerance_w,
+            controls.current_tolerance_a,
+            controls.power_tolerance_w,
             cancelled,
         )?;
-        if currents_a.iter().any(|&i| i != 0.0) && !positive(field.power_w) {
-            return Err(invalid(
-                "nonzero terminal current lost representable Joule work",
-            ));
-        }
-        Ok(field)
+        let source = self.problem.terminal_motion(
+            &self.faces,
+            &self.vertices,
+            motion,
+            controls,
+            cancelled,
+        )?;
+        let adjusted = currents_a
+            .iter()
+            .zip(&source.currents_a)
+            .map(|(&authored, &motional)| finite(authored - motional))
+            .collect::<Result<Vec<_>>>()?;
+        let voltages = self.current_voltages(&adjusted, cancelled)?;
+        let (voltages, relative) = self.relative_at_voltages(&voltages, cancelled)?;
+        self.problem.recover_terminal_motion(
+            relative,
+            &source,
+            &self.faces,
+            &self.vertices,
+            &voltages,
+            currents_a,
+            controls,
+            cancelled,
+        )
     }
 
     fn admit_response(
@@ -491,7 +585,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialConductanceMatrix<'m, C> {
     }
 }
 
-impl<C: SpatialConductorMaterial> SpatialMixedConductance<'_, '_, C> {
+impl<'m, C: SpatialConductorMaterial> SpatialMixedConductance<'_, 'm, C> {
     pub fn voltage_terminals(&self) -> &[usize] {
         &self.voltage_terminals
     }
@@ -513,6 +607,52 @@ impl<C: SpatialConductorMaterial> SpatialMixedConductance<'_, '_, C> {
         power_tolerance_w: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialConductionField> {
+        self.admit_control_drive(
+            voltages_v,
+            currents_a,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        let mut voltages = self.control_voltages(voltages_v, currents_a, cancelled)?;
+        let field = self.source.field_at_voltages(
+            &voltages,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        let mut expected_currents = self
+            .source
+            .vertices
+            .iter()
+            .map(|vertices| terminal_current(&field, vertices, cancelled))
+            .collect::<Result<Vec<_>>>()?;
+        for (&terminal, &current) in self.current_terminals.iter().zip(currents_a) {
+            expected_currents[terminal] = current;
+        }
+        let gauge = voltages[0];
+        for voltage in &mut voltages {
+            *voltage = finite(*voltage - gauge)?;
+        }
+        self.source.admit_response(
+            &field,
+            &voltages,
+            &expected_currents,
+            current_tolerance_a,
+            power_tolerance_w,
+            cancelled,
+        )?;
+        Ok(field)
+    }
+
+    fn admit_control_drive(
+        &self,
+        voltages_v: &[f64],
+        currents_a: &[f64],
+        current_tolerance_a: f64,
+        power_tolerance_w: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
         check(cancelled)?;
         if voltages_v.len() != self.voltage_terminals.len()
             || currents_a.len() != self.current_terminals.len()
@@ -524,6 +664,15 @@ impl<C: SpatialConductorMaterial> SpatialMixedConductance<'_, '_, C> {
                 "complete finite mixed terminal controls and positive field tolerances required",
             ));
         }
+        Ok(())
+    }
+
+    fn control_voltages(
+        &self,
+        voltages_v: &[f64],
+        currents_a: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>> {
         let n = self.source.faces.len();
         let mut voltages = vec![0.0; n];
         for (&terminal, &voltage) in self.voltage_terminals.iter().zip(voltages_v) {
@@ -554,33 +703,64 @@ impl<C: SpatialConductorMaterial> SpatialMixedConductance<'_, '_, C> {
         {
             voltages[terminal] = finite(value / scale)?;
         }
-        let field = self.source.field_at_voltages(
-            &voltages,
-            current_tolerance_a,
-            power_tolerance_w,
+        Ok(voltages)
+    }
+
+    /// Resolve original voltage/current causality in the presence of motion:
+    /// G_FF V_F = I_F - I_motion,F - G_FD V_D. The current subset may include
+    /// terminal zero; a zero-current electrode floats, without insulating its
+    /// individual faces. Voltage controls retain their original terminal order.
+    ///
+    /// Exactly one additional native motional solve is needed beyond the N-1
+    /// retained basis solves. Actual signed terminal work is checked against
+    /// conductor-frame heat plus Lorentz work, including generated power.
+    pub fn field_at_controls_with_motion(
+        &self,
+        voltages_v: &[f64],
+        currents_a: &[f64],
+        motion: SpatialConductionMotion<'_>,
+        controls: ConductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialMovingConductionField<'m, C>> {
+        self.admit_control_drive(
+            voltages_v,
+            currents_a,
+            controls.current_tolerance_a,
+            controls.power_tolerance_w,
             cancelled,
         )?;
-        let mut expected_currents = self
-            .source
-            .vertices
+        let source = self.source.problem.terminal_motion(
+            &self.source.faces,
+            &self.source.vertices,
+            motion,
+            controls,
+            cancelled,
+        )?;
+        let adjusted = self
+            .current_terminals
             .iter()
-            .map(|vertices| terminal_current(&field, vertices, cancelled))
+            .zip(currents_a)
+            .map(|(&terminal, &authored)| finite(authored - source.currents_a[terminal]))
             .collect::<Result<Vec<_>>>()?;
+        let voltages = self.control_voltages(voltages_v, &adjusted, cancelled)?;
+        let (voltages, relative) = self.source.relative_at_voltages(&voltages, cancelled)?;
+        let mut expected_currents = self.source.currents_at_voltages(&voltages, cancelled)?;
+        for (current, &motional) in expected_currents.iter_mut().zip(&source.currents_a) {
+            check(cancelled)?;
+            *current = finite(*current + motional)?;
+        }
         for (&terminal, &current) in self.current_terminals.iter().zip(currents_a) {
             expected_currents[terminal] = current;
         }
-        let gauge = voltages[0];
-        for voltage in &mut voltages {
-            *voltage = finite(*voltage - gauge)?;
-        }
-        self.source.admit_response(
-            &field,
+        self.source.problem.recover_terminal_motion(
+            relative,
+            &source,
+            &self.source.faces,
+            &self.source.vertices,
             &voltages,
             &expected_currents,
-            current_tolerance_a,
-            power_tolerance_w,
+            controls,
             cancelled,
-        )?;
-        Ok(field)
+        )
     }
 }

@@ -6567,3 +6567,26 @@ retention, spectral support, single-slab agreement and every coherent
 interface. These new checks have not been executed: the execution environment
 became unavailable before the first actual-source probe returned. Earlier
 single-slab results do not establish the new stack or its refactored helpers.
+## Total-current electrodes in the native moving conductor
+
+`SpatialResistance::field_at_current_with_motion`,
+`SpatialConductanceMatrix::field_at_currents_with_motion` and
+`SpatialMixedConductance::field_at_controls_with_motion` share their original
+electrode admission, conductivity/contact operator and equilibrated terminal
+factors. One additional zero-voltage motional solve supplies the affine current
+source; prescribed currents close against `G V + I_motion`, including floating
+electrodes and a current-controlled reference terminal. Preparation plus motion
+costs two native field solves for a pair, or N for N terminals. Caller work
+budgets must include that additional solve.
+
+Only native potentials are superposed. The actual field then recovers local
+current, bulk/contact Joule heat and Lorentz work together, with independent
+terminal-current and signed authored `sum(V I)` checks. Open-circuit EMF,
+short-circuit braking and generated electrical power remain distinct from
+positive conductor-frame heat; probe/source heat is never deposited. Native
+moving-contact restrictions, cancellation and solver limits remain in force.
+These are fixed-domain quasistatic snapshots, without induction, sliding-contact
+physics, mechanical integration or a regulated-power branch. Focused manufactured
+bar regressions cover signed current, mixed floating electrodes, reordered
+terminals, contact heat and transactional refusal/reuse.
+
