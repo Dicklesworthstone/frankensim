@@ -1,9 +1,10 @@
-//! Spatial magnetic memory and both physical loss channels on one thermal clock.
+//! Spatial magnetic memory and physical loss channels on one thermal clock.
 //!
 //! Every thermal trial restarts the SAME accepted potential and vector play
-//! history. The native field solve computes resolved Ohmic and pinning heat;
-//! both reach their original finite cells exactly once. Backward-Euler loss
-//! remains numerical work, never heat. Source-backed conductivity changes with
+//! history. The native field solve computes resolved Ohmic, pinning and intrinsic
+//! viscous switching heat; each reaches its original finite cells exactly once.
+//! The endpoint integration remainder remains numerical work, never heat.
+//! Source-backed conductivity changes with
 //! temperature, while every fitted magnetic coefficient must remain constant
 //! within its explicitly supported temperature interval.
 
@@ -55,12 +56,12 @@ impl<'t, 'm, S> HystereticEddyEnthalpyCandidate<'t, 'm, S> {
     pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample<S>, HystereticEddyStep> {
         &self.report
     }
-    /// Native Joule plus pinning heat deposited into the finite cells [J].
+    /// Native Joule, pinning and viscous heat deposited into finite cells [J].
     /// Numerical dissipation is excluded from this physical heat total.
     pub fn deposited_heat_j(&self) -> f64 {
         self.report.deposited_joule_j
     }
-    /// Physical Joule and pinning heat is already deposited. Numerical loss
+    /// Physical Joule, pinning and viscous heat is already deposited. Numerical loss
     /// has not been deposited and must not be added to any thermal cell.
     pub fn into_parts(
         self,
@@ -94,7 +95,7 @@ impl<'m> ThermalDriver for PlanarHystereticEddyCandidate<'m> {
     }
 }
 
-// Pinning also heats electrically insulating magnetic material. Conductor-only
+// Switching also heats electrically insulating magnetic material. Conductor-only
 // Joule records cannot stand in for the complete original magnetic cell list.
 fn deposit_heat(
     proposal: &PlanarHystereticEddyCandidate<'_>,
@@ -103,7 +104,7 @@ fn deposit_heat(
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<BTreeMap<CellId, f64>, Error> {
     let mut powers = deposit_cell_heat(&proposal.step().cells, routes, dt, checkpoint)?;
-    deposit_pinning_heat(
+    deposit_constitutive_heat(
         &proposal.step().magnetic.cells,
         routes,
         dt,
@@ -114,8 +115,9 @@ fn deposit_heat(
 }
 
 // Field-driven and circuit-driven magnetic histories deposit the identical
-// original per-cell pinning receipt, including electrically insulating cells.
-pub(in crate::circuit_enthalpy) fn deposit_pinning_heat(
+// original per-cell dry plus viscous receipt, including insulating cells.
+// Use the total physical receipt, never the half-viscous variational objective.
+pub(in crate::circuit_enthalpy) fn deposit_constitutive_heat(
     losses: &[fs_em::planar::nonlinear::hysteretic::PlanarHystereticCellStep],
     routes: &MagneticRoutes,
     dt: f64,
@@ -124,7 +126,7 @@ pub(in crate::circuit_enthalpy) fn deposit_pinning_heat(
 ) -> Result<(), Error> {
     if losses.len() != routes.magnetic.len() {
         return Err(invalid(
-            "pinning heat changed original magnetic cell correspondence",
+            "constitutive heat changed original magnetic cell correspondence",
         ));
     }
     for loss in losses {
@@ -132,10 +134,10 @@ pub(in crate::circuit_enthalpy) fn deposit_pinning_heat(
         let receiver = routes
             .magnetic
             .get(&loss.triangle)
-            .ok_or_else(|| invalid("pinning heat lacks an original magnetic region"))?;
+            .ok_or_else(|| invalid("constitutive heat lacks an original magnetic region"))?;
         let heat = finite(loss.irreversible_heat_j)?;
         if heat < 0.0 {
-            return Err(invalid("negative native magnetic pinning heat"));
+            return Err(invalid("negative native magnetic constitutive heat"));
         }
         if heat == 0.0 {
             continue;
@@ -148,7 +150,7 @@ pub(in crate::circuit_enthalpy) fn deposit_pinning_heat(
         let combined = finite(previous + power)?;
         if power == 0.0 || combined == previous {
             return Err(invalid(
-                "local pinning heat disappeared in receiving-cell sum",
+                "local constitutive heat disappeared in receiving-cell sum",
             ));
         }
         powers.insert(cell, combined);
@@ -270,7 +272,7 @@ impl MagneticThermalNetwork<'_> {
     ///
     /// Every heated magnetic triangle needs an explicit original thermal
     /// receiver, including insulating core cells. Fixed regions may dissipate
-    /// no pinning heat. Fits, geometry and solid caloric charts remain fixed;
+    /// no pinning or viscous heat. Fits, geometry and solid caloric charts remain fixed;
     /// changing magnetic coefficients, magnetic entropy, phase transitions and
     /// empirical core-loss maps are not supplied by this first-order model.
     #[allow(clippy::too_many_arguments)]

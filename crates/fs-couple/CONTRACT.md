@@ -2121,8 +2121,9 @@ The opt-in `hysteretic-eddy-heating` feature connects the original
 `PlanarHystereticEddy` vector-history owner to `MagneticThermalNetwork` and
 the existing finite-cell enthalpy Newton driver. Every thermal trial starts
 from the same accepted potential and vector polarizations. Native per-triangle
-pinning heat and spatial Joule heat enter their actual receiving cells exactly
-once. Insulating magnetic triangles can heat through pinning alone; any
+pinning, intrinsic viscous switching and spatial Joule heat enter their actual
+receiving cells exactly once. Insulating magnetic triangles can heat through
+pinning and finite-rate switching without Ohmic conduction; any
 dissipating triangle without a finite receiver refuses. The endpoint field's
 numerical dissipation remains in the work account and never heats a cell.
 
@@ -2136,7 +2137,17 @@ magnetic storage change, physical heat, numerical loss, thermal storage and
 source work share one acceptance audit; failure/cancellation publishes neither
 history. The shared report's `deposited_joule_j` counter denotes total deposited
 physical heat in this driver; `deposited_heat_j()` names that sum explicitly,
-and its native field report separates Joule from pinning heat.
+and its native field report separates Joule, pinning and viscous heat.
+
+An explicitly source-selected viscosity uses the same physical interval as the
+thermal driver and every native field trial. The finite receiver deposits the
+full constitutive heat, never the half-viscous variational objective. Its source
+bundle includes all original viscosity claims, even an all-zero profile, so the
+complete caloric interval must support the kinetic fit too. Native winding
+circuits share this existing eddy and thermal route. Synthetic regressions
+check finite-rate polarization and continued hold heating against an independent
+scalar kinetic balance, exact deposited energy, retained source queries and
+atomic refusal of insufficient viscosity temperature support.
 
 This is fixed-geometry, fixed-fit, first-order magnetoquasistatic/thermal
 coupling. It supplies no changing-fit thermomagnetic entropy/parameter work,

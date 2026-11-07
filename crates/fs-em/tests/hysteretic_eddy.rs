@@ -3,6 +3,8 @@
 
 #![cfg(feature = "magnetic-hysteresis")]
 
+#[path = "hysteretic_eddy/rate.rs"]
+mod rate;
 #[path = "hysteretic_eddy/winding.rs"]
 mod winding;
 
@@ -54,6 +56,15 @@ fn sources(
     pinning: bool,
     sigma: f64,
 ) -> (ResolvedVectorHysteresis, ResolvedConductorState) {
+    sources_with_viscosity(mu, pinning, sigma, None)
+}
+
+fn sources_with_viscosity(
+    mu: f64,
+    pinning: bool,
+    sigma: f64,
+    viscosity: Option<f64>,
+) -> (ResolvedVectorHysteresis, ResolvedConductorState) {
     let basis = ElectricalPropertyBasis::Conductivity;
     let mut roles = HysteresisSources {
         background_permeability: PropertyKey::new("background_mu", MAGNETIC_PERMEABILITY_DIMS),
@@ -80,6 +91,14 @@ fn sources(
             (branch.saturation_polarization.clone(), SATURATION),
         ]);
         roles.branches.push(branch);
+    }
+    let viscosity_key = PropertyKey::new(
+        "intrinsic_branch_viscosity",
+        fs_material::field_storage::hysteresis::source::MAGNETIC_VISCOSITY_DIMS,
+    );
+    if let Some(viscosity) = viscosity {
+        assert!(pinning, "viscosity fixture needs one actual branch");
+        values.push((viscosity_key.clone(), viscosity));
     }
     let mut claims = ClaimSet::new();
     for (key, value) in values {
@@ -132,10 +151,17 @@ fn sources(
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    (
-        ResolvedVectorHysteresis::from_isotropic_source(scalar).unwrap(),
-        conductor,
-    )
+    let magnetic = if viscosity.is_some() {
+        ResolvedVectorHysteresis::from_isotropic_source_with_viscosity(
+            scalar,
+            vec![viscosity_key],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap()
+    } else {
+        ResolvedVectorHysteresis::from_isotropic_source(scalar).unwrap()
+    };
+    (magnetic, conductor)
 }
 
 fn square(depth: f64) -> TriComplex2 {
@@ -183,6 +209,14 @@ fn problem(
     sigma: f64,
 ) -> (PlanarHystereticMagnetostatics, Vec<EddyConductor>) {
     let (magnetic, conductor) = sources(mu, pinning, sigma);
+    problem_from_sources(mesh, magnetic, conductor)
+}
+
+fn problem_from_sources(
+    mesh: TriComplex2,
+    magnetic: ResolvedVectorHysteresis,
+    conductor: ResolvedConductorState,
+) -> (PlanarHystereticMagnetostatics, Vec<EddyConductor>) {
     let count = mesh.faces().len();
     let owner = PlanarHystereticMagnetostatics::new(
         mesh,

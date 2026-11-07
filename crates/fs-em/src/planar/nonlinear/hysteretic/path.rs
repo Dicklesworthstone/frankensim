@@ -462,19 +462,19 @@ fn defects(
 }
 
 struct Account {
-    cells: Vec<[f64; 4]>,
-    corrections: Vec<[f64; 4]>,
-    total: [f64; 7],
-    correction: [f64; 7],
+    cells: Vec<[f64; 6]>,
+    corrections: Vec<[f64; 6]>,
+    total: [f64; 9],
+    correction: [f64; 9],
     last: Option<PlanarHystereticStep>,
 }
 impl Account {
     fn new(cells: usize) -> Self {
         Self {
-            cells: vec![[0.0; 4]; cells],
-            corrections: vec![[0.0; 4]; cells],
-            total: [0.0; 7],
-            correction: [0.0; 7],
+            cells: vec![[0.0; 6]; cells],
+            corrections: vec![[0.0; 6]; cells],
+            total: [0.0; 9],
+            correction: [0.0; 9],
             last: None,
         }
     }
@@ -490,6 +490,8 @@ impl Account {
                 cell.irreversible_heat_j,
                 cell.numerical_dissipation_j,
                 cell.field_work_j,
+                cell.pinning_heat_j,
+                cell.viscous_heat_j,
             ]
             .into_iter()
             .enumerate()
@@ -505,6 +507,8 @@ impl Account {
             step.boundary_work_j,
             step.supplied_work_j,
             step.field_work_j,
+            step.pinning_heat_j,
+            step.viscous_heat_j,
         ]
         .into_iter()
         .enumerate()
@@ -525,12 +529,14 @@ impl Account {
         let (mut local_defect, mut correction) = (0.0, 0.0);
         for (i, cell) in result.cells.iter_mut().enumerate() {
             poll(cancelled)?;
-            for k in 0..4 {
+            for k in 0..6 {
                 self.cells[i][k] = finite(self.cells[i][k] + self.corrections[i][k])?;
             }
-            let [stored, heat, numerical, work] = self.cells[i];
+            let [stored, heat, numerical, work, pinning, viscous] = self.cells[i];
             cell.stored_energy_change_j = stored;
             cell.irreversible_heat_j = heat;
+            cell.pinning_heat_j = pinning;
+            cell.viscous_heat_j = viscous;
             cell.numerical_dissipation_j = numerical;
             cell.field_work_j = work;
             cell.energy_residual_j = finite(work - stored - heat - numerical)?;
@@ -540,12 +546,24 @@ impl Account {
                 cell.energy_residual_j.abs(),
             )?;
         }
-        for i in 0..7 {
+        for i in 0..9 {
             self.total[i] = finite(self.total[i] + self.correction[i])?;
         }
-        let [stored, heat, numerical, impressed, boundary, supplied, work] = self.total;
+        let [
+            stored,
+            heat,
+            numerical,
+            impressed,
+            boundary,
+            supplied,
+            work,
+            pinning,
+            viscous,
+        ] = self.total;
         result.stored_energy_change_j = stored;
         result.irreversible_heat_j = heat;
+        result.pinning_heat_j = pinning;
+        result.viscous_heat_j = viscous;
         result.numerical_dissipation_j = numerical;
         result.impressed_current_work_j = impressed;
         result.boundary_work_j = boundary;

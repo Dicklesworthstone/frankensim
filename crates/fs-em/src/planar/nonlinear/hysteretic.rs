@@ -2,7 +2,7 @@
 //!
 //! Every triangle owns its original source-selected vector play law and accepted
 //! polarization. Newton trials freeze that history and minimize the incremental
-//! potential W_new + Q, not storage alone. The existing nonlinear field owner
+//! potential W_new + Q_pinning + Q_viscous/2. The existing nonlinear field owner
 //! supplies the FEEC tangent, checked CG and bounded globalization. See Egger &
 //! Engertsberger (2025), section II, <https://arxiv.org/abs/2507.14521> for the
 //! coupled variational formulation; this implementation reuses the existing
@@ -12,10 +12,11 @@
 //! minor loops and rotating-field memory. Branchless sourced cells represent a
 //! linear background. Every physical reversal must be resolved in the loading
 //! history. Numerical endpoint dissipation is reported separately from physical
-//! pinning heat. The static entry points supply no eddy-current or motion law;
-//! the sibling eddy::hysteretic owner adds resolved induction through this same
-//! variational solve. No anisotropic fit, measured-material qualification or
-//! path-independent coenergy claim is implied.
+//! pinning and viscous heat. Source-selected finite switching rates require a
+//! positive physical duration from the sibling eddy::hysteretic owner; static
+//! entry points refuse an active kinetic fit. Resolved induction uses this same
+//! variational solve and retains its separate Joule loss. No anisotropic fit,
+//! measured-material qualification or path-independent coenergy claim is implied.
 
 /// Bounded continuation of an authored quasistatic magnetic loading segment.
 pub mod path;
@@ -100,8 +101,11 @@ pub struct PlanarHystereticCellStep {
     pub triangle: usize,
     pub volume_m3: f64,
     pub stored_energy_change_j: f64,
-    /// Original material pinning heat, available once to a thermal consumer [J].
+    /// Dry pinning plus intrinsic viscous heat, available once to a thermal
+    /// consumer [J]. Resolved eddy-current heat remains a separate channel.
     pub irreversible_heat_j: f64,
+    pub pinning_heat_j: f64,
+    pub viscous_heat_j: f64,
     /// Endpoint-integration loss, never deposited as thermal energy [J].
     pub numerical_dissipation_j: f64,
     /// H_new dot the actual FE curl increment, integrated over this cell [J].
@@ -116,7 +120,10 @@ pub struct PlanarHystereticCellStep {
 pub struct PlanarHystereticStep {
     pub cells: Vec<PlanarHystereticCellStep>,
     pub stored_energy_change_j: f64,
+    /// Total physical constitutive heat: pinning_heat_j + viscous_heat_j [J].
     pub irreversible_heat_j: f64,
+    pub pinning_heat_j: f64,
+    pub viscous_heat_j: f64,
     pub numerical_dissipation_j: f64,
     pub impressed_current_work_j: f64,
     pub boundary_work_j: f64,
@@ -124,9 +131,9 @@ pub struct PlanarHystereticStep {
     pub field_work_j: f64,
     /// Work absorbed by an optional coupled positive operator. Zero for the
     /// static entry points. The induction owner independently identifies this
-    /// pairing with its spatial Joule heat; it is not additional pinning heat.
+    /// pairing with its spatial Joule heat; it is not constitutive heat.
     pub quadratic_work_j: f64,
-    /// Supplied endpoint work minus storage change, pinning heat, numerical
+    /// Supplied endpoint work minus storage change, constitutive heat, numerical
     /// dissipation and coupled-operator work. A residual norm alone is insufficient.
     pub energy_residual_j: f64,
     pub nonlinear: NonlinearMagneticReport,
@@ -310,6 +317,7 @@ impl PlanarHystereticMagnetostatics {
         references: &[usize],
         controls: VectorHysteresisControls,
         quadratic: Option<&dyn PositiveQuadratic>,
+        duration_s: Option<f64>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Evaluation> {
         let mut evaluation = Evaluation {
@@ -331,22 +339,31 @@ impl PlanarHystereticMagnetostatics {
                 )
             });
             let b = [finite(gradient[1])?, finite(-gradient[0])?];
-            let step = self.materials[triangle]
-                .law()
-                .candidate_flux_density(
+            let law = self.materials[triangle].law();
+            let step = match duration_s {
+                Some(duration_s) => law.candidate_flux_density_timed(
+                    &previous.cell_states[triangle],
+                    [b[0], b[1], 0.0],
+                    duration_s,
+                    controls,
+                    cancelled,
+                ),
+                None => law.candidate_flux_density(
                     &previous.cell_states[triangle],
                     [b[0], b[1], 0.0],
                     controls,
                     cancelled,
-                )
-                .map_err(|e| history_error(triangle, e))?;
+                ),
+            }
+            .map_err(|e| history_error(triangle, e))?;
             let h = step.state.field_a_m();
             let nu = step
                 .incremental_reluctivity_m_h()
                 .map_err(|e| history_error(triangle, e))?;
             let volume = self.volumes_m3[triangle];
-            // Relative to accepted storage; this constant changes neither H
-            // nor the minimizer and retains small increments around a bias.
+            // The native potential includes half the physical viscous heat;
+            // using its full heat would give the wrong residual and tangent.
+            // Subtracting accepted storage retains small increments about bias.
             let density = step
                 .incremental_potential_change_j_m3()
                 .map_err(|e| history_error(triangle, e))?;
@@ -476,6 +493,7 @@ impl PlanarHystereticMagnetostatics {
             boundary_potential_wb_m,
             initial_potential_wb_m,
             None,
+            None,
             controls,
             cancelled,
         )
@@ -484,6 +502,8 @@ impl PlanarHystereticMagnetostatics {
     /// Shared field/history solve. A positive coupled operator must reference
     /// the accepted A, and this initial induction rung holds boundary traces
     /// fixed. Its work is admitted here and independently closed by its owner.
+    /// A transient owner supplies its actual positive duration so every Newton
+    /// trial retains the same accepted memory and intrinsic switching rate.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn candidate_loaded<'a>(
         &'a self,
@@ -492,10 +512,22 @@ impl PlanarHystereticMagnetostatics {
         boundary_potential_wb_m: &[(usize, f64)],
         initial_potential_wb_m: &[f64],
         quadratic: Option<&dyn PositiveQuadratic>,
+        duration_s: Option<f64>,
         controls: PlanarHystereticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarHystereticCandidate<'a>> {
         poll(cancelled)?;
+        if duration_s.is_some_and(|dt| !dt.is_finite() || dt <= 0.0)
+            || (duration_s.is_none()
+                && self
+                    .materials
+                    .iter()
+                    .any(|material| material.law().is_rate_dependent()))
+        {
+            return Err(invalid(
+                "finite-rate magnetic history requires a positive physical interval",
+            ));
+        }
         if !std::ptr::eq(self, previous.problem)
             || !controls.energy_tolerance_j.is_finite()
             || controls.energy_tolerance_j <= 0.0
@@ -539,6 +571,7 @@ impl PlanarHystereticMagnetostatics {
                     &references,
                     controls.material,
                     quadratic,
+                    duration_s,
                     cancelled,
                 )
             },
@@ -548,6 +581,8 @@ impl PlanarHystereticMagnetostatics {
             cells: Vec::with_capacity(self.materials.len()),
             stored_energy_change_j: 0.0,
             irreversible_heat_j: 0.0,
+            pinning_heat_j: 0.0,
+            viscous_heat_j: 0.0,
             numerical_dissipation_j: 0.0,
             impressed_current_work_j: 0.0,
             boundary_work_j: 0.0,
@@ -569,10 +604,14 @@ impl PlanarHystereticMagnetostatics {
                 finite(volume * h[0].mul_add(after[0] - before[0], h[1] * (after[1] - before[1])))?;
             let change = finite(volume * native.energy_change_j_m3)?;
             let heat = finite(volume * native.irreversible_heat_j_m3)?;
+            let pinning = finite(volume * native.pinning_heat_j_m3)?;
+            let viscous = finite(volume * native.viscous_heat_j_m3)?;
             let numerical = finite(volume * native.numerical_dissipation_j_m3)?;
             let residual = finite(work - change - heat - numerical)?;
             step.stored_energy_change_j = finite(step.stored_energy_change_j + change)?;
             step.irreversible_heat_j = finite(step.irreversible_heat_j + heat)?;
+            step.pinning_heat_j = finite(step.pinning_heat_j + pinning)?;
+            step.viscous_heat_j = finite(step.viscous_heat_j + viscous)?;
             step.numerical_dissipation_j = finite(step.numerical_dissipation_j + numerical)?;
             step.field_work_j = finite(step.field_work_j + work)?;
             energy = finite(volume.mul_add(native.state.stored_energy_j_m3(), energy))?;
@@ -581,6 +620,8 @@ impl PlanarHystereticMagnetostatics {
                 volume_m3: volume,
                 stored_energy_change_j: change,
                 irreversible_heat_j: heat,
+                pinning_heat_j: pinning,
+                viscous_heat_j: viscous,
                 numerical_dissipation_j: numerical,
                 field_work_j: work,
                 energy_residual_j: residual,

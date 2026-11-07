@@ -425,9 +425,10 @@ component; disconnected or relabeled electrical regions refuse.
 The shared variational field solve adds `C_sigma delta A/dt` to both residual
 and tangent and half its increment-work pairing to the objective. Every Newton
 trial still starts from the SAME accepted magnetic history. The complete account
-is `delta W + Q_pinning + Q_Joule + D_numerical = W_supplied`. Per-triangle
-pinning heat and exact nodal Ohmic E/J and heat remain distinct. The original
-material endpoint remainder is numerical loss, never deposited as heat.
+is `delta W + Q_pinning + Q_viscous + Q_Joule + D_numerical = W_supplied`.
+Per-triangle dry pinning, intrinsic viscous switching, and exact nodal Ohmic E/J
+and heat remain distinct. The original material endpoint remainder is numerical
+loss, never deposited as heat.
 The assembled quadratic work must independently agree with the spatial Joule
 integral within the explicit magnetic work budget.
 
@@ -438,6 +439,32 @@ magnetic fit is rechecked across that explicitly source-supported interval.
 Changed fitted coefficients, nonthermal coordinates or source identities refuse.
 Initial algebraic constraints use the accepted constitutive H directly, without
 equilibrating away remanence or introducing an initialization impulse.
+
+An explicit `ResolvedVectorHysteresis::from_isotropic_source_with_viscosity`
+fit selects one original nonnegative coefficient `eta` [m s/H] per branch.
+The field passes its owned positive `dt` into the native B-driven return map:
+each branch adds `eta*|delta polarization|^2/(2dt)` to the incremental objective,
+while physical switching heat is the FULL `eta*|delta polarization|^2/dt`.
+The original magnetic storage and consistent inverse permeability remain the
+field's energy and tangent owners. An explicit all-zero profile follows the
+existing rate-independent kernel exactly; clockless statics and its authored
+path continuation refuse active kinetics instead of inventing a timescale.
+
+The native winding circuit already delegates every frozen-history terminal
+trial to this induction owner, so its accepted interval also controls intrinsic
+switching without a second circuit or field solver. Existing finite thermal
+consumers deposit `irreversible_heat_j = pinning_heat_j + viscous_heat_j` once,
+alongside independently resolved Joule heat. Kinetic coefficients retain the
+same original source card, query, receipt continuity and explicit temperature
+support as the other magnetic coefficients. They must describe intrinsic
+switching independently of the eddy-current dissipation already resolved here;
+conductivity or a total measured core-loss curve does not supply that fit.
+
+`tests/hysteretic_eddy/rate.rs` adds independent scalar-kinetic/P1 conducting
+relaxation accounts, intrinsic switching without a resolved conductor, exact
+zero-viscosity recovery, and clockless/failure/cancellation replay cases. These
+manufactured fits verify the model's numerical contract, not experimental
+material authority.
 
 Four G1/G3/G4 regressions cover independent scalar-play/P1 relaxation with
 remanence, the exact branchless backward-Euler limit, balanced driven nested
@@ -464,12 +491,14 @@ The original planar P1/FEEC Newton solver is shared with reversible magnetics.
 For every global trial it evaluates the native B-driven vector return map from
 the SAME accepted history, uses its consistent inverse permeability rotated
 into the gradient frame, and minimizes the incremental potential
-`delta W + Q`. Minimizing stored energy alone would omit pinning and select
-the wrong field. Shape gradients, physical cell volumes and immutable source
+`delta W + Q_pinning + Q_viscous/2`; the static rate-independent limit has no
+viscous term. Minimizing stored energy alone would omit pinning, while using
+full viscous heat would double its constitutive resistance. Shape gradients,
+physical cell volumes and immutable source
 preparation are retained outside the Newton loop.
 
 Immutable candidates contain actual `curl(A)`, all native material states,
-per-cell stored-energy changes and physical pinning heat, and a separately
+per-cell stored-energy changes, separate physical pinning/viscous heat, and a separately
 identified nonnegative endpoint numerical remainder. Impressed-current work
 and prescribed-boundary reaction work are both included. Acceptance independently
 checks the full field residual, local constitutive flux residuals, the sum of

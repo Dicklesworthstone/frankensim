@@ -14,7 +14,7 @@ use super::{
 };
 use crate::circuit_enthalpy::{
     CircuitThermalCoefficients,
-    eddy::hysteretic::deposit_pinning_heat,
+    eddy::hysteretic::deposit_constitutive_heat,
     material::{CellResistor, MaterialNetwork, MaterialNetworkSample},
 };
 use fs_em::{
@@ -97,7 +97,7 @@ impl WindingThermalNetwork<'_> {
     /// fitted magnetic coefficients must remain constant on their source-admitted
     /// temperature intervals. A dissipating magnetic triangle needs an explicit
     /// finite receiver, including electrically insulating material. Core eddy,
-    /// stranded copper, native graph and magnetic pinning heat are deposited once.
+    /// stranded copper, native graph and magnetic pinning/viscous heat are deposited once.
     /// Backward-Euler numerical loss participates only in the work balance.
     ///
     /// Geometry and mapped wholly solid, constant-density caloric charts remain
@@ -464,7 +464,7 @@ impl WindingThermalNetwork<'_> {
                     dt,
                     checkpoint,
                 )?;
-                deposit_pinning_heat(
+                deposit_constitutive_heat(
                     &step.field.magnetic.cells,
                     &routes.magnetic,
                     dt,

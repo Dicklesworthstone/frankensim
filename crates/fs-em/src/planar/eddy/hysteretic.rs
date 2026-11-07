@@ -3,10 +3,12 @@
 //! Backward Euler minimizes the original frozen-history magnetic potential
 //! plus `delta A . C_sigma delta A / (2 dt) - load . delta A`. The existing
 //! floating-conductor projection, Newton/FEEC/checked-CG solve and exact P1
-//! Joule integral retain ownership. No phenomenological core-loss term is added.
+//! Joule integral retain ownership. Separately source-selected intrinsic branch
+//! viscosities use this owner's actual dt in the same variational solve; their
+//! fitted loss must exclude the eddy currents already resolved here.
 //!
 //! Every trial starts from the same accepted vector polarizations. The physical
-//! balance is `delta W + Q_pinning + Q_Joule + D_numerical = W_supplied`.
+//! balance is `delta W + Q_pinning + Q_viscous + Q_Joule + D_numerical = W_supplied`.
 //! The endpoint numerical remainder is never heat. This is first-order,
 //! fixed-geometry, isotropic magnetoquasistatics with fixed boundary traces and
 //! explicit balanced impressed currents; no motion, terminal circuit, changing
@@ -116,8 +118,10 @@ pub struct HystereticEddyStep {
     pub stored_before_j: f64,
     pub stored_after_j: f64,
     pub joule_heat_j: f64,
+    /// Total pinning plus intrinsic viscous heat; the magnetic receipt retains
+    /// both channels separately for every cell and for the full field.
     pub hysteresis_heat_j: f64,
-    /// Q_Joule + Q_pinning, deposited once by the finite thermal receiver.
+    /// Q_Joule + Q_pinning + Q_viscous, deposited once by the finite receiver.
     pub heat_j: f64,
     pub supplied_work_j: f64,
     /// Endpoint integration loss, excluded from heat_j and thermal deposition.
@@ -297,6 +301,7 @@ impl<'m> PlanarHystereticEddy<'m> {
                 &self.boundary,
                 self.potential_wb_m(),
                 Some(&quadratic),
+                Some(dt),
                 limits.magnetic,
                 cancelled,
             )?
@@ -342,7 +347,7 @@ impl<'m> PlanarHystereticEddy<'m> {
             || energy_residual_j.abs() > limits.magnetic.energy_tolerance_j
         {
             return Err(EddyError::Balance(
-                "hysteretic storage, pinning heat, spatial Joule heat, numerical loss and supplied work do not close",
+                "hysteretic storage, constitutive heat, spatial Joule heat, numerical loss and supplied work do not close",
             ).into());
         }
         let step = HystereticEddyStep {

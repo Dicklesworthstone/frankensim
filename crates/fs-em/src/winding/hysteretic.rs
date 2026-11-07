@@ -3,15 +3,16 @@
 //! Each terminal trial starts from the SAME accepted A and every branch
 //! polarization. The existing nonlinear terminal solver pairs endpoint current
 //! with `F^T delta(A)/dt + L_end delta(I)/dt + R I`; the original field owner
-//! supplies remanence, saturation, pinning loss and resolved core eddy diffusion.
+//! supplies remanence, saturation, pinning loss, source-selected intrinsic
+//! switching rates and resolved core eddy diffusion.
 //! No effective inductance, scalar-memory replacement or empirical loss map is
 //! substituted. Private native-port work cancels once against actual field work.
 //!
 //! The fixed planar geometry contains stationary, disjoint stranded windings.
 //! Magnetic fits remain constant on their source-admitted temperature support;
 //! source-bound copper/core conductivity and graph resistance may refresh.
-//! Physical pinning and Joule heat stay separate from backward-Euler numerical
-//! loss. Motion, solid current injection, changing magnetic fits and physical
+//! Physical pinning, viscous and Joule heat stay separate from backward-Euler
+//! numerical loss. Motion, solid current injection, changing magnetic fits and physical
 //! validation remain outside this estimated, default-off rung.
 
 use super::{
@@ -364,7 +365,7 @@ impl<'m> HystereticWindingCircuit<'m> {
     /// are held over the interval. Source refresh preserves the same fitted
     /// magnetic law and does not erase pinning memory between terminal trials.
     ///
-    /// This first-order composition returns all spatial copper and pinning
+    /// This first-order composition returns all spatial copper and constitutive
     /// heat once. End/field numerical loss is never physical heating. A thermal
     /// receiver must accept its own corresponding caloric candidate atomically.
     pub fn step_to_candidate(

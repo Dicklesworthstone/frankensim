@@ -51,6 +51,9 @@ use fs_solver::{CheckedCgConfig, NewtonKrylovConfig};
 use fs_thermal::enthalpy::*;
 use std::sync::Arc;
 
+#[path = "hysteretic_eddy_enthalpy/rate.rs"]
+mod rate;
+
 const DEPTH: f64 = 0.3;
 const MU: f64 = 0.01;
 const CHI: f64 = 0.2;
@@ -213,6 +216,13 @@ fn controls() -> CircuitEnthalpySolve {
     }
 }
 fn problem(card: &MaterialCard, paired: bool) -> PlanarHystereticMagnetostatics {
+    problem_with_viscosity(card, paired, None)
+}
+fn problem_with_viscosity(
+    card: &MaterialCard,
+    paired: bool,
+    viscosity: Option<PropertyKey>,
+) -> PlanarHystereticMagnetostatics {
     let (vertices, faces) = if paired {
         (
             vec![
@@ -249,7 +259,15 @@ fn problem(card: &MaterialCard, paired: bool) -> PlanarHystereticMagnetostatics 
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
-    let source = ResolvedVectorHysteresis::from_isotropic_source(source).unwrap();
+    let source = match viscosity {
+        Some(key) => ResolvedVectorHysteresis::from_isotropic_source_with_viscosity(
+            source,
+            vec![key],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap(),
+        None => ResolvedVectorHysteresis::from_isotropic_source(source).unwrap(),
+    };
     let materials = vec![source; faces.len()];
     PlanarHystereticMagnetostatics::new(
         TriComplex2::from_indexed_triangles(
