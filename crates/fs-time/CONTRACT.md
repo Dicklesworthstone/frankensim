@@ -326,6 +326,29 @@ where claimed below.
   and refusals. Fixed topology, ratios, rest phases and coefficients are
   required; rigid gearing, backlash, clutch friction, gear-tooth/material
   validity, thermal allocation and parameter-change work are not inferred.
+- `RotorBank::gear_train` prepares independent fixed signed gear ratios between
+  original relative shafts. Each connected component retains one free shaft
+  momentum, with the constrained axial modes condensed into the original cached
+  3x3 gyrostat tensor. Counterrotation and nonparallel axes retain full carrier
+  recoil; no shaft speed or reaction torque is prescribed by the ratio itself.
+  The constraint graph must be a forest: redundant and contradictory cycles,
+  invalid shafts, zero ratios and unrepresentable composed ratios refuse.
+  Preparation and steps use O(N+E) work, except the native 3x3 preparation;
+  the hot path allocates nothing and performs no factorization or iteration.
+  Explicit simultaneous engagement preserves total momentum and records its
+  nonnegative original kinetic loss. Retained free/driven motion uses one native
+  gyrostat drift between reciprocal endpoint impulses, integrating one shared
+  phase per gear group. Receipts separate authored drive work, uniquely resolved
+  mesh impulses, ideal reaction work and the native drift/reconstruction error.
+  Signed-step reversal, carrier/spatial momentum, the original coaxial kinetic
+  solution, and second-order convergence to an independent nonparallel
+  four-coordinate Euler/quaternion reference are tested in
+  `tests/lie_rotor_geared.rs`, including cancellation of equal counterrotating
+  spins, constraint-order/orientation parity and cyclic-ratio refusals.
+  This fixed-axis, fixed-inertia ideal gearing does not infer teeth, backlash,
+  friction, finite capacity, changing-ratio work, a thermal destination or an
+  adjoint; engagement does not reset tooth phase. Timestep refinement remains
+  necessary for gyroscopic phase and finite-step energy behavior.
 - `RotorBank::lock_mode(mask)` prepares retained ideal rotor/carrier shaft
   locks with `I_mode=I_reduced+sum_selected J_i a_i a_i^T`.
   Engagement applies simultaneous original-owner impulses with complete

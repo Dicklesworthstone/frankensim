@@ -44,6 +44,13 @@ pub use clutch::{
     DryClutchStepper,
 };
 
+#[path = "rotors/geared.rs"]
+mod geared;
+pub use geared::{
+    GearConstraint, GearEngagement, GearTrain, GearedRotorDrift, GearedRotorImpulse,
+    GearedRotorStep,
+};
+
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
 pub const MAX_AXIAL_ROTORS: usize = 64;
 
