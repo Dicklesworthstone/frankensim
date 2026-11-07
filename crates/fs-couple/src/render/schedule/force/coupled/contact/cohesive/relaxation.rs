@@ -23,6 +23,9 @@ use fs_material::cohesive::relaxation::{
 };
 use fs_math::dd::Dd;
 
+/// Explicit original-source temperature updates at held native state.
+pub mod temperature;
+
 /// Accepted native motion and original-area adhesive work for one timestep.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViscoelasticBondModalFrame {

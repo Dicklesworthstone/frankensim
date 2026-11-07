@@ -12,6 +12,9 @@ use fs_material::state_point::MaterialPropertySelection;
 #[path = "../viscoelastic_bond_source/common.rs"]
 mod material;
 
+#[path = "relaxation/temperature.rs"]
+mod temperature;
+
 fn source() -> ResolvedViscoelasticBond {
     resolve_viscoelastic_bond(
         &material::card(false, false),

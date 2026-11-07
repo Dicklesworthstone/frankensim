@@ -5216,3 +5216,24 @@ weighted faces, second-order continuous-reference refinement for all geometries,
 shared opposing exchange, algebraic crystal buffering, and late stage/source/
 budget refusals. Rust formatting and independent reference calculations passed;
 the new native integration tests remain unrun.
+
+
+## Native relaxing-bond temperature continuation (G2)
+
+The native intact adhesive owner accepts an explicit temperature successor only
+through the original source gate. Ordered surfaces, card identity, pinned
+coefficient claims, thickness, branch indexing, nonthermal coordinates and
+runtime limits remain fixed. At held actual jump, the material owner retains
+branch strains, past mechanical work/heat and elapsed time. Changed moduli
+supply signed parameter work; changing relaxation times alone supplies none.
+Prepared ramp coefficients are rebuilt for the existing native timestep.
+
+`apply_temperature_successor_with_admission` stages that parameter-work account
+before publishing the source, retained point and prepared coefficients together.
+Native displacement, velocity, sample count and the last mechanical frame stay
+at their accepted values. The separate temperature report retains constitutive
+storage increments even beside large unchanged preload and admits no invented
+heat or thermal expansion. The next native timestep uses the refreshed law and
+the same branch memory. G2 regressions in
+`tests/cohesive_modal/relaxation/temperature.rs` cover actual continued body
+motion, source/receiver refusal and late cancellation with replay.
