@@ -26,7 +26,8 @@
     "Overblown notes: none are posted. Only the paper's measured operating points were rendered, so where each register begins and any hysteresis are unmapped",
     "Pages for E5, F#5, A5 and C#6: they appear only in the scale and melody, on cards with the same edits as the posted four, without the swing limit",
     "The flue's true taper, the pocket's shape, the thin hole wall, hole shape and undercut, and the bore's narrowing at the wedge. Where the wedge tip sits in the wall isn't published, and the cards use one end of that bracket",
-    "A measured jet card: these cards use the repository's interim one"
+    "A measured jet card: these cards use the repository's interim one",
+    "Openings that hear each other: the open holes and the end radiate apart. Tried with every opening hearing every other free-field, after the travel time between them (`outlet_mutual free-field`), which is passive here because the side holes carry baffled loads, the row lowered B5, D6 and G5 by 1.74, 0.13 and 1.81 c on the raw renders. All three already sit flat of the recording (16.2, 1.41 and 42.5 c), so the gap grew, to 17.9, 1.54 and 44.3 c. The mean miss of H2 to H12 re H1 against the recording's held part moved 7.85 to 7.81 dB on B5, 15.105 to 15.114 on D6 and 11.39 to 11.12 on G5. The pages and the scale and melody stops keep the openings apart; D5, with only the end open, has nothing to pair"
   ],
   "blocked": null,
   "beads": [
