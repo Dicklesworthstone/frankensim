@@ -19,6 +19,9 @@ use crate::creep::{CreepEnergy, CreepLaw, CreepTolerances, NortonCreep};
 use crate::plastic::J2Plasticity;
 use crate::plastic::chaboche::ChabocheJ2;
 use crate::plastic::energy::{EnergyError, EnergyTolerances, IncrementEnergy, StoredEnergy};
+use crate::plastic::hill::Hill48;
+use crate::plastic::hill::oriented::OrientedHill48;
+use crate::plastic::hill::source::ResolvedHill48;
 use crate::plastic::rate::{LinearOverstressJ2, PowerLawOverstressJ2, VoceOverstressJ2};
 use crate::plastic::voce::VoceJ2;
 use crate::{MaterialError, SmallStrainLaw, Voigt};
@@ -97,6 +100,33 @@ native_energy!(
         .validate_overstress_history(strain, state),
     |law| Some(law.duration_s())
 );
+
+// Hill's checked account owns incoming-history admission and the complete
+// local-axis history. The oriented owner transforms work-conjugate stress and
+// strain while retaining that history; no J2 projection or second return map
+// belongs at the section boundary.
+macro_rules! native_hill_energy {
+    ($law:ty) => {
+        impl NativeSectionEnergyLaw for $law {
+            fn native_energy_increment(
+                &self,
+                old_strain: &Voigt,
+                old_state: &Self::State,
+                strain: &Voigt,
+                tolerances: EnergyTolerances,
+            ) -> Result<(Self::State, Voigt, IncrementEnergy), MaterialError> {
+                let value = self
+                    .advance_with_energy(old_strain, old_state, strain, tolerances)
+                    .map_err(|e| MaterialError::State {
+                        what: e.to_string(),
+                    })?;
+                Ok((value.response.state, value.response.stress_pa, value.energy))
+            }
+        }
+    };
+}
+native_hill_energy!(Hill48);
+native_hill_energy!(OrientedHill48);
 
 // These explicit isothermal implementations keep thermal expansion/entropy
 // out of the mechanical-only account. Primary strain hardening is kinetic:
@@ -230,7 +260,7 @@ fn creep_energy(
     }
 }
 
-macro_rules! native_creep_source {
+macro_rules! native_source_energy {
     ($law:ty) => {
         impl NativeSectionEnergyLaw for $law {
             fn physical_duration_s(&self) -> Option<f64> {
@@ -250,10 +280,11 @@ macro_rules! native_creep_source {
         }
     };
 }
-native_creep_source!(ResolvedNortonCreep);
-native_creep_source!(ResolvedNortonJ2);
-native_creep_source!(ResolvedRecoveringNorton);
-native_creep_source!(ResolvedRecoveringNortonJ2);
+native_source_energy!(ResolvedNortonCreep);
+native_source_energy!(ResolvedNortonJ2);
+native_source_energy!(ResolvedRecoveringNorton);
+native_source_energy!(ResolvedRecoveringNortonJ2);
+native_source_energy!(ResolvedHill48);
 
 impl<const N: usize> NativeSectionEnergyLaw for ChabocheJ2<N> {
     fn native_energy_increment(

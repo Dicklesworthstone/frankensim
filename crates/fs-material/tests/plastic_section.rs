@@ -396,3 +396,5 @@ mod energy;
 mod thermal;
 #[path = "plastic_section/creep.rs"]
 mod creep;
+#[path = "plastic_section/hill.rs"]
+mod hill;

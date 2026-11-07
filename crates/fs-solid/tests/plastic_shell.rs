@@ -478,3 +478,6 @@ mod drilling;
 
 #[path = "plastic_shell/contact.rs"]
 mod contact;
+
+#[path = "plastic_shell/hill.rs"]
+mod hill;
