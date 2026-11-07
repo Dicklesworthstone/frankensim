@@ -15,16 +15,25 @@
 //!
 //! All waves share one vacuum wavelength and the declared source-plane
 //! curvature. This clear-pupil, scalar, paraxial query does not make the
-//! radiance path tracer coherent, resolve polarization, integrate a shutter,
+//! radiance path tracer coherent, resolve polarization,
 //! or infer phases from arbitrary scene points. Finite rectangular pixels
-//! integrate the same field with bandwidth-guided positive quadrature. See TU Delft,
+//! integrate the same field with bandwidth-guided positive quadrature. The
+//! separate spectral exposure query retains cross-frequency beats over an
+//! actual shutter and the physical sensor plane's common Fresnel phase. See TU Delft,
 //! *Interference and Coherence*, for field versus intensity superposition:
 //! <https://interactivetextbooks.tudelft.nl/tn2421/content/Chap5_Interference/InterferenceCoherence_2022_01Clean.html>.
 
 use super::{CameraError, PhysicalCamera, PreparedDiffractionAmplitude};
 use fs_math::{c64::C64, dd::Dd};
 
+mod exposure;
 mod pixel;
+pub use exposure::{
+    CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
+    CoherentDiffractionExposureSample, CoherentDiffractionPixelExposure,
+    CoherentDiffractionShutter, CoherentDiffractionTone, MAX_COHERENT_DIFFRACTION_TONES,
+    PreparedCoherentDiffractionExposure,
+};
 pub use pixel::{
     CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,
 };
@@ -101,6 +110,14 @@ pub enum CoherentDiffractionError {
     InvalidPixel,
     /// The maximum subcell intensity phase span is outside `(0, 1]` radians.
     InvalidPixelResolution,
+    /// A spectral line needs a finite, strictly positive vacuum frequency.
+    InvalidFrequency,
+    /// Sensor distance must be positive and agree with a declared lens conjugate.
+    InvalidSensorPlane,
+    /// Every tone must declare the same ordered covariance-factor identities.
+    InconsistentCoherenceFactors,
+    /// The original analytic shutter kernel refused its clock or contraction.
+    Shutter(fs_fft::harmonic_window::WindowError),
     /// A preparation count exceeds the caller's explicit bound.
     Limit {
         /// Quantity whose admitted count was exceeded.
@@ -125,6 +142,11 @@ impl std::error::Error for CoherentDiffractionError {}
 impl From<CameraError> for CoherentDiffractionError {
     fn from(value: CameraError) -> Self {
         Self::Camera(value)
+    }
+}
+impl From<fs_fft::harmonic_window::WindowError> for CoherentDiffractionError {
+    fn from(value: fs_fft::harmonic_window::WindowError) -> Self {
+        Self::Shutter(value)
     }
 }
 

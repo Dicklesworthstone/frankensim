@@ -25,11 +25,15 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
-    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionPixel,
+    CoherentDiffractionError, CoherentDiffractionExposureLimits,
+    CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
+    CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
-    CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
-    LayeredCameraRay, LayeredDiffraction, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
-    PupilCoherenceFactor, SpectralCameraRay,
+    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentPupilIllumination,
+    CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction, LayeredCameraRay,
+    LayeredDiffraction, MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT,
+    PreparedCoherentDiffraction, PreparedCoherentDiffractionExposure, PupilCoherenceFactor,
+    SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]
 pub use diffraction::{DispersiveThinLens, ThinLensElement};

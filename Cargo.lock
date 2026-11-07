@@ -2568,6 +2568,7 @@ dependencies = [
  "fs-conduction",
  "fs-evidence",
  "fs-exec",
+ "fs-fft",
  "fs-ga",
  "fs-geom",
  "fs-img",

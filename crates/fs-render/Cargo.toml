@@ -17,6 +17,7 @@ fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-conduction = { path = "../fs-conduction", optional = true }
 fs-evidence = { path = "../fs-evidence", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
+fs-fft = { path = "../fs-fft", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
 fs-img = { path = "../fs-img", optional = true }
 fs-ivl = { path = "../fs-ivl", optional = true }
@@ -50,7 +51,7 @@ fs-thermochem = { path = "../fs-thermochem" }
 # the recorded adversarial, workspace, nested-Wasm, and four-quadrant gates.
 # The wider SIMD BVH and ray-rate claims remain separate perf-evidence work.
 default = ["chart-backends"]
-chart-backends = ["dep:fs-blake3", "dep:fs-evidence", "dep:fs-exec", "dep:fs-geom", "dep:fs-ivl", "dep:fs-rep-nurbs"]
+chart-backends = ["dep:fs-blake3", "dep:fs-evidence", "dep:fs-exec", "dep:fs-fft", "dep:fs-geom", "dep:fs-ivl", "dep:fs-rep-nurbs"]
 # [F]-gated per the Ambition-Tag rule: volumetric media ship disabled
 # until the live-field progressive lane lands in perf-CI.
 volumes = ["dep:fs-rand"]

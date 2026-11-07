@@ -3885,6 +3885,58 @@ evaluation. The runnable
 `examples/coherent_pupil.rs` emits a CSV comparison of coherent, partially
 coherent and incoherent illumination with the same pupil and isolated powers.
 
+### Finite-exposure coherent camera pixels
+
+`PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored
+positive-frequency `CoherentDiffractionTone` spectrum, an explicit sensor axial
+distance and a uniform `CoherentDiffractionShutter`. Frequencies use a shared
+pupil-centre clock and `exp(-i*2*pi*f*t)`. Each line independently reuses the
+original pupil at vacuum wavelength c/f, including its signed defocus, physical
+medium and material-band admission. Equal frequencies coalesce as DD fields
+before any power or cross moment. Covariance column r names the same source
+coefficient at every frequency; absent contributions use empty wave slices.
+Distinct columns remain uncorrelated. Matching wavelengths or nearby spectral
+lines never establish source coherence automatically.
+
+The measured quantity is the squared analytic scalar optical field, preserving
+the original sqrt(W) amplitude and monochromatic power normalization. It is
+cycle-averaged photodetection, not subcycle real-field measurement; optical
+sum-frequency terms and detector/material nonlinear response are excluded.
+The existing `fs-fft` difference-frequency kernel integrates every cross term
+analytically over the actual shutter. Its real-peak normalization is explicitly
+removed for analytic-field power. Computation does not step through optical
+carrier cycles or beat periods, even for long exposures.
+
+At the physical sensor coordinate x=d*theta, the field includes the common
+Fresnel phase `exp(i*k_f*d*(1+|theta|²/2))`. Longitudinal propagation delay and
+quadratic detector chirp cancel for one frequency but cannot be omitted across
+frequencies. They use the original medium phase index and retained DD frequency
+differences. Source-to-pupil and additional material/lens piston phases remain
+authored. A physical focal-length camera enforces its original sensor conjugate;
+an FOV-only camera explicitly declares its otherwise unknown sensor distance.
+This is the same scalar paraxial model, with source/observation tangent norm at
+most 0.1, and does not enable coherent scene transport or vector diffraction.
+
+`PreparedCoherentDiffractionExposure::observe` returns shutter-average power
+density. `integrate_pixel` returns average collected power and integrated joules
+using the original positive spatial Gauss rule. Resolution includes both the
+shortest physical wavelength's pupil bandwidth and the frequency-dependent
+sensor-chirp gradient across that pixel. It is a bandwidth-guided resolution,
+not a quadrature or optical error certificate. Original pupil evaluations,
+spatial sample counts and total frequency-pair contractions are preflighted.
+The spectrum has at most 64 authored tones; all source/factor counts are also
+caller-bounded. Cached temporal kernels and pupil transfers make observations
+allocation-free with bounded scratch and cancellation checks. Negative or
+unrepresentable contracted powers are refused, never silently clipped; DD
+moments do not certify relative accuracy at arbitrary interference nulls.
+
+Focused tests compare analytic beat visibility, shutter-clock and sensor-delay
+phase, independent wavelength/defocus transfers, a separable square-pupil pixel
+integral with strong detector chirp, a positive sub-ulp destructive-beat energy,
+shared versus independent spectral covariance columns, monochromatic power and
+energy normalization, equal-frequency weak residuals, spatial refinement,
+physical-conjugate refusal, work preflight and cancellation/reuse.
+
 ### Source-depth-resolved diffraction across separated planes
 
 `PhysicalCamera::with_layered_diffraction(LayeredDiffraction)` admits one to

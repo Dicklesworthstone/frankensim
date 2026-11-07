@@ -42,10 +42,13 @@ mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 pub use coherent::{
-    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionPixel,
+    CoherentDiffractionError, CoherentDiffractionExposureLimits,
+    CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
+    CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
-    CoherentPupilIllumination, CoherentPupilWave, MAX_COHERENT_PUPIL_TANGENT,
-    PreparedCoherentDiffraction, PupilCoherenceFactor,
+    CoherentDiffractionShutter, CoherentDiffractionTone, CoherentPupilIllumination,
+    CoherentPupilWave, MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT,
+    PreparedCoherentDiffraction, PreparedCoherentDiffractionExposure, PupilCoherenceFactor,
 };
 #[cfg(feature = "tracer")]
 pub use dispersive::{DispersiveThinLens, ThinLensElement};

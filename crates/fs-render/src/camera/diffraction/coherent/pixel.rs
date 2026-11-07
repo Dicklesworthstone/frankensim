@@ -144,35 +144,10 @@ impl PreparedCoherentDiffraction<'_, '_> {
         poll(&mut cancelled)?;
         let (subdivisions, quadrature_samples, pupil_evaluations) =
             self.pixel_work(pixel, limits)?;
-        let mut power = [Dd::ZERO; 2];
-        if quadrature_samples != 0 {
-            let step: [Dd; 2] = std::array::from_fn(|axis| {
-                Dd::from_f64(pixel.extent_tangent[axis]) / Dd::from_f64(subdivisions[axis] as f64)
-            });
-            let cell_area = Dd::from_f64(pixel.area_tangent)
-                / Dd::from_f64(subdivisions[0] as f64)
-                / Dd::from_f64(subdivisions[1] as f64);
-            for y in 0..subdivisions[1] {
-                for x in 0..subdivisions[0] {
-                    for &(ny, wy) in &GAUSS {
-                        for &(nx, wx) in &GAUSS {
-                            poll(&mut cancelled)?;
-                            let at = std::array::from_fn(|axis| {
-                                let (index, node) = if axis == 0 { (x, nx) } else { (y, ny) };
-                                (Dd::from_f64(pixel.minimum_tangent[axis])
-                                    + step[axis]
-                                        * (Dd::from_f64(index as f64) + Dd::from_f64(node)))
-                                .to_f64()
-                            });
-                            let (_, mean, fluctuations) = self.field_moments(at, &mut cancelled)?;
-                            let weight = cell_area * Dd::from_f64(wx) * Dd::from_f64(wy);
-                            power[0] = power[0] + weight * mean;
-                            power[1] = power[1] + weight * fluctuations;
-                        }
-                    }
-                }
-            }
-        }
+        let power = integrate_moments(pixel, subdivisions, &mut cancelled, |at, cancelled| {
+            let (_, mean, fluctuations) = self.field_moments(at, cancelled)?;
+            Ok([mean, fluctuations])
+        })?;
         let result = CoherentDiffractionPixelPower {
             mean_power_w: rounded(power[0])?,
             fluctuation_power_w: rounded(power[1])?,
@@ -190,55 +165,108 @@ impl PreparedCoherentDiffraction<'_, '_> {
         pixel: CoherentDiffractionPixel,
         limits: CoherentDiffractionPixelLimits,
     ) -> Result<([usize; 2], usize, usize), CoherentDiffractionError> {
-        if !limits.maximum_phase_span_rad.is_finite()
-            || limits.maximum_phase_span_rad <= 0.0
-            || limits.maximum_phase_span_rad > 1.0
-        {
-            return Err(CoherentDiffractionError::InvalidPixelResolution);
-        }
-        if self.waves == 0 {
-            return Ok(([0; 2], 0, 0));
-        }
-        let over_samples = || CoherentDiffractionError::Limit {
-            quantity: "pixel quadrature samples",
-            requested: usize::MAX,
-            maximum: limits.maximum_samples,
-        };
         let maximum_step = self.pupil.scale * (0.5 * limits.maximum_phase_span_rad);
-        if maximum_step <= 0.0 {
-            return Err(CoherentDiffractionError::Unrepresentable);
-        }
-        let mut subdivisions = [0; 2];
-        for (axis, count) in subdivisions.iter_mut().enumerate() {
-            // ceil is an exact elementary rounding operation, independent of
-            // the platform's transcendental library.
-            let needed = (pixel.extent_tangent[axis] / maximum_step).ceil().max(1.0);
-            if !needed.is_finite() || needed >= usize::MAX as f64 {
-                return Err(over_samples());
-            }
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            {
-                *count = needed as usize;
-            }
-        }
-        let samples = subdivisions[0]
-            .checked_mul(subdivisions[1])
-            .and_then(|cells| cells.checked_mul(16))
-            .ok_or_else(over_samples)?;
-        admit_count("pixel quadrature samples", samples, limits.maximum_samples)?;
-        let evaluations =
-            samples
-                .checked_mul(self.waves)
-                .ok_or(CoherentDiffractionError::Limit {
-                    quantity: "pixel pupil evaluations",
-                    requested: usize::MAX,
-                    maximum: limits.maximum_pupil_evaluations,
-                })?;
-        admit_count(
-            "pixel pupil evaluations",
-            evaluations,
-            limits.maximum_pupil_evaluations,
-        )?;
-        Ok((subdivisions, samples, evaluations))
+        pixel_work(pixel, limits, [maximum_step; 2], self.waves)
     }
+}
+
+/// Shared spatial rule: wavelength/exposure callers supply their physical
+/// phase-gradient bound, then use exactly the same positive area quadrature.
+pub(super) fn pixel_work(
+    pixel: CoherentDiffractionPixel,
+    limits: CoherentDiffractionPixelLimits,
+    maximum_step: [f64; 2],
+    waves: usize,
+) -> Result<([usize; 2], usize, usize), CoherentDiffractionError> {
+    if !limits.maximum_phase_span_rad.is_finite()
+        || limits.maximum_phase_span_rad <= 0.0
+        || limits.maximum_phase_span_rad > 1.0
+    {
+        return Err(CoherentDiffractionError::InvalidPixelResolution);
+    }
+    if waves == 0 {
+        return Ok(([0; 2], 0, 0));
+    }
+    let over_samples = || CoherentDiffractionError::Limit {
+        quantity: "pixel quadrature samples",
+        requested: usize::MAX,
+        maximum: limits.maximum_samples,
+    };
+    if maximum_step
+        .iter()
+        .any(|&step| !step.is_finite() || step <= 0.0)
+    {
+        return Err(CoherentDiffractionError::Unrepresentable);
+    }
+    let mut subdivisions = [0; 2];
+    for (axis, count) in subdivisions.iter_mut().enumerate() {
+        // ceil is an exact elementary rounding operation, independent of
+        // the platform's transcendental library.
+        let needed = (pixel.extent_tangent[axis] / maximum_step[axis])
+            .ceil()
+            .max(1.0);
+        if !needed.is_finite() || needed >= usize::MAX as f64 {
+            return Err(over_samples());
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            *count = needed as usize;
+        }
+    }
+    let samples = subdivisions[0]
+        .checked_mul(subdivisions[1])
+        .and_then(|cells| cells.checked_mul(16))
+        .ok_or_else(over_samples)?;
+    admit_count("pixel quadrature samples", samples, limits.maximum_samples)?;
+    let evaluations = samples
+        .checked_mul(waves)
+        .ok_or(CoherentDiffractionError::Limit {
+            quantity: "pixel pupil evaluations",
+            requested: usize::MAX,
+            maximum: limits.maximum_pupil_evaluations,
+        })?;
+    admit_count(
+        "pixel pupil evaluations",
+        evaluations,
+        limits.maximum_pupil_evaluations,
+    )?;
+    Ok((subdivisions, samples, evaluations))
+}
+
+pub(super) fn integrate_moments<C: FnMut() -> bool>(
+    pixel: CoherentDiffractionPixel,
+    subdivisions: [usize; 2],
+    cancelled: &mut C,
+    mut moments: impl FnMut([f64; 2], &mut C) -> Result<[Dd; 2], CoherentDiffractionError>,
+) -> Result<[Dd; 2], CoherentDiffractionError> {
+    let mut power = [Dd::ZERO; 2];
+    if subdivisions.contains(&0) {
+        return Ok(power);
+    }
+    let step: [Dd; 2] = std::array::from_fn(|axis| {
+        Dd::from_f64(pixel.extent_tangent[axis]) / Dd::from_f64(subdivisions[axis] as f64)
+    });
+    let cell_area = Dd::from_f64(pixel.area_tangent)
+        / Dd::from_f64(subdivisions[0] as f64)
+        / Dd::from_f64(subdivisions[1] as f64);
+    for y in 0..subdivisions[1] {
+        for x in 0..subdivisions[0] {
+            for &(ny, wy) in &GAUSS {
+                for &(nx, wx) in &GAUSS {
+                    poll(cancelled)?;
+                    let at = std::array::from_fn(|axis| {
+                        let (index, node) = if axis == 0 { (x, nx) } else { (y, ny) };
+                        (Dd::from_f64(pixel.minimum_tangent[axis])
+                            + step[axis] * (Dd::from_f64(index as f64) + Dd::from_f64(node)))
+                        .to_f64()
+                    });
+                    let value = moments(at, cancelled)?;
+                    let weight = cell_area * Dd::from_f64(wx) * Dd::from_f64(wy);
+                    power[0] = power[0] + weight * value[0];
+                    power[1] = power[1] + weight * value[1];
+                }
+            }
+        }
+    }
+    Ok(power)
 }

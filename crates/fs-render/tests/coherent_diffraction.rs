@@ -4,11 +4,470 @@
 use fs_geom::{Point3, Vec3};
 use fs_math::c64::C64;
 use fs_render::camera::{
-    Aperture, CameraError, CameraProjection, CoherentDiffractionError, CoherentDiffractionLimits,
-    CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,
+    Aperture, CameraError, CameraProjection, CoherentDiffractionError,
+    CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
+    CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelLimits,
+    CoherentDiffractionPixelPower, CoherentDiffractionShutter, CoherentDiffractionTone,
     CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
     PhysicalCamera, PupilCoherenceFactor,
 };
+
+const EXPOSURE_LIMITS: CoherentDiffractionExposureLimits = CoherentDiffractionExposureLimits {
+    maximum_tones: 16,
+    sources: LIMITS,
+    maximum_pair_contractions: 1000,
+};
+
+const EXPOSURE_PIXEL_LIMITS: CoherentDiffractionExposurePixelLimits =
+    CoherentDiffractionExposurePixelLimits {
+        spatial: PIXEL_LIMITS,
+        maximum_pair_contractions: 1_000_000,
+    };
+
+fn tone<'a>(
+    frequency_hz: f64,
+    mean: &'a [CoherentPupilWave],
+    factors: &'a [PupilCoherenceFactor<'a>],
+) -> CoherentDiffractionTone<'a> {
+    CoherentDiffractionTone {
+        frequency_hz,
+        illumination: CoherentPupilIllumination { mean, factors },
+    }
+}
+
+fn sinc_reference(x: f64) -> f64 {
+    if x == 0.0 { 1.0 } else { x.sin() / x }
+}
+
+#[test]
+fn g1_spectral_shutter_matches_beat_visibility_and_absolute_sensor_phase() {
+    let f0 = 299_792_458.0 / LAMBDA;
+    let distance = 0.037;
+    let waves_a = [CoherentPupilWave {
+        tangent_direction: [0.03, 0.0],
+        amplitude_sqrt_w: C64::new(0.8, -0.2),
+    }];
+    let waves_b = [CoherentPupilWave {
+        tangent_direction: [0.0299, 0.00015],
+        amplitude_sqrt_w: C64::new(-0.3, 0.9),
+    }];
+    let at = [0.0302, -0.0001];
+    for camera in [focused(), defocused(2.4)] {
+        for delta in [1.0e9, 0.13 * f0] {
+            let f1 = f0 + delta;
+            let beat = f1 - f0;
+            let tones = [tone(f0, &waves_a, &[]), tone(f1, &waves_b, &[])];
+            let amplitude = |waves: &[CoherentPupilWave], frequency: f64| {
+                let offset =
+                    std::array::from_fn(|axis| at[axis] - waves[0].tangent_direction[axis]);
+                let wavelength = 299_792_458.0 / frequency * 1e9;
+                let pupil = if camera.defocused_diffraction().is_some() {
+                    camera.defocused_diffraction_amplitude(offset, wavelength)
+                } else {
+                    camera.in_focus_diffraction_amplitude(offset, wavelength)
+                }
+                .unwrap();
+                pupil * waves[0].amplitude_sqrt_w
+            };
+            let a = amplitude(&waves_a, f0);
+            let b = amplitude(&waves_b, f1);
+            for (start, duration) in [
+                (0.0, 0.25 / beat),
+                (0.13 / beat, 1.0 / beat),
+                (-0.2 / beat, 3.7 / beat),
+            ] {
+                let shutter = CoherentDiffractionShutter::try_new(start, duration).unwrap();
+                let query = camera
+                    .prepare_coherent_diffraction_exposure(
+                        &tones,
+                        distance,
+                        shutter,
+                        EXPOSURE_LIMITS,
+                        || false,
+                    )
+                    .unwrap();
+                let phase = core::f64::consts::TAU
+                    * beat
+                    * (distance * (1.0 + 0.5 * (at[0] * at[0] + at[1] * at[1])) / 299_792_458.0
+                        - start
+                        - duration * 0.5);
+                let rotation = C64::new(phase.cos(), phase.sin());
+                let cross = b * a.conj() * rotation;
+                let expected = a.norm_sq()
+                    + b.norm_sq()
+                    + 2.0 * cross.re * sinc_reference(core::f64::consts::PI * beat * duration);
+                let measured = query.observe(at, || false).unwrap();
+                // The widely separated lines exercise independent wavelength and
+                // defocus transfers; their independent f64 reference phase has
+                // a ~1e-11-radian argument-rounding floor in this fixture.
+                close(measured.power_density_w, expected, 3e-10);
+                assert_eq!(measured.fluctuation_power_density_w, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_spectral_coherence_equal_lines_and_incoherent_banks_keep_their_normalization() {
+    let camera = focused();
+    let f0 = 299_792_458.0 / LAMBDA;
+    let f1 = f0 + 1e9;
+    let shutter = CoherentDiffractionShutter::try_new(0.0, 0.2e-9).unwrap();
+    let positive = [wave([0.0; 2], C64::ONE)];
+    let negative = [wave([0.0; 2], C64::new(-1.0, 0.0))];
+    let zero: [CoherentPupilWave; 0] = [];
+    let coherent = [tone(f0, &positive, &[]), tone(f1, &negative, &[])];
+    let power = camera
+        .prepare_coherent_diffraction_exposure(&coherent, 0.03, shutter, EXPOSURE_LIMITS, || false)
+        .unwrap()
+        .observe([0.0; 2], || false)
+        .unwrap()
+        .power_density_w;
+    let factor_a = [PupilCoherenceFactor { waves: &positive }];
+    let factor_b = [PupilCoherenceFactor { waves: &negative }];
+    let same_factor = [tone(f0, &[], &factor_a), tone(f1, &[], &factor_b)];
+    let measured = camera
+        .prepare_coherent_diffraction_exposure(&same_factor, 0.03, shutter, EXPOSURE_LIMITS, || {
+            false
+        })
+        .unwrap()
+        .observe([0.0; 2], || false)
+        .unwrap();
+    close(measured.fluctuation_power_density_w, power, 2e-13);
+    assert_eq!(measured.mean_power_density_w, 0.0);
+    let factor_a = [
+        PupilCoherenceFactor { waves: &positive },
+        PupilCoherenceFactor { waves: &zero },
+    ];
+    let factor_b = [
+        PupilCoherenceFactor { waves: &zero },
+        PupilCoherenceFactor { waves: &negative },
+    ];
+    let separate = [tone(f0, &[], &factor_a), tone(f1, &[], &factor_b)];
+    let incoherent = camera
+        .prepare_coherent_diffraction_exposure(&separate, 0.03, shutter, EXPOSURE_LIMITS, || false)
+        .unwrap()
+        .observe([0.0; 2], || false)
+        .unwrap()
+        .power_density_w;
+    let area = core::f64::consts::PI * RADIUS * RADIUS;
+    let expected = area * ((f0 / 299_792_458.0).powi(2) + (f1 / 299_792_458.0).powi(2));
+    close(incoherent, expected, 3e-12);
+    assert!(power < 0.5 * incoherent);
+
+    // A one-Hz separation beside an optical carrier, observed for 0.1 ns.
+    // The beat energy is far below one binary64 step of either isolated power;
+    // converting each window kernel to f64 before contraction would erase it.
+    let tiny_duration = 1e-10;
+    let tiny_shutter = CoherentDiffractionShutter::try_new(
+        0.03 / 299_792_458.0 - 0.5 * tiny_duration,
+        tiny_duration,
+    )
+    .unwrap();
+    let equal_opposite = [wave([0.0; 2], C64::new(-f0 / (f0 + 1.0), 0.0))];
+    let tiny_tones = [
+        tone(f0, &positive, &[]),
+        tone(f0 + 1.0, &equal_opposite, &[]),
+    ];
+    let tiny = camera
+        .prepare_coherent_diffraction_exposure(
+            &tiny_tones,
+            0.03,
+            tiny_shutter,
+            EXPOSURE_LIMITS,
+            || false,
+        )
+        .unwrap()
+        .observe([0.0; 2], || false)
+        .unwrap()
+        .power_density_w;
+    let leading =
+        area * (f0 / 299_792_458.0).powi(2) * (core::f64::consts::TAU * tiny_duration).powi(2)
+            / 12.0;
+    assert!(tiny > 0.0);
+    close(tiny, leading, 2e-10);
+
+    // Equal-frequency fields must coalesce before any diagonal/cross moments.
+    let strong = [wave([0.0; 2], C64::new(1e16, -2e16))];
+    let weak = [wave([0.0; 2], C64::new(0.5, 0.75))];
+    let opposite = [wave([0.0; 2], C64::new(-1e16, 2e16))];
+    let entries = [
+        tone(f0, &strong, &[]),
+        tone(f0, &weak, &[]),
+        tone(f0, &opposite, &[]),
+    ];
+    let query = camera
+        .prepare_coherent_diffraction_exposure(&entries, 0.03, shutter, EXPOSURE_LIMITS, || false)
+        .unwrap();
+    assert_eq!(query.frequency_count(), 1);
+    close(
+        query.observe([0.0; 2], || false).unwrap().power_density_w,
+        intensity(&camera, &weak, &[], [0.0; 2]),
+        3e-12,
+    );
+    let footprint = pixel([-2.0; 2], [2.0; 2]);
+    let collected = query
+        .integrate_pixel(footprint, EXPOSURE_PIXEL_LIMITS, || false)
+        .unwrap();
+    close(
+        collected.average_power.power_w,
+        pixel_power(&camera, &weak, &[], footprint).power_w,
+        3e-12,
+    );
+    close(
+        collected.energy_j,
+        collected.average_power.power_w * shutter.duration_s(),
+        2e-15,
+    );
+}
+
+#[test]
+fn g1_spectral_pixel_integrates_chromatic_square_pupils_and_sensor_chirp() {
+    let camera =
+        base(Aperture::try_regular_polygon(RADIUS, 4, core::f64::consts::FRAC_PI_4).unwrap())
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+            .unwrap();
+    let centre = [0.03, 0.0];
+    let minimum = [centre[0] - SCALE, -SCALE];
+    let maximum = [centre[0] + SCALE, SCALE];
+    let footprint = CoherentDiffractionPixel::try_new(minimum, maximum).unwrap();
+    let f0 = 299_792_458.0 / LAMBDA;
+    let f1 = f0 + 1e9;
+    let beat = f1 - f0;
+    let distance = 1e6;
+    let duration = 0.2 / beat;
+    let midpoint = distance * (1.0 + 0.5 * centre[0] * centre[0]) / 299_792_458.0;
+    let shutter = CoherentDiffractionShutter::try_new(midpoint - duration * 0.5, duration).unwrap();
+    let waves = [CoherentPupilWave {
+        tangent_direction: centre,
+        amplitude_sqrt_w: C64::ONE,
+    }];
+    let tones = [tone(f0, &waves, &[]), tone(f1, &waves, &[])];
+    let query = camera
+        .prepare_coherent_diffraction_exposure(&tones, distance, shutter, EXPOSURE_LIMITS, || false)
+        .unwrap();
+    let measured = query
+        .integrate_pixel(footprint, EXPOSURE_PIXEL_LIMITS, || false)
+        .unwrap();
+    assert!(
+        measured.average_power.subdivisions[0] > 100,
+        "sensor chirp must influence the spatial work bound"
+    );
+
+    // Independent separable square-pupil Fourier integral, evaluated with
+    // Simpson in each axis. It uses no production transfer or shutter kernel.
+    let a = RADIUS * core::f64::consts::FRAC_1_SQRT_2;
+    let lambda = [299_792_458.0 / f0, 299_792_458.0 / f1];
+    let delta_k = core::f64::consts::TAU * beat / 299_792_458.0;
+    let shape = |line: usize, axis: usize, coordinate: f64| {
+        sinc_reference(core::f64::consts::TAU * a * (coordinate - centre[axis]) / lambda[line])
+    };
+    let mut diagonal = 0.0;
+    for line in 0..2 {
+        let mut norm = (2.0 * a / lambda[line]).powi(2);
+        for axis in 0..2 {
+            norm *= integrate_reference(minimum[axis], maximum[axis], |q| {
+                shape(line, axis, q).powi(2)
+            });
+        }
+        diagonal += norm;
+    }
+    let mut cross = C64::ONE;
+    for axis in 0..2 {
+        let real = integrate_reference(minimum[axis], maximum[axis], |q| {
+            shape(0, axis, q)
+                * shape(1, axis, q)
+                * (0.5 * delta_k * distance * (q * q - centre[axis] * centre[axis])).cos()
+        });
+        let imaginary = integrate_reference(minimum[axis], maximum[axis], |q| {
+            shape(0, axis, q)
+                * shape(1, axis, q)
+                * (0.5 * delta_k * distance * (q * q - centre[axis] * centre[axis])).sin()
+        });
+        cross = cross * C64::new(real, imaginary);
+    }
+    let reference_phase =
+        core::f64::consts::TAU * beat * (midpoint - shutter.start_s() - 0.5 * duration);
+    cross = cross * C64::new(reference_phase.cos(), reference_phase.sin());
+    let expected = diagonal
+        + 8.0 * a * a / (lambda[0] * lambda[1])
+            * cross.re
+            * sinc_reference(core::f64::consts::PI * beat * duration);
+    close(measured.average_power.power_w, expected, 3e-8);
+    close(measured.energy_j, expected * duration, 3e-8);
+    let refined = query
+        .integrate_pixel(
+            footprint,
+            CoherentDiffractionExposurePixelLimits {
+                spatial: CoherentDiffractionPixelLimits {
+                    maximum_phase_span_rad: 0.5,
+                    ..PIXEL_LIMITS
+                },
+                ..EXPOSURE_PIXEL_LIMITS
+            },
+            || false,
+        )
+        .unwrap();
+    close(
+        refined.average_power.power_w,
+        measured.average_power.power_w,
+        2e-11,
+    );
+}
+
+#[test]
+fn g0_g4_spectral_exposure_refuses_invalid_models_and_preflights_work() {
+    let camera = focused();
+    let f0 = 299_792_458.0 / LAMBDA;
+    let waves = [wave([0.0; 2], C64::ONE)];
+    let tones = [tone(f0, &waves, &[]), tone(f0 + 1e9, &waves, &[])];
+    let shutter = CoherentDiffractionShutter::try_new(0.0, 0.2e-9).unwrap();
+    let query = camera
+        .prepare_coherent_diffraction_exposure(&tones, 0.03, shutter, EXPOSURE_LIMITS, || false)
+        .unwrap();
+    let footprint = pixel([-1.0; 2], [1.0; 2]);
+    let baseline = query
+        .integrate_pixel(footprint, EXPOSURE_PIXEL_LIMITS, || false)
+        .unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        query.integrate_pixel(
+            footprint,
+            CoherentDiffractionExposurePixelLimits {
+                maximum_pair_contractions: baseline.pair_contractions - 1,
+                ..EXPOSURE_PIXEL_LIMITS
+            },
+            || {
+                polls += 1;
+                false
+            }
+        ),
+        Err(CoherentDiffractionError::Limit {
+            quantity: "pixel exposure pair contractions",
+            ..
+        })
+    ));
+    assert_eq!(polls, 1);
+    let mut polls = 0;
+    assert_eq!(
+        query.integrate_pixel(footprint, EXPOSURE_PIXEL_LIMITS, || {
+            polls += 1;
+            polls == 31
+        }),
+        Err(CoherentDiffractionError::Cancelled)
+    );
+    assert_eq!(
+        query
+            .integrate_pixel(footprint, EXPOSURE_PIXEL_LIMITS, || false)
+            .unwrap(),
+        baseline
+    );
+    for frequency in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+        assert!(matches!(
+            camera.prepare_coherent_diffraction_exposure(
+                &[tone(frequency, &waves, &[])],
+                0.03,
+                shutter,
+                EXPOSURE_LIMITS,
+                || false
+            ),
+            Err(CoherentDiffractionError::InvalidFrequency)
+        ));
+    }
+    assert!(matches!(
+        camera.prepare_coherent_diffraction_exposure(
+            &[tone(1.0, &waves, &[])],
+            0.03,
+            shutter,
+            EXPOSURE_LIMITS,
+            || false
+        ),
+        Err(CoherentDiffractionError::Camera(_))
+    ));
+    let factors = [PupilCoherenceFactor { waves: &waves }];
+    assert!(matches!(
+        camera.prepare_coherent_diffraction_exposure(
+            &[tones[0], tone(f0, &waves, &factors)],
+            0.03,
+            shutter,
+            EXPOSURE_LIMITS,
+            || false
+        ),
+        Err(CoherentDiffractionError::InconsistentCoherenceFactors)
+    ));
+    assert!(matches!(
+        camera.prepare_coherent_diffraction_exposure(
+            &tones,
+            0.03,
+            shutter,
+            CoherentDiffractionExposureLimits {
+                sources: CoherentDiffractionLimits {
+                    maximum_waves: 1,
+                    ..LIMITS
+                },
+                ..EXPOSURE_LIMITS
+            },
+            || false
+        ),
+        Err(CoherentDiffractionError::Limit {
+            quantity: "pupil waves",
+            ..
+        })
+    ));
+    assert!(CoherentDiffractionShutter::try_new(0.0, 0.0).is_err());
+    assert!(CoherentDiffractionShutter::try_new(f64::INFINITY, 1.0).is_err());
+    let physical = PhysicalCamera::try_look_at(
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(0.0, 0.0, -1.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        CameraProjection::try_focal_sensor(0.05, 0.024).unwrap(),
+        2.0,
+        Aperture::try_circular(RADIUS).unwrap(),
+    )
+    .unwrap()
+    .with_in_focus_diffraction(FocusedDiffraction::try_new(0.0).unwrap())
+    .unwrap();
+    assert!(matches!(
+        physical.prepare_coherent_diffraction_exposure(
+            &tones,
+            0.05,
+            shutter,
+            EXPOSURE_LIMITS,
+            || false
+        ),
+        Err(CoherentDiffractionError::InvalidSensorPlane)
+    ));
+    physical
+        .prepare_coherent_diffraction_exposure(
+            &tones,
+            0.05 / (1.0 - 0.05 / 2.0),
+            shutter,
+            EXPOSURE_LIMITS,
+            || false,
+        )
+        .unwrap();
+    let empty = camera
+        .prepare_coherent_diffraction_exposure(&[], 0.03, shutter, EXPOSURE_LIMITS, || false)
+        .unwrap();
+    assert_eq!(
+        empty
+            .integrate_pixel(
+                footprint,
+                CoherentDiffractionExposurePixelLimits {
+                    spatial: CoherentDiffractionPixelLimits {
+                        maximum_samples: 0,
+                        maximum_pupil_evaluations: 0,
+                        ..PIXEL_LIMITS
+                    },
+                    maximum_pair_contractions: 0,
+                },
+                || false
+            )
+            .unwrap()
+            .energy_j,
+        0.0
+    );
+}
 
 const RADIUS: f64 = 0.001;
 const LAMBDA_NM: f64 = 550.0;
