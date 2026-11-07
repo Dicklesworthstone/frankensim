@@ -1,5 +1,65 @@
 # fs-gas contract
 
+## Energy-selective kinetic alpha escape
+
+`AlphaEscapeTable` retains an identified, ordered table of nonnegative escape
+hazards against physical energy per alpha. `KineticAlphaTransport::with_escape`
+opts into the local loss law `dn_i/dt = -lambda(E_i) n_i`; absent or zero hazards
+retain the closed population. Linear interpolation stays inside the original
+table support. Every represented physical energy must be covered, including
+accepted endpoints and volume-history knots. A moving energy coordinate uses
+`E_i = E_i,initial (V_initial/V)^(2/3)` when sampling the law, not the original
+reference-grid energy. No extrapolation, clipping or fitted rate is inferred.
+
+The existing kinetic midpoint and step-doubling owners compose exact positive
+exponential escape symmetrically with their collision and burn maps. Survivors
+and small losses are evaluated separately; fixed-size stage arrays bound work
+without allocating histories or rebuilding published grids. Compensated local
+alpha-number, alpha-energy and companion-electron-energy increments enter
+time-error acceptance independently. Only accepted fine trajectories publish
+their inventories and accounts; domain/work refusal and cancellation are atomic.
+
+The coupled frozen interval also limits the maximum represented escape exposure
+to one e-fold whenever kinetic alphas exist or an alpha-producing channel is
+enabled. Its maximum hazard is prepared once per source evaluation. Unresolved
+steps return the original retryable work refusal, so both saturated coarse/fine
+maps cannot falsely accept an empty stock under continuous birth or a spurious
+collision/escape partition. The original attempt/minimum-step limits remain
+binding: very stiff coupled laws may require smaller steps or refuse. The exact
+standalone escape kernel and an empty source-off population need no such cap.
+This guard does not turn the local error estimate into a global certificate or
+claim stiff-uniform accuracy for the split system.
+
+Escaped alphas carry their actual physical-bin kinetic energy out of the parcel.
+They are neither thermalized in the plasma nor removed from Maxwellian ash.
+Each also removes two companion electrons at the current electron pool's mean
+sensible energy. This is an explicit quasineutral inventory closure: it retains
+the admitted charge discrepancy, but supplies no ambipolar/sheath potential,
+return-current work, momentum flux, pitch angle, spatial orbit or receiving wall.
+Thermal helium, fuel supply/exhaust and thermal energy confinement retain their
+separate original owners; confinement energy must exclude these carried exports.
+
+`KineticAlphaBalance` exposes escaped alpha amount and kinetic energy, companion
+electron amount, and its thermal energy. Its kinetic account becomes
+`delta(Ualpha)+Halpha_h+Halpha_e+Ealpha_out-Ealpha_born-Walpha_on=0`.
+The complete network account includes both energy exports and adjusts He4,
+electron, baryon and charge inventories. These quantities are available to an
+explicit receiving-body calculation; a plasma energy debit alone does not claim
+wall deposition or a spatial loss spectrum.
+
+Energy-dependent alpha confinement in a Fokker-Planck description is discussed
+by Katsurai and Maekawa, *Nuclear Fusion* 17 (1977),
+<https://doi.org/10.1088/0029-5515/17/5/005>. The table here is caller-authored;
+it does not implement that paper's fitted assumptions or a magnetic transport
+model. Tests cover exact selective losses/deep survivors, constant-hazard number
+decay during collisional slowing, an independent compressing `lambda(E)=aE`
+analytic limit, all-channel fueling/thermal-exhaust competition, restart and
+atomic refusal, including a saturated continuous-birth case whose independent
+positive equilibrium exceeds the requested amount tolerance. Numerical time
+error remains distinct from energy-grid error
+and the physical validity of the authored escape law. The reflecting collision
+boundaries and absence of a kinetic-to-thermal tail handoff remain unchanged.
+
 ## Source-owned homogeneous real-gas fields
 
 With both `material` and `experimental-euler`, `dynamics::nonideal::RealGas` binds the original `ThermochemicalPengRobinsonModel`, frozen mixture/context and one immutable reference density/temperature to the native `Conserved` state. Native density-energy inversion supplies pressure, temperature and acoustic speed. Internal-energy changes use the common original reference, including density-dependent residual energy; arbitrary source formation-energy and entropy datums do not change field dynamics. Referenced internal energy may be signed and is not an ideal-gas positivity test.

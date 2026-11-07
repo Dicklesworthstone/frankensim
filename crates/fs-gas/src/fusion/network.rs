@@ -162,8 +162,11 @@ pub struct FusionNetworkBalance {
     pub heavy_energy_residual_j: f64,
     /// Delta thermal U + neutron/photon/transport energy out - Q - external heat
     /// - work on ions - work on electrons + particle energy out - particle energy in [J].
+    /// A kinetic result also includes alpha storage/work and its separately
+    /// reported alpha/companion-electron energy exports.
     pub total_energy_residual_j: f64,
     /// Relative baryon drift, including emitted neutrons and external ion transfers.
+    /// A kinetic result includes its separately reported escaped alphas.
     pub relative_baryon_residual: f64,
     /// Relative positive-ion charge drift after accounting for particle exchange.
     pub relative_charge_residual: f64,

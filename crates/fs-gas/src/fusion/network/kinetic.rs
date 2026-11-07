@@ -1,7 +1,7 @@
 //! Shared-network evolution with an explicit isotropic alpha distribution.
 
 use super::*;
-use crate::fusion::kinetic::{AlphaEnergyGrid, MAX_ALPHA_BINS};
+use crate::fusion::kinetic::{AlphaEnergyGrid, AlphaEscapeTable, MAX_ALPHA_BINS};
 use fs_thermochem::coulomb::test_particle::TestParticleCoulombV1;
 
 mod solve;
@@ -15,6 +15,7 @@ pub use volume::{KineticFusionVolumeResult, advance_adiabatic_kinetic_fusion_vol
 #[derive(Clone, Debug, PartialEq)]
 pub struct KineticAlphaTransport {
     collisions: TestParticleCoulombV1,
+    escape: Option<AlphaEscapeTable>,
     maximum_number_ratio: f64,
     maximum_energy_ratio: f64,
     maximum_upper_bin_fraction: f64,
@@ -49,6 +50,7 @@ impl KineticAlphaTransport {
         }
         Ok(Self {
             collisions,
+            escape: None,
             maximum_number_ratio,
             maximum_energy_ratio,
             maximum_upper_bin_fraction,
@@ -57,6 +59,17 @@ impl KineticAlphaTransport {
     }
     pub const fn collisions(&self) -> &TestParticleCoulombV1 {
         &self.collisions
+    }
+    /// Add an explicit physical-energy loss law. Every escaped alpha exports
+    /// its kinetic energy and two companion electrons carrying their current
+    /// mean thermal energy. This quasineutral closure infers no sheath work,
+    /// return current, orbit or pitch-angle distribution, or receiving body.
+    pub fn with_escape(mut self, escape: AlphaEscapeTable) -> Self {
+        self.escape = Some(escape);
+        self
+    }
+    pub const fn escape(&self) -> Option<&AlphaEscapeTable> {
+        self.escape.as_ref()
     }
     pub const fn maximum_number_ratio(&self) -> f64 {
         self.maximum_number_ratio
@@ -79,6 +92,14 @@ pub struct KineticAlphaBalance {
     pub born_alpha_amount_mol: f64,
     /// Complete born-alpha kinetic energy, including incoming thermal energy [J].
     pub born_alpha_energy_j: f64,
+    /// Kinetic He4 removed by the declared escape law [mol]. Thermal ash is separate.
+    pub escaped_alpha_amount_mol: f64,
+    /// Kinetic energy carried out by those alphas at their physical energies [J].
+    pub escaped_alpha_energy_j: f64,
+    /// Companion electrons removed to retain the admitted charge discrepancy [mol].
+    pub escaped_electrons_mol: f64,
+    /// Current mean thermal energy carried out by companion electrons [J].
+    pub escaped_electron_thermal_energy_j: f64,
     /// Signed collisional heat to background ions [J].
     pub deposited_heavy_energy_j: f64,
     /// Signed collisional heat to electrons [J].
@@ -87,7 +108,7 @@ pub struct KineticAlphaBalance {
     pub alpha_energy_change_j: f64,
     /// Mechanical work on the kinetic alpha population [J], positive for compression.
     pub boundary_work_on_alphas_j: f64,
-    /// Delta alpha energy + heat - born energy - alpha boundary work [J].
+    /// Delta alpha energy + heat + escaped alpha energy - births - alpha work [J].
     pub alpha_energy_residual_j: f64,
     /// Distribution amount minus independently accumulated alpha inventory [mol].
     pub alpha_amount_residual_mol: f64,
@@ -151,7 +172,8 @@ impl KineticFusionResult {
     }
     /// Shared nuclear and thermal accounts. Charged-product deposition fields
     /// contain only prompt non-alpha products; alpha heat is in alpha_balance.
-    /// The total energy residual includes alpha kinetic storage and pressure work.
+    /// The total energy residual includes alpha kinetic storage, pressure work,
+    /// and both fast-alpha/companion-electron energy exports in alpha_balance.
     pub const fn balance(&self) -> FusionNetworkBalance {
         self.balance
     }
@@ -189,8 +211,10 @@ impl KineticFusionResult {
 /// represented alpha against its stationary-ion velocity-variance limit.
 ///
 /// This entrypoint has rigid volume. It resolves no fast-secondary
-/// reactions, alpha self-collisions, pitch angles, confinement, magnetic fields
-/// or neutron transport. Numerical time error and energy-grid error are distinct;
+/// reactions, alpha self-collisions, pitch angles, magnetic fields or neutron
+/// transport. Optional escape is prescribed through alpha_transport, with its
+/// own support and quasineutral export law; no orbit confinement is inferred.
+/// Numerical time error and energy-grid error are distinct;
 /// refine the authored grid for distribution and heating predictions.
 pub fn advance_kinetic_fusion(
     initial: &KineticFusionState,
@@ -217,7 +241,7 @@ pub fn advance_kinetic_fusion(
 
 /// Couple kinetic alpha heating and thermal burn to prescribed volume motion.
 ///
-/// The parcel and its alpha population are explicitly confined and isotropic.
+/// The retained parcel and alpha population are explicitly co-moving and isotropic.
 /// Physical alpha centers follow E*V^(2/3)=constant under geometry alone; bin
 /// amounts remain unchanged. The moving energy coordinate avoids repeated
 /// conservative remaps and their artificial spreading. Every collision, birth,
@@ -230,7 +254,7 @@ pub fn advance_kinetic_fusion(
 /// longer covers a birth energy refuses instead of clipping it. Output grids
 /// contain actual physical energies and remain usable by either kinetic entrypoint.
 ///
-/// The caller supplies boundary motion, confinement and the isotropic closure;
+/// The caller supplies boundary motion, optional escape and the isotropic closure;
 /// this is not piston dynamics, a shock model, or anisotropic magnetic work.
 pub fn advance_kinetic_fusion_with_volume(
     initial: &KineticFusionState,

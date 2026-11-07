@@ -24,6 +24,9 @@ pub(super) struct Point {
     pub(super) kinetic_alpha_amount: Sum,
     pub(super) thermal_helium4_amount: Sum,
     pub(super) alpha_deposited: [Sum; 2],
+    pub(super) escaped_alpha_amount: Sum,
+    pub(super) escaped_alpha_energy: Sum,
+    pub(super) escaped_alpha_electron_energy: Sum,
     amounts: [Sum; 6],
     extents: [Sum; 4],
     products: [[Sum; 2]; 4],
@@ -184,6 +187,9 @@ impl<'a> Problem<'a> {
             kinetic_alpha_amount: sum(self.initial_alpha_amount),
             thermal_helium4_amount: sum(self.thermal_helium4_amount),
             alpha_deposited: [Sum::default(); 2],
+            escaped_alpha_amount: Sum::default(),
+            escaped_alpha_energy: Sum::default(),
+            escaped_alpha_electron_energy: Sum::default(),
             amounts: self.initial_amounts.map(sum),
             extents: [Sum::default(); 4],
             products: [[Sum::default(); 2]; 4],
@@ -264,7 +270,8 @@ impl<'a> Problem<'a> {
                 + point.alpha_deposited[1].value
                 - point.transport_energy_out[1].value
                 + point.particles.energy_in[1].value
-                - point.particles.energy_out[1].value,
+                - point.particles.energy_out[1].value
+                - point.escaped_alpha_electron_energy.value,
         ]
     }
     fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
@@ -283,6 +290,7 @@ impl<'a> Problem<'a> {
             && point.photons.value == 0.0
             && point.work_on_pools.iter().all(|x| x.value == 0.0)
             && point.alpha_deposited.iter().all(|x| x.value == 0.0)
+            && point.escaped_alpha_amount.value == 0.0
             && point.transport_energy_out.iter().all(|x| x.value == 0.0)
             && point.volume == self.initial.volume()
             && (point.time == 0.0
@@ -331,7 +339,14 @@ impl<'a> Problem<'a> {
                 .chain(point.extents.iter())
                 .chain(point.products.iter().flatten())
                 .chain(point.deposited.iter())
-                .chain([&point.ion_removal, &point.neutrons, &point.photons])
+                .chain([
+                    &point.ion_removal,
+                    &point.neutrons,
+                    &point.photons,
+                    &point.escaped_alpha_amount,
+                    &point.escaped_alpha_energy,
+                    &point.escaped_alpha_electron_energy,
+                ])
                 .any(|x| !x.value.is_finite() || x.value < 0.0)
         {
             return Err(FusionNetworkError::Arithmetic(
@@ -615,6 +630,61 @@ impl<'a> Problem<'a> {
             account.add(energy);
         }
     }
+
+    /// Remove only kinetic He4 and its charge's companion electrons. Thermal
+    /// ash and ion energy stay in the plasma; outgoing electron energy is its
+    /// actual pool mean. The kinetic owner independently supplies the resolved
+    /// escaping alpha energy and positive distribution survivor.
+    pub(super) fn escape_alphas(
+        &self,
+        old: Point,
+        removed_mol: f64,
+        retained_mol: f64,
+        kinetic_energy_j: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, FusionNetworkError> {
+        poll(cancelled)?;
+        if !self.kinetic_alphas
+            || [removed_mol, retained_mol, kinetic_energy_j]
+                .iter()
+                .any(|x| !x.is_finite() || *x < 0.0)
+        {
+            return Err(FusionNetworkError::Arithmetic(
+                "kinetic alpha escape accounts",
+            ));
+        }
+        if removed_mol == 0.0 {
+            return Ok(old);
+        }
+        let mut next = old;
+        let he4 = self.plasma.indices()[4];
+        let electron = self.plasma.electron_index();
+        next.kinetic_alpha_amount = consume(old.kinetic_alpha_amount, removed_mol, retained_mol);
+        next.amounts[he4] = consume(
+            old.amounts[he4],
+            removed_mol,
+            old.thermal_helium4_amount.value + retained_mol,
+        );
+        let outgoing_electrons = 2.0 * removed_mol;
+        let electrons = old.amounts[electron].value;
+        if !positive(electrons) || outgoing_electrons > electrons {
+            return Err(FusionNetworkError::OutsideDomain);
+        }
+        next.amounts[electron].add(-outgoing_electrons);
+        let mean_electron_energy = old.thermal_energy[1].value / electrons;
+        let outgoing_electron_energy = mean_electron_energy * outgoing_electrons;
+        next.thermal_energy[1] = consume(
+            old.thermal_energy[1],
+            outgoing_electron_energy,
+            mean_electron_energy * next.amounts[electron].value,
+        );
+        next.escaped_alpha_amount.add(removed_mol);
+        next.escaped_alpha_energy.add(kinetic_energy_j);
+        next.escaped_alpha_electron_energy
+            .add(outgoing_electron_energy);
+        self.admit(next, cancelled)?;
+        Ok(next)
+    }
     fn midpoint(
         &self,
         old: Point,
@@ -769,6 +839,31 @@ impl<'a> Problem<'a> {
             c.energy_tolerance_j,
             &mut add,
         );
+        add(
+            full.escaped_alpha_amount
+                .increment_since(old.escaped_alpha_amount),
+            fine.escaped_alpha_amount
+                .increment_since(old.escaped_alpha_amount),
+            c.absolute_amount_tolerance_mol,
+        );
+        for (a, b, before) in [
+            (
+                full.escaped_alpha_energy,
+                fine.escaped_alpha_energy,
+                old.escaped_alpha_energy,
+            ),
+            (
+                full.escaped_alpha_electron_energy,
+                fine.escaped_alpha_electron_energy,
+                old.escaped_alpha_electron_energy,
+            ),
+        ] {
+            add(
+                a.increment_since(before),
+                b.increment_since(before),
+                c.energy_tolerance_j,
+            );
+        }
         if !norm.is_finite() {
             return Err(FusionNetworkError::Arithmetic(
                 "network local error estimate",
@@ -944,6 +1039,8 @@ impl<'a> Problem<'a> {
             + point.transport_energy_out[1].value
             + point.particles.energy_out[0].value
             + point.particles.energy_out[1].value
+            + point.escaped_alpha_energy.value
+            + point.escaped_alpha_electron_energy.value
             - point.particles.energy_in[0].value
             - point.particles.energy_in[1].value
             - released.value
@@ -980,6 +1077,10 @@ impl<'a> Problem<'a> {
             expected_amount.add(-point.particles.exhausted[slot].value);
             activity +=
                 point.particles.injected[slot].value + point.particles.exhausted[slot].value;
+            if slot == 4 {
+                expected_amount.add(-point.escaped_alpha_amount.value);
+                activity += point.escaped_alpha_amount.value;
+            }
             let residual = (after - expected_amount.value).abs();
             stoichiometry = stoichiometry.max(residual);
             if !residual.is_finite()
@@ -995,20 +1096,26 @@ impl<'a> Problem<'a> {
         let particles = point.particles;
         let net = particles.nuclei_net_in();
         let activity = particles.nuclei_activity();
-        let baryon_residual = (baryons[1] - baryons[0] - net[0]) / (baryons[0] + activity[0]);
-        let charge_residual = (charge[1] - charge[0] - net[1]) / (charge[0] + activity[1]);
+        let alpha_baryons_out = 4.0 * point.escaped_alpha_amount.value;
+        let alpha_charge_out = 2.0 * point.escaped_alpha_amount.value;
+        let baryon_residual = (baryons[1] - baryons[0] - net[0] + alpha_baryons_out)
+            / (baryons[0] + activity[0] + alpha_baryons_out);
+        let charge_residual = (charge[1] - charge[0] - net[1] + alpha_charge_out)
+            / (charge[0] + activity[1] + alpha_charge_out);
         let electron = self.plasma.electron_index();
         let electron_particle_residual = amounts[electron].value()
             - self.initial_amounts[electron]
             - particles.electrons_in.value
-            + particles.electrons_out.value;
+            + particles.electrons_out.value
+            + alpha_charge_out;
         if !electron_particle_residual.is_finite()
             || electron_particle_residual.abs()
                 > self.controls.absolute_amount_tolerance_mol
                     + self.controls.balance_relative_tolerance
                         * (self.initial_amounts[electron]
                             + particles.electrons_in.value
-                            + particles.electrons_out.value)
+                            + particles.electrons_out.value
+                            + alpha_charge_out)
         {
             return Err(FusionNetworkError::Balance(
                 "particle-source companion electrons",
@@ -1025,6 +1132,8 @@ impl<'a> Problem<'a> {
                     + particles.energy_in[1].value
                     + particles.energy_out[0].value
                     + particles.energy_out[1].value
+                    + point.escaped_alpha_energy.value
+                    + point.escaped_alpha_electron_energy.value
                     + point.work_on_pools[0].value.abs()
                     + point.work_on_pools[1].value.abs()
                     + kinetic_energy_change_j.abs()

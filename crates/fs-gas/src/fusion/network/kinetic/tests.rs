@@ -17,6 +17,7 @@ mod fixture;
 
 mod compression;
 mod confinement;
+mod escape;
 mod history;
 mod particles;
 
@@ -281,14 +282,15 @@ fn check_accounts(result: &KineticFusionResult) {
 
     close(
         state.alpha_amount().value() - initial.alpha_amount().value(),
-        a.born_alpha_amount_mol,
+        a.born_alpha_amount_mol - a.escaped_alpha_amount_mol,
         3e-12,
         1e-22,
     );
     close(
         alpha_energy - initial.alpha_energy().value()
             + a.deposited_heavy_energy_j
-            + a.deposited_electron_energy_j,
+            + a.deposited_electron_energy_j
+            + a.escaped_alpha_energy_j,
         a.born_alpha_energy_j + a.boundary_work_on_alphas_j,
         3e-12,
         2e-6,
@@ -315,7 +317,8 @@ fn check_accounts(result: &KineticFusionResult) {
             + b.boundary_work_on_electrons_j
             - b.electron_transport_energy_out_j
             + b.particles.injected_thermal_energy_j[1]
-            - b.particles.exhausted_thermal_energy_j[1],
+            - b.particles.exhausted_thermal_energy_j[1]
+            - a.escaped_electron_thermal_energy_j,
         3e-12,
         2e-6,
     );
@@ -325,7 +328,9 @@ fn check_accounts(result: &KineticFusionResult) {
             + b.photon_energy_escaped_j
             + b.heavy_transport_energy_out_j
             + b.electron_transport_energy_out_j
-            + b.particles.exhausted_thermal_energy_j.iter().sum::<f64>(),
+            + b.particles.exhausted_thermal_energy_j.iter().sum::<f64>()
+            + a.escaped_alpha_energy_j
+            + a.escaped_electron_thermal_energy_j,
         b.nuclear_energy_released_j
             + b.external_heavy_energy_j
             + b.external_electron_energy_j
@@ -359,7 +364,7 @@ fn check_accounts(result: &KineticFusionResult) {
             })
             .sum();
         close(
-            inventory(state) + escaped,
+            inventory(state) + escaped + weights[4] * a.escaped_alpha_amount_mol,
             inventory(initial) + net_particles,
             3e-12,
             1e-20,

@@ -9,10 +9,15 @@
 //! Both energy boundaries are reflecting. Finite energy support and grid
 //! resolution are explicit numerical approximations; detailed balance on a
 //! fixed grid is not a claim of exact continuum Maxwellian quadrature.
+//! An optional authored energy-dependent escape hazard removes kinetic alphas
+//! through a separately accounted particle/energy port, without thermalizing
+//! their remaining kinetic energy inside the plasma.
 
 mod collision;
+mod escape;
 mod grid;
 
+pub use escape::AlphaEscapeTable;
 pub use grid::AlphaEnergyGrid;
 
 pub use super::network::kinetic::{
@@ -22,6 +27,7 @@ pub use super::network::kinetic::{
 };
 
 pub(crate) use collision::AlphaCollisionOperator;
+pub(crate) use escape::PreparedAlphaEscape;
 
 /// Fixed upper bound on success-path collision workspace.
 pub(crate) const MAX_ALPHA_BINS: usize = 256;

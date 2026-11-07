@@ -1,7 +1,7 @@
 use super::super::solve as burn;
 use super::*;
 use crate::fusion::emission::{self, NeutronMoments};
-use crate::fusion::kinetic::AlphaCollisionOperator;
+use crate::fusion::kinetic::{AlphaCollisionOperator, PreparedAlphaEscape};
 use crate::fusion::solve::Sum;
 use crate::fusion::volume::{adiabatic_work_on_pools, log_volume_ratio};
 use fs_math::det::{exp, pow};
@@ -24,6 +24,7 @@ pub(super) struct Point {
 struct Sources {
     core: burn::Sources,
     collision: AlphaCollisionOperator,
+    escape: Option<PreparedAlphaEscape>,
 }
 pub(super) struct Problem<'a> {
     initial: &'a KineticFusionState,
@@ -191,7 +192,22 @@ impl<'a> Problem<'a> {
             &prepared,
             &mut *cancelled,
         )?;
-        Ok(Sources { core, collision })
+        let escape = self
+            .alpha
+            .escape()
+            .map(|table| {
+                table.prepare(
+                    self.initial.energy_grid(),
+                    point.alpha_energy_scale,
+                    cancelled,
+                )
+            })
+            .transpose()?;
+        Ok(Sources {
+            core,
+            collision,
+            escape,
+        })
     }
 
     /// Admit complete source coefficients at accepted endpoints and authored
@@ -217,6 +233,14 @@ impl<'a> Problem<'a> {
             .map_err(coulomb_error)?;
         let core = self.core.sources(point.core, cancelled)?;
         let energies = self.initial.energy_grid().energies();
+        if let Some(table) = self.alpha.escape() {
+            // The original table covers a contiguous interval. Admit both
+            // physical endpoints also at accepted geometry knots, where
+            // interior midpoint sampling alone can miss a domain excursion.
+            for endpoint in [energies[0], energies[energies.len() - 1]] {
+                table.hazard_at(Energy::new(endpoint.value() * point.alpha_energy_scale))?;
+            }
+        }
         for channel in [0, 3] {
             if let Some(event) = core.events[channel] {
                 let birth = event.product_kinetic_energies_j()[0];
@@ -261,7 +285,23 @@ impl<'a> Problem<'a> {
         source: &Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, FusionNetworkError> {
-        let mut next = self.collide(old, 0.5 * dt, &source.collision, cancelled)?;
+        if let Some(escape) = &source.escape {
+            let has_alphas_or_births = old.core.kinetic_alpha_amount.value > 0.0
+                || source.core.events[0].is_some()
+                || source.core.events[3].is_some();
+            // Exact separate maps do not make a stiff composition exact:
+            // saturated coarse/fine removals can both erase a continuously
+            // replenished alpha stock and hide the splitting error. Resolve at
+            // most one escape e-fold per coupled frozen interval. The original
+            // bounded retry owner shortens the whole physical step; a source
+            // too stiff for its declared budget refuses rather than certifying
+            // that false equilibrium. An empty alpha-free solve has no split.
+            if has_alphas_or_births && escape.maximum_rate_s_inv() * dt > 1.0 {
+                return Err(FusionNetworkError::StepBudget);
+            }
+        }
+        let escaped = self.escape(old, 0.5 * dt, source.escape.as_ref(), cancelled)?;
+        let mut next = self.collide(escaped, 0.5 * dt, &source.collision, cancelled)?;
         let (core, births) =
             self.core
                 .frozen_step_with_births(next.core, dt, source.core, cancelled)?;
@@ -281,7 +321,38 @@ impl<'a> Problem<'a> {
             )?;
         }
         self.admit(&next, cancelled)?;
-        self.collide(next, 0.5 * dt, &source.collision, cancelled)
+        let next = self.collide(next, 0.5 * dt, &source.collision, cancelled)?;
+        self.escape(next, 0.5 * dt, source.escape.as_ref(), cancelled)
+    }
+
+    fn escape(
+        &self,
+        old: Point,
+        dt: f64,
+        source: Option<&PreparedAlphaEscape>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, FusionNetworkError> {
+        let Some(source) = source else {
+            return Ok(old);
+        };
+        let step = source.advance(
+            self.initial.energy_grid(),
+            old.alpha_energy_scale,
+            &old.alphas,
+            dt,
+            cancelled,
+        )?;
+        let mut next = old;
+        next.alphas = step.amounts;
+        next.core = self.core.escape_alphas(
+            old.core,
+            step.removed_mol,
+            step.retained_mol,
+            step.removed_energy_j,
+            cancelled,
+        )?;
+        self.admit(&next, cancelled)?;
+        Ok(next)
     }
 
     fn midpoint(
@@ -526,9 +597,10 @@ impl<'a> Problem<'a> {
         let deposited = point.core.alpha_deposited.map(|v| v.value);
         let (number, _) = self.moments(&point);
         let amount_residual = number - point.core.kinetic_alpha_amount.value;
-        let energy_residual = energy_change + deposited[0] + deposited[1]
-            - born_energy
-            - point.alpha_boundary_work.value;
+        let energy_residual =
+            energy_change + deposited[0] + deposited[1] + point.core.escaped_alpha_energy.value
+                - born_energy
+                - point.alpha_boundary_work.value;
         let c = self.controls;
         if !energy_residual.is_finite()
             || !amount_residual.is_finite()
@@ -540,6 +612,7 @@ impl<'a> Problem<'a> {
                             + state.alpha_energy().value()
                             + deposited[0].abs()
                             + deposited[1].abs()
+                            + point.core.escaped_alpha_energy.value
                             + point.alpha_boundary_work.value.abs())
             || amount_residual.abs()
                 > c.absolute_amount_tolerance_mol
@@ -553,6 +626,10 @@ impl<'a> Problem<'a> {
         let alpha_balance = KineticAlphaBalance {
             born_alpha_amount_mol: born_amount,
             born_alpha_energy_j: born_energy,
+            escaped_alpha_amount_mol: point.core.escaped_alpha_amount.value,
+            escaped_alpha_energy_j: point.core.escaped_alpha_energy.value,
+            escaped_electrons_mol: 2.0 * point.core.escaped_alpha_amount.value,
+            escaped_electron_thermal_energy_j: point.core.escaped_alpha_electron_energy.value,
             deposited_heavy_energy_j: deposited[0],
             deposited_electron_energy_j: deposited[1],
             alpha_energy_change_j: energy_change,
