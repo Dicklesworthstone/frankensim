@@ -51,6 +51,16 @@ pub enum VibrationError {
     Modal(ModalError),
     /// A zero, negative, nonfinite or insufficiently resolved structural mode.
     UnresolvedMode { index: usize, lambda: f64, residual: f64 },
+    /// The complete eigenfrequency enclosure leaves a participating material's
+    /// supported band. A computed resonance does not authorize extrapolation.
+    MaterialBand {
+        /// Index in the complete native modal basis.
+        index: usize,
+        /// Discrete eigenfrequency enclosure [rad/s].
+        omega_interval_rad_s: (f64, f64),
+        /// Common support of the active mechanical material sources [rad/s].
+        source_band_rad_s: (f64, f64),
+    },
 }
 impl From<MembraneError> for VibrationError {
     fn from(error: MembraneError) -> Self { Self::Membrane(error) }
@@ -187,6 +197,8 @@ impl MembranePatch {
     ///
     /// Native geometry and two-sided sheet admission, roundoff symmetry, dense work
     /// limits and the complete positive spectrum retain their original gates.
+    /// Every eigenfrequency enclosure must fit the active elastic and inertial
+    /// source bands, independently of whether a damping model is later attached.
     /// No modes are clipped, selected or assigned independent masses/damping.
     pub fn modes_from_tangent(
         &self, displacement_m:&[[f64;3]], free_dofs:&[usize], stiffness:&[f64],
@@ -218,6 +230,7 @@ impl MembranePatch {
         // operating envelope merely because a source law permits that strain.
         self.evaluate(displacement_m,&mut cancelled)?;
         self.admit_linearization(displacement_m,&mut cancelled)?;
+        let material_band = self.mechanical_frequency_band_rad_s(&mut cancelled)?;
         let k=stiffness;
         let m=self.mass_on_dofs(inertia,free_dofs,&mut cancelled)?;
         // Check the exact assembled action BEFORE the shared dense owner does
@@ -242,6 +255,14 @@ impl MembranePatch {
                 || mode.interval.0<=0.0
                 || mode.residual>settings.relative_residual_tolerance*mode.lambda {
                 return Err(VibrationError::UnresolvedMode {index,lambda:mode.lambda,residual:mode.residual});
+            }
+            if let Some((lo, hi)) = material_band {
+                let interval = (mode.interval.0.sqrt(), mode.interval.1.sqrt());
+                if !(interval.0 >= lo && interval.1 <= hi) {
+                    return Err(VibrationError::MaterialBand {
+                        index, omega_interval_rad_s: interval, source_band_rad_s: (lo, hi),
+                    });
+                }
             }
         }
         let pressure_load_per_pa=self.pressure_load_n(displacement_m,1.0,&mut cancelled)?;

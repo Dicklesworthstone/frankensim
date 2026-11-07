@@ -14,7 +14,7 @@ use fs_matdb::{
     PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_qty::{Dims, DynViscosity, QuantitySpec};
-use fs_solid::membrane::vibration::{MembraneModes, VibrationSettings};
+use fs_solid::membrane::vibration::{MembraneModes, VibrationError, VibrationSettings};
 use fs_solid::membrane::viscosity::{MembraneViscosity, MembraneViscosityError};
 use fs_solid::membrane::{MembraneBudget, MembraneDomain, MembraneError, MembranePatch};
 use fs_solid::mesh2::Mesh2;
@@ -148,12 +148,20 @@ fn modes<'a>(
     displacement: &[[f64; 3]],
     dofs: &[usize],
 ) -> MembraneModes<'a> {
+    try_modes(patch, displacement, dofs).unwrap()
+}
+
+fn try_modes<'a>(
+    patch: &'a MembranePatch,
+    displacement: &[[f64; 3]],
+    dofs: &[usize],
+) -> Result<MembraneModes<'a>, VibrationError> {
     let n = dofs.len();
     let mut stiffness = vec![0.0; n * n];
     let mut direction = vec![[0.0; 3]; patch.mesh().nodes.len()];
     for (column, &dof) in dofs.iter().enumerate() {
         direction[dof / 3][dof % 3] = 1.0;
-        let action = patch.tangent_apply(displacement, &direction, || false).unwrap();
+        let action = patch.tangent_apply(displacement, &direction, || false)?;
         direction[dof / 3][dof % 3] = 0.0;
         for (row, &index) in dofs.iter().enumerate() {
             stiffness[row * n + column] = action[index / 3][index % 3];
@@ -163,7 +171,7 @@ fn modes<'a>(
         displacement, dofs, &stiffness,
         VibrationSettings { max_free_dofs: 16, relative_residual_tolerance: 1e-8 },
         || false,
-    ).unwrap()
+    )
 }
 
 #[test]
@@ -373,11 +381,22 @@ fn mechanical_source_bands_bound_quadratic_and_tabulated_damping_and_modes() {
             ).unwrap();
             assert_eq!(admitted.resolved_band_rad_s(), (0.0, cutoff));
             assert_eq!(admitted.reference_laws()[0].source(), p.sheets()[0].material());
-            // Numeric coefficients and native modal extraction are unchanged.
-            // The retained actual mode lies outside the narrower source support.
-            let basis = modes(&p, &u, &[5, 8]);
-            close(basis.modes()[0].lambda, reference_modes.modes()[0].lambda);
-            assert!(admitted.project_modes(&basis, 100_000, || false).is_err());
+            if key == THICKNESS {
+                // These sheet energies and their inertia are per area; only
+                // the volume viscosity uses thickness. Its support must not
+                // restrict undamped native modes, but still bounds their loss.
+                let basis = modes(&p, &u, &[5, 8]);
+                close(basis.modes()[0].lambda, reference_modes.modes()[0].lambda);
+                assert!(admitted.project_modes(&basis, 100_000, || false).is_err());
+            } else {
+                // An undamped mode cannot escape the elastic or inertial
+                // source domain merely by omitting the damping adapter.
+                assert!(matches!(try_modes(&p, &u, &[5, 8]),
+                    Err(VibrationError::MaterialBand {
+                        omega_interval_rad_s: (low, _), source_band_rad_s: (0.0, high), ..
+                    }) if low > cutoff && high == cutoff
+                ), "{key} did not constrain native modal extraction");
+            }
         }
     }
 }
@@ -437,6 +456,13 @@ fn disjoint_regional_mechanical_support_cannot_borrow_a_broad_viscosity_band() {
     for band in [(0.0, 1000.0), (0.0, 100.0), (200.0, 300.0), (100.0, 200.0)] {
         assert!(MembraneViscosity::new(&p, laws.clone(), band, || false).is_err());
     }
+    let mut u = deformed();
+    u.extend(deformed());
+    assert!(matches!(try_modes(&p, &u, &[5, 8, 14, 17]),
+        Err(VibrationError::Membrane(MembraneError::Invalid(
+            "membrane mechanical sources have disjoint frequency support"
+        )))
+    ));
 }
 
 #[path = "membrane_viscosity/modal.rs"]

@@ -19,7 +19,9 @@
 //! deformation, not an artificial stiffness floor.
 
 use crate::mesh2::{Mesh2, shapes_at};
-use fs_material::sheet::{MembraneLaw, ResolvedSheet, SheetError, SheetLaw, SheetResponse};
+use fs_material::sheet::{AREAL_DENSITY, MEMBRANE_PROPERTIES, MembraneLaw, ResolvedSheet,
+    SheetError, SheetLaw, SheetResponse, THICKNESS};
+use fs_material::sheet::tabulated::{COUPLING_PROPERTY, CURVE_PROPERTIES};
 use std::collections::BTreeSet;
 
 /// Allocation/topology limits checked before allocating element data.
@@ -226,6 +228,50 @@ impl MembranePatch {
     pub fn nodal_mass_kg(&self) -> &[f64] { &self.nodal_mass_kg }
     /// Conserved total reference mass, in kilograms.
     pub fn reference_mass_kg(&self) -> f64 { self.nodal_mass_kg.iter().sum() }
+
+    // Shared by undamped modal extraction and material damping. Only sources
+    // used by this mechanical owner participate: extra retained properties do
+    // not acquire authority over the spectrum. Quadratic/tabulated sheet laws
+    // are per area; thickness enters their viscosity, not their elastic energy.
+    // An explicit graded reference inventory retains the original sheet source
+    // authority, so it does not remove the areal-density applicability either.
+    fn mechanical_frequency_band_rad_s(
+        &self, cancelled: &mut (impl FnMut() -> bool + ?Sized),
+    ) -> Result<Option<(f64, f64)>, MembraneError> {
+        let mut band: Option<(f64, f64)> = None;
+        for (index, (element, sheet)) in self.elements.iter().zip(&self.sheets).enumerate() {
+            poll(cancelled)?;
+            let mut include = |key: &str| -> Result<(), MembraneError> {
+                let property = sheet.material().property(key).ok_or(
+                    MembraneError::Invalid("missing original membrane mechanical source"))?;
+                if let Some((lo, hi)) = property.angular_frequency_band_rad_s()
+                    .map_err(|source| MembraneError::Material {
+                        element: index, source: SheetError::Material(source),
+                    })?
+                {
+                    band = Some(band.map_or((lo, hi), |(a, b)| (a.max(lo), b.min(hi))));
+                }
+                Ok(())
+            };
+            include(AREAL_DENSITY)?;
+            match &element.law {
+                MembraneLaw::Quadratic(_) => {
+                    for key in MEMBRANE_PROPERTIES { include(key)?; }
+                }
+                MembraneLaw::Tabulated(_) => {
+                    for key in CURVE_PROPERTIES { include(key)?; }
+                    include(COUPLING_PROPERTY)?;
+                }
+                // Bulk hyperelastic energy is integrated over reference
+                // thickness. Its own model admission already excludes spectra.
+                MembraneLaw::Hyperelastic(_) => include(THICKNESS)?,
+            }
+            if band.is_some_and(|(lo, hi)| hi < lo) {
+                return Err(MembraneError::Invalid("membrane mechanical sources have disjoint frequency support"));
+            }
+        }
+        Ok(band)
+    }
 
     // Compute H from relative displacements before forming F = A + H. Using
     // sym(A^t H) + H^t H/2 avoids subtracting nearly equal unit metrics and

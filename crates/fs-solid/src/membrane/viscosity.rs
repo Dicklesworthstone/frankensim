@@ -20,8 +20,7 @@ use super::{Element, MembraneError, MembranePatch, dot, finite_vectors, poll};
 use fs_material::plane_stress_viscosity::{
     MaterialPlane, PlaneStressViscosity, factor_passive_resultant,
 };
-use fs_material::sheet::{AREAL_DENSITY, MEMBRANE_PROPERTIES, MembraneLaw, THICKNESS};
-use fs_material::sheet::tabulated::{COUPLING_PROPERTY, CURVE_PROPERTIES};
+use fs_material::sheet::{MembraneLaw, THICKNESS};
 
 /// Original membrane/source refusal or an incompatible material binding.
 #[derive(Debug)]
@@ -249,7 +248,8 @@ impl<'a> MembraneViscosity<'a> {
         let mut volumes_m3 = Vec::with_capacity(laws.len());
         let mut factors = Vec::with_capacity(laws.len());
         let mut natural_references = Vec::with_capacity(laws.len());
-        let mut source_band = (0.0_f64, f64::INFINITY);
+        let mut source_band = patch.mechanical_frequency_band_rad_s(&mut cancelled)?
+            .unwrap_or((0.0_f64, f64::INFINITY));
         for (index, ((element, sheet), law)) in
             patch.elements.iter().zip(&patch.sheets).zip(&laws).enumerate()
         {
@@ -275,30 +275,14 @@ impl<'a> MembraneViscosity<'a> {
             }
             let (loss_lo, loss_hi) = law.omega_band_rad_s();
             source_band = (source_band.0.max(loss_lo), source_band.1.min(loss_hi));
-            let mut include_property = |key: &str| -> Result<()> {
-                let property = sheet.material().property(key)
-                    .ok_or_else(|| invalid("missing original membrane mechanical source"))?;
-                if let Some((low, high)) = property.angular_frequency_band_rad_s()
-                    .map_err(|source| MembraneViscosityError::Source { element: index, source })?
-                {
-                    source_band = (source_band.0.max(low), source_band.1.min(high));
-                }
-                Ok(())
-            };
-            include_property(AREAL_DENSITY)?;
-            include_property(THICKNESS)?;
-            match &element.law {
-                MembraneLaw::Quadratic(_) => {
-                    for key in MEMBRANE_PROPERTIES { include_property(key)?; }
-                }
-                MembraneLaw::Tabulated(_) => {
-                    for key in CURVE_PROPERTIES { include_property(key)?; }
-                    include_property(COUPLING_PROPERTY)?;
-                }
-                // The native hyperelastic owner already requires fixed external
-                // model support and refuses frequency applicability. Reference
-                // mass/thickness still belong to the original sheet above.
-                MembraneLaw::Hyperelastic(_) => {}
+            // Reference-volume dissipation also consumes thickness, including
+            // for membrane elastic laws whose energy is already per area.
+            let thickness = sheet.material().property(THICKNESS)
+                .ok_or_else(|| invalid("missing original membrane thickness source"))?;
+            if let Some((low, high)) = thickness.angular_frequency_band_rad_s()
+                .map_err(|source| MembraneViscosityError::Source { element: index, source })?
+            {
+                source_band = (source_band.0.max(low), source_band.1.min(high));
             }
             if source_band.1 < source_band.0 || lo < source_band.0 || hi > source_band.1 {
                 return Err(invalid("declared membrane band exceeds combined mechanical and viscosity source support"));

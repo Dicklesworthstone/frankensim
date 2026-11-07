@@ -2126,7 +2126,13 @@ global injectivity/continuum stability certificate is claimed.
 composing physical models. It accepts a finite row-major full residual tangent
 in an ordered unique free-DOF map, reuses original geometry/material admission
 and reference mass, and retains the original symmetry, complete-positive-spectrum
-and residual gates. `MembraneModes` owns the same pressure projection and
+and residual gates. Every eigenfrequency enclosure must also fit the common
+support of the original areal-density and active elastic-law sources. This
+admission applies before damping is attached; unsupported modes cannot escape
+through the undamped entry. Per-area sheet laws do not borrow thickness support,
+while bulk hyperelastic energy and volume viscosity retain its applicability.
+Unrelated carried material channels do not narrow the spectrum. `MembraneModes`
+owns the same pressure projection and
 reconstruction as held-pressure `MembraneVibration`. This lower entry does not
 certify force equilibrium or constitutive provenance of a supplied matrix;
 the composing physical owner must supply the same accepted state, supports and
