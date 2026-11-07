@@ -20,7 +20,10 @@
 //! switching, electrocaloric heat, leakage, geometry evolution or measured fit.
 //! Electrical refinement accumulates per-cell Q, deposited as Q/dt over one
 //! backward-Euler thermal interval. It does not refine heat-release chronology
-//! or increase the coupled thermal time order.
+//! or increase the coupled thermal time order. [`trajectory`] instead refines
+//! both histories together, resolving when that physical heat reaches each cell.
+
+pub mod trajectory;
 
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,

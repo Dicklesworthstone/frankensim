@@ -1856,6 +1856,45 @@ zero-loss/refusal behavior; original source and whole-volume admission; late
 cancellation, budgets, caloric support and replay; and cumulative refined-path
 heat with separate numerical loss and retained global-work receipts.
 
+### Resolving dielectric heat-release chronology
+
+The same default-off spatial dielectric owner exposes
+`advance_affine_candidate` and `advance_affine_candidate_with_heat_assembly`
+through its `trajectory` module. One authored affine voltage/charge and volume
+charge segment is now refined in physical time. Full and two-half trials use
+the original coupled endpoint solver; only the two-half field and thermal
+histories can be retained. Each substep deposits its own physical switching
+heat while the original conduction, reservoirs and complete HeatAssembly act.
+A hold can therefore refine solely for thermal cooling with unchanged electric
+field, zero switching heat and unchanged polarization.
+
+`HystereticThermalPathControls` combines the original P/Q/work refinement
+policy with a separate L1 cell-energy defect and explicit global thermal-driver
+evaluation cap. Thermal relative errors scale interval energy changes, never
+absolute reference enthalpy. Both per-cell heat defects and thermal defects
+use absolute sums so opposing spatial errors cannot cancel. Coarse, half and
+rejected trials consume one global field-solve/operator/evaluation budget.
+The original per-step caps remain active. Duration-weighted native energy
+allowances and thermal Newton absolute targets precede whole-path physical
+balance gates; no converged-state or small-update fallback bypasses them.
+
+Only interval descriptors and a bounded set of trial states are retained. A
+rejected first half is reused only for its identical left-child starting
+history. Cumulative accepted-only electrical/cell and thermal energy accounts
+use compensated sums; the original stable thermal residuals are preserved.
+The report explicitly identifies its source sample, nonlinear reports and
+charge residuals as final-substep data. Global attempted-work counts and
+empirical error estimates remain in `HystereticThermalPathSummary`.
+Cancellation, refinement/work refusal or source-domain failure returns neither
+new history. These are first-order thermal trajectories with empirical local
+estimates, not certified global time errors, automatic event detection,
+temperature-dependent switching or an increase in the thermal integrator order.
+
+The three `hysteretic_dielectric_enthalpy::trajectory` G1/G3/G4 tests compare
+switching during cooling with an independent piecewise analytical solution,
+check exponential cooling through HeatAssembly while every electrical error is
+zero, and exercise global work caps, depth, late cancellation and exact retry.
+
 
 ## Accelerating stress histories through the original PCM renderer
 

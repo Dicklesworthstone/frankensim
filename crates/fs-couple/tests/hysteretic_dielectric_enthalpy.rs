@@ -2,6 +2,9 @@
 //! Scaled analytical SI fixtures exercise the equations, not measured materials.
 #![cfg(feature = "experimental-dielectric-hysteresis")]
 
+#[path = "hysteretic_dielectric_enthalpy/trajectory.rs"]
+mod trajectory;
+
 use fs_couple::{
     circuit_enthalpy::{
         CircuitEnthalpyError, CircuitEnthalpySolve,
