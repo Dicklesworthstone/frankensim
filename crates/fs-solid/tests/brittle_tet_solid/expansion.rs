@@ -11,6 +11,9 @@ use fs_solid::brittle::solid::expansion::{
     ThermalBrittleTetEnergy, ThermalBrittleTetError, ThermalBrittleTetSolid,
 };
 
+#[path = "expansion/initiation.rs"]
+mod initiation;
+
 const RIGID_SUPPORTS: [(usize, f64); 6] =
     [(0, 0.0), (1, 0.0), (2, 0.0), (4, 0.0), (5, 0.0), (8, 0.0)];
 

@@ -1,5 +1,48 @@
 # fs-solid CONTRACT
 
+## Thermal tensile onset with original-source fracture handoff
+
+`expansion::initiation::ThermalTensileElasticTetSolid` retains virgin elastic
+prehistory on the original P1 mesh and selected thermal sources. The native
+equilibrium solver evaluates the original elastic backbone at TOTAL strain
+minus integrated free expansion. Tensile detection consumes MECHANICAL strain,
+so a freely expanding body remains stress-free while restraint or nonuniform
+expansion can select a crack plane. Reference temperature, selected expansion
+curve, source claims and nonthermal query coordinates remain authoritative.
+
+Each proposed endpoint checks the new coefficients at the held old mechanical
+strain before the joint displacement/eigenstrain solve. The native Rankine
+detector then inspects the mechanical strain chord under those coefficients.
+Elastic acceptance separates signed parameter work, total-strain mechanical
+work, eigenstrain work, storage and endpoint quadrature defect through the
+existing `ThermalBrittleTetEnergy`; fracture accounts stay zero. Repeated
+principal tension requires an explicit physical direction hint.
+
+An onset prediction resolves the same discovered planes and actual geometric
+V/A widths at BOTH old and proposed thermal sources. The new material source
+bridge preserves exact expansion/reference receipts during geometry preparation.
+`handoff` seeds only the OLD accepted endpoint, checking source, plane, width,
+total/mechanical strain, stress, storage and undamaged mixed-mode history.
+`replay` validates both source preparations and sends the retained request to
+`ThermalBrittleTetSolid::advance`, which owns subsequent coefficient transfer,
+eigenstrain work and irreversible fracture. No predictor work is accepted or
+charged again during handoff.
+
+Coefficient changes that already make the held mechanical start critical
+retain the native typed `StartNotElastic` refusal; they require earlier
+handoff or resolved source endpoints. Chord fractions do not identify physical
+times or temperatures. Source extrema/reversals, fixed receiving planes, the
+tensile-only criterion and small-strain domain remain explicit limitations;
+this static entry supplies no heat equation or inferred caloric heat.
+
+Four native regression definitions exercise free expansion across source knots,
+analytic restrained-cooling onset and native softening, conservative thermal
+handoff, separate coefficient work, coefficient-trigger refusal and repeated
+principal tension. Source/API review, focused formatting and independent
+scalar work/onset checks completed; native compilation and execution remain
+unperformed because the required distributed runners and pinned constellation
+checkouts are unavailable.
+
 ## Owned membrane histories for evolving native kinetics
 
 `membrane::visco::owned::OwnedFiniteViscoMembraneMotion` captures an accepted

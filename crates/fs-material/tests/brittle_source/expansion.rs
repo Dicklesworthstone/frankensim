@@ -397,3 +397,6 @@ fn numerically_identical_alpha_cannot_silently_switch_selected_evidence() {
 
 #[path = "expansion/dynamics.rs"]
 mod dynamics;
+
+#[path = "expansion/initiation.rs"]
+mod initiation;

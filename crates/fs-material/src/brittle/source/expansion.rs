@@ -144,6 +144,43 @@ impl ResolvedThermalBrittle {
         &self.band
     }
 
+    /// Prepare a discovered plane and geometric width while retaining this
+    /// exact thermal source, expansion integral and immutable reference.
+    ///
+    /// The receiver may change only crack-plane geometry. The complete original
+    /// material bundle (including extra multiphysics receipts), coefficients and
+    /// strain/work controls must agree. This is source preparation, not history
+    /// transfer: any elastic handoff must separately check stress and storage,
+    /// and an existing damaged state cannot be attached to the new owner.
+    pub fn with_resolved_band(
+        &self,
+        band: ResolvedBrittleCrackBand,
+    ) -> Result<Self, BrittleSourceError> {
+        if band.material() != self.band.material()
+            || band.law().elastic() != self.band.law().elastic()
+            || band.law().parameters() != self.band.law().parameters()
+        {
+            return Err(BrittleSourceError::Invalid(
+                "thermal crack-plane preparation must retain the complete original source",
+            ));
+        }
+        let original = self.band.law().settings();
+        let target = band.law().settings();
+        if target.maximum_strain != original.maximum_strain
+            || target.energy_tolerance_j_m3 != original.energy_tolerance_j_m3
+        {
+            return Err(BrittleSourceError::Invalid(
+                "thermal crack-plane preparation must retain strain and work controls",
+            ));
+        }
+        let candidate = Self {
+            band,
+            expansion: self.expansion.clone(),
+        };
+        candidate.check_binding()?;
+        Ok(candidate)
+    }
+
     /// Exact selected expansion curve, reference/current receipts and integral.
     #[must_use]
     pub const fn expansion(&self) -> &IntegratedIsotropicThermalExpansion {

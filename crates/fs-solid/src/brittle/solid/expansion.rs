@@ -20,12 +20,17 @@
 //! selected completed, traction-free cracks through the original topology owner.
 //! Large thermal jumps can cross a softening branch before Newton equilibrates;
 //! callers must resolve them with physical temperature/load endpoints.
+//! The [`initiation`] child discovers tensile planes from retained elastic
+//! thermal prehistory, then hands the old accepted state to this same owner.
 
 /// Retained source-bound motion with joint displacement and thermal eigenstrain.
 pub mod dynamics;
 
 /// Completed native fracture release retaining thermal source and strain history.
 pub mod fracture;
+
+/// Thermal elastic prehistory, tensile-plane discovery and conservative handoff.
+pub mod initiation;
 
 use std::sync::Arc;
 

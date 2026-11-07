@@ -17825,6 +17825,19 @@ ownership, nonlinear work and cancellation refusals retain the original state.
 
 `brittle::source::expansion::ResolvedThermalBrittle` binds the original brittle source bundle to the original integrated isotropic thermal-expansion source. Its resolver selects the fracture, elastic and instantaneous alpha(T) claims together at one fixed reference, then retains those claims and integrates the selected expansion through every supported temperature cell. Missing path support, different evidence, coordinate conventions, source context or reference refuses. Negative and zero expansion coefficients are admissible; alpha is never replaced by an endpoint secant approximation.
 
+`ResolvedThermalBrittle::with_resolved_band` prepares a discovered crack plane
+and receiving geometric width while retaining the exact integrated expansion
+and immutable reference. The complete material bundle, including any original
+density receipt, elastic/fracture coefficients and strain/work bounds must
+agree. Equal numerical coefficients from a different source or temperature
+context do not authorize replacement. Geometry preparation transfers no
+history: the original tensile owner must separately admit an elastic seed and
+its stress/storage continuity, and existing damaged states keep their native
+ownership checks. Three native regression definitions in
+`tests/brittle_source/expansion/initiation.rs` cover source/reference retention,
+mechanical-strain fracture after handoff, unchanged later thermal refresh,
+source/context/control refusal and preservation of additional density receipts.
+
 The borrowed total-strain law supplies mechanical strain equal to total tensor strain minus the integrated free strain times the identity. Both total and mechanical Frobenius bounds are checked. Tensor shear values, native tangent conventions, fixed plane/width, cohesive history and original fracture-energy matching are retained. No independent damage model or thermal history copy is introduced.
 
 A coefficient-only preparation transfers the original mechanical history to the admitted successor source. A solid consumer then solves total displacement and the new eigenstrain together; it must not precommit a fully restrained damage trial before free expansion equilibrates. A distinct optional held-total-strain operation represents actual restraint: it orders coefficient work before the native mechanical-strain change and uses the original exact mean stress for eigenstrain work. Signed coefficient/eigenstrain work, coefficient-induced and strain-induced fracture, storage change and checked work defects remain separate. Cooling, reheating and increased toughness do not erase original damage or cumulative fracture work.
