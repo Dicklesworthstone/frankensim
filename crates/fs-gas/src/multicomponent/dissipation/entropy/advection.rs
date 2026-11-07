@@ -385,12 +385,15 @@ impl EntropyTracker {
             let mut count = 0;
             for (index, (a, b, areas, mask)) in stages.into_iter().enumerate() {
                 poll(cancelled)?;
-                let exterior = self.exterior.get(index).ok_or(FlowError::EntropyDomain(
+                let exterior = self.exterior.get_mut(index).ok_or(FlowError::EntropyDomain(
                     "network exterior entropy stage count",
                 ))?;
-                let (exchange, _) = exterior.stage_pair(
+                let (exchange, inventory) = exterior.stage_pair(
                     gas, a, b, dt, areas, mask, &self.reference_entropy, cancelled,
                 )?;
+                // These physical SSP transfers become readable by a composing
+                // owner only after the complete network account is admitted.
+                exterior.accepted_inventory = Some(inventory);
                 total.input = total.input + exchange.input;
                 scalar(total.input)?;
                 for end in 0..2 {
@@ -418,6 +421,9 @@ impl EntropyTracker {
                 Ok(())
             }
             Err(error) => {
+                for exterior in &mut self.exterior {
+                    exterior.accepted_inventory = None;
+                }
                 if matches!(
                     &error,
                     FlowError::EntropyDecrease { .. } | FlowError::SpeciesInventoryDrift { .. }
@@ -427,6 +433,53 @@ impl EntropyTracker {
                 Err(error)
             }
         }
+    }
+
+    /// Recontract a completely admitted native network step in THIS original
+    /// source basis. Prescribed efforts differ between physical ends, so their
+    /// conservative inventories cannot be combined before this contraction.
+    /// Internal ports were masked by the native stage owner, not inferred here.
+    pub(super) fn exchange_from_network_transport(
+        &self,
+        gas: &MixtureGas,
+        transport: &Self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EntropyExchange, FlowError> {
+        poll(cancelled)?;
+        if !self.matches_source(gas) || !transport.matches_source(gas)
+            || self.exterior.is_empty()
+            || self.exterior.len() != transport.exterior.len()
+            || self.initial_temperature.len() != transport.initial_temperature.len()
+            || transport.accepted != 1 || transport.completed_exterior_report.is_none()
+        {
+            return Err(FlowError::EntropyDomain(
+                "reacting network requires an admitted matching exterior transport account",
+            ));
+        }
+        let mut total = EntropyExchange::default();
+        for (original, accepted) in self.exterior.iter().zip(&transport.exterior) {
+            poll(cancelled)?;
+            let inventory = accepted.accepted_inventory.as_ref().ok_or(
+                FlowError::EntropyDomain("missing accepted network exterior transfers"),
+            )?;
+            let exchange = original.exchange_from_inventory(
+                gas, inventory, &self.reference_entropy, cancelled,
+            )?;
+            total.input = total.input + exchange.input;
+            scalar(total.input)?;
+            for end in 0..2 {
+                total.source_input[end] = total.source_input[end] + exchange.source_input[end];
+                scalar(total.source_input[end])?;
+            }
+            for k in 0..gas.species_count() {
+                poll(cancelled)?;
+                total.species[k] = total.species[k] + exchange.species[k];
+                total.throughput[k] = total.throughput[k] + exchange.throughput[k];
+                scalar(total.species[k])?;
+                scalar(total.throughput[k])?;
+            }
+        }
+        Ok(total)
     }
 
     fn exterior_step_report(

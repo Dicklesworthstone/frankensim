@@ -1,10 +1,13 @@
 //! Independent chemical/source entropy and whole-network publication checks.
+mod exterior;
 use super::*;
 use crate::multicomponent::dissipation::{ConstantTransport, DissipationControl};
 use crate::multicomponent::network::dissipation::NetworkDissipationOperator;
 use crate::multicomponent::network::dissipation::tests::fields;
 use crate::multicomponent::{MixtureEntropyControl, Reconstruction, StepControl};
 use fs_thermochem::{Nasa9RegionV1, Nasa9StandardStateModelV1};
+
+mod stabilized;
 
 fn controls() -> ReactiveStepControl {
     ReactiveStepControl {

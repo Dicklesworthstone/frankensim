@@ -90,9 +90,9 @@ impl ReactingNetwork1d {
             || !positive(controls.transport.cfl) || controls.transport.cfl > 0.45
             || controls.transport.maximum_halvings > 32
         { return Err(ReactiveNetworkError::Invalid("reacting network duration, CFL or retry controls")); }
-        if entropy.is_some() && (volume_rates.is_some() || reservoirs.is_some() || !sources.is_empty()) {
+        if entropy.is_some() && (volume_rates.is_some() || !sources.is_empty()) {
             return Err(ReactiveNetworkError::Invalid(
-                "closed reacting entropy excludes prescribed motion, reservoirs and additional sources",
+                "reacting entropy excludes prescribed motion and additional wall/valve sources",
             ));
         }
         let volume_rates = match volume_rates {
@@ -176,7 +176,7 @@ impl ReactingNetwork1d {
                 react_network(&mut self.trial, &mut self.reactor, &mut self.amounts,
                     half.value(), &mut chemistry, entropy.as_deref_mut(), &mut cancelled)?;
                 let transport = if let Some(account) = entropy.as_deref_mut() {
-                    account.advance_transport(&mut self.trial, Time::new(duration), controls.transport, &mut cancelled)?
+                    account.advance_transport(&mut self.trial, Time::new(duration), controls.transport, reservoirs, &mut cancelled)?
                 } else { match (volume_rates, reservoirs) {
                     (Some(rates), Some(reservoirs)) => self.trial.step_with_reservoirs_and_volume_rates(
                         Time::new(duration), controls.transport, reservoirs, rates, &mut cancelled)?,

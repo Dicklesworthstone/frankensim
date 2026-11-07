@@ -118,9 +118,26 @@ impl MixtureNetwork1d {
         entropy: MixtureEntropyControl,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(super::NetworkStepReport, ExteriorMixtureEntropyReport), Error> {
-        let active = self.admit_reservoirs(reservoirs, &mut cancelled)?;
+        let (report, account) = self.step_with_reservoirs_and_entropy_account(
+            maximum_duration, controls, reservoirs, entropy, &mut cancelled,
+        )?;
+        Ok((report, account.exterior_report()))
+    }
+
+    /// Retain the original accepted SSP stage transfers for a composing source
+    /// owner. No extra field copy, alternate flux or rounded entropy sum enters
+    /// the complete chemistry/transport source account.
+    pub(super) fn step_with_reservoirs_and_entropy_account(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: &[[Option<Cell<'_>>; 2]],
+        entropy: MixtureEntropyControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(super::NetworkStepReport, EntropyTracker), Error> {
+        let active = self.admit_reservoirs(reservoirs, cancelled)?;
         let reservoirs = active.then_some(reservoirs);
-        let mut account = self.entropy_account(entropy, reservoirs, &mut cancelled)?;
+        let mut account = self.entropy_account(entropy, reservoirs, cancelled)?;
         let report = self.step_impl(
             maximum_duration,
             controls,
@@ -129,7 +146,7 @@ impl MixtureNetwork1d {
             Some(&mut account),
             cancelled,
         )?;
-        Ok((report, account.exterior_report()))
+        Ok((report, account))
     }
 
     /// Combine the same prescribed-reservoir entropy account with simultaneous

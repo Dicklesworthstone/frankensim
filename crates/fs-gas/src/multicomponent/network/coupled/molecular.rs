@@ -41,6 +41,12 @@ pub(in crate::multicomponent::network) enum MolecularMethod<'a> {
         controls: DissipationControl,
         entropy: MixtureEntropyControl,
     },
+    EntropyStabilized {
+        controls: StabilizedDissipationControl,
+        entropy: MixtureEntropyControl,
+        /// Includes both molecular halves and every discarded composition.
+        evaluations: &'a mut usize,
+    },
     Stabilized {
         controls: StabilizedDissipationControl,
         /// Borrowed by the complete composition, never reset by a half or retry.
@@ -132,6 +138,26 @@ impl MolecularMethod<'_> {
                     stabilized: Some(report),
                     adaptive: None,
                     entropy: None,
+                })
+            }
+            Self::EntropyStabilized {
+                controls,
+                entropy,
+                evaluations,
+            } => {
+                if moving_volumes || reservoirs.is_some() {
+                    return Err(DissipationError::Invalid(
+                        "closed stabilized entropy composition requires fixed volumes and no baths",
+                    ));
+                }
+                let (report, measured) = operator.advance_stabilized_entropy_for_trial(
+                    network, duration, *controls, *entropy, evaluations, cancelled,
+                )?;
+                Ok(MolecularHalf {
+                    physical: report.transport,
+                    stabilized: Some(report),
+                    adaptive: None,
+                    entropy: Some(measured),
                 })
             }
             Self::Adaptive {

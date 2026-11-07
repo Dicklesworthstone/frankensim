@@ -35,7 +35,7 @@ mod stabilized;
 mod step;
 pub use super::coupled::molecular::{SplitAdaptiveNetworkDissipationReport, SplitStabilizedNetworkDissipationReport};
 pub use adaptive::AdaptiveReactiveNetworkReport;
-pub use entropy::ReactiveNetworkEntropyReport;
+pub use entropy::{ReactiveNetworkEntropyReport, ReactiveNetworkExteriorEntropyReport, StabilizedReactiveNetworkEntropyReport};
 pub use stabilized::StabilizedReactiveNetworkReport;
 
 /// Physical owner of one local chemistry or caloric reconstruction refusal.

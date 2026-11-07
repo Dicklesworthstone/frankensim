@@ -273,6 +273,32 @@ impl ReactiveEntropyAccount {
         check
     }
 
+    /// The same source/chemistry/boundary law for separate branch fields and
+    /// compact volumes. The native middle transport carries one inventory per
+    /// physical exterior pair; its rounded entropy report is never summed into
+    /// this original-to-final account.
+    pub(in crate::multicomponent) fn check_candidate_with_exterior_cells<'a, 'b>(
+        &mut self,
+        gas: &MixtureGas,
+        cells: impl IntoIterator<Item = (Cell<'a>, Cell<'b>, f64)>,
+        temperature_bounds: Option<[f64; 2]>,
+        transport: &EntropyTracker,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ReactiveExteriorEntropyReport, FlowError> {
+        self.reset_endpoint();
+        let check = (|| {
+            self.collect_candidate_cells(gas, cells, temperature_bounds, cancelled)?;
+            let exchange = self.state.exchange_from_network_transport(gas, transport, cancelled)?;
+            self.exterior_report_from_exchange(gas, &exchange, cancelled)
+        })();
+        if matches!(&check, Err(
+            FlowError::EntropyDecrease { .. } | FlowError::SpeciesInventoryDrift { .. }
+        )) {
+            self.rejected_entropy_steps += 1;
+        }
+        check
+    }
+
     /// Admit a complete window directly against its native conserved rollback
     /// rows and the accepted physical transfers already merged into this account.
     /// There is ONE whole-window allowance, independent of local step allowances.

@@ -5,6 +5,12 @@ use crate::multicomponent::dissipation::entropy::reactive::ReactiveEntropyAccoun
 pub use crate::multicomponent::reactive::{ReactiveEntropyReport, SplitMolecularEntropyReport};
 use crate::multicomponent::{MixtureEntropyControl, MixtureEntropyReport, cell};
 
+mod exterior;
+pub use exterior::ReactiveNetworkExteriorEntropyReport;
+
+mod stabilized;
+pub use stabilized::StabilizedReactiveNetworkEntropyReport;
+
 /// Complete accepted network evolution with component and whole-state entropy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReactiveNetworkEntropyReport {
@@ -118,10 +124,12 @@ pub(super) struct CoupledEntropy {
     account: ReactiveEntropyAccount,
     transport: Option<MixtureEntropyReport>,
     completed: Option<(ReactiveEntropyReport, Option<SplitMolecularEntropyReport>)>,
+    // Empty for closed composition; one original boundary account otherwise.
+    exterior: Vec<exterior::ExteriorCoupling>,
 }
 
 impl CoupledEntropy {
-    fn new(
+    pub(super) fn new(
         network: &MixtureNetwork1d,
         controls: MixtureEntropyControl,
         cancelled: &mut impl FnMut() -> bool,
@@ -133,6 +141,7 @@ impl CoupledEntropy {
             ),
             transport: None,
             completed: None,
+            exterior: Vec::new(),
         })
     }
 
@@ -140,6 +149,9 @@ impl CoupledEntropy {
         self.account.begin_attempt();
         self.transport = None;
         self.completed = None;
+        if let Some(exterior) = self.exterior.first_mut() {
+            exterior.reset();
+        }
     }
 
     pub(super) fn observe_chemistry_row(
@@ -159,8 +171,17 @@ impl CoupledEntropy {
         network: &mut MixtureNetwork1d,
         duration: Time,
         controls: crate::multicomponent::StepControl,
+        reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, ReactiveNetworkError> {
+        if !self.exterior.is_empty() {
+            return self.advance_exterior_transport(network, duration, controls, reservoirs, cancelled);
+        }
+        if reservoirs.is_some() {
+            return Err(ReactiveNetworkError::Invalid(
+                "closed reacting entropy cannot admit unaccounted reservoir transfers",
+            ));
+        }
         let (transport, entropy) =
             network.step_with_entropy(duration, controls, self.controls, cancelled)?;
         self.transport = Some(entropy);
@@ -201,20 +222,21 @@ impl CoupledEntropy {
         let cells = original
             .zip(final_cells)
             .map(|((old, volume), new)| (old, new, volume));
+        let temperature_bounds = Some([
+            chemistry.minimum_temperature_k,
+            chemistry.maximum_temperature_k,
+        ]);
+        if !self.exterior.is_empty() {
+            return self.finish_exterior(candidate.gas(), cells, temperature_bounds, molecular, cancelled);
+        }
         let report = self.account.check_candidate_cells(
-            candidate.gas(),
-            cells,
-            Some([
-                chemistry.minimum_temperature_k,
-                chemistry.maximum_temperature_k,
-            ]),
-            cancelled,
+            candidate.gas(), cells, temperature_bounds, cancelled,
         )?;
         self.completed = Some((report, molecular));
         Ok(())
     }
 
-    fn complete(self, coupled: ReactiveNetworkReport) -> ReactiveNetworkEntropyReport {
+    pub(super) fn complete(self, coupled: ReactiveNetworkReport) -> ReactiveNetworkEntropyReport {
         let (entropy, dissipation_entropy) =
             self.completed.expect("admitted complete reacting entropy");
         ReactiveNetworkEntropyReport {

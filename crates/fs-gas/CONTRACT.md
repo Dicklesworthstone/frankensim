@@ -3375,6 +3375,61 @@ Focused G1/G4 regressions reconstruct source entropy with variable Cp and a
 nonzero physical species entropy datum, create an initially absent product,
 exercise heat-release duration retries, and cancel/reuse the final transaction.
 
+### Complete reacting entropy with stabilized molecular transport
+
+`ReactingNetwork1d::step_with_stabilized_dissipation_and_entropy` uses the
+source-conjugate RKL2 molecular halves inside the original D/2-C/2-A-C/2-D/2
+retry transaction. Every physical molecular macrostep and complete half interval
+receives the original endpoint entropy gate. Its complete pre-step source
+account retains physical chemical entropy constants; only the reference effect
+of bounded numerical source-continuity defects is removed.
+
+One actual RHS budget spans both halves and discarded compositions. Exhaustion
+is terminal. All fields, clocks, finite-port receipts and operator reports
+publish only after complete temperature, balance, entropy and final cancellation
+checks. `StabilizedReactiveNetworkEntropyReport` retains the complete entropy
+result, both accepted RKL2 intervals and total actual work. Native source and
+transport owners retain their existing workspaces and original caloric laws.
+
+This entry admits stationary closed constant-area geometry with common species
+support at active molecular faces. Baths, moving volumes, other sources and
+adaptive entropy composition remain separate paths. The physical macrostep cap
+is an explicit accuracy choice. Linear RKL stability and symmetric splitting do
+not establish nonlinear positivity, a fully discrete coupled entropy theorem
+or global temporal order. Focused G1/G4 regressions check complete variable-Cp
+chemical entropy, heat-release retry budgets, final cancellation and reuse.
+
+### Complete source entropy in open reacting networks
+
+`ReactingNetwork1d::step_with_reservoirs_and_entropy` admits the original
+C(dt/2)-A(dt)-C(dt/2) transaction with stationary prescribed pressure reservoirs.
+The native characteristic closure, chemistry, engineering flux and bounded
+complete-duration retries are retained. Every branch cell and finite plenum
+contributes actual source entropy. All-None reservoirs retain the closed path.
+
+The complete account is anchored before chemistry. Each accepted physical
+exterior pair retains its actual SSP species/momentum/referenced-energy
+transfers, signed time-area measure and absolute stage species throughput.
+These inventories are contracted against each original reservoir effort in
+the immutable pre-chemistry basis; rounded component entropy reports are not
+summed. Internal finite-plenum ports and periodic faces supply no exterior
+entropy. Advected enthalpy already contains pressure-flow work. Outflow uses
+the receiving reservoir's thermodynamics and includes coupling irreversibility.
+
+Actual chemical entropy constants remain physical. Only bounded numerical
+species-source continuity defects lose their reference contribution. Zero
+reservoir activity refuses nonzero transfer at either SSP stage. The complete
+endpoint gate and final cancellation poll precede publishing fields, clocks
+and receipts. G1 tests reconstruct variable-Cp state entropy and reservoir
+efforts independently, retain a nonzero chemical entropy datum, admit entropy-
+decreasing outflow with positive generation, and exercise hot-reaction retries.
+G4 checks final cancellation, zero-activity refusal and reuse.
+
+This entry requires fixed geometry and excludes molecular baths, moving
+volumes and additional wall/valve sources. It measures finite-step entropy
+admission of the existing engineering model; no fully discrete stability or
+global temporal-order theorem is claimed.
+
 ## Molecular N2/O2 shockwave manifold consumer
 
 `cargo run -p fs-gas --features experimental-euler --example mixture_manifold -- 64 molecular`
