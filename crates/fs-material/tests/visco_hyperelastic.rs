@@ -932,6 +932,131 @@ fn branch_cap_and_cap_plus_one() {
     };
     assert!(make(MAX_FINITE_STRAIN_BRANCHES).is_ok());
     assert!(matches!(make(MAX_FINITE_STRAIN_BRANCHES + 1), Err(MaterialError::Parameters { .. })));
+    let mut changed = make(1).unwrap();
+    changed.branches = vec![nh_branch(1.0e4, 0.1); MAX_FINITE_STRAIN_BRANCHES + 1];
+    let state = changed.initial_state();
+    assert!(matches!(
+        changed.freeze(&state, 0.0),
+        Err(MaterialError::Parameters { .. })
+    ));
+    assert!(matches!(
+        changed.free_energy(&state, &I),
+        Err(MaterialError::Parameters { .. })
+    ));
+}
+
+#[test]
+fn changed_public_branches_refuse_before_instantaneous_response_or_storage() {
+    let law = ViscoHyperelastic::new(
+        decoupled_nh_equilibrium(1.0e5, 1.0e8),
+        vec![nh_branch(1.0e4, 0.1)],
+    )
+    .unwrap();
+    let accepted = law.initial_state();
+    let remainder = law.initial_remainder_state();
+    let mut shear = I;
+    shear[1] = 0.2;
+    let mut invalid = Vec::new();
+    for modulus in [-2.0e5, 0.0, f64::NAN, f64::INFINITY] {
+        invalid.push(nh_branch(modulus, 0.1));
+    }
+    for tau in [-0.1, 0.0, f64::NAN, f64::INFINITY] {
+        invalid.push(nh_branch(1.0e4, tau));
+    }
+    invalid.push(FiniteStrainBranch {
+        energy: BranchEnergy::Ogden {
+            terms: vec![OgdenTerm {
+                mu_pa: 1.0e4,
+                alpha: -2.0,
+            }],
+        },
+        tau_s: 0.1,
+    });
+    invalid.push(FiniteStrainBranch {
+        energy: BranchEnergy::Ogden { terms: vec![] },
+        tau_s: 0.1,
+    });
+    for branch in invalid {
+        let mut changed = law.clone();
+        changed.branches[0] = branch;
+        // At dt=0 the local return map used to bypass both positive-modulus
+        // and relaxation-time admission. A negative branch could then supply
+        // negative stored energy and reverse the total shear stiffness.
+        for dt in [0.0, 0.05] {
+            assert!(matches!(
+                changed.freeze(&accepted, dt),
+                Err(MaterialError::Parameters { .. })
+            ));
+            assert!(matches!(
+                changed.freeze_remainder(&remainder, dt),
+                Err(MaterialError::Parameters { .. })
+            ));
+            assert!(matches!(
+                changed.step(&accepted, &shear, dt),
+                Err(MaterialError::Parameters { .. })
+            ));
+            assert!(matches!(
+                changed.step_remainder_response(&remainder, &shear, dt),
+                Err(MaterialError::Parameters { .. })
+            ));
+            assert!(matches!(
+                changed.algorithmic_tangent(&accepted, &shear, dt),
+                Err(MaterialError::Parameters { .. })
+            ));
+        }
+        assert!(matches!(
+            changed.free_energy(&accepted, &shear),
+            Err(MaterialError::Parameters { .. })
+        ));
+        assert!(matches!(
+            changed.mixed_remainder_free_energy(&accepted, &shear),
+            Err(MaterialError::Parameters { .. })
+        ));
+        assert!(matches!(
+            changed.remainder_free_energy(&remainder, &shear),
+            Err(MaterialError::Parameters { .. })
+        ));
+    }
+    assert_eq!(accepted, law.initial_state());
+    assert_eq!(remainder, law.initial_remainder_state());
+}
+
+#[test]
+fn admitted_relaxation_time_change_preserves_the_instantaneous_shear_response() {
+    let mut law = ViscoHyperelastic::new(
+        decoupled_nh_equilibrium(1.0e5, 1.0e8),
+        vec![nh_branch(1.0e4, 0.1)],
+    )
+    .unwrap();
+    let state = law.initial_state();
+    law.branches[0].tau_s = 0.3;
+    let mut shear = I;
+    shear[1] = 0.2;
+    let response = law.step_response(&state, &shear, 0.0).unwrap();
+    let modulus = 1.1e5;
+    close(
+        response.first_piola_pa[1],
+        modulus * shear[1],
+        modulus,
+        1e-13,
+    );
+    close(
+        response.state.stored,
+        0.5 * modulus * shear[1].powi(2),
+        modulus,
+        1e-13,
+    );
+    close(
+        law.free_energy(&response.state, &shear).unwrap(),
+        response.state.stored,
+        modulus,
+        1e-13,
+    );
+    assert_eq!(response.dissipated_pa, 0.0);
+    assert_eq!(
+        response.state.inverse_viscous_cauchy_green,
+        state.inverse_viscous_cauchy_green
+    );
 }
 
 #[test]

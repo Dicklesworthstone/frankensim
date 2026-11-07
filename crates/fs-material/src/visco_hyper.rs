@@ -318,7 +318,7 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoHyperelastic
     }
 
     fn validate_mixed(&self) -> Result<(), MaterialError> {
-        self.law.validate_mixed_parameters()?;
+        crate::hyper::mixed::MixedFiniteStrainPotential::validate_mixed(&self.law.equilibrium)?;
         self.law.check_inputs(
             self.accepted,
             &self.accepted.deformation_gradient,
@@ -361,7 +361,7 @@ impl crate::hyper::mixed::MixedFiniteStrainPotential for FrozenViscoRemainder<'_
     }
 
     fn validate_mixed(&self) -> Result<(), MaterialError> {
-        self.law.validate_mixed_parameters()?;
+        crate::hyper::mixed::MixedFiniteStrainPotential::validate_mixed(&self.law.equilibrium)?;
         self.accepted.check_ledger()?;
         self.law.check_inputs(
             self.accepted,
@@ -999,19 +999,20 @@ impl ViscoHyperelastic {
             .pullback_pressure_potential(elastic, pressure_pa)
     }
 
-    fn validate_mixed_parameters(&self) -> Result<(), MaterialError> {
-        crate::hyper::mixed::MixedFiniteStrainPotential::validate_mixed(&self.equilibrium)?;
-        if self.branches.len() > MAX_FINITE_STRAIN_BRANCHES {
-            return Err(parameters(
-                "mixed viscous branch count exceeds its original cap".into(),
-            ));
+    fn validate_branches(branches: &[FiniteStrainBranch]) -> Result<(), MaterialError> {
+        if branches.len() > MAX_FINITE_STRAIN_BRANCHES {
+            return Err(parameters(format!(
+                "{} branches exceed the cap of {MAX_FINITE_STRAIN_BRANCHES}",
+                branches.len()
+            )));
         }
-        for branch in &self.branches {
+        for branch in branches {
             branch.energy.validate()?;
             if !(branch.tau_s.is_finite() && branch.tau_s > 0.0) {
-                return Err(parameters(
-                    "mixed viscous relaxation time must be finite and positive".into(),
-                ));
+                return Err(parameters(format!(
+                    "relaxation time {} s must be finite and positive",
+                    branch.tau_s
+                )));
             }
         }
         Ok(())
@@ -1060,21 +1061,7 @@ impl ViscoHyperelastic {
         equilibrium: Hyperelastic,
         branches: Vec<FiniteStrainBranch>,
     ) -> Result<Self, MaterialError> {
-        if branches.len() > MAX_FINITE_STRAIN_BRANCHES {
-            return Err(parameters(format!(
-                "{} branches exceed the cap of {MAX_FINITE_STRAIN_BRANCHES}",
-                branches.len()
-            )));
-        }
-        for b in &branches {
-            if !(b.tau_s.is_finite() && b.tau_s > 0.0) {
-                return Err(parameters(format!(
-                    "relaxation time {} s must be finite and positive",
-                    b.tau_s
-                )));
-            }
-            b.energy.validate()?;
-        }
+        Self::validate_branches(&branches)?;
         Ok(Self {
             equilibrium,
             branches,
@@ -1174,6 +1161,10 @@ impl ViscoHyperelastic {
         f: &[f64; 9],
         dt: f64,
     ) -> Result<(), MaterialError> {
+        // The branch list and its coefficients are public. Readmit them once
+        // at the shared trial boundary, including elastic jumps and energy-only
+        // queries; the local return map must never see a nonphysical branch.
+        Self::validate_branches(&self.branches)?;
         s.check_ledger()?;
         if s.reference_gradient() != self.reference_deformation.deformation_gradient() {
             return Err(state_error(
@@ -1444,6 +1435,9 @@ impl ViscoHyperelastic {
     /// response of every branch) with no viscous loss.
     ///
     /// # Errors
+    /// [`MaterialError::Parameters`] if public branch parameters no longer
+    /// satisfy the constructor's cap, admissible energy coefficients and
+    /// positive relaxation times.
     /// [`MaterialError::State`] on a negative or non-finite `dt`, det F <= 0,
     /// a state that does not match the law, an equilibrium-law domain
     /// refusal, or a local Newton that does not converge.
