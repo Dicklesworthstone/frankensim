@@ -221,3 +221,156 @@ fn common_temperature_source_remains_common_temperature_only() {
             .is_err()
     );
 }
+
+#[test]
+fn reacting_refresh_uses_changed_carrier_and_neutral_densities_without_lte_reset() {
+    let state = frozen_state(0.001, 6000.0, 12000.0, 1.0);
+    let (original, card) = source_with_card(&state);
+    // Independent manufactured endpoint: population and temperature changes
+    // have distinct analytic effects on constant-cross-section electron drag.
+    let next = frozen_state(0.003, 6500.0, 15000.0, 1.0);
+    let refreshed = original
+        .at_reacting_state(&next, &[&card], || false)
+        .unwrap();
+    assert_eq!(refreshed.state(), &next);
+    assert!(refreshed.equilibrium().is_none());
+    assert_eq!(refreshed.limits(), original.limits());
+    let before = original
+        .carriers()
+        .iter()
+        .find(|s| s.is_electron())
+        .unwrap();
+    let after = refreshed
+        .carriers()
+        .iter()
+        .find(|s| s.is_electron())
+        .unwrap();
+    let drag_ratio = (0.997 / 0.999) * (15000.0_f64 / 12000.0).sqrt();
+    relative(
+        after.number_density_per_m3() / before.number_density_per_m3(),
+        3.0,
+        2e-15,
+    );
+    relative(
+        after.relaxation().rate_per_s() / before.relaxation().rate_per_s(),
+        drag_ratio,
+        2e-8,
+    );
+    relative(
+        after.conductivity_s_m() / before.conductivity_s_m(),
+        3.0 / drag_ratio,
+        2e-8,
+    );
+    match (before.relaxation().source(), after.relaxation().source()) {
+        (
+            CarrierMomentumSource::ElectronNeutral {
+                contributions: old, ..
+            },
+            CarrierMomentumSource::ElectronNeutral {
+                state: bound,
+                contributions: new,
+                ..
+            },
+        ) => {
+            assert_eq!(bound, &next);
+            assert_eq!(old[0].evaluation().source(), new[0].evaluation().source());
+            assert_eq!(
+                old[0].evaluation().controls(),
+                new[0].evaluation().controls()
+            );
+            relative(
+                new[0].number_density_per_m3() / old[0].number_density_per_m3(),
+                0.997 / 0.999,
+                2e-15,
+            );
+        }
+        _ => panic!("reaction refresh changed the momentum source"),
+    }
+    // Recombination can reduce the populations with the identical original
+    // source. Returning to the old physical state recovers its transport.
+    let recovered = refreshed
+        .at_reacting_state(&state, &[&card], || false)
+        .unwrap();
+    assert_eq!(recovered, original);
+    assert!(original.at_frozen_state(&next, &[&card], || false).is_err());
+}
+
+#[test]
+fn reacting_refresh_rebinds_original_coulomb_law_to_actual_populations() {
+    let state = frozen_state(0.001, 6000.0, 12000.0, 1.0);
+    let (base, card) = source_with_card(&state);
+    let original = base
+        .with_coulomb_drag(coulomb_model(&state), || false)
+        .unwrap();
+    let next = frozen_state(0.002, 6500.0, 15000.0, 1.0);
+    let refreshed = original
+        .at_reacting_state(&next, &[&card], || false)
+        .unwrap();
+    let old_law = original.coulomb_model().unwrap();
+    let new_law = refreshed.coulomb_model().unwrap();
+    assert!(new_law.is_bound_to_populations(&next));
+    assert!(!old_law.is_bound_to_populations(&next));
+    assert_eq!(new_law.screening(), old_law.screening());
+    assert_eq!(new_law.cutoff(), old_law.cutoff());
+    assert_eq!(new_law.limits(), old_law.limits());
+    assert_ne!(refreshed.coulomb_pairs(), original.coulomb_pairs());
+    let independent = source_with_card(&next)
+        .0
+        .with_coulomb_drag(coulomb_model(&next), || false)
+        .unwrap();
+    relative(
+        refreshed.conductivity_s_m(),
+        independent.conductivity_s_m(),
+        2e-12,
+    );
+    let field = 0.01 * refreshed.maximum_electric_field_v_m();
+    relative(
+        refreshed
+            .joule_heating_w_m3([field, 0.0])
+            .unwrap()
+            .total_power_density_w_m3(),
+        independent
+            .joule_heating_w_m3([field, 0.0])
+            .unwrap()
+            .total_power_density_w_m3(),
+        2e-12,
+    );
+}
+
+#[test]
+fn reacting_refresh_preserves_source_support_domains_and_atomic_publication() {
+    let state = frozen_state(0.001, 6000.0, 12000.0, 1.0);
+    let (original, card) = source_with_card(&state);
+    let saved = original.clone();
+    let next = frozen_state(0.002, 6500.0, 15000.0, 1.0);
+    assert!(original.at_reacting_state(&next, &[], || false).is_err());
+    assert!(
+        original
+            .at_reacting_state(&next, &[&card, &card], || false)
+            .is_err()
+    );
+    for unsupported in [
+        frozen_state(0.0, 6500.0, 15000.0, 1.0),
+        frozen_state(0.002, 6500.0, 15000.0, 2.0),
+        frozen_state(0.5, 6500.0, 15000.0, 1.0),
+    ] {
+        assert!(
+            original
+                .at_reacting_state(&unsupported, &[&card], || false)
+                .is_err()
+        );
+    }
+    assert_eq!(
+        original.at_reacting_state(&next, &[&card], || true),
+        Err(IonizedGasRefreshError::Cancelled)
+    );
+    let mut polls = 0;
+    assert_eq!(
+        original.at_reacting_state(&next, &[&card], || {
+            polls += 1;
+            polls > 8
+        }),
+        Err(IonizedGasRefreshError::Cancelled)
+    );
+    assert_eq!(original, saved);
+}

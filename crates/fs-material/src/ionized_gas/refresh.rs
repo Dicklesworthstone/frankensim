@@ -1,14 +1,15 @@
-//! Refresh the original drag sources after heating a frozen gas parcel.
+//! Refresh original drag sources after thermal or population evolution.
 
 use super::{
     CarrierMomentumRelaxation, CarrierMomentumSource, IonizedGasConductivity, IonizedGasError,
 };
 use crate::state_point::MaterialStatePointError;
 use fs_matdb::MaterialCard;
+use fs_thermochem::coulomb::{CoulombErrorV1, CoulombModelV1};
 use fs_thermochem::electron_collision::ElectronCollisionErrorV1;
 use fs_thermochem::equilibrium::composition::state::FrozenIonizedGasStateV1;
 
-/// Original-source refusal while refreshing a frozen-population transport law.
+/// Original-source refusal while refreshing the actual gas transport state.
 #[derive(Clone, Debug, PartialEq)]
 pub enum IonizedGasRefreshError {
     Invalid(&'static str),
@@ -19,7 +20,7 @@ pub enum IonizedGasRefreshError {
 }
 impl core::fmt::Display for IonizedGasRefreshError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "ionized-gas frozen-state refresh: {self:?}")
+        write!(f, "ionized-gas source refresh: {self:?}")
     }
 }
 impl std::error::Error for IonizedGasRefreshError {}
@@ -44,16 +45,65 @@ impl IonizedGasConductivity {
         &self,
         next: &FrozenIonizedGasStateV1,
         original_cards: &[&MaterialCard],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, IonizedGasRefreshError> {
+        self.refresh_state(next, original_cards, true, cancelled)
+    }
+
+    /// Refresh the SAME original transport laws after finite-rate chemistry
+    /// changes carrier and neutral populations in a rigid parcel. The accepted
+    /// state supplies its actual amounts, Th, Te and pressure; no equilibrium
+    /// reset, extra reaction heat or cached collision frequency is introduced.
+    ///
+    /// Original thermodynamics, volume and the set of present species must
+    /// agree. An appearing carrier or neutral needs a separately admitted
+    /// momentum source; an exhausted source is not silently dropped. All
+    /// original numerical controls and weak-ionization/transport limits remain
+    /// binding. Neutral drag uses the NEW target density and Maxwellian Te.
+    /// The Coulomb source, when present, is rebound to the new populations with
+    /// exactly the original screening, short-range cutoff and physical limits.
+    ///
+    /// Material-backed rates preserve their original immutable cards, complete
+    /// property requirements and state schema, just as `at_frozen_state` does.
+    /// The source must cover the actual endpoint; this query neither integrates
+    /// chemistry nor establishes validity between the two states. Failure or
+    /// cancellation leaves the original transport and gas snapshots unchanged.
+    pub fn at_reacting_state(
+        &self,
+        next: &FrozenIonizedGasStateV1,
+        original_cards: &[&MaterialCard],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, IonizedGasRefreshError> {
+        self.refresh_state(next, original_cards, false, cancelled)
+    }
+
+    fn refresh_state(
+        &self,
+        next: &FrozenIonizedGasStateV1,
+        original_cards: &[&MaterialCard],
+        frozen_populations: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, IonizedGasRefreshError> {
         use IonizedGasRefreshError::{Invalid, Material};
         poll(&mut cancelled)?;
         if next.thermodynamics() != self.state().thermodynamics()
-            || next.amounts() != self.state().amounts()
             || next.volume() != self.state().volume()
         {
             return Err(Invalid(
-                "refresh requires the original thermodynamics, amounts and volume",
+                "refresh requires the original thermodynamics and volume",
+            ));
+        }
+        if frozen_populations && next.amounts() != self.state().amounts() {
+            return Err(Invalid("frozen-state refresh requires unchanged amounts"));
+        }
+        if next
+            .amounts()
+            .iter()
+            .zip(self.state().amounts())
+            .any(|(new, old)| (new.value() > 0.0) != (old.value() > 0.0))
+        {
+            return Err(Invalid(
+                "population refresh requires the original present-species source support",
             ));
         }
         if original_cards.len() > self.carriers().len() {
@@ -170,8 +220,23 @@ impl IonizedGasConductivity {
         let mut refreshed = Self::from_state(next.clone(), rates, self.limits(), &mut cancelled)
             .map_err(transport_error)?;
         if let Some(coulomb) = self.coulomb_model() {
+            let model = if coulomb.is_bound_to_populations(next) {
+                coulomb.clone()
+            } else {
+                CoulombModelV1::new_with_cutoff(
+                    next,
+                    coulomb.screening(),
+                    coulomb.cutoff(),
+                    coulomb.limits(),
+                    &mut cancelled,
+                )
+                .map_err(|error| match error {
+                    CoulombErrorV1::Cancelled => IonizedGasRefreshError::Cancelled,
+                    error => transport_error(IonizedGasError::Coulomb(error)),
+                })?
+            };
             refreshed = refreshed
-                .with_coulomb_drag(coulomb.clone(), &mut cancelled)
+                .with_coulomb_drag(model, &mut cancelled)
                 .map_err(transport_error)?;
         }
         poll(&mut cancelled)?;

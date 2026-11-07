@@ -3199,6 +3199,26 @@ an intervening path. The focused refresh tests exercise source/card retention,
 the constant-cross-section sqrt(Te) law, Coulomb reevaluation, fixed-population
 and volume binding, common-temperature refusal and transactional cancellation.
 
+`IonizedGasConductivity::at_reacting_state` extends the same source refresh to
+changed species amounts after finite-rate chemistry. Original thermodynamics,
+volume and present-species support remain exact. Electron drag is reintegrated
+at the actual Te and multiplied by the new neutral densities; all carrier
+densities and resulting conductivity are rebuilt from the accepted endpoint.
+An optional Coulomb model is rebound to these populations using its original
+screening, short-range cutoff and physical limits, then reevaluated together
+with the original background anchors. Material cards retain their exact
+identity, requirements and supported temperature/pressure schema.
+
+No LTE reset, extra ionization heat or stale collision frequency enters this
+handoff. Newly appearing or exhausted species require a separately admitted
+transport source bank; weak-ionization, source and classical-domain limits
+continue to apply. Publication is atomic and the frozen-population entry point
+still rejects changing amounts. Focused regressions independently reconstruct
+carrier/neutral density scaling, constant-cross-section temperature dependence,
+Coulomb population rebinding, Joule heat, reverse population evolution, source
+support and cancellation. This is an endpoint material evaluation, not a
+reaction integrator or a continuously coupled field/chemistry solve.
+
 ## Permanent secondary creep
 
 `creep::NortonCreep` adds sub-yield permanent deformation on the existing
