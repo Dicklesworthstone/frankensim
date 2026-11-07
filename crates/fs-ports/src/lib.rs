@@ -3074,12 +3074,21 @@ impl BoundaryEntropyBreakdown {
         &self.temperature_reference
     }
 
-    /// Fixed-order total boundary entropy transfer.
+    fn components(&self) -> [f64; 4] {
+        [
+            self.advected.value(),
+            self.diffusive_chemical.value(),
+            self.heat.value(),
+            self.radiation.value(),
+        ]
+    }
+
+    /// Compensated fixed-order total boundary entropy transfer.
     #[must_use]
     pub fn total(&self) -> Entropy {
+        // The constructor rejects this sentinel before publishing a breakdown.
         Entropy::new(
-            ((self.advected.value() + self.diffusive_chemical.value()) + self.heat.value())
-                + self.radiation.value(),
+            fixed_order_window_sum("entropy_boundary_total", self.components()).unwrap_or(f64::NAN),
         )
     }
 }
@@ -5083,12 +5092,15 @@ fn window_residual(
     final_value: f64,
     inputs: impl IntoIterator<Item = f64>,
 ) -> Result<f64, CoupleError> {
-    let change = final_value - initial;
-    ensure_finite_window_value(field, None, change)?;
-    let total_input = fixed_order_window_sum(field, inputs)?;
-    let residual = change - total_input;
-    ensure_finite_window_value(field, None, residual)?;
-    Ok(residual)
+    // Keep storage and boundary terms in ONE reduction. Rounding delta H and
+    // sum(W) separately can erase a real residual even when the boundary sum
+    // itself is compensated: H1=1e16, H0=0, W=[1e16,1] must report -1 J.
+    fixed_order_window_sum(
+        field,
+        [final_value, -initial]
+            .into_iter()
+            .chain(inputs.into_iter().map(|value| -value)),
+    )
 }
 
 fn compute_window_residuals(
@@ -5127,7 +5139,7 @@ fn compute_window_residuals(
         final_snapshot.balance.entropy.value(),
         contributions
             .iter()
-            .map(|entry| entry.transfer.entropy_into.total().value()),
+            .flat_map(|entry| entry.transfer.entropy_into.components()),
     )?;
     let mut elements = Vec::with_capacity(spec.element_schema.elements().len());
     for (index, element) in spec.element_schema.elements().iter().enumerate() {
@@ -5184,7 +5196,7 @@ fn build_window_exchange_ledger(
             "exchange_entropy_into",
             group
                 .iter()
-                .map(|entry| entry.transfer.entropy_into.total().value()),
+                .flat_map(|entry| entry.transfer.entropy_into.components()),
         )?;
         let mut element_amounts_into = Vec::new();
         if let Some(first) = group.first() {

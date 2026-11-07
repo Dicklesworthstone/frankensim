@@ -2916,6 +2916,77 @@ fn canonical_compensated_window_sum_is_permutation_stable() {
 }
 
 #[test]
+fn window_balance_retains_small_loss_beside_large_stored_and_supplied_energy() {
+    // G0/G3: every declared extensive balance has a one-unit deficit. Neither
+    // a large supply nor a large change in storage may round that deficit away.
+    for initial_value in [0.0, 1.0] {
+        let spec = window_spec(&["large", "small"], None);
+        let initial = window_snapshot(
+            &spec,
+            WindowEndpoint::Initial,
+            window_balance(
+                initial_value,
+                initial_value,
+                initial_value,
+                initial_value,
+                0.0,
+            ),
+        );
+        let final_snapshot = window_snapshot(
+            &spec,
+            WindowEndpoint::Final,
+            window_balance(1e16, 1e16, 1e16, 1e16, 0.0),
+        );
+        let large = window_contribution(&spec, "large", [1e16; 4], [0.0; 4]);
+        let small = window_contribution(&spec, "small", [1.0 - initial_value; 4], [0.0; 4]);
+        let report =
+            WindowAuditReport::audit(spec, initial, final_snapshot, [small, large]).unwrap();
+        assert!(!report.is_green());
+        assert_eq!(report.residuals().first_law().value(), -1.0);
+        assert_eq!(report.residuals().mass().value(), -1.0);
+        assert_eq!(report.residuals().charge().value(), -1.0);
+        assert_eq!(report.residuals().elements()[0].amount().value(), -1.0);
+        assert_eq!(report.violations().len(), 4);
+    }
+}
+
+#[test]
+fn entropy_mechanisms_remain_separate_until_the_complete_balance_closes() {
+    // A small diffusive transfer remains real beside a large advected stream,
+    // both within a row and across rows. The negative generation must alarm.
+    for split in [false, true] {
+        let spec = window_spec(&["inlet", "outlet"], None);
+        let initial = window_snapshot(
+            &spec,
+            WindowEndpoint::Initial,
+            window_balance(0.0, 0.0, 0.0, 0.0, 0.0),
+        );
+        let final_snapshot = window_snapshot(
+            &spec,
+            WindowEndpoint::Final,
+            window_balance(0.0, 0.0, 0.0, 0.0, if split { 0.0 } else { 1e16 }),
+        );
+        let inlet = window_contribution(&spec, "inlet", [0.0; 4], [1e16, 1.0, 0.0, 0.0]);
+        let outlet = window_contribution(
+            &spec,
+            "outlet",
+            [0.0; 4],
+            [if split { -1e16 } else { 0.0 }, 0.0, 0.0, 0.0],
+        );
+        let report =
+            WindowAuditReport::audit(spec, initial, final_snapshot, [outlet, inlet]).unwrap();
+        assert_eq!(report.residuals().entropy_generation().value(), -1.0);
+        assert!(!report.is_green());
+        assert_eq!(
+            report.violations()[0].law(),
+            &WindowBalanceLaw::EntropyGeneration
+        );
+    }
+    let entropy = boundary_entropy("cancellation", &window_interval(), [1e16, 1.0, -1e16, 0.0]);
+    assert_eq!(entropy.total().value(), 1.0);
+}
+
+#[test]
 fn explicitly_closed_isolated_window_audits_without_boundary_rows() {
     let interval = window_interval();
     let spec = AccountingWindowSpec::try_new(

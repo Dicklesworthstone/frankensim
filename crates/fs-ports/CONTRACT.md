@@ -15,6 +15,16 @@ through its public reexports. fs-couple/tests/port_identity.rs pins type and
 error identity across both entry points. FEEC's terminal-relative and integral
 batteries consume the direct fs-ports dependency.
 
+Closed-window first-law, mass, element, charge and entropy residuals accumulate
+the two stored inventories and every signed boundary term in one compensated,
+fixed-order reduction. Entropy mechanisms remain separate through that final
+reduction and through exchange grouping. A weak heat or diffusive contribution
+must not disappear merely because two separately rounded large totals agree.
+The existing coupling battery covers one-unit deficits beside 1e16-unit
+inventories/streams and cancellation within and across entropy rows. This is a
+floating-point conservation check, not an interval bound or a recovery of
+precision already lost by the producer of an individual inventory.
+
 ## Port-schema adoption contract
 
 `PortedModule` binds a stable port order to the pre-integrated transfers of the
