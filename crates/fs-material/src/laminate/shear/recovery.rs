@@ -19,6 +19,9 @@ struct LayerProfile {
     traction: [[f64; 4]; 3],
     // Cholesky factor of the ORIGINAL rotated, uncorrected physical G [Pa].
     lower: [f64; 3],
+    // Quadratic Bernstein maps from the ORIGINAL section's energy coordinate
+    // to physical engineering ply shear, both in section axes.
+    strain_bernstein: [[f64; 4]; 3],
     sin: f64,
     cos: f64,
 }
@@ -98,9 +101,17 @@ impl LaminateShearRecovery {
             // Use the original laminate's rotation convention.
             let cos = fs_math::det::cos(original.orientation_rad);
             let sin = fs_math::det::sin(original.orientation_rad);
+            let lower = [l00, l10, l11];
+            let strain_bernstein = strain_bernstein(
+                traction,
+                lower,
+                section.shear_pa_m(),
+                section.total_thickness_m(),
+            )?;
             profiles.push(LayerProfile {
                 traction,
-                lower: [l00, l10, l11],
+                lower,
+                strain_bernstein,
                 sin,
                 cos,
             });
@@ -111,6 +122,25 @@ impl LaminateShearRecovery {
     /// Exact retained section, including original spatial layer/source order.
     pub fn section(&self) -> &LaminateSection {
         &self.section
+    }
+
+    /// Degree-two Bernstein coefficients of the physical engineering-shear
+    /// map through one original ply. Each row-major 2x2 matrix maps the SAME
+    /// section coordinate `[gamma_xz, gamma_yz]` to local physical ply shear,
+    /// both in section axes. For thickness fraction t the weights are
+    /// `[(1-t)^2, 2*t*(1-t), t^2]`.
+    ///
+    /// These are coefficients, not three sampled responses: control 1 need
+    /// not be a value attained at the ply midpoint. Their convex hull encloses
+    /// the complete quadratic profile, including interior shear maxima that
+    /// cannot be bounded by observing only the two ply faces. They retain the
+    /// original traction field, uncorrected ply compliance and coupled H;
+    /// no additional correction factor is applied to strain.
+    pub fn strain_bernstein_controls(&self, layer: usize) -> Result<&[[f64; 4]; 3], LaminateError> {
+        self.profiles
+            .get(layer)
+            .map(|profile| &profile.strain_bernstein)
+            .ok_or(invalid("shear recovery layer out of range"))
     }
 
     /// Recover one ply point from the actual section resultants [Qx,Qy] [N/m].
@@ -203,4 +233,41 @@ impl LaminateShearRecovery {
             ],
         )
     }
+}
+
+fn strain_bernstein(
+    traction: [[f64; 4]; 3],
+    lower: [f64; 3],
+    stiffness: &[f64; 4],
+    thickness: f64,
+) -> Result<[[f64; 4]; 3], LaminateError> {
+    // Normalize BOTH physical operators by the same compliance scale before
+    // the Cholesky solves. This avoids forming an enormous dimensional stress
+    // merely to recover a dimensionless strain map.
+    let scale = lower.iter().fold(0.0_f64, |m, value| m.max(value.abs()));
+    let [l00, l10, l11] = lower.map(|value| value / scale);
+    let h = stiffness.map(|value| (value / scale / thickness) / scale);
+    let polynomial = [
+        traction[0],
+        core::array::from_fn(|i| traction[0][i] + 0.5 * traction[1][i]),
+        core::array::from_fn(|i| traction[0][i] + traction[1][i] + traction[2][i]),
+    ];
+    let mut maps = [[0.0; 4]; 3];
+    for (map, p) in maps.iter_mut().zip(polynomial) {
+        for column in 0..2 {
+            let stress = [
+                p[0] * h[column] + p[1] * h[2 + column],
+                p[2] * h[column] + p[3] * h[2 + column],
+            ];
+            let w0 = stress[0] / l00;
+            let w1 = (stress[1] - l10 * w0) / l11;
+            let gamma1 = w1 / l11;
+            map[column] = (w0 - l10 * gamma1) / l00;
+            map[2 + column] = gamma1;
+        }
+    }
+    if maps.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(invalid("unrepresentable recovered shear strain polynomial"));
+    }
+    Ok(maps)
 }

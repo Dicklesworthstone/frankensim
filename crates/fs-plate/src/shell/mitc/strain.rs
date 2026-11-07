@@ -301,6 +301,16 @@ pub struct ShellStrainPoint {
     pub transverse_shear: [f64; 2],
 }
 
+/// Coherent real and imaginary parts of one native shell strain phasor.
+/// With the exp(i omega t) convention, the instantaneous field is
+/// `real * cos(omega t) - imaginary * sin(omega t)`. Components are never
+/// independently maximized or assigned independent phases.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HarmonicShellStrainPoint {
+    pub real: ShellStrainPoint,
+    pub imaginary: ShellStrainPoint,
+}
+
 impl ShellStrainPoint {
     fn from_coefficients(c: [f64; 8]) -> Self {
         Self {
@@ -320,6 +330,20 @@ pub fn integration_rule() -> Vec<([f64; 3], f64)> {
     element::stiffness_rule()
 }
 
+fn bernstein_weights(lambda: [f64; 3]) -> Result<[f64; 6], PlateError> {
+    if lambda
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0 || *v > 1.0)
+        || (lambda.iter().sum::<f64>() - 1.0).abs() > 32.0 * f64::EPSILON
+    {
+        return Err(invalid(
+            "finite barycentric point inside the original facet required",
+        ));
+    }
+    let [a, b, c] = lambda;
+    Ok([a * a, b * b, c * c, 2.0 * a * b, 2.0 * b * c, 2.0 * c * a])
+}
+
 impl RealElementStrain {
     pub const RETAINED_BYTES: usize = core::mem::size_of::<Self>();
 
@@ -327,13 +351,7 @@ impl RealElementStrain {
     /// original triangle. This also retains an affine thermal bubble whenever
     /// this field came from `PreparedThermalShell::strain_field`.
     pub fn at_barycentric(&self, lambda: [f64; 3]) -> Result<ShellStrainPoint, PlateError> {
-        if lambda.iter().any(|v| !v.is_finite() || *v < 0.0 || *v > 1.0)
-            || (lambda.iter().sum::<f64>() - 1.0).abs() > 32.0 * f64::EPSILON
-        {
-            return Err(invalid("finite barycentric point inside the original facet required"));
-        }
-        let [a, b, c] = lambda;
-        let weights = [a * a, b * b, c * c, 2.0 * a * b, 2.0 * b * c, 2.0 * c * a];
+        let weights = bernstein_weights(lambda)?;
         let values = core::array::from_fn(|component| {
             (0..6).map(|i| weights[i] * self.controls[i][component]).sum()
         });
@@ -481,6 +499,36 @@ impl HarmonicElementStrain {
     /// Exact retained inline storage; no heap data.
     pub const RETAINED_BYTES: usize = core::mem::size_of::<Self>();
 
+    /// Evaluate the coherent complex polynomial inside the original triangle.
+    /// This retains the complete native director-bubble strain; no spatial
+    /// averaging or harmonic-amplitude envelope replaces its phase.
+    pub fn at_barycentric(&self, lambda: [f64; 3]) -> Result<HarmonicShellStrainPoint, PlateError> {
+        let weights = bernstein_weights(lambda)?;
+        let observe = |controls: &Controls| -> Result<ShellStrainPoint, PlateError> {
+            let values = core::array::from_fn(|component| {
+                (0..6).map(|i| weights[i] * controls[i][component]).sum()
+            });
+            if values.iter().any(|value: &f64| !value.is_finite()) {
+                return Err(invalid("unrepresentable harmonic point strain"));
+            }
+            Ok(ShellStrainPoint::from_coefficients(values))
+        };
+        Ok(HarmonicShellStrainPoint {
+            real: observe(&self.real)?,
+            imaginary: observe(&self.imaginary)?,
+        })
+    }
+
+    /// Coherent complex Bernstein coefficients, not six physical samples.
+    /// Their convex hull covers the complete original spatial polynomial at
+    /// every common harmonic phase.
+    pub fn bernstein_controls(&self) -> [HarmonicShellStrainPoint; 6] {
+        core::array::from_fn(|i| HarmonicShellStrainPoint {
+            real: ShellStrainPoint::from_coefficients(self.real[i]),
+            imaginary: ShellStrainPoint::from_coefficients(self.imaginary[i]),
+        })
+    }
+
     /// Bound an isotropic, real constant-Poisson-ratio plane-stress film.
     /// Reconstruct xx/yy/gamma_xy as membrane + z*curvature; use
     /// epsilon_zz = -nu/(1-nu)*(epsilon_xx+epsilon_yy). All engineering shears
@@ -522,7 +570,7 @@ impl HarmonicElementStrain {
     }
 }
 
-fn validate_layer(faces_m: [f64; 2], poisson_ratio: f64) -> Result<(), PlateError> {
+pub(super) fn validate_layer(faces_m: [f64; 2], poisson_ratio: f64) -> Result<(), PlateError> {
     if faces_m.iter().any(|z| !z.is_finite())
         || faces_m[0] > faces_m[1]
         || !poisson_ratio.is_finite()
@@ -545,7 +593,11 @@ fn empty_bound() -> TensorStrainBound {
     }
 }
 
-fn plane_stress_tensor(strain: &[f64; 8], z: f64, nu: f64) -> Result<[f64; 6], PlateError> {
+pub(super) fn plane_stress_tensor(
+    strain: &[f64; 8],
+    z: f64,
+    nu: f64,
+) -> Result<[f64; 6], PlateError> {
     let xx = strain[0] + z * strain[3];
     let yy = strain[1] + z * strain[4];
     let tensor = [
@@ -562,7 +614,7 @@ fn plane_stress_tensor(strain: &[f64; 8], z: f64, nu: f64) -> Result<[f64; 6], P
     Ok(tensor)
 }
 
-fn hypot(a: f64, b: f64) -> Result<f64, PlateError> {
+pub(super) fn hypot(a: f64, b: f64) -> Result<f64, PlateError> {
     let scale = a.abs().max(b.abs());
     if scale == 0.0 {
         return Ok(0.0);
@@ -574,7 +626,7 @@ fn hypot(a: f64, b: f64) -> Result<f64, PlateError> {
     Ok(value)
 }
 
-fn tensor_cycle_norm(real: &[f64; 6], imaginary: &[f64; 6]) -> Result<f64, PlateError> {
+pub(super) fn tensor_cycle_norm(real: &[f64; 6], imaginary: &[f64; 6]) -> Result<f64, PlateError> {
     // Scale before squaring: very small/large but representable strains should
     // not silently underflow to zero or overflow their Gram matrix.
     let scale = real

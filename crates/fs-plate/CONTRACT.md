@@ -2037,3 +2037,38 @@ is inferred from a representative stress block.
 Four focused tests in `tests/fatigue_findley.rs` cover signed twist/pretension,
 native matrix equality, true rotating shear traction on a tilted plane, explicit
 window continuation, source context, aggregate budgets and late rollback.
+
+## Coherent harmonic laminate shear and complete-ply strain bounds
+
+`PreparedLaminateShearFacet::evaluate_harmonic` extends the original
+equilibrated cylindrical two-probe shear recovery to coherent complex motion.
+Physical point responses retain section, material and facet phase and report
+cycle-mean recoverable shear work. The original laminate owner caches three
+quadratic Bernstein strain maps per ply (twelve additional scalars); the middle
+coefficient is a polynomial control, not a physical midpoint sample.
+
+Real and harmonic `isotropic_layer_bound` queries combine the original MITC
+in-plane field with those recovered transverse shear maps over the complete
+physical ply. Six triangle controls times three thickness controls cover shear
+maxima inside the layer even when exterior-face shear vanishes. Bounds retain
+common harmonic phase and tensor shear weights. Preparation retains the
+original section, reference, inertia and orientation admission; observation
+uses fixed local arrays and does not reinterpret the default coating shear or
+loss operators.
+
+The supplied Poisson ratio selects an explicit isotropic, zero-eigenstrain
+plane-stress normal-strain closure. It is not a transverse-normal law inferred
+from an orthotropic source. Known thermal-origin fields refuse that full-tensor
+closure because normal free strain is not retained by the shear observer;
+their native in-plane and physical ply-shear recovery remains available.
+These observations retain the cylindrical approximation and do not claim a
+general 3-D/free-edge solution, material failure, discretization-error bounds
+or interval-certified floating-point bounds.
+
+Ten focused native tests passed, using the original laminate integration,
+MITC assembly/condensation, thermal response and sparse static solve. Coverage
+includes coefficient reconstruction, phase/snapshot equivalence, mean stored
+work, interface traction, interior maxima, complete-domain containment,
+cancellation/reuse and the thermal closure refusal. The existing total-energy
+regression now includes the condensed director's native membrane/bending
+contribution when comparing recovered shear work with the full shell operator.
