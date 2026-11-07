@@ -33,7 +33,7 @@ mod impedance;
 use impedance::PreparedPortImpedance;
 mod compact;
 use compact::CompactPortFactor;
-pub use impedance::{HarmonicPortControls, HarmonicPortResponse};
+pub use impedance::{HarmonicPortControls, HarmonicPortResponse, admit_passive_port_impedance};
 mod frequency;
 pub use frequency::{
     HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicPortFrequencyResponse,
@@ -41,7 +41,7 @@ pub use frequency::{
 mod parameter;
 pub use parameter::{
     HarmonicParameterControls, HarmonicParameterResponse, HarmonicPortParameterDirection,
-    HarmonicPortParameterResponse,
+    HarmonicPortParameterResponse, harmonic_mean_power_derivative_with_cancel,
 };
 mod interference;
 pub use interference::{

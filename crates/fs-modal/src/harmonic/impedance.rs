@@ -42,6 +42,63 @@ pub struct HarmonicPortResponse {
     pub average_absorbed_power_w: f64,
 }
 
+/// Admit the Hermitian part of a complete physical effort/flow impedance.
+///
+/// This is the same pointwise, diagonally equilibrated PSD admission used by
+/// the loaded mechanical response. Full mutual and nonreciprocal entries stay
+/// unchanged. The bounded fs-la dense owner supplies the work cap; a caller
+/// admitting many frequencies must also bound its total table and work.
+/// Neither causality nor passivity between sampled frequencies is established.
+///
+/// # Errors
+/// Empty, incomplete or nonfinite matrices, the fs-la dense work cap, a
+/// materially negative Hermitian direction, or cancellation. No load is fitted,
+/// symmetrized, regularized or evaluated through a surrogate mechanical solve.
+pub fn admit_passive_port_impedance(
+    ports: usize,
+    impedance: &[C64],
+    cx: &Cx<'_>,
+) -> Result<(), HarmonicResponseError> {
+    poll(cx)?;
+    let pp = ports
+        .checked_mul(ports)
+        .ok_or(invalid("impedance extent overflow"))?;
+    let real_dimension = ports
+        .checked_mul(2)
+        .ok_or(invalid("Hermitian extent overflow"))?;
+    if ports == 0 || impedance.len() != pp || impedance.iter().any(|z| !finite(*z)) {
+        return Err(invalid("finite nonempty ports*ports impedance required"));
+    }
+    admit_jacobi_eigh(real_dimension)
+        .map_err(|_| invalid("load Hermitian PSD admission exceeds fs-la work cap"))?;
+    // [Re(H), -Im(H); Im(H), Re(H)] duplicates H's real eigenvalues.
+    // Midpoints avoid overflow while preserving zero dissipative channels.
+    let mut hermitian = vec![0.0; real_dimension * real_dimension];
+    for a in 0..ports {
+        poll(cx)?;
+        for b in 0..=a {
+            let za = impedance[a * ports + b];
+            let zb = impedance[b * ports + a];
+            let re = f64::midpoint(za.re, zb.re);
+            let im = if a == b {
+                0.0
+            } else {
+                f64::midpoint(za.im, -zb.im)
+            };
+            for offset in [0, ports] {
+                hermitian[(a + offset) * real_dimension + b + offset] = re;
+                hermitian[(b + offset) * real_dimension + a + offset] = re;
+            }
+            hermitian[a * real_dimension + b + ports] = -im;
+            hermitian[(b + ports) * real_dimension + a] = -im;
+            hermitian[b * real_dimension + a + ports] = im;
+            hermitian[(a + ports) * real_dimension + b] = im;
+        }
+    }
+    require_psd(&hermitian, real_dimension, "load Hermitian part", cx)?;
+    poll(cx)
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct PreparedPortImpedance {
     pub(super) coordinates: usize,
@@ -88,9 +145,6 @@ impl PreparedPortImpedance {
         let pp = ports
             .checked_mul(ports)
             .ok_or(invalid("impedance extent overflow"))?;
-        let real_dimension = ports
-            .checked_mul(2)
-            .ok_or(invalid("Hermitian extent overflow"))?;
         if force_map.len() != np
             || impedance.len() != pp
             || force_map.iter().any(|x| !x.is_finite())
@@ -116,36 +170,7 @@ impl PreparedPortImpedance {
             bytes,
             controls.maximum_payload_bytes,
         )?;
-        admit_jacobi_eigh(real_dimension)
-            .map_err(|_| invalid("load Hermitian PSD admission exceeds fs-la work cap"))?;
-
-        // The Hermitian part governs work even for nonreciprocal loads. Its
-        // real representation [Re(H), -Im(H); Im(H), Re(H)] is symmetric and
-        // duplicates the eigenvalues; reuse the original numerical PSD owner.
-        // Midpoints avoid overflow while preserving zero dissipative channels.
-        let mut hermitian = vec![0.0; real_dimension * real_dimension];
-        for a in 0..ports {
-            poll(cx)?;
-            for b in 0..=a {
-                let za = impedance[a * ports + b];
-                let zb = impedance[b * ports + a];
-                let re = f64::midpoint(za.re, zb.re);
-                let im = if a == b {
-                    0.0
-                } else {
-                    f64::midpoint(za.im, -zb.im)
-                };
-                for offset in [0, ports] {
-                    hermitian[(a + offset) * real_dimension + b + offset] = re;
-                    hermitian[(b + offset) * real_dimension + a + offset] = re;
-                }
-                hermitian[a * real_dimension + b + ports] = -im;
-                hermitian[(b + ports) * real_dimension + a] = -im;
-                hermitian[b * real_dimension + a + ports] = im;
-                hermitian[(a + ports) * real_dimension + b] = im;
-            }
-        }
-        require_psd(&hermitian, real_dimension, "load Hermitian part", cx)?;
+        admit_passive_port_impedance(ports, impedance, cx)?;
         poll(cx)?;
         Ok(Self {
             coordinates: n,

@@ -4,7 +4,7 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
     HarmonicParameterControls, HarmonicPortControls, HarmonicResponseControls,
-    HarmonicResponseError, PreparedHarmonicResponse,
+    HarmonicResponseError, PreparedHarmonicResponse, harmonic_mean_power_derivative_with_cancel,
 };
 use fs_modal::quadratic_modes::QuadraticParameterDirection;
 
@@ -55,6 +55,78 @@ fn scalar(a: f64, b: f64, tolerance: f64) {
 }
 fn pair(a: C64, b: C64) -> f64 {
     (a.conj() * b).re
+}
+
+#[test]
+fn shared_mean_work_tangent_retains_reactive_and_mutual_cancellation_before_rounding() {
+    let large = 1e200;
+    let z = C64::new(large, large);
+    let phase_slope = C64::new(-large, large);
+    // A common phase rotation changes no real work, although each real
+    // component product overflows if formed before its signed cancellation.
+    assert_eq!(
+        harmonic_mean_power_derivative_with_cancel(
+            &[z], &[z], &[phase_slope], &[phase_slope], || false,
+        ).unwrap(),
+        0.0,
+    );
+    // Retain the complete mutual exchange before rounding individual ports.
+    // The first two per-port slopes exceed f64, but their exact cancellation
+    // leaves the third original port's finite contribution.
+    assert_eq!(
+        harmonic_mean_power_derivative_with_cancel(
+            &[C64::from_re(large), C64::from_re(large), C64::from_re(2.0)],
+            &[C64::ZERO; 3],
+            &[C64::ZERO; 3],
+            &[C64::from_re(large), C64::from_re(-large), C64::from_re(3.0)],
+            || false,
+        ).unwrap(),
+        3.0,
+    );
+    for exponent in [-900, 900] {
+        let flow = 2_f64.powi(exponent);
+        let effort = 3.0 * 2_f64.powi(-exponent);
+        let work = harmonic_mean_power_derivative_with_cancel(
+            &[C64::from_re(flow)], &[C64::from_re(effort)],
+            &[C64::from_re(2.0 * flow)], &[C64::from_re(-effort)], || false,
+        ).unwrap();
+        assert_eq!(work, 1.5);
+    }
+    let smallest = f64::from_bits(1);
+    assert_eq!(
+        harmonic_mean_power_derivative_with_cancel(
+            &[C64::ZERO], &[C64::from_re(2.0)],
+            &[C64::from_re(smallest)], &[C64::ZERO], || false,
+        ).unwrap(),
+        smallest,
+    );
+    assert!(harmonic_mean_power_derivative_with_cancel(
+        &[C64::from_re(large)], &[C64::ZERO], &[C64::ZERO], &[C64::from_re(large)], || false,
+    ).is_err());
+    assert!(harmonic_mean_power_derivative_with_cancel(
+        &[C64::ZERO], &[C64::from_re(0.5)], &[C64::from_re(smallest)], &[C64::ZERO], || false,
+    ).is_err());
+}
+
+#[test]
+fn shared_mean_work_tangent_checks_shape_finite_inputs_and_late_cancellation() {
+    let z = [C64::ONE];
+    assert_eq!(
+        harmonic_mean_power_derivative_with_cancel(&[], &[], &[], &[], || false).unwrap(),
+        0.0,
+    );
+    assert!(harmonic_mean_power_derivative_with_cancel(&z, &[], &z, &z, || false).is_err());
+    assert!(harmonic_mean_power_derivative_with_cancel(
+        &z, &z, &[C64::new(f64::NAN, 0.0)], &z, || false,
+    ).is_err());
+    let mut polls = 0;
+    assert!(matches!(
+        harmonic_mean_power_derivative_with_cancel(&z, &z, &z, &z, || {
+            polls += 1;
+            polls == 3
+        }),
+        Err(HarmonicResponseError::Cancelled),
+    ));
 }
 
 #[test]

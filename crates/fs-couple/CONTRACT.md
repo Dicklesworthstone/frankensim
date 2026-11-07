@@ -3420,3 +3420,46 @@ deformed heat-transfer area, wetting law, exterior-fluid evolution, pore-fluid
 transport or global time-accuracy certificate is inferred.
 
 Native regression execution remains unverified on the exhausted shared build host.
+
+## Physical impedance back-reaction in nonlinear harmonic balance
+
+`phs_orbit::impedance::PeriodicPortImpedance` admits the complete original
+physical port impedance at DC and every supplied harmonic of one fixed clock.
+The source matrices use `exp(-i omega t)`; preparation conjugates them for
+fs-orbit's positive-frequency Fourier chart. DC is explicitly finite and real.
+The shared fs-modal Hermitian PSD admission preserves all mutual and
+nonreciprocal entries. It establishes pointwise numerical admission only;
+physical source validity, unsampled bands and causality stay with the caller.
+
+`PreparedPhsImpedance` augments the original pHS state with physical flow
+unknowns, using `P(s)=[[sI,G Z(s)],[0,I]]` and the nonlinear island
+`[(J-R) grad H+G f, G^T grad H]`. The load therefore changes the solved motion;
+it is not a receiver observation or an effective damping substituted for the
+source. Original nonlinear storage, physical port ordering and every Maxwell
+memory coordinate remain intact. Complete native/caller storage tangents
+differentiate the same original law; exact quadratic tangents are cached.
+
+Fixed-order and adaptive scaled seeded solves use the existing fs-orbit
+Newton/AFT/refinement owners. Seeds and scales include the appended flows;
+their algebraic equations have flow units. The drive must fit the initial
+order and the table must cover every potentially retained order before source
+evaluation. No omitted matrix defaults to zero. The independent omitted-band
+assessment requires no load beyond retained order because those state/flow
+coefficients are exactly zero. No time-domain RHS, shooting capability,
+infinite-tail bound or stability claim is inferred from the frequency table.
+
+The returned state orbit retains the original coordinates for acoustic
+observation. Its full-balance diagnostics also include the flow constraints.
+The independent cycle audit reevaluates original storage and ports, separately
+reporting authored source work, native resistance loss, absorbed boundary work
+and the RMS difference between nonlinear physical flow and retained flow.
+Boundary work is not inferred to be heat or radiation, and a sample ladder
+remains necessary for nonlinear work convergence. Edited/foreign boundary
+efforts, unsupported sampling, absent bands, refusing sources/tangents,
+resource limits and cancellation refuse without an unloaded fallback.
+
+Five G1/G3 regression definitions exercise the actual baffled-piston owner,
+native nonlinear Duffing/Maxwell storage, nonlinear port harmonics, full mutual
+nonreciprocal loads, DC work and power-conjugate unit changes, plus admission
+and cancellation. Rust syntax/formatting were checked; native execution remains
+unverified in the current dependency/resource environment.

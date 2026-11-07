@@ -418,6 +418,21 @@ backward check. Neither is a forward-error certificate at a narrow resonance.
 Signed power products retain binary exponents through cancellation before
 recovering physical units, including lossless source-phase rotations and
 motion in a damping direction's nullspace.
+
+`harmonic_mean_power_derivative_with_cancel` exposes that existing physical
+work contraction for original-state consumers. It contracts
+`Re(flow_theta^H*effort + flow^H*effort_theta)/2` across equal finite port slices
+using the same binary-normalized DD products, retaining mutual cancellation
+before rounding a total or restoring physical units. It allocates nothing,
+uses constant scratch and linear work, polls before/during/after contraction,
+and refuses unrepresentable final values. It neither infers dissipative heat
+nor supplies an exact-summation or forward-error guarantee at arbitrary nulls.
+The accompanying focused cases in `harmonic_parameter` cover reactive phase
+changes, overflowing products with finite mutual cancellation, original port
+unit changes, a retained smallest-subnormal result, invalid inputs and late
+cancellation. Those new cases remain unexecuted under the dependency resource
+blocker.
+
 Additional payload admission is `512*n + 384*p`; work admission is
 `256*(n*n+n*p+p*p)+256*(n+p+k)`, with `64*(n*n*p+k*k)` added for a compact
 loaded factor of dimension k. Direction/source inputs and the original factor

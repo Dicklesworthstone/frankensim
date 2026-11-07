@@ -3,7 +3,8 @@
 //! This is an adapter, not a second orbit solver. fs-orbit owns harmonic balance,
 //! shooting and continuation; fs-phs owns energy, interconnection, dissipation
 //! and material-memory coordinates. The adapter evaluates the ORIGINAL continuous
-//! vector field at every AFT sample and exposes only the default sI frequency port.
+//! vector field at every AFT sample. The basic ODE adapter exposes the default sI
+//! frequency port; [`impedance`] adds physical frequency-dependent back-reaction.
 //! Descriptor systems are intentionally excluded because their algebraic rows need
 //! an explicit descriptor OrbitProblem rather than an inverted mass matrix.
 //!
@@ -32,6 +33,9 @@ pub mod spectrum;
 
 /// Original harmonic and sideband outputs through physical BEM receivers.
 pub mod acoustic;
+
+/// Full physical impedance back-reaction on forced nonlinear periodic regimes.
+pub mod impedance;
 
 /// Physical probe response and frequency conversion about driven or self-excited periodic orbits.
 pub mod sideband;

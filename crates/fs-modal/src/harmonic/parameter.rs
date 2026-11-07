@@ -149,6 +149,58 @@ impl PowerSum {
     }
 }
 
+/// Differentiate signed cycle-mean work of original power-conjugate phasors.
+///
+/// Returns `Re(flow_derivative^H*effort + flow^H*effort_derivative)/2`, summed
+/// over every original port. The derivative can be with respect to frequency
+/// or any authored physical parameter; all four arrays use the same ordering.
+/// Work exchanged through a port is not necessarily local dissipative heat.
+///
+/// Reuses the structural harmonic owner's binary-normalized double-double
+/// products. Individual products may exceed f64 when their signed sum is
+/// finite, including purely reactive changes and cancelling mutual exchanges.
+/// Rounding occurs after the complete contraction. This is not an exact-sum
+/// or forward-error certificate at an arbitrary cancellation.
+///
+/// Equal finite slices are required; an empty port set returns zero. Work is
+/// linear in the borrowed port count with constant scratch and no allocation.
+/// Cancellation is checked before, during and after contraction. A nonzero
+/// final value outside f64's representable range refuses, without a partial sum.
+pub fn harmonic_mean_power_derivative_with_cancel(
+    flow: &[C64],
+    effort: &[C64],
+    flow_derivative: &[C64],
+    effort_derivative: &[C64],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<f64, HarmonicResponseError> {
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    let n = flow.len();
+    if effort.len() != n || flow_derivative.len() != n || effort_derivative.len() != n {
+        return Err(invalid("equal original port and derivative lengths required"));
+    }
+    let mut sum = PowerSum::default();
+    for i in 0..n {
+        if cancelled() {
+            return Err(HarmonicResponseError::Cancelled);
+        }
+        if [flow[i], effort[i], flow_derivative[i], effort_derivative[i]]
+            .iter()
+            .any(|&value| !finite(value))
+        {
+            return Err(invalid("finite original port phasors and derivatives required"));
+        }
+        sum.half_inner(flow_derivative[i], effort[i], 1.0)?;
+        sum.half_inner(flow[i], effort_derivative[i], 1.0)?;
+    }
+    let value = sum.value()?;
+    if cancelled() {
+        return Err(HarmonicResponseError::Cancelled);
+    }
+    Ok(value)
+}
+
 impl PreparedHarmonicResponse {
     /// Differentiate the forced response along original M/C/K and F directions.
     ///
