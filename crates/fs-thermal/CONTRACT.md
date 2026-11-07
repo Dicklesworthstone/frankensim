@@ -3067,3 +3067,31 @@ how small its probability is. Active volume is explicit, and population
 counts must not be confused with concentrations. This reduced law does not
 infer diffusion, spin statistics, density saturation, or a measured material
 coefficient. Numerical tests use manufactured parameters.
+
+## Controlled nonlinear phosphorescence evolution
+
+`SingletTripletRecyclingPlan::advance_with_annihilation` couples optional
+local pair laws to the original singlet/triplet, pump and spectral photon
+network. Positive exponential midpoint prediction and correction resolve
+the original stiff linear kinetics together with frozen nonlinear rates.
+Only corrector histories enter physical accounts. Original nonradiative and
+reverse-crossing channels are reconstructed directly from their original
+rates; internal reaction coordinates introduce no reported fictitious bath
+exchange. Pair counts, productive singlets and pair heat remain separate.
+
+Inactive laws retain the exact existing linear path. An isolated unpumped
+pair law uses its analytic solution. General evolution refines bounded
+meshes, compares stored energy and integrated physical channels, and also
+checks endpoint radiative power expressed over the interval. A true-time
+geometrically refined final segment resolves fast emitting states without
+uniformly resolving their lifetimes; its work counts against the authored
+budget. Identical meshes provide no convergence evidence. A nonlinear
+exposure guard prevents an over-damped predictor from falsely appearing
+converged. Budget exhaustion or cancellation returns no accepted candidate.
+
+`AnnihilationLimits` controls componentwise absolute/relative convergence
+and maximum segments. The reported discrepancy is a refinement indicator,
+not a rigorous error enclosure. Whole-interval conservation independently
+uses the original linear owner's relative allowance and compensated net
+thermal exchange. Linear coefficients and optical transport stay fixed
+within the interval; thermal feedback still requires outer time refinement.

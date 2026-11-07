@@ -22,6 +22,11 @@ use fs_la::decay::{DecayError, MAX_DECAY_EDGES, MAX_DECAY_NODES};
 /// Existing bounded positive-evolution accuracy and resource controls.
 pub use fs_la::decay::DecayLimits as RecyclingLimits;
 
+/// Positive exponential-midpoint coupling to authored triplet-pair annihilation.
+#[path = "recycling/annihilation.rs"]
+pub mod annihilation;
+pub use annihilation::{AnnihilationLimits, AnnihilationRecyclingStep};
+
 /// One conditional emitted photon bin from one state of one active cell.
 /// State 0 is singlet and state 1 triplet. Weights sum to one per emitting state;
 /// transport fractions sum to one per channel, including absorption edges.

@@ -149,11 +149,8 @@ impl TripletAnnihilation {
                 "positive triplet endpoint or pair count",
             ));
         }
-        let singlet_production = positive_product(
-            pair_events,
-            self.singlet_yield,
-            "annihilation singlet production",
-        )?;
+        let (singlet_production, nonradiative_heat_j) =
+            self.event_channels(energies, pair_events)?;
         let new_populations = [
             finite(
                 populations[0] + singlet_production,
@@ -161,26 +158,6 @@ impl TripletAnnihilation {
             )?,
             triplets,
         ];
-        let dark_pairs = positive_product(
-            pair_events,
-            1.0 - self.singlet_yield,
-            "nonproductive annihilation pairs",
-        )?;
-        let dark_energy = positive_product(dark_pairs, et, "nonproductive annihilation energy")?;
-        let productive_gap = if self.singlet_yield > 0.0 {
-            et - (es - et)
-        } else {
-            0.0
-        };
-        let mut heat = CompensatedSum::default();
-        heat.add(dark_energy)?;
-        heat.add(dark_energy)?;
-        heat.add(positive_product(
-            singlet_production,
-            productive_gap,
-            "productive annihilation heat",
-        )?)?;
-        let nonradiative_heat_j = finite(heat.value + heat.correction, "annihilation heat")?;
         let mut balance = CompensatedSum::default();
         for i in 0..2 {
             balance.add(initial[i])?;
@@ -201,6 +178,81 @@ impl TripletAnnihilation {
                 "annihilation energy residual",
             )?,
         })
+    }
+    // Internal coupling coefficient: dNt/dt = -lambda*Nt when the other
+    // occurrence of Nt is frozen. Its binary scaling shares the exact owner.
+    pub(super) fn frozen_removal_rate_s(
+        &self,
+        triplet_population: f64,
+    ) -> Result<f64, SingletTripletError> {
+        if !nonnegative(triplet_population) {
+            return Err(SingletTripletError::Invalid(
+                "annihilation triplet population",
+            ));
+        }
+        if self.pair_rate_m3_s == 0.0 || triplet_population == 0.0 {
+            return Ok(0.0);
+        }
+        let (km, ke) = parts(self.pair_rate_m3_s);
+        let (nm, ne) = parts(triplet_population);
+        let (vm, ve) = parts(self.active_volume_m3);
+        let rate = finite(
+            scaled(km * nm / vm, ke + ne - ve + 1),
+            "frozen annihilation rate",
+        )?;
+        if rate == 0.0 {
+            return Err(SingletTripletError::Unrepresentable(
+                "positive frozen annihilation rate",
+            ));
+        }
+        Ok(rate)
+    }
+
+    // Shared physical branching for exact steps and integrated frozen-rate
+    // coupling counts. Never infer heat by subtracting an artificial bath term.
+    pub(super) fn event_channels(
+        &self,
+        energies: [f64; 2],
+        pair_events: f64,
+    ) -> Result<(f64, f64), SingletTripletError> {
+        let [es, et] = energies;
+        if !energies.iter().all(|&x| x.is_finite() && x > 0.0)
+            || es < et
+            || !nonnegative(pair_events)
+            || (self.singlet_yield > 0.0 && es - et > et)
+        {
+            return Err(SingletTripletError::Invalid(
+                "annihilation energies or pair count",
+            ));
+        }
+        let singlets = positive_product(
+            pair_events,
+            self.singlet_yield,
+            "annihilation singlet production",
+        )?;
+        let dark_pairs = positive_product(
+            pair_events,
+            1.0 - self.singlet_yield,
+            "nonproductive annihilation pairs",
+        )?;
+        let dark_energy = positive_product(dark_pairs, et, "nonproductive annihilation energy")?;
+        let productive_gap = if self.singlet_yield > 0.0 {
+            et - (es - et)
+        } else {
+            0.0
+        };
+        let mut heat = CompensatedSum::default();
+        heat.add(dark_energy)?;
+        heat.add(dark_energy)?;
+        heat.add(positive_product(
+            singlets,
+            productive_gap,
+            "productive annihilation heat",
+        )?)?;
+        Ok((
+            singlets,
+            finite(heat.value + heat.correction, "annihilation heat")?,
+        ))
     }
 }
 
