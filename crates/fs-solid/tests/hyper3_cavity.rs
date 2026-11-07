@@ -19,6 +19,8 @@ mod multiple;
 mod real_gas;
 #[path = "hyper3_cavity/batch.rs"]
 mod batch;
+#[path = "hyper3_cavity/epoch.rs"]
+mod epoch;
 
 fn with_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
     let gate = CancelGate::new();

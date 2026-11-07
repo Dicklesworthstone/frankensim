@@ -480,3 +480,98 @@ fn g1_heating_one_dense_chamber_moves_the_other_without_merging_sources() {
         assert_eq!(changed, saved);
     });
 }
+
+#[test]
+fn g1_heated_real_gas_epoch_uses_accepted_density_entropy_and_acoustic_work() {
+    use fs_solid::hyper3::pressure::cavity::{AdiabaticCavityGas, CavityGasEpoch};
+
+    with_cx(|_, cx| {
+        let (nodes, tets) = shell();
+        let cavity = Arc::new(cavity(&nodes, &tets, cx));
+        let anchor_stretch = 0.90_f64;
+        let target_stretch = 0.88_f64;
+        let anchor_u: Vec<_> = nodes.iter().flatten()
+            .map(|x| (anchor_stretch - 1.0) * x).collect();
+        let target_u: Vec<_> = nodes.iter().flatten()
+            .map(|x| (target_stretch - 1.0) * x).collect();
+        let anchor_volume = cavity.evaluate(&anchor_u, cx).unwrap().volume_m3();
+        let original = parcel(cavity.reference_volume_m3(), CP_SLOPE, 1e24);
+        let (mut heated, _) = original.at_volume_isentropic(
+            anchor_volume, controls(), || false,
+        ).unwrap();
+        let molar0 = reference_molar_volume();
+        let molar_anchor = molar0 * anchor_stretch.powi(3);
+        let molar_target = molar0 * target_stretch.powi(3);
+        let moles = cavity.reference_volume_m3() / molar0;
+        let old_temperature = heated.state().temperature_k();
+        let anchor_temperature = 400.0;
+        // Independent density-dependent PR caloric difference at held geometry.
+        let heat_per_mole = R * (anchor_temperature - old_temperature)
+            * (2.5 + 0.5 * CP_SLOPE * (anchor_temperature + old_temperature))
+            + pr_point(anchor_temperature, molar_anchor, CP_SLOPE).residual_energy_j_mol
+            - pr_point(old_temperature, molar_anchor, CP_SLOPE).residual_energy_j_mol;
+        let heat = heated.add_heat(
+            moles * heat_per_mole,
+            GasEnergySolve {
+                minimum_temperature_k: 200.0,
+                maximum_temperature_k: 600.0,
+                energy_tolerance_j_kg: 1e-7,
+                maximum_iterations: 128,
+            },
+            || false,
+        ).unwrap();
+        near(heated.state().temperature_k(), anchor_temperature, 3e-8);
+        near(heat.stored_energy_change_j, moles * heat_per_mole, 3e-6);
+        let saved = heated.clone();
+        let epoch = CavityGasEpoch::try_new(
+            Arc::clone(&cavity), &anchor_u, heated, cx,
+        ).unwrap();
+        assert_eq!(epoch.gas(), &saved);
+        let ambient = 1.2e6;
+        let start = cavity.adiabatic_gas_load(
+            &anchor_u, &epoch, ambient, controls(), cx,
+        ).unwrap();
+        assert_eq!(start.gas.gas(), epoch.gas());
+        assert_eq!(start.potential_change_j, 0.0);
+        let load = cavity.adiabatic_gas_load(
+            &target_u, &epoch, ambient, controls(), cx,
+        ).unwrap();
+        // Integrate this new physical isentrope from heated T and accepted
+        // molar volume, not the original undeformed 300 K parcel.
+        let (mut lo, mut hi) = (anchor_temperature, 500.0);
+        for _ in 0..100 {
+            let mid = 0.5 * (lo + hi);
+            if entropy_change(
+                anchor_temperature, molar_anchor, mid, molar_target, CP_SLOPE,
+            ) < 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let expected = pr_point(0.5 * (lo + hi), molar_target, CP_SLOPE);
+        let stored_per_mole = R * (expected.temperature - anchor_temperature)
+            * (2.5 + 0.5 * CP_SLOPE * (expected.temperature + anchor_temperature))
+            + expected.residual_energy_j_mol
+            - pr_point(anchor_temperature, molar_anchor, CP_SLOPE).residual_energy_j_mol;
+        let (volume, gradient) = tetra_volume_gradient(current_inner(&nodes, &target_u));
+        near(load.gas.gas().state().temperature_k(), expected.temperature, 1e-7);
+        near(load.net_pressure_pa, expected.pressure - ambient, 8e-3);
+        near(load.potential_change_j,
+            moles * stored_per_mole + ambient * (volume - anchor_volume), 3e-4);
+        near(start.gas.stored_energy_change_to(&load.gas, || false).unwrap(),
+            moles * stored_per_mole, 3e-4);
+        for local in 0..12 {
+            near(load.force_n[12 + local],
+                (expected.pressure - ambient) * gradient[local], 2e-3);
+            near(load.force_tangent.acoustic_rank_one_vector()[12 + local],
+                (expected.bulk_modulus / volume).sqrt() * gradient[local], 2e-6);
+        }
+        assert!((expected.bulk_modulus
+            / (load.gas.gas().state().gamma() * expected.pressure) - 1.0).abs() > 0.005);
+        assert_eq!(load.gas.gas().mass_kg().to_bits(), original.mass_kg().to_bits());
+        assert_eq!(load.gas.gas().model(), original.model());
+        assert_eq!(load.gas.gas().point().axes().get("material-lot"), Some(&47.0));
+        assert_eq!(epoch.gas(), &saved);
+    });
+}

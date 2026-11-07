@@ -12084,3 +12084,57 @@ This remains the native bounded P1 finite-strain model with held interval
 pressure, explicit reference transport geometry and its original locking and
 constitutive limits; contact tooling, mesh adaptation and experimental forming
 validation are separate capabilities.
+
+
+### Gas isentropes anchored at accepted deformed cavity geometry
+
+`hyper3::pressure::cavity::CavityGasEpoch<G>` admits a physical gas parcel at
+the actual accepted cavity geometry. This closes the native seam needed after
+source-owned heat exchange at fixed current volume: the heated parcel starts
+the next mechanical isentrope directly, without a fictitious entropy solve back
+to undeformed solid volume. The caller retains the physical heat receipt and
+owns coupled time integration and energy acceptance.
+
+`try_new(Arc<ClosedTetCavity>, accepted_displacement_m, gas, cx)` admits the
+complete solid mesh through the existing geometry owner and requires bit-exact
+agreement between gas volume and represented accepted cavity volume. The epoch
+retains the exact prepared-cavity identity, compact accepted positions and
+volume in one shared immutable anchor. Newton clones share the anchor and
+prepared cavity; they do not clone the full mesh or retain a full displacement
+copy. Gas inventory, source model, auxiliary query axes and homogeneous-phase
+admission remain with the original ideal or Peng--Robinson parcel.
+
+A sealed reference-geometry hook keeps ordinary parcels' strict undeformed-volume
+requirement. Only explicitly constructed epochs use an accepted deformed anchor.
+Their force, acoustic compressibility, geometry tangent and direct stored-energy
+increments delegate to the existing native owners. Exterior pressure potential
+uses the original compensated compact volume increment from this physical
+anchor, so the complete conservative potential remains
+`U(current)-U(anchor) + p_exterior*(V(current)-V(anchor))`. Physical heat already
+supplied to the anchored parcel is not replayed as mechanical work.
+
+An accepted load returns an output-only epoch sharing the original anchor.
+It may expose or yield its physical parcel through `gas()`/`into_gas()`, but
+cannot silently replace a reference, even if its volume happens to equal the
+anchor volume. A different prepared-cavity identity also refuses. To start a
+new reference after physical heating, the caller explicitly constructs a fresh
+epoch at the accepted displacement. Continuing the same isentrope instead uses
+the original admitted reference. This explicit alternative applies to the
+existing generic static, retained porous, thermal and consistent-inertia
+cavity consumers without changing their work or history acceptance owners.
+
+Focused G1/G3/G4 regressions in `tests/hyper3_cavity/epoch.rs` specify a heated
+variable-Cv ideal gas at a deformed anchor, an admissible next isentrope whose
+fictitious undeformed rebase would leave its temperature bracket, independent
+force/acoustic/work derivatives, source and inventory preservation, exact
+reference identity, output-only/fresh-binding behavior, complete-mesh refusal
+and cancellation. The existing `hyper3_cavity/real_gas.rs` adds a heated dense
+gas case using its independent PR Helmholtz/entropy oracle, including both
+density-dependent caloric storage and the true acoustic bulk modulus. Both
+gas-law tests retain a 1e24 J/kg energy datum to exercise direct increments.
+
+The execution host was unavailable during implementation. A bounded pinned
+rustfmt stdin attempt could not start; these new sources and tests have source
+review and independent scalar-oracle checks, but no new formatting, compilation
+or native-runtime pass is claimed. This seam itself adds no heat-transfer law,
+simultaneous heat/motion integrator, gas momentum, phase split or contact model.

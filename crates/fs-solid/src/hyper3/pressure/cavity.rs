@@ -36,6 +36,8 @@ mod tangent;
 pub use tangent::TetCavityGasTangent;
 mod constitutive;
 pub use constitutive::AdiabaticCavityGas;
+mod epoch;
+pub use epoch::CavityGasEpoch;
 pub(crate) mod equilibrium;
 pub use equilibrium::AdiabaticCavity;
 
@@ -91,7 +93,7 @@ pub struct TetCavityGasLoad<G = ClosedGasParcel> {
     /// Full force derivative: sparse geometry plus acoustic rank-one coupling.
     /// Use apply_into with reusable buffers for large admitted cavity meshes.
     pub force_tangent: TetCavityGasTangent,
-    /// Delta U_gas + p_exterior Delta V [J] from the reference cavity state.
+    /// Delta U_gas + p_exterior Delta V [J] from this source's admitted anchor.
     pub potential_change_j: f64,
     // Retain the already evaluated compact geometry for original-volume work
     // between Newton trials. No second mesh admission or position copy is needed.
@@ -358,8 +360,10 @@ impl ClosedTetCavity {
 
     /// Pull the original closed gas through this cavity's exact nonlinear volume.
     ///
-    /// The supplied parcel must be at the undeformed cavity volume. Every call
-    /// starts from that immutable thermodynamic state, follows its source-owned
+    /// An ordinary parcel must be at the undeformed cavity volume. An admitted
+    /// [`CavityGasEpoch`] instead binds a physical parcel at its accepted deformed
+    /// geometry, for example after source-owned heat exchange at fixed volume.
+    /// Every call starts from that immutable thermodynamic state, follows its source-owned
     /// reversible adiabatic path to the CURRENT cavity volume, and then uses the
     /// common acoustic mechanical-load owner for pressure and dp/dV. This avoids
     /// a fixed-gamma or frozen-pressure surrogate and keeps source, force,
@@ -394,14 +398,12 @@ impl ClosedTetCavity {
         cx: &Cx<'_>,
     ) -> Result<TetCavityGasLoad<G>, HyperTetError> {
         checkpoint(cx)?;
-        if gas.volume_m3().to_bits() != self.reference_volume_m3.to_bits()
-            || !exterior_pressure_pa.is_finite()
-            || exterior_pressure_pa < 0.0
-        {
+        if !exterior_pressure_pa.is_finite() || exterior_pressure_pa < 0.0 {
             return Err(invalid(
-                "adiabatic cavity gas must start at the reference volume with finite nonnegative exterior pressure",
+                "adiabatic cavity exterior pressure must be finite and nonnegative",
             ));
         }
+        let reference_positions = gas.reference_positions_m(self)?;
         let geometry = geometry()?;
         if !std::ptr::eq(geometry.cavity, self) {
             return Err(invalid("gas load geometry belongs to a different cavity"));
@@ -459,7 +461,7 @@ impl ClosedTetCavity {
         )?;
         let exterior_work = if exterior_pressure_pa == 0.0 { Dd::ZERO } else {
             Dd::from_f64(exterior_pressure_pa) * self.volume_increment(
-                &self.reference_positions_m, &geometry.positions_m, cx,
+                reference_positions, &geometry.positions_m, cx,
             )?
         };
         let potential_change_j = finite((Dd::from_f64(volume_step.stored_energy_change_j)

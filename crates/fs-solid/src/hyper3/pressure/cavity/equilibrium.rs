@@ -21,7 +21,8 @@ use super::{AdiabaticCavityGas, ClosedTetCavity, HyperTetError, TetCavityGasLoad
 pub struct AdiabaticCavity<'a, G = ClosedGasParcel> {
     /// Prepared closed inner boundary of the complete reference solid.
     pub cavity: &'a ClosedTetCavity,
-    /// Original gas inventory at the undeformed cavity volume.
+    /// Immutable gas reference: an ordinary parcel at undeformed cavity volume,
+    /// or a [`super::CavityGasEpoch`] at its explicitly admitted accepted geometry.
     pub reference: &'a G,
     /// Fixed exterior absolute pressure [Pa], finite and nonnegative.
     pub exterior_pressure_pa: f64,

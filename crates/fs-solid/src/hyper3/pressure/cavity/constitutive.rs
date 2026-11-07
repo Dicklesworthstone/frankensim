@@ -3,6 +3,8 @@
 //! This sealed seam changes only which source owner supplies thermodynamics.
 //! Geometry, mechanical pullback, acoustic factors and equilibrium stay shared.
 
+use super::{ClosedTetCavity, HyperTetError, invalid};
+
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::thermochemical_gas::energy::entropy::{GasEntropyError, GasEntropySolve};
@@ -18,7 +20,8 @@ mod sealed {
 /// Conserved, source-resolved gas storage for a reversible adiabatic cavity.
 ///
 /// Implementations are sealed to the original ideal and Peng–Robinson parcel
-/// owners. Each supplies its complete material state and the same shared
+/// owners and their admitted [`super::CavityGasEpoch`] bindings. Each supplies
+/// its complete material state and the same shared
 /// mechanical load. In particular, real-gas storage includes density-dependent
 /// internal energy and its stiffness uses the actual `rho*c²`, never `gamma*p`.
 /// The material owner admits the homogeneous phase branch and thermodynamic
@@ -29,6 +32,24 @@ pub trait AdiabaticCavityGas: sealed::Gas + Clone + core::fmt::Debug {
 
     /// Current physical volume [m³] of this unchanged mass inventory.
     fn volume_m3(&self) -> f64;
+
+    /// Original compact geometry for this immutable thermodynamic reference.
+    ///
+    /// Ordinary parcels retain strict undeformed-volume admission. The sealed
+    /// geometry-bound epoch overrides this only for its exact admitted cavity.
+    /// Returned isentropic endpoints cannot silently replace that reference.
+    #[doc(hidden)]
+    fn reference_positions_m<'a>(
+        &'a self,
+        cavity: &'a ClosedTetCavity,
+    ) -> Result<&'a [[f64; 3]], HyperTetError> {
+        if self.volume_m3().to_bits() != cavity.reference_volume_m3.to_bits() {
+            return Err(invalid(
+                "ordinary adiabatic cavity gas must start at the undeformed cavity volume",
+            ));
+        }
+        Ok(&cavity.reference_positions_m)
+    }
 
     /// Immutable endpoint and original-law work on the source isentrope.
     fn at_volume_isentropic(
@@ -56,6 +77,8 @@ pub trait AdiabaticCavityGas: sealed::Gas + Clone + core::fmt::Debug {
         cancelled: impl FnMut() -> bool,
     ) -> Result<f64, GasEnergyError>;
 }
+
+impl<G: AdiabaticCavityGas> sealed::Gas for super::CavityGasEpoch<G> {}
 
 impl sealed::Gas for ClosedGasParcel {}
 impl AdiabaticCavityGas for ClosedGasParcel {
