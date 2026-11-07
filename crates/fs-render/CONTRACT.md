@@ -1408,6 +1408,25 @@ differentiable lift). Pure Rust throughout.
   narrow-band proposals, source PDFs, direct-estimator energy agreement,
   moving accepted source states and deterministic execution replay.
 
+- With `photometry`, `DiffuseThermalSurface::visible_observables` measures the
+  original gray or borrowed spectral source in absolute units: 380–780 nm
+  radiant exitance in W/m², CIE XYZ with Y in cd/m², Lambertian luminous
+  exitance in lm/m², and optional xy chromaticity. Source identity and the
+  published observer ID are retained. Four-point Gauss–Legendre integration
+  splits at every emissivity knot and every existing 5 nm observer boundary;
+  narrow accepted emission peaks therefore survive even when all original
+  midpoint samples miss them. The operation allocates no heap storage and
+  performs at most 376 pointwise source evaluations. Its CIE response remains
+  piecewise constant inside the existing observer bins; tracer packet semantics
+  do not change. Missing visible-band support and nonfinite outputs refuse.
+  Zero represented XYZ has no invented chromaticity. Exitance is gross emission
+  per area of one emitting face, not net exchange or an additional thermal debit.
+  No display-white normalization, exposure, out-of-band cooling law, calibrated
+  specimen or certified quadrature error is inferred. G1/G3 numerical tests
+  compare independent SI references, emissivity scaling, gray/spectral limits
+  and sub-bin emission. The `incandescent_emission` example reports watts,
+  lumens and source color for an explicitly authored gray model.
+
 - `charts` module (plan §10.2, beads qfx.2 + 8ll9; [S], default-on through
   `chart-backends`): render charts that opt into a typed trace theorem, WITHOUT
   conversion; other chart types remain explicit no-claim previews until they

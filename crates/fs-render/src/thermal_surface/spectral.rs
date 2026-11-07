@@ -179,6 +179,12 @@ impl SpectralDiffuseThermalSurface {
         self.emissivity
     }
 
+    /// Borrow the declared knots for source integration without copying them.
+    #[cfg(feature = "photometry")]
+    pub(crate) fn emissivity_knots(&self) -> &[(f64, f64)] {
+        self.emissivity.knots()
+    }
+
     /// Reciprocal opaque diffuse reflectance `1 - emissivity(lambda)`.
     pub fn reflectance(&self, wavelength_nm: f64) -> Result<f64, ThermalSurfaceError> {
         Ok(1.0 - self.emissivity.at(wavelength_nm)?)

@@ -133,6 +133,10 @@ name = "temperature_radiative_balance"
 required-features = ["optical-heating"]
 
 [[example]]
+name = "incandescent_emission"
+required-features = ["photometry"]
+
+[[example]]
 name = "distributed_optical_heating"
 required-features = ["optical-heating"]
 

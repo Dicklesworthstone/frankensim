@@ -39,6 +39,11 @@ pub(crate) use planck::{
 mod spectral;
 pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
 
+#[cfg(feature = "photometry")]
+mod observables;
+#[cfg(feature = "photometry")]
+pub use observables::ThermalVisibleObservables;
+
 /// Original thermal spectra observed from moving inertial vacuum frames.
 pub mod doppler;
 
