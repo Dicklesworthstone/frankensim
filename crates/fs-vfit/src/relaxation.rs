@@ -14,6 +14,11 @@
 //! They represent stress relaxation (for example a Maxwell material wall), not
 //! the high-pass inertive branches above. Both families share ONE midpoint port
 //! solve and publish together; no branch is stepped against a lagged flow.
+//! [`RelaxationSampling::ExactHeldFlow`] instead integrates these branch
+//! histories and their resistor heat continuously under the solved, held flow.
+//! Their interval-mean pressures enter the same simultaneous port solve. The
+//! base R-L-C contribution retains its original midpoint rule; this does not
+//! claim an exact continuous solution of the complete coupled wave boundary.
 //!
 //! [`ParallelCellLoad`] is a separate, flow-driven series chain of parallel
 //! R, L and C cells, Z = sum 1/(1/R + 1/(sL) + sC), for a caller that has
@@ -36,10 +41,22 @@ pub use exact::ExactParallelCellLoad;
 
 use crate::impedance::{ImpedanceFrame, SeriesImpedance, SeriesImpedanceSpec};
 use crate::waveguide::WaveguideError;
+use fs_material::visco::PronyRamp;
 use fs_math::c64::C64;
 
 /// Bounded inline branch storage, matching the existing fs-phs Foster producer.
 pub const MAX_RELAXATION_BRANCHES: usize = 8;
+
+/// Time representation of the RL and RC memories in a declared load.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RelaxationSampling {
+    /// Original simultaneous implicit-midpoint branch and base dynamics.
+    #[default]
+    BilinearMidpoint,
+    /// Exact branch decay, interval-mean pressure and positive resistor heat
+    /// under the solved constant flow. The base R-L-C remains midpoint.
+    ExactHeldFlow,
+}
 
 /// One passive term R s/(s+w), with retained inertance R/w.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -67,6 +84,7 @@ pub struct RelaxationImpedanceSpec {
     count: usize,
     compliance_terms: [ComplianceRelaxationTerm; MAX_RELAXATION_BRANCHES],
     compliance_count: usize,
+    sampling: RelaxationSampling,
 }
 
 impl RelaxationImpedanceSpec {
@@ -88,7 +106,8 @@ impl RelaxationImpedanceSpec {
             }
         }
         let mut out = Self { base, terms: [RelaxationTerm::default(); MAX_RELAXATION_BRANCHES], count: terms.len(),
-            compliance_terms: [ComplianceRelaxationTerm::default(); MAX_RELAXATION_BRANCHES], compliance_count: 0 };
+            compliance_terms: [ComplianceRelaxationTerm::default(); MAX_RELAXATION_BRANCHES], compliance_count: 0,
+            sampling: RelaxationSampling::BilinearMidpoint };
         out.terms[..terms.len()].copy_from_slice(terms);
         Ok(out)
     }
@@ -119,6 +138,19 @@ impl RelaxationImpedanceSpec {
     pub fn compliance_terms(&self) -> &[ComplianceRelaxationTerm] {
         &self.compliance_terms[..self.compliance_count]
     }
+
+    /// Select the branch time representation before binding any state. The
+    /// choice travels with terminal, series and shunt network declarations.
+    /// No coefficient, ordering, source spectrum or base integration is changed.
+    #[must_use]
+    pub const fn with_sampling(mut self, sampling: RelaxationSampling) -> Self {
+        self.sampling = sampling;
+        self
+    }
+
+    /// Time representation of this load's retained relaxation branches.
+    #[must_use]
+    pub const fn sampling(&self) -> RelaxationSampling { self.sampling }
 
     /// The declared R-L-C contribution, excluding every relaxation branch.
     #[must_use]
@@ -169,11 +201,16 @@ pub struct RelaxationImpedance {
     pressure_retained: [f64; MAX_RELAXATION_BRANCHES],
     pressure_driven: [f64; MAX_RELAXATION_BRANCHES],
     sqrt_compliance: [f64; MAX_RELAXATION_BRANCHES],
+    // Combined RL/RC count is at most eight. Preparation is scalar and inline;
+    // the established Copy/history API and network memory admission are kept.
+    exact_ramps: [PronyRamp; MAX_RELAXATION_BRANCHES],
 }
 
 impl RelaxationImpedance {
     /// Bind to a characteristic port at zero stored energy. The effective port
-    /// resistance is derived from midpoint elimination; it is not physical loss.
+    /// resistance is derived from the selected branch mean-pressure relation;
+    /// it is not an additional physical loss. Exact branch coefficients reuse
+    /// the material owner's cached Prony endpoint/mean/positive-heat kernel.
     ///
     /// # Errors
     /// Invalid port/time, unrepresentable branch storage or discrete coefficients.
@@ -184,12 +221,24 @@ impl RelaxationImpedance {
         let mut driven = [0.0; MAX_RELAXATION_BRANCHES];
         let mut resistance = [0.0; MAX_RELAXATION_BRANCHES];
         let mut sqrt_inertance = [0.0; MAX_RELAXATION_BRANCHES];
+        let exact = spec.sampling == RelaxationSampling::ExactHeldFlow;
+        let mut exact_ramps = [PronyRamp::new(0.0); MAX_RELAXATION_BRANCHES];
         let mut effective_port = port_impedance;
         for (i, term) in spec.terms().iter().enumerate() {
             let k = term.rate_per_s * (0.5 * dt);
             let inertia = term.resistance_pa_s_m3 / term.rate_per_s;
-            retained[i] = 1.0 / (1.0 + k);
-            driven[i] = k / (1.0 + k);
+            if exact {
+                let rate = term.rate_per_s * dt;
+                if !rate.is_finite() || rate <= 0.0 {
+                    return Err(WaveguideError("exact relaxation needs a positive representable rate interval"));
+                }
+                exact_ramps[i] = PronyRamp::new(rate);
+                retained[i] = exact_ramps[i].apply(1.0, 0.0).1;
+                driven[i] = -fs_math::det::expm1(-rate);
+            } else {
+                retained[i] = 1.0 / (1.0 + k);
+                driven[i] = k / (1.0 + k);
+            }
             resistance[i] = term.resistance_pa_s_m3 * retained[i];
             if ![k, inertia, retained[i], driven[i], resistance[i]].iter().all(|v| v.is_finite() && *v > 0.0) {
                 return Err(WaveguideError("relaxation storage or midpoint coefficient is not representable"));
@@ -204,14 +253,28 @@ impl RelaxationImpedance {
             let k = term.rate_per_s * (0.5 * dt);
             // Dividing sequentially avoids overflowing R*w merely to invert it.
             let compliance = (1.0 / term.resistance_pa_s_m3) / term.rate_per_s;
-            pressure_retained[i] = 1.0 / (1.0 + k);
-            pressure_driven[i] = k / (1.0 + k);
-            let r = term.resistance_pa_s_m3 * pressure_driven[i];
+            sqrt_compliance[i] = fs_math::det::sqrt(compliance);
+            let r = if exact {
+                let rate = term.rate_per_s * dt;
+                if !rate.is_finite() || rate <= 0.0 {
+                    return Err(WaveguideError("exact compliance relaxation needs a positive representable rate interval"));
+                }
+                exact_ramps[spec.count + i] = PronyRamp::new(rate);
+                pressure_retained[i] = exact_ramps[spec.count + i].apply(1.0, 0.0).1;
+                // In the energy coordinate x=sqrt(C)*p, a held flow is the
+                // strain ramp delta=dt*U/sqrt(C). This scaling avoids R*w.
+                pressure_driven[i] = dt / sqrt_compliance[i];
+                let mean_ramp = exact_ramps[spec.count + i].apply(0.0, 1.0).1;
+                (mean_ramp * pressure_driven[i]) / sqrt_compliance[i]
+            } else {
+                pressure_retained[i] = 1.0 / (1.0 + k);
+                pressure_driven[i] = k / (1.0 + k);
+                term.resistance_pa_s_m3 * pressure_driven[i]
+            };
             if ![k, compliance, pressure_retained[i], pressure_driven[i], r]
                 .iter().all(|v| v.is_finite() && *v > 0.0) {
                 return Err(WaveguideError("compliance relaxation storage or midpoint coefficient is not representable"));
             }
-            sqrt_compliance[i] = fs_math::det::sqrt(compliance);
             effective_port += r;
         }
         if spec.count != 0 || spec.compliance_count != 0 {
@@ -219,7 +282,8 @@ impl RelaxationImpedance {
         }
         Ok(Self { spec, base, port_impedance, dt, flows: [0.0; MAX_RELAXATION_BRANCHES],
             retained, driven, resistance, sqrt_inertance,
-            pressures: [0.0; MAX_RELAXATION_BRANCHES], pressure_retained, pressure_driven, sqrt_compliance })
+            pressures: [0.0; MAX_RELAXATION_BRANCHES], pressure_retained, pressure_driven, sqrt_compliance,
+            exact_ramps })
     }
 
     /// Immutable physical coefficient declaration.
@@ -289,22 +353,43 @@ impl RelaxationImpedance {
         let mut dissipated = base.dissipated_energy_j;
         for (i, term) in self.spec.terms().iter().enumerate() {
             let difference = flow - self.flows[i];
-            // Compute k/(1+k) directly, not 1-retained (which loses tiny k).
-            flows[i] += (2.0 * self.driven[i]) * difference;
-            let resistor_flow = self.retained[i] * difference;
-            dissipated += (term.resistance_pa_s_m3 * resistor_flow) * (resistor_flow * self.dt);
+            if self.spec.sampling == RelaxationSampling::ExactHeldFlow {
+                // Relative to the held equilibrium, this is homogeneous
+                // Maxwell decay. Its Prony loss is exactly integral R(U-q)^2.
+                let shifted = -self.sqrt_inertance[i] * difference;
+                let (relaxed, _, heat) = self.exact_ramps[i].apply(shifted, 0.0);
+                flows[i] = if self.driven[i] < 0.5 {
+                    self.flows[i] + self.driven[i] * difference
+                } else { flow + relaxed / self.sqrt_inertance[i] };
+                dissipated += heat;
+            } else {
+                // Compute k/(1+k) directly, not 1-retained (which loses tiny k).
+                flows[i] += (2.0 * self.driven[i]) * difference;
+                let resistor_flow = self.retained[i] * difference;
+                dissipated += (term.resistance_pa_s_m3 * resistor_flow) * (resistor_flow * self.dt);
+            }
             if !flows[i].is_finite() {
                 return Err(WaveguideError("relaxation branch state left the finite set"));
             }
         }
         let mut pressures = self.pressures;
         for (i, term) in self.spec.compliance_terms().iter().enumerate() {
-            let drive = term.resistance_pa_s_m3 * flow;
-            pressures[i] += (2.0 * self.pressure_driven[i]) * (drive - self.pressures[i]);
-            // Convex form avoids subtracting two almost equal endpoint pressures.
-            let midpoint = self.pressure_retained[i] * self.pressures[i] + self.pressure_driven[i] * drive;
-            dissipated += (midpoint / term.resistance_pa_s_m3) * (midpoint * self.dt);
-            if !pressures[i].is_finite() || !midpoint.is_finite() {
+            let mean = if self.spec.sampling == RelaxationSampling::ExactHeldFlow {
+                let state = self.sqrt_compliance[i] * self.pressures[i];
+                let delta = self.pressure_driven[i] * flow;
+                let (next, mean, heat) = self.exact_ramps[self.spec.count + i].apply(state, delta);
+                pressures[i] = next / self.sqrt_compliance[i];
+                dissipated += heat;
+                mean / self.sqrt_compliance[i]
+            } else {
+                let drive = term.resistance_pa_s_m3 * flow;
+                pressures[i] += (2.0 * self.pressure_driven[i]) * (drive - self.pressures[i]);
+                // Convex form avoids subtracting two almost equal endpoint pressures.
+                let midpoint = self.pressure_retained[i] * self.pressures[i] + self.pressure_driven[i] * drive;
+                dissipated += (midpoint / term.resistance_pa_s_m3) * (midpoint * self.dt);
+                midpoint
+            };
+            if !pressures[i].is_finite() || !mean.is_finite() {
                 return Err(WaveguideError("compliance relaxation branch state left the finite set"));
             }
         }

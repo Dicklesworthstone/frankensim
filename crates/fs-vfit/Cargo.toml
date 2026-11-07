@@ -13,12 +13,12 @@ layer = "L3"
 [dependencies]
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
+fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
 
 [dev-dependencies]
 fs-duct = { path = "../fs-duct" }
-fs-material = { path = "../fs-material" }
 
 [lints]
 workspace = true

@@ -54,17 +54,21 @@ pub struct ImpedanceFrame {
     pub state: ImpedanceState,
     /// Reflected characteristic pressure wave [Pa].
     pub reflected_pressure_pa: f64,
-    /// Midpoint pressure across the complete series load [Pa].
+    /// Power-conjugate step pressure across the complete load [Pa]. The series
+    /// owner uses midpoint pressure; exact relaxation arms add their continuous
+    /// interval-mean pressure under the solved held flow.
     pub pressure_pa: f64,
-    /// Midpoint volume flow INTO the load [m^3/s].
+    /// Solved volume flow INTO the load [m^3/s], used at the midpoint of the
+    /// base dynamics and held over any exact relaxation interval.
     pub flow_m3_s: f64,
     /// Actual inertance/compliance storage after the step [J].
     pub stored_energy_j: f64,
     /// Difference in actual storage [J].
     pub storage_change_j: f64,
-    /// R U_mid^2 dt [J], never total terminal work or a fitted loss.
+    /// Physical resistor heat [J]: R U_mid^2 dt for the series owner, plus
+    /// independently integrated branch heat in a relaxation load.
     pub dissipated_energy_j: f64,
-    /// Midpoint pressure times flow times dt [J]; may be negative on release.
+    /// Power-conjugate step pressure times flow times dt [J]; may be negative on release.
     pub supplied_work_j: f64,
 }
 

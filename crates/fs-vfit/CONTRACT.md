@@ -24,6 +24,27 @@ to parallel biquad sections and discrete state-space.
 - Passivity is impedance-form positive realness `Re H(i*omega) >= 0`
   with `d >= 0`, `e >= 0`.
 
+## Exact RL and RC boundary memory
+
+`RelaxationImpedanceSpec::with_sampling(ExactHeldFlow)` selects exact continuous
+decay for both the inertive `R*s/(s+w)` and complementary compliance
+`R*w/(s+w)` branches. The declaration travels unchanged through terminal,
+interior-shunt and series network loads. Existing declarations retain
+`BilinearMidpoint`, and the base series RLC retains its original midpoint rule
+under either selection. The complete coupled boundary is therefore not claimed
+to be an exact held-incident-wave trajectory.
+
+All branches share the current solved flow. Their continuous interval-mean
+pressures enter the same implicit port equation and their stored energy and
+independent positive resistor heat enter the same work balance. Cached
+`fs-material::visco::PronyRamp` coefficients supply endpoint, mean and heat;
+warm stepping allocates nothing and evaluates no exponentials. An RC pressure
+uses energy coordinate `sqrt(C)*p` with ramp `dt*U/sqrt(C)`, while an RL branch
+uses homogeneous decay about the held equilibrium flow. The dual
+`RelaxationAdmittanceSpec::with_sampling` holds the common pressure and returns
+mean branch flow with the same physical energy identity. Exact memory resolves
+neither within-interval input variation nor the base oscillator's time error.
+
 ## Exact held-flow acoustic cells
 
 `relaxation::ExactParallelCellLoad` advances the same declared parallel RLC

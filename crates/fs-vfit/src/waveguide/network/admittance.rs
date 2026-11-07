@@ -2,13 +2,13 @@
 //!
 //! Y(s)=G+s*C+sum g*s/(s+p). Each term is a SERIES RC branch in parallel:
 //! z'=p*(P-z), U=g*(P-z), H=g*z²/(2p), loss=g*(P-z)².
-//! Exchange pressure and flow in the existing RelaxationImpedance midpoint
-//! owner: its incident wave is a/Z and its port impedance is 1/Z. This is an
+//! Exchange pressure and flow in the existing RelaxationImpedance owner with
+//! its declared branch sampling: incident wave a/Z, port impedance 1/Z. This is an
 //! algebraic dual, not a new time integrator, delayed thermal force or output EQ.
 //! Physical getters keep admittance coefficients and pressure histories distinct
 //! from the original impedance's resistance/inertance and flow coordinates.
 use crate::impedance::SeriesImpedanceSpec;
-use crate::relaxation::{RelaxationFrame, RelaxationImpedance, RelaxationImpedanceSpec, RelaxationTerm, MAX_RELAXATION_BRANCHES};
+use crate::relaxation::{RelaxationFrame, RelaxationImpedance, RelaxationImpedanceSpec, RelaxationSampling, RelaxationTerm, MAX_RELAXATION_BRANCHES};
 use crate::waveguide::WaveguideError;
 
 /// One passive series-RC shunt: high-frequency conductance g and relaxation p.
@@ -46,6 +46,17 @@ impl RelaxationAdmittanceSpec {
     /// Direct compliance [m³/Pa], excluding every relaxation arm.
     #[must_use]
     pub fn compliance_m3_pa(&self)->f64 { self.dual.base().inertance_pa_s2_m3 }
+    /// Select the shared branch integrator through exact pressure/flow duality.
+    /// ExactHeldFlow on the dual means a held common pressure for these RC
+    /// arms and their interval-mean flow. Direct base storage remains midpoint.
+    #[must_use]
+    pub const fn with_sampling(mut self, sampling: RelaxationSampling) -> Self {
+        self.dual = self.dual.with_sampling(sampling);
+        self
+    }
+    /// The selected time representation of the RC branch histories.
+    #[must_use]
+    pub const fn sampling(&self) -> RelaxationSampling { self.dual.sampling() }
     /// Ordered branch coefficients with physical admittance units.
     pub fn terms(&self)->impl ExactSizeIterator<Item=AdmittanceTerm> + '_ {
         self.dual.terms().iter().map(|t|AdmittanceTerm {
@@ -56,9 +67,9 @@ impl RelaxationAdmittanceSpec {
 /// Complete immutable trial; hidden coordinates cannot be forged for publication.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdmittanceFrame {
-    /// Midpoint common pressure [Pa].
+    /// Solved common pressure [Pa], held during exact branch integration.
     pub pressure_pa:f64,
-    /// Midpoint total flow into the shunt [m³/s].
+    /// Power-conjugate flow [m³/s]: midpoint base plus mean exact branches.
     pub flow_m3_s:f64,
     /// Reflected pressure wave [Pa].
     pub reflected_pressure_pa:f64,
