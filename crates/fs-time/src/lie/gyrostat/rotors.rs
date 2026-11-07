@@ -62,7 +62,7 @@ pub use backlash::{
 mod transmission;
 pub use transmission::{
     RotorTransmission, ShaftConstraint, TransmissionDrift, TransmissionEngagement,
-    TransmissionImpulse, TransmissionStep,
+    TransmissionImpulse, TransmissionNetworkStep, TransmissionNetworkStepper, TransmissionStep,
 };
 
 /// Maximum fixed-axis rotors in this allocation-free stepping lane.
@@ -376,6 +376,23 @@ impl<const N: usize> RotorBank<N> {
         shaft_impulse_nms: [f64; N],
         external_impulse_body: Vec3,
     ) -> Result<RotorImpulse<N>, LieStepError> {
+        self.apply_impulse_with_zero_recoil(
+            state,
+            shaft_impulse_nms,
+            external_impulse_body,
+            [false; 3],
+        )
+    }
+
+    // Only native constrained owners may supply structural zero-recoil facts.
+    // Actual momentum-transfer and recoil residual checks remain authoritative.
+    fn apply_impulse_with_zero_recoil(
+        &self,
+        state: &RotorState<N>,
+        shaft_impulse_nms: [f64; N],
+        external_impulse_body: Vec3,
+        known_zero_recoil: [bool; 3],
+    ) -> Result<RotorImpulse<N>, LieStepError> {
         self.admit_state(state)?;
         let before_carrier = self.carrier_momentum(state)?;
         let before_omega = self.inertia.velocity(before_carrier)?;
@@ -403,13 +420,14 @@ impl<const N: usize> RotorBank<N> {
         }
         let after_carrier = self.carrier_momentum(&after)?;
         let external = after.total_momentum_body - state.total_momentum_body;
-        self.admit_recoil(
+        self.admit_recoil_with_zero(
             before_carrier,
             after_carrier,
             external,
             &actual,
             external_impulse_body,
             &shaft_impulse_nms,
+            known_zero_recoil,
         )?;
         let after_omega = self.inertia.velocity(after_carrier)?;
         let mean_omega = before_omega.scale(0.5) + after_omega.scale(0.5);
@@ -603,6 +621,28 @@ impl<const N: usize> RotorBank<N> {
         requested_external: Vec3,
         requested_axial: &[f64; N],
     ) -> Result<(), LieStepError> {
+        self.admit_recoil_with_zero(
+            before_carrier,
+            after_carrier,
+            external,
+            axial_change,
+            requested_external,
+            requested_axial,
+            [false; 3],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit_recoil_with_zero(
+        &self,
+        before_carrier: Vec3,
+        after_carrier: Vec3,
+        external: Vec3,
+        axial_change: &[f64; N],
+        requested_external: Vec3,
+        requested_axial: &[f64; N],
+        known_zero_recoil: [bool; 3],
+    ) -> Result<(), LieStepError> {
         // Each rotor can resolve its own impulse while a much larger rotor
         // erases that transfer in the aggregate h passed to the native drift.
         // Check the transfer independently of both endpoint sums and energy:
@@ -619,11 +659,12 @@ impl<const N: usize> RotorBank<N> {
                 *physical = *physical - dd(axis) * dd(*impulse);
             }
         }
-        for (((before, after), expected), requested) in components(before_carrier)
+        for (axis, (((before, after), expected), requested)) in components(before_carrier)
             .into_iter()
             .zip(components(after_carrier))
             .zip(required)
             .zip(requested)
+            .enumerate()
         {
             let expected = scalar(expected.to_f64(), "carrier impulse balance")?;
             let requested = scalar(requested.to_f64(), "requested carrier impulse")?;
@@ -634,8 +675,10 @@ impl<const N: usize> RotorBank<N> {
             // unequal stored p. A zero requested recoil must not be mistaken
             // for a lost nonzero torque because of that rounding remainder;
             // the actual transfers still obey the same local residual bound.
+            // A constrained owner's exact-expression zero source skips only
+            // the lost-nonzero test, never this actual transfer residual bound.
             let scale = before.abs().max(after.abs()).max(expected.abs());
-            if (requested != 0.0 && actual == 0.0)
+            if (requested != 0.0 && actual == 0.0 && !known_zero_recoil[axis])
                 || (actual - expected).abs() > 4096.0 * f64::EPSILON * scale
             {
                 return Err(invalid("unresolved carrier recoil against rotor momentum"));

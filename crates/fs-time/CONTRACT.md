@@ -375,6 +375,42 @@ where claimed below.
   scaled/permuted rows, native limits, reversal and atomic refusal. This ideal
   fixed-axis/fixed-inertia/fixed-row model does not infer tooth geometry,
   compliance, backlash, capacity, losses, variable-ratio work or an adjoint.
+- `RotorTransmission::torsional_network_stepper(couplings, duration)` binds
+  the original `TorsionalCoupling` spring/damper laws to the retained ideal
+  shaft modes. Unequal differential loads, fixed-ring planetary loads, signed
+  ratios, and parallel or dependent passive rows retain their actual original
+  ports and coefficients. Passive rows do not add kinematic constraints.
+  Preparation projects each load impulse into the free generalized momenta and
+  forms its PSD mobility from the original polar inertias and complete retained
+  carrier tensor. One native Cholesky factor prepares the simultaneous midpoint
+  system; no sequential pair impulses or diagonal-carrier approximation is used.
+  Two implicit midpoint shaft/phase half-stages surround the existing constrained
+  gyrostat drift. Receipts retain authored drive work, each coupling's signed
+  effort impulse, original ideal-row reactions, polarized spring storage,
+  nonnegative viscous heat, and separate numerical drift/work defects.
+  Explicit fixed phases and full locks retain static load reactions without
+  inventing motion or heat. Torque-neutral represented rows are recognized only
+  when native error-free products/additions have no residual and no underflow
+  uncertainty. That narrow source fact skips only a spurious lost-nonzero-recoil
+  check; original actual-transfer residual bounds remain, and neighboring
+  physically nonzero recoil still resolves or refuses. Requested midpoint phase
+  increments are checked before ordinary stored-angle addition rounding; actual
+  stored spring-work and constraint residuals remain in the final balance.
+  Up to 64 passive rows are admitted. Preparation may allocate; hot operations
+  use fixed stack arrays and O(N*M+M*M+N+E*E) work without allocation or factoring.
+  Empty/zero-law loads delegate to the original held-drive transmission map.
+  With delta=duration/2, the numerical PSD-trace resolution number
+  `delta*trace((D+delta*K/2)*H)` is at most two. This is a finite-step,
+  second-order split model, not exact stiff relaxation or a certified trajectory
+  bound; unresolved original work/phase/momentum increments refuse atomically.
+  `tests/lie_rotor_transmission_network.rs` covers original-coordinate midpoint
+  KKT mechanics, unequal loads, undamped frequency/storage, viscous carrier
+  momentum transfer through an output speed crossing, nonparallel Euler/RK4
+  work/heat refinement, 40 dependent ports through native blocked factorization,
+  fixed-ring/full-lock reactions, zero/nonzero-recoil neighbors and native limits.
+  Fixed axes, inertia, rows, coefficients and duration are required. Changing
+  parameters needs separately accounted work; tooth contact, nonlinear friction,
+  thermal destinations, exact stiff decay and a discrete adjoint are not inferred.
 - `RotorBank::lock_mode(mask)` prepares retained ideal rotor/carrier shaft
   locks with `I_mode=I_reduced+sum_selected J_i a_i a_i^T`.
   Engagement applies simultaneous original-owner impulses with complete

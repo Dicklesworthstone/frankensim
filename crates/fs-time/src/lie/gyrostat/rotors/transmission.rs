@@ -17,6 +17,10 @@ use super::{
 };
 use fs_math::dd::Dd;
 
+#[path = "transmission/passive.rs"]
+mod passive;
+pub use passive::{TransmissionNetworkStep, TransmissionNetworkStepper};
+
 const ROUNDING: f64 = 8192.0 * f64::EPSILON;
 
 /// One constant dimensionless relation sum_i coefficients[i] * q_i' = 0.
@@ -47,6 +51,7 @@ pub struct RotorTransmission<const N: usize, const M: usize> {
     row_scale: [f64; M],
     weighted_scale: [f64; M],
     fixed_phase: [bool; N],
+    reaction_free_components: [bool; 3],
     force_basis: [[f64; M]; N],
     rate_basis: [[f64; M]; N],
     multiplier_basis: [[f64; M]; M],
@@ -180,6 +185,17 @@ impl<const N: usize> RotorBank<N> {
                 weighted[i][e] = value;
             }
         }
+        // A row may exert exactly no carrier torque along a component. Use
+        // original represented coefficients and native error-free transforms,
+        // with no rank/near-zero tolerance and no discarded residuals.
+        let reaction_free_components = core::array::from_fn(|d| {
+            constraints.iter().all(|row| {
+                exact_zero_sum(
+                    0.0,
+                    (0..N).map(|i| (row.coefficients[i], components(self.rotors[i].axis_body)[d])),
+                )
+            })
+        });
         let mut force_basis = [[0.0; M]; N];
         let mut rate_basis = [[0.0; M]; N];
         let mut multiplier_basis = [[0.0; M]; M];
@@ -220,6 +236,11 @@ impl<const N: usize> RotorBank<N> {
                         scalar(factor.u[i * M + c] / root_inertia[i], "shaft rate basis")?;
                     for (value, a) in axis.iter_mut().zip(components(self.rotors[i].axis_body)) {
                         *value = *value + dd(force_basis[i][c]) * dd(a);
+                    }
+                }
+                for d in 0..3 {
+                    if reaction_free_components[d] {
+                        axis[d] = Dd::ZERO;
                     }
                 }
                 reaction_axis[c] = vector(
@@ -297,6 +318,7 @@ impl<const N: usize> RotorBank<N> {
             row_scale,
             weighted_scale,
             fixed_phase,
+            reaction_free_components,
             force_basis,
             rate_basis,
             multiplier_basis,
@@ -422,37 +444,25 @@ impl<const N: usize, const M: usize> RotorTransmission<N, M> {
             external_impulse_body,
             1.0,
         )? - state.total_momentum_body;
-        let mut modes = [Dd::ZERO; M];
-        for i in 0..N {
-            scalar(drive_impulse_nms[i], "transmission shaft drive impulse")?;
-            for c in 0..M {
-                modes[c] = modes[c] + dd(self.rate_basis[i][c]) * dd(drive_impulse_nms[i]);
-            }
-        }
-        let mut transfer = [0.0; N];
-        for i in 0..N {
-            let mut value = dd(drive_impulse_nms[i]);
-            for c in 0..M {
-                value = value - dd(self.force_basis[i][c]) * modes[c];
-            }
-            transfer[i] = if M == N {
-                0.0
-            } else {
-                scalar(value.to_f64(), "transmission free drive transfer")?
-            };
-        }
-        let delta_omega = self
-            .inertia
-            .velocity(delivered - self.bank.rotor_momentum(&transfer)?)?;
-        for (i, value) in transfer.iter_mut().enumerate() {
-            *value = scalar(
-                (dd(*value) + dot_dd(self.recoil_axis[i], delta_omega)).to_f64(),
-                "transmission original shaft impulse",
-            )?;
-        }
-        let impulse = self
-            .bank
-            .apply_impulse(state, transfer, external_impulse_body)?;
+        let (transfer, _) = self.impulse_response(&drive_impulse_nms, delivered)?;
+        let known_zero_recoil = core::array::from_fn(|d| {
+            self.reaction_free_components[d]
+                && exact_zero_sum(
+                    components(external_impulse_body)[d],
+                    (0..N).map(|i| {
+                        (
+                            -components(self.bank.rotors[i].axis_body)[d],
+                            drive_impulse_nms[i],
+                        )
+                    }),
+                )
+        });
+        let impulse = self.bank.apply_impulse_with_zero_recoil(
+            state,
+            transfer,
+            external_impulse_body,
+            known_zero_recoil,
+        )?;
         self.admit_transmission(&impulse.state_after)?;
         let constraints =
             self.constraint_impulses(&impulse.axial_momentum_change_nms, &drive_impulse_nms)?;
@@ -708,6 +718,76 @@ impl<const N: usize, const M: usize> RotorTransmission<N, M> {
         })
     }
 
+    // Free generalized source impulse before carrier recoil. An explicitly
+    // fixed original port is exactly in the reaction space; remove it before
+    // the numerical projection so static motor/load efforts do not invent an
+    // unresolvable free transfer.
+    fn project_drive(&self, drives: &[f64; N]) -> Result<[f64; N], LieStepError> {
+        let mut modes = [Dd::ZERO; M];
+        for i in 0..N {
+            scalar(drives[i], "transmission shaft drive impulse")?;
+            if !self.fixed_phase[i] {
+                for c in 0..M {
+                    modes[c] = modes[c] + dd(self.rate_basis[i][c]) * dd(drives[i]);
+                }
+            }
+        }
+        let mut projected = [0.0; N];
+        for i in 0..N {
+            if M == N || self.fixed_phase[i] {
+                continue;
+            }
+            let mut value = dd(drives[i]);
+            for c in 0..M {
+                value = value - dd(self.force_basis[i][c]) * modes[c];
+            }
+            projected[i] = scalar(value.to_f64(), "transmission free drive transfer")?;
+        }
+        Ok(projected)
+    }
+
+    // Preserve structurally torque-free row components before rounding the
+    // SVD projection: their carrier action is exactly the authored source.
+    fn projected_rotor_momentum(
+        &self,
+        source: &[f64; N],
+        projected: &[f64; N],
+    ) -> Result<Vec3, LieStepError> {
+        let mut value = components(self.bank.rotor_momentum(projected)?);
+        for d in 0..3 {
+            if self.reaction_free_components[d] {
+                let mut component = Dd::ZERO;
+                for i in 0..N {
+                    component = component
+                        + dd(components(self.bank.rotors[i].axis_body)[d]) * dd(source[i]);
+                }
+                value[d] = scalar(component.to_f64(), "authored torque-free carrier component")?;
+            }
+        }
+        Ok(Vec3::new(value[0], value[1], value[2]))
+    }
+
+    // Affine response for preparation and implicit constitutive stages. State
+    // publication, actual rounded transfers and all work/recoil gates still
+    // belong to apply_impulse and the original rotor bank.
+    fn impulse_response(
+        &self,
+        drives: &[f64; N],
+        external: Vec3,
+    ) -> Result<([f64; N], Vec3), LieStepError> {
+        let mut transfer = self.project_drive(drives)?;
+        let delta_omega = self
+            .inertia
+            .velocity(external - self.projected_rotor_momentum(drives, &transfer)?)?;
+        for (i, value) in transfer.iter_mut().enumerate() {
+            *value = scalar(
+                (dd(*value) + dot_dd(self.recoil_axis[i], delta_omega)).to_f64(),
+                "transmission original shaft impulse",
+            )?;
+        }
+        Ok((transfer, delta_omega))
+    }
+
     fn admit_transmission(&self, state: &RotorState<N>) -> Result<(), LieStepError> {
         let omega = self.bank.angular_velocity(state)?;
         for row in &self.normalized {
@@ -758,11 +838,23 @@ impl<const N: usize, const M: usize> RotorTransmission<N, M> {
         rates: &[f64; N],
         duration: f64,
     ) -> Result<[f64; N], LieStepError> {
+        self.advance_phase_with_increment(state, rates, duration)
+            .map(|(phase, _)| phase)
+    }
+
+    // Retain the actual requested increments separately from ordinary phase
+    // addition roundoff for constitutive quadrature and spring-work admission.
+    fn advance_phase_with_increment(
+        &self,
+        state: &RotorState<N>,
+        rates: &[f64; N],
+        duration: f64,
+    ) -> Result<([f64; N], [f64; N]), LieStepError> {
         // An all-locked inventory has no phase degree of freedom. Otherwise
         // remove only numerical row residuals from the admitted mean-rate rule;
         // the orthogonal complement retains every independent differential mode.
         if M == N {
-            return Ok(state.relative_angle_rad);
+            return Ok((state.relative_angle_rad, [0.0; N]));
         }
         let mut modes = [Dd::ZERO; M];
         for c in 0..M {
@@ -772,6 +864,7 @@ impl<const N: usize, const M: usize> RotorTransmission<N, M> {
         }
         let mut phase = state.relative_angle_rad;
         let mut actual = [0.0; N];
+        let mut requested = [0.0; N];
         for i in 0..N {
             if self.fixed_phase[i] {
                 // A singleton row fixes this original phase exactly. Dropping
@@ -788,6 +881,7 @@ impl<const N: usize, const M: usize> RotorTransmission<N, M> {
                 "transmission phase increment",
             )?;
             phase[i] = increment(phase[i], delta, "transmission relative phase")?;
+            requested[i] = delta;
             actual[i] = (dd(phase[i]) - dd(state.relative_angle_rad[i])).to_f64();
         }
         for row in &self.normalized {
@@ -804,7 +898,7 @@ impl<const N: usize, const M: usize> RotorTransmission<N, M> {
                 return Err(invalid("unresolved transmission phase increments"));
             }
         }
-        Ok(phase)
+        Ok((phase, requested))
     }
 
     fn constraint_impulses(
@@ -906,4 +1000,30 @@ fn unscale_multiplier(value: Dd, first: f64, second: f64) -> Result<f64, LieStep
         return Err(invalid("resolved original shaft reaction units"));
     }
     Ok(result)
+}
+
+// Conservative exact-expression recognition, not a general sum certificate.
+// A product or addition with any residual, overflow or uncertain underflow
+// retains the ordinary recoil guard. No near-zero threshold selects zero.
+fn exact_zero_sum(mut total: f64, terms: impl Iterator<Item = (f64, f64)>) -> bool {
+    if !total.is_finite() {
+        return false;
+    }
+    // Keep all possible 106-bit product tails above the subnormal floor.
+    const MIN_PRODUCT: f64 = f64::from_bits(55_u64 << 52);
+    for (a, b) in terms {
+        if a == 0.0 || b == 0.0 {
+            continue;
+        }
+        let (product, tail) = fs_math::eft::two_prod(a, b);
+        if !product.is_finite() || product.abs() < MIN_PRODUCT || tail != 0.0 {
+            return false;
+        }
+        let (sum, tail) = fs_math::eft::two_sum(total, product);
+        if !sum.is_finite() || tail != 0.0 {
+            return false;
+        }
+        total = sum;
+    }
+    total == 0.0
 }

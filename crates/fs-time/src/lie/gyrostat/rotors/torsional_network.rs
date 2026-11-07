@@ -46,16 +46,16 @@ pub struct TorsionalCoupling {
 }
 
 impl TorsionalCoupling {
-    fn ports(self) -> [(usize, f64); 2] {
+    pub(super) fn ports(self) -> [(usize, f64); 2] {
         [(self.first_rotor, 1.0), (self.second_rotor, -self.ratio)]
     }
-    fn active(self) -> bool {
+    pub(super) fn active(self) -> bool {
         self.stiffness_nm_per_rad != 0.0 || self.damping_nms_per_rad != 0.0
     }
-    fn mapped<const N: usize>(self, values: &[f64; N]) -> Dd {
+    pub(super) fn mapped<const N: usize>(self, values: &[f64; N]) -> Dd {
         dd(values[self.first_rotor]) - dd(self.ratio) * dd(values[self.second_rotor])
     }
-    fn strain<const N: usize>(self, phase: &[f64; N]) -> Dd {
+    pub(super) fn strain<const N: usize>(self, phase: &[f64; N]) -> Dd {
         self.mapped(phase) - dd(self.rest_angle_rad)
     }
 }
