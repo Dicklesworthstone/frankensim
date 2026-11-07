@@ -408,6 +408,7 @@ impl CoatingThermalEmission {
     ) -> Result<CoatingEmissionSample, CoatingEmissionError> {
         let mut sample = CoatingEmissionSample {
             stokes: Stokes::unpolarized(0.0),
+            polarized_radiance: [0.0; 2],
             films: [[0.0; 2]; MAX_COHERENT_STACK_LAYERS],
             film_count: layers.len(),
             substrate: None,
@@ -467,6 +468,7 @@ impl CoatingThermalEmission {
             }
         }
         let [s, p] = sums.map(PositiveSum::value);
+        sample.polarized_radiance = [s, p];
         sample.stokes =
             Stokes::try_new(s + p, s - p, 0.0, 0.0).ok_or(ThermalSurfaceError::Unrepresentable)?;
         Ok(sample)
@@ -545,6 +547,39 @@ impl CoatingThermalEmission {
     pub const fn optical_identity(&self) -> ContentHash {
         self.optical_identity
     }
+
+    /// Match the exact native smooth-conductor reflection law to this source.
+    /// The explicit thermal films replace any attachment on its stored bulk
+    /// substrate, just as they do in the reciprocal absorption solve. Compare
+    /// original knots, provenance and gap policy rather than sampled Fresnel
+    /// values, which cannot establish equality of two finite-band laws.
+    ///
+    /// Native smooth conductors currently represent no film or one original
+    /// absorbing/lossless film. Compact periodic stacks and transmitting ports
+    /// require their own matching scene representation and are refused here.
+    pub(crate) fn matches_smooth_conductor(&self, optics: &ConductorOptics) -> bool {
+        let Exit::Opaque { substrate, .. } = self.exit else {
+            return false;
+        };
+        if substrate.samples() != optics.samples()
+            || substrate.source() != optics.source()
+            || substrate.provenance() != optics.provenance()
+            || substrate.max_knot_span_nm() != optics.max_knot_span_nm()
+            || optics.periodic_coating().is_some()
+        {
+            return false;
+        }
+        match self.films.as_ref() {
+            [] => optics.coating().is_none() && optics.absorbing_coating().is_none(),
+            [Film { optics: OwnedLayer::Lossless(film), .. }] => {
+                optics.coating() == Some(*film)
+            }
+            [Film { optics: OwnedLayer::Absorbing(film), .. }] => {
+                optics.absorbing_coating() == Some(*film)
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Allocation-free reciprocal work in authored film order. This is shared by
@@ -566,6 +601,7 @@ impl ReciprocalLayerAbsorption {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoatingEmissionSample {
     stokes: Stokes,
+    polarized_radiance: [f64; 2],
     films: [[f64; 2]; MAX_COHERENT_STACK_LAYERS],
     film_count: usize,
     substrate: Option<[f64; 2]>,
@@ -583,6 +619,17 @@ impl CoatingEmissionSample {
     #[must_use]
     pub const fn stokes(&self) -> Stokes {
         self.stokes
+    }
+
+    /// Independently summed incoherent `[L_s, L_p]` radiances in the same
+    /// outgoing interface frame as [`Self::stokes`]. These positive channels
+    /// are retained before forming I and Q; reconstructing them as `(I±Q)/2`
+    /// can erase the weaker channel when the polarization contrast is large.
+    /// An analyzer can sum the two pure-polarization responses without that
+    /// cancellation, using the original work rather than another optical solve.
+    #[must_use]
+    pub const fn polarized_radiance_w_m2_sr_nm(&self) -> [f64; 2] {
+        self.polarized_radiance
     }
 
     /// Per-film `[L_s, L_p]` in authored order, even under reverse observation.
@@ -768,3 +815,6 @@ fn hash_ior(hash: &mut DomainHasher, ior: DielectricIor) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod matching_tests;

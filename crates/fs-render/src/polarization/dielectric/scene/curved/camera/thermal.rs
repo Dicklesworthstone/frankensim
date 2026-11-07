@@ -26,6 +26,8 @@ mod spatial;
 pub use spatial::{SpatialVolumeEmitter, TemperatureField};
 mod surface;
 pub use surface::DiffuseThermalEmitter;
+mod coating;
+pub use coating::CoatingThermalEmitter;
 #[cfg(feature = "material-state")]
 pub use spatial::AxialGasTemperatureField;
 

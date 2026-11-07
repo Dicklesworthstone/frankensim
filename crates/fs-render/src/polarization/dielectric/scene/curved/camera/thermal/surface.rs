@@ -176,7 +176,10 @@ impl CurvedCameraScene<'_, '_> {
                     object_id: emitter.object_id,
                 };
                 let index = emitter.admit_scene(self.scene)?;
-                if slots[index].is_some() || self.emitters[index].is_some() {
+                if slots[index].is_some() || self.emitters[index].is_some()
+                    || self.coating_thermal_emitters.get(index)
+                        .is_some_and(|faces| faces.iter().any(Option::is_some))
+                {
                     return Err(invalid);
                 }
                 slots[index] = Some(*emitter);

@@ -14,13 +14,52 @@ use super::{
 
 use super::super::CurvedTraceEvent;
 use super::thermal::ThermalEmission;
-use crate::polarization::dielectric::transport::PolarizationFrame;
+use crate::polarization::dielectric::transport::{PolarizationFrame, PolarizedBeam};
 use crate::polarization::dielectric::transport::connection::{
     normalized_camera, reciprocal_contraction,
 };
 
 #[cfg(feature = "volumes")]
 use super::super::participating::{CurvedRayleighEvent, CurvedRayleighPath};
+
+/// Positive incoherent s/p sources must remain separate through a crossed
+/// analyzer: forming I=s+p and Q=s-p first can erase the weaker channel.
+/// The result is relative to total emitted radiance; physical camera prefix I
+/// remains in the original radiometric/logarithmic accumulation below.
+pub(super) fn thermal_polarization_weight(
+    beam: PolarizedBeam,
+    frame: PolarizationFrame,
+    radiance: [f64; 2],
+) -> Result<f64, CameraRadianceError> {
+    use crate::polarization::Stokes;
+    let total = radiance[0] + radiance[1];
+    if !total.is_finite()
+        || total <= 0.0
+        || radiance.iter().any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(CameraRadianceError::NumericalRange);
+    }
+    if radiance[0] == radiance[1] {
+        return Ok(1.0);
+    }
+    let camera = normalized_camera(beam, Stokes::unpolarized(1.0))
+        .map_err(CurvedSceneError::from)?;
+    let s = reciprocal_contraction(camera, frame,
+        Stokes { i: 1.0, q: 1.0, u: 0.0, v: 0.0 })
+        .map_err(CurvedSceneError::from)?;
+    let p = reciprocal_contraction(camera, frame,
+        Stokes { i: 1.0, q: -1.0, u: 0.0, v: 0.0 })
+        .map_err(CurvedSceneError::from)?;
+    let weight = (radiance[0] / total) * s + (radiance[1] / total) * p;
+    if !weight.is_finite()
+        || weight < 0.0
+        || (weight == 0.0
+            && ((radiance[0] > 0.0 && s > 0.0) || (radiance[1] > 0.0 && p > 0.0)))
+    {
+        return Err(CameraRadianceError::NumericalRange);
+    }
+    Ok(weight)
+}
 
 /// A stack-only accumulator. A callback failure stops the original walker and
 /// retains the camera error without exposing camera policy in public power APIs.
@@ -182,24 +221,32 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
             .diffuse_thermal_emitters
             .get(contact.witness.boundary_id)
             .and_then(Option::as_ref);
-        let (object_id, sides) = match (emitter, thermal) {
-            (Some(emitter), None) => (emitter.object_id, emitter.sides),
-            (None, Some(thermal)) => (thermal.object_id(), EmissionSides::Both),
-            (None, None) => return Ok(()),
-            (Some(_), Some(_)) => return Err(CameraRadianceError::NumericalRange),
+        let beam = path.beam();
+        let coating = self.camera.coating_thermal_emitters
+            .get(contact.witness.boundary_id)
+            .and_then(|faces| {
+                let side = usize::from(contact.witness.normal.dot(beam.ray().dir) > 0.0);
+                faces[side].as_ref()
+            });
+        let (object_id, sides) = match (emitter, thermal, coating) {
+            (Some(emitter), None, None) => (emitter.object_id, emitter.sides),
+            (None, Some(thermal), None) => (thermal.object_id(), EmissionSides::Both),
+            (None, None, Some(thermal)) => (thermal.object_id(), EmissionSides::Both),
+            (None, None, None) => return Ok(()),
+            _ => return Err(CameraRadianceError::NumericalRange),
         };
         if object_id != contact.object_id {
             return Err(CameraRadianceError::NumericalRange);
         }
-        let beam = path.beam();
         // Sidedness belongs to the original geometry, not a face-forwarded
         // normal, sampled facet or authored normal perturbation.
         if sides == EmissionSides::Front && contact.witness.normal.dot(beam.ray().dir) >= 0.0 {
             return Ok(());
         }
-        let emitted = match (emitter, thermal) {
-            (Some(emitter), None) => emitter.spectrum.evaluate(beam.wavelength_nm())?,
-            (None, Some(thermal)) => {
+        let mut directional_state = None;
+        let emitted = match (emitter, thermal, coating) {
+            (Some(emitter), None, None) => emitter.spectrum.evaluate(beam.wavelength_nm())?,
+            (None, Some(thermal), None) => {
                 // This source's original Kirchhoff/Planck law emits into
                 // vacuum. Keep actual local phase-index admission separate
                 // from the reciprocal camera-to-source radiance conversion.
@@ -211,6 +258,17 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                     .radiance_w_m2_sr_nm(beam.wavelength_nm())
                     .map_err(CameraRadianceError::Thermal)?
             }
+            (None, None, Some(thermal)) => {
+                if phase_index(beam.medium(), beam.wavelength_nm())? != 1.0 {
+                    return Err(CameraRadianceError::UnsupportedSurface { object_id });
+                }
+                let (radiance, frame) = thermal.sample(
+                    beam.wavelength_nm(), beam.ray().dir.scale(-1.0),
+                    contact.witness.normal, beam.frame().horizontal(),
+                )?;
+                directional_state = Some((radiance, frame));
+                radiance[0] + radiance[1]
+            }
             _ => return Err(CameraRadianceError::NumericalRange),
         };
         if emitted == 0.0 || mis_weight == 0.0 || source_scale == 0.0 {
@@ -221,13 +279,13 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                 PathTermination::Extinguished,
             ));
         }
-        let polarization_weight = if let Some(polarization) =
+        let source_polarization = if let Some(polarization) =
             emitter.and_then(|emitter| emitter.polarization())
         {
             let source = polarization.normalized_stokes(beam.wavelength_nm())?;
             if source.q == 0.0 && source.u == 0.0 && source.v == 0.0 {
                 // Retain every legacy intensity bit and its arbitrary frame.
-                1.0
+                None
             } else {
                 let axis = self.camera.emitter_polarization_axes
                     .get(contact.witness.boundary_id)
@@ -235,12 +293,19 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                     .ok_or(CameraRadianceError::NumericalRange)?;
                 let frame = PolarizationFrame::try_new(beam.ray().dir.scale(-1.0), axis)
                     .map_err(CurvedSceneError::from)?;
-                // Keep physical prefix I outside the bounded polarization
-                // contraction so the existing logarithmic recovery can rescue
-                // extreme source/prefix products. Reciprocity negates U only.
-                let camera = normalized_camera(*beam, source).map_err(CurvedSceneError::from)?;
-                reciprocal_contraction(camera, frame, source).map_err(CurvedSceneError::from)?
+                Some((source, frame))
             }
+        } else {
+            None
+        };
+        let polarization_weight = if let Some((radiance, frame)) = directional_state {
+            thermal_polarization_weight(*beam, frame, radiance)?
+        } else if let Some((source, frame)) = source_polarization {
+            // Keep physical prefix I outside the bounded polarization
+            // contraction so the existing logarithmic recovery can rescue
+            // extreme source/prefix products. Reciprocity negates U only.
+            let camera = normalized_camera(*beam, source).map_err(CurvedSceneError::from)?;
+            reciprocal_contraction(camera, frame, source).map_err(CurvedSceneError::from)?
         } else {
             1.0
         };

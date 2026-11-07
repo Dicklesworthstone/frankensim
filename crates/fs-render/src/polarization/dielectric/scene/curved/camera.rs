@@ -41,6 +41,8 @@
 //! calibrated: no thermal emissivity or material/source energy coupling is inferred.
 //! Explicit diffuse thermal bindings instead query the original finite-band
 //! Planck/Kirchhoff owner and verify the native surface's reciprocal reflectance.
+//! [`CoatingThermalEmitter`] binds the original directional s/p thermal law to
+//! a matching smooth conductor face, retaining each film's own temperature.
 //! An environment is evaluated only after proven homogeneous escape. Nonzero
 //! homogeneous absorption over the remaining infinite path gives exactly zero;
 //! optional isothermal LTE volume sources supply their own finite thermal tail.
@@ -74,7 +76,10 @@ pub mod transient;
 use emission::SurfaceEmission;
 
 mod thermal;
-pub use thermal::{DiffuseThermalEmitter, IsothermalVolumeEmitter, SpatialVolumeEmitter, TemperatureField};
+pub use thermal::{
+    CoatingThermalEmitter, DiffuseThermalEmitter, IsothermalVolumeEmitter,
+    SpatialVolumeEmitter, TemperatureField,
+};
 #[cfg(feature = "material-state")]
 pub use thermal::AxialGasTemperatureField;
 
@@ -363,6 +368,7 @@ pub enum CameraRadianceError {
     NumericalRange,
     Optics(DielectricError),
     Thermal(crate::thermal_surface::ThermalSurfaceError),
+    CoatingThermal(crate::thermal_surface::CoatingEmissionError),
     Scene(CurvedSceneError),
 }
 impl From<CurvedSceneError> for CameraRadianceError {
@@ -447,6 +453,9 @@ pub struct CurvedCameraScene<'s, 'm> {
     // unpolarized scenes keep this empty and allocate no additional table.
     emitter_polarization_axes: Vec<Option<Vec3>>,
     diffuse_thermal_emitters: Vec<Option<DiffuseThermalEmitter>>,
+    // Independently authored positive/negative thermal faces, allocated only
+    // when a directional coating source is bound to the original geometry.
+    coating_thermal_emitters: Vec<[Option<CoatingThermalEmitter>; 2]>,
     environment: Option<EnvironmentRadiance<'s>>,
     volume_emitters: Vec<Option<IsothermalVolumeEmitter>>,
     spatial_volume_emitters: Vec<Option<SpatialVolumeEmitter<'s>>>,
@@ -531,6 +540,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
             emitters: slots,
             emitter_polarization_axes,
             diffuse_thermal_emitters: Vec::new(),
+            coating_thermal_emitters: Vec::new(),
             environment,
             volume_emitters: Vec::new(),
             spatial_volume_emitters: Vec::new(),

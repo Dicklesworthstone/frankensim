@@ -8989,5 +8989,46 @@ responses, exact extinction, body rotation, spectral changes, independently
 expanded total-internal-reflection phase, delayed source exposures and molecular
 scattering. These are authored source laws and numerical model checks, not
 measured emitter calibration, coherent interference between scene paths,
-polarized environment/thermal emission, bulk birefringence or a resolved physical
+polarized environment emission, bulk birefringence or a resolved physical
 polarizer. The original opt-in tracer/volume feature boundaries remain in force.
+
+## Directional polarized coating heat reaches native camera observations
+
+`camera::CoatingThermalEmitter` binds one original geometric side of an existing
+smooth conductor to `CoatingThermalEmission`. Positive and negative faces may
+retain independent thermal snapshots; duplicate same-side sources and competing
+calibrated/diffuse thermal emitters refuse before publication. The source must
+match the native conductor's complete bulk knots, source/status, provenance,
+interpolation policy and exact zero/one absorbing or lossless film. Agreement
+at a few sampled wavelengths is insufficient. The thermal owner's explicit
+films retain their existing precedence over a stored substrate attachment.
+
+Each actual hit queries the original positive layer-work/Planck owner at its
+vacuum wavelength and outward geometric cosine, preserving every film's own
+temperature and physical `I=L_s+L_p`, `Q=L_s-L_p`, `U=V=0`. The emission sample
+also retains the original positive s/p radiances, before their sum/difference
+rounding. Camera contraction combines the two pure-channel responses with
+positive radiance fractions; a weak channel is not reconstructed by subtracting
+nearly equal Stokes components. Exact extinction stays zero; an unrepresentable
+positive response refuses rather than becoming false black. The physical s
+axis is perpendicular to the outgoing ray/normal plane; the transported camera
+frame resolves its exact normal-incidence degeneracy. The original reciprocal
+contraction retains polarization through earlier Fresnel/scattering events
+and camera analyzers. Existing source/radiance weights and logarithmic
+range recovery apply once, with no averaged temperature, scalar emissivity,
+tabulated lamp fit, extra cosine factor or thermal debit.
+
+Binding allocates only a surface-indexed pair of optional face slots. Queries
+reuse shared immutable optical data and the existing allocation-free coherent
+source owner. Ordinary, analyzed, molecular, raster and transient paths share
+the same source accumulator. A `NativeCoatingEmission` snapshot can supply its
+original emitter directly; rebinding changes the observed frozen state without
+advancing or mutating heat. No source implies no new thermal table or solve.
+
+The observed mode retains the original local-index-one exterior approximation
+and finite optical support. Rough/periodic surfaces, unsupported arbitrary
+multilayer/transmitting native scene representations and nonvacuum emitting
+hosts refuse. Directional thermal sources currently enter through camera hits;
+the uniform-source finite-area proposal API does not substitute a fixed-angle
+thermal spectrum. Time-varying thermal states, directional thermal area NEE,
+bulk birefringence and polarized environment laws remain separate work.
