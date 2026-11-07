@@ -1291,7 +1291,10 @@ fn evaluate_radiated_power(
 /// `q_j = i omega rho v_j`; output order matches `points` order. This entry
 /// point retains the original centroid rule even when triangles are present.
 /// See [`exterior_pressure_at_points_integrated`] for triangle integration.
-/// Its discrete solid-angle guard is not a topology certificate.
+/// Retained triangles use the same closed-component winding and actual
+/// face/edge clearance admission as [`crate::near_field`]. Centroid-only
+/// surfaces retain their approximate solid-angle guard. Neither admission is
+/// a global self-intersection certificate.
 ///
 /// # Errors
 /// [`HelmholtzError`] for mismatched/malformed solution data or a non-finite,
@@ -1377,6 +1380,23 @@ fn exterior_pressure_at_points_impl(
     } else {
         None
     };
+    let exact_geometry = surface.triangles().is_some();
+    if exact_geometry {
+        // Geometry must not depend on the pressure quadrature rule. A point
+        // weight A/r^2 diverges near a face centroid and misses narrow gaps
+        // away from centroids; it is not a winding number. Reuse the actual
+        // closed-component/face-clearance owner for BOTH numerical images.
+        // The pressure API predates the adaptive receiver-array cap, so admit
+        // bounded chunks without silently truncating an existing caller's grid.
+        for chunk in points.chunks(crate::near_field::MAX_RECEIVERS) {
+            crate::near_field::admit_exterior_points(
+                surface,
+                chunk,
+                f64::MIN_POSITIVE,
+                crate::panel3d::MAX_SURFACE_PANELS,
+            )?;
+        }
+    }
     let mut pressure = Vec::with_capacity(points.len());
     for &x in points {
         if x.iter().any(|coordinate| !coordinate.is_finite()) {
@@ -1395,7 +1415,9 @@ fn exterior_pressure_at_points_impl(
                 });
             }
             let normal_projection = dot(surface.normals()[j], d);
-            solid_angle += normal_projection * surface.areas()[j] / (four_pi * r * r * r);
+            if !exact_geometry {
+                solid_angle += normal_projection * surface.areas()[j] / (four_pi * r * r * r);
+            }
             let q = solution.velocity[j] * C64::new(0.0, omega_rho);
             if let Some(triangles) = triangles {
                 let (single, double) = if triangle_is_near(x, surface.centroids()[j], triangles[j])

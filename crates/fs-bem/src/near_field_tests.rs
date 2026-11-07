@@ -98,6 +98,54 @@ fn prepared_rows_observe_the_same_bem_fields_with_linearity_far_limit_and_strict
     scaled=solution.clone();scaled.surface_fingerprint^=1;assert!(prepared.evaluate(&scaled).is_err());
     scaled=solution;scaled.pressure[0]=C64::new(f64::NAN,0.);assert!(prepared.evaluate(&scaled).is_err());
 }
+
+#[test]
+fn g1_finite_microphones_use_exact_exterior_geometry_at_both_faces_of_a_thin_radiator() {
+    let surface=SpherePanels::from_triangles(box_triangles([0.,0.,-0.002],[0.1,0.1,0.004])).unwrap();
+    let medium=Medium {density:1.2,sound_speed:340.};
+    let k=std::f64::consts::TAU*100./340.;
+    let velocity:Vec<_>=surface.normals().iter().map(|n|C64::from_re(n[2])).collect();
+    let solution=solve_radiation(&surface,k,medium,&velocity,Formulation::PlainCbie).unwrap();
+    let mut points=Vec::new();
+    for face in [0,2] {
+        for clearance in [0.005,0.01,0.02] {
+            points.push(std::array::from_fn(|axis|surface.centroids()[face][axis]
+                +clearance*surface.normals()[face][axis]));
+        }
+    }
+    // These microphones are outside the actual mesh. The former centroid
+    // solid-angle proxy diverged near the closest panel and refused them.
+    let geometry=Geometry::new(&surface,&points,0.004).unwrap();
+    let reference=geometry.prepare(k,medium,Options {
+        relative_tolerance:1e-9,..Options::default()
+    }).unwrap().evaluate(&solution).unwrap();
+    let integrated=helmholtz::exterior_pressure_at_points_integrated(&surface,&solution,medium,&points).unwrap();
+    let centroid=helmholtz::exterior_pressure_at_points(&surface,&solution,medium,&points).unwrap();
+    for ((&actual,&expected),coarse) in integrated.iter().zip(&reference.pressure).zip(centroid) {
+        assert!((actual-expected).abs()<2e-6*expected.abs(),"{actual:?} vs {expected:?}");
+        assert!(coarse.re.is_finite()&&coarse.im.is_finite());
+    }
+    // Preserve the original arbitrary-cardinality finite-grid API: batching
+    // geometric admission must neither truncate nor impose the adaptive cap.
+    let grid=vec![points[0];MAX_RECEIVERS+1];
+    let all=helmholtz::exterior_pressure_at_points_integrated(&surface,&solution,medium,&grid).unwrap();
+    assert_eq!(all,vec![integrated[0];grid.len()]);
+    assert!(helmholtz::exterior_pressure_at_points_integrated(&surface,&solution,medium,&[]).unwrap().is_empty());
+}
+
+#[test]
+fn g1_finite_microphones_refuse_hidden_slab_interiors_and_face_edge_contact() {
+    let surface=slab();
+    let medium=Medium {density:1.2,sound_speed:340.};
+    let velocity:Vec<_>=surface.normals().iter().map(|n|C64::from_re(n[2])).collect();
+    let solution=solve_radiation(&surface,0.1,medium,&velocity,Formulation::PlainCbie).unwrap();
+    for point in [[0.3,0.4,0.],[0.3,0.4,0.002],[0.,0.5,0.002],[0.,0.,0.002]] {
+        for evaluate in [helmholtz::exterior_pressure_at_points,
+            helmholtz::exterior_pressure_at_points_integrated] {
+            assert!(evaluate(&surface,&solution,medium,&[point]).is_err(),"accepted {point:?}");
+        }
+    }
+}
 #[test]
 fn under_resolved_work_refuses_instead_of_publishing_centroid_or_partial_receiver_results() {
     let body=slab();let geometry=Geometry::new(&body,&[[0.3,0.4,0.022],[2.,2.,2.]],0.01).unwrap();

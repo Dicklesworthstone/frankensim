@@ -477,6 +477,14 @@ everywhere: this is screening, not a viscous truth source.
 - `exterior_pressure_at_points` — deterministic batched finite-distance
   centroid pressure via `SUM (dG/dn_y p - G i omega rho v) A`; mismatched source
   surface or medium and invalid/non-exterior points are refused.
+  On retained triangles both finite-distance APIs reuse the near-field owner's
+  exact-coordinate closed components, component-wise winding and actual
+  face/edge clearance, including its roundoff clearance. The geometric test is
+  independent of the pressure quadrature: a valid close microphone is not
+  refused by a divergent centroid solid-angle proxy, and a thin-body interior
+  cannot slip between the centroids. Centroid-only geometry retains the legacy
+  approximate test. This is not a self-intersection or quadrature certificate.
+  Receiver grids are admitted in complete bounded chunks without truncation.
   `exterior_pressure_at_points_integrated` shares this admission and integrates
   retained triangles: exact static terms plus 8x8 regular remainders near a
   panel, or 4x4 complete Green kernels for well-separated points. The latter
