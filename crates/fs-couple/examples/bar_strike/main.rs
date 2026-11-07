@@ -247,6 +247,9 @@ fn run(card: &Card, out: &Path) -> Result<(), Error> {
             o.report.source_id
         );
     }
+    // An outside card's refusal is its Debug text, which quotes its fields: escaped for the JSON string
+    // (backslash first, then the double quote) the row still parses. `inside` has neither and is unchanged.
+    let validity = validity.replace('\\', "\\\\").replace('"', "\\\"");
     let record = format!(
         "{{\"suite\":\"bar-strike\",\"case\":\"strike-render\",\"bar\":\"{}\",\"mallet_mass_kg\":{},\"mallet_speed_m_s\":{},\"k_n_per_m_alpha\":{},\"alpha\":{},\"contact_time_s\":{},\"peak_force_n\":{},\"contact_card_validity\":\"{validity}\",\"strike_x_m\":{},\"loss\":\"{}\",\"rms_pa\":{rms},\"peak_pa\":{peak},\"clipped_samples\":{clipped},\"wav_blake3\":\"{hash}\",\"sample_rate_hz\":{},\"full_scale_pa\":{},\"resonator_isolated_hz\":{resonator},\"supports\":false,\"mallet_shaft\":false,\"acceptance\":false,\"elapsed_s\":{}}}",
         card.name,
