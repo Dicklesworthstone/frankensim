@@ -6,6 +6,9 @@ use fs_em::spatial::vector_potential::induction::terminals::circuit::{
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
 
+#[path = "circuit/thermal.rs"]
+mod thermal;
+
 fn config(reference_ohm: f64) -> SpatialTerminalCircuitConfig {
     SpatialTerminalCircuitConfig {
         reference_resistance_ohm: reference_ohm,

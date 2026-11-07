@@ -3027,11 +3027,27 @@ numerical reference loss. Independent original branch currents reconstruct KCL,
 resistor heat, capacitor charge work, inductor flux work including mutual terms,
 ideal-transformer work and original external-source supply. Combined field and
 circuit storage, conductor-frame Ohmic heat, physical graph-resistor heat,
-Lorentz work, impressed-current work and external supply must close. The native
+Lorentz work, impressed-current work, signed magnetic parameter work and external
+supply must close. The native
 diagnostic record retains the canceled reference contribution; the physical heat
 fields exclude it. Consistent Lorentz loads use the same accepted field current.
 
-This owner adds no switching, source-dependent circuit storage, material or
+`SpatialTerminalCircuit::step_with_materials_candidate` admits the complete
+original source-pinned induced-linear material refresh used by voltage/current
+electrodes. Endpoint operators are prepared once and shared by the baseline,
+each affine probe and final replay; each starts with the original accepted A,
+old magnetic source and native circuit flux/charge. A material refresh invalidates
+the previous field response. The new response may be reused after acceptance
+under its exact endpoint operators, duration, velocity and numerical controls;
+history offsets and physical final replays remain fresh. `field_trials` counts
+actual full-field solves, including the single solve of a wholly shorted layout.
+Independent changing-material RC/RLC regressions retain before-state magnetic
+effort, capacitor charge and inductor flux, check original source work and
+reference-impedance invariance, and verify cache/budget/support/cancellation
+behavior. This entry reports parameter work without choosing temperature or
+depositing reversible magnetic heat; the finite-caloric consumer owns that law.
+
+This owner adds no switching, source-dependent circuit storage,
 geometry refresh, contact impedance, thermal deposition, nonlinear field step,
 moving interface or displacement-current law. The native circuit retains its
 own topology and initial-constraint refusals. Focused electrode-circuit tests

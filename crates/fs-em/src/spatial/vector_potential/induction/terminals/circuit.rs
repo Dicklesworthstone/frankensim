@@ -16,20 +16,23 @@
 //! fixed field/material/topology and numerical probe controls. The history
 //! offsets and final native/field states are always recomputed. Probe fields
 //! undergo the original material-domain and energy checks, as does final replay.
-//! Geometry, material refresh, switching and nonlinear field evolution are
-//! outside this fixed-configuration owner.
+//! A source-pinned temperature refresh assembles endpoint operators once and
+//! invalidates the material-dependent response. Every probe still starts from
+//! the original magnetic effort and native circuit flux/charge. Geometry,
+//! switching and nonlinear field evolution remain outside this owner.
 
 mod native;
 pub(in crate::spatial::vector_potential::induction) mod nonlinear;
 pub use nonlinear::SpatialTerminalCircuitNonlinearControls;
 
-use super::super::{SpatialInductionControls, SpatialInductionStep};
+use super::super::{Prepared, SpatialInductionControls, SpatialInductionStep};
 use super::{SpatialTerminalInduction, SpatialTerminalInductionCandidate};
-use crate::spatial::SpatialMagneticError;
+use crate::spatial::{SpatialMagneticError, SpatialMagneticMaterial};
 use crate::winding::nonlinear::{NonlinearWindingError, native_seed};
 use crate::winding::{
     nonlinear::resistors::GraphResistorMaterial, ohmic::WindingGraphResistorHeat,
 };
+use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_la::factor::{FactorError, Lu, lu};
 use fs_material::conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial};
 use fs_phs::{
@@ -41,6 +44,7 @@ use fs_phs::{
 };
 use fs_solver::{NewtonError, NewtonReport, SolverRunProgress};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Native dense allocation and terminal probing are deliberately small.
 pub const MAX_TERMINAL_CIRCUIT_COORDINATES: usize = 16;
@@ -435,6 +439,65 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         controls: SpatialTerminalCircuitControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialTerminalCircuitCandidate<'m, C>> {
+        self.step_prepared_candidate(
+            Arc::clone(&self.field.field.prepared),
+            external_inputs,
+            endpoint_impressed_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Close the original circuit against source-pinned endpoint conductivity
+    /// and induced-linear permeability without resetting either history.
+    ///
+    /// Endpoint operators are prepared once and shared by all field trials.
+    /// Every trial uses the accepted OLD magnetic source, A, impressed current,
+    /// native flux and charge. Material refresh invalidates the cached response;
+    /// independent source, charge, storage and parameter-work checks remain on
+    /// the actual final replay. A finite caloric owner must separately account
+    /// for signed magnetic parameter work and the field entropy correction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_candidate(
+        &self,
+        external_inputs: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<C>>,
+        assembly: WeightedAssemblyLimits,
+        controls: SpatialTerminalCircuitControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialTerminalCircuitCandidate<'m, C>> {
+        let prepared = self
+            .field
+            .field
+            .prepare_materials(materials, conductors, assembly, cancelled)?;
+        self.step_prepared_candidate(
+            prepared,
+            external_inputs,
+            endpoint_impressed_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn step_prepared_candidate(
+        &self,
+        prepared: Arc<Prepared<'m, C>>,
+        external_inputs: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialTerminalCircuitControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialTerminalCircuitCandidate<'m, C>> {
         poll(cancelled)?;
         admit_inputs(&self.layout, external_inputs)?;
         let k = self.layout.coordinates.len();
@@ -458,7 +521,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
                 return Err(SpatialTerminalCircuitError::FieldTrialBudget);
             }
             let voltage = vec![0.0; self.field.electrode_faces().len()];
-            let field = self.field.step_voltage_candidate(
+            let field = self.field.step_voltage_prepared_candidate(
+                Arc::clone(&prepared),
                 &voltage,
                 endpoint_impressed_current_a_m2,
                 velocity_m_s,
@@ -492,7 +556,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         }
         let key = signature(controls);
         let cached = self.response.as_ref().filter(|r| {
-            r.duration_s.to_bits() == duration_s.to_bits()
+            Arc::ptr_eq(&prepared, &self.field.field.prepared)
+                && r.duration_s.to_bits() == duration_s.to_bits()
                 && r.velocity_m_s == velocity_m_s
                 && r.controls == key
         });
@@ -501,7 +566,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
             return Err(SpatialTerminalCircuitError::FieldTrialBudget);
         }
         let mut voltage = vec![0.0; self.field.electrode_faces().len()];
-        let baseline = self.field.step_voltage_candidate(
+        let baseline = self.field.step_voltage_prepared_candidate(
+            Arc::clone(&prepared),
             &voltage,
             endpoint_impressed_current_a_m2,
             velocity_m_s,
@@ -524,7 +590,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
                 poll(cancelled)?;
                 let terminal = self.layout.coordinates[column];
                 voltage[terminal] = controls.voltage_probe_v;
-                let probe = self.field.step_voltage_candidate(
+                let probe = self.field.step_voltage_prepared_candidate(
+                    Arc::clone(&prepared),
                     &voltage,
                     endpoint_impressed_current_a_m2,
                     velocity_m_s,
@@ -598,7 +665,8 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalCircuit<'m, C> {
         }
         // Neither a cached response nor a small Schur residual admits a field:
         // replay all original constitutive, charge, Ampere and energy checks.
-        let field = self.field.step_voltage_candidate(
+        let field = self.field.step_voltage_prepared_candidate(
+            prepared,
             &voltage,
             endpoint_impressed_current_a_m2,
             velocity_m_s,
