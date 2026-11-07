@@ -6,6 +6,9 @@
 //! validates its material through fs-material, translates its historical
 //! stabilization convention, and delegates every numerical operation.
 
+/// Native material inertia and elasticity on the shared structural time owner.
+pub mod dynamics3;
+
 use crate::SolidError;
 use fs_cutfem::{
     CutElasticity as CanonicalCutElasticity, CutElasticitySolution, CutFemError, CutSdf, Quadtree,

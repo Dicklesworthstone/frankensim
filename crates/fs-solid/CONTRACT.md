@@ -3919,8 +3919,29 @@ MEASURED locking-free formulation, on both the body-fitted and the
 CutFEM-on-SDF frontends. Constitutive laws live in fs-material; this
 crate owns body-fitted kinematics, weak forms, boundary operators, and
 the globalized Newton loop. Vector CutFEM assembly and solution are
-owned canonically by fs-cutfem; fs-solid retains only a legacy
-constructor facade.
+owned canonically by fs-cutfem; fs-solid retains a legacy constructor facade
+and a structural-time adapter over the original three-dimensional operators.
+
+`cutfront::dynamics3::CutSecondOrderProblem3` binds Cartesian or adaptive native
+elasticity to its exact `MaterialMass3` owner and fixed physical occupancies.
+One free-coordinate map removes the same homogeneous strong support rows from
+mass, stiffness, forcing and transposes. Adaptive hanging constraints remain in
+the native owners. The existing `fs-time` generalized-alpha stepper owns the
+accepted state, clock, nonlinear solve and cancellation transaction; the adapter
+adds neither artificial support mass nor stabilization inertia. Native material
+strain admission runs at initial, trial and accepted states. Its diagonal
+preconditioner does not replace the consistent physical mass action.
+Cancellation polls run inside native mass and strain callbacks and before/after
+the original bounded, indivisible stiffness action.
+
+The same adapter supplies fixed-configuration state/force VJPs and consistent
+initial acceleration through `fs-time`. Geometry, material, occupancy, stiffness
+scales and supports remain fixed; their derivatives, moving supports, physical
+damping, prestress, support reactions and a continuum error certificate are not
+inferred. Positive mass diagonals do not establish mass nonsingularity. Focused
+G1/G3 regression sources in `tests/cutfront_dynamics3.rs` cover forced rigid
+translation and work, clamped Cartesian/adaptive dense-pencil agreement,
+forcing pullbacks and transactional refusals. Native execution remains unverified.
 
 The `linear3` module is the generic body-fitted three-dimensional
 small-strain rung. It assembles a sparse stiffness/consistent-mass pencil from
