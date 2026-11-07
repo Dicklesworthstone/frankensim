@@ -18,6 +18,8 @@ use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
 use fs_phs::Storage;
 
 pub(super) mod relaxation;
+/// Source-bound elastic tensile admission on the original fiber continuum.
+pub mod strength;
 
 /// Continuous-span constitutive bounds, independent of numerical resolution.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -74,6 +76,7 @@ pub struct FiberStrain {
     viscous_coefficient_j_s: f64,
     limits: FiberStrainLimits,
     config: NonlinearModalConfig,
+    tensile: Option<std::sync::Arc<strength::FiberTensileGuard>>,
 }
 
 impl TensionedFiberRibbon {
@@ -163,6 +166,7 @@ impl TensionedFiberRibbon {
             viscous_coefficient_j_s,
             limits,
             config,
+            tensile: None,
         };
         if let Some(memory) = &mut self.relaxation {
             memory.with_finite_strain(
@@ -211,6 +215,26 @@ fn invalid() -> ModalCouplingError {
 }
 
 impl FiberStrain {
+    fn validate_kinematics(&self, q: &[f64]) -> Result<(f64, f64), ModalCouplingError> {
+        if q.len() != self.coordinate_count() || q.iter().any(|x| !x.is_finite()) {
+            return Err(invalid());
+        }
+        let slopes = self.slopes(q);
+        let slope_bound: f64 = slopes.iter().map(|x| x.abs()).sum();
+        let (mean, variation) = self
+            .model
+            .strain_bounds(&slopes, &q[..self.model.axial_modes().len()])
+            .map_err(|_| invalid())?;
+        if !slope_bound.is_finite()
+            || slope_bound > self.limits.maximum_slope
+            || mean.abs() + variation > self.limits.maximum_strain
+            || self.tension_n + self.axial_rigidity_n * (mean - variation) <= 0.0
+        {
+            return Err(invalid());
+        }
+        Ok((mean, variation))
+    }
+
     /// Original continuous-span motion bounds.
     pub const fn limits(&self) -> FiberStrainLimits {
         self.limits
@@ -293,21 +317,17 @@ impl ModalPotential for FiberStrain {
         self.model.axial_modes().len() + self.slope_scales.len()
     }
     fn validate_coordinates(&self, q: &[f64]) -> Result<(), ModalCouplingError> {
-        if q.len() != self.coordinate_count() || q.iter().any(|x| !x.is_finite()) {
-            return Err(invalid());
-        }
-        let slopes = self.slopes(q);
-        let slope_bound: f64 = slopes.iter().map(|x| x.abs()).sum();
-        let (mean, variation) = self
-            .model
-            .strain_bounds(&slopes, &q[..self.model.axial_modes().len()])
-            .map_err(|_| invalid())?;
-        if !slope_bound.is_finite()
-            || slope_bound > self.limits.maximum_slope
-            || mean.abs() + variation > self.limits.maximum_strain
-            || self.tension_n + self.axial_rigidity_n * (mean - variation) <= 0.0
-        {
-            return Err(invalid());
+        let (mean, variation) = self.validate_kinematics(q)?;
+        if let Some(guard) = &self.tensile {
+            let axial_strain = self.tension_n / self.axial_rigidity_n + mean + variation;
+            if guard
+                .assess(&q[self.model.axial_modes().len()..], axial_strain)?
+                .exceeds_limit()
+            {
+                return Err(ModalCouplingError::Invalid {
+                    what: "fiber tensile envelope exceeds its original material limit",
+                });
+            }
         }
         Ok(())
     }

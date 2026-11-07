@@ -1815,6 +1815,32 @@ invariance, source refusals, unchanged admitted mechanics and native rollback,
 including supported conversion. Native execution is a separate verification
 obligation.
 
+### Tensile admission on material fiber ribbons
+
+`TensionedFiberRibbon::with_tensile_limit` binds every original fiber layer's
+named static strength to the existing nonlinear `FiberStrain` owner. Its
+retained longitudinal strain supplies the axial upper bound, including the
+maintained preload and geometric mean. Original mass-normalized transverse
+coordinates supply a continuous-span curvature envelope. Each layer uses
+`E_i (epsilon_max + r_outer_i K)` with its own physical fiber radius: refining
+the ribbon width changes neither stress nor utilization. `FiberTensileAssessment`
+reports force per original fiber, retaining the section and strength receipts.
+
+Preload and the original coupled candidate gate refuse a crossed envelope;
+state, histories, work accounts and time remain transactional. Forces and energy
+are unchanged. The additional per-layer comparison allocates no scratch; it
+reuses the native strain evaluation and stores immutable strength data once.
+This explicitly selected elastic normal-stress envelope has the same model
+limits as the string criterion above. Sourced axial and bending Kelvin--Voigt
+viscosities must both be exactly zero: this coordinate-only candidate gate
+cannot bound total strain-rate stress without a velocity-aware owner. It checks
+the original material coefficients, not numerical or modal damping. Hereditary
+combinations refuse in either builder order until actual layer memories can
+participate. Tests in
+`tests/material_multi_bow/fiber_ribbon/tensile.rs` cover analytical demand,
+width refinement, source/preload and viscous-material refusal, and native
+contact-bank rollback.
+
 
 ## Actual worn material leaving hardness-coupled thermal receivers
 

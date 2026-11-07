@@ -16,6 +16,8 @@ mod normal_motion;
 mod relaxation;
 #[path = "fiber_ribbon/residual.rs"]
 mod residual;
+#[path = "fiber_ribbon/tensile.rs"]
+mod tensile;
 
 fn support_program(knots: &[(u64, f64)]) -> FiberSupportProgram {
     FiberSupportProgram {
@@ -424,21 +426,41 @@ fn migrating_string_contact_keeps_fiber_material_stations_and_reciprocal_history
 }
 
 fn fiber_material(rho: f64, young: f64, eta: f64) -> ResolvedMaterialStatePoint {
+    fiber_material_with_limit(rho, young, eta, eta, None)
+}
+
+fn fiber_material_with_limit(
+    rho: f64,
+    young: f64,
+    axial_eta: f64,
+    bending_eta: f64,
+    limit: Option<f64>,
+) -> ResolvedMaterialStatePoint {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
-    for (key, dims, value) in [
+    let mut properties = vec![
         ("density", Density::DIMS, rho),
         ("young_modulus", Pressure::DIMS, young),
-        (ETA, DynViscosity::DIMS, eta),
-        (YOUNG_VISCOSITY_PROPERTY, DynViscosity::DIMS, eta),
-    ] {
+        (ETA, DynViscosity::DIMS, bending_eta),
+        (YOUNG_VISCOSITY_PROPERTY, DynViscosity::DIMS, axial_eta),
+    ];
+    if let Some(limit) = limit {
+        properties.extend([
+            ("fiber_tensile_limit", Pressure::DIMS, limit),
+            ("delta", Pressure::DIMS, young),
+            ("tau", fs_qty::Time::DIMS, 0.01),
+        ]);
+    }
+    for (key, dims, value) in properties {
+        let mut validity = ValidityDomain::unconstrained().with("T", 280.0, 310.0);
+        if key != "fiber_tensile_limit" {
+            validity = validity.with("omega", 0.0, 1e8);
+        }
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(key, dims),
                 value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained()
-                    .with("T", 280.0, 310.0)
-                    .with("omega", 0.0, 1e8),
+                validity,
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
                 observations: vec![],

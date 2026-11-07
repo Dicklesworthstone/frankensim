@@ -75,6 +75,15 @@ impl TensionedFiberRibbon {
         gate: &CancelGate,
     ) -> Result<Self, FiberRibbonError> {
         poll(gate)?;
+        if self
+            .strain
+            .as_ref()
+            .is_some_and(|strain| strain.tensile_capacity().is_some())
+        {
+            return Err(FiberRibbonError::Invalid(
+                "fiber tensile admission needs actual hereditary layer stresses",
+            ));
+        }
         if self.relaxation.is_some()
             || !(1..=256).contains(&max_memory_states)
             || source.elastic() != self.axial.elastic()
