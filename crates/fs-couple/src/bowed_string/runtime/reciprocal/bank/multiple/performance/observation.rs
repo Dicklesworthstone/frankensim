@@ -221,8 +221,12 @@ impl BoundShellObserver {
             *velocity = scale*state.velocity_m_sqrt_kg_per_s;
         }
         let pressure = match &mut self.observer {
-            BoundReceiver::Shell(observer) => observer.step(&self.velocity)
-                .map_err(|_| render_invalid("closed-shell observation failed on accepted modal velocities"))?[0],
+            BoundReceiver::Shell(observer) => {
+                let mut field = [0.0; 4];
+                observer.step_into(&self.velocity, &mut field)
+                    .map_err(|_| render_invalid("closed-shell observation failed on accepted modal velocities"))?;
+                field[0]
+            },
             BoundReceiver::Plate(observer) => observer.step(&self.velocity)
                 .map_err(|_| render_invalid("material plate observation failed on accepted modal velocities"))?,
         };

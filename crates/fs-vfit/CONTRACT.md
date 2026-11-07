@@ -301,9 +301,19 @@ The cold caps are 4096 inputs, 256 output components, 4194304 coefficients and
 Source/receiver units, provenance, pass band, latency and producer uncertainty
 travel in the upstream artifact; replay supplies no defaults for them. Histories
 start at zero. Traversal and sums are fixed; identical same-ISA replay is bitwise
-deterministic. Invalid input or output overflow leaves all history unchanged.
-`observation::tests` covers delayed two-input summation, error/retry identity,
-empty/index errors and each allocation-free cap/cap+1 admission.
+deterministic. Product and sum roundoff are retained with a compensated Dot2
+accumulator across all taps and source kernels of each output; `transfer_at`
+uses the same compensation for its real and imaginary transfer components.
+This avoids losing a quiet interference residual when large opposing sources
+cancel, without claiming relative accuracy at arbitrary nulls or avoiding
+overflow of an intermediate product/sum. `step_into` reuses two cold-allocated
+scratch scalars per admitted output and allocates nothing per sample. Invalid input, output shape or arithmetic
+overflow leaves all history and the caller's output unchanged. `step` delegates
+to this same owner and allocates only its returned output vector.
+`observation::tests` covers delayed coherent cancellation, the analytically
+known residual of two opposing products, DC transfer/replay parity,
+independent DD convolution, error/retry identity, empty/index errors and each
+allocation-free cap/cap+1 admission.
 
 ## Multiport impedances (IRP M2.5-W3b)
 
