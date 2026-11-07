@@ -6295,3 +6295,34 @@ original inertial polarization reservoirs are connected to that time-domain
 account. Steady Poynting absorption is not substituted for missing finite-window
 storage/work. Temperature feedback, material dispersion derivatives and a
 transient Maxwell discretization are outside this adapter's scope.
+
+### Coherent angular spectra in transparent crystals
+
+`uniaxial::oriented::spectrum::PreparedUniaxialAngularSpectrum` binds a sparse
+authored incident spectrum to the original `OrientedUniaxialInterface` at one
+positive supported frequency. Preparation resolves the original incident law,
+both original principal-index laws and permeability once. Each mode supplies
+a signed tangential phase index, an incidence-plane azimuth and global complex
+Ex/Ey peak coefficients. The fixed global crystal axis is transformed into
+each incidence plane before the existing coupled Maxwell solve; the physical
+crystal is never rotated independently for different incident directions.
+Exact zero coefficients may be omitted without discarding any nonzero mode.
+
+Physical-point queries return all Cartesian E/H components and the full local
+cycle-mean Poynting vector. The ordinary and extraordinary waves retain their
+own normal wavenumbers, including negative normal phase and evanescent decay.
+The original double-double longitudinal phase propagation is reused; transverse
+phase products and coherent field sums also retain double-double residuals.
+Both eigenmodes and all source directions are summed before computing flux,
+preserving cross-polarized reflection, depth-dependent elliptical polarization,
+spatial birefringence, interference fringes and incident-side standing waves.
+Fields follow Re(E exp(+i omega t)), with z=0 at the interface and crystal z>=0.
+
+Mode/work and numerical-storage caps precede allocations and material solves;
+cancellation prevents a partial prepared source or field from being returned.
+Preparation is O(N), and each point query uses at most two plane-wave fields
+per retained mode with no allocation, material reevaluation or boundary solve.
+This sparse monochromatic owner introduces no sampling grid, FFT, paraxial
+approximation, spectral interpolation, power normalization or inferred source
+coherence. Finite crystals, absorbing anisotropy, films, transient reservoirs
+and geometric ray traversal remain outside this half-space capability.

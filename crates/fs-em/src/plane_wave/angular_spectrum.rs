@@ -39,7 +39,7 @@ use modes::{
 
 mod absorption;
 pub use absorption::AngularSpectrumAbsorptionField;
-mod modes;
+pub(in crate::plane_wave) mod modes;
 
 mod aperture;
 pub use aperture::{

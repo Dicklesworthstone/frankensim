@@ -63,7 +63,7 @@ pub(super) fn cartesian(te_tm: [C64; 2], p: [f64; 2]) -> [C64; 2] {
 
 /// The decaying branch is used for transmitted fields. Negative distance is
 /// permitted only for lossless incident waves; growing evanescent waves refuse.
-pub(super) fn propagation(kz: C64, distance: f64) -> Option<C64> {
+pub(in crate::plane_wave) fn propagation(kz: C64, distance: f64) -> Option<C64> {
     let decay = kz.im * distance;
     let phase = kz.re * distance;
     if decay.is_nan() || decay > 0.0 || !phase.is_finite() {

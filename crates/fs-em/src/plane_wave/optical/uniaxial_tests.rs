@@ -454,3 +454,110 @@ fn oriented_crystal_retains_original_sources_dispersion_and_refusal_domains() {
         );
     }
 }
+
+#[test]
+fn prepared_crystal_spectrum_binds_original_laws_and_coherent_spatial_fields() {
+    use crate::plane_wave::{
+        angular_spectrum::{AngularSpectrumError, AngularSpectrumSide},
+        uniaxial::oriented::{
+            OrientedUniaxialInterface,
+            spectrum::{
+                PreparedUniaxialAngularSpectrum, UniaxialIncidentMode, UniaxialSpectrumLimits,
+            },
+        },
+    };
+    let (ordinary, extraordinary) = axes(
+        [1.4, 1.6],
+        [1.8, 2.0],
+        [0.0; 2],
+        Some(MU),
+        [400.0, 800.0],
+        0,
+    );
+    let crystal = UniaxialOpticalResponse::try_new(&ordinary, &extraordinary, SPAN).unwrap();
+    let outside = incident(1.0, MU);
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside),
+        crystal,
+        [1.0, 2.0, 3.0],
+    )
+    .unwrap();
+    let input = [
+        UniaxialIncidentMode {
+            tangential_phase_index: 0.6,
+            incidence_plane_axis: [1.0, 0.0],
+            electric_v_m: [C64::ONE, C64::ZERO],
+        },
+        UniaxialIncidentMode {
+            tangential_phase_index: -0.4,
+            incidence_plane_axis: [3.0, -4.0],
+            electric_v_m: [C64::new(0.2, 0.7), C64::new(-0.3, 0.1)],
+        },
+    ];
+    let limits = UniaxialSpectrumLimits {
+        maximum_modes: 2,
+        maximum_workspace_bytes: 10000,
+    };
+    let mut depths = Vec::new();
+    for wavelength in [400.0, 550.0, 800.0] {
+        let omega = frequency(wavelength);
+        let prepared =
+            PreparedUniaxialAngularSpectrum::prepare(&interface, omega, &input, limits, || false)
+                .unwrap();
+        assert!(core::ptr::eq(prepared.source(), &interface));
+        assert_eq!(prepared.angular_frequency_rad_s(), omega);
+        assert_eq!(prepared.retained_mode_count(), 2);
+        assert!(prepared.workspace_bytes() <= limits.maximum_workspace_bytes);
+        let point = [0.3e-6, -0.5e-6, 0.0];
+        let left = prepared
+            .field_at(AngularSpectrumSide::TotalIncidentSide, point, || false)
+            .unwrap();
+        let right = prepared
+            .field_at(AngularSpectrumSide::Transmitted, point, || false)
+            .unwrap();
+        for j in 0..2 {
+            complex_near(left.electric_v_m[j], right.electric_v_m[j], 3e-14);
+            complex_near(left.magnetic_a_m[j], right.magnetic_a_m[j], 3e-16);
+        }
+        near(left.poynting_w_m2[2], right.poynting_w_m2[2], 3e-16);
+        depths.push(
+            prepared
+                .field_at(AngularSpectrumSide::Transmitted, [0.0, 0.0, 1e-6], || false)
+                .unwrap(),
+        );
+    }
+    assert!((depths[0].electric_v_m[0] - depths[2].electric_v_m[0]).abs() > 0.1);
+    assert!(matches!(
+        PreparedUniaxialAngularSpectrum::prepare(
+            &interface,
+            frequency(399.0),
+            &input,
+            limits,
+            || false,
+        ),
+        Err(AngularSpectrumError::Source(_))
+    ));
+    assert!(matches!(
+        PreparedUniaxialAngularSpectrum::prepare(
+            &interface,
+            frequency(399.0),
+            &input,
+            UniaxialSpectrumLimits {
+                maximum_modes: 0,
+                ..limits
+            },
+            || false,
+        ),
+        Err(AngularSpectrumError::Invalid(_))
+    ));
+    assert!(matches!(
+        PreparedUniaxialAngularSpectrum::prepare(
+            &interface,
+            frequency(399.0),
+            &input,
+            limits,
+            || true,
+        ),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+}
