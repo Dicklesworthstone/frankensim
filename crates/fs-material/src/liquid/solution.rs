@@ -17,11 +17,14 @@
 
 /// Closed isobaric mixing/heating from the original pure-liquid Cp sources.
 pub mod caloric;
+/// Original-source binary Maxwell–Stefan diffusivity at actual temperature and composition.
+pub mod diffusion;
 /// Source-resolved homogeneous cells for finite-rate diffuse interfaces.
 pub mod gradient;
 /// Original-source transport for homogeneous liquids with more than two components.
 pub mod multicomponent;
 mod mixing;
+pub use diffusion::{MaterialBinaryDiffusivity, ResolvedBinaryDiffusivity};
 pub use mixing::BinaryLiquidMixing;
 
 use std::sync::Arc;

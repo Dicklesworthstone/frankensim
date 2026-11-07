@@ -16674,6 +16674,32 @@ empty inventory and cancellation. These material integration tests require
 the normal material/runtime build; the dependency-light thermochemistry tests
 do not substitute for that gate.
 
+### Original-source binary liquid diffusivity
+
+`liquid::solution::diffusion::MaterialBinaryDiffusivity` binds one explicit
+ordered species pair to the original scalar Maxwell–Stefan diffusivity claim
+in m²/s. Absolute temperature and first-species mole fraction require their
+actual static quantity declarations. Typed external conditions, including
+pressure, remain fixed at the original query; stress, strain, rate and field
+coordinates cannot acquire a frozen physical owner through this adapter.
+
+Each evaluation resolves the left endpoint, arithmetic-mean composition face
+and right endpoint through the shared material resolver and the same pinned
+claim. It evaluates nonlinear source data at the face rather than averaging
+endpoint diffusivities. Joint interpolation support, numerical nonnegativity
+and source validity apply to all three samples. Explicit zero diffusivity is
+admitted as a closed kinetic path; negative values, unsupported points and
+unrepresentable traces refuse. The owner neither extrapolates nor switches
+claims when temperature or composition changes.
+
+The adapter supplies stage-lagged kinetics to a transport owner; it does not
+solve transport, infer a thermodynamic factor from diffusivity, or certify an
+entire path from endpoint samples. Query and complete receipt allocations are
+explicit; no mutable source cache is retained. Focused source tests exercise
+temperature/composition changes, fixed pressure, original claim identity,
+endpoint and joint-face support, zero/negative coefficients, typed-coordinate
+refusals and cancellation without partial publication.
+
 ## Coherent reflection and mode conversion between elastic solids
 
 `elastic::acoustic::interface::IsotropicElasticInterface` borrows two original explicitly isotropic `ElasticAcousticState` values. Their Christoffel speeds, density, Mandel stiffness, identities and original strain ceilings remain authoritative. `prepare_incidence` fixes conserved tangential slowness from one propagating P/SV/SH channel and an incidence cosine; one row-scaled native 4×4 complex LU supplies P/SV scattering from both sides, while SH uses its independent traction match. Preparation is cancellable and retains fixed-size wave and scattering arrays.
