@@ -159,7 +159,7 @@ impl<'m> NonlinearElectricField<'m> {
 
     /// Local shape forces on vertices 1 and 2; the force on vertex 0 is their
     /// negative sum. This preserves cell translation invariance exactly.
-    fn shape_cell(&self, cell: usize) -> Result<[[f64; 2]; 2], Error> {
+    pub(super) fn shape_cell(&self, cell: usize) -> Result<[[f64; 2]; 2], Error> {
         if !isotropic(&self.problem.materials[cell]) {
             return Err(invalid(
                 "shape work requires a frozen isotropic material potential",

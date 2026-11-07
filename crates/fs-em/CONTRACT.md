@@ -4242,6 +4242,32 @@ outside this analytic boundary model.
 
 ## Source-backed nonlinear electrostatics and differential capacitance
 
+`electrostatic::nonlinear::axisymmetric::AxisymmetricNonlinearElectrostatics`
+uses this same prepared nonlinear Gauss/Newton and differential-capacitance
+owner on the original revolved metric. Constant cell fields integrate against
+the exact radial volume; volume-charge loads retain the exact radial P1 moments
+shared with linear electrostatics. Physical electrodes accept voltage or total
+charge, including floating conductors, and each needs its own positive-area
+surface. Fields, storage, charge and capacitance include the authored angular
+span. The typed result keeps planar force/history APIs inaccessible.
+For frozen isotropic laws without volume charge, meridional `virtual_work`
+differentiates the actual discrete functional, including the variation of the
+radial Jacobian as well as the field gradient and planar area. Axis vertices
+remain on the axis. Tensor-axis transport, moving charge, retained cylindrical
+polarization, leakage and finite mechanical trajectories are not inferred.
+Synthetic native tests cover nonlinear disk and coaxial responses, charge
+control, differential capacitance, exact source moments and re-solved
+voltage/charge shape derivatives; they do not qualify empirical materials.
+
+Nonlinear fields and retained polarization histories use one independent
+voltage reference per electrical component, including components joined by a
+shared conductor. References stay separate from the small physical potentials
+through charge control, differential response, changing control modes and
+adaptive paths. Volume/electrode Gauss balance is gated independently for each
+component; opposite residuals cannot cancel globally. Per-vertex and
+per-terminal reference accessors retain every authored bias. The scalar
+reference accessors describe only the first voltage-controlled terminal overall.
+
 `electrostatic::nonlinear::PlanarNonlinearElectrostatics` retains the original
 planar P1 mesh, physical extrusion depth and material sources. Linear scalar or
 explicitly framed tensor cells can coexist with the shared reversible radial
@@ -5396,6 +5422,23 @@ include the supplied angular span. TAU gives a complete body of revolution;
 a smaller span describes its symmetry sector, not a separately driven wedge.
 The two-terminal capacitor checks Q/V against 2U/V² and lowers into the original
 native circuit branch, with one storage account for the same field.
+
+`axisymmetric::network` extends that same radial operator to complete Maxwell
+capacitance matrices, repeated voltage-field recovery and mixed voltage/total-
+charge floating conductors. Each conductor must have its own positive-area
+exterior trace; an axis-only conductor cannot borrow support from edges joining
+different terminals, including in the two-terminal API. Preparation reuses the
+existing bounded unit solves and floating-block factorization; queries retain
+trapped-charge offsets, physical storage and independent component references
+without another FE solve. Recovered fields keep the axisymmetric type. The full
+native circuit block retains total electrode charges and the original radial
+storage, including floating-node charge conservation and resistor heat. Branches
+and block are one store, not extra field energy. G0/G1/G3/G4 regressions in
+`tests/axisymmetric_electrostatic/network.rs` cover analytic disk and coaxial
+conductors, direct-solve parity, angular span, trapped charge, independent large
+biases, reference refusal, native RC power and cancelled preparation. This is
+the frozen, source-free linear capacitance response; it adds no changing-material
+work, distributed leakage, fringing outside the mesh or mechanical force law.
 
 G0/G1/G3/G4 cases in `tests/axisymmetric_electrostatic.rs` cover coaxial and
 layered-coaxial capacitance, charged-cylinder refinement, exact axial fields

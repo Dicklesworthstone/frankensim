@@ -185,6 +185,90 @@ fn slab(switching: bool) -> PlanarHystereticElectrostatics {
     .unwrap();
     field(mesh, &[&[0, 3], &[1, 2]], switching)
 }
+
+#[test]
+fn affine_paths_preserve_every_component_reference_and_switching_history() {
+    let mesh = TriComplex2::from_indexed_triangles(
+        "independent-affine-switching-slabs",
+        vec![
+            [0.0, 0.0],
+            [GAP, 0.0],
+            [GAP, WIDTH],
+            [0.0, WIDTH],
+            [0.0, 2.0 * WIDTH],
+            [GAP, 2.0 * WIDTH],
+            [GAP, 3.0 * WIDTH],
+            [0.0, 3.0 * WIDTH],
+        ],
+        vec![[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]],
+        Metric2::planar(DEPTH).unwrap(),
+    )
+    .unwrap();
+    let mut ordinary = field(mesh, &[&[0, 3], &[1, 2], &[4, 7], &[5, 6]], true);
+    let mut biased = ordinary.clone();
+    for (step, displacement) in [3e-5, -2e-5].into_iter().enumerate() {
+        let q = AREA * displacement;
+        let boundary = |first, second| {
+            if step == 0 {
+                [
+                    ElectrodeControl::Voltage(first),
+                    ElectrodeControl::Charge(q),
+                    ElectrodeControl::Voltage(second),
+                    ElectrodeControl::Charge(-0.5 * q),
+                ]
+            } else {
+                [
+                    ElectrodeControl::Charge(-q),
+                    ElectrodeControl::Voltage(first),
+                    ElectrodeControl::Charge(0.5 * q),
+                    ElectrodeControl::Voltage(second),
+                ]
+            }
+        };
+        let a = ordinary
+            .solve_affine_path_candidate(&[0.0; 4], &boundary(0.0, 0.0), controls(), &mut || false)
+            .unwrap();
+        let b = biased
+            .solve_affine_path_candidate(
+                &[0.0; 4],
+                &boundary(1e250, -1e250),
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        assert_eq!(
+            a.field().relative_voltage_v(),
+            b.field().relative_voltage_v()
+        );
+        assert_eq!(a.field().terminal_charge_c(), b.field().terminal_charge_c());
+        assert_eq!(a.field().stored_energy_j(), b.field().stored_energy_j());
+        assert_eq!(
+            a.report().account.switching_heat_j,
+            b.report().account.switching_heat_j
+        );
+        assert_eq!(
+            a.report().account.endpoint_source_work_j,
+            b.report().account.endpoint_source_work_j
+        );
+        assert_eq!(a.report().summary, b.report().summary);
+        assert_eq!(&b.field().reference_voltage_by_vertex_v()[..4], &[1e250; 4]);
+        assert_eq!(
+            &b.field().reference_voltage_by_vertex_v()[4..],
+            &[-1e250; 4]
+        );
+        assert_eq!(b.field().reference_terminal_for_terminal(0), Some(step));
+        assert_eq!(b.field().reference_terminal_for_terminal(2), Some(step + 2));
+        assert_eq!(b.field().reference_voltage_for_terminal_v(3), Some(-1e250));
+        for cell in 0..4 {
+            assert_eq!(
+                a.field().cell_history(cell).unwrap().polarizations_c_m2(),
+                b.field().cell_history(cell).unwrap().polarizations_c_m2(),
+            );
+        }
+        ordinary = a.into_parts().0;
+        biased = b.into_parts().0;
+    }
+}
 fn hexagon() -> PlanarHystereticElectrostatics {
     let height = GAP * 0.8660254037844386;
     let mesh = TriComplex2::from_indexed_triangles(

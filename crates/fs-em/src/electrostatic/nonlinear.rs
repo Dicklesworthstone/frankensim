@@ -14,6 +14,8 @@
 //! These fixed-source discrete balances supply no thermal evolution,
 //! electrostriction or spatial error bounds.
 
+/// Revolved nonlinear fields, charged electrodes and differential capacitance.
+pub mod axisymmetric;
 mod electrodes;
 pub mod force;
 /// Retained vector polarization on the same prepared geometry and Gauss solver.
@@ -260,8 +262,24 @@ impl PlanarNonlinearElectrostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(cancelled)?;
-        if !matches!(mesh.metric(), Metric2::Planar { .. })
-            || mesh.faces().is_empty()
+        if !matches!(mesh.metric(), Metric2::Planar { .. }) {
+            return Err(invalid(
+                "planar nonlinear electrostatics requires a planar metric",
+            ));
+        }
+        Self::assemble_metric(mesh, materials, limits, cancelled)
+    }
+
+    // Only geometry-specific public owners can reach this shared core. In
+    // particular, a revolved field cannot escape through planar force APIs.
+    fn assemble_metric(
+        mesh: TriComplex2,
+        materials: Vec<DielectricMaterial>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        poll(cancelled)?;
+        if mesh.faces().is_empty()
             || materials.len() != mesh.faces().len()
             || mesh.vertices().len() > limits.max_dofs
             || mesh.edges().len() > limits.max_dofs
@@ -273,7 +291,7 @@ impl PlanarNonlinearElectrostatics {
                 .is_none_or(|v| v > limits.max_triplets)
         {
             return Err(invalid(
-                "bounded planar mesh and one original material law per triangle required",
+                "bounded meridional or planar mesh and one original material law per triangle required",
             ));
         }
         let mut linear = Vec::with_capacity(materials.len());
@@ -524,15 +542,15 @@ impl PlanarNonlinearElectrostatics {
 }
 
 /// Actual nonlinear field at its operating point. Relative potentials preserve
-/// small fields under a large common electrode bias. The stored tangent belongs
-/// to this accepted state and cannot be treated as a global Q=C*V law.
+/// small fields under independent large biases on disconnected electrical
+/// components. The stored tangent belongs to this accepted state and cannot be
+/// treated as a global Q=C*V law.
 pub struct NonlinearElectricField<'m> {
     problem: &'m PlanarNonlinearElectrostatics,
     electrodes: Arc<electrodes::Layout>,
     controls: Vec<ElectrodeControl>,
     dofs: electrodes::Dofs,
-    reference_terminal: usize,
-    reference_voltage_v: f64,
+    references: electrodes::VoltageReferences,
     relative_voltage_v: Vec<f64>,
     terminal_voltage_v: Vec<f64>,
     terminal_charge_c: Vec<f64>,
@@ -541,6 +559,7 @@ pub struct NonlinearElectricField<'m> {
     evaluation: Evaluation,
     volume_charge_c: f64,
     charge_balance_residual_c: f64,
+    maximum_component_charge_residual_c: f64,
     maximum_free_charge_residual_c: f64,
     maximum_floating_charge_residual_c: f64,
     energy_identity_residual_j: f64,
@@ -550,15 +569,43 @@ impl<'m> NonlinearElectricField<'m> {
     pub fn problem(&self) -> &'m PlanarNonlinearElectrostatics {
         self.problem
     }
+    /// First voltage control in terminal order. Other electrical components
+    /// retain their own references; use the per-vertex or per-terminal getters.
     pub fn reference_terminal(&self) -> usize {
-        self.reference_terminal
+        self.references.first_terminal
     }
+    /// Absolute voltage of `reference_terminal`, retained for single-component
+    /// callers. It is not the reference of every disconnected component.
     pub fn reference_voltage_v(&self) -> f64 {
-        self.reference_voltage_v
+        self.references.first_voltage_v
     }
+    /// Voltage-controlled reference terminal of each mesh vertex's electrical
+    /// component. Terminal ordering deterministically selects each reference.
+    pub fn reference_terminal_by_vertex(&self) -> &[usize] {
+        &self.references.terminal_by_vertex
+    }
+    /// Per-vertex absolute references. Adding these to `relative_voltage_v`
+    /// reconstructs absolute voltage, subject to floating-point rounding.
+    pub fn reference_voltage_by_vertex_v(&self) -> &[f64] {
+        &self.references.voltage_by_vertex_v
+    }
+    pub fn reference_terminal_for_terminal(&self, terminal: usize) -> Option<usize> {
+        self.electrodes
+            .terminals
+            .get(terminal)
+            .map(|trace| self.references.terminal_by_vertex[trace[0]])
+    }
+    pub fn reference_voltage_for_terminal_v(&self, terminal: usize) -> Option<f64> {
+        self.electrodes
+            .terminals
+            .get(terminal)
+            .map(|trace| self.references.voltage_by_vertex_v[trace[0]])
+    }
+    /// Potentials relative to each vertex's electrical component reference.
     pub fn relative_voltage_v(&self) -> &[f64] {
         &self.relative_voltage_v
     }
+    /// Electrode potentials relative to their own electrical component reference.
     pub fn terminal_voltage_v(&self) -> &[f64] {
         &self.terminal_voltage_v
     }
@@ -608,6 +655,11 @@ impl<'m> NonlinearElectricField<'m> {
     }
     pub fn charge_balance_residual_c(&self) -> f64 {
         self.charge_balance_residual_c
+    }
+    /// Largest absolute electrode-plus-volume free charge of any electrical
+    /// component, independently gated so opposite defects cannot cancel.
+    pub fn maximum_component_charge_residual_c(&self) -> f64 {
+        self.maximum_component_charge_residual_c
     }
     pub fn maximum_free_charge_residual_c(&self) -> f64 {
         self.maximum_free_charge_residual_c

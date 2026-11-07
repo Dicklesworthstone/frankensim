@@ -1,7 +1,11 @@
 //! Independent nonlinear slab/series oracles at picofarad and picocoulomb scales.
 //! Authored constitutive fixtures; these are not measured material predictions.
+#[path = "nonlinear_electrostatic/axisymmetric.rs"]
+mod axisymmetric;
 #[path = "nonlinear_electrostatic/force.rs"]
 mod force;
+#[path = "nonlinear_electrostatic/gauges.rs"]
+mod gauges;
 #[path = "nonlinear_electrostatic/thermal.rs"]
 mod thermal;
 

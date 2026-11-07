@@ -81,6 +81,16 @@ fn volume_shares(mesh: &TriComplex2, face: [u32; 3]) -> [f64; 3] {
     }
 }
 
+/// Exact weak moments of a constant cell charge on the original metric.
+/// Keep the planar division order unchanged; a revolved cell's nodal charge
+/// is not uniform because the volume measure contains its varying radius.
+pub(super) fn volume_nodal_loads(mesh: &TriComplex2, face: [u32; 3], charge_c: f64) -> [f64; 3] {
+    match mesh.metric() {
+        Metric2::Planar { .. } => [charge_c / 3.0; 3],
+        Metric2::Axisymmetric { .. } => volume_shares(mesh, face).map(|share| charge_c * share),
+    }
+}
+
 // Integral(N_i r ds)/integral(r ds) = (1+r_i/(r_0+r_1))/3.
 // A zero-radius edge has no physical surface measure; its zero source
 // remains zero and a nonzero authored density is refused below.
@@ -144,10 +154,7 @@ pub(super) fn assemble(
         accumulate(&mut volume_charge_c, &mut volume_correction, charge)?;
         // Preserve the planar path's original division/rounding while using
         // the exact radial first moment for a revolved cell.
-        let loads = match mesh.metric() {
-            Metric2::Planar { .. } => [charge / 3.0; 3],
-            Metric2::Axisymmetric { .. } => volume_shares(mesh, *face).map(|share| charge * share),
-        };
+        let loads = volume_nodal_loads(mesh, *face, charge);
         for (&vertex, load) in face.iter().zip(loads) {
             accumulate(
                 &mut rhs[vertex as usize],

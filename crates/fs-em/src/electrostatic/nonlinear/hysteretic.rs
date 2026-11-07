@@ -176,6 +176,7 @@ pub struct HystereticElectrostaticStep {
     pub field_source_work_residual_j: f64,
     pub energy_residual_j: f64,
     pub charge_balance_residual_c: f64,
+    pub maximum_component_charge_residual_c: f64,
     pub maximum_free_charge_residual_c: f64,
     pub maximum_floating_charge_residual_c: f64,
     pub nonlinear: NonlinearElectrostaticReport,
@@ -188,7 +189,7 @@ pub struct PlanarHystereticElectrostatics {
     problem: PlanarNonlinearElectrostatics,
     layout: Arc<electrodes::Layout>,
     relative_voltage_v: Vec<f64>,
-    reference_voltage_v: f64,
+    references: electrodes::VoltageReferences,
     terminal_voltage_v: Vec<f64>,
     terminal_charge_c: Vec<f64>,
     free_charge_density_c_m3: Vec<f64>,
@@ -249,7 +250,7 @@ impl PlanarHystereticElectrostatics {
         let problem = PlanarNonlinearElectrostatics::new(mesh, laws, limits, cancelled)?;
         let relative_voltage_v = vec![0.0; problem.mesh.vertices().len()];
         let prepared = problem.prepare_electrodes(terminals, cancelled)?;
-        prepared.coordinates(
+        let (_, _, references) = prepared.coordinates(
             &vec![ElectrodeControl::Voltage(0.0); terminals.len()],
             &relative_voltage_v,
             cancelled,
@@ -260,7 +261,7 @@ impl PlanarHystereticElectrostatics {
             problem,
             layout,
             relative_voltage_v,
-            reference_voltage_v: 0.0,
+            references,
             terminal_voltage_v: vec![0.0; terminals.len()],
             terminal_charge_c: vec![0.0; terminals.len()],
             free_charge_density_c_m3: vec![0.0; cells],
@@ -270,12 +271,34 @@ impl PlanarHystereticElectrostatics {
     pub fn problem(&self) -> &PlanarNonlinearElectrostatics {
         &self.problem
     }
+    /// Potentials relative to each vertex's electrical component reference.
     pub fn relative_voltage_v(&self) -> &[f64] {
         &self.relative_voltage_v
     }
+    /// Absolute voltage of the first voltage-controlled terminal. Independent
+    /// components retain their own references in the per-vertex getters.
     pub fn reference_voltage_v(&self) -> f64 {
-        self.reference_voltage_v
+        self.references.first_voltage_v
     }
+    pub fn reference_terminal_by_vertex(&self) -> &[usize] {
+        &self.references.terminal_by_vertex
+    }
+    pub fn reference_voltage_by_vertex_v(&self) -> &[f64] {
+        &self.references.voltage_by_vertex_v
+    }
+    pub fn reference_terminal_for_terminal(&self, terminal: usize) -> Option<usize> {
+        self.layout
+            .terminals
+            .get(terminal)
+            .map(|trace| self.references.terminal_by_vertex[trace[0]])
+    }
+    pub fn reference_voltage_for_terminal_v(&self, terminal: usize) -> Option<f64> {
+        self.layout
+            .terminals
+            .get(terminal)
+            .map(|trace| self.references.voltage_by_vertex_v[trace[0]])
+    }
+    /// Electrode potentials relative to their own electrical component reference.
     pub fn terminal_voltage_v(&self) -> &[f64] {
         &self.terminal_voltage_v
     }
@@ -359,18 +382,17 @@ impl PlanarHystereticElectrostatics {
             problem: &self.problem,
             layout: self.layout.clone(),
         };
-        let reference = boundary
-            .iter()
-            .position(|c| matches!(c, ElectrodeControl::Voltage(_)))
-            .filter(|&index| index < self.layout.terminals.len())
-            .ok_or_else(|| invalid("a voltage-controlled reference is required"))?;
-        // Retain small fields even if an authored common voltage bias is huge.
-        let shift = self.relative_voltage_v[self.layout.terminals[reference][0]];
-        let initial: Vec<_> = self
-            .relative_voltage_v
-            .iter()
-            .map(|v| finite(*v - shift))
-            .collect::<Result<_, _>>()?;
+        let references = self.layout.voltage_references(boundary, cancelled)?;
+        // Control modes can select a different reference in each component.
+        // Shift only by that component's previous physical terminal voltage;
+        // authored common biases never enter field or memory arithmetic.
+        let mut initial = Vec::with_capacity(self.relative_voltage_v.len());
+        for (v, &potential) in self.relative_voltage_v.iter().enumerate() {
+            poll(cancelled)?;
+            let reference = references.terminal_by_vertex[v];
+            let shift = self.relative_voltage_v[self.layout.terminals[reference][0]];
+            initial.push(finite(potential - shift)?);
+        }
         let solved = prepared.solve(
             free_charge_density_c_m3,
             boundary,
@@ -471,6 +493,7 @@ impl PlanarHystereticElectrostatics {
             field_source_work_residual_j: work_residual,
             energy_residual_j: energy_residual,
             charge_balance_residual_c: solved.charge_balance_residual_c,
+            maximum_component_charge_residual_c: solved.maximum_component_charge_residual_c,
             maximum_free_charge_residual_c: solved.maximum_free_charge_residual_c,
             maximum_floating_charge_residual_c: solved.maximum_floating_charge_residual_c,
             nonlinear: solved.report.clone(),
@@ -479,7 +502,7 @@ impl PlanarHystereticElectrostatics {
             problem: next,
             layout: self.layout.clone(),
             relative_voltage_v: solved.relative_voltage_v,
-            reference_voltage_v: solved.reference_voltage_v,
+            references: solved.references,
             terminal_voltage_v: solved.terminal_voltage_v,
             terminal_charge_c: solved.terminal_charge_c,
             free_charge_density_c_m3: free_charge_density_c_m3.to_vec(),

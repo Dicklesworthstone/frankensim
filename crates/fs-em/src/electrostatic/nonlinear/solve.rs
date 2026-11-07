@@ -31,15 +31,17 @@ fn loads(
     let mut rhs = vec![0.0; problem.mesh.vertices().len()];
     let mut correction = vec![0.0; rhs.len()];
     let (mut total, mut ct) = (0.0, 0.0);
-    for (element, &density) in problem.elements.iter().zip(rho) {
+    for (cell, (element, &density)) in problem.elements.iter().zip(rho).enumerate() {
         poll(cancelled)?;
         let q = finite(element.volume_m3 * density)?;
-        if density != 0.0 && q / 3.0 == 0.0 {
+        let loads =
+            super::super::sources::volume_nodal_loads(&problem.mesh, problem.mesh.faces()[cell], q);
+        if density != 0.0 && loads.contains(&0.0) {
             return Err(invalid("free charge load underflowed"));
         }
         add(&mut total, &mut ct, q)?;
-        for v in element.vertices {
-            add(&mut rhs[v], &mut correction[v], q / 3.0)?;
+        for (v, load) in element.vertices.into_iter().zip(loads) {
+            add(&mut rhs[v], &mut correction[v], load)?;
         }
     }
     for (v, c) in rhs.iter_mut().zip(correction) {
@@ -84,8 +86,7 @@ pub(super) fn solve<'m>(
     poll(cancelled)?;
     controls(settings)?;
     let problem = electrodes.problem;
-    let (dofs, mut potential, reference_terminal, reference_voltage_v) =
-        electrodes.coordinates(boundary, initial, cancelled)?;
+    let (dofs, mut potential, references) = electrodes.coordinates(boundary, initial, cancelled)?;
     let (rhs, volume_charge_c) = loads(problem, rho, cancelled)?;
     let mut evaluation = Evaluation::new(problem);
     let mut trial = Evaluation::new(problem);
@@ -210,6 +211,20 @@ pub(super) fn solve<'m>(
     let mut terminal_voltage_v = Vec::with_capacity(boundary.len());
     let mut terminal_charge_c = Vec::with_capacity(boundary.len());
     let mut nodal_boundary_charge_c = vec![None; potential.len()];
+    // One independent physical Gauss balance per anchored electrical component.
+    // Use its reference terminal as a compact index, rather than one work slot
+    // per mesh vertex. The volume charge is integrated independently of rhs.
+    let mut component_charge = vec![0.0; boundary.len()];
+    let mut component_correction = vec![0.0; boundary.len()];
+    for (element, &density) in problem.elements.iter().zip(rho) {
+        poll(cancelled)?;
+        let reference = references.terminal_by_vertex[element.vertices[0]];
+        add(
+            &mut component_charge[reference],
+            &mut component_correction[reference],
+            element.volume_m3 * density,
+        )?;
+    }
     let (mut total, mut ct) = (volume_charge_c, 0.0);
     let (mut pairing, mut cp) = (0.0, 0.0);
     let mut maximum_floating_charge_residual_c: f64 = 0.0;
@@ -229,6 +244,12 @@ pub(super) fn solve<'m>(
         terminal_voltage_v.push(voltage);
         terminal_charge_c.push(charge);
         add(&mut total, &mut ct, charge)?;
+        let reference = references.terminal_by_vertex[trace[0]];
+        add(
+            &mut component_charge[reference],
+            &mut component_correction[reference],
+            charge,
+        )?;
         add(&mut pairing, &mut cp, voltage * charge)?;
         if let ElectrodeControl::Charge(requested) = boundary[t] {
             maximum_floating_charge_residual_c =
@@ -244,16 +265,32 @@ pub(super) fn solve<'m>(
         }
     }
     let charge_balance_residual_c = finite(total + ct)?;
+    let mut worst_component_charge_residual_c: f64 = 0.0;
+    for (&charge, &correction) in component_charge.iter().zip(&component_correction) {
+        poll(cancelled)?;
+        let residual = finite(charge + correction)?;
+        if residual.abs() > worst_component_charge_residual_c.abs() {
+            worst_component_charge_residual_c = residual;
+        }
+    }
+    let maximum_component_charge_residual_c = worst_component_charge_residual_c.abs();
     let energy_identity_residual_j = finite(
         evaluation.energy + evaluation.coenergy + evaluation.switching_heat_j() - (pairing + cp),
     )?;
     if charge_balance_residual_c.abs() > settings.charge_tolerance_c
+        || maximum_component_charge_residual_c > settings.charge_tolerance_c
         || maximum_free_charge_residual_c > settings.charge_tolerance_c
         || maximum_floating_charge_residual_c > settings.charge_tolerance_c
         || energy_identity_residual_j.abs() > settings.energy_tolerance_j
     {
         return Err(ElectrostaticError::Balance {
-            charge_residual_c: charge_balance_residual_c,
+            charge_residual_c: if charge_balance_residual_c.abs()
+                >= maximum_component_charge_residual_c
+            {
+                charge_balance_residual_c
+            } else {
+                worst_component_charge_residual_c
+            },
             maximum_free_charge_residual_c: maximum_free_charge_residual_c
                 .max(maximum_floating_charge_residual_c),
             energy_residual_j: energy_identity_residual_j,
@@ -266,8 +303,7 @@ pub(super) fn solve<'m>(
         electrodes: electrodes.layout.clone(),
         controls: boundary.to_vec(),
         dofs,
-        reference_terminal,
-        reference_voltage_v,
+        references,
         relative_voltage_v: potential,
         terminal_voltage_v,
         terminal_charge_c,
@@ -276,6 +312,7 @@ pub(super) fn solve<'m>(
         evaluation,
         volume_charge_c,
         charge_balance_residual_c,
+        maximum_component_charge_residual_c,
         maximum_free_charge_residual_c,
         maximum_floating_charge_residual_c,
         energy_identity_residual_j,

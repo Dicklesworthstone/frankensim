@@ -213,6 +213,107 @@ fn voltage(value: f64) -> [ElectrodeControl; 2] {
 }
 
 #[test]
+fn disconnected_histories_keep_independent_biases_when_reference_electrodes_change() {
+    let single = mesh([1.0, 0.0]);
+    let mut vertices = single.vertices().to_vec();
+    vertices.extend(single.vertices().iter().map(|&[x, y]| [x, y + 2.0 * WIDTH]));
+    let triangles = vec![
+        [0, 1, 4],
+        [0, 4, 3],
+        [1, 2, 5],
+        [1, 5, 4],
+        [6, 7, 10],
+        [6, 10, 9],
+        [7, 8, 11],
+        [7, 11, 10],
+    ];
+    let independent = TriComplex2::from_indexed_triangles(
+        "independently-biased-switching-slabs",
+        vertices,
+        triangles,
+        Metric2::planar(DEPTH).unwrap(),
+    )
+    .unwrap();
+    let mut ordinary = PlanarHystereticElectrostatics::new(
+        independent,
+        vec![source(EPS, true); 8],
+        &[&[0, 3], &[2, 5], &[6, 9], &[8, 11]],
+        local(),
+        limits(),
+        &mut || false,
+    )
+    .unwrap();
+    let mut biased = ordinary.clone();
+    for (step, displacement) in [2.5e-5, -3.5e-5, 1.5e-5, -2.0e-5].into_iter().enumerate() {
+        let q = AREA * displacement;
+        let switched = step % 2 == 1;
+        let boundary = |first, second| {
+            if switched {
+                [
+                    ElectrodeControl::Charge(-q),
+                    ElectrodeControl::Voltage(first),
+                    ElectrodeControl::Charge(0.75 * q),
+                    ElectrodeControl::Voltage(second),
+                ]
+            } else {
+                [
+                    ElectrodeControl::Voltage(first),
+                    ElectrodeControl::Charge(q),
+                    ElectrodeControl::Voltage(second),
+                    ElectrodeControl::Charge(-0.75 * q),
+                ]
+            }
+        };
+        let a = ordinary
+            .solve_candidate(&[0.0; 8], &boundary(0.0, 0.0), controls(), &mut || false)
+            .unwrap();
+        let b = biased
+            .solve_candidate(&[0.0; 8], &boundary(1e250, -1e250), controls(), &mut || {
+                false
+            })
+            .unwrap();
+        assert_eq!(
+            a.field().relative_voltage_v(),
+            b.field().relative_voltage_v()
+        );
+        assert_eq!(a.field().terminal_charge_c(), b.field().terminal_charge_c());
+        assert_eq!(a.field().stored_energy_j(), b.field().stored_energy_j());
+        assert_eq!(a.step().switching_heat_j, b.step().switching_heat_j);
+        assert_eq!(
+            a.step().endpoint_source_work_j,
+            b.step().endpoint_source_work_j
+        );
+        assert_eq!(
+            a.step().numerical_dissipation_j,
+            b.step().numerical_dissipation_j
+        );
+        assert!(b.step().maximum_component_charge_residual_c <= controls().charge_tolerance_c);
+        let first_reference = if switched { 1 } else { 0 };
+        assert_eq!(
+            &b.field().reference_terminal_by_vertex()[..6],
+            &[first_reference; 6]
+        );
+        assert_eq!(
+            &b.field().reference_terminal_by_vertex()[6..],
+            &[first_reference + 2; 6]
+        );
+        assert_eq!(&b.field().reference_voltage_by_vertex_v()[..6], &[1e250; 6]);
+        assert_eq!(
+            &b.field().reference_voltage_by_vertex_v()[6..],
+            &[-1e250; 6]
+        );
+        for cell in 0..8 {
+            assert_eq!(
+                a.field().cell_history(cell).unwrap().polarizations_c_m2(),
+                b.field().cell_history(cell).unwrap().polarizations_c_m2(),
+            );
+        }
+        ordinary = a.into_parts().0;
+        biased = b.into_parts().0;
+    }
+}
+
+#[test]
 fn linear_voltage_charge_and_common_bias_limits_close_independent_work() {
     let initial = slab(false, [1.0, 0.0]);
     let v = 400.0;

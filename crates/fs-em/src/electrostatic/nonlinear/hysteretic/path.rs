@@ -13,7 +13,7 @@
 //! quasistatic continuation, not a time integrator or a thermal update.
 
 use super::super::{
-    ElectrodeControl, NonlinearElectrostaticControls, NonlinearElectrostaticError, add,
+    ElectrodeControl, NonlinearElectrostaticControls, NonlinearElectrostaticError, add, electrodes,
 };
 use super::{
     HystereticElectrostaticCandidate, HystereticElectrostaticStep, PlanarHystereticElectrostatics,
@@ -175,7 +175,7 @@ struct Loading {
     end: Vec<ElectrodeControl>,
     rho_start: Vec<f64>,
     rho_end: Vec<f64>,
-    final_reference_voltage_v: f64,
+    final_references: electrodes::VoltageReferences,
 }
 impl Loading {
     fn new(
@@ -191,26 +191,17 @@ impl Loading {
                 "complete volume-charge and electrode endpoints required",
             ));
         }
-        let (reference, reference_v) = boundary
-            .iter()
-            .enumerate()
-            .find_map(|(i, c)| {
-                if let ElectrodeControl::Voltage(v) = *c {
-                    Some((i, v))
-                } else {
-                    None
-                }
-            })
-            .ok_or_else(|| invalid("an affine loading path needs a voltage reference"))?;
-        finite(reference_v)?;
-        let old_reference = field.terminal_voltage_v[reference];
+        let final_references = field.layout.voltage_references(boundary, cancelled)?;
         let mut start = Vec::with_capacity(boundary.len());
         let mut end = Vec::with_capacity(boundary.len());
         for (i, control) in boundary.iter().enumerate() {
             poll(cancelled)?;
             match *control {
                 ElectrodeControl::Voltage(v) => {
-                    finite(v)?;
+                    let vertex = field.layout.terminals[i][0];
+                    let reference = final_references.terminal_by_vertex[vertex];
+                    let reference_v = final_references.voltage_by_vertex_v[vertex];
+                    let old_reference = field.terminal_voltage_v[reference];
                     start.push(ElectrodeControl::Voltage(finite(
                         field.terminal_voltage_v[i] - old_reference,
                     )?));
@@ -231,7 +222,7 @@ impl Loading {
             end,
             rho_start: field.free_charge_density_c_m3.clone(),
             rho_end: rho.to_vec(),
-            final_reference_voltage_v: reference_v,
+            final_references,
         })
     }
     fn at(
@@ -608,7 +599,7 @@ impl PlanarHystereticElectrostatics {
                 maximum_accepted_defect_ratio: maximum_ratio,
             },
         };
-        current.reference_voltage_v = loading.final_reference_voltage_v;
+        current.references = loading.final_references;
         poll(cancelled)?;
         Ok(HystereticPathCandidate {
             field: current,
