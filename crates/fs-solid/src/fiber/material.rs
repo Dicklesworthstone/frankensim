@@ -30,6 +30,7 @@ use fs_material::plastic::chaboche::source::{
 use fs_material::plastic::reduction::{UniaxialJ2, UniaxialTabulated, UniaxialVoce};
 use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
 use fs_material::plastic::tabulated::rate::source::ResolvedTabulatedOverstressJ2;
+use fs_material::plastic::thermal::tabulated::axial::UniaxialThermalTabulated;
 use fs_material::plastic::source::{
     HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
 };
@@ -162,6 +163,13 @@ impl FiberMaterial {
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Tabulated(law) => Self::tabulated(law, density_kg_m3),
             FiberLaw::TabulatedOverstress(law) => Self::tabulated_overstress(law, density_kg_m3),
+            FiberLaw::ThermalTabulated(law) => {
+                require(
+                    density_kg_m3 == law.density_kg_m3(),
+                    "thermal tabulated fibers retain their original caloric reference density",
+                )?;
+                Self::thermal_tabulated(law)
+            }
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
             FiberLaw::ChabocheBranches(law) => {
                 require(
@@ -391,6 +399,24 @@ impl FiberMaterial {
         )?;
         material.source = Some(original);
         Ok(material)
+    }
+
+    /// Adopt a prepared thermal interval and its original caloric reference
+    /// density. Source-selected strength, expansion and kinetics remain inside
+    /// the law; heating changes neither the reference mass nor its calibration.
+    pub fn thermal_tabulated(law: UniaxialThermalTabulated) -> Result<Self> {
+        let density_kg_m3 = law.density_kg_m3();
+        require(
+            positive(density_kg_m3),
+            "thermal tabulated fibers require positive original reference density",
+        )?;
+        let source = Some(law.material().clone());
+        Ok(Self {
+            law: FiberLaw::ThermalTabulated(law),
+            density_kg_m3,
+            source,
+            chaboche_branch_properties: None,
+        })
     }
 
     /// Resolve density and the original J2 coefficients at one fixed source

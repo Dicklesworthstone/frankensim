@@ -11887,3 +11887,13 @@ separate `ViscoHarmonicFrequencyOperator` at its peak and both edges. Resource,
 shared-evaluation, strain-domain and cancellation refusals preserve factor reuse.
 These native tests remain unexecuted under the real dependency build's resource
 blocker; scoped syntax and whitespace checks do not replace their execution.
+
+## Temperature-dependent tabulated malleability in timed frames
+
+`FiberMaterial::thermal_tabulated` admits an owned original-source thermal interval and derives reference density from its caloric inventory. `FiberLaw::ThermalTabulated` retains the native axial plastic state and accepted temperature. The existing physical-time quasistatic and backward-Euler frame owners consume it through the same force-based equilibrium, history commit and work audit. Rebinding admits new temperatures and duration only when the original calibration and accepted-temperature continuity agree; Newton trials share immutable preparation and never query sources or advance extra material time.
+
+The thermal adapter reads old Helmholtz storage directly at the accepted old temperature, retains native endpoint storage, and reports yield and viscous work separately. Exact mechanical-entropy storage and signed reversible heat remain explicit. Native material and inertial numerical losses are never deposited as heat. The scalar history must agree with the native tensor/thermal increment before the frame is returned. Unsupported source/domain changes, clockless routes, incompatible intervals and cancellation leave the accepted frame unchanged.
+
+`Frame2d::thermal_tabulated_fibers` exposes a bounded, cancellable inventory in the original integration order: member/section/fiber identity, reference volume, member reference mass, accepted axial strain and borrowed material/history. It requires complete thermal-fiber coverage and performs no equilibrium solve or constitutive advance. This supplies a direct correspondence to existing caloric cells without reconstructing a second frame.
+
+Three G0/G1 regression sources exercise heated force-controlled extension and permanent shape, unequal-fiber-temperature bending and residual curvature, and heated power-law dynamics with both reference-mass formulations followed by held-strain relaxation. Independent scalar momentum, storage, entropy, heat and work calculations passed, as did scoped Rust syntax/format, whitespace and API checks. Native Cargo execution remains unverified because DSR/RCH are unavailable and shared build storage is full. The existing linear geometry, small-strain source domains, stationary-support and reference-mass assumptions remain binding.

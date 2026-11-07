@@ -8,7 +8,8 @@
 //!
 //! This checked path admits linear geometry, stationary supports and Norton or
 //! joint Norton/J2, with optional independent resistance recovery and sourced
-//! thermal-expansion wrappers, or measured-curve Perzyna plastic flow. Temperature
+//! thermal-expansion wrappers, or measured-curve plastic/Perzyna flow with sourced
+//! temperature-dependent hardening, elasticity and expansion. Temperature
 //! is prescribed through original source-bound laws between intervals; this
 //! owner reports reciprocal heat but does not itself solve a caloric field.
 //! Nodal rotations and the sum of absolute quadrature curvature are bounded;
@@ -37,6 +38,10 @@ use fs_material::creep::{CreepError, CreepTolerances, NortonCreep};
 use fs_material::plastic::energy::EnergyError;
 use fs_material::plastic::reduction::UniaxialJ2State;
 use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
+use fs_material::plastic::thermal::FeedbackError;
+use fs_material::plastic::thermal::tabulated::axial::{
+    UniaxialThermalTabulated, UniaxialThermalTabulatedState,
+};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use std::cell::Cell;
 
@@ -46,6 +51,9 @@ pub use dynamics::{FrameCreepDynamicEnergy, FrameCreepDynamicStep};
 /// Original tabulated Perzyna work, kept distinct from yield and creep heat.
 pub mod overstress;
 pub use overstress::FrameInelasticEnergy;
+/// Prescribed thermal hardening and the original reciprocal material account.
+pub mod thermal_tabulated;
+pub use thermal_tabulated::FrameThermalTabulatedFiber;
 
 /// Independent physical-unit gates and work bound for one native frame step.
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +72,7 @@ pub enum FrameCreepError {
     Mechanical(SolidError),
     Material(CreepError),
     Plastic(EnergyError),
+    Thermal(FeedbackError),
     Cancelled,
     Equilibrium {
         dof: usize,
@@ -161,6 +170,7 @@ fn energy_gate(residual: f64, tolerance: f64) -> Result<(), FrameCreepError> {
 #[derive(Clone, Copy)]
 enum CreepPoint<'a> {
     TabulatedOverstress(&'a UniaxialTabulatedOverstress, &'a UniaxialJ2State),
+    ThermalTabulated(&'a UniaxialThermalTabulated, &'a UniaxialThermalTabulatedState),
     Norton(&'a UniaxialNorton, &'a UniaxialNortonState),
     RecoveringNorton(&'a UniaxialRecoveringNorton, &'a UniaxialRecoveringNortonState),
     NortonJ2(&'a UniaxialNortonJ2, &'a UniaxialNortonJ2State),
@@ -175,6 +185,9 @@ impl<'a> CreepPoint<'a> {
         match (law, state) {
             (FiberLaw::TabulatedOverstress(law), FiberState::TabulatedOverstress(state)) => {
                 Ok(Self::TabulatedOverstress(law, state))
+            }
+            (FiberLaw::ThermalTabulated(law), FiberState::ThermalTabulated(state)) => {
+                Ok(Self::ThermalTabulated(law, state))
             }
             (FiberLaw::Norton(law), FiberState::Norton(state)) => Ok(Self::Norton(law, state)),
             (FiberLaw::RecoveringNorton(law), FiberState::RecoveringNorton(state)) => {
@@ -213,7 +226,7 @@ impl<'a> CreepPoint<'a> {
             Self::ThermalNortonJ2(law, _) => law.kinetics(),
             Self::ThermalRecoveringNorton(law, _) => law.kinetics(),
             Self::ThermalRecoveringNortonJ2(law, _) => law.kinetics(),
-            Self::TabulatedOverstress(..) => return Err(FrameCreepError::Invalid(
+            Self::TabulatedOverstress(..) | Self::ThermalTabulated(..) => return Err(FrameCreepError::Invalid(
                 "Norton and Perzyna physical histories cannot be interchanged",
             )),
         })
@@ -221,18 +234,21 @@ impl<'a> CreepPoint<'a> {
     fn elastic(self) -> Result<&'a fs_material::IsotropicElastic, FrameCreepError> {
         match self {
             Self::TabulatedOverstress(law, _) => Ok(&law.backbone().backbone().backbone().elastic),
+            Self::ThermalTabulated(law, _) => Ok(&law.tensor_law().tabulated_law().backbone().elastic),
             _ => Ok(self.kinetics()?.elastic()),
         }
     }
     fn duration_s(self) -> Result<f64, FrameCreepError> {
         match self {
             Self::TabulatedOverstress(law, _) => Ok(law.duration_s()),
+            Self::ThermalTabulated(law, _) => Ok(law.duration_s()),
             _ => Ok(self.kinetics()?.duration_s()),
         }
     }
     fn material(self) -> Option<&'a ResolvedMaterialStatePoint> {
         match self {
             Self::TabulatedOverstress(law, _) => law.material(),
+            Self::ThermalTabulated(law, _) => Some(law.material()),
             Self::Norton(law, _) => law.material(),
             Self::RecoveringNorton(law, _) => law.material(),
             Self::NortonJ2(law, _) => law.material(),
@@ -250,12 +266,13 @@ impl<'a> CreepPoint<'a> {
             Self::ThermalRecoveringNorton(law, _) => Some(law.expansion_material()),
             Self::ThermalRecoveringNortonJ2(law, _) => Some(law.expansion_material()),
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::NortonJ2(..)
-                | Self::RecoveringNortonJ2(..) | Self::TabulatedOverstress(..) => None,
+                | Self::RecoveringNortonJ2(..) | Self::TabulatedOverstress(..)
+                | Self::ThermalTabulated(..) => None,
         }
     }
     fn hardening(self) -> Option<f64> {
         match self {
-            Self::TabulatedOverstress(..) => None,
+            Self::TabulatedOverstress(..) | Self::ThermalTabulated(..) => None,
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..)
                 | Self::ThermalRecoveringNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().hardening),
@@ -267,6 +284,7 @@ impl<'a> CreepPoint<'a> {
     fn yield_stress(self) -> Option<f64> {
         match self {
             Self::TabulatedOverstress(law, _) => Some(law.backbone().backbone().backbone().yield_stress),
+            Self::ThermalTabulated(law, _) => Some(law.tensor_law().tabulated_law().backbone().yield_stress),
             Self::Norton(..) | Self::RecoveringNorton(..) | Self::ThermalNorton(..)
                 | Self::ThermalRecoveringNorton(..) => None,
             Self::NortonJ2(law, _) => Some(law.backbone().plastic().yield_stress),
@@ -288,6 +306,8 @@ impl<'a> CreepPoint<'a> {
         match self {
             Self::TabulatedOverstress(law, state) => return law.tensor_strain(strain, state)
                 .map(|_| ()).map_err(FrameCreepError::Plastic),
+            Self::ThermalTabulated(law, state) => return law.tensor_strain(strain, state)
+                .map(|_| ()).map_err(FrameCreepError::Thermal),
             Self::Norton(law, state) => law.tensor_strain(strain, state),
             Self::RecoveringNorton(law, state) => law.tensor_strain(strain, state),
             Self::NortonJ2(law, state) => law.tensor_strain(strain, state),
@@ -311,6 +331,11 @@ impl<'a> CreepPoint<'a> {
             (self, committed)
         {
             return overstress::audit(law, state, accepted, old_strain, new_strain, tolerances);
+        }
+        if let (Self::ThermalTabulated(law, state), Self::ThermalTabulated(_, accepted)) =
+            (self, committed)
+        {
+            return thermal_tabulated::audit(law, state, accepted, old_strain, new_strain, tolerances);
         }
         let modulus = self.elastic()?.youngs;
         let close = |a: &[f64; 6], b: &[f64; 6], pa: f64, pb: f64| {
@@ -593,6 +618,8 @@ impl Frame2d {
     /// Sourced Norton yield stress may follow temperature; authored yield stays fixed.
     /// Tabulated Perzyna fibers may change only duration, retaining their complete
     /// original curve, kinetics, receipts and fixed external source coordinates.
+    /// Thermal tabulated fibers prepare old/new endpoints from their own original
+    /// source family; each family retains its explicit temperature axis internally.
     pub fn with_creep_laws<L: Clone + Into<FiberLaw>>(
         &self,
         laws: &[L],
@@ -626,6 +653,16 @@ impl Frame2d {
                         (old, law)
                     {
                         overstress::admit_rebind(a, b)?;
+                    } else if let (
+                        CreepPoint::ThermalTabulated(a, state),
+                        CreepPoint::ThermalTabulated(b, _),
+                    ) = (old, law)
+                    {
+                        a.admit_successor(b).map_err(FrameCreepError::Thermal)?;
+                        require(
+                            b.old_temperature_k() == state.temperature_k(),
+                            "thermal table interval must start at the fiber's accepted temperature",
+                        )?;
                     } else {
                         let old_kinetics = old.kinetics()?;
                         let kinetics = law.kinetics()?;

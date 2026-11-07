@@ -665,3 +665,6 @@ fn clock_source_and_support_refusals_leave_nonvirgin_frames_usable() {
     );
     assert_eq!(accepted.displacements(), displacement);
 }
+
+#[path = "frame_tabulated_overstress/thermal.rs"]
+mod thermal;

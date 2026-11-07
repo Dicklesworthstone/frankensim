@@ -34,6 +34,9 @@ use fs_material::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
 use fs_material::plastic::chaboche::axial::{UniaxialChaboche, UniaxialChabocheState};
 use fs_material::plastic::tabulated::rate::axial::UniaxialTabulatedOverstress;
+use fs_material::plastic::thermal::tabulated::axial::{
+    UniaxialThermalTabulated, UniaxialThermalTabulatedState,
+};
 use fs_material::plastic::reduction::{
     UniaxialJ2, UniaxialJ2State, UniaxialTabulated, UniaxialVoce,
 };
@@ -73,6 +76,9 @@ pub enum FiberLaw {
     Tabulated(UniaxialTabulated),
     /// Original bounded hardening with associative Perzyna flow over one physical interval.
     TabulatedOverstress(UniaxialTabulatedOverstress),
+    /// Original temperature-dependent hardening, expansion and optional Perzyna
+    /// flow over one prepared physical interval.
+    ThermalTabulated(UniaxialThermalTabulated),
     /// Independent nonlinear backstress recovery with native Voce isotropic hardening.
     Chaboche(UniaxialChaboche),
     /// Two through eight independently evolving native recovery branches.
@@ -110,6 +116,8 @@ pub enum FiberState {
     Tabulated(UniaxialJ2State),
     /// Permanent axial/accumulated plastic flow; accepted viscous overstress may persist.
     TabulatedOverstress(UniaxialJ2State),
+    /// Permanent signed/path plastic history and its accepted source temperature.
+    ThermalTabulated(UniaxialThermalTabulatedState),
     /// Signed axial plastic history and independently retained backstress.
     Chaboche(UniaxialChabocheState),
     /// Ordered native histories, with the same branch count as the fiber law.
@@ -161,6 +169,9 @@ impl From<UniaxialTabulated> for FiberLaw {
 impl From<UniaxialTabulatedOverstress> for FiberLaw {
     fn from(law: UniaxialTabulatedOverstress) -> Self { Self::TabulatedOverstress(law) }
 }
+impl From<UniaxialThermalTabulated> for FiberLaw {
+    fn from(law: UniaxialThermalTabulated) -> Self { Self::ThermalTabulated(law) }
+}
 
 impl FiberLaw {
     /// These native returns consume their selected physical interval exactly once.
@@ -170,6 +181,7 @@ impl FiberLaw {
                 | Self::RecoveringNortonJ2(_) | Self::ThermalNorton(_)
                 | Self::ThermalNortonJ2(_) | Self::ThermalRecoveringNorton(_)
                 | Self::ThermalRecoveringNortonJ2(_) | Self::TabulatedOverstress(_)
+                | Self::ThermalTabulated(_)
         )
     }
 }
@@ -213,6 +225,7 @@ impl Section {
                 FiberLaw::Voce(l) => FiberState::Voce(l.initial_state()),
                 FiberLaw::Tabulated(l) => FiberState::Tabulated(l.initial_state()),
                 FiberLaw::TabulatedOverstress(l) => FiberState::TabulatedOverstress(l.initial_state()),
+                FiberLaw::ThermalTabulated(l) => FiberState::ThermalTabulated(l.initial_state()),
                 FiberLaw::Chaboche(l) => FiberState::Chaboche(l.initial_state()),
                 FiberLaw::ChabocheBranches(l) => FiberState::ChabocheBranches(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
@@ -336,6 +349,11 @@ impl Section {
                         .map_err(|error| refused(&error.to_string()))?;
                     (response.stress_pa, response.tangent_pa)
                 }
+                (FiberLaw::ThermalTabulated(l), FiberState::ThermalTabulated(s)) => {
+                    let response = l.response(eps, s)
+                        .map_err(|error| refused(&error.to_string()))?;
+                    (response.stress_pa, response.tangent_pa)
+                }
                 (FiberLaw::Tabulated(l), FiberState::Tabulated(s)) => match l.response(eps, s) {
                     // The native checked reduction admits the full compatible
                     // tensor strain and the table's accumulated-strain support.
@@ -443,6 +461,12 @@ impl Section {
                         })?.state;
                 }
                 (FiberLaw::TabulatedOverstress(l), FiberState::TabulatedOverstress(s)) => {
+                    *s = l.response(eps, s)
+                        .map_err(|error| SolidError::MaterialRefused {
+                            what: error.to_string(),
+                        })?.state;
+                }
+                (FiberLaw::ThermalTabulated(l), FiberState::ThermalTabulated(s)) => {
                     *s = l.response(eps, s)
                         .map_err(|error| SolidError::MaterialRefused {
                             what: error.to_string(),
