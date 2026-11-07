@@ -1,5 +1,26 @@
 # fs-solid CONTRACT
 
+## Spatial indentation hardness from accepted J2 history
+
+`SmallStrainTetProblem<ResolvedJ2Plasticity>::observe_hardness` evaluates each
+accepted element through its independently sourced `ResolvedJ2Hardness` path.
+Uniform and heterogeneous material fields use the original Newton solution,
+accumulated plastic strain and exact mechanical sources. Hardness is neither
+averaged across regions nor inferred from yield stress. Native constitutive
+admission and the prepared hardness interval are checked before a complete
+field is returned; late refusal or cancellation leaves all inputs unchanged.
+The caller accepts its native mechanical candidate and hardness field together.
+
+The observer allocates one scalar per element, borrows source receipts and
+performs no second return map. Typed endpoints remain available from the original
+material observer. It does not attest an arbitrary solution's origin, certify
+unobserved intermediate mechanical states, evolve contact geometry, or add heat.
+`tests/plastic3_hardness.rs` follows loading, unloading and reversals in a bonded
+two-material native solid, exports original hardness tests and passes the local
+field to the existing Archard owner without averaging hardness. Prescribed
+surface pressure/slip quadrature is a coupling fixture, not a contact solve or
+measured material qualification. Late source/range refusal remains atomic.
+
 ## Owned finite-strain membrane reference continuation
 
 `OwnedFiniteViscoMembraneMotion::change_reference` delegates to the original

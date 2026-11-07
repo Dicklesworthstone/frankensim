@@ -73,6 +73,9 @@ pub mod hex;
 /// Fixed-plane strain-life observation of the native cyclic J2 load path.
 pub mod fatigue;
 
+/// Original indentation hardness on each accepted native J2 element history.
+pub mod hardness;
+
 /// Newton controls for each increment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IncrementSettings {
