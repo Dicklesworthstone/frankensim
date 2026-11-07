@@ -22,6 +22,8 @@ pub mod fixture;
 pub mod mixed_mode;
 /// Finite normal inertia, original branch events and explicit released energy.
 pub mod motion;
+/// Source-bound elastic and irreversible rolling at a frozen JKR normal state.
+pub mod rolling;
 /// Same-source thermal changes at an explicitly retained normal control.
 pub mod temperature;
 mod work;

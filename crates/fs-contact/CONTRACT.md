@@ -3918,3 +3918,22 @@ source/domain/cancellation refusals. The native changing-load/path owner's
 including seven executed signed-gap groups. Source adapter/tests parse with
 the pinned Rust formatter; the source-bound contact suite and full workspace
 build are not claimed by that limited run.
+
+## Source-bound JKR adhesive rolling
+
+`normal_patch::adhesive::rolling::SourceJkrRollingContact` obtains its reduced
+radius, elastic modulus, work of adhesion and attached contact radius from the
+original `SourceJkrSphereContact` response. The Dominik--Tielens small-shift
+rolling stiffness therefore remains finite at zero or tensile normal force
+while the original JKR branch remains attached. Authored critical displacement
+and small-shift applicability limits are explicit; adhesion energy alone does
+not determine the irreversible rolling threshold.
+
+The original `fs-tribo` rolling law owns bounded elastic contact memory,
+recoverable storage, analytic mean moment and nonnegative rolling loss. Exact
+source, normal-state and rolling-control identity bind the accepted history;
+foreign history and invalid trials refuse without mutation. This scalar,
+fixed-axis, fixed-normal-state law does not transport memory under finite
+rotations, evolve contact area, partition heat or model shear-induced peeling.
+Regression groups cover zero/tensile-load stiffness, threshold/reversal work,
+subdivision, source/history mismatch and atomic refusal.

@@ -16,6 +16,9 @@ use crate::{ApplicabilityRange, InputAuthority, InterfaceMedium, InterfaceSystem
 pub mod viscoelastic;
 use viscoelastic::ViscoelasticSphereRollingCard;
 
+/// Adhesive rolling spring and irreversible yield on a frozen JKR patch.
+pub mod adhesive;
+
 const EPSILON: f64 = 128.0 * f64::EPSILON;
 
 /// Generic published-form identity retained by the Coulomb contour rung.

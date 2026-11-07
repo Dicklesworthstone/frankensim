@@ -2644,3 +2644,28 @@ compatibility and analytic tangent, force-budget scaling, release/flight/reentry
 contact-duration representation, original-path parity and atomic refusals.
 All 26 changing-load/path tests pass in a focused original-source Rust build
 with actual `fs-math`; this is not a full workspace or cross-ISA build.
+
+## Adhesive rolling spring and irreversible yield
+
+`rolling_loss::adhesive::AdhesiveRollingContact` retains fixed-axis elastic
+rolling history on one frozen attached JKR patch. Dominik and Tielens (1995),
+DOI 10.1080/01418619508243800, equation 25, supplies the spring moment
+`M = -4 Fc (a/a0)^(3/2) xi`, where `Fc = 3 pi W R/2`, `xi = R theta`, and W
+is work of adhesion. An independently supplied critical shift selects an
+elastic/perfectly plastic plateau, explicitly distinct from a microscopic
+contact-migration law. A caller ceiling bounds critical shift/contact radius;
+the normal owner remains responsible for JKR applicability and attachment.
+
+Each prescribed monotone scalar increment has an analytic elastic/yield split.
+Endpoint and work-mean resisting moments, recoverable spring storage, factored
+storage change, irreversible rolling loss and applied work remain separate.
+Existing double-double arithmetic retains sub-ULP angle and elastic history.
+Evaluation is constant-work and allocation-free, with no state mutation on
+refusal. Original parameter and limit mismatches reject. Fixed inputs give
+deterministic same-ISA results; no new cross-ISA accuracy certificate is claimed.
+
+G0/G1/G3 tests cover elastic recovery, yield and reversal, exact path work,
+subdivision, sub-ULP history, and nonzero resistance at tensile JKR pull-off.
+The force-controlled pull-off stiffness is half its zero-load value. Arbitrary
+vector rolling, spin, sliding, changing normal area, detachment release, finite
+rotation, material calibration and heat allocation require their own owners.
