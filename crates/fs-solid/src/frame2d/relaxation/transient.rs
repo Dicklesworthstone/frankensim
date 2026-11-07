@@ -1,4 +1,4 @@
-//! Original longitudinal Maxwell histories on the full native frame trajectory.
+//! Original longitudinal/shear Maxwell histories on the full native trajectory.
 //! The shared coupled exact-flow owner advances mechanics, every source memory
 //! and every ordinary boundary state together. These observations never replay
 //! a constitutive update or turn the integration defect into material heat.
@@ -51,7 +51,7 @@ pub struct FrameRelaxationTransientReport<'a> {
 
 /// Fixed-source, fixed-clock native history with atomic memory observations.
 /// No mode truncation, fitted damping ratio, split held-velocity forcing or
-/// parallel integrator replaces the original longitudinal Maxwell law.
+/// parallel integrator replaces the original longitudinal or shear Maxwell law.
 pub struct PreparedFrameRelaxationTransient<'a> {
     source: &'a PreparedFrameRelaxation,
     native: PreparedFrameTransient<'a>,

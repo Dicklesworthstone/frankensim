@@ -3577,16 +3577,22 @@ homogenization, the P2 milestone.
   inputs refuse. It is a lower bound on bending loss: intrinsic anelastic
   excess is the consumer's measured addend or a reported unknown.
 
-- `section::relaxation::ConcentricPronySection` and
-  `section::torsion::ConcentricPronyTorsionalSection` compose independent
-  generalized-Maxwell bending/shear spectra on the existing bonded concentric
-  geometry. Both use one `LayerRelaxationProperties` coefficient resolver;
+- `section::relaxation::ConcentricPronySection`,
+  `section::torsion::ConcentricPronyTorsionalSection` and
+  `section::relaxation::transverse::ConcentricPronyTransverseSection` compose
+  independent generalized-Maxwell bending, torsion and transverse shear spectra
+  on the existing bonded concentric geometry. All three use one
+  `LayerRelaxationProperties` coefficient resolver;
   the bending-specific spelling names the same source-role type. Each layer
   selects its equilibrium modulus and zero or more modulus/time pairs.
   An explicit empty spectrum is elastic; an omitted layer or absent claim
   refuses. Equilibrium must match the actual channel's Young/shear modulus.
   Each arm retains `delta_E * I` for bending or `delta_G * J`, `J=2I`,
-  for circular torsion. Time constants and layer identities are never averaged.
+  for circular torsion. Transverse arms retain `kappa*A*delta_G` [N] in their
+  distinct corrected-area record, never a polar-moment rigidity. The original
+  shear roles, correction and equilibrium stiffness remain authoritative.
+  A receiving member supplies its own spatial strain basis and memory states;
+  no G(t) is inferred from E(t). Time constants and layer identities are never averaged.
   The original torsional Kelvin viscosity remains a separate parallel dashpot;
   it is not counted again in the Prony spectrum. Geometry, mass, equilibrium
   stiffness and all source receipts survive without authority promotion.
@@ -3598,7 +3604,7 @@ homogenization, the P2 milestone.
   unrepresentable-stiffness inputs refuse atomically. G1/G3 tests check independent
   complex bending/torsional stiffness, unchanged parallel viscous loss and
   homogeneous subdivision; G0 covers empty layers and invalid source roles.
-  This is frozen-state small-strain bonded bending/circular torsion, not helical
+  This is frozen-state small-strain bonded section relaxation, not helical
   winding, axial creep, interlayer slip, heating or experimental validation.
 - `state_point` is the fail-closed bridge from immutable `fs-matdb`
   `MaterialCard`s to executable scalar property bundles. Consumers declare

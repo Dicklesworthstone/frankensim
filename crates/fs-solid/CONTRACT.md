@@ -9346,7 +9346,7 @@ AC and poles. The original source resolver retains equilibrium modulus, every
 delta_E/tau pair, selectors, receipts and held-environment applicability. The
 explicit longitudinal declaration applies one scalar E(t) to axial strain and
 both bending strains; it does not reinterpret a bending-only or torsional law.
-Only `reference_strain_traces` supplies the geometry and conjugate force maps.
+The same reference member coordinates supply the geometry and conjugate force maps.
 Their exact coefficients are delta_E*A/L, 3*delta_E*I/L^3 and delta_E*I/L^3.
 
 Each positive original arm/channel has an energy-normalized elastic extension
@@ -9392,6 +9392,36 @@ zero-only/empty spectra, and source/budget/cancellation refusals. New modules
 passed pinned Rust formatting and syntax parsing. Full dependency compilation
 and those integration executions remain outstanding in this constrained session;
 the leaf checks are not a full native frame validation or performance benchmark.
+
+## Independent shear Maxwell memory on the original Timoshenko basis
+
+`Frame2d::prepare_relaxing_resonance_with_transverse_shear` composes original
+longitudinal and independent transverse spectra in the same native resonance
+and exact transient owner. Each selected Timoshenko member requires a
+`FrameTransverseRelaxation` binding for every layer; an explicit empty spectrum
+declares elastic G. Missing G, foreign/duplicate selections and nonzero selected
+axial, bending or shear Kelvin loss refuse. Euler--Bernoulli members keep their
+existing channels and refuse a transverse binding.
+
+Original equilibrium E/G fixes the translation and section-spin interpolation,
+inertia, and three geometric work ports. With original bending/shear fractions
+beta and s, an E arm has coefficients `delta_E*A/L`,
+`3*delta_E*I*beta^2/L^3`, `delta_E*I/L^3`; each G arm contributes
+`kappa*delta_G*A*s^2/(4*L)` through the symmetric port. All original times and
+layer identities survive. Neither complex frequency nor evolving memory refits
+the spatial shape, and equilibrium stiffness is not counted twice. This fixed
+Galerkin beam requires spatial refinement; it is not exact continuum dynamics.
+
+`FrameStrainChannel::TransverseShear` distinguishes its physical memory storage
+and heat in the existing harmonic/transient reports. Source-band intersection,
+boundary states, cancellation and native balance retain their existing owners.
+Preparation charges three states per declared E arm and one per G arm before
+source evaluation, including declared zero increments. Four exact-source
+coefficient/observation tests passed. Source and native integration regressions
+cover corrected annular arms, explicit elastic channels, independent AC rigidity,
+physical power and constrained shear-memory decay; those full targets await
+the pinned dependencies and prescribed build runner. No live thermal update
+or heat deposition is added to this fixed-source model.
 
 ## Native frame hereditary time histories
 

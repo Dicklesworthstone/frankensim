@@ -345,7 +345,7 @@ impl Frame2d {
     // Geometric displacement coordinates, not a constitutive strain law.
     // Shear-deformable viscosity applies its own curvature/shear coefficients;
     // the public longitudinal traces above retain their original refusal.
-    fn reference_member_coordinates(
+    pub(super) fn reference_member_coordinates(
         &self,
         element: usize,
     ) -> Result<([usize; 6], [[f64; 6]; 3], f64), SolidError> {

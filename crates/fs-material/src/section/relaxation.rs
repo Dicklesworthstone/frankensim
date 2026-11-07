@@ -18,6 +18,9 @@ use crate::visco::GeneralizedMaxwell;
 use fs_qty::Density;
 use fs_qty::{Pressure, QuantitySpec, Time};
 
+/// Independent transverse-shear relaxation on the same corrected section.
+pub mod transverse;
+
 /// Cold-path bound on the total declared arms across all layers.
 pub const MAX_SECTION_RELAXATION_BRANCHES: usize = 128;
 
@@ -101,75 +104,20 @@ impl SectionPronySpectrum {
         axis: SectionRelaxationAxis,
         properties: &[LayerRelaxationProperties],
     ) -> Result<Self, MaterialStatePointError> {
-        if properties.len() != elastic.layers().len() {
-            return Err(invalid("section relaxation needs one source binding per layer"));
-        }
-        let mut count = 0_usize;
-        for binding in properties {
-            if binding.branches.len() > MAX_SECTION_RELAXATION_BRANCHES - count {
-                return Err(invalid("section relaxation exceeds 128 total arms"));
-            }
-            count += binding.branches.len();
-        }
+        let count = admit_bindings(elastic, properties)?;
         let mut branches = Vec::with_capacity(count);
         let mut spectra = Vec::with_capacity(properties.len());
         let mut band = (0.0_f64, f64::MAX);
         let mut instantaneous = equilibrium_stiffness_n_m2;
-        for (layer_index, ((layer, geometry), binding)) in elastic.layers().iter()
-            .zip(elastic.layer_integrals()).zip(properties).enumerate()
+        for (layer_index, (geometry, binding)) in elastic.layer_integrals().iter()
+            .zip(properties).enumerate()
         {
-            let parents = match shear {
-                Some(shear) => shear.source_properties(layer_index)?,
-                None => elastic.elastic_source_properties(layer_index)?,
-            };
-            for property in parents {
-                if !property.is_constant_at_fixed_environment() {
-                    return Err(invalid("section relaxation requires its original held-environment elastic parents"));
-                }
-                if let Some((lo, hi)) = property.angular_frequency_band_rad_s()? {
-                    band = (band.0.max(lo), band.1.min(hi));
-                }
-            }
-            let elastic_modulus = match shear {
-                Some(shear) => shear.layer_shear_modulus_pa(layer_index)?,
-                None => geometry.young_modulus_pa(),
-            };
-            let mut coefficient = |key: &str, quantity: QuantitySpec, needs_band: bool| {
-                let property = layer.material.property(key)
-                    .ok_or_else(|| invalid("section relaxation is missing an unambiguous source coefficient"))?;
-                if property.requirement().quantity() != quantity
-                    || !property.is_constant_at_fixed_environment()
-                {
-                    return Err(invalid("section relaxation needs held-environment coefficients with the declared SI quantity"));
-                }
-                match property.angular_frequency_band_rad_s()? {
-                    Some((lo, hi)) => band = (band.0.max(lo), band.1.min(hi)),
-                    None if needs_band => return Err(invalid("each layer relaxation law needs explicit frequency support")),
-                    None => (),
-                }
-                Ok(property.value_si())
-            };
-            let equilibrium = coefficient(&binding.equilibrium_modulus,
-                QuantitySpec::dimensional(Pressure::DIMS), binding.branches.is_empty())?;
-            if !equilibrium.is_finite() || equilibrium <= 0.0
-                || equilibrium.to_bits() != elastic_modulus.to_bits()
-            {
-                return Err(invalid("each elastic layer must use its explicit equilibrium modulus"));
-            }
+            let law = resolve_layer_spectrum(elastic, shear, layer_index, binding, &mut band)?;
             let moment = match axis {
                 SectionRelaxationAxis::Bending => geometry.second_moment_m4(),
                 SectionRelaxationAxis::Torsion => 2.0 * geometry.second_moment_m4(),
             };
-            let mut terms = Vec::with_capacity(binding.branches.len());
-            for (index, pair) in binding.branches.iter().enumerate() {
-                if binding.branches[..index].contains(pair) {
-                    return Err(invalid("layer relaxation repeats a source-property pair"));
-                }
-                let delta = coefficient(&pair.0, QuantitySpec::dimensional(Pressure::DIMS), false)?;
-                let tau = coefficient(&pair.1, QuantitySpec::dimensional(Time::DIMS), true)?;
-                if !delta.is_finite() || delta < 0.0 || !tau.is_finite() || tau <= 0.0 {
-                    return Err(invalid("layer relaxation needs nonnegative modulus increments and positive times"));
-                }
+            for &(delta, tau) in &law.terms {
                 let stiffness = delta * moment;
                 instantaneous += stiffness;
                 if !stiffness.is_finite() || (delta > 0.0 && stiffness == 0.0)
@@ -180,16 +128,95 @@ impl SectionPronySpectrum {
                 branches.push(LayerRelaxationBranch {
                     layer_index, relaxing_stiffness_n_m2: stiffness, relaxation_time_s: tau,
                 });
-                terms.push((delta, tau));
             }
-            spectra.push(GeneralizedMaxwell::new(equilibrium, terms)
-                .map_err(|_| invalid("layer relaxation spectrum is outside its constitutive domain"))?);
+            spectra.push(law);
         }
         if !band.0.is_finite() || !band.1.is_finite() || band.0 < 0.0 || band.1 < band.0 {
             return Err(invalid("layer relaxation frequency bands do not intersect"));
         }
         Ok(Self { properties: properties.to_vec(), branches, spectra, omega_band_rad_s: band })
     }
+}
+
+// Source admission is shared by bending, torsion and transverse shear. The
+// channel owner supplies its actual geometric integral and dimensional record.
+fn admit_bindings(
+    elastic: &ConcentricElasticSection,
+    properties: &[LayerRelaxationProperties],
+) -> Result<usize, MaterialStatePointError> {
+    if properties.len() != elastic.layers().len() {
+        return Err(invalid("section relaxation needs one source binding per layer"));
+    }
+    let mut count = 0_usize;
+    for binding in properties {
+        if binding.branches.len() > MAX_SECTION_RELAXATION_BRANCHES - count {
+            return Err(invalid("section relaxation exceeds 128 total arms"));
+        }
+        count += binding.branches.len();
+    }
+    Ok(count)
+}
+
+fn resolve_layer_spectrum(
+    elastic: &ConcentricElasticSection,
+    shear: Option<&ConcentricShearSection>,
+    layer_index: usize,
+    binding: &LayerRelaxationProperties,
+    band: &mut (f64, f64),
+) -> Result<GeneralizedMaxwell, MaterialStatePointError> {
+    let parents = match shear {
+        Some(shear) => shear.source_properties(layer_index)?,
+        None => elastic.elastic_source_properties(layer_index)?,
+    };
+    for property in parents {
+        if !property.is_constant_at_fixed_environment() {
+            return Err(invalid("section relaxation requires its original held-environment elastic parents"));
+        }
+        if let Some((lo, hi)) = property.angular_frequency_band_rad_s()? {
+            band.0 = band.0.max(lo);
+            band.1 = band.1.min(hi);
+        }
+    }
+    let elastic_modulus = match shear {
+        Some(shear) => shear.layer_shear_modulus_pa(layer_index)?,
+        None => elastic.layer_integrals()[layer_index].young_modulus_pa(),
+    };
+    let mut coefficient = |key: &str, quantity: QuantitySpec, needs_band: bool| {
+        let property = elastic.layers()[layer_index].material.property(key)
+            .ok_or_else(|| invalid("section relaxation is missing an unambiguous source coefficient"))?;
+        if property.requirement().quantity() != quantity
+            || !property.is_constant_at_fixed_environment()
+        {
+            return Err(invalid("section relaxation needs held-environment coefficients with the declared SI quantity"));
+        }
+        match property.angular_frequency_band_rad_s()? {
+            Some((lo, hi)) => { band.0 = band.0.max(lo); band.1 = band.1.min(hi); }
+            None if needs_band => return Err(invalid("each layer relaxation law needs explicit frequency support")),
+            None => (),
+        }
+        Ok(property.value_si())
+    };
+    let equilibrium = coefficient(&binding.equilibrium_modulus,
+        QuantitySpec::dimensional(Pressure::DIMS), binding.branches.is_empty())?;
+    if !equilibrium.is_finite() || equilibrium <= 0.0
+        || equilibrium.to_bits() != elastic_modulus.to_bits()
+    {
+        return Err(invalid("each elastic layer must use its explicit equilibrium modulus"));
+    }
+    let mut terms = Vec::with_capacity(binding.branches.len());
+    for (index, pair) in binding.branches.iter().enumerate() {
+        if binding.branches[..index].contains(pair) {
+            return Err(invalid("layer relaxation repeats a source-property pair"));
+        }
+        let delta = coefficient(&pair.0, QuantitySpec::dimensional(Pressure::DIMS), false)?;
+        let tau = coefficient(&pair.1, QuantitySpec::dimensional(Time::DIMS), true)?;
+        if !delta.is_finite() || delta < 0.0 || !tau.is_finite() || tau <= 0.0 {
+            return Err(invalid("layer relaxation needs nonnegative modulus increments and positive times"));
+        }
+        terms.push((delta, tau));
+    }
+    GeneralizedMaxwell::new(equilibrium, terms)
+        .map_err(|_| invalid("layer relaxation spectrum is outside its constitutive domain"))
 }
 
 impl ConcentricPronySection {

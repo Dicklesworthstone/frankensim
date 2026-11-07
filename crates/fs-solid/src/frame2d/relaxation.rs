@@ -1,8 +1,10 @@
-//! Source-authored longitudinal Maxwell memory in native frame AC, poles and time histories.
+//! Source-authored longitudinal and shear Maxwell memory in native frame histories.
 //!
 //! The original member supplies E_infinity. Every positive layer arm contributes
 //! its original delta_E and tau through the geometry-owned axial and two bending
-//! strain traces. All native frame coordinates, memory states and optional
+//! strain traces. Explicit Timoshenko selections also retain each independent
+//! delta_G and tau on that same original reference interpolation. All native
+//! frame coordinates, memory states and optional
 //! boundary states/constraints enter the SAME coupled pHS preparation.
 //!
 //! In the elastic-strain chart z=sqrt(k)*(extension-viscous_extension),
@@ -21,12 +23,16 @@ use super::coupled::{
 };
 use super::{Frame2d, Rayleigh};
 use fs_exec::Cx;
+use fs_material::section::relaxation::transverse::ConcentricPronyTransverseSection;
 use fs_material::section::relaxation::{ConcentricPronySection, LayerRelaxationProperties};
 use fs_material::state_point::MaterialStatePointError;
 use fs_math::c64::C64;
 use fs_phs::harmonic::{HarmonicResponse, MAX_HARMONIC_DIMENSION};
 use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage};
-use memory::{MemoryCoefficient, longitudinal_coefficients};
+use memory::{
+    MemoryCoefficient, longitudinal_coefficients, longitudinal_coefficients_on_reference,
+    transverse_coefficient,
+};
 use std::collections::BTreeSet;
 
 /// One original scalar longitudinal E(t) per bonded layer, explicitly governing
@@ -38,17 +44,27 @@ pub struct FrameLongitudinalRelaxation {
     pub layers: Vec<LayerRelaxationProperties>,
 }
 
+/// Independent G(t) for every layer of an original shear-deformable member.
+/// An explicit empty spectrum declares elastic shear. E(t) never supplies an
+/// inferred G(t), Poisson ratio or relaxation time.
+#[derive(Clone, Debug)]
+pub struct FrameTransverseRelaxation {
+    pub element: usize,
+    pub layers: Vec<LayerRelaxationProperties>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameStrainChannel {
     Axial,
     SymmetricBending,
     AntisymmetricBending,
+    TransverseShear,
 }
 impl FrameStrainChannel {
     fn index(self) -> usize {
         match self {
             Self::Axial => 0,
-            Self::SymmetricBending => 1,
+            Self::SymmetricBending | Self::TransverseShear => 1,
             Self::AntisymmetricBending => 2,
         }
     }
@@ -59,6 +75,8 @@ impl FrameStrainChannel {
 pub struct FrameRelaxationMember {
     pub element: usize,
     pub source: ConcentricPronySection,
+    /// Original independent shear laws, present only on Timoshenko members.
+    pub transverse_source: Option<ConcentricPronyTransverseSection>,
     dofs: [usize; 6],
     weights: [[f64; 6]; 3],
 }
@@ -177,8 +195,49 @@ impl Frame2d {
         controls: FrameCoupledControls,
         cx: &Cx<'_>,
     ) -> Result<PreparedFrameRelaxation, FrameRelaxationError> {
+        self.prepare_relaxing_resonance_with_transverse_shear(
+            rayleigh,
+            selections,
+            &[],
+            boundary,
+            controls,
+            cx,
+        )
+    }
+
+    /// Compose independent source E(t) and G(t) on the SAME native frame.
+    ///
+    /// Every selected Timoshenko member requires an explicit shear selection,
+    /// including an empty-arm declaration for purely elastic G. Longitudinal
+    /// selections remain required for all selected members; Euler--Bernoulli
+    /// members retain their existing three channels and refuse shear bindings.
+    ///
+    /// The original equilibrium section fixes the displacement/section-spin
+    /// interpolation, mass and three work ports. E arms use that reference
+    /// curvature; each G arm adds its own constant engineering-shear memory
+    /// through the symmetric port. Neither frequency nor time changes shapes.
+    /// Equilibrium stiffness is already present once in the native frame.
+    /// Distinct layer times, zero-arm receipts, boundary states, physical heat,
+    /// AC/poles and exact transient histories share the existing pHS owner.
+    ///
+    /// Fixed material temperature, small strain and perfect bonding apply.
+    /// This Galerkin model is not a frequency-dependent static condensation;
+    /// spatial refinement controls its approximation. State budgets charge
+    /// three states per declared E arm and one per G arm before source queries.
+    pub fn prepare_relaxing_resonance_with_transverse_shear(
+        &self,
+        rayleigh: Rayleigh,
+        selections: &[FrameLongitudinalRelaxation],
+        transverse: &[FrameTransverseRelaxation],
+        boundary: Option<FrameDynamicPortLoad<'_>>,
+        controls: FrameCoupledControls,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedFrameRelaxation, FrameRelaxationError> {
         poll(cx)?;
-        if selections.is_empty() || selections.len() > self.elements.len() {
+        if selections.is_empty()
+            || selections.len() > self.elements.len()
+            || transverse.len() > selections.len()
+        {
             return Err(invalid(
                 "nonempty unique original member selections required",
             ));
@@ -218,7 +277,36 @@ impl Frame2d {
                     .ok_or_else(|| invalid("source arm count overflow"))?;
             }
         }
-        let memory_cap = 3_u128 * arms as u128;
+        let mut shear_arms = 0usize;
+        let mut shear_members = BTreeSet::new();
+        for selection in transverse {
+            poll(cx)?;
+            if !unique.contains(&selection.element)
+                || !shear_members.insert(selection.element)
+                || self.material_shear_section(selection.element).is_none()
+            {
+                return Err(invalid(
+                    "shear relaxation requires a unique selected Timoshenko member",
+                ));
+            }
+            for layer in &selection.layers {
+                poll(cx)?;
+                shear_arms = shear_arms
+                    .checked_add(layer.branches.len())
+                    .ok_or_else(|| invalid("shear source arm count overflow"))?;
+            }
+        }
+        for selection in selections {
+            poll(cx)?;
+            if self.material_shear_section(selection.element).is_some()
+                && !shear_members.contains(&selection.element)
+            {
+                return Err(invalid(
+                    "Timoshenko relaxation requires explicit independent shear spectra",
+                ));
+            }
+        }
+        let memory_cap = 3_u128 * arms as u128 + shear_arms as u128;
         let load_cap = memory_cap + nb as u128;
         limit(
             "frame plus all declared memory and boundary states",
@@ -298,6 +386,9 @@ impl Frame2d {
                 .is_some_and(|section| {
                     section.axial().viscous_rigidity_n_s() != 0.0
                         || section.bending().viscous_stiffness_n_m2_s() != 0.0
+                        || section
+                            .transverse()
+                            .is_some_and(|shear| shear.viscous_rigidity_n_s() != 0.0)
                 })
             {
                 return Err(invalid(
@@ -311,13 +402,33 @@ impl Frame2d {
                 })?
                 .clone()
                 .with_prony_bending(&selection.layers)?;
+            let transverse_source = transverse
+                .iter()
+                .find(|shear| shear.element == selection.element)
+                .map(|shear| {
+                    self.material_shear_section(selection.element)
+                        .expect("admitted original shear section")
+                        .clone()
+                        .with_prony_transverse(&shear.layers)
+                })
+                .transpose()?;
+            let (bending_fraction, shear_fraction) = self.elements[selection.element]
+                .transverse_shear
+                .as_ref()
+                .map_or((1.0, 0.0), |shear| {
+                    (shear.bending_fraction, shear.shear_fraction)
+                });
             let source_band = source.omega_band_rad_s();
             band = (band.0.max(source_band.0), band.1.min(source_band.1));
+            if let Some(shear) = &transverse_source {
+                let source_band = shear.omega_band_rad_s();
+                band = (band.0.max(source_band.0), band.1.min(source_band.1));
+            }
             if band.0 > band.1 {
                 return Err(invalid("original source frequency supports do not overlap"));
             }
             let (dofs, weights, length) = self
-                .reference_strain_traces(selection.element)
+                .reference_member_coordinates(selection.element)
                 .map_err(FrameCoupledError::Frame)?;
             for (layer, (geometry, law)) in source
                 .elastic()
@@ -331,13 +442,24 @@ impl Frame2d {
                     if delta == 0.0 {
                         continue;
                     }
-                    let coefficients = longitudinal_coefficients(
-                        delta,
-                        geometry.area_m2(),
-                        geometry.second_moment_m4(),
-                        length,
-                        tau,
-                    )
+                    let coefficients = if transverse_source.is_some() {
+                        longitudinal_coefficients_on_reference(
+                            delta,
+                            geometry.area_m2(),
+                            geometry.second_moment_m4(),
+                            length,
+                            tau,
+                            bending_fraction,
+                        )
+                    } else {
+                        longitudinal_coefficients(
+                            delta,
+                            geometry.area_m2(),
+                            geometry.second_moment_m4(),
+                            length,
+                            tau,
+                        )
+                    }
                     .ok_or_else(|| {
                         invalid("positive longitudinal memory coefficients are not representable")
                     })?;
@@ -363,9 +485,41 @@ impl Frame2d {
                     }
                 }
             }
+            if let Some(shear) = &transverse_source {
+                let mut branch = 0usize;
+                for (layer, law) in shear.spectra().iter().enumerate() {
+                    for (source_arm, &(delta, tau)) in law.terms.iter().enumerate() {
+                        poll(cx)?;
+                        let rigidity = shear.branches()[branch].relaxing_rigidity_n;
+                        branch += 1;
+                        if delta == 0.0 {
+                            continue;
+                        }
+                        let coefficient =
+                            transverse_coefficient(rigidity, length, tau, shear_fraction)
+                                .ok_or_else(|| {
+                                    invalid(
+                                        "positive shear memory coefficients are not representable",
+                                    )
+                                })?;
+                        coordinates.push(FrameRelaxationCoordinate {
+                            element: selection.element,
+                            layer,
+                            source_arm,
+                            channel: FrameStrainChannel::TransverseShear,
+                            native_state: 2 * nf + coordinates.len(),
+                            stiffness_n_m: coefficient.stiffness,
+                            relaxation_time_s: tau,
+                            member: members.len(),
+                            coefficient,
+                        });
+                    }
+                }
+            }
             members.push(FrameRelaxationMember {
                 element: selection.element,
                 source,
+                transverse_source,
                 dofs,
                 weights,
             });

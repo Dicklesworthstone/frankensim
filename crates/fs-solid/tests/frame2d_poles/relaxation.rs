@@ -2,6 +2,7 @@
 //! physical descriptor loading. Independent closed-form member equations.
 
 mod transient;
+mod transverse;
 
 use super::{NO_RAYLEIGH, RADIUS, RHO, YOUNG, guided, with_cx};
 use fs_evidence::ValidityDomain;
@@ -63,6 +64,15 @@ fn material_layer(
     arms: &[(f64, f64)],
     band: (f64, f64),
 ) -> (ConcentricMaterialLayer, LayerRelaxationProperties) {
+    material_layer_with_transverse(radius, arms, None, band)
+}
+
+fn material_layer_with_transverse(
+    radius: f64,
+    arms: &[(f64, f64)],
+    shear_arms: Option<&[(f64, f64)]>,
+    band: (f64, f64),
+) -> (ConcentricMaterialLayer, LayerRelaxationProperties) {
     let mut definitions = vec![
         ("density".to_string(), RHO, Density::DIMS, false),
         ("young_modulus".to_string(), YOUNG, Pressure::DIMS, false),
@@ -75,6 +85,31 @@ fn material_layer(
         definitions.push((delta_name.clone(), delta, Pressure::DIMS, true));
         definitions.push((tau_name.clone(), tau, Time::DIMS, true));
         branches.push((delta_name, tau_name));
+    }
+    if let Some(shear_arms) = shear_arms {
+        definitions.extend([
+            (
+                "shear_modulus".to_string(),
+                YOUNG / 3.0,
+                Pressure::DIMS,
+                false,
+            ),
+            (
+                "shear_equilibrium".to_string(),
+                YOUNG / 3.0,
+                Pressure::DIMS,
+                true,
+            ),
+        ]);
+        for (index, &(delta, tau)) in shear_arms.iter().enumerate() {
+            definitions.push((
+                format!("shear_increment_{index}"),
+                delta,
+                Pressure::DIMS,
+                true,
+            ));
+            definitions.push((format!("shear_time_{index}"), tau, Time::DIMS, true));
+        }
     }
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
