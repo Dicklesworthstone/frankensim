@@ -337,7 +337,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// adaptive rise tolerances from declared radiative reservoirs as well.
 /// Version 133 admits closed/open reflected-enclosure adaptive goals through
 /// original contact and convection plus complete physical radiative fluxes.
-pub const SOLVE_DRIVER_VERSION: u32 = 133;
+/// Version 134 shares the physical solve geometry across surface power, airflow
+/// measures, retained fields and adjoints when propagating geometry offsets.
+pub const SOLVE_DRIVER_VERSION: u32 = 134;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";
@@ -5874,30 +5876,6 @@ fn offset_mesh(
     })
 }
 
-/// Each target's wetted area measured on the perturbed faces it owns; a target
-/// the lowered boundary does not name keeps its nominal area.
-fn perturbed_target_areas(
-    moved: &fs_conduction::ConductionMesh,
-    boundary: &fs_conduction::ThermalBoundary,
-    nominal: &BTreeMap<String, f64>,
-) -> BTreeMap<String, f64> {
-    nominal
-        .iter()
-        .map(|(target, &area)| {
-            let area = boundary.region_names().iter().position(|name| name == target).map_or(area, |index| {
-                moved
-                    .boundary()
-                    .iter()
-                    .enumerate()
-                    .filter(|(slot, _)| boundary.region_for(*slot) == Some(index))
-                    .map(|(_, face)| face.area)
-                    .sum()
-            });
-            (target.clone(), area)
-        })
-        .collect()
-}
-
 fn parse_claim_id(pin: &str, target: &str) -> Result<ClaimId, SolveRefusal> {
     ContentHash::from_hex(pin).map(ClaimId).ok_or_else(|| {
         conduction_error(
@@ -6054,9 +6032,15 @@ struct ConductionBoundaryLowering {
 /// Robin row ONLY from `derived` (target -> (h, T_ref)) supplied by the
 /// conjugate exchange; without an entry it refuses rather than inventing a
 /// coefficient.
+///
+/// The reference mesh retains the original assignment coordinates. The physical
+/// mesh has the same numbered vertices and ordered boundary faces at the solve
+/// geometry. Its native face areas keep total-watt sources fixed under shape
+/// changes, while prescribed W/m² conditions retain their flux density.
 fn conduction_boundary(
     setup: &ConductionSetup,
     mesh: &fs_conduction::ConductionMesh,
+    physical_mesh: &fs_conduction::ConductionMesh,
     labeled: &fs_mesh::LabeledTetComplex,
     surfaces: &BTreeMap<String, AssignmentSurface>,
     regions: &[fs_mesh::RegionSpec],
@@ -6125,14 +6109,6 @@ fn conduction_boundary(
             ));
         }
     }
-    let face_area = |face: &fs_conduction::BoundaryFace| {
-        let p = mesh.positions();
-        let [a, b, c] = face.vertices.map(|v| p[v as usize]);
-        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]];
-        0.5 * fs_math::det::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])
-    };
     for row in &setup.boundaries {
         let surface = surfaces.get(&row.target).ok_or_else(|| {
             conduction_error(
@@ -6165,27 +6141,16 @@ fn conduction_boundary(
         let (matched, area_m2) = mesh
             .boundary()
             .iter()
-            .filter(|face| {
+            .enumerate()
+            .filter(|(_, face)| {
                 let key = coordinate_face_key(mesh.positions(), face.vertices);
                 !interface_faces.contains(&key)
                     && parent_by_boundary
                         .get(&key)
                         .is_some_and(|parent| parents.contains(parent))
             })
-            .fold((0usize, 0.0f64), |(count, area), face| {
-                let p = mesh.positions();
-                let [a, b, c] = face.vertices.map(|v| p[v as usize]);
-                let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-                let w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-                let n = [
-                    u[1] * w[2] - u[2] * w[1],
-                    u[2] * w[0] - u[0] * w[2],
-                    u[0] * w[1] - u[1] * w[0],
-                ];
-                (
-                    count + 1,
-                    area + 0.5 * fs_math::det::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]),
-                )
+            .fold((0usize, 0.0f64), |(count, area), (slot, _)| {
+                (count + 1, area + physical_mesh.boundary()[slot].area)
             });
         target_area_m2.insert(row.target.clone(), area_m2);
         if matched == 0 {
@@ -6286,7 +6251,10 @@ fn conduction_boundary(
             !interface_faces.contains(&key)
                 && parent_by_boundary.get(&key).is_some_and(|parent| parents.contains(parent))
         };
-        let area_m2: f64 = mesh.boundary().iter().filter(|face| in_surface(face)).map(face_area).sum();
+        let area_m2: f64 = mesh.boundary().iter().enumerate()
+            .filter(|(_, face)| in_surface(face))
+            .map(|(slot, _)| physical_mesh.boundary()[slot].area)
+            .sum();
         if !(area_m2.is_finite() && area_m2 > 0.0) {
             return Err(conduction_error(
                 "cli-solve-conduction-boundary-empty",
@@ -6295,9 +6263,9 @@ fn conduction_boundary(
             ));
         }
         target_area_m2.insert(name.clone(), area_m2);
-        // Uniform inward flux: the declared watts over the surface's area. A
-        // declared surface-offset band translates a planar patch along its
-        // normal, so the nominal area is also the perturbed one.
+        // Uniform inward flux integrates to the declared watts on the actual
+        // solve geometry. Even a nominally planar patch changes area when its
+        // edge vertices move along the enclosing body's averaged normals.
         let condition = fs_conduction::ThermalBc::neumann(-watts / area_m2).map_err(|error| {
             conduction_error(
                 "cli-solve-conduction-boundary",
@@ -6987,6 +6955,7 @@ fn conduction_solve_receipt(
             let lowering = conduction_boundary(
                 setup,
                 &mesh,
+                solve_mesh,
                 labeled,
                 &surfaces,
                 &regions,
@@ -7062,6 +7031,7 @@ fn conduction_solve_receipt(
             let placeholder_lowering = conduction_boundary(
                 setup,
                 &mesh,
+                solve_mesh,
                 labeled,
                 &surfaces,
                 &regions,
@@ -7069,14 +7039,7 @@ fn conduction_solve_receipt(
                 &placeholder,
                 &surface_heat_inputs,
             )?;
-            let areas = match &perturbed {
-                None => placeholder_lowering.target_area_m2,
-                Some(moved) => perturbed_target_areas(
-                    moved,
-                    &placeholder_lowering.boundary,
-                    &placeholder_lowering.target_area_m2,
-                ),
-            };
+            let areas = placeholder_lowering.target_area_m2;
             let path = conjugate::derive_air_path(
                 &laws,
                 &handoff.operating,
@@ -7108,7 +7071,7 @@ fn conduction_solve_receipt(
                 }));
             }
             let boundary = conduction_boundary(
-                setup, &mesh, labeled, &surfaces, &regions, &interface_faces,
+                setup, &mesh, solve_mesh, labeled, &surfaces, &regions, &interface_faces,
                 &initial_derived, &surface_heat_inputs,
             )?.boundary;
             let interfaces = if temperature_contact.is_none() {
@@ -7262,7 +7225,7 @@ fn conduction_solve_receipt(
         let surface_slots = if surface_heat_inputs.names.is_empty() {
             BTreeMap::new()
         } else {
-            conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+            conduction_boundary(setup, &mesh, solve_mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.surface_slots
         };
         let surface_fragment = if surface_heat_inputs.watts.is_empty() {
@@ -7271,7 +7234,7 @@ fn conduction_solve_receipt(
             // Each powered surface's measured area and delivered watts, plus
             // the hottest vertex: the footprint falsifiers (area equals the
             // declared patch; moving the patch moves the hot spot).
-            let areas = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+            let areas = conduction_boundary(setup, &mesh, solve_mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.target_area_m2;
             let finite = |value: f64| {
                 canonical_f64(value).ok_or_else(|| {
@@ -7298,7 +7261,7 @@ fn conduction_solve_receipt(
                 .iter()
                 .enumerate()
                 .fold(0, |best, (index, &t)| if t > solution.temperature[best] { index } else { best });
-            let [x, y, z] = mesh.positions()[hottest];
+            let [x, y, z] = solve_mesh.positions()[hottest];
             Some(format!(
                 "{{\"surfaces\":[{}],\"hottest_vertex_m\":[{},{},{}]}}",
                 rows.join(","),
@@ -7308,7 +7271,7 @@ fn conduction_solve_receipt(
             ))
         };
         let adjoint_data = if adaptive_requested || roundoff_wanted || adjoint_requested || mean_bound_requested {
-            let boundary = conduction_boundary(setup, &mesh, labeled, &surfaces, &regions,
+            let boundary = conduction_boundary(setup, &mesh, solve_mesh, labeled, &surfaces, &regions,
                 &interface_faces, &derived_boundary, &surface_heat_inputs)?.boundary;
             let interface_surfaces = if temperature_contact.is_none() {
                 lower_thermal_interface_surfaces(spec, cards, &interface_resolution)?
@@ -7344,7 +7307,8 @@ fn conduction_solve_receipt(
         check_deadline()?;
         let mut solved = RungSolved {
             census,
-            mesh,
+            // QoIs and rebuilt operators must retain the geometry actually solved.
+            mesh: perturbed.unwrap_or(mesh),
             solution,
             labels,
             interface_pair_count: interface_resolution.pairs.len(),
@@ -14669,6 +14633,116 @@ impl<'a> JsonCursor<'a> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn g0_surface_power_uses_physical_area_and_preserves_assignment_identity() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        use fs_conduction::{ConductionMesh, ScalarField, ThermalBc};
+        use fs_exec::{Budget, Cx, ExecMode, StreamKey};
+        use fs_feec::TetComplex;
+
+        let gate = CancelGate::new_clock_free();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey { seed: 7, kernel_id: 1, tile: 0, iteration: 0 },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let positions = vec![
+                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
+            ];
+            let triangles = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+            let regions = vec![fs_mesh::RegionSpec {
+                id: fs_mesh::RegionId(1),
+                kind: fs_mesh::RegionKind::Solid,
+                seed: [0.1, 0.1, 0.1],
+                triangles: triangles.clone(),
+            }];
+            let audited = fs_mesh::volumetricize(
+                fs_mesh::UnverifiedPlc::new(positions, regions.clone()),
+                fs_mesh::VolumetricPolicy::fixture_default("m"),
+                &cx,
+            ).unwrap();
+            let labeled = audited.labeled();
+            let labels: Vec<u32> = labeled.region_of_tet().iter().map(|id| id.0).collect();
+            let mesh = ConductionMesh::new_region_owned(
+                TetComplex::from_tets(labeled.positions().len(), labeled.tets().to_vec()),
+                labeled.positions().to_vec(),
+                &labels,
+            ).unwrap();
+            let surfaces = BTreeMap::from([
+                ("heater".to_string(), super::AssignmentSurface {
+                    triangles: vec![triangles[0]], enclosed_volume: None,
+                }),
+                ("flux".to_string(), super::AssignmentSurface {
+                    triangles: vec![triangles[1]], enclosed_volume: None,
+                }),
+            ]);
+            let setup = fs_project::ConductionSetup {
+                regions: Vec::new(),
+                boundaries: vec![fs_project::spec::ThermalBoundary {
+                    target: "flux".to_string(),
+                    condition: fs_project::ThermalBoundaryCondition::HeatFlux {
+                        outward_flux: fs_qty::QtyAny::new(
+                            2.0, fs_project::spec::dims::HEAT_FLUX,
+                        ),
+                    },
+                }],
+                adiabatic_remainder: true,
+                radiation: None,
+                enclosure_radiation: None,
+                transient: None,
+            };
+            let heat = super::SurfaceHeat {
+                names: BTreeSet::from(["heater".to_string(), "flux".to_string()]),
+                watts: BTreeMap::from([("heater".to_string(), 7.0)]),
+            };
+            let lower = |physical_mesh: &ConductionMesh| {
+                super::conduction_boundary(
+                    &setup, &mesh, physical_mesh, labeled, &surfaces, &regions,
+                    &BTreeSet::new(), &BTreeMap::new(), &heat,
+                ).unwrap()
+            };
+            let nominal = lower(&mesh);
+            for scale in [0.75, 1.0, 1.25] {
+                let physical = ConductionMesh::new(
+                    mesh.complex().clone(),
+                    mesh.positions().iter().map(|p| p.map(|x| scale * x)).collect(),
+                ).unwrap();
+                let lowered = lower(&physical);
+                assert_eq!(lowered.surface_slots, nominal.surface_slots);
+                assert_eq!(lowered.boundary.region_names(), nominal.boundary.region_names());
+                let mut heater_outward_w = 0.0;
+                let mut prescribed_outward_w = 0.0;
+                for (slot, face) in physical.boundary().iter().enumerate() {
+                    let Some(region) = lowered.boundary.region_for(slot) else { continue };
+                    let Some(ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) }) =
+                        lowered.boundary.condition_for(slot)
+                    else { panic!("both authored surface laws are uniform Neumann rows") };
+                    match lowered.boundary.region_names()[region].as_str() {
+                        "heater" => heater_outward_w += *flux * face.area,
+                        "flux" => {
+                            assert_eq!(*flux, 2.0, "prescribed flux keeps its W/m² value");
+                            prescribed_outward_w += *flux * face.area;
+                        }
+                        _ => panic!("lowering invented a boundary region"),
+                    }
+                }
+                assert!((heater_outward_w + 7.0).abs() < 1e-12,
+                    "declared watts must survive changed surface area: {heater_outward_w}");
+                assert!((prescribed_outward_w - scale * scale).abs() < 1e-12,
+                    "prescribed density must integrate over the physical half-unit face");
+                for target in ["heater", "flux"] {
+                    assert!((lowered.target_area_m2[target] - 0.5 * scale * scale).abs() < 1e-12);
+                }
+            }
+        });
+    }
 
     #[test]
     fn envelope_vertices_move_inlet_reference_and_radiative_reservoirs_together() {

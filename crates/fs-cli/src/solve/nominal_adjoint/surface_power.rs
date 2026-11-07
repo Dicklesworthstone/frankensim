@@ -36,14 +36,9 @@ pub(super) fn pullback(
             return Err(bad("surface-power slots differ from the retained Neumann trace"));
         }
         count += 1;
-        let [a, b, c] = face.vertices.map(|v| mesh.positions()[v as usize]);
-        let u = [b[0]-a[0], b[1]-a[1], b[2]-a[2]];
-        let w = [c[0]-a[0], c[1]-a[1], c[2]-a[2]];
-        let cross = [u[1]*w[2]-u[2]*w[1], u[2]*w[0]-u[0]*w[2], u[0]*w[1]-u[1]*w[0]];
-        // Exact geometric expression/order used by conduction_boundary to
-        // normalize the declared watts. Assembly uses its cached face.area.
-        area = finite(area + 0.5*fs_math::det::sqrt(
-            cross[0]*cross[0]+cross[1]*cross[1]+cross[2]*cross[2]))?;
+        // Share the primal normalization and the assembled P1 load's native
+        // physical face measure; no second geometric evaluation may drift.
+        area = finite(area + face.area)?;
         for &v in &face.vertices {
             load_bar = finite(load_bar + (face.area/3.0)*finite(lambda[v as usize])?)?;
         }
