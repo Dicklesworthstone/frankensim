@@ -31,6 +31,7 @@ use super::*;
 pub mod implicit;
 
 /// Explicit current face metrics while reference inventory stays immutable.
+#[path = "conduction/geometry.rs"]
 pub mod geometry;
 pub use geometry::{CurrentConductionGeometry, CurrentConductiveBoundary, CurrentConductiveLink};
 
