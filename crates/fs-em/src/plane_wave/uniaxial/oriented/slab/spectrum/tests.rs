@@ -137,6 +137,28 @@ fn slab_preparation_limits_and_cancelled_field_leave_reusable_source() {
         maximum_modes: 2,
         maximum_workspace_bytes: usize::MAX,
     };
+    let required = admit(2, limits).unwrap();
+    assert_eq!(
+        admit(
+            2,
+            UniaxialSpectrumLimits {
+                maximum_workspace_bytes: required,
+                ..limits
+            }
+        )
+        .unwrap(),
+        required
+    );
+    assert!(
+        admit(
+            2,
+            UniaxialSpectrumLimits {
+                maximum_workspace_bytes: required - 1,
+                ..limits
+            }
+        )
+        .is_err()
+    );
     assert!(admit(3, limits).is_err());
     assert!(
         admit(
@@ -202,4 +224,35 @@ fn slab_preparation_limits_and_cancelled_field_leave_reusable_source() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn slab_spectrum_keeps_sub_ulp_interference_between_distinct_incident_directions() {
+    let p = 0.6_f64;
+    let other = p.next_up();
+    let d = data();
+    let modes = prepare_modes(
+        d,
+        &[
+            input(p, [1.0, 0.0], [C64::ZERO, C64::ONE]),
+            input(other, [1.0, 0.0], [C64::ZERO, -C64::ONE]),
+        ],
+        &mut || false,
+    )
+    .unwrap();
+    let x = 1e-4;
+    let field = field_at(
+        &modes,
+        d.thickness_m,
+        SlabRegion::Incident,
+        [x, 0.0, 0.0],
+        &mut || false,
+    )
+    .unwrap();
+    // exp(-i*p*x)*(1-exp(-i*(other-p)*x)); the omitted quadratic
+    // term is below 1e-40. Separately rounded phasors lose this field.
+    let delta = (other - p) * x;
+    let expected = C64::new((p * x).cos(), -(p * x).sin()) * C64::new(0.0, delta);
+    assert!(field.electric_v_m[1].abs() > 0.0);
+    close(field.electric_v_m[1], expected, 3e-35);
 }

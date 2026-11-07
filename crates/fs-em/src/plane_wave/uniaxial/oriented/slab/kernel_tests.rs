@@ -385,3 +385,43 @@ fn matched_and_thin_slab_limits_keep_phase_and_physical_domains() {
         .is_err()
     );
 }
+
+#[test]
+fn optical_exit_fields_retain_the_authored_face_distance() {
+    let mut d = input(1.0, 1.0, 1.0, 1.0, 1.000_000_000_000_000_2, [1.0, 2.0, 3.0]);
+    d.crystal.omega = 1e7 * C0;
+    let r = solve(d, Incidence::Cosine(1.0), [C64::ZERO, C64::ONE]).unwrap();
+    let field = r
+        .field_at(SlabRegion::Transmitted, [0.0, 0.0, 1000.000_000_000_000_1])
+        .unwrap();
+    // Independent 110-digit reduction for the exact binary64 k*z. A matched
+    // slab must preserve that complete physical path across its exit anchor.
+    let expected = C64::new(0.873_120_176_906_475_4, 0.487_505_032_465_107_1);
+    complex_near(field.electric_v_m[1], expected, 5e-16);
+    complex_near(
+        field.magnetic_a_m[0],
+        expected.scale(-1.0 / (MU * C0)),
+        3e-18,
+    );
+    near(field.poynting_w_m2[2], 0.5 / (MU * C0), 2e-18);
+}
+
+#[test]
+fn original_slab_exit_retains_a_late_evanescent_field_without_fictitious_heat() {
+    let d = input(1.5, 1.7, 2.0, 0.9, 0.6, [1.0, 2.0, 3.0]);
+    let r = solve(
+        d,
+        Incidence::TangentialIndex(1.2),
+        [C64::ZERO, C64::from_re(1e100)],
+    )
+    .unwrap();
+    assert_eq!(r.exit_wave_kind, UniaxialWaveKind::Evanescent);
+    let z = r.thickness_m - 800.0 / r.exit_normal_wavenumber_rad_m.im;
+    let tail = r.field_at(SlabRegion::Transmitted, [0.0, 0.0, z]).unwrap();
+    let exposure = -r.exit_normal_wavenumber_rad_m.im * (z - r.thickness_m);
+    let expected = (r.transmitted_electric_v_m[1].abs().ln() - exposure).exp();
+    assert!(tail.electric_v_m[1].abs() > 0.0);
+    near(tail.electric_v_m[1].abs() / expected, 1.0, 4e-13);
+    assert_eq!(r.transmitted_power_fraction, 0.0);
+    assert_eq!(tail.poynting_w_m2[2], 0.0);
+}

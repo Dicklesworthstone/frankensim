@@ -6314,10 +6314,14 @@ covered by focused tests. The prepared point evaluator and the existing
 accumulator, retaining relative phase between both eigenmodes and authored
 incident directions before coherent power contraction. Sparse spectra keep
 their original source resolution, global-axis rotations, coefficients,
-mode/workspace limits and cancellation. Finite-slab observers retain their
-original face-anchored phases and helper signatures while sharing the DD
-field contraction and accounting for its actual storage. FFT-grid attachment
-remains outside this change.
+mode/workspace limits and cancellation. Finite-slab observers pass their solved
+waves, signed normal wavevectors and physical face anchors into this same
+propagation owner. The original face-distance subtraction retains its DD
+residual before phase and attenuation multiplication; relative carriers are
+combined before phasors round. Equal wavevectors anchored at distinct faces
+therefore retain their relative phase even at very large observation
+coordinates. Workspace admission accounts for the actual shared accumulator.
+FFT-grid attachment remains outside this change.
 
 
 ### Retained vector polarization on the native planar Gauss solve
@@ -6554,6 +6558,18 @@ summed before forming Poynting flux. The same global crystal axis applies to
 every azimuth. Preparation is bounded O(N); point queries allocate nothing and
 perform no material or boundary reevaluation. Cancellation returns no partial
 source or field.
+
+The shared spatial propagator keeps entrance anchors for incident, reflected
+and forward internal waves, and exit anchors for backward internal and
+transmitted waves. Backward waves retain their actual signed global normal
+wavevector. All physical face distances, relative eigenmode phases and
+interdirection phases enter one compensated E/H sum before signed SI Poynting
+flux is formed. Scale-aware attenuation preserves representable late
+evanescent fields when a standalone exponential would underflow. Physical
+region admission occurs once per query; preparation and point queries retain
+their original cancellation and storage limits. Focused numerical controls
+cover optical face-distance residuals, weak backward retardance, distinct-face
+interference, late exit evanescence and sub-ULP interdirection cancellation.
 
 This is one homogeneous transparent uniaxial slab. The exit can propagate,
 be critical or be evanescent. Exactly coalesced **internal crystal** critical

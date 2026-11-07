@@ -1,8 +1,7 @@
 //! Sparse finite-slab illumination, reusing the original coherent-field sum.
 use super::super::super::kernel::unit_axis;
-use super::super::spectrum::{
-    FieldSum, UniaxialIncidentMode, UniaxialSpectrumField, UniaxialSpectrumLimits,
-};
+use super::super::kernel::FieldSum;
+use super::super::spectrum::{UniaxialIncidentMode, UniaxialSpectrumField, UniaxialSpectrumLimits};
 use super::super::{Incidence, ReflectionError};
 use super::{OrientedUniaxialSlab, SlabRegion, UniaxialSlabResponse, kernel};
 use crate::plane_wave::angular_spectrum::AngularSpectrumError;
@@ -154,13 +153,17 @@ fn field_at(
 ) -> Result<UniaxialSpectrumField> {
     poll(cancelled)?;
     kernel::admit_point(region, point, depth)?;
-    let mut sum = FieldSum::new();
+    let mut sum = FieldSum::at_point(point).map_err(bad)?;
     for mode in modes {
         poll(cancelled)?;
-        mode.response
-            .accumulate(&mut sum, region, point, mode.axis)?;
+        mode.response.accumulate(&mut sum, region, mode.axis)?;
     }
-    sum.finish()
+    let field = sum.finish().map_err(bad)?;
+    Ok(UniaxialSpectrumField {
+        electric_v_m: field.electric_v_m,
+        magnetic_a_m: field.magnetic_a_m,
+        poynting_w_m2: field.poynting_w_m2,
+    })
 }
 
 #[cfg(test)]

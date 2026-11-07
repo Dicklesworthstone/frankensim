@@ -415,12 +415,22 @@ fn wrong_halfspaces_and_nonfinite_coordinates_refuse_without_changing_preparatio
 fn shared_accumulator_keeps_distinct_direction_dark_and_longitudinal_fields() {
     let data = Input {
         omega: C0,
-        ni: 1.0, no: 1.0, ne: 1.0,
+        ni: 1.0,
+        no: 1.0,
+        ne: 1.0,
         electric: [C64::ZERO, C64::ONE],
         ..input([1.0, 2.0, 3.0], 0.8)
     };
-    let a = solve(Input { incidence: Incidence::TangentialIndex(0.6), ..data }).unwrap();
-    let b = solve(Input { incidence: Incidence::TangentialIndex(-0.6), ..data }).unwrap();
+    let a = solve(Input {
+        incidence: Incidence::TangentialIndex(0.6),
+        ..data
+    })
+    .unwrap();
+    let b = solve(Input {
+        incidence: Incidence::TangentialIndex(-0.6),
+        ..data
+    })
+    .unwrap();
     let sample = |x| {
         let mut sum = FieldSum::new(OrientedCrystalFieldSide::Transmitted, [x, 0.0, 0.3]).unwrap();
         sum.add_response(&a, [1.0, 0.0]).unwrap();
@@ -441,7 +451,9 @@ fn shared_accumulator_retains_sub_ulp_relative_direction_phase() {
     let other = p.next_up();
     let data = Input {
         omega: C0,
-        ni: 1.0, no: 1.0, ne: 1.0,
+        ni: 1.0,
+        no: 1.0,
+        ne: 1.0,
         electric: [C64::ZERO, C64::ONE],
         incidence: Incidence::TangentialIndex(p),
         ..input([1.0, 2.0, 3.0], 0.8)
@@ -451,7 +463,8 @@ fn shared_accumulator_retains_sub_ulp_relative_direction_phase() {
         incidence: Incidence::TangentialIndex(other),
         electric: [C64::ZERO, -C64::ONE],
         ..data
-    }).unwrap();
+    })
+    .unwrap();
     let x = 1e-4;
     let mut sum = FieldSum::new(OrientedCrystalFieldSide::Incident, [x, 0.0, 0.0]).unwrap();
     sum.add_response(&a, [1.0, 0.0]).unwrap();
@@ -472,15 +485,24 @@ fn shared_accumulator_uses_the_global_incidence_azimuth_and_all_three_coordinate
     let p = -0.7;
     let data = Input {
         omega: C0,
-        ni: 1.5, no: 1.5, ne: 1.5,
-        electric: [authored[0].scale(plane[0]) + authored[1].scale(plane[1]),
-            authored[1].scale(plane[0]) - authored[0].scale(plane[1])],
+        ni: 1.5,
+        no: 1.5,
+        ne: 1.5,
+        electric: [
+            authored[0].scale(plane[0]) + authored[1].scale(plane[1]),
+            authored[1].scale(plane[0]) - authored[0].scale(plane[1]),
+        ],
         incidence: Incidence::TangentialIndex(p),
         ..input([1.0, 2.0, 3.0], 0.8)
     };
     let mut r = solve(data).unwrap();
-    let rotate = |v: Vector| [v[0].scale(plane[0]) - v[1].scale(plane[1]),
-        v[0].scale(plane[1]) + v[1].scale(plane[0]), v[2]];
+    let rotate = |v: Vector| {
+        [
+            v[0].scale(plane[0]) - v[1].scale(plane[1]),
+            v[0].scale(plane[1]) + v[1].scale(plane[0]),
+            v[2],
+        ]
+    };
     for wave in &mut r.transmitted {
         wave.electric_v_m = rotate(wave.electric_v_m);
         wave.magnetic_a_m = rotate(wave.magnetic_a_m);
@@ -492,8 +514,11 @@ fn shared_accumulator_uses_the_global_incidence_azimuth_and_all_three_coordinate
     // Independent homogeneous-medium transversality and Faraday law.
     let q = (1.5_f64 * 1.5 - p * p).sqrt();
     let k = [p * plane[0], p * plane[1], q];
-    let e = [authored[0], authored[1],
-        -(authored[0].scale(k[0]) + authored[1].scale(k[1])).scale(1.0 / q)];
+    let e = [
+        authored[0],
+        authored[1],
+        -(authored[0].scale(k[0]) + authored[1].scale(k[1])).scale(1.0 / q),
+    ];
     let h = super::super::cross(k.map(C64::from_re), e).map(|v| v.scale(1.0 / (C0 * MU)));
     let (sine, cosine) = (k[0] * point[0] + k[1] * point[1] + k[2] * point[2]).sin_cos();
     let phase = C64::new(cosine, -sine);
@@ -518,4 +543,148 @@ fn already_phased_fields_share_the_coherent_sum_without_halfspace_admission() {
     let mut invalid = FieldSum::from_phasors();
     invalid.add_phasor(electric, magnetic, C64::new(f64::NAN, 0.0));
     assert!(invalid.finish().is_err());
+}
+
+#[test]
+fn anchored_fields_share_the_coherent_sum_without_halfspace_admission() {
+    let electric = [C64::ZERO, C64::ONE, C64::ZERO];
+    let magnetic = [-C64::ONE, C64::ZERO, C64::ZERO];
+    let geometry = WaveGeometry {
+        tangential_wavenumber_rad_m: 0.0,
+        incidence_plane_axis: [1.0, 0.0],
+        normal_wavenumber_rad_m: C64::ZERO,
+        anchor_z_m: 100.0,
+    };
+    let mut sum = FieldSum::at_point([0.0, 0.0, 100.0]).unwrap();
+    sum.add_wave(&electric, &magnetic, geometry).unwrap();
+    sum.add_wave(
+        &electric.map(|v| v * C64::new(0.0, 1.0)),
+        &magnetic.map(|v| v * C64::new(0.0, 1.0)),
+        geometry,
+    )
+    .unwrap();
+    let field = sum.finish().unwrap();
+    assert_eq!(field.electric_v_m[1], C64::new(1.0, 1.0));
+    assert_eq!(field.magnetic_a_m[0], C64::new(-1.0, -1.0));
+    assert_eq!(field.poynting_w_m2, [0.0, 0.0, 1.0]);
+
+    let mut invalid = FieldSum::at_point([0.0; 3]).unwrap();
+    invalid
+        .add_wave(&[C64::new(f64::NAN, 0.0); 3], &magnetic, geometry)
+        .unwrap();
+    assert!(invalid.finish().is_err());
+}
+
+#[test]
+fn face_distance_residuals_preserve_optical_phase_in_both_directions() {
+    let electric = [C64::ZERO, C64::ONE, C64::ZERO];
+    // Independent 110-digit decimal reduction/Taylor series of the exact
+    // binary64 inputs: exp(-i*1e7*(1000.0000000000001-1.0000000000000002)).
+    // Rounding the face subtraction first adds 2.22e-9 radians of error.
+    let expected = C64::new(-0.997_175_245_490_830_3, -0.075_110_117_695_969_2);
+    for (normal, anchor, z, sign) in [
+        (1e7, 1.000_000_000_000_000_2, 1000.000_000_000_000_1, -1.0),
+        (-1e7, 1000.000_000_000_000_1, 1.000_000_000_000_000_2, 1.0),
+    ] {
+        let magnetic = [C64::from_re(sign), C64::ZERO, C64::ZERO];
+        let mut sum = FieldSum::at_point([0.0, 0.0, z]).unwrap();
+        sum.add_wave(
+            &electric,
+            &magnetic,
+            WaveGeometry {
+                tangential_wavenumber_rad_m: 0.0,
+                incidence_plane_axis: [1.0, 0.0],
+                normal_wavenumber_rad_m: C64::from_re(normal),
+                anchor_z_m: anchor,
+            },
+        )
+        .unwrap();
+        let field = sum.finish().unwrap();
+        complex_near(field.electric_v_m[1], expected, 2e-16);
+        complex_near(field.magnetic_a_m[0], expected.scale(sign), 2e-16);
+        assert_eq!(field.poynting_w_m2[2], -0.5 * sign);
+    }
+}
+
+#[test]
+fn equal_wavevectors_retain_distinct_face_phases_at_huge_coordinates() {
+    let electric = [C64::ZERO, C64::ONE, C64::ZERO];
+    let magnetic = [-C64::ONE, C64::ZERO, C64::ZERO];
+    let geometry = WaveGeometry {
+        tangential_wavenumber_rad_m: 0.0,
+        incidence_plane_axis: [1.0, 0.0],
+        normal_wavenumber_rad_m: C64::ONE,
+        anchor_z_m: 0.0,
+    };
+    let mut sum = FieldSum::at_point([0.0, 0.0, 1e200]).unwrap();
+    sum.add_wave(&electric, &magnetic, geometry).unwrap();
+    sum.add_wave(
+        &electric.map(|v| -v),
+        &magnetic.map(|v| -v),
+        WaveGeometry {
+            anchor_z_m: 1e-20,
+            ..geometry
+        },
+    )
+    .unwrap();
+    let actual = sum.finish().unwrap();
+    // |1-exp(i*a)| = a + O(a^3). A common enormous carrier cannot erase
+    // the authored face separation, even when z-a itself rounds to z.
+    near(actual.electric_v_m[1].abs() / 1e-20, 1.0, 3e-15);
+    near(actual.poynting_w_m2[2] / 5e-41, 1.0, 3e-15);
+}
+
+#[test]
+fn backward_anchored_modes_keep_weak_retardance_and_signed_transport() {
+    let electric = [C64::ZERO, C64::ONE, C64::ZERO];
+    let magnetic = [C64::ONE, C64::ZERO, C64::ZERO];
+    let geometry = WaveGeometry {
+        tangential_wavenumber_rad_m: 1.0,
+        incidence_plane_axis: [1.0, 0.0],
+        normal_wavenumber_rad_m: -C64::ONE,
+        anchor_z_m: 1.0,
+    };
+    let distance = 2.0_f64.powi(-15);
+    let mut sum = FieldSum::at_point([1e200, 0.0, 1.0 - distance]).unwrap();
+    sum.add_wave(&electric, &magnetic, geometry).unwrap();
+    sum.add_wave(
+        &electric.map(|v| -v),
+        &magnetic.map(|v| -v),
+        WaveGeometry {
+            normal_wavenumber_rad_m: C64::from_re(-1.0_f64.next_up()),
+            ..geometry
+        },
+    )
+    .unwrap();
+    let actual = sum.finish().unwrap();
+    let retardance = f64::EPSILON * distance;
+    near(actual.electric_v_m[1].abs() / retardance, 1.0, 3e-15);
+    near(
+        actual.poynting_w_m2[2] / (-0.5 * retardance * retardance),
+        1.0,
+        3e-15,
+    );
+}
+
+#[test]
+fn face_anchored_evanescence_preserves_scaled_tails_and_refuses_growth() {
+    let electric = [C64::ZERO, C64::from_re(1e100), C64::ZERO];
+    let magnetic = [C64::new(0.0, 1e100), C64::ZERO, C64::ZERO];
+    for (decay, anchor, z) in [(-800.0, 0.0, 1.0), (800.0, 2.0, 1.0), (-800.0, 1.0, 2.0)] {
+        let geometry = WaveGeometry {
+            tangential_wavenumber_rad_m: 0.0,
+            incidence_plane_axis: [1.0, 0.0],
+            normal_wavenumber_rad_m: C64::new(0.0, decay),
+            anchor_z_m: anchor,
+        };
+        let mut sum = FieldSum::at_point([0.0, 0.0, z]).unwrap();
+        sum.add_wave(&electric, &magnetic, geometry).unwrap();
+        let tail = sum.finish().unwrap();
+        let expected = (1e100_f64.ln() - 800.0).exp();
+        near(tail.electric_v_m[1].re / expected, 1.0, 3e-13);
+        near(tail.magnetic_a_m[0].im / expected, 1.0, 3e-13);
+        assert_eq!(tail.poynting_w_m2, [0.0; 3]);
+        let mut growing = FieldSum::at_point([0.0, 0.0, 2.0 * anchor - z]).unwrap();
+        assert!(growing.add_wave(&electric, &magnetic, geometry).is_err());
+    }
 }

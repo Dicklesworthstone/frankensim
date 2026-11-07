@@ -8,7 +8,7 @@ type Result<T> = core::result::Result<T, &'static str>;
 
 #[path = "propagation.rs"]
 mod propagation;
-pub(super) use propagation::{FieldSum, field};
+pub(super) use propagation::{FieldSum, WaveGeometry, field};
 pub use propagation::{OrientedCrystalField, OrientedCrystalFieldSide};
 
 /// Actual transmitted field of one outgoing eigenmode at the interface.

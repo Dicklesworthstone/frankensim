@@ -40,12 +40,24 @@ struct Wave<'a> {
     magnetic: &'a Vector,
 }
 
+/// An already solved plane wave, with fields anchored at one physical z face.
+/// The normal wavevector keeps its global sign: backward evanescence has
+/// Im(kz)>0 and decays toward z<anchor_z_m. Transverse origins remain x=y=0.
+#[derive(Clone, Copy)]
+pub(crate) struct WaveGeometry {
+    pub(crate) tangential_wavenumber_rad_m: f64,
+    pub(crate) incidence_plane_axis: [f64; 2],
+    pub(crate) normal_wavenumber_rad_m: C64,
+    pub(crate) anchor_z_m: f64,
+}
+
 /// Geometry of the first active wave, retained as a shared phase reference.
 #[derive(Clone, Copy)]
 struct Carrier {
     tangential: f64,
     axis: [f64; 2],
     normal: f64,
+    anchor_z: f64,
 }
 
 /// One physical-point accumulator shared by single waves and sparse spectra.
@@ -70,6 +82,7 @@ impl FieldSum {
                 tangential: 0.0,
                 axis: [0.0; 2],
                 normal: 0.0,
+                anchor_z: 0.0,
             }),
         }
     }
@@ -87,16 +100,60 @@ impl FieldSum {
         }
     }
 
-    pub(crate) fn new(side: OrientedCrystalFieldSide, point: [f64; 3]) -> Result<Self> {
-        use OrientedCrystalFieldSide::{Extraordinary, Ordinary, Transmitted};
+    /// Construct a physical-point sum after the caller's region admission.
+    /// Generic anchored waves need no single-interface half-space selection.
+    pub(crate) fn at_point(point: [f64; 3]) -> Result<Self> {
         if point.iter().any(|v| !v.is_finite()) {
             return Err("crystal observation coordinates must be finite metres");
         }
+        Ok(Self {
+            fields: [ZERO; 6],
+            side: OrientedCrystalFieldSide::Transmitted,
+            point,
+            reference: None,
+        })
+    }
+
+    pub(crate) fn new(side: OrientedCrystalFieldSide, point: [f64; 3]) -> Result<Self> {
+        use OrientedCrystalFieldSide::{Extraordinary, Ordinary, Transmitted};
+        let mut sum = Self::at_point(point)?;
         let crystal_side = matches!(side, Ordinary | Extraordinary | Transmitted);
         if crystal_side && point[2] < 0.0 || !crystal_side && point[2] > 0.0 {
             return Err("crystal field observation is outside the selected half-space");
         }
-        Ok(Self { fields: [ZERO; 6], side, point, reference: None })
+        sum.side = side;
+        Ok(sum)
+    }
+
+    /// Add full global E/H fields before rounding their propagation factor.
+    /// Decay uses the authored face distance, including its subtraction
+    /// residual; phase is relative to the first active wave across all faces.
+    pub(crate) fn add_wave(
+        &mut self,
+        electric: &Vector,
+        magnetic: &Vector,
+        geometry: WaveGeometry,
+    ) -> Result<()> {
+        if !geometry.anchor_z_m.is_finite() {
+            return Err("crystal wave anchor must be finite metres");
+        }
+        let values = attenuated(
+            Wave {
+                normal: geometry.normal_wavenumber_rad_m,
+                electric,
+                magnetic,
+            },
+            Dd::from_f64(self.point[2]) - Dd::from_f64(geometry.anchor_z_m),
+        )?;
+        self.add_fields(
+            values,
+            Carrier {
+                tangential: geometry.tangential_wavenumber_rad_m,
+                axis: geometry.incidence_plane_axis,
+                normal: geometry.normal_wavenumber_rad_m.re,
+                anchor_z: geometry.anchor_z_m,
+            },
+        )
     }
 
     /// Add one already solved incident direction. Its response fields have
@@ -114,7 +171,15 @@ impl FieldSum {
             tangential: boundary.tangential_wavenumber_rad_m,
             axis,
             normal,
+            anchor_z: 0.0,
         };
+        self.add_fields(values, carrier)
+    }
+
+    fn add_fields(&mut self, values: Fields, carrier: Carrier) -> Result<()> {
+        if values.iter().all(|&v| v == ZERO) {
+            return Ok(());
+        }
         if let Some(reference) = self.reference {
             let rotation = relative_rotation(carrier, reference, self.point)?;
             for (sum, value) in self.fields.iter_mut().zip(values) {
@@ -138,7 +203,9 @@ impl FieldSum {
                 poynting_w_m2: [0.0; 3],
             });
         }
-        let reference = self.reference.ok_or("crystal field has no phase reference")?;
+        let reference = self
+            .reference
+            .ok_or("crystal field has no phase reference")?;
         // All directions and eigenmodes interfere in the SAME DD sum. A
         // common unit phase cannot change the physical energy transport.
         let poynting_w_m2 = core::array::from_fn(|j| {
@@ -151,7 +218,12 @@ impl FieldSum {
         });
         let rotation = relative_rotation(
             reference,
-            Carrier { tangential: 0.0, axis: [0.0; 2], normal: 0.0 },
+            Carrier {
+                tangential: 0.0,
+                axis: [0.0; 2],
+                normal: 0.0,
+                anchor_z: 0.0,
+            },
             self.point,
         )?;
         let rounded = self.fields.map(|value| {
@@ -215,7 +287,7 @@ fn pair_field(
     let mut sum = [ZERO; 6];
     let mut reference = None;
     for wave in waves.into_iter().flatten() {
-        let values = attenuated(wave, z)?;
+        let values = attenuated(wave, Dd::from_f64(z))?;
         if values.iter().all(|&v| v == ZERO) {
             continue;
         }
@@ -223,8 +295,7 @@ fn pair_field(
             // Remove the shared carrier before the two waves interfere.
             // A large absolute phase must not erase weak retardance or the
             // relative phase of an incident/reflected standing wave.
-            let relative = (Dd::from_f64(wave.normal.re) - Dd::from_f64(normal))
-                * Dd::from_f64(z);
+            let relative = (Dd::from_f64(wave.normal.re) - Dd::from_f64(normal)) * Dd::from_f64(z);
             let rotation = phasor(relative)?;
             for (total, value) in sum.iter_mut().zip(values) {
                 let value = multiply(value, rotation);
@@ -251,15 +322,29 @@ fn relative_rotation(carrier: Carrier, reference: Carrier, point: [f64; 3]) -> R
     // retain their difference before multiplication by a large coordinate.
     let x = phasor(transverse(0))?;
     let y = phasor(transverse(1))?;
+    let k = Dd::from_f64(carrier.normal);
+    let reference_k = Dd::from_f64(reference.normal);
+    let anchor = Dd::from_f64(carrier.anchor_z);
+    // k*(z-a) - kr*(z-ar) = (k-kr)*(z-a) + kr*(ar-a).
+    // Difference the carriers and face coordinates BEFORE their products.
+    // Equal k at different faces keeps its physical anchor phase; equal
+    // faces retain weak retardance without subtracting huge absolute phases.
     let z = phasor(
-        (Dd::from_f64(carrier.normal) - Dd::from_f64(reference.normal))
-            * Dd::from_f64(point[2]),
+        (k - reference_k) * (Dd::from_f64(point[2]) - anchor)
+            + reference_k * (Dd::from_f64(reference.anchor_z) - anchor),
     )?;
     Ok(multiply(multiply(x, y), z))
 }
 
-fn attenuated(wave: Wave<'_>, z: f64) -> Result<Fields> {
-    let exposure = -wave.normal.im * z;
+fn attenuated(wave: Wave<'_>, distance: Dd) -> Result<Fields> {
+    let leading = -wave.normal.im * distance.hi;
+    // Positive overflow means complete extinction, not an invalid DD product.
+    // Otherwise retain the authored distance residual until exposure rounds.
+    let exposure = if leading.is_infinite() {
+        leading
+    } else {
+        (Dd::from_f64(-wave.normal.im) * distance).to_f64()
+    };
     if !(exposure >= 0.0) {
         return Err("crystal evanescent field must decay into its half-space");
     }

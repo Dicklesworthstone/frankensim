@@ -1,7 +1,7 @@
 //! Fixed-size two-face Maxwell matching with bounded propagation factors.
 use super::super::super::kernel::{UniaxialWaveKind, binary_scale, outgoing_root};
-use super::super::kernel::{Eigenbasis, Input as ModeInput, eigenbasis};
-use super::super::spectrum::{FieldSum, UniaxialSpectrumField, rotate, transverse_phase};
+use super::super::kernel::{Eigenbasis, FieldSum, Input as ModeInput, WaveGeometry, eigenbasis};
+use super::super::spectrum::{UniaxialSpectrumField, rotate};
 use super::super::{Incidence, ResolvedFrequency};
 use crate::plane_wave::angular_spectrum::{AngularSpectrumError, modes::propagation};
 use fs_math::{c64::C64, dd::Dd};
@@ -64,9 +64,15 @@ impl UniaxialSlabResponse {
         region: SlabRegion,
         position_m: [f64; 3],
     ) -> core::result::Result<UniaxialSpectrumField, AngularSpectrumError> {
-        let mut sum = FieldSum::new();
-        self.accumulate(&mut sum, region, position_m, [1.0, 0.0])?;
-        sum.finish()
+        admit_point(region, position_m, self.thickness_m)?;
+        let mut sum = FieldSum::at_point(position_m).map_err(AngularSpectrumError::Invalid)?;
+        self.accumulate(&mut sum, region, [1.0, 0.0])?;
+        let field = sum.finish().map_err(AngularSpectrumError::Invalid)?;
+        Ok(UniaxialSpectrumField {
+            electric_v_m: field.electric_v_m,
+            magnetic_a_m: field.magnetic_a_m,
+            poynting_w_m2: field.poynting_w_m2,
+        })
     }
 
     pub(super) fn rotate(&mut self, axis: [f64; 2]) {
@@ -82,28 +88,33 @@ impl UniaxialSlabResponse {
         }
     }
 
+    /// The single response or prepared spectrum admits the point once before
+    /// adding waves. Every prepared mode belongs to the same slab thickness.
     pub(super) fn accumulate(
         &self,
         sum: &mut FieldSum,
         region: SlabRegion,
-        point: [f64; 3],
         axis: [f64; 2],
     ) -> core::result::Result<(), AngularSpectrumError> {
-        admit_point(region, point, self.thickness_m)?;
-        let transverse = transverse_phase(self.tangential_wavenumber_rad_m, axis, point)?;
-        let mut add = |e, h, k, distance| -> core::result::Result<(), AngularSpectrumError> {
-            let phase = propagation(k, distance).ok_or(AngularSpectrumError::Invalid(
-                "uniaxial slab propagation is unrepresentable",
-            ))?;
-            sum.add(e, h, transverse * phase);
-            Ok(())
+        let mut add = |e, h, k, anchor| {
+            sum.add_wave(
+                e,
+                h,
+                WaveGeometry {
+                    tangential_wavenumber_rad_m: self.tangential_wavenumber_rad_m,
+                    incidence_plane_axis: axis,
+                    normal_wavenumber_rad_m: k,
+                    anchor_z_m: anchor,
+                },
+            )
+            .map_err(AngularSpectrumError::Invalid)
         };
         if matches!(region, SlabRegion::Incident | SlabRegion::TotalIncidentSide) {
             add(
-                self.incident_electric_v_m,
-                self.incident_magnetic_a_m,
+                &self.incident_electric_v_m,
+                &self.incident_magnetic_a_m,
                 C64::from_re(self.incident_normal_wavenumber_rad_m),
-                point[2],
+                0.0,
             )?;
         }
         if matches!(
@@ -111,38 +122,39 @@ impl UniaxialSlabResponse {
             SlabRegion::Reflected | SlabRegion::TotalIncidentSide
         ) {
             add(
-                self.reflected_electric_v_m,
-                self.reflected_magnetic_a_m,
+                &self.reflected_electric_v_m,
+                &self.reflected_magnetic_a_m,
                 C64::from_re(-self.incident_normal_wavenumber_rad_m),
-                point[2],
+                0.0,
             )?;
         }
         if region == SlabRegion::Crystal {
             for wave in &self.forward {
                 add(
-                    wave.electric_v_m,
-                    wave.magnetic_a_m,
+                    &wave.electric_v_m,
+                    &wave.magnetic_a_m,
                     wave.normal_wavenumber_rad_m,
-                    point[2],
+                    0.0,
                 )?;
             }
             for wave in &self.backward {
-                // exp(-i*k_minus*(z-d)) = exp(-i*(-k_minus)*(d-z)).
-                // Reversed coordinates reuse the original decaying propagator.
+                // Keep the actual backward root and exit-face anchor. The
+                // common kernel retains z-d before phase/decay multiplication;
+                // this is exp(-i*(-k_minus)*(d-z)) without rounded distances.
                 add(
-                    wave.electric_v_m,
-                    wave.magnetic_a_m,
-                    -wave.normal_wavenumber_rad_m,
-                    self.thickness_m - point[2],
+                    &wave.electric_v_m,
+                    &wave.magnetic_a_m,
+                    wave.normal_wavenumber_rad_m,
+                    self.thickness_m,
                 )?;
             }
         }
         if region == SlabRegion::Transmitted {
             add(
-                self.transmitted_electric_v_m,
-                self.transmitted_magnetic_a_m,
+                &self.transmitted_electric_v_m,
+                &self.transmitted_magnetic_a_m,
                 self.exit_normal_wavenumber_rad_m,
-                point[2] - self.thickness_m,
+                self.thickness_m,
             )?;
         }
         Ok(())
