@@ -2,10 +2,9 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_conduction::material::ConductivityModel;
-use fs_conduction::transient::enthalpy::heterogeneous::ReferenceEnthalpyMaterial;
 use fs_exec::Cx;
 use fs_matdb::{ClaimSelection, QueryPoint};
-use fs_material::phase::EquilibriumPhaseState;
+use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, EquilibriumPhaseState};
 use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
 };
@@ -19,6 +18,8 @@ use super::{
 pub(super) struct BoundSource<'a> {
     pub source: SpatialMaterialSource<'a>,
     pub reference_elastic: ResolvedMaterialStatePoint,
+    /// Source reference density used in the constitutive identity. An explicit
+    /// native nodal profile separately owns storage and inertia when present.
     pub reference_density_kg_m3: f64,
     pub conductivity: ConductivityModel,
     pub conductivity_source: SpatialConductivitySource,
@@ -30,7 +31,8 @@ impl<'a> BoundSource<'a> {
     pub fn try_new(
         mut source: SpatialMaterialSource<'a>,
         conductivity_source: SpatialConductivitySource,
-        native: ReferenceEnthalpyMaterial<'_>,
+        native_curve: &EquilibriumEnthalpyPhaseCurve,
+        scalar_reference_density_kg_m3: Option<f64>,
         mesh_frame: ContentHash,
         maximum_strain: f64,
         cx: &Cx<'_>,
@@ -42,7 +44,7 @@ impl<'a> BoundSource<'a> {
             || low <= 0.0
             || low >= high
             || source.point.temperature_axis != "T"
-            || source.curve.identity() != native.curve.identity()
+            || source.curve.identity() != native_curve.identity()
             || source.curve.material_card_identity() != source.point.material.content_hash()
         {
             return Err(Error::Invalid(
@@ -73,16 +75,20 @@ impl<'a> BoundSource<'a> {
             .property(DENSITY_PROPERTY)
             .ok_or(Error::Invalid("reference density source required"))?
             .value_si();
-        if !same_measure(density, native.reference_density_kg_m3)
+        if scalar_reference_density_kg_m3.is_some_and(|rho| !same_measure(density, rho))
             || !same_measure(density, reference_phase.bulk_density_kg_m3())
         {
             return Err(Error::Invalid(
-                "original caloric, prepared heat and mechanical reference densities must agree",
+                "caloric and mechanical source reference densities must agree with any scalar heat inventory",
             ));
         }
+        // Preserve the original scalar inventory exactly when one exists.
+        // With a P1 inventory this is only the admitted constitutive source
+        // density; no scalar value replaces the native nodal mass profile.
+        let reference_density_kg_m3 = scalar_reference_density_kg_m3.unwrap_or(density);
         let material = source.stiffness_model.material(
             &elastic,
-            native.reference_density_kg_m3,
+            reference_density_kg_m3,
             elastic.identity(),
             maximum_strain,
         )?;
@@ -181,7 +187,7 @@ impl<'a> BoundSource<'a> {
         let bound = Self {
             source,
             reference_elastic: elastic,
-            reference_density_kg_m3: native.reference_density_kg_m3,
+            reference_density_kg_m3,
             conductivity,
             conductivity_source,
             reference_phase,

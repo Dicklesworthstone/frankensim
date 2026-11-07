@@ -279,16 +279,23 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
             sources.into_iter().zip(conductivity_sources).enumerate()
         {
             poll(cx)?;
-            let reference =
+            let curve =
                 thermal
-                    .reference_material(index)
+                    .reference_curve(index)
                     .ok_or(SpatialSolidEnthalpyError::Invalid(
-                        "native reference material missing",
+                        "native caloric chart missing",
                     ))?;
+            // A P1 profile has no scalar reference-material descriptor.
+            // Admit its original chart and constitutive source independently;
+            // resolve()/begin_transient() retain the actual native inventory.
+            let scalar_density = thermal
+                .reference_material(index)
+                .map(|reference| reference.reference_density_kg_m3);
             let entry = BoundSource::try_new(
                 source,
                 conductivity_source,
-                reference,
+                curve,
+                scalar_density,
                 mesh_frame,
                 maximum_absolute_mandel_strain,
                 cx,
@@ -760,6 +767,10 @@ impl SpatialSolidState<'_> {
     /// density field. Material cards still supply stiffness and source identity.
     /// Motion, supports and allowances retain their native meanings; no static
     /// equilibration or replacement thermal inventory is introduced.
+    ///
+    /// `loads` already contains assembled forces. Acceleration or gravity
+    /// loads must be assembled with the same reference profile through the
+    /// native geometry/history APIs; this initializer does not rebuild them.
     #[allow(clippy::too_many_arguments)]
     pub fn begin_transient<'g, 'm, 'p, 's>(
         &self,

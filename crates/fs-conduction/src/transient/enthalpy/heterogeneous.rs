@@ -719,6 +719,16 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         self.inner.mesh
     }
 
+    /// Original borrowed caloric chart at a retained material-table ID.
+    ///
+    /// Available for scalar and P1 reference inventories, including unused
+    /// table entries. This does not assert a scalar density or mass inventory;
+    /// those remain owned by the original reference-material or nodal profile.
+    #[must_use]
+    pub fn reference_curve(&self, material: usize) -> Option<&'c EquilibriumEnthalpyPhaseCurve> {
+        self.reference_materials.get(material).map(|entry| entry.curve)
+    }
+
     /// Original borrowed caloric chart and frozen reference density. Coupled
     /// Lagrangian owners must use this inventory, not a fresh density at T.
     /// Returns None for an explicit nodal profile: no scalar material density

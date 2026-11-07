@@ -798,6 +798,62 @@ fn g4_joint_spatial_heat_and_motion_refuse_without_publishing_either_history() {
 }
 
 #[test]
+fn g4_spatial_modal_reduction_refuses_graded_reference_inventory() {
+    use fs_couple::solid_enthalpy::SolidEnthalpyError;
+    use fs_couple::solid_enthalpy::valve::{HeatedValveError, HeatedValveReduction};
+    use fs_solid::reduce::OrificeSpec;
+
+    with_cx(|cx| {
+        let (card, caloric) = fixture(2., 1000., 1e-5, 10., 500., 750.);
+        let mesh = mesh();
+        let scalar_owner = native(&mesh, caloric.curve(), 6., cx);
+        let graded_owner = native(&mesh, caloric.curve(), 6., cx)
+            .with_nodal_reference_density(cx, &[3., 6., 9., 12.])
+            .unwrap();
+        let context = point(300.);
+        let scalar = bind(&scalar_owner, source(&card, caloric.curve(), &context), cx).unwrap();
+        let graded = bind(&graded_owner, source(&card, caloric.curve(), &context), cx).unwrap();
+        let fixed: Vec<_> = (0..11).collect();
+        let pressure = [[0., 0., 0.], [0., 0., 0.], [0., 0., 0.], [0., 0., 1.]];
+        let reduction = HeatedValveReduction {
+            fixed_dofs: &fixed,
+            orifice: OrificeSpec {
+                face_nodes: &[1, 2, 3],
+                opening_axis: [0., 0., 1.],
+                width_axis: [1., 0., 0.],
+                opposing_plane_offset_m: -0.5,
+            },
+            equilibrium_nodal_forces_n: &[(11, -0.1)],
+            nodal_load_per_pa_m2: &pressure,
+            window_hz: (0.01, 20.),
+            retained_compliance_floor: 0.999,
+            loss_factor: 0.,
+            source_id: "spatial reference inventory refusal",
+            static_solve: TetStaticSolveConfig::default(),
+            maximum_nodal_displacement_m: 0.1,
+        };
+        // The same physical reduction is admitted for scalar inventory.
+        // The graded path must fail specifically at its unsupported mass owner.
+        assert!(
+            scalar
+                .resolve(&[0.; 4], cx)
+                .unwrap()
+                .reduce_pressure_valve(&reduction, cx)
+                .is_ok()
+        );
+        assert!(matches!(
+            graded
+                .resolve(&[0.; 4], cx)
+                .unwrap()
+                .reduce_pressure_valve(&reduction, cx),
+            Err(HeatedValveError::Solid(SolidEnthalpyError::Invalid(
+                "spatial modal reduction does not support nodal reference-density profiles"
+            )))
+        ));
+    });
+}
+
+#[test]
 fn g1_spatial_inertial_paths_share_the_native_graded_reference_inventory() {
     with_cx(|cx| {
         let (card, caloric) = fixture(2., 60., 1e-5, 10., 500., 45.);
@@ -1224,6 +1280,64 @@ fn native_chart_inventory_and_continuous_source_support_are_admission_requiremen
         );
         assert!(bind(&native_good, source(&other, foreign.curve(), &context), cx).is_err());
         assert!(bind(&native_good, source(&other, caloric.curve(), &context), cx).is_err());
+        // The profile owns mass; the retired scalar rho=3 is no longer an
+        // inventory assertion. Caloric/card identity remains mandatory.
+        let graded = native(&mesh, caloric.curve(), 3., cx)
+            .with_nodal_reference_density(cx, &[3., 6., 9., 12.])
+            .unwrap();
+        assert!(graded.reference_material(0).is_none());
+        assert_eq!(
+            graded.reference_curve(0).unwrap().identity(),
+            caloric.curve().identity()
+        );
+        assert!(graded.reference_curve(1).is_none());
+        assert!(bind(&graded, source(&card, caloric.curve(), &context), cx).is_ok());
+        assert!(bind(&graded, source(&other, foreign.curve(), &context), cx).is_err());
+        assert!(bind(&graded, source(&other, caloric.curve(), &context), cx).is_err());
+
+        // Table identity must also survive for an unused material ID; a
+        // vertex-only chart lookup cannot validate this original source.
+        let unused = HeterogeneousEnthalpyBackwardEuler::new(
+            cx,
+            &mesh,
+            &[
+                ReferenceEnthalpyMaterial {
+                    curve: caloric.curve(),
+                    reference_density_kg_m3: 3.,
+                },
+                ReferenceEnthalpyMaterial {
+                    curve: foreign.curve(),
+                    reference_density_kg_m3: 9.,
+                },
+            ],
+            &[0],
+            EnthalpyBudget {
+                max_vertices: 4,
+                max_elements: 2,
+            },
+        )
+        .unwrap()
+        .with_nodal_reference_density(cx, &[3., 6., 9., 12.])
+        .unwrap();
+        assert_eq!(
+            unused.reference_curve(1).unwrap().identity(),
+            foreign.curve().identity()
+        );
+        assert!(unused.reference_material(1).is_none());
+        assert!(unused.reference_curve(2).is_none());
+        let bind_unused = |unused_source| {
+            SpatialSolidEnthalpy::try_new(
+                &unused,
+                vec![source(&card, caloric.curve(), &context), unused_source],
+                TetAssemblyBudget::standard(),
+                solid_config().mesh_frame,
+                0.1,
+                cx,
+            )
+        };
+        assert!(bind_unused(source(&other, foreign.curve(), &context)).is_ok());
+        assert!(bind_unused(source(&card, caloric.curve(), &context)).is_err());
+
         let native_scaled = native(&mesh, caloric.curve(), 6., cx)
             .with_phase_conductivity(
                 cx,

@@ -21,6 +21,7 @@ use super::{
     SpatialSolidEnthalpy, SpatialSolidEnthalpyError, SpatialSolidState, ThermalBoundary,
     ThermalInterfaces,
 };
+use crate::solid_enthalpy::SolidEnthalpyError;
 use crate::solid_enthalpy::valve::{HeatedValveError, HeatedValveReduction};
 
 /// A failed proposal changes neither nodal heat nor accepted motion.
@@ -75,11 +76,20 @@ impl SpatialSolidState<'_> {
     /// Lower the exact nodal-heat-derived material field through the SAME
     /// equilibrium, initial-stress, aperture and modal reducer as finite cells.
     /// Reference density, local thermal strain and frame remain source-owned.
+    /// Explicit P1 reference-density profiles refuse until the native modal
+    /// reducer can retain that inventory; scalar constitutive density cannot
+    /// substitute for it.
     pub fn reduce_pressure_valve(
         &self,
         reduction: &HeatedValveReduction<'_>,
         cx: &Cx<'_>,
     ) -> Result<ThermalPressureLoadedValve, HeatedValveError> {
+        crate::solid_enthalpy::poll(cx)?;
+        if self.nodal_reference_density_kg_m3.is_some() {
+            return Err(HeatedValveError::Solid(SolidEnthalpyError::Invalid(
+                "spatial modal reduction does not support nodal reference-density profiles",
+            )));
+        }
         reduction.reduce_state(
             &self.problem(reduction.fixed_dofs),
             self.thermal_strains(),
