@@ -21,14 +21,18 @@
 //!
 //! This remains a quasi-one-dimensional, small-signal, calorically-perfect
 //! model. The caller must justify the slender smooth geometry and original
-//! gas's frozen-Cp range. Choking, supersonic branches, shocks, separation,
-//! entropy/vorticity/composition waves, wall/bulk loss and radiation are not
-//! modeled. A conservative whole-profile transverse cut-on check is necessary,
+//! gas's frozen-Cp range. The base acoustic owner has no entropy perturbation;
+//! [`entropy`] adds its advected characteristic and acoustic conversion.
+//! Choking, supersonic branches, shocks, separation, vorticity/composition
+//! waves, wall/bulk loss and radiation are not modeled. A conservative
+//! whole-profile transverse cut-on check is necessary,
 //! not a certificate of three-dimensional accuracy. Refining the explicit
 //! integration axis controls numerical error within this model only.
 
 mod mean;
 pub use mean::{IsentropicMeanFlow, IsentropicMeanState, MINIMUM_SUBSONIC_MARGIN};
+/// Advected entropy and its conversion into sound by the original mean flow.
+pub mod entropy;
 /// Driven original conjugate loads on the variable-flow profile.
 pub mod termination;
 
@@ -72,6 +76,44 @@ impl Node {
             pressure_scales,
             velocity_scale,
             energy_scales,
+        })
+    }
+
+    fn field(&self, enthalpy: C64, mass: C64) -> Result<FlowProfileField, DuctError> {
+        let s = self.mean;
+        let forward =
+            (enthalpy + mass.scale(s.flow_impedance_j_s_kg2)).scale(self.pressure_scales[0]);
+        let backward =
+            (enthalpy - mass.scale(s.flow_impedance_j_s_kg2)).scale(self.pressure_scales[1]);
+        let pressure = forward + backward;
+        let velocity = (forward - backward).scale(self.velocity_scale);
+        let volume = velocity.scale(s.area_m2);
+        let energy = forward.scale(self.energy_scales[0]).norm_sq()
+            + backward.scale(self.energy_scales[1]).norm_sq();
+        let pressure_work = 0.5 * (pressure * volume.conj()).re;
+        let power = 0.5 * (enthalpy * mass.conj()).re;
+        if ![pressure, velocity, volume, enthalpy, mass]
+            .into_iter()
+            .all(finite)
+            || ![energy, pressure_work, power]
+                .into_iter()
+                .all(f64::is_finite)
+        {
+            return Err(bad(
+                "isentropic local acoustic field or work is unrepresentable",
+            ));
+        }
+        Ok(FlowProfileField {
+            x_m: self.x,
+            mean: s,
+            pressure_pa: pressure,
+            particle_velocity_m_s: velocity,
+            volume_flow_m3_s: volume,
+            mass_flow_perturbation_kg_s: mass,
+            stagnation_enthalpy_perturbation_j_kg: enthalpy,
+            pressure_work_power_w: pressure_work,
+            disturbance_energy_density_j_m3: energy,
+            disturbance_power_w: power,
         })
     }
 }
@@ -400,40 +442,7 @@ impl<'prepared, 'flow, 'source> IsentropicProfileExcitation<'prepared, 'flow, 's
         let t = n.response;
         let enthalpy = t[0] * self.incoming[0] + t[1] * self.incoming[1];
         let mass = t[2] * self.incoming[0] + t[3] * self.incoming[1];
-        let s = n.mean;
-        let forward = (enthalpy + mass.scale(s.flow_impedance_j_s_kg2)).scale(n.pressure_scales[0]);
-        let backward =
-            (enthalpy - mass.scale(s.flow_impedance_j_s_kg2)).scale(n.pressure_scales[1]);
-        let pressure = forward + backward;
-        let velocity = (forward - backward).scale(n.velocity_scale);
-        let volume = velocity.scale(s.area_m2);
-        let energy = forward.scale(n.energy_scales[0]).norm_sq()
-            + backward.scale(n.energy_scales[1]).norm_sq();
-        let pressure_work = 0.5 * (pressure * volume.conj()).re;
-        let power = 0.5 * (enthalpy * mass.conj()).re;
-        if ![pressure, velocity, volume, enthalpy, mass]
-            .into_iter()
-            .all(finite)
-            || ![energy, pressure_work, power]
-                .into_iter()
-                .all(f64::is_finite)
-        {
-            return Err(bad(
-                "isentropic local acoustic field or work is unrepresentable",
-            ));
-        }
-        Ok(FlowProfileField {
-            x_m: n.x,
-            mean: s,
-            pressure_pa: pressure,
-            particle_velocity_m_s: velocity,
-            volume_flow_m3_s: volume,
-            mass_flow_perturbation_kg_s: mass,
-            stagnation_enthalpy_perturbation_j_kg: enthalpy,
-            pressure_work_power_w: pressure_work,
-            disturbance_energy_density_j_m3: energy,
-            disturbance_power_w: power,
-        })
+        n.field(enthalpy, mass)
     }
 }
 

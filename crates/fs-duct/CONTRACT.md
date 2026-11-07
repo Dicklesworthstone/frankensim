@@ -4377,3 +4377,51 @@ This section amends the sparse Krylov section above, which states `MAX_DG_SPARSE
 ## Exterior-load admission before source closure
 
 `network::CoupledTermination::validate` exposes the original complete Hermitian passivity check for an externally prepared load, with positive frequency and unique nonempty port labels. It adds no alternate matrix criterion, reciprocity repair or resistance floor. `fs-couple::compact_wall_radiation` uses this entry for native unflanged self impedance plus original free-field mutual radiation and spherical impedance-wall returns, then feeds the complete matrix into the existing source solver. A signed reflected correction is not admitted as a standalone passive load; the physical source closure uses the complete exterior impedance. Original generator/source dissipation and full coupled-load work remain authoritative.
+
+## Advected entropy and noncompact nozzle sound
+
+`PreparedIsentropicProfile::prepare_entropy` borrows the original acoustic
+cache and adds the third linearized-Euler characteristic `sigma = s'/cp`.
+It retains the same gas, mean flow, every geometry span and observation node.
+With `B = p'/rho + U u'` and `j = A (rho u' + U p'/c^2)`, the original
+no-heat Euler equations give `sigma_x = i omega sigma/U`,
+`B_x = i omega u' + U U_x sigma` and `j_x = i omega A p'/c^2`.
+The original analytic radius slope supplies `U_x`; there is no differenced
+mean gradient or compact area-jump law. Total mass perturbation is
+`j - m_bar sigma` and total stagnation enthalpy is `B + cp T sigma`.
+Density, temperature and entropy observations retain those thermodynamic terms.
+
+A bounded fixed-size upper-block fourth-order Magnus exponential prepares
+the entropy forcing response on every original integration panel. It reuses
+the original homogeneous acoustic scattering to impose both acoustic incoming
+conditions, and normalizes entropy at the physical upstream end for either
+flow sign. Uniform flow transports entropy without generating sound. Warm
+coherent source, termination and node queries allocate nothing and perform
+no integration or mean-state queries. Additional preparation and storage are
+O(original panels), under the original step cap; cancellation publishes no
+partial cache.
+
+The prepared source/termination closure reuses the original two-ended acoustic
+feedback solve and its condition ceiling. Boundary laws use full `H'` and
+outward `m'`, including entropy-dependent forcing. Pressure work, acoustic
+`Re(B conj(j))/2`, signed `U U_x Re(sigma conj(j))/2` conversion, and the
+full `H'/m'` boundary pairing are separate observations. The mixed three-channel
+scattering matrix is not called unitary or passive, and boundary pair products
+are not promoted to complete entropy-wave power or heat.
+
+This remains a calorically perfect, inviscid, slender quasi-one-dimensional
+model. Zero through-flow refuses the finite-frequency advected entropy problem;
+the original acoustic owner retains its zero-flow behavior. Entropy phase and
+conversion require their own integration refinement, since entropy wavelengths
+can be much shorter than acoustic wavelengths. No mean heat transfer, entropy
+generation, shocks, separation, viscosity, vorticity/composition waves, or
+three-dimensional accuracy is inferred. Primary derivation:
+[Yeddula et al. (2022)](https://doi.org/10.1017/jfm.2022.101), equations 2.1-2.8,
+with zero heat and reversed time convention.
+
+Eight G1/G3/G4 regression groups specify uniform transport, original acoustic
+parity and coherence, independent primitive-Euler refinement, compact total-H/m
+invariants, geometry/flow reversal, conversion-work balance, full-H/m driven
+loads, and refusal/cancellation. Selective formatting and diff checks and a
+separate developer numerical fixture check passed; native Rust compilation
+and tests remain unexecuted in this environment.
