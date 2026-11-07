@@ -49,7 +49,7 @@ impl BodyAccelerationField3 {
 
     // Parameters are admitted once at binding. Sampling adds no source query,
     // allocation or temporal averaging; the original cell order is retained.
-    fn at_cell(&self, key: u64, lane: usize) -> Result<[f64; 3], FreeSurfaceError3> {
+    pub(super) fn at_cell(&self, key: u64, lane: usize) -> Result<[f64; 3], FreeSurfaceError3> {
         let (origin, acceleration, gradient) = match self {
             Self::Uniform(acceleration) => return Ok(*acceleration),
             Self::Affine {

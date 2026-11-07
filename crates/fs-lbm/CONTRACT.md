@@ -15687,3 +15687,48 @@ All six orientations, a partial terminal layer and subcell slabs retain the
 existing mass, momentum, geometry, source and cancellation gates. Repeated
 calls remain thermal source splitting; arbitrary flowing geometries, viscous
 integration, capillarity and melting require their existing physical owners.
+
+
+### Conservative dyadic resolution transfer of sparse liquid momentum
+
+`FreeSurface3::refine_dyadic` and frozen
+`MaterialFreeSurface3::refine_dyadic` return a new original owner on the same
+bounded physical domain. Every spatial axis is refined by two and every active
+tile supplies eight child tiles, with dx and dt both halved. This P0 transfer
+gives each symmetric child the parent's actual intrinsic density and retained
+liquid fill; physical child mass is one eighth. Explicit budgets admit actual
+stored mass, first mass moment, linear/angular momentum, kinetic storage,
+speed, six-mode physical viscous stress, total domain cells and active tiles.
+Native receipts use original coarse units; the material receipt uses kg, m, s,
+J and Pa and independently checks rounded SI totals before returning the candidate.
+
+Uniform BGK viscosity is retained through tau_f=2*tau_c-1/2. Physical
+Guo-frame nonequilibrium is scaled by tau_f/(2*tau_c), preserving physical
+viscous stress with its (tau-1/2)/tau factor. Native velocity/pressure units stay
+fixed, held force density halves and native surface tension doubles, subject
+to the original fine capillary admission. Uniform/affine acceleration remains
+the original force owner and is evaluated at actual child centers with a
+zero-time force reframe. Fixed solid tiles, uniform planar contact angle and
+integer piston location retain their physical geometry. Geometry epoch
+increments because cell identities change; source state stays immutable and
+no elapsed time, work, heat or conversion event is authored.
+
+This owner refuses unlocated carry, non-BGK collision, local surface-tension/
+bulk-relaxation fields, spatial or dynamic contact-angle history and
+unrepresentable scales/populations/balances. The SI route retains the original
+frozen source and pressure datum; evolving thermal/rheology and other histories
+need their own transfer owners. It reconstructs no hidden subcell free-surface
+shape or higher velocity modes, performs no local AMR/coarsening, and does not
+promise identical later trajectories on the finer discretization.
+
+Eight focused checks passed in this session: five tests compile the complete
+new native refinement module unchanged with actual sparse/native storage and
+original constructor, read/write, sample, force and closure source spans,
+compensated sums, cancellation, scalar BGK collision and Guo frame/stress
+routines. Three tests execute the unchanged SI conversion/receipt helpers with
+a minimal error facade. The focused harness does not include full streaming,
+conversion timesteps or material-owner construction. Two original material
+integration regressions in `tests/material_free_surface3/refinement.rs` specify
+coarse evolution, independent physical inventories, source/pressure/unit
+retention, fine evolution and atomic refusal. Those complete integration tests
+were added but not executed under the current full-Cargo resource limit.

@@ -66,6 +66,8 @@ mod forcing;
 pub use forcing::BodyAccelerationField3;
 mod conversion_momentum;
 mod impulse;
+mod refinement;
+pub use refinement::{DyadicRefinementControls3, DyadicRefinementInventory3, DyadicRefinementReport3};
 pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;
 mod motion;
@@ -383,7 +385,7 @@ pub struct FreeSurface3 {
     planar_contact_field: Option<wetting::PlanarContactField3>,
     /// Optional integer-cell piston occupying a complete slab from one domain face.
     planar_piston: Option<PlanarPiston3>,
-    /// Accepted moving-geometry publication count. Fluid-only steps do not change it.
+    /// Accepted geometry/resolution publication count. Fluid-only steps do not change it.
     geometry_epoch: u64,
     /// In Local mode, unresolved mass with no adjacent interface recipient.
     /// It remains in the ledger; no location is available to redistribute it.
@@ -673,7 +675,7 @@ impl FreeSurface3 {
         Ok(fs)
     }
 
-    /// Number of accepted moving-geometry publications. Fluid-only steps leave
+    /// Number of accepted geometry or grid-resolution publications. Fluid-only steps leave
     /// this unchanged, so a solid owner can reject stale geometry observations.
     #[must_use]
     pub const fn geometry_epoch(&self) -> u64 {

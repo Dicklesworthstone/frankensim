@@ -23,6 +23,9 @@ use crate::d3q19::{Q3, TILE};
 use crate::{CS2, ScalingPlan};
 
 mod impulse;
+mod refinement;
+pub use refinement::{MaterialDyadicRefinementControls3, MaterialDyadicRefinementInventory3,
+    MaterialDyadicRefinementReport3};
 pub use impulse::{
     MaterialFreeSurfaceImpulseControls2, MaterialFreeSurfaceImpulseControls3,
     MaterialFreeSurfaceImpulseError, MaterialFreeSurfaceImpulseReport2,
