@@ -165,7 +165,8 @@ treats `K L` as the length of an equivalent pin-ended column and ties `K` to
 the actual structural restraints; it does not justify inferring `K` from the
 translation-only supports used by this axial layout model.
 
-This is a frozen-state pin-jointed, solid-square force-equilibrium sizing model,
+This is a frozen-state pin-jointed force-equilibrium sizing model with homothetic
+sections (solid squares by default),
 not elastic-compatible force distribution, rotating anisotropic failure,
 post-failure redistribution, creep or thermally restrained strain. The continuous
 axial mass objective does not imply globally optimal Euler/catalog sections or
@@ -317,3 +318,49 @@ truss-006 rod spot check.
   independently requires threshold, member-product, orientation, endpoint,
   unique-path, and unique-bottleneck separation before promotion. This crate
   alone makes no load-path claim.
+
+
+## Homothetic compression-section geometry
+
+`sizing::HomotheticSection` admits fixed section families through
+`SectionFamily`; `MaterialLayout::with_sections` borrows one admitted shape
+per **original** ground member. Omission preserves the solid-square default.
+Pruning, catalog snapping and every self-weight rebuild retain that assignment
+and the independent effective-length factor K.
+
+For actual material area A, both the continuous Euler floor and post-snap
+resistance use the same weakest principal relation I_min = c A²:
+
+| Family | Admitted shape parameter | c = I_min / A² |
+| --- | --- | --- |
+| Solid square | None | 1/12 |
+| Solid circle | None | 1/(4 pi) |
+| Solid rectangle | Major/minor ratio r >= 1 | 1/(12 r) |
+| Circular tube | Inner/outer diameter ratio 0 <= r < 1 | (1+r²)/(4 pi (1-r²)) |
+
+The tube coefficient factors 1-r² as (1-r)(1+r), avoiding thin-wall subtraction.
+Nonfinite/out-of-domain ratios refuse. The checked
+`minimum_second_moment_m4` query refuses nonpositive/nonfinite areas or
+unrepresentable inertia. Nonsquare compression audits require positive finite
+inertia and Euler resistance. Unit rectangles and zero-bore tubes canonicalize
+to square and solid-circle families. Square sizing/audit arithmetic and default
+audit rows remain unchanged.
+
+Catalog values are net material areas, including wall material only for tubes.
+Density*A*physical_length determines mass; neither enclosed area nor K changes
+that identity. sqrt(A) is an equivalent-square side for nonsquare families,
+not an actual diameter, side or wall thickness. Each `SizedMember` retains its
+admitted shape; nonsquare audit rows include its family and weak-axis coefficient.
+Signed axial strengths, tensile areas and the LP/certificate problem are unchanged.
+
+These are elastic member Euler checks. No local-wall, distortional, torsional,
+inelastic, imperfection-sensitive or code buckling capacity is inferred.
+Fabrication and wall-thickness limits remain explicit caller responsibilities.
+The existing square Cosserat spot check refuses a nonsquare **requested member**;
+other members' section choices do not disable it.
+
+Focused material tests use independent geometric moments for all four families,
+combined K/shape scaling, refitted compression signs, catalog resistance,
+original indexing after pruning, unchanged tension/mass semantics, invalid
+geometry and cancellation. Body-load regressions check shape-dependent converged
+sections and independent original K through the actual self-weight rebuild.

@@ -1,12 +1,16 @@
 //! The nonlinear sizing pass: surviving members get cross-sections
 //! from their declared axial limit, compression members get EULER BUCKLING floors
-//! (solid-square closed form `I = A²/12` ⇒ `A ≥ √(12|q|(Kl)²/(π²E))`),
-//! with explicit effective-length factor `K` (pinned ends by default),
+//! (`I_min = c A²` ⇒ `A ≥ √(|q|(Kl)²/(π²E c))`), with admitted homothetic
+//! section shape and effective-length factor `K` (solid square/pinned by default),
 //! joint parsimony prunes negligible members with a MANDATORY
 //! least-squares equilibrium re-verification on the survivors, and
 //! catalog snapping rounds areas UP (feasibility preserved by
 //! construction) before the member-by-member code-check audit —
 //! fs-constraint `Code` rows, every member listed, every check named.
+
+/// Admitted homothetic section geometry, scaled by physical material area.
+pub mod section;
+pub use section::{HomotheticSection, SectionFamily};
 
 use crate::ground::GroundStructure;
 use crate::lp::LayoutLp;
@@ -29,6 +33,9 @@ pub struct SizedMember {
     /// Euler effective buckling length `K * length`, in metres. This does not
     /// replace the physical member length used for material volume or mass.
     pub effective_buckling_length: f64,
+    /// Admitted cross-section shape. All areas below are actual material area;
+    /// sqrt(area) is a physical side only for the solid-square family.
+    pub section: HomotheticSection,
     /// Continuous area from the declared limit for the refitted force sign.
     /// The uniform legacy entry point uses symmetric yield stress.
     pub area_yield: f64,
@@ -75,7 +82,15 @@ pub fn size_and_snap(
         gs,
         lp,
         x,
-        |_| (sigma_y, sigma_y, youngs, 1.0),
+        |_| {
+            (
+                sigma_y,
+                sigma_y,
+                youngs,
+                1.0,
+                HomotheticSection::solid_square(),
+            )
+        },
         catalog,
         prune_frac,
         ConstraintKind::Code {
@@ -85,7 +100,7 @@ pub fn size_and_snap(
 }
 
 /// Shared sizing kernel: a material assignment supplies each member's tensile
-/// limit, compressive magnitude limit, modulus and effective-length factor to
+/// limit, compressive magnitude limit, modulus, effective-length factor and shape to
 /// the same refit, buckling, snap and audit path. The force sign is selected
 /// AFTER the equilibrium refit.
 #[allow(clippy::too_many_lines)]
@@ -93,7 +108,7 @@ pub(crate) fn size_and_snap_members(
     gs: &GroundStructure,
     lp: &LayoutLp,
     x: &[f64],
-    properties: impl Fn(usize) -> (f64, f64, f64, f64),
+    properties: impl Fn(usize) -> (f64, f64, f64, f64, HomotheticSection),
     catalog: &[f64],
     prune_frac: f64,
     checks: ConstraintKind,
@@ -125,7 +140,8 @@ pub(crate) fn size_and_snap_members(
     };
     let mut all_pass = true;
     for (si, &k) in survivors.iter().enumerate() {
-        let (tensile_limit, compressive_limit, youngs, buckling_length_factor) = properties(k);
+        let (tensile_limit, compressive_limit, youngs, buckling_length_factor, section) =
+            properties(k);
         let check_description =
             code_description
                 .as_deref()
@@ -147,9 +163,15 @@ pub(crate) fn size_and_snap_members(
             // The admitted effective length carries the caller's restraint or
             // bracing model. It changes Euler resistance, not axial stiffness,
             // material volume or the nodal equilibrium geometry.
-            (12.0 * q.abs() * effective_buckling_length * effective_buckling_length
-                / (std::f64::consts::PI.powi(2) * youngs))
-                .sqrt()
+            if section.family() == SectionFamily::SolidSquare {
+                // Preserve the original square arithmetic and catalog decisions.
+                (12.0 * q.abs() * effective_buckling_length * effective_buckling_length
+                    / (std::f64::consts::PI.powi(2) * youngs))
+                    .sqrt()
+            } else {
+                effective_buckling_length * (q.abs() / youngs).sqrt()
+                    / (std::f64::consts::PI * section.weak_axis_inertia_coefficient().sqrt())
+            }
         } else {
             0.0
         };
@@ -162,15 +184,39 @@ pub(crate) fn size_and_snap_members(
         // Post-snap re-verification (the checks the code row names).
         let stress_ok =
             area_catalog.is_finite() && q.abs() / area_catalog <= stress_limit * (1.0 + 1e-9);
-        let buckling_ok = q >= 0.0
-            || (area_catalog.is_finite()
+        let buckling_ok = if q >= 0.0 {
+            true
+        } else if section.family() == SectionFamily::SolidSquare {
+            area_catalog.is_finite()
                 && q.abs()
                     <= std::f64::consts::PI.powi(2) * youngs * area_catalog * area_catalog
                         / 12.0
                         / (effective_buckling_length * effective_buckling_length)
-                        * (1.0 + 1e-9));
+                        * (1.0 + 1e-9)
+        } else {
+            section
+                .minimum_second_moment_m4(area_catalog)
+                .is_ok_and(|inertia| {
+                    let capacity = std::f64::consts::PI.powi(2) * youngs * inertia
+                        / (effective_buckling_length * effective_buckling_length);
+                    area_buckling.is_finite()
+                        && area_buckling > 0.0
+                        && capacity.is_finite()
+                        && capacity > 0.0
+                        && q.abs() <= capacity * (1.0 + 1e-9)
+                })
+        };
         let pass = stress_ok && buckling_ok;
         all_pass &= pass;
+        let section_description = if section.family() == SectionFamily::SolidSquare {
+            String::new()
+        } else {
+            format!(
+                "\"section_family\":\"{}\",\"i_min_over_area_squared\":{:.17e},",
+                section.name(),
+                section.weak_axis_inertia_coefficient()
+            )
+        };
         let mut row = String::new();
         let _ = write!(
             row,
@@ -179,7 +225,7 @@ pub(crate) fn size_and_snap_members(
              \"buckling_length_factor\":{buckling_length_factor:.4e},\
              \"effective_buckling_length\":{effective_buckling_length:.4e},\
              \"stress_limit_pa\":{stress_limit:.4e},\
-             {check_description},\"stress_ok\":{stress_ok},\"buckling_ok\":{buckling_ok}}}"
+             {section_description}{check_description},\"stress_ok\":{stress_ok},\"buckling_ok\":{buckling_ok}}}"
         );
         audit.rows.push(row);
         audit.members.push(SizedMember {
@@ -189,6 +235,7 @@ pub(crate) fn size_and_snap_members(
             length: l,
             buckling_length_factor,
             effective_buckling_length,
+            section,
             area_yield,
             area_buckling,
             area_catalog,

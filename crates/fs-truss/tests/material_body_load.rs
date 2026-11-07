@@ -332,3 +332,87 @@ fn numerical_shape_catalog_iteration_and_cancellation_fail_without_changing_the_
         assert_eq!(case.loads(), &[[0.0, 2.0], [0.0, -1.0]]);
     });
 }
+
+#[test]
+fn self_weight_uses_actual_section_shape_and_material_area_with_original_k() {
+    use fs_truss::sizing::{HomotheticSection, SectionFamily};
+    with_cx(|cx, _| {
+        let states = [material(2.0)];
+        let catalog = [0.02, 0.04, 0.05, 0.07, 0.10, 0.13];
+        for hanging in [false, true] {
+            let (ground, case) = vertical(cx, hanging);
+            for (family, factor, compression_area) in [
+                (SectionFamily::SolidSquare, 1.0, 0.05),
+                (SectionFamily::SolidCircle, 2.0, 0.13),
+                (
+                    SectionFamily::SolidRectangle { aspect_ratio: 4.0 },
+                    1.0,
+                    0.10,
+                ),
+                (
+                    SectionFamily::CircularTube {
+                        inner_diameter_ratio: 0.8,
+                    },
+                    2.0,
+                    0.04,
+                ),
+            ] {
+                let sections = [HomotheticSection::try_new(family).unwrap()];
+                let factors = [factor];
+                let layout = MaterialLayout::try_new(
+                    &ground,
+                    &case,
+                    &states,
+                    &[0],
+                    LayoutLimits::default(),
+                    cx,
+                )
+                .unwrap()
+                .with_sections(&sections, cx)
+                .unwrap()
+                .with_effective_buckling_length_factors(&factors, cx)
+                .unwrap();
+                let result = layout
+                    .solve_with_body_loads([0.0, -9.81], &catalog, 1e-3, settings(), 8, cx)
+                    .unwrap();
+                let expected_area = if hanging { 0.02 } else { compression_area };
+                assert_eq!(result.areas_m2, vec![expected_area]);
+                let member = &result.design.audit.members[0];
+                assert_eq!(member.section, sections[0]);
+                assert_eq!(member.buckling_length_factor, factor);
+                let mass = 2.0 * expected_area; // Actual wall/solid area times physical length.
+                let force = 1.0 + 0.5 * mass * 9.81;
+                near(member.force, if hanging { force } else { -force });
+                near(result.design.mass_kg.unwrap(), mass);
+                if hanging {
+                    assert_eq!(member.area_buckling, 0.0);
+                } else {
+                    // Independent family coefficients at fixed geometric ratios.
+                    let coefficient = match family {
+                        SectionFamily::SolidSquare => 1.0 / 12.0,
+                        SectionFamily::SolidCircle => 1.0 / (4.0 * std::f64::consts::PI),
+                        SectionFamily::SolidRectangle { .. } => 1.0 / 48.0,
+                        SectionFamily::CircularTube { .. } => 1.64 / (1.44 * std::f64::consts::PI),
+                    };
+                    near(
+                        member.area_buckling,
+                        factor
+                            * (force / (std::f64::consts::PI.powi(2) * 1000.0 * coefficient))
+                                .sqrt(),
+                    );
+                    let resistance =
+                        std::f64::consts::PI.powi(2) * 1000.0 * coefficient * expected_area.powi(2)
+                            / factor.powi(2);
+                    assert!(resistance >= force);
+                }
+                assert!(result.design.audit.all_pass);
+                assert_eq!(
+                    layout
+                        .body_loads(&result.areas_m2, [0.0, -9.81], cx)
+                        .unwrap(),
+                    result.body_loads
+                );
+            }
+        }
+    });
+}

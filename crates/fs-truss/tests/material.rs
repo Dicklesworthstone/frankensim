@@ -910,3 +910,277 @@ fn incomplete_sources_invalid_assignments_and_cancelled_publication_refuse() {
         );
     });
 }
+
+/// Independent physical dimensions, not the production I/A² coefficient.
+fn section_inertia_oracle(family: fs_truss::sizing::SectionFamily, area: f64) -> f64 {
+    use fs_truss::sizing::SectionFamily;
+    let pi = std::f64::consts::PI;
+    match family {
+        SectionFamily::SolidSquare => {
+            let side = area.sqrt();
+            side.powi(4) / 12.0
+        }
+        SectionFamily::SolidCircle => {
+            let diameter = 2.0 * (area / pi).sqrt();
+            pi * diameter.powi(4) / 64.0
+        }
+        SectionFamily::SolidRectangle { aspect_ratio } => {
+            let minor = (area / aspect_ratio).sqrt();
+            let major = aspect_ratio * minor;
+            major * minor.powi(3) / 12.0
+        }
+        SectionFamily::CircularTube {
+            inner_diameter_ratio,
+        } => {
+            let outer = 2.0 * (area / (pi * (1.0 - inner_diameter_ratio.powi(2)))).sqrt();
+            let inner = inner_diameter_ratio * outer;
+            pi * (outer.powi(4) - inner.powi(4)) / 64.0
+        }
+    }
+}
+
+#[test]
+fn section_families_and_effective_lengths_share_physical_euler_sizing_and_audit() {
+    use fs_truss::sizing::{HomotheticSection, SectionFamily};
+    with_cx(|cx, _| {
+        let youngs = 200e9;
+        let source = card([8000.0; 2], [youngs; 2], [300e6; 2]);
+        let states = [material(&source, 300.0)];
+        let catalog = [1e-8, 1.3e-6, 2.5e-6, 5e-6, 1e-5, 2e-5];
+        let factors = [0.5, 2.0];
+        for force in [-1.0, 1.0] {
+            let (ground, case) = two_members(cx, force);
+            for family in [
+                SectionFamily::SolidSquare,
+                SectionFamily::SolidCircle,
+                SectionFamily::SolidRectangle { aspect_ratio: 4.0 },
+                SectionFamily::CircularTube {
+                    inner_diameter_ratio: 0.8,
+                },
+            ] {
+                let section = HomotheticSection::try_new(family).unwrap();
+                let sections = [section; 2];
+                let layout = MaterialLayout::try_new(
+                    &ground,
+                    &case,
+                    &states,
+                    &[0, 0],
+                    LayoutLimits::default(),
+                    cx,
+                )
+                .unwrap()
+                .with_effective_buckling_length_factors(&factors, cx)
+                .unwrap();
+                assert_eq!(layout.section(0), Some(HomotheticSection::solid_square()));
+                assert_eq!(layout.section(2), None);
+                let costs = layout.lp().c().to_vec();
+                // Supply tensile iterates even for compression: the common
+                // refit, not the trial sign, must select compression sizing.
+                let forces = [1.0, 1.0, 0.0, 0.0];
+                let square = layout.size_and_snap(&forces, &catalog, 1e-3, cx).unwrap();
+                let layout = layout.with_sections(&sections, cx).unwrap();
+                assert_eq!(layout.lp().c(), costs.as_slice());
+                let sized = layout.size_and_snap(&forces, &catalog, 1e-3, cx).unwrap();
+                assert!(sized.audit.all_pass);
+                if family == SectionFamily::SolidSquare {
+                    assert_eq!(sized.audit.rows, square.audit.rows);
+                }
+                let coefficient = section_inertia_oracle(family, 1.0);
+                relative(section.weak_axis_inertia_coefficient(), coefficient, 2e-15);
+                for (member, &factor) in sized.audit.members.iter().zip(&factors) {
+                    assert_eq!(member.section, section);
+                    assert_eq!(member.buckling_length_factor, factor);
+                    let expected_floor = if force < 0.0 {
+                        factor
+                            * (1.0 / (std::f64::consts::PI.powi(2) * youngs * coefficient)).sqrt()
+                    } else {
+                        0.0
+                    };
+                    relative(member.area_buckling, expected_floor, 3e-12);
+                    let inertia = section_inertia_oracle(family, member.area_catalog);
+                    relative(
+                        section
+                            .minimum_second_moment_m4(member.area_catalog)
+                            .unwrap(),
+                        inertia,
+                        3e-15,
+                    );
+                    if force < 0.0 {
+                        let resistance =
+                            std::f64::consts::PI.powi(2) * youngs * inertia / factor.powi(2);
+                        assert!(resistance >= force.abs());
+                    } else {
+                        assert_eq!(member.area_catalog, 1e-8);
+                    }
+                    relative(member.area_yield, 1.0 / 300e6, 2e-12);
+                }
+                let physical_volume: f64 = sized
+                    .audit
+                    .members
+                    .iter()
+                    .map(|member| member.area_catalog * member.length)
+                    .sum();
+                relative(sized.mass_kg.unwrap(), 8000.0 * physical_volume, 1e-12);
+                if force > 0.0 {
+                    assert_eq!(sized.mass_kg, square.mass_kg);
+                    assert_eq!(sized.volume_m3, square.volume_m3);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn section_assignment_survives_pruning_and_square_rod_scope_is_local_to_checked_member() {
+    use fs_truss::sizing::{HomotheticSection, SectionFamily};
+    with_cx(|cx, _| {
+        let ground = GroundStructure::try_from_parts(
+            &[[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [2.0, 0.0]],
+            &[(0, 1), (0, 2), (2, 3)],
+            &[1.0; 3],
+            GroundLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let case = LayoutCase::try_new(
+            vec![[true, true], [true, true], [false, true], [false, true]],
+            vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [-1.0, 0.0]],
+            4,
+        )
+        .unwrap();
+        let source = card([8000.0; 2], [200e9; 2], [300e6; 2]);
+        let states = [material(&source, 300.0)];
+        let sections = [
+            HomotheticSection::solid_square(),
+            HomotheticSection::try_new(SectionFamily::SolidRectangle { aspect_ratio: 4.0 })
+                .unwrap(),
+            HomotheticSection::try_new(SectionFamily::CircularTube {
+                inner_diameter_ratio: 0.8,
+            })
+            .unwrap(),
+        ];
+        let factors = [3.0, 0.5, 2.0];
+        let layout = MaterialLayout::try_new(
+            &ground,
+            &case,
+            &states,
+            &[0; 3],
+            LayoutLimits::default(),
+            cx,
+        )
+        .unwrap()
+        .with_sections(&sections, cx)
+        .unwrap()
+        .with_effective_buckling_length_factors(&factors, cx)
+        .unwrap();
+        let sized = layout
+            .size_and_snap(
+                &[0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                &[1e-6, 3e-6, 1e-5],
+                1e-3,
+                cx,
+            )
+            .unwrap();
+        assert!(sized.audit.all_pass);
+        assert_eq!(sized.audit.pruned, 1);
+        assert_eq!(
+            sized
+                .audit
+                .members
+                .iter()
+                .map(|member| member.index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        for member in &sized.audit.members {
+            assert_eq!(member.section, sections[member.index]);
+            assert_eq!(member.buckling_length_factor, factors[member.index]);
+            let coefficient = section_inertia_oracle(member.section.family(), 1.0);
+            relative(
+                member.area_buckling,
+                factors[member.index]
+                    * (1.0 / (std::f64::consts::PI.powi(2) * 200e9 * coefficient)).sqrt(),
+                2e-12,
+            );
+        }
+        assert!(matches!(
+            layout.rod_buckling_check(1, 1e-4, 1e-6, 1.0, 1e-4),
+            Err(fs_truss::TrussConstructionError::InvalidInput {
+                field: "rod check section",
+                ..
+            })
+        ));
+        // Nonsquare assignments on other members must not disable this screen.
+        assert!(layout.rod_buckling_check(0, 1e-4, 1e-6, 1.0, 1e-4).is_ok());
+    });
+}
+
+#[test]
+fn homothetic_section_domains_and_assignment_admission_fail_before_publication() {
+    use fs_truss::sizing::{HomotheticSection, SectionFamily};
+    for ratio in [f64::NAN, f64::INFINITY, -1.0, 0.0, 0.5] {
+        assert!(
+            HomotheticSection::try_new(SectionFamily::SolidRectangle {
+                aspect_ratio: ratio
+            })
+            .is_err()
+        );
+    }
+    for ratio in [f64::NAN, f64::INFINITY, -1.0, 1.0, 2.0] {
+        assert!(
+            HomotheticSection::try_new(SectionFamily::CircularTube {
+                inner_diameter_ratio: ratio
+            })
+            .is_err()
+        );
+    }
+    let square = HomotheticSection::solid_square();
+    assert_eq!(
+        HomotheticSection::try_new(SectionFamily::SolidRectangle { aspect_ratio: 1.0 }).unwrap(),
+        square
+    );
+    assert_eq!(
+        HomotheticSection::try_new(SectionFamily::CircularTube {
+            inner_diameter_ratio: 0.0
+        })
+        .unwrap(),
+        HomotheticSection::try_new(SectionFamily::SolidCircle).unwrap(),
+    );
+    let thin = HomotheticSection::try_new(SectionFamily::CircularTube {
+        inner_diameter_ratio: 1.0 - f64::EPSILON,
+    })
+    .unwrap();
+    assert!(thin.weak_axis_inertia_coefficient().is_finite());
+    assert!(thin.weak_axis_inertia_coefficient() > 1e14);
+    for area in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-300, f64::MAX] {
+        assert!(square.minimum_second_moment_m4(area).is_err());
+    }
+    with_cx(|cx, gate| {
+        let source = card([8000.0; 2], [200e9; 2], [300e6; 2]);
+        let states = [material(&source, 300.0)];
+        let (ground, case) = two_members(cx, -1.0);
+        let new_layout = || {
+            MaterialLayout::try_new(
+                &ground,
+                &case,
+                &states,
+                &[0, 0],
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap()
+        };
+        assert!(matches!(
+            new_layout().with_sections(&[], cx),
+            Err(fs_truss::TrussConstructionError::VectorLength { .. })
+        ));
+        assert!(new_layout().with_sections(&[square], cx).is_err());
+        assert!(new_layout().with_sections(&[square; 3], cx).is_err());
+        let layout = new_layout();
+        gate.request();
+        assert!(matches!(
+            layout.with_sections(&[square; 2], cx),
+            Err(fs_truss::TrussConstructionError::Cancelled { .. })
+        ));
+    });
+}

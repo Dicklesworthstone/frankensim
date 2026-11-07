@@ -3,11 +3,12 @@
 //! The same immutable state-point bundle supplies density, Young's modulus
 //! and signed axial strength limits to every stage. Assignment is per member; different cards
 //! and temperatures require data changes, never a different equilibrium solver.
-//! This is the existing axial, solid-square, pin-jointed equilibrium model. The caller
+//! This is the existing axial, pin-jointed model with admitted homothetic sections
+//! (solid squares by default). The caller
 //! explicitly selects either symmetric yield or separate tension/compression
 //! limits; the same choice reaches layout, refitting and catalog sizing.
 //! Euler sizing defaults to pinned effective lengths; separately admitted
-//! restraint/bracing factors persist through sizing and self-weight rebuilds.
+//! restraint/bracing factors and section shapes persist through sizing and self-weight rebuilds.
 //! It does not infer a code allowable from an ultimate strength, model creep or
 //! thermal strain, or add self-weight implicitly to the declared load case.
 
@@ -25,7 +26,7 @@ use fs_qty::{Density, Pressure};
 
 use crate::ground::{GroundStructure, TrussConstructionError};
 use crate::lp::{LayoutCase, LayoutLimits, LayoutLp, PdhgError, PdhgReport, PdhgSettings};
-use crate::sizing::{CatalogAudit, size_and_snap_members};
+use crate::sizing::{CatalogAudit, HomotheticSection, SectionFamily, size_and_snap_members};
 
 fn invalid(field: &'static str, requirement: &'static str) -> TrussConstructionError {
     TrussConstructionError::InvalidInput { field, requirement }
@@ -38,7 +39,7 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), TrussConstructionError> {
         })
 }
 
-/// Exactly the material properties used by axial layout and square-member sizing.
+/// Exactly the material properties used by axial layout and homothetic-member sizing.
 /// No elastic, thermal or strength coefficient is inferred from a material name.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrussMaterial {
@@ -219,6 +220,7 @@ pub struct MaterialLayout<'a> {
     density_scale_kg_m3: f64,
     objective: MaterialLayoutObjective,
     effective_buckling_length_factors: Option<&'a [f64]>,
+    sections: Option<&'a [HomotheticSection]>,
 }
 
 /// Layout iterates and their physical volume and mass. The numerical report uses the
@@ -397,6 +399,7 @@ impl<'a> MaterialLayout<'a> {
             density_scale_kg_m3,
             objective,
             effective_buckling_length_factors: None,
+            sections: None,
         })
     }
 
@@ -456,6 +459,50 @@ impl<'a> MaterialLayout<'a> {
         Some(
             self.effective_buckling_length_factors
                 .map_or(1.0, |factors| factors[member]),
+        )
+    }
+
+    /// Bind an admitted homothetic section to each ORIGINAL ground member.
+    ///
+    /// Catalog entries remain physical material areas in m². The same section's
+    /// weak-axis coefficient I_min/A² governs continuous Euler sizing and the
+    /// post-snap check, including after pruning and self-weight rebuilding.
+    /// Missing assignments retain the original solid-square model.
+    ///
+    /// Shape does not change axial stress, the force-equilibrium LP or its
+    /// certificates. Thin-wall/local/distortional buckling, eccentricity,
+    /// fabrication limits and frame stability require separate models.
+    ///
+    /// # Errors
+    /// Incomplete original-member assignments or cancellation refuse before
+    /// publication. Each section's ratios were already checked at construction.
+    pub fn with_sections(
+        mut self,
+        sections: &'a [HomotheticSection],
+        cx: &Cx<'_>,
+    ) -> Result<Self, TrussConstructionError> {
+        checkpoint(cx)?;
+        if sections.len() != self.assignments.len() {
+            return Err(TrussConstructionError::VectorLength {
+                field: "member section geometry",
+                expected: self.assignments.len(),
+                actual: sections.len(),
+            });
+        }
+        checkpoint(cx)?;
+        self.sections = Some(sections);
+        Ok(self)
+    }
+
+    /// Admitted shape for an ORIGINAL member, or None for an absent index.
+    #[must_use]
+    pub fn section(&self, member: usize) -> Option<HomotheticSection> {
+        self.assignments.get(member)?;
+        Some(
+            self.sections
+                .map_or(HomotheticSection::solid_square(), |sections| {
+                    sections[member]
+                }),
         )
     }
 
@@ -548,7 +595,9 @@ impl<'a> MaterialLayout<'a> {
 
     /// Refit equilibrium and size every survivor with the resolved limit for
     /// its REFITTED force sign, its own modulus and its admitted effective
-    /// buckling length. Mass comes from its source
+    /// buckling length and weak-axis section geometry. Catalog values are
+    /// physical material areas; sqrt(area) is only an equivalent-square side
+    /// for nonsquare shapes. Mass comes from its source
     /// density and actual snapped geometry, so swapping a material propagates
     /// through all three stages.
     ///
@@ -600,6 +649,10 @@ impl<'a> MaterialLayout<'a> {
                     state.youngs,
                     self.effective_buckling_length_factors
                         .map_or(1.0, |factors| factors[member]),
+                    self.sections
+                        .map_or(HomotheticSection::solid_square(), |sections| {
+                            sections[member]
+                        }),
                 )
             },
             catalog,
@@ -642,11 +695,12 @@ impl<'a> MaterialLayout<'a> {
     }
 
     /// Run the existing conservative shear-stiff Cosserat spot check with the
-    /// member's geometry and material modulus. This retains that model's fixed
+    /// member's square geometry and material modulus. This retains that model's fixed
     /// ten-segment clamped-free approximation, not a certified buckling load.
     ///
     /// # Errors
-    /// Refuses an absent member or invalid loading/section controls.
+    /// Refuses an absent member, a nonsquare section on the requested member,
+    /// or invalid loading/section controls. Other members' shapes are immaterial.
     pub fn rod_buckling_check(
         &self,
         member: usize,
@@ -667,6 +721,17 @@ impl<'a> MaterialLayout<'a> {
             return Err(invalid(
                 "rod check",
                 "requires finite positive area, factor, imperfection and nonzero force",
+            ));
+        }
+        if self
+            .section(member)
+            .expect("material member exists")
+            .family()
+            != SectionFamily::SolidSquare
+        {
+            return Err(invalid(
+                "rod check section",
+                "the existing Cosserat screen requires a solid square on the checked member",
             ));
         }
         Ok(crate::rodcheck::rod_buckling_check(
