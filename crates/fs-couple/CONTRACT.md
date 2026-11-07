@@ -5479,3 +5479,39 @@ specify complete differentiated source rows and work channels, distinct coupled
 physical receiver peaks and phases, and source-tangent/resource-refusal behavior.
 Those FE regressions are authored but unexecuted while the complete `fs-couple`
 dependency build is unavailable. MR56's broader qualification remains open.
+
+### Adaptive physical time for retained porous gas/wall compression
+
+`ThermalPorousGasSystem::advance_adaptive` resolves a complete physical stroke
+through the existing heat-before-motion owner, including ideal or homogeneous
+Peng--Robinson gas, permanent porous compaction, original wall calorics, native
+transport and optional retained inertia. Prescribed coordinates move linearly
+from their actual accepted positions to the requested endpoint. Other supplied
+loads and pressure are held; external gas heat is supplied at constant power.
+These loading assumptions are explicit. Birth/remap changes require a separate
+admitted stroke boundary.
+
+Each comparison evaluates one full interval and two sequential half intervals
+from the same accepted histories. Only the two-half path becomes physical state.
+No extrapolated plastic metric, gas state or observer history is published.
+Local error includes gas temperature and volume, direct original caloric storage,
+wall temperature and specific enthalpy, displacement, velocity, irreversible
+porous metric/strain/volume, and native heat/work/numerical-loss channels. Relative
+scales use interval changes and do not grow with a formation-enthalpy datum.
+All coarse/rejected/fine native heat probes share one bounded global trial count.
+
+Accepted energy increments use compensated accumulation, retain numerical
+endpoint-work and kinetic-loss accounts separately, and exclude every rejected
+receipt. Whole-window gates bound summed absolute energy residuals, interface
+representation loss and direct original-to-final gas storage closure. The final
+interval receives the requested external heat remainder. The report keeps compact
+stroke totals and the complete last native candidate; storage does not grow with
+the number of accepted meshes. A late source, observer, nonlinear, cancellation,
+budget or accuracy refusal publishes no partial stroke.
+
+Three focused regression definitions cover convergence toward an independent
+continuous two-capacity heat solution, coarse/rejected work budgets and late
+atomic refusal, and retained heated compaction with velocity, permanent volume
+change and an independently recombined first law. Local full-versus-two-half
+control resolves the declared first-order split; it is not a global error bound,
+second-order integrator or calibrated moving-wall transport model.

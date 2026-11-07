@@ -21,6 +21,7 @@
 mod gas;
 mod observer;
 pub mod source;
+pub mod march;
 
 pub use gas::ThermalCavityGas;
 pub use source::{CavityWallSourceContact, CavityWallSourceReceipt};

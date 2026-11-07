@@ -1,4 +1,6 @@
 //! Physical heat exchange on retained finite compression histories.
+#[path = "heat/march.rs"]
+mod march;
 #[path = "heat/real_gas.rs"]
 mod real_gas;
 
