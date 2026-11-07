@@ -2358,9 +2358,11 @@ endpoint admission and source calculation, then corrects each selected internal
 transfer with the same power on both cells. Original component-datum handling,
 fixed mass continuity, caloric laws, external stream enthalpy and backward-Euler
 energy accounting remain authoritative. Prepared mass, geometry and material
-bindings are checked on every candidate. Topological junction gradients,
-external streams on stencil centres, and entropy/species/selective-stream
-closures refuse instead of silently borrowing an unsupported reconstruction.
+bindings are checked on every candidate. Topological junction gradients and
+external streams on stencil centres refuse. Stationary species, selective
+streams and explicit-trajectory entropy histories require separate closures;
+the bulk thermal entropy limiter below supplies a closure for stateless and
+native implicit graph queries.
 
 The plan bounds authored stencils and retains only native cell identities and
 prepared geometric factors; no new physical timeline or accepted-state clamp is
@@ -2601,8 +2603,9 @@ Flow-entropy histories still refuse as an implicit endpoint binding.
 Thermal entropy leaves mass-carried
 transfers unclassified unless the caller selects
 `with_implicit_advection_entropy` after binding an admitted bulk or liquid
-upwind flow or a source-anchored stationary mixture, including source-bound
-selective outlets.
+upwind flow, a source-anchored stationary mixture including source-bound
+selective outlets, or ordinary bulk reconstruction with its thermal entropy
+limiter enabled.
 No phase mobility, moving inventory, pressure work or momentum feedback is
 inferred. The selected method's time error and upwind spatial diffusion still
 require independent refinement.
@@ -2647,11 +2650,11 @@ publish no entropy or physical prefix.
 
 `Advected::endpoint_transport_with_entropy` exposes the same stateless bulk/liquid
 transport query for callers needing instantaneous rates. No observer history
-or explicit CFL step is advanced. Nonempty face reconstruction requires its
-own entropy closure and refuses the implicit entropy opt-in; the energy-only
-reconstruction path remains available. The entropy query runs only on final
-audited Newton endpoints, leaving intermediate residuals and analytic tangents
-unchanged.
+or explicit CFL step is advanced. Nonempty reconstruction without its thermal
+entropy limiter refuses the implicit entropy opt-in; the original energy-only
+reconstruction remains available. Full entropy bookkeeping runs only on final
+audited Newton endpoints. The opted-in face bound itself participates in every
+nonlinear residual and analytic tangent, as part of the actual physical flux.
 
 Focused G1/G3/G4 regressions cover exact high-Courant chain/graph balances,
 large enthalpy-reference shifts, unequal-mass latent throughflow, nonlinear
@@ -2696,8 +2699,8 @@ reconstruction. A fully solid geometric sample on a zero-flow edge retains
 first-order donor upwind; nonzero liquid flow through solid still refuses.
 The bounded face trace stays between its original mobile-liquid samples.
 
-The limiter is continuous and piecewise linear. Equal nonzero slopes select
-the left active derivative; a zero or opposite-sign slope selects the flat
+The ordinary minmod limiter is continuous and piecewise linear. Equal nonzero
+slopes select the left active derivative; a zero or opposite-sign slope selects the flat
 branch. These are deterministic generalized derivatives at limiter switches,
 not claims of classical differentiability. The existing Newton line search,
 interval retries, adaptive controller and local/total joule gates remain active.
@@ -2725,6 +2728,58 @@ dry-sample fallback, and an independently solved high-Courant native graph
 interval that crosses the liquidus. Native Rust execution of these new cases
 was unavailable in the implementation session; separate numerical checks of
 their balances and derivatives do not substitute for executing the crate.
+
+### Original-caloric entropy limits for reconstructed bulk flow
+
+`LimitedEnthalpyReconstruction::with_thermal_entropy_limit` optionally bounds
+the existing minmod correction using the same material's original entropy
+difference and temperature. For a directed internal face A to B, write
+`h_face=h_A+c`, `D_A=(h_A-h_B)/T_B-(s_A-s_B)` and
+`W=1/T_B-1/T_A`. Its local spatial entropy production per unit mass flow is
+`D_A+c*W`. A monotone original caloric law gives the nonnegative donor-cell
+gap `D_A`; the limiter retains the original correction when that production
+is nonnegative within finite-increment roundoff. Otherwise it reduces only
+the paired face correction to `c=-D_A/W`. It neither repairs accepted energy
+nor introduces a new heat or entropy source.
+
+The active nonlinear tangent uses `ds/dh=1/T` and each original endpoint's
+analytic `dT/dh`, already supplied by the native fused caloric query. It
+replaces only the correction columns on the same sparse graph Jacobian;
+original upwind and component-reference derivatives remain authoritative.
+The two caloric concavity gaps and the temperature jump must be resolved
+before dividing. An unresolved active bound falls back to donor upwind,
+using a roundoff scale built from finite `delta_h/T`, `delta_s` and correction
+terms, never absolute formation enthalpy or entropy references. Equal-temperature
+latent plateaus retain their original reconstructed flux and tangent without
+an apparent heat capacity or singular quotient.
+
+The actual represented power also obeys the bound: if adding the correction
+to a distant physical component-reference flux rounds farther from upwind than
+requested, the shared power is rounded toward its original donor value.
+An unrepresentable correction retains the exact donor power and tangent.
+Both cells always receive the same opposite transfer. The final face remains
+inside the original caloric domain. Stationary mixtures, selective streams
+and stationary-skeleton liquid carriage require separate entropy closures and
+refuse this bulk-only opt-in.
+
+`Advected::endpoint_transport_with_reconstruction_and_entropy` exposes the
+same endpoint flux and classified rates without advancing a history. The
+native graph can also combine the plan with `with_implicit_advection_entropy`
+for backward Euler and SDIRK2. The actual represented correction power times
+`W` augments the existing spatial mixing term; boundary entropy remains owned
+by the original inlet/outlet calculation. Reconciliation uses the returned
+transport powers, and the signed temporal/algebraic defect remains separate.
+This is a local semidiscrete flux condition, not a general finite-time entropy
+guarantee; it does not widen SDIRK2's passive conduction acceptance gate to
+advection or unclassified heat/work sources.
+
+Regression fixtures compare constant-Cp faces with an independent logarithmic
+entropy-conservative value in both flow directions and shifted enthalpy datums,
+check nonlinear source tangents by perturbing the complete returned powers,
+retain isothermal latent transport, and verify smooth spatial refinement.
+Distant physical component references exercise rounding and lost-tangent
+fallback. Native backward-Euler and SDIRK2 cases check conservative energy,
+classified spatial mixing and the separate temporal entropy balance.
 
 ### Gray radiative links between finite enthalpy bodies
 

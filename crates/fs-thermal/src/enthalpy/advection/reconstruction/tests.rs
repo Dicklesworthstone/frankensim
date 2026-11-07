@@ -7,6 +7,9 @@ use crate::enthalpy::{
     Boundary, DepositedCell, DepositionBudget, Event, StepConfig, ThermalLaw, TimedEvent,
 };
 
+#[path = "entropy_tests.rs"]
+mod entropy;
+
 struct Law {
     datum: f64,
     hole: bool,
@@ -24,6 +27,18 @@ impl ThermalLaw for Law {
     }
     fn maximum_temperature_slope(&self) -> f64 {
         1.0
+    }
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        a: f64,
+        b: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        let ta = self.temperature_k(a)?;
+        self.temperature_k(b)?;
+        if self.hole && (a.min(b) - self.datum) < 160.0 && (a.max(b) - self.datum) > 140.0 {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(Some(((b - a) / ta).ln_1p()))
     }
 }
 
@@ -50,7 +65,7 @@ fn cell(law: &Law, id: usize, h: f64, a: [f64; 3], b: [f64; 3], mass: f64) -> De
     }
 }
 
-fn prepare<'a>(law: &'a Law, cells: Vec<DepositedCell>) -> DepositionSimulation<'a> {
+fn prepare<'a>(law: &'a dyn ThermalLaw, cells: Vec<DepositedCell>) -> DepositionSimulation<'a> {
     let n = cells.len();
     DepositionSimulation::new(
         cells
@@ -60,7 +75,7 @@ fn prepare<'a>(law: &'a Law, cells: Vec<DepositedCell>) -> DepositionSimulation<
                 event: Event::Birth(cell),
             })
             .collect(),
-        &[(MaterialId(1), law as &dyn ThermalLaw)],
+        &[(MaterialId(1), law)],
         DepositionBudget {
             max_cells: n,
             max_links: 2 * n + 4,

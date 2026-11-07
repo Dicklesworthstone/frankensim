@@ -94,13 +94,17 @@ impl ImplicitAdvection {
         thermal: &DepositionSimulation<'_>,
         stage: &ImplicitAdvectionStage<'_>,
         index: &BTreeMap<CellId, usize>,
+        caloric_states: &[ImplicitConductionState],
         with_entropy: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<
-        (TransportStepCoefficients<()>, Vec<(usize, usize, f64)>, Option<EndpointAdvectionEntropy>),
+        (
+            TransportStepCoefficients<()>,
+            Vec<(usize, usize, f64)>,
+            Option<EndpointAdvectionEntropy>,
+        ),
         ImplicitConductionError,
-    >
-    {
+    > {
         let flow = stage.flow.as_ref();
         // Liquid upwind columns remain dynamic with or without reconstruction.
         // Face corrections below augment this same carrier tangent; they must
@@ -132,8 +136,22 @@ impl ImplicitAdvection {
                 None,
             ));
         };
-        let (transport, rates) =
-            flow.reconstructed_endpoint(thermal, reconstruction, true, &mut checkpoint)?;
+        // Reuse the original fused endpoint query. An active entropy bound
+        // differentiates its exact caloric integral with these analytic dT/dh
+        // values; no additional material query or finite difference is needed.
+        let calorics = |id| -> Result<(f64, f64), DepositionError> {
+            let i = *index.get(&id).ok_or(DepositionError::Arithmetic)?;
+            let state = caloric_states.get(i).ok_or(DepositionError::Arithmetic)?;
+            Ok((state.temperature_k, state.temperature_slope_kg_k_j))
+        };
+        let (transport, rates, flow_entropy) = flow.reconstructed_endpoint_with_calorics(
+            thermal,
+            reconstruction,
+            true,
+            self.entropy && with_entropy,
+            Some(&calorics),
+            &mut checkpoint,
+        )?;
         tangent
             .try_reserve_exact(rates.len())
             .map_err(|_| TridiagonalError::Capacity)?;
@@ -145,7 +163,7 @@ impl ImplicitAdvection {
             }
             tangent.push((index[&row], index[&col], derivative));
         }
-        Ok((transport, tangent, None))
+        Ok((transport, tangent, flow_entropy))
     }
 }
 
@@ -236,6 +254,7 @@ impl ImplicitConductionChain<'_> {
     ) -> Result<Self, ImplicitConductionError> {
         checkpoint()?;
         self.admit(thermal, &mut checkpoint)?;
+        let caloric_states = self.endpoint(thermal, &mut checkpoint)?.states;
         let advection = self.advection.as_mut().ok_or(ImplicitConductionError::Invalid(
             "advection schedule requires an attached implicit flow",
         ))?;
@@ -245,7 +264,14 @@ impl ImplicitConductionChain<'_> {
         schedule.admit(&advection.flow, thermal, &mut checkpoint)?;
         advection.schedule = Some(schedule.clone());
         let stage = advection.stage(thermal.time_s(), &mut checkpoint)?;
-        advection.endpoint(thermal, &stage, &self.index, advection.entropy, &mut checkpoint)?;
+        advection.endpoint(
+            thermal,
+            &stage,
+            &self.index,
+            &caloric_states,
+            advection.entropy,
+            &mut checkpoint,
+        )?;
         drop(stage);
         checkpoint()?;
         Ok(self)
@@ -337,8 +363,10 @@ impl ImplicitConductionChain<'_> {
     /// h/s at every stage while storage uses mixture entropy; no additional
     /// latent-energy source is introduced. Original phase support, source
     /// identity and fixed-density admission remain authoritative.
-    /// Nonempty face reconstruction requires its own entropy closure and
-    /// refuses this opt-in; its existing energy-only API is unchanged.
+    /// Nonempty face reconstruction requires its original bulk thermal entropy
+    /// limiter. That limiter classifies its actual paired correction in spatial
+    /// mixing; the same native temporal/algebraic defect remains separate.
+    /// Ordinary reconstruction without that opt-in retains its energy-only API.
     pub fn with_implicit_advection_entropy(
         mut self,
         thermal: &DepositionSimulation<'_>,
@@ -349,7 +377,11 @@ impl ImplicitConductionChain<'_> {
         let advection = self.advection.as_mut().ok_or(ImplicitConductionError::Invalid(
             "implicit entropy requires an attached upwind flow",
         ))?;
-        if advection.reconstruction.is_some() {
+        if advection
+            .reconstruction
+            .as_ref()
+            .is_some_and(|reconstruction| !reconstruction.has_thermal_entropy_limit())
+        {
             return Err(ImplicitConductionError::Invalid(
                 "reconstructed enthalpy transport requires its own entropy closure",
             ));

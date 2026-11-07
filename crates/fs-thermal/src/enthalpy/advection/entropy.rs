@@ -62,7 +62,9 @@ pub struct AdvectionEntropyAudit {
     pub advective_balance_residual_j_k: f64,
 }
 
-/// Instantaneous entropy terms from the original upwind carrier endpoint, W/K.
+/// Instantaneous entropy terms from the original carrier endpoint, W/K.
+/// An opted-in thermal entropy face limiter includes its conservative
+/// reconstruction correction in the spatial mixing term.
 /// No physical interval, accepted history or extra heat source is implied.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AdvectionEntropyRates {
@@ -75,6 +77,35 @@ pub struct AdvectionEntropyRates {
 pub(in crate::enthalpy) struct EndpointAdvectionEntropy {
     pub(in crate::enthalpy) rates: AdvectionEntropyRates,
     pub(in crate::enthalpy) temperatures: BTreeMap<CellId, f64>,
+}
+
+impl EndpointAdvectionEntropy {
+    /// Keep actual transport arithmetic separate from the classified flux
+    /// entropy, including when a native face reconstruction changes the power.
+    pub(in crate::enthalpy) fn reconcile_transport(
+        &mut self,
+        transport: &TransportStepCoefficients<()>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        let mut at_cell = Sum::default();
+        for (&id, &watts) in &transport.heat.bulk.sources_w {
+            checkpoint()?;
+            at_cell.add(finite(watts / temperature(&self.temperatures, id)?)?)?;
+        }
+        for transfer in &transport.transfers {
+            checkpoint()?;
+            at_cell.add(finite(
+                -transfer.power_w / temperature(&self.temperatures, transfer.a)?,
+            )?)?;
+            at_cell.add(finite(
+                transfer.power_w / temperature(&self.temperatures, transfer.b)?,
+            )?)?;
+        }
+        self.rates.balance_residual_w_k = finite(
+            at_cell.total()? - self.rates.boundary_entropy_input_w_k - self.rates.upwind_mixing_w_k,
+        )?;
+        Ok(())
+    }
 }
 
 impl AdvectionEntropyRates {
@@ -150,23 +181,15 @@ impl Advected<()> {
         // Use the exact powers returned by the physical transport owner, not
         // a reconstructed stored-energy difference or an independently evolved
         // flow. Continuity/flux roundoff stays in its own balance residue.
-        let mut at_cell = Sum::default();
-        for (&id, &watts) in &transport.heat.bulk.sources_w {
-            checkpoint()?;
-            at_cell.add(finite(watts / temperature(&temperatures, id)?)?)?;
-        }
-        for transfer in &transport.transfers {
-            checkpoint()?;
-            at_cell.add(finite(-transfer.power_w / temperature(&temperatures, transfer.a)?)?)?;
-            at_cell.add(finite(transfer.power_w / temperature(&temperatures, transfer.b)?)?)?;
-        }
         let rates = AdvectionEntropyRates {
             boundary_entropy_input_w_k: boundary,
             upwind_mixing_w_k: mixing,
-            balance_residual_w_k: finite(at_cell.total()? - boundary - mixing)?,
+            balance_residual_w_k: 0.0,
         };
+        let mut entropy = EndpointAdvectionEntropy { rates, temperatures };
+        entropy.reconcile_transport(&transport, &mut checkpoint)?;
         checkpoint()?;
-        Ok((transport, EndpointAdvectionEntropy { rates, temperatures }))
+        Ok((transport, entropy))
     }
 }
 
@@ -263,12 +286,12 @@ impl DepositionSimulation<'_> {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Sum {
+pub(super) struct Sum {
     value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, term: f64) -> Result<(), DepositionError> {
+    pub(super) fn add(&mut self, term: f64) -> Result<(), DepositionError> {
         let term = finite(term)?;
         let next = finite(self.value + term)?;
         let lost = if self.value.abs() >= term.abs() {
@@ -280,7 +303,7 @@ impl Sum {
         self.value = next;
         Ok(())
     }
-    fn total(&self) -> Result<f64, DepositionError> {
+    pub(super) fn total(&self) -> Result<f64, DepositionError> {
         finite(self.value + self.correction)
     }
 }

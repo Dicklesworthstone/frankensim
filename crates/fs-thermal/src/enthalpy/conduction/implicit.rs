@@ -766,7 +766,8 @@ impl<'a> ImplicitConductionChain<'a> {
                 let stage = advection_stage.ok_or(DepositionError::Arithmetic)?;
                 endpoint.advection_multiplier = stage.multiplier;
                 let (transport, tangent, flow_entropy) = advection.endpoint(
-                    thermal, stage, &self.index, entropy, &mut || (checkpoint.borrow_mut())(),
+                    thermal, stage, &self.index, &endpoint.states, entropy,
+                    &mut || (checkpoint.borrow_mut())(),
                 )?;
                 endpoint.transport_tangent = tangent;
                 if let Some(flow_entropy) = flow_entropy {

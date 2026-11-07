@@ -11,21 +11,33 @@
 //!
 //! This is an endpoint spatial reconstruction, not an explicit time integrator
 //! or a blanket TVD/convergence certificate for a coupled nonlinear solve.
-//! Smooth interior affine fields are reconstructed exactly (up to roundoff);
+//! Without the optional thermal entropy limiter, smooth interior affine fields
+//! are reconstructed exactly (up to roundoff);
 //! absent stencils, junctions and extrema retain the original upwind trace.
 //! A stationary-skeleton liquid carrier reconstructs h_liquid=max(h,h_liquidus),
 //! preserving liquid superheat without transporting the solid's latent fraction.
 //! A dry stencil neighbor supplies no liquid gradient and retains donor upwind.
+//! The bulk thermal entropy opt-in may reduce the same face correction using
+//! the original caloric entropy law, while preserving its paired heat transfer.
 //! Nonuniform-grid limiters require actual distances rather than uniform-grid
 //! jump ratios; see X. Zeng, "A general approach to enhance slope limiters on
 //! non-uniform rectilinear grids", <https://arxiv.org/abs/1301.0967>.
 
+use super::entropy::{AdvectionEntropyRates, EndpointAdvectionEntropy, Sum};
 use super::{Advected, finite, invalid};
 use crate::enthalpy::backward_euler::TransportStepCoefficients;
 use crate::enthalpy::{
     CellGeometry, CellId, DepositionError, DepositionSimulation, MaterialId, ThermalStorageBasis,
 };
 use std::collections::BTreeMap;
+
+#[path = "reconstruction/entropy.rs"]
+mod entropy;
+
+/// Original endpoint temperature and dT/dh, supplied by the native implicit
+/// caloric owner. Explicit flux queries do not need a derivative callback.
+pub(in crate::enthalpy) type ReconstructionCalorics<'a> =
+    dyn Fn(CellId) -> Result<(f64, f64), DepositionError> + 'a;
 
 /// Hard ceiling on authored centre stencils in one reconstruction plan.
 pub const MAX_AXIAL_STENCILS: usize = 65_536;
@@ -56,11 +68,13 @@ struct BoundCell {
 
 struct FaceIncrement {
     value: f64,
-    // Derivative with respect to carried enthalpy: the active increment
-    // depends on one neighbor and the donor with opposite coefficients.
+    // Derivatives of the correction in carried-enthalpy coordinates. Ordinary
+    // minmod uses donor/neighbor; the entropy bound uses donor/receiver.
     // Each column's own carrier slope converts this to stored mixture h.
-    // None selects the flat/extremum branch.
-    neighbor_partial: Option<(CellId, f64)>,
+    partials: Option<[(CellId, f64); 2]>,
+    // Set by the original entropy query only for unequal-temperature faces.
+    // Entropy-neutral latent traces retain their original flux arithmetic.
+    guard_power_roundoff: bool,
 }
 
 /// Immutable numerical geometry for selected interior pipe cells.
@@ -73,6 +87,7 @@ struct FaceIncrement {
 pub struct LimitedEnthalpyReconstruction {
     stencils: BTreeMap<CellId, PreparedStencil>,
     cells: BTreeMap<CellId, BoundCell>,
+    thermal_entropy_limit: bool,
 }
 
 impl LimitedEnthalpyReconstruction {
@@ -91,6 +106,7 @@ impl LimitedEnthalpyReconstruction {
         let mut result = Self {
             stencils: BTreeMap::new(),
             cells: BTreeMap::new(),
+            thermal_entropy_limit: false,
         };
         for stencil in stencils {
             checkpoint()?;
@@ -171,6 +187,29 @@ impl LimitedEnthalpyReconstruction {
         self.stencils.is_empty()
     }
 
+    /// Limit each reconstructed bulk face by its original thermal entropy.
+    ///
+    /// The existing minmod trace is retained whenever its directed face
+    /// production is nonnegative within finite-increment roundoff. Otherwise
+    /// only its conservative face correction is reduced toward the original
+    /// donor flux. Source entropy differences, actual temperatures and analytic
+    /// caloric tangents supply the active bound; no heat capacity is averaged.
+    /// Equal-temperature latent plateaus retain their original reconstruction.
+    ///
+    /// This opt-in requires ordinary same-material bulk transport and original
+    /// caloric entropy support when a face correction is present. Stationary
+    /// mixtures, selective streams and stationary-skeleton liquid carriage need
+    /// separate closures. It is a local semidiscrete condition, not a guarantee
+    /// about a finite time step, coupled work, or a general maximum principle.
+    pub fn with_thermal_entropy_limit(mut self) -> Self {
+        self.thermal_entropy_limit = true;
+        self
+    }
+
+    pub(in crate::enthalpy) fn has_thermal_entropy_limit(&self) -> bool {
+        self.thermal_entropy_limit
+    }
+
     fn admit(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -200,6 +239,11 @@ impl LimitedEnthalpyReconstruction {
         {
             return Err(invalid(
                 "limited enthalpy reconstruction has no species or entropy-mixing closure",
+            ));
+        }
+        if self.thermal_entropy_limit && flow.liquid_carrier.is_some() {
+            return Err(invalid(
+                "thermal entropy face limiting requires ordinary bulk carriage",
             ));
         }
         let mut neighbors: BTreeMap<_, u8> = self.stencils.keys().map(|&id| (id, 0)).collect();
@@ -248,7 +292,8 @@ impl LimitedEnthalpyReconstruction {
         let Some(stencil) = self.stencils.get(&up) else {
             return Ok(FaceIncrement {
                 value: 0.0,
-                neighbor_partial: None,
+                partials: None,
+                guard_power_roundoff: false,
             });
         };
         let centre = flow.carried_h(&thermal.cells()[&up])?;
@@ -262,7 +307,8 @@ impl LimitedEnthalpyReconstruction {
                 // liquid state from which to infer a slope.
                 return Ok(FaceIncrement {
                     value: 0.0,
-                    neighbor_partial: None,
+                    partials: None,
+                    guard_power_roundoff: false,
                 });
             }
         }
@@ -286,7 +332,8 @@ impl LimitedEnthalpyReconstruction {
         if increment == 0.0 {
             return Ok(FaceIncrement {
                 value: 0.0,
-                neighbor_partial: None,
+                partials: None,
+                guard_power_roundoff: false,
             });
         }
         let face_h = finite(centre + increment)?;
@@ -300,14 +347,15 @@ impl LimitedEnthalpyReconstruction {
         // At equal nonzero slopes choose the left active derivative. At a
         // sign switch the zero branch above supplies a generalized derivative.
         // Minmod is piecewise linear, not classically differentiable there.
-        let neighbor_partial = if limited_left.abs() <= limited_right.abs() {
+        let (neighbor, partial) = if limited_left.abs() <= limited_right.abs() {
             (stencil.previous, -direction * stencil.left_fraction)
         } else {
             (stencil.next, direction * stencil.right_fraction)
         };
         Ok(FaceIncrement {
             value: increment,
-            neighbor_partial: Some(neighbor_partial),
+            partials: Some([(neighbor, partial), (up, -partial)]),
+            guard_power_roundoff: false,
         })
     }
 }
@@ -339,6 +387,28 @@ impl Advected<()> {
             .map(|(transport, _)| transport)
     }
 
+    /// The same conservative face flux with original advective entropy.
+    /// Nonempty reconstruction requires `with_thermal_entropy_limit`. Boundary
+    /// streams remain native upwind; internal face corrections change only
+    /// spatial mixing. Actual transport arithmetic retains its separate balance
+    /// residue, and no thermal or observer history is advanced by this query.
+    pub fn endpoint_transport_with_reconstruction_and_entropy(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        reconstruction: &LimitedEnthalpyReconstruction,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, AdvectionEntropyRates), DepositionError> {
+        let (transport, _, entropy) = self.reconstructed_endpoint_with_calorics(
+            thermal,
+            reconstruction,
+            false,
+            true,
+            None,
+            checkpoint,
+        )?;
+        Ok((transport, entropy.ok_or(DepositionError::Arithmetic)?.rates))
+    }
+
     /// The native implicit owner can request the active face-correction
     /// tangent in the same pass as the physical flux. Entries differentiate
     /// heat into a row with respect to a column's specific enthalpy [kg/s].
@@ -348,15 +418,56 @@ impl Advected<()> {
         thermal: &DepositionSimulation<'_>,
         reconstruction: &LimitedEnthalpyReconstruction,
         differentiate: bool,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(TransportStepCoefficients<()>, Vec<(CellId, CellId, f64)>), DepositionError> {
+        self.reconstructed_endpoint_with_calorics(
+            thermal,
+            reconstruction,
+            differentiate,
+            false,
+            None,
+            checkpoint,
+        )
+        .map(|(transport, tangent, _)| (transport, tangent))
+    }
+
+    pub(in crate::enthalpy) fn reconstructed_endpoint_with_calorics(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        reconstruction: &LimitedEnthalpyReconstruction,
+        differentiate: bool,
+        with_entropy: bool,
+        calorics: Option<&ReconstructionCalorics<'_>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (
+            TransportStepCoefficients<()>,
+            Vec<(CellId, CellId, f64)>,
+            Option<EndpointAdvectionEntropy>,
+        ),
+        DepositionError,
+    > {
         checkpoint()?;
-        if reconstruction.is_empty() {
-            return Ok((self.endpoint_transport(thermal, checkpoint)?, Vec::new()));
+        if !reconstruction.is_empty() {
+            reconstruction.admit(thermal, self, &mut checkpoint)?;
+            if with_entropy && !reconstruction.thermal_entropy_limit {
+                return Err(invalid(
+                    "reconstructed entropy requires thermal entropy face limiting",
+                ));
+            }
         }
-        reconstruction.admit(thermal, self, &mut checkpoint)?;
-        let mut endpoint = self.endpoint_transport(thermal, &mut checkpoint)?;
+        let (mut endpoint, mut entropy) = if with_entropy {
+            let (transport, entropy) =
+                self.endpoint_transport_entropy_state(thermal, &mut checkpoint)?;
+            (transport, Some(entropy))
+        } else {
+            (self.endpoint_transport(thermal, &mut checkpoint)?, None)
+        };
+        if reconstruction.is_empty() {
+            return Ok((endpoint, Vec::new(), entropy));
+        }
         let mut tangent = Vec::new();
+        let mut entropy_correction = Sum::default();
         if differentiate {
             let capacity = self
                 .flows
@@ -377,23 +488,49 @@ impl Advected<()> {
             if transfer.a != up || transfer.b != down {
                 return Err(invalid("native upwind transfer order changed"));
             }
-            let increment = reconstruction.face_increment(thermal, self, up, down)?;
-            if increment.value != 0.0 {
-                transfer.power_w = finite(transfer.power_w + finite(rate * increment.value)?)?;
+            let mut increment = reconstruction.face_increment(thermal, self, up, down)?;
+            if reconstruction.thermal_entropy_limit && increment.value != 0.0 {
+                increment =
+                    entropy::limit_face(thermal, up, down, increment, differentiate, calorics)?;
             }
-            if let Some((neighbor, partial)) = increment.neighbor_partial.filter(|_| differentiate)
-            {
-                let derivative = finite(rate * partial)?;
-                if derivative == 0.0 {
-                    return Err(DepositionError::Arithmetic);
+            if increment.value != 0.0 {
+                let old_power = transfer.power_w;
+                let correction_power = finite(rate * increment.value)?;
+                transfer.power_w = if increment.guard_power_roundoff {
+                    entropy::apply_correction(old_power, correction_power)?
+                } else {
+                    finite(old_power + correction_power)?
+                };
+                if increment.guard_power_roundoff && transfer.power_w == old_power {
+                    // A correction below the actual flux representation's
+                    // resolution retains the donor flux and donor tangent.
+                    increment.partials = None;
                 }
+                if let Some(entropy) = &entropy {
+                    let ta = entropy.temperatures[&up];
+                    let tb = entropy.temperatures[&down];
+                    // Classify the actually applied paired correction, including
+                    // its rounding against the original component-reference flux.
+                    entropy_correction.add(finite(
+                        (transfer.power_w - old_power) * ((ta - tb) / ta / tb),
+                    )?)?;
+                }
+            }
+            if let Some(partials) = increment.partials.filter(|_| differentiate) {
                 // One power, two opposite physical accounts. A liquid trace
                 // differentiates the moving liquid's h, not the solid's latent
                 // inventory: donor and neighbor can have different slopes.
-                for (col, partial) in [(neighbor, derivative), (up, -derivative)] {
+                for (col, partial) in partials {
+                    if partial == 0.0 {
+                        continue;
+                    }
+                    let derivative = finite(rate * partial)?;
+                    if derivative == 0.0 {
+                        return Err(DepositionError::Arithmetic);
+                    }
                     let slope = self.implicit_carried_enthalpy_slope(&thermal.cells()[&col])?;
                     if slope != 0.0 {
-                        let value = finite(partial * slope)?;
+                        let value = finite(derivative * slope)?;
                         if value == 0.0 {
                             return Err(DepositionError::Arithmetic);
                         }
@@ -405,8 +542,13 @@ impl Advected<()> {
         if transfers.next().is_some() {
             return Err(invalid("native upwind transfer count changed"));
         }
+        if let Some(entropy) = &mut entropy {
+            entropy.rates.upwind_mixing_w_k =
+                finite(entropy.rates.upwind_mixing_w_k + entropy_correction.total()?)?;
+            entropy.reconcile_transport(&endpoint, &mut checkpoint)?;
+        }
         checkpoint()?;
-        Ok((endpoint, tangent))
+        Ok((endpoint, tangent, entropy))
     }
 }
 

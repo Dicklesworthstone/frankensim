@@ -22,6 +22,9 @@ pub struct AdvectiveEntropyContribution {
     /// This is upwind/control-volume mixing, not constitutive fluid dissipation.
     /// Ordinary bulk mixing is nonnegative for one immutable monotone T(h)
     /// in exact arithmetic; selected outlets retain their signed removal term.
+    /// Native thermal entropy face limiting adds the actual conservative
+    /// reconstruction correction times (1/T_receiver - 1/T_donor). Boundary
+    /// streams and their original entropy references remain unchanged.
     /// Source-anchored stationary mixtures retain signed composition/pressure
     /// and separation/removal terms; per-face nonnegativity requires additional
     /// physical assumptions. No separator work or reservoir heat is invented.
