@@ -219,6 +219,23 @@ impl<'a> ImplicitConductionGraph<'a> {
         })
     }
 
+    /// Prescribe continuous bath temperatures at each native stage time.
+    /// The chain attachment retains original face/caloric ownership, clips
+    /// intervals at history knots and accounts heat at the actual bath Kelvin.
+    pub fn with_bath_temperature_histories(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        reservoirs: &[(CellId, &'a super::boundary::BathTemperatureSchedule)],
+        ambient: &[(CellId, &'a super::boundary::BathTemperatureSchedule)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_bath_temperature_histories(
+                thermal, reservoirs, ambient, checkpoint,
+            )?,
+        })
+    }
+
     /// Replace selected bulk-series links with original integrated conductive
     /// fluxes and their full tangents. The same attachment and ownership rules
     /// as [`ImplicitConductionChain::with_link_laws`] apply.

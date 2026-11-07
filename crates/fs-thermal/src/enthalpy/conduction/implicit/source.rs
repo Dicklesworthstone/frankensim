@@ -245,9 +245,14 @@ impl ImplicitConductionChain<'_> {
                 earlier_transition(next, source.next_transition_time_s(after_s), after_s)
             },
         );
+        let baths = self.reservoir_histories.values()
+            .chain(self.ambient_histories.values())
+            .fold(local, |next, history| {
+                earlier_transition(next, history.schedule.next_transition_time_s(after_s), after_s)
+            });
         let coupled = self.coupled_heat_source.as_ref()
             .and_then(|source| source.law.next_transition_time_s(after_s));
-        earlier_transition(local, coupled, after_s)
+        earlier_transition(baths, coupled, after_s)
     }
 }
 

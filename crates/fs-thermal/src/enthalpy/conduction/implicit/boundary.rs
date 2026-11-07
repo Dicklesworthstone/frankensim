@@ -7,6 +7,12 @@ use crate::enthalpy::{
 };
 use std::collections::BTreeMap;
 
+/// Continuous prescribed temperatures on the original boundary channels.
+#[path = "boundary/history.rs"]
+mod history;
+pub use history::{BathTemperatureKnot, BathTemperatureSchedule};
+pub(super) use history::{BoundBathHistory, temperature_at};
+
 /// Gray radiation and convection through the original finite half-cell.
 #[path = "boundary/radiation.rs"]
 mod radiation;
@@ -98,7 +104,7 @@ pub trait ImplicitBoundaryLaw {
     }
 }
 
-/// Two signed reservoir exchanges through one original physical boundary face.
+/// Up to two signed bath exchanges through one original physical boundary face.
 ///
 /// Powers are positive outward. Their sum is the heat removed from the cell;
 /// their separate temperatures determine the reservoir entropy exchange. They
@@ -134,7 +140,7 @@ impl ImplicitBoundaryExchangeState {
 
 /// Complete exchange with two prescribed baths on the original caloric object.
 ///
-/// The selected channel supplies its actual authored bath temperature. An
+/// The selected channel supplies its actual stage bath temperature. An
 /// implementation must explicitly bind the second bath and return both actual
 /// temperatures. Each query is immutable and keeps one shared half-cell and
 /// surface balance. The native heat and entropy owners consume the same two

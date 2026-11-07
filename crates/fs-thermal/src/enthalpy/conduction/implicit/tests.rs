@@ -1502,3 +1502,6 @@ mod advection;
 
 #[path = "tests/source.rs"]
 mod heat_source;
+
+#[path = "tests/bath_history.rs"]
+mod bath_history;

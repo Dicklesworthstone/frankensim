@@ -1,5 +1,29 @@
 # fs-thermal contract
 
+## Continuous prescribed bath-temperature histories
+
+`BathTemperatureSchedule` and `with_bath_temperature_histories` on native
+implicit chain/graph owners prescribe bounded continuous piecewise-linear
+positive-Kelvin histories on existing reservoir and ambient channels. Original
+calorics, geometric conductivity, material-density half-distance derivatives,
+integrated/radiative boundary laws and native exposed-area Robin coefficients
+remain active. Each BE endpoint and SDIRK stage samples its physical time;
+fixed, observed and adaptive intervals clip at history knots. Scheduled
+single-bath power replaces the original channel through the existing boundary
+exchange owner, with one heat credit and entropy at the actual bath temperature.
+Passive SDIRK entropy admission retains those actual stage exchanges. A
+composed law's separately declared bath remains law-owned. Accepted states
+retain authored boundaries; conflicting native temperature events, outside-domain
+queries, invalid samples, budget exhaustion and cancellation refuse
+transactionally. Histories never imply extrapolation or additional heat sources.
+
+Four exact-production native Rust checks passed for schedule interpolation,
+support/admission, floating-point extremes and one-credit actual-bath entropy.
+Four pipeline regression groups cover physical stage sampling and refinement,
+nonlinear/radiative/composed tangents, latent-plateau Robin cooling, and rollback.
+Those pipeline regressions were authored but not executed against the complete
+Cargo graph in this environment.
+
 ## Sparse coupled heat-generation feedback in implicit conduction
 
 `ImplicitCoupledHeatSourceLaw` and the chain/graph

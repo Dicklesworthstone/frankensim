@@ -47,32 +47,54 @@ impl ImplicitConductionChain<'_> {
             for (stage, duration_s) in stages {
                 let temperature_k = stage.states[i].temperature_k;
                 minimum_temperature_k = minimum_temperature_k.min(temperature_k);
-                let ambient = cell.boundary.ambient_k;
-                let conductance = stage
-                    .boundary_values
-                    .ambient_w_k
-                    .get(&id)
-                    .copied()
-                    .unwrap_or(exposed[&id] * cell.boundary.htc_w_m2_k);
-                let heat = finite(duration_s * finite(conductance * (ambient - temperature_k))?)?;
-                absolute_heat_j.add(heat.abs())?;
-                if heat != 0.0 {
-                    minimum_temperature_k = minimum_temperature_k.min(ambient);
-                }
-                if let Some(reservoir) = cell.boundary.reservoir {
+                if let Some(exchange) = stage.ambient_exchange_states.get(&id) {
+                    // A prescribed history retains its actual stage power and
+                    // bath Kelvin. Never reconstruct it from authored data.
+                    for bath in exchange.baths {
+                        let heat = finite(duration_s * bath.outward_power_w)?;
+                        absolute_heat_j.add(heat.abs())?;
+                        if heat != 0.0 {
+                            minimum_temperature_k = minimum_temperature_k.min(bath.temperature_k);
+                        }
+                    }
+                } else {
+                    let ambient = cell.boundary.ambient_k;
                     let conductance = stage
                         .boundary_values
-                        .reservoir_w_k
+                        .ambient_w_k
                         .get(&id)
                         .copied()
-                        .unwrap_or(reservoir.conductance_w_k);
-                    let heat = finite(
-                        duration_s
-                            * finite(conductance * (reservoir.temperature_k - temperature_k))?,
-                    )?;
+                        .unwrap_or(exposed[&id] * cell.boundary.htc_w_m2_k);
+                    let heat = finite(duration_s * finite(conductance * (ambient - temperature_k))?)?;
                     absolute_heat_j.add(heat.abs())?;
                     if heat != 0.0 {
-                        minimum_temperature_k = minimum_temperature_k.min(reservoir.temperature_k);
+                        minimum_temperature_k = minimum_temperature_k.min(ambient);
+                    }
+                }
+                if let Some(reservoir) = cell.boundary.reservoir {
+                    if let Some(exchange) = stage.reservoir_exchange_states.get(&id) {
+                        for bath in exchange.baths {
+                            let heat = finite(duration_s * bath.outward_power_w)?;
+                            absolute_heat_j.add(heat.abs())?;
+                            if heat != 0.0 {
+                                minimum_temperature_k = minimum_temperature_k.min(bath.temperature_k);
+                            }
+                        }
+                    } else {
+                        let conductance = stage
+                            .boundary_values
+                            .reservoir_w_k
+                            .get(&id)
+                            .copied()
+                            .unwrap_or(reservoir.conductance_w_k);
+                        let heat = finite(
+                            duration_s
+                                * finite(conductance * (reservoir.temperature_k - temperature_k))?,
+                        )?;
+                        absolute_heat_j.add(heat.abs())?;
+                        if heat != 0.0 {
+                            minimum_temperature_k = minimum_temperature_k.min(reservoir.temperature_k);
+                        }
                     }
                 }
             }

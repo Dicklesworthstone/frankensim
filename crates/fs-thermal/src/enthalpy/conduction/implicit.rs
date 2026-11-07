@@ -19,7 +19,7 @@
 //! through the same nonlinear/time owner with a bounded sparse Krylov solve.
 //! The opt-in `advance_sdirk2_to` path shares this residual and Newton owner,
 //! with second-order L-stable quadrature for fixed networks, piecewise constant
-//! source/bath events and continuous prescribed endpoint source histories,
+//! source/bath events and continuous prescribed source and bath histories,
 //! including native Robin coefficients.
 //! Selected planar layers may expand or contract at fixed mass and footprint.
 //! Their original density and specific-volume tangent update every native
@@ -291,6 +291,8 @@ pub struct ImplicitConductionChain<'a> {
     ambient_laws: BTreeMap<CellId, &'a dyn ImplicitBoundaryLaw>,
     reservoir_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
     ambient_exchanges: BTreeMap<CellId, &'a dyn ImplicitBoundaryExchangeLaw>,
+    reservoir_histories: BTreeMap<CellId, boundary::BoundBathHistory<'a>>,
+    ambient_histories: BTreeMap<CellId, boundary::BoundBathHistory<'a>>,
     heat_sources: BTreeMap<CellId, &'a dyn ImplicitHeatSourceLaw>,
     coupled_heat_source: Option<CoupledHeatSource<'a>>,
     advection: Option<ImplicitAdvection>,
@@ -412,6 +414,8 @@ impl<'a> ImplicitConductionChain<'a> {
             ambient_laws: BTreeMap::new(),
             reservoir_exchanges: BTreeMap::new(),
             ambient_exchanges: BTreeMap::new(),
+            reservoir_histories: BTreeMap::new(),
+            ambient_histories: BTreeMap::new(),
             heat_sources: BTreeMap::new(),
             coupled_heat_source: None,
             advection: None,
@@ -563,6 +567,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 }
             }
         }
+        self.admit_bath_histories(thermal, checkpoint)?;
         checkpoint()?;
         Ok(())
     }
@@ -708,6 +713,13 @@ impl<'a> ImplicitConductionChain<'a> {
         let mut ambient_exchange_states = BTreeMap::new();
         for (&id, binding) in &self.conduction.reservoirs {
             checkpoint()?;
+            let cell = &thermal.cells[&id];
+            let reservoir = cell.boundary.reservoir.ok_or(ImplicitConductionError::Invalid(
+                "implicit reservoir disappeared",
+            ))?;
+            let bath_temperature_k = boundary::temperature_at(
+                &self.reservoir_histories, id, reservoir.temperature_k, thermal.time_s,
+            )?;
             let index = self.index[&id];
             let distance =
                 endpoint_distance(&layer_distances, index, binding.geometry.half_distance_m);
@@ -717,18 +729,11 @@ impl<'a> ImplicitConductionChain<'a> {
                 surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
             };
             if let Some(law) = self.reservoir_exchanges.get(&id) {
-                let cell = &thermal.cells[&id];
-                let reservoir = cell
-                    .boundary
-                    .reservoir
-                    .ok_or(ImplicitConductionError::Invalid(
-                        "implicit exchange reservoir disappeared",
-                    ))?;
                 let state = if self.has_material_density_geometry(id) {
                     require_geometry_tangent(
                         law.state_at_specific_enthalpy_with_geometry_tangent(
                             cell.specific_h_j_kg,
-                            reservoir.temperature_k,
+                            bath_temperature_k,
                             geometry,
                             distance.relative_enthalpy_slope_kg_j,
                             checkpoint,
@@ -737,7 +742,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 } else {
                     law.state_at_specific_enthalpy(
                         cell.specific_h_j_kg,
-                        reservoir.temperature_k,
+                        bath_temperature_k,
                         geometry,
                         checkpoint,
                     )?
@@ -748,18 +753,11 @@ impl<'a> ImplicitConductionChain<'a> {
                 continue;
             }
             if let Some(law) = self.reservoir_laws.get(&id) {
-                let cell = &thermal.cells[&id];
-                let reservoir = cell
-                    .boundary
-                    .reservoir
-                    .ok_or(ImplicitConductionError::Invalid(
-                        "implicit flux reservoir disappeared",
-                    ))?;
                 let state = if self.has_material_density_geometry(id) {
                     require_geometry_tangent(
                         law.state_at_specific_enthalpy_with_geometry_tangent(
                             cell.specific_h_j_kg,
-                            reservoir.temperature_k,
+                            bath_temperature_k,
                             geometry,
                             distance.relative_enthalpy_slope_kg_j,
                             checkpoint,
@@ -768,7 +766,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 } else {
                     law.state_at_specific_enthalpy(
                         cell.specific_h_j_kg,
-                        reservoir.temperature_k,
+                        bath_temperature_k,
                         geometry,
                         checkpoint,
                     )?
@@ -791,6 +789,10 @@ impl<'a> ImplicitConductionChain<'a> {
         }
         for (&id, binding) in &self.conduction.ambient_faces {
             checkpoint()?;
+            let cell = &thermal.cells[&id];
+            let bath_temperature_k = boundary::temperature_at(
+                &self.ambient_histories, id, cell.boundary.ambient_k, thermal.time_s,
+            )?;
             let index = self.index[&id];
             let distance =
                 endpoint_distance(&layer_distances, index, binding.geometry.half_distance_m);
@@ -800,12 +802,11 @@ impl<'a> ImplicitConductionChain<'a> {
                 surface_resistance_m2_k_w: binding.geometry.surface_resistance_m2_k_w,
             };
             if let Some(law) = self.ambient_exchanges.get(&id) {
-                let cell = &thermal.cells[&id];
                 let state = if self.has_material_density_geometry(id) {
                     require_geometry_tangent(
                         law.state_at_specific_enthalpy_with_geometry_tangent(
                             cell.specific_h_j_kg,
-                            cell.boundary.ambient_k,
+                            bath_temperature_k,
                             geometry,
                             distance.relative_enthalpy_slope_kg_j,
                             checkpoint,
@@ -814,7 +815,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 } else {
                     law.state_at_specific_enthalpy(
                         cell.specific_h_j_kg,
-                        cell.boundary.ambient_k,
+                        bath_temperature_k,
                         geometry,
                         checkpoint,
                     )?
@@ -825,12 +826,11 @@ impl<'a> ImplicitConductionChain<'a> {
                 continue;
             }
             if let Some(law) = self.ambient_laws.get(&id) {
-                let cell = &thermal.cells[&id];
                 let state = if self.has_material_density_geometry(id) {
                     require_geometry_tangent(
                         law.state_at_specific_enthalpy_with_geometry_tangent(
                             cell.specific_h_j_kg,
-                            cell.boundary.ambient_k,
+                            bath_temperature_k,
                             geometry,
                             distance.relative_enthalpy_slope_kg_j,
                             checkpoint,
@@ -839,7 +839,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 } else {
                     law.state_at_specific_enthalpy(
                         cell.specific_h_j_kg,
-                        cell.boundary.ambient_k,
+                        bath_temperature_k,
                         geometry,
                         checkpoint,
                     )?
@@ -874,7 +874,7 @@ impl<'a> ImplicitConductionChain<'a> {
             .map(|source| source.endpoint(thermal, checkpoint))
             .transpose()?;
         checkpoint()?;
-        Ok(Endpoint {
+        let mut endpoint = Endpoint {
             states,
             layer_distances,
             link_values,
@@ -891,7 +891,9 @@ impl<'a> ImplicitConductionChain<'a> {
             transport_tangent: Vec::new(),
             advection_multiplier: 1.0,
             advection_entropy: None,
-        })
+        };
+        self.apply_bath_histories(thermal, &mut endpoint, checkpoint)?;
+        Ok(endpoint)
     }
 
     #[cfg(test)]
