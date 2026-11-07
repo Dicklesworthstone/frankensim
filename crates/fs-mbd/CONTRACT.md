@@ -3800,20 +3800,26 @@ motion and heat. This is separate from a full Cargo/DSR workspace gate.
 under the existing material-derived Kelvin–Voigt rolling moment. The original
 Hertz patch, source density/radius, held temperature and frequency, and
 quasistatic validity remain binding. The constant-load vector equation
-`(m + I/R²) du/dt = F_t - (A N/R) u` is integrated analytically, including
-driven turning and reversal. Both endpoint static-traction norms bound the
+`(m + I/R²) du/dt = F_t + (T × n)/R - (A N/R) u` is integrated analytically,
+including driven turning and reversal. The original entry point retains zero
+applied torque; `advance_viscoelastic_sphere_rolling_with_torque` admits a held
+world motor or braking torque. Both endpoint static-traction norms bound the
 entire exponential path; infeasible rolling refuses rather than projecting
 away slip. Native linear and world-origin angular impulses, actual force work,
-moving-plane work and continuous bulk torque work are audited. The nonnegative
-heat integral uses exponential moments, not an energy defect. Normal spin is
-preserved. Changing-axis attitude alone uses bounded Lie midpoint steps;
+signed motor work, moving-plane work and continuous bulk torque work are audited.
+The nonnegative heat integral uses exponential moments, not an energy defect.
+Normal torque accelerates normal spin and its work is retained separately;
+normal spin contributes no deformation heat in this rolling law.
+Changing-axis attitude alone uses bounded Lie midpoint steps;
 commuting attitude is exact. This is a homogeneous-sphere, held-load no-slip
 phase with asymptotic coast-down, not sliding, impact, finite-time viscous
 arrest, torsional loss or thermal transport. Generated heat belongs to the
 card's deforming sphere and is already included in the native advance loss.
-Focused physical groups cover exact coast-down, driven work, world/boost
-covariance, continuation, elastic limits, source/traction refusal, late
-cancellation and attitude refinement.
+Focused physical groups cover exact coast-down, motor startup, braking and
+reversal, driven work, normal-spin work without spurious heat, world/boost
+covariance, continuation, elastic rigid-body limits, source/traction refusal,
+late cancellation and attitude refinement, including motor startup from rest
+whose rolling and normal-spin accelerations evolve differently.
 
 ## Native rigid-body directional friction impulses
 

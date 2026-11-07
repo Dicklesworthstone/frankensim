@@ -2,9 +2,10 @@
 //!
 //! For the original first-order sphere law, `M = -A N R omega_t`. With
 //! no contact-point slip, force and moment balance give
-//! `(m + I/R²) du/dt = F_t - (A N/R) u`, where `u` is centre velocity
-//! relative to the prescribed plane. This constant-load equation is solved
-//! analytically, including turning and force-driven reversal. There is no
+//! `(m + I/R²) du/dt = F_t + (T × n)/R - (A N/R) u`, where `u` is centre
+//! velocity relative to the prescribed plane and `T` is an applied world
+//! torque. This constant-load equation is solved analytically, including
+//! turning and force- or torque-driven reversal. There is no
 //! finite-time coast-down stop, velocity cutoff, or numerical loss term.
 //!
 //! The source's actual Hertz patch and its temperature, frequency, wave-speed
@@ -14,7 +15,8 @@
 //! this steady no-slip material law supplies neither mechanism. Hertz normal
 //! storage is constant. The sphere uses the original rigid contact radius,
 //! within the source's small-indentation approximation. Normal-axis spin is
-//! retained and has no loss in this law. Heat is generated in the source's
+//! driven by the normal component of the applied torque and has no loss in
+//! this law. Heat is generated in the source's
 //! deforming sphere; this module performs no thermal transport.
 
 use super::*;
@@ -115,7 +117,7 @@ impl From<RollingLossError> for SphereRollingError {
 /// coefficient interval. Constitutive/model-form approximation remains that
 /// of the source card; this is not an arbitrary-speed rolling model or a
 /// self-heating material update. Every refusal leaves caller state unchanged.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn advance_viscoelastic_sphere_rolling<'a>(
     scene: &SpherePlane,
     state: SpherePlaneState,
@@ -123,9 +125,46 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
     binding: SphereRollingBinding<'a>,
     duration_s: f64,
     config: SpherePlaneConfig,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ViscoelasticSphereAdvance<'a>, SphereRollingError> {
+    advance_viscoelastic_sphere_rolling_with_torque(
+        scene,
+        state,
+        Vec3::ZERO,
+        support_friction,
+        binding,
+        duration_s,
+        config,
+        cancelled,
+    )
+}
+
+/// Advance material-derived rolling under a held external world torque.
+///
+/// Tangential torque drives or brakes the same constrained rolling coordinate
+/// as the applied force. The static traction demand follows actual linear
+/// momentum balance, so a motor cannot bypass the contact's static capacity.
+/// Normal torque accelerates normal-axis spin without adding rolling loss.
+/// Its signed work and impulse are included separately in `motion`; only
+/// viscoelastic deformation contributes to `deformation_heat_j`.
+///
+/// All source, support, no-slip and applicability requirements of
+/// [`advance_viscoelastic_sphere_rolling`] also apply. Translation, momenta,
+/// force work and motor work integrate analytically. Changing-axis attitude
+/// follows the bounded Lie-midpoint path, including accelerated normal spin.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn advance_viscoelastic_sphere_rolling_with_torque<'a>(
+    scene: &SpherePlane,
+    state: SpherePlaneState,
+    external_torque_world: Vec3,
+    support_friction: &FrictionLaw,
+    binding: SphereRollingBinding<'a>,
+    duration_s: f64,
+    config: SpherePlaneConfig,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ViscoelasticSphereAdvance<'a>, SphereRollingError> {
     poll(&mut cancelled)?;
+    vector(external_torque_world)?;
     if !duration_s.is_finite() || duration_s <= 0.0 {
         return Err(SpherePlaneError::Invalid("positive finite rolling duration required").into());
     }
@@ -139,6 +178,10 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
     let spin0 = world_spin(body);
     let omega0 = spin0.scale(engine.inertia.recip());
     let normal_spin = engine.n.scale(omega0.dot(engine.n));
+    let normal_acceleration = engine
+        .n
+        .scale(external_torque_world.dot(engine.n) / engine.inertia);
+    vector(normal_acceleration)?;
     let rolling0 = omega0.sub(normal_spin);
     let relative0 = v0.sub(scene.velocity_world);
     let gap = engine.gap(body, state.time_s)?;
@@ -207,7 +250,14 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
     let z = finite(rate * duration_s)?;
     let moments = exponential_moments(z);
     let [decay, phi1, phi2, phi3, variance] = moments;
-    let acceleration_free = engine.force_tangent_world.scale(effective_mass.recip());
+    let driving_force = if external_torque_world == Vec3::ZERO {
+        engine.force_tangent_world
+    } else {
+        engine
+            .force_tangent_world
+            .add(external_torque_world.cross(engine.n).scale(radius.recip()))
+    };
+    let acceleration_free = driving_force.scale(effective_mass.recip());
     let initial_acceleration = acceleration_free.sub(relative0.scale(rate));
     if decay == 0.0 && initial_acceleration != Vec3::ZERO {
         return Err(
@@ -265,23 +315,30 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
         .scale(phi1)
         .add(angular_drive.scale(duration_s * phi2));
     let rolling_rotation = mean_rolling.scale(duration_s);
-    let response = |rolling: Vec3| -> Result<ViscoelasticSphereResponse, SphereRollingError> {
-        let angular_speed = norm(rolling)?;
-        Ok(binding.card.response(
-            binding.patch,
-            binding.interface,
-            RollingKinematics::new(
-                finite(radius * angular_speed)?,
-                angular_speed,
-                omega0.dot(engine.n),
-                binding.temperature_kelvin,
-                binding.excitation_frequency_hz,
-                duration_s,
-            )?,
-        )?)
-    };
-    let response_before = response(rolling0)?;
-    let response_after = response(rolling1)?;
+    let normal_spin1 = normal_spin.add(normal_acceleration.scale(duration_s));
+    let normal_rotation = normal_spin.scale(duration_s).add(
+        normal_acceleration
+            .scale(0.5 * duration_s)
+            .scale(duration_s),
+    );
+    let response =
+        |rolling: Vec3, spin_rate: f64| -> Result<ViscoelasticSphereResponse, SphereRollingError> {
+            let angular_speed = norm(rolling)?;
+            Ok(binding.card.response(
+                binding.patch,
+                binding.interface,
+                RollingKinematics::new(
+                    finite(radius * angular_speed)?,
+                    angular_speed,
+                    spin_rate,
+                    binding.temperature_kelvin,
+                    binding.excitation_frequency_hz,
+                    duration_s,
+                )?,
+            )?)
+        };
+    let response_before = response(rolling0, omega0.dot(engine.n))?;
+    let response_after = response(rolling1, normal_spin1.dot(engine.n))?;
     // The nonnegative variance form integrates the actual squared rolling rate.
     // It stays positive during reversal and avoids subtracting large energy
     // or terminal-velocity terms to infer a small dissipated heat.
@@ -294,9 +351,15 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
     vector(rolling_impulse)?;
 
     let mut orientation = body.pose().orientation();
-    let angular_acceleration0 = angular_drive.sub(rolling0.scale(rate));
-    if commuting_directions(omega0, angular_acceleration0) {
-        let rotation = normal_spin.scale(duration_s).add(rolling_rotation);
+    let angular_acceleration0 = angular_drive
+        .sub(rolling0.scale(rate))
+        .add(normal_acceleration);
+    let commuting = commuting_directions(omega0, angular_acceleration0)
+        && (rate == 0.0
+            || (commuting_directions(omega0, normal_acceleration)
+                && commuting_directions(angular_acceleration0, normal_acceleration)));
+    if commuting {
+        let rotation = normal_rotation.add(rolling_rotation);
         orientation = orientation.right_exp(orientation.rotate_world_to_body(rotation))?;
     } else {
         let count = (duration_s / config.max_attitude_step_s).ceil().max(1.0);
@@ -307,13 +370,15 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
         let step = duration_s / steps as f64;
         for index in 0..steps {
             poll(&mut cancelled)?;
+            let time = (index as f64 + 0.5) * step;
             let rotation = normal_spin
-                .add(rolling_at((index as f64 + 0.5) * step))
+                .add(normal_acceleration.scale(time))
+                .add(rolling_at(time))
                 .scale(step);
             orientation = orientation.right_exp(orientation.rotate_world_to_body(rotation))?;
         }
     }
-    let spin1 = normal_spin.add(rolling1).scale(engine.inertia);
+    let spin1 = normal_spin1.add(rolling1).scale(engine.inertia);
     let after = RigidBodyState::new(
         Pose::new(x0.add(displacement), orientation)?,
         v1.scale(engine.mass),
@@ -362,10 +427,13 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
         .add(engine.arm.cross(tangent_impulse))
         .add(rolling_impulse);
     let force_work = finite(scene.force_world.dot(displacement))?;
+    let torque_impulse = external_torque_world.scale(duration_s);
+    let torque_work = finite(external_torque_world.dot(normal_rotation.add(rolling_rotation)))?;
     let plane_work = finite(contact_impulse.dot(scene.velocity_world))?;
     let initial_energy = body.kinetic_energy(scene.properties)?;
     let final_energy = after.kinetic_energy(scene.properties)?;
-    let energy_residual = finite(final_energy - initial_energy - force_work - plane_work + heat)?;
+    let energy_residual =
+        finite(final_energy - initial_energy - force_work - torque_work - plane_work + heat)?;
     let linear_residual = after
         .linear_momentum_world()
         .sub(body.linear_momentum_world())
@@ -374,10 +442,12 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
     let angular_residual = total_angular(after)
         .sub(total_angular(body))
         .sub(external_angular)
+        .sub(torque_impulse)
         .sub(contact_angular);
     for value in [
         position_integral,
         contact_impulse,
+        torque_impulse,
         external_angular,
         contact_angular,
         linear_residual,
@@ -386,7 +456,12 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
         vector(value)?;
     }
     let tolerance = 16_384.0 * f64::EPSILON;
-    let energy_scale = initial_energy + final_energy + force_work.abs() + plane_work.abs() + heat;
+    let energy_scale = initial_energy
+        + final_energy
+        + force_work.abs()
+        + torque_work.abs()
+        + plane_work.abs()
+        + heat;
     let linear_scale = norm(body.linear_momentum_world())?
         + norm(after.linear_momentum_world())?
         + norm(scene.force_world)? * duration_s
@@ -394,6 +469,7 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
     let angular_scale = angular_magnitude(body)?
         + angular_magnitude(after)?
         + norm(external_angular)?
+        + norm(torque_impulse)?
         + norm(contact_angular)?;
     if energy_residual.abs() > finite(tolerance * energy_scale)?
         || norm(linear_residual)? > finite(tolerance * linear_scale)?
@@ -433,8 +509,8 @@ pub fn advance_viscoelastic_sphere_rolling<'a>(
             contact_impulse_world: contact_impulse,
             contact_angular_impulse_world: contact_angular,
             external_force_work: force_work,
-            external_torque_work: 0.0,
-            external_torque_impulse_world: Vec3::ZERO,
+            external_torque_work: torque_work,
+            external_torque_impulse_world: torque_impulse,
             plane_work,
             dissipated_energy: heat,
             energy_balance_residual: energy_residual,

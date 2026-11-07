@@ -1,10 +1,12 @@
 //! Material-derived motion and actual deformation work; synthetic source data.
 use fs_mbd::sphere_plane::rolling::{
     SphereRollingBinding, SphereRollingError, advance_viscoelastic_sphere_rolling,
+    advance_viscoelastic_sphere_rolling_with_torque,
 };
 use fs_mbd::sphere_plane::{
     SpherePlane, SpherePlaneConfig, SpherePlaneError, SpherePlaneMode, SpherePlaneState,
     advance_sphere_plane_with_support_friction,
+    advance_sphere_plane_with_torque_and_support_friction,
 };
 use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
 use fs_tribo::rolling_loss::viscoelastic::{
@@ -308,6 +310,237 @@ fn driven_turn_and_reversal_integrate_real_force_and_continuous_torque_work() {
         }
         assert!(result.deformation_heat_j > 0.0);
     }
+}
+
+#[test]
+fn motor_startup_braking_and_reversal_balance_real_motor_work_and_deformation_heat() {
+    for (speed, terminal_speed, scaled_time) in
+        [(0.0, 0.008, 3.0), (0.01, -0.005, 0.5), (0.01, -0.005, 3.0)]
+    {
+        let mut f = Fixture::new(2e-4);
+        let terminal = Vec3::new(terminal_speed, 0.0, 0.0);
+        // Independent force and motor owners supply 30% and 70% of the
+        // generalized rolling drive. Actual traction is not that drive.
+        let force = terminal.scale(0.3 * f.beta());
+        let torque = f
+            .scene
+            .normal_world
+            .cross(terminal)
+            .scale(0.7 * f.beta() * RADIUS);
+        f.scene.force_world = f.scene.force_world.add(force);
+        let u0 = Vec3::new(speed, 0.0, 0.0);
+        let before = f.state(u0, 0.0, UnitQuaternion::IDENTITY);
+        let h = scaled_time / f.rate();
+        let result = advance_viscoelastic_sphere_rolling_with_torque(
+            &f.scene,
+            before,
+            torque,
+            &SUPPORT,
+            f.binding(),
+            h,
+            SpherePlaneConfig::default(),
+            || false,
+        )
+        .unwrap();
+        let decay = (-scaled_time).exp();
+        let difference = u0.sub(terminal);
+        let j1 = -(-scaled_time).exp_m1() / f.rate();
+        let j2 = -(-2.0 * scaled_time).exp_m1() / (2.0 * f.rate());
+        let displacement = terminal.scale(h).add(difference.scale(j1));
+        let rotation = f
+            .scene
+            .normal_world
+            .cross(displacement)
+            .scale(RADIUS.recip());
+        let heat = f.beta()
+            * (terminal.norm_squared() * h
+                + 2.0 * terminal.dot(difference) * j1
+                + difference.norm_squared() * j2);
+        vector_close(
+            velocity(&f, result.motion.state_after),
+            terminal.add(difference.scale(decay)),
+        );
+        vector_close(
+            result.motion.state_after.body().pose().position_world(),
+            before.body().pose().position_world().add(displacement),
+        );
+        vector_close(
+            omega(&f, result.motion.state_after),
+            f.scene
+                .normal_world
+                .cross(velocity(&f, result.motion.state_after))
+                .scale(RADIUS.recip()),
+        );
+        close(result.deformation_heat_j, heat);
+        close(result.motion.external_force_work, force.dot(displacement));
+        close(result.motion.external_torque_work, torque.dot(rotation));
+        vector_close(result.motion.external_torque_impulse_world, torque.scale(h));
+        let traction0 = difference
+            .scale(-f.scene.properties.mass() * f.rate())
+            .sub(force);
+        let traction1 = difference
+            .scale(-f.scene.properties.mass() * f.rate() * decay)
+            .sub(force);
+        close(
+            result.maximum_required_traction_n,
+            traction0
+                .norm_squared()
+                .sqrt()
+                .max(traction1.norm_squared().sqrt()),
+        );
+        close(result.motion.energy_balance_residual, 0.0);
+        vector_close(result.motion.angular_momentum_residual, Vec3::ZERO);
+        vector_close(result.motion.linear_momentum_residual, Vec3::ZERO);
+        assert!(heat > 0.0);
+        if terminal_speed < 0.0 && scaled_time < 1.0 {
+            assert!(
+                result.motion.external_torque_work < 0.0,
+                "braking extracts motor work"
+            );
+            assert!(velocity(&f, result.motion.state_after).x > 0.0);
+        } else if terminal_speed < 0.0 {
+            assert!(
+                velocity(&f, result.motion.state_after).x < 0.0,
+                "motor crosses zero speed"
+            );
+        }
+    }
+}
+
+#[test]
+fn normal_motor_torque_changes_spin_and_energy_without_inventing_rolling_heat() {
+    let f = Fixture::new(2e-4);
+    let inertia = f.scene.properties.principal_inertia_body().z;
+    let h = 0.3;
+    let spin = 0.7;
+    let acceleration = -2.0;
+    let torque = f.scene.normal_world.scale(inertia * acceleration);
+    let before = f.state(Vec3::ZERO, spin, UnitQuaternion::IDENTITY);
+    let result = advance_viscoelastic_sphere_rolling_with_torque(
+        &f.scene,
+        before,
+        torque,
+        &SUPPORT,
+        f.binding(),
+        h,
+        SpherePlaneConfig {
+            max_attitude_substeps: 1,
+            ..SpherePlaneConfig::default()
+        },
+        || false,
+    )
+    .unwrap();
+    let final_spin = spin + acceleration * h;
+    close(omega(&f, result.motion.state_after).z, final_spin);
+    vector_close(velocity(&f, result.motion.state_after), Vec3::ZERO);
+    assert_eq!(result.deformation_heat_j, 0.0);
+    assert_eq!(result.rolling_angular_impulse_world, Vec3::ZERO);
+    assert_eq!(result.maximum_required_traction_n, 0.0);
+    close(
+        result.motion.external_torque_work,
+        0.5 * inertia * (final_spin * final_spin - spin * spin),
+    );
+    close(result.motion.energy_balance_residual, 0.0);
+    vector_close(result.motion.angular_momentum_residual, Vec3::ZERO);
+    let angle = spin * h + 0.5 * acceleration * h * h;
+    let exact = UnitQuaternion::from_axis_angle(f.scene.normal_world, angle).unwrap();
+    let axis = Vec3::new(1.0, 0.0, 0.0);
+    vector_close(
+        result
+            .motion
+            .state_after
+            .body()
+            .pose()
+            .orientation()
+            .rotate_body_to_world(axis),
+        exact.rotate_body_to_world(axis),
+    );
+}
+
+#[test]
+fn motor_rolling_respects_static_capacity_and_reaches_the_elastic_rigid_body_limit() {
+    for relaxation in [0.0, 1e-16] {
+        let mut f = Fixture::new(relaxation);
+        f.scene.force_world = f.scene.force_world.add(Vec3::new(1e-4, 2e-4, 0.0));
+        let inertia = f.scene.properties.principal_inertia_body().z;
+        let torque = Vec3::new(3e-6, -2e-6, inertia);
+        let before = f.state(Vec3::ZERO, 0.0, UnitQuaternion::IDENTITY);
+        let material = advance_viscoelastic_sphere_rolling_with_torque(
+            &f.scene,
+            before,
+            torque,
+            &SUPPORT,
+            f.binding(),
+            0.2,
+            SpherePlaneConfig::default(),
+            || false,
+        )
+        .unwrap();
+        let rigid = advance_sphere_plane_with_torque_and_support_friction(
+            &f.scene,
+            before,
+            torque,
+            &SUPPORT,
+            0.2,
+            SpherePlaneConfig::default(),
+            || false,
+        )
+        .unwrap();
+        vector_close(
+            velocity(&f, material.motion.state_after),
+            velocity(&f, rigid.state_after),
+        );
+        vector_close(
+            omega(&f, material.motion.state_after),
+            omega(&f, rigid.state_after),
+        );
+        vector_close(
+            material.motion.state_after.body().pose().position_world(),
+            rigid.state_after.body().pose().position_world(),
+        );
+        close(
+            material.motion.external_force_work,
+            rigid.external_force_work,
+        );
+        close(
+            material.motion.external_torque_work,
+            rigid.external_torque_work,
+        );
+        if relaxation == 0.0 {
+            assert_eq!(material.deformation_heat_j, 0.0);
+        } else {
+            assert!(material.deformation_heat_j > 0.0);
+        }
+    }
+    let f = Fixture::new(2e-4);
+    let before = f.state(Vec3::ZERO, 0.0, UnitQuaternion::IDENTITY);
+    let demand = Vec3::new(0.0, 2.0 * 0.4 * f.patch.normal_load_n() * RADIUS, 0.0);
+    assert!(matches!(
+        advance_viscoelastic_sphere_rolling_with_torque(
+            &f.scene,
+            before,
+            demand,
+            &SUPPORT,
+            f.binding(),
+            0.1,
+            SpherePlaneConfig::default(),
+            || false,
+        ),
+        Err(SphereRollingError::TractionExceeded { .. })
+    ));
+    assert!(matches!(
+        advance_viscoelastic_sphere_rolling_with_torque(
+            &f.scene,
+            before,
+            Vec3::new(f64::NAN, 0.0, 0.0),
+            &SUPPORT,
+            f.binding(),
+            0.1,
+            SpherePlaneConfig::default(),
+            || false,
+        ),
+        Err(SphereRollingError::Dynamics(_))
+    ));
 }
 
 #[test]
@@ -721,4 +954,185 @@ fn changing_axis_attitude_refines_without_changing_analytic_heat_or_momenta() {
         errors[1] < 0.3 * errors[0] && errors[2] < 0.3 * errors[1],
         "{errors:?}"
     );
+}
+
+#[test]
+fn motor_startup_from_rest_resolves_noncommuting_rolling_and_normal_spin() {
+    let f = Fixture::new(2e-4);
+    let inertia = f.scene.properties.principal_inertia_body().z;
+    let before = f.state(Vec3::ZERO, 0.0, UnitQuaternion::IDENTITY);
+    // At rest, omega cross alpha is exactly zero for every motor torque.
+    // Tangential acceleration subsequently decays while normal acceleration
+    // stays constant, so their rotations do not commute over the interval.
+    // This deterministically exercises the initial-only commutation shortcut;
+    // no nearly parallel vectors or fixture rounding are involved.
+    let torque = Vec3::new(0.0, 0.01 * f.beta() * RADIUS, 0.7 * inertia);
+    let solve = |step| {
+        advance_viscoelastic_sphere_rolling_with_torque(
+            &f.scene,
+            before,
+            torque,
+            &SUPPORT,
+            f.binding(),
+            0.8,
+            SpherePlaneConfig {
+                max_attitude_step_s: step,
+                ..SpherePlaneConfig::default()
+            },
+            || false,
+        )
+        .unwrap()
+    };
+    let reference = solve(0.0002);
+    let axis = Vec3::new(1.0, 0.0, 0.0);
+    let expected = reference
+        .motion
+        .state_after
+        .body()
+        .pose()
+        .orientation()
+        .rotate_body_to_world(axis);
+    let mut errors = Vec::new();
+    for step in [0.04, 0.02, 0.01] {
+        let result = solve(step);
+        let actual = result
+            .motion
+            .state_after
+            .body()
+            .pose()
+            .orientation()
+            .rotate_body_to_world(axis);
+        errors.push(actual.sub(expected).norm_squared().sqrt());
+        vector_close(
+            omega(&f, result.motion.state_after),
+            omega(&f, reference.motion.state_after),
+        );
+        close(result.deformation_heat_j, reference.deformation_heat_j);
+        close(
+            result.motion.external_torque_work,
+            reference.motion.external_torque_work,
+        );
+    }
+    assert!(
+        errors[0] > 1e-10 && errors[1] < 0.3 * errors[0] && errors[2] < 0.3 * errors[1],
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn motor_work_is_additive_and_covariant_on_a_translating_rotated_support() {
+    let base = Fixture::new(2e-4);
+    let u0 = Vec3::new(0.01, 0.0, 0.0);
+    let torque = Vec3::new(
+        -0.004 * base.beta() * RADIUS,
+        0.0,
+        0.8 * base.scene.properties.principal_inertia_body().z,
+    );
+    let initial = base.state(u0, 1.3, UnitQuaternion::IDENTITY);
+    let h = 0.6;
+    let controls = SpherePlaneConfig {
+        max_attitude_step_s: 0.002,
+        ..SpherePlaneConfig::default()
+    };
+    let whole = advance_viscoelastic_sphere_rolling_with_torque(
+        &base.scene,
+        initial,
+        torque,
+        &SUPPORT,
+        base.binding(),
+        h,
+        controls,
+        || false,
+    )
+    .unwrap();
+    let first = advance_viscoelastic_sphere_rolling_with_torque(
+        &base.scene,
+        initial,
+        torque,
+        &SUPPORT,
+        base.binding(),
+        0.5 * h,
+        controls,
+        || false,
+    )
+    .unwrap();
+    let second = advance_viscoelastic_sphere_rolling_with_torque(
+        &base.scene,
+        first.motion.state_after,
+        torque,
+        &SUPPORT,
+        base.binding(),
+        0.5 * h,
+        controls,
+        || false,
+    )
+    .unwrap();
+    vector_close(
+        velocity(&base, whole.motion.state_after),
+        velocity(&base, second.motion.state_after),
+    );
+    vector_close(
+        omega(&base, whole.motion.state_after),
+        omega(&base, second.motion.state_after),
+    );
+    close(
+        whole.deformation_heat_j,
+        first.deformation_heat_j + second.deformation_heat_j,
+    );
+    close(
+        whole.motion.external_torque_work,
+        first.motion.external_torque_work + second.motion.external_torque_work,
+    );
+    vector_close(
+        whole.motion.external_torque_impulse_world,
+        first
+            .motion
+            .external_torque_impulse_world
+            .add(second.motion.external_torque_impulse_world),
+    );
+    let rotation = UnitQuaternion::new(0.5, 0.5, 0.5, 0.5).unwrap();
+    let rotate = |v| rotation.rotate_body_to_world(v);
+    let boost = Vec3::new(0.003, -0.002, 0.004);
+    let mut moved = base.clone();
+    moved.scene.normal_world = rotate(base.scene.normal_world);
+    moved.scene.force_world = rotate(base.scene.force_world);
+    moved.scene.velocity_world = boost;
+    let result = advance_viscoelastic_sphere_rolling_with_torque(
+        &moved.scene,
+        moved.state(rotate(u0), 1.3, rotation),
+        rotate(torque),
+        &SUPPORT,
+        moved.binding(),
+        h,
+        controls,
+        || false,
+    )
+    .unwrap();
+    vector_close(
+        velocity(&moved, result.motion.state_after),
+        rotate(velocity(&base, whole.motion.state_after)).add(boost),
+    );
+    vector_close(
+        omega(&moved, result.motion.state_after),
+        rotate(omega(&base, whole.motion.state_after)),
+    );
+    vector_close(
+        result.motion.state_after.body().pose().position_world(),
+        rotate(whole.motion.state_after.body().pose().position_world()).add(boost.scale(h)),
+    );
+    vector_close(
+        result.motion.external_torque_impulse_world,
+        rotate(whole.motion.external_torque_impulse_world),
+    );
+    close(
+        result.motion.external_torque_work,
+        whole.motion.external_torque_work,
+    );
+    close(result.deformation_heat_j, whole.deformation_heat_j);
+    close(
+        result.motion.plane_work,
+        result.motion.contact_impulse_world.dot(boost),
+    );
+    close(result.motion.energy_balance_residual, 0.0);
+    vector_close(result.motion.angular_momentum_residual, Vec3::ZERO);
 }
