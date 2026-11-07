@@ -10,7 +10,7 @@
 
 use super::{ViscoElementError, ViscoElements, checkpoint};
 use fs_exec::Cx;
-use fs_math::{c64::C64, det};
+use fs_math::c64::C64;
 use fs_modal::harmonic::{
     HarmonicPortControls, HarmonicPortResponse, HarmonicResponse, HarmonicResponseControls,
     HarmonicResponseError, PreparedHarmonicResponse,
@@ -334,30 +334,11 @@ fn validate_harmonic_strain(
     re: [f64; 6],
     im: [f64; 6],
 ) -> Result<(), ViscoElementError> {
-    // Maximize ||re*cos(theta)+im*sin(theta)|| via the largest eigenvector
-    // of its 2x2 Gram matrix. Scaling preserves the original phase arithmetic.
-    let scale = re
-        .iter()
-        .chain(&im)
-        .map(|v| v.abs())
-        .fold(0.0_f64, f64::max);
-    if re.iter().chain(&im).any(|v| !v.is_finite()) {
+    if re.iter().chain(&im).any(|value| !value.is_finite()) {
         return Err(ViscoElementError::NonFiniteResult);
     }
-    if scale == 0.0 {
-        return Ok(());
-    }
-    let (mut a, mut b, mut c) = (0.0, 0.0, 0.0);
-    for i in 0..6 {
-        let (r, s) = (re[i] / scale, im[i] / scale);
-        a += r * r;
-        b += s * s;
-        c += r * s;
-    }
-    let angle = 0.5 * det::atan2(2.0 * c, a - b);
-    let (sin, cos) = det::sin_cos(angle);
-    let peak = core::array::from_fn(|i| cos.mul_add(re[i], sin * im[i]));
-    law.validate_mandel_strain(&peak)
+    let strain = core::array::from_fn(|i| C64::new(re[i], im[i]));
+    law.validate_harmonic_mandel_strain(&strain)
         .map_err(ViscoElementError::Material)
 }
 

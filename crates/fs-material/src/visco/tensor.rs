@@ -26,7 +26,7 @@ use fs_math::det;
 pub mod lower;
 pub use lower::*;
 mod frequency;
-pub use frequency::TensorPronyFrequencyDerivative;
+pub use frequency::{PlaneStressHarmonic, TensorPronyFrequencyDerivative};
 
 /// Maximum number of Prony relaxation branches admitted by [`TensorProny`].
 pub const MAX_PRONY_BRANCHES: usize = 64;

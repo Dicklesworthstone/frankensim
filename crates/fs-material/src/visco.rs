@@ -53,7 +53,10 @@ pub mod temperature;
 /// Passive full-tensor Prony (generalized Maxwell) viscoelastic law in Mandel coordinates.
 pub mod tensor;
 pub use modified_zener::ModifiedFractionalZener;
-pub use tensor::{Mandel6, PronyBranch, TensorProny, TensorPronyFrequencyDerivative, TensorPronyState};
+pub use tensor::{
+    Mandel6, PlaneStressHarmonic, PronyBranch, TensorProny, TensorPronyFrequencyDerivative,
+    TensorPronyState,
+};
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable
 /// `FS-MAT-VISCO-*` codes.

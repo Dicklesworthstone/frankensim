@@ -20028,3 +20028,30 @@ in an inert buffer, original Coulomb rebinding, incomplete/foreign/duplicate
 source refusal and atomic cancellation. These material integration tests remain
 unexecuted without the complete native dependency chain. Source/bank admission,
 format checks and static API review do not constitute that missing test pass.
+
+## Prepared full plane-stress harmonic strain recovery
+
+`TensorProny::prepare_plane_stress_harmonic` reuses the original full complex
+constraint solve to retain engineering storage/loss and all six Mandel strain
+components in every supported ordered material plane. Physical peak phasors
+use `exp(-i omega t)`: the transverse constraint is conjugated consistently
+with `C' - i C''`. At DC strains must be real. Preparation retains the original
+frequency admission and strain ceiling; each response remains immutable.
+
+`PlaneStressHarmonic::recover_strain` uses compensated, factored contractions
+without per-point allocation or another material solve. The common
+`TensorProny::validate_harmonic_mandel_strain` admits the maximum physical norm
+over the complete cycle through the scaled two-column Gram eigenvalue.
+It includes transverse strain, admits rotating strains that a complex-norm
+bound would reject, and catches maxima missed by checking only quadrature
+phases. The original full-coordinate solid harmonic owner uses this same
+admission. This is a pointwise source-domain check, not a spatial error bound.
+
+Nine tests of the actual numeric strain/projection modules passed against
+the real `fs-math` library, covering phase-invariant extrema, large and
+subnormal physical scales, finite refusal, complex signs and cancellation.
+Five material integration regressions cover full anisotropic stress constraints
+in every ordered plane, independently computed complex Poisson strain, complete
+cycle limits, transverse-domain refusal and original frequency/DC admission.
+Those integration tests remain unexecuted because the real runtime dependency
+build is killed before reaching the material crate in this environment.

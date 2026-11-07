@@ -66,6 +66,19 @@ impl Sum {
     }
 }
 
+pub(super) fn apply(t: &[[C64; 3]; 6], strain: &[C64; 3]) -> [C64; 6] {
+    core::array::from_fn(|i| {
+        let (mut real, mut imaginary) = (Sum::default(), Sum::default());
+        for (map, value) in t[i].iter().zip(strain) {
+            real.add([map.re, value.re, 1.0, 1.0]);
+            real.add([-map.im, value.im, 1.0, 1.0]);
+            imaginary.add([map.re, value.im, 1.0, 1.0]);
+            imaginary.add([map.im, value.re, 1.0, 1.0]);
+        }
+        C64::new(real.value(), imaginary.value())
+    })
+}
+
 pub(super) fn project(c: &[[C64; 6]; 6], t: &[[C64; 3]; 6], i: usize, j: usize, scale: f64) -> C64 {
     let (mut real, mut imaginary) = (Sum::default(), Sum::default());
     for row in 0..6 {
@@ -95,6 +108,26 @@ pub(super) fn project(c: &[[C64; 6]; 6], t: &[[C64; 3]; 6], i: usize, j: usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_strain_map_retains_signed_complex_cancellation() {
+        let mut map = [[C64::ZERO; 3]; 6];
+        map[0] = [
+            C64::new(1e200, 1e200),
+            C64::new(-1e200, -1e200),
+            C64::new(3.0, -2.0),
+        ];
+        map[1][2] = C64::from_re(f64::from_bits(1));
+        let strain = [
+            C64::new(1e200, -1e200),
+            C64::new(1e200, -1e200),
+            C64::new(2.0, 1.0),
+        ];
+        let actual = apply(&map, &strain);
+        assert_eq!(actual[0], C64::new(8.0, -1.0));
+        assert_eq!(actual[1], C64::new(f64::from_bits(2), f64::from_bits(1)));
+        assert!(actual[2..].iter().all(|v| *v == C64::ZERO));
+    }
 
     #[test]
     fn complex_symmetric_projection_matches_direct_full_contraction() {

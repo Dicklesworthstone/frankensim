@@ -5,6 +5,8 @@ use crate::visco::prony_spectrum::PronySpectrumWeights;
 use fs_math::dd::Dd;
 
 mod plane_stress;
+mod strain;
+pub use plane_stress::PlaneStressHarmonic;
 
 /// Physical tensor derivatives with respect to angular frequency [rad/s].
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +90,21 @@ fn derivative_tensors<const N: usize>(
 }
 
 impl TensorProny {
+    /// Admit the maximum physical Mandel strain over an entire harmonic cycle.
+    ///
+    /// `strain` is a peak phasor, not an RMS amplitude. Both harmonic sign
+    /// conventions describe the same ellipse and have the same peak norm.
+    /// The largest eigenvalue of its scaled 2x2 Gram matrix gives the exact
+    /// cycle extremum without sampling phases or summing component maxima.
+    /// The original tensor material's strain limit is retained. This admits
+    /// one spatial point; it does not certify unsampled spatial variation.
+    pub fn validate_harmonic_mandel_strain(
+        &self,
+        strain: &[fs_math::c64::C64; 6],
+    ) -> Result<(), ViscoError> {
+        admit_harmonic_strain(strain, self.strain_limit)
+    }
+
     /// Differentiate the original storage, loss and effective harmonic viscosity.
     ///
     /// The same constitutive frequency band as `complex_modulus` applies. The
@@ -111,5 +128,14 @@ impl TensorProny {
             loss_pa_s,
             effective_viscosity_pa_s2,
         })
+    }
+}
+
+fn admit_harmonic_strain(strain: &[fs_math::c64::C64; 6], limit: f64) -> Result<(), ViscoError> {
+    match strain::peak_norm(strain) {
+        Some(peak) if peak <= limit => Ok(()),
+        _ => Err(ViscoError::Parameters {
+            what: "harmonic strain exceeds the original tensor material small-strain domain",
+        }),
     }
 }
