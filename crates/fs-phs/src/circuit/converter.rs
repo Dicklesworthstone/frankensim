@@ -25,6 +25,8 @@
 use crate::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use crate::{PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage};
 
+/// Finite charge and voltage response of capacitor-backed source/load terminals.
+pub mod capacitor_terminals;
 /// Explicit complementary gate intervals on these SAME storage coordinates.
 pub mod switching;
 /// Finite source resistances and resistive loads on these SAME bus terminals.
