@@ -43,6 +43,7 @@ pub use exposure::{
     CoherentJonesDiffractionTone, CoherentJonesPupilIllumination, CoherentJonesPupilWave,
     JonesPupilCoherenceFactor, MAX_COHERENT_DIFFRACTION_TONES, PreparedCoherentDiffractionExposure,
     PreparedCoherentJonesDiffractionExposure,
+    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
 };
 pub use pixel::{
     CoherentDiffractionPixel, CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower,

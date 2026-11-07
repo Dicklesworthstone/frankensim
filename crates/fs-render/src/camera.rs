@@ -38,6 +38,7 @@ pub use diffraction::{
     JonesPupilCoherenceFactor, LayeredCameraRay, LayeredDiffraction,
     MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
     PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
     PupilCoherenceFactor, SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]

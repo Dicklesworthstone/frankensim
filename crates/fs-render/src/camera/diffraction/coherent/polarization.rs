@@ -34,7 +34,8 @@ type Moments = [Dd; 4];
 /// A physical coherency result in the declared common transverse pupil frame.
 ///
 /// Units follow the containing result: tangent-coordinate power density for
-/// point observations, or watts for finite-pixel integrals. Matrix entries and
+/// point observations, watts for finite-pixel averages, or joules for exposure
+/// integrals. Matrix entries and
 /// Stokes are rounded separately from the same DD moments. In particular, a
 /// weak diagonal remains available even when rounded I and Q become equal.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -45,7 +46,7 @@ pub struct PolarizedDiffractionCoherency {
 }
 
 impl PolarizedDiffractionCoherency {
-    /// Independent nonnegative powers on the first and second pupil axes.
+    /// Nonnegative diagonal moments on the two pupil axes, in the result's units.
     #[must_use]
     pub const fn axis_powers(self) -> [f64; 2] {
         self.axis_powers
@@ -307,7 +308,7 @@ fn is_zero(value: Dd) -> bool {
     value.hi == 0.0 && value.lo == 0.0
 }
 
-fn outer(field: JonesField) -> Result<Moments, CoherentDiffractionError> {
+pub(super) fn outer(field: JonesField) -> Result<Moments, CoherentDiffractionError> {
     let x = square(field[0])?;
     let y = square(field[1])?;
     // A represented nonzero field cannot physically have zero axis power.
@@ -324,7 +325,9 @@ fn outer(field: JonesField) -> Result<Moments, CoherentDiffractionError> {
     Ok([x, y, cross_re, cross_im])
 }
 
-fn coherency(moment: Moments) -> Result<PolarizedDiffractionCoherency, CoherentDiffractionError> {
+pub(super) fn coherency(
+    moment: Moments,
+) -> Result<PolarizedDiffractionCoherency, CoherentDiffractionError> {
     let axis_powers = [rounded(moment[0])?, rounded(moment[1])?];
     if axis_powers.iter().any(|x| *x < 0.0) {
         return Err(CoherentDiffractionError::Unrepresentable);

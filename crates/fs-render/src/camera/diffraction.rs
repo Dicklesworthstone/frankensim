@@ -55,6 +55,7 @@ pub use coherent::{
     CoherentPupilIllumination, CoherentPupilWave, JonesPupilCoherenceFactor,
     MAX_COHERENT_DIFFRACTION_TONES, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
     PreparedCoherentDiffractionExposure, PreparedCoherentJonesDiffractionExposure,
+    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
     PupilCoherenceFactor,
 };
 #[cfg(feature = "tracer")]

@@ -27,6 +27,7 @@ mod jones;
 pub use jones::{
     CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,
     CoherentJonesPupilWave, JonesPupilCoherenceFactor, PreparedCoherentJonesDiffractionExposure,
+    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
 };
 
 const C_M_S: f64 = 299_792_458.0;

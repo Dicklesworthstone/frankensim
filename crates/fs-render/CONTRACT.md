@@ -9873,3 +9873,54 @@ coherent versus independent Jones illumination, polarization and covariance
 basis changes, finite-pixel depolarization, cancellation and weak-axis range,
 and admission/work/cancellation bounds. They were source-reviewed but could
 not be executed because the execution environment was unavailable.
+
+### Full spectral coherency over the original finite shutter
+
+`PreparedCoherentJonesDiffractionExposure::observe_coherency` returns the
+shutter-averaged full coherency and native Stokes state in the original camera
+right/up frame, for incoming propagation along -forward. It uses the existing
+Jones source, covariance-column identities, equal-frequency field grouping,
+wavelength-specific pupil caches, chromatic sensor phases and analytic
+`ProperHarmonicProduct` kernels. The matrix is the average outer product of
+the analytic field; it is not the outer product of a time-averaged field.
+Deterministic multicolor illumination can therefore depolarize during a finite
+shutter. Independent source columns add coherencies without cross terms.
+
+The four DD moments are Cxx, Cyy, Re(Cxy) and Im(Cxy), with Cxy=Ex conj(Ey).
+Their direct temporal contraction preserves native I=Cxx+Cyy, Q=Cxx-Cyy,
+U=2 Re(Cxy), V=2 Im(Cxy). No analyzer-intensity differencing is used. Axis
+moments and the complex cross term remain available independently of rounded
+Stokes I/Q. The result retains separate deterministic-mean, covariance and
+total contributions. Diagonal range, native Stokes admission and direct
+weak-channel correlation checks refuse invalid contractions without clipping.
+
+`integrate_pixel_coherency` integrates these same moments with the original
+positive spatial rule, shortest-wavelength pupil bandwidth and mixed-frequency
+sensor-chirp bound. It returns spatially integrated average coherency in watts
+and shutter-integrated coherency in joules; all signed Stokes components share
+those units. This retains temporal and spatial depolarization. Each authored
+vector wave still evaluates its physical pupil once per spatial sample.
+
+For n distinct frequencies and each mean/covariance bank, full coherency costs
+four diagonal real moments plus six per unequal-frequency pair: n*(3*n+1).
+The original preparation's pair limit preflights the full query, while existing
+pixel limits bound total contractions, samples and pupil evaluations. A budget
+that admits detector power may refuse the more expensive full matrix. Original
+detector-power arithmetic and grouping are preserved. Shared source products
+now refuse a wholly underflowed product of nonzero complex wave/transfer values
+instead of reporting false exact extinction. Queries use bounded scratch,
+allocate nothing, and remain reusable after refusal or cancellation.
+
+The original uniform-shutter, cycle-averaged analytic-field detector and scalar
+paraxial pupil assumptions remain. There is no optical-carrier time raster,
+subcycle real-field detector, inferred coherence, vector high-NA diffraction,
+or polarization-dependent pupil transfer. Spatial resolution is not an error
+certificate, and DD moments do not guarantee relative accuracy at an arbitrary
+interference null. Point results are tangent-coordinate power densities; this
+does not change physical scene radiance or imply a sensor QE/electronics model.
+
+Six native regression groups cover analytic polarization beats, analyzer agreement,
+shutter depolarization, covariance identity, frame rotation, finite-pixel chromatic
+integration and energy, weak-axis retention, independent time-quadrature
+convergence, and work/cancellation/range admission. Their execution is tracked
+separately from the completed pinned-rustfmt and source review.

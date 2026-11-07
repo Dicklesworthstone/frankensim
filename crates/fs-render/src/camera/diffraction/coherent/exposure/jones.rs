@@ -24,6 +24,13 @@ use super::{
 };
 use fs_math::c64::C64;
 
+mod coherency;
+pub use coherency::{
+    PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
+};
+
+type JonesFields = [[[Dd; 2]; 2]; MAX_COHERENT_DIFFRACTION_TONES];
+
 /// One tilted Jones field in the camera's common paraxial pupil x/y basis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentJonesPupilWave {
@@ -125,6 +132,7 @@ pub struct PreparedCoherentJonesDiffractionExposure<'camera, 'source> {
     factors: usize,
     waves: usize,
     contractions_per_component: usize,
+    maximum_pair_contractions: usize,
 }
 
 impl PhysicalCamera {
@@ -137,6 +145,8 @@ impl PhysicalCamera {
     /// immutable preparation supports either detector. Pixel work charges the
     /// actual one or two analyzed components. No source phase or coherence is
     /// inferred from polarization, frequency proximity or scene radiance.
+    /// Full coherency queries additionally preflight their four matrix moments
+    /// against this same pair budget before evaluating any pupil.
     pub fn prepare_coherent_jones_diffraction_exposure<'camera, 'source>(
         &'camera self,
         tones: &[CoherentJonesDiffractionTone<'source>],
@@ -260,6 +270,7 @@ impl PhysicalCamera {
             factors,
             waves,
             contractions_per_component,
+            maximum_pair_contractions: limits.maximum_pair_contractions,
         })
     }
 }
@@ -349,35 +360,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         let mut result = [Dd::ZERO; 2];
         for bank in 0..=self.factors {
             poll(cancelled)?;
-            let mut fields = [[[Dd::ZERO; 2]; 2]; MAX_COHERENT_DIFFRACTION_TONES];
-            for ((source, tone), &group) in self
-                .sources
-                .iter()
-                .zip(&self.optics.tones)
-                .zip(&self.optics.tone_groups)
-            {
-                poll(cancelled)?;
-                let waves = if bank == 0 {
-                    source.mean
-                } else {
-                    source.factors[bank - 1].waves
-                };
-                for wave in waves {
-                    poll(cancelled)?;
-                    let h = tone.pupil.amplitude([
-                        at[0] - wave.tangent_direction[0],
-                        at[1] - wave.tangent_direction[1],
-                    ])?;
-                    let hr = Dd::from_f64(h.re);
-                    let hi = Dd::from_f64(h.im);
-                    for (field, a) in fields[group].iter_mut().zip(wave.amplitude_sqrt_w) {
-                        let ar = Dd::from_f64(a.re);
-                        let ai = Dd::from_f64(a.im);
-                        field[0] = field[0] + (ar * hr - ai * hi);
-                        field[1] = field[1] + (ar * hi + ai * hr);
-                    }
-                }
-            }
+            let fields = self.group_fields(bank, at, cancelled)?;
             let mut moment = Dd::ZERO;
             for component in 0..detector.components() {
                 poll(cancelled)?;
@@ -408,5 +391,52 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
             result[component] = result[component] + moment;
         }
         Ok(result)
+    }
+
+    // Shared original source grouping for detector power and full coherency.
+    // Equal-frequency fields interfere here, before any temporal moments.
+    fn group_fields(
+        &self,
+        bank: usize,
+        at: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<JonesFields, CoherentDiffractionError> {
+        let mut fields = [[[Dd::ZERO; 2]; 2]; MAX_COHERENT_DIFFRACTION_TONES];
+        for ((source, tone), &group) in self
+            .sources
+            .iter()
+            .zip(&self.optics.tones)
+            .zip(&self.optics.tone_groups)
+        {
+            poll(cancelled)?;
+            let waves = if bank == 0 {
+                source.mean
+            } else {
+                source.factors[bank - 1].waves
+            };
+            for wave in waves {
+                poll(cancelled)?;
+                let h = tone.pupil.amplitude([
+                    at[0] - wave.tangent_direction[0],
+                    at[1] - wave.tangent_direction[1],
+                ])?;
+                let hr = Dd::from_f64(h.re);
+                let hi = Dd::from_f64(h.im);
+                for (field, a) in fields[group].iter_mut().zip(wave.amplitude_sqrt_w) {
+                    let ar = Dd::from_f64(a.re);
+                    let ai = Dd::from_f64(a.im);
+                    let term = [ar * hr - ai * hi, ar * hi + ai * hr];
+                    if term.iter().all(|v| v.hi == 0.0 && v.lo == 0.0)
+                        && (a.re != 0.0 || a.im != 0.0)
+                        && (h.re != 0.0 || h.im != 0.0)
+                    {
+                        return Err(CoherentDiffractionError::Unrepresentable);
+                    }
+                    field[0] = field[0] + term[0];
+                    field[1] = field[1] + term[1];
+                }
+            }
+        }
+        Ok(fields)
     }
 }
