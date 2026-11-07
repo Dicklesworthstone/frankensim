@@ -3008,3 +3008,34 @@ decay records with explicitly manufactured photon kernels and a spatially
 refined response; its CSV separates direct decay heat, shield heat and photon
 escape, and checks the original radiation account at every interval. It does
 not claim that its illustrative shielding coefficients are evaluated data.
+
+## Prescribed photon illumination on the native heat timeline
+
+`thermal::ExternalPhotonHeating` drives the existing enthalpy timeline from
+explicit gamma/X-ray group-power histories without requiring nuclear inventories
+or source identities that name thermal cells. `PhotonPowerSchedule` retains its
+authored identity, exact radiation kind and energy grid, and continuous
+piecewise-affine absolute-time knots. Powers are already total energy per second
+entering the declared source geometry; no extra area or cosine factor is applied.
+The final knot is held, so a finite pulse ends with zero power.
+
+`from_slab` and `from_refined_slab` reuse the original material/geometry admission
+and photon transport owners. Original mass/volume supplies density, volume/area
+supplies layer depth, and every response destination remains bound, including
+transparent or scattering-only cells. Refinement changes the temporary photon
+grid while retaining original source energies and thermal receiver identities.
+
+The observer clips native intervals at source knots, integrates their powers
+analytically, and applies the existing grouped response. Absorbed joules become
+native mean heat rates once; incident, absorbed, escaped and credited energy
+remain separate. Immutable schedules and responses are shared across trial
+clones; accepted clock and accounts publish only after the original thermal step
+and binding checks succeed. Other sources compose through `CoupledObservers`.
+
+Transport remains steady with fixed material coefficients. Photon flight-time
+storage, changing opacity, thermal expansion and charged-particle transport are
+not inferred. Exact source integration does not eliminate native thermal
+timestep or photon spatial/angular/energy discretization errors. Focused kernel
+and owning integration regressions cover affine energy, spectral pulse
+calorimetry, independent identities, refinement, restart, zero-heat scattering,
+and atomic refusal; their numerical checks do not qualify measured source data.

@@ -39,6 +39,11 @@ pub use spectral::{DecayRadiationEmitter, DecayRadiationHeatSource};
 use spectral::BoundSpectralRadiation;
 mod photon;
 pub use photon::{PhotonSlabGeometry, PhotonSlabLayer};
+mod photon_external;
+pub use photon_external::{
+    ExternalPhotonHeating, ExternalPhotonHeatingAudit, PhotonHeatingBudget, PhotonIllumination,
+    PhotonPowerKnot, PhotonPowerSchedule,
+};
 mod irradiation;
 pub use irradiation::{
     IrradiationCellSource, IrradiationCellStep, IrradiationHeating, IrradiationHeatingBudget,

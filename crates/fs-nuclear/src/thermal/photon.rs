@@ -38,12 +38,12 @@ pub struct PhotonSlabGeometry {
     pub position_tolerance_m: f64,
 }
 
-struct PhotonSlabInput {
-    radiation: DecayRadiation,
-    edges_j: Vec<f64>,
-    cells: Vec<PhotonSlabCell>,
-    source_ids: Vec<u64>,
-    receivers: Vec<RadiationReceiver>,
+pub(super) struct PhotonSlabInput {
+    pub(super) radiation: DecayRadiation,
+    pub(super) edges_j: Vec<f64>,
+    pub(super) cells: Vec<PhotonSlabCell>,
+    pub(super) source_ids: Vec<u64>,
+    pub(super) receivers: Vec<RadiationReceiver>,
 }
 
 impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
@@ -179,20 +179,6 @@ impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
                 "cannot change photon transport during a pending interval",
             ));
         }
-        let groups = layers
-            .first()
-            .map_or(0, |layer| layer.material.group_edges_j().len() - 1);
-        // Apply the transport owner's actual caps before copying any grid or
-        // expanding immutable mass coefficients into macroscopic cell rows.
-        admit_slab_dimensions(layers.len(), groups, self.sources.len(), ordinates, limits)?;
-        if !geometry.area_m2.is_finite()
-            || geometry.area_m2 <= 0.0
-            || !nonnegative(geometry.position_tolerance_m)
-        {
-            return Err(FissionThermalError::Invalid(
-                "positive common photon area and finite nonnegative geometry tolerance required",
-            ));
-        }
         let source_ids: Vec<_> = self.sources.keys().map(|cell| cell.0).collect();
         let declared: BTreeSet<_> = emitters.iter().map(|emitter| emitter.cell_id.0).collect();
         if source_ids.is_empty()
@@ -203,126 +189,157 @@ impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
                 "photon emitters must cover the nonempty original source cohort exactly",
             ));
         }
-        let radiation = layers[0].material.radiation();
-        let edges = layers[0].material.group_edges_j().to_vec();
-        let first = thermal
-            .cells()
-            .get(&layers[0].cell_id)
-            .ok_or(FissionThermalError::InactiveCell(layers[0].cell_id))?;
-        let direction = normal(first.geometry)?;
-        let mut expected_start = first.geometry.start_m;
-        let mut previous_end = expected_start;
-        let mut seen = BTreeSet::new();
-        let mut receivers = Vec::with_capacity(layers.len());
-        let mut physical = Vec::with_capacity(layers.len());
-        for layer in layers {
-            checkpoint()?;
-            if !seen.insert(layer.cell_id) {
-                return Err(FissionThermalError::Invalid(
-                    "duplicate photon material cell",
-                ));
-            }
-            if layer.material.radiation() != radiation || layer.material.group_edges_j() != edges {
-                return Err(FissionThermalError::Invalid(
-                    "photon materials must share the same radiation kind and energy grid",
-                ));
-            }
-            let cell = thermal
-                .cells()
-                .get(&layer.cell_id)
-                .ok_or(FissionThermalError::InactiveCell(layer.cell_id))?;
-            let material_id = MaterialId(layer.material.material_id());
-            if cell.material_id != material_id {
-                return Err(FissionThermalError::MaterialMismatch {
-                    cell_id: layer.cell_id,
-                    expected: material_id,
-                    actual: cell.material_id,
-                });
-            }
-            let thickness = cell.geometry.volume_m3 / geometry.area_m2;
-            let density = cell.mass_kg / cell.geometry.volume_m3;
-            if !thickness.is_finite() || thickness <= 0.0 || !density.is_finite() || density <= 0.0
-            {
-                return Err(FissionThermalError::Arithmetic);
-            }
-            // A tolerance at least half the layer depth cannot establish even
-            // its ordered extent. Compare by division to avoid half underflow.
-            if geometry.position_tolerance_m / thickness >= 0.5 {
-                return Err(FissionThermalError::Invalid(
-                    "photon geometry tolerance must resolve every material layer",
-                ));
-            }
-            let alignment: f64 = normal(cell.geometry)?
-                .into_iter()
-                .zip(direction)
-                .map(|(actual, reference)| actual * reference)
-                .sum();
-            if !alignment.is_finite() || alignment <= 0.0 {
-                return Err(FissionThermalError::Invalid(
-                    "original photon layers must point forward along the stack normal",
-                ));
-            }
-            let expected_end = std::array::from_fn(|axis| {
-                direction[axis].mul_add(thickness, expected_start[axis])
-            });
-            if !matches_position(
-                cell.geometry.start_m,
-                expected_start,
-                geometry.position_tolerance_m,
-            ) || !matches_position(
-                cell.geometry.start_m,
-                previous_end,
-                geometry.position_tolerance_m,
-            ) || !matches_position(
-                cell.geometry.end_m,
-                expected_end,
-                geometry.position_tolerance_m,
-            ) || cell.geometry.start_m == cell.geometry.end_m
-                || expected_start == expected_end
-            {
-                return Err(FissionThermalError::Invalid(
-                    "original cells must form a contiguous collinear photon stack with volume/area depths",
-                ));
-            }
-            thermal.temperature_k(layer.cell_id)?;
-            receivers.push(RadiationReceiver {
-                cell_id: layer.cell_id,
-                material_id,
-            });
-            physical.push((layer, thickness, density));
-            expected_start = expected_end;
-            previous_end = cell.geometry.end_m;
-        }
-        if source_ids.iter().any(|&id| !seen.contains(&CellId(id))) {
+        photon_material_input(
+            thermal, geometry, layers, source_ids, true, ordinates, limits, checkpoint,
+        )
+    }
+}
+
+// The original material/geometry conversion also serves prescribed boundary
+// illumination. Only nuclear sources require emitting IDs to be cell IDs;
+// explicit transport geometries admit their own source locations afterward.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn photon_material_input(
+    thermal: &DepositionSimulation<'_>,
+    geometry: PhotonSlabGeometry,
+    layers: Vec<PhotonSlabLayer>,
+    source_ids: Vec<u64>,
+    sources_are_cells: bool,
+    ordinates: usize,
+    limits: PhotonSlabLimits,
+    checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+) -> Result<PhotonSlabInput, FissionThermalError> {
+    checkpoint()?;
+    let groups = layers
+        .first()
+        .map_or(0, |layer| layer.material.group_edges_j().len() - 1);
+    // Bound all native rows before expanding their material coefficients.
+    admit_slab_dimensions(layers.len(), groups, source_ids.len(), ordinates, limits)?;
+    if !geometry.area_m2.is_finite()
+        || geometry.area_m2 <= 0.0
+        || !nonnegative(geometry.position_tolerance_m)
+    {
+        return Err(FissionThermalError::Invalid(
+            "positive common photon area and finite nonnegative geometry tolerance required",
+        ));
+    }
+    let radiation = layers[0].material.radiation();
+    let edges = layers[0].material.group_edges_j().to_vec();
+    let first = thermal
+        .cells()
+        .get(&layers[0].cell_id)
+        .ok_or(FissionThermalError::InactiveCell(layers[0].cell_id))?;
+    let direction = normal(first.geometry)?;
+    let mut expected_start = first.geometry.start_m;
+    let mut previous_end = expected_start;
+    let mut seen = BTreeSet::new();
+    let mut receivers = Vec::with_capacity(layers.len());
+    let mut physical = Vec::with_capacity(layers.len());
+    for layer in layers {
+        checkpoint()?;
+        if !seen.insert(layer.cell_id) {
             return Err(FissionThermalError::Invalid(
-                "every photon source must occupy an original material layer",
+                "duplicate photon material cell",
             ));
         }
-        let cells = photon_call(checkpoint, |radiation_checkpoint| {
-            let mut cells = Vec::with_capacity(physical.len());
-            for (layer, thickness, density) in physical {
-                cells.push(layer.material.macroscopic_cell(
-                    layer.cell_id.0,
-                    thickness,
-                    density,
-                    &mut *radiation_checkpoint,
-                )?);
-            }
-            Ok(cells)
-        })?;
-        Ok(PhotonSlabInput {
-            radiation,
-            edges_j: edges,
-            cells,
-            source_ids,
-            receivers,
-        })
+        if layer.material.radiation() != radiation || layer.material.group_edges_j() != edges {
+            return Err(FissionThermalError::Invalid(
+                "photon materials must share the same radiation kind and energy grid",
+            ));
+        }
+        let cell = thermal
+            .cells()
+            .get(&layer.cell_id)
+            .ok_or(FissionThermalError::InactiveCell(layer.cell_id))?;
+        let material_id = MaterialId(layer.material.material_id());
+        if cell.material_id != material_id {
+            return Err(FissionThermalError::MaterialMismatch {
+                cell_id: layer.cell_id,
+                expected: material_id,
+                actual: cell.material_id,
+            });
+        }
+        let thickness = cell.geometry.volume_m3 / geometry.area_m2;
+        let density = cell.mass_kg / cell.geometry.volume_m3;
+        if !thickness.is_finite() || thickness <= 0.0 || !density.is_finite() || density <= 0.0 {
+            return Err(FissionThermalError::Arithmetic);
+        }
+        // A tolerance at least half the layer depth cannot establish even
+        // its ordered extent. Compare by division to avoid half underflow.
+        if geometry.position_tolerance_m / thickness >= 0.5 {
+            return Err(FissionThermalError::Invalid(
+                "photon geometry tolerance must resolve every material layer",
+            ));
+        }
+        let alignment: f64 = normal(cell.geometry)?
+            .into_iter()
+            .zip(direction)
+            .map(|(actual, reference)| actual * reference)
+            .sum();
+        if !alignment.is_finite() || alignment <= 0.0 {
+            return Err(FissionThermalError::Invalid(
+                "original photon layers must point forward along the stack normal",
+            ));
+        }
+        let expected_end =
+            std::array::from_fn(|axis| direction[axis].mul_add(thickness, expected_start[axis]));
+        if !matches_position(
+            cell.geometry.start_m,
+            expected_start,
+            geometry.position_tolerance_m,
+        ) || !matches_position(
+            cell.geometry.start_m,
+            previous_end,
+            geometry.position_tolerance_m,
+        ) || !matches_position(
+            cell.geometry.end_m,
+            expected_end,
+            geometry.position_tolerance_m,
+        ) || cell.geometry.start_m == cell.geometry.end_m
+            || expected_start == expected_end
+        {
+            return Err(FissionThermalError::Invalid(
+                "original cells must form a contiguous collinear photon stack with volume/area depths",
+            ));
+        }
+        thermal.temperature_k(layer.cell_id)?;
+        receivers.push(RadiationReceiver {
+            cell_id: layer.cell_id,
+            material_id,
+        });
+        physical.push((layer, thickness, density));
+        expected_start = expected_end;
+        previous_end = cell.geometry.end_m;
     }
+    if sources_are_cells && source_ids.iter().any(|&id| !seen.contains(&CellId(id))) {
+        return Err(FissionThermalError::Invalid(
+            "every photon source must occupy an original material layer",
+        ));
+    }
+    let cells = photon_call(checkpoint, |radiation_checkpoint| {
+        let mut cells = Vec::with_capacity(physical.len());
+        for (layer, thickness, density) in physical {
+            cells.push(layer.material.macroscopic_cell(
+                layer.cell_id.0,
+                thickness,
+                density,
+                &mut *radiation_checkpoint,
+            )?);
+        }
+        Ok(cells)
+    })?;
+    Ok(PhotonSlabInput {
+        radiation,
+        edges_j: edges,
+        cells,
+        source_ids,
+        receivers,
+    })
 }
 
 // Material conversion and both transport routes share the same exact callback
 // translation; no wrapped cancellation can replace the original source error.
-fn photon_call<R>(
+pub(super) fn photon_call<R>(
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
     run: impl FnOnce(&mut dyn FnMut() -> Result<(), RadiationError>) -> Result<R, RadiationError>,
 ) -> Result<R, FissionThermalError> {
