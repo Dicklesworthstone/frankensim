@@ -3,9 +3,11 @@
 //! The same immutable state-point bundle supplies density, Young's modulus
 //! and signed axial strength limits to every stage. Assignment is per member; different cards
 //! and temperatures require data changes, never a different equilibrium solver.
-//! This is the existing axial, solid-square, pin-jointed model. The caller
+//! This is the existing axial, solid-square, pin-jointed equilibrium model. The caller
 //! explicitly selects either symmetric yield or separate tension/compression
 //! limits; the same choice reaches layout, refitting and catalog sizing.
+//! Euler sizing defaults to pinned effective lengths; separately admitted
+//! restraint/bracing factors persist through sizing and self-weight rebuilds.
 //! It does not infer a code allowable from an ultimate strength, model creep or
 //! thermal strain, or add self-weight implicitly to the declared load case.
 
@@ -216,6 +218,7 @@ pub struct MaterialLayout<'a> {
     strength_scale_pa: f64,
     density_scale_kg_m3: f64,
     objective: MaterialLayoutObjective,
+    effective_buckling_length_factors: Option<&'a [f64]>,
 }
 
 /// Layout iterates and their physical volume and mass. The numerical report uses the
@@ -393,7 +396,67 @@ impl<'a> MaterialLayout<'a> {
             strength_scale_pa,
             density_scale_kg_m3,
             objective,
+            effective_buckling_length_factors: None,
         })
+    }
+
+    /// Bind one dimensionless Euler effective-length factor `K` per ORIGINAL
+    /// ground member. Compression sizing uses `P_cr = pi² E I / (K L)²`;
+    /// omission retains pinned `K = 1`. The same borrowed factors reach every
+    /// self-weight rebuild and the post-snap audit, including after pruning.
+    ///
+    /// The caller must establish the restraint/bracing model independently.
+    /// This does not infer end fixity from nodal translation supports, change
+    /// pin-jointed equilibrium or physical member mass, or establish global
+    /// frame stability, inelastic buckling or postbuckling strength. The axial
+    /// LP objective and its optional certificates remain unchanged.
+    ///
+    /// # Errors
+    /// Refuses incomplete assignments, nonfinite/nonpositive factors, an
+    /// unrepresentable effective length, or cancellation before publication.
+    pub fn with_effective_buckling_length_factors(
+        mut self,
+        factors: &'a [f64],
+        cx: &Cx<'_>,
+    ) -> Result<Self, TrussConstructionError> {
+        checkpoint(cx)?;
+        if factors.len() != self.assignments.len() {
+            return Err(TrussConstructionError::VectorLength {
+                field: "effective buckling length factors",
+                expected: self.assignments.len(),
+                actual: factors.len(),
+            });
+        }
+        for (member, &factor) in factors.iter().enumerate() {
+            if member % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let effective_length = factor * self.ground.lengths()[member];
+            if !factor.is_finite()
+                || factor <= 0.0
+                || !effective_length.is_finite()
+                || effective_length <= 0.0
+            {
+                return Err(invalid(
+                    "effective buckling length factor",
+                    "requires finite positive K and representable positive K * member length",
+                ));
+            }
+        }
+        checkpoint(cx)?;
+        self.effective_buckling_length_factors = Some(factors);
+        Ok(self)
+    }
+
+    /// Admitted Euler effective-length factor for an original member, or
+    /// `None` if the member does not exist. The implicit pinned default is 1.
+    #[must_use]
+    pub fn effective_buckling_length_factor(&self, member: usize) -> Option<f64> {
+        self.assignments.get(member)?;
+        Some(
+            self.effective_buckling_length_factors
+                .map_or(1.0, |factors| factors[member]),
+        )
     }
 
     /// Common equilibrium/PDHG/certificate API. Its objective is uniformly
@@ -484,7 +547,8 @@ impl<'a> MaterialLayout<'a> {
     }
 
     /// Refit equilibrium and size every survivor with the resolved limit for
-    /// its REFITTED force sign and its own modulus. Mass comes from its source
+    /// its REFITTED force sign, its own modulus and its admitted effective
+    /// buckling length. Mass comes from its source
     /// density and actual snapped geometry, so swapping a material propagates
     /// through all three stages.
     ///
@@ -530,7 +594,13 @@ impl<'a> MaterialLayout<'a> {
             forces,
             |member| {
                 let state = &self.materials[self.assignments[member]];
-                (state.tensile_limit, state.compressive_limit, state.youngs)
+                (
+                    state.tensile_limit,
+                    state.compressive_limit,
+                    state.youngs,
+                    self.effective_buckling_length_factors
+                        .map_or(1.0, |factors| factors[member]),
+                )
             },
             catalog,
             prune_frac,

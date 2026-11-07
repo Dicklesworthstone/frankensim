@@ -209,7 +209,8 @@ impl MaterialLayout<'_> {
     /// loads, and use the same LP/refit/axial-limit/Euler/catalog owners again. Only
     /// exact equality of the complete section vector (including absent members)
     /// accepts. The returned loads, mass and design therefore describe one state.
-    /// Original support loads, material assignments and assembly limits persist.
+    /// Original support loads, material assignments, effective buckling-length
+    /// factors and assembly limits persist.
     ///
     /// This bounded fixed-point iteration can cycle or lack a feasible catalog;
     /// it does not establish a global self-weight optimum. It retains the
@@ -256,7 +257,7 @@ impl MaterialLayout<'_> {
                 loads,
                 self.case.node_count(),
             )?;
-            let loaded = MaterialLayout::try_new_with_objective(
+            let mut loaded = MaterialLayout::try_new_with_objective(
                 self.ground,
                 &load_case,
                 self.materials,
@@ -265,6 +266,10 @@ impl MaterialLayout<'_> {
                 self.limits,
                 cx,
             )?;
+            // Geometry and original member order are unchanged. Reuse the
+            // already admitted immutable restraint/bracing assignment rather
+            // than resetting the rebuilt design to pinned Euler lengths.
+            loaded.effective_buckling_length_factors = self.effective_buckling_length_factors;
             let (solution, design, next_areas) =
                 loaded.solve_sized(catalog, prune_frac, settings, iteration, cx)?;
             if areas == next_areas {

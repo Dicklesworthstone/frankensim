@@ -234,6 +234,46 @@ fn density_only_changes_reach_self_weight_sections_and_actual_tension_or_compres
 }
 
 #[test]
+fn self_weight_rebuilds_retain_original_effective_compression_lengths() {
+    with_cx(|cx, _| {
+        let (ground, case) = vertical(cx, false);
+        let states = [material(2.0)];
+        let catalog = [0.02, 0.04, 0.05, 0.07, 0.10, 0.13];
+        for (factor, expected_area) in [(0.5, 0.02), (1.0, 0.05), (2.0, 0.10)] {
+            let factors = [factor];
+            let layout =
+                MaterialLayout::try_new(&ground, &case, &states, &[0], LayoutLimits::default(), cx)
+                    .unwrap()
+                    .with_effective_buckling_length_factors(&factors, cx)
+                    .unwrap();
+            let result = layout
+                .solve_with_body_loads([0.0, -9.81], &catalog, 1e-3, settings(), 8, cx)
+                .unwrap();
+            assert_eq!(result.areas_m2, vec![expected_area]);
+            let member = &result.design.audit.members[0];
+            assert_eq!(member.buckling_length_factor, factor);
+            assert_eq!(member.effective_buckling_length, factor);
+            let mass = 2.0 * expected_area; // Physical length remains one metre.
+            let compressive_force = 1.0 + 0.5 * mass * 9.81;
+            near(member.force, -compressive_force);
+            near(result.design.mass_kg.unwrap(), mass);
+            near(
+                member.area_buckling,
+                factor
+                    * (12.0 * compressive_force / (std::f64::consts::PI.powi(2) * 1000.0)).sqrt(),
+            );
+            assert!(result.design.audit.all_pass);
+            assert_eq!(
+                layout
+                    .body_loads(&result.areas_m2, [0.0, -9.81], cx)
+                    .unwrap(),
+                result.body_loads
+            );
+        }
+    });
+}
+
+#[test]
 fn numerical_shape_catalog_iteration_and_cancellation_fail_without_changing_the_case() {
     with_cx(|cx, gate| {
         let (ground, case) = vertical(cx, true);

@@ -534,6 +534,127 @@ fn compression_buckling_uses_each_members_modulus_not_global_steel() {
 }
 
 #[test]
+fn effective_lengths_change_compression_sizing_but_not_tension_or_physical_mass() {
+    with_cx(|cx, _| {
+        let youngs = 200e9;
+        let source = card([8000.0; 2], [youngs; 2], [300e6; 2]);
+        let states = [material(&source, 300.0)];
+        let catalog = [1e-8, 1.3e-6, 2.5e-6, 5e-6];
+        for force in [-1.0, 1.0] {
+            let (ground, case) = two_members(cx, force);
+            let layout = MaterialLayout::try_new(
+                &ground,
+                &case,
+                &states,
+                &[0, 0],
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap();
+            assert_eq!(layout.effective_buckling_length_factor(0), Some(1.0));
+            assert_eq!(layout.effective_buckling_length_factor(2), None);
+            // Deliberately tensile iterates in both cases: sizing must select
+            // compression from the equilibrium refit, not the supplied sign.
+            let forces = [1.0, 1.0, 0.0, 0.0];
+            let pinned = layout.size_and_snap(&forces, &catalog, 1e-3, cx).unwrap();
+            let explicit_pinned = layout
+                .with_effective_buckling_length_factors(&[1.0, 1.0], cx)
+                .unwrap();
+            let repeated = explicit_pinned
+                .size_and_snap(&forces, &catalog, 1e-3, cx)
+                .unwrap();
+            assert_eq!(pinned.audit.rows, repeated.audit.rows);
+            let factors = [0.5, 2.0];
+            let restrained = explicit_pinned
+                .with_effective_buckling_length_factors(&factors, cx)
+                .unwrap();
+            let sized = restrained
+                .size_and_snap(&forces, &catalog, 1e-3, cx)
+                .unwrap();
+            assert!(sized.audit.all_pass);
+            for (member, &factor) in sized.audit.members.iter().zip(&factors) {
+                assert_eq!(member.buckling_length_factor, factor);
+                assert_eq!(member.effective_buckling_length, factor * member.length);
+                relative(member.force, force, 1e-12);
+                let expected_floor = if force < 0.0 {
+                    factor * (12.0 / (std::f64::consts::PI.powi(2) * youngs)).sqrt()
+                } else {
+                    0.0
+                };
+                relative(member.area_buckling, expected_floor, 1e-12);
+                if force < 0.0 {
+                    let inertia = member.area_catalog.powi(2) / 12.0;
+                    let capacity = std::f64::consts::PI.powi(2) * youngs * inertia
+                        / member.effective_buckling_length.powi(2);
+                    assert!(capacity >= force.abs());
+                } else {
+                    assert_eq!(member.area_catalog, 1e-8);
+                }
+            }
+            if force < 0.0 {
+                assert_eq!(sized.audit.members[0].area_catalog, 1.3e-6);
+                assert_eq!(sized.audit.members[1].area_catalog, 5e-6);
+                // Actual one-metre lengths determine volume; K must not
+                // double the second member's mass or halve the first's.
+                relative(sized.mass_kg.unwrap(), 8000.0 * (1.3e-6 + 5e-6), 1e-12);
+            } else {
+                assert_eq!(sized.mass_kg, pinned.mass_kg);
+                assert_eq!(sized.volume_m3, pinned.volume_m3);
+            }
+            assert!(sized.audit.rows[0].contains("\"buckling_length_factor\":5.0000e-1"));
+            assert!(sized.audit.rows[1].contains("\"effective_buckling_length\":2.0000e0"));
+        }
+    });
+}
+
+#[test]
+fn effective_buckling_lengths_refuse_incomplete_invalid_and_cancelled_assignments() {
+    with_cx(|cx, gate| {
+        let source = card([8000.0; 2], [200e9; 2], [300e6; 2]);
+        let states = [material(&source, 300.0)];
+        let ground = GroundStructure::try_from_parts(
+            &[[0.0, 0.0], [2.0, 0.0]],
+            &[(0, 1)],
+            &[2.0],
+            GroundLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let case = LayoutCase::try_new(
+            vec![[true, true], [false, true]],
+            vec![[0.0, 0.0], [-1.0, 0.0]],
+            2,
+        )
+        .unwrap();
+        let new_layout = || {
+            MaterialLayout::try_new(&ground, &case, &states, &[0], LayoutLimits::default(), cx)
+                .unwrap()
+        };
+        for factors in [
+            vec![],
+            vec![1.0, 1.0],
+            vec![0.0],
+            vec![-1.0],
+            vec![f64::NAN],
+            vec![f64::INFINITY],
+            vec![f64::MAX], // K is finite, but K * L is not.
+        ] {
+            assert!(
+                new_layout()
+                    .with_effective_buckling_length_factors(&factors, cx)
+                    .is_err()
+            );
+        }
+        let layout = new_layout();
+        gate.request();
+        assert!(matches!(
+            layout.with_effective_buckling_length_factors(&[2.0], cx),
+            Err(fs_truss::TrussConstructionError::Cancelled { .. })
+        ));
+    });
+}
+
+#[test]
 fn swapping_member_assignments_changes_actual_optimum_load_path() {
     with_cx(|cx, _| {
         // Direct tie and the two inclined ties are alternative load paths.

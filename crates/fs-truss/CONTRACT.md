@@ -139,10 +139,31 @@ chooses the tensile or compressive limit from the force AFTER equilibrium
 refitting, including when refitting reverses an input iterate's sign. The
 existing `SizedMember::area_yield` field is the area from that declared limit;
 for `resolve` and the uniform legacy path it is still the yield-based area.
-The source-bound catalog audit labels axial limits and pinned Euler as
+The source-bound catalog audit labels axial limits and effective-length Euler as
 physical model checks, not building-code certification. Absent catalog sections
 leave mass/volume totals unavailable. Immutable geometry/material assignments
 prevent using a different ordering or temperature state during sizing.
+
+`MaterialLayout::with_effective_buckling_length_factors` optionally binds one
+finite positive dimensionless `K` per original member; the default is pinned
+`K = 1`. The caller owns the independent restraint/bracing justification.
+The common compression sizing and post-snap audit both use `P_cr = pi² E I/(K L)²`,
+and each sized member retains `K` and `K L`. The immutable assignment persists
+through pruning and self-weight rebuilds. Physical length still determines
+equilibrium, volume and mass; tensile limits and the axial LP/certificate problem
+are unaffected. This does not infer rotational fixity from nodal translation
+supports, establish global frame stability, or model inelastic/postbuckling
+resistance. The separate Cosserat spot check remains its documented clamped-free
+model. Tests in `material.rs` and `material_body_load.rs` check analytic Euler
+scaling, refitted compression signs, unchanged tensile sizing/physical mass,
+self-weight persistence, invalid assignments and cancellation.
+
+The Euler effective-length relation follows FHWA's
+[*Engineering for Structural Stability in Bridge Construction Reference Manual*](https://www.fhwa.dot.gov/bridge/pubs/nhi15044.pdf),
+NHI Course 130102, Equation 4-2 and Figure 4-5, printed page 4.10. That reference
+treats `K L` as the length of an equivalent pin-ended column and ties `K` to
+the actual structural restraints; it does not justify inferring `K` from the
+translation-only supports used by this axial layout model.
 
 This is a frozen-state pin-jointed, solid-square force-equilibrium sizing model,
 not elastic-compatible force distribution, rotating anisotropic failure,

@@ -1,6 +1,7 @@
 //! The nonlinear sizing pass: surviving members get cross-sections
 //! from their declared axial limit, compression members get EULER BUCKLING floors
-//! (solid-square closed form `I = A²/12` ⇒ `A ≥ √(12|q|l²/(π²E))`),
+//! (solid-square closed form `I = A²/12` ⇒ `A ≥ √(12|q|(Kl)²/(π²E))`),
+//! with explicit effective-length factor `K` (pinned ends by default),
 //! joint parsimony prunes negligible members with a MANDATORY
 //! least-squares equilibrium re-verification on the survivors, and
 //! catalog snapping rounds areas UP (feasibility preserved by
@@ -23,6 +24,11 @@ pub struct SizedMember {
     pub force: f64,
     /// Length.
     pub length: f64,
+    /// Admitted dimensionless Euler effective-length factor; pinned ends use 1.
+    pub buckling_length_factor: f64,
+    /// Euler effective buckling length `K * length`, in metres. This does not
+    /// replace the physical member length used for material volume or mass.
+    pub effective_buckling_length: f64,
     /// Continuous area from the declared limit for the refitted force sign.
     /// The uniform legacy entry point uses symmetric yield stress.
     pub area_yield: f64,
@@ -69,7 +75,7 @@ pub fn size_and_snap(
         gs,
         lp,
         x,
-        |_| (sigma_y, sigma_y, youngs),
+        |_| (sigma_y, sigma_y, youngs, 1.0),
         catalog,
         prune_frac,
         ConstraintKind::Code {
@@ -79,14 +85,15 @@ pub fn size_and_snap(
 }
 
 /// Shared sizing kernel: a material assignment supplies each member's tensile
-/// limit, compressive magnitude limit and modulus to the same refit, buckling,
-/// snap and audit path. The force sign is selected AFTER the equilibrium refit.
+/// limit, compressive magnitude limit, modulus and effective-length factor to
+/// the same refit, buckling, snap and audit path. The force sign is selected
+/// AFTER the equilibrium refit.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn size_and_snap_members(
     gs: &GroundStructure,
     lp: &LayoutLp,
     x: &[f64],
-    properties: impl Fn(usize) -> (f64, f64, f64),
+    properties: impl Fn(usize) -> (f64, f64, f64, f64),
     catalog: &[f64],
     prune_frac: f64,
     checks: ConstraintKind,
@@ -112,13 +119,21 @@ pub(crate) fn size_and_snap_members(
         pruned,
         ..CatalogAudit::default()
     };
-    let check_description = match checks {
-        ConstraintKind::Code { standard } => format!("\"code\":\"{standard}\""),
-        _ => "\"physics\":\"signed-axial-limits-and-pinned-euler\"".to_string(),
+    let code_description = match checks {
+        ConstraintKind::Code { standard } => Some(format!("\"code\":\"{standard}\"")),
+        _ => None,
     };
     let mut all_pass = true;
     for (si, &k) in survivors.iter().enumerate() {
-        let (tensile_limit, compressive_limit, youngs) = properties(k);
+        let (tensile_limit, compressive_limit, youngs, buckling_length_factor) = properties(k);
+        let check_description =
+            code_description
+                .as_deref()
+                .unwrap_or(if buckling_length_factor == 1.0 {
+                    "\"physics\":\"signed-axial-limits-and-pinned-euler\""
+                } else {
+                    "\"physics\":\"signed-axial-limits-and-effective-length-euler\""
+                });
         let q = q_refit[si];
         let stress_limit = if q < 0.0 {
             compressive_limit
@@ -126,11 +141,15 @@ pub(crate) fn size_and_snap_members(
             tensile_limit
         };
         let l = gs.lengths()[k];
+        let effective_buckling_length = buckling_length_factor * l;
         let area_yield = q.abs() / stress_limit;
         let area_buckling = if q < 0.0 {
-            // Euler with pinned ends, solid square I = A²/12:
-            // |q| ≤ π²EI/l² ⇒ A ≥ √(12|q|l²/(π²E)).
-            (12.0 * q.abs() * l * l / (std::f64::consts::PI.powi(2) * youngs)).sqrt()
+            // The admitted effective length carries the caller's restraint or
+            // bracing model. It changes Euler resistance, not axial stiffness,
+            // material volume or the nodal equilibrium geometry.
+            (12.0 * q.abs() * effective_buckling_length * effective_buckling_length
+                / (std::f64::consts::PI.powi(2) * youngs))
+                .sqrt()
         } else {
             0.0
         };
@@ -148,7 +167,7 @@ pub(crate) fn size_and_snap_members(
                 && q.abs()
                     <= std::f64::consts::PI.powi(2) * youngs * area_catalog * area_catalog
                         / 12.0
-                        / (l * l)
+                        / (effective_buckling_length * effective_buckling_length)
                         * (1.0 + 1e-9));
         let pass = stress_ok && buckling_ok;
         all_pass &= pass;
@@ -157,6 +176,8 @@ pub(crate) fn size_and_snap_members(
             row,
             "{{\"member\":{k},\"force\":{q:.4e},\"len\":{l:.3},\"a_yield\":{area_yield:.4e},\
              \"a_euler\":{area_buckling:.4e},\"a_catalog\":{area_catalog:.4e},\
+             \"buckling_length_factor\":{buckling_length_factor:.4e},\
+             \"effective_buckling_length\":{effective_buckling_length:.4e},\
              \"stress_limit_pa\":{stress_limit:.4e},\
              {check_description},\"stress_ok\":{stress_ok},\"buckling_ok\":{buckling_ok}}}"
         );
@@ -166,6 +187,8 @@ pub(crate) fn size_and_snap_members(
             ends: gs.members()[k],
             force: q,
             length: l,
+            buckling_length_factor,
+            effective_buckling_length,
             area_yield,
             area_buckling,
             area_catalog,
