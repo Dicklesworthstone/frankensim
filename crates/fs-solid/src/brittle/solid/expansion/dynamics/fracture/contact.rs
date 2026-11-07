@@ -102,7 +102,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             controls,
             cx,
         )?;
-        let solid = ThermalBrittleTetSolid {
+        let mut solid = ThermalBrittleTetSolid {
             geometry: self.solid.geometry,
             materials: self.solid.materials,
             bands: Arc::clone(&self.solid.bands),
@@ -112,11 +112,15 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             stored_energy_j: self.solid.stored_energy_j,
             fracture_dissipation_j: self.solid.fracture_dissipation_j,
         };
+        solid
+            .refresh_rate_stresses(&velocity_mps, &self.free_linear_strain_rates_per_s, cx)
+            .map_err(BrittleFaceImpactError::Motion)?;
         checkpoint(cx)?;
         Ok(ThermalBrittleFaceImpactStep {
             motion: ThermalBrittleTetMotion {
                 solid,
                 velocity_mps,
+                free_linear_strain_rates_per_s: Arc::clone(&self.free_linear_strain_rates_per_s),
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
                 mass: Arc::clone(&self.mass),
                 kinetic_energy_j: impulse.kinetic_after_j,

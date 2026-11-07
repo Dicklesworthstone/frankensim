@@ -1,5 +1,35 @@
 # fs-solid CONTRACT
 
+## Thermal strain rates in native viscous tensile fracture
+
+`ThermalBrittleTetMotion` advances total deformation and source-integrated free
+strain through the original timed crack-band adapters. Both native backward
+Euler and midpoint retain separate parameter work, total-strain work,
+eigenstrain work, intrinsic fracture and physical viscous loss. The total mean
+stress enters both strain work ports; viscous loss is subtracted once from the
+complete physical balance and never added to cumulative fracture history.
+
+Every interval explicitly declares affine free strain. Actual endpoint stress
+uses the native P1 projection of accepted velocity minus that imposed rate,
+including the distinct centered endpoint velocity. Temperature endpoints do
+not supply an inferred instantaneous derivative. The explicit initial-rate
+constructor admits thermal kinematics without advancing work, history or time;
+the existing constructor declares held initial temperature.
+
+Accepted scalar free-strain rates survive zero-time normal/friction impulses
+and completed-fracture topology transfer. Post-impulse stress is readmitted at
+the resulting actual velocity; original reference mass stays frozen. Sustained
+and contact-time balances carry physical viscous loss. Untimed static evolution
+and elastic-only prehistory refuse surviving viscous bonds. Source, rate,
+energy, geometry and cancellation gates publish no partial successor.
+
+Focused native regressions cover matched free expansion, restrained heating and
+cooling, independent inertial solutions for both schemes, endpoint versus chord
+rates, rupture/reclosure, source/refusal atomicity and retained thermal rates
+through fracture/contact. The coefficient-first thermal split remains explicit;
+there is no inferred heat conversion, caloric feedback or unresolved temperature
+trajectory guarantee.
+
 ## Physical fracture viscosity in native tetrahedral dynamics
 
 `BrittleTetMotion` endpoint and midpoint advances use the original duration-bound

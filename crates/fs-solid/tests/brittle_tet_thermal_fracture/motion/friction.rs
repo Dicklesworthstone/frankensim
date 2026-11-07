@@ -99,6 +99,7 @@ fn directional_thermal_fragment_impact_preserves_source_eigenstrain_and_original
             .impact_released_faces_frictional(&[0.5], &friction, &[], ORIGIN, controls(), cx)
             .unwrap();
         assert_eq!(hit.rows.len(), 3);
+        assert_eq!(hit.motion.free_linear_strain_rates_per_s(), arrived.free_linear_strain_rates_per_s());
         assert!(matches!(
             hit.contact.transformed.determinacy,
             FrictionalContactDeterminacy::UniqueImpulses

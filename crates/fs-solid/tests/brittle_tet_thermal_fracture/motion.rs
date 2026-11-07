@@ -150,6 +150,12 @@ fn thermal_motion_release_keeps_original_mass_and_continues_sources_with_both_op
             cold[0].band().reference_density_kg_m3().unwrap(),
             0.5 * DENSITY
         );
+        for (element, &rate) in cooled.free_linear_strain_rates_per_s().iter().enumerate() {
+            let expected = (cold[element].free_linear_strain()
+                - reference[element].free_linear_strain()) / 0.01;
+            assert!(expected < 0.0);
+            close(rate, expected, 1e-14);
+        }
         let before = inventory(&cooled);
         let cut = topology(&geometry, cx);
         let target =
@@ -170,6 +176,7 @@ fn thermal_motion_release_keeps_original_mass_and_continues_sources_with_both_op
         ));
         close(split.reference_mass_kg(), 2.0, 1e-15);
         assert_eq!(split.time_s(), cooled.time_s());
+        assert_eq!(split.free_linear_strain_rates_per_s(), cooled.free_linear_strain_rates_per_s());
         assert_eq!(split.accepted_steps(), 1);
         assert_eq!(split.remaining_steps(), 3);
         assert!(core::ptr::eq(
@@ -230,6 +237,9 @@ fn thermal_motion_release_keeps_original_mass_and_continues_sources_with_both_op
             )
             .unwrap();
         for next in [&backward.motion, &midpoint.motion] {
+            for &rate in next.free_linear_strain_rates_per_s() {
+                close(rate, delta_free / 0.01, 1e-14);
+            }
             assert_eq!(next.reference_density_kg_m3(), &[DENSITY; 2]);
             close(next.reference_mass_kg(), 2.0, 1e-15);
             assert_eq!(next.accepted_steps(), 2);
@@ -426,6 +436,7 @@ fn thermally_fractured_body_impacts_with_retained_reference_mass_and_resumes_nat
                 .impact_released_faces(&[restitution], &[], ORIGIN, impact_controls(), cx)
                 .unwrap();
             assert_eq!(hit.rows.len(), 3);
+            assert_eq!(hit.motion.free_linear_strain_rates_per_s(), arrived.free_linear_strain_rates_per_s());
             assert!(matches!(
                 hit.contact.determinacy,
                 MultiImpactDeterminacy::UniqueImpulses

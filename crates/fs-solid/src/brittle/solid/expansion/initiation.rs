@@ -226,6 +226,14 @@ impl<'a> ThermalTensileElasticTetSolid<'a> {
                 "virgin zero-expansion sources and nonempty budgeted geometry required",
             ));
         }
+        for source in materials {
+            checkpoint(cx)?;
+            if source.band().law().viscosity().is_some() {
+                return Err(ThermalTensileTetInitiationError::Invalid(
+                    "elastic-only thermal tensile prehistory cannot omit physical bond viscosity",
+                ));
+            }
+        }
         let solution = SmallStrainTetSolution {
             displacement_m: vec![[0.0; 3]; geometry.nodes_m().len()],
             element_strain: vec![[0.0; 6]; materials.len()],

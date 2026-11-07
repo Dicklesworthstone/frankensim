@@ -674,3 +674,6 @@ mod midpoint;
 
 #[path = "brittle_tet_thermal_motion/modes.rs"]
 mod modes;
+
+#[path = "brittle_tet_thermal_motion/rate.rs"]
+mod rate;

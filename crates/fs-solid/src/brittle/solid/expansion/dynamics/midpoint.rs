@@ -7,7 +7,7 @@
 //! from displacement work, coefficient work and irreversible fracture loss.
 //!
 //! Mean external/support work plus parameter/eigenstrain work balances elastic
-//! storage, physical fracture and native kinetic change, without endpoint
+//! storage, physical fracture/viscous loss and native kinetic change, without endpoint
 //! quadrature compensation or numerical kinetic loss. This work identity does
 //! not make the coefficient-first thermal split second order. The caller must
 //! resolve temperature changes, force means, thermal/mechanical reversals and
@@ -42,6 +42,9 @@ pub struct ThermalBrittleTetMidpointEnergy {
     pub eigenstrain_work_j: f64,
     pub constitutive_strain_work_j: f64,
     pub fracture_dissipation_j: f64,
+    /// Exact surviving-bond physical loss on the mechanical-strain path.
+    /// No part is counted as intrinsic fracture or numerical kinetic damping.
+    pub viscous_dissipation_j: f64,
     pub parameter_fracture_dissipation_j: f64,
     pub strain_split_error_j: f64,
     pub material_balance_error_j: f64,
@@ -54,7 +57,7 @@ pub struct ThermalBrittleTetMidpointEnergy {
     pub support_mean_work_j: f64,
     pub equilibrium_work_residual_j: f64,
     /// External plus coefficient/eigenstrain work minus elastic storage change,
-    /// physical fracture and kinetic change. No numerical loss is subtracted.
+    /// physical fracture/viscous loss and kinetic change. No numerical loss is subtracted.
     pub total_balance_error_j: f64,
 }
 
@@ -69,6 +72,8 @@ impl ThermalBrittleTetMidpointEnergy {
 #[derive(Debug)]
 pub struct ThermalBrittleTetMidpointStep<'a> {
     pub motion: ThermalBrittleTetMotion<'a>,
+    /// Intrinsic mechanical-strain work/storage/fracture densities; total work
+    /// and physical viscous loss are reported separately in `energy`.
     pub element_energy: Vec<BrittleEnergy>,
     pub element_transfer: Vec<BrittleTetTemperatureElementEnergy>,
     pub energy: ThermalBrittleTetMidpointEnergy,
@@ -86,6 +91,9 @@ impl<'a> ThermalBrittleTetMotion<'a> {
     /// and the original reference mass. The mean material tangent differentiates
     /// the mean force with respect to the NEW total strain at fixed temperature.
     /// The optional native numerical fallback differentiates that SAME response.
+    /// Total and free thermal strain share one affine path. Published endpoint
+    /// stress uses the actual `B*v_next` minus that imposed free-strain rate;
+    /// centered endpoint velocity generally differs from the path's mean rate.
     ///
     /// Every source, solver, time/budget, cancellation and physical-work gate
     /// passes before the new material owner, velocity and clock are published.
@@ -163,10 +171,15 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             .solid
             .prepare_materials(next_materials, controls.material_energy_tolerance_j, cx)
             .map_err(thermal_error)?;
+        let free_rates = self.interval_free_strain_rates(next_materials, dt_s, cx)?;
         let mut laws = Vec::with_capacity(next_materials.len());
-        for material in next_materials {
+        for (element, material) in next_materials.iter().enumerate() {
             checkpoint(cx)?;
-            laws.push(material.mean_small_strain_law());
+            laws.push(
+                material
+                    .mean_small_strain_law_over_time(dt_s)
+                    .map_err(|source| BrittleTetDynamicError::Source { element, source })?,
+            );
         }
         let problem = SmallStrainTetProblem {
             nodes_m: self.solid.geometry.nodes_m(),
@@ -194,6 +207,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 &prepared,
                 &mut step.solution,
                 ThermalBrittleResponse::Mean,
+                Some(dt_s),
                 controls.material_energy_tolerance_j,
                 cx,
             )
@@ -205,9 +219,10 @@ impl<'a> ThermalBrittleTetMotion<'a> {
         let storage = material.stored_after_j - material.stored_before_j;
         let equilibrium =
             (external - recovered.response_internal_work_j) - step.energy.inertial_work_j;
-        let total = (((external + material.parameter_work_j + material.eigenstrain_work_j)
+        let total = ((((external + material.parameter_work_j + material.eigenstrain_work_j)
             - storage)
             - material.fracture_dissipation_j)
+            - material.viscous_dissipation_j)
             - step.energy.kinetic_change_j;
         let energy = ThermalBrittleTetMidpointEnergy {
             inertia: step.energy,
@@ -218,6 +233,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             eigenstrain_work_j: material.eigenstrain_work_j,
             constitutive_strain_work_j: material.constitutive_strain_work_j,
             fracture_dissipation_j: material.fracture_dissipation_j,
+            viscous_dissipation_j: material.viscous_dissipation_j,
             parameter_fracture_dissipation_j: material.parameter_fracture_dissipation_j,
             strain_split_error_j: material.strain_split_error_j,
             material_balance_error_j: material.material_balance_error_j,
@@ -262,7 +278,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 "thermal midpoint requires zero native numerical kinetic loss",
             ));
         }
-        let solid = ThermalBrittleTetSolid {
+        let mut solid = ThermalBrittleTetSolid {
             geometry: self.solid.geometry,
             materials: next_materials,
             bands: Arc::clone(&self.solid.bands),
@@ -272,11 +288,13 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             stored_energy_j: material.stored_after_j,
             fracture_dissipation_j: recovered.cumulative_loss_j,
         };
+        solid.refresh_rate_stresses(&step.velocity_mps, &free_rates, cx)?;
         checkpoint(cx)?;
         Ok(ThermalBrittleTetMidpointStep {
             motion: self.successor(
                 solid,
                 step.velocity_mps,
+                free_rates,
                 step.energy.kinetic_after_j,
                 next_time,
             ),

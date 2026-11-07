@@ -98,6 +98,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             motion: ThermalBrittleTetMotion {
                 solid: fracture.solid,
                 velocity_mps: transfer.velocity_mps,
+                free_linear_strain_rates_per_s: Arc::clone(&self.free_linear_strain_rates_per_s),
                 reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
                 mass: Arc::new(transfer.mass),
                 kinetic_energy_j: transfer.kinetic_after_j,

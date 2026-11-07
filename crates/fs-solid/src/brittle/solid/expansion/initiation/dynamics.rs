@@ -521,6 +521,7 @@ impl<'a> ThermalTensileElasticTetMotion<'a> {
             constitutive_strain_work_j: material.constitutive_strain_work_j,
             fracture_dissipation_j: 0.0,
             parameter_fracture_dissipation_j: 0.0,
+            viscous_dissipation_j: 0.0,
             strain_split_error_j: material.strain_split_error_j,
             material_balance_error_j: material.material_balance_error_j,
             mean_internal_work_j,

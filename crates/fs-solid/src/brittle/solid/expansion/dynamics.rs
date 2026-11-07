@@ -13,6 +13,7 @@
 //! and mechanical reversals. No intermediate restrained damage state is accepted.
 //!
 //! Eigenstrain work is a mechanical port, not caloric heat. Physical fracture,
+//! surviving-bond viscous loss,
 //! endpoint constitutive quadrature and backward-Euler kinetic loss have
 //! distinct accounts. The default step is first-order backward Euler; the
 //! midpoint path retains centered momentum and analytic mean forces. Thermal
@@ -49,6 +50,9 @@ use crate::plastic3::{
 pub struct ThermalBrittleTetMotion<'a> {
     solid: ThermalBrittleTetSolid<'a>,
     velocity_mps: Vec<[f64; 3]>,
+    /// Actual imposed isotropic free-strain rate at this accepted endpoint.
+    /// One value per original element; zero-time impulses and cuts retain it.
+    free_linear_strain_rates_per_s: Arc<[f64]>,
     reference_density_kg_m3: Arc<[f64]>,
     mass: Arc<P1ReferenceMass>,
     kinetic_energy_j: f64,
@@ -70,6 +74,9 @@ pub struct ThermalBrittleTetDynamicEnergy {
     pub eigenstrain_work_j: f64,
     pub constitutive_strain_work_j: f64,
     pub fracture_dissipation_j: f64,
+    /// Exact physical surviving-bond loss on the mechanical-strain path,
+    /// distinct from intrinsic fracture, thermal work and numerical damping.
+    pub viscous_dissipation_j: f64,
     pub parameter_fracture_dissipation_j: f64,
     pub strain_split_error_j: f64,
     pub material_balance_error_j: f64,
@@ -82,7 +89,7 @@ pub struct ThermalBrittleTetDynamicEnergy {
     /// Endpoint internal work minus exact TOTAL-strain mechanical work.
     /// This excludes physical eigenstrain work and numerical kinetic loss.
     pub constitutive_endpoint_defect_j: f64,
-    /// External plus parameter/eigenstrain work minus storage, fracture,
+    /// External plus parameter/eigenstrain work minus storage, fracture/viscous loss,
     /// kinetic change and the two distinct numerical accounts.
     pub total_balance_error_j: f64,
 }
@@ -98,7 +105,8 @@ impl ThermalBrittleTetDynamicEnergy {
 #[derive(Debug)]
 pub struct ThermalBrittleTetMotionStep<'a> {
     pub motion: ThermalBrittleTetMotion<'a>,
-    /// Native mechanical-strain path accounts per reference volume, J/m3.
+    /// Intrinsic mechanical-strain work/storage/fracture per reference volume,
+    /// J/m3. Complete work and separate physical viscosity are in `energy`.
     pub element_energy: Vec<BrittleEnergy>,
     pub element_transfer: Vec<BrittleTetTemperatureElementEnergy>,
     pub energy: ThermalBrittleTetDynamicEnergy,
@@ -111,7 +119,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
     /// Current source density may differ from the frozen reference density.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::brittle::solid::expansion) fn from_tensile_handoff(
-        solid: ThermalBrittleTetSolid<'a>,
+        mut solid: ThermalBrittleTetSolid<'a>,
         velocity_mps: Vec<[f64; 3]>,
         reference_density_kg_m3: Arc<[f64]>,
         mass: Arc<P1ReferenceMass>,
@@ -132,9 +140,12 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 "thermal tensile handoff must preserve original motion and inventory dimensions",
             ));
         }
+        let free_linear_strain_rates_per_s: Arc<[f64]> = vec![0.0; solid.materials.len()].into();
+        solid.refresh_rate_stresses(&velocity_mps, &free_linear_strain_rates_per_s, cx)?;
         Ok(Self {
             solid,
             velocity_mps,
+            free_linear_strain_rates_per_s,
             reference_density_kg_m3,
             mass,
             kinetic_energy_j,
@@ -152,9 +163,54 @@ impl<'a> ThermalBrittleTetMotion<'a> {
     /// neither the expansion reference nor a later current-density query implies
     /// a volume conversion. Starting motion preserves all prestress, damage and
     /// fracture loss; supplied velocity is actual initial kinetic storage.
+    /// Initial temperature is held: its free-strain rate is zero. Use
+    /// [`Self::try_from_solid_with_free_strain_rates`] for an already moving
+    /// thermal boundary; no thermal derivative is inferred from temperature.
     pub fn try_from_solid(
         solid: &ThermalBrittleTetSolid<'a>,
         initial_velocity_mps: &[[f64; 3]],
+        initial_time_s: f64,
+        maximum_steps: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, BrittleTetDynamicError> {
+        Self::from_solid_rates(
+            solid,
+            initial_velocity_mps,
+            None,
+            initial_time_s,
+            maximum_steps,
+            cx,
+        )
+    }
+
+    /// Admit an explicitly supplied instantaneous isotropic free-strain rate
+    /// per element together with actual nodal velocity. The source can convert
+    /// a declared temperature rate using its current selected alpha(T).
+    ///
+    /// Initial total stress uses `B*v - free_rate*I`; neither damage, work nor
+    /// physical time advances. Reference mass and history remain unchanged.
+    pub fn try_from_solid_with_free_strain_rates(
+        solid: &ThermalBrittleTetSolid<'a>,
+        initial_velocity_mps: &[[f64; 3]],
+        initial_free_linear_strain_rates_per_s: &[f64],
+        initial_time_s: f64,
+        maximum_steps: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, BrittleTetDynamicError> {
+        Self::from_solid_rates(
+            solid,
+            initial_velocity_mps,
+            Some(initial_free_linear_strain_rates_per_s),
+            initial_time_s,
+            maximum_steps,
+            cx,
+        )
+    }
+
+    fn from_solid_rates(
+        solid: &ThermalBrittleTetSolid<'a>,
+        initial_velocity_mps: &[[f64; 3]],
+        initial_free_rates: Option<&[f64]>,
         initial_time_s: f64,
         maximum_steps: usize,
         cx: &Cx<'_>,
@@ -168,9 +224,12 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 .iter()
                 .flatten()
                 .any(|v| !v.is_finite())
+            || initial_free_rates.is_some_and(|rates| {
+                rates.len() != solid.materials.len() || rates.iter().any(|rate| !rate.is_finite())
+            })
         {
             return Err(BrittleTetDynamicError::Invalid(
-                "finite full initial velocity, nonnegative time and positive step budget required",
+                "finite full initial velocity/free-strain rates, nonnegative time and positive step budget required",
             ));
         }
         let mut densities = Vec::with_capacity(solid.materials.len());
@@ -216,7 +275,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 "initial consistent kinetic storage must be finite and nonnegative",
             ));
         }
-        let retained = ThermalBrittleTetSolid {
+        let mut retained = ThermalBrittleTetSolid {
             geometry: solid.geometry,
             materials: solid.materials,
             bands: Arc::clone(&solid.bands),
@@ -226,10 +285,18 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             stored_energy_j: solid.stored_energy_j,
             fracture_dissipation_j: solid.fracture_dissipation_j,
         };
+        let free_linear_strain_rates_per_s: Arc<[f64]> =
+            initial_free_rates.map_or_else(|| vec![0.0; solid.materials.len()].into(), Arc::from);
+        retained.refresh_rate_stresses(
+            initial_velocity_mps,
+            &free_linear_strain_rates_per_s,
+            cx,
+        )?;
         checkpoint(cx)?;
         Ok(Self {
             solid: retained,
             velocity_mps: initial_velocity_mps.to_vec(),
+            free_linear_strain_rates_per_s,
             reference_density_kg_m3: densities.into(),
             mass: Arc::new(mass),
             kinetic_energy_j: kinetic,
@@ -246,6 +313,14 @@ impl<'a> ThermalBrittleTetMotion<'a> {
     #[must_use]
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
         &self.velocity_mps
+    }
+    /// Accepted imposed isotropic free-strain rates in original element order.
+    /// A physical step declares a straight free-strain path, giving
+    /// `(free_next-free_old)/dt`. Initial rates are explicitly supplied or zero;
+    /// zero-time contact and topology transfer preserve them unchanged.
+    #[must_use]
+    pub fn free_linear_strain_rates_per_s(&self) -> &[f64] {
+        &self.free_linear_strain_rates_per_s
     }
     #[must_use]
     pub fn reference_density_kg_m3(&self) -> &[f64] {
@@ -278,6 +353,8 @@ impl<'a> ThermalBrittleTetMotion<'a> {
     /// fixed projection. Loads and support displacements are absolute endpoints.
     /// Each Newton proposal uses the same coefficient-transferred mechanical
     /// history. The reference mass stays unchanged even if queried rho(T) changes.
+    /// Total and source-integrated free strain follow straight paths over dt;
+    /// this declares the free-strain rate, not an unseen temperature trajectory.
     /// Every source, solve, budget, cancellation or late work refusal leaves
     /// the complete old material state, inventory, velocity and clock retryable.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -315,10 +392,15 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 cx,
             )
             .map_err(thermal_error)?;
+        let free_rates = self.interval_free_strain_rates(next_materials, dt_s, cx)?;
         let mut laws = Vec::with_capacity(next_materials.len());
-        for material in next_materials {
+        for (element, material) in next_materials.iter().enumerate() {
             checkpoint(cx)?;
-            laws.push(material.small_strain_law());
+            laws.push(
+                material
+                    .small_strain_law_over_time(dt_s)
+                    .map_err(|source| BrittleTetDynamicError::Source { element, source })?,
+            );
         }
         let problem = SmallStrainTetProblem {
             nodes_m: self.solid.geometry.nodes_m(),
@@ -347,6 +429,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
                 &prepared,
                 &mut step.solution,
                 ThermalBrittleResponse::Endpoint,
+                Some(dt_s),
                 controls.work.material_energy_tolerance_j,
                 cx,
             )
@@ -359,9 +442,10 @@ impl<'a> ThermalBrittleTetMotion<'a> {
         let constitutive = material.endpoint_work_defect_j;
         let equilibrium =
             (external - recovered.response_internal_work_j) - step.energy.inertial_work_j;
-        let total = (((((external + material.parameter_work_j + material.eigenstrain_work_j)
+        let total = ((((((external + material.parameter_work_j + material.eigenstrain_work_j)
             - storage)
             - material.fracture_dissipation_j)
+            - material.viscous_dissipation_j)
             - step.energy.kinetic_change_j)
             - step.energy.numerical_loss_j)
             - constitutive;
@@ -374,6 +458,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             eigenstrain_work_j: material.eigenstrain_work_j,
             constitutive_strain_work_j: material.constitutive_strain_work_j,
             fracture_dissipation_j: material.fracture_dissipation_j,
+            viscous_dissipation_j: material.viscous_dissipation_j,
             parameter_fracture_dissipation_j: material.parameter_fracture_dissipation_j,
             strain_split_error_j: material.strain_split_error_j,
             material_balance_error_j: material.material_balance_error_j,
@@ -418,7 +503,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
         ] {
             energy_gate(account, defect, tolerance)?;
         }
-        let solid = ThermalBrittleTetSolid {
+        let mut solid = ThermalBrittleTetSolid {
             geometry: self.solid.geometry,
             materials: next_materials,
             bands: Arc::clone(&self.solid.bands),
@@ -428,11 +513,13 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             stored_energy_j: material.stored_after_j,
             fracture_dissipation_j: recovered.cumulative_loss_j,
         };
+        solid.refresh_rate_stresses(&step.velocity_mps, &free_rates, cx)?;
         checkpoint(cx)?;
         Ok(ThermalBrittleTetMotionStep {
             motion: self.successor(
                 solid,
                 step.velocity_mps,
+                free_rates,
                 step.energy.kinetic_after_j,
                 next_time,
             ),
@@ -440,6 +527,34 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             element_transfer: prepared.element_transfer,
             energy,
         })
+    }
+
+    /// One declared affine free-strain path per original material element.
+    fn interval_free_strain_rates(
+        &self,
+        next_materials: &[ResolvedThermalBrittle],
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Arc<[f64]>, BrittleTetDynamicError> {
+        checkpoint(cx)?;
+        if next_materials.len() != self.solid.materials.len() || !dt_s.is_finite() || dt_s <= 0.0 {
+            return Err(BrittleTetDynamicError::Invalid(
+                "complete thermal source field and positive physical interval required",
+            ));
+        }
+        let mut rates = Vec::with_capacity(next_materials.len());
+        for (old, next) in self.solid.materials.iter().zip(next_materials) {
+            checkpoint(cx)?;
+            let change = next.free_linear_strain() - old.free_linear_strain();
+            let rate = change / dt_s;
+            if !rate.is_finite() || (change != 0.0 && rate == 0.0) {
+                return Err(BrittleTetDynamicError::Invalid(
+                    "affine free-strain rate must be finite and representable",
+                ));
+            }
+            rates.push(rate);
+        }
+        Ok(rates.into())
     }
 
     fn admit_step(
@@ -505,6 +620,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
         &self,
         solid: ThermalBrittleTetSolid<'next>,
         velocity_mps: Vec<[f64; 3]>,
+        free_linear_strain_rates_per_s: Arc<[f64]>,
         kinetic_energy_j: f64,
         time_s: f64,
     ) -> ThermalBrittleTetMotion<'next>
@@ -514,6 +630,7 @@ impl<'a> ThermalBrittleTetMotion<'a> {
         ThermalBrittleTetMotion {
             solid,
             velocity_mps,
+            free_linear_strain_rates_per_s,
             reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
             mass: Arc::clone(&self.mass),
             kinetic_energy_j,
@@ -521,6 +638,81 @@ impl<'a> ThermalBrittleTetMotion<'a> {
             maximum_steps: self.maximum_steps,
             accepted_steps: self.accepted_steps + 1,
         }
+    }
+}
+
+impl ThermalBrittleTetSolid<'_> {
+    /// Observe actual endpoint mechanical rate without evolving any history.
+    /// The native P1 total-strain projection and the explicitly imposed thermal
+    /// rate remain separate until the original source performs their subtraction.
+    fn refresh_rate_stresses(
+        &mut self,
+        velocity_mps: &[[f64; 3]],
+        free_rates_per_s: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), BrittleTetDynamicError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != self.geometry.nodes_m().len()
+            || free_rates_per_s.len() != self.materials.len()
+            || velocity_mps
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+            || free_rates_per_s.iter().any(|value| !value.is_finite())
+        {
+            return Err(BrittleTetDynamicError::Invalid(
+                "finite complete endpoint velocity and imposed free-strain rates required",
+            ));
+        }
+        if !self
+            .materials
+            .iter()
+            .zip(&self.solution.element_states)
+            .any(|(source, state)| source.band().law().viscosity().is_some() && !state.failed())
+        {
+            return Ok(());
+        }
+        // Only native geometry/type admission is used; strain_field performs
+        // no untimed constitutive trial. Every coordinate is known here, so
+        // no free unknown is introduced into the caller's solve budget.
+        let laws: Vec<_> = self
+            .materials
+            .iter()
+            .map(|source| source.small_strain_law())
+            .collect();
+        let prescribed: Vec<_> = velocity_mps
+            .as_flattened()
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        let problem = SmallStrainTetProblem {
+            nodes_m: self.geometry.nodes_m(),
+            tetrahedra: self.geometry.tetrahedra(),
+            laws: SmallStrainLawField::PerElement(&laws),
+            prescribed_m: &prescribed,
+            nodal_forces_n: &[],
+            load_path: &[1.0],
+            budget: self.budget,
+            settings: IncrementSettings::default(),
+        };
+        let total_rates = problem.strain_field(velocity_mps.as_flattened(), cx)?;
+        let mut stresses = Vec::with_capacity(self.materials.len());
+        for (element, source) in self.materials.iter().enumerate() {
+            checkpoint(cx)?;
+            stresses.push(
+                source
+                    .stress_at_rate(
+                        &self.solution.element_states[element],
+                        &total_rates[element],
+                        free_rates_per_s[element],
+                    )
+                    .map_err(|source| BrittleTetDynamicError::Source { element, source })?,
+            );
+        }
+        checkpoint(cx)?;
+        self.solution.element_stress = stresses;
+        Ok(())
     }
 }
 

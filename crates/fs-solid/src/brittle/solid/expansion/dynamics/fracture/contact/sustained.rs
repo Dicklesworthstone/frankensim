@@ -214,8 +214,7 @@ impl<'a> NativeFaceSustainedTrial for ThermalBrittleTetMidpointStep<'a> {
             storage_change_j: energy.stored_after_j - energy.stored_before_j,
             // The native fracture account already includes parameter loss.
             fracture_dissipation_j: energy.fracture_dissipation_j,
-            // The thermal-eigenstrain source owner refuses bond viscosity.
-            viscous_dissipation_j: 0.0,
+            viscous_dissipation_j: energy.viscous_dissipation_j,
             kinetic_change_j: energy.inertia.kinetic_change_j,
             parameter_work_j: energy.parameter_work_j,
             eigenstrain_work_j: energy.eigenstrain_work_j,
