@@ -28,6 +28,10 @@ pub mod directional;
 #[path = "sphere_plane/hertz_impacts.rs"]
 pub mod hertz_impacts;
 
+/// Joint finite-Hertz-patch shear and spin during persistent normal support.
+#[path = "sphere_plane/hertz_support.rs"]
+pub mod hertz_support;
+
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
 use core::fmt;
 use fs_contact::ballistic::{
@@ -204,7 +208,13 @@ pub struct SpherePlaneAdvance {
     /// allocation. Curved-sliding loss belongs to the declared time-discrete
     /// trajectory and converges with its sliding timestep.
     pub dissipated_energy: f64,
-    /// Actual kinetic-energy change minus supplied work plus loss, in J.
+    /// Signed work of the native residual motion in an admitted static patch,
+    /// in J. This numerical constraint-work defect is independently bounded by
+    /// its support owner; it is neither friction heat nor an external source.
+    /// The original point-contact paths leave this account exactly zero.
+    pub static_contact_work_residual: f64,
+    /// Actual kinetic-energy change minus supplied and static-residual work,
+    /// plus physical loss, in J. Static residual work remains separately visible.
     pub energy_balance_residual: f64,
     /// Actual momentum change minus applied force and contact impulses.
     pub linear_momentum_residual: Vec3,
@@ -285,6 +295,7 @@ struct Ledger {
     torque_impulse: Vec3,
     plane_work: f64,
     loss: f64,
+    static_work: f64,
     impact_loss: f64,
     impulse_scale: f64,
     angular_scale: f64,
@@ -648,7 +659,23 @@ impl Engine {
         tangent_force: Vec3,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<RigidBodyState, SpherePlaneError> {
+        self.segment_with_spin(body, h, normal_force, tangent_force, 0.0, cancelled)
+    }
+
+    /// One original constant-wrench segment. The free patch couple enters
+    /// actual spin, attitude and world angular balance in the same update as
+    /// its contact force; it is not an extra momentum kick or external motor.
+    fn segment_with_spin(
+        &mut self,
+        body: RigidBodyState,
+        h: f64,
+        normal_force: f64,
+        tangent_force: Vec3,
+        spin_moment_nm: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RigidBodyState, SpherePlaneError> {
         poll(cancelled)?;
+        finite(spin_moment_nm)?;
         // Support cancels only the normal applied force. Tangential driving
         // remains in both the analytic trajectory and the external-work ledger.
         let supported = normal_force > 0.0;
@@ -667,7 +694,13 @@ impl Engine {
         let p1 = body.linear_momentum_world().add(total.scale(h));
         let l0 = world_spin(body);
         // The normal support line passes through the centre exactly.
-        let contact_torque = self.arm.cross(tangent_force);
+        let contact_torque = if spin_moment_nm == 0.0 {
+            self.arm.cross(tangent_force)
+        } else {
+            self.arm
+                .cross(tangent_force)
+                .add(self.n.scale(spin_moment_nm))
+        };
         let torque = if self.external_torque_world == Vec3::ZERO {
             contact_torque
         } else {
@@ -723,6 +756,11 @@ impl Engine {
         }
         let external_angular = torque_integral(x0, v0, acceleration, self.scene.force_world, h);
         let contact_angular = torque_integral(x0.add(self.arm), v0, acceleration, contact, h);
+        let contact_angular = if spin_moment_nm == 0.0 {
+            contact_angular
+        } else {
+            contact_angular.add(self.n.scale(finite(spin_moment_nm * h)?))
+        };
         vector(external_angular)?;
         vector(contact_angular)?;
         self.ledger.contact = self.ledger.contact.add(contact_impulse);
@@ -1400,6 +1438,7 @@ fn advance_with_contact<C: FnMut() -> bool>(
             - ledger.force_work
             - ledger.torque_work
             - ledger.plane_work
+            - ledger.static_work
             + ledger.loss,
     )?;
     let linear_momentum_residual = body
@@ -1420,6 +1459,7 @@ fn advance_with_contact<C: FnMut() -> bool>(
         + ledger.force_work.abs()
         + ledger.torque_work.abs()
         + ledger.plane_work.abs()
+        + ledger.static_work.abs()
         + ledger.loss;
     let linear_scale = norm(state.body.linear_momentum_world())?
         + norm(body.linear_momentum_world())?
@@ -1453,6 +1493,7 @@ fn advance_with_contact<C: FnMut() -> bool>(
             external_torque_impulse_world: ledger.torque_impulse,
             plane_work: ledger.plane_work,
             dissipated_energy: ledger.loss,
+            static_contact_work_residual: ledger.static_work,
             energy_balance_residual,
             linear_momentum_residual,
             angular_momentum_residual,

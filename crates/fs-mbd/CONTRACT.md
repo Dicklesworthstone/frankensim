@@ -1100,6 +1100,66 @@ analytic spin braking/arrest and attitude, mixed-budget recoil, detected
 motor-driven impacts and continuation, rotation/boost/plane-work covariance,
 separate sustained support, event-dependent source radius and atomic refusal.
 
+## Finite Hertz shear/spin during persistent sphere support
+
+`sphere_plane::hertz_support` advances the original sphere pose, linear and
+angular momenta under one distributed circular Hertz static/kinetic wrench
+surface. Shear and normal-axis spin share that surface; independent saturated
+force/torque limits and a fitted wrench ellipse are not substituted. The
+original support reaction supplies the load, and the radius is a separately
+declared physical input. A source-returned `HertzWrenchContact` must retain that
+actual load. The scene's point-impact model remains independently selected;
+this support entry does not extrapolate its sustained patch into an impact.
+
+The free spin couple enters the same original constant-wrench segment as its
+tangential force. Actual spin drives attitude, and the free angular impulse
+enters the whole world-origin angular balance. Actual contact-relative shear
+and normal spin determine friction work. A translating plane supplies its real
+force/velocity work and has no invented torsional work. External motor work,
+physical sustained loss and original impact loss retain separate accounts.
+
+Pure spin and collinear pure shear use the original exact Hertz capacities and
+analytic first-zero times. Static holding and breakaway test the complete force
+and moment demand against the original joint static surface. The accepted
+`SpherePlaneHertzState` distinguishes resolved zero motion from durable static
+capture: an overdriven zero is continued into reversal, including an interval
+ending exactly at that zero, without resetting native rounded momenta. Generic
+mixed motion uses bounded velocity-implicit projection on the original kinetic
+surface, with first-order continuum convergence and timestep-boundary capture.
+Moving capture additionally requires interior kinetic-demand feasibility; a
+coarse step cannot capture within the static/kinetic hysteresis band. Trials
+whose held wrench assists the incoming motion refine or refuse. The actual
+linear-velocity segment's midpoint work owns dissipation; the constitutive
+projection's endpoint work is not a second heat source.
+
+Retained roundoff at static capture can have small signed native constraint
+work. `SpherePlaneAdvance::static_contact_work_residual` reports this account
+explicitly, and the original global energy gate closes with it separately from
+nonnegative physical loss. Each static segment and the sum of absolute static
+defects have independent caller bounds. No momentum projection, clipped heat
+or relaxed global conservation tolerance hides this defect. Original point and
+material rolling paths retain exactly zero in the new account.
+
+Source phases, mixed-motion steps and attitude steps have distinct controls.
+The source callback receives the actual body, point, frame, load, shear/spin,
+driving acceleration and interval; it returns an original law plus private
+candidate history. Only complete original geometry, momentum, work and budget
+acceptance publishes motion and history. Refining the mechanical timestep does
+not resolve a changing held source. Hot-step work uses fixed arrays; support
+transitions and source work are bounded. This model adds no retained partial
+slip, deformation rolling loss, normal compliance, temperature evolution,
+contact-radius evolution or heat partition.
+
+Eight native regression groups cover analytic spin stopping/attitude, static
+hysteresis and cumulative static-work refusal; opposed-motor zero/reversal and
+split continuation; recovery of the original pure-shear trajectory; joint
+static holding/breakaway; first-order refinement against independent continuous
+RK4 COM/spin/position/dissipation flow; actual source-dependent radius and atomic
+refusals; detected impact-to-support and lift-off; and arbitrary rotation,
+shared drift and real moving-plane work. Together with the existing native
+sphere-plane suites, 71 tests pass. These are bounded model checks, not physical
+calibration, full-workspace Cargo or performance qualification.
+
 ## Directional friction on moving sphere/plane trajectories
 
 `sphere_plane::directional` advances the original sphere's position,

@@ -24,6 +24,9 @@ mod torque;
 #[path = "sphere_plane/hertz_impacts.rs"]
 mod hertz_impacts;
 
+#[path = "sphere_plane/hertz_support.rs"]
+mod hertz_support;
+
 const MASS: f64 = 2.0;
 const RADIUS: f64 = 0.5;
 const INERTIA: f64 = 0.2;
