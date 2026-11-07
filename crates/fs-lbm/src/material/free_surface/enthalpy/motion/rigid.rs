@@ -140,6 +140,8 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             controls: self.controls,
             time_origin_s: self.time_origin_s,
             accepted_steps: tick.accepted_steps,
+            density_accuracy_kg_m3: self.density_accuracy_kg_m3,
+            volume_slab: None,
             h: tick.h,
             states: tick.states,
             phase_conduction: self.phase_conduction,
