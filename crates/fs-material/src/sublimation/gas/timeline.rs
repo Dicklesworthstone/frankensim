@@ -365,10 +365,13 @@ impl ThermalWork {
     fn used(&self) -> usize { self.used.get() }
     fn remaining(&self) -> usize { self.limit - self.used.get() }
     fn charge(&self) -> Result<(), DepositionError> {
-        if self.used.get() >= self.limit {
+        self.charge_steps(1)
+    }
+    fn charge_steps(&self, count: usize) -> Result<(), DepositionError> {
+        if count > self.remaining() {
             return Err(DepositionError::Budget("adaptive coupled thermal work"));
         }
-        self.used.set(self.used.get() + 1);
+        self.used.set(self.used.get() + count);
         Ok(())
     }
 }

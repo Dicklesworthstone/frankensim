@@ -1,5 +1,35 @@
 # fs-material — CONTRACT
 
+## Adaptive supported deposition with finite gas
+
+`sublimation::gas::timeline::coating::adaptive::advance_coatings_adaptive_with_gas`
+advances the original supported-coating, heat-transport and closed-gas owners
+on one event clock. It compares one complete interval with two half intervals
+and accepts only the conservative fine history, without extrapolating physical
+inventories. The shared `GasTimelineAdaptiveSolve` controls bound local errors
+in gas and substrate temperatures, every gas-species inventory, coating mass,
+and substrate/coating specific enthalpy. Deposit mass has its own error scale;
+heavy nonvolatile supports cannot conceal small-film errors. Relative caloric
+scales use increments from the interval's initial state, not arbitrary datums.
+
+Trials stop at birth/contact events; new surfaces acquire no preceding exposure,
+and empty pre-birth spans jump to their next event. Accepted heat, incoming
+material and molecular streams are accumulated once in canonical cell order.
+Every completed original thermal substep, including rejected/coarse probes,
+spends one whole-call work allowance. Only gross-inventory refusals are retried
+with a shorter interval; source-domain failures, exhausted budgets and
+cancellation preserve their original refusal and publish no partial state.
+Whole-window acceptance separately checks each deposit's integrated mass,
+all gas-species inventories, unchanged support mass, and gas/solid energy defects.
+
+This is a first-order local temporal estimator, not a global accuracy bound or
+experimental calibration. Original fixed reference areas, internally isothermal
+thin coatings, explicitly supplied molecular/film resistance and reflected heat
+remain the physical model. Spatial frost structure, nucleation and moving
+geometry are not inferred. The focused coating regressions include an independent
+simultaneous-rate reference, birth shielding, datum/mass-scale invariance, and
+shared-budget/cancellation behavior.
+
 ## Thermal finite porous compression
 
 `plastic::finite::porous::thermal::AffineThermalFinitePorous` extends the

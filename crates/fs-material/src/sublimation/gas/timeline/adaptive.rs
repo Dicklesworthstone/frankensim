@@ -190,12 +190,12 @@ fn compare(
 }
 
 #[derive(Default)]
-struct CellTotals {
+pub(super) struct CellTotals {
     outgoing: Sum, incoming: Sum, transferred: Sum, energy: Sum, reflected: Sum,
     recession: Sum, steps: usize,
 }
 impl CellTotals {
-    fn add(&mut self, row: &GasCellAudit) -> Result<(), DepositionError> {
+    pub(super) fn add(&mut self, row: &GasCellAudit) -> Result<(), DepositionError> {
         self.outgoing.add(row.outgoing_mass_kg)?;
         self.incoming.add(row.incoming_mass_kg)?;
         self.transferred.add(row.transferred_mass_kg)?;
@@ -205,7 +205,7 @@ impl CellTotals {
         self.steps = self.steps.checked_add(row.phase_steps).ok_or(DepositionError::Arithmetic)?;
         Ok(())
     }
-    fn report(self) -> Result<GasCellAudit, DepositionError> {
+    pub(super) fn report(self) -> Result<GasCellAudit, DepositionError> {
         Ok(GasCellAudit {
             outgoing_mass_kg: self.outgoing.value()?, incoming_mass_kg: self.incoming.value()?,
             transferred_mass_kg: self.transferred.value()?, energy_into_gas_j: self.energy.value()?,

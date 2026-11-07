@@ -14,6 +14,9 @@
 //! Nucleation, internal film resistance, moving geometry and liquid exchange are
 //! not inferred from a bare surface or from the depositing species' name.
 
+/// Error-controlled complete heat/coating/gas histories, including bare surfaces.
+pub mod adaptive;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -23,7 +26,7 @@ use super::super::chamber::coating::{
     advance_supported_chamber, advance_supported_chamber_with_films,
 };
 use super::super::{GasSurfaceBinding, GasSurfaceError, compatibility, phase_at, species_snapshot};
-use super::{GasCellAudit, GasTimelineAudit, HeatTotals, Sum, add, finite};
+use super::{GasCellAudit, GasTimelineAudit, HeatTotals, Sum, ThermalWork, add, finite};
 use crate::thermochemical_gas::{ThermochemicalGasModel, energy::parcel::ClosedGasParcel};
 use fs_thermal::enthalpy::sublimation::{
     ThermalSublimationError,
@@ -78,6 +81,10 @@ pub struct GasCoatingTimelineCandidate<'thermal, 'catalog> {
     gas: ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
     audit: GasTimelineAudit,
+    // Source-relative defects, retained separately so adaptive histories do not
+    // subtract large formation/reference energies or hide opposing residuals.
+    solid_stream_energy_residual_j: f64,
+    gas_stream_energy_residual_j: f64,
 }
 impl<'thermal, 'catalog> GasCoatingTimelineCandidate<'thermal, 'catalog> {
     #[must_use]
@@ -204,6 +211,25 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
     target_s: f64,
     thermal_config: StepConfig,
     controls: GasSupportedChamberSolve,
+    checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<GasCoatingTimelineCandidate<'thermal, 'catalog>, GasCoatingTimelineError> {
+    advance_coatings_metered(coating, surfaces, accommodation, gas, catalog,
+        target_s, thermal_config, controls, None, checkpoint)
+}
+
+// Share the original physical march with adaptive coarse/fine probes. Completed
+// heat work is charged BEFORE a molecular inventory refusal can request retry.
+#[allow(clippy::too_many_arguments)]
+fn advance_coatings_metered<'thermal, 'catalog>(
+    coating: &CoatingSimulation<'thermal>,
+    surfaces: &[GasCoatingTimelineSurface<'_>],
+    accommodation: Option<&BTreeMap<CellId, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    target_s: f64,
+    thermal_config: StepConfig,
+    controls: GasSupportedChamberSolve,
+    work: Option<&ThermalWork>,
     mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<GasCoatingTimelineCandidate<'thermal, 'catalog>, GasCoatingTimelineError> {
     checkpoint()?;
@@ -289,9 +315,10 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
         coating.time_s(),
         thermal_config,
         controls.storage,
-        budget.max_substeps,
+        work.map_or(budget.max_substeps, ThermalWork::remaining),
         &mut checkpoint,
     )?;
+    if let Some(work) = work { work.charge_steps(first_heat.substeps)?; }
     let mut heat = HeatTotals::default();
     heat.add(first_heat)?;
     let mut next_gas = gas.clone();
@@ -359,9 +386,10 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
             stop,
             thermal_config,
             controls.storage,
-            remaining,
+            work.map_or(remaining, |meter| remaining.min(meter.remaining())),
             &mut checkpoint,
         )?;
+        if let Some(work) = work { work.charge_steps(report.substeps)?; }
         next = heated;
         heat.add(report)?;
         if active.is_empty() {
@@ -614,6 +642,8 @@ pub fn advance_coatings_with_gas<'thermal, 'catalog>(
         gas: next_gas,
         catalog,
         audit,
+        solid_stream_energy_residual_j: supported_defect,
+        gas_stream_energy_residual_j: gas_defect,
     })
 }
 

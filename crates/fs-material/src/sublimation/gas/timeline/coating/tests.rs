@@ -1,4 +1,7 @@
 //! Original thermal cells and NASA gas owners; manufactured compatible charts.
+#[path = "adaptive_tests.rs"]
+mod adaptive_tests;
+
 use super::*;
 use crate::sublimation::gas::{chamber::GasChamberSolve, tests as fixture};
 use fs_thermal::enthalpy::sublimation::coating::CoatingSurface;
