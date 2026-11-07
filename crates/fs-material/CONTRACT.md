@@ -6565,8 +6565,15 @@ The actual consumer is `fs-lbm::material::free_surface`. No heat-capacity or
 conductivity tuple is needed for this isothermal momentum model. Source conditions
 and surface context remain frozen; the adapter supplies no phase diagram, ambient
 gas, wetting or purity default, runtime material-state transfer, or evolving
-surface-energy account. Scalar constants and supported temperature coefficients
-do not authorize frequency- or rate-dependent Newtonian flow.
+surface-energy account. The ordinary momentum/capillarity and equilibrium-wetting
+admission also accepts explicitly typed held composition, moisture and
+concentration curves/surfaces, using the shared fixed-external-state policy.
+The mixture remains uniform and fixed; this supplies no species transport or
+mixing law. Pressure response still requires an evolving pressure owner, and
+frequency/rate/strain support cannot become constant Newtonian flow. Legacy
+scalar/temperature records retain their original interface selectors. The public
+temperature-only support helper used by thermal, bulk-viscosity and cavitation
+owners is unchanged.
 
 `gas_field::steady::SteadyAxialGas::solve` lowers its source packs, axial volumes,
 supplies and walls through `to_network` into the shared

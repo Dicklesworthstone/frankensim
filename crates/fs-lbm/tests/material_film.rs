@@ -22,7 +22,7 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
 };
-use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::semantic::{CompositionBasis, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Frequency, QuantitySpec, Temperature};
 
 const LIMITS: LongWaveLimits = LongWaveLimits {
@@ -141,6 +141,72 @@ fn card(basis: LiquidViscosityBasis, with_surface: bool, shear_dependent: bool) 
     .unwrap()
 }
 
+// Manufactured laws, not a mixing rule or calibration. One typed mixture
+// coordinate drives every physical coefficient in the original source card.
+fn mixture_card(
+    basis: LiquidViscosityBasis,
+    loading: QuantitySpec,
+    range: [f64; 2],
+    as_surface: bool,
+) -> MaterialCard {
+    let original = card(basis, true, false);
+    let mut claims = ClaimSet::new();
+    for (_, source) in original.claims().claims_ordered() {
+        let mut claim = source.clone();
+        let PropertyValue::Curve { knots, dims, .. } = &claim.value else {
+            unreachable!()
+        };
+        let [low, high] = [knots[0].1, knots[1].1];
+        let dims = *dims;
+        claim.validity = ValidityDomain::unconstrained()
+            .with_quantity(
+                "T",
+                *point(300.0).axis_quantities().get("T").unwrap(),
+                300.0,
+                400.0,
+            )
+            .with_quantity(
+                "pressure",
+                QuantitySpec::semantic(SemanticType::new(
+                    QuantityKind::Pressure,
+                    ValueForm::Static,
+                )),
+                90_000.0,
+                110_000.0,
+            )
+            .with_quantity("loading", loading, range[0], range[1]);
+        claim.value = if as_surface {
+            PropertyValue::Surface2D {
+                axes: ["T".into(), "loading".into()],
+                axis_dims: [Temperature::DIMS, loading.dims()],
+                samples: vec![
+                    ([300.0, range[0]], low),
+                    ([400.0, range[0]], 0.9 * low),
+                    ([300.0, range[1]], high),
+                    ([400.0, range[1]], 0.9 * high),
+                ],
+                triangles: vec![[0, 1, 2], [1, 3, 2]],
+                dims,
+            }
+        } else {
+            PropertyValue::Curve {
+                abscissa: "loading".into(),
+                abscissa_dims: loading.dims(),
+                knots: vec![(range[0], low), (range[1], high)],
+                dims,
+            }
+        };
+        claims.insert_claim(claim).unwrap();
+    }
+    MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap()
+}
+
+fn mixture_point(loading: QuantitySpec, value: f64) -> QueryPoint {
+    point(300.0)
+        .with_quantity("loading", loading, value)
+        .unwrap()
+}
+
 fn resolve(
     card: &MaterialCard,
     basis: LiquidViscosityBasis,
@@ -206,7 +272,10 @@ fn both_original_viscosity_bases_drive_dimensional_film_and_keep_receipts() {
             driven.surface_velocity_m_s(),
             film.surface_velocity_m_s() + surface_traction * h / mu,
         );
-        near(driven.wall_shear_pa(), film.wall_shear_pa() + surface_traction);
+        near(
+            driven.wall_shear_pa(),
+            film.wall_shear_pa() + surface_traction,
+        );
         let power = driven.power();
         near(
             power.viscous_dissipation_w_m2,
@@ -248,8 +317,7 @@ fn pinned_temperature_update_changes_all_coefficients_without_losing_context() {
         0.5,
     );
     near(
-        hot_shear.power().viscous_dissipation_w_m2
-            / cold_shear.power().viscous_dissipation_w_m2,
+        hot_shear.power().viscous_dissipation_w_m2 / cold_shear.power().viscous_dissipation_w_m2,
         0.5,
     );
     assert!(a.long_wave_mode(10.0, LIMITS).unwrap().growth_per_s > 0.0);
@@ -278,6 +346,198 @@ fn pinned_temperature_update_changes_all_coefficients_without_losing_context() {
             .is_err()
     );
     assert_eq!(first.coefficients().density_kg_m3, 1000.0);
+}
+
+#[test]
+fn held_mixture_drives_native_film_jet_and_free_surface_scaling() {
+    use fs_lbm::jet::material::MaterialCapillaryJet;
+    use fs_lbm::material::free_surface::{
+        maximum_capillary_timestep_s, plan_free_surface_from_material,
+    };
+
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
+        for (kind, range, as_surface) in [
+            (
+                QuantityKind::Composition(CompositionBasis::MassFraction),
+                [0.0, 0.2],
+                false,
+            ),
+            (QuantityKind::MassConcentration, [0.0, 200.0], true),
+        ] {
+            let quantity = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+            let card = mixture_card(basis, quantity, range, as_surface);
+            let low_query = mixture_point(quantity, range[0]);
+            let high_query = mixture_point(quantity, range[1]);
+            let low = resolve_liquid_surface_state(
+                &card,
+                &low_query,
+                basis,
+                LiquidCapillarity::Sourced,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            // A second held scenario reuses the same selected claims and full
+            // context. No runtime composition or reference-density update.
+            let high = ResolvedLiquidSurfaceState::try_from_material(
+                low.material().at_query_point(&card, &high_query).unwrap(),
+                basis,
+                low.capillarity(),
+            )
+            .unwrap();
+            let first = MaterialFilmLiquid::try_new(&low).unwrap();
+            let second = MaterialFilmLiquid::try_new(&high).unwrap();
+            let a = first.film(2e-6, 4.0, 3.0).unwrap();
+            let b = second.film(2e-6, 4.0, 3.0).unwrap();
+            near(b.thickness_m().powi(3) / a.thickness_m().powi(3), 2.5);
+            near(b.reynolds() / a.reynolds(), 0.4);
+            near(b.wall_shear_pa(), 800.0 * 4.0 * b.thickness_m());
+            let a_shear = first.sheared_film(1e-3, 0.0, 0.25).unwrap();
+            let b_shear = second.sheared_film(1e-3, 0.0, 0.25).unwrap();
+            near(
+                b_shear.flow_per_width_m2_s() / a_shear.flow_per_width_m2_s(),
+                0.5,
+            );
+            near(
+                b_shear.power().viscous_dissipation_w_m2 / a_shear.power().viscous_dissipation_w_m2,
+                0.5,
+            );
+            let a_jet = MaterialCapillaryJet::inviscid(&low, 0.001, 0.01).unwrap();
+            assert!(MaterialCapillaryJet::inviscid(&high, 0.001, 0.01).is_err());
+            let b_jet = MaterialCapillaryJet::inviscid(&high, 0.001, 0.03).unwrap();
+            near(
+                b_jet.jet().mode(500.0).unwrap().growth_per_s
+                    / a_jet.jet().mode(500.0).unwrap().growth_per_s,
+                (0.04_f64 / 800.0 / (0.08 / 1000.0)).sqrt(),
+            );
+            let a_lattice = plan_free_surface_from_material(&low, 0.001, 0.0005, 0.1).unwrap();
+            let b_lattice = plan_free_surface_from_material(&high, 0.001, 0.0005, 0.1).unwrap();
+            near(b_lattice.flow().viscosity / a_lattice.flow().viscosity, 2.5);
+            near(b_lattice.mass_unit_kg() / a_lattice.mass_unit_kg(), 0.8);
+            near(
+                b_lattice.surface_tension_lattice() / a_lattice.surface_tension_lattice(),
+                0.625,
+            );
+            near(
+                maximum_capillary_timestep_s(&high, 0.001).unwrap().unwrap()
+                    / maximum_capillary_timestep_s(&low, 0.001).unwrap().unwrap(),
+                1.6_f64.sqrt(),
+            );
+            assert!(core::ptr::eq(second.material(), &high));
+            assert!(core::ptr::eq(b_jet.material(), &high));
+            assert!(core::ptr::eq(b_lattice.material(), &high));
+            assert_eq!(
+                high.material().card_identity(),
+                low.material().card_identity()
+            );
+            for previous in low.material().properties() {
+                let refreshed = high
+                    .material()
+                    .property(previous.requirement().name())
+                    .unwrap();
+                assert_eq!(
+                    refreshed.answer().receipt.selected,
+                    previous.answer().receipt.selected
+                );
+                assert_eq!(refreshed.source_axes(), previous.source_axes());
+                assert_eq!(
+                    refreshed.source_axes().len(),
+                    if as_surface { 2 } else { 1 }
+                );
+                assert_eq!(
+                    refreshed.answer().receipt.axis_quantities,
+                    *high_query.axis_quantities()
+                );
+                assert!(
+                    refreshed
+                        .answer()
+                        .receipt
+                        .query_point
+                        .contains(&("loading".into(), range[1]))
+                );
+                assert!(
+                    refreshed
+                        .answer()
+                        .receipt
+                        .query_point
+                        .contains(&("surface_environment".into(), 7.0))
+                );
+                // Other owners that evolve temperature/pressure must not inherit
+                // this ordinary isothermal mixture admission via the public guard.
+                assert!(
+                    fs_material::liquid::surface::require_frozen_coefficient_support(refreshed)
+                        .is_err()
+                );
+            }
+            assert!(
+                low.material()
+                    .at_query_point(&card, &mixture_point(quantity, 1.1 * range[1]))
+                    .is_err()
+            );
+            assert!(low.material().at_query_point(&card, &point(300.0)).is_err());
+        }
+    }
+}
+
+#[test]
+fn held_mixture_does_not_freeze_pressure_dynamic_axes_or_guess_quantity_roles() {
+    let scalar = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (quantity, range) in [
+        (scalar(QuantityKind::Pressure), [90_000.0, 110_000.0]),
+        (scalar(QuantityKind::Stress), [90_000.0, 110_000.0]),
+        (QuantitySpec::dimensional(Frequency::DIMS), [0.0, 10.0]),
+        (QuantitySpec::dimensional(fs_qty::Dims::NONE), [0.0, 0.2]),
+    ] {
+        for as_surface in [false, true] {
+            let card = mixture_card(LiquidViscosityBasis::Dynamic, quantity, range, as_surface);
+            assert!(
+                resolve_liquid_surface_state(
+                    &card,
+                    &mixture_point(quantity, range[0]),
+                    LiquidViscosityBasis::Dynamic,
+                    LiquidCapillarity::Sourced,
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err()
+            );
+        }
+    }
+    let mass = scalar(QuantityKind::Composition(CompositionBasis::MassFraction));
+    let mole = scalar(QuantityKind::Composition(CompositionBasis::MoleFraction));
+    let original = mixture_card(LiquidViscosityBasis::Dynamic, mass, [0.0, 0.2], false);
+    assert!(
+        resolve_liquid_surface_state(
+            &original,
+            &mixture_point(mole, 0.1),
+            LiquidViscosityBasis::Dynamic,
+            LiquidCapillarity::Sourced,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .is_err()
+    );
+    // Even applicability-only dynamic restrictions require their actual owner.
+    let rate = QuantitySpec::dimensional(Frequency::DIMS);
+    let mut claims = ClaimSet::new();
+    for (_, source) in original.claims().claims_ordered() {
+        let mut claim = source.clone();
+        claim.validity = claim.validity.with_quantity("rate", rate, 0.0, 10.0);
+        claims.insert_claim(claim).unwrap();
+    }
+    let restricted = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+    assert!(
+        resolve_liquid_surface_state(
+            &restricted,
+            &mixture_point(mass, 0.1)
+                .with_quantity("rate", rate, 1.0)
+                .unwrap(),
+            LiquidViscosityBasis::Dynamic,
+            LiquidCapillarity::Sourced,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .is_err()
+    );
 }
 
 #[test]

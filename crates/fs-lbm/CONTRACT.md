@@ -6689,9 +6689,13 @@ invented for an isothermal momentum solve. The complete source point and usage
 receipts retain temperature, pressure, composition and surface-environment
 conditions, including stated unknowns. An already resolved multiphysics bundle
 can be adopted intact; the surface consumer does not query independently or
-drop other properties. Constants and temperature-only curves are supported,
-including an explicitly typed absolute-temperature axis under any source name.
-Other response curves and dynamic frequency/rate/strain bounds refuse.
+drop other properties. Constants, supported temperature coefficients and
+explicitly typed held composition/moisture/concentration curves or surfaces
+are admitted by the original material owner. That owner retains scalar/T-only
+interface selectors and requires typed semantics for new environmental laws.
+Pressure response and dynamic frequency/rate/strain dependence still need
+their evolving owners. The frozen scenario supplies no composition transport,
+mixing closure or live change of reference density.
 
 The existing material momentum-scaling helper owns nu_lattice and tau for both
 thermal and free-surface consumers. Explicit dx/dt convert gravity to native

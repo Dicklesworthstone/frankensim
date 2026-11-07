@@ -70,10 +70,12 @@ impl ResolvedLiquidSurfaceState {
     /// Extra properties, original selections and all receipts are retained.
     /// The requested viscosity basis is the independent source; another viscosity
     /// observation is not reconciled with it or turned into a derived claim.
-    /// Only validity-wide constants or positive absolute-temperature curves are
-    /// admitted. Other response curves and frequency/rate/strain-restricted
-    /// coefficients require a constitutive owner that evolves those coordinates.
-    /// Fixed pressure, composition and interface envelopes remain source context.
+    /// Validity-wide constants and positive absolute-temperature curves retain
+    /// their original support. Explicitly typed held composition, moisture and
+    /// concentration curves/surfaces also supply Newtonian coefficients; the
+    /// mixture stays uniform and fixed for this source state. Pressure response
+    /// still needs its evolving rheology/EOS owner. Frequency/rate/strain support
+    /// cannot be frozen. Original interface and pressure envelopes are retained.
     ///
     /// # Errors
     /// Refuses missing/ambiguous required properties, incorrect quantities,
@@ -450,8 +452,11 @@ fn coefficient(
     Ok(value)
 }
 
-// Momentum, capillarity and equilibrium wetting share the same rule for a
-// frozen instantaneous coefficient; a valid dynamic sample is insufficient.
+// The ordinary isothermal momentum, capillarity and equilibrium-wetting owners
+// hold composition as well as temperature. They do not own diffusion, species
+// transport or a pressure-dependent liquid EOS. Keep this broader admission
+// local: thermal, cavitation and bulk-viscosity callers of the public helper
+// below retain their own temperature/evolution contract.
 fn require_frozen_coefficient(
     property: &ResolvedScalarProperty,
     name: &'static str,
@@ -460,9 +465,24 @@ fn require_frozen_coefficient(
     if property.requirement().quantity() != QuantitySpec::dimensional(dims) {
         return Err(MaterialStatePointError::InvalidRequirement {
             property: name.to_owned(),
-            reason: "frozen liquid coefficient needs its exact scalar quantity and a constant or absolute-temperature-only source",
+            reason: "frozen liquid coefficient needs its exact scalar quantity",
         });
     }
+    let held_mixture = property.is_static_at_fixed_external_conditions()
+        && property.source_axes().iter().all(|(axis, _)| {
+            property
+                .answer()
+                .receipt
+                .axis_quantities
+                .get(axis)
+                .and_then(|quantity| quantity.semantic_type())
+                .is_none_or(|quantity| quantity.kind() != QuantityKind::Pressure)
+        });
+    if held_mixture {
+        return Ok(());
+    }
+    // Preserve the original scalar/T-only source context, including opaque
+    // interface selectors. New multiaxis laws require the shared typed policy.
     require_frozen_coefficient_support(property)
 }
 
@@ -678,11 +698,11 @@ impl ResolvedLiquidWettingState {
 /// Resolve only the equilibrium angle needed by a geometric wall closure.
 ///
 /// Missing equilibrium data never falls back to advancing/receding endpoints
-/// or a neutral wall. Constants or absolute-temperature-only sources may be
-/// frozen at this point; dynamic rate/strain/frequency support is not silently
-/// broadened into a static response. Complete interface identity and context
-/// remain accessible. This supplies no hysteresis, moving-contact-line law,
-/// thermocapillary traction or experimental accuracy claim.
+/// or a neutral wall. Constants and supported temperature/held-mixture sources
+/// may be frozen at this point; dynamic pressure/rate/strain/frequency response
+/// is not silently broadened into a static law. Complete interface identity and
+/// context remain accessible. This supplies no composition transport, hysteresis,
+/// moving-contact-line law, thermocapillary traction or accuracy claim.
 ///
 /// # Errors
 /// Refuses source/selection/unit/domain failures, angles outside (0, pi), and
