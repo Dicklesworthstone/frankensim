@@ -264,6 +264,21 @@ the crash cascade with structurally exact energy accounting.
   elastic/fully-relaxed limits.
 - `duffing_backbone` / `single_mode_beta` — the analytic
   perturbation pins.
+- `duffing_backbone_exact` evaluates the full conservative Duffing period by
+  the energy-integral/AGM identity, using the original physical turning-point
+  amplitude. Hardening, pure-quartic motion and softening below the separatrix
+  share one bounded, allocation-free owner. Binary scaling and fs-math
+  quad-double products retain extreme units and near-separatrix cancellation;
+  the final AGM uses deterministic square roots. Invalid/nonperiodic inputs
+  and unrepresentable frequencies refuse. The old perturbation function keeps
+  its small-amplitude meaning. `SosModalStorage::invariant_axis_backbone`
+  derives the frequency from the actual source coefficients, requiring each
+  active stress channel to leave the selected axis invariant. It never drops
+  coupling to manufacture a scalar resonance. These are conservative-orbit
+  frequencies, useful as periodic-solver seeds, not forced peaks or transverse
+  stability results; turning amplitude differs from the pinned Fourier
+  amplitude in harmonic balance. G1/G3 tests independently integrate the energy
+  period and check the weak/pure-quartic/separatrix and unit-scaling limits.
 - The `assemble*` systems retain fs-phs's original-energy discrete-gradient
   stepping, striking, damping, and work ledger.
 - `sav::{SavStepper, SavConfig, SavState, SavRecord}` is a separate opt-in

@@ -49,9 +49,11 @@ use fs_phs::{
 mod membrane;
 pub use membrane::{VkSampledPlateParams, von_karman_sampled_plate_with_membrane};
 
+pub mod backbone;
 pub mod longitudinal;
 pub mod preload;
 pub mod sav;
+pub use backbone::{DuffingBackboneError, duffing_backbone_exact};
 pub use preload::PreloadedModalStorage;
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the
@@ -178,6 +180,43 @@ impl SosModalStorage {
             }
         }
         Ok(())
+    }
+
+    /// Exact conservative frequency of one invariant displacement axis.
+    ///
+    /// The physical peak displacement is in the original mass-normalized
+    /// coordinates. This uses the SAME source stiffness and stress channels;
+    /// every active channel must leave the selected axis invariant. In
+    /// particular, every Kirchhoff-Carrier axis is admitted, while a plate mode
+    /// that drives another mode refuses instead of silently dropping coupling.
+    /// Channel-by-channel invariance is sufficient, not necessary: cancellations
+    /// between distinct noninvariant channels are not inferred here.
+    ///
+    /// The result can seed the frequency of a nonlinear periodic-orbit solve.
+    /// Its turning amplitude is not the solver's first-harmonic amplitude, and
+    /// its existence does not imply transverse or forced-response stability.
+    /// No state, model coefficient, damping or assembled dynamics is changed.
+    pub fn invariant_axis_backbone(
+        &self,
+        mode: usize,
+        amplitude: f64,
+    ) -> Result<f64, NlModalError> {
+        self.validate()?;
+        backbone::invariant_axis_backbone(
+            &self.omegas,
+            self.channels
+                .iter()
+                .map(|channel| (channel.coefficient, channel.coupling.as_slice())),
+            mode,
+            amplitude,
+        )
+        .map_err(|error| NlModalError::Parameter {
+            what: if error == DuffingBackboneError::NonInvariantAxis {
+                "backbone axis couples to other displacement coordinates"
+            } else {
+                "backbone mode, amplitude or scalar frequency is not representable"
+            },
+        })
     }
 
     /// Exact continuous effort Jacobian applied to a physical state direction.
@@ -1715,7 +1754,9 @@ mod beam_dispersion_tests {
 /// First-order Duffing backbone: for
 /// `qddot + w0^2 q + beta q^3 = 0`, the amplitude-dependent frequency
 /// is `w(a) = w0 (1 + 3 beta a^2 / (8 w0^2))` — the analytic
-/// perturbation pin the batteries measure against.
+/// perturbation pin the batteries measure against. This is valid only for
+/// `|beta| a^2 / w0^2 << 1`; use [`duffing_backbone_exact`] for the full
+/// conservative scalar orbit at a physical turning-point amplitude.
 #[must_use]
 pub fn duffing_backbone(omega0: f64, beta: f64, amplitude: f64) -> f64 {
     omega0 * (1.0 + 3.0 * beta * amplitude * amplitude / (8.0 * omega0 * omega0))
