@@ -113,6 +113,32 @@ impl PumpDriveCurve {
         self.viscosity_domain_m2_s
     }
 
+    // Reused by calibrated-speed preparation; hydraulic feasibility still
+    // belongs to evaluate at the actual material and final commanded speed.
+    pub(super) fn inputs_at_flow(&self, q: f64) -> Result<(f64, f64), PumpOperatingError> {
+        in_domain(
+            "drive inlet volume flow",
+            q,
+            (
+                self.points[0].flow.value(),
+                self.points[self.points.len() - 1].flow.value(),
+            ),
+        )?;
+        let upper = self.points.partition_point(|p| p.flow.value() < q);
+        let right = self.points[upper];
+        Ok(if right.flow.value() == q {
+            (right.shaft_input.value(), right.electrical_input.value())
+        } else {
+            let left = self.points[upper - 1];
+            let fraction = (q - left.flow.value()) / (right.flow.value() - left.flow.value());
+            (
+                (1.0 - fraction) * left.shaft_input.value() + fraction * right.shaft_input.value(),
+                (1.0 - fraction) * left.electrical_input.value()
+                    + fraction * right.electrical_input.value(),
+            )
+        })
+    }
+
     pub(super) fn evaluate(
         &self,
         flow: VolumetricFlowRate,
@@ -126,28 +152,7 @@ impl PumpDriveCurve {
             viscosity,
             self.viscosity_domain_m2_s,
         )?;
-        let q = flow.value();
-        in_domain(
-            "drive inlet volume flow",
-            q,
-            (
-                self.points[0].flow.value(),
-                self.points[self.points.len() - 1].flow.value(),
-            ),
-        )?;
-        let upper = self.points.partition_point(|p| p.flow.value() < q);
-        let right = self.points[upper];
-        let (shaft, electrical) = if right.flow.value() == q {
-            (right.shaft_input.value(), right.electrical_input.value())
-        } else {
-            let left = self.points[upper - 1];
-            let fraction = (q - left.flow.value()) / (right.flow.value() - left.flow.value());
-            (
-                (1.0 - fraction) * left.shaft_input.value() + fraction * right.shaft_input.value(),
-                (1.0 - fraction) * left.electrical_input.value()
-                    + fraction * right.electrical_input.value(),
-            )
-        };
+        let (shaft, electrical) = self.inputs_at_flow(flow.value())?;
         // A head/power pair can disagree only BETWEEN samples: hydraulic power
         // is quadratic in flow on a linear head segment. Never clip that deficit
         // or silently reinterpret a physically impossible equipment curve.

@@ -1,4 +1,6 @@
 //! Finite-inventory recirculation through the real material/pump/flow owners.
+#[path = "liquid_recirculation/speed.rs"]
+mod speed;
 use fs_airflow::graph::thermal::medium::FlowHeatGeometry;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::{

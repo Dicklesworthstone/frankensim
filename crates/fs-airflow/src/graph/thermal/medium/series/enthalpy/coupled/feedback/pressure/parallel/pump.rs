@@ -17,6 +17,8 @@
 pub mod solid;
 /// Equipment input power and explicit pump/motor waste-heat destinations.
 pub mod power;
+/// Calibrated speed slices prepared for the same operating-point/thermal paths.
+pub mod speed;
 
 use power::{PumpDriveCurve, PumpPowerState};
 
@@ -45,6 +47,7 @@ pub struct PumpHeadCurve {
     kinematic_viscosity_domain_m2_s: (f64, f64),
     source: SourceProvenance,
     drive: Option<PumpDriveCurve>,
+    speed_rpm: Option<f64>,
 }
 impl PumpHeadCurve {
     /// Admit 2..=1024 increasing flows, nonincreasing nonnegative heads, positive
@@ -66,7 +69,7 @@ impl PumpHeadCurve {
         {
             return Err(PumpOperatingError::Invalid("invalid pump curve, gravity, source or viscosity domain"));
         }
-        Ok(Self { points, gravity_m_per_s2, kinematic_viscosity_domain_m2_s, source, drive: None })
+        Ok(Self { points, gravity_m_per_s2, kinematic_viscosity_domain_m2_s, source, drive: None, speed_rpm: None })
     }
     /// Bind independently authored shaft/electrical input data at the SAME
     /// fixed speed. Every evaluation must lie in both curves' fluid/flow domains.
@@ -78,6 +81,9 @@ impl PumpHeadCurve {
     }
     /// Optional original drive data and explicit thermal destinations.
     pub fn drive_curve(&self) -> Option<&PumpDriveCurve> { self.drive.as_ref() }
+    /// Selected calibrated speed in revolutions/minute, when prepared from a
+    /// speed map. A legacy fixed-speed curve does not infer an unknown speed.
+    pub const fn speed_rpm(&self) -> Option<f64> { self.speed_rpm }
     /// Original samples, including both admitted endpoint flows.
     pub fn points(&self) -> &[PumpHeadPoint] { &self.points }
     /// Original equipment-data citation; not a material receipt.
@@ -99,14 +105,9 @@ impl PumpHeadCurve {
         }
         Ok((density, viscosity))
     }
-    /// Evaluate head and hydraulic power at the actual inlet material and flow.
-    /// Shaft/electrical input is evaluated only when a drive curve is bound.
-    /// Head alone never implies efficiency or an electrical input.
-    pub fn evaluate(
-        &self, inlet: &ResolvedLiquidState, flow: VolumetricFlowRate,
-    ) -> Result<PumpSupplyState, PumpOperatingError> {
-        let q = flow.value();
-        let (density, viscosity) = self.admit_inlet(inlet)?;
+    // Shared by actual-field evaluation and once-per-command speed preparation.
+    // Both paths interpolate at the SAME inlet volume flow, with no scaling.
+    fn head_at_flow(&self, q: f64) -> Result<f64, PumpOperatingError> {
         let lo = self.points[0].flow.value();
         let hi = self.points[self.points.len()-1].flow.value();
         if !q.is_finite() || q < lo || q > hi {
@@ -115,14 +116,24 @@ impl PumpHeadCurve {
             });
         }
         let upper = self.points.partition_point(|p| p.flow.value() < q);
-        let head = if self.points[upper].flow.value() == q {
+        Ok(if self.points[upper].flow.value() == q {
             self.points[upper].head.value()
         } else {
             let left = self.points[upper-1];
             let right = self.points[upper];
             let fraction = (q-left.flow.value()) / (right.flow.value()-left.flow.value());
             (1.0-fraction)*left.head.value() + fraction*right.head.value()
-        };
+        })
+    }
+    /// Evaluate head and hydraulic power at the actual inlet material and flow.
+    /// Shaft/electrical input is evaluated only when a drive curve is bound.
+    /// Head alone never implies efficiency or an electrical input.
+    pub fn evaluate(
+        &self, inlet: &ResolvedLiquidState, flow: VolumetricFlowRate,
+    ) -> Result<PumpSupplyState, PumpOperatingError> {
+        let q = flow.value();
+        let (density, viscosity) = self.admit_inlet(inlet)?;
+        let head = self.head_at_flow(q)?;
         let pressure = density * (self.gravity_m_per_s2 * head);
         let power = pressure * q;
         if !pressure.is_finite() || !power.is_finite()
@@ -133,13 +144,16 @@ impl PumpHeadCurve {
         }).transpose()?;
         Ok(PumpSupplyState { inlet_volume_flow_m3_s: q, inlet_density_kg_m3: density,
             inlet_kinematic_viscosity_m2_s: viscosity, head_m: head,
-            available_pressure_pa: pressure, hydraulic_power_w: power, drive_power })
+            available_pressure_pa: pressure, hydraulic_power_w: power, drive_power,
+            speed_rpm: self.speed_rpm })
     }
 }
 
 /// Actual pump evaluation; hydraulic output is not shaft power or heat deposition.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PumpSupplyState {
+    /// Actual selected calibrated speed, rev/min; unknown for legacy curves.
+    pub speed_rpm: Option<f64>,
     /// Actual supply volume flow, m3/s.
     pub inlet_volume_flow_m3_s: f64,
     /// Actual common-inlet density, kg/m3.
