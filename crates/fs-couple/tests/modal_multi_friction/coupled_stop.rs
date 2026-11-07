@@ -184,11 +184,11 @@ fn row_b_one_sweep_is_rescued_to_the_oracle() { known_answer(B, 1); }
 fn row_c_one_sweep_is_rescued_to_the_oracle() { known_answer(C, 1); }
 
 #[test]
-fn residual_stop_retains_three_participant_reactions_and_independent_work_balance() {
+fn residual_stop_retains_multiple_support_reactions_and_independent_work_balance() {
     let gate = CancelGate::new_clock_free();
-    let omega: [f64; 3] = [800.0, 1100.0, 600.0];
-    // String, physical contact receiver, then its distinct bridge body.
-    let normal = [100.0, -60.0, 35.0];
+    let omega: [f64; 4] = [800.0, 1100.0, 600.0, 900.0];
+    // String, physical contact receiver, then two independent bridge bodies.
+    let normal = [100.0, -60.0, 35.0, -25.0];
     let tail = 2e-5;
     let stiffness = 50_000.0;
     let network = CoupledModalSystem::new(omega.iter().map(|w| image(*w, 0.0, 0.0)).collect(),
@@ -203,12 +203,13 @@ fn residual_stop_retains_three_participant_reactions_and_independent_work_balanc
         left: attachment(0), right: None, law: law(),
     }, config(), &gate).unwrap().with_additional_ports(vec![], joint_config(), &gate).unwrap()
         .with_obstacle_residual_ports_and_corrections(vec![(contact.clone(), stop_config())],
-            vec![ModalAttachment { component: 2, shapes: vec![normal[2]] }], vec![tail],
+            vec![vec![ModalAttachment { component: 2, shapes: vec![normal[2]] },
+                ModalAttachment { component: 3, shapes: vec![normal[3]] }]], vec![tail],
             FrictionObstacleConfig { max_contacts: 4, max_setup_terms: 100_000 }, &gate).unwrap();
     assert_eq!(bank.obstacle(0).unwrap().right, contact.right);
     assert_eq!(bank.obstacle_normal_column(0).unwrap(), normal);
 
-    let external = [1.0, 0.0, 0.0];
+    let external = [1.0, 0.0, 0.0, 0.0];
     let response: Vec<_> = omega.iter().map(|w| (1.0-(w*DT).cos())/(w*w)).collect();
     let free = normal[0]*response[0]*external[0];
     let compliance: f64 = normal.iter().zip(&response).map(|(n, d)| n*n*d).sum();
@@ -222,7 +223,7 @@ fn residual_stop_retains_three_participant_reactions_and_independent_work_balanc
     assert!((stop.normal_force_n-reaction).abs() < 2e-12);
     let mut mechanical_energy = 0.0;
     let mut external_work = 0.0;
-    for i in 0..3 {
+    for i in 0..omega.len() {
         let force = external[i]-normal[i]*reaction;
         let q = response[i]*force;
         let v = (omega[i]*DT).sin()/omega[i]*force;
@@ -234,6 +235,7 @@ fn residual_stop_retains_three_participant_reactions_and_independent_work_balanc
     }
     assert!(bank.components()[1].states()[0].velocity_m_sqrt_kg_per_s > 0.0);
     assert!(bank.components()[2].states()[0].velocity_m_sqrt_kg_per_s < 0.0);
+    assert!(bank.components()[3].states()[0].velocity_m_sqrt_kg_per_s > 0.0);
     let contact_energy = 0.5*stiffness*closure*closure;
     let residual_energy = 0.5*tail*reaction*reaction;
     assert!((stop.stored_energy_j-contact_energy).abs() < 1e-16);
@@ -247,18 +249,20 @@ fn residual_stop_retains_three_participant_reactions_and_independent_work_balanc
 #[test]
 fn residual_stop_refuses_incomplete_or_invalid_retained_corrections() {
     let gate = CancelGate::new_clock_free();
-    for case in 0..4 {
+    for case in 0..6 {
         let contact = ModalContact {
             left: attachment(0), right: attachment(1),
             law: Obstacle::new(vec![-1.0], 1, 1, vec![0.0], vec![1.0], 5000.0, 1.0,
                 "synthetic correction admission".into()).unwrap(),
         };
-        let mut corrections = vec![attachment(1)];
+        let mut corrections = vec![vec![attachment(1)]];
         match case {
             0 => corrections.clear(),
-            1 => corrections[0].component = 2,
-            2 => corrections[0].shapes.push(1.0),
-            _ => corrections[0].shapes[0] = f64::NAN,
+            1 => corrections[0][0].component = 2,
+            2 => corrections[0][0].shapes.push(1.0),
+            3 => corrections[0][0].shapes[0] = f64::NAN,
+            4 => corrections[0].push(attachment(1)),
+            _ => corrections[0].push(attachment(0)),
         }
         assert!(joint(false).with_obstacle_residual_ports_and_corrections(
             vec![(contact, stop_config())], corrections, vec![2e-5],

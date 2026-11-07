@@ -174,7 +174,7 @@ fn released_preload_matches_the_dense_solve_with_the_omitted_modes_kept() {
     let correction = [0.2, -0.1];
     let contacts: Vec<_> = STOP_SHAPES.iter().zip(STOP_GAPS)
         .map(|(shapes, gap)| (stop(&[shapes[0]-correction[0], shapes[1]-correction[1]], gap), normal_limits())).collect();
-    let corrections = vec![ModalAttachment { component: 0, shapes: correction.to_vec() }; 2];
+    let corrections = vec![vec![ModalAttachment { component: 0, shapes: correction.to_vec() }]; 2];
     let mut joint = retained_joint().with_obstacle_residual_ports_and_corrections(contacts, corrections,
         omitted_compliance(), limits(), &gate).unwrap();
     let energy = joint.initialize_released_equilibrium(&STOP_LOAD, &gate).unwrap();

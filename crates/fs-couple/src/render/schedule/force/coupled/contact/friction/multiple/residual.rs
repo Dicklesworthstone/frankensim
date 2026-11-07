@@ -81,6 +81,36 @@ impl FrictionResidual {
     pub(super) fn publish(&mut self, force: &[f64]) { self.accepted_force.copy_from_slice(force); }
 }
 
+// Sparse signed support rows enter the SAME complete force/displacement column
+// for tangential and normal contacts. One row per component, in original index
+// order, bounds both validation and accumulation by the retained mode count.
+pub(super) fn add_support_corrections(network: &CoupledModalSystem, column: &mut [f64],
+    corrections: &[ModalAttachment], gate: &CancelGate) -> Result<(), ModalCouplingError>
+{
+    if corrections.len() > network.models.len() {
+        return Err(invalid("residual support maps exceed the retained component count"));
+    }
+    let mut previous = None;
+    for correction in corrections {
+        poll(Some(gate))?;
+        if previous.is_some_and(|component| component >= correction.component) {
+            return Err(invalid("residual support maps require unique components in ascending order"));
+        }
+        let model = network.models.get(correction.component)
+            .ok_or_else(|| invalid("residual support map names an unknown retained component"))?;
+        if correction.shapes.len() != model.modes().len()
+            || correction.shapes.iter().any(|shape| !shape.is_finite()) {
+            return Err(invalid("residual support map must match its finite retained basis"));
+        }
+        let offset = network.offsets[correction.component];
+        for (local, shape) in correction.shapes.iter().enumerate() {
+            column[offset+local] = finite(column[offset+local]+shape)?;
+        }
+        previous = Some(correction.component);
+    }
+    Ok(())
+}
+
 impl MultiFrictionModalSystem {
     /// Bind the omitted modes' static response at fixed friction ports, once
     /// before playback. `geometry` is the retained force/displacement map after
@@ -108,26 +138,30 @@ impl MultiFrictionModalSystem {
     }
 
     /// Bind the same omitted-mode tail while retaining both physical contact
-    /// surfaces and one additional signed support map per port. A condensed
+    /// surfaces and a sparse collection of signed support maps per port. A condensed
     /// string against resolved fibers, for example, still applies the opposite
     /// traction to the actual fiber while its bridge reacts on the body.
     ///
-    /// The complete retained map is `b_left - b_right + b_correction`.
+    /// The complete retained map is `b_left - b_right + sum(b_correction)`.
     /// It supplies BOTH displacement and force in the original joint solver;
     /// every cross-port term is recomputed from that complete map. The producer
     /// must derive this correction and `compliance` from the SAME support Schur
     /// complement. A correction has no independent force law, state or heat.
     /// The local contact attachments returned by `port` retain their original
     /// participant identities. All fixed-map restrictions above still apply.
+    /// Supply one collection per original port, including an empty collection
+    /// when it has no support correction. Within each collection, original
+    /// component indices must be unique and ascending; combine same-body rows
+    /// before binding. Thus support setup stays bounded by the original modes.
     pub fn with_friction_residual_ports_and_corrections(self,
-        geometry: Vec<FrictionGeometry>, corrections: Vec<ModalAttachment>,
+        geometry: Vec<FrictionGeometry>, corrections: Vec<Vec<ModalAttachment>>,
         compliance: Vec<f64>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         self.bind_friction_residual_ports(geometry, Some(corrections), compliance, gate)
     }
 
     fn bind_friction_residual_ports(mut self, geometry: Vec<FrictionGeometry>,
-        corrections: Option<Vec<ModalAttachment>>, compliance: Vec<f64>, gate: &CancelGate)
+        corrections: Option<Vec<Vec<ModalAttachment>>>, compliance: Vec<f64>, gate: &CancelGate)
         -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;

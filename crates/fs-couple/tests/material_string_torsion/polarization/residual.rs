@@ -285,46 +285,152 @@ fn g3_oblique_stops_keep_two_axis_residuals_under_a_common_basis_rotation() {
     });
 }
 
+// Identical physical modes/ports, stored as one four-mode component or two
+// independent two-mode bodies. Splitting storage cannot change mechanics.
+fn partitioned_bank(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    split: bool,
+    bow: [f64; 2],
+) -> MultiBowStringBank {
+    let base = two_axis_bank(cx, gate, 7800.0, directions(bow, [1.0, 0.0]));
+    let body = base.system().components()[1].clone();
+    let mut strings = base.source().strings().to_vec();
+    let mut other = second_axis(TransverseDirection::Y);
+    let bodies = if split {
+        other.body.component = 1;
+        vec![body.clone(), body]
+    } else {
+        strings[0].connections[0].body.shapes.resize(4, 0.0);
+        let second = other.body.shapes.clone();
+        other.body.shapes = vec![0.0; 2];
+        other.body.shapes.extend(second);
+        vec![
+            ModalAcousticTimeModel::try_new(
+                48_000,
+                body.modes().iter().chain(body.modes()).copied().collect(),
+                ModalAcousticTimeBudget::audible_reference(),
+            )
+            .unwrap(),
+        ]
+    };
+    let bank = ReciprocalStringBank::new(cx, strings, gas(), bodies, law(), options(), gate)
+        .unwrap()
+        .with_translational_body_connections(vec![other], gate)
+        .unwrap()
+        .with_residual_flexibility(gate)
+        .unwrap();
+    multi(bank, gate)
+}
+
 #[test]
-fn g0_point_residuals_refuse_multiple_receiving_bodies_without_losing_zero_axes() {
+fn g3_oblique_residual_bow_keeps_independent_bridge_bodies_and_their_work() {
     with_cx(|cx, gate| {
-        let make = |bow| {
-            let base = two_axis_bank(cx, gate, 7800.0, directions(bow, [1.0, 0.0]));
-            let body = base.system().components()[1].clone();
-            let mut other = second_axis(TransverseDirection::Y);
-            other.body.component = 1;
-            let bank = ReciprocalStringBank::new(
-                cx,
-                base.source().strings().to_vec(),
-                gas(),
-                vec![body.clone(), body],
-                law(),
-                options(),
-                gate,
-            )
-            .unwrap()
-            .with_translational_body_connections(vec![other], gate)
-            .unwrap()
-            .with_residual_flexibility(gate)
-            .unwrap();
-            multi(bank, gate)
+        let make = |split, bow| {
+            partitioned_bank(cx, gate, split, bow)
+                .with_bow_residual_flexibility(gate)
+                .unwrap()
         };
-        // An exactly orthogonal support contributes zero, even on another body.
-        assert!(make([1.0, 0.0]).with_bow_residual_flexibility(gate).is_ok());
-        assert!(make([0.0, 1.0]).with_bow_residual_flexibility(gate).is_ok());
-        let error = make([0.6, 0.8])
-            .with_bow_residual_flexibility(gate)
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("one receiving body"), "{error}");
-        let error = make([1.0, 0.0])
-            .with_string_stops(
-                vec![stop(TransverseDirection::try_new([0.6, 0.8]).unwrap())],
-                stop_limits(),
-                gate,
-            )
-            .err()
-            .unwrap();
-        assert!(error.to_string().contains("one receiving body"), "{error}");
+        // Zero-axis corrections remain admitted and add no artificial receiver.
+        let _ = make(true, [1.0, 0.0]);
+        let _ = make(true, [0.0, 1.0]);
+        let (mut combined, mut split) = (make(false, [0.6, 0.8]), make(true, [0.6, 0.8]));
+        assert_eq!(
+            combined.system().friction_residual_compliance(),
+            split.system().friction_residual_compliance()
+        );
+        let zero = vec![0.0; split.system().mode_count()];
+        for _ in 0..128 {
+            let a = combined.step(&zero, &[drive()]).unwrap().clone();
+            let b = split.step(&zero, &[drive()]).unwrap().clone();
+            near(a.observer_pressure_pa, b.observer_pressure_pa, 1e-12);
+            near(a.drive_work_j, b.drive_work_j, 1e-17);
+            near(
+                a.friction_residual_energy_j,
+                b.friction_residual_energy_j,
+                1e-17,
+            );
+            near(
+                a.friction_residual_loss_j,
+                b.friction_residual_loss_j,
+                1e-17,
+            );
+            assert!(a.energy_residual_j.abs() <= a.energy_tolerance_j);
+            assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+        }
+        for body in &split.system().components()[1..] {
+            assert!(
+                body.states()
+                    .iter()
+                    .any(|s| s.velocity_m_sqrt_kg_per_s.abs() > 1e-12),
+                "an independent bridge body received no reciprocal reaction"
+            );
+        }
+        for (a, b) in combined.system().components()[1].states().iter().zip(
+            split.system().components()[1..]
+                .iter()
+                .flat_map(|body| body.states()),
+        ) {
+            near(a.displacement_m_sqrt_kg, b.displacement_m_sqrt_kg, 1e-14);
+            near(
+                a.velocity_m_sqrt_kg_per_s,
+                b.velocity_m_sqrt_kg_per_s,
+                1e-12,
+            );
+        }
+    });
+}
+
+#[test]
+fn g3_oblique_residual_stop_keeps_independent_bridge_bodies_and_their_work() {
+    with_cx(|cx, gate| {
+        let normal = TransverseDirection::try_new([0.6, 0.8]).unwrap();
+        let make = |split| {
+            partitioned_bank(cx, gate, split, normal.components())
+                .with_string_stops(vec![stop(normal)], stop_limits(), gate)
+                .unwrap()
+        };
+        let (mut combined, mut split) = (make(false), make(true));
+        let column = split.system().obstacle_normal_column(0).unwrap();
+        assert!(
+            column[11..13].iter().any(|x| *x != 0.0) && column[13..15].iter().any(|x| *x != 0.0)
+        );
+        assert_eq!(column, combined.system().obstacle_normal_column(0).unwrap());
+        let port = StringForcePort {
+            location: StringBowLocation {
+                string: 0,
+                station_fraction: 0.43,
+            },
+            coupling: StringForceCoupling::Centreline,
+        };
+        let force: Vec<_> = split.string_force_columns(&[port], 4096, gate).unwrap()[0]
+            .iter()
+            .map(|x| 0.001 * x)
+            .collect();
+        let zero = vec![0.0; force.len()];
+        let released = [FrictionDrive {
+            speed_m_s: 0.0,
+            normal_force_n: 0.0,
+        }];
+        let mut engaged = false;
+        for n in 0..96 {
+            let external = if n < 32 { &force } else { &zero };
+            let a = combined.step(external, &released).unwrap().clone();
+            let b = split.step(external, &released).unwrap().clone();
+            near(a.observer_pressure_pa, b.observer_pressure_pa, 1e-12);
+            near(a.external_work_j, b.external_work_j, 1e-17);
+            near(
+                a.obstacle_residual_energy_j,
+                b.obstacle_residual_energy_j,
+                1e-17,
+            );
+            assert!(a.energy_residual_j.abs() <= a.energy_tolerance_j);
+            assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+            engaged |= split.system().last_obstacle_frames().unwrap()[0].normal_force_n > 0.0;
+        }
+        assert!(
+            engaged,
+            "independently supported oblique residual stop never engaged"
+        );
     });
 }

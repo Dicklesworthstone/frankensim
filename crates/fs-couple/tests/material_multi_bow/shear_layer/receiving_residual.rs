@@ -1,4 +1,4 @@
-//! G1: a condensed support and both physical surfaces share one virtual work.
+//! G1: several condensed supports and both surfaces share one virtual work.
 //! Frequencies and layer coefficients are manufactured analytical fixtures.
 use super::*;
 use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeModel};
@@ -11,7 +11,7 @@ use fs_math::c64::C64;
 #[test]
 fn receiving_residual_refuses_incomplete_or_foreign_retained_corrections() {
     let gate = CancelGate::new_clock_free();
-    for case in 0..3 {
+    for case in 0..6 {
         let models = (0..3)
             .map(|_| {
                 ModalAcousticTimeModel::try_new(
@@ -42,14 +42,23 @@ fn receiving_residual_refuses_incomplete_or_foreign_retained_corrections() {
             left: port.left.clone(),
             right: port.right.clone(),
         }];
-        let mut corrections = vec![ModalAttachment {
+        let mut corrections = vec![vec![ModalAttachment {
             component: 2,
             shapes: vec![0.25],
-        }];
+        }]];
         match case {
             0 => corrections.clear(),
-            1 => corrections[0].component = 3,
-            _ => corrections[0].shapes.push(0.25),
+            1 => corrections[0][0].component = 3,
+            2 => corrections[0][0].shapes.push(0.25),
+            3 => corrections[0][0].shapes[0] = f64::NAN,
+            4 => {
+                let duplicate = corrections[0][0].clone();
+                corrections[0].push(duplicate);
+            }
+            _ => corrections[0].push(ModalAttachment {
+                component: 0,
+                shapes: vec![0.25],
+            }),
         }
         let system = FrictionModalSystem::new(network, port, options().friction, &gate)
             .unwrap()
@@ -69,15 +78,15 @@ fn receiving_residual_refuses_incomplete_or_foreign_retained_corrections() {
 }
 
 #[test]
-fn receiving_residual_film_matches_independent_three_participant_reactions_and_work() {
+fn receiving_residual_film_matches_independent_multi_body_reactions_and_work() {
     let gate = CancelGate::new_clock_free();
-    // Two string coordinates, one shared bridge body, two receiving fibers.
-    // The shared body contributes a signed cross-port compliance; omitting
-    // its force or replacing the fiber with it changes this analytic solution.
-    let hz = [180.0, 260.0, 90.0, 330.0, 410.0];
+    // Two string coordinates, two shared bridge bodies, two receiving fibers.
+    // Both supports contribute signed cross-port compliance; omitting either
+    // reaction or replacing a fiber changes this independent analytic solution.
+    let hz = [180.0, 260.0, 90.0, 330.0, 410.0, 140.0];
     let columns = [
-        [100.0, 0.0, 35.0, -60.0, 0.0],
-        [0.0, 120.0, -20.0, 0.0, -75.0],
+        [100.0, 0.0, 35.0, -60.0, 0.0, -15.0],
+        [0.0, 120.0, -20.0, 0.0, -75.0, 25.0],
     ];
     let tail = [2e-5, 5e-6, 5e-6, 4e-5];
     for film_first in [false, true] {
@@ -119,9 +128,14 @@ fn receiving_residual_film_matches_independent_three_participant_reactions_and_w
             })
             .collect();
         let corrections = (0..2)
-            .map(|i| ModalAttachment {
-                component: 2,
-                shapes: vec![columns[i][2]],
+            .map(|i| {
+                [2, 5]
+                    .into_iter()
+                    .map(|component| ModalAttachment {
+                        component,
+                        shapes: vec![columns[i][component]],
+                    })
+                    .collect()
             })
             .collect();
         let layers = vec![
@@ -152,7 +166,7 @@ fn receiving_residual_film_matches_independent_three_participant_reactions_and_w
         let mut a = tail;
         for i in 0..2 {
             for j in 0..2 {
-                a[2 * i + j] += (0..5)
+                a[2 * i + j] += (0..hz.len())
                     .map(|mode| columns[i][mode] * columns[j][mode] * modal_response[mode])
                     .sum::<f64>();
             }
@@ -165,11 +179,11 @@ fn receiving_residual_film_matches_independent_three_participant_reactions_and_w
             dt * (a[0] * speeds[1] - a[2] * speeds[0]) / determinant,
         ];
         let frame = system
-            .step(&[0.0; 5], &[drive(speeds[0], 1.0), drive(speeds[1], 1.0)])
+            .step(&[0.0; 6], &[drive(speeds[0], 1.0), drive(speeds[1], 1.0)])
             .unwrap()
             .clone();
         let mut mechanical_energy = 0.0;
-        for mode in 0..5 {
+        for mode in 0..hz.len() {
             let load = columns[0][mode] * force[0] + columns[1][mode] * force[1];
             let omega = core::f64::consts::TAU * hz[mode];
             let q = load * modal_response[mode];

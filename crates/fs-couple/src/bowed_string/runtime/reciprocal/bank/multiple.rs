@@ -134,8 +134,8 @@ impl MultiBowStringBank {
     /// maps remain reciprocal; retained modes are unchanged. Torsional modes
     /// remain resolved explicitly, with no invented omitted torsional response.
     /// Both admitted orthogonal bridge axes contribute, including oblique bow
-    /// tangents. Their nonzero corrections must share one receiving body per
-    /// bow; its actual surface or resolved hair reaction remains independent.
+    /// tangents. Each bridge retains its own receiving body; the bow's actual
+    /// surface or resolved hair reaction remains independent.
     ///
     /// The omitted bending tail is quasi-static. Its separately reported
     /// backward-Euler loss is numerical and vanishes with modal enrichment;
@@ -184,7 +184,7 @@ impl MultiBowStringBank {
             geometry.push(crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::FrictionGeometry {
                 left, right: original.right.clone(),
             });
-            corrections.push(correction.body);
+            corrections.push(correction.bodies);
         }
         self.system = self.system.with_friction_residual_ports_and_corrections(geometry, corrections, compliance, gate)
             .map_err(ReciprocalStringError::Friction)?;

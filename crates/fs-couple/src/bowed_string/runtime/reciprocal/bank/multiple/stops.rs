@@ -94,8 +94,8 @@ impl MultiBowStringBank {
     /// With residual flexibility, the omitted bending tail adds its condensed
     /// bridge reaction alongside the original receiver, including a receiver
     /// on a different body. Both reactions use the same closure/force map.
-    /// Oblique stops include both admitted orthogonal bridge axes. Their
-    /// nonzero bridge corrections must share one receiving body per stop.
+    /// Oblique stops include both admitted orthogonal bridge axes, retaining
+    /// every bridge's original receiving body and the actual contact receiver.
     /// Prescribed support translation follows the declared fixed normals.
     /// `with_stop_station_motion` also admits migration along the original span,
     /// retaining the complete source basis and accounting for attachment work.
@@ -147,9 +147,9 @@ impl MultiBowStringBank {
     // bridge's cross term, minus k_eff G_sb times the bridge link's string and
     // body columns, and the stops share the condensed omitted-mode compliance
     // (bank/residual.rs). Retain the actual receiver and return the additional
-    // bridge-body correction separately: a stop can have three participants.
+    // bridge-body corrections separately: a stop can load several participants.
     fn residual_stop_geometry(&self, stops: &[MaterialStringStop], geometry: &mut [ObstacleGeometry],
-        gate: &CancelGate) -> Result<(Vec<ModalAttachment>, Vec<f64>), RenderError>
+        gate: &CancelGate) -> Result<(Vec<Vec<ModalAttachment>>, Vec<f64>), RenderError>
     {
         let strings = self.source.bank().strings();
         let mut ports = Vec::with_capacity(stops.len());
@@ -175,7 +175,7 @@ impl MultiBowStringBank {
             // Closure is left - receiver + factor*bridge_body. Its transpose
             // must load ALL participants; substituting the bridge for the
             // receiver would disconnect the stop's actual opposite reaction.
-            corrections.push(correction.body);
+            corrections.push(correction.bodies);
         }
         Ok((corrections, compliance))
     }

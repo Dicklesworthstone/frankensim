@@ -2816,16 +2816,23 @@ normals therefore retain both physical bridge reactions; no retained frequency,
 material loss or torsional coordinate is changed. Preparation occurs once at
 binding, with no additional per-sample projection or integration path.
 
-Nonzero support corrections for one contact must share one receiving body;
-distinct support bodies refuse explicitly. The actual opposite contact surface
-remains independent and retains its original reaction. The omitted bending
+Support corrections retain every original receiving body. The generic friction
+and normal-contact owners accept one sparse collection of signed attachments
+per contact, with unique ascending original component indices; same-body rows
+are combined by the material producer. Their sum enters the complete reciprocal
+force/displacement column before any joint response or cross-compliance is
+computed. Empty collections add no support. Total support-map work is bounded
+by the original retained mode count and occurs only at binding. The actual
+opposite contact surface remains independent and retains its reaction. The omitted bending
 response remains quasi-static, and its numerical loss stays separate from
 physical dissipation. Existing restrictions on nonorthogonal residual bridges,
 moving contacts and incompatible nonlinear/history mechanisms remain in force.
 `tests/material_string_torsion/polarization/residual.rs` specifies a bowed X/Y
 mirror with energy checks, an independent omitted-mode sine-series comparison
 for oblique bow cross-compliance, active oblique-stop rotation covariance, and
-the receiving-body boundary.
+equivalence when independent body coordinates are stored together or separately.
+The existing material shear-film and coupled-stop residual tests independently
+check each support's signed reaction, physical contact work and energy balance.
 
 ## Exact compact radiation from linear string harmonics
 

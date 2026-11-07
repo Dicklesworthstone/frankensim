@@ -9,13 +9,14 @@ use super::*;
 pub(crate) struct PointCorrection {
     /// Subtract from the contact's original string row; torsion stays zero.
     pub string_shapes: Vec<f64>,
-    /// Add to its complete contact map, retaining the actual opposite surface.
-    pub body: ModalAttachment,
+    /// Add each body row to the complete map; retain the actual opposite surface.
+    pub bodies: Vec<ModalAttachment>,
 }
 
 /// One original bridge and any admitted orthogonal directed bridge per string.
-/// The contact owner accepts one extra body map: combine all nonzero support
-/// corrections in that SAME body basis, or refuse distinct receiving bodies.
+/// Keep every support's original receiving body, combining rows only within
+/// the same body basis. The existing contact owner assembles their reciprocal
+/// global column once, with no additional state or integration path.
 pub(crate) fn point_residual(
     strings: &[MaterialStringMember],
     cards: &[BowedStringCard],
@@ -34,11 +35,16 @@ pub(crate) fn point_residual(
         let bridge = member
             .source
             .bridge_shape(&cards[point.string], connection.station_fraction)?;
+        let body = ModalAttachment {
+            component: cards.len() + connection.body.component,
+            shapes: connection.body.shapes.iter().map(|b| factor * b).collect(),
+        };
         corrections.push(PointCorrection {
             string_shapes: bridge.into_iter().map(|b| factor * b).collect(),
-            body: ModalAttachment {
-                component: cards.len() + connection.body.component,
-                shapes: connection.body.shapes.iter().map(|b| factor * b).collect(),
+            bodies: if body.shapes.iter().any(|b| *b != 0.0) {
+                vec![body]
+            } else {
+                Vec::new()
             },
         });
     }
@@ -89,29 +95,24 @@ pub(crate) fn point_residual(
                 *shape += factor * b;
             }
             let component = cards.len() + connection.body.component;
-            if component != correction.body.component {
-                if correction.body.shapes.iter().any(|b| *b != 0.0) {
+            if let Some(body) = correction
+                .bodies
+                .iter_mut()
+                .find(|body| body.component == component)
+            {
+                if body.shapes.len() != connection.body.shapes.len() {
                     return Err(invalid(
-                        "point residual corrections require one receiving body per contact",
+                        "residual body corrections must use the same receiving body basis",
                     ));
                 }
-                correction.body = ModalAttachment {
+                for (shape, b) in body.shapes.iter_mut().zip(&connection.body.shapes) {
+                    *shape += factor * b;
+                }
+            } else {
+                correction.bodies.push(ModalAttachment {
                     component,
-                    shapes: vec![0.0; connection.body.shapes.len()],
-                };
-            }
-            if correction.body.shapes.len() != connection.body.shapes.len() {
-                return Err(invalid(
-                    "residual body corrections must use the same receiving body basis",
-                ));
-            }
-            for (shape, b) in correction
-                .body
-                .shapes
-                .iter_mut()
-                .zip(&connection.body.shapes)
-            {
-                *shape += factor * b;
+                    shapes: connection.body.shapes.iter().map(|b| factor * b).collect(),
+                });
             }
         }
         // G_ij - sum_b k_eff,b G_ib G_jb. Compute each pair once so symmetry
@@ -132,6 +133,11 @@ pub(crate) fn point_residual(
                 compliance[j * q + i] = g;
             }
         }
+    }
+    for correction in &mut corrections {
+        correction
+            .bodies
+            .sort_unstable_by_key(|body| body.component);
     }
     Ok((corrections, compliance))
 }

@@ -31,7 +31,7 @@ pub struct FrictionObstacleConfig {
     /// Conservative combined setup bound: s*(n*(k+2)+(k+1)^2)+n*s^2,
     /// where s is normal + friction ports, n modes and k bilateral links.
     /// This includes existing friction setup; it is not an incremental allowance.
-    /// Condensed third-participant maps add at most n*q terms for q normals.
+    /// Sparse condensed support maps add at most n*q terms for q normals.
     pub max_setup_terms: usize,
 }
 
@@ -96,10 +96,10 @@ impl MultiFrictionModalSystem {
     }
 
     /// Bind omitted-mode normal compliance while retaining both contact
-    /// participants and an additional signed support map for each contact.
+    /// participants and a sparse collection of signed support maps per contact.
     ///
     /// The complete closure and reciprocal force map is
-    /// `left - right + correction`. A string support Schur complement can
+    /// `left - right + sum(correction)`. A string support Schur complement can
     /// therefore load its bridge without replacing the actual receiving body.
     /// All normal/normal and normal/friction responses use that complete map.
     /// The producer must derive corrections and the row-major compliance from
@@ -109,8 +109,11 @@ impl MultiFrictionModalSystem {
     /// numerical-loss accounting of `with_obstacle_residual_compliance`.
     /// Local attachments returned by `obstacle` retain the contact participants;
     /// `obstacle_normal_column` exposes the complete retained map.
+    /// Each contact needs one collection, possibly empty. Its original retained
+    /// component indices must be unique and ascending; combine same-body rows
+    /// before binding. The original n*q support-setup bound therefore still holds.
     pub fn with_obstacle_residual_ports_and_corrections(self,
-        contacts: Vec<(ModalContact, ModalContactConfig)>, corrections: Vec<ModalAttachment>,
+        contacts: Vec<(ModalContact, ModalContactConfig)>, corrections: Vec<Vec<ModalAttachment>>,
         compliance: Vec<f64>, limits: FrictionObstacleConfig, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         if contacts.is_empty() {
@@ -121,12 +124,12 @@ impl MultiFrictionModalSystem {
     }
 
     fn bind_obstacles(mut self, contacts: Vec<(ModalContact, ModalContactConfig)>,
-        corrections: Option<&[ModalAttachment]>, limits: FrictionObstacleConfig,
+        corrections: Option<&[Vec<ModalAttachment>]>, limits: FrictionObstacleConfig,
         gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
         if corrections.is_some_and(|maps| maps.len() != contacts.len()) {
-            return Err(invalid("condensed obstacles need one signed retained correction per contact").into());
+            return Err(invalid("condensed obstacles need one support-map collection per contact").into());
         }
         if contacts.is_empty() { return Ok(self); }
         if self.friction_residual.is_some() {
@@ -571,7 +574,7 @@ impl ObstacleSet {
     pub(super) fn take_endpoint_miss(&mut self) -> bool { std::mem::take(&mut self.endpoint_missed) }
     pub(super) fn set_headroom(&mut self, headroom: bool) { self.headroom = headroom; }
     fn new(system: &MultiFrictionModalSystem, contacts: Vec<(ModalContact, ModalContactConfig)>,
-        corrections: Option<&[ModalAttachment]>,
+        corrections: Option<&[Vec<ModalAttachment>]>,
         limits: FrictionObstacleConfig, gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {
         let q = contacts.len(); let p = system.points.len(); let s = p+q;
@@ -592,17 +595,7 @@ impl ObstacleSet {
             poll(Some(gate))?;
             let mut column = contact_column(network, &contact, config)?;
             if let Some(corrections) = corrections {
-                let correction = &corrections[index];
-                let model = network.models.get(correction.component)
-                    .ok_or_else(|| invalid("condensed obstacle correction names an unknown retained component"))?;
-                if correction.shapes.len() != model.modes().len()
-                    || correction.shapes.iter().any(|shape| !shape.is_finite()) {
-                    return Err(invalid("condensed obstacle correction must match its finite retained basis"));
-                }
-                let offset = network.offsets[correction.component];
-                for (local, shape) in correction.shapes.iter().enumerate() {
-                    column[offset+local] = finite(column[offset+local]+shape)?;
-                }
+                super::residual::add_support_corrections(network, &mut column, &corrections[index], gate)?;
             }
             let old = extension(network.components(), &column, 0.0)?;
             let law = OpeningContactStep::new(&contact.law, -old).map_err(ModalCouplingError::ContactLaw)?;
