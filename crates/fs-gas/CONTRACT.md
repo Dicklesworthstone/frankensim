@@ -7956,3 +7956,71 @@ and source refusal after a feasible prefix. Native execution and pinned
 formatting have not run because the execution environment is unavailable;
 source/API review and independent analytic reference calculations are separate
 from runtime verification.
+
+## Thermal reacting compression histories and finite-body cycles
+
+`material::compression::history::thermal` extends the prepared
+`MaterialThermalCompressionReactor` with
+`advance_history_with_heat_bath` and
+`advance_history_with_finite_body`. Both use the same admitted
+`CompressionKnot` schedule as the original adiabatic history entry:
+2–4097 knots, exact initial volume binding, positive finite volumes, strictly
+increasing elapsed times and representable adjacent volume ratios. Each segment
+has its own logarithmic volume path. Turning points and physical-time dwells are
+retained even when the last volume equals the first.
+
+The existing prepared thermal owner supplies every fixed or adaptive endpoint.
+The history layer adds no chemistry, volume map, heat-transfer stage, caloric
+inversion or time controller. Original gas species amounts, formation energy,
+source query axes, neutral-gas admission and transport/caloric sources continue
+through every knot. The held bath retains its declared temperature and total
+conductance. A finite body retains its original source curve, mass, held
+pressure, conductance and current enthalpy/phase, including heat-flow reversal
+on a latent plateau where its temperature is unchanged. Its density-derived
+volume never substitutes for prescribed gas volume.
+
+Fixed subdivisions apply separately to moving segments, while one explicit
+whole-history allowance bounds their total; each dwell costs one native
+interval. Adaptive mode delegates to the original thermal full/two-half
+controller, preserving its temperature, species, work, heat and finite-body
+enthalpy comparisons. Accepted-interval and evaluation caps apply to the entire
+history, including coarse/rejected probes. The last one or two available
+evaluations can admit a known one-evaluation dwell; a moving comparison still
+requires three. A native suggested step carries across knots and dwells, within
+the same original bounds. No comparison crosses a prescribed rate discontinuity.
+
+The generic history report retains the original gas or gas/body physical
+payload. Chronological compensated sums preserve work delivered to the gas,
+signed partner heat, gas storage, independently accumulated first-law residual,
+gas/partner stage entropy and production. Finite-body histories additionally sum
+the original body enthalpy/internal-energy changes, outward pressure-volume
+work and both coupled residuals. Exchanged heat cancels once; neither chemical
+formation energy nor latent storage becomes an extra heat source. All-probe
+chemical work remains separate from accepted physical accounts. An explicit
+duration discrepancy reports compensated segment durations minus the exact
+final elapsed knot.
+
+Native adaptive refusals retain the global history clock and spent prefix
+counts in the typed thermal-adaptive history error. Complete knot admission
+precedes evolution. Gas and body remain private proposals through every
+segment, aggregate-account check and final cancellation checkpoint; a late
+work limit, source-domain exit, accuracy failure or cancellation publishes
+neither endpoint. Numerical reactor workspace may change on refusal and remains
+reusable for deterministic replay.
+
+Focused G1/G3/G4 regressions cover a closed reacting bath cycle against an
+independent exact first law with fixed-step refinement; a variable-Cv gas and
+variable-Cp/density body against independent coupled balances; latent melting
+and partial reversal through both fixed and adaptive histories; exact global
+budgets including a final single-evaluation dwell; translated error clocks;
+source refusal after a feasible prefix; late cancellation/replay; and an
+independent binary-duration rounding check. Manufactured irreversible
+equal-caloric cases stop before their mixing-entropy maximum rather than
+loosening native entropy gates.
+
+This remains a prescribed homogeneous gas and lumped thermal partner. It adds
+no spatial wall gradients, piston inertia, moving-area conductance inference,
+gas phase equilibrium or measured combustion/heat-transfer calibration. The
+original native source-domain, material-reconciliation entropy and local-error
+limitations remain unchanged. Aggregating local comparisons and residuals does
+not certify global integration accuracy or coupled passivity.

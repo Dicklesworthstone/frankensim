@@ -9,6 +9,9 @@
 //! duplicate kinetics, caloric inversion, volume work or error comparisons.
 //! Adaptive local comparisons are not a global accuracy certificate.
 
+/// Bath and original finite-body heat exchange throughout prescribed histories.
+pub mod thermal;
+
 use super::adaptive::{
     AdaptiveMaterialCompressionError, AdaptiveMaterialCompressionSolve,
     MAX_COMPRESSION_EVALUATIONS, advance_closed_parcel_compression_adaptive,
@@ -109,6 +112,14 @@ pub enum MaterialCompressionHistoryError {
         end_time_s: f64,
         source: AdaptiveMaterialCompressionError,
     },
+    /// Thermal native comparisons use the same global clock/count convention,
+    /// including original heat and finite-body enthalpy error components.
+    ThermalAdaptive {
+        segment: usize,
+        start_time_s: f64,
+        end_time_s: f64,
+        source: super::thermal::adaptive::AdaptiveMaterialThermalCompressionError,
+    },
     Cancelled,
 }
 impl core::fmt::Display for MaterialCompressionHistoryError {
@@ -132,12 +143,7 @@ fn validate(
     solve: MaterialCompressionHistorySolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), MaterialCompressionHistoryError> {
-    poll(cancelled)?;
-    if !(2..=MAX_COMPRESSION_HISTORY_KNOTS).contains(&knots.len()) {
-        return Err(MaterialCompressionHistoryError::Invalid(
-            "history requires 2..=4097 knots",
-        ));
-    }
+    validate_knots(parcel, knots, cancelled)?;
     match solve {
         MaterialCompressionHistorySolve::Fixed {
             controls,
@@ -160,6 +166,21 @@ fn validate(
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+/// Common schedule admission for adiabatic and thermal original-source owners.
+fn validate_knots(
+    parcel: &ClosedGasParcel,
+    knots: &[CompressionKnot],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), MaterialCompressionHistoryError> {
+    poll(cancelled)?;
+    if !(2..=MAX_COMPRESSION_HISTORY_KNOTS).contains(&knots.len()) {
+        return Err(MaterialCompressionHistoryError::Invalid(
+            "history requires 2..=4097 knots",
+        ));
     }
     for (index, knot) in knots.iter().enumerate() {
         poll(cancelled)?;
