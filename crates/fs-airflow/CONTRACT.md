@@ -4567,6 +4567,10 @@ heat coefficients; neither is deposited a second time at the exterior ports.
 The same gray, spectral and native thermal paths consume this response.
 Distinct layer indices and asymmetric front/back reflection stay in the original
 slab owner; the enclosure does not replace them with an averaged reflectance.
+The boundary operator retains its original H=J+P/A form: the slab diagonal is
+transmission plus that face's summed layer absorption, with reflected self-return
+added once by the shared factorization. This positive 1-R representation also
+preserves weak escape when reflection rounds to one.
 
 `SpectralOptics::new_with_slab_bands` requires genuine band sources for
 non-port faces and each physical material layer. Every band retains identical

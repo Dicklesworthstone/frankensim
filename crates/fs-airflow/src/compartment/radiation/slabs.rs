@@ -340,7 +340,17 @@ fn slab_coefficients(emissivities: &[f64], slabs: &[SlabPair]) -> BoundaryCoeffi
             result.reflection[i] = slab.optics.reflectances()[side];
             result.transmission[i] = slab.optics.transmittance();
             result.partner[i] = j;
-            result.diagonal[i] = 1.0;
+            // The shared factorization writes H = J + P/A and adds the
+            // reflected self-return separately. Its base diagonal is 1-R,
+            // retained as positive escape/absorption to avoid cancellation
+            // when a reflective slab has R rounded to one.
+            result.diagonal[i] = slab
+                .optics
+                .face_coupling()
+                .iter()
+                .fold(slab.optics.transmittance(), |escape, absorption| {
+                    escape + absorption[side]
+                });
             result.thermal_anchor[i] = slab.optics.face_coupling().iter().any(|x| x[side] > 0.0);
         }
     }
