@@ -142,7 +142,7 @@ pub(super) fn no_claim(spec: &ProjectSpec) -> &'static str {
 pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     // Also reject a transient-adjoint output on a steady project; an ignored
     // report request must never look like a completed derivative calculation.
-    let requested_adjoint = adjoint::requested(spec)?;
+    let _ = adjoint::requested(spec)?;
     if radiation::pointwise_requested(spec) {
         if !policy(spec).is_some_and(|time| time.enthalpy.is_some()) {
             return Err(conduction_error(
@@ -164,11 +164,6 @@ pub(super) fn admit(spec: &ProjectSpec) -> Result<(), SolveRefusal> {
     let Some(transient) = policy(spec) else {
         return Ok(());
     };
-    if !transient.surface_capacities.is_empty() && requested_adjoint.is_some() {
-        return Err(bad(
-            "coating storage requires a complete trajectory storage pullback; use the forward temperature and energy results until coating adjoints are admitted",
-        ));
-    }
     if let Some(violation) = spec
         .validate()
         .into_iter()

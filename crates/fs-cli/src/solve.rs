@@ -343,7 +343,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// temperature grids and every coupled capacity response and energy audit.
 /// Version 136 differentiates declared surface watts and duties through the
 /// complete native capacity and total-enthalpy trajectories on physical traces.
-pub const SOLVE_DRIVER_VERSION: u32 = 136;
+/// Version 137 admits coated temperature-trajectory adjoints with complete
+/// storage history and a capacity control that scales only volume storage.
+pub const SOLVE_DRIVER_VERSION: u32 = 137;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

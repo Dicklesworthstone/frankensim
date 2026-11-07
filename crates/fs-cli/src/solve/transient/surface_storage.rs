@@ -10,8 +10,9 @@ use std::time::Instant;
 
 use super::{SolveRefusal, bad, json_string, lower, number, poll};
 
-/// Bound preparation and the shared owner's temporary mass assembly before
-/// either time grid starts. No extra allocation is charged for an empty list.
+/// Bound preparation, the original lumped bulk matrix retained for controls,
+/// and temporary combined-mass assembly before either time grid starts.
+/// No extra allocation is charged for an empty list.
 pub(super) fn workspace_bytes(
     vertices: usize,
     elements: usize,
@@ -122,7 +123,7 @@ pub(super) fn prepare<'m>(
         ",\"surface_storage\":{{\"model\":\"perfectly-bonded-temperature-independent-coating\",\"discretization\":\"p1-surface-row-lumped\",\"surfaces\":[{}],\"total_capacity_j_k\":{total},\"scope\":{}}}",
         receipts.join(","),
         json_string(
-            "Declared areal capacity shares the original boundary temperature and adds storage to the same volume capacity operator. Both time grids and every thermal, contact, convection and patch-radiation response use that operator. Prescribed nodes retain their storage reactions. The coating adds no separate temperature, contact resistance, tangential conduction or material-source authority. It must not also be represented by volume storage. Coating trajectory adjoints and total-enthalpy storage are not admitted."
+            "Declared areal capacity shares the original boundary temperature and adds storage to the same volume capacity operator. Both time grids and every thermal, contact, convection and patch-radiation response use that operator. Prescribed nodes retain their storage reactions. The coating adds no separate temperature, contact resistance, tangential conduction or material-source authority. It must not also be represented by volume storage. Trajectory adjoints retain this storage while holding the coating fixed; their capacity control scales only the volume capacities. Total-enthalpy storage is not admitted."
         ),
     );
     Ok((engine, fragment))

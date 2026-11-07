@@ -19,6 +19,7 @@ pub struct StepLinearization<'a> {
     primal: StepSolution,
     response: RobinResponse,
     capacity: &'a Csr,
+    volume_capacity: &'a Csr,
     mesh: &'a ConductionMesh,
     dofs: DofMap,
     old: Vec<f64>,
@@ -199,8 +200,9 @@ impl BackwardEuler<'_> {
             }
         }
         poll(cx, 0)?;
-        Ok(StepLinearization { primal, response, capacity: &self.capacity, mesh: self.mesh, dofs,
-            old: old.to_vec(), dt_s, source_load_w })
+        Ok(StepLinearization { primal, response, capacity: &self.capacity,
+            volume_capacity: self.volume_capacity.as_ref().unwrap_or(&self.capacity),
+            mesh: self.mesh, dofs, old: old.to_vec(), dt_s, source_load_w })
     }
 }
 
@@ -364,6 +366,35 @@ impl StepLinearization<'_> {
             .map(|(new, old)| finite(new - old)).collect::<Result<Vec<_>, _>>()?;
         let mut storage = vec![0.0; delta.len()];
         self.capacity.spmv(&delta, &mut storage);
+        let mut value = 0.0;
+        for (i, (&weight, &change)) in lambda.iter().zip(&storage).enumerate() {
+            if i % 512 == 0 { poll(cx, i)?; }
+            value = finite(value - finite(weight * finite(change / self.dt_s)?)?)?;
+        }
+        Ok(value)
+    }
+
+    /// Derivative with respect to a common multiplier on volume capacities
+    /// at multiplier one, holding every added coating and the OLD state fixed.
+    ///
+    /// The tangent and history pullback still use the complete physical
+    /// volume-plus-surface storage. Only this parameter partial uses the
+    /// original bulk operator retained before the first nonzero coating:
+    /// `-lambda^T C_volume (T_new - T_old) / dt`.
+    /// No subtraction from combined storage can lose a small bulk contribution.
+    /// Empty/all-zero coatings use the original matrix and arithmetic exactly.
+    /// A trajectory sums this contraction while propagating complete history.
+    ///
+    /// # Errors
+    /// Refuses malformed/nonfinite multipliers, overflow or cancellation.
+    pub fn volume_capacity_multiplier_pullback(
+        &self, cx: &Cx<'_>, nodal_load_adjoint: &[f64],
+    ) -> Result<f64, ConductionError> {
+        let lambda = self.multiplier(cx, nodal_load_adjoint)?;
+        let delta = self.primal.temperature.iter().zip(&self.old)
+            .map(|(new, old)| finite(new - old)).collect::<Result<Vec<_>, _>>()?;
+        let mut storage = vec![0.0; delta.len()];
+        self.volume_capacity.spmv(&delta, &mut storage);
         let mut value = 0.0;
         for (i, (&weight, &change)) in lambda.iter().zip(&storage).enumerate() {
             if i % 512 == 0 { poll(cx, i)?; }

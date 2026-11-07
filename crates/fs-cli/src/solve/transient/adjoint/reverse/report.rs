@@ -89,6 +89,9 @@ pub(super) fn render(
         scope = scope.replace("Surface-power, ", "");
         scope.push_str(" Every declared surface-power row retains independent watts and duty controls through its exact physical-area normalized inward P1 load. Multiple sources on one trace remain separate controls. The same complete dual includes all admitted feedback, with zero future heating sensitivity at an initial sampled peak.");
     }
+    if result.coating_storage {
+        scope.push_str(" Bonded coating storage remains in every endpoint tangent and history transpose, including storage at prescribed nodes. The capacity control scales only the original regional volume capacities; the independently declared coating moments remain fixed. No coating-capacity or thickness derivative is supplied.");
+    }
     if result.boundary_histories {
         scope.push_str(" Declared thermal histories are held fixed and sampled at the same interval starts as the forward trajectory, before every endpoint reconstruction and coupled tangent. A replaced static Robin reference has zero derivative and is marked reference_history_held_fixed; its coefficient remains a control. Scheduled static heat-flux controls are omitted and scheduled prescribed-temperature coordinates remain fixed. These are not derivatives of history values or switching times.");
     }

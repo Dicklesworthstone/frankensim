@@ -94,6 +94,10 @@ pub struct StepSolution {
 pub struct BackwardEuler<'m> {
     mesh: &'m ConductionMesh,
     capacity: Csr,
+    // Original bulk storage retained on the first nonzero coating addition.
+    // Never recover it by subtracting a large coating from the combined matrix.
+    // Absent/all-zero coatings keep the original matrix and allocate no copy.
+    volume_capacity: Option<Csr>,
     material_capacities: Vec<MaterialHeatCapacity>,
     // Intersection of every incident material's interval. A shared vertex must
     // be supported by all of its cells, not just their mean temperature.
@@ -108,7 +112,8 @@ impl<'m> BackwardEuler<'m> {
         poll(cx, 0)?;
         let capacity = assemble_capacitance(cx, mesh, capacity)?;
         poll(cx, 0)?;
-        Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
+        Ok(Self { mesh, capacity, volume_capacity: None,
+            material_capacities: Vec::new(), capacity_temperature_spans: None })
     }
 
     /// Prepare one declared volumetric heat capacity per tetrahedron, in mesh order.
@@ -122,7 +127,8 @@ impl<'m> BackwardEuler<'m> {
         }
         let capacity = assemble_capacitance_from(cx, mesh, |e| capacities[e].value_j_per_m3_k())?;
         poll(cx, 0)?;
-        Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
+        Ok(Self { mesh, capacity, volume_capacity: None,
+            material_capacities: Vec::new(), capacity_temperature_spans: None })
     }
 
     /// Prepare a frozen P1 volumetric heat-capacity field in vertex order.
@@ -135,7 +141,8 @@ impl<'m> BackwardEuler<'m> {
         poll(cx, 0)?;
         let capacity = assemble_nodal_capacitance(cx, mesh, capacities)?;
         poll(cx, 0)?;
-        Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
+        Ok(Self { mesh, capacity, volume_capacity: None,
+            material_capacities: Vec::new(), capacity_temperature_spans: None })
     }
 
     /// Prepare a stationary composite in local thermal equilibrium from
@@ -207,7 +214,8 @@ impl<'m> BackwardEuler<'m> {
         let capacity = assemble_capacitance_from(cx, mesh,
             |element| sources[of_element[element]].value_j_per_m3_k())?;
         poll(cx, 0)?;
-        Ok(Self { mesh, capacity, material_capacities: sources.to_vec(),
+        Ok(Self { mesh, capacity, volume_capacity: None,
+            material_capacities: sources.to_vec(),
             capacity_temperature_spans: Some(spans) })
     }
 

@@ -926,3 +926,119 @@ fn continuum_mean_certificate_refuses_unrepresented_coating_physics() {
             TetError::Unsupported(reason))) if reason.contains("coating")));
     });
 }
+
+#[test]
+fn coating_adjoints_keep_bulk_and_total_capacity_controls_distinct() {
+    with_cx(|cx| {
+        let mesh = mesh();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region("bath", |_| true, ThermalBc::robin(2.0, 300.0).unwrap())
+            .unwrap()
+            .finish()
+            .unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(8.0);
+        let problem = ConductionProblem {
+            mesh: &mesh, boundary: &boundary, material: &material,
+            element_materials: None, source: &source,
+        };
+        let old: Vec<_> = mesh.positions().iter()
+            .map(|point| 305.0 + point[0] - 2.0 * point[1]).collect();
+        let engine = |bulk_scale: f64, coating_scale: f64| {
+            let first: Vec<_> = mesh.boundary().iter().enumerate().map(|(face, geometry)|
+                SurfaceHeatCapacity::nodal(face, geometry.vertices.map(|vertex|
+                    areal(coating_scale * (1.0 + mesh.positions()[vertex as usize][2])))))
+                .collect();
+            let second: Vec<_> = (0..mesh.boundary().len())
+                .map(|face| SurfaceHeatCapacity::uniform(face, areal(0.5 * coating_scale)))
+                .collect();
+            BackwardEuler::uniform(cx, &mesh,
+                VolumetricHeatCapacity::declared(3.0 * bulk_scale).unwrap())
+                .unwrap()
+                .with_surface_heat_capacity(cx, &first).unwrap()
+                .with_surface_heat_capacity(cx, &second).unwrap()
+        };
+        let nominal = engine(1.0, 1.0);
+        let step = nominal.linearize_step(
+            cx, problem, None, &old, 0.25, config(), None, &["bath"],
+        ).unwrap();
+        let mut goal = vec![0.0; mesh.vertex_count()];
+        goal[mesh.vertex_count() - 1] = 1.0;
+        let gradient = step.pullback(cx, &goal, &[0.0], &[0.0]).unwrap();
+        let bulk = step.volume_capacity_multiplier_pullback(cx, &gradient.nodal_load).unwrap();
+        let total = step.capacity_multiplier_pullback(cx, &gradient.nodal_load).unwrap();
+        let history: f64 = step.previous_temperature_pullback(cx, &gradient.nodal_load)
+            .unwrap().iter().sum();
+        assert!((bulk - total).abs() > 1e-3, "fixed coating is not a bulk-capacity control");
+        for (axis, actual) in [bulk, total, history].into_iter().enumerate() {
+            let epsilon = 1e-4;
+            let evaluate = |direction: f64| {
+                let bulk_scale = if axis < 2 { 1.0 + direction * epsilon } else { 1.0 };
+                let coating_scale = if axis == 1 { bulk_scale } else { 1.0 };
+                let history: Vec<_> = old.iter().map(|&temperature|
+                    temperature + if axis == 2 { direction * epsilon } else { 0.0 }).collect();
+                engine(bulk_scale, coating_scale)
+                    .advance(cx, problem, None, &history, 0.25, config()).unwrap()
+                    .temperature[mesh.vertex_count() - 1]
+            };
+            let expected = (evaluate(1.0) - evaluate(-1.0)) / (2.0 * epsilon);
+            close(actual, expected, 2e-6 + 2e-5 * expected.abs());
+        }
+
+        // Both empty and repeated all-zero additions keep the original
+        // operator and the original whole-capacity contraction bit for bit.
+        let bare = BackwardEuler::uniform(cx, &mesh,
+            VolumetricHeatCapacity::declared(3.0).unwrap()).unwrap();
+        let zero = engine(1.0, 0.0);
+        let base_step = bare.linearize_step(
+            cx, problem, None, &old, 0.25, config(), None, &["bath"],
+        ).unwrap();
+        let zero_step = zero.linearize_step(
+            cx, problem, None, &old, 0.25, config(), None, &["bath"],
+        ).unwrap();
+        assert_eq!(base_step.primal().temperature, zero_step.primal().temperature);
+        let base_gradient = base_step.pullback(cx, &goal, &[0.0], &[0.0]).unwrap();
+        let zero_gradient = zero_step.pullback(cx, &goal, &[0.0], &[0.0]).unwrap();
+        assert_eq!(base_gradient.nodal_load, zero_gradient.nodal_load);
+        let expected = base_step.capacity_multiplier_pullback(cx, &base_gradient.nodal_load)
+            .unwrap().to_bits();
+        assert_eq!(zero_step.volume_capacity_multiplier_pullback(cx, &zero_gradient.nodal_load)
+            .unwrap().to_bits(), expected);
+        assert_eq!(zero_step.capacity_multiplier_pullback(cx, &zero_gradient.nodal_load)
+            .unwrap().to_bits(), expected);
+    });
+}
+
+#[test]
+fn large_coating_does_not_erase_the_original_bulk_capacity_partial() {
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder().finish().unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(1e18);
+        let layers: Vec<_> = (0..mesh.boundary().len())
+            .map(|face| SurfaceHeatCapacity::uniform(face, areal(1e20)))
+            .collect();
+        let engine = BackwardEuler::uniform(cx, &mesh,
+            VolumetricHeatCapacity::declared(1.0).unwrap()).unwrap()
+            .with_surface_heat_capacity(cx, &layers).unwrap();
+        let mut controls = config();
+        controls.energy_tolerance_j = 1e9;
+        let old = [300.0; 4];
+        let step = engine.linearize_step(
+            cx, ConductionProblem { mesh: &mesh, boundary: &boundary,
+                material: &material, element_materials: None, source: &source },
+            None, &old, 1.0, controls, None, &[],
+        ).unwrap();
+        // The public contraction accepts any total watt-coordinate multiplier.
+        // This one exposes the small original bulk term even when floating
+        // addition cannot represent it next to the coating diagonal.
+        let expected = -mesh.element_volume(0) / 4.0
+            * step.primal().temperature.iter().zip(old)
+                .map(|(&new, previous)| new - previous).sum::<f64>();
+        assert!(expected.abs() > 1e-4);
+        close(step.volume_capacity_multiplier_pullback(cx, &[1.0; 4]).unwrap(),
+            expected, 1e-12);
+    });
+}

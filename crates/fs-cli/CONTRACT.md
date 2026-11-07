@@ -1,6 +1,6 @@
 # CONTRACT: fs-cli
 
-## Native coating heat storage — driver 135
+## Native coating heat storage and trajectory adjoints — drivers 135, 137
 
 Schema-v17 constant-capacity transient projects may add uniform, explicitly
 sourced areal heat capacity to a named exterior thermal boundary through
@@ -21,12 +21,26 @@ Before stepping, admission includes coating assembly workspace. The existing
 transient receipt retains each target's actual face count, area, areal and
 integrated capacity, and source, with the same complete storage/net-input
 energy gate. Repeated targets, missing/empty retained patches, unsupported
-units and storage models refuse. Total-enthalpy and trajectory-adjoint
-coatings remain explicitly unsupported; no incomplete derivative is emitted.
+units and storage models refuse. Total-enthalpy coatings remain unsupported.
+
+Driver 137 admits final-temperature and sampled-peak trajectory adjoints with
+these constant-capacity coatings through the existing coupled reverse path.
+Every endpoint tangent and history transpose retains complete volume-plus-
+coating storage. The product's capacity multiplier scales only the original
+regional volume capacities while holding the independently declared coating
+fixed. The native owner retains the original bulk operator before the first
+nonzero layer; it never reconstructs small bulk terms by subtracting a large
+coating from the rounded total. Empty and all-zero coatings preserve the
+original operator and capacity contraction exactly. No coating-capacity or
+thickness derivative is supplied. Driver 137 invalidates earlier cached runs.
 
 Native regressions compare uniform heating on a regular tetrahedron against
 `P t / (C_volume V + C_surface A)`, preserve the zero/empty field exactly, and
 check the added reservoir heat when only prescribed nodes carry storage.
+Adjoint regressions compare bulk-only and whole-storage controls with endpoint
+perturbations, retain small bulk partials under large coating storage, and
+compare final and sampled-peak product derivatives against perturbed physical
+trajectories with held thermal histories and ambient radiation.
 
 ## Adaptive reflected-enclosure cooling — driver 133
 

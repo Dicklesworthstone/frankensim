@@ -126,6 +126,7 @@ struct Derivatives {
     coefficients: Vec<f64>,
     reference_histories: Vec<bool>,
     boundary_histories: bool,
+    coating_storage: bool,
     primal_iterations: usize,
     dual_iterations: usize,
     max_dual_solves_per_step: usize,
@@ -616,7 +617,9 @@ pub(in crate::solve::transient) fn finish(
             source_controls[index][region] = dot(cx, &density_bar, basis, deadline)?;
         }
         source_multipliers[index] = step.source_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?;
-        capacities = finite(capacities + step.capacity_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?)?;
+        // The product control scales regional volume capacities. Coatings stay
+        // fixed while the complete storage remains in the tangent and history.
+        capacities = finite(capacities + step.volume_capacity_multiplier_pullback(cx, &gradient.nodal_load).map_err(lower)?)?;
         for i in 0..ports.len() {
             if natural_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i]))
                 || air_bound.as_ref().is_some_and(|bound| bound.owns_region(ports[i])) {
@@ -691,6 +694,7 @@ pub(in crate::solve::transient) fn finish(
         coefficients: fixed_ports.iter().map(|&i| coefficients[i]).collect(),
         reference_histories: fixed_ports.iter().map(|&i| reference_histories[i]).collect(),
         boundary_histories: boundary_history.is_some(),
+        coating_storage: !policy.surface_capacities.is_empty(),
         primal_iterations, dual_iterations, max_dual_solves_per_step, worst_dual,
         reconstructed_steps, revalidated_steps, additional_storage_bytes, radiation, convection,
         contact, material_controls, prescribed_temperature, prescribed_heat_flux, surface_power,

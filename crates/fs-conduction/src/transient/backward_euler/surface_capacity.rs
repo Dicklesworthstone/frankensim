@@ -266,7 +266,17 @@ impl<'m> BackwardEuler<'m> {
                 combined.push(row, row, surface);
             }
         }
-        self.capacity = combined.assemble();
+        let combined = combined.assemble();
+        if self.volume_capacity.is_none() {
+            // Move the original bulk operator into its retained owner before
+            // replacing physical storage. Subtracting the coating afterwards
+            // could lose a small bulk contribution to floating-point rounding.
+            self.volume_capacity = Some(std::mem::replace(&mut self.capacity, combined));
+        } else {
+            // Further bonded layers change physical storage, never the original
+            // volume-capacity coordinate differentiated by the product.
+            self.capacity = combined;
+        }
         poll(cx, n)?;
         Ok(self)
     }

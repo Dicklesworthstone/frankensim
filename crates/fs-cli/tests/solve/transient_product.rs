@@ -806,19 +806,91 @@ fn g1_native_coating_on_prescribed_nodes_retains_its_reservoir_storage_reaction(
 }
 
 #[test]
-fn g0_native_coating_adjoint_refusal_does_not_publish_an_incomplete_field() {
-    let bytes = tetra_stl();
-    let mut spec = conduction_fixture_project(7, &bytes);
-    declaration(&mut spec, 100.0, 2.0);
-    coating(&mut spec, "air", 20.0);
-    spec.outputs.as_mut().unwrap().push(OutputRequest {
-        name: "temperature-final-adjoint".into(), kind: "report".into(), region: None,
-    });
-    let ledger = Ledger::open(":memory:").unwrap();
-    import_fixture(&ledger, &spec, bytes);
-    let error = run_solve(&ledger, &CancelGate::new_clock_free(), &mut benign_clock(),
-        &decode(&spec), &fixture_cards(), &mut Vec::new()).unwrap_err();
-    assert_eq!(error.code, "cli-solve-conduction-transient", "{error:?}");
-    assert_eq!(error.stage, Some("conduction"));
-    assert_eq!(stage_receipt_hashes(&ledger, error.run.as_ref().unwrap()).len(), 4);
+fn g1_native_coating_trajectory_adjoints_keep_bulk_capacity_controls_physical() {
+    for radiating in [false, true] {
+        let mut spec = conduction_fixture_project(7, &tetra_stl());
+        declaration(&mut spec, 60.0, 2.0);
+        capacity_history_time(&mut spec).max_step.value = 0.35;
+        spec.power.as_mut().unwrap()[0].watts.value = 2.0;
+        spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap().boundaries[0].condition =
+            ThermalBoundaryCondition::Convection {
+                coefficient: QtyAny::new(2.0, fs_project::spec::dims::HEAT_TRANSFER_COEFFICIENT),
+                reference_temperature: QtyAny::new(293.15, fs_project::spec::dims::TEMPERATURE),
+            };
+        let cards = if radiating {
+            let (cards, identity) = radiation_product::emissivity_cards(&fixture_cards(), 0.6);
+            radiation_product::declare(&mut spec, &identity, "air", 293.15);
+            cards
+        } else { fixture_cards() };
+        spec.solver.as_mut().unwrap().tolerance_rel = 1e-12;
+        spec.envelope.as_mut().unwrap().ambient_lo.value = 280.0;
+        spec.envelope.as_mut().unwrap().ambient_hi.value = 345.0;
+        capacity_history(&mut spec, fs_project::TransientBoundaryTarget::ConvectionTemperature,
+            &[(0.4, 340.0), (2.0, 285.0)]);
+        coating(&mut spec, "air", 20.0);
+
+        let (plain, plain_field) = capacity_history_run(&spec, &cards, None);
+        let mut derivatives = Vec::new();
+        for peak in [false, true] {
+            let output = if peak { "temperature-sampled-peak-adjoint" }
+                else { "temperature-final-adjoint" };
+            let (receipt, field) = capacity_history_run(&spec, &cards, Some(output));
+            assert_eq!(field, plain_field, "the coated forward trajectory must remain unchanged");
+            let gradient = capacity_history_gradient(&receipt);
+            close(n(gradient, "value_k"), capacity_history_value(&plain, &plain_field, peak), 0.0);
+            if peak {
+                assert!(n(gradient, "time_s") > 0.0 && n(gradient, "time_s") < 2.0);
+                let selected = n(gradient, "state_index") as usize;
+                for interval in &gradient.get("intervals").unwrap().as_array().unwrap()[selected..] {
+                    for power in interval.get("regional_power").unwrap().as_array().unwrap() {
+                        close(n(power, "dtemperature_ddelivered_watts_k_per_w"), 0.0, 0.0);
+                    }
+                }
+            }
+            derivatives.push((peak, receipt));
+        }
+
+        // Reuse each pair of real perturbed trajectories for both objectives.
+        // Coating capacity never changes in any of these controls.
+        for coordinate in ["volume-capacity", "power", "initial-temperature"] {
+            let epsilon = if coordinate == "volume-capacity" { 1e-4 } else { 1e-3 };
+            let mut plus = spec.clone();
+            let mut minus = spec.clone();
+            for (child, direction) in [(&mut plus, 1.0), (&mut minus, -1.0)] {
+                match coordinate {
+                    "volume-capacity" => {
+                        for row in &mut capacity_history_time(child).capacities {
+                            row.volumetric_heat_capacity.value *= 1.0 + direction * epsilon;
+                        }
+                    }
+                    "power" => child.power.as_mut().unwrap()[0].watts.value += direction * epsilon,
+                    "initial-temperature" => {
+                        let fs_project::TransientInitialTemperature::Uniform(temperature) =
+                            &mut capacity_history_time(child).initial_temperature
+                            else { panic!("explicit original initial state"); };
+                        temperature.value += direction * epsilon;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let (plus_receipt, plus_field) = capacity_history_run(&plus, &cards, None);
+            let (minus_receipt, minus_field) = capacity_history_run(&minus, &cards, None);
+            for &(peak, ref receipt) in &derivatives {
+                let gradient = capacity_history_gradient(receipt);
+                let expected = (capacity_history_value(&plus_receipt, &plus_field, peak)
+                    - capacity_history_value(&minus_receipt, &minus_field, peak)) / (2.0 * epsilon);
+                let actual = match coordinate {
+                    "volume-capacity" => n(gradient, "dtemperature_dcapacity_multiplier_k"),
+                    "power" => n(&gradient.get("regional_power").unwrap().as_array().unwrap()[0],
+                        "dtemperature_duniform_added_watts_k_per_w"),
+                    "initial-temperature" => n(gradient, "dtemperature_duniform_initial_k_per_k"),
+                    _ => unreachable!(),
+                };
+                close(actual, expected, 5e-6 + 3e-4 * expected.abs());
+                if coordinate == "volume-capacity" && peak {
+                    assert!(actual.abs() > 1e-4, "bulk storage has a nonzero physical influence");
+                }
+            }
+        }
+    }
 }
