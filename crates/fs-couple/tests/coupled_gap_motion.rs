@@ -198,6 +198,71 @@ fn source_geometry_full_matrix_currents_and_fixed_linkage_force_agree() {
     assert_eq!(model.body(), &body(MASS));
 }
 
+#[test]
+fn shared_gap_flux_reversal_retains_attraction_and_physical_momentum_kinematics() {
+    let dt = 0.15;
+    let initial_linkage = [0.9, -0.7];
+    let ports = initial_linkage.map(|lambda| -2.0 * lambda / dt);
+    for velocity in [-0.3, 0.0, 0.25] {
+        let gap = CommonMagneticGap::new(medium(0.7, 0.8), winding(false), [0.2, 1.2]).unwrap();
+        let graph = CircuitGraph {
+            node_count: 3,
+            branches: vec![
+                (1, 0, Branch::Inductor { henries: f64::NAN }),
+                (2, 0, Branch::Inductor { henries: f64::NAN }),
+                (1, 0, Branch::VoltageSource { port: 0 }),
+                (2, 0, Branch::VoltageSource { port: 1 }),
+            ],
+            transformers: vec![],
+        };
+        let model = CoupledGapMotion::new(
+            graph,
+            vec![],
+            gap,
+            body(MASS),
+            CoupledGapInitial {
+                fluxes_wb: initial_linkage.to_vec(),
+                charges_c: vec![],
+                electrical_ports: ports.to_vec(),
+                velocity_m_s: velocity,
+            },
+        )
+        .unwrap();
+        let candidate = model
+            .step_candidate(
+                vec![],
+                FieldMotionInput {
+                    electrical_ports: &ports,
+                    external_force_n: 0.0,
+                    duration_s: dt,
+                },
+                controls(),
+                || false,
+            )
+            .unwrap();
+        let next = candidate.model();
+        for (&lambda, initial) in next.circuit().fluxes_wb().iter().zip(initial_linkage) {
+            close(lambda, -initial, 1e-11);
+        }
+        assert!(
+            next.momentum_kg_m_s() < model.momentum_kg_m_s(),
+            "a reversed field still attracts the poles"
+        );
+        let mean_velocity = f64::midpoint(model.velocity_m_s(), next.velocity_m_s());
+        close(
+            next.gap().gap_m() - model.gap().gap_m(),
+            dt * mean_velocity,
+            2e-11,
+        );
+        close(candidate.step().native.y[2], mean_velocity, 2e-11);
+        close(
+            candidate.step().energy_residual_j,
+            0.0,
+            controls().energy_tolerance_j,
+        );
+    }
+}
+
 fn derivative(x: [f64; 4]) -> [f64; 4] {
     let (current, force, _) = magnetic(x[2], [x[0], x[1]]);
     [

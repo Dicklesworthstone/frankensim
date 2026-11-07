@@ -12,7 +12,10 @@
 use fs_material::field_storage::ResolvedInductor;
 use fs_mbd_material::ResolvedBody;
 use fs_phs::circuit::{Branch, CircuitDae, CircuitGraph, MutualInductance};
-use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, Storage, step_descriptor};
+use fs_phs::{
+    ConstitutiveDiscreteGradient, DescriptorPortHamiltonian, QuadraticStorage, Storage,
+    step_descriptor,
+};
 
 use super::super::contacts::{self, SeriesElectricalContact};
 use super::super::{
@@ -22,7 +25,7 @@ use super::super::{
 use super::{
     AxialSupport, FieldMotionInput, FieldMotionStep, MaterialCircuit, MaterialCircuitError,
     MaterialCircuitSolve, MaterialResistor, MaterialStorageElement, coupling_scale, invalid, phs,
-    within,
+    quadratic_chord, quadratic_chord_tangent, within,
 };
 
 mod core;
@@ -848,6 +851,10 @@ impl CoupledGapStorage {
     }
 }
 impl Storage for CoupledGapStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        Some(self)
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         if !within(x[self.gap_index], self.gap.limits_m) {
             return f64::NAN;
@@ -912,5 +919,133 @@ impl Storage for CoupledGapStorage {
             }
         }
         Some(remainder)
+    }
+}
+
+impl CoupledGapStorage {
+    // [gap endpoint][linkage endpoint]. Both paths retain the same material
+    // source and original leakage; no field energy enters a momentum row.
+    fn chord_fluxes(&self, a: &[f64], b: &[f64]) -> [[f64; 2]; 2] {
+        [a[self.gap_index], b[self.gap_index]]
+            .map(|gap| [a, b].map(|x| self.gap.flux(gap, |i| x[self.indices[i]])))
+    }
+
+    fn core_chord(&self, a: f64, b: f64, gap: f64) -> f64 {
+        self.gap.core.as_ref().map_or(0.0, |core| {
+            core.chord_correction(a, b, self.gap.inverse_leakage_turns + gap / self.gap.scale)
+        })
+    }
+}
+
+impl ConstitutiveDiscreteGradient for CoupledGapStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], _: &[f64], out: &mut [f64]) {
+        if !quadratic_chord(&self.other, a, b, out)
+            || !within(a[self.gap_index], self.gap.limits_m)
+            || !within(b[self.gap_index], self.gap.limits_m)
+        {
+            out.fill(f64::NAN);
+            return;
+        }
+        let [ga, gb] = [a[self.gap_index], b[self.gap_index]];
+        let flux = self.chord_fluxes(a, b);
+        let electrical_correction =
+            [0, 1].map(|side| self.core_chord(flux[side][0], flux[side][1], [ga, gb][side]));
+        // Symmetric coordinate-increment work: change all linkages at fixed
+        // gap on each path, then change the gap at each fixed linkage bank.
+        // Unlike a product of the diagonal endpoint fluxes, the gap chords
+        // stay attractive when the electrical drive reverses flux polarity.
+        for (winding, &index) in self.indices.iter().enumerate() {
+            let w = &self.gap.windings[winding];
+            let mut currents = [0.0; 2];
+            for side in 0..2 {
+                currents[side] = f64::midpoint(
+                    self.gap.current(winding, a[index], flux[side][0]),
+                    self.gap.current(winding, b[index], flux[side][1]),
+                ) + (f64::from(w.signed_turns) / w.leakage_h)
+                    * electrical_correction[side];
+            }
+            out[index] += f64::midpoint(currents[0], currents[1]);
+        }
+        let gm = f64::midpoint(ga, gb);
+        let mut gap_efforts = [0.0; 2];
+        for side in 0..2 {
+            let (fa, fb) = (flux[0][side], flux[1][side]);
+            gap_efforts[side] = 0.5 * fa * (fb / self.gap.scale)
+                - self.core_chord(fa, fb, gm) * (f64::midpoint(fa, fb) / self.gap.scale);
+        }
+        if gap_efforts.iter().any(|e| !e.is_finite() || *e < 0.0) {
+            out.fill(f64::NAN);
+            return;
+        }
+        out[self.gap_index] += f64::midpoint(gap_efforts[0], gap_efforts[1]);
+        out[self.momentum_index] +=
+            f64::midpoint(a[self.momentum_index], b[self.momentum_index]) / self.mass;
+        if let Some(support) = &self.support {
+            match (support.force_and_energy(ga), support.force_and_energy(gb)) {
+                (Ok((fa, _)), Ok((fb, _))) => out[self.gap_index] -= f64::midpoint(fa, fb),
+                _ => out.fill(f64::NAN),
+            }
+        }
+        if out.iter().any(|x| !x.is_finite()) {
+            out.fill(f64::NAN);
+        }
+    }
+
+    fn end_jacobian_action(
+        &self,
+        a: &[f64],
+        b: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> bool {
+        // Saturation-knot chords retain the original bounded nonlinear probe
+        // path. The common linear-gap model has the exact allocation-free action.
+        if self.gap.core.is_some() {
+            return false;
+        }
+        if !quadratic_chord_tangent(&self.other, direction, out)
+            || a.len() != out.len()
+            || b.len() != out.len()
+            || a.iter().chain(b).any(|x| !x.is_finite())
+            || !within(a[self.gap_index], self.gap.limits_m)
+            || !within(b[self.gap_index], self.gap.limits_m)
+        {
+            out.fill(f64::NAN);
+            return false;
+        }
+        let g = self.gap_index;
+        let flux = self.chord_fluxes(a, b);
+        let numerator: f64 = self
+            .indices
+            .iter()
+            .zip(&self.gap.windings)
+            .map(|(&index, w)| f64::from(w.signed_turns) * (direction[index] / w.leakage_h))
+            .sum();
+        let ra = self.gap.inverse_leakage_turns + a[g] / self.gap.scale;
+        let rb = self.gap.inverse_leakage_turns + b[g] / self.gap.scale;
+        let dgap = direction[g] / self.gap.scale;
+        let dflux = [
+            [0.0, numerator / ra],
+            [
+                -flux[1][0] * dgap / rb,
+                (numerator - flux[1][1] * dgap) / rb,
+            ],
+        ];
+        let mean_flux_change = 0.25 * (dflux[0][1] + dflux[1][0] + dflux[1][1]);
+        for (&index, w) in self.indices.iter().zip(&self.gap.windings) {
+            out[index] += (0.5 * direction[index] - f64::from(w.signed_turns) * mean_flux_change)
+                / w.leakage_h;
+        }
+        out[g] += (0.25 / self.gap.scale)
+            * (flux[0][0] * dflux[1][0] + dflux[0][1] * flux[1][1] + flux[0][1] * dflux[1][1]);
+        out[self.momentum_index] += 0.5 * (direction[self.momentum_index] / self.mass);
+        if let Some(support) = &self.support {
+            if support.force_and_energy(a[g]).is_err() || support.force_and_energy(b[g]).is_err() {
+                out.fill(f64::NAN);
+                return false;
+            }
+            out[g] += 0.5 * support.stiffness_n_m() * direction[g];
+        }
+        out.iter().all(|x| x.is_finite())
     }
 }

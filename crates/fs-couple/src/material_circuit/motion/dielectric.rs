@@ -12,7 +12,10 @@ use fs_material::field_storage::dielectric::reversible::{
 use fs_mbd_material::ResolvedBody;
 use fs_phs::circuit::capacitance::{CapacitorChargeCurve, CapacitorCurve};
 use fs_phs::circuit::{Branch, CircuitDae, CircuitGraph, MutualInductance};
-use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage, step_descriptor};
+use fs_phs::{
+    ConstitutiveDiscreteGradient, DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage,
+    step_descriptor,
+};
 
 use super::super::contacts::{self, ContactHeat, SeriesElectricalContact};
 use super::super::{
@@ -20,7 +23,7 @@ use super::super::{
     ResistorHeat, account_step_with_storage_change, bind_with_storage_laws, extended, poll,
 };
 use super::support::AxialSupport;
-use super::{FieldMotionInput, invalid, phs, positive, within};
+use super::{FieldMotionInput, invalid, phs, positive, quadratic_chord, within};
 
 /// Original constitutive source and fixed-area geometry of one moving branch.
 #[derive(Clone, Debug, PartialEq)]
@@ -129,6 +132,104 @@ impl ReversibleDielectricGap {
             response.field_strength_v_m.copysign(displacement),
             response.energy_density_j_m3,
         ))
+    }
+
+    // Exact average-vector-field effort on each original E(D) segment. E is
+    // affine and w is quadratic there, so Simpson integrates BOTH reciprocal
+    // efforts exactly. Source knots, including signed reversals, split the
+    // path; no source resampling, fitted potential or global correction is used.
+    fn field_chord(
+        &self,
+        qa: f64,
+        qb: f64,
+        ga: f64,
+        gb: f64,
+    ) -> Result<(f64, f64), MaterialCircuitError> {
+        if qa == qb {
+            let (field, energy) = self.density(qa)?;
+            return Ok((
+                finite(f64::midpoint(ga, gb) * field)?,
+                finite(self.area_m2 * energy)?,
+            ));
+        }
+        let (qa, qb, ga, gb) = if qa < qb {
+            (qa, qb, ga, gb)
+        } else {
+            (qb, qa, gb, ga)
+        };
+        self.density(qa)?;
+        self.density(qb)?;
+        let dq = finite(qb - qa)?;
+        let knots = &self.material.source_path().knots;
+        let scale = self.material.displacement_scale();
+        let knot_charge = |i: usize| self.area_m2 * (scale * knots[i].1.evidence.value.value);
+        let gap_at = |charge: f64| {
+            if charge == qa {
+                ga
+            } else if charge == qb {
+                gb
+            } else {
+                (gb - ga).mul_add((charge - qa) / dq, ga)
+            }
+        };
+        let (mut voltage, mut voltage_tail, mut force, mut force_tail) =
+            (0.0_f64, 0.0, 0.0_f64, 0.0);
+        let add = |total: &mut f64, tail: &mut f64, value: f64| {
+            let next = *total + value;
+            *tail += if total.abs() >= value.abs() {
+                (*total - next) + value
+            } else {
+                (value - next) + *total
+            };
+            *total = next;
+        };
+        let mut left = qa;
+        while left < qb {
+            let boundary = if left < 0.0 {
+                let i = knots
+                    .partition_point(|(_, answer)| {
+                        self.area_m2 * (scale * answer.evidence.value.value) < -left
+                    })
+                    .saturating_sub(1)
+                    .min(knots.len() - 2);
+                -knot_charge(i)
+            } else {
+                let i = knots
+                    .partition_point(|(_, answer)| {
+                        self.area_m2 * (scale * answer.evidence.value.value) <= left
+                    })
+                    .saturating_sub(1)
+                    .min(knots.len() - 2);
+                knot_charge(i + 1)
+            };
+            let right = boundary.min(qb);
+            if right <= left {
+                return Err(invalid(
+                    "dielectric source chord is below represented charge resolution",
+                ));
+            }
+            let mid = f64::midpoint(left, right);
+            let (el, wl) = self.density(left)?;
+            let (em, wm) = self.density(mid)?;
+            let (er, wr) = self.density(right)?;
+            let gap_left = gap_at(left);
+            let gap_right = gap_at(right);
+            let weight = (right - left) / dq;
+            let electric = finite(
+                weight
+                    * sum([
+                        gap_left * (el / 6.0),
+                        f64::midpoint(gap_left, gap_right) * (em * (2.0 / 3.0)),
+                        gap_right * (er / 6.0),
+                    ]),
+            )?;
+            let mechanical =
+                finite((self.area_m2 * weight) * sum([wl / 6.0, wm * (2.0 / 3.0), wr / 6.0]))?;
+            add(&mut voltage, &mut voltage_tail, electric);
+            add(&mut force, &mut force_tail, mechanical);
+            left = right;
+        }
+        Ok((finite(voltage + voltage_tail)?, finite(force + force_tail)?))
     }
 }
 
@@ -743,6 +844,10 @@ impl MotionStorage {
     }
 }
 impl Storage for MotionStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        Some(self)
+    }
+
     fn coordinate_scale(&self, i: usize) -> Option<f64> {
         if i == self.charge {
             Some(self.dielectric.maximum_charge_c)
@@ -785,5 +890,42 @@ impl Storage for MotionStorage {
     }
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
         Some(self.remainder(a, b, mid).unwrap_or(f64::NAN))
+    }
+}
+
+impl ConstitutiveDiscreteGradient for MotionStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], _: &[f64], out: &mut [f64]) {
+        if !quadratic_chord(&self.other, a, b, out)
+            || !within(a[self.gap], self.dielectric.gap_limits_m)
+            || !within(b[self.gap], self.dielectric.gap_limits_m)
+        {
+            out.fill(f64::NAN);
+            return;
+        }
+        let Ok((voltage, gap_effort)) =
+            self.dielectric
+                .field_chord(a[self.charge], b[self.charge], a[self.gap], b[self.gap])
+        else {
+            out.fill(f64::NAN);
+            return;
+        };
+        out[self.charge] += voltage;
+        out[self.gap] += gap_effort;
+        out[self.momentum] += f64::midpoint(a[self.momentum], b[self.momentum]) / self.mass;
+        for (i, curve) in &self.curves {
+            out[*i] += curve.discrete_voltage_v(a[*i], b[*i]).unwrap_or(f64::NAN);
+        }
+        if let Some(support) = &self.support {
+            match (
+                support.force_and_energy(a[self.gap]),
+                support.force_and_energy(b[self.gap]),
+            ) {
+                (Ok((fa, _)), Ok((fb, _))) => out[self.gap] -= f64::midpoint(fa, fb),
+                _ => out.fill(f64::NAN),
+            }
+        }
+        if out.iter().any(|x| !x.is_finite()) {
+            out.fill(f64::NAN);
+        }
     }
 }

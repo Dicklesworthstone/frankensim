@@ -21,11 +21,16 @@ pub mod dielectric;
 use support::AxialSupport;
 
 use fs_matdb::EvaluationDecision;
-use fs_material::field_storage::{ELECTRIC_PERMITTIVITY_PROPERTY, MAGNETIC_PERMEABILITY_PROPERTY,
-    ResolvedCapacitor, ResolvedInductor};
+use fs_material::field_storage::{
+    ELECTRIC_PERMITTIVITY_PROPERTY, MAGNETIC_PERMEABILITY_PROPERTY, ResolvedCapacitor,
+    ResolvedInductor,
+};
 use fs_mbd_material::ResolvedBody;
-use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage, step_descriptor};
 use fs_phs::circuit::{Branch, CircuitDae, CircuitError};
+use fs_phs::{
+    ConstitutiveDiscreteGradient, DescriptorPortHamiltonian, QuadraticStorage, StepRecord, Storage,
+    step_descriptor,
+};
 
 use super::storage::MaterialStorageElement;
 use super::contacts::{self, ContactHeat, SeriesElectricalContact};
@@ -320,6 +325,9 @@ impl MaterialFieldMotion {
     /// storage are retained. An optional layered support adds its original
     /// material energy and consistent inertia. No force gain, separate circuit
     /// integrator, authored spring constant or overridden mass is introduced.
+    /// The field's exact average-vector-field chord acts only on charge/linkage
+    /// and gap. Kinetic effort remains mean physical momentum divided by mass;
+    /// nonlinear field work never modifies that velocity or other circuit efforts.
     ///
     /// The endpoint must also admit its unchanged proposed charge/flux under the
     /// original algebraic constraints at the NEW geometry. Incompatible ideal
@@ -550,6 +558,10 @@ impl GapStorage {
     }
 }
 impl Storage for GapStorage {
+    fn discrete_gradient_rule(&self) -> Option<&dyn ConstitutiveDiscreteGradient> {
+        Some(self)
+    }
+
     fn hamiltonian(&self, x: &[f64]) -> f64 {
         if !within(x[self.gap_index], self.limits) { return f64::NAN; }
         self.electrical_energy(x)+self.kinetic_energy(x)+self.elastic_energy(x)
@@ -581,5 +593,169 @@ impl Storage for GapStorage {
         // and frozen-prestrain support terms are quadratic and contribute zero;
         // avoid subtracting large Hs.
         Some(0.125*dq*(dq/self.scale)*dd)
+    }
+}
+
+// The symmetric derivative of the ORIGINAL retained quadratic energy, including
+// the tiny matrix asymmetry admitted by QuadraticStorage. This is local to the
+// field-motion composition; no nonlinear energy correction enters these rows.
+fn quadratic_chord(other: &QuadraticStorage, a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+    let q = other.matrix();
+    let n = q.len().isqrt();
+    if a.len() != n || b.len() != n || out.len() != n || a.iter().chain(b).any(|x| !x.is_finite()) {
+        out.fill(f64::NAN);
+        return false;
+    }
+    for (i, value) in out.iter_mut().enumerate() {
+        *value = (0..n)
+            .map(|j| (0.5 * q[i * n + j] + 0.5 * q[j * n + i]) * f64::midpoint(a[j], b[j]))
+            .sum();
+    }
+    out.iter().all(|x| x.is_finite())
+}
+
+fn quadratic_chord_tangent(other: &QuadraticStorage, direction: &[f64], out: &mut [f64]) -> bool {
+    let q = other.matrix();
+    let n = q.len().isqrt();
+    if direction.len() != n || out.len() != n || direction.iter().any(|x| !x.is_finite()) {
+        out.fill(f64::NAN);
+        return false;
+    }
+    for (i, value) in out.iter_mut().enumerate() {
+        *value = (0..n)
+            .map(|j| (0.25 * q[i * n + j] + 0.25 * q[j * n + i]) * direction[j])
+            .sum();
+    }
+    out.iter().all(|x| x.is_finite())
+}
+
+impl ConstitutiveDiscreteGradient for GapStorage {
+    fn evaluate(&self, a: &[f64], b: &[f64], _: &[f64], out: &mut [f64]) {
+        if !quadratic_chord(&self.other, a, b, out)
+            || !within(a[self.gap_index], self.limits)
+            || !within(b[self.gap_index], self.limits)
+        {
+            out.fill(f64::NAN);
+            return;
+        }
+        let q = self.coordinate_index;
+        let g = self.gap_index;
+        let p = self.momentum_index;
+        let qm = f64::midpoint(a[q], b[q]);
+        let gm = f64::midpoint(a[g], b[g]);
+        let dq = b[q] - a[q];
+        let dg = b[g] - a[g];
+        // Exact integral of grad(q²*g/(2*scale)) along the endpoint segment.
+        // The cubic work is confined to the same two physical coordinates.
+        out[q] += qm * (gm / self.scale) + (dq / 12.0) * (dg / self.scale);
+        out[g] += 0.5 * (qm * (qm / self.scale) + (dq / 12.0) * (dq / self.scale));
+        out[p] += f64::midpoint(a[p], b[p]) / self.mass;
+        if let Some(support) = &self.support {
+            match (
+                support.force_and_energy(a[g]),
+                support.force_and_energy(b[g]),
+            ) {
+                (Ok((fa, _)), Ok((fb, _))) => out[g] -= f64::midpoint(fa, fb),
+                _ => out.fill(f64::NAN),
+            }
+        }
+        if out.iter().any(|x| !x.is_finite()) {
+            out.fill(f64::NAN);
+        }
+    }
+
+    fn end_jacobian_action(
+        &self,
+        a: &[f64],
+        b: &[f64],
+        direction: &[f64],
+        out: &mut [f64],
+    ) -> bool {
+        if !quadratic_chord_tangent(&self.other, direction, out)
+            || a.len() != out.len()
+            || b.len() != out.len()
+            || a.iter().chain(b).any(|x| !x.is_finite())
+            || !within(a[self.gap_index], self.limits)
+            || !within(b[self.gap_index], self.limits)
+        {
+            out.fill(f64::NAN);
+            return false;
+        }
+        let q = self.coordinate_index;
+        let g = self.gap_index;
+        let p = self.momentum_index;
+        let qm = f64::midpoint(a[q], b[q]);
+        let gm = f64::midpoint(a[g], b[g]);
+        let q_weight = (0.5 * qm + (b[q] - a[q]) / 12.0) / self.scale;
+        let g_weight = (0.5 * gm + (b[g] - a[g]) / 12.0) / self.scale;
+        out[q] += g_weight * direction[q] + q_weight * direction[g];
+        out[g] += q_weight * direction[q];
+        out[p] += 0.5 * (direction[p] / self.mass);
+        if let Some(support) = &self.support {
+            if support.force_and_energy(a[g]).is_err() || support.force_and_energy(b[g]).is_err() {
+                out.fill(f64::NAN);
+                return false;
+            }
+            out[g] += 0.5 * support.stiffness_n_m() * direction[g];
+        }
+        out.iter().all(|x| x.is_finite())
+    }
+}
+
+#[cfg(test)]
+mod momentum_chord_tests {
+    use super::*;
+
+    #[test]
+    fn field_chord_preserves_component_work_and_has_its_own_exact_tangent() {
+        let mut matrix = vec![0.0; 25];
+        matrix[0] = 2.0;
+        matrix[18] = 3.0;
+        matrix[3] = 0.4;
+        matrix[15] = 0.4;
+        let law = GapStorage {
+            other: QuadraticStorage::new(matrix, 5).unwrap(),
+            coordinate_index: 1,
+            gap_index: 2,
+            momentum_index: 4,
+            mass: 0.9,
+            scale: 0.75,
+            limits: [0.2, 2.0],
+            support: None,
+        };
+        let a = [0.7, -0.8, 0.4, 0.5, 2.3];
+        let b = [-0.3, 0.5, 1.1, -0.6, -1.4];
+        let mid = core::array::from_fn::<_, 5, _>(|i| f64::midpoint(a[i], b[i]));
+        let mut effort = [0.0; 5];
+        law.evaluate(&a, &b, &mid, &mut effort);
+        let work: f64 = (0..5).map(|i| effort[i] * (b[i] - a[i])).sum();
+        assert!((work - (law.hamiltonian(&b) - law.hamiltonian(&a))).abs() < 3e-14);
+        assert_eq!(effort[4], mid[4] / law.mass);
+        assert_eq!(effort[0], 2.0 * mid[0] + 0.4 * mid[3]);
+        assert_eq!(effort[3], 0.4 * mid[0] + 3.0 * mid[3]);
+        let mut reverse = [0.0; 5];
+        law.evaluate(&b, &a, &mid, &mut reverse);
+        assert_eq!(effort, reverse);
+        let direction = [0.2, -0.3, 0.5, -0.1, 0.4];
+        let mut tangent = [0.0; 5];
+        assert!(law.end_jacobian_action(&a, &b, &direction, &mut tangent));
+        let probe = |sign: f64| {
+            let endpoint = core::array::from_fn::<_, 5, _>(|i| b[i] + sign * 1e-6 * direction[i]);
+            let center = core::array::from_fn::<_, 5, _>(|i| f64::midpoint(a[i], endpoint[i]));
+            let mut out = [0.0; 5];
+            law.evaluate(&a, &endpoint, &center, &mut out);
+            out
+        };
+        let (plus, minus) = (probe(1.0), probe(-1.0));
+        for i in 0..5 {
+            assert!((tangent[i] - (plus[i] - minus[i]) / 2e-6).abs() < 3e-9);
+        }
+        let mut coincident = [0.0; 5];
+        let mut analytic = [0.0; 5];
+        law.evaluate(&a, &a, &a, &mut coincident);
+        law.gradient(&a, &mut analytic);
+        for i in 0..5 {
+            assert!((coincident[i] - analytic[i]).abs() < 2e-15);
+        }
     }
 }

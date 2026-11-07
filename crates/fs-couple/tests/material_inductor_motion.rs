@@ -153,6 +153,69 @@ fn permeability_turns_and_body_density_change_motion_at_fixed_flux_linkage() {
     }
 }
 
+#[test]
+fn driven_flux_has_the_original_maxwell_impulse_and_mean_physical_velocity() {
+    let (linkage, voltage, dt, force, scale) = (-0.2_f64, 1.4, 0.3, 0.015, 2.0);
+    for velocity in [-0.3, 0.0, 0.4] {
+        let circuit = MaterialCircuit::new_with_storage(
+            CircuitGraph {
+                node_count: 2,
+                branches: vec![
+                    (1, 0, Branch::Inductor { henries: f64::NAN }),
+                    (1, 0, Branch::VoltageSource { port: 0 }),
+                ],
+                transformers: vec![],
+            },
+            vec![],
+            vec![magnetic(0, 1.0, 0.5, 1.0, 2)],
+            vec![linkage],
+            vec![],
+            &[voltage],
+        )
+        .unwrap();
+        let model =
+            MaterialFieldMotion::new(circuit, 0, body(2000.0), velocity, [0.2, 1.5]).unwrap();
+        let candidate = model
+            .step_candidate(
+                vec![],
+                FieldMotionInput {
+                    electrical_ports: &[voltage],
+                    external_force_n: force,
+                    duration_s: dt,
+                },
+                controls(),
+                || false,
+            )
+            .unwrap();
+        let next = candidate.model();
+        let l1 = next.circuit().fluxes_wb()[0];
+        near((l1 - linkage).abs(), voltage * dt, 2e-12);
+        // The held voltage gives affine linkage. The continuous Maxwell-force
+        // integral is independent of the gap's initial mechanical momentum.
+        let impulse = dt * (force - (linkage * linkage + linkage * l1 + l1 * l1) / (6.0 * scale));
+        near(
+            next.momentum_kg_m_s() - model.momentum_kg_m_s(),
+            impulse,
+            2e-11,
+        );
+        near(
+            next.gap_m() - model.gap_m(),
+            0.5 * dt * (model.velocity_m_s() + next.velocity_m_s()),
+            2e-11,
+        );
+        near(
+            candidate.step().native.y[1],
+            0.5 * (model.velocity_m_s() + next.velocity_m_s()),
+            2e-11,
+        );
+        near(
+            candidate.step().energy_residual_j,
+            0.0,
+            controls().energy_tolerance_j,
+        );
+    }
+}
+
 fn network() -> MaterialCircuit {
     MaterialCircuit::new_with_storage(CircuitGraph { node_count: 4, branches: vec![
         (1, 2, Branch::Resistor { ohms: f64::NAN }),

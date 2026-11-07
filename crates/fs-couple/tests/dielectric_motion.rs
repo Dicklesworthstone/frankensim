@@ -286,6 +286,74 @@ fn fixed_charge_force_is_the_energy_derivative_for_both_polarities_and_source_ma
     }
 }
 
+#[test]
+fn driven_nonlinear_charge_preserves_native_momentum_through_source_knots_and_polarity() {
+    // Independent cubic primitive of the authored piecewise-quadratic w(D).
+    let integral = |d: f64| {
+        let magnitude = d.abs();
+        let value = if magnitude <= 2.0 {
+            magnitude.powi(3) / 12.0
+        } else if magnitude <= 3.0 {
+            let x = magnitude - 2.0;
+            2.0 / 3.0 + x + 0.5 * x * x + x.powi(3) / 3.0
+        } else {
+            let x = magnitude - 3.0;
+            2.5 + 3.0 * x + 1.5 * x * x + x.powi(3) / 24.0
+        };
+        value.copysign(d)
+    };
+    let (q0, area, current, dt, force) = (1.3_f64, 0.5, 4.0, 0.4, 0.05);
+    for velocity in [-0.3, 0.0, 0.25] {
+        let mut driven = graph(false);
+        driven
+            .branches
+            .push((1, 0, Branch::CurrentSource { port: 0 }));
+        let mut start = initial(q0, 1.0, velocity);
+        start.electrical_inputs = vec![current];
+        let moving = ReversibleDielectricGapMotion::new(
+            driven,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            ReversibleDielectricGap::new(nonlinear(), 0, area, [0.2, 1.8]).unwrap(),
+            body(2.0),
+            None,
+            start,
+        )
+        .unwrap();
+        let candidate = moving
+            .step_candidate(
+                vec![],
+                FieldMotionInput {
+                    electrical_ports: &[current],
+                    external_force_n: force,
+                    duration_s: dt,
+                },
+                controls(),
+                || false,
+            )
+            .unwrap();
+        let next = candidate.model();
+        near((next.charge_c() - q0).abs(), current * dt, 2e-11);
+        let (da, db) = (q0 / area, next.charge_c() / area);
+        let field_impulse = -area * dt * (integral(db) - integral(da)) / (db - da);
+        near(
+            next.momentum_kg_m_s() - moving.momentum_kg_m_s(),
+            force * dt + field_impulse,
+            2e-11,
+        );
+        let mean_velocity = f64::midpoint(moving.velocity_m_s(), next.velocity_m_s());
+        near(next.gap_m() - moving.gap_m(), dt * mean_velocity, 2e-11);
+        near(candidate.step().native.y[1], mean_velocity, 2e-11);
+        near(
+            candidate.step().energy_residual_j,
+            0.0,
+            controls().energy_tolerance_j,
+        );
+    }
+}
+
 // Independent continuous ODE: q'=-d E(q/A)/R, d'=v, m v'=F-A w(q/A).
 fn rhs(x: [f64; 3]) -> [f64; 3] {
     [
@@ -334,6 +402,9 @@ fn nonlinear_rc_motion_crosses_source_knots_and_refines_to_the_independent_ode()
                 )
                 .unwrap();
             let (next, step) = proposal.into_parts();
+            let mean_velocity = f64::midpoint(moving.velocity_m_s(), next.velocity_m_s());
+            near(next.gap_m()-moving.gap_m(), (0.8/f64::from(steps))*mean_velocity, 2e-11);
+            near(step.native.y[0], mean_velocity, 2e-11);
             assert!(step.heat_j > 0.0);
             near(step.heat_j, step.resistors[0].heat_j, 1e-14);
             heat += step.heat_j;

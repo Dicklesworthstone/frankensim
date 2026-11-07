@@ -257,7 +257,7 @@ fn reference_state() -> [f64; 4] {
     }
     x
 }
-fn run_nonlinear(steps: usize) -> [f64; 4] {
+fn run_nonlinear(steps: usize) -> [f64; 4]{
     let mut model = nonlinear(0.7, [0.9, -0.7], false, 3.0).unwrap();
     assert!(model.common_flux_wb().unwrap() / AREA < 1.2);
     let initial = model.magnetic_energy_j().unwrap() + 0.5 * MASS * model.velocity_m_s().powi(2);
@@ -272,6 +272,9 @@ fn run_nonlinear(steps: usize) -> [f64; 4] {
             )
             .unwrap();
         let report = candidate.step();
+        let mean_velocity = f64::midpoint(model.velocity_m_s(), candidate.model().velocity_m_s());
+        close(candidate.model().gap_m()-model.gap_m(), (0.2/steps as f64)*mean_velocity, 2e-11);
+        close(report.native.y[2], mean_velocity, 2e-11);
         close(
             report.electrical_energy_j[1],
             candidate.model().magnetic_energy_j().unwrap(),
@@ -346,6 +349,11 @@ fn field_reversal_crosses_signed_source_knees_without_inventing_magnetic_loss() 
             )
             .unwrap();
         let report = candidate.step();
+        let mean_velocity = f64::midpoint(model.velocity_m_s(), candidate.model().velocity_m_s());
+        close(candidate.model().gap_m()-model.gap_m(), 0.03*mean_velocity, 2e-11);
+        close(report.native.y[2], mean_velocity, 2e-11);
+        assert!(candidate.model().momentum_kg_m_s()-model.momentum_kg_m_s() < 0.03*FORCE,
+            "source-knee and polarity crossings must retain attractive magnetic impulse");
         close(report.energy_residual_j, 0.0, 2e-9);
         close(report.heat_j, report.native.dissipated, 2e-10);
         heat += report.heat_j;

@@ -1518,6 +1518,35 @@ Focused regression definitions cover local and total work, independence from
 unrelated mechanical momenta, reverse-step symmetry, endpoint derivatives,
 coincident states, the constant-law path and invalid-support refusal.
 
+### Physical momentum in reciprocal electric and magnetic gaps
+
+`material_circuit::motion` confines nonlinear field work to the original
+charge/linkage and gap coordinates. Its cubic uniform-gap energy uses an exact
+average-vector-field chord with an analytic endpoint derivative. The mechanical
+effort is the mean physical momentum divided by the original body/support mass;
+unrelated circuit storage retains its own quadratic efforts. A full-state
+Gonzalez correction no longer changes mechanical velocity to close field energy.
+For a held current or voltage source, the actual force impulse matches the
+analytic integral of the original quadratic Maxwell force, including reversal.
+`motion::dielectric` uses the same average-vector-field rule on each original
+piecewise-affine E(D) segment. Exact polynomial quadrature splits only at source
+knots; kinetic effort and unrelated nonlinear capacitor secants retain their
+physical coordinates. Its linear material limit matches the uniform-gap owner.
+
+`motion::coupled_gap` uses symmetric fixed-gap/fixed-linkage work chords through
+the same winding leakage and optional reversible-core source. Core saturation
+work is projected only through its original scalar flux constraint. Fixed-linkage
+gap chords remain attractive through field polarity reversals. The no-core
+case has an analytic endpoint action; saturation and nonlinear dielectric paths
+retain the native bounded Newton probes. All four shared-gap corner states must
+remain inside original source support; an unsupported corner refuses the trial.
+These symmetric, consistent time maps retain the original support, circuit
+constraint and transactional refusal boundaries and require time refinement.
+Focused regressions check physical displacement/momentum kinematics, reciprocal
+energy and source work, polarity and source-knee crossings, and the existing
+independent RK4 refinement reference. These are numerical-law checks, not new
+measured material or actuator validation claims.
+
 ## Annular DG terminal passages
 
 Fixed DG terminal passages accept concentric axial annuli through

@@ -182,6 +182,31 @@ impl ReversibleMagneticCore {
         })
     }
 
+    // Correction to the mean flux in an exact two-endpoint magnetic-work law.
+    // R = dW_core - avg(F_core)*dPhi, so R/(r*dPhi + dF_core)
+    // distributes ONLY the core's nonlinear work through its original scalar
+    // flux constraint. A single affine source span has R=0 exactly.
+    pub(super) fn chord_correction(&self, a: f64, b: f64, reluctance: f64) -> f64 {
+        let remainder = self.trapezoid_remainder(a, b);
+        if remainder == 0.0 {
+            return 0.0;
+        }
+        let (Some(ra), Some(rb)) = (self.response(a), self.response(b)) else {
+            return f64::NAN;
+        };
+        let fa = self.path_length_m * ra.field_strength_a_m.copysign(a);
+        let fb = self.path_length_m * rb.field_strength_a_m.copysign(b);
+        let denominator = reluctance * (b - a) + (fb - fa);
+        if !positive(reluctance)
+            || !denominator.is_finite()
+            || denominator == 0.0
+            || denominator.signum() != (b - a).signum()
+        {
+            return f64::NAN;
+        }
+        remainder / denominator
+    }
+
     // W(b)-W(a)-avg(W'(a),W'(b))*(b-a), evaluated from source slope jumps
     // instead of subtracting large endpoint energies. A single affine H span
     // has exactly zero defect; only crossed saturation knots contribute.

@@ -110,6 +110,69 @@ fn dielectric_and_electrode_material_swaps_change_real_motion_by_the_energy_deri
     }
 }
 
+#[test]
+fn driven_charge_delivers_its_physical_force_impulse_without_changing_mass_kinematics() {
+    let (charge, current, dt, force, scale) = (0.2_f64, 1.5, 0.3, 0.015, 0.5);
+    for velocity in [-0.3, 0.0, 0.4] {
+        let circuit = MaterialCircuit::new_with_storage(
+            CircuitGraph {
+                node_count: 2,
+                branches: vec![
+                    (1, 0, Branch::Capacitor { farads: f64::NAN }),
+                    (1, 0, Branch::CurrentSource { port: 0 }),
+                ],
+                transformers: vec![],
+            },
+            vec![],
+            vec![capacitor(0, 1.0, 0.5, 1.0)],
+            vec![],
+            vec![charge],
+            &[current],
+        )
+        .unwrap();
+        let model =
+            MaterialFieldMotion::new(circuit, 0, plate(2000.0), velocity, [0.2, 1.5]).unwrap();
+        let candidate = model
+            .step_candidate(
+                vec![],
+                FieldMotionInput {
+                    electrical_ports: &[current],
+                    external_force_n: force,
+                    duration_s: dt,
+                },
+                controls(),
+                || false,
+            )
+            .unwrap();
+        let next = candidate.model();
+        let q1 = next.circuit().charges_c()[0];
+        near((q1 - charge).abs(), current * dt, 2e-12);
+        // Constant current makes q(t) affine. Integrate its original Maxwell
+        // force -q(t)^2/(2 epsilon A) analytically, including polarity reversal.
+        let impulse = dt * (force - (charge * charge + charge * q1 + q1 * q1) / (6.0 * scale));
+        near(
+            next.momentum_kg_m_s() - model.momentum_kg_m_s(),
+            impulse,
+            2e-11,
+        );
+        near(
+            next.gap_m() - model.gap_m(),
+            0.5 * dt * (model.velocity_m_s() + next.velocity_m_s()),
+            2e-11,
+        );
+        near(
+            candidate.step().native.y[1],
+            0.5 * (model.velocity_m_s() + next.velocity_m_s()),
+            2e-11,
+        );
+        near(
+            candidate.step().energy_residual_j,
+            0.0,
+            controls().energy_tolerance_j,
+        );
+    }
+}
+
 fn network() -> MaterialCircuit {
     MaterialCircuit::new_with_storage(CircuitGraph { node_count: 3, branches: vec![
         (1, 2, Branch::Resistor { ohms: f64::NAN }),
