@@ -159,8 +159,14 @@ fn assert_faces(
             cell,
             axis,
         );
-        let rho_alpha = 0.5 * pl.density * heat.diffusivities()[left]
-            + 0.5 * pr.density * heat.diffusivities()[cell];
+        let rho_alpha = face_viscosity_reference(
+            active,
+            [heat.coefficient(left).unwrap(), heat.coefficient(cell).unwrap()],
+            momentum.filter_width(),
+            left,
+            cell,
+            axis,
+        );
         let ts = tangents(axis);
         let derivative = (pr.velocity[axis] - pl.velocity[axis]) / flow.grid.spacing[axis];
         let transverse: f64 = ts

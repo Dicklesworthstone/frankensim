@@ -467,8 +467,14 @@ fn g1_dynamic_heat_with_zero_modeled_stress_reaches_conservative_flux_and_stabil
         let mut left = c;
         left[0] = (c[0] + n - 1) % n;
         let left = flow.grid.index(left);
-        let rho_alpha =
-            0.5 * rho[left] * heat.diffusivities()[left] + 0.5 * rho[i] * heat.diffusivities()[i];
+        let rho_alpha = face_viscosity_reference(
+            &active,
+            [heat.coefficient(left).unwrap(), heat.coefficient(i).unwrap()],
+            h,
+            left,
+            i,
+            0,
+        );
         let face = flow.grid.cell_face(0, c);
         let a = active.work.flux[0][face];
         let b = molecular.work.flux[0][face];
@@ -708,8 +714,14 @@ fn g1_cartesian_dynamic_stress_and_heat_use_physical_faces_and_conserve() {
                     axis,
                 );
                 let k_t = if independent_heat {
-                    3.5 * (0.5 * rho[left] * heat.diffusivities()[left]
-                        + 0.5 * rho[i] * heat.diffusivities()[i])
+                    3.5 * face_viscosity_reference(
+                        &active,
+                        [heat.coefficient(left).unwrap(), heat.coefficient(i).unwrap()],
+                        core.filter_width(),
+                        left,
+                        i,
+                        axis,
+                    )
                 } else {
                     3.5 * mu_t / fixed.turbulent_prandtl
                 };
@@ -819,7 +831,13 @@ fn dynamic_face_strain_retains_shear_hidden_from_both_cell_centers() {
             |p| {
                 let cell = at(p[0] as usize, p[1] as usize, p[2] as usize);
                 let u = velocity[cell];
-                [1.0 + 0.1 * (cell % 7) as f64 / 6.0, u[0], u[1], u[2], 2.0]
+                let rho = 1.0 + 0.1 * (cell % 7) as f64 / 6.0;
+                let pressure = if independent_heat {
+                    rho * (1.4 + 0.05 * (cell % 5) as f64)
+                } else {
+                    2.0
+                };
+                [rho, u[0], u[1], u[2], pressure]
             },
         );
         let controls = config(DynamicAveraging::Domain);
@@ -829,7 +847,10 @@ fn dynamic_face_strain_retains_shear_hidden_from_both_cell_centers() {
                 law(flow.gas(), 0.01, 0.0, 0.004),
                 DynamicThermalSubgridConfig {
                     momentum: controls.model,
-                    heat: thermal_config().heat,
+                    heat: DynamicScalarConfig {
+                        averaging: DynamicAveraging::Domain,
+                        ..thermal_config().heat
+                    },
                 },
                 usize::MAX,
                 || false,
@@ -873,6 +894,40 @@ fn dynamic_face_strain_retains_shear_hidden_from_both_cell_centers() {
             0.02 * expected_mu,
             2e-13,
         );
+        if independent_heat {
+            use fs_lbm::sgs3::dynamic::scalar::PeriodicDynamicScalar;
+            let temperature: Vec<_> = active.work.primitive.iter().map(|p| p.temperature).collect();
+            let mut heat = PeriodicDynamicScalar::new([n; 3], usize::MAX).unwrap();
+            fit.prepare_with_scalar(
+                controls.model,
+                DynamicScalarConfig {
+                    averaging: DynamicAveraging::Domain,
+                    ..thermal_config().heat
+                },
+                &density,
+                &resolved,
+                &temperature,
+                &mut heat,
+                || false,
+            )
+            .unwrap();
+            // Independent physical-unit Germano evaluation of the fixed field.
+            let heat_coefficient = 0.052_373_451_587_678_26;
+            for cell in [left, right] {
+                close(heat.coefficient(cell).unwrap(), heat_coefficient, 2e-13);
+                assert!(heat.diffusivities()[cell] < 1e-14);
+            }
+            let expected_heat = -1.025 * heat_coefficient * 0.02 * 3.5
+                * (temperature[right] - temperature[left]);
+            assert!(expected_heat.abs() > 1e-6);
+            // Mean face velocity is zero, so no SGS stress work contaminates
+            // this direct heat-flux check. Cell-diffusivity interpolation gave zero.
+            close(
+                active.work.flux[0][face].energy - base.work.flux[0][face].energy,
+                expected_heat,
+                2e-13,
+            );
+        }
         let initial = flow.totals();
         let report = active
             .advance(&mut flow, Time::new(0.001), MolecularControl::default(), || false)

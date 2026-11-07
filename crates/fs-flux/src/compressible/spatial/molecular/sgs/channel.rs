@@ -225,37 +225,38 @@ impl ChannelDynamicThermalTransport {
             &mut *cancelled,
         )?;
         self.work.store_transport(
-            primitive,
             self.momentum.coefficients_squared(),
-            self.heat.diffusivities(),
+            self.heat.coefficients(),
             dynamic_coefficient_squared,
             cancelled,
         )
+    }
+
+    pub(super) fn face_heat_coefficient(&self, left: usize, right: usize) -> f64 {
+        self.work.face_heat_coefficient(left, right)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn face_coefficients(
         &self,
         gas: &FrozenGas,
-        left: usize,
-        right: usize,
         axis: usize,
         face: usize,
         temperature: f64,
         pressure: f64,
         mu_t: f64,
+        rho_alpha: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
     ) -> Result<(f64, f64), MolecularError> {
-        self.work.face_coefficients(
+        thermal::ThermalWorkspace::face_coefficients(
             gas,
-            left,
-            right,
             axis,
             face,
             temperature,
             pressure,
             mu_t,
+            rho_alpha,
             molecular_mu,
             molecular_conductivity,
             self.config.momentum.maximum_eddy_to_molecular,

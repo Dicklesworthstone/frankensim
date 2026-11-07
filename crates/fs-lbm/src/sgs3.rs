@@ -16,8 +16,7 @@
 //! changes the constructor's molecular collision law.
 
 mod model;
-pub use model::{SgsConfig, SgsError, SgsModel, SgsUse, eddy_viscosity};
-pub(crate) use model::smagorinsky_viscosity;
+pub use model::{SgsConfig, SgsError, SgsModel, SgsUse, eddy_viscosity, smagorinsky_viscosity};
 mod vreman;
 pub use vreman::vreman_eddy_viscosity;
 

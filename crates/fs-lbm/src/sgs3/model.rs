@@ -166,9 +166,17 @@ pub fn eddy_viscosity(
     }
 }
 
-/// The same Smagorinsky closure for an already resolved shear invariant.
-/// Constitutive roots supply the trial rate; no fictitious gradient is needed.
-pub(crate) fn smagorinsky_viscosity(
+/// Evaluate `(C_s Delta)^2 |S|` from an already resolved shear invariant.
+/// `cs` is C_s, not C_s squared: a fitted momentum or scalar coefficient C
+/// must be supplied as `sqrt(C)`. `shear_rate` is the nonnegative physical
+/// `|S| = sqrt(2 S:S)`; metres and inverse seconds return m^2/s.
+///
+/// Constitutive roots can supply a trial rate, and conservative faces can
+/// reuse one rate for independent stress, heat and species coefficients.
+/// Reuse the rate itself, not `Delta^2 |S|`: retaining `C_s Delta` preserves
+/// representable results that separately squaring Delta could lose.
+/// All inputs are validated even when the coefficient or rate is exactly zero.
+pub fn smagorinsky_viscosity(
     cs: f64,
     filter_width: f64,
     shear_rate: f64,
@@ -246,6 +254,67 @@ mod tests {
                 let ratio = eddy_viscosity(model, 1.0, scaled).unwrap() / (scale * reference);
                 assert!((ratio - 1.0).abs() < 1e-14, "scale={scale} ratio={ratio}");
             }
+        }
+    }
+
+    #[test]
+    fn reused_smagorinsky_rate_preserves_scaling_zeros_and_refusals() {
+        let tensors = [
+            [[0.3, 0.7, -0.2], [-0.1, -0.4, 0.6], [0.8, -0.5, 0.1]],
+            [[0.0, 1.0, 0.0], [0.0; 3], [0.0; 3]],
+            [[0.0, -0.2, 0.0], [0.2, 0.0, 0.0], [0.0; 3]],
+            [[0.0; 3]; 3],
+        ];
+        for tensor in tensors {
+            for scale in [1e-150, 1.0, 1e150] {
+                let gradient = tensor.map(|row| row.map(|value| value * scale));
+                let rate = eddy_viscosity(SgsModel::Smagorinsky { cs: 1.0 }, 1.0, gradient)
+                    .unwrap();
+                for (cs, width) in [
+                    (0.0, 1.0),
+                    (0.17, 2.0),
+                    (1e-100, 1e100),
+                    (1e100, 1e-100),
+                    (1e-100, 1e200),
+                    (1e100, 1e-200),
+                ] {
+                    let expected = eddy_viscosity(SgsModel::Smagorinsky { cs }, width, gradient);
+                    let reused = smagorinsky_viscosity(cs, width, rate);
+                    assert_eq!(reused.map(f64::to_bits), expected.map(f64::to_bits));
+                }
+            }
+        }
+        // Factoring out Delta^2 |S| would overflow for the first pair and
+        // underflow for the second, although both requested diffusivities fit.
+        for (coefficient, width, expected) in
+            [(1e-200, 1e200, 1e200), (1e200, 1e-200, 1e-200)]
+        {
+            let actual = smagorinsky_viscosity(det::sqrt(coefficient), width, 1.0).unwrap();
+            assert!((actual / expected - 1.0).abs() < 1e-14);
+        }
+        assert_eq!(
+            smagorinsky_viscosity(1.0, 1e200, 1.0),
+            Err(SgsError::NonFiniteViscosity)
+        );
+        assert_eq!(smagorinsky_viscosity(0.0, f64::MAX, f64::MAX), Ok(0.0));
+        assert_eq!(smagorinsky_viscosity(f64::MAX, f64::MAX, 0.0), Ok(0.0));
+        for cs in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                smagorinsky_viscosity(cs, 1.0, 0.0),
+                Err(SgsError::InvalidCoefficient)
+            );
+        }
+        for width in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                smagorinsky_viscosity(0.0, width, 0.0),
+                Err(SgsError::InvalidFilterWidth)
+            );
+        }
+        for rate in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                smagorinsky_viscosity(0.0, 1.0, rate),
+                Err(SgsError::NonFiniteGradient)
+            );
         }
     }
 

@@ -1,8 +1,9 @@
 //! Independent dynamic momentum and temperature diffusion on one gas owner.
 //!
-//! The shared Favre Germano scalar fit returns a thermal diffusivity, not a
-//! Prandtl number. The conservative face operator consumes
-//! `k_t = mean(rho alpha_t) Cp(T_face)` using the original caloric source.
+//! The shared Favre Germano scalar fit retains C_phi independently of the
+//! centered cell strain. Each conservative face uses its full velocity tensor:
+//! `alpha_t = C_phi,face Delta^2 |S_face|` and
+//! `k_t = rho_face alpha_t Cp(T_face)` from the original caloric source.
 //! A heat fit can remain active when the momentum fit is zero. No division
 //! by the momentum coefficient, inferred Prandtl floor, or second heating
 //! source is introduced. The existing total-energy flux and stability estimate
@@ -98,7 +99,7 @@ pub(super) struct ThermalWorkspace {
     pub(super) density: Vec<f64>,
     pub(super) velocity: Vec<[f64; 3]>,
     pub(super) temperature: Vec<f64>,
-    rho_diffusivity: Vec<f64>,
+    heat_coefficient: Vec<f64>,
 }
 
 impl SubgridTransport {
@@ -157,37 +158,38 @@ impl DynamicThermalTransport {
             &mut *cancelled,
         )?;
         self.work.store_transport(
-            primitive,
             self.momentum.coefficients_squared(),
-            self.heat.diffusivities(),
+            self.heat.coefficients(),
             dynamic_coefficient_squared,
             cancelled,
         )
+    }
+
+    pub(super) fn face_heat_coefficient(&self, left: usize, right: usize) -> f64 {
+        self.work.face_heat_coefficient(left, right)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn face_coefficients(
         &self,
         gas: &FrozenGas,
-        left: usize,
-        right: usize,
         axis: usize,
         face: usize,
         temperature: f64,
         pressure: f64,
         mu_t: f64,
+        rho_alpha: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
     ) -> Result<(f64, f64), MolecularError> {
-        self.work.face_coefficients(
+        ThermalWorkspace::face_coefficients(
             gas,
-            left,
-            right,
             axis,
             face,
             temperature,
             pressure,
             mu_t,
+            rho_alpha,
             molecular_mu,
             molecular_conductivity,
             self.config.momentum.maximum_eddy_to_molecular,
@@ -202,12 +204,12 @@ impl ThermalWorkspace {
             density: allocated(cells, 0.0)?,
             velocity: allocated(cells, [0.0; 3])?,
             temperature: allocated(cells, 0.0)?,
-            rho_diffusivity: allocated(cells, 0.0)?,
+            heat_coefficient: allocated(cells, 0.0)?,
         })
     }
 
     pub(super) fn workspace_bytes(&self) -> usize {
-        (self.density.capacity() + self.temperature.capacity() + self.rho_diffusivity.capacity())
+        (self.density.capacity() + self.temperature.capacity() + self.heat_coefficient.capacity())
             * core::mem::size_of::<f64>()
             + self.velocity.capacity() * core::mem::size_of::<[f64; 3]>()
     }
@@ -230,14 +232,12 @@ impl ThermalWorkspace {
 
     pub(super) fn store_transport(
         &mut self,
-        primitive: &[Primitive],
         coefficients: impl ExactSizeIterator<Item = f64>,
-        diffusivity: &[f64],
+        heat_coefficients: impl ExactSizeIterator<Item = f64>,
         dynamic_coefficient_squared: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MolecularError> {
-        for (cell, ((p, fitted), coefficient)) in primitive
-            .iter()
+        for (cell, ((heat, fitted), coefficient)) in heat_coefficients
             .zip(coefficients)
             .zip(dynamic_coefficient_squared)
             .enumerate()
@@ -246,34 +246,30 @@ impl ThermalWorkspace {
                 poll(cancelled)?;
             }
             *coefficient = fitted;
-            self.rho_diffusivity[cell] = p.density * diffusivity[cell];
-            if !self.rho_diffusivity[cell].is_finite() {
-                return Err(MolecularError::Invalid(
-                    "unrepresentable dynamic thermal SGS transport",
-                ));
-            }
+            self.heat_coefficient[cell] = heat;
         }
         poll(cancelled)?;
         Ok(())
     }
 
+    pub(super) fn face_heat_coefficient(&self, left: usize, right: usize) -> f64 {
+        0.5 * self.heat_coefficient[left] + 0.5 * self.heat_coefficient[right]
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn face_coefficients(
-        &self,
         gas: &FrozenGas,
-        left: usize,
-        right: usize,
         axis: usize,
         face: usize,
         temperature: f64,
         pressure: f64,
         mu_t: f64,
+        rho_alpha: f64,
         molecular_mu: f64,
         molecular_conductivity: f64,
         maximum_viscosity_ratio: f64,
         maximum_diffusivity_ratio: f64,
     ) -> Result<(f64, f64), MolecularError> {
-        let rho_alpha = 0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right];
         if mu_t == 0.0 && rho_alpha == 0.0 {
             return Ok((molecular_mu, molecular_conductivity));
         }

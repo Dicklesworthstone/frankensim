@@ -14280,6 +14280,12 @@ when the adjacent centered cell strains vanish. Uniform-flow or uniform-scalar
 preparation clears the coefficient output, including when reusing a workspace.
 The existing successful-preparation, bounds and exploratory-use rules apply.
 
+`sgs3::smagorinsky_viscosity` accepts `C_s` and the physical `sqrt(2 S:S)`
+invariant, allowing conservative faces to reuse one strain evaluation across
+independent fitted coefficients. A fitted `C_s²` or `C_phi` is supplied as its
+square root. The existing `(C_s Delta) * ((C_s Delta) * |S|)` arithmetic and
+input validation are unchanged, including validation at exactly zero transport.
+
 ## Resolved inviscid vorticity production
 
 `FlowKinematics3::inviscid_vorticity_budget` retains the separate stretching

@@ -34,7 +34,7 @@
 //! (24)-(26): https://imag.umontpellier.fr/~nicoud/PDF/notes_Nicoud_1and2.pdf.
 
 use super::*;
-use fs_lbm::sgs3::{SgsConfig, eddy_viscosity, vreman_eddy_viscosity};
+use fs_lbm::sgs3::{SgsConfig, eddy_viscosity, smagorinsky_viscosity, vreman_eddy_viscosity};
 pub use fs_lbm::sgs3::{SgsModel, SgsUse};
 pub(in crate::compressible::spatial) mod wall;
 pub use wall::EquilibriumWallConfig;
@@ -241,7 +241,7 @@ impl SubgridTransport {
                 );
             }
         }
-        let mu_t = if let SubgridClosure::Local {
+        let (mu_t, rho_alpha) = if let SubgridClosure::Local {
             config,
             widths,
             filter_width,
@@ -263,12 +263,24 @@ impl SubgridTransport {
                 model => eddy_viscosity(model, *filter_width, g),
             }
             .map_err(MolecularError::Subgrid)?;
-            (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
+            (
+                (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu,
+                0.0,
+            )
         } else {
             let coefficient = 0.5 * self.dynamic_coefficient_squared[left]
                 + 0.5 * self.dynamic_coefficient_squared[right];
-            if coefficient == 0.0 {
-                0.0
+            let heat_coefficient = match &self.closure {
+                SubgridClosure::DynamicThermal(dynamic) => {
+                    dynamic.face_heat_coefficient(left, right)
+                }
+                SubgridClosure::ChannelDynamicThermal(dynamic) => {
+                    dynamic.face_heat_coefficient(left, right)
+                }
+                _ => 0.0,
+            };
+            if coefficient == 0.0 && heat_coefficient == 0.0 {
+                (0.0, 0.0)
             } else {
                 let width = match &self.closure {
                     SubgridClosure::Local { filter_width, .. } => *filter_width,
@@ -285,15 +297,27 @@ impl SubgridTransport {
                     axis,
                     distance,
                 );
-                let nu = eddy_viscosity(
-                    SgsModel::Smagorinsky {
-                        cs: fs_math::det::sqrt(coefficient),
-                    },
-                    width,
-                    g,
-                )
-                .map_err(MolecularError::Subgrid)?;
-                (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
+                // Resolve the physical strain invariant once, then preserve
+                // the scale-safe (sqrt(C) * Delta)^2 grouping for each fit.
+                let shear_rate = eddy_viscosity(SgsModel::Smagorinsky { cs: 1.0 }, 1.0, g)
+                    .map_err(MolecularError::Subgrid)?;
+                // Both independent fits act on the conservative face tensor.
+                // Neither a centered strain null nor a zero momentum fit may
+                // erase turbulent heat transfer resolved by this face.
+                let density = 0.5 * primitive[left].density + 0.5 * primitive[right].density;
+                let transport = |coefficient: f64| -> Result<f64, MolecularError> {
+                    if coefficient == 0.0 {
+                        return Ok(0.0);
+                    }
+                    let nu = smagorinsky_viscosity(
+                        fs_math::det::sqrt(coefficient),
+                        width,
+                        shear_rate,
+                    )
+                    .map_err(MolecularError::Subgrid)?;
+                    Ok(density * nu)
+                };
+                (transport(coefficient)?, transport(heat_coefficient)?)
             }
         };
         let (prandtl, maximum_ratio) = match &self.closure {
@@ -316,13 +340,12 @@ impl SubgridTransport {
             SubgridClosure::DynamicThermal(dynamic) => {
                 return dynamic.face_coefficients(
                     gas,
-                    left,
-                    right,
                     axis,
                     face,
                     temperature,
                     pressure,
                     mu_t,
+                    rho_alpha,
                     molecular_mu,
                     molecular_conductivity,
                 );
@@ -330,13 +353,12 @@ impl SubgridTransport {
             SubgridClosure::ChannelDynamicThermal(dynamic) => {
                 return dynamic.face_coefficients(
                     gas,
-                    left,
-                    right,
                     axis,
                     face,
                     temperature,
                     pressure,
                     mu_t,
+                    rho_alpha,
                     molecular_mu,
                     molecular_conductivity,
                 );

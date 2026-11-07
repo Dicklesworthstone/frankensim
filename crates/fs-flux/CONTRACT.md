@@ -3138,8 +3138,12 @@ momentum viscosity and temperature diffusivity using
 fit consumes the same-stage density, velocity and temperature; it does not
 derive diffusivity from a prescribed Prandtl number or divide by the momentum
 fit. Thus a zero eddy viscosity can coexist with nonzero modeled heat flux.
-The existing face flux adds the average of `rho*alpha_t` times its original
-source Cp to conductivity, and uses that total conductivity in the original
+The scalar fit retains `C_phi` independently of centered cell strain. Interior
+faces interpolate density and the nonnegative coefficient separately, then
+evaluate `alpha_t = C_phi,face Delta^2 |S_face|` on the same full velocity
+gradient as the conservative stress. Thus a resolved face shear still mixes
+heat when both adjacent centered derivatives cancel. The existing face flux
+adds `rho_face*alpha_t*Cp(T_face)` to conductivity and uses the total in the original
 parabolic stability estimate and conservative total-energy update. The
 authored heat-to-molecular diffusivity bound is checked as `k_t/k_m` using the
 same face material state; active modeled heat with zero molecular conductivity
@@ -3176,8 +3180,10 @@ not disable heat. Negative fits follow the core's zero-backscatter policy;
 positive coefficient and eddy/molecular bounds refuse instead of clipping.
 
 Interior faces use the original conservative stress, stress work and heat
-operator, adding `mean(rho*nu_t)` to shear viscosity and
-`mean(rho*alpha_t)*Cp(T_face)` to conductivity from the original caloric source.
+operator. The momentum and scalar coefficients remain independent of centered
+cell strain; interpolated coefficients and density act on the full face strain
+to supply `rho_face*C_s,face^2*Delta^2*|S_face|` and
+`rho_face*C_phi,face*Delta^2*|S_face|*Cp(T_face)` from the original caloric source.
 The original molecular bulk viscosity is retained. Modeled stress and heat
 vanish at the physical wall by default; the explicit equilibrium wall selector
 can replace adiabatic tangential traction while retaining the same wall-work
