@@ -53,7 +53,6 @@ fn conserved_inlet_mixture_drives_loading_and_observer_without_resetting_history
         let original = live.clone();
         let original_gas = gas.clone();
         let original_reservoir = reservoir.clone();
-        let previous = accelerations(&original);
         let heat = FiniteGasStringHeat {
             string_heat_j: 5e-8,
             gas_heat_j: 0.25,
@@ -151,18 +150,21 @@ fn conserved_inlet_mixture_drives_loading_and_observer_without_resetting_history
                 <= flow_solve().transfer.mass_tolerance_kg
         );
 
-        // The dipole uses the previous ACCEPTED acceleration, not the discarded
-        // heat-stage observation; both density and sound speed are final ones.
+        // The dipole uses the final held law's exact endpoint derivative;
+        // both density and sound speed belong to the same accepted mixture.
         let string = live.mechanical().specimen().string();
         let medium = gas.state().state();
         let pi = core::f64::consts::PI;
         let acceleration = accelerations(&live);
+        let even = live.mechanical().modes()[1];
+        let jerk = -even.angular_frequency_rad_s.powi(2)
+            * live.mechanical().states()[1].velocity_m_sqrt_kg_per_s
+            - 2.0 * even.damping_ratio * even.angular_frequency_rad_s * acceleration[1];
         let factor = medium.density * string.width_m
             / (4.0 * pi * (string.lin_density_kg_m * string.length_m / 2.0).sqrt());
         let pressure = factor * 2.0 * string.length_m / pi * acceleration[0]
             - factor * string.length_m.powi(2) / (2.0 * pi * medium.sound_speed)
-                * (acceleration[1] - previous[1])
-                * 48000.0;
+                * jerk;
         close(
             frame.thermal.string.vibration.acoustic.observer_pressure_pa,
             pressure,

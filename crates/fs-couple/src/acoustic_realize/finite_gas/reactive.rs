@@ -51,8 +51,8 @@ impl ThermalMaterialStringRuntime {
     /// authoritative. There is no reaction-only substep or inferred mechanism.
     ///
     /// The original finite-gas publisher independently measures complete energy,
-    /// rebuilds drag and diagnostic pressure using the final mixture, retains
-    /// prior acceleration and advances one sample/epoch. Both accepted owners
+    /// rebuilds drag and exact endpoint pressure using the final mixture, and
+    /// advances one sample/epoch. Both accepted owners
     /// remain unchanged if chemistry, source, energy, observer or work admission
     /// fails. Retrying therefore cannot deposit heat or emit a sample twice.
     ///

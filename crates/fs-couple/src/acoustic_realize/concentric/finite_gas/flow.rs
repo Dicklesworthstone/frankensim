@@ -26,7 +26,7 @@ use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{
 pub struct ConcentricFiniteGasFlowFrame<S, R> {
     /// Original thermal substep accounts. Its gas source snapshot is the
     /// pre-transfer endpoint used by the heat law. The vibration's pressure
-    /// observation uses the FINAL mixture and previous accepted acceleration.
+    /// observation uses the FINAL mixture's endpoint acceleration and jerk.
     pub thermal: ConcentricFiniteGasFrame<S, R>,
     /// Upstream/downstream ownership of the original transfer report.
     pub direction: FiniteGasStringFlowDirection,
@@ -80,8 +80,8 @@ impl ThermalConcentricStringRuntime<'_> {
     /// retain the native refusal. No second jet-kinetic or flow-work heat is added.
     ///
     /// The final gas changes drag, sound speed and the pressure observation on
-    /// the continuing coordinates. The old accepted acceleration is used even
-    /// when the discarded thermal-stage observer has already been evaluated.
+    /// the continuing coordinates. Exact endpoint derivatives use this final
+    /// held law even when a thermal-stage observer was already evaluated.
     /// One clock tick is consumed. All four owners publish together only after
     /// final source, temperature, observer, energy and cancellation admission.
     /// Callbacks retain the original repeatable-proposal contract.

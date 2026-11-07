@@ -1,4 +1,4 @@
-//! G1: original spatial source moments and accepted joined-clock histories.
+//! G1: spatial source moments, exact linear derivatives and joined-clock histories.
 use super::*;
 use crate::thin_plate::CompactBody;
 
@@ -21,6 +21,137 @@ fn string() -> PrestressedString {
         moving_end: true,
         tension_loss_factor: None,
         bending_loss_factor: None,
+    }
+}
+
+fn compact_linear_string() -> PrestressedString {
+    let mut value = string();
+    value.moving_end = false;
+    value.length_m = 0.002;
+    value.lin_density_kg_m = 1e-6;
+    value.width_m = 1e-5;
+    value.n_modes = 2;
+    // f_2 = 3200 Hz at an 8000 Hz sample clock, while k_air L < 0.12
+    // keeps the authored strip inside its compact-source approximation.
+    value.tension_n = value.lin_density_kg_m * (3200.0 * value.length_m).powi(2);
+    value.rayleigh = Some(RayleighParams {
+        alpha_per_s: 0.0,
+        beta_s: 0.0,
+    });
+    value
+}
+
+#[test]
+fn upper_band_even_partial_keeps_analytic_amplitude_and_phase() {
+    let string = compact_linear_string();
+    let gas = gas_state(AmbientGas::sea_level()).unwrap();
+    let mut member = linear_string_member(&string, None, None, &gas, 1.0, 8000, 1.0).unwrap();
+    let amplitude = 1e-10;
+    member
+        .model
+        .restore_states(&[
+            ModalAcousticState::default(),
+            ModalAcousticState {
+                displacement_m_sqrt_kg: amplitude,
+                velocity_m_sqrt_kg_per_s: 0.0,
+            },
+        ])
+        .unwrap();
+    let pi = core::f64::consts::PI;
+    let omega = 2.0 * pi * 3200.0;
+    let factor = gas.density * string.width_m
+        / (4.0 * pi * (string.lin_density_kg_m * string.length_m / 2.0).sqrt());
+    let pressure_amplitude = -factor * string.length_m.powi(2) / (2.0 * pi * gas.sound_speed)
+        * amplitude
+        * omega.powi(3);
+    let mut sine_gain = 0.0;
+    let mut cosine_leakage = 0.0;
+    let mut error = 0.0_f64;
+    // Forty complete cycles allow independent in-phase/quadrature extraction.
+    for sample in 1..=100 {
+        let phase = omega * sample as f64 / 8000.0;
+        let actual = advance_linear_member(&mut member, &[0.0; 2]).unwrap();
+        let normalized = actual / pressure_amplitude;
+        sine_gain += normalized * phase.sin() / 50.0;
+        cosine_leakage += normalized * phase.cos() / 50.0;
+        error = error.max((normalized - phase.sin()).abs());
+    }
+    assert!(
+        (sine_gain - 1.0).abs() < 2e-11,
+        "amplitude gain {sine_gain}"
+    );
+    assert!(
+        cosine_leakage.abs() < 2e-11,
+        "phase leakage {cosine_leakage}"
+    );
+    assert!(error < 2e-11, "endpoint pressure error {error}");
+    assert!(member.observer.previous_acceleration.is_none());
+}
+
+// Differentiate the closed-form shifted-equilibrium trajectory, independently
+// of the observer's force/velocity/acceleration recurrence.
+fn held_derivatives(omega: f64, damping: f64, q0: f64, v0: f64, force: f64, t: f64) -> [f64; 4] {
+    let gamma = damping / 2.0;
+    let wd = (omega.powi(2) - gamma.powi(2)).sqrt();
+    let equilibrium = force / omega.powi(2);
+    let mut cosine = q0 - equilibrium;
+    let mut sine = (v0 + gamma * cosine) / wd;
+    let decay = (-gamma * t).exp();
+    let mut values = [equilibrium, 0.0, 0.0, 0.0];
+    for value in &mut values {
+        *value += decay * (cosine * (wd * t).cos() + sine * (wd * t).sin());
+        (cosine, sine) = (-gamma * cosine + wd * sine, -wd * cosine - gamma * sine);
+    }
+    values
+}
+
+#[test]
+fn damped_odd_and_even_partials_follow_held_force_derivatives_across_load_changes() {
+    let mut string = compact_linear_string();
+    let damping = 160.0;
+    string.rayleigh = Some(RayleighParams {
+        alpha_per_s: damping,
+        beta_s: 0.0,
+    });
+    let gas = gas_state(AmbientGas::sea_level()).unwrap();
+    let pi = core::f64::consts::PI;
+    let factor = gas.density * string.width_m
+        / (4.0 * pi * (string.lin_density_kg_m * string.length_m / 2.0).sqrt());
+    for active in 0..2 {
+        let mut member = linear_string_member(&string, None, None, &gas, 1.0, 8000, 1.0).unwrap();
+        let omega = 2.0 * pi * 1600.0 * (active + 1) as f64;
+        let (mut q0, mut v0) = (1e-10, -3e-7);
+        let mut states = [ModalAcousticState::default(); 2];
+        states[active] = ModalAcousticState {
+            displacement_m_sqrt_kg: q0,
+            velocity_m_sqrt_kg_per_s: v0,
+        };
+        member.model.restore_states(&states).unwrap();
+        let mut peak = 0.0_f64;
+        let mut error = 0.0_f64;
+        for force in [0.02, -0.01, 0.0] {
+            let mut forces = [0.0; 2];
+            forces[active] = force;
+            let mut endpoint = [0.0; 4];
+            for sample in 1..=16 {
+                endpoint = held_derivatives(omega, damping, q0, v0, force, sample as f64 / 8000.0);
+                let expected = if active == 0 {
+                    factor * 2.0 * string.length_m / pi * endpoint[2]
+                } else {
+                    -factor * string.length_m.powi(2) / (2.0 * pi * gas.sound_speed) * endpoint[3]
+                };
+                let actual = advance_linear_member(&mut member, &forces).unwrap();
+                peak = peak.max(expected.abs());
+                error = error.max((actual - expected).abs());
+            }
+            (q0, v0) = (endpoint[0], endpoint[1]);
+        }
+        assert!(peak > 0.0);
+        assert!(
+            error < 2e-11 * peak,
+            "mode {}: error {error} vs peak {peak}",
+            active + 1
+        );
     }
 }
 

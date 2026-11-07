@@ -391,7 +391,7 @@ pub struct RealizedAssembly {
 /// # Errors
 /// Empty assemblies, invalid events, gas/domain refusals, stepper or TMM
 /// refusals.
-#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
+#[allow(clippy::too_many_lines)]// one coherent realization dispatcher
 pub fn realize_assembly(
     assembly: &AcousticAssembly,
 ) -> Result<RealizedAssembly, AcousticRealizeError> {
@@ -562,7 +562,7 @@ enum AssemblyPlateChart<'a> {
     Material(&'a ResolvedPlateChart),
 }
 
-#[allow(clippy::too_many_lines)] // one coherent realization dispatcher
+#[allow(clippy::too_many_lines)]// one coherent realization dispatcher
 fn realize_assembly_inner(
     assembly: &AcousticAssembly,
     chart: Option<(AssemblyPlateChart<'_>, &PlateChartRadiation)>,
@@ -789,8 +789,8 @@ fn realize_assembly_inner(
 /// support does no work (`φ(0)=0`) so the members share a clock
 /// but not a force — the chain is driven only by blow/reed.
 /// Shared clock, not FIR.
-#[allow(clippy::too_many_lines)] // one coherent coupled realization
-#[allow(clippy::needless_range_loop)] // the sample index is the time axis
+#[allow(clippy::too_many_lines)]// one coherent coupled realization
+#[allow(clippy::needless_range_loop)]// the sample index is the time axis
 fn realize_coupled_ode(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -955,7 +955,7 @@ fn realize_coupled_ode(
     finish_observer(assembly, gas, out, absorption)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent chain step record
+#[allow(clippy::too_many_arguments)]// one coherent chain step record
 fn step_string_chain(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
@@ -984,7 +984,7 @@ fn chain_inlet_pressure(body: &fs_phs::PortHamiltonian, x: &[f64], n_plate: usiz
     body.output(x)[0]
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent chain step record
+#[allow(clippy::too_many_arguments)]// one coherent chain step record
 fn step_chain_inlet(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
@@ -1020,7 +1020,7 @@ fn step_chain_inlet(
     step_chain_flow(body, linear, exact, x, &u, dt)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent chain step record
+#[allow(clippy::too_many_arguments)]// one coherent chain step record
 fn step_plate_chain(
     body: &fs_phs::PortHamiltonian,
     linear: &fs_phs::linear_exact::LinearSplit,
@@ -1160,8 +1160,8 @@ mod blown_ode_tests;
 /// One shared clock: string, plate, and duct exchange force and flow
 /// every sample via the characteristic FIR. Used when the duct is
 /// not a cylindrical chain.
-#[allow(clippy::too_many_lines)] // one coherent coupled realization
-#[allow(clippy::needless_range_loop)] // the sample index is the time axis
+#[allow(clippy::too_many_lines)]// one coherent coupled realization
+#[allow(clippy::needless_range_loop)]// the sample index is the time axis
 fn realize_coupled(
     assembly: &AcousticAssembly,
     gas: &GasState,
@@ -1595,11 +1595,13 @@ pub fn string_mode_omega(string: &PrestressedString, k: usize) -> f64 {
 /// The first moment assumes an observer on the positive string axis; the
 /// scenario has no directional listener. This remains a compact strip model,
 /// not the radiation solution for a cylindrical wire. Common propagation
-/// delay is omitted. Jerk uses backward differences of accepted accelerations
-/// (first-order); instantaneous release impulses are not reconstructed. The
-/// joined moving-end path supplies interval-mean accelerations from its accepted
-/// momentum increments, retaining that clock instead of inferring endpoint
-/// reactions from a descriptor step's interval multiplier.
+/// delay is omitted. Linear held-force modes use their exact endpoint
+/// acceleration and jerk. The nonlinear path retains first-order backward
+/// differences of accepted accelerations. The joined moving-end path supplies
+/// interval-mean accelerations from its accepted momentum increments, retaining
+/// that clock instead of inferring endpoint reactions from a descriptor step's
+/// interval multiplier. Distributional impulses at ideal force, release or
+/// parameter jumps are not reconstructed by either observation.
 #[derive(Clone)]
 struct StringObserver {
     weights: Vec<(f64, f64)>,
@@ -1661,13 +1663,49 @@ impl StringObserver {
             .zip(previous)
             .map(|((&(area, moment), &a), &before)| area * a + moment * ((a - before) / dt))
             .sum();
+        Self::check_pressure(pressure)?;
+        self.previous_acceleration = Some(acceleration);
+        Ok(pressure)
+    }
+
+    /// Smooth endpoint limit under this sample's held force and coefficients.
+    /// From q'' + d q' + omega^2 q = f, a = f - omega^2 q - d v and
+    /// j = -omega^2 v - d a. In particular the even sine modes radiate through
+    /// j alone: differencing a would attenuate them by sinc(omega dt/2) and
+    /// introduce a half-sample phase lag. No sampled history or allocation is
+    /// needed, including after a material or gas rebind. An ideal jump's delta
+    /// impulse is outside this smooth, held-parameter observation.
+    fn observe_linear(
+        &self,
+        model: &ModalAcousticTimeModel,
+        force: &[f64],
+    ) -> Result<f64, AcousticRealizeError> {
+        let pressure = self
+            .weights
+            .iter()
+            .zip(model.modes())
+            .zip(model.states())
+            .zip(model.damping_rates_per_s())
+            .zip(force)
+            .map(|((((&(area, moment), mode), state), &damping), &f)| {
+                let omega_sq = mode.angular_frequency_rad_s.powi(2);
+                let acceleration = f
+                    - omega_sq * state.displacement_m_sqrt_kg
+                    - damping * state.velocity_m_sqrt_kg_per_s;
+                let jerk = -omega_sq * state.velocity_m_sqrt_kg_per_s - damping * acceleration;
+                area * acceleration + moment * jerk
+            })
+            .sum();
+        Self::check_pressure(pressure)
+    }
+
+    fn check_pressure(pressure: f64) -> Result<f64, AcousticRealizeError> {
         let limit = ModalAcousticTimeBudget::audible_reference().maximum_abs_pressure_pa;
         if !pressure.is_finite() || pressure.abs() > limit {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "compact string observer pressure is nonfinite or exceeds its pressure budget",
             });
         }
-        self.previous_acceleration = Some(acceleration);
         Ok(pressure)
     }
 }
@@ -2087,7 +2125,7 @@ fn secondary_string(string: &PrestressedString, tension_scale: f64) -> Prestress
 /// storage. Hunt–Crossley and Stribeck stay port forces, not terms
 /// in `H`.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // one coherent realization
+#[allow(clippy::too_many_lines)]// one coherent realization
 fn realize_dirac_join(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -2392,8 +2430,8 @@ fn moving_end_string_phs(
     with_bending_relaxation(string, base)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent solver probe
-#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the ODE twin
+#[allow(clippy::too_many_arguments)]// one coherent solver probe
+#[allow(clippy::unnecessary_wraps)]// uniform Result surface with the ODE twin
 fn leftover_u(
     sys: &fs_phs::DescriptorPortHamiltonian,
     x: &[f64],
@@ -2449,8 +2487,8 @@ fn leftover_u(
     Ok(u)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent solver probe
-#[allow(clippy::unnecessary_wraps)] // uniform Result surface with the DAE twin
+#[allow(clippy::too_many_arguments)]// one coherent solver probe
+#[allow(clippy::unnecessary_wraps)]// uniform Result surface with the DAE twin
 fn leftover_u_ode(
     sys: &fs_phs::PortHamiltonian,
     x: &[f64],
@@ -2623,8 +2661,8 @@ fn free_fixed_pluck_modal(pluck: Pluck, string: &PrestressedString, k_zero: usiz
     mu * phi0 * acc * (l / nq as f64)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent realization record
-#[allow(clippy::needless_range_loop)] // modal index spans state and shape arrays
+#[allow(clippy::too_many_arguments)]// one coherent realization record
+#[allow(clippy::needless_range_loop)]// modal index spans state and shape arrays
 fn realize_string(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -2824,6 +2862,7 @@ pub struct LinearMaterialStringRuntime {
     sample_rate_hz: u32,
     epoch: u64,
     accepted_samples: u64,
+    settled_load_initialized: bool,
 }
 
 /// Prescribed transverse force at a fixed material station for one sample.
@@ -2991,6 +3030,7 @@ impl LinearMaterialStringRuntime {
             sample_rate_hz,
             epoch: 0,
             accepted_samples: 0,
+            settled_load_initialized: false,
         })
     }
 
@@ -3000,7 +3040,7 @@ impl LinearMaterialStringRuntime {
         &self.specimen
     }
 
-    /// One epoch covers the specimen, operators, vibration and observer history.
+    /// One epoch covers the specimen, operators, vibration and observer.
     #[must_use]
     pub const fn epoch(&self) -> u64 {
         self.epoch
@@ -3084,9 +3124,9 @@ impl LinearMaterialStringRuntime {
     /// establishes stored elastic energy, not a measured actuator-work transfer.
     /// Continue stepping the same loads to hold the shape, or release them to
     /// excite vibration. Only a zero-state runtime with no accepted samples or
-    /// observer history can be initialized; existing motion is never reset.
-    /// Material state and sample count are unchanged. Publication advances the
-    /// epoch and records zero previous acceleration for the stationary history.
+    /// prior load initialization can be initialized; existing motion is never
+    /// reset. Material state and sample count are unchanged. Publication
+    /// advances the epoch and records the one-time initialization.
     /// Cancellation or a force/state/energy refusal leaves the runtime untouched.
     pub fn initialize_point_load_equilibrium(
         &mut self,
@@ -3096,7 +3136,7 @@ impl LinearMaterialStringRuntime {
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
         if self.accepted_samples != 0
-            || self.member.observer.previous_acceleration.is_some()
+            || self.settled_load_initialized
             || self.states().iter().any(|state| {
                 state.displacement_m_sqrt_kg != 0.0 || state.velocity_m_sqrt_kg_per_s != 0.0
             })
@@ -3112,10 +3152,10 @@ impl LinearMaterialStringRuntime {
             .model
             .initialize_static_equilibrium(&forces)
             .map_err(AcousticRealizeError::Modal)?;
-        candidate.observer.previous_acceleration = Some(vec![0.0; forces.len()]);
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
         self.member = candidate;
+        self.settled_load_initialized = true;
         self.epoch = epoch;
         Ok(epoch)
     }
@@ -3158,7 +3198,7 @@ impl LinearMaterialStringRuntime {
 
     /// Replace surrounding gas without restarting vibration or advancing time.
     /// Air damping and acoustic observation rebuild through their shared owners;
-    /// material receipts, modal coordinates and previous acceleration survive.
+    /// material receipts, modal coordinates and settled-load initialization survive.
     /// The update advances the epoch, but consumes no sample or material heat.
     /// This prescribed gas change does not model fluid-loading work, boundary
     /// heat transfer or a propagating change of the surrounding atmosphere.
@@ -3195,8 +3235,8 @@ impl LinearMaterialStringRuntime {
     }
 
     /// Add higher sine modes at rest without advancing the physical clock.
-    /// Existing coordinates and accepted acceleration history are retained
-    /// exactly. New modes have zero prior acceleration (no prior forcing).
+    /// Existing coordinates and the accepted clock are retained exactly.
+    /// New modes start with zero displacement and velocity.
     /// This is explicit fixed-basis refinement, not reconstruction of omitted
     /// history, a tail-error estimate or transfer across changed geometry.
     /// Returns the new epoch; smaller/equal counts or inadmissible frequencies
@@ -3233,16 +3273,6 @@ impl LinearMaterialStringRuntime {
             .model
             .restore_states(&states)
             .map_err(AcousticRealizeError::Modal)?;
-        member.observer.previous_acceleration = self
-            .member
-            .observer
-            .previous_acceleration
-            .as_ref()
-            .map(|previous| {
-                let mut extended = previous.clone();
-                extended.resize(mode_count, 0.0);
-                extended
-            });
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
         self.specimen = specimen;
@@ -3253,7 +3283,7 @@ impl LinearMaterialStringRuntime {
 
     /// Advance one sample under held modal forces [N/sqrt(kg)].
     ///
-    /// Mechanics, accepted acceleration history and sample position publish
+    /// Mechanics, endpoint pressure and sample position publish
     /// together after pressure/energy limits and a final cancellation poll.
     /// A refusal preserves the entire runtime for retry. The returned pressure
     /// is the compact strip observation; work and loss refer to retained modes.
@@ -3267,20 +3297,13 @@ impl LinearMaterialStringRuntime {
         let epoch = next_string_epoch(self.epoch)?;
         let samples = next_string_epoch(self.accepted_samples)?;
         let mut candidate = self.member.clone();
-        let initial = candidate
-            .observer
-            .previous_acceleration
-            .is_none()
-            .then(|| linear_accelerations(&candidate.model, forces));
         let mut frame = candidate
             .model
             .step(forces)
             .map_err(AcousticRealizeError::Modal)?;
-        frame.observer_pressure_pa = candidate.observer.observe(
-            linear_accelerations(&candidate.model, forces),
-            initial,
-            candidate.model.sample_period_s(),
-        )?;
+        frame.observer_pressure_pa = candidate
+            .observer
+            .observe_linear(&candidate.model, forces)?;
         let dissipation = partition_string_dissipation(&frame, &candidate.loss_parts)?;
         cx.checkpoint()
             .map_err(|_| AcousticRealizeError::Cancelled)?;
@@ -3299,8 +3322,8 @@ impl LinearMaterialStringRuntime {
     /// The exact card, length, linear density and mode count must be unchanged.
     /// No mass tolerance or mode-number matching hides a basis transfer. Loss,
     /// tension, EI and observer weights rebuild together using existing owners.
-    /// Previous accepted acceleration is retained for the observer's backward
-    /// difference; an abrupt parameter jump can therefore emit a transient.
+    /// Endpoint acceleration and jerk use the new held law. Distributional
+    /// impulses at an abrupt parameter jump are not reconstructed.
     /// Updates are piecewise constant, with no crossfade or adiabatic claim.
     ///
     /// `maximum_abs_parameter_work_j` is a caller-owned energy-transfer budget,
@@ -3331,9 +3354,8 @@ impl LinearMaterialStringRuntime {
     /// vibration. This operation is unavailable on the thermal wrapper, whose
     /// immutable material/enthalpy binding must not silently change identity.
     ///
-    /// Force projection, damping and pressure weights rebuild together. Accepted
-    /// physical acceleration history survives its change in normalization, so
-    /// the next observer sample includes the change in endpoint acceleration.
+    /// Force projection, damping and pressure weights rebuild together. The
+    /// next pressure uses the new law's actual endpoint acceleration and jerk.
     /// Distributional radiation from an instantaneous velocity jump is not
     /// reconstructed; that needs a time-resolved transition. Time does not
     /// advance and no crossfade is inserted. Reproject held physical forces
@@ -3428,27 +3450,6 @@ impl LinearMaterialStringRuntime {
             .model
             .restore_states(&transferred)
             .map_err(AcousticRealizeError::Modal)?;
-        candidate.observer.previous_acceleration = self
-            .member
-            .observer
-            .previous_acceleration
-            .as_ref()
-            .map(|history| history.iter().map(|value| value * mass_scale).collect());
-        if candidate
-            .observer
-            .previous_acceleration
-            .as_ref()
-            .zip(self.member.observer.previous_acceleration.as_ref())
-            .is_some_and(|(history, previous)| {
-                history.iter().zip(previous).any(|(value, before)| {
-                    !value.is_finite() || (*before != 0.0 && *value == 0.0)
-                })
-            })
-        {
-            return Err(AcousticRealizeError::InvalidDescription {
-                what: "material substitution acceleration history is unrepresentable",
-            });
-        }
         let energy = |model: &ModalAcousticTimeModel| -> f64 {
             model
                 .modes()
@@ -3809,7 +3810,7 @@ impl ThermalMaterialStringRuntime {
         Ok(result)
     }
 
-    /// Mechanics, material receipts, observer history and epoch, read only.
+    /// Mechanics, material receipts, observer and epoch, read only.
     #[must_use]
     pub const fn mechanical(&self) -> &LinearMaterialStringRuntime {
         &self.mechanical
@@ -4336,7 +4337,7 @@ impl ThermalMaterialStringRuntime {
             .sum();
         let mass = candidate.specimen().mass_kg();
         let heat = vibration.dissipation.material_heat_j + external_heat_j;
-        let (mut candidate, exchange) = self.prepare_thermal_rebind(cx, &candidate, thermal)?;
+        let (candidate, exchange) = self.prepare_thermal_rebind(cx, &candidate, thermal)?;
         // The accepted frame reports the new elastic law's actual energy.
         // Losses/work above still belong to the frozen-temperature mechanical
         // substep; parameter work is the separately balanced thermal exchange.
@@ -4348,23 +4349,12 @@ impl ThermalMaterialStringRuntime {
             vibration.acoustic.total_modal_energy_j = vibration.acoustic.modal_energy_j.iter().sum();
         }
         // Rebinding is internal to this sample's transaction, not a second
-        // accepted instant. Observe the final acceleration with the previous
-        // accepted history, so pressure and its retained history use the new law.
-        candidate.member.observer = self.mechanical.member.observer.clone();
-        let initial = candidate
-            .member
-            .observer
-            .previous_acceleration
-            .is_none()
-            .then(|| linear_accelerations(&self.mechanical.member.model, forces));
+        // accepted instant. Observe the final state under the new held law;
+        // this does not difference across the thermal parameter intervention.
         vibration.acoustic.observer_pressure_pa = candidate
             .member
             .observer
-            .observe(
-                linear_accelerations(&candidate.member.model, forces),
-                initial,
-                candidate.member.model.sample_period_s(),
-            )
+            .observe_linear(&candidate.member.model, forces)
             .map_err(ThermalStringError::Acoustic)?;
         let enthalpy_change_j =
             mass * (thermal.specific_enthalpy_j_kg() - self.thermal.specific_enthalpy_j_kg());
@@ -4515,21 +4505,6 @@ fn linear_string_member(
     })
 }
 
-fn linear_accelerations(model: &ModalAcousticTimeModel, force: &[f64]) -> Vec<f64> {
-    model
-        .modes()
-        .iter()
-        .zip(model.states())
-        .zip(model.damping_rates_per_s())
-        .zip(force)
-        .map(|(((mode, state), &damping), &f)| {
-            let omega = mode.angular_frequency_rad_s;
-            f - omega * omega * state.displacement_m_sqrt_kg
-                - damping * state.velocity_m_sqrt_kg_per_s
-        })
-        .collect()
-}
-
 fn step_linear_member(
     member: &mut LinearMember,
     bow: Option<BowStroke>,
@@ -4570,26 +4545,20 @@ fn step_linear_member(
             *f += c;
         }
     }
-    advance_linear_member(member, &force, dt)
+    advance_linear_member(member, &force)
 }
 
 fn advance_linear_member(
     member: &mut LinearMember,
     force: &[f64],
-    dt: f64,
 ) -> Result<f64, AcousticRealizeError> {
-    let initial = member
-        .observer
-        .previous_acceleration
-        .is_none()
-        .then(|| linear_accelerations(&member.model, force));
     member
         .model
         .step(force)
         .map_err(AcousticRealizeError::Modal)?;
     member
         .observer
-        .observe(linear_accelerations(&member.model, force), initial, dt)
+        .observe_linear(&member.model, force)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4708,7 +4677,7 @@ struct KcMember {
     observer: StringObserver,
 }
 
-#[allow(clippy::too_many_arguments)] // the fixed physical clock accompanies one string image
+#[allow(clippy::too_many_arguments)]// the fixed physical clock accompanies one string image
 fn kc_string_member(
     string: &PrestressedString,
     pluck: Option<Pluck>,
@@ -5806,8 +5775,8 @@ fn realize_blown_duct(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)] // one coherent realization record
-#[allow(clippy::needless_range_loop)] // the sample index is the time axis
+#[allow(clippy::too_many_arguments)]// one coherent realization record
+#[allow(clippy::needless_range_loop)]// the sample index is the time axis
 fn realize_blown_with_body(
     physics: &Duct,
     blow: VolumeVelocityPulse,
@@ -6019,7 +5988,7 @@ mod string_observer_tests {
                 .all(|s| s.displacement_m_sqrt_kg > 0.0)
         );
         for _ in 0..8 {
-            let pressure = advance_linear_member(&mut member, &force, 1.0 / 8_000.0).unwrap();
+            let pressure = advance_linear_member(&mut member, &force).unwrap();
             assert!(
                 pressure.abs() < 1.0e-12,
                 "stationary loaded string radiated {pressure} Pa"

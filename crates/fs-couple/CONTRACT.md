@@ -2526,3 +2526,21 @@ moving contacts and incompatible nonlinear/history mechanisms remain in force.
 mirror with energy checks, an independent omitted-mode sine-series comparison
 for oblique bow cross-compliance, active oblique-stop rotation covariance, and
 the receiving-body boundary.
+
+## Exact compact radiation from linear string harmonics
+
+The fixed-end linear string renderer and its material, thermal, concentric and
+finite-gas runtimes evaluate compact-strip pressure from the accepted modal
+state and authoritative damping rates. Under held force and coefficients,
+`a = f - omega^2 q - d v` and `j = -omega^2 v - d a`. The original signed area
+and first-moment weights retain odd-mode acceleration and even-mode jerk
+radiation. The observer adds no allocation or sampled derivative history, so
+even partials avoid backward differences' attenuation and half-sample phase lag.
+Material and gas updates evaluate the same expression under their final held law.
+
+The original nonlinear acceleration differences and constrained moving-end
+interval-mean observation retain their clocks. This remains a compact strip
+observer without radiation loading or common propagation delay; ideal force,
+release and parameter-jump impulses require a resolved transition and are not
+reconstructed. Analytic high-band amplitude/phase, two-grid public-runtime,
+damped held-load and material/gas-update regressions cover the changed behavior.

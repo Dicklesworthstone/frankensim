@@ -275,7 +275,6 @@ fn g1_finite_gas_energy_and_endpoint_pressure_use_the_same_accepted_medium() {
         }
         let before = live.clone();
         let old_gas = gas.clone();
-        let previous = accelerations(&before);
         let cv = 2.5 * fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / 0.028;
         let heat = FiniteGasStringHeat {
             string_heat_j: 5e-8,
@@ -336,13 +335,16 @@ fn g1_finite_gas_energy_and_endpoint_pressure_use_the_same_accepted_medium() {
         let string = live.mechanical().specimen().string();
         let pi = core::f64::consts::PI;
         let acceleration = accelerations(&live);
+        let even = live.mechanical().modes()[1];
+        let jerk = -even.angular_frequency_rad_s.powi(2)
+            * live.mechanical().states()[1].velocity_m_sqrt_kg_per_s
+            - 2.0 * even.damping_ratio * even.angular_frequency_rad_s * acceleration[1];
         let pressure = |medium: &fs_material::gas::GasState| {
             let factor = medium.density * string.width_m
                 / (4.0 * pi * (string.lin_density_kg_m * string.length_m / 2.0).sqrt());
             factor * 2.0 * string.length_m / pi * acceleration[0]
                 - factor * string.length_m.powi(2) / (2.0 * pi * medium.sound_speed)
-                    * (acceleration[1] - previous[1])
-                    * 48000.0
+                    * jerk
         };
         close(
             frame.string.vibration.acoustic.observer_pressure_pa,

@@ -69,8 +69,8 @@ impl ThermalMaterialStringRuntime {
     /// endpoints; donor/receiver solve controls follow the selected direction.
     ///
     /// Drag and the compact observer are rebuilt from the final local mixture,
-    /// retaining modal displacement/momentum and the PREVIOUS accepted sample's
-    /// acceleration. The next sample therefore evolves with the new density,
+    /// retaining modal displacement/momentum and evaluating exact acceleration
+    /// and jerk under that held law. The next sample uses the new density,
     /// viscosity and sound speed. One epoch and one audio sample are consumed.
     /// Source disagreement, excessive withdrawal, pressure-order reversal,
     /// final temperature bounds, observer failure or cancellation publish NONE

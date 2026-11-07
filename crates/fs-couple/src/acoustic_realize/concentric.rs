@@ -15,7 +15,7 @@
 //! and Kelvin-Voigt bending are explicit limits. Helical slip, evolving geometry,
 //! melting, nonlinear stretching and a coupled instrument body are not supplied.
 
-/// Finite source gas, reciprocal surface heat and retained acoustic history.
+/// Finite source gas, reciprocal surface heat and continuing acoustic observation.
 pub mod finite_gas;
 
 use std::cell::Cell;
@@ -25,7 +25,7 @@ use std::convert::Infallible;
 use super::{
     AcousticRealizeError, LinearMember, MaterialStringFrame, ModalAcousticMode, ModalAcousticState,
     Pluck, PrestressedString, StringDissipation, StringPointForce, StringPointMotion,
-    linear_accelerations, linear_string_member, next_string_epoch, partition_string_dissipation,
+    linear_string_member, next_string_epoch, partition_string_dissipation,
     string_point_participation, validate_external_gas, validate_incremental_string,
     validate_string, validate_string_station,
 };
@@ -178,7 +178,7 @@ pub struct ConcentricStringOhmicSource<S> {
     pub transport: S,
 }
 
-/// The native string mode/observer history with original layered constitutive data.
+/// The native string motion and observer with original layered constitutive data.
 #[derive(Clone)]
 pub struct ThermalConcentricStringRuntime<'a> {
     law: ConcentricThermoelasticLaw<'a>,
@@ -195,6 +195,7 @@ pub struct ThermalConcentricStringRuntime<'a> {
     sample_rate_hz: u32,
     initial_time_s: f64,
     accepted_samples: u64,
+    settled_load_initialized: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -215,12 +216,17 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
     /// The ordinary source-bound Kelvin-Voigt selector is used for every layer.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
-        cx: &Cx<'_>, template: PrestressedString,
+        cx: &Cx<'_>,
+        template: PrestressedString,
         law: ConcentricThermoelasticLaw<'a>,
         bindings: Vec<ConcentricStringThermalCell<'a>>,
-        thermal: &DepositionSimulation<'_>, reference_length_m: f64,
-        strain_limit: f64, pluck: Option<Pluck>, gas: GasState,
-        listener_m: f64, sample_rate_hz: u32,
+        thermal: &DepositionSimulation<'_>,
+        reference_length_m: f64,
+        strain_limit: f64,
+        pluck: Option<Pluck>,
+        gas: GasState,
+        listener_m: f64,
+        sample_rate_hz: u32,
     ) -> Result<Self, ConcentricStringError> {
         checkpoint(cx)?;
         validate_external_gas(&gas)?;
@@ -236,9 +242,23 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         validate_string(&string, pluck, None)?;
         let member = linear_string_member(&string, pluck, None, &gas,
             listener_m, sample_rate_hz, 1.0)?;
-        let result = Self { law, bindings, template, reference_length_m, strain_limit,
-            source, section, string, member, gas, listener_m, sample_rate_hz,
-            initial_time_s: thermal.time_s(), accepted_samples: 0 };
+        let result = Self {
+            law,
+            bindings,
+            template,
+            reference_length_m,
+            strain_limit,
+            source,
+            section,
+            string,
+            member,
+            gas,
+            listener_m,
+            sample_rate_hz,
+            initial_time_s: thermal.time_s(),
+            accepted_samples: 0,
+            settled_load_initialized: false,
+        };
         result.admit_cells(cx, thermal)?;
         result.admit_capacity(cx, &result.source, result.states())?;
         checkpoint(cx)?;
@@ -257,14 +277,16 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
 
     /// Settle physical point loads before the simulation window, then hold or
     /// release them through the ordinary force projection. Only an unexcited
-    /// runtime without accepted samples or observer history can be initialized.
+    /// runtime without accepted samples or prior load initialization is admitted.
     /// The native modal equilibrium owner supplies the displacement; existing
     /// motion is never replaced and no loading work is invented inside the run.
-    pub fn initialize_point_load_equilibrium(&mut self, cx: &Cx<'_>, loads: &[StringPointForce])
-        -> Result<(), ConcentricStringError>
-    {
+    pub fn initialize_point_load_equilibrium(
+        &mut self,
+        cx: &Cx<'_>,
+        loads: &[StringPointForce],
+    ) -> Result<(), ConcentricStringError> {
         checkpoint(cx)?;
-        if self.accepted_samples != 0 || self.member.observer.previous_acceleration.is_some()
+        if self.accepted_samples != 0 || self.settled_load_initialized
             || self.states().iter().any(|state| state.displacement_m_sqrt_kg != 0.0
                 || state.velocity_m_sqrt_kg_per_s != 0.0)
         { return Err(invalid("settled loads require an unexcited layered string before stepping")); }
@@ -272,9 +294,9 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         let mut member = self.member.clone();
         member.model.initialize_static_equilibrium(&forces).map_err(AcousticRealizeError::Modal)?;
         self.admit_capacity(cx, &self.source, member.model.states())?;
-        member.observer.previous_acceleration = Some(vec![0.0; forces.len()]);
         checkpoint(cx)?;
         self.member = member;
+        self.settled_load_initialized = true;
         Ok(())
     }
 
@@ -373,10 +395,18 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
     // this thermal/mechanical candidate; it must not sample another material epoch.
     #[allow(clippy::too_many_arguments)]
     fn step_with_resolved_thermal_network<'t, S, E>(
-        &mut self, cx: &Cx<'_>, thermal: &mut DepositionSimulation<'t>,
-        controls: ConcentricStringThermalSolve, energy_guess_j: &[f64], forces: &[f64],
-        resolve: impl Fn(&DepositionSimulation<'t>, &ConcentricThermoelasticState, f64, &StringDissipation)
-            -> Result<StepCoefficients<S>, ConcentricStringError<E>>,
+        &mut self,
+        cx: &Cx<'_>,
+        thermal: &mut DepositionSimulation<'t>,
+        controls: ConcentricStringThermalSolve,
+        energy_guess_j: &[f64],
+        forces: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+            &ConcentricThermoelasticState,
+            f64,
+            &StringDissipation,
+        ) -> Result<StepCoefficients<S>, ConcentricStringError<E>>,
     ) -> Result<ConcentricStringThermalFrame<S>, ConcentricStringError<E>> {
         checkpoint(cx)?;
         controls.newton.validate()?;
@@ -400,9 +430,13 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         let mut advanced = self.member.clone();
         let mut acoustic = advanced.model.step(forces).map_err(AcousticRealizeError::Modal)?;
         let dissipation = partition_string_dissipation(&acoustic, &advanced.loss_parts)?;
-        let fixed_layers = layer_energies(cx, &self.source, advanced.model.states(), self.reference_length_m, self.string.length_m)?;
-        let initial_acceleration = self.member.observer.previous_acceleration.is_none()
-            .then(|| linear_accelerations(&self.member.model, forces));
+        let fixed_layers = layer_energies(
+            cx,
+            &self.source,
+            advanced.model.states(),
+            self.reference_length_m,
+            self.string.length_m,
+        )?;
         let material_loss = layer_losses(&self.section, &dissipation)?;
         let step = BackwardEulerStep::new(thermal, target_s, thermal_checkpoint)?;
         let dt = step.duration_s();
@@ -436,7 +470,6 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
                 let mut member = linear_string_member(&string, None, None, &self.gas,
                     self.listener_m, self.sample_rate_hz, 1.0)?;
                 member.model.restore_states(advanced.model.states()).map_err(AcousticRealizeError::Modal)?;
-                member.observer.previous_acceleration = self.member.observer.previous_acceleration.clone();
                 let after_layers = layer_energies(cx, &source, member.model.states(), self.reference_length_m, string.length_m)?;
                 let mut exchanges = Vec::with_capacity(self.bindings.len());
                 let StepCoefficients { mut sources_w, conductances_w_k, payload } =
@@ -474,14 +507,13 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         if !result.report.converged { return Err(ConcentricStringError::NotConverged(result.report)); }
         let trial = evaluate(&solver.x)?;
         let maximum_cell_residual_j = trial.maximum_cell_residual_j();
-        let (next, (source, section, string, mut member, layers, external_heat_j, payload), audit) =
+        let (next, (source, section, string, member, layers, external_heat_j, payload), audit) =
             trial.accept(controls.cell_energy_tolerance_j, controls.thermal_energy_tolerance_j, thermal_checkpoint)?;
         acoustic.modal_energy_j = member.model.modes().iter().zip(member.model.states())
             .map(|(mode, state)| 0.5*(state.velocity_m_sqrt_kg_per_s.powi(2)
                 +(mode.angular_frequency_rad_s*state.displacement_m_sqrt_kg).powi(2))).collect();
         acoustic.total_modal_energy_j = acoustic.modal_energy_j.iter().sum();
-        acoustic.observer_pressure_pa = member.observer.observe(
-            linear_accelerations(&member.model, forces), initial_acceleration, member.model.sample_period_s())?;
+        acoustic.observer_pressure_pa = member.observer.observe_linear(&member.model, forces)?;
         let after_energy = internal_energy(cx, &source, member.model.states(), self.reference_length_m, string.length_m)?;
         let residual = finite(acoustic.input_work_j+external_heat_j
             -(after_energy-before_energy+audit.stored_energy_change_j+dissipation.air_loss_j

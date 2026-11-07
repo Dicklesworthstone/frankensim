@@ -135,7 +135,7 @@ fn g1_substitution_preserves_displacement_momentum_and_rebuilds_actual_sound() {
 
         // Same physical force, new mass normalization. Independently solve the
         // forced damped oscillator and compact strip pressure, including the
-        // even mode's accepted physical acceleration history across the swap.
+        // even mode's exact endpoint jerk under the replacement material law.
         let force = runtime.project_point_forces(cx, &loads()).unwrap();
         for (new_force, old_force) in force.iter().zip(&old_force) {
             close(new_force * scale, *old_force);
@@ -165,19 +165,12 @@ fn g1_substitution_preserves_displacement_momentum_and_rebuilds_actual_sound() {
                 * (v * (wd * dt).cos() - (decay * v + omega.powi(2) * q) / wd * (wd * dt).sin());
             expected_states.push((next_q, next_v));
             let acceleration = input - omega.powi(2) * next_q - 2.0 * decay * next_v;
-            let previous = (old_force[k]
-                - old_modes[k].angular_frequency_rad_s.powi(2) * before[k].displacement_m_sqrt_kg
-                - 2.0
-                    * old_modes[k].damping_ratio
-                    * old_modes[k].angular_frequency_rad_s
-                    * before[k].velocity_m_sqrt_kg_per_s)
-                * scale;
+            let jerk = -omega.powi(2) * next_v - 2.0 * decay * acceleration;
             let kpi = (k + 1) as f64 * core::f64::consts::PI;
             expected_pressure += if k % 2 == 0 {
                 factor * 2.0 * new.length_m / kpi * acceleration
             } else {
-                -factor * new.length_m.powi(2) / (kpi * gas.sound_speed) * (acceleration - previous)
-                    / dt
+                -factor * new.length_m.powi(2) / (kpi * gas.sound_speed) * jerk
             };
         }
         let frame = runtime.step(cx, &force).unwrap();

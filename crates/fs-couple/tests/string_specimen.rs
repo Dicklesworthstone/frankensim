@@ -475,6 +475,101 @@ fn incremental_ambient() -> AmbientGas {
 }
 
 #[test]
+fn g1_upper_even_partial_matches_continuous_pressure_on_both_sample_grids() {
+    with_string_cx(|cx, _| {
+        let pi = core::f64::consts::PI;
+        let (length, radius, density, young) = (0.002_f64, 1e-6_f64, 1000.0, 2e9);
+        let linear_density = density * pi * radius.powi(2);
+        let bending = young * pi * radius.powi(4) / 4.0;
+        let wave = 2.0 * pi / length;
+        let omega = 2.0 * pi * 3200.0;
+        let tension = (linear_density * omega.powi(2) - bending * wave.powi(4)) / wave.powi(2);
+        let source = elastic("synthetic compact wire", density, young);
+        let specimen = with_uniform_circular_material_state(
+            PrestressedString {
+                length_m: length,
+                tension_n: tension,
+                n_modes: 2,
+                rayleigh: Some(RayleighParams {
+                    alpha_per_s: 0.0,
+                    beta_s: 0.0,
+                }),
+                ..template()
+            },
+            radius,
+            &source,
+        )
+        .unwrap();
+        // Opposite loads cancel the first sine mode and preload the second.
+        let loads = [
+            StringPointForce {
+                station_frac: 0.25,
+                force_n: 1e-11,
+            },
+            StringPointForce {
+                station_frac: 0.75,
+                force_n: -1e-11,
+            },
+        ];
+        let mut lower = LinearMaterialStringRuntime::try_new(
+            cx,
+            specimen.clone(),
+            None,
+            incremental_ambient(),
+            1.0,
+            8000,
+        )
+        .unwrap();
+        let mut higher = LinearMaterialStringRuntime::try_new(
+            cx,
+            specimen,
+            None,
+            incremental_ambient(),
+            1.0,
+            16000,
+        )
+        .unwrap();
+        lower.initialize_point_load_equilibrium(cx, &loads).unwrap();
+        higher
+            .initialize_point_load_equilibrium(cx, &loads)
+            .unwrap();
+        let q0 = lower.states()[1].displacement_m_sqrt_kg;
+        assert!(q0 > 0.0);
+        assert!(lower.states()[0].displacement_m_sqrt_kg.abs() < 1e-14 * q0);
+        assert_eq!(lower.states(), higher.states());
+        let gas = lower.ambient();
+        assert!(omega * length / gas.sound_speed < 0.12);
+        let factor =
+            gas.density * 2.0 * radius / (4.0 * pi * (linear_density * length / 2.0).sqrt());
+        let amplitude =
+            -factor * length.powi(2) / (2.0 * pi * gas.sound_speed) * q0 * omega.powi(3);
+        let mut sine_gain = 0.0;
+        let mut cosine_leakage = 0.0;
+        for sample in 1..=100 {
+            let pressure = lower
+                .step(cx, &[0.0; 2])
+                .unwrap()
+                .acoustic
+                .observer_pressure_pa;
+            higher.step(cx, &[0.0; 2]).unwrap();
+            let fine = higher
+                .step(cx, &[0.0; 2])
+                .unwrap()
+                .acoustic
+                .observer_pressure_pa;
+            let phase = omega * sample as f64 / 8000.0;
+            let expected = amplitude * phase.sin();
+            assert!((pressure - expected).abs() < 2e-10 * amplitude.abs());
+            assert!((fine - expected).abs() < 2e-10 * amplitude.abs());
+            sine_gain += pressure / amplitude * phase.sin() / 50.0;
+            cosine_leakage += pressure / amplitude * phase.cos() / 50.0;
+        }
+        assert!((sine_gain - 1.0).abs() < 2e-10);
+        assert!(cosine_leakage.abs() < 2e-10);
+    });
+}
+
+#[test]
 fn g1_settled_point_load_holds_then_releases_physical_string() {
     with_string_cx(|cx, _| {
         let mut runtime = LinearMaterialStringRuntime::try_new(
@@ -919,15 +1014,6 @@ fn g1_ambient_rebind_updates_drag_and_pressure_without_resetting_motion() {
         .unwrap();
         runtime.step(cx, &[0.0, 0.0]).unwrap();
         let before = runtime.clone();
-        let previous_acceleration: Vec<_> = before
-            .modes()
-            .iter()
-            .zip(before.states())
-            .map(|(m, s)| {
-                -m.angular_frequency_rad_s.powi(2) * s.displacement_m_sqrt_kg
-                    - 2.0 * m.damping_ratio * m.angular_frequency_rad_s * s.velocity_m_sqrt_kg_per_s
-            })
-            .collect();
         let mut ambient = incremental_ambient();
         ambient.pressure_pa *= 0.5;
         ambient.temperature_k = 330.0;
@@ -969,10 +1055,13 @@ fn g1_ambient_rebind_updates_drag_and_pressure_without_resetting_motion() {
         let factor = runtime.ambient().density * string.width_m / (4.0 * pi * mass_scale);
         let area = factor * 2.0 * string.length_m / pi;
         let moment = -factor * string.length_m.powi(2) / (2.0 * pi * runtime.ambient().sound_speed);
-        let expected_pressure = area * acceleration[0]
-            + moment * (acceleration[1] - previous_acceleration[1]) * 48_000.0;
+        let even = runtime.modes()[1];
+        let jerk = -even.angular_frequency_rad_s.powi(2)
+            * runtime.states()[1].velocity_m_sqrt_kg_per_s
+            - 2.0 * even.damping_ratio * even.angular_frequency_rad_s * acceleration[1];
+        let expected_pressure = area * acceleration[0] + moment * jerk;
         close(frame.acoustic.observer_pressure_pa, expected_pressure);
-        // A same-state rebind must not reset the observer's jerk history.
+        // A same-state rebind cannot alter the exact endpoint observation.
         let mut control = runtime.clone();
         runtime.rebind_ambient(cx, ambient).unwrap();
         let actual = runtime.step(cx, &[0.0, 0.0]).unwrap();
@@ -1292,18 +1381,6 @@ fn g4_incremental_material_refusals_preserve_epoch_and_replay_suffix() {
         );
         assert_eq!(runtime.epoch(), reference.epoch());
         assert_eq!(runtime.accepted_samples(), reference.accepted_samples());
-        let before_acceleration: Vec<f64> = runtime
-            .modes()
-            .iter()
-            .zip(runtime.states())
-            .map(|(mode, state)| {
-                -mode.angular_frequency_rad_s.powi(2) * state.displacement_m_sqrt_kg
-                    - 2.0
-                        * mode.damping_ratio
-                        * mode.angular_frequency_rad_s
-                        * state.velocity_m_sqrt_kg_per_s
-            })
-            .collect();
         assert_eq!(
             runtime.rebind(cx, hot.clone(), 1.0).unwrap(),
             reference.rebind(cx, hot, 1.0).unwrap()
@@ -1330,13 +1407,15 @@ fn g4_incremental_material_refusals_preserve_epoch_and_replay_suffix() {
                                 * state.velocity_m_sqrt_kg_per_s
                     })
                     .collect();
-                // The even mode's jerk must span the material update, retaining
-                // the last accepted cold acceleration rather than reinitializing it.
+                // The smooth endpoint derivative uses the accepted hot law,
+                // without a sampled impulse from the abrupt material change.
+                let even = runtime.modes()[1];
+                let jerk = -even.angular_frequency_rad_s.powi(2)
+                    * runtime.states()[1].velocity_m_sqrt_kg_per_s
+                    - 2.0 * even.damping_ratio * even.angular_frequency_rad_s * acceleration[1];
                 let expected = factor
                     * (2.0 * string.length_m / pi * acceleration[0]
-                        - string.length_m.powi(2) / (2.0 * pi * gas.sound_speed)
-                            * (acceleration[1] - before_acceleration[1])
-                            * 48_000.0);
+                        - string.length_m.powi(2) / (2.0 * pi * gas.sound_speed) * jerk);
                 close(frame.acoustic.observer_pressure_pa, expected);
             }
         }

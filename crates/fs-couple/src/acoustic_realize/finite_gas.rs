@@ -4,7 +4,8 @@
 //! aerodynamic drag heats the gas.
 //! The existing NASA-9 parcel owns caloric inversion, EOS and transport. The
 //! acoustic owner then rebuilds drag and its compact observer from that same
-//! accepted gas, preserving modal coordinates and the previous acceleration.
+//! accepted gas, preserving modal coordinates and evaluating exact endpoint
+//! acceleration and jerk under the new held coefficients.
 //! This is a first-order partitioned, well-mixed fixed-volume model. The
 //! `exchange` module adds reciprocal source-resolved thermal transfer. Neither
 //! path introduces a chamber boundary, radiation loading or gas pressure work.
@@ -22,7 +23,7 @@ pub mod reactive;
 
 use super::{
     AcousticRealizeError, ThermalMaterialStringFrame, ThermalMaterialStringRuntime,
-    ThermalStringError, linear_accelerations,
+    ThermalStringError,
 };
 use fs_material::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
@@ -311,8 +312,8 @@ impl ThermalMaterialStringRuntime {
     }
 
     // The surrounding transaction may heat AND exchange species before it has
-    // its final medium. Always reconstruct from the original sample history,
-    // never from an intermediate observer evaluation in the same sample.
+    // its final medium. Observe the accepted motion under that final held law;
+    // intermediate observer evaluations do not advance a separate history.
     fn refresh_finite_gas_medium(
         &self,
         cx: &fs_exec::Cx<'_>,
@@ -328,28 +329,11 @@ impl ThermalMaterialStringRuntime {
             .mechanical
             .rebind_gas(cx, gas)
             .map_err(ThermalStringError::Acoustic)?;
-        candidate.mechanical.member.observer.previous_acceleration = self
-            .mechanical
-            .member
-            .observer
-            .previous_acceleration
-            .clone();
-        let initial = candidate
-            .mechanical
-            .member
-            .observer
-            .previous_acceleration
-            .is_none()
-            .then(|| linear_accelerations(&self.mechanical.member.model, forces));
         string.vibration.acoustic.observer_pressure_pa = candidate
             .mechanical
             .member
             .observer
-            .observe(
-                linear_accelerations(&candidate.mechanical.member.model, forces),
-                initial,
-                candidate.mechanical.member.model.sample_period_s(),
-            )
+            .observe_linear(&candidate.mechanical.member.model, forces)
             .map_err(ThermalStringError::Acoustic)?;
         Ok(())
     }

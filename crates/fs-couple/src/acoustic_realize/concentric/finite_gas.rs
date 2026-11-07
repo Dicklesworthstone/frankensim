@@ -13,12 +13,11 @@ use std::cell::{Cell, RefCell};
 
 use super::{
     ConcentricStringError, ConcentricStringOhmicSource, ConcentricStringThermalFrame,
-    ConcentricStringThermalSolve, ThermalConcentricStringRuntime, add_ohmic_heat,
-    checkpoint, deposit, finite, invalid, positive,
+    ConcentricStringThermalSolve, ThermalConcentricStringRuntime, add_ohmic_heat, checkpoint,
+    deposit, finite, invalid, positive,
 };
 use crate::acoustic_realize::{
-    AcousticRealizeError, finite_gas::FiniteGasStringSolve,
-    linear_accelerations, linear_string_member,
+    AcousticRealizeError, finite_gas::FiniteGasStringSolve, linear_string_member,
 };
 use crate::cavity_phs::piston::thermal::{
     ConductanceSample, HeatExchangeSolve, feedback,
@@ -124,7 +123,7 @@ fn finite_gas_conductance<E: From<LayerConductionError>>(
 
 impl<'a> ThermalConcentricStringRuntime<'a> {
     /// Continue unequal-temperature layers, optional DC drive and a finite
-    /// source atmosphere in ONE transaction, preserving modal/observer history.
+    /// source atmosphere in ONE transaction, preserving accepted modal motion.
     ///
     /// Mechanics freezes accepted solid/gas coefficients for one exact sample.
     /// Its actual aerodynamic loss enters the source parcel once. For each
@@ -371,12 +370,16 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
         Ok((selected, volume))
     }
 
-    // A candidate may contain a discarded heat-stage observation. Always use
-    // the ORIGINAL accepted acceleration, so a physical sample advances the
-    // dipole history once even when heat and species transport both rebind gas.
+    // A candidate may contain a discarded heat-stage observation. Re-evaluate
+    // exact acceleration and jerk under the final held gas law, without a
+    // sampled derivative across heat or species parameter interventions.
     fn refresh_finite_gas_medium<E>(
-        &self, cx: &Cx<'_>, forces: &[f64], runtime: &mut Self,
-        vibration: &mut super::MaterialStringFrame, gas: &fs_material::gas::GasState,
+        &self,
+        cx: &Cx<'_>,
+        forces: &[f64],
+        runtime: &mut Self,
+        vibration: &mut super::MaterialStringFrame,
+        gas: &fs_material::gas::GasState,
     ) -> Result<(), ConcentricStringError<E>> {
         checkpoint(cx)?;
         let mut member = linear_string_member(&runtime.string, None, None,
@@ -386,12 +389,8 @@ impl<'a> ThermalConcentricStringRuntime<'a> {
                 a.angular_frequency_rad_s.to_bits() != b.angular_frequency_rad_s.to_bits())
         { return Err(invalid("gas rebind changed the fixed mechanical energy basis")); }
         member.model.restore_states(runtime.states()).map_err(AcousticRealizeError::Modal)?;
-        member.observer.previous_acceleration = self.member.observer.previous_acceleration.clone();
-        let initial_acceleration = member.observer.previous_acceleration.is_none()
-            .then(|| linear_accelerations(&self.member.model, forces));
-        vibration.acoustic.observer_pressure_pa = member.observer.observe(
-            linear_accelerations(&member.model, forces), initial_acceleration,
-            member.model.sample_period_s())?;
+        vibration.acoustic.observer_pressure_pa =
+            member.observer.observe_linear(&member.model, forces)?;
         runtime.member = member;
         runtime.gas = *gas;
         Ok(())

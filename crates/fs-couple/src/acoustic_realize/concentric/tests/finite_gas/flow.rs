@@ -88,12 +88,6 @@ fn gas_injection_conserves_each_species_and_all_storage_without_resetting_layer_
         let old_local = ClosedGasParcel::from_isochoric(gas.clone());
         let old_reservoir = reservoir.clone();
         let old_thermal = thermal.clone();
-        let previous = original
-            .member
-            .observer
-            .previous_acceleration
-            .clone()
-            .unwrap();
         let mut heat_only = live.clone();
         let mut heat_only_cells = thermal.clone();
         let mut heat_only_gas = gas.clone();
@@ -196,8 +190,15 @@ fn gas_injection_conserves_each_species_and_all_storage_without_resetting_layer_
         assert!((frame.reservoir_energy_change_j - reservoir_change).abs() < 1e-10);
 
         // The native compact dipole at a 1 m observer, independently assembled
-        // from the two modal accelerations and the PREVIOUS accepted sample.
-        let a = linear_accelerations(&live.member.model, &[0.0; 2]);
+        // from accepted modal acceleration and the smooth endpoint jerk.
+        let a: Vec<_> = live.modes().iter().zip(live.states()).map(|(mode, state)| {
+            -mode.angular_frequency_rad_s.powi(2) * state.displacement_m_sqrt_kg
+                - 2.0 * mode.damping_ratio * mode.angular_frequency_rad_s
+                    * state.velocity_m_sqrt_kg_per_s
+        }).collect();
+        let even = live.modes()[1];
+        let jerk = -even.angular_frequency_rad_s.powi(2) * live.states()[1].velocity_m_sqrt_kg_per_s
+            - 2.0 * even.damping_ratio * even.angular_frequency_rad_s * a[1];
         let medium = live.gas();
         let string = live.string();
         let pi = core::f64::consts::PI;
@@ -205,8 +206,7 @@ fn gas_injection_conserves_each_species_and_all_storage_without_resetting_layer_
             / (4.0 * pi * (string.lin_density_kg_m * string.length_m / 2.0).sqrt());
         let pressure = scale * 2.0 * string.length_m / pi * a[0]
             - scale * string.length_m.powi(2) / (2.0 * pi * medium.sound_speed)
-                * (a[1] - previous[1])
-                * f64::from(RATE);
+                * jerk;
         near(
             frame.thermal.string.vibration.acoustic.observer_pressure_pa,
             pressure,
