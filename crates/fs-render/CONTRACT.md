@@ -4209,6 +4209,14 @@ by the number of surviving colors. Only the separate geometric weight is
 applied after scene transport. Existing mandatory-ray pixel APIs preserve
 their original behavior and refuse sequential lenses explicitly.
 
+With `volumes`, the visible and QE sequential Rayleigh entry points reuse
+those same proposal and integration helpers. Their shared tracking callback
+continues complete lens/analyzer Stokes states through original molecular
+Mueller events and heterogeneous acceptance draws. The generic
+`CurvedSequentialRayleighPixelSample` retains per-wavelength volume and flight
+counts; clipped lanes retain zero work. Zero scattering preserves the complete
+surface-only sample. Native volume/work limits abort the whole observation.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim

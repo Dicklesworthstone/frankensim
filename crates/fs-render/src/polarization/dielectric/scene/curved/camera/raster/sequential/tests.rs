@@ -15,6 +15,9 @@ use fs_blake3::ContentHash;
 use fs_geom::{Point3, Vec3};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "volumes")]
+mod participating;
+
 const SEED: u64 = 79;
 const SAMPLE: u32 = 6;
 

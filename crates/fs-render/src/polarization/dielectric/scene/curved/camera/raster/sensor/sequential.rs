@@ -113,11 +113,49 @@ impl CurvedCameraRaster<'_> {
         sample: u32,
         analyzer: Option<CameraAnalyzer>,
     ) -> Result<CurvedSequentialSensorPixelSample<C>, CurvedRasterError> {
+        let key = [seed as u32, (seed >> 32) as u32];
+        self.sample_sequential_sensor_with_transport(
+            cx,
+            sensor,
+            seed,
+            pixel,
+            sample,
+            analyzer,
+            |cx, beam, lane| {
+                scene.sample_sequential_ray_with_samples(
+                    cx,
+                    beam,
+                    initial_medium,
+                    settings,
+                    |event| {
+                        let block =
+                            philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
+                        core::array::from_fn(|i| unit(block[i]))
+                    },
+                )
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in super::super) fn sample_sequential_sensor_with_transport<const C: usize>(
+        &self,
+        cx: &Cx<'_>,
+        sensor: &QuantumEfficiencySensor<C>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        analyzer: Option<CameraAnalyzer>,
+        mut trace: impl FnMut(
+            &Cx<'_>,
+            &SequentialCameraBeam,
+            usize,
+        ) -> Result<CameraRadianceSample, CameraRadianceError>,
+    ) -> Result<CurvedSequentialSensorPixelSample<C>, CurvedRasterError> {
         cx.checkpoint().map_err(CameraError::from)?;
         if self.camera.sequential_lens().is_none() {
             return Err(CameraError::InvalidSequentialLens.into());
         }
-        let key = [seed as u32, (seed >> 32) as u32];
         let mut draws = None;
         let packet = self.sample_optional_packet_with_transport(
             cx,
@@ -134,17 +172,7 @@ impl CurvedCameraRaster<'_> {
                 let CameraLaunch::Sequential(beam) = launch else {
                     return Err(CameraError::InvalidSequentialLens.into());
                 };
-                Ok(scene.sample_sequential_ray_with_samples(
-                    cx,
-                    &beam,
-                    initial_medium,
-                    settings,
-                    |event| {
-                        let block =
-                            philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
-                        core::array::from_fn(|i| unit(block[i]))
-                    },
-                )?)
+                Ok(trace(cx, &beam, lane)?)
             },
         )?;
         let wavelengths = draws.ok_or(CurvedRasterError::NumericalRange)?;

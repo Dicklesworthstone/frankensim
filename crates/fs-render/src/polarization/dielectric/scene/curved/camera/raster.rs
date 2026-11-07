@@ -47,6 +47,8 @@ pub mod area_lights;
 pub mod sensor;
 mod sequential;
 pub use sequential::CurvedSequentialPixelSample;
+#[cfg(feature = "volumes")]
+pub use sequential::CurvedSequentialRayleighPixelSample;
 /// Native finite-source histories at the original observation clock.
 pub mod transient;
 

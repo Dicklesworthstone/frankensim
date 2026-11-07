@@ -2,6 +2,11 @@
 
 use super::*;
 
+#[cfg(feature = "volumes")]
+mod participating;
+#[cfg(feature = "volumes")]
+pub use participating::CurvedSequentialRayleighPixelSample;
+
 /// One visible sample through a resolved sequential lens. A rejected optical
 /// lane has no outgoing ray or scene path and remains a zero-contribution draw.
 /// Average complete samples normally; never renormalize surviving wavelengths.
@@ -110,11 +115,47 @@ impl CurvedCameraRaster<'_> {
         sample: u32,
         analyzer: Option<CameraAnalyzer>,
     ) -> Result<CurvedSequentialPixelSample, CurvedRasterError> {
+        let key = [seed as u32, (seed >> 32) as u32];
+        self.sample_sequential_pixel_with_transport(
+            cx,
+            seed,
+            pixel,
+            sample,
+            analyzer,
+            |cx, beam, lane| {
+                scene.sample_sequential_ray_with_samples(
+                    cx,
+                    beam,
+                    initial_medium,
+                    settings,
+                    |event| {
+                        let block =
+                            philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
+                        core::array::from_fn(|i| unit(block[i]))
+                    },
+                )
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sample_sequential_pixel_with_transport(
+        &self,
+        cx: &Cx<'_>,
+        seed: u64,
+        pixel: u32,
+        sample: u32,
+        analyzer: Option<CameraAnalyzer>,
+        mut trace: impl FnMut(
+            &Cx<'_>,
+            &SequentialCameraBeam,
+            usize,
+        ) -> Result<CameraRadianceSample, CameraRadianceError>,
+    ) -> Result<CurvedSequentialPixelSample, CurvedRasterError> {
         cx.checkpoint().map_err(CameraError::from)?;
         if self.camera.sequential_lens().is_none() {
             return Err(CameraError::InvalidSequentialLens.into());
         }
-        let key = [seed as u32, (seed >> 32) as u32];
         let packet = self.sample_optional_packet_with_transport(
             cx,
             seed,
@@ -132,17 +173,7 @@ impl CurvedCameraRaster<'_> {
                 let CameraLaunch::Sequential(beam) = launch else {
                     return Err(CameraError::InvalidSequentialLens.into());
                 };
-                Ok(scene.sample_sequential_ray_with_samples(
-                    cx,
-                    &beam,
-                    initial_medium,
-                    settings,
-                    |event| {
-                        let block =
-                            philox4x32_10([pixel, sample, event, 0x6372_7340 + lane as u32], key);
-                        core::array::from_fn(|i| unit(block[i]))
-                    },
-                )?)
+                Ok(trace(cx, &beam, lane)?)
             },
         )?;
         let mut xyz = [0.0; 3];
