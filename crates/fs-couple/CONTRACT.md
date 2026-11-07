@@ -5805,3 +5805,38 @@ All selected physical velocities, true wet masses and body-point speeds are admi
 The material adapter obtains dx, velocity and mass units from the original immutable liquid binding and enforces its scenario speed before staging. Source density and scaling cannot be independently replaced by the caller.
 
 Fourteen focused native tests passed in this session: six exact-map cases use the production kinetic-metric solve with original Jacobi eigenvectors and double-double arithmetic; five coupling cases use production staging, original sparse population storage, the shared impulse kernel and original full-inertia MBD state/work/impulse methods; three compact-stencil cases check actual populations, readback and refusal. These cover analytical finite two-mass relaxation, independent vector-force/torque RK4, mixed retained masses, rotated inertia, semigroup and Galilean behavior, stiff relaxation, physical balances and late rollback. The selected-source harness does not execute unrelated collision/streaming or the complete material graph. Two original-material regressions are included but were not executed under the current full-Cargo resource limit.
+
+## Sharp-edged tone-hole orifice on the DG route (`dg_terminal_orifice PORT_ID C_VC`)
+
+`DgTerminalChannelKind::Orifice` is a terminal channel like `Closed`, `Slit`, `Circular` and `Annular`, declared in the
+`dg_terminal_channels` block: `dg_terminal_orifice PORT_ID C_VC`. It puts the open tone hole's quasi-steady sharp-edged law
+`p_duct - p_exterior = K |Q| Q`, `K = rho / (2 C_vc^2 A^2)`, in series with the chimney's exterior load. `A` is the DG chimney's actual
+outlet area and `rho` the terminal's own gas (it follows a gas refresh); the law has the form of the live reed card's
+`open_hole_orifice` (`fs_duct::open_hole_orifice_quadratic_coeff`). `C_VC` is the card's number, finite and in (0, 2]; the posted
+oboe pages use `fs_duct::SHARP_EDGE_VENA_CONTRACTA` = 0.61 = pi/(pi + 2), which that constant's doc (fb6ff3ced) names the steady
+thin-plate vena-contracta value (Kirchhoff free-streamline contraction of a plane jet), not a tone-hole measurement. The printed anchors
+quoted there, in this same `K |Q| Q` form, are C_vc = 1 (Atig, Dalmont and Gilbert 2004, thin-walled unflanged open end), 1.18 (flanged)
+and 1.096 (the side-hole term of Dalmont et al. 2002 as quoted by Szwarcberg et al. 2024): a `K` 2.7 to 3.2 times smaller than the 0.61
+gives. A ruling on that constant therefore moves both routes: put the same value on the card.
+
+The row needs a `dg_side_chimney` on its port (the axial outlet and flush side ports are refused) and no driven exterior mouth. It
+takes no transverse cell. A port with no row, and a card with no row, are unchanged bit for bit.
+
+Scheme. Each mechanical sample solves the linear terminal group with the series resistance `Z = K |Q_prev|`, `Q_prev` the previous
+accepted sample's outward flow (zero before the first, so the first sample has no resistance). `Z >= 0` makes the group passive by
+construction: the resistance returns no work. The coupling (`TerminalCoupling`) is rebuilt for the NEXT sample inside the fallible
+phase of `preview_step` and published by `accept`, so a dropped or refused trial changes nothing and `port_response` and
+`preview_step` always read the same accepted resistance. The channel frame reports the drop the sample was solved with
+(`K |Q_prev| Q`), which is what the existing same-step pressure and work audits see; its work `Z Q^2 dt` is entered in the load's
+ledger as port work and dissipation, with no storage.
+
+Lag. The law is `K |Q| Q`; the solved drop uses `|Q_prev|`. `DgTerminalChannelLoad::orifice_report` keeps, over the accepted
+samples, the largest `|K (|Q| - |Q_prev|) Q|` [Pa], `sum |K (|Q| - |Q_prev|) Q| |Q| dt` and `sum K |Q|^3 dt` [J] (their ratio is the share of
+the law's dissipation the lag misattributes) and the work taken. The lag is `O(dt)`: tests settle a constant flow to the law
+and show the share falling below 0.7 times its value when the step is halved on the same 1 kHz drive. The sidecar carries the law and
+its coefficients (`sharp-edged-orifice`); the end-of-render lag account is the accessor, not a sidecar field.
+
+Evidence (G0/G1): `dg_port::channel::orifice_tests` (the first sample is the plain group's bit for bit; every sample's solved drop
+is `K |Q_prev| Q` and equals the observed duct-minus-exterior drop; the work is nonnegative and equals `Z Q^2 dt`; the ledger drift
+stays under 1e-9; a settled flow has no lag; halving the step cuts the lag share; refusals; a dropped trial restores everything),
+`dg_port::input::tests::terminal_channels` (the row, its refusals), and the existing terminal-channel tests unchanged.

@@ -116,3 +116,29 @@ fn terminal_source_refuses_undeclared_ports_duplicate_losses_and_unbounded_state
         assert!(read_receipted(&valid.replace(from, to), None).is_err(), "admitted {to}");
     }
 }
+
+#[test]
+fn an_orifice_terminal_is_a_chimney_row_with_the_cards_own_vena_contracta_and_no_transverse_state() {
+    let block = "dg_terminal_channels 2 0\ndg_terminal_closed 1\ndg_terminal_orifice 7 0.61";
+    let source = read(&input(block)).unwrap();
+    assert_eq!(source.maximum_terminal_transverse_cells, 0);
+    assert_eq!(source.terminal_channels[1], DgTerminalChannelInput {
+        port: PortId(7), kind: DgTerminalChannelKind::Orifice { vena_contracta: 0.61 },
+    });
+    // Another card's coefficient is just another number on the row.
+    let other = read(&input("dg_terminal_channels 1 0\ndg_terminal_orifice 7 1.0956")).unwrap();
+    assert_eq!(other.terminal_channels[0].kind, DgTerminalChannelKind::Orifice { vena_contracta: 1.0956 });
+    for (from, to) in [
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 1 0.61"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 99 0.61"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 7 0"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 7 -0.61"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 7 NaN"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 7 2.5"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 7"),
+        ("dg_terminal_orifice 7 0.61", "dg_terminal_orifice 7 0.61 ignored"),
+        ("dg_terminal_closed 1", "dg_terminal_closed 7"),
+    ] {
+        assert!(read(&input(&block.replace(from, to))).is_err(), "admitted {to}");
+    }
+}

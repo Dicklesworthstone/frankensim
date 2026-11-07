@@ -43,8 +43,8 @@ use branch::BranchCoupling;
 
 mod channel;
 pub use channel::{
-    DgTerminalChannelFrame, DgTerminalChannelGasUpdate, DgTerminalChannelInput, DgTerminalChannelKind,
-    DgTerminalChannelLoad, MAX_DG_TERMINAL_TRANSVERSE_CELLS,
+    DgOrificeReport, DgTerminalChannelFrame, DgTerminalChannelGasUpdate, DgTerminalChannelInput,
+    DgTerminalChannelKind, DgTerminalChannelLoad, MAX_DG_TERMINAL_TRANSVERSE_CELLS,
 };
 
 use crate::acoustic_realize::AcousticRealizeError;
@@ -461,6 +461,17 @@ impl DgPortLoad {
             |frame| frame.source_work_j);
         let (terminal_channels, terminal_channel_frames) = self.step_terminal_channels(
             &output, &outward_flows, &load_pressure, load_offset)?;
+        // An orifice's resistance is K |Q| of the sample just solved: the NEXT sample's terminal group is
+        // built from it here, in the fallible phase, and published by `accept` with everything else.
+        let next_terminal_coupling = match (&relation, &self.terminal, &self.terminal_coupling) {
+            (Some(relation), Some(terminal), Some(coupling))
+                if terminal_channels.iter().any(|channel| channel.orifice_report().is_some()) =>
+            {
+                Some(TerminalCoupling::with_channels(&relation.response, self.inlet,
+                    self.terminal_ports().to_vec(), terminal, coupling.driven_mouth, &terminal_channels)?)
+            }
+            _ => None,
+        };
         let mut terminal_frames = Vec::with_capacity(count);
         if let (Some(relation), Some(coupling)) = (relation, &self.terminal_coupling) {
             let h = &relation.response.history_pressure_pa;
@@ -480,7 +491,10 @@ impl DgPortLoad {
                 let channel = terminal_channel_frames.iter().find(|frame| frame.port == id);
                 let channel_pressure = channel.map_or(0.0, |frame| frame.constitutive_pressure_drop_pa);
                 let channel_work_j = channel.map_or(0.0, |frame| frame.pressure_work_j);
-                let closed = channel.is_some_and(|frame| frame.step.is_none());
+                // A rigid closure has no step; an orifice has none either but carries a drop to audit.
+                let closed = channel.is_some_and(|frame| frame.step.is_none())
+                    && !terminal_channels.iter().any(|owner|
+                        owner.input().port == id && owner.orifice_report().is_some());
                 pressure_scale += channel_pressure.abs();
                 // Branch condensation can cancel large internal terms. Keep the
                 // original owner terms in the same fixed relative work audit.
@@ -532,7 +546,7 @@ impl DgPortLoad {
         Ok(DgPortTrial { owner: self, main_inputs: Some(main_inputs), state, output, terminal, terminal_frame, terminal_frames,
             inlet_work_j, source_work_j, driven_mouth_frame, independent_mouth_frame, independent_mouths_frame,
             branch_states, branch_frames,
-            terminal_channels, terminal_channel_frames })
+            terminal_channels, terminal_channel_frames, next_terminal_coupling })
     }
 }
 
@@ -555,6 +569,8 @@ pub(crate) struct DgPortTrial<'a> {
     branch_frames: Vec<DgBranchFrame>,
     terminal_channels: Vec<DgTerminalChannelLoad>,
     terminal_channel_frames: Vec<DgTerminalChannelFrame>,
+    // Only an orifice terminal changes the group between samples; otherwise the owner's stays.
+    next_terminal_coupling: Option<TerminalCoupling>,
 }
 
 impl DgPortTrial<'_> {
@@ -604,6 +620,9 @@ impl DgPortTrial<'_> {
         self.owner.last_branch_frames = self.branch_frames;
         self.owner.terminal_channels = self.terminal_channels;
         self.owner.last_terminal_channel_frames = self.terminal_channel_frames;
+        if let Some(coupling) = self.next_terminal_coupling {
+            self.owner.terminal_coupling = Some(coupling);
+        }
         self.output
     }
 }

@@ -563,6 +563,7 @@ impl DgPortLoad {
             branch_frames,
             terminal_channels: Vec::new(),
             terminal_channel_frames: Vec::new(),
+            next_terminal_coupling: None,
         })
     }
 }

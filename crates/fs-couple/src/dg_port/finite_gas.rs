@@ -155,7 +155,8 @@ pub(crate) fn admitted_volume<E>(
             ));
         }
         volume += match channel.input().kind {
-            DgTerminalChannelKind::Closed => 0.0,
+            // A rigid closure or an inertialess orifice holds no gas.
+            DgTerminalChannelKind::Closed | DgTerminalChannelKind::Orifice { .. } => 0.0,
             DgTerminalChannelKind::Slit {
                 width_m,
                 height_m,

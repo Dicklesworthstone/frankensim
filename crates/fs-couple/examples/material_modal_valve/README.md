@@ -1052,6 +1052,26 @@ work, lateral-wall corrections, entrance/exit shedding and turbulent losses
 are outside this reduction. Changing a pad gap during playback needs the
 corresponding moving-boundary operator and is not exposed by these records.
 
+A finite chimney's open mouth can also carry the open tone hole's sharp-edged
+orifice law, the one the live reed card's `open_hole_orifice` solves:
+
+```text
+dg_terminal_orifice 18 0.61
+```
+
+The fields are `PORT C_VC`. The row puts `p_duct - p_exterior = K |Q| Q`,
+`K = rho / (2 C_vc^2 A^2)`, in series with that chimney's exterior load; `A` is
+the chimney's outlet area and `rho` its own gas. `C_VC` is the card's number in
+`(0, 2]` and the card names its source: the posted oboe pages use fs-duct's
+`SHARP_EDGE_VENA_CONTRACTA`, 0.61, so one ruling on that constant covers both
+routes. The row needs a `dg_side_chimney` on its port, no transverse cell
+(`dg_terminal_channels` counts it, its cell allowance can stay zero) and no
+driven exterior mouth. Each sample solves the group with the previous
+sample's `|Q|` in `K |Q|` (a nonnegative series resistance: the group stays
+passive, and a card without the row is bit for bit what it was). The lag is one
+mechanical step; `DgTerminalChannelLoad::orifice_report` keeps how far the
+solved drop stayed from the law over a render.
+
 `../flue-dg-slit-chimney.performance` combines this shared channel with a finite
 DG chimney, three distinct source gas records and mutual mouth/terminal
 radiation. To close that chimney, replace its slit row with

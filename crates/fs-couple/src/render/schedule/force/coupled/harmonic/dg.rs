@@ -251,6 +251,11 @@ impl CoupledModalSystem {
         gate: &CancelGate,
     ) -> Result<DgLoadedModalHarmonicResponse, DgHarmonicCouplingError> {
         poll(Some(gate))?;
+        // An orifice terminal is a nonlinear time-domain law (`K |Q| Q`); its channel has no linear field, so the
+        // harmonic solve would read it as a rigid closure. Refuse by name instead of answering a different question.
+        if channels.iter().any(|channel| channel.orifice_report().is_some()) {
+            return Err(invalid("continuous modal/DG response refuses a nonlinear orifice terminal: its law is time-domain only").into());
+        }
         let view = duct.continuous_operator();
         let n = self.mode_count();
         let branch_views: Vec<_> = branches.iter()
@@ -501,7 +506,7 @@ impl CoupledModalSystem {
                         DgTerminalChannelKind::Slit { maximum_mach, .. }
                         | DgTerminalChannelKind::Circular { maximum_mach, .. }
                         | DgTerminalChannelKind::Annular { maximum_mach, .. } => maximum_mach,
-                        DgTerminalChannelKind::Closed => return Err(invalid(
+                        DgTerminalChannelKind::Closed | DgTerminalChannelKind::Orifice { .. } => return Err(invalid(
                             "continuous finite channel lost its physical geometry").into()),
                     };
                     if velocities.iter().any(|v| v.abs() > maximum_mach * owner.gas().sound_speed) {

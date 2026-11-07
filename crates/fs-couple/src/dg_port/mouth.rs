@@ -75,6 +75,8 @@ impl DgPortLoad {
             || self.terminal.as_ref().is_none_or(|load|
                 load.pole_states().iter().any(|state| state.re != 0.0 || state.im != 0.0))
             || self.terminal_coupling.as_ref().is_none_or(|coupling| coupling.driven_mouth)
+            // An orifice terminal refreshes its group each sample on the single-inlet path only.
+            || self.terminal_channels.iter().any(|channel| channel.orifice_report().is_some())
         {
             return Err(invalid("joint mouth requires one cold DG/branch/terminal source"));
         }

@@ -55,12 +55,25 @@ pub enum DgTerminalChannelKind {
         /// Maximum absolute resolved cell speed / local sound speed, in (0,.3].
         maximum_mach: f64,
     },
+    /// The quasi-steady sharp-edged orifice law of an open tone hole, in series with
+    /// the terminal's exterior load: `p_duct - p_exterior = K |Q| Q` with
+    /// `K = rho / (2 C_vc^2 A^2)`, `A` the actual chimney outlet area and `rho` the
+    /// terminal's own gas (the live reed card's `open_hole_orifice` law, which takes
+    /// the same form). The coefficient uses the PREVIOUS accepted sample's `|Q|`, so
+    /// each sample solves a linear terminal group whose series resistance
+    /// `K |Q_prev|` is nonnegative: the group stays passive and an absent channel
+    /// changes no bit. The lag is one mechanical step and is measured per render
+    /// (`DgOrificeReport`). No storage; the law is inertialess.
+    Orifice {
+        /// Vena-contracta coefficient `C_vc` of the card, finite and in (0, 2].
+        vena_contracta: f64,
+    },
 }
 
 impl DgTerminalChannelKind {
     pub(super) fn section(self) -> Option<(f64, usize)> {
         match self {
-            Self::Closed => None,
+            Self::Closed | Self::Orifice { .. } => None,
             Self::Slit { width_m, height_m, transverse_cells, .. } =>
                 Some((width_m * height_m, transverse_cells)),
             Self::Circular { radius_m, radial_cells, .. } =>
@@ -73,7 +86,7 @@ impl DgTerminalChannelKind {
 
     fn maximum_mach(self) -> Option<f64> {
         match self {
-            Self::Closed => None,
+            Self::Closed | Self::Orifice { .. } => None,
             Self::Slit { maximum_mach, .. } | Self::Circular { maximum_mach, .. }
             | Self::Annular { maximum_mach, .. } => Some(maximum_mach),
         }
@@ -133,8 +146,64 @@ impl DgTerminalChannelInput {
                 return Err(invalid("DG terminal annulus requires finite positive ordered radii, area and a slender gap, 2..=4096 cells and Mach in (0,.3]"));
             }
         }
+        if let DgTerminalChannelKind::Orifice { vena_contracta } = self.kind {
+            if !(vena_contracta.is_finite() && vena_contracta > 0.0 && vena_contracta <= 2.0) {
+                return Err(invalid("DG terminal orifice requires a finite vena-contracta coefficient in (0, 2]"));
+            }
+        }
         Ok(())
     }
+}
+
+/// The lagged sharp-edged orifice of one terminal: its coefficient, area and the
+/// running account of how far the solved drop (`K |Q_prev| Q`) has stayed from the
+/// law it stands for (`K |Q| Q`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OrificeState {
+    vena_contracta: f64,
+    area_m2: f64,
+    last_flow_m3_s: f64,
+    last_step_work_j: f64,
+    max_lag_drop_pa: f64,
+    lag_work_j: f64,
+    law_work_j: f64,
+    steps: u64,
+}
+
+impl OrificeState {
+    /// `K = rho / (2 C_vc^2 A^2)` in the terminal's own gas [Pa s^2/m^6].
+    fn coefficient(&self, density_kg_m3: f64) -> f64 {
+        density_kg_m3 / (2.0 * self.vena_contracta * self.vena_contracta * self.area_m2 * self.area_m2)
+    }
+
+    /// The affine load of the next sample: `dp = K |Q_prev| Q`, no offset. Zero at rest (a
+    /// resistance of exactly zero adds nothing to the terminal matrix).
+    fn load(&self, density_kg_m3: f64) -> crate::bernoulli_aperture::slit_channel::SlitChannelLoad {
+        crate::bernoulli_aperture::slit_channel::SlitChannelLoad {
+            impedance_pa_s_m3: self.coefficient(density_kg_m3) * self.last_flow_m3_s.abs(),
+            history_pressure_pa: 0.0,
+        }
+    }
+}
+
+/// Measured account of one orifice terminal after the last accepted sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DgOrificeReport {
+    pub vena_contracta: f64,
+    /// Actual chimney outlet area the law is written on [m^2].
+    pub area_m2: f64,
+    /// Outward flow of the last accepted sample [m^3/s].
+    pub last_flow_m3_s: f64,
+    /// Accepted samples.
+    pub steps: u64,
+    /// Largest `|K (|Q| - |Q_prev|) Q|` over the accepted samples [Pa]: how far the solved drop was from the law.
+    pub max_lag_drop_pa: f64,
+    /// `sum |K (|Q| - |Q_prev|) Q| |Q| dt` [J] and `sum K |Q|^3 dt` [J]: their ratio is the share of the law's
+    /// dissipation the lag misattributed over the render.
+    pub lag_work_j: f64,
+    pub law_work_j: f64,
+    /// Work the solved resistance took, `sum K |Q_prev| Q^2 dt` [J]; all of it is dissipated.
+    pub dissipated_j: f64,
 }
 
 /// Bound material and the unchanged original channel owner, without a mutable
@@ -144,6 +213,7 @@ pub struct DgTerminalChannelLoad {
     input: DgTerminalChannelInput,
     gas: GasState,
     channel: Option<FixedChannel>,
+    orifice: Option<OrificeState>,
     cumulative_pressure_work_j: f64,
     cumulative_viscous_dissipation_j: f64,
     cumulative_numerical_dissipation_j: f64,
@@ -177,11 +247,32 @@ impl DgTerminalChannelLoad {
         self.cumulative_numerical_dissipation_j
     }
     pub(super) fn cumulative_dissipated_j(&self) -> f64 {
-        self.cumulative_viscous_dissipation_j + self.cumulative_numerical_dissipation_j
+        if self.orifice.is_some() {
+            // The orifice stores nothing: every joule its resistance takes is dissipated.
+            self.cumulative_pressure_work_j
+        } else {
+            self.cumulative_viscous_dissipation_j + self.cumulative_numerical_dissipation_j
+        }
+    }
+    /// The orifice account of this terminal after the last accepted sample, if it is one.
+    pub fn orifice_report(&self) -> Option<DgOrificeReport> {
+        self.orifice.map(|orifice| DgOrificeReport {
+            vena_contracta: orifice.vena_contracta,
+            area_m2: orifice.area_m2,
+            last_flow_m3_s: orifice.last_flow_m3_s,
+            steps: orifice.steps,
+            max_lag_drop_pa: orifice.max_lag_drop_pa,
+            lag_work_j: orifice.lag_work_j,
+            law_work_j: orifice.law_work_j,
+            dissipated_j: self.cumulative_pressure_work_j,
+        })
     }
     pub(super) fn pressure_load(&self)
         -> Result<Option<crate::bernoulli_aperture::slit_channel::SlitChannelLoad>, AcousticRealizeError>
     {
+        if let Some(orifice) = &self.orifice {
+            return Ok(Some(orifice.load(self.gas.density)));
+        }
         self.channel.as_ref().map(FixedChannel::pressure_load).transpose()
     }
 
@@ -240,7 +331,8 @@ impl DgTerminalChannelFrame {
     // zero flow cancels inertial history to roundoff. Scaling by Q alone
     // would demand a bit-exact FV cancellation instead of the fixed work gate.
     pub(super) fn work_scale_j(&self) -> f64 {
-        self.step.map_or(0.0, |step| step.pressure_work_j.abs()
+        // A rigid closure has no work (0.0); an orifice has no step but does work.
+        self.step.map_or(self.pressure_work_j.abs(), |step| step.pressure_work_j.abs()
             + step.stored_delta_j.abs() + step.viscous_dissipation_j
             + step.numerical_dissipation_j)
     }
@@ -281,6 +373,13 @@ impl DgPortLoad {
             {
                 return Err(invalid("DG terminal channels require distinct actual terminal ports"));
             }
+            if matches!(input.kind, DgTerminalChannelKind::Orifice { .. })
+                && (!self.branches.iter().any(|branch| branch.port() == input.port)
+                    || !self.terminal_area_m2(input.port)?.is_some_and(|area| area.is_finite() && area > 0.0)
+                    || self.has_driven_mouth())
+            {
+                return Err(invalid("DG terminal orifice is a tone-hole law: it needs a finite DG chimney with an outlet area and no driven exterior mouth"));
+            }
             if let Some((channel_area, transverse_cells)) = input.kind.section() {
                 cells = cells.checked_add(transverse_cells)
                     .ok_or_else(|| invalid("DG terminal transverse state count overflow"))?;
@@ -303,8 +402,16 @@ impl DgPortLoad {
         let mut channels = Vec::with_capacity(inputs.len());
         for input in inputs {
             let gas = self.terminal_gas(input.port)?;
+            let orifice = if let DgTerminalChannelKind::Orifice { vena_contracta } = input.kind {
+                let area_m2 = self.terminal_area_m2(input.port)?
+                    .ok_or_else(|| invalid("DG terminal orifice lost its chimney outlet area"))?;
+                Some(OrificeState {
+                    vena_contracta, area_m2, last_flow_m3_s: 0.0, last_step_work_j: 0.0,
+                    max_lag_drop_pa: 0.0, lag_work_j: 0.0, law_work_j: 0.0, steps: 0,
+                })
+            } else { None };
             let channel = match input.kind {
-                DgTerminalChannelKind::Closed => None,
+                DgTerminalChannelKind::Closed | DgTerminalChannelKind::Orifice { .. } => None,
                 DgTerminalChannelKind::Slit { width_m, height_m, length_m, transverse_cells, .. } => {
                     Some(SlitChannel::from_gas(&gas, SlitChannelSpec {
                         length_m, width_m, height_m, transverse_cells,
@@ -326,7 +433,7 @@ impl DgPortLoad {
                     })?.into())
                 }
             };
-            channels.push(DgTerminalChannelLoad { input, gas, channel,
+            channels.push(DgTerminalChannelLoad { input, gas, channel, orifice,
                 cumulative_pressure_work_j: 0.0, cumulative_viscous_dissipation_j: 0.0,
                 cumulative_numerical_dissipation_j: 0.0, cumulative_parameter_work_j: 0.0 });
         }
@@ -383,6 +490,26 @@ impl DgPortLoad {
                 candidate.cumulative_numerical_dissipation_j += step.numerical_dissipation_j;
                 candidate.channel = Some(next);
                 (constitutive_drop, step.pressure_work_j, flow_residual, Some(step))
+            } else if let Some(orifice) = &owner.orifice {
+                // The sample was solved with the resistance Z = K |Q_prev|: that drop, not the law at the new
+                // flow, is what the same-step pressure and work audits must see. The law's own value and the
+                // difference are kept for the render's report.
+                let k = orifice.coefficient(owner.gas.density);
+                let used = k * orifice.last_flow_m3_s.abs();
+                let constitutive_drop = used * flow;
+                let work = constitutive_drop * (flow * self.propagator.dt());
+                let law_drop = k * flow.abs() * flow;
+                let lag_drop = (law_drop - constitutive_drop).abs();
+                let mut next = *orifice;
+                next.last_flow_m3_s = flow;
+                next.last_step_work_j = work;
+                next.max_lag_drop_pa = next.max_lag_drop_pa.max(lag_drop);
+                next.lag_work_j += lag_drop * flow.abs() * self.propagator.dt();
+                next.law_work_j += k * flow.abs() * flow * flow * self.propagator.dt();
+                next.steps += 1;
+                candidate.orifice = Some(next);
+                candidate.cumulative_pressure_work_j += work;
+                (constitutive_drop, work, 0.0, None)
             } else {
                 if flow != 0.0 { return Err(invalid("rigid DG terminal closure admitted nonzero flow")); }
                 (drop, 0.0, 0.0, None)
@@ -410,6 +537,15 @@ pub(super) fn include_channel_ledgers(
     output: &mut DgStepOutput, channels: &[DgTerminalChannelLoad],
 ) -> Result<(), AcousticRealizeError> {
     for channel in channels {
+        if let Some(orifice) = &channel.orifice {
+            // An orifice stores nothing and returns nothing: the work its resistance took is dissipated.
+            output.ledger.port_work_step_j += orifice.last_step_work_j;
+            output.ledger.cumulative_port_work_j += channel.cumulative_pressure_work_j;
+            output.ledger.cumulative_dissipated_j += channel.cumulative_dissipated_j();
+            output.ledger.energy_balance_residual_j += channel.cumulative_dissipated_j()
+                - channel.cumulative_pressure_work_j;
+            continue;
+        }
         let Some(owner) = &channel.channel else { continue; };
         let step = owner.last_step();
         output.ledger.stored_energy_j += step.kinetic_energy_j;
@@ -441,3 +577,5 @@ pub(super) fn include_channel_ledgers(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod orifice_tests;

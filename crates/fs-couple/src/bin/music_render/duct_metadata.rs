@@ -157,6 +157,11 @@ pub(super) fn dg_radiation_provenance(load: &fs_couple::dg_port::DgPortLoad) -> 
                 DgTerminalChannelKind::Annular {
                     inner_radius_m, outer_radius_m, length_m, radial_cells, maximum_mach,
                 } => format!("\"kind\":\"unsteady-fixed-annular\",\"inner_radius_m\":{inner_radius_m:e},\"outer_radius_m\":{outer_radius_m:e},\"length_m\":{length_m:e},\"radial_cells\":{radial_cells},\"maximum_mach\":{maximum_mach:e}"),
+                DgTerminalChannelKind::Orifice { vena_contracta } => {
+                    let area_m2 = bound.orifice_report().map_or(f64::NAN, |report| report.area_m2);
+                    let k = bound.gas().density / (2.0 * vena_contracta * vena_contracta * area_m2 * area_m2);
+                    format!("\"kind\":\"sharp-edged-orifice\",\"law\":\"dp = K |Q_prev| Q, K = rho / (2 C_vc^2 A^2), one-sample lag\",\"vena_contracta\":{vena_contracta:e},\"outlet_area_m2\":{area_m2:e},\"k_pa_s2_m6\":{k:e}")
+                }
             };
             format!("{{\"port\":{},{law},\"gas\":{}}}", input.port.0, gas_state(bound.gas()))
         }).collect::<Vec<_>>().join(",");

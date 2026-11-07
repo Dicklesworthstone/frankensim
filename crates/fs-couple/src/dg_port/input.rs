@@ -260,6 +260,14 @@ impl DgSourceInput {
     /// dg_terminal_slit PORT_ID WIDTH_M HEIGHT_M LENGTH_M CELLS MAX_MACH
     /// dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH
     /// dg_terminal_annular PORT_ID INNER_RADIUS_M OUTER_RADIUS_M LENGTH_M CELLS MAX_MACH
+    /// dg_terminal_orifice PORT_ID C_VC
+    /// The orifice row puts the open tone hole's quasi-steady sharp-edged law, `dp = K |Q| Q` with
+    /// `K = rho / (2 C_vc^2 A^2)` (`A` the DG chimney's outlet area, `rho` its own gas), in series with
+    /// the chimney's exterior load. `C_VC` is the card's: name its source on the card, as the live reed
+    /// card's `open_hole_orifice` takes fs-duct's `SHARP_EDGE_VENA_CONTRACTA`. The coefficient uses the
+    /// previous sample's `|Q|` (a nonnegative series resistance, so the group stays passive; the lag is
+    /// reported by `DgTerminalChannelLoad::orifice_report`). It needs a `dg_side_chimney` on its port and
+    /// no driven exterior mouth. A port with no row is unchanged bit for bit.
     /// A closed finite chimney retains its complete DG volume and wall memory
     /// with a rigid distal boundary, and consumes no exterior matrix row.
     /// Omitted ports remain directly connected to the full exterior matrix.
@@ -567,9 +575,17 @@ impl DgSourceInput {
                             radial_cells: row.count(MAX_DG_TERMINAL_TRANSVERSE_CELLS)?,
                             maximum_mach: row.positive()?,
                         },
-                        _ => return Err(bad(line, "expected a closed terminal or finite slit/circular/annular channel").into()),
+                        "dg_terminal_orifice" => DgTerminalChannelKind::Orifice {
+                            vena_contracta: row.positive()?,
+                        },
+                        _ => return Err(bad(line, "expected a closed terminal, a tone-hole orifice or a finite slit/circular/annular channel").into()),
                     };
                     row.finish()?;
+                    if matches!(kind, DgTerminalChannelKind::Orifice { .. })
+                        && !source.chimneys.iter().any(|chimney| chimney.port == port)
+                    {
+                        return Err(bad(line, "a terminal orifice needs a finite DG chimney (dg_side_chimney) on its port").into());
+                    }
                     let channel = DgTerminalChannelInput { port, kind };
                     channel.validate().map_err(DgSourceError::Physics)?;
                     if let Some((_, cells)) = kind.section() {

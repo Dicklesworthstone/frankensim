@@ -325,7 +325,7 @@ fn volumes(kind: DgTerminalChannelKind) -> Vec<f64> {
                 })
                 .collect()
         }
-        DgTerminalChannelKind::Closed => Vec::new(),
+        DgTerminalChannelKind::Closed | DgTerminalChannelKind::Orifice { .. } => Vec::new(),
     }
 }
 
