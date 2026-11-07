@@ -399,6 +399,40 @@ fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bo
     duration_s: f64,
     controls: GasChamberSolve,
     admit_roster: impl FnOnce() -> Result<(), GasSurfaceError>,
+    snapshot_surface: impl FnMut(&S, GasSpeciesSnapshot) -> Result<SurfaceSnapshot, GasSurfaceError>,
+    prepare_surface: impl FnMut(&S, SurfaceSnapshot, f64, &mut C)
+        -> Result<PreparedSurface, GasSurfaceError>,
+    observe: impl FnMut(&S, &SurfaceSnapshot) -> Result<(), GasSurfaceError>,
+    cancelled: C,
+) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
+    advance_chamber_with_inventory(
+        surfaces, accommodation, gas, catalog, duration_s, controls,
+        InventoryAdmission::FrozenGross, admit_roster, snapshot_surface,
+        prepare_surface, observe, cancelled,
+    )
+}
+
+// Integrated turnover has a separately solved finite reservoir and a unilateral
+// film boundary. Its gross counterflows may recycle mass many times; applying
+// old-inventory gross caps would destroy that physical solution. This private
+// policy is admitted only for one such surface, never a set of independently
+// solved surfaces that would spend the same vapor more than once.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InventoryAdmission {
+    FrozenGross,
+    IntegratedSingleSurface,
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_chamber_with_inventory<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bool>(
+    surfaces: &[S],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasChamberSolve,
+    inventory_admission: InventoryAdmission,
+    admit_roster: impl FnOnce() -> Result<(), GasSurfaceError>,
     mut snapshot_surface: impl FnMut(&S, GasSpeciesSnapshot) -> Result<SurfaceSnapshot, GasSurfaceError>,
     mut prepare_surface: impl FnMut(&S, SurfaceSnapshot, f64, &mut C)
         -> Result<PreparedSurface, GasSurfaceError>,
@@ -407,6 +441,13 @@ fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bo
 ) -> Result<(GasChamberCandidate<'catalog>, BTreeMap<u64, ReflectedHeatStep>), GasSurfaceError> {
     poll(&mut cancelled)?;
     validate_controls(controls.surface, duration_s)?;
+    if inventory_admission == InventoryAdmission::IntegratedSingleSurface
+        && (surfaces.len() != 1 || accommodation.is_some())
+    {
+        return Err(invalid(
+            "integrated molecular turnover requires one surface and specular nonsticking gas",
+        ));
+    }
     if controls.maximum_surfaces == 0 || surfaces.len() > controls.maximum_surfaces {
         return Err(invalid(
             "joint molecular surface count exceeds its declared work budget",
@@ -445,29 +486,48 @@ fn advance_chamber_with_owner<'catalog, S: ChamberSurfaceOwner, C: FnMut() -> bo
         account.outgoing.add(snapshot.outgoing_mass_kg)?;
         account.incoming.add(snapshot.incoming_mass_kg)?;
         account.transferred.add(snapshot.transferred_mass_kg)?;
-        merge_limit(
-            &mut limit,
-            inventory_limit(
-                duration_s,
-                snapshot.outgoing_mass_kg,
-                // In a mixture this is only its OLD solid inventory.
-                snapshot.available_solid_mass_kg,
-                controls.surface.maximum_gross_inventory_fraction,
+        match inventory_admission {
+            InventoryAdmission::FrozenGross => merge_limit(
+                &mut limit,
+                inventory_limit(
+                    duration_s,
+                    snapshot.outgoing_mass_kg,
+                    // In a mixture this is only its OLD solid inventory.
+                    snapshot.available_solid_mass_kg,
+                    controls.surface.maximum_gross_inventory_fraction,
+                ),
             ),
-        );
+            InventoryAdmission::IntegratedSingleSurface => {
+                let dm = snapshot.transferred_mass_kg;
+                let remaining = snapshot.available_solid_mass_kg - dm;
+                let vapor = snapshot.gas.vapor_mass_kg + dm;
+                let residual = (snapshot.outgoing_mass_kg - snapshot.incoming_mass_kg) - dm;
+                if !remaining.is_finite() || remaining < 0.0
+                    || !vapor.is_finite() || vapor < 0.0
+                    || !snapshot.outgoing_mass_kg.is_finite() || snapshot.outgoing_mass_kg < 0.0
+                    || !snapshot.incoming_mass_kg.is_finite() || snapshot.incoming_mass_kg < 0.0
+                    || !residual.is_finite()
+                    || residual.abs() > controls.surface.gas.mass_tolerance_kg
+                {
+                    return Err(invalid("integrated molecular turnover failed its net inventory balance"));
+                }
+            }
+        }
         snapshots.push((*surface, snapshot));
     }
-    for account in species.values() {
-        poll(&mut cancelled)?;
-        merge_limit(
-            &mut limit,
-            inventory_limit(
-                duration_s,
-                account.incoming.value()?,
-                account.gas.vapor_mass_kg,
-                controls.surface.maximum_gross_inventory_fraction,
-            ),
-        );
+    if inventory_admission == InventoryAdmission::FrozenGross {
+        for account in species.values() {
+            poll(&mut cancelled)?;
+            merge_limit(
+                &mut limit,
+                inventory_limit(
+                    duration_s,
+                    account.incoming.value()?,
+                    account.gas.vapor_mass_kg,
+                    controls.surface.maximum_gross_inventory_fraction,
+                ),
+            );
+        }
     }
     // Local equilibrium alone is insufficient: another surface could change
     // this shared gas during the interval. Only a stationary complete chamber

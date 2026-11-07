@@ -23,6 +23,9 @@
 /// Existing coatings with independent deposit/support temperatures and finite conductance.
 pub mod resistance;
 
+/// Finite-reservoir molecular turnover through bare-film birth and extinction.
+pub mod lifecycle;
+
 use std::collections::BTreeMap;
 
 use fs_thermal::sublimation::{

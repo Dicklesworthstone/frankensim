@@ -396,6 +396,58 @@ its complete history-dependent owner exists.
 thermal derivatives, Maxwell reciprocity, objectivity, nonproportional retained
 history, relaxation-time independence, native plane reduction and refusals.
 
+## Supported-film lifecycle with finite nonisothermal gas
+
+`sublimation::gas::chamber::coating::lifecycle::advance_supported_lifecycle`
+advances one original `GasSupportedSurface` through zero-film formation and
+complete extinction. The thermal molecular-turnover owner integrates the
+finite reservoir's changing backpressure at frozen initial support/gas
+temperatures, area and optional dilute-film coefficient. Both integrated
+opposing streams then enter the original supported caloric storage and the
+same shared source-relative gas transaction. Composition, pressure, transport
+and gas caloric state are reconstructed once; support mass never enters vapor.
+
+The interface explicitly admits barrier-free heterogeneous deposition and
+instantaneous re-emission. A bare undersaturated support re-emits every sticking
+incoming molecule at its own temperature, giving equal nonzero streams and
+sensible heat exchange without negative film inventory. Supersaturation forms
+a film with concurrent emission. After an actual zero-film hit, the remaining
+interval follows the same bare-interface rule. An initially absent vapor may
+be emitted, mixed and reabsorbed within one interval using its retained original
+caloric source at gas temperature. No first-step emission suppression, arbitrary
+trace-mass seed or latent-energy double count is introduced.
+
+`GasSupportedLifecycleSolve` carries the existing gas and supported-storage
+solvers, source-compatibility tolerance and an explicit deposit-volume ceiling
+in `(0,0.01]`. Gross streams may recycle inventories many times, so this owner
+uses a private single-surface integrated-inventory admission instead of the
+ordinary chamber's old-inventory gross bounds. It independently admits net
+inventories, stream/mass representation residuals, source identity and complete
+gas/support energy balances. The ordinary multi-surface chamber retains its
+original gross admission. More than one independently integrated surface or
+additional reflected-heat accommodation refuses rather than sharing the same
+finite vapor twice or freezing its changing pressure in a second heat model.
+
+The candidate retains the original supported-chamber endpoint plus the exact
+frozen-temperature turnover receipt and both endpoint deposit-volume fractions.
+Its turnover reservoir is an intermediate kinetic state; `gas()` is the final
+thermochemical state. Positive asymptotic inventory tails that cannot survive
+the original net-transfer representation refuse, even below mass tolerance;
+they are never relabeled as an extinction event. Zero duration still admits
+sources and volume and preserves state. Cancellation or any unsupported source,
+unrepresentable inventory, volume or caloric balance publishes no partial state.
+
+The coupled step is first order in evolving temperatures; its kinetic extinction
+time is a local event estimate, not an exact nonisothermal clock. This model
+has one internally isothermal supported coating, fixed exposed area and fixed
+accessible gas volume, with specular nonsticking/carrier reflection. The volume
+cap bounds omitted deposit displacement, not pressure-work error. Nucleation,
+adsorption residence, porosity, gas-film heat storage, multiple competing fronts,
+finite support/coating thermal resistance and resolved morphology remain outside
+this opt-in model. Focused G0/G1 tests specify analytical finite-vapor growth,
+extinction and continuing bare sensible exchange, same-interval species reentry,
+the original small-step limit, datum invariance and transactional refusals.
+
 ## Adaptive supported deposition with finite gas
 
 `sublimation::gas::timeline::coating::adaptive::advance_coatings_adaptive_with_gas`
