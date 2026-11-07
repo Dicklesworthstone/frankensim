@@ -1,5 +1,29 @@
 # CONTRACT: fs-conduction
 
+## Material-orientation controls for anisotropic conduction
+
+`ConductivityModel::rotated` applies a declared proper world-frame rotation
+to the complete retained conductivity law while preserving its source receipts,
+temperature support and principal conductivity tables. The geometry, thermal
+contacts and boundary laws remain independently owned.
+
+`RobinResponse::conductivity_rotation_pullback` returns three derivatives per
+element for infinitesimal right-handed world-axis rotations, in objective units
+per radian. It contracts the complete thermal nodal-load adjoint with the native
+stiffness assembled from `Omega*K - K*Omega`; rotation commutes with the original
+P1 material integral, including crossed conductivity knots. It retains the
+Dirichlet lift and adds no second K'(T) term. Grouped material orientations sum
+their element vectors. Isotropic conductivity has zero rotation sensitivity.
+
+This is a bulk material orientation control at fixed geometry, storage,
+interface laws and source context. A caller's adjoint must already include all
+state feedback, and explicit objective dependence needs its own direct term.
+No new global matrix or primal/transpose solve is created by the contraction.
+The production rotation differential passed a direct native Rust check against
+independent finite rotations and isotropic/repeated-eigenvalue null directions.
+Full heterogeneous nonlinear re-solve regressions are defined but require a
+complete native build for execution.
+
 ## Conductivity design across fixed thermal contacts
 
 `ConductivityDesign::with_interfaces` retains a checked, immutable matching

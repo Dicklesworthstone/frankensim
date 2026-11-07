@@ -1409,3 +1409,114 @@ fn element_stiffness_rows_sum_to_zero() {
         &format!("worst_row_sum={worst:e} scale={scale:e}"),
     );
 }
+
+#[test]
+fn conductivity_rotation_preserves_nonlinear_law_receipts_and_support() {
+    let claims = conductivity_claims();
+    let table = ConductivityTable::from_claims(
+        &claims,
+        "thermal_conductivity",
+        &[280.0, 360.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    let rotation = [[0.8, -0.6, 0.0], [0.6, 0.8, 0.0], [0.0, 0.0, 1.0]];
+    let isotropic = ConductivityModel::isotropic(table.clone());
+    assert_eq!(isotropic.rotated(rotation).unwrap(), isotropic);
+    assert_eq!(isotropic.provenance(), ProvenanceClass::MatdbReceipts);
+    let tables = [
+        table,
+        ConductivityTable::declared_curve(vec![(250.0, 30.0), (400.0, 60.0)]).unwrap(),
+        ConductivityTable::declared_curve(vec![(260.0, 3.0), (380.0, 9.0)]).unwrap(),
+    ];
+    let model = ConductivityModel::orthotropic(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        tables.clone(),
+    )
+    .unwrap();
+    let rotated = model.rotated(rotation).unwrap();
+    assert_eq!(rotated.temperature_span(), model.temperature_span());
+    assert_eq!(rotated.provenance(), model.provenance());
+    assert_eq!(rotated.receipts(), model.receipts());
+    assert_eq!(
+        rotated.is_temperature_dependent(),
+        model.is_temperature_dependent()
+    );
+    for receipt in rotated.receipts() {
+        claims.verify_receipt(receipt).unwrap();
+    }
+    // Independent closed form for a rotated diagonal tensor, including its
+    // temperature tangent on either side of the retained 300 K source knot.
+    let expected = |k: [f64; 3]| {
+        [
+            [0.64 * k[0] + 0.36 * k[1], 0.48 * (k[0] - k[1]), 0.0],
+            [0.48 * (k[0] - k[1]), 0.36 * k[0] + 0.64 * k[1], 0.0],
+            [0.0, 0.0, k[2]],
+        ]
+    };
+    for t in [285.0, 295.0, 315.0, 355.0] {
+        for (actual, reference) in [
+            (
+                rotated.tensor_at(t).unwrap(),
+                expected(tables.each_ref().map(|v| v.eval(t).unwrap())),
+            ),
+            (
+                rotated.tensor_derivative_at(t).unwrap(),
+                expected(tables.each_ref().map(|v| v.derivative(t).unwrap())),
+            ),
+        ] {
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!((actual[i][j] - reference[i][j]).abs() < 1e-12);
+                }
+            }
+        }
+    }
+    for t in [279.0, 361.0] {
+        assert!(rotated.tensor_at(t).is_err());
+        assert!(rotated.tensor_derivative_at(t).is_err());
+    }
+}
+
+#[test]
+fn conductivity_rotation_transforms_constant_tensor_and_round_trips() {
+    let model = ConductivityModel::constant_tensor(ANISO_K).unwrap();
+    let quarter_turn = [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    let inverse = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+    let rotated = model.rotated(quarter_turn).unwrap();
+    assert_eq!(
+        rotated.tensor_at(300.0).unwrap(),
+        [[2.0, -0.5, -0.75], [-0.5, 3.0, 0.25], [-0.75, 0.25, 1.5]],
+    );
+    assert_eq!(rotated.tensor_derivative_at(300.0).unwrap(), [[0.0; 3]; 3]);
+    assert_eq!(rotated.rotated(inverse).unwrap(), model);
+    assert_eq!(rotated.provenance(), model.provenance());
+    assert_eq!(rotated.receipts(), model.receipts());
+}
+
+#[test]
+fn conductivity_rotation_refuses_reflections_scaling_shear_and_nonfinite_matrices() {
+    let models = [
+        ConductivityModel::isotropic_declared(2.5).unwrap(),
+        ConductivityModel::constant_tensor(ANISO_K).unwrap(),
+        ConductivityModel::orthotropic(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            std::array::from_fn(|i| ConductivityTable::declared((i + 1) as f64).unwrap()),
+        )
+        .unwrap(),
+    ];
+    for matrix in [
+        [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [[1.0, 0.2, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [[f64::NAN, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [[1.0, f64::INFINITY, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    ] {
+        for model in &models {
+            assert!(matches!(
+                model.rotated(matrix),
+                Err(ConductionError::Conductivity { .. })
+            ));
+        }
+    }
+}

@@ -119,3 +119,185 @@ fn conductivity_controls_refuse_wrong_fields_fixed_duals_budgets_and_kinks() {
             &vec![0.0;mesh.vertex_count()],mesh.element_count()),Err(ConductionError::Cancelled {..})));
     });
 }
+
+fn rotate_about(axis: usize, angle: f64, value: [f64; 3]) -> [f64; 3] {
+    let (s, c) = angle.sin_cos();
+    let p = (axis + 1) % 3;
+    let q = (axis + 2) % 3;
+    let mut out = value;
+    out[p] = c * value[p] - s * value[q];
+    out[q] = s * value[p] + c * value[q];
+    out
+}
+
+#[test]
+fn orientation_tangent_matches_rotated_tensors_and_isotropic_null_directions() {
+    let k = [[4.0, 0.7, -0.4], [0.7, 2.0, 0.3], [-0.4, 0.3, 1.0]];
+    let rotate = |axis, angle| {
+        let columns = std::array::from_fn::<_, 3, _>(|j| {
+            rotate_about(axis, angle, std::array::from_fn(|i| k[i][j]))
+        });
+        std::array::from_fn::<_, 3, _>(|i| {
+            rotate_about(axis, angle, std::array::from_fn(|j| columns[j][i]))
+        })
+    };
+    let epsilon = 1e-5;
+    for (axis, derivative) in rotation_tangents(k).iter().enumerate() {
+        let low = rotate(axis, -epsilon);
+        let high = rotate(axis, epsilon);
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = (high[i][j] - low[i][j]) / (2.0 * epsilon);
+                assert!((derivative[i][j] - expected).abs() < 1e-9);
+                assert_eq!(derivative[i][j], derivative[j][i]);
+            }
+        }
+        assert!((derivative[0][0] + derivative[1][1] + derivative[2][2]).abs() < 1e-15);
+    }
+    assert_eq!(
+        rotation_tangents([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 3.0]]),
+        [[[0.0; 3]; 3]; 3],
+    );
+    // Rotation around the symmetry axis of a transversely isotropic solid
+    // changes no physical conductivity, even when the third eigenvalue differs.
+    assert_eq!(
+        rotation_tangents([[3.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 8.0]])[2],
+        [[0.0; 3]; 3],
+    );
+}
+
+fn orientation_physical(
+    cx: &Cx<'_>,
+    rotations: [[f64; 3]; 2],
+    nonlinear: bool,
+    differentiated: bool,
+) -> (f64, [[f64; 3]; 2]) {
+    let mesh = mesh();
+    let model = |region: usize| {
+        let mut axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        for (axis, angle) in [0.23 + 0.17 * region as f64, -0.31, 0.41]
+            .into_iter()
+            .enumerate()
+        {
+            axes = axes.map(|v| rotate_about(axis, angle, v));
+        }
+        let tables = std::array::from_fn(|axis| {
+            let (middle, values) = match axis {
+                0 => (320.0, [3.0, 8.0, 11.0]),
+                1 => (330.0, [15.0, 7.0, 5.0]),
+                _ => (340.0, [2.0, 4.0, 14.0]),
+            };
+            let factor = 1.0 + 0.3 * region as f64;
+            ConductivityTable::declared_curve(vec![
+                (
+                    250.0,
+                    factor * if nonlinear { values[0] } else { values[1] },
+                ),
+                (middle, factor * values[1]),
+                (
+                    450.0,
+                    factor * if nonlinear { values[2] } else { values[1] },
+                ),
+            ])
+            .unwrap()
+        });
+        let material = ConductivityModel::orthotropic(axes, tables).unwrap();
+        let mut columns = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        for (axis, angle) in rotations[region].into_iter().enumerate() {
+            columns = columns.map(|v| rotate_about(axis, angle, v));
+        }
+        let rotation = std::array::from_fn(|i| std::array::from_fn(|j| columns[j][i]));
+        material.rotated(rotation).unwrap()
+    };
+    let fallback = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(1.0, 1.0), (2.0, 1.0)]).unwrap(),
+    );
+    let assigned = ElementMaterials::new(
+        MaterialTable::new([(MaterialId(7), model(0)), (MaterialId(8), model(1))]).unwrap(),
+        (0..mesh.element_count())
+            .map(|e| MaterialId(7 + (e % 2) as u32))
+            .collect(),
+    )
+    .unwrap();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "hot",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::dirichlet(350.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "cooled",
+            |f| on_box_face(f.centroid[0], 0.1),
+            ThermalBc::robin(80.0, 290.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let source = ScalarField::Uniform(2000.0);
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &fallback,
+        element_materials: Some(&assigned),
+        source: &source,
+    };
+    let linearization = RobinLinearization::new(cx, problem, config(), &["cooled"]).unwrap();
+    let temperature = &linearization.primal().temperature;
+    let value = temperature[mesh.vertex_count() - 1];
+    if !differentiated {
+        return (value, [[0.0; 3]; 2]);
+    }
+    let mut weights = vec![0.0; mesh.vertex_count()];
+    weights[mesh.vertex_count() - 1] = 1.0;
+    let adjoint = linearization
+        .pullback(cx, &weights, &[0.0], &[0.0])
+        .unwrap();
+    let local = RobinResponse::conductivity_rotation_pullback(
+        cx,
+        problem,
+        temperature,
+        &adjoint.nodal_load,
+        mesh.element_count(),
+    )
+    .unwrap();
+    let mut gradient = [[0.0; 3]; 2];
+    for (e, entry) in local.into_iter().enumerate() {
+        for axis in 0..3 {
+            gradient[e % 2][axis] += entry[axis];
+        }
+    }
+    assert_eq!(temperature, &linearization.primal().temperature);
+    (value, gradient)
+}
+
+#[test]
+fn orientation_controls_match_heterogeneous_nonlinear_physical_resolves() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        for nonlinear in [false, true] {
+            let (_, actual) = orientation_physical(cx, [[0.0; 3]; 2], nonlinear, true);
+            let epsilon = 2e-4;
+            for region in 0..2 {
+                for axis in 0..3 {
+                    let mut low = [[0.0; 3]; 2];
+                    low[region][axis] = -epsilon;
+                    let mut high = [[0.0; 3]; 2];
+                    high[region][axis] = epsilon;
+                    let expected = (orientation_physical(cx, high, nonlinear, false).0
+                        - orientation_physical(cx, low, nonlinear, false).0)
+                        / (2.0 * epsilon);
+                    assert!(
+                        expected.abs() > 1e-6,
+                        "each material/axis must affect the goal"
+                    );
+                    assert!(
+                        (actual[region][axis] - expected).abs() < 5e-5 * expected.abs().max(1.0),
+                        "nonlinear={nonlinear} material={region} axis={axis}: {} vs {expected}",
+                        actual[region][axis],
+                    );
+                }
+            }
+        }
+    });
+}

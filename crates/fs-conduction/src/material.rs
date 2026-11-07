@@ -965,6 +965,59 @@ impl ConductivityModel {
         })
     }
 
+    /// Rotate the complete conductivity law by a caller-declared proper rotation.
+    ///
+    /// Matrix entries use the usual row/column convention:
+    /// `K_rotated(T) = rotation * K(T) * rotation^T`. Each principal-axis
+    /// vector is multiplied by `rotation`; all principal temperature tables,
+    /// source receipts, provenance and support remain unchanged. Isotropic
+    /// models are unchanged clones. The rotation creates no new material claim
+    /// and does not rotate mesh geometry, boundary conditions or contact laws.
+    ///
+    /// # Errors
+    /// Refuses a nonfinite, nonorthogonal or orientation-reversing matrix.
+    /// Orthogonality uses the native principal-frame tolerance. A transformed
+    /// tensor/frame that cannot retain its native numerical admission also
+    /// refuses rather than publishing an invalid material.
+    pub fn rotated(&self, rotation: [[f64; 3]; 3]) -> Result<Self, ConductionError> {
+        check_orthonormal(&rotation)?;
+        let determinant = rotation[0][0]
+            * (rotation[1][1] * rotation[2][2] - rotation[1][2] * rotation[2][1])
+            - rotation[0][1]
+                * (rotation[1][0] * rotation[2][2] - rotation[1][2] * rotation[2][0])
+            + rotation[0][2]
+                * (rotation[1][0] * rotation[2][1] - rotation[1][1] * rotation[2][0]);
+        if !determinant.is_finite() || determinant <= 0.0 {
+            return Err(ConductionError::Conductivity {
+                what: "material rotation must be proper; reflections are not rotations".into(),
+            });
+        }
+        let rotate = |v: [f64; 3]| {
+            rotation.map(|row| row[0].mul_add(v[0], row[1].mul_add(v[1], row[2] * v[2])))
+        };
+        let mut model = self.clone();
+        match &mut model.kind {
+            ConductivityKind::ConstantTensor { tensor, .. } => {
+                // First rotate each column, then right-multiply by R^T.
+                let columns: [[f64; 3]; 3] = std::array::from_fn(|j| {
+                    rotate([tensor[0][j], tensor[1][j], tensor[2][j]])
+                });
+                let transformed = std::array::from_fn(|i| {
+                    rotate([columns[0][i], columns[1][i], columns[2][i]])
+                });
+                check_spd(&transformed)?;
+                **tensor = transformed;
+            }
+            ConductivityKind::Orthotropic { axes, .. } => {
+                let transformed = (**axes).map(rotate);
+                check_orthonormal(&transformed)?;
+                **axes = transformed;
+            }
+            ConductivityKind::Isotropic(_) => {}
+        }
+        Ok(model)
+    }
+
     /// The tensor at a temperature.
     ///
     /// # Errors

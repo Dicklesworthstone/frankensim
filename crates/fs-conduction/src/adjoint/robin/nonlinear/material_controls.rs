@@ -48,32 +48,8 @@ impl RobinResponse {
         nodal_load_adjoint: &[f64],
         max_elements: usize,
     ) -> Result<Vec<f64>, ConductionError> {
-        poll(cx, 0)?;
-        let n = problem.mesh.vertex_count();
-        let ne = problem.mesh.element_count();
-        if ne > max_elements {
-            return Err(invalid(
-                "conductivity-scale pullback exceeds the element allowance",
-            ));
-        }
-        vector(cx, temperature, n)?;
-        vector(cx, nodal_load_adjoint, n)?;
-        if let Some(materials) = problem.element_materials {
-            materials.validate_for(problem.mesh)?;
-        }
-        for &(v, prescribed) in problem.boundary.dirichlet() {
-            poll(cx, v)?;
-            if v >= n || temperature[v] != prescribed || nodal_load_adjoint[v] != 0.0 {
-                return Err(invalid(
-                    "conductivity-scale pullback requires the unchanged prescribed values and zero fixed-node dual",
-                ));
-            }
-        }
-        if !material_is_smooth(cx, problem, temperature)? {
-            return Err(invalid(
-                "conductivity-scale pullback cannot choose a total derivative at a material kink or validity endpoint",
-            ));
-        }
+        let ne =
+            material_control_elements(cx, problem, temperature, nodal_load_adjoint, max_elements)?;
         let mut result = Vec::new();
         result
             .try_reserve_exact(ne)
@@ -103,6 +79,142 @@ impl RobinResponse {
         poll(cx, ne)?;
         Ok(result)
     }
+
+    /// Pull a complete thermal adjoint back to each element's material orientation.
+    ///
+    /// The three entries are derivatives for right-handed infinitesimal rotations
+    /// about the WORLD x, y and z axes, in objective units per radian. For
+    /// R(delta) = exp([delta]_cross), the controlled law is
+    /// K_e(T,delta) = R(delta) K_e(T) R(delta)^T at delta=0. The complete
+    /// temperature-dependent tensor rotates; its principal conductivities,
+    /// their temperature laws and positive definiteness are preserved.
+    /// Sum element vectors for a region undergoing the same world-frame rotation.
+    ///
+    /// The integrated original tensor gives dK/d(delta_i) = Omega_i*K-K*Omega_i.
+    /// This commutes with the P1 constitutive integral, including crossed table
+    /// knots. The result is -lambda_e^T*(dA_e/d(delta_i))*T_e. No K'(T) is
+    /// inserted again: the supplied complete nodal-load adjoint must already
+    /// include material, contact, radiation and convection state feedback.
+    /// Its ownership requirements are those of [Self::conductivity_scale_pullback].
+    /// Isotropic laws have exactly zero rotational stiffness derivative.
+    ///
+    /// This rotates BULK material axes at fixed mesh geometry, reference mass,
+    /// boundary/sheet/contact laws and heat sources. It does not rotate the
+    /// body, modify a source claim's support, or differentiate an interface
+    /// orientation law. Add explicit objective dependence separately.
+    ///
+    /// One 24-byte-per-element result vector is allocated. Three local 4x4
+    /// contractions per element reuse the native stiffness kernel; no global
+    /// matrix, extra primal solve or extra transpose solve is formed.
+    ///
+    /// # Errors
+    /// The same field, support, smoothness, budget and cancellation refusals as
+    /// [Self::conductivity_scale_pullback], plus unrepresentable derivative arithmetic.
+    pub fn conductivity_rotation_pullback(
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        temperature: &[f64],
+        nodal_load_adjoint: &[f64],
+        max_elements: usize,
+    ) -> Result<Vec<[f64; 3]>, ConductionError> {
+        let ne =
+            material_control_elements(cx, problem, temperature, nodal_load_adjoint, max_elements)?;
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(ne)
+            .map_err(|_| invalid("conductivity-rotation result allocation refused"))?;
+        for (e, tet) in problem.mesh.complex().tets.iter().enumerate() {
+            poll(cx, e)?;
+            let model = match problem.element_materials {
+                Some(materials) => materials.model_for(e)?,
+                None => problem.material,
+            };
+            let tensor =
+                checked_element_conductivity(Some(cx), problem.mesh, e, model, temperature, false)?
+                    .tensor;
+            let mut gradient = [0.0; 3];
+            for (axis, derivative) in rotation_tangents(tensor).iter().enumerate() {
+                let stiffness = element_stiffness(problem.mesh, e, derivative);
+                for (a, &v) in tet.iter().enumerate() {
+                    for (b, &w) in tet.iter().enumerate() {
+                        let contribution = checked(
+                            checked(nodal_load_adjoint[v as usize] * checked(stiffness[a][b])?)?
+                                * temperature[w as usize],
+                        )?;
+                        gradient[axis] = checked(gradient[axis] - contribution)?;
+                    }
+                }
+            }
+            result.push(gradient);
+        }
+        poll(cx, ne)?;
+        Ok(result)
+    }
+}
+
+fn material_control_elements(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    temperature: &[f64],
+    nodal_load_adjoint: &[f64],
+    max_elements: usize,
+) -> Result<usize, ConductionError> {
+    poll(cx, 0)?;
+    let n = problem.mesh.vertex_count();
+    let ne = problem.mesh.element_count();
+    if ne > max_elements {
+        return Err(invalid(
+            "conductivity pullback exceeds the element allowance",
+        ));
+    }
+    vector(cx, temperature, n)?;
+    vector(cx, nodal_load_adjoint, n)?;
+    if let Some(materials) = problem.element_materials {
+        materials.validate_for(problem.mesh)?;
+    }
+    for &(v, prescribed) in problem.boundary.dirichlet() {
+        poll(cx, v)?;
+        if v >= n || temperature[v] != prescribed || nodal_load_adjoint[v] != 0.0 {
+            return Err(invalid(
+                "conductivity pullback requires unchanged prescribed values and zero fixed-node dual",
+            ));
+        }
+    }
+    if !material_is_smooth(cx, problem, temperature)? {
+        return Err(invalid(
+            "conductivity pullback requires a smooth material neighborhood at the supplied field",
+        ));
+    }
+    Ok(ne)
+}
+
+/// Exact differential of R*K*R^T at the identity, for world-axis generators.
+/// No division by an eigenvalue or separation of repeated principal values:
+/// isotropic tensors and repeated eigenvalues have their correct null directions.
+fn rotation_tangents(k: [[f64; 3]; 3]) -> [[[f64; 3]; 3]; 3] {
+    std::array::from_fn(|axis| {
+        let p = (axis + 1) % 3;
+        let q = (axis + 2) % 3;
+        std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                let left = if i == p {
+                    -k[q][j]
+                } else if i == q {
+                    k[p][j]
+                } else {
+                    0.0
+                };
+                let right = if j == p {
+                    -k[i][q]
+                } else if j == q {
+                    k[i][p]
+                } else {
+                    0.0
+                };
+                left + right
+            })
+        })
+    })
 }
 
 #[cfg(test)]
