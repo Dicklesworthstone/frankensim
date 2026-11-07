@@ -11,10 +11,9 @@
 
 use crate::frame::{FrameTree, WORLD};
 use crate::payload::{
-    OrientationParity, OutsideDomainPolicy, Payload, QuantityContract, ReferenceSemantics,
-    SampleSource, TableInterpolation, VectorPayload,
+    OrientationParity, Payload, QuantityContract, ReferenceSemantics, VectorPayload,
 };
-use crate::{BcKind, BcValue, BoundaryCondition, Physics, ScenarioError};
+use crate::{BcKind, BcValue, BoundaryCondition, Physics};
 use fs_ga::{Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
 use std::ops::ControlFlow;
@@ -27,22 +26,7 @@ pub struct WorldVector3 {
     pub orientation: OrientationParity,
 }
 
-/// No value is returned after a policy, arithmetic, frame or caller refusal.
-#[derive(Debug, Clone, PartialEq)]
-pub enum VectorEvaluationError {
-    Unsupported(&'static str),
-    InvalidTime,
-    OutsideDomain { time_s: f64, first_s: f64, last_s: f64 },
-    Arithmetic(&'static str),
-    Frame(ScenarioError),
-    Cancelled,
-}
-impl std::fmt::Display for VectorEvaluationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Cartesian vector evaluation refused: {self:?}")
-    }
-}
-impl std::error::Error for VectorEvaluationError {}
+pub use crate::sample::PayloadEvaluationError as VectorEvaluationError;
 
 fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), VectorEvaluationError> {
     if checkpoint().is_break() { Err(VectorEvaluationError::Cancelled) } else { Ok(()) }
@@ -84,13 +68,7 @@ impl VectorPayload {
             _ => return Err(E::Unsupported("declare world-cartesian in WORLD or frame-cartesian in its named frame")),
         }
         if frames.frames.len() > 256 { return Err(E::Unsupported("Cartesian evaluation admits at most 256 frame rows")); }
-        let local = match self.source() {
-            SampleSource::Fixed(value) => components(value),
-            SampleSource::Distribution { .. } => return Err(E::Unsupported("a distribution is not an explicit time history")),
-            SampleSource::Table { times, values, interpolation, outside } => {
-                table_value(times, values, *interpolation, *outside, time_s)?
-            }
-        };
+        let local = crate::sample::value(self.source(), time_s, |v| components(v))?;
         poll(checkpoint)?;
         let pose = frames.world_pose(self.meta().frame(), time_s).map_err(E::Frame)?;
         poll(checkpoint)?;
@@ -168,48 +146,4 @@ impl BoundaryCondition {
             .world_vector_at(frames, time_s, checkpoint)
             .map(|value| value.values)
     }
-}
-
-fn table_value(
-    times: &[QtyAny], values: &[Vec<QtyAny>], interpolation: TableInterpolation,
-    outside: OutsideDomainPolicy, time_s: f64,
-) -> Result<[f64; 3], VectorEvaluationError> {
-    use VectorEvaluationError as E;
-    // Nonempty, increasing, finite time and equal shapes are constructor invariants.
-    let first = times[0].value;
-    let last = times[times.len() - 1].value;
-    let mut time = time_s;
-    if time < first || time > last {
-        time = match outside {
-            OutsideDomainPolicy::Refuse => return Err(E::OutsideDomain { time_s, first_s: first, last_s: last }),
-            OutsideDomainPolicy::Clamp => time.clamp(first, last),
-            OutsideDomainPolicy::Periodic => {
-                let period = last - first;
-                let delta = time - first;
-                if !period.is_finite() || period <= 0.0 || !delta.is_finite() {
-                    return Err(E::Arithmetic("unrepresentable periodic time reduction"));
-                }
-                let phase = delta.rem_euclid(period);
-                let wrapped = first + phase;
-                if !wrapped.is_finite() { return Err(E::Arithmetic("nonfinite wrapped time")); }
-                wrapped.clamp(first, last)
-            }
-        };
-    }
-    let left = times.partition_point(|t| t.value <= time).saturating_sub(1);
-    if left + 1 == times.len() || time == times[left].value
-        || interpolation == TableInterpolation::StepLeft {
-        return Ok(components(&values[left]));
-    }
-    let width = times[left + 1].value - times[left].value;
-    if !width.is_finite() || width <= 0.0 { return Err(E::Arithmetic("unrepresentable interpolation span")); }
-    let weight = (time - times[left].value) / width;
-    if !weight.is_finite() || !(0.0..=1.0).contains(&weight) {
-        return Err(E::Arithmetic("unrepresentable interpolation weight"));
-    }
-    // Convex form avoids overflow in (right-left) for opposite large samples.
-    let out = std::array::from_fn(|i|
-        (1.0 - weight) * values[left][i].value + weight * values[left + 1][i].value);
-    if out.iter().all(|v| v.is_finite()) { Ok(out) }
-    else { Err(E::Arithmetic("nonfinite interpolated component")) }
 }

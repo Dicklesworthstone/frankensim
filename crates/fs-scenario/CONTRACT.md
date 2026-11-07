@@ -285,6 +285,16 @@ flagships.
   uniform/time-signal kg/s declaration, and all new typed rows forbid the
   incompressible compatibility tag. A spatial total-flow profile is refused
   until a geometry-bound layer can retain and certify its surface integral.
+- `ScalarPayload::scalar_at` executes ordinary scalar histories through the
+  same fixed/held/linear table sampler as Cartesian vectors. Exact knots,
+  outside-domain policy and logarithmic lookup stay shared. The original
+  quantity contract accompanies every sample; frame validation uses physical
+  time without adding frame motion to the scalar. Unsupported bases, odd
+  parity, reset references and stochastic distributions refuse. The existing
+  `VectorEvaluationError` path remains available for vector consumers.
+  `fs-couple::scenario_electric` binds canonical voltage/current-density rows
+  to original exterior faces and the source-bound 3-D conduction/heat owners;
+  normal-current direction is explicit rather than inferred from a frame.
 - `ensemble::StochasticEnsemble` — seeded generators: Dryden gust PSD,
   Kanai–Tajimi ground-acceleration PSD (spectral representation with
   Gaussian coefficients — a genuine Gaussian process), Carreau parameter

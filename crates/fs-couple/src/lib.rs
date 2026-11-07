@@ -219,6 +219,8 @@ pub mod reed_bore;
 pub mod render;
 /// Finite propellant storage and nozzle impulse on the original variable-mass vehicle.
 pub mod rocket_blowdown;
+/// Typed scenario potentials and normal currents on native material fields.
+pub mod scenario_electric;
 /// Typed SI pressure histories on the original open-boundary owners.
 pub mod scenario_pressure;
 /// Atomic mixed velocity-inlet and pressure-outlet control updates.

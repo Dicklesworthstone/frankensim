@@ -1,3 +1,21 @@
+## Canonical electrical histories on native material fields
+
+`scenario_electric` binds the existing typed `Electrics/ElectricPotential`
+and `Electrics/NormalCurrentDensity` rows to original exterior tetrahedral
+faces. All rows use one explicit physical sample time and the original scalar
+payload interpolation, outside-domain, frame and reference policies. Current
+direction is explicit; A/m² is never reinterpreted as total amperes.
+
+The lowered `SpatialConductionBoundary` feeds the original source-bound DC
+solver or existing `SpatialConductionThermalNetwork`. Conductivity, exact P1
+traces, component gauges, local Joule heat and contact heat remain with their
+native owners. Overlapping/empty/non-exterior patches, incompatible metadata
+and cancellation publish no boundary or field. These are fixed-geometry DC
+snapshots or explicitly held electrothermal drives, not an implicit continuous
+history integrator, motional field or dielectric/inductive transient claim.
+The `spatial_conduction_enthalpy::scenario` regressions exercise canonical IR,
+heterogeneous conduction, signed current and the original finite heat feedback.
+
 ## Source-bound enthalpy endpoints with prescribed support motion
 
 `SolidEnthalpyState::advance_transient_with_supports_candidate` and
