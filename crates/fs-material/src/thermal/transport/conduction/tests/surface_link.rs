@@ -3,6 +3,9 @@ use super::*;
 use fs_thermal::enthalpy::conduction::implicit::link::{
     ImplicitSurfaceExchangeLaw, ImplicitSurfaceExchangeState,
 };
+use fs_thermal::enthalpy::conduction::implicit::{
+    ImplicitConductionGraph, ImplicitConductionLinearControls,
+};
 use std::cell::{Cell, RefCell};
 
 const SIGMA: f64 = 5.670_374_419e-8;
@@ -10,6 +13,7 @@ const SIGMA: f64 = 5.670_374_419e-8;
 #[derive(Clone, Copy)]
 enum Model {
     Gray,
+    Contact,
     Onset { origin: [f64; 2], slopes: [f64; 2] },
 }
 
@@ -81,6 +85,14 @@ impl ImplicitSurfaceExchangeLaw for Surface<'_> {
             return ImplicitSurfaceExchangeState::from_conductance(s, g, [0.0; 2], slopes);
         }
         let (h, eps) = coefficients(e, s);
+        if matches!(self.model, Model::Contact) {
+            return ImplicitSurfaceExchangeState::from_conductance(
+                s,
+                h,
+                [0.01, 0.02],
+                [2e-5, 1e-5],
+            );
+        }
         let effective = 1.0 / (1.0 / eps[0] + 1.0 / eps[1] - 1.0);
         let epsilon_slopes = eps.map(|value| (effective / value).powi(2));
         let sum = s[0] + s[1];
@@ -125,6 +137,7 @@ fn reference(e: [f64; 2], d: [f64; 2], model: Model) -> (f64, [f64; 2]) {
         Model::Onset { origin, slopes } => {
             (slopes[0] * (e[0] - origin[0]) + slopes[1] * (e[1] - origin[1])) * (s[0] - s[1])
         }
+        Model::Contact => coefficients(e, s).0 * (s[0] - s[1]),
     };
     let (mut lo, mut hi) = (
         0.0,
@@ -140,6 +153,208 @@ fn reference(e: [f64; 2], d: [f64; 2], model: Model) -> (f64, [f64; 2]) {
     }
     let j = (lo + hi) / 2.0;
     (sign * AREA * j, faces(j))
+}
+
+const TRACE_RADII: [f64; 2] = [0.01, 0.03];
+const CONTACT_RADIUS: f64 = 0.02;
+const OUTER_RADIUS: f64 = 0.04;
+const AXIAL_LENGTH: f64 = 0.2;
+
+#[derive(Clone, Copy)]
+enum Radial {
+    Cylinder,
+    Sphere,
+}
+
+impl Radial {
+    fn geometry(self, reverse: bool) -> LayerGeometry {
+        let r = if reverse {
+            [TRACE_RADII[1], TRACE_RADII[0]]
+        } else {
+            TRACE_RADII
+        };
+        match self {
+            Self::Cylinder => LayerGeometry::cylindrical(r, CONTACT_RADIUS, AXIAL_LENGTH),
+            Self::Sphere => LayerGeometry::spherical(r, CONTACT_RADIUS),
+        }
+        .unwrap()
+    }
+
+    fn area(self) -> f64 {
+        use core::f64::consts::PI;
+        match self {
+            Self::Cylinder => (2.0 * PI * CONTACT_RADIUS) * AXIAL_LENGTH,
+            Self::Sphere => (4.0 * PI * CONTACT_RADIUS) * CONTACT_RADIUS,
+        }
+    }
+
+    // Direct integrals of dr/A(r), independent of production equivalent lengths.
+    fn resistance_integrals(self) -> [f64; 2] {
+        use core::f64::consts::PI;
+        TRACE_RADII.map(|r| match self {
+            Self::Cylinder => (r / CONTACT_RADIUS).ln().abs() / (2.0 * PI * AXIAL_LENGTH),
+            Self::Sphere => (1.0 / r - 1.0 / CONTACT_RADIUS).abs() / (4.0 * PI),
+        })
+    }
+
+    // Inner and outer finite volumes retain their physical mass and surface
+    // area. The native centreline is metadata, not a reconstructed radial mesh.
+    fn timeline<'a>(
+        self,
+        laws: [&'a dyn ThermalLaw; 2],
+        temperatures: [f64; 2],
+        reverse: bool,
+    ) -> (DepositionSimulation<'a>, [f64; 2]) {
+        use core::f64::consts::PI;
+        let (rc, ro, length, area) = (CONTACT_RADIUS, OUTER_RADIUS, AXIAL_LENGTH, self.area());
+        let (volumes, surfaces) = match self {
+            Self::Cylinder => (
+                [PI * rc * rc * length, PI * (ro * ro - rc * rc) * length],
+                [
+                    area + 2.0 * PI * rc * rc,
+                    area + 2.0 * PI * ro * length + 2.0 * PI * (ro * ro - rc * rc),
+                ],
+            ),
+            Self::Sphere => (
+                [
+                    4.0 * PI * rc.powi(3) / 3.0,
+                    4.0 * PI * (ro.powi(3) - rc.powi(3)) / 3.0,
+                ],
+                [area, area + 4.0 * PI * ro * ro],
+            ),
+        };
+        let masses = volumes.map(|volume| RHO * volume);
+        let mut events = Vec::new();
+        for side in 0..2 {
+            events.push(TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: CellId(side as u64),
+                    segment_id: side as u64,
+                    body_id: 0,
+                    material_id: [CV_MATERIAL, CP_MATERIAL][side],
+                    mass_kg: masses[side],
+                    specific_h_j_kg: energy(side, temperatures[side]),
+                    geometry: CellGeometry {
+                        start_m: [0.0; 3],
+                        end_m: [
+                            0.0,
+                            0.0,
+                            match self {
+                                Self::Cylinder => length,
+                                Self::Sphere => ro,
+                            },
+                        ],
+                        volume_m3: volumes[side],
+                        surface_area_m2: surfaces[side],
+                    },
+                    boundary: Boundary {
+                        ambient_k: 300.0,
+                        htc_w_m2_k: 0.0,
+                        reservoir: None,
+                        source_w: 0.0,
+                    },
+                }),
+            });
+        }
+        events.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id: LINK,
+                a: CellId(u64::from(reverse)),
+                b: CellId(u64::from(!reverse)),
+                area_m2: area,
+                conductance_w_k: 0.0,
+            }),
+        });
+        let thermal = DepositionSimulation::new(
+            events,
+            &[(CV_MATERIAL, laws[0]), (CP_MATERIAL, laws[1])],
+            DepositionBudget {
+                max_cells: 2,
+                max_links: 1,
+                max_events: 3,
+                max_substeps: 128,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-8,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+        (thermal, masses)
+    }
+}
+
+// Solve in TOTAL power using analytic radial Fourier integrals and quadratic
+// Kirchhoff primitives. No production geometry, surface solve or inverse is used.
+fn radial_reference(shape: Radial, e: [f64; 2]) -> (f64, [f64; 2]) {
+    let t = [temperature(0, e[0]), temperature(1, e[1])];
+    let r = shape.resistance_integrals();
+    let sign = if t[0] >= t[1] { 1.0 } else { -1.0 };
+    let faces = |q: f64| {
+        [
+            (t[0] * t[0] - 2.0 * sign * q * r[0] / 0.04).sqrt(),
+            (t[1] * t[1] + 2.0 * sign * q * r[1] / 0.02).sqrt(),
+        ]
+    };
+    let (mut lo, mut hi) = (
+        0.0,
+        (t[0] * t[0] - t[1] * t[1]).abs() / (2.0 * (r[0] / 0.04 + r[1] / 0.02)),
+    );
+    for _ in 0..80 {
+        let q = (lo + hi) / 2.0;
+        let s = faces(q);
+        if sign * shape.area() * coefficients(e, s).0 * (s[0] - s[1]) > q {
+            lo = q;
+        } else {
+            hi = q;
+        }
+    }
+    let q = (lo + hi) / 2.0;
+    (sign * q, faces(q))
+}
+
+struct ReversedSurface<'a>(&'a dyn ImplicitSurfaceExchangeLaw);
+
+impl ImplicitSurfaceExchangeLaw for ReversedSurface<'_> {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        let [a, b] = self.0.caloric_laws();
+        [b, a]
+    }
+    fn energy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        let [a, b] = self.0.energy_bounds_j_kg();
+        [b, a]
+    }
+    fn surface_temperature_bounds_k(&self) -> [[f64; 2]; 2] {
+        let [a, b] = self.0.surface_temperature_bounds_k();
+        [b, a]
+    }
+    fn state_at_surfaces(
+        &self,
+        e: [f64; 2],
+        s: [f64; 2],
+    ) -> Result<ImplicitSurfaceExchangeState, DepositionError> {
+        let state = self.0.state_at_surfaces([e[1], e[0]], [s[1], s[0]])?;
+        Ok(ImplicitSurfaceExchangeState {
+            flux_a_to_b_w_m2: -state.flux_a_to_b_w_m2,
+            conductance_w_m2_k: state.conductance_w_m2_k,
+            surface_derivatives_w_m2_k: [
+                -state.surface_derivatives_w_m2_k[1],
+                -state.surface_derivatives_w_m2_k[0],
+            ],
+            energy_derivatives_w_kg_m2_j: [
+                -state.energy_derivatives_w_kg_m2_j[1],
+                -state.energy_derivatives_w_kg_m2_j[0],
+            ],
+        })
+    }
 }
 
 #[test]
@@ -523,4 +738,346 @@ fn g1_insulating_onset_keeps_both_inward_energy_derivatives_including_positive_c
         );
     }
     assert!(native.power_enthalpy_derivatives_w_kg_j[1] > 0.0);
+}
+
+#[test]
+fn g1_radial_live_contacts_use_exact_common_area_and_both_source_tangents() {
+    let (fa, fb) = (Fixture::new(true), Fixture::new(false));
+    let (cv, cp) = (fa.cv(), fb.cp());
+    let a = IsochoricConductionLaw::try_new(&fa.card, &cv, &fa.conductivity, SELECTION).unwrap();
+    let b = IsobaricConductionLaw::try_new(&fb.card, &cp, &fb.conductivity, SELECTION).unwrap();
+    let layers = [
+        CaloricConductionLayer::from_isochoric(&a).unwrap(),
+        CaloricConductionLayer::from_isobaric(&b).unwrap(),
+    ];
+    let mut law = source(&cv, &cp);
+    law.model = Model::Contact;
+    for shape in [Radial::Cylinder, Radial::Sphere] {
+        let (thermal, _) = shape.timeline([&cv, &cp], [650.0, 350.0], false);
+        let link = IntegratedCaloricSurfaceLink::new(
+            &thermal,
+            LINK,
+            [&layers[0], &layers[1]],
+            shape.geometry(false),
+            &law,
+            layer_controls(),
+            || Ok(()),
+        )
+        .unwrap();
+        let r = shape.resistance_integrals();
+        for side in 0..2 {
+            near(
+                link.native_geometry().half_distances_m[side],
+                shape.area() * r[side],
+                1e-15,
+            );
+        }
+        for t in [[650.0, 350.0], [350.0, 650.0], [475.0, 475.0]] {
+            let e = [energy(0, t[0]), energy(1, t[1])];
+            let (expected, s) = radial_reference(shape, e);
+            law.queries.borrow_mut().clear();
+            let response = link.evaluate(e, || Ok(())).unwrap();
+            near(response.power_a_to_b_w, expected, 4e-9);
+            for side in 0..2 {
+                near(response.interface_temperature_k[side], s[side], 2e-9);
+            }
+            assert!(!law.queries.borrow().is_empty());
+            assert!(
+                law.queries
+                    .borrow()
+                    .iter()
+                    .all(|(queried, _)| *queried == e)
+            );
+            near(response.surface_heat_residual_w, 0.0, 4e-9);
+            near(response.layer_heat_residual_w, 0.0, 4e-9);
+            let native = link
+                .state_at_specific_enthalpies(
+                    e,
+                    link.native_geometry(),
+                    thermal.contact_patch(LINK).unwrap(),
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            near(native.conductance_w_k * (t[0] - t[1]), expected, 4e-9);
+            let h = coefficients(e, s).0;
+            let jump = s[0] - s[1];
+            let ds = [h + 0.01 * jump, -h + 0.02 * jump];
+            let de = [2e-5 * jump, 1e-5 * jump];
+            let denominator =
+                1.0 + shape.area() * (ds[0] * r[0] / (0.04 * s[0]) - ds[1] * r[1] / (0.02 * s[1]));
+            let capacities = [200.0 + 0.5 * t[0], 400.0 + t[1]];
+            near(
+                response.source_flux_derivative_scale_m2,
+                shape.area() / denominator,
+                2e-12,
+            );
+            for side in 0..2 {
+                let frozen = shape.area() * ds[side] * t[side] / s[side] / denominator;
+                near(response.endpoint_derivative_w_k[side], frozen, 2e-9);
+                near(
+                    native.power_enthalpy_derivatives_w_kg_j[side],
+                    frozen / capacities[side] + shape.area() * de[side] / denominator,
+                    3e-12,
+                );
+                let mut lower = e;
+                let mut upper = e;
+                lower[side] -= 0.25;
+                upper[side] += 0.25;
+                near(
+                    native.power_enthalpy_derivatives_w_kg_j[side],
+                    (radial_reference(shape, upper).0 - radial_reference(shape, lower).0) / 0.5,
+                    3e-8,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_radial_source_exchange_advances_native_graph_with_conservative_heat_and_entropy() {
+    let (fa, fb) = (Fixture::new(true), Fixture::new(false));
+    let (cv, cp) = (fa.cv(), fb.cp());
+    let a = IsochoricConductionLaw::try_new(&fa.card, &cv, &fa.conductivity, SELECTION).unwrap();
+    let b = IsobaricConductionLaw::try_new(&fb.card, &cp, &fb.conductivity, SELECTION).unwrap();
+    let layers = [
+        CaloricConductionLayer::from_isochoric(&a).unwrap(),
+        CaloricConductionLayer::from_isobaric(&b).unwrap(),
+    ];
+    let mut law = source(&cv, &cp);
+    law.model = Model::Contact;
+    let (t0, dt) = ([650.0, 330.0], 300.0);
+    for shape in [Radial::Cylinder, Radial::Sphere] {
+        let (thermal, masses) = shape.timeline([&cv, &cp], t0, false);
+        let link = IntegratedCaloricSurfaceLink::new(
+            &thermal,
+            LINK,
+            [&layers[0], &layers[1]],
+            shape.geometry(false),
+            &law,
+            layer_controls(),
+            || Ok(()),
+        )
+        .unwrap();
+        let observer = ConductionObserver::new(
+            &thermal,
+            &[
+                (CV_MATERIAL, &a as &dyn ConductivityLaw),
+                (CP_MATERIAL, &b as &dyn ConductivityLaw),
+            ],
+            &[link.native_geometry()],
+            &[],
+            || Ok(()),
+        )
+        .unwrap();
+        let graph = ImplicitConductionGraph::new(
+            &thermal,
+            &observer,
+            &[
+                (CV_MATERIAL, &a as &dyn ImplicitConductionLaw),
+                (CP_MATERIAL, &b as &dyn ImplicitConductionLaw),
+            ],
+            ImplicitConductionLinearControls::default(),
+            || Ok(()),
+        )
+        .unwrap()
+        .with_link_laws(&thermal, &[(LINK, &link)], || Ok(()))
+        .unwrap();
+        let controls = ImplicitConductionControls {
+            maximum_dt_s: dt,
+            maximum_halvings: 0,
+            cell_tolerance_j: 1e-6,
+            total_tolerance_j: 1e-6,
+            ..ImplicitConductionControls::default()
+        };
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        let (next, report) = graph
+            .advance_to(&thermal, dt, controls, &mut workspace, || Ok(()))
+            .unwrap();
+        let e0 = [energy(0, t0[0]), energy(1, t0[1])];
+        let endpoint = |q: f64| [e0[0] - q / masses[0], e0[1] + q / masses[1]];
+        let residual = |q: f64| q - dt * radial_reference(shape, endpoint(q)).0;
+        let (mut lo, mut hi) = (0.0, masses[0] * (e0[0] - energy(0, t0[1])));
+        assert!(residual(lo) < 0.0 && residual(hi) > 0.0);
+        for _ in 0..80 {
+            let q = (lo + hi) / 2.0;
+            if residual(q) < 0.0 {
+                lo = q;
+            } else {
+                hi = q;
+            }
+        }
+        let q = (lo + hi) / 2.0;
+        let e = [
+            next.cells()[&CellId(0)].specific_h_j_kg,
+            next.cells()[&CellId(1)].specific_h_j_kg,
+        ];
+        for side in 0..2 {
+            near(e[side], endpoint(q)[side], 2e-6 / masses[side]);
+            assert_eq!(next.cells()[&CellId(side as u64)].mass_kg, masses[side]);
+            assert_eq!(
+                next.cells()[&CellId(side as u64)].geometry,
+                thermal.cells()[&CellId(side as u64)].geometry
+            );
+        }
+        near(
+            masses[0] * (e[0] - e0[0]) + masses[1] * (e[1] - e0[1]),
+            0.0,
+            1e-6,
+        );
+        let t = [temperature(0, e[0]), temperature(1, e[1])];
+        let entropy = masses[0] * (200.0 * (t[0] / t0[0]).ln() + 0.5 * (t[0] - t0[0]))
+            + masses[1] * (400.0 * (t[1] / t0[1]).ln() + t[1] - t0[1]);
+        let (power, s) = radial_reference(shape, e);
+        near(dt * power, q, 2e-6);
+        // Independent entropy of both radial material legs and the contact
+        // telescopes to the native two-cell transfer, counted exactly once.
+        let production = [
+            q * (1.0 / s[0] - 1.0 / t[0]),
+            q * (1.0 / s[1] - 1.0 / s[0]),
+            q * (1.0 / t[1] - 1.0 / s[1]),
+        ];
+        assert!(production.into_iter().all(|value| value > 0.0));
+        near(report.entropy.thermal_storage_change_j_k, entropy, 2e-8);
+        near(
+            report.entropy.conduction_generation_j_k,
+            production.iter().sum(),
+            2e-8,
+        );
+        assert!(entropy > 0.0 && report.energy.residual_j.abs() <= 1e-6);
+        assert_eq!(report.energy.external_heat_j, 0.0);
+        assert_eq!(report.energy.substeps, 1);
+        assert_eq!(report.entropy.reservoir_entropy_input_j_k, 0.0);
+        assert!(!report.entropy.has_unclassified_sources);
+        assert_eq!(
+            next.material_storage_basis(CV_MATERIAL).unwrap(),
+            ThermalStorageBasis::InternalEnergy
+        );
+        assert_eq!(
+            next.material_storage_basis(CP_MATERIAL).unwrap(),
+            ThermalStorageBasis::Enthalpy
+        );
+    }
+}
+
+#[test]
+fn g3_radial_contact_relabeling_preserves_heat_and_refuses_mismatched_interface_measures() {
+    use fs_thermal::enthalpy::ContactPatchUpdate;
+    let (fa, fb) = (Fixture::new(true), Fixture::new(false));
+    let (cv, cp) = (fa.cv(), fb.cp());
+    let a = IsochoricConductionLaw::try_new(&fa.card, &cv, &fa.conductivity, SELECTION).unwrap();
+    let b = IsobaricConductionLaw::try_new(&fb.card, &cp, &fb.conductivity, SELECTION).unwrap();
+    let layers = [
+        CaloricConductionLayer::from_isochoric(&a).unwrap(),
+        CaloricConductionLayer::from_isobaric(&b).unwrap(),
+    ];
+    let mut law = source(&cv, &cp);
+    law.model = Model::Contact;
+    let reversed_source = ReversedSurface(&law);
+    let t = [650.0, 350.0];
+    let e = [energy(0, t[0]), energy(1, t[1])];
+    for shape in [Radial::Cylinder, Radial::Sphere] {
+        let (thermal, _) = shape.timeline([&cv, &cp], t, false);
+        let (reversed, _) = shape.timeline([&cv, &cp], t, true);
+        let link = IntegratedCaloricSurfaceLink::new(
+            &thermal,
+            LINK,
+            [&layers[0], &layers[1]],
+            shape.geometry(false),
+            &law,
+            layer_controls(),
+            || Ok(()),
+        )
+        .unwrap();
+        let reverse_link = IntegratedCaloricSurfaceLink::new(
+            &reversed,
+            LINK,
+            [&layers[1], &layers[0]],
+            shape.geometry(true),
+            &reversed_source,
+            layer_controls(),
+            || Ok(()),
+        )
+        .unwrap();
+        let forward = link.evaluate(e, || Ok(())).unwrap();
+        let backward = reverse_link.evaluate([e[1], e[0]], || Ok(())).unwrap();
+        near(backward.power_a_to_b_w, -forward.power_a_to_b_w, 4e-9);
+        let tangent = link
+            .state_at_specific_enthalpies(
+                e,
+                link.native_geometry(),
+                thermal.contact_patch(LINK).unwrap(),
+                &mut || Ok(()),
+            )
+            .unwrap()
+            .power_enthalpy_derivatives_w_kg_j;
+        let reversed_tangent = reverse_link
+            .state_at_specific_enthalpies(
+                [e[1], e[0]],
+                reverse_link.native_geometry(),
+                reversed.contact_patch(LINK).unwrap(),
+                &mut || Ok(()),
+            )
+            .unwrap()
+            .power_enthalpy_derivatives_w_kg_j;
+        for side in 0..2 {
+            near(
+                backward.interface_temperature_k[side],
+                forward.interface_temperature_k[1 - side],
+                2e-9,
+            );
+            near(reversed_tangent[side], -tangent[1 - side], 3e-12);
+        }
+        let patch = thermal.contact_patch(LINK).unwrap();
+        let mut unequal = patch;
+        unequal.covered_area_m2[1] *= 0.5;
+        let mismatched = thermal
+            .replace_contact_patches(
+                &[ContactPatchUpdate {
+                    id: LINK,
+                    expected: Some(patch),
+                    replacement: Some(unequal),
+                }],
+                || Ok(()),
+            )
+            .unwrap();
+        assert!(
+            IntegratedCaloricSurfaceLink::new(
+                &mismatched,
+                LINK,
+                [&layers[0], &layers[1]],
+                shape.geometry(false),
+                &law,
+                layer_controls(),
+                || Ok(()),
+            )
+            .is_err()
+        );
+        assert!(
+            link.state_at_specific_enthalpies(e, link.native_geometry(), unequal, &mut || Ok(()))
+                .is_err()
+        );
+        if let Radial::Cylinder = shape {
+            // One common interface cannot have a different length on one side.
+            let different_length =
+                LayerGeometry::cylindrical(TRACE_RADII, CONTACT_RADIUS, 1.1 * AXIAL_LENGTH)
+                    .unwrap();
+            assert!(
+                IntegratedCaloricSurfaceLink::new(
+                    &thermal,
+                    LINK,
+                    [&layers[0], &layers[1]],
+                    different_length,
+                    &law,
+                    layer_controls(),
+                    || Ok(()),
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(thermal.contact_patch(LINK), Some(patch));
+        assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, e[0]);
+        assert_eq!(thermal.cells()[&CellId(1)].specific_h_j_kg, e[1]);
+    }
+    assert!(LayerGeometry::cylindrical([0.01, 0.015], CONTACT_RADIUS, AXIAL_LENGTH).is_err());
+    assert!(LayerGeometry::spherical([0.025, 0.03], CONTACT_RADIUS).is_err());
 }

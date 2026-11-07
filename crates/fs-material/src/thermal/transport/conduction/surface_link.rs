@@ -21,11 +21,19 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 /// caloric derivatives reach the original implicit chain/graph. No material
 /// chart is resampled, and no extra storage or thermal clock is introduced.
 ///
-/// The interface is planar with equal actual covered areas, source-free,
-/// quasi-steady, passive and zero-storage. Its source owns the complete
-/// interface response; no separate authored contact resistance may coexist.
-/// Radiation/view assumptions or gas/contact conditions belong to that source.
-/// General enclosures remain with their original radiosity owner.
+/// The interface has equal actual covered areas and is source-free,
+/// quasi-steady, passive and zero-storage. Planar, cylindrical and spherical
+/// material legs use their original exact resistance coordinates. Radial faces
+/// are the two material-side traces at ONE shared interface radius: a cylinder
+/// retains one common axial length, and a sphere retains its full solid angle.
+/// Both actual covered areas must equal that geometric interface area.
+///
+/// The source owns the complete interface response; no separate authored
+/// contact resistance may coexist. Radiation/view assumptions or gas/contact
+/// conditions belong to that source. Radial material geometry does not adapt a
+/// planar radiation law to separated concentric radiating faces. Such a gap,
+/// partial circumferential contact, axial end effects and general enclosures
+/// require their separately resolved geometry and original physical owners.
 pub struct IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
     layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
     patch: ContactPatch,
@@ -44,6 +52,12 @@ impl<'l, 'a, 'm> IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
     /// Both source caloric objects must exactly match the original ordered
     /// layers. Explicit energy bounds lie inside each original material chart.
     /// Surface bounds are independent and may exclude the bulk temperatures.
+    ///
+    /// The original patch and BOTH covered areas must match the geometry's
+    /// common interface area, including the cylinder's declared axial length.
+    /// `LayerGeometry` admits only positive radial traces straddling that same
+    /// radius, in either A/B order. Its equivalent distances are resistance
+    /// coordinates; they neither replace physical cell volumes nor infer mass.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         thermal: &DepositionSimulation<'_>,
@@ -55,11 +69,6 @@ impl<'l, 'a, 'm> IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
-        if geometry.radial_coordinates_m().is_some() {
-            return Err(DepositionError::InvalidInput(
-                "caloric surface exchange requires equal-area planar material faces",
-            ));
-        }
         let caloric = source.caloric_laws();
         let energy_bounds = source.energy_bounds_j_kg();
         let surface_bounds = source.surface_temperature_bounds_k();
@@ -85,6 +94,9 @@ impl<'l, 'a, 'm> IntegratedCaloricSurfaceLink<'l, 'a, 'm> {
                 ));
             }
         }
+        // LayerGeometry already owns the common interface radius/length and
+        // ordered radial resistance integrals. Match its physical area before
+        // lowering those integrals to the original scalar surface solve.
         let (patch, energies) =
             admit_original_link(thermal, link_id, layers, geometry, &mut checkpoint)?;
         if patch.covered_area_m2 != [patch.link.area_m2; 2] {

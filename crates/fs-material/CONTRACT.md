@@ -9673,8 +9673,17 @@ source response. Each energy bound lies within its own original material
 chart, and exact ordered caloric objects must match. Face support may be
 narrower than the material charts and exclude either bulk temperature. The
 source must admit its complete coupled query; interval bounds alone do not
-authorize extrapolation. Geometry is planar with equal actual covered areas,
-and the same source owns the entire interface.
+authorize extrapolation. Planar, cylindrical and spherical material legs retain
+their original exact Kirchhoff resistance coordinates. Both actual covered
+areas and the native patch area must equal the declared common interface area.
+Radial faces are the two material-side traces at one shared positive interface
+radius; the ordered bulk traces straddle that radius. A cylinder uses one
+common axial length and a sphere its full solid angle. Changing the cylinder
+length without changing the original patch therefore refuses. The same source
+owns the entire interface; equivalent radial distances do not replace physical
+control-volume sizes or create thermal mass. This does not infer a radiative
+view factor for separated concentric faces, partial circumferential contact or
+axial end effects; those layouts need their own resolved geometric model.
 
 The complete native energy tangent combines the original material/surface
 endpoint derivatives times their original 1/Cp or 1/Cv with the explicit source
