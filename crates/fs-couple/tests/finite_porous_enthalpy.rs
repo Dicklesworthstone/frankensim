@@ -4,6 +4,9 @@
 //! and caloric closure are solved independently below, including thermal and
 //! plastic volume, energetic Voce storage and signed mechanical work defects.
 
+#[path = "finite_porous_enthalpy/cavity.rs"]
+mod cavity;
+
 #[path = "finite_porous_enthalpy/pressure.rs"]
 mod pressure;
 

@@ -11,11 +11,17 @@
 //! solid density is rho0/det(F). Conductances belong to the supplied reference
 //! thermal network, without an inferred moving-area transport approximation.
 
+/// Independent sealed gas storage shares the original compaction/heat endpoint.
+pub mod cavity;
 pub mod material;
 /// Current-area pressure drives the same retained thermal feedback.
 pub mod pressure;
 /// The original explicit cell/query protocol also binds porous families.
 pub use super::FiniteThermoplasticCell as FiniteThermalPorousCell;
+pub use cavity::{
+    FiniteThermalPorousCavitiesCandidate, FiniteThermalPorousCavitiesEnergy,
+    FiniteThermalPorousCavityEquilibrium,
+};
 pub use material::FiniteThermalPorousMaterialBinding;
 pub use pressure::{FiniteThermalPorousPressureCandidate, FiniteThermalPorousPressureEnergy};
 
@@ -298,13 +304,14 @@ pub struct FiniteThermalPorousCandidate<
     't,
     O,
     A = fs_solid::hyper3::plastic::thermal::FiniteThermoplasticTetEnergy,
+    E = HyperTetSolution,
 > {
     thermal: DepositionSimulation<'t>,
     solid: FiniteThermalPorousSolid<'a>,
     observer: O,
-    report: FiniteThermoplasticReport<HyperTetSolution, A>,
+    report: FiniteThermoplasticReport<E, A>,
 }
-impl<'a, 't, O, A> FiniteThermalPorousCandidate<'a, 't, O, A> {
+impl<'a, 't, O, A, E> FiniteThermalPorousCandidate<'a, 't, O, A, E> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
@@ -314,7 +321,7 @@ impl<'a, 't, O, A> FiniteThermalPorousCandidate<'a, 't, O, A> {
     pub const fn observer(&self) -> &O {
         &self.observer
     }
-    pub const fn report(&self) -> &FiniteThermoplasticReport<HyperTetSolution, A> {
+    pub const fn report(&self) -> &FiniteThermoplasticReport<E, A> {
         &self.report
     }
     pub fn into_parts(
@@ -323,7 +330,7 @@ impl<'a, 't, O, A> FiniteThermalPorousCandidate<'a, 't, O, A> {
         DepositionSimulation<'t>,
         FiniteThermalPorousSolid<'a>,
         O,
-        FiniteThermoplasticReport<HyperTetSolution, A>,
+        FiniteThermoplasticReport<E, A>,
     ) {
         (self.thermal, self.solid, self.observer, self.report)
     }

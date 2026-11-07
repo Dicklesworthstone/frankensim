@@ -50,9 +50,9 @@ impl CaloricMaterial for super::porous::material::FiniteThermalPorousMaterialBin
     }
 }
 
-/// The original mechanical owner's independently retained whole-solid account.
-/// Nonthermal irreversible energy is explicit; it is neither discarded nor
-/// silently deposited into the separate caloric chart.
+/// The original mechanical owner's solid and explicitly coupled storage account.
+/// Nonthermal irreversible energy and independent gas storage remain explicit;
+/// neither is silently deposited into the separate solid caloric chart.
 pub(in crate::solid_enthalpy) trait MechanicalEnergy {
     fn internal_energy_change_j(&self) -> f64;
     fn endpoint_work_defect_j(&self) -> f64;
@@ -60,6 +60,14 @@ pub(in crate::solid_enthalpy) trait MechanicalEnergy {
     fn support_endpoint_work_j(&self) -> f64;
     /// Path work from held follower pressure, separate from dead/support loads.
     fn follower_pressure_work_j(&self) -> f64 {
+        0.0
+    }
+    /// Direct stored-energy change of independently sealed source gases.
+    fn cavity_gas_storage_change_j(&self) -> f64 {
+        0.0
+    }
+    /// Work of the cavities' explicitly supplied exterior pressure fields.
+    fn cavity_exterior_work_j(&self) -> f64 {
         0.0
     }
     fn nonthermal_loss_j(&self) -> f64;
@@ -360,38 +368,44 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
             inertia.kinetic_change_j + inertia.numerical_loss_j
         });
         let pressure_work_j = finite(actual.energy.follower_pressure_work_j())?;
-        let combined_residual_j = if pressure_work_j == 0.0 {
-            // Preserve the exact arithmetic of existing unpressured owners.
-            finite(
-                actual.energy.internal_energy_change_j()
-                    + thermal_audit.stored_energy_change_j
-                    + actual.energy.endpoint_work_defect_j()
-                    + inertia_account
-                    - actual.energy.dead_load_endpoint_work_j()
-                    - actual.energy.support_endpoint_work_j()
-                    - external_heat_j
-                    - thermal_audit.incoming_energy_j,
-            )?
-        } else {
-            // Pressure path work enters once; its endpoint correction is
-            // already in the complete external-work defect. Compensated sums
-            // retain small heat balances against large opposing boundary work.
-            let kinetic = actual.inertia.as_ref().map_or(Dd::ZERO, |inertia| {
-                Dd::from_f64(inertia.kinetic_change_j) + Dd::from_f64(inertia.numerical_loss_j)
-            });
-            finite(
-                (Dd::from_f64(actual.energy.internal_energy_change_j())
-                    + Dd::from_f64(thermal_audit.stored_energy_change_j)
-                    + Dd::from_f64(actual.energy.endpoint_work_defect_j())
-                    + kinetic
-                    - Dd::from_f64(actual.energy.dead_load_endpoint_work_j())
-                    - Dd::from_f64(actual.energy.support_endpoint_work_j())
-                    - Dd::from_f64(pressure_work_j)
-                    - Dd::from_f64(external_heat_j)
-                    - Dd::from_f64(thermal_audit.incoming_energy_j))
-                .to_f64(),
-            )?
-        };
+        let gas_storage_j = finite(actual.energy.cavity_gas_storage_change_j())?;
+        let cavity_exterior_work_j = finite(actual.energy.cavity_exterior_work_j())?;
+        let combined_residual_j =
+            if pressure_work_j == 0.0 && gas_storage_j == 0.0 && cavity_exterior_work_j == 0.0 {
+                // Preserve the exact arithmetic of existing unpressured owners.
+                finite(
+                    actual.energy.internal_energy_change_j()
+                        + thermal_audit.stored_energy_change_j
+                        + actual.energy.endpoint_work_defect_j()
+                        + inertia_account
+                        - actual.energy.dead_load_endpoint_work_j()
+                        - actual.energy.support_endpoint_work_j()
+                        - external_heat_j
+                        - thermal_audit.incoming_energy_j,
+                )?
+            } else {
+                // Gas storage and external pressure work enter once. Internal gas
+                // work cancels between solid and gas; its endpoint correction is
+                // already in the complete external-work defect. Compensated sums
+                // retain small heat balances against large opposing boundary work.
+                let kinetic = actual.inertia.as_ref().map_or(Dd::ZERO, |inertia| {
+                    Dd::from_f64(inertia.kinetic_change_j) + Dd::from_f64(inertia.numerical_loss_j)
+                });
+                finite(
+                    (Dd::from_f64(actual.energy.internal_energy_change_j())
+                        + Dd::from_f64(thermal_audit.stored_energy_change_j)
+                        + Dd::from_f64(gas_storage_j)
+                        + Dd::from_f64(actual.energy.endpoint_work_defect_j())
+                        + kinetic
+                        - Dd::from_f64(actual.energy.dead_load_endpoint_work_j())
+                        - Dd::from_f64(actual.energy.support_endpoint_work_j())
+                        - Dd::from_f64(pressure_work_j)
+                        - Dd::from_f64(cavity_exterior_work_j)
+                        - Dd::from_f64(external_heat_j)
+                        - Dd::from_f64(thermal_audit.incoming_energy_j))
+                    .to_f64(),
+                )?
+            };
         let nonthermal_loss_j = finite(actual.energy.nonthermal_loss_j())?;
         if nonthermal_loss_j < 0.0 {
             return Err(FiniteThermoplasticError::Invalid(

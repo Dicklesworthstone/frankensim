@@ -426,8 +426,9 @@ pub struct FiniteThermoplasticReport<E = HyperTetSolution, A = FiniteThermoplast
     /// Sum of absolute cell heat discrepancies; opposing cells cannot cancel.
     pub heat_defect_j: f64,
     pub thermal_residual_j: f64,
-    /// Caloric + mechanical internal + kinetic change + numerical defects
-    /// minus actual load/support work, boundary heat and incoming energy.
+    /// Caloric + mechanical internal + explicitly coupled gas storage + kinetic
+    /// change + numerical defects, minus actual external load/pressure/support
+    /// work, boundary heat and incoming energy.
     pub combined_residual_j: f64,
 }
 

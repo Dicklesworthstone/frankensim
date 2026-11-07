@@ -3887,3 +3887,48 @@ sideband mixing, and coverage/base/cancellation refusal. Three tests of the
 actual shared signed-frequency production leaf passed against the real fs-math
 dependency. Full native adapter execution remains unverified while the unchanged
 dependency graph is blocked by the upstream asupersync memory limit.
+
+## Thermal porous solids with sealed source cavities (2026-11-06)
+
+The original `solid_enthalpy::finite_plastic::porous::FiniteThermalPorousSolid`
+now exposes `advance_with_cavities` and
+`advance_with_cavities_and_coupling`. Every Picard or IQN-ILS proposal uses the
+same accepted material, motion and thermal/observer history. The native thermal
+porous solid solves original sealed gas pressure, current cavity geometry,
+thermal constitutive response and optional consistent inertia together. The
+final actual-temperature proposal must pass the existing cellwise heat,
+temperature, thermal transport and complete energy acceptance gates before any
+endpoint is returned.
+
+`FiniteThermalPorousCavitiesCandidate` retains the original caloric timeline,
+source-bound solid, independent observer and `FiniteThermalPorousCavityEquilibrium`
+containing both native solid equilibrium and caller-ordered gas endpoints.
+`FiniteThermalPorousCavitiesEnergy` retains material heat/storage, optional held
+pressure, each original gas/exterior/work-correction receipt, compensated gas
+storage/exterior-work totals and the complete signed external-work defect.
+
+The combined identity is material internal-energy change + caloric storage
+change + gas storage change + kinetic change + numerical kinetic loss + complete
+external-work defect = dead/support work + held pressure work + explicit cavity
+exterior work + external/incoming thermal energy. Internal gas work cancels
+between solid and gas. Only native signed material caloric heat enters the solid
+cells; gas storage, numerical pressure quadrature corrections and kinetic losses
+are never deposited again as heat. Default zero cavity accounts preserve the
+existing feedback arithmetic for uncoupled owners.
+
+Cavities remain resolved homogeneous isentropic sources. Original undeformed
+volume bindings survive all increments; output deformed gas parcels cannot
+replace them. This interface does not model gas-wall heat transfer, pore-fluid
+transport or gas waves. Solid conductances retain the supplied reference thermal
+network. Synthetic source coefficients establish mathematical regression
+expectations, not measured calibration.
+
+Focused regressions in `tests/finite_porous_enthalpy/cavity.rs` cover an actual
+free inner-wall displacement and independent hydrostatic/caloric/gas predictions
+through both coupling methods; direct gas energy with a large arbitrary datum;
+prescribed-motion heat parity with and without gas; retained consistent inertia
+and compaction; original source identity; and rollback after observer, coupling
+iteration and replacement-reference refusals. The pinned formatter parsed the
+new source. Native compilation and execution were not available in this shared
+workspace because disk and memory were exhausted; these tests are authored,
+not reported as passed.
