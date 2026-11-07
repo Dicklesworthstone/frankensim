@@ -127,10 +127,12 @@ impl MaterialBinaryDiffusivity {
             let quantity = reference.axis_quantities().get(axis).copied();
             !valid_axis(axis)
                 || quantity.and_then(QuantitySpec::semantic_type).is_none()
+                || (axis != temperature_axis
+                    && quantity.is_some_and(|q| q.dims() == Temperature::DIMS))
                 || !is_fixed_external_coordinate(axis, quantity, Some(value))
         }) {
             return Err(BinaryLiquidError::Invalid(
-                "diffusion source coordinates must be explicit typed external conditions",
+                "diffusion source requires one owned temperature and typed fixed external conditions",
             ));
         }
         let requirement =

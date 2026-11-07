@@ -203,9 +203,10 @@ impl BinaryMiscibilityNetwork {
         })
     }
 
-    /// Reuse an admitted prescribed flow after a uniform temperature change.
-    /// Only temperature may differ: the original pair, c, kappa, cells and all
-    /// physical face coefficients must match exactly. Rate and donor caches are
+    /// Reuse an admitted prescribed flow after a uniform temperature change or
+    /// an explicit material-diffusivity binding. The original pair, c, kappa,
+    /// cells and physical face geometry must match exactly. Constant-D models
+    /// still require identical authored coefficients. Rate and donor caches are
     /// shared; no continuity tolerance is relaxed and no velocity is projected.
     /// The old flow remains bound to its old model until explicitly rebound.
     pub fn rebind_advection(
@@ -225,12 +226,21 @@ impl BinaryMiscibilityNetwork {
             || self.owner.faces.len() != previous.owner.faces.len()
         {
             return Err(Error::Invalid(
-                "flow rebinding may change only the original uniform temperature",
+                "flow rebinding requires the original thermodynamics and finite volumes",
             ));
         }
         for (current, old) in self.owner.faces.iter().zip(previous.owner.faces.iter()) {
             poll(&mut cancelled)?;
-            if current.physical != old.physical || current.gradient_j != old.gradient_j {
+            #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+            let sourced = self.owner.diffusivity_source.is_some();
+            #[cfg(not(any(feature = "continuum", feature = "experimental-miscibility-material")))]
+            let sourced = false;
+            if current.physical.cells != old.physical.cells
+                || current.physical.area_m2 != old.physical.area_m2
+                || current.physical.distance_m != old.physical.distance_m
+                || current.gradient_j != old.gradient_j
+                || (!sourced && current.physical.diffusivity_m2_s != old.physical.diffusivity_m2_s)
+            {
                 return Err(Error::Invalid(
                     "flow rebinding requires the same original physical faces",
                 ));
@@ -415,6 +425,7 @@ impl BinaryMiscibilityNetwork {
             })
             .collect::<Result<Vec<_>>>()?;
         state.elapsed_s = elapsed_s;
+        self.qualify_diffusivity_sources(&state, &mut cancelled)?;
         poll(&mut cancelled)?;
         Ok(BinaryMiscibilityAdvectionCandidate {
             state,

@@ -139,6 +139,7 @@ pub(super) fn step(
             capacity_residual_mol: capacity_residual,
         });
     }
+    network.qualify_diffusivity_sources(&state, &mut cancelled)?;
     let after = network.free_energy_j(&state, &mut cancelled)?;
     let change = network.free_energy_change(initial, &state, &mut cancelled)?;
     let dissipation = dissipation.value()?;
@@ -191,10 +192,11 @@ fn solve_face(
 ) -> Result<Option<Root>> {
     let face = &network.owner.faces[face_index];
     let [i, j] = face.physical.cells;
-    if face.mobility_mol2_j_s == 0.0 {
+    let old = [state.fractions[i], state.fractions[j]];
+    let base_mobility = network.stage_face_mobility(face_index, old, cancelled)?;
+    if base_mobility == 0.0 {
         return Ok(None);
     }
-    let old = [state.fractions[i], state.fractions[j]];
     // Arithmetic face composition is the binary Maxwell-Stefan molar-frame
     // mobility: c D x_A x_B/(RT), never a signed effective Fick diffusivity.
     let mean = [
@@ -204,7 +206,7 @@ fn solve_face(
     if (old[0][0] == 0.0 && old[1][0] == 0.0) || (old[0][1] == 0.0 && old[1][1] == 0.0) {
         return Ok(None);
     }
-    let mobility = face.mobility_mol2_j_s * (mean[0] * mean[1]);
+    let mobility = base_mobility * (mean[0] * mean[1]);
     let time_mobility = mobility * duration_s;
     if !positive(mobility) || !positive(time_mobility) {
         return Err(Error::Arithmetic(

@@ -300,6 +300,13 @@ fn g0_typed_coordinates_and_explicit_binary_identity_are_required() {
             )
             .unwrap(),
         query(300.0, 0.5)
+            .with_quantity(
+                "other_temperature",
+                typed(QuantityKind::AbsoluteTemperature),
+                300.0,
+            )
+            .unwrap(),
+        query(300.0, 0.5)
             .with_quantity("stress", typed(QuantityKind::Stress), 1e5)
             .unwrap(),
     ];

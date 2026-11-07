@@ -6048,6 +6048,42 @@ and multiphase density transport are outside this owner. The existing rigid
 BDF1 geometry/time truncation limits remain unchanged; nonlinear material
 closure does not establish exact finite-step whole-fluid angular conservation.
 
+## Original-source binary molecular diffusivity
+
+`BinaryMiscibilityNetwork::bind_diffusivity_source` attaches an immutable
+`fs-material::liquid::solution::MaterialBinaryDiffusivity` to the SAME accepted
+binary field. The ordered species must match its original thermodynamic pair.
+The returned candidate preserves both component inventories, compensated low
+words, composition, geometry and elapsed time. Its source explicitly replaces
+the authored constant face diffusivities; zero area still closes a geometric
+face, while zero source diffusivity closes that stage's molecular kinetics.
+
+At each canonical pair stage the source resolves the actual absolute temperature,
+both current endpoint compositions and their arithmetic-mean face. The face
+value supplies the nonnegative Maxwell--Stefan diffusivity in the original
+`c D x_A x_B / (R T)` mobility. It is held during that scalar convex-split root;
+later pairs, timesteps and adaptive coarse/fine trials resolve it again. Thus
+the existing monotonic root, species conservation and free-energy inequality
+are retained with first-order lagged nonlinear kinetics. This is not a fully
+implicit composition-dependent D scheme, a temperature-gradient/Soret law, or
+an inferred effective Fick coefficient in the spinodal region.
+
+Prescribed temperature changes re-evaluate the pinned source without accumulated
+rescaling, and the existing adiabatic and liquid-material adapters preserve it.
+Published diffusion, advection and temperature endpoints qualify every original
+cell and face, including disconnected cells. Source-domain refusal, negative
+kinetics and cancellation publish no partial state. Explicit flow rebinding may
+retain its donor/continuity caches across sourced-D changes only when the original
+thermodynamics, capacities, geometry and gradient coefficients still agree.
+
+`faces()` exposes binding/temperature snapshots; transport never treats them as
+a last-successful-state cache. The numerical workspace retains its original
+bound. Shared material-card storage and transient source-query/receipt allocations
+are additional; O(cells+faces) bounded source queries per sweep occur outside the
+scalar root iterations. `tests/miscibility_material/diffusivity.rs` checks constant
+source equivalence, original-source temperature cycling, composition refresh,
+adaptive stages, conserved inventories, dissipation and transactional refusal.
+
 ## Conservative spatial binary miscibility
 
 The opt-in `experimental-miscibility` feature exposes `miscibility` without

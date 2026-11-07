@@ -50,6 +50,10 @@ pub mod flow;
 #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
 pub mod material;
 
+/// Original material-sourced molecular diffusivity at actual temperature and composition.
+#[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+pub mod diffusivity;
+
 /// Hard admission bounds keep every allocation and face sweep finite.
 pub const MAX_MISCIBILITY_CELLS: usize = 65_536;
 pub const MAX_MISCIBILITY_FACES: usize = 262_144;
@@ -70,6 +74,8 @@ pub struct BinaryMiscibilityFace {
     pub distance_m: f64,
     /// Original binary Maxwell-Stefan diffusivity [m²/s], independent of chi.
     /// Explicit zero closes molecular transport, while gradient energy remains.
+    /// With a material diffusivity source this is the binding/temperature
+    /// snapshot; each physical exchange samples that source again.
     pub diffusivity_m2_s: f64,
 }
 
@@ -104,6 +110,9 @@ pub enum BinaryMiscibilityError {
     Invalid(&'static str),
     Arithmetic(&'static str),
     Thermodynamics(BinarySolutionErrorV1),
+    /// Original molecular-kinetic source refused the actual physical state.
+    #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+    DiffusivitySource(fs_material::liquid::solution::BinaryLiquidError),
     Workspace {
         required: usize,
         maximum: usize,
@@ -170,6 +179,9 @@ struct Owner {
     adjacent_faces: Arc<[usize]>,
     gradient_diagonal_j: Arc<[f64]>,
     workspace_bytes: usize,
+    #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+    diffusivity_source:
+        Option<Arc<fs_material::liquid::solution::diffusion::MaterialBinaryDiffusivity>>,
 }
 
 /// Prepared immutable graph, shared with every accepted state.
@@ -304,6 +316,8 @@ impl BinaryMiscibilityNetwork {
                 adjacent_faces: adjacent_faces.into(),
                 gradient_diagonal_j: gradient_diagonal_j.into(),
                 workspace_bytes,
+                #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+                diffusivity_source: None,
             }),
         })
     }
@@ -382,13 +396,15 @@ impl BinaryMiscibilityNetwork {
             fractions.push(self.fractions(*pair, capacity)?);
         }
         poll(&mut cancelled)?;
-        Ok(BinaryMiscibilityState {
+        let state = BinaryMiscibilityState {
             owner: Arc::clone(&self.owner),
             amount_remainders: vec![[0.0; 2]; amounts.len()],
             amounts,
             fractions,
             elapsed_s: 0.0,
-        })
+        };
+        self.qualify_diffusivity_sources(&state, &mut cancelled)?;
+        Ok(state)
     }
 
     /// Actual bulk plus square-gradient free energy [J], with no local flash.
@@ -487,6 +503,62 @@ impl BinaryMiscibilityNetwork {
             .model()
             .evaluate_composition(fractions)?
             .mole_fractions())
+    }
+
+    // Freeze only the current pair-stage kinetic coefficient, preserving the
+    // monotone convex-split root. Later pairs and time stages query it anew.
+    fn stage_face_mobility(
+        &self,
+        face: usize,
+        fractions: [[f64; 2]; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64> {
+        #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+        if let Some(source) = &self.owner.diffusivity_source {
+            let resolved = source
+                .resolve_face(self.model().temperature(), fractions, cancelled)
+                .map_err(diffusivity::source_error)?;
+            let geometry = self.owner.faces[face].physical;
+            return face_mobility(
+                self.model(),
+                geometry.area_m2 / geometry.distance_m,
+                resolved.diffusivity_m2_s,
+            );
+        }
+        let _ = (fractions, cancelled);
+        Ok(self.owner.faces[face].mobility_mol2_j_s)
+    }
+
+    fn qualify_diffusivity_sources(
+        &self,
+        state: &BinaryMiscibilityState,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
+        #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+        if let Some(source) = &self.owner.diffusivity_source {
+            // Include disconnected cells: applicability belongs to the entire
+            // accepted material field, not only to conducting connections.
+            for (cell, &fraction) in state.fractions.iter().enumerate() {
+                if self.owner.adjacent_offsets[cell] != self.owner.adjacent_offsets[cell + 1] {
+                    continue;
+                }
+                source
+                    .resolve_face(self.model().temperature(), [fraction; 2], &mut *cancelled)
+                    .map_err(diffusivity::source_error)?;
+            }
+            for face in self.owner.faces.iter() {
+                let [i, j] = face.physical.cells;
+                source
+                    .resolve_face(
+                        self.model().temperature(),
+                        [state.fractions[i], state.fractions[j]],
+                        &mut *cancelled,
+                    )
+                    .map_err(diffusivity::source_error)?;
+            }
+        }
+        let _ = (state, cancelled);
+        Ok(())
     }
     fn gradient(
         &self,

@@ -1,6 +1,8 @@
 //! G0/G1/G3/G4: conserved fields retain original homogeneous liquid sources.
 //! All material curves below are synthetic numerical fixtures, not measurements.
 
+#[path = "miscibility_material/diffusivity.rs"]
+mod diffusivity;
 #[path = "miscibility_material/thermal.rs"]
 mod thermal;
 
@@ -113,6 +115,8 @@ fn card(upper_x: f64, middle_density: f64) -> MaterialCard {
 // transport curves change with actual temperature. A nonunit hot density scale
 // deliberately leaves the fixed-volume model after the temperature change.
 fn temperature_card(hot_density_scale: f64, maximum_temperature: f64) -> MaterialCard {
+    let hot_fraction = (maximum_temperature - 300.0) / 300.0;
+    let endpoint_density_scale = 1.0 + hot_fraction * (hot_density_scale - 1.0);
     let mut claims = ClaimSet::new();
     for (name, spec, values) in [
         (
@@ -143,8 +147,14 @@ fn temperature_card(hot_density_scale: f64, maximum_temperature: f64) -> Materia
                 samples: vec![
                     ([300.0, 0.0], values[0]),
                     ([300.0, 1.0], values[1]),
-                    ([600.0, 0.0], values[0] * hot_density_scale),
-                    ([600.0, 1.0], values[1] * hot_density_scale),
+                    (
+                        [maximum_temperature, 0.0],
+                        values[0] * endpoint_density_scale,
+                    ),
+                    (
+                        [maximum_temperature, 1.0],
+                        values[1] * endpoint_density_scale,
+                    ),
                 ],
                 triangles: vec![[0, 2, 1], [1, 2, 3]],
                 dims: spec.dims(),
@@ -153,7 +163,13 @@ fn temperature_card(hot_density_scale: f64, maximum_temperature: f64) -> Materia
             PropertyValue::Curve {
                 abscissa: "T".into(),
                 abscissa_dims: Temperature::DIMS,
-                knots: vec![(300.0, values[0]), (600.0, values[1])],
+                knots: vec![
+                    (300.0, values[0]),
+                    (
+                        maximum_temperature,
+                        values[0] + hot_fraction * (values[1] - values[0]),
+                    ),
+                ],
                 dims: spec.dims(),
             }
         };

@@ -3,8 +3,9 @@
 //! Cooling/heating changes the original pair's chi, chemical potentials and
 //! Maxwell-Stefan mobility. It does not flash cells into bulk equilibrium, seed
 //! phases, discard interface history or advance the clock. Geometry, site
-//! concentration, kappa and authored diffusivity stay fixed; temperature-dependent
-//! diffusivity or thermal expansion require separately qualified source models.
+//! concentration and kappa stay fixed. Authored constant diffusivities remain
+//! unchanged; an explicitly bound material diffusivity is re-evaluated at the
+//! new temperature and actual field composition. Thermal expansion is excluded.
 //!
 //! For the original chi = A + B/T law, fixed-composition mixing entropy is
 //! independent of temperature. Consequently the external change of field free
@@ -100,7 +101,20 @@ impl BinaryMiscibilityNetwork {
             let mut faces = Vec::with_capacity(self.owner.faces.len());
             for face in self.owner.faces.iter() {
                 poll(&mut cancelled)?;
-                let physical = face.physical;
+                #[allow(unused_mut)]
+                let mut physical = face.physical;
+                #[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+                if let Some(source) = &self.owner.diffusivity_source {
+                    let [i, j] = physical.cells;
+                    physical.diffusivity_m2_s = source
+                        .resolve_face(
+                            temperature,
+                            [initial.fractions[i], initial.fractions[j]],
+                            &mut cancelled,
+                        )
+                        .map_err(super::diffusivity::source_error)?
+                        .diffusivity_m2_s;
+                }
                 faces.push(Face {
                     physical,
                     gradient_j: face.gradient_j,
@@ -121,6 +135,11 @@ impl BinaryMiscibilityNetwork {
                     adjacent_faces: Arc::clone(&self.owner.adjacent_faces),
                     gradient_diagonal_j: Arc::clone(&self.owner.gradient_diagonal_j),
                     workspace_bytes: self.owner.workspace_bytes,
+                    #[cfg(any(
+                        feature = "continuum",
+                        feature = "experimental-miscibility-material"
+                    ))]
+                    diffusivity_source: self.owner.diffusivity_source.clone(),
                 }),
             }
         };
@@ -151,6 +170,7 @@ impl BinaryMiscibilityNetwork {
         let free_energy_before_j = self.free_energy_j(initial, &mut cancelled)?;
         let mut state = initial.clone();
         state.owner = Arc::clone(&network.owner);
+        network.qualify_diffusivity_sources(&state, &mut cancelled)?;
         let free_energy_after_j = network.free_energy_j(&state, &mut cancelled)?;
         let change = BinaryMiscibilityTemperatureChange {
             temperature_before: original.temperature(),
