@@ -99,6 +99,7 @@ pub(in crate::multicomponent::dissipation) fn interior<L: TransportLaw>(
     let mut x = [0.0; MAX_SPECIES];
     fractions(gas, left.densities, &mut xl[..n])?;
     fractions(gas, right.densities, &mut xr[..n])?;
+    let mass_ratio = active_mass_ratio(diffusion, &xl[..n], &xr[..n], mass_ratio);
     let mut contrast =
         (t / pl.temperature.min(pr.temperature)).max(p / pl.pressure.min(pr.pressure));
     for k in 0..n {

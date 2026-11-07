@@ -18,6 +18,8 @@ pub struct TransportFaceReport {
     /// Maximum face diffusion scale before spatial inverse lengths [m²/s].
     /// Pairs with both species absent contribute no molecular timestep scale;
     /// their source coefficients remain validated at every face evaluation.
+    /// Molecular-mass contrasts include every species present on either trace,
+    /// without letting absent catalog species restrict the diffusion step.
     pub diffusivity_m2_s: f64,
     /// Original molecular shear viscosity at this face [Pa s], before any
     /// composing modeled transport. Exposes the actual source evaluation
@@ -411,6 +413,39 @@ pub(super) fn prepare_diffusion(
     Ok((diffusion, mass_ratio))
 }
 
+/// Restrict the mass conversion estimate to the exact endpoint support. For a
+/// species absent on both traces, x_i = grad(x_i) = Y_i = 0, including its Soret
+/// force. Its original Maxwell--Stefan row is a positive diagonal times z_i=0;
+/// it contributes neither to active friction rows nor to the mass constraint.
+/// The remaining system has the same mass conversion estimate as that mixture
+/// without the absent species. One-sided species and every positive endpoint
+/// fraction stay in the estimate, even if interpolation rounds the face to zero.
+/// Full-catalog mass and source admission remains in the prepared owners.
+fn active_mass_ratio(
+    diffusion: &MaxwellStefanV1,
+    left: &[f64],
+    right: &[f64],
+    catalog_ratio: f64,
+) -> f64 {
+    let mut minimum = f64::INFINITY;
+    let mut maximum = 0.0_f64;
+    let mut count = 0;
+    for (k, mass) in diffusion.molar_masses().iter().enumerate() {
+        if left[k] != 0.0 || right[k] != 0.0 {
+            minimum = minimum.min(mass.value());
+            maximum = maximum.max(mass.value());
+            count += 1;
+        }
+    }
+    debug_assert!(count > 0);
+    if count == left.len() {
+        catalog_ratio
+    } else {
+        // A nonempty subset cannot exceed the already admitted catalog ratio.
+        maximum / minimum
+    }
+}
+
 pub(super) struct Trace<'a> {
     pub densities: &'a [f64],
     pub primitive: Primitive,
@@ -638,6 +673,7 @@ fn interior_components<const TRANSVERSE: usize, L: TransportLaw>(
     let mut gradient = [0.0; MAX_SPECIES];
     fractions(gas, left.densities, &mut xl[..n])?;
     fractions(gas, right.densities, &mut xr[..n])?;
+    let mass_ratio = active_mass_ratio(diffusion, &xl[..n], &xr[..n], mass_ratio);
     for k in 0..n {
         x[k] = left_weight * xl[k] + right_weight * xr[k];
         gradient[k] = (xr[k] - xl[k]) / distance;
