@@ -29,8 +29,8 @@ use fs_qty::{
 
 pub mod oscillator;
 pub use oscillator::{
-    LorentzError, LorentzPole, LorentzState, LorentzStep, PreparedLorentzHarmonic,
-    PreparedLorentzStep,
+    LorentzError, LorentzHarmonicTransfer, LorentzPole, LorentzState, LorentzStep,
+    PreparedLorentzHarmonic, PreparedLorentzStep,
 };
 
 impl From<LorentzError> for FieldStorageError {

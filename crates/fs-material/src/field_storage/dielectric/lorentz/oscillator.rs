@@ -16,6 +16,8 @@ use fs_modal::time::{LinearForceTransition, ModalAcousticState, ModalAcousticTim
 
 mod harmonic;
 pub use harmonic::PreparedLorentzHarmonic;
+mod transfer;
+pub use transfer::LorentzHarmonicTransfer;
 
 /// Invalid physical data, an unresolved arithmetic range, or an actual pole.
 #[derive(Clone, Debug, PartialEq)]
