@@ -43,6 +43,15 @@ work/physical refusals.
 
 ## Exact physical records and sampled harmonic receivers
 
+`observation::AngularHarmonicFieldLine` and `PreparedHarmonicField::new_angular`
+retain source-authored rad/s without a round trip through f64 Hz. The original
+angular values govern coalescing, samples, finite-window p/u moments, product
+spectra and output-Nyquist admission. Existing `HarmonicFieldLine` constructors
+retain their original mathematical Hz conversion and observation semantics.
+Both paths share amplitude accumulation, work budgets and cancellation. The
+`fs-couple` port-harmonic bridge uses this angular path; its long-epoch regression
+checks original-clock pressure, intensity, quadratic spectra and calibrated PCM.
+
 Material-bound 2D and periodic 3D jets retain every admitted recording step,
 including odd and prime record lengths. Their prepared force spectra and the
 shared transverse periodogram use fs-fft's cached GeneralFft. The physical grid

@@ -280,18 +280,16 @@ fn field<const D: usize>(
 fn kernel(
     window: HarmonicWindow,
     kind: FactorKind,
-    a: f64,
-    b: f64,
+    a: PreparedFrequency,
+    b: PreparedFrequency,
 ) -> Result<MomentKernel, AeroacError> {
     Ok(match kind {
         FactorKind::Deterministic => {
-            MomentKernel::Deterministic(window.product_kernel_hz(a, b).map_err(window_error)?)
+            MomentKernel::Deterministic(a.product_kernel(b, window).map_err(window_error)?)
         }
-        FactorKind::Proper => MomentKernel::Proper(
-            window
-                .proper_product_kernel_hz(a, b)
-                .map_err(window_error)?,
-        ),
+        FactorKind::Proper => {
+            MomentKernel::Proper(a.proper_kernel(b, window).map_err(window_error)?)
+        }
     })
 }
 
@@ -319,7 +317,7 @@ fn pair<const D: usize>(
         for x in &a.lines {
             for y in &b.lines {
                 poll(cancelled)?;
-                moments.add(kernel(window, kind, x.frequency_hz, y.frequency_hz)?, x, y)?;
+                moments.add(kernel(window, kind, x.frequency, y.frequency)?, x, y)?;
             }
         }
         if bank != 0 {
@@ -327,7 +325,7 @@ fn pair<const D: usize>(
             // This is not the average instantaneous covariance above.
             let a = averaged_amplitudes(a, window, cancelled)?;
             let b = averaged_amplitudes(b, window, cancelled)?;
-            covariance.add(kernel(window, kind, 0.0, 0.0)?, &a, &b)?;
+            covariance.add(kernel(window, kind, a.frequency, b.frequency)?, &a, &b)?;
         }
     }
     poll(cancelled)?;
@@ -340,15 +338,13 @@ fn averaged_amplitudes<const D: usize>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<PreparedLine<D>, AeroacError> {
     let mut result = PreparedLine {
-        frequency_hz: 0.0,
+        frequency: PreparedFrequency::Hertz(0.0),
         pressure: ComplexSum::default(),
         velocity: [ComplexSum::default(); D],
     };
     for line in &field.lines {
         poll(cancelled)?;
-        let integral = window
-            .product_kernel_hz(line.frequency_hz, 0.0)
-            .map_err(window_error)?;
+        let integral = line.frequency.mean_kernel(window).map_err(window_error)?;
         let add = |sum: &mut ComplexSum, value: ComplexSum| -> Result<(), AeroacError> {
             let [re, im] = value.parts();
             sum.re = sum.re

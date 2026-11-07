@@ -20,7 +20,8 @@
 
 use crate::AeroacError;
 use fs_fft::harmonic_window::{
-    HarmonicProduct, HarmonicWindow, ProperHarmonicProduct, WindowError,
+    HarmonicProduct, HarmonicWindow, ProperHarmonicProduct, WindowError, angular_frequency,
+    phase_hz_from_clock_dd,
 };
 use fs_math::{c64::C64, dd::Dd, det};
 
@@ -50,6 +51,20 @@ pub mod array;
 pub struct HarmonicFieldLine<const D: usize> {
     /// Positive frequency [Hz]. Exactly equal frequencies are coalesced.
     pub frequency_hz: f64,
+    /// Observed complex peak acoustic pressure [Pa].
+    pub pressure_pa: C64,
+    /// Observed complex peak particle velocity [m/s] in one Cartesian frame.
+    pub particle_velocity_m_s: [C64; D],
+}
+
+/// An already propagated line retaining a source-authored angular frequency.
+///
+/// This has the same physical peak-phasor convention as [`HarmonicFieldLine`],
+/// but no round trip through f64 hertz is applied to its original rad/s clock.
+#[derive(Clone, Copy, Debug)]
+pub struct AngularHarmonicFieldLine<const D: usize> {
+    /// Positive original angular frequency [rad/s]. Exact equals coalesce.
+    pub angular_frequency_rad_s: f64,
     /// Observed complex peak acoustic pressure [Pa].
     pub pressure_pa: C64,
     /// Observed complex peak particle velocity [m/s] in one Cartesian frame.
@@ -124,9 +139,54 @@ impl<const D: usize> PreparedHarmonicField<D> {
 
     /// Admit and coalesce fields with bounded cancellation polls.
     /// No partially prepared field is published after cancellation or refusal.
-    #[allow(clippy::float_cmp)] // Only exact frequency equality permits coalescing.
     pub fn new_cancellable(
         lines: &[HarmonicFieldLine<D>],
+        budget: HarmonicObservationBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            lines.iter().map(|line| {
+                (
+                    PreparedFrequency::Hertz(line.frequency_hz),
+                    line.pressure_pa,
+                    line.particle_velocity_m_s,
+                )
+            }),
+            budget,
+            cancelled,
+        )
+    }
+
+    /// Preserve source-authored rad/s through samples, window moments and
+    /// quadratic spectra. Frequencies are never reconstructed from rounded Hz.
+    pub fn new_angular(
+        lines: &[AngularHarmonicFieldLine<D>],
+        budget: HarmonicObservationBudget,
+    ) -> Result<Self, AeroacError> {
+        Self::new_angular_cancellable(lines, budget, || false)
+    }
+
+    /// Admit native angular lines with bounded cancellation and no partial result.
+    pub fn new_angular_cancellable(
+        lines: &[AngularHarmonicFieldLine<D>],
+        budget: HarmonicObservationBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            lines.iter().map(|line| {
+                (
+                    PreparedFrequency::Angular(line.angular_frequency_rad_s),
+                    line.pressure_pa,
+                    line.particle_velocity_m_s,
+                )
+            }),
+            budget,
+            cancelled,
+        )
+    }
+
+    fn prepare(
+        lines: impl ExactSizeIterator<Item = (PreparedFrequency, C64, [C64; D])>,
         budget: HarmonicObservationBudget,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
@@ -143,24 +203,21 @@ impl<const D: usize> PreparedHarmonicField<D> {
         combined
             .try_reserve_exact(lines.len())
             .map_err(|_| invalid("harmonic field allocation exceeds available memory"))?;
-        for line in lines {
+        for (frequency, pressure_pa, particle_velocity_m_s) in lines {
             poll(&mut cancelled)?;
-            let omega = core::f64::consts::TAU * line.frequency_hz;
-            if !omega.is_finite() || omega <= 0.0 {
+            let omega = frequency
+                .angular()
+                .map_err(|_| invalid("harmonic frequencies must be positive finite"))?;
+            if !omega.hi.is_finite() || !omega.lo.is_finite() || omega.hi <= 0.0 {
                 return Err(invalid("harmonic frequencies must be positive finite"));
             }
-            if !finite(line.pressure_pa)
-                || line
-                    .particle_velocity_m_s
-                    .iter()
-                    .any(|value| !finite(*value))
-            {
+            if !finite(pressure_pa) || particle_velocity_m_s.iter().any(|value| !finite(*value)) {
                 return Err(nonfinite("harmonic pressure or particle velocity"));
             }
             let mut group = None;
             for (index, previous) in combined.iter().enumerate() {
                 poll(&mut cancelled)?;
-                if previous.frequency_hz == line.frequency_hz {
+                if previous.frequency == frequency {
                     group = Some(index);
                     break;
                 }
@@ -168,16 +225,16 @@ impl<const D: usize> PreparedHarmonicField<D> {
             let index = group.unwrap_or(combined.len());
             if index == combined.len() {
                 combined.push(PreparedLine {
-                    frequency_hz: line.frequency_hz,
+                    frequency,
                     pressure: ComplexSum::default(),
                     velocity: [ComplexSum::default(); D],
                 });
             }
-            combined[index].pressure.add(line.pressure_pa);
+            combined[index].pressure.add(pressure_pa);
             for (sum, value) in combined[index]
                 .velocity
                 .iter_mut()
-                .zip(line.particle_velocity_m_s)
+                .zip(particle_velocity_m_s)
             {
                 sum.add(value);
             }
@@ -201,7 +258,7 @@ impl<const D: usize> PreparedHarmonicField<D> {
     /// Integrate actual real pressure and energy flux on the source clock.
     ///
     /// Both sum- and difference-frequency contributions survive. Grouped field
-    /// components and the Hz-to-radian conversion remain extended precision
+    /// components, original frequencies and any Hz conversion remain extended precision
     /// through the contractions. This is not a relative certificate at a null.
     pub fn observe_window(
         &self,
@@ -278,9 +335,7 @@ impl<const D: usize> PreparedHarmonicField<D> {
                 poll(cancelled)?;
                 // A unit DC field integrates each retained component without
                 // rounding a tiny mean-phase decrement to C64 first.
-                let kernel = window
-                    .product_kernel_hz(line.frequency_hz, 0.0)
-                    .map_err(window_error)?;
+                let kernel = line.frequency.mean_kernel(window).map_err(window_error)?;
                 let unit = [Dd::ONE, Dd::ZERO];
                 sums.pressure_mean = sums.pressure_mean
                     + kernel
@@ -299,13 +354,13 @@ impl<const D: usize> PreparedHarmonicField<D> {
                 poll(cancelled)?;
                 let kernel = match kind {
                     FactorKind::Deterministic => MomentKernel::Deterministic(
-                        window
-                            .product_kernel_hz(a.frequency_hz, b.frequency_hz)
+                        a.frequency
+                            .product_kernel(b.frequency, window)
                             .map_err(window_error)?,
                     ),
                     FactorKind::Proper => MomentKernel::Proper(
-                        window
-                            .proper_product_kernel_hz(a.frequency_hz, b.frequency_hz)
+                        a.frequency
+                            .proper_kernel(b.frequency, window)
                             .map_err(window_error)?,
                     ),
                 };
@@ -528,9 +583,89 @@ impl ComplexSum {
 
 #[derive(Clone, Debug)]
 struct PreparedLine<const D: usize> {
-    frequency_hz: f64,
+    frequency: PreparedFrequency,
     pressure: ComplexSum,
     velocity: [ComplexSum; D],
+}
+
+// Preserve the unit in which the source clock was authored. The Hertz branch
+// delegates to the existing Hz kernels, retaining their conversion semantics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PreparedFrequency {
+    Hertz(f64),
+    Angular(f64),
+}
+
+impl PreparedFrequency {
+    fn angular(self) -> Result<Dd, WindowError> {
+        match self {
+            Self::Hertz(hz) => angular_frequency(hz),
+            Self::Angular(omega) if omega.is_finite() => Ok(Dd::from_f64(omega)),
+            Self::Angular(_) => Err(WindowError::InvalidFrequency),
+        }
+    }
+
+    fn native(self) -> f64 {
+        match self {
+            Self::Hertz(value) | Self::Angular(value) => value,
+        }
+    }
+
+    fn is_angular(self) -> bool {
+        matches!(self, Self::Angular(_))
+    }
+
+    fn phase(self, time: Dd) -> Result<[Dd; 2], WindowError> {
+        if let Self::Hertz(hz) = self {
+            return phase_hz_from_clock_dd(hz, time);
+        }
+        if !time.hi.is_finite() || !time.lo.is_finite() {
+            return Err(WindowError::InvalidWindow);
+        }
+        let angle = self.angular()? * Dd::from_pair(time.hi, time.lo);
+        if !angle.hi.is_finite() || !angle.lo.is_finite() {
+            return Err(WindowError::Unrepresentable);
+        }
+        let (sin, cos) = det::sin_cos_dd(angle);
+        Ok([cos, -sin])
+    }
+
+    fn below_nyquist(self, sample_rate_hz: u32) -> Result<bool, WindowError> {
+        let limit_hz = 0.5 * f64::from(sample_rate_hz);
+        match self {
+            Self::Hertz(hz) => Ok(hz < limit_hz),
+            Self::Angular(_) => Ok(self.angular()?.lt(angular_frequency(limit_hz)?)),
+        }
+    }
+
+    fn mean_kernel(self, window: HarmonicWindow) -> Result<HarmonicProduct, WindowError> {
+        match self {
+            Self::Hertz(hz) => window.product_kernel_hz(hz, 0.0),
+            Self::Angular(omega) => window.product_kernel(omega, 0.0),
+        }
+    }
+
+    fn product_kernel(
+        self,
+        other: Self,
+        window: HarmonicWindow,
+    ) -> Result<HarmonicProduct, WindowError> {
+        match (self, other) {
+            (Self::Hertz(a), Self::Hertz(b)) => window.product_kernel_hz(a, b),
+            _ => window.product_kernel_dd(self.angular()?, other.angular()?),
+        }
+    }
+
+    fn proper_kernel(
+        self,
+        other: Self,
+        window: HarmonicWindow,
+    ) -> Result<ProperHarmonicProduct, WindowError> {
+        match (self, other) {
+            (Self::Hertz(a), Self::Hertz(b)) => window.proper_product_kernel_hz(a, b),
+            _ => window.proper_product_kernel_dd(self.angular()?, other.angular()?),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

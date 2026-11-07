@@ -325,7 +325,7 @@ fn realize_field<const D: usize>(
                 im: value.re * im + value.im * re,
             };
             let scaled = PreparedLine {
-                frequency_hz: line.frequency_hz,
+                frequency: line.frequency,
                 pressure: scale(line.pressure),
                 velocity: line.velocity.map(scale),
             };
@@ -335,7 +335,7 @@ fn realize_field<const D: usize>(
             let mut group = None;
             for (index, previous) in lines.iter().enumerate() {
                 poll(cancelled)?;
-                if previous.frequency_hz == line.frequency_hz {
+                if previous.frequency == line.frequency {
                     group = Some(index);
                     break;
                 }

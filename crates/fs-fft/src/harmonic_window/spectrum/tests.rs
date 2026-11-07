@@ -134,6 +134,63 @@ fn output_spectrum_integrates_with_both_physical_window_profiles() {
 }
 
 #[test]
+fn hz_products_share_the_long_epoch_sample_and_window_clock() {
+    let epoch = 2.0_f64.powi(40);
+    let fa = 4096.0;
+    let a = C64::new(0.75, -0.25);
+    let b = C64::new(-0.5, 0.875);
+    let real_at = |amplitude: C64, frequency: f64, time: Dd| {
+        let [re, im] = phase_hz_from_clock_dd(frequency, time).unwrap();
+        Dd::from_f64(amplitude.re) * re - Dd::from_f64(amplitude.im) * im
+    };
+    let phases = [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)];
+    // Equal carriers also exercise the exact DC term. The resolved beat and
+    // carrier sum must retain the same mathematical 2*pi as the input samples;
+    // lifting only f64::TAU shifts the sum by more than two radians here.
+    for fb in [fa, fa + 0.25] {
+        for law in [HarmonicProductLaw::Real, HarmonicProductLaw::ProperComplex] {
+            let q =
+                PreparedHarmonicProductSpectrum::new([input(a, fa, b, fb, law)], limits()).unwrap();
+            for offset in [0.0, 0.00019, 0.123] {
+                let time = Dd::from_pair(epoch, offset);
+                let expected = match law {
+                    HarmonicProductLaw::Real => real_at(a, fa, time) * real_at(b, fb, time),
+                    HarmonicProductLaw::ProperComplex => {
+                        phases.iter().fold(Dd::ZERO, |sum, &z| {
+                            sum + real_at(a * z, fa, time) * real_at(b * z, fb, time)
+                        }) / Dd::from_f64(4.0)
+                    }
+                };
+                close(
+                    q.evaluate_from_clock_dd(time).unwrap().to_f64(),
+                    expected.to_f64(),
+                    2e-14,
+                );
+            }
+            for profile in [
+                HarmonicWindowProfile::Uniform,
+                HarmonicWindowProfile::Triangular,
+            ] {
+                let window = HarmonicWindow::with_profile(epoch, 0.00031, profile).unwrap();
+                let expected = match law {
+                    HarmonicProductLaw::Real => window
+                        .product_kernel_hz(fa, fb)
+                        .unwrap()
+                        .mean_real_product(a, b)
+                        .unwrap(),
+                    HarmonicProductLaw::ProperComplex => window
+                        .proper_product_kernel_hz(fa, fb)
+                        .unwrap()
+                        .mean_real_product(a, b)
+                        .unwrap(),
+                };
+                close(q.mean(window).unwrap(), expected, 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
 fn signed_lines_and_high_carrier_sum_low_bits_are_preserved() {
     let carrier = 2.0_f64.powi(48);
     let q = PreparedHarmonicProductSpectrum::new(

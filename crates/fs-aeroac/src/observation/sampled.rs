@@ -5,7 +5,6 @@
 //! coarser output clock refuses instead of silently aliasing or dropping tones.
 
 use super::*;
-use fs_fft::harmonic_window::phase_hz_from_clock_dd;
 
 /// Uniform output samples at `epoch_s + index / sample_rate_hz`.
 ///
@@ -112,15 +111,22 @@ impl<const D: usize> PreparedHarmonicField<D> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            if line.frequency_hz >= 0.5 * f64::from(clock.sample_rate_hz) {
+            if !line
+                .frequency
+                .below_nyquist(clock.sample_rate_hz)
+                .map_err(window_error)?
+            {
                 return Err(invalid(
                     "harmonic field contains a line at or above output Nyquist",
                 ));
             }
             // Bounding both ends covers the absolute phase of every sample.
-            phase_hz_from_clock_dd(line.frequency_hz, clock.time_at(first_sample)?)
+            line.frequency
+                .phase(clock.time_at(first_sample)?)
                 .map_err(window_error)?;
-            phase_hz_from_clock_dd(line.frequency_hz, clock.time_at(end)?).map_err(window_error)?;
+            line.frequency
+                .phase(clock.time_at(end)?)
+                .map_err(window_error)?;
         }
         poll(&mut cancelled)
     }
@@ -172,8 +178,7 @@ impl<const D: usize> PreparedHarmonicField<D> {
             if index % 64 == 0 {
                 poll(cancelled)?;
             }
-            let [real, imaginary] =
-                phase_hz_from_clock_dd(line.frequency_hz, time_s).map_err(window_error)?;
+            let [real, imaginary] = line.frequency.phase(time_s).map_err(window_error)?;
             pressure = pressure + line.pressure.re * real - line.pressure.im * imaginary;
             if include_velocity {
                 for (sum, amplitude) in velocity.iter_mut().zip(&line.velocity) {

@@ -2997,6 +2997,37 @@ equivalence when independent body coordinates are stored together or separately.
 The existing material shear-film and coupled-stop residual tests independently
 check each support's signed reaction, physical contact work and energy balance.
 
+## Nonlinear port harmonics and sidebands through physical BEM receivers
+
+`phs_orbit::acoustic::PortAcousticSpectrum` connects the original nonlinear
+port-spectrum and infinitesimal sideband observers to the existing prepared
+BEM pressure/particle-velocity banks. Ordinary harmonic peak phasors retain
+their negative-time convention. Positive-time sidebands fold at their actual
+signed carrier-plus-orbit frequencies: positive bands conjugate, negative bands
+do not, and coincident physical lines combine coherently before source mapping.
+DC remains explicit in the original port units, without an invented static
+acoustic solution. No amplitude threshold removes a retained harmonic.
+
+The caller supplies each exact-frequency source-by-port map in declared SI
+source units, with its physical sign and phase. All banks must share the given
+receiver identities and geometry. The returned `PreparedHarmonicField<3>`
+receivers use the existing finite-window interference/intensity and calibrated
+PCM owners, retaining inharmonic beats and the original source clock. Preparation
+and propagation admit complete count/work/storage budgets and cancellation;
+they perform no new field solve. Native BEM identities and producer uncertainty
+remain borrowed in the result. This is observation of the supplied periodic
+regime or small probe, not radiation feedback, an attack transient, source-unit
+inference, stability proof, or a new source/spatial accuracy certificate.
+
+`tests/phs_harmonic_acoustic.rs` exercises an original cubic-storage output
+with DC/even/odd harmonics through actual incident-plus-scattered BEM fields
+and the PCM stream, conjugate sideband collisions, independently integrated
+finite-window beats and vector intensity, static-only output, and physical
+binding/budget/cancellation refusals. Forced and autonomous cycle-work audits
+also refuse grids that cannot resolve the authored input or retained state
+harmonics; nonlinear power still needs successive-grid convergence evidence.
+
+
 ## Exact compact radiation from linear string harmonics
 
 The fixed-end linear string renderer and its material, thermal, concentric and

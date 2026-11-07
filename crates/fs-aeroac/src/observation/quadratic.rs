@@ -5,8 +5,9 @@
 
 use super::*;
 use fs_fft::harmonic_window::{
-    HarmonicProductInput, HarmonicProductLaw, HarmonicProductSpectrumLimits,
-    MAX_PRODUCT_SPECTRUM_TERMS, PreparedHarmonicProductSpectrum, ProductSpectrumError,
+    AngularHarmonicProductInput, HarmonicProductInput, HarmonicProductLaw,
+    HarmonicProductSpectrumLimits, MAX_PRODUCT_SPECTRUM_TERMS, PreparedHarmonicProductSpectrum,
+    ProductSpectrumError,
 };
 
 /// Physical field coordinate in the original observation frame.
@@ -182,8 +183,19 @@ fn build<'a, const D: usize>(
     }
     let mut pairs = 0usize;
     let mut terms = 0usize;
+    let mut angular = None;
     for (law, field) in banks.clone() {
         poll(&mut cancelled)?;
+        for line in &field.lines {
+            poll(&mut cancelled)?;
+            let native_angular = line.frequency.is_angular();
+            if angular.is_some_and(|original| original != native_angular) {
+                return Err(invalid(
+                    "quadratic fields must share their authored frequency unit",
+                ));
+            }
+            angular = Some(native_angular);
+        }
         let count = field
             .lines
             .len()
@@ -214,24 +226,51 @@ fn build<'a, const D: usize>(
     // their low DD components retained through the shared spectrum engine.
     let products = banks.flat_map(move |(law, field)| {
         field.lines.iter().flat_map(move |a| {
-            field.lines.iter().map(move |b| HarmonicProductInput {
-                left_frequency_hz: a.frequency_hz,
-                right_frequency_hz: b.frequency_hz,
-                left_amplitude: parts(a, left),
-                right_amplitude: parts(b, right),
-                law,
+            field.lines.iter().map(move |b| {
+                (
+                    a.frequency.native(),
+                    b.frequency.native(),
+                    parts(a, left),
+                    parts(b, right),
+                    law,
+                )
             })
         })
     });
-    let spectrum = PreparedHarmonicProductSpectrum::new_cancellable(
-        products,
-        HarmonicProductSpectrumLimits {
-            maximum_products: pairs,
-            maximum_generated_terms: terms,
-            maximum_workspace_bytes: limits.maximum_workspace_bytes,
-        },
-        &mut cancelled,
-    )
+    let limits = HarmonicProductSpectrumLimits {
+        maximum_products: pairs,
+        maximum_generated_terms: terms,
+        maximum_workspace_bytes: limits.maximum_workspace_bytes,
+    };
+    let spectrum = if angular.unwrap_or(false) {
+        PreparedHarmonicProductSpectrum::from_angular_frequencies_cancellable(
+            products.map(|(a, b, left_amplitude, right_amplitude, law)| {
+                AngularHarmonicProductInput {
+                    left_angular_frequency_rad_s: a,
+                    right_angular_frequency_rad_s: b,
+                    left_amplitude,
+                    right_amplitude,
+                    law,
+                }
+            }),
+            limits,
+            &mut cancelled,
+        )
+    } else {
+        PreparedHarmonicProductSpectrum::new_cancellable(
+            products.map(
+                |(a, b, left_amplitude, right_amplitude, law)| HarmonicProductInput {
+                    left_frequency_hz: a,
+                    right_frequency_hz: b,
+                    left_amplitude,
+                    right_amplitude,
+                    law,
+                },
+            ),
+            limits,
+            &mut cancelled,
+        )
+    }
     .map_err(spectrum_error)?;
     poll(&mut cancelled)?;
     Ok(AcousticProductSpectrum {

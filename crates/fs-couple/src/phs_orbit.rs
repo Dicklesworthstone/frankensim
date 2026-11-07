@@ -30,6 +30,9 @@ pub use tangent::{
 /// Physical port harmonics evaluated through the original nonlinear storage.
 pub mod spectrum;
 
+/// Original harmonic and sideband outputs through physical BEM receivers.
+pub mod acoustic;
+
 /// Physical probe response and frequency conversion about driven or self-excited periodic orbits.
 pub mod sideband;
 
@@ -568,13 +571,16 @@ pub struct PhsOrbitAudit {
 }
 
 /// Audit one FORCED orbit using its exact authored Fourier input and original
-/// pHS energy/resistance. No damping or energy correction is applied.
+/// pHS energy/resistance. No damping or energy correction is applied. The grid
+/// must resolve every authored drive and retained state harmonic; nonlinear
+/// work can need finer sampling and still requires successive-grid comparison.
 pub fn audit_forced_orbit(
     system:&PortHamiltonian, input:&PeriodicPortInput, orbit:&HbOrbit, samples:usize,
 ) -> Result<PhsOrbitAudit,PhsOrbitError> {
     if system.port_dim()!=input.port_count() || orbit.coeffs.len()!=system.state_dim()
         || orbit.omega.to_bits()!=input.omega_rad_s().to_bits()
         || samples<32 || samples>65_536
+        || input.highest_nonzero_harmonic() > samples.saturating_sub(1) / 2
         || orbit.coeffs.iter().any(|row|row.is_empty())
     { return Err(bad("cycle audit needs matching forced orbit and 32..=65536 samples")); }
     audit_orbit_with_input(system, orbit, samples,
@@ -602,6 +608,7 @@ fn audit_orbit_with_input_effort(
         || !orbit.omega.is_finite() || orbit.omega<=0.0
         || !(core::f64::consts::TAU/orbit.omega).is_finite()
         || !(32..=65_536).contains(&samples)
+        || width.saturating_sub(1) > samples.saturating_sub(1) / 2
         || orbit.coeffs.iter().any(|row|row.len()!=width || row[0].im!=0.0
             || row.iter().any(|z|!z.re.is_finite() || !z.im.is_finite()))
     { return Err(bad("cycle audit needs finite original-state Fourier rows and 32..=65536 samples")); }

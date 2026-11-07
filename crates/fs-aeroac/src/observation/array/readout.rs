@@ -1,7 +1,6 @@
 //! Physical first-order microphone projection and authored delay-and-sum signals.
 
 use super::*;
-use fs_fft::harmonic_window::phase_hz_from_clock_dd;
 
 /// One signed, causal tap on an original physical receiver.
 /// The ideal first-order microphone reads alpha*p - (1-alpha)*rho*c*n.u,
@@ -221,8 +220,7 @@ impl<'a, const D: usize> PreparedHarmonicArray<'a, D> {
                     value.re = value.re + u.re * coefficient;
                     value.im = value.im + u.im * coefficient;
                 }
-                let [re, im] = phase_hz_from_clock_dd(line.frequency_hz, -tap.delay_s)
-                    .map_err(window_error)?;
+                let [re, im] = line.frequency.phase(-tap.delay_s).map_err(window_error)?;
                 let rotated = ComplexSum {
                     re: (value.re * re - value.im * im) * tap.gain,
                     im: (value.re * im + value.im * re) * tap.gain,
@@ -233,7 +231,7 @@ impl<'a, const D: usize> PreparedHarmonicArray<'a, D> {
                 let mut group = None;
                 for (index, previous) in lines.iter().enumerate() {
                     poll(cancelled)?;
-                    if previous.frequency_hz == line.frequency_hz {
+                    if previous.frequency == line.frequency {
                         group = Some(index);
                         break;
                     }
@@ -243,7 +241,7 @@ impl<'a, const D: usize> PreparedHarmonicArray<'a, D> {
                     lines[index].pressure.im = lines[index].pressure.im + rotated.im;
                 } else {
                     lines.push(PreparedLine {
-                        frequency_hz: line.frequency_hz,
+                        frequency: line.frequency,
                         pressure: rotated,
                         velocity: [],
                     });

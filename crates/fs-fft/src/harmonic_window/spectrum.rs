@@ -454,7 +454,9 @@ fn tone(
     if frequency.lo == 0.0 {
         frequency.lo = 0.0;
     }
-    let tau = Dd::from_f64(core::f64::consts::TAU);
+    // Match the mathematical Hz clock used by samples and window moments.
+    // Lifting rounded f64::TAU leaves a phase error that grows with the epoch.
+    let tau = TAU_DD;
     let (frequency_hz, angular_frequency_rad_s) = if angular {
         (checked(frequency / tau)?, frequency)
     } else {

@@ -597,7 +597,10 @@ pub(crate) const TAU_DD: Dd = Dd {
     lo: 2.449_293_598_294_706_4e-16,
 };
 
-fn angular_frequency(frequency_hz: f64) -> Result<Dd, WindowError> {
+/// Convert authored hertz to angular frequency with the mathematical 2*pi
+/// constant retained in DD. A source already authored in rad/s must instead
+/// retain that original value; converting through f64 Hz changes its clock.
+pub fn angular_frequency(frequency_hz: f64) -> Result<Dd, WindowError> {
     if !frequency_hz.is_finite() {
         return Err(WindowError::InvalidFrequency);
     }
