@@ -1992,3 +1992,28 @@ refusal. All seven changed Rust files were parsed successfully with rustfmt; the
 motion and regression modules were formatted. Native Cargo compilation and
 regression execution remain outstanding because DSR/RCH are unavailable and
 the shared filesystem is full.
+
+## Fixed-attitude hydrostatic initialization
+
+`hydrostatic::solve_heave_equilibrium` balances the source-derived body weight
+against the existing `HydrostaticReservoir::load_frame` at fixed attitude and
+lateral position. It uses a declared translation bracket along the direction
+opposite gravity, an absolute force allowance and at most 128 load evaluations.
+Safeguarded secant steps and periodic bisection retain the bracket; an accepted
+endpoint may terminate immediately. No new force law or time integrator is
+introduced, and frozen material snapshots are not resolved again.
+
+Uniform, layered, continuous-density and conserved finite-tank reservoirs use
+the same entry point. Finite waterlines and interfaces are solved by their
+original owners at each candidate pose. Their geometry, overflow, cancellation
+and convergence refusals propagate without publishing a partial initialization.
+
+The result carries the actual load, net force, signed heave residual and
+external torque required to hold the chosen attitude. Both momenta are zero;
+this is not a conservative replacement of a moving state or physical damping.
+Heave balance alone does not establish rotational equilibrium, uniqueness or
+floating stability. Failure to bracket a root describes the supplied interval,
+not every possible attitude or placement. G1/G3/G4 regressions in
+`tests/hydrostatic/equilibrium.rs` cover analytic drafts, stratification,
+conserved liquid inventories, heterogeneous holding torque, rigid-frame
+covariance, bounded work and transactional cancellation.

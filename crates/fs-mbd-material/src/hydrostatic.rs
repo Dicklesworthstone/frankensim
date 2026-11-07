@@ -33,6 +33,7 @@ mod geometry;
 mod layered;
 mod linear_density;
 mod density_profile;
+mod equilibrium;
 mod step;
 mod finite_tank;
 mod finite_layered;
@@ -52,6 +53,10 @@ pub use finite_tank::{
     HydrostaticTankGeometry, MAX_TANK_BODIES, MAX_TANK_VOLUME_EVALUATIONS,
 };
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};
+pub use equilibrium::{
+    HeaveEquilibrium, HeaveEquilibriumControls, HeaveEquilibriumError,
+    MAX_HEAVE_EVALUATIONS, solve_heave_equilibrium,
+};
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
 pub use layered::{HydrostaticLayer, LayeredHydrostaticMedium, MAX_HYDROSTATIC_LAYERS};
 pub use linear_density::LinearDensityHydrostaticMedium;
