@@ -1,5 +1,15 @@
 # fs-gas contract
 
+## Source-owned homogeneous real-gas fields
+
+With both `material` and `experimental-euler`, `dynamics::nonideal::RealGas` binds the original `ThermochemicalPengRobinsonModel`, frozen mixture/context and one immutable reference density/temperature to the native `Conserved` state. Native density-energy inversion supplies pressure, temperature and acoustic speed. Internal-energy changes use the common original reference, including density-dependent residual energy; arbitrary source formation-energy and entropy datums do not change field dynamics. Referenced internal energy may be signed and is not an ideal-gas positivity test.
+
+The existing const-generic HLLC/HLL kernel now accepts a constitutive admission callback. Both HLLC stars and each HLL fallback middle state are resolved through the original real-gas EOS. A source-invalid star can use the original bounded HLL speed expansion; cancellation propagates. The ideal/frozen-gas paths retain the same shared numerical algebra and admission semantics.
+
+`RealGasEuler1d` reuses the original mesh, conservative volume update, compensated totals, step controls and balance reports. It admits constant area with nonuniform cell widths, periodic interfaces evaluated once, zero-gradient traces, fixed reflecting walls and prescribed exterior states in the same energy gauge. Reflecting walls use the shared EOS-checked flux and exactly zero mass/energy transfer. Numerical scratch is preallocated and accepted primitives are cached. Every first Euler stage, second Euler endpoint and final SSP-RK2 average is source-admitted before the final transactional swap; actual face signal speeds determine both stage CFL gates and bounded time-step retries.
+
+Spatial reconstruction is explicitly `FirstOrder`; SSP-RK2 supplies the two-stage time update without a global second-order spatial claim. The caller declares one homogeneous stable density/temperature branch, and every actual state is checked. No phase flash, global entropy or positivity theorem, MUSCL reconstruction, variable area, viscous/thermal transport, evolving composition or moving wall is inferred. The six `material_nonideal_flow` regressions specify original caloric/acoustic source retention, datum-invariant compressive histories, nonuniform free streams, closed-box compression balances, an independently tabulated dense translating shock, weak acoustic refinement and atomic source/cancellation refusal.
+
 ## Fully-ionized fueling and selective thermal ash exhaust
 
 `FusionParticleExchange` supplies explicit constant ion rates in mol/s and

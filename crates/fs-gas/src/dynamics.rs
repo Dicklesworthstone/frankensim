@@ -1,8 +1,11 @@
-//! Conservative one-dimensional Euler flow with original frozen NASA-9 gas laws.
+//! Conservative Euler flow with original frozen gas constitutive laws.
 //!
 //! HLLC restores the contact wave; inadmissible star states fall back to an HLL
-//! flux. MUSCL reconstruction and SSP RK2 are bounded by local signal speeds,
-//! with transactional step reduction rather than clipping conserved variables.
+//! flux. The ideal mechanical owner supports MUSCL reconstruction and SSP RK2.
+//! The material-gated `nonideal` owner binds original NASA/PR source laws to the
+//! same flux/update machinery with explicit first-order spatial reconstruction.
+//! Both use local signal speeds and transactional time-step reduction without
+//! clipping conserved variables.
 //! This is an Estimated engineering baseline, not a discrete entropy theorem.
 //! References: Toro, Spruce and Speares, Shock Waves 4 (1994), 25–34,
 //! DOI 10.1007/BF01414629; Ketcheson, LeVeque and del Razo, *Riemann Problems
@@ -20,6 +23,9 @@ pub(crate) use moving::MovingWorkspace;
 pub mod inertial_walls;
 /// Synchronized shock propagation through passages and finite rigid gas volumes.
 pub mod network;
+/// Conservative homogeneous real-gas fields on the original material sources.
+#[cfg(feature = "material")]
+pub mod nonideal;
 /// Resolved pressure waves driving an inertial end wall with common work accounting.
 pub mod piston;
 pub(crate) mod wall;

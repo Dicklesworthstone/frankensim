@@ -587,105 +587,153 @@ impl FrozenGas {
         pr: Primitive,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NumericalFlux<N>, Error> {
-        poll(cancelled)?;
-        let fl = physical_flux(left, pl);
-        let fr = physical_flux(right, pr);
-        let sl = (pl.velocity - pl.sound_speed).min(pr.velocity - pr.sound_speed);
-        let sr = (pl.velocity + pl.sound_speed).max(pr.velocity + pr.sound_speed);
-        let speed = sl.abs().max(sr.abs());
-        if !positive(speed) || !fl.iter().chain(&fr).all(|x| x.is_finite()) {
-            return Err(Error::Invalid("unrepresentable Euler flux or signal speed"));
-        }
-        let (ql, qr) = (left.array(), right.array());
-        // Consistency is exact for equal traces. Forming a redundant HLLC
-        // star state can round (rho*s)/s away from rho and manufacture flux
-        // in a resting atmosphere or a uniform moving flow.
-        if ql == qr && pl == pr {
-            return flux(fl, speed, false);
-        }
-        // A stationary pressure contact (including a tangential shear jump)
-        // transports no mass, tangential momentum or energy in inviscid Euler.
-        if pl.velocity == 0.0 && pr.velocity == 0.0 && pl.pressure == pr.pressure {
+        checked_trace_interface(
+            left,
+            pl,
+            right,
+            pr,
+            |q, _| Ok(self.admissible_trace(q)),
+            cancelled,
+        )
+    }
+}
+
+/// The original HLLC/HLL algebra with a constitutive owner's checked admission.
+/// Every supplied trace/primitive pair must already describe one accepted EOS
+/// state in one common energy reference. The callback resolves trial states;
+/// it must distinguish cancellation from a recoverable star-state refusal.
+#[cfg(feature = "material")]
+pub(super) fn checked_euler_flux<E, C>(
+    left: Conserved,
+    pl: Primitive,
+    right: Conserved,
+    pr: Primitive,
+    mut admit: impl FnMut(Conserved, &mut C) -> Result<bool, E>,
+    cancelled: &mut C,
+) -> Result<FaceFlux, E>
+where
+    E: From<Error>,
+    C: FnMut() -> bool,
+{
+    checked_trace_interface(
+        NormalConserved::from(left),
+        pl,
+        NormalConserved::from(right),
+        pr,
+        |q, cancelled| admit(q.normal_state(), cancelled),
+        cancelled,
+    )
+    .map(|f| FaceFlux::from(NormalFaceFlux::from(f)))
+}
+
+fn checked_trace_interface<const N: usize, Q: Trace<N>, E, C>(
+    left: Q,
+    pl: Primitive,
+    right: Q,
+    pr: Primitive,
+    mut admit: impl FnMut(Q, &mut C) -> Result<bool, E>,
+    cancelled: &mut C,
+) -> Result<NumericalFlux<N>, E>
+where
+    E: From<Error>,
+    C: FnMut() -> bool,
+{
+    poll(cancelled).map_err(E::from)?;
+    let fl = physical_flux(left, pl);
+    let fr = physical_flux(right, pr);
+    let sl = (pl.velocity - pl.sound_speed).min(pr.velocity - pr.sound_speed);
+    let sr = (pl.velocity + pl.sound_speed).max(pr.velocity + pr.sound_speed);
+    let speed = sl.abs().max(sr.abs());
+    if !positive(speed) || !fl.iter().chain(&fr).all(|x| x.is_finite()) {
+        return Err(Error::Invalid("unrepresentable Euler flux or signal speed").into());
+    }
+    let (ql, qr) = (left.array(), right.array());
+    // Consistency is exact for equal traces. Forming a redundant HLLC
+    // star state can round (rho*s)/s away from rho and manufacture flux
+    // in a resting atmosphere or a uniform moving flow.
+    if ql == qr && pl == pr {
+        return flux(fl, speed, false);
+    }
+    // A stationary pressure contact (including a tangential shear jump)
+    // transports no mass, tangential momentum or energy in inviscid Euler.
+    if pl.velocity == 0.0 && pr.velocity == 0.0 && pl.pressure == pr.pressure {
+        return flux(
+            core::array::from_fn(|k| if k == 1 { pl.pressure } else { 0.0 }),
+            speed,
+            false,
+        );
+    }
+    // An exact moving pressure contact transports the upwind trace,
+    // including its tangential kinetic energy. Reconstructing unchanged
+    // star traces can round heat outside the admitted source interval and
+    // spuriously select HLL. Both original traces are already admitted.
+    if pl.velocity == pr.velocity && pl.pressure == pr.pressure {
+        return flux(if pl.velocity > 0.0 { fl } else { fr }, speed, false);
+    }
+    if sl >= 0.0 {
+        return flux(fl, speed, false);
+    }
+    if sr <= 0.0 {
+        return flux(fr, speed, false);
+    }
+    let al = ql[0] * (sl - pl.velocity);
+    let ar = qr[0] * (sr - pr.velocity);
+    let contact = (pr.pressure - pl.pressure + al * pl.velocity - ar * pr.velocity) / (al - ar);
+    let pstar = pl.pressure + al * (contact - pl.velocity);
+    if contact.is_finite() && sl < contact && contact < sr && positive(pstar) {
+        let star = |q: Q, p: Primitive, s: f64| {
+            let values = q.array();
+            Q::from_array(core::array::from_fn(|k| match k {
+                0 => values[0] * (s - p.velocity) / (s - contact),
+                1 => values[0] * (s - p.velocity) / (s - contact) * contact,
+                k if k == N - 1 => {
+                    ((s - p.velocity) * values[k] - p.pressure * p.velocity + pstar * contact)
+                        / (s - contact)
+                }
+                k => values[k] * (s - p.velocity) / (s - contact),
+            }))
+        };
+        let ls = star(left, pl, sl);
+        let rs = star(right, pr, sr);
+        if admit(ls, cancelled)? && admit(rs, cancelled)? {
+            let (q, qs, f, s) = if contact >= 0.0 {
+                (left, ls, fl, sl)
+            } else {
+                (right, rs, fr, sr)
+            };
+            let (q, qs) = (q.array(), qs.array());
             return flux(
-                core::array::from_fn(|k| if k == 1 { pl.pressure } else { 0.0 }),
+                core::array::from_fn(|k| f[k] + s * (qs[k] - q[k])),
                 speed,
                 false,
             );
         }
-        // An exact moving pressure contact transports the upwind trace,
-        // including its tangential kinetic energy. Reconstructing unchanged
-        // star traces can round heat outside the admitted source interval and
-        // spuriously select HLL. Both original traces are already admitted.
-        if pl.velocity == pr.velocity && pl.pressure == pr.pressure {
-            return flux(if pl.velocity > 0.0 { fl } else { fr }, speed, false);
-        }
-        if sl >= 0.0 {
-            return flux(fl, speed, false);
-        }
-        if sr <= 0.0 {
-            return flux(fr, speed, false);
-        }
-        let al = ql[0] * (sl - pl.velocity);
-        let ar = qr[0] * (sr - pr.velocity);
-        let contact = (pr.pressure - pl.pressure + al * pl.velocity - ar * pr.velocity) / (al - ar);
-        let pstar = pl.pressure + al * (contact - pl.velocity);
-        if contact.is_finite() && sl < contact && contact < sr && positive(pstar) {
-            let star = |q: Q, p: Primitive, s: f64| {
-                let values = q.array();
-                Q::from_array(core::array::from_fn(|k| match k {
-                    0 => values[0] * (s - p.velocity) / (s - contact),
-                    1 => values[0] * (s - p.velocity) / (s - contact) * contact,
-                    k if k == N - 1 => {
-                        ((s - p.velocity) * values[k] - p.pressure * p.velocity + pstar * contact)
-                            / (s - contact)
-                    }
-                    k => values[k] * (s - p.velocity) / (s - contact),
-                }))
-            };
-            let ls = star(left, pl, sl);
-            let rs = star(right, pr, sr);
-            if self.admissible_trace(ls) && self.admissible_trace(rs) {
-                let (q, qs, f, s) = if contact >= 0.0 {
-                    (left, ls, fl, sl)
-                } else {
-                    (right, rs, fr, sr)
-                };
-                let (q, qs) = (q.array(), qs.array());
-                return flux(
-                    core::array::from_fn(|k| f[k] + s * (qs[k] - q[k])),
-                    speed,
-                    false,
-                );
-            }
-        }
-        for expansion in 0..=8 {
-            poll(cancelled)?;
-            let (l, r) = if expansion == 0 {
-                (sl, sr)
-            } else {
-                let a = speed * (1_u32 << (expansion - 1)) as f64;
-                (-a, a)
-            };
-            if !l.is_finite() || !r.is_finite() {
-                return Err(Error::Invalid("HLL wave-speed overflow"));
-            }
-            let middle = Q::from_array(core::array::from_fn(|k| {
-                (r * qr[k] - l * ql[k] + fl[k] - fr[k]) / (r - l)
-            }));
-            if self.admissible_trace(middle) {
-                return flux(
-                    core::array::from_fn(|k| {
-                        (r * fl[k] - l * fr[k] + l * r * (qr[k] - ql[k])) / (r - l)
-                    }),
-                    l.abs().max(r.abs()),
-                    true,
-                );
-            }
-        }
-        Err(Error::Invalid(
-            "HLL intermediate state outside admitted source domain",
-        ))
     }
+    for expansion in 0..=8 {
+        poll(cancelled).map_err(E::from)?;
+        let (l, r) = if expansion == 0 {
+            (sl, sr)
+        } else {
+            let a = speed * (1_u32 << (expansion - 1)) as f64;
+            (-a, a)
+        };
+        if !l.is_finite() || !r.is_finite() {
+            return Err(Error::Invalid("HLL wave-speed overflow").into());
+        }
+        let middle = Q::from_array(core::array::from_fn(|k| {
+            (r * qr[k] - l * ql[k] + fl[k] - fr[k]) / (r - l)
+        }));
+        if admit(middle, cancelled)? {
+            return flux(
+                core::array::from_fn(|k| {
+                    (r * fl[k] - l * fr[k] + l * r * (qr[k] - ql[k])) / (r - l)
+                }),
+                l.abs().max(r.abs()),
+                true,
+            );
+        }
+    }
+    Err(Error::Invalid("HLL intermediate state outside admitted source domain").into())
 }
 
 fn physical_flux<const N: usize>(q: impl Trace<N>, p: Primitive) -> [f64; N] {
@@ -697,13 +745,13 @@ fn physical_flux<const N: usize>(q: impl Trace<N>, p: Primitive) -> [f64; N] {
         k => q[k] * p.velocity,
     })
 }
-fn flux<const N: usize>(
+fn flux<const N: usize, E: From<Error>>(
     f: [f64; N],
     signal_speed: f64,
     used_hll_fallback: bool,
-) -> Result<NumericalFlux<N>, Error> {
+) -> Result<NumericalFlux<N>, E> {
     if !f.iter().all(|x| x.is_finite()) {
-        return Err(Error::Invalid("non-finite numerical flux"));
+        return Err(Error::Invalid("non-finite numerical flux").into());
     }
     Ok(NumericalFlux {
         values: f,
