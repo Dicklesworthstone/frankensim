@@ -1,3 +1,20 @@
+## Source-bound enthalpy endpoints with prescribed support motion
+
+`SolidEnthalpyState::advance_transient_with_supports_candidate` and
+`advance_transient_with_support_accelerations_candidate` pass source-resolved
+thermal fields into the native thermal/support Newmark candidates. The existing
+specimen, original property-source, reference-inventory, mesh-frame and exact
+shared-clock checks apply identically to all three transient endpoint routes.
+
+The returned state retains support displacement, velocity, acceleration,
+refreshed thermal stress and reactions together. Complete stiffness stays fixed
+on the support path; reference inertia stays frozen. Signed thermal work and
+support work remain distinct, with no inferred caloric feedback. Endpoints
+still require explicit admission of intervening thermal events and timestep
+refinement. The focused `solid_enthalpy` regression advances cold/warm/hot
+source states through both endpoint conventions and checks clock/source refusal
+without altering accepted thermal or mechanical state.
+
 ## Complete heat assemblies on current and voltage motors
 
 Current- and finite-inductance voltage-driven material motors accept

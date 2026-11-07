@@ -592,15 +592,61 @@ impl SolidEnthalpyState<'_> {
     /// The native owner retains reference mass, mesh and zero supports while
     /// rebuilding changed stiffness. Motion/history continues, and expansion
     /// and stiffness work are audited separately, even in fully clamped elements.
-    /// Changing stiffness admits mass-proportional damping only. This is
-    /// prescribed one-way thermal loading: signed material work is NOT subtracted
-    /// from caloric storage. Reciprocal thermoelastic heat needs its own closure.
+    /// Changed stiffness uses the endpoint-averaged stiffness in physical
+    /// Rayleigh damping, with endpoint acceleration recovered from the actual
+    /// endpoint operators. This is prescribed one-way thermal loading: signed
+    /// material work is NOT subtracted from caloric storage. Reciprocal
+    /// thermoelastic heat needs its own closure.
     /// This endpoint adapter does not inspect intervening thermal events; admit
     /// that path, resolve heating events and verify temporal refinement explicitly.
     pub fn advance_transient_candidate<'g, 'm, 'p, 's>(
         &self, previous: &Self, run: &TetTransientRun3<'g, 'm, '_, '_>,
         problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'_, '_>, cx: &Cx<'_>,
     ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SolidEnthalpyError> {
+        let h_s = self.transient_interval(previous, run, problem, cx)?;
+        Ok(run.advance_thermal_candidate(problem, self.thermal_strains(), loads, h_s,
+            self.mesh_frame, self.maximum_absolute_mandel_strain, cx)?)
+    }
+
+    /// Advance this source-resolved thermal endpoint with absolute support
+    /// displacements [m]. Source, specimen, reference inventory and clock
+    /// admission is identical to `advance_transient_candidate`. The run must
+    /// already own prescribed supports, and every element's stiffness must stay
+    /// unchanged. Omitted fixed components have zero endpoint displacement.
+    /// The returned candidate retains both thermal and full support motion;
+    /// reactions, support work and signed thermal work share that endpoint.
+    /// This remains one-way heating, without a reciprocal caloric debit.
+    pub fn advance_transient_with_supports_candidate<'g, 'm, 'p, 's>(
+        &self, previous: &Self, run: &TetTransientRun3<'g, 'm, '_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m: &[(usize, f64)], cx: &Cx<'_>,
+    ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SolidEnthalpyError> {
+        let h_s = self.transient_interval(previous, run, problem, cx)?;
+        Ok(run.advance_thermal_with_supports_candidate(problem, self.thermal_strains(),
+            loads, prescribed_dofs_m, h_s, self.mesh_frame,
+            self.maximum_absolute_mandel_strain, cx)?)
+    }
+
+    /// Advance the same admitted thermal/support path using endpoint support
+    /// accelerations [m/s²]. Omitted fixed components have zero acceleration;
+    /// accepted support displacement and velocity continue through Newmark.
+    /// All source/clock and unchanged-stiffness requirements of
+    /// `advance_transient_with_supports_candidate` also apply.
+    pub fn advance_transient_with_support_accelerations_candidate<'g, 'm, 'p, 's>(
+        &self, previous: &Self, run: &TetTransientRun3<'g, 'm, '_, '_>,
+        problem: &'p TetLinearElasticProblem<'s>, loads: &TetLoadCase3<'_, '_>,
+        prescribed_dofs_m_s2: &[(usize, f64)], cx: &Cx<'_>,
+    ) -> Result<(TetTransientRun3<'g, 'm, 'p, 's>, ThermalTransientStep3), SolidEnthalpyError> {
+        let h_s = self.transient_interval(previous, run, problem, cx)?;
+        Ok(run.advance_thermal_with_support_accelerations_candidate(problem,
+            self.thermal_strains(), loads, prescribed_dofs_m_s2, h_s, self.mesh_frame,
+            self.maximum_absolute_mandel_strain, cx)?)
+    }
+
+    fn transient_interval(
+        &self, previous: &Self, run: &TetTransientRun3<'_, '_, '_, '_>,
+        problem: &TetLinearElasticProblem<'_>, cx: &Cx<'_>,
+    ) -> Result<f64, SolidEnthalpyError> {
         poll(cx)?;
         if !previous.matches_transient(run)
             || !self.matches_problem(problem) || self.mesh_frame != previous.mesh_frame
@@ -624,8 +670,7 @@ impl SolidEnthalpyState<'_> {
             || (run.state().time_s + h_s).to_bits() != self.time_s.to_bits() {
             return Err(SolidEnthalpyError::Invalid("thermal and mechanical endpoints must share one distinct representable clock"));
         }
-        Ok(run.advance_thermal_candidate(problem, self.thermal_strains(), loads, h_s,
-            self.mesh_frame, self.maximum_absolute_mandel_strain, cx)?)
+        Ok(h_s)
     }
 
     pub fn solve(

@@ -472,3 +472,77 @@ fn intermediate_melting_cannot_be_hidden_by_a_fully_solid_final_state() {
         assert_eq!(thermal.cells()[&CellId(30)].specific_h_j_kg,0.);
     });
 }
+
+
+#[test]
+fn g1_g4_enthalpy_endpoints_continue_prescribed_support_motion_on_the_same_source_clock() {
+    with_cx(|cx| {
+        let fixed: Vec<_> = (0..12).filter(|d| *d != 3).collect();
+        let zero = [[0.0; 3]; 4];
+        let (card, caloric) = material_with_modulus_endpoint(60.0, 60.0, 1e-5, 10.0, 0.0, false);
+        let thermal = initial(caloric.curve(), &[(30, 100.0)], 1.0);
+        let context = point(300.0);
+        let model = SolidEnthalpy::try_new(&thermal, &NODES, &TETS,
+            vec![source(30, &card, caloric.curve(), &context)], TetAssemblyBudget::standard(),
+            0.1, config().mesh_frame, cx).unwrap();
+        let loads = model.geometry().assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let cold = model.resolve(&thermal, cx).unwrap();
+        let cold_problem = cold.problem(&fixed);
+        let support_a = 0.02;
+        let mut acceleration = zero; acceleration[0][0] = support_a;
+        let run = loads.begin_transient_with_supports(&cold_problem, Some(cold.thermal_strains()),
+            0.0, &zero, &zero, &acceleration, Default::default(), cx).unwrap();
+        let heated = thermal.advance_to(0.01, thermal_config(), || Ok(())).unwrap().0;
+        let warm = model.resolve(&heated, cx).unwrap();
+        let warm_problem = warm.problem(&fixed);
+        let (next, first) = warm.advance_transient_with_support_accelerations_candidate(
+            &cold, &run, &warm_problem, &loads, &[(0, support_a)], cx).unwrap();
+        let h = 0.01; let b = 0.25 * h * h;
+        let support_q = 0.5 * support_a * h * h;
+        let strain = 1e-5 * (0.1 + 0.005 * 0.1 * 0.1);
+        let predictor = b * (-0.5 * support_a);
+        let expected_a = (10.0 * strain + 10.0 * support_q
+            - 0.05 * support_a - 10.0 * predictor) / (0.1 + 10.0 * b);
+        near(next.state().displacement[0], predictor + b * expected_a, 1e-14);
+        near(next.state().acceleration[0], expected_a, 1e-11);
+        let motion = next.nodal_motion(cx).unwrap();
+        near(motion[0][0][0], support_q, 1e-15);
+        near(motion[1][0][0], h * support_a, 1e-15);
+        assert!(first.physical_balance_error_j.abs() < 1e-12);
+        assert_eq!(next.state().time_s, heated.time_s());
+        assert_ne!(cold.materials()[0].material_state_identity,
+            warm.materials()[0].material_state_identity);
+        near(warm.materials()[0].density_kg_m3, 6.0, 1e-12);
+
+        let heated_again = heated.advance_to(0.02, thermal_config(), || Ok(())).unwrap().0;
+        let hot = model.resolve(&heated_again, cx).unwrap();
+        let hot_problem = hot.problem(&fixed);
+        let final_support_q = 0.5 * support_a * 0.02 * 0.02;
+        let (continued, second) = hot.advance_transient_with_supports_candidate(
+            &warm, &next, &hot_problem, &loads, &[(0, final_support_q)], cx).unwrap();
+        let full = continued.nodal_motion(cx).unwrap();
+        near(full[0][0][0], final_support_q, 1e-15);
+        near(full[1][0][0], 0.02 * support_a, 1e-13);
+        near(full[2][0][0], support_a, 1e-11);
+        assert_eq!(continued.state().time_s, heated_again.time_s());
+        assert_eq!(continued.state().step, 2);
+        assert!(second.physical_balance_error_j.abs() < 1e-12);
+        assert!(continued.recover_response(config().mesh_frame, 0.1, cx)
+            .unwrap().free_force_residual_n < 1e-11);
+        // Every route shares the exact original source and clock admission.
+        assert!(matches!(hot.advance_transient_with_supports_candidate(
+            &cold, &next, &hot_problem, &loads, &[(0, final_support_q)], cx),
+            Err(SolidEnthalpyError::Invalid(_))));
+        assert!(matches!(warm.advance_transient_with_support_accelerations_candidate(
+            &cold, &run, &cold_problem, &loads, &[(0, support_a)], cx),
+            Err(SolidEnthalpyError::Invalid(_))));
+        assert!(matches!(cold.advance_transient_with_supports_candidate(
+            &cold, &run, &cold_problem, &loads, &[], cx),
+            Err(SolidEnthalpyError::Invalid(_))));
+        assert_eq!(run.state().time_s, 0.0);
+        assert_eq!(run.nodal_motion(cx).unwrap()[0], zero);
+        assert_eq!(next.state().time_s, heated.time_s());
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(thermal.cells()[&CellId(30)].specific_h_j_kg, 0.0);
+    });
+}
