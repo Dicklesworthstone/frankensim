@@ -3406,14 +3406,28 @@ log-log interpolation between the original observations. Every original knot,
 claim, uncertainty, validity condition, typed query and selection receipt stays
 attached to `SnCurve::source`; a tabulated-only source remains tabulated-only.
 No point is dropped to repair monotonicity, avoid a source conflict or escape a
-validity boundary. The selected source must declare R = -1 and the actual
-absolute temperature. Strength, censored runouts and an unsupported endurance
-limit cannot replace finite-life observations. Applicability labels remain
-caller declarations; material/process/environment equivalence is not inferred.
+validity boundary. The original resolver requires R = -1;
+`resolve_log_log_sn_at_stress_ratio` retains one exact source-declared fixed
+ratio in -1 <= R < 1, including pulsating and tension-tension calibrations.
+Both require the actual absolute temperature. Strength, censored runouts and an
+unsupported endurance limit cannot replace finite-life observations.
+Applicability labels remain caller declarations; material/process/environment
+equivalence is not inferred.
+
+`SnCurve::new_at_stress_ratio` likewise retains an explicitly authored fixed
+calibration ratio. `MeanStressCorrection::MatchCalibration` checks every
+counted full cycle and endpoint half cycle against that ratio, allowing only
+floating-point roundoff. The cycle maximum must be tensile. Amplitude remains
+half the signed range; the measured mean-stress effect is already in the curve.
+Non-R=-1 curves cannot silently use uncorrected or Goodman policies. A mismatch
+refuses the requested block or finalization transactionally, preserving the
+accepted prefix for continuation. Normalizing amplitude and mean before the
+ratio check avoids intermediate stress overflow; each cycle adds constant work
+and no allocation. No load-ratio interpolation or mean-stress law is inferred.
 
 `SnCalibrationSource::matches_material_state` binds the original card, named
 material state and every fixed typed physical query coordinate to a native
-material bundle. Only the calibration life axis and fully reversed R axis are
+material bundle. Only the calibration life axis and calibration R axis are
 excluded from physical-state matching. Custom temperature axes and additional
 fixed environmental coordinates remain exact. A mean-stress correction is a
 separately declared empirical model; it does not confer new source support.

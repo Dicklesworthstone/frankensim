@@ -11,6 +11,7 @@ use fs_matdb::{
 };
 use fs_material::fatigue::source::{
     SnLifeMeasure, SnSourceRequest, SnStressMeasure, resolve_log_log_sn,
+    resolve_log_log_sn_at_stress_ratio,
 };
 use fs_material::fatigue::{FatigueError, MeanStressCorrection, RainflowLimits, RainflowMiner};
 use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
@@ -229,6 +230,86 @@ fn g1_range_and_reversal_sources_give_identical_amplitudes_lives_and_damage() {
         cb.curve().source().unwrap().card_identity(),
         b.content_hash()
     );
+}
+
+#[test]
+fn g1_fixed_ratio_sources_retain_measured_mean_stress_and_count_conventions() {
+    for ratio in [0.0, 0.1] {
+        let mut expected = None;
+        for (stress, life) in [
+            (SnStressMeasure::Amplitude, SnLifeMeasure::Cycles),
+            (SnStressMeasure::Range, SnLifeMeasure::Reversals),
+        ] {
+            let mut req = request(stress, life);
+            req.load_basis = format!("synthetic axial normal stress at R={ratio}");
+            let mut original = claim(&req, InterpolationPolicy::TabulatedOnly);
+            original.validity = original.validity.with_quantity(
+                "stress-ratio",
+                QuantitySpec::dimensional(Dims::NONE),
+                ratio,
+                ratio,
+            );
+            let material = card(vec![original.clone()]);
+            let at = point(&req).with("stress-ratio", ratio).unwrap();
+            // The original constructor keeps its explicit fully reversed contract.
+            assert!(resolve_log_log_sn(&material, &at, &req, SINGLE).is_err());
+            let curve = resolve_log_log_sn_at_stress_ratio(&material, &at, &req, SINGLE)
+                .unwrap();
+            assert_eq!(curve.reference_stress_ratio(), ratio);
+            assert_eq!(curve.cycles_to_failure(40e6).unwrap(), Some(100.0));
+            let retained = curve.source().unwrap();
+            assert_eq!(retained.claim(), &original);
+            assert_eq!(retained.query(), &at);
+            assert_eq!(retained.card_identity(), material.content_hash());
+            assert_eq!(retained.observations().len(), 3);
+            for (_, answer) in retained.observations() {
+                material.claims().verify_receipt(&answer.receipt).unwrap();
+            }
+            let mut counter = RainflowMiner::new(
+                Arc::new(curve),
+                MeanStressCorrection::MatchCalibration,
+                RainflowLimits { maximum_samples: 20, maximum_residue: 10 },
+            ).unwrap();
+            // a=40 MPa at the source's actual R; two closed cycles give D=2/100.
+            let maximum = 80e6 / (1.0 - ratio);
+            let minimum = ratio * maximum;
+            counter.push_block(&[minimum, maximum, minimum, maximum, minimum], &mut || false)
+                .unwrap();
+            let result = counter.finish().unwrap();
+            assert!((result.miner_damage - 0.02).abs() < 1e-14);
+            assert!((result.maximum_corrected_amplitude_pa / 40e6 - 1.0).abs() < 1e-14);
+            if let Some(previous) = expected {
+                assert_eq!(result, previous);
+            }
+            expected = Some(result);
+        }
+    }
+}
+
+#[test]
+fn g0_fixed_ratio_source_requires_one_exact_typed_calibration_ratio() {
+    let req = request(SnStressMeasure::Amplitude, SnLifeMeasure::Cycles);
+    for (minimum, maximum) in [(0.0, 0.1), (-1.1, -1.1), (1.0, 1.0), (2.0, 2.0)] {
+        let mut original = claim(&req, InterpolationPolicy::TabulatedOnly);
+        original.validity = original.validity.with_quantity(
+            "stress-ratio",
+            QuantitySpec::dimensional(Dims::NONE),
+            minimum,
+            maximum,
+        );
+        let material = card(vec![original]);
+        let at = point(&req).with("stress-ratio", minimum).unwrap();
+        assert!(resolve_log_log_sn_at_stress_ratio(&material, &at, &req, SINGLE).is_err());
+    }
+    let mut original = claim(&req, InterpolationPolicy::TabulatedOnly);
+    original.validity = original.validity.with_quantity(
+        "stress-ratio", QuantitySpec::dimensional(Pressure::DIMS), 0.1, 0.1,
+    );
+    let material = card(vec![original]);
+    let at = point(&req).with_quantity(
+        "stress-ratio", QuantitySpec::dimensional(Pressure::DIMS), 0.1,
+    ).unwrap();
+    assert!(resolve_log_log_sn_at_stress_ratio(&material, &at, &req, SINGLE).is_err());
 }
 
 #[test]

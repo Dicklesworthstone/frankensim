@@ -2,9 +2,9 @@
 //!
 //! This is an empirical Palmgren-Miner baseline, not a constitutive softening
 //! law, a multiaxial failure criterion, or a validated component-life claim.
-//! Supply a SIGNED stress history in Pa, a fully reversed S-N calibration and
-//! an explicitly named mean-stress policy. Never feed unsigned von Mises
-//! stress as a substitute for a reversing tensile/compressive history.
+//! Supply a SIGNED stress history in Pa, an S-N calibration with an explicit
+//! reference stress ratio and a named mean-stress policy. Never feed unsigned
+//! von Mises stress as a substitute for a reversing tensile/compressive history.
 //!
 //! Monotone runs and plateaus are reduced incrementally. Unclosed reversals
 //! survive arbitrary input blocks; call `finish` only at the end of the whole
@@ -51,7 +51,8 @@ impl FatigueScope {
     }
 }
 
-/// One fully reversed S-N observation: stress AMPLITUDE, not stress range.
+/// One S-N observation at the curve's reference stress ratio: stress AMPLITUDE,
+/// not stress range or maximum stress.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SnPoint {
     pub amplitude_pa: f64,
@@ -64,6 +65,7 @@ pub struct SnCurve {
     scope: FatigueScope,
     points: Vec<SnPoint>,
     endurance_limit_pa: Option<f64>,
+    reference_stress_ratio: f64,
     source: Option<Arc<source::SnCalibrationSource>>,
 }
 
@@ -72,6 +74,11 @@ pub struct SnCurve {
 pub enum MeanStressCorrection {
     /// Explicit mean-independent approximation. Does not imply its validation.
     Uncorrected,
+    /// Use the original S-N curve only for cycles matching its calibration
+    /// R = sigma_min/sigma_max. No mean-stress transformation is applied.
+    /// Both full and endpoint half cycles must match; the tolerance accounts
+    /// only for floating-point reconstruction, not a wider physical domain.
+    MatchCalibration,
     /// Modified Goodman for tensile means; compressive means receive no credit.
     /// The declared ultimate strength bounds every accepted tensile sample.
     GoodmanTensionOnly { ultimate_strength_pa: f64 },
@@ -98,6 +105,7 @@ pub enum FatigueError {
     LifeOutsideCurve { cycles: f64, minimum: f64, maximum: f64 },
     InvalidStressExtrema { minimum_pa: f64, maximum_pa: f64 },
     MeanStressOutsideStrainLife { mean_pa: f64, fatigue_strength_coefficient_pa: f64 },
+    StressRatioOutsideCalibration { actual_ratio: f64, required_ratio: f64 },
     NoTensileStress { maximum_pa: f64 },
     UnsupportedPairedHistory { sample: u64, what: &'static str },
     StaticStrengthExceeded { peak_pa: f64, ultimate_strength_pa: f64 },
@@ -115,6 +123,8 @@ impl core::fmt::Display for FatigueError {
 impl std::error::Error for FatigueError {}
 
 impl SnCurve {
+    /// Create a fully reversed (R = -1) stress-life calibration.
+    ///
     /// Points must have strictly increasing positive amplitudes and strictly
     /// decreasing finite lives >= 1 cycle. Interpolation is linear in log-log
     /// coordinates. No below/above-table extrapolation is ever performed.
@@ -127,6 +137,24 @@ impl SnCurve {
         points: Vec<SnPoint>,
         endurance_limit_pa: Option<f64>,
     ) -> Result<Self, FatigueError> {
+        Self::new_at_stress_ratio(scope, points, endurance_limit_pa, -1.0)
+    }
+
+    /// Preserve an S-N calibration's actual stress ratio instead of relabeling
+    /// it as fully reversed. The supported reference domain is -1 <= R < 1,
+    /// covering fully reversed, pulsating and tension-tension calibrations.
+    /// Non-fully-reversed curves require `MeanStressCorrection::MatchCalibration`
+    /// in the rainflow counter; no Goodman or other transformation is inferred.
+    /// Points and endurance support follow the same rules as [`Self::new`].
+    pub fn new_at_stress_ratio(
+        scope: FatigueScope,
+        points: Vec<SnPoint>,
+        endurance_limit_pa: Option<f64>,
+        reference_stress_ratio: f64,
+    ) -> Result<Self, FatigueError> {
+        if !reference_stress_ratio.is_finite() || !(-1.0..1.0).contains(&reference_stress_ratio) {
+            return Err(FatigueError::InvalidCalibration("S-N reference stress ratio must be finite with -1 <= R < 1"));
+        }
         scope.validate()?;
         if points.len() < 2 || points.iter().any(|p|
             !p.amplitude_pa.is_finite() || p.amplitude_pa <= 0.0
@@ -146,13 +174,37 @@ impl SnCurve {
         {
             return Err(FatigueError::InvalidCalibration("endurance limit must be positive and strictly below finite-life data"));
         }
-        Ok(Self { scope, points, endurance_limit_pa, source: None })
+        Ok(Self { scope, points, endurance_limit_pa, reference_stress_ratio, source: None })
     }
 
     pub fn scope(&self) -> &FatigueScope { &self.scope }
     pub fn points(&self) -> &[SnPoint] { &self.points }
     pub fn endurance_limit_pa(&self) -> Option<f64> { self.endurance_limit_pa }
+    /// Stress ratio R = sigma_min/sigma_max of the calibration observations.
+    pub fn reference_stress_ratio(&self) -> f64 { self.reference_stress_ratio }
     pub fn source(&self) -> Option<&source::SnCalibrationSource> { self.source.as_deref() }
+
+    fn admit_cycle_ratio(&self, amplitude_pa: f64, mean_pa: f64) -> Result<(), FatigueError> {
+        // Normalize before reconstructing the endpoints so a valid finite
+        // history does not overflow merely while checking its ratio.
+        let scale = amplitude_pa.max(mean_pa.abs());
+        if scale == 0.0 { return Ok(()); }
+        let amplitude = amplitude_pa / scale;
+        let mean = mean_pa / scale;
+        let maximum = mean + amplitude;
+        if maximum <= 0.0 {
+            return Err(FatigueError::NoTensileStress { maximum_pa: mean_pa + amplitude_pa });
+        }
+        let minimum = mean - amplitude;
+        let expected_minimum = self.reference_stress_ratio * maximum;
+        let tolerance = 32.0 * f64::EPSILON * maximum.abs().max(minimum.abs());
+        if (minimum - expected_minimum).abs() > tolerance {
+            return Err(FatigueError::StressRatioOutsideCalibration {
+                actual_ratio: minimum / maximum, required_ratio: self.reference_stress_ratio,
+            });
+        }
+        Ok(())
+    }
 
     /// `None` means zero amplitude or the explicitly declared endurance regime,
     /// not a demonstrated infinite service life. Everything else needs support
@@ -194,15 +246,16 @@ impl MeanStressCorrection {
         Ok(())
     }
 
-    /// Equivalent fully reversed amplitude. Compressive mean never increases
-    /// predicted life in the tension-only Goodman policy.
+    /// Equivalent amplitude. Goodman maps to fully reversed calibration and
+    /// gives no credit for compressive mean. `MatchCalibration` leaves amplitude
+    /// unchanged; the counter checks its reference ratio before life lookup.
     pub fn corrected_amplitude(self, amplitude_pa: f64, mean_pa: f64) -> Result<f64, FatigueError> {
         self.validate()?;
         if !amplitude_pa.is_finite() || amplitude_pa < 0.0 || !mean_pa.is_finite() {
             return Err(FatigueError::Arithmetic);
         }
         let value = match self {
-            Self::Uncorrected => amplitude_pa,
+            Self::Uncorrected | Self::MatchCalibration => amplitude_pa,
             Self::GoodmanTensionOnly { ultimate_strength_pa: s } => {
                 let peak = mean_pa + amplitude_pa;
                 if !peak.is_finite() || peak >= s {
@@ -253,6 +306,9 @@ pub struct RainflowMiner {
 impl RainflowMiner {
     pub fn new(curve: Arc<SnCurve>, correction: MeanStressCorrection, limits: RainflowLimits) -> Result<Self, FatigueError> {
         correction.validate()?;
+        if curve.reference_stress_ratio != -1.0 && correction != MeanStressCorrection::MatchCalibration {
+            return Err(FatigueError::InvalidCalibration("a non-fully-reversed S-N curve requires MatchCalibration; no R=-1 mean-stress transformation is inferred"));
+        }
         Ok(Self { curve, correction, history: RainflowHistory::new(limits)? })
     }
 
@@ -343,6 +399,9 @@ impl CycleLife for StressLife<'_> {
         Ok(())
     }
     fn evaluate_cycle(&self, amplitude: f64, mean: f64, _contexts: [(); 2]) -> Result<(Option<f64>, f64), FatigueError> {
+        if self.correction == MeanStressCorrection::MatchCalibration {
+            self.curve.admit_cycle_ratio(amplitude, mean)?;
+        }
         let corrected = self.correction.corrected_amplitude(amplitude, mean)?;
         Ok((self.curve.cycles_to_failure(corrected)?, corrected))
     }
@@ -588,6 +647,90 @@ mod tests {
         assert!(SnCurve::new(scope(), curve.points().to_vec(), Some(1.0)).is_err());
         let mut reversed = curve.points().to_vec(); reversed.reverse();
         assert!(SnCurve::new(scope(), reversed, None).is_err());
+    }
+
+    #[test]
+    fn g1_fixed_ratio_curves_count_pulsating_and_tension_tension_cycles() {
+        for ratio in [-1.0, 0.0, 0.1, 0.75] {
+            let curve = Arc::new(SnCurve::new_at_stress_ratio(
+                scope(), curve().points().to_vec(), None, ratio).unwrap());
+            assert_eq!(curve.reference_stress_ratio(), ratio);
+            let mut c = RainflowMiner::new(curve, MeanStressCorrection::MatchCalibration,
+                RainflowLimits { maximum_samples: 20, maximum_residue: 8 }).unwrap();
+            // Same calibrated amplitude a=2 for every R: max=2a/(1-R).
+            let peak = 4.0 / (1.0 - ratio);
+            let low = ratio * peak;
+            c.push_block(&[low, peak, low], &mut || false).unwrap();
+            let result = c.finish().unwrap();
+            close(result.miner_damage, 1.0 / 500.0);
+            close(result.maximum_corrected_amplitude_pa, 2.0);
+            assert_eq!((result.full_cycles, result.half_cycles), (0, 2));
+        }
+    }
+
+    #[test]
+    fn g0_fixed_ratio_cannot_silently_use_fully_reversed_corrections() {
+        let curve = Arc::new(SnCurve::new_at_stress_ratio(
+            scope(), curve().points().to_vec(), None, 0.1).unwrap());
+        for correction in [MeanStressCorrection::Uncorrected,
+            MeanStressCorrection::GoodmanTensionOnly { ultimate_strength_pa: 20.0 }]
+        {
+            assert!(matches!(RainflowMiner::new(curve.clone(), correction,
+                RainflowLimits { maximum_samples: 20, maximum_residue: 8 }),
+                Err(FatigueError::InvalidCalibration(_))));
+        }
+        for invalid in [f64::NAN, f64::INFINITY, -1.01, 1.0, 2.0] {
+            assert!(SnCurve::new_at_stress_ratio(
+                scope(), curve.points().to_vec(), None, invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn g4_ratio_mismatch_preserves_pending_cycles_and_damage() {
+        let curve = Arc::new(SnCurve::new_at_stress_ratio(
+            scope(), curve().points().to_vec(), None, 0.0).unwrap());
+        let mut c = RainflowMiner::new(curve, MeanStressCorrection::MatchCalibration,
+            RainflowLimits { maximum_samples: 20, maximum_residue: 8 }).unwrap();
+        c.push_block(&[0.0, 4.0, 0.0], &mut || false).unwrap();
+        let before = c.clone();
+        // Earlier samples can count valid cycles before a later mismatch.
+        assert!(matches!(c.push_block(&[6.0, -3.0, 6.0, 0.0], &mut || false),
+            Err(FatigueError::StressRatioOutsideCalibration { .. })));
+        assert_eq!(c, before);
+        c.push(4.0).unwrap();
+        c.push(2.0).unwrap();
+        let before = c.clone();
+        // A truncated observation has an unsupported endpoint half cycle.
+        assert!(matches!(c.preview_finish(), Err(FatigueError::StressRatioOutsideCalibration { .. })));
+        assert!(matches!(c.finish(), Err(FatigueError::StressRatioOutsideCalibration { .. })));
+        assert_eq!(c, before);
+        // Completing the same excursion recovers the calibrated R=0 cycle.
+        c.push(0.0).unwrap();
+        close(c.finish().unwrap().miner_damage, 2.0 / 500.0);
+    }
+
+    #[test]
+    fn g3_fixed_ratio_counting_is_scale_and_chunk_invariant() {
+        for scale in [1e-200, 1.0, 1e200] {
+            let points = curve().points().iter().map(|p| SnPoint {
+                amplitude_pa: p.amplitude_pa * scale,
+                cycles_to_failure: p.cycles_to_failure,
+            }).collect();
+            let curve = Arc::new(SnCurve::new_at_stress_ratio(scope(), points, None, 0.5).unwrap());
+            let samples = [4.0, 8.0, 4.0, 8.0, 4.0].map(|x| x * scale);
+            let make = || RainflowMiner::new(curve.clone(), MeanStressCorrection::MatchCalibration,
+                RainflowLimits { maximum_samples: 20, maximum_residue: 8 }).unwrap();
+            let mut whole = make();
+            whole.push_block(&samples, &mut || false).unwrap();
+            let expected = whole.finish().unwrap();
+            close(expected.miner_damage, 2.0 / 500.0);
+            for split in 0..=samples.len() {
+                let mut chunked = make();
+                chunked.push_block(&samples[..split], &mut || false).unwrap();
+                chunked.push_block(&samples[split..], &mut || false).unwrap();
+                assert_eq!(chunked.finish().unwrap(), expected);
+            }
+        }
     }
 
     #[test]

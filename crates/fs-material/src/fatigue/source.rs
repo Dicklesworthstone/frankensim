@@ -53,10 +53,12 @@ impl SnLifeMeasure {
     }
 }
 
-/// The source must explicitly admit the query temperature and fully reversed
-/// stress ratio R = sigma_min/sigma_max = -1. Other context coordinates travel
+/// The source must explicitly admit the query temperature and calibration
+/// stress ratio R = sigma_min/sigma_max. Other context coordinates travel
 /// in the original typed query. Labels describe applicability; they do not
-/// independently establish specimen or component equivalence.
+/// independently establish specimen or component equivalence. The original
+/// `resolve_log_log_sn` constructor requires R = -1; use
+/// `resolve_log_log_sn_at_stress_ratio` for a source's actual fixed ratio.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SnSourceRequest {
     pub stress_measure: SnStressMeasure,
@@ -107,7 +109,7 @@ impl SnCalibrationSource {
     }
 
     /// Bind the actual native material card/state and every fixed typed
-    /// physical coordinate. Life and fully reversed calibration R identify
+    /// physical coordinate. Life and the calibration stress ratio identify
     /// the original S-N observations; they are not native state coordinates.
     /// A mean-stress policy remains a separately declared empirical model.
     pub fn matches_material_state(
@@ -179,8 +181,9 @@ fn query(
 ///
 /// The supplied query must select the source at an actual knot. All knots must
 /// remain admitted under that same selection and frozen external context. Only
-/// fully reversed normal-stress calibrations are admitted; R != -1 requires a
-/// separately justified fatigue model, not relabeling or a second Goodman fit.
+/// fully reversed normal-stress calibrations are admitted here. For an original
+/// fixed R != -1 calibration use [`resolve_log_log_sn_at_stress_ratio`], which
+/// requires cycle-by-cycle ratio matching instead of applying a second fit.
 /// Source observations are lives TO FAILURE, not censored runouts. No endurance
 /// plateau is inferred from the final measured point.
 pub fn resolve_log_log_sn(
@@ -188,6 +191,41 @@ pub fn resolve_log_log_sn(
     point: &QueryPoint,
     request: &SnSourceRequest,
     selection: ClaimSelection,
+) -> Result<SnCurve, SnSourceError> {
+    resolve_at_ratio(card, point, request, selection, -1.0)
+}
+
+/// Build the same bounded log-log model at the source's actual fixed stress
+/// ratio. The query and selected claim must agree on one exact R in [-1, 1);
+/// a validity interval is not evidence of a ratio-independent fatigue law.
+/// Original knots, stress/life conventions and receipts remain unchanged.
+///
+/// A non-fully-reversed curve requires `MeanStressCorrection::MatchCalibration`
+/// in the rainflow counter. Every complete or endpoint half cycle must match
+/// this ratio; no implicit Goodman, Walker or other mean-stress law is fitted.
+pub fn resolve_log_log_sn_at_stress_ratio(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    request: &SnSourceRequest,
+    selection: ClaimSelection,
+) -> Result<SnCurve, SnSourceError> {
+    let ratio = *point
+        .axes()
+        .get(&request.stress_ratio_axis)
+        .ok_or(SnSourceError::Invalid("source stress ratio is missing"))?;
+    require(
+        ratio.is_finite() && (-1.0..1.0).contains(&ratio),
+        "source S-N ratio must be finite with -1 <= R < 1",
+    )?;
+    resolve_at_ratio(card, point, request, selection, ratio)
+}
+
+fn resolve_at_ratio(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    request: &SnSourceRequest,
+    selection: ClaimSelection,
+    reference_stress_ratio: f64,
 ) -> Result<SnCurve, SnSourceError> {
     let life_axis = request.life_measure.axis_name();
     require(
@@ -237,9 +275,10 @@ pub fn resolve_log_log_sn(
                 .axis_quantities()
                 .get(&request.stress_ratio_axis)
                 == Some(&dimensionless)
-            && point.axes().get(&request.stress_ratio_axis) == Some(&-1.0)
-            && claim.validity.bounds().get(&request.stress_ratio_axis) == Some(&(-1.0, -1.0)),
-        "fully reversed calibration needs a source-declared R = -1, not an assumed mean stress",
+            && point.axes().get(&request.stress_ratio_axis) == Some(&reference_stress_ratio)
+            && claim.validity.bounds().get(&request.stress_ratio_axis)
+                == Some(&(reference_stress_ratio, reference_stress_ratio)),
+        "calibration needs the exact source-declared fixed stress ratio, not an assumed mean-stress law",
     )?;
     let temperature_quantity = point
         .axis_quantities()
@@ -313,7 +352,7 @@ pub fn resolve_log_log_sn(
         load_basis: request.load_basis.clone(),
         temperature_k,
     };
-    let mut curve = SnCurve::new(scope, points, None)?;
+    let mut curve = SnCurve::new_at_stress_ratio(scope, points, None, reference_stress_ratio)?;
     curve.source = Some(Arc::new(SnCalibrationSource {
         card_identity: card.content_hash(),
         material_state: id.clone(),
