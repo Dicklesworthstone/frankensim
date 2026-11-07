@@ -1,7 +1,8 @@
 //! Independently fitted temperature mixing on the original mixture owner.
 //!
-//! The scalar Germano fit supplies alpha_t directly, without dividing by the
-//! momentum coefficient or inventing a Prandtl floor. Temperature is the
+//! The scalar Germano fit supplies its own C_theta, without dividing by the
+//! momentum coefficient or inventing a Prandtl floor. Each conservative face
+//! applies that coefficient to its actual Delta² |S|. Temperature is the
 //! fitted scalar; this remains a low-Mach gradient-diffusion heat model for
 //! evolving mixtures, not a closure for all compressible SGS energy terms.
 //! Species mixing retains the explicitly authored common Schmidt number.
@@ -34,7 +35,7 @@ impl MixtureDynamicThermalSubgridConfig {
 
 impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Combined flow and operator numerical payload. Thermal fitting adds a
-    /// scalar workspace, temperature staging and rho*alpha_t cache to dynamic
+    /// scalar workspace, temperature staging and coefficient cache to dynamic
     /// momentum: nominally 264 additional bytes/cell over molecular-only flow.
     pub fn required_workspace_bytes_with_dynamic_thermal_sgs(
         flow: &MixtureEuler3d,
@@ -119,7 +120,7 @@ pub(super) struct ThermalFields {
     pub(super) density: Vec<f64>,
     pub(super) velocity: Vec<[f64; 3]>,
     pub(super) temperature: Vec<f64>,
-    rho_diffusivity: Vec<f64>,
+    heat_coefficient: Vec<f64>,
 }
 
 impl DynamicThermalTransport {
@@ -162,8 +163,8 @@ impl DynamicThermalTransport {
             .map_err(dynamic_error)?;
         self.work
             .fields
-            .collect_heat(self.work.heat.diffusivities(), cancelled)?;
-        Ok(momentum.maximum_coefficient_squared != 0.0 || heat.maximum_diffusivity != 0.0)
+            .collect_heat(self.work.heat.coefficients(), cancelled)?;
+        Ok(momentum.maximum_coefficient_squared != 0.0 || heat.maximum_coefficient != 0.0)
     }
 
     pub(in crate::compressible::spatial::mixture::molecular::sgs) fn coefficient_squared(
@@ -177,14 +178,14 @@ impl DynamicThermalTransport {
         self.work.momentum.filter_width()
     }
 
-    /// Density-weighted thermal diffusivity and its molecular ratio bound.
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat(
+    /// Face-interpolated C_theta and the actual heat/molecular ratio bound.
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat_coefficient(
         &self,
         left: usize,
         right: usize,
     ) -> (f64, f64) {
         (
-            self.work.fields.face_heat(left, right),
+            self.work.fields.face_heat_coefficient(left, right),
             self.config.transport.heat.maximum_diffusivity_to_molecular,
         )
     }
@@ -217,12 +218,12 @@ impl ThermalFields {
             density: allocated(cells, 0.0)?,
             velocity: allocated(cells, [0.0; 3])?,
             temperature: allocated(cells, 0.0)?,
-            rho_diffusivity: allocated(cells, 0.0)?,
+            heat_coefficient: allocated(cells, 0.0)?,
         })
     }
 
     pub(super) fn workspace_bytes(&self) -> usize {
-        (self.density.capacity() + self.temperature.capacity() + self.rho_diffusivity.capacity())
+        (self.density.capacity() + self.temperature.capacity() + self.heat_coefficient.capacity())
             * size_of::<f64>()
             + self.velocity.capacity() * size_of::<[f64; 3]>()
     }
@@ -245,20 +246,23 @@ impl ThermalFields {
 
     pub(super) fn collect_heat(
         &mut self,
-        diffusivities: &[f64],
+        coefficients: impl ExactSizeIterator<Item = f64>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), DissipationError> {
-        for (i, (weight, &alpha)) in self
-            .rho_diffusivity
+        if coefficients.len() != self.heat_coefficient.len() {
+            return Err(DissipationError::Invalid("dynamic mixture heat cache length"));
+        }
+        for (i, (target, coefficient)) in self
+            .heat_coefficient
             .iter_mut()
-            .zip(diffusivities)
+            .zip(coefficients)
             .enumerate()
         {
             if i % 64 == 0 {
                 poll(cancelled)?;
             }
-            *weight = self.density[i] * alpha;
-            if !weight.is_finite() {
+            *target = coefficient;
+            if !coefficient.is_finite() || coefficient < 0.0 {
                 return Err(DissipationError::Invalid(
                     "unrepresentable dynamic mixture heat coefficient",
                 ));
@@ -267,7 +271,7 @@ impl ThermalFields {
         poll(cancelled)
     }
 
-    pub(super) fn face_heat(&self, left: usize, right: usize) -> f64 {
-        0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right]
+    pub(super) fn face_heat_coefficient(&self, left: usize, right: usize) -> f64 {
+        0.5 * self.heat_coefficient[left] + 0.5 * self.heat_coefficient[right]
     }
 }

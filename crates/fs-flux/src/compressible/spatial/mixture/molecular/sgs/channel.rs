@@ -5,6 +5,8 @@
 //! no-slip/thermal wall data. Only tangential directions are test filtered;
 //! no sample crosses a physical wall. Its discretization and Cabot reference
 //! remain with `fs_lbm::sgs3::dynamic::channel`.
+//! Fitted heat and stress coefficients retain their independence from the
+//! centered strain; conservative faces evaluate the current full strain.
 //!
 //! The original mixture face still owns Cp(T,Y), referenced partial enthalpies,
 //! Maxwell--Stefan diffusion, conservative stress work and wall heat exchange.
@@ -172,7 +174,7 @@ pub(super) struct DynamicChannelThermalTransport {
     density: Vec<f64>,
     velocity: Vec<[f64; 3]>,
     temperature: Vec<f64>,
-    rho_diffusivity: Vec<f64>,
+    heat_coefficient: Vec<f64>,
 }
 
 impl DynamicChannelThermalTransport {
@@ -198,7 +200,7 @@ impl DynamicChannelThermalTransport {
             density: allocated(grid.len(), 0.0)?,
             velocity: allocated(grid.len(), [0.0; 3])?,
             temperature: allocated(grid.len(), 0.0)?,
-            rho_diffusivity: allocated(grid.len(), 0.0)?,
+            heat_coefficient: allocated(grid.len(), 0.0)?,
         })
     }
 
@@ -207,7 +209,7 @@ impl DynamicChannelThermalTransport {
             + self.heat.workspace_bytes()
             + (self.density.capacity()
                 + self.temperature.capacity()
-                + self.rho_diffusivity.capacity())
+                + self.heat_coefficient.capacity())
                 * size_of::<f64>()
             + self.velocity.capacity() * size_of::<[f64; 3]>()
     }
@@ -260,24 +262,24 @@ impl DynamicChannelThermalTransport {
                 &mut *cancelled,
             )
             .map_err(dynamic_error)?;
-        for (i, (weight, &alpha)) in self
-            .rho_diffusivity
+        for (i, (target, coefficient)) in self
+            .heat_coefficient
             .iter_mut()
-            .zip(self.heat.diffusivities())
+            .zip(self.heat.coefficients())
             .enumerate()
         {
             if i % 64 == 0 {
                 poll(cancelled)?;
             }
-            *weight = self.density[i] * alpha;
-            if !weight.is_finite() {
+            *target = coefficient;
+            if !coefficient.is_finite() || coefficient < 0.0 {
                 return Err(DissipationError::Invalid(
                     "unrepresentable dynamic mixture channel heat coefficient",
                 ));
             }
         }
         poll(cancelled)?;
-        Ok(momentum.maximum_coefficient_squared != 0.0 || heat.maximum_diffusivity != 0.0)
+        Ok(momentum.maximum_coefficient_squared != 0.0 || heat.maximum_coefficient != 0.0)
     }
 
     pub(super) fn coefficient_squared(&self, cell: usize) -> Option<f64> {
@@ -288,9 +290,9 @@ impl DynamicChannelThermalTransport {
         self.momentum.filter_width()
     }
 
-    pub(super) fn face_heat(&self, left: usize, right: usize) -> (f64, f64) {
+    pub(super) fn face_heat_coefficient(&self, left: usize, right: usize) -> (f64, f64) {
         (
-            0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right],
+            0.5 * self.heat_coefficient[left] + 0.5 * self.heat_coefficient[right],
             self.config.heat.maximum_diffusivity_to_molecular,
         )
     }

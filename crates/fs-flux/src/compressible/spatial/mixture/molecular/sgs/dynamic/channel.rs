@@ -5,6 +5,8 @@
 //! does not prescribe a mass-fraction gradient in a coupled Maxwell--Stefan /
 //! Soret law: both physical and filtered species derivatives therefore use
 //! three interior fluid centres near each wall, without invented wall values.
+//! The fitted heat/species coefficients are interpolated independently of
+//! density and applied to the same conservative face strain as momentum.
 
 use super::thermal::ThermalFields;
 use super::*;
@@ -18,7 +20,7 @@ use fs_lbm::sgs3::dynamic::channel::{ChannelDynamicScalar, ChannelDynamicSgs};
 pub struct MixtureChannelDynamicSpeciesSubgridConfig {
     pub transport: ChannelDynamicThermalSubgridConfig,
     pub species: ChannelDynamicComponentsConfig,
-    /// Finite nonnegative physical bound on the fitted common D [m²/s].
+    /// Finite nonnegative bound on cell and conservative-face common D [m²/s].
     /// Coupled molecular diffusion is not reduced to an invented scalar ratio.
     pub maximum_species_diffusivity_m2_s: f64,
 }
@@ -116,7 +118,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 )
                 .map_err(dynamic_error)?,
                 fields: ThermalFields::new(flow.cell_count())?,
-                rho_diffusivity: allocated(flow.cell_count(), 0.0)?,
+                species_coefficient: allocated(flow.cell_count(), 0.0)?,
             }),
             dynamic_coefficient_squared: allocated(flow.cell_count(), 0.0)?,
             heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
@@ -150,7 +152,7 @@ pub(in crate::compressible::spatial::mixture::molecular::sgs) struct ChannelDyna
     heat: ChannelDynamicScalar,
     species: ChannelDynamicComponents,
     fields: ThermalFields,
-    rho_diffusivity: Vec<f64>,
+    species_coefficient: Vec<f64>,
 }
 
 impl ChannelDynamicSpeciesTransport {
@@ -161,7 +163,7 @@ impl ChannelDynamicSpeciesTransport {
             + self.heat.workspace_bytes()
             + self.species.workspace_bytes()
             + self.fields.workspace_bytes()
-            + self.rho_diffusivity.capacity() * size_of::<f64>()
+            + self.species_coefficient.capacity() * size_of::<f64>()
     }
 
     pub(in crate::compressible::spatial::mixture::molecular::sgs) fn prepare(
@@ -198,28 +200,27 @@ impl ChannelDynamicSpeciesTransport {
             ));
         }
         self.fields
-            .collect_heat(self.heat.diffusivities(), cancelled)?;
-        for (cell, (&diffusivity, weight)) in self
+            .collect_heat(self.heat.coefficients(), cancelled)?;
+        for (cell, (coefficient, target)) in self
             .species
-            .diffusivities()
-            .iter()
-            .zip(&mut self.rho_diffusivity)
+            .coefficients()
+            .zip(&mut self.species_coefficient)
             .enumerate()
         {
             if cell % 64 == 0 {
                 poll(cancelled)?;
             }
-            *weight = primitive[cell].density * diffusivity;
-            if !weight.is_finite() {
+            *target = coefficient;
+            if !coefficient.is_finite() || coefficient < 0.0 {
                 return Err(DissipationError::Invalid(
-                    "unrepresentable channel species mass diffusion",
+                    "unrepresentable channel species coefficient",
                 ));
             }
         }
         poll(cancelled)?;
         Ok(momentum.maximum_coefficient_squared != 0.0
-            || heat.maximum_diffusivity != 0.0
-            || species.maximum_diffusivity != 0.0)
+            || heat.maximum_coefficient != 0.0
+            || species.maximum_coefficient != 0.0)
     }
 
     pub(in crate::compressible::spatial::mixture::molecular::sgs) fn coefficient_squared(
@@ -233,22 +234,22 @@ impl ChannelDynamicSpeciesTransport {
         self.momentum.filter_width()
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat(
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat_coefficient(
         &self,
         left: usize,
         right: usize,
     ) -> (f64, f64) {
         (
-            self.fields.face_heat(left, right),
+            self.fields.face_heat_coefficient(left, right),
             self.config.transport.heat.maximum_diffusivity_to_molecular,
         )
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_species(
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_species_coefficient(
         &self,
         left: usize,
         right: usize,
     ) -> f64 {
-        0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right]
+        0.5 * self.species_coefficient[left] + 0.5 * self.species_coefficient[right]
     }
 }

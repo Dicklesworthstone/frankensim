@@ -118,8 +118,14 @@ fn check_heat_faces(flow: &MixtureEuler3d) -> (MolecularTransport3d<ConstantTran
                         * model.evaluate_properties(at).unwrap().cp().value()
                 })
                 .sum();
-            let weight = 0.5 * rho[left] * heat.diffusivities()[left]
-                + 0.5 * rho[right] * heat.diffusivities()[right];
+            let weight = dynamic_face_viscosity_reference(
+                &op,
+                [heat.coefficient(left).unwrap(), heat.coefficient(right).unwrap()],
+                core.filter_width(),
+                left,
+                right,
+                axis,
+            );
             let expected =
                 -weight * cp * (pr.temperature - pl.temperature) / flow.grid.spacing[axis];
             for component in 0..6 {
@@ -214,7 +220,7 @@ fn g0_dynamic_mixture_thermal_zero_fit_clears_heat_cache_and_retains_molecular_b
     let ViscosityClosure::DynamicThermal(thermal) = &op.sgs.as_ref().unwrap().closure else {
         unreachable!()
     };
-    assert!((0..uniform.cell_count()).all(|i| thermal.face_heat(i, i).0 == 0.0));
+    assert!((0..uniform.cell_count()).all(|i| thermal.face_heat_coefficient(i, i).0 == 0.0));
     assert_eq!(op.work.flux, base.work.flux);
     let mut actual = uniform;
     let mut expected = field(material(0.0), actual.grid, PERIODIC, |_| {

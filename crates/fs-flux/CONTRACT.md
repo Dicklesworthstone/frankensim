@@ -3640,7 +3640,11 @@ The mixture transport owner also exposes `with_dynamic_thermal_sgs` with
 `MixtureDynamicThermalSubgridConfig`. Momentum and temperature diffusivity
 are fitted separately from the same SSP-stage density, velocity and temperature;
 species mixing retains its explicitly supplied common Schmidt number. The
-source mixture Cp converts face-averaged `rho*alpha_t` to conductivity. Heat
+source mixture Cp converts `rho_face*C_phi,face*Delta^2*|S_face|` to conductivity.
+Fitted coefficients and density are interpolated independently; the full
+conservative-face strain preserves mixing when centered cell derivatives cancel.
+The physical strain invariant is evaluated once for all dynamic transports,
+while each coefficient retains its scale-safe length multiplication. Heat
 therefore remains active when modeled stress and species diffusivity vanish,
 and source Cv is still refreshed for its contribution to the stability bound.
 The original molecular face reports its evaluated conductivity alongside
@@ -3663,13 +3667,16 @@ scale; independent normalization would incorrectly increase trace-species
 weight. Momentum, temperature and species coefficients are independent and
 use one preparation of the same SSP-stage Favre fields. No turbulent Schmidt
 number or marker species is chosen. The face adds
-`j_i = -mean(rho*D_t)*grad(Y_i)` with the existing present-species pivot,
+`j_i = -rho_face*D_t,face*grad(Y_i)`, where
+`D_t,face = C_species,face*Delta^2*|S_face|`, with the existing present-species pivot,
 exact absent species, referenced partial enthalpies and combined stability
 estimate. Species transport and its enthalpy flux remain active at zero eddy
 viscosity. Original Maxwell--Stefan differential diffusion is retained.
 
 The species fit has an explicit coefficient bound and a physical admission
-bound `maximum_species_diffusivity_m2_s`. The molecular owner is a coupled
+bound `maximum_species_diffusivity_m2_s`. Both the fitted cell diffusivities
+and the actual conservative-face diffusivity must satisfy this bound; a
+centered strain null cannot bypass face admission. The molecular owner is a coupled
 Maxwell--Stefan operator, so its combined viscous/thermal/species stability
 envelope is not misrepresented as a scalar molecular diffusivity for a ratio.
 The complete field/operator capacity budget includes 352 nominal additional
@@ -3748,10 +3755,14 @@ by the original molecular wall owner.
 
 Interior faces retain original Maxwell--Stefan diffusion, Soret/Dufour terms,
 source calorics and molecular bulk viscosity. The modeled common species flux
-`j_i = -mean(rho*D_t)*grad(Y_i)` uses the existing present-species pivot, exactly
+`j_i = -rho_face*C_species,face*Delta^2*|S_face|*grad(Y_i)` uses the existing
+present-species pivot, exactly
 absent species and matching source-referenced partial enthalpies in conservative
 total energy. Independent heat and species transport remain available when
-the momentum fit vanishes. Modeled heat and species flux are zero on physical
+the momentum fit vanishes or centered cell strain cancels. Density and all
+three fitted coefficients are interpolated separately and act on one shared
+physical face-strain invariant. The actual face species diffusivity also obeys
+its configured physical admission bound. Modeled heat and species flux are zero on physical
 walls; an explicit equilibrium wall may supply tangential stress using the
 same prescribed-wall work. Other walls retain the molecular half-cell stress
 and heat. Every SSP stage and retry refreshes the fits and the

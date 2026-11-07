@@ -321,8 +321,7 @@ fn g4_dynamic_mixture_budgets_topology_and_cancel_refuse_without_publication() {
     assert_eq!(op.last_step(), Some(&report));
 }
 
-#[test]
-fn dynamic_face_strain_drives_mixture_stress_and_species_at_centered_nulls() {
+fn centered_null_field(temperature_follows_composition: bool) -> MixtureEuler3d {
     let n = 6;
     let at = |x: usize, y: usize, z: usize| (z * n + y) * n + x;
     let mut random = 1u32;
@@ -341,7 +340,7 @@ fn dynamic_face_strain_drives_mixture_stress_and_species_at_centered_nulls() {
             velocity[at(x, y, z)] = [0.0; 3];
         }
     }
-    let mut flow = field(
+    field(
         material(0.0),
         CartesianGrid::new(n, n, n, 1.0, 1.0, 1.0).unwrap(),
         PERIODIC,
@@ -349,9 +348,15 @@ fn dynamic_face_strain_drives_mixture_stress_and_species_at_centered_nulls() {
             let cell = at(p[0] as usize, p[1] as usize, p[2] as usize);
             let rho = 1.0 + 0.1 * (cell % 7) as f64 / 6.0;
             let fraction = 0.4 + 0.05 * (cell % 5) as f64;
-            ([rho * fraction, rho * (1.0 - fraction), 0.0], velocity[cell], 1.5)
+            let temperature = if temperature_follows_composition { 1.0 + fraction } else { 1.5 };
+            ([rho * fraction, rho * (1.0 - fraction), 0.0], velocity[cell], temperature)
         },
-    );
+    )
+}
+
+#[test]
+fn dynamic_face_strain_drives_mixture_stress_and_species_at_centered_nulls() {
+    let mut flow = centered_null_field(false);
     let mut cfg = dynamic_config();
     cfg.transport.model.averaging = DynamicAveraging::Domain;
     let mut active = dynamic_operator(&flow, cfg);
@@ -359,8 +364,8 @@ fn dynamic_face_strain_drives_mixture_stress_and_species_at_centered_nulls() {
     let base_rate = faces(&mut base, &flow).rate;
     let active_rate = faces(&mut active, &flow).rate;
     assert!(active_rate > base_rate);
-    let left = at(1, 1, 1);
-    let right = at(2, 1, 1);
+    let left = flow.grid.index([1, 1, 1]);
+    let right = flow.grid.index([2, 1, 1]);
     for cell in [left, right] {
         assert!(active.work.gradient[cell].iter().flatten().all(|g| g.abs() < 1e-15));
     }

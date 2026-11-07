@@ -189,12 +189,12 @@ fn check_shared(
             momentum.coefficient_squared(cell).unwrap()
         );
         assert_eq!(
-            active.face_heat(cell, cell).0,
-            rho[cell] * heat.diffusivities()[cell]
+            active.face_heat_coefficient(cell, cell).0,
+            heat.coefficient(cell).unwrap()
         );
         assert_eq!(
-            active.face_species(cell, cell),
-            rho[cell] * species.diffusivities()[cell]
+            active.face_species_coefficient(cell, cell),
+            species.coefficient(cell).unwrap()
         );
     }
 }
@@ -286,7 +286,15 @@ fn g1_channel_species_and_referenced_enthalpy_remain_active_at_zero_eddy_viscosi
             }
             let pl = active.work.primitive[left];
             let pr = active.work.primitive[right];
-            let j = -model.face_species(left, right)
+            let mass_diffusion = dynamic_face_viscosity_reference(
+                &active,
+                [model.face_species_coefficient(left, right); 2],
+                model.filter_width(),
+                left,
+                right,
+                axis,
+            );
+            let j = -mass_diffusion
                 * (flow.states()[7 * right] / pr.density - flow.states()[7 * left] / pl.density)
                 / flow.grid.spacing[axis];
             let face = flow.grid.cell_face(axis, c) * 7;
@@ -319,7 +327,15 @@ fn g1_channel_species_and_referenced_enthalpy_remain_active_at_zero_eddy_viscosi
                         / model.molar_mass().value()
                 })
                 .collect();
-            let heat = -model.face_heat(left, right).0 * cp * (pr.temperature - pl.temperature)
+            let heat_diffusion = dynamic_face_viscosity_reference(
+                &active,
+                [model.face_heat_coefficient(left, right).0; 2],
+                model.filter_width(),
+                left,
+                right,
+                axis,
+            );
+            let heat = -heat_diffusion * cp * (pr.temperature - pl.temperature)
                 / flow.grid.spacing[axis];
             close(delta[6], heat + (h[0] - h[1]) * j, 4e-14);
             nonzero += usize::from(j.abs() > 1e-10);
@@ -439,8 +455,8 @@ fn g0_channel_zero_fit_clears_all_transport_and_keeps_molecular_trajectory() {
     };
     assert!(
         (0..actual.cell_count())
-            .all(|cell| model.face_heat(cell, cell).0 == 0.0
-                && model.face_species(cell, cell) == 0.0)
+            .all(|cell| model.face_heat_coefficient(cell, cell).0 == 0.0
+                && model.face_species_coefficient(cell, cell) == 0.0)
     );
     let controls = DissipationControl::default();
     let report = active

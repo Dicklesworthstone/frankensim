@@ -2,8 +2,9 @@
 //!
 //! The shared Germano fit minimizes the sum of all species' scalar residuals,
 //! with one normalization for the complete species bank. Its common positive
-//! diffusivity preserves the mass-frame closure `sum(j_i) = 0` without fitting
-//! or clipping species independently. Heat, species and momentum remain three
+//! coefficient multiplies Delta² |S| at each conservative face, preserving the
+//! mass-frame closure `sum(j_i) = 0` without fitting or clipping species
+//! independently. Heat, species and momentum remain three
 //! independent fits: species mixing can survive a zero momentum coefficient.
 //! This is a gradient-diffusion exploration closure, not a turbulent reaction
 //! rate, flame-wrinkling, wall or shock interaction model.
@@ -18,7 +19,7 @@ use fs_lbm::sgs3::dynamic::scalar::components::PeriodicDynamicComponents;
 pub struct MixtureDynamicSpeciesSubgridConfig {
     pub transport: DynamicThermalSubgridConfig,
     pub species: DynamicComponentsConfig,
-    /// Finite nonnegative admission bound on the fitted species D [m²/s].
+    /// Finite nonnegative admission bound on cell and conservative-face D [m²/s].
     /// The original coupled Maxwell--Stefan law has no single molecular D;
     /// its total stability bound is deliberately not used as a fake ratio.
     pub maximum_species_diffusivity_m2_s: f64,
@@ -96,7 +97,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         .map_err(dynamic_error)?,
                 )
                 .map_err(dynamic_error)?,
-                rho_diffusivity: allocated(flow.cell_count(), 0.0)?,
+                species_coefficient: allocated(flow.cell_count(), 0.0)?,
             }),
             dynamic_coefficient_squared: allocated(flow.cell_count(), 0.0)?,
             heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
@@ -126,7 +127,7 @@ pub(in crate::compressible::spatial::mixture::molecular::sgs) struct DynamicSpec
         MixtureDynamicSpeciesSubgridConfig,
     work: ThermalWorkspace,
     species: PeriodicDynamicComponents,
-    rho_diffusivity: Vec<f64>,
+    species_coefficient: Vec<f64>,
 }
 
 impl DynamicSpeciesTransport {
@@ -135,7 +136,7 @@ impl DynamicSpeciesTransport {
     ) -> usize {
         self.work.workspace_bytes()
             + self.species.workspace_bytes()
-            + self.rho_diffusivity.capacity() * size_of::<f64>()
+            + self.species_coefficient.capacity() * size_of::<f64>()
     }
 
     pub(in crate::compressible::spatial::mixture::molecular::sgs) fn prepare(
@@ -169,28 +170,27 @@ impl DynamicSpeciesTransport {
         }
         self.work
             .fields
-            .collect_heat(self.work.heat.diffusivities(), cancelled)?;
-        for (cell, (&diffusivity, weight)) in self
+            .collect_heat(self.work.heat.coefficients(), cancelled)?;
+        for (cell, (coefficient, target)) in self
             .species
-            .diffusivities()
-            .iter()
-            .zip(&mut self.rho_diffusivity)
+            .coefficients()
+            .zip(&mut self.species_coefficient)
             .enumerate()
         {
             if cell % 64 == 0 {
                 poll(cancelled)?;
             }
-            *weight = primitive[cell].density * diffusivity;
-            if !weight.is_finite() {
+            *target = coefficient;
+            if !coefficient.is_finite() || coefficient < 0.0 {
                 return Err(DissipationError::Invalid(
-                    "unrepresentable dynamic species mass diffusion",
+                    "unrepresentable dynamic species coefficient",
                 ));
             }
         }
         poll(cancelled)?;
         Ok(momentum.maximum_coefficient_squared != 0.0
-            || heat.maximum_diffusivity != 0.0
-            || species.maximum_diffusivity != 0.0)
+            || heat.maximum_coefficient != 0.0
+            || species.maximum_coefficient != 0.0)
     }
 
     pub(in crate::compressible::spatial::mixture::molecular::sgs) fn coefficient_squared(
@@ -204,22 +204,22 @@ impl DynamicSpeciesTransport {
         self.work.momentum.filter_width()
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat(
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_heat_coefficient(
         &self,
         left: usize,
         right: usize,
     ) -> (f64, f64) {
         (
-            self.work.fields.face_heat(left, right),
+            self.work.fields.face_heat_coefficient(left, right),
             self.config.transport.heat.maximum_diffusivity_to_molecular,
         )
     }
 
-    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_species(
+    pub(in crate::compressible::spatial::mixture::molecular::sgs) fn face_species_coefficient(
         &self,
         left: usize,
         right: usize,
     ) -> f64 {
-        0.5 * self.rho_diffusivity[left] + 0.5 * self.rho_diffusivity[right]
+        0.5 * self.species_coefficient[left] + 0.5 * self.species_coefficient[right]
     }
 }

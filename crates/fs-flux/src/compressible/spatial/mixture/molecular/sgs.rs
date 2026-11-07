@@ -6,9 +6,9 @@
 //! `j_i^t = -(mu_t/Sc_t) grad(Y_i)`. The same original referenced partial
 //! enthalpies accompany those species fluxes in conservative total energy.
 //! There is no separate viscous or chemical heating source.
-//! Dynamic stress applies the fitted C_s squared to the conservative face
-//! strain, with separately averaged density and coefficient. It never selects
-//! a face viscosity by interpolating cell-centered strain magnitudes.
+//! Dynamic stress, heat and species apply their fitted coefficients to the
+//! conservative face strain, with separately averaged density and coefficient.
+//! A zero cell-centered strain cannot erase transport across resolved face shear.
 //! Lagrangian stress optionally holds that coefficient over one complete physical
 //! coupled step, committing its signed pathline history only with accepted flow.
 //! The existing stage-local composition, calorics and face strain remain active.
@@ -40,7 +40,7 @@ pub use crate::compressible::spatial::molecular::sgs::{
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
-use fs_lbm::sgs3::{eddy_viscosity, vreman_eddy_viscosity};
+use fs_lbm::sgs3::{eddy_viscosity, smagorinsky_viscosity, vreman_eddy_viscosity};
 use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
@@ -342,90 +342,115 @@ impl SubgridTransport {
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<TransportFaceReport, DissipationError> {
-        let mu = if let ViscosityClosure::Local {
-            config,
-            widths,
-            filter_width,
-        } = &self.closure
-        {
-            if config.transport.model.coefficient() == 0.0 {
-                return Ok(receipt);
-            }
-            // This owner's cell tensor is derivative-first. Transpose before
-            // constructing the same component-first face tensor as frozen gas.
-            let transpose =
-                |g: [[f64; 3]; 3]| std::array::from_fn(|i| std::array::from_fn(|j| g[j][i]));
-            let g = face_gradient(
-                primitive[left].velocity,
-                primitive[right].velocity,
-                transpose(gradient[left]),
-                transpose(gradient[right]),
-                axis,
-                distance,
-            );
-            let nu = match config.transport.model {
-                SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, *widths, g),
-                model => eddy_viscosity(model, *filter_width, g),
-            }
-            .map_err(|_| DissipationError::Invalid("mixture subgrid face gradient or viscosity"))?;
-            (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
-        } else {
-            let coefficient = 0.5 * self.dynamic_coefficient_squared[left]
-                + 0.5 * self.dynamic_coefficient_squared[right];
-            if coefficient == 0.0 {
-                0.0
-            } else {
-                let width = match &self.closure {
-                    ViscosityClosure::Local { filter_width, .. } => *filter_width,
-                    ViscosityClosure::Dynamic(dynamic) => dynamic.filter_width(),
-                    ViscosityClosure::Lagrangian(dynamic) => dynamic.filter_width(),
-                    ViscosityClosure::DynamicThermal(dynamic) => dynamic.filter_width(),
-                    ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.filter_width(),
-                    ViscosityClosure::DynamicSpecies(dynamic) => dynamic.filter_width(),
-                    ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.filter_width(),
-                };
-                let transpose =
-                    |g: [[f64; 3]; 3]| std::array::from_fn(|i| std::array::from_fn(|j| g[j][i]));
-                let g = face_gradient(
-                    primitive[left].velocity,
-                    primitive[right].velocity,
-                    transpose(gradient[left]),
-                    transpose(gradient[right]),
-                    axis,
-                    distance,
-                );
-                let nu = eddy_viscosity(
-                    SgsModel::Smagorinsky {
-                        cs: fs_math::det::sqrt(coefficient),
-                    },
-                    width,
-                    g,
-                )
-                .map_err(|_| {
-                    DissipationError::Invalid("dynamic mixture face strain or viscosity")
-                })?;
-                (0.5 * primitive[left].density + 0.5 * primitive[right].density) * nu
-            }
-        };
         let dynamic_heat = match &self.closure {
-            ViscosityClosure::DynamicThermal(dynamic) => Some(dynamic.face_heat(left, right)),
-            ViscosityClosure::DynamicChannelThermal(dynamic) => {
-                Some(dynamic.face_heat(left, right))
+            ViscosityClosure::DynamicThermal(dynamic) => {
+                Some(dynamic.face_heat_coefficient(left, right))
             }
-            ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_heat(left, right)),
+            ViscosityClosure::DynamicChannelThermal(dynamic) => {
+                Some(dynamic.face_heat_coefficient(left, right))
+            }
+            ViscosityClosure::DynamicSpecies(dynamic) => {
+                Some(dynamic.face_heat_coefficient(left, right))
+            }
             ViscosityClosure::ChannelDynamicSpecies(dynamic) => {
-                Some(dynamic.face_heat(left, right))
+                Some(dynamic.face_heat_coefficient(left, right))
             }
             _ => None,
         };
         let dynamic_species = match &self.closure {
-            ViscosityClosure::DynamicSpecies(dynamic) => Some(dynamic.face_species(left, right)),
-            ViscosityClosure::ChannelDynamicSpecies(dynamic) => {
-                Some(dynamic.face_species(left, right))
-            }
+            ViscosityClosure::DynamicSpecies(dynamic) => Some((
+                dynamic.face_species_coefficient(left, right),
+                dynamic.config.maximum_species_diffusivity_m2_s,
+            )),
+            ViscosityClosure::ChannelDynamicSpecies(dynamic) => Some((
+                dynamic.face_species_coefficient(left, right),
+                dynamic.config.maximum_species_diffusivity_m2_s,
+            )),
             _ => None,
         };
+        let momentum_coefficient = 0.5 * self.dynamic_coefficient_squared[left]
+            + 0.5 * self.dynamic_coefficient_squared[right];
+        let momentum_disabled = match &self.closure {
+            ViscosityClosure::Local { config, .. } => config.transport.model.coefficient() == 0.0,
+            _ => momentum_coefficient == 0.0,
+        };
         // An exactly disabled model makes no extra caloric calls/arithmetic.
+        if momentum_disabled
+            && dynamic_heat.is_none_or(|(coefficient, _)| coefficient == 0.0)
+            && dynamic_species.is_none_or(|(coefficient, _)| coefficient == 0.0)
+        {
+            return Ok(receipt);
+        }
+        // Reconstruct once at the conservative face for all three transports.
+        // This owner's cell tensor is derivative-first; transpose to du_i/dx_j.
+        let transpose =
+            |g: [[f64; 3]; 3]| std::array::from_fn(|i| std::array::from_fn(|j| g[j][i]));
+        let g = face_gradient(
+            primitive[left].velocity,
+            primitive[right].velocity,
+            transpose(gradient[left]),
+            transpose(gradient[right]),
+            axis,
+            distance,
+        );
+        let filter_width = match &self.closure {
+            ViscosityClosure::Local { filter_width, .. } => *filter_width,
+            ViscosityClosure::Dynamic(dynamic) => dynamic.filter_width(),
+            ViscosityClosure::Lagrangian(dynamic) => dynamic.filter_width(),
+            ViscosityClosure::DynamicThermal(dynamic) => dynamic.filter_width(),
+            ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.filter_width(),
+            ViscosityClosure::DynamicSpecies(dynamic) => dynamic.filter_width(),
+            ViscosityClosure::ChannelDynamicSpecies(dynamic) => dynamic.filter_width(),
+        };
+        let density = 0.5 * primitive[left].density + 0.5 * primitive[right].density;
+        // Dynamic momentum, heat and species share |S|. Reuse the normalized
+        // invariant once while retaining each coefficient's original length
+        // scaling; forming Delta² first would narrow the representable range.
+        let shear_rate = if matches!(&self.closure, ViscosityClosure::Local { .. }) {
+            0.0
+        } else {
+            eddy_viscosity(SgsModel::Smagorinsky { cs: 1.0 }, 1.0, g)
+                .map_err(|_| DissipationError::Invalid("dynamic mixture face strain or diffusivity"))?
+        };
+        let face_diffusivity = |coefficient: f64| -> Result<f64, DissipationError> {
+            if coefficient == 0.0 {
+                return Ok(0.0);
+            }
+            smagorinsky_viscosity(
+                fs_math::det::sqrt(coefficient),
+                filter_width,
+                shear_rate,
+            )
+            .map_err(|_| DissipationError::Invalid("dynamic mixture face strain or diffusivity"))
+        };
+        let mu = density
+            * if let ViscosityClosure::Local { config, widths, .. } = &self.closure {
+                match config.transport.model {
+                    SgsModel::Vreman { cv } => vreman_eddy_viscosity(cv, *widths, g),
+                    model => eddy_viscosity(model, filter_width, g),
+                }
+                .map_err(|_| {
+                    DissipationError::Invalid("mixture subgrid face gradient or viscosity")
+                })?
+            } else {
+                face_diffusivity(momentum_coefficient)?
+            };
+        let dynamic_heat = dynamic_heat
+            .map(|(coefficient, maximum)| {
+                face_diffusivity(coefficient).map(|alpha| (density * alpha, maximum))
+            })
+            .transpose()?;
+        let dynamic_species = dynamic_species
+            .map(|(coefficient, maximum)| {
+                let diffusivity = face_diffusivity(coefficient)?;
+                if diffusivity > maximum {
+                    return Err(DissipationError::Invalid(
+                        "dynamic species face diffusivity exceeds its physical admission bound",
+                    ));
+                }
+                Ok(density * diffusivity)
+            })
+            .transpose()?;
         if mu == 0.0
             && dynamic_heat.is_none_or(|(weight, _)| weight == 0.0)
             && dynamic_species.is_none_or(|weight| weight == 0.0)

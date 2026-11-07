@@ -221,8 +221,14 @@ fn channel_mixture_faces_keep_source_enthalpy_cp_and_molecular_wall_heat_work() 
                         species_energy += h * j;
                         active_species += usize::from(j.abs() > 1e-9);
                     }
-                    let weight = 0.5 * rho[left] * heat.diffusivities()[left]
-                        + 0.5 * rho[right] * heat.diffusivities()[right];
+                    let weight = dynamic_face_viscosity_reference(
+                        &op,
+                        [heat.coefficient(left).unwrap(), heat.coefficient(right).unwrap()],
+                        core.filter_width(),
+                        left,
+                        right,
+                        axis,
+                    );
                     let q = -weight * cp * (temperature[right] - temperature[left])
                         / flow.grid.spacing[axis];
                     let work: f64 = (0..3)
@@ -284,7 +290,7 @@ fn channel_mixture_heat_remains_active_on_planes_with_zero_momentum_fit() {
         c[0] = (c[0] + 1) % flow.grid.shape[0];
         let right = flow.grid.index(c);
         if sgs.dynamic_coefficient_squared[left] + sgs.dynamic_coefficient_squared[right] != 0.0
-            || thermal.face_heat(left, right).0 == 0.0
+            || thermal.face_heat_coefficient(left, right).0 == 0.0
         {
             continue;
         }
