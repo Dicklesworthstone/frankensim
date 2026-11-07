@@ -19,6 +19,8 @@ mod sphere;
 mod tube;
 #[path = "finite_gas_convection/tube_sections.rs"]
 mod tube_sections;
+#[path = "finite_gas_convection/laminar_sections.rs"]
+mod laminar_sections;
 #[path = "finite_gas_convection/isochoric_wall.rs"]
 mod isochoric_wall;
 use fs_airflow::graph::thermal::medium::convection::{

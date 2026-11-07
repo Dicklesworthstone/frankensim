@@ -3,6 +3,19 @@
 use super::*;
 use fs_convection::developing::{RectangularDuctSection, evaluate_rectangular_duct_section};
 
+/// Physical rectangular interval and its actual perimeter-average transfer.
+/// The containing sample retains the original downstream cumulative mean.
+#[derive(Debug)]
+pub struct RectangularDuctSectionDetails {
+    pub hydraulic_diameter: Length,
+    pub aspect_ratio: f64,
+    pub start: Length,
+    pub end: Length,
+    pub upstream: Option<NusseltEvaluation>,
+    /// Actual section-average h * hydraulic_diameter / k.
+    pub nusselt: f64,
+}
+
 /// Original material, hydraulic geometry, cumulative means and section transfer.
 #[derive(Debug)]
 pub struct MaterialRectangularDuctSection<'a, F: FluidTransport + ?Sized> {
@@ -37,6 +50,25 @@ impl<F: FluidTransport + ?Sized> MaterialRectangularDuctSection<'_, F> {
     }
     pub const fn coefficient(&self) -> &Evidence<HeatTransferCoefficient> {
         &self.coefficient
+    }
+
+    pub(crate) fn into_parts(self) -> (
+        FluidTransportState,
+        NusseltEvaluation,
+        Evidence<HeatTransferCoefficient>,
+        RectangularDuctSectionDetails,
+    ) {
+        let (_, _, upstream, downstream, nusselt) = self.section.into_parts();
+        let aspect_ratio = downstream.groups()["aspect_ratio"];
+        (
+            self.transport,
+            downstream,
+            self.coefficient,
+            RectangularDuctSectionDetails {
+                hydraulic_diameter: self.hydraulic_diameter,
+                aspect_ratio, start: self.start, end: self.end, upstream, nusselt,
+            },
+        )
     }
 
     /// Use this same coefficient on the original conduction row. The reference

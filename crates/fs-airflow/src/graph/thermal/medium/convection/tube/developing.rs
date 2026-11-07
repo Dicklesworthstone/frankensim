@@ -10,7 +10,7 @@ use fs_convection::developing::{
 /// Positive starts also retain the upstream mean and an unbounded local-model
 /// discrepancy; their inferred profile has no independent experimental bound.
 #[derive(Debug)]
-pub struct TurbulentTubeSectionDetails {
+pub struct TubeSectionDetails {
     pub diameter: Length,
     pub start: Length,
     pub end: Length,
@@ -18,6 +18,9 @@ pub struct TurbulentTubeSectionDetails {
     /// Actual section-average h * diameter / k.
     pub nusselt: f64,
 }
+
+/// Compatibility name for the originally turbulent-only circular section.
+pub type TurbulentTubeSectionDetails = TubeSectionDetails;
 
 /// Original bulk material, circular geometry and cumulative entrance transfer.
 /// The finite section's coefficient can enter the existing conduction Robin row.

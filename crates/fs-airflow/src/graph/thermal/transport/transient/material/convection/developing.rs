@@ -147,7 +147,7 @@ impl DevelopingSectionEvaluation {
     fn coefficient(&self, conductivity: f64, diameter: Length) -> Result<f64, CorrelationError> {
         let conductivity = ThermalConductivity::new(conductivity);
         match self {
-            Self::Circular(s) => Ok(s.heat_transfer_coefficient(conductivity, diameter)?.value()),
+            Self::Circular(s) => Ok(s.heat_transfer_coefficient(conductivity, diameter)?.value.value()),
             Self::TurbulentCircular(s) => Ok(s
                 .heat_transfer_coefficient(conductivity, diameter)?.value.value()),
             Self::Rectangular(s) => Ok(s

@@ -1,4 +1,4 @@
-//! Variable-viscosity turbulent heat transfer in smooth circular tubes.
+//! Material-driven heat transfer in smooth circular tubes.
 //!
 //! Sieder-Tate uses bulk Re, Pr and conductivity, with only the viscosity
 //! denominator evaluated at the fluid-facing wall. Keeping both source owners
@@ -9,9 +9,13 @@ use super::*;
 /// Developing turbulent sections retain the original physical tube entrance.
 pub mod developing;
 pub use developing::{
-    MaterialTurbulentTubeSection, TurbulentTubeSectionDetails,
+    MaterialTurbulentTubeSection, TubeSectionDetails, TurbulentTubeSectionDetails,
     evaluate_turbulent_tube_section_from_material,
 };
+
+/// Thermally developing laminar sections retain the same physical entrance.
+pub mod laminar;
+pub use laminar::{MaterialLaminarTubeSection, evaluate_laminar_tube_section_from_material};
 
 /// Original bulk and wall-temperature fluid sources for one tube evaluation.
 /// The surface source is the same FLUID at the wall temperature, not the solid.

@@ -127,6 +127,7 @@ impl NaturalGasSurface {
                     coefficient,
                     section: None,
                     tube_section: None,
+                    rectangular_section: None,
                 }),
             },
         })

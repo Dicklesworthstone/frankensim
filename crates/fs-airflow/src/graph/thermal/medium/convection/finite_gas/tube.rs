@@ -142,6 +142,7 @@ impl<M: FilmGasSource> ForcedTubeGasSurface<'_, M> {
                         coefficient,
                         section: None,
                         tube_section: None,
+                        rectangular_section: None,
                     }),
                 },
                 surface_gas: Some(surface_gas),

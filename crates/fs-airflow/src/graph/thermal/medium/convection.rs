@@ -29,11 +29,12 @@ pub use mixed::{
 pub mod sphere;
 pub use sphere::{MaterialSphereConvection, evaluate_sphere_from_material};
 
-/// Turbulent circular tubes with source-resolved bulk and wall viscosity.
+/// Circular tubes with source-resolved bulk properties and explicit wall corrections.
 pub mod tube;
 pub use tube::{
-    MaterialTubeConvection, MaterialTurbulentTubeSection, TurbulentTubeSectionDetails,
-    evaluate_tube_from_material,
+    MaterialLaminarTubeSection, MaterialTubeConvection, MaterialTurbulentTubeSection,
+    TubeSectionDetails, TurbulentTubeSectionDetails,
+    evaluate_laminar_tube_section_from_material, evaluate_tube_from_material,
     evaluate_turbulent_tube_section_from_material,
 };
 
@@ -46,7 +47,10 @@ pub use plate::{
 
 /// Rectangular cooling-channel sections retain their original heated entrance.
 pub mod duct;
-pub use duct::{MaterialRectangularDuctSection, evaluate_rectangular_duct_section_from_material};
+pub use duct::{
+    MaterialRectangularDuctSection, RectangularDuctSectionDetails,
+    evaluate_rectangular_duct_section_from_material,
+};
 
 /// Planar gas convection on the original moving-liquid interface heat solve.
 pub mod free_surface;

@@ -4626,6 +4626,39 @@ geometry and heated length. Regressions cover subdivision, source identity,
 piston/body and fixed-volume energy, latent heat, and mixed heat-network
 exchange.
 
+`evaluate_laminar_tube_section_from_material` and
+`FilmGasHeatLaw::BulkForcedLaminarTubeSection(ForcedTubeSectionGasSurface)`
+carry the original Hausen thermal entrance into the same material Robin and
+finite-gas heat owners. The circular velocity profile must already be developed
+at the heated inlet. Both positive endpoint source domains remain mandatory;
+neither a thermal patch nor flow reversal silently creates a new entrance.
+One original bulk snapshot supplies Re, Pr and conductivity. Circular patch
+area cannot exceed pi D (end-start). `TubeSectionDetails` retains actual section
+Nu and the upstream mean; the previous turbulent metadata and geometry names
+remain compatible aliases. The downstream mean is never relabeled as a local
+correlation, and positive-start coefficient evidence retains unbounded local
+model discrepancy.
+
+`FilmGasHeatLaw::BulkForcedRectangularDuctSection` uses the existing
+material-backed simultaneously developing rectangular CWT section. The source
+still admits exactly aspect ratio 0.5 and actual Pr=0.72; no property value is
+adjusted to fit that slice. A section must cover all four isothermal walls:
+area equals Dh(1+alpha)^2/alpha times (end-start), within floating-point
+roundoff. The source's perimeter-average coefficient cannot be applied to an
+isolated wall or partially heated perimeter. `rectangular_section` preserves
+hydraulic diameter, aspect ratio, physical distances, upstream mean and actual
+Nu, including the original table/engineering-bridge distinction.
+
+Both new film laws re-query the source at actual bulk temperature, pressure
+and composition on every thermal trial, retaining original source and branch
+admission. Zero-area isolation bypasses property/correlation evaluation.
+Piston, fixed-volume and existing heat-network callbacks retain their original
+single reciprocal heat transfer and finite storage. No second heat integrator
+or frozen-temperature reservoir is introduced. Focused laminar regressions
+exercise independent formula/table subdivision, source and geometry refusal,
+piston heat in both directions and through melting, and both shapes on the
+fixed-volume body/gas energy residual with external heat budgets.
+
 ## Pump drive input and coolant heating
 
 Fixed-speed liquid cooling pumps may bind an independently sourced `PumpDriveCurve`

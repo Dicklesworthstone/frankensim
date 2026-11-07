@@ -91,6 +91,17 @@ impl RectangularDuctSection {
     pub const fn downstream(&self) -> &NusseltEvaluation { &self.downstream }
     pub const fn nusselt(&self) -> f64 { self.nusselt }
 
+    /// Retain both original cumulative means when handing the section to a
+    /// thermal owner. Compute its coefficient first: the downstream evaluation
+    /// remains a whole-length mean, not the section-average value.
+    #[must_use]
+    pub fn into_parts(self) -> (f64, f64, Option<NusseltEvaluation>, NusseltEvaluation, f64) {
+        (
+            self.start_over_diameter, self.end_over_diameter,
+            self.upstream, self.downstream, self.nusselt,
+        )
+    }
+
     /// Convert using the original fluid conductivity and hydraulic diameter.
     /// A positive-start section has no independently established local model
     /// discrepancy; it retains both mean evaluations rather than inheriting
@@ -456,16 +467,29 @@ impl CircularDuctSection {
     /// Derived section-average Nu, based on the original duct diameter.
     pub const fn nusselt(&self) -> f64 { self.nusselt }
 
+    /// Retain the physical interval, original cumulative means and actual
+    /// section Nu. Compute the coefficient first to retain its section evidence;
+    /// the downstream evaluation is never relabeled as a local coefficient.
+    #[must_use]
+    pub fn into_parts(self) -> (f64, f64, Option<NusseltEvaluation>, NusseltEvaluation, f64) {
+        (
+            self.start_over_diameter, self.end_over_diameter,
+            self.upstream, self.downstream, self.nusselt,
+        )
+    }
+
     /// Convert the section mean with the SAME fluid conductivity and diameter.
-    /// The result has the attached mean-card authority only through this receipt;
-    /// neither its numerical error nor its model discrepancy is enclosed.
+    /// At the actual entrance this preserves the original whole-length evidence.
+    /// A positive-start section binds both mean evaluations and the physical
+    /// interval, with unbounded local model discrepancy: the original mean-card
+    /// allowance does not validate the inferred section profile.
     pub fn heat_transfer_coefficient(
         &self,
         conductivity: ThermalConductivity,
         diameter: Length,
-    ) -> Result<HeatTransferCoefficient, CorrelationError> {
-        // Reuse original dimensional admission without manufacturing a new card.
-        self.downstream.heat_transfer_coefficient(conductivity, diameter)?;
+    ) -> Result<Evidence<HeatTransferCoefficient>, CorrelationError> {
+        let mut evidence = self.downstream.heat_transfer_coefficient(conductivity, diameter)?;
+        let Some(upstream) = &self.upstream else { return Ok(evidence); };
         let value = self.nusselt * conductivity.value() / diameter.value();
         if !value.is_finite() || value <= 0.0 {
             return Err(CorrelationError::NonFiniteResult {
@@ -473,7 +497,52 @@ impl CircularDuctSection {
                 value_bits: value.to_bits(),
             });
         }
-        Ok(HeatTransferCoefficient::new(value))
+        evidence.value = HeatTransferCoefficient::new(value);
+        evidence.qoi = value;
+        evidence.numerical = NumericalCertificate::estimate(value, value);
+        evidence.model.discrepancy_rel = f64::INFINITY;
+        evidence.model.assumptions.push(
+            "section integral of the held-property Hausen circular CWT mean from one physical heated entrance".into());
+        evidence.model.assumptions.push(
+            "original mean-card discrepancy does not bound local or section model discrepancy".into());
+        evidence.model.assumptions.sort_unstable();
+        evidence.model.assumptions.dedup();
+        evidence.sensitivity = SensitivitySummary::default();
+        let mut values = [0_u8; 32];
+        for (bytes, input) in values.chunks_exact_mut(8).zip([
+            self.start_over_diameter, self.end_over_diameter,
+            conductivity.value(), diameter.value(),
+        ]) {
+            bytes.copy_from_slice(&input.to_bits().to_le_bytes());
+        }
+        evidence.provenance = ProvenanceHash::chain("convection-circular-duct-section-nu-to-h-v1", &[
+            upstream.evidence().provenance, self.downstream.evidence().provenance,
+            ProvenanceHash::of_bytes(&values),
+        ]);
+        Ok(evidence)
+    }
+
+    /// Apply the actual section coefficient to the existing conduction Robin
+    /// row. The reference is the bulk fluid temperature, not a film query state.
+    pub fn robin_boundary(
+        &self,
+        conductivity: ThermalConductivity,
+        diameter: Length,
+        reference_temperature: Temperature,
+    ) -> Result<CorrelationRobinBoundary, CorrelationError> {
+        let temperature = reference_temperature.value();
+        if !temperature.is_finite() {
+            return Err(CorrelationError::InvalidDimensionalInput {
+                field: "Robin reference temperature", value_bits: temperature.to_bits(),
+                requirement: "supply a finite coherent-SI absolute temperature",
+            });
+        }
+        let coefficient = self.heat_transfer_coefficient(conductivity, diameter)?;
+        let boundary = fs_conduction::ThermalBc::robin(coefficient.value.value(), temperature)
+            .map_err(|_| CorrelationError::NonFiniteResult {
+                stage: "conduction Robin boundary admission", value_bits: coefficient.value.value().to_bits(),
+            })?;
+        Ok(CorrelationRobinBoundary { coefficient, reference_temperature, boundary })
     }
 }
 
@@ -579,7 +648,38 @@ mod tests {
         assert_eq!(section.downstream().card().id, CorrelationId::CircularDuctHausen);
         near(section.heat_transfer_coefficient(
             ThermalConductivity::new(0.5), Length::new(0.03),
-        ).unwrap().value(), section.nusselt() * 0.5 / 0.03);
+        ).unwrap().value.value(), section.nusselt() * 0.5 / 0.03);
+    }
+
+    #[test]
+    fn g0_g3_circular_section_preserves_actual_boundary_heat_and_original_mean_authority() {
+        let conductivity = ThermalConductivity::new(0.5);
+        let diameter = Length::new(0.03);
+        let whole = evaluate_circular_duct_section(100.0, 8.0, 0.0, 30.0).unwrap();
+        let original = whole.downstream().heat_transfer_coefficient(conductivity, diameter).unwrap();
+        let whole_coefficient = whole.heat_transfer_coefficient(conductivity, diameter).unwrap();
+        assert_eq!(whole_coefficient, original);
+
+        let section = evaluate_circular_duct_section(100.0, 8.0, 10.0, 30.0).unwrap();
+        let coefficient = section.heat_transfer_coefficient(conductivity, diameter).unwrap();
+        assert!(coefficient.value.value() < original.value.value());
+        assert!(coefficient.model.discrepancy_rel.is_infinite());
+        assert!(coefficient.sensitivity.d_qoi.is_empty());
+        assert_ne!(coefficient.provenance, original.provenance);
+        let robin = section.robin_boundary(conductivity, diameter, Temperature::new(300.0)).unwrap();
+        assert_eq!(robin.coefficient(), &coefficient);
+        assert_eq!(robin.boundary_condition(), &fs_conduction::ThermalBc::robin(coefficient.value.value(), 300.0).unwrap());
+        for temperature in [f64::NAN, f64::INFINITY] {
+            assert!(section.robin_boundary(conductivity, diameter, Temperature::new(temperature)).is_err());
+        }
+        let expected_upstream = section.upstream().unwrap().evidence().provenance;
+        let expected_downstream = section.downstream().evidence().provenance;
+        let expected_nusselt = section.nusselt();
+        let (start, end, upstream, downstream, nusselt) = section.into_parts();
+        assert_eq!((start, end, nusselt), (10.0, 30.0, expected_nusselt));
+        assert_eq!(upstream.unwrap().evidence().provenance, expected_upstream);
+        assert_eq!(downstream.evidence().provenance, expected_downstream);
+        assert_ne!(nusselt, downstream.evidence().value);
     }
 
     #[test]

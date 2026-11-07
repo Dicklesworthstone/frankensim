@@ -98,6 +98,19 @@ pub fn model(fraction: f64) -> ThermochemicalGasModel {
 pub fn model_transport(fraction: f64, variable_transport: bool) -> ThermochemicalGasModel {
     model_transport_with_reference(fraction, variable_transport, 0.0)
 }
+
+/// Manufactured constant-property gas for the table's exact Pr=0.72 slice.
+/// Unit molar mass and rho=1 fixtures keep conserved-density reconstruction
+/// exact, without rounding an arbitrary source Prandtl number into the table.
+pub fn model_pr072() -> ThermochemicalGasModel {
+    let cp = 3.5 * fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+    let viscosity = 1.8e-5;
+    let species = packs("Pr072", 1.0, 3.5, viscosity,
+        (viscosity / 0.72) * cp, false, 0.0);
+    from_packs(&[species.binding()],
+        Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(), None).unwrap()
+}
+
 pub fn model_transport_with_reference(
     fraction: f64, variable_transport: bool, energy_reference_k: f64,
 ) -> ThermochemicalGasModel {

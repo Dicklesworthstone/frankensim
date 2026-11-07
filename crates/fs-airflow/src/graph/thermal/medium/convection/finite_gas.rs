@@ -60,21 +60,25 @@ pub struct ForcedGasSurface {
 #[derive(Debug)]
 pub struct GasConvectionEvaluation {
     pub transport: FluidTransportState,
-    /// Original mean evaluation. For a plate or tube section this is the
+    /// Original mean evaluation. For a plate or duct section this is the
     /// downstream cumulative mean; use effective_nusselt() for its actual Nu.
     pub nusselt: NusseltEvaluation,
     pub coefficient: Evidence<HeatTransferCoefficient>,
     pub section: Option<super::PlateSectionDetails>,
     /// Physical circular-tube entrance distances and diameter, separate from
     /// the downstream cumulative mean. Present only for a tube-section law.
-    pub tube_section: Option<super::TurbulentTubeSectionDetails>,
+    pub tube_section: Option<super::TubeSectionDetails>,
+    /// Physical four-wall rectangular section and its original upstream mean.
+    pub rectangular_section: Option<super::RectangularDuctSectionDetails>,
 }
 
 impl GasConvectionEvaluation {
-    /// Actual Nu used by the coefficient: tube diameter for tube sections,
+    /// Actual Nu used by the coefficient: inside/hydraulic diameter for ducts,
     /// downstream distance for plate sections, or the original card's length.
     pub fn effective_nusselt(&self) -> f64 {
         if let Some(section) = &self.tube_section {
+            section.nusselt
+        } else if let Some(section) = &self.rectangular_section {
             section.nusselt
         } else {
             self.section.as_ref().map_or(self.nusselt.evidence().value, |section| section.nusselt)
@@ -85,7 +89,8 @@ impl GasConvectionEvaluation {
         evaluation: super::MaterialConvection<'_, F>,
     ) -> Self {
         let (transport, nusselt, coefficient) = evaluation.into_parts();
-        Self { transport, nusselt, coefficient, section: None, tube_section: None }
+        Self { transport, nusselt, coefficient, section: None, tube_section: None,
+            rectangular_section: None }
     }
 }
 
@@ -172,7 +177,8 @@ impl ForcedGasSurface {
         }
         Ok(ConductanceSample { conductance_w_k: conductance,
             source: FiniteGasConvectionSample { gas: gas.clone(), body, area_m2: self.area_m2,
-                evaluation: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None, tube_section: None }) } })
+                evaluation: Some(GasConvectionEvaluation { transport, nusselt, coefficient,
+                    section: None, tube_section: None, rectangular_section: None }) } })
     }
 
     /// Couple a finite source-backed gas, inertial piston and finite enthalpy body.
@@ -265,7 +271,8 @@ impl ForcedGasSurface {
             let (transport, nusselt, coefficient) = evaluated.into_parts();
             Ok(ConvectionCoefficient {
                 coefficient_w_per_m2_k: coefficient.value.value(),
-                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient, section: None, tube_section: None }),
+                source: Some(GasConvectionEvaluation { transport, nusselt, coefficient,
+                    section: None, tube_section: None, rectangular_section: None }),
             })
         })
     }

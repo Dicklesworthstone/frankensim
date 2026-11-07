@@ -6,6 +6,7 @@ pub use source::{FilmGasSource, PengRobinsonFilmSource};
 use super::super::{
     AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material,
     evaluate_natural_from_material, evaluate_flat_plate_section_from_material,
+    evaluate_laminar_tube_section_from_material, evaluate_rectangular_duct_section_from_material,
     evaluate_turbulent_tube_section_from_material, mixed,
 };
 use super::*;
@@ -34,6 +35,14 @@ pub enum FilmGasHeatLaw {
     /// This is the shared constant-property Gnielinski specialization K=1,
     /// with no wall-viscosity query or correction.
     BulkForcedTubeSection(ForcedTurbulentTubeSectionGasSurface),
+    /// Thermally developing Hausen circular section at the actual bulk state.
+    /// The inlet velocity profile is already developed; each thermal patch
+    /// retains distances from the original physical heated entrance.
+    BulkForcedLaminarTubeSection(ForcedTubeSectionGasSurface),
+    /// Simultaneously developing rectangular CWT section at actual bulk Pr.
+    /// The source admits aspect ratio 0.5 and Pr=0.72 only. All four walls
+    /// share one temperature, and the patch covers the full wetted perimeter.
+    BulkForcedRectangularDuctSection(ForcedRectangularDuctSectionGasSurface),
     Natural(NaturalGasSurface),
     /// Laminar aiding mixed convection with explicitly bounded density departure.
     AidingVerticalPlate(AidingVerticalPlateGasSurface),
@@ -80,7 +89,7 @@ impl ForcedPlateGasSurface {
     }
 }
 
-/// One inside-wall section of a smooth, straight turbulent circular tube.
+/// One inside-wall section of a smooth, straight circular tube.
 ///
 /// `start` and `end` are distances from the same physical heated entrance,
 /// not distances from this thermal patch. Flow reversal requires rebinding
@@ -88,9 +97,11 @@ impl ForcedPlateGasSurface {
 /// circular inside-wall section area pi D (end-start). Uniform bulk properties
 /// and thermal driving make adjacent sections additive; local property refresh
 /// does not solve spatially nonuniform entrance history. The original card's
-/// Re, Pr and positive-endpoint L/D bounds remain mandatory on every trial.
+/// Re, Pr and positive-endpoint entrance bounds remain mandatory on every trial.
+/// The selected heat law supplies either laminar Hausen or turbulent Gnielinski
+/// development; geometry never switches the physical regime automatically.
 #[derive(Clone, Copy, Debug)]
-pub struct ForcedTurbulentTubeSectionGasSurface {
+pub struct ForcedTubeSectionGasSurface {
     pub area_m2: f64,
     pub diameter: Length,
     pub start: Length,
@@ -98,7 +109,10 @@ pub struct ForcedTurbulentTubeSectionGasSurface {
     pub speed_m_s: f64,
 }
 
-impl ForcedTurbulentTubeSectionGasSurface {
+/// Compatibility name for the originally turbulent-only circular surface.
+pub type ForcedTurbulentTubeSectionGasSurface = ForcedTubeSectionGasSurface;
+
+impl ForcedTubeSectionGasSurface {
     fn validate(self) -> Result<(), MaterialConvectionError> {
         let diameter = self.diameter.value();
         let start = self.start.value();
@@ -118,7 +132,53 @@ impl ForcedTurbulentTubeSectionGasSurface {
             || (self.area_m2 > 0.0 && self.speed_m_s == 0.0)
         {
             return Err(invalid(
-                "finite gas turbulent tube sections need positive diameter, finite 0 <= start < end from one entrance, positive active speed and a patch no larger than pi D (end-start)",
+                "finite gas tube sections need positive diameter, finite 0 <= start < end from one entrance, positive active speed and a patch no larger than pi D (end-start)",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One full-perimeter axial section of an isothermal rectangular passage.
+///
+/// Hydraulic diameter and minor/major aspect ratio determine the inside
+/// perimeter P=Dh(1+alpha)^2/alpha. An active patch must cover P(end-start),
+/// within floating-point roundoff. The source gives a four-wall average, not
+/// an individual-wall coefficient; partial-perimeter scaling is unsupported.
+/// Zero area explicitly isolates the body without evaluating a correlation.
+#[derive(Clone, Copy, Debug)]
+pub struct ForcedRectangularDuctSectionGasSurface {
+    pub area_m2: f64,
+    pub hydraulic_diameter: Length,
+    pub aspect_ratio: f64,
+    pub start: Length,
+    pub end: Length,
+    pub speed_m_s: f64,
+}
+
+impl ForcedRectangularDuctSectionGasSurface {
+    fn validate(self) -> Result<(), MaterialConvectionError> {
+        let diameter = self.hydraulic_diameter.value();
+        let start = self.start.value();
+        let end = self.end.value();
+        let start_ratio = start / diameter;
+        let end_ratio = end / diameter;
+        let alpha = self.aspect_ratio;
+        let inside_area = diameter * (1.0 + alpha) * ((1.0 + alpha) / alpha) * (end - start);
+        if !self.area_m2.is_finite() || self.area_m2 < 0.0
+            || !diameter.is_finite() || diameter <= 0.0
+            || !alpha.is_finite() || alpha <= 0.0 || alpha > 1.0
+            || !start.is_finite() || start < 0.0
+            || !end.is_finite() || end <= start
+            || !start_ratio.is_finite() || (start > 0.0 && start_ratio == 0.0)
+            || !end_ratio.is_finite() || end_ratio <= start_ratio
+            || !inside_area.is_finite() || inside_area <= 0.0
+            || (self.area_m2 > 0.0 && (self.area_m2 / inside_area - 1.0).abs() > 64.0 * f64::EPSILON)
+            || !self.speed_m_s.is_finite() || self.speed_m_s < 0.0
+            || (self.area_m2 > 0.0 && self.speed_m_s == 0.0)
+        {
+            return Err(invalid(
+                "finite gas rectangular sections need positive hydraulic diameter, 0 < aspect ratio <= 1, finite 0 <= start < end, positive active speed and complete four-wall area",
             ));
         }
         Ok(())
@@ -169,8 +229,8 @@ impl<M: FilmGasSource> Clone for FilmGasSurface<'_, M> {
 #[derive(Debug)]
 pub struct FilmGasConvectionSample<S = ResolvedThermochemicalGasState, W = EquilibriumPhaseState> {
     pub interface: FiniteGasConvectionSample<S, W>,
-    /// Source-validated bulk properties for `BulkForced` and
-    /// `BulkForcedTubeSection`, mean-film properties
+    /// Source-validated bulk properties for `BulkForced` and all internal
+    /// duct-section laws, mean-film properties
     /// otherwise. None only for an explicitly isolated zero-area patch.
     pub property_gas: Option<S>,
 }
@@ -208,7 +268,11 @@ impl FilmGasHeatLaw {
                 }
                 Ok(surface.area_m2)
             }
-            Self::BulkForcedTubeSection(surface) => {
+            Self::BulkForcedTubeSection(surface) | Self::BulkForcedLaminarTubeSection(surface) => {
+                surface.validate()?;
+                Ok(surface.area_m2)
+            }
+            Self::BulkForcedRectangularDuctSection(surface) => {
                 surface.validate()?;
                 Ok(surface.area_m2)
             }
@@ -230,8 +294,8 @@ impl FilmGasHeatLaw {
 
 impl<M: FilmGasSource> FilmGasSurface<'_, M> {
     /// Re-query source-pinned properties at the actual bulk pressure and the
-    /// selected reference temperature: T_bulk for `BulkForced` and
-    /// `BulkForcedTubeSection`, otherwise
+    /// selected reference temperature: T_bulk for `BulkForced` and all internal
+    /// duct-section laws, otherwise
     /// (T_wall + T_bulk)/2. Both signed heat flow and Rayleigh forcing retain
     /// the full wall-to-bulk temperature contrast. The property query is not
     /// a replacement gas endpoint or a second finite-capacity reservoir.
@@ -276,7 +340,10 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
             });
         }
         let property_temperature = match self.law {
-            FilmGasHeatLaw::BulkForced(_) | FilmGasHeatLaw::BulkForcedTubeSection(_) => bulk,
+            FilmGasHeatLaw::BulkForced(_)
+                | FilmGasHeatLaw::BulkForcedTubeSection(_)
+                | FilmGasHeatLaw::BulkForcedLaminarTubeSection(_)
+                | FilmGasHeatLaw::BulkForcedRectangularDuctSection(_) => bulk,
             _ => 0.5 * wall + 0.5 * bulk,
         };
         // Re-query even at T_bulk: cloning the snapshot here would bypass the
@@ -300,6 +367,7 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                 let (transport, nusselt, coefficient, section) = evaluated.into_parts();
                 Some(GasConvectionEvaluation {
                     transport, nusselt, coefficient, section: Some(section), tube_section: None,
+                    rectangular_section: None,
                 })
             }
             FilmGasHeatLaw::BulkForcedTubeSection(surface) => {
@@ -309,6 +377,28 @@ impl<M: FilmGasSource> FilmGasSurface<'_, M> {
                 let (transport, nusselt, coefficient, tube_section) = evaluated.into_parts();
                 Some(GasConvectionEvaluation {
                     transport, nusselt, coefficient, section: None, tube_section: Some(tube_section),
+                    rectangular_section: None,
+                })
+            }
+            FilmGasHeatLaw::BulkForcedLaminarTubeSection(surface) => {
+                let evaluated = evaluate_laminar_tube_section_from_material(
+                    &property, surface.speed_m_s, surface.diameter, surface.start, surface.end,
+                )?;
+                let (transport, nusselt, coefficient, tube_section) = evaluated.into_parts();
+                Some(GasConvectionEvaluation {
+                    transport, nusselt, coefficient, section: None, tube_section: Some(tube_section),
+                    rectangular_section: None,
+                })
+            }
+            FilmGasHeatLaw::BulkForcedRectangularDuctSection(surface) => {
+                let evaluated = evaluate_rectangular_duct_section_from_material(
+                    &property, surface.speed_m_s, surface.hydraulic_diameter,
+                    surface.aspect_ratio, surface.start, surface.end,
+                )?;
+                let (transport, nusselt, coefficient, rectangular_section) = evaluated.into_parts();
+                Some(GasConvectionEvaluation {
+                    transport, nusselt, coefficient, section: None, tube_section: None,
+                    rectangular_section: Some(rectangular_section),
                 })
             }
             FilmGasHeatLaw::Forced(surface) | FilmGasHeatLaw::BulkForced(surface) => {

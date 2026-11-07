@@ -561,7 +561,15 @@ positive upstream point and downstream point must satisfy the unchanged card's
 Re, Pr and L/D support. No small-distance floor or domain extrapolation exists.
 
 The result's positive dimensional coefficient uses `h=Nu_section k/D` and
-retains its original mean-card receipts. It is derived held-property transfer,
+returns `Evidence<HeatTransferCoefficient>`, with original mean-card receipts.
+The first section preserves the original mean's coefficient and evidence
+exactly. Positive-start sections bind both original means, both entrance
+distances, conductivity and diameter; their local model discrepancy is
+explicitly unbounded. The native Robin lowering uses this same section
+coefficient and the actual bulk reference temperature. `into_parts` hands the
+original means and separate section Nu to finite thermal owners without
+relabeling a cumulative mean as a local coefficient.
+It is derived held-property transfer,
 not a new fitted correlation or a validated local discrepancy bound. The mean
 card's engineering allowance does not automatically bound a difference of
 cumulative predictions. No new sensitivity or numerical enclosure is claimed.
@@ -569,11 +577,12 @@ Subdivision additivity assumes the same fluid properties, diameter, velocity
 and wall state throughout the compared intervals. Local source/temperature
 updates remain a separate held-property approximation.
 
-Three regression sources cover cumulative additivity versus entrance resets,
-the analytic differential limit for adjacent floating-point lengths, and
-original domain/dimensional refusal. Source/API and scalar algebra review were
-completed; Rust parsing, compilation and native numerical execution were
-unavailable in the delivery environment. These tests are not reported executed.
+Regressions cover cumulative additivity versus entrance resets, the analytic
+differential limit for adjacent floating-point lengths, original domain and
+dimensional refusal, and the actual section coefficient reaching the native
+Robin row while both original cumulative means retain their identities.
+These are implementation checks, not experimental validation of a local
+heat-transfer profile.
 
 ## Finite external flat-plate strips
 
