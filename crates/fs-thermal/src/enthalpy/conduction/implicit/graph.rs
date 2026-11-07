@@ -3,6 +3,9 @@ use super::*;
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolverRunProgress};
 use std::cell::RefCell;
 
+#[path = "graph/forest.rs"]
+mod forest;
+
 /// Bounded linear work inside the original Newton/time-step controls.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitConductionLinearControls {
@@ -40,8 +43,9 @@ pub(super) enum LinearTopology {
 ///
 /// This uses the same enthalpy residual, analytic conductivity/temperature
 /// derivatives, line search, events, heat/entropy accounts and adaptive owner
-/// as `ImplicitConductionChain`. Only its linear algebra differs: bounded,
-/// diagonally preconditioned FGMRES replaces the chain's O(n) direct solve.
+/// as `ImplicitConductionChain`. Bounded FGMRES replaces the chain's O(n)
+/// direct solve. Acyclic Jacobians use exact
+/// sparse forest preconditioning; cycles and unsafe pivots use diagonal scaling.
 pub struct ImplicitConductionGraph<'a> {
     inner: ImplicitConductionChain<'a>,
 }
@@ -72,7 +76,9 @@ impl<'a> ImplicitConductionGraph<'a> {
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         Ok(Self {
-            inner: self.inner.with_boundary_exchanges(thermal, reservoirs, ambient, checkpoint)?,
+            inner: self
+                .inner
+                .with_boundary_exchanges(thermal, reservoirs, ambient, checkpoint)?,
         })
     }
 
@@ -103,7 +109,9 @@ impl<'a> ImplicitConductionGraph<'a> {
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         Ok(Self {
-            inner: self.inner.with_scheduled_implicit_advection(thermal, flow, schedule, checkpoint)?,
+            inner: self
+                .inner
+                .with_scheduled_implicit_advection(thermal, flow, schedule, checkpoint)?,
         })
     }
 
@@ -115,7 +123,9 @@ impl<'a> ImplicitConductionGraph<'a> {
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         Ok(Self {
-            inner: self.inner.with_implicit_advection_schedule(thermal, schedule, checkpoint)?,
+            inner: self
+                .inner
+                .with_implicit_advection_schedule(thermal, schedule, checkpoint)?,
         })
     }
 
@@ -128,7 +138,9 @@ impl<'a> ImplicitConductionGraph<'a> {
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         Ok(Self {
-            inner: self.inner.with_implicit_advection_entropy(thermal, checkpoint)?,
+            inner: self
+                .inner
+                .with_implicit_advection_entropy(thermal, checkpoint)?,
         })
     }
 
@@ -333,7 +345,10 @@ impl<'a> ImplicitConductionGraph<'a> {
         workspace: &mut ImplicitConductionWorkspace,
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<
-        (DepositionSimulation<'m>, adaptive::AdaptiveImplicitConductionReport),
+        (
+            DepositionSimulation<'m>,
+            adaptive::AdaptiveImplicitConductionReport,
+        ),
         adaptive::AdaptiveImplicitConductionError,
     > {
         self.inner
@@ -347,6 +362,7 @@ impl<'a> ImplicitConductionGraph<'a> {
 struct GraphOperator<'a, 'c> {
     diagonal: &'a [f64],
     entries: &'a [(usize, usize, f64)],
+    forest: Option<forest::Forest>,
     checkpoint: &'a RefCell<&'c mut dyn FnMut() -> Result<(), DepositionError>>,
     error: &'a RefCell<Option<DepositionError>>,
 }
@@ -403,6 +419,13 @@ impl LinearOp for GraphOperator<'_, '_> {
 }
 impl FlexiblePreconditioner for GraphOperator<'_, '_> {
     fn apply(&self, _: usize, residual: &[f64], output: &mut [f64]) {
+        if let Some(forest) = &self.forest {
+            if forest.apply(residual, output, || self.poll()) || self.error.borrow().is_some() {
+                return;
+            }
+            // Unsafe preconditioner arithmetic does not reject the original
+            // system. Retry this action with the existing diagonal scaling.
+        }
         for (i, ((out, &r), &d)) in output
             .iter_mut()
             .zip(residual)
@@ -433,15 +456,29 @@ pub(super) fn solve(
     report: &mut ImplicitConductionReport,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<(), ImplicitConductionError> {
+    if report.linear_iterations >= controls.maximum_iterations {
+        return Err(DepositionError::Budget("conduction Krylov iterations").into());
+    }
+    let entries = workspace
+        .graph_entries
+        .as_deref()
+        .ok_or(ImplicitConductionError::Invalid("missing graph Jacobian"))?;
+    let forest =
+        forest::Forest::factor(&workspace.diagonal, entries, checkpoint).map_err(|error| {
+            match error {
+                forest::FactorError::Capacity => {
+                    DepositionError::Budget("conduction forest allocation")
+                }
+                forest::FactorError::Checkpoint(error) => error,
+            }
+        })?;
     let error = RefCell::new(None);
     let checkpoint: &mut dyn FnMut() -> Result<(), DepositionError> = checkpoint;
     let checkpoint = RefCell::new(checkpoint);
     let operator = GraphOperator {
         diagonal: &workspace.diagonal,
-        entries: workspace
-            .graph_entries
-            .as_deref()
-            .ok_or(ImplicitConductionError::Invalid("missing graph Jacobian"))?,
+        entries,
+        forest,
         checkpoint: &checkpoint,
         error: &error,
     };

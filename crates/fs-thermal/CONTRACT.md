@@ -1775,7 +1775,15 @@ The graph Jacobian retains the analytic derivatives of both T(h) and k(h),
 including zero dT/dh on latent plateaus and energy-coordinate mass factors.
 It stores one diagonal and two off-diagonal contributions per physical link.
 The existing `fs-solver` FGMRES owner applies this generally nonsymmetric
-operator with diagonal preconditioning; no dense global matrix is assembled.
+operator without assembling a dense global matrix. Each current Jacobian is
+checked for acyclic off-diagonal support after combining parallel contributions.
+Forests use exact leaf elimination, retaining unequal directional derivatives,
+one-sided couplings and disconnected cells; active cycles or unsafe pivots retain
+diagonal preconditioning. Assembly and factorization take
+O(cells + Jacobian contributions), and each forest inverse action takes
+O(cells) without scratch allocation. Unsafe
+inverse arithmetic also falls back to diagonal scaling. The Krylov solver still
+verifies the true residual of the original, uncombined contributions.
 Each operator action is O(cells + links), and bounded restart storage is
 O(cells * restart + links). Original map-based physical bookkeeping remains.
 The direct `ImplicitConductionChain` path retains its O(cells) tridiagonal solve.
@@ -1789,7 +1797,9 @@ Cancellation and exhausted budgets publish no physical candidate. Linear
 residual convergence never replaces the original joule acceptance gates.
 
 Regression coverage includes stiff star equilibration with unequal capacities,
-independent endpoint elimination, energy and entropy accounts, latent branches,
+independent endpoint elimination, a manufactured 49-cell branched endpoint with
+parallel contacts and a one-iteration linear budget, energy and entropy accounts,
+latent branches,
 active cycles and parallel links, an isolated cell, asymmetric covered areas,
 the original-residual Jacobian and transpose, adaptive analytical diffusion,
 shared work budgets and cancellation. Geometry and reference masses remain

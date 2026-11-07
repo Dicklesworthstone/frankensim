@@ -230,6 +230,75 @@ fn stiff_star_matches_independent_unequal_capacity_endpoint_and_conserves_heat()
 }
 
 #[test]
+fn stiff_branched_network_with_parallel_contacts_needs_one_krylov_iteration() {
+    let law = Law {
+        plateau: false,
+        nonlinear: false,
+    };
+    let count = 49;
+    let dt = 1000.0;
+    let masses: Vec<_> = (0..count)
+        .map(|i| 0.5 + 0.25 * ((5 * i) % 11) as f64)
+        .collect();
+    let expected: Vec<_> = (0..count)
+        .map(|i| 400.0 + (((7 * i) % 13) as f64 - 6.0) / dt)
+        .collect();
+    let mut edges = Vec::new();
+    // Cell IDs do not follow a path. Every seventh branch has an additional
+    // physical contact, including the opposite stored endpoint orientation.
+    for i in 1..count {
+        edges.push(((i - 1) / 2, i, 0.25 * (i % 5) as f64));
+        if i % 7 == 0 {
+            edges.push((i, (i - 1) / 2, 0.5));
+        }
+    }
+    // G1 manufactured backward-Euler endpoint from independent pairwise heat
+    // balances, not from the production Jacobian or its factorization.
+    let mut initial = expected.clone();
+    for &(a, b, resistance) in &edges {
+        let heat = dt * (expected[a] - expected[b]) / (1.0 + resistance);
+        initial[a] += heat / masses[a];
+        initial[b] -= heat / masses[b];
+    }
+    let (thermal, observer) = setup(&law, &initial, &masses, &edges);
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(1), &law)],
+        ImplicitConductionLinearControls {
+            maximum_iterations: 1,
+            ..Default::default()
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let (next, report) = graph
+        .advance_to(
+            &thermal,
+            dt,
+            ImplicitConductionControls {
+                minimum_dt_s: dt,
+                maximum_halvings: 0,
+                cell_tolerance_j: 2e-8,
+                ..controls(dt)
+            },
+            &mut ImplicitConductionWorkspace::new(count).unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
+    for (i, &temperature) in expected.iter().enumerate() {
+        near(next.temperature_k(id(i)).unwrap(), temperature, 2e-9);
+    }
+    assert_eq!(report.linear_iterations, 1);
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(report.rejected_intervals, 0);
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    near(report.energy.residual_j, 0.0, 1e-8);
+    assert!(report.entropy.conduction_generation_j_k > 0.0);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
 fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_calorics() {
     let law = Law {
         plateau: true,
@@ -313,6 +382,7 @@ fn branched_latent_transport_and_cyclic_nonlinear_jacobian_keep_original_caloric
     let operator = GraphOperator {
         diagonal: &workspace.diagonal,
         entries: workspace.graph_entries.as_deref().unwrap(),
+        forest: None,
         checkpoint: &checkpoint,
         error: &error,
     };
