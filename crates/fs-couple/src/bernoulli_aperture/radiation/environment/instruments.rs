@@ -4,6 +4,7 @@ use super::{BaffledEnvironment, BaffledOutletBinding, bind_baffled_environment,
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::radiation::RadiationFlange;
 use crate::bernoulli_aperture::fractional::FractionalTubePolicy;
+use crate::bernoulli_aperture::viscothermal::ViscothermalTimeOptions;
 use crate::bernoulli_aperture::two_sided::{
     ApertureDuctSpec, LoadedAperture, TwoSidedAperture, TwoSidedLimits,
 };
@@ -199,25 +200,40 @@ impl crate::flue_loop::FlueVoice {
         flanges: &[RadiationFlange],
         voice_seed: u64, voice_index: u32, gate: &CancelGate,
     ) -> Result<(Self, BaffledEnvironment), crate::flue_loop::FlueError> {
+        Self::from_baffled_environment_flanges_with_time_options(card, displacement_gain,
+            seed_amplitude_rel, geometry, source, walls,
+            ViscothermalTimeOptions { fractional: policy, ..Default::default() },
+            radiation, flanges, voice_seed, voice_index, gate)
+    }
+
+    /// Compose the same outlet reaction, observer environment and optional
+    /// material walls with an explicit distributed viscothermal sampling rule.
+    /// The original gas/spectrum, loss bands, fractional phase budget and all
+    /// source admission remain unchanged. The exact rule reaches both viscous
+    /// and thermal legs through the shared network constructor.
+    ///
+    /// # Errors
+    /// Original source, radiation, material and selected sampling admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_baffled_environment_flanges_with_time_options(
+        card: Option<&fs_aeroac::jetcard::JetCard>, displacement_gain: f64,
+        seed_amplitude_rel: f64, geometry: crate::flue_loop::FlueGeometry,
+        source: FlueNetworkSpec, walls: Option<MaterialWallInput>,
+        options: ViscothermalTimeOptions, radiation: DuctRadiationSpec,
+        flanges: &[RadiationFlange],
+        voice_seed: u64, voice_index: u32, gate: &CancelGate,
+    ) -> Result<(Self, BaffledEnvironment), crate::flue_loop::FlueError> {
         use crate::flue_loop::FlueError;
         poll(gate).map_err(FlueError::Physics)?;
         let card = card.ok_or(FlueError::NoCard)?;
         let rate = radiation.reconstruction.mechanics_rate_hz();
-        if policy.is_some_and(|p| p.maximum_frequency_hz < radiation.receiver.maximum_frequency_hz) {
+        if options.fractional.is_some_and(|p| p.maximum_frequency_hz < radiation.receiver.maximum_frequency_hz) {
             return Err(FlueError::Physics(super::invalid("fractional propagation must cover the exterior radiation band")));
         }
         let (source, environment) = source.with_baffled_environment_flanges(radiation, flanges, gate)
             .map_err(FlueError::Physics)?;
-        let voice = match (policy, walls) {
-            (Some(policy), walls) => Self::from_fractional_network(Some(card),
-                displacement_gain, seed_amplitude_rel, geometry, source, walls,
-                policy, rate, voice_seed, voice_index, gate)?,
-            (None, Some(walls)) => Self::from_material_network(Some(card),
-                displacement_gain, seed_amplitude_rel, geometry, source, walls,
-                rate, voice_seed, voice_index, gate)?,
-            (None, None) => Self::from_network(Some(card), displacement_gain,
-                seed_amplitude_rel, geometry, source, rate, voice_seed, voice_index, gate)?,
-        };
+        let voice = Self::from_network_with_time_options(Some(card), displacement_gain,
+            seed_amplitude_rel, geometry, source, walls, rate, voice_seed, voice_index, options, gate)?;
         poll(gate).map_err(FlueError::Physics)?;
         Ok((voice, environment))
     }

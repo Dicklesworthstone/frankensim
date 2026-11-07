@@ -14,6 +14,39 @@ fn source() -> String {
 }
 
 #[test]
+fn explicit_distributed_sampling_reaches_file_rendered_regional_pressure() {
+    use fs_vfit::relaxation::RelaxationSampling;
+    let base = source();
+    let gate = CancelGate::new_clock_free();
+    let mut signals = Vec::new();
+    for (suffix, sampling) in [
+        ("", RelaxationSampling::BilinearMidpoint),
+        (" bilinear-midpoint", RelaxationSampling::BilinearMidpoint),
+        (" exact-held-flow", RelaxationSampling::ExactHeldFlow),
+    ] {
+        let text = base.replace("viscothermal sections 1", &format!("viscothermal sections 1{suffix}"));
+        let file = FlueFilePerformance::from_bytes(text.as_bytes(), 37, &gate).unwrap();
+        let network = file.renderer().voice().network().unwrap();
+        assert_eq!(network.source().gases[1].temperature, 308.15);
+        assert_eq!(network.source().viscothermal[0].section, 1);
+        assert_eq!(network.viscothermal_sections()[0].loss.sampling(), sampling);
+        let mut renderer = file.into_renderer();
+        let mut signal = vec![0.0; 1024];
+        for block in signal.chunks_mut(37) { renderer.block(block).unwrap(); }
+        assert!(signal.iter().all(|x| x.is_finite()));
+        assert!(signal.iter().any(|x| x.abs() > 1e-12));
+        signals.push(signal);
+    }
+    assert_eq!(signals[0], signals[1]);
+    assert_ne!(signals[0], signals[2]);
+    let exact = base.replace("viscothermal sections 1", "viscothermal sections 1 exact-held-flow");
+    let mut partitioned = FlueFilePerformance::from_bytes(exact.as_bytes(), 1, &gate).unwrap().into_renderer();
+    let mut signal = vec![0.0; 1024];
+    for sample in &mut signal { partitioned.block(core::slice::from_mut(sample)).unwrap(); }
+    assert_eq!(signal, signals[2]);
+}
+
+#[test]
 fn independent_aperture_card_reaches_pcm_and_reports_actual_geometry() {
     let baseline = articulated_source();
     let text = baseline.replace("mouth_radiation -0.3 0 4 4",

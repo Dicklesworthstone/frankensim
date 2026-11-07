@@ -4157,3 +4157,22 @@ nonlinear restoring-effort peaks with changing waveforms, and source-clock,
 anchor, branch-distance, resolution and cancellation refusals. These tests are
 authored but not claimed executed without the complete `fs-couple` dependency
 closure. Formatting and bounded native-API/physics review passed.
+
+## File-selected distributed viscothermal sampling in flues
+
+The existing flue performance source accepts an optional final sampling token
+on its `viscothermal` header: `bilinear-midpoint` or `exact-held-flow`. This
+works after `none`, a tube's `CELLS MIN_HZ MAX_HZ`, or `sections COUNT` followed
+by the original addressed `loss_section` records. Omission selects the same
+midpoint arithmetic as legacy files; unsupported or additional tokens refuse.
+The selection covers both viscous series and thermal shunt memories of every
+selected physical section.
+
+One `ViscothermalTimeOptions` value carries that choice and the existing
+fractional transit policy into the original network constructor. The shared
+baffled-environment constructor accepts the same options, so source-bound
+material walls, outlet flanges and reaction/observer composition cannot reset
+the selected distributed memory. Their own constitutive and radiation laws
+remain separately selected. Regional gases, physical Foster spectra, source
+bands, fit/scattering gates and interval-mean work ports retain their original
+owners. Exact selection adds no acoustic filter or new fitted coefficients.

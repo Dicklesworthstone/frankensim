@@ -73,6 +73,28 @@ fn loaded(text: &str, pack: &NormalizedMaterialCardPack, block: usize) -> FlueFi
             Ok(pack.clone())
         }).unwrap()
 }
+
+#[test]
+fn exact_distributed_loss_survives_source_walls_and_baffled_reaction() {
+    use fs_vfit::relaxation::RelaxationSampling;
+    let material = pack(1000.0, 1e6, None, 100_000.0);
+    let base = source();
+    let text = base.replace("viscothermal sections 2", "viscothermal sections 2 exact-held-flow");
+    let file = loaded(&text, &material, 37);
+    let network = file.renderer().voice().network().unwrap();
+    assert_eq!(file.wall_records().len(), 1);
+    assert_eq!(file.radiation_bindings().len(), 1);
+    assert_eq!(network.material_walls()[0].source().material.card_identity(), material.card().content_hash());
+    assert_eq!(network.material_walls()[0].source().node, 1);
+    assert_eq!(network.viscothermal_sections().len(), 2);
+    assert!(network.viscothermal_sections().iter()
+        .all(|section| section.loss.sampling() == RelaxationSampling::ExactHeldFlow));
+    let actual = trace(file);
+    let original = trace(loaded(&base, &material, 37));
+    assert!(actual.maximum_wall_energy > 0.0 && actual.maximum_terminal_energy > 0.0);
+    assert_ne!(actual.incoming, original.incoming);
+    assert_ne!(actual.pressure, original.pressure);
+}
 struct Trace {
     pressure: Vec<f64>,
     incoming: Vec<f64>,

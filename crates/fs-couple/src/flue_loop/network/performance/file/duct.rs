@@ -4,7 +4,7 @@ use super::*;
 use crate::bernoulli_aperture::radiation::RadiationFlange;
 use crate::flue_loop::network::performance::FlueRadiatingOutlet;
 use fs_vfit::impedance::SeriesImpedanceSpec;
-use fs_vfit::relaxation::RelaxationImpedanceSpec;
+use fs_vfit::relaxation::{RelaxationImpedanceSpec, RelaxationSampling};
 
 pub(super) struct Input {
     pub graph: TubeNetworkSpec,
@@ -12,6 +12,20 @@ pub(super) struct Input {
     pub inner: Vec<HoleInnerLength>,
     explicit_network: bool,
 }
+
+// One choice applies to every addressed viscous/thermal pair. It changes the
+// shared discrete memory law, never the gas, physical spectrum or fit budget.
+fn read_loss_sampling(row: &mut Row<'_>) -> Result<RelaxationSampling, FlueInputError> {
+    match row.fields.next() {
+        None | Some("bilinear-midpoint") => Ok(RelaxationSampling::BilinearMidpoint),
+        Some("exact-held-flow") => Ok(RelaxationSampling::ExactHeldFlow),
+        Some(_) => Err(bad(row.line,
+            "viscothermal sampling requires bilinear-midpoint or exact-held-flow")),
+    }
+}
+
+#[cfg(test)]
+mod sampling_tests;
 
 /// An open side hole's inner length, from `inner BORE_RADIUS_M` on its
 /// chimney's `duct_section` row (before any `gas`):
@@ -268,13 +282,20 @@ impl Input {
         Ok(Self { graph, gases, inner, explicit_network })
     }
 
-    pub fn read_losses(&self, rows: &mut Rows<'_>) -> Result<Vec<ViscothermalSectionSpec>, FlueInputError> {
-        let record = rows.record("viscothermal")?;
-        if record == "none" { return Ok(Vec::new()); }
-        let mut row = Row { fields: record.split_ascii_whitespace(), line: rows.line };
+    pub fn read_losses(&self, rows: &mut Rows<'_>)
+        -> Result<(Vec<ViscothermalSectionSpec>, RelaxationSampling), FlueInputError>
+    {
+        let mut row = rows.row("viscothermal")?;
+        if row.fields.clone().next() == Some("none") {
+            row.fields.next();
+            let sampling = read_loss_sampling(&mut row)?;
+            row.end()?;
+            return Ok((Vec::new(), sampling));
+        }
         if row.fields.clone().next() == Some("sections") {
             row.fields.next();
             let count: usize = row.number()?;
+            let sampling = read_loss_sampling(&mut row)?;
             row.end()?;
             if count > self.graph.sections.len() {
                 return Err(bad(rows.line, "viscothermal selection exceeds the physical section count"));
@@ -291,15 +312,16 @@ impl Input {
                 row.end()?;
                 selections.push(loss);
             }
-            Ok(selections)
+            Ok((selections, sampling))
         } else {
             if self.explicit_network {
                 return Err(bad(row.line, "network losses require none or sections COUNT with addressed loss_section records"));
             }
             let loss = ViscothermalSectionSpec { section: 0, cells: row.number()?,
                 minimum_frequency_hz: row.scalar()?, maximum_frequency_hz: row.scalar()? };
+            let sampling = read_loss_sampling(&mut row)?;
             row.end()?;
-            Ok(vec![loss])
+            Ok((vec![loss], sampling))
         }
     }
 

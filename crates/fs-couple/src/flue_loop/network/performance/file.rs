@@ -44,7 +44,7 @@ use crate::bernoulli_aperture::radiation::environment::multiport::input::{
 use crate::bernoulli_aperture::radiation::environment::multiport::source::{
     ComputedBaffledInput, ComputedBaffledRecord, MimoSourceInput, MimoSourceRecord,
 };
-use crate::bernoulli_aperture::viscothermal::ViscothermalSectionSpec;
+use crate::bernoulli_aperture::viscothermal::{ViscothermalSectionSpec, ViscothermalTimeOptions};
 use crate::flue_loop::network::{FlueNetworkSpec, FlueSourcePaths};
 use crate::flue_loop::window_radiation::{WindowFlux, WindowRadiationLoad, WindowRadiationSampling, cut_up_piston};
 use crate::flue_loop::{FlueError, FlueGeometry, FlueVoice, JetNoiseSpec};
@@ -317,6 +317,15 @@ impl FlueFilePerformance {
     /// owner covers half of each adjacent physical section, leaving unselected
     /// and endpoint half-strips rigid. `walls none` or no row retains rigid walls.
     ///
+    /// The `viscothermal` header accepts a trailing `exact-held-flow` or
+    /// `bilinear-midpoint` after `none`, `sections COUNT`, or a tube's
+    /// `CELLS MIN_HZ MAX_HZ`. The selection applies to every declared viscous
+    /// and thermal section, including when material walls and compact outlet
+    /// reaction are present.
+    /// Omission retains the original midpoint result. Exact memory uses the
+    /// same source spectrum, sampled-fit/scattering gates and interval-mean
+    /// pressure/flow ports; fractional travel and physical bands are unchanged.
+    ///
     /// Optional `boundaries COUNT` follows the wall records and binds every
     /// `duct_node driven` in ascending node order to a material cantilever slit.
     /// Each boundary has the following records (all numeric quantities are SI):
@@ -570,7 +579,8 @@ impl FlueFilePerformance {
         let policy = FractionalTubePolicy { maximum_frequency_hz: row.scalar()?,
             maximum_summed_phase_error_rad: row.scalar()? };
         row.end()?;
-        let viscothermal = duct.read_losses(&mut rows)?;
+        let (viscothermal, sampling) = duct.read_losses(&mut rows)?;
+        let time_options = ViscothermalTimeOptions { sampling, fractional: Some(policy) };
         let mut row = rows.row("receiver")?;
         let receiver = CircularOutletReceiver { position_m: [row.scalar()?,row.scalar()?,row.scalar()?],
             radial_rings: row.number()?, angular_points: row.number()?, maximum_frequency_hz: row.scalar()? };
@@ -689,8 +699,8 @@ impl FlueFilePerformance {
             }
         };
         let (voice, radiation_bindings) = if radiation_reaction {
-            let (voice, environment) = FlueVoice::from_baffled_environment_flanges(Some(&card),
-                displacement_gain, seed_amplitude_rel, geometry, source, walls, Some(policy),
+            let (voice, environment) = FlueVoice::from_baffled_environment_flanges_with_time_options(Some(&card),
+                displacement_gain, seed_amplitude_rel, geometry, source, walls, time_options,
                 radiation(), &outlet_flanges, voice_seed, voice_index, gate)
                 .map_err(FlueInputError::Physics)?;
             for binding in environment.bindings() {
@@ -701,8 +711,8 @@ impl FlueFilePerformance {
             }
             (voice, environment.into_parts().1)
         } else {
-            (FlueVoice::from_fractional_network(Some(&card), displacement_gain, seed_amplitude_rel,
-                geometry, source, walls, policy, mechanics_rate_hz, voice_seed, voice_index, gate)
+            (FlueVoice::from_network_with_time_options(Some(&card), displacement_gain, seed_amplitude_rel,
+                geometry, source, walls, mechanics_rate_hz, voice_seed, voice_index, time_options, gate)
                 .map_err(FlueInputError::Physics)?, Vec::new())
         };
         let held_pressure_pa = held_blowing_pressure(&schedule, control_source.as_ref());
