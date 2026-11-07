@@ -1,88 +1,12 @@
 //! Original ordered-interface spectra reach the native coupled load line.
 use fs_couple::cohesive_contact::{CohesiveContactConfig, CohesiveLoadLine};
-use fs_evidence::ValidityDomain;
-use fs_matdb::{
-    ClaimSet, InterfaceSystemCard, InterpolationPolicy, MaterialStateId, PropertyClaim,
-    PropertyKey, PropertyValue, Provenance, QueryPoint, SurfaceSpec, SystemContext,
-    UncertaintyModel,
-};
-use fs_material::cohesive::relaxation::{ViscoelasticBondLimits, source::*};
+use fs_matdb::QueryPoint;
+use fs_material::cohesive::relaxation::source::*;
 use fs_material::state_point::MaterialPropertySelection;
-use fs_qty::{Dims, Length, Pressure, Time};
+#[path = "viscoelastic_bond_source/common.rs"]
+mod common;
+use common::{card, limits};
 
-fn limits() -> ViscoelasticBondLimits {
-    ViscoelasticBondLimits {
-        maximum_jump_m: 1e-4,
-        maximum_rate_m_s: 1.0,
-        maximum_elapsed_s: 2.0,
-    }
-}
-fn card(missing_shear: bool, wrong_units: bool) -> InterfaceSystemCard {
-    let mut claims = ClaimSet::new();
-    let mut parameters = vec![(BONDLINE_THICKNESS_PROPERTY.to_owned(), Length::DIMS, 0.001)];
-    for (prefix, e0, e1, tau) in [
-        (NORMAL_RELAXATION_PREFIX, 1e6, 2e6, 0.01),
-        (SHEAR_RELAXATION_PREFIX, 4e5, 8e5, 0.025),
-    ] {
-        if missing_shear && prefix == SHEAR_RELAXATION_PREFIX {
-            continue;
-        }
-        parameters.extend([
-            (format!("{prefix}_branch_count"), Dims::NONE, 1.0),
-            (format!("{prefix}_equilibrium_modulus"), Pressure::DIMS, e0),
-            (format!("{prefix}_modulus_1"), Pressure::DIMS, e1),
-            (
-                format!("{prefix}_time_1"),
-                if wrong_units {
-                    Length::DIMS
-                } else {
-                    Time::DIMS
-                },
-                tau,
-            ),
-        ]);
-    }
-    for (name, dims, value) in parameters {
-        claims
-            .insert_claim(PropertyClaim {
-                key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
-                uncertainty: UncertaintyModel::Unstated,
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: vec![],
-                provenance: Provenance {
-                    source: "manufactured intact joint relaxation; not measured adhesive data"
-                        .into(),
-                    license: "CC0-1.0".into(),
-                    artifact: None,
-                },
-            })
-            .unwrap();
-    }
-    let surface = |name: &str| SurfaceSpec {
-        material: MaterialStateId {
-            chemistry: name.into(),
-            phase: "solid".into(),
-            process: "specified prepared substrate".into(),
-            revision: 1,
-        },
-        texture_frame: name.into(),
-    };
-    InterfaceSystemCard::assemble(
-        surface("A"),
-        surface("B"),
-        SystemContext {
-            medium: "fixed intact thin adhesive".into(),
-            third_body: None,
-            environment: "fixed temperature".into(),
-            history: "declared cure and normal restraint".into(),
-        },
-        claims,
-        vec![],
-    )
-    .unwrap()
-}
 #[test]
 fn sourced_relaxation_drives_native_bonded_motion_and_retains_domain_refusals() {
     let card = card(false, false);
@@ -211,4 +135,164 @@ fn incomplete_and_dimensionally_wrong_interface_spectra_do_not_become_bulk_defau
             .is_err()
         );
     }
+}
+
+#[test]
+fn pinned_temperature_refresh_preserves_memory_before_native_motion_uses_hot_spectra() {
+    let card = common::temperature_card();
+    let source = resolve_viscoelastic_bond(
+        &card,
+        &QueryPoint::new().with("T", 280.0).unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,
+        limits(),
+    )
+    .unwrap();
+    let hot = source.at_temperature(&card, "T", 320.0).unwrap();
+    source.require_temperature_successor(&hot, "T").unwrap();
+    assert_eq!(source.surfaces(), hot.surfaces());
+    assert_eq!(
+        source.resolved().card_identity(),
+        hot.resolved().card_identity()
+    );
+    for (a, b) in source
+        .resolved()
+        .properties()
+        .iter()
+        .zip(hot.resolved().properties())
+    {
+        assert_eq!(a.requirement(), b.requirement());
+        assert_eq!(a.answer().receipt.selected, b.answer().receipt.selected);
+    }
+    let config = CohesiveContactConfig {
+        max_iterations: 8,
+        max_material_evaluations: 16,
+        max_backtracks: 8,
+        jump_absolute_tolerance_m: 1e-14,
+        jump_relative_tolerance: 1e-11,
+        maximum_jump_increment_m: 1e-4,
+        maximum_force_n: 100.0,
+        material_energy_tolerance_j_m2: 1e-9,
+    };
+    let mut native = CohesiveLoadLine::new(
+        1e-4,
+        [[1e-8, 2e-9, 0.0], [2e-9, 8e-9, 1e-9], [0.0, 1e-9, 7e-9]],
+        config,
+    )
+    .unwrap();
+    let dt = 0.001;
+    let cold_ramp = source.law().prepare(dt).unwrap();
+    let mut before = source.law().bonded_point();
+    for free in [
+        [1e-5, -5e-6, 3e-6],
+        [-3e-6, 2e-6, 8e-6],
+        [4e-6, -6e-6, 2e-6],
+    ] {
+        before = native
+            .trial_relaxation(&before, &cold_ramp, free, || true)
+            .unwrap()
+            .material
+            .point;
+    }
+    let transfer = before.transfer_temperature(hot.law(), 1e-10).unwrap();
+    assert_eq!(transfer.point.jump_m(), before.jump_m());
+    assert_eq!(transfer.point.elapsed_s(), before.elapsed_s());
+    assert!(transfer.parameter_work_j_m2 < 0.0);
+    assert!(
+        (transfer.stored_change_j_m2
+            - (transfer.point.stored_energy_j_m2() - before.stored_energy_j_m2()))
+        .abs()
+            < 1e-12
+    );
+    assert!(transfer.defect_j_m2.abs() < 1e-12);
+    let hot_ramp = hot.law().prepare(dt).unwrap();
+    let free = [5e-6, -4e-6, 1e-6];
+    let continued = native
+        .trial_relaxation(&transfer.point, &hot_ramp, free, || true)
+        .unwrap();
+    let cold = native
+        .trial_relaxation(&before, &cold_ramp, free, || true)
+        .unwrap();
+    let reset = native
+        .trial_relaxation(&hot.law().bonded_point(), &hot_ramp, free, || true)
+        .unwrap();
+    assert_ne!(continued.material.traction_pa, cold.material.traction_pa);
+    assert_ne!(continued.material.traction_pa, reset.material.traction_pa);
+    assert_eq!(
+        continued.material.point.elapsed_s(),
+        before.elapsed_s() + dt
+    );
+    assert!(continued.material.viscous_dissipated_j_m2 > 0.0);
+    assert!(
+        (continued.material.work_j_m2
+            - continued.material.stored_change_j_m2
+            - continued.material.viscous_dissipated_j_m2)
+            .abs()
+            < 1e-10
+    );
+}
+
+#[test]
+fn temperature_refresh_refuses_untyped_axis_source_replacement_and_geometry_change() {
+    let query = QueryPoint::new().with("T", 280.0).unwrap();
+    let interface = common::temperature_card();
+    let source = resolve_viscoelastic_bond(
+        &interface,
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+        limits(),
+    )
+    .unwrap();
+    for temperature in [279.0, 321.0, 0.0, f64::NAN] {
+        assert!(source.at_temperature(&interface, "T", temperature).is_err());
+    }
+    assert!(
+        source
+            .at_temperature(&interface, "missing_axis", 300.0)
+            .is_err()
+    );
+    let untyped = resolve_viscoelastic_bond(
+        &card(false, false),
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+        limits(),
+    )
+    .unwrap();
+    assert!(
+        untyped
+            .at_temperature(&card(false, false), "T", 300.0)
+            .is_err()
+    );
+    assert!(source.require_temperature_successor(&untyped, "T").is_err());
+    let mut other_limits = limits();
+    other_limits.maximum_elapsed_s = 1.0;
+    let restricted = resolve_viscoelastic_bond(
+        &interface,
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+        other_limits,
+    )
+    .unwrap();
+    assert!(
+        source
+            .require_temperature_successor(&restricted, "T")
+            .is_err()
+    );
+    let expanding = common::expanding_temperature_card();
+    let changing_geometry = resolve_viscoelastic_bond(
+        &expanding,
+        &query,
+        MaterialPropertySelection::SingleClaimOnly,
+        limits(),
+    )
+    .unwrap();
+    assert!(
+        changing_geometry
+            .at_temperature(&expanding, "T", 320.0)
+            .is_err()
+    );
+    assert!(source.at_temperature(&expanding, "T", 300.0).is_err());
+    // Every failed requery leaves the original claim plan and point retryable.
+    let retry = source.at_temperature(&interface, "T", 320.0).unwrap();
+    assert_eq!(retry.law().thickness_m(), source.law().thickness_m());
+    assert_eq!(retry.law().normal_spectrum().terms[0].1, 0.002);
 }

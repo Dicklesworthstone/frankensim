@@ -8279,8 +8279,9 @@ Independent effective normal and shear `GeneralizedMaxwell` spectra are required
 the normal spectrum already represents the specified joint's lateral restraint.
 No Poisson-ratio assumption turns bulk E/K into interface normal data. Both shear
 directions share the supplied shear spectrum. Compression remains the same intact
-material; debonding, contact, friction, healing and temperature evolution are outside
-this law. It cannot be attached to a damaged `CohesivePoint` or reset its history.
+material; debonding, contact, friction and healing are outside this law. It cannot
+be attached to a damaged `CohesivePoint` or reset its history. Temperature-dependent
+coefficients use the explicit held-jump continuation below.
 
 The original `PronyState` and exact `PronyRamp` own memory and physical heat.
 `prepare(dt)` evaluates exponential ramp coefficients once per law/duration,
@@ -8317,6 +8318,39 @@ Focused numerical tests check independent relaxation formulas, the original scal
 Maxwell owner, reversals, subdivision, shear covariance, tangents, retryable domain
 refusals, cross-axis compliance and bonded-mass work/heat closure. Fixtures are
 manufactured coefficients, not a measured epoxy or silicone calibration.
+
+### Held-jump temperature continuation of adhesive relaxation
+
+`ResolvedViscoelasticBond::at_temperature` requeries the same selected coefficient
+claims on an original, dimensionally declared Kelvin axis. Its
+`require_temperature_successor` guard preserves the original ordered surfaces,
+card identity, complete claim plan, branch counts and indexed identities,
+thickness, model-use limits, and every non-temperature query coordinate.
+A coefficient curve cannot silently change geometry or add/drop/reorder memory
+branches. Claim-domain refusals remain with the original material query owner.
+
+After that source guard, `ViscoelasticBondPoint::transfer_temperature` retains each
+physical Maxwell spring strain, total jump, elapsed time, past mechanical work
+and physical heat. Only spring coefficients and subsequent relaxation kinetics
+change. At fixed strains it accounts for signed parameter work
+`h/2 (delta(E_inf) epsilon^2 + sum delta(E_j) q_j^2)` separately from mechanical
+work and heat. An independent spring-force storage-change calculation uses
+compensated product differences; unchanged springs contribute exact zero.
+Small changed-mode work therefore survives an unrelated large stored inventory.
+A change of relaxation times alone has exact zero parameter/storage work and
+leaves endpoint traction unchanged. Relaxation times may cross without sorting
+the declared branches or replacing their internal state.
+
+The returned `ViscoelasticBondTemperatureStep` contains the successor point,
+parameter work, storage change and their checked defect per original area.
+Every failure leaves the original point retryable. The caller prepares the
+successor law for its next actual mechanical interval and owns the signed
+parameter-work destination. This is a coefficient continuation with held
+geometry and physical strain, not a caloric, entropy, thermal-expansion,
+fracture or thermorheological-simplicity calibration. No heat is inferred from
+the temperature change itself. Focused tests cover memory preservation,
+heating/cooling reversibility, kinetics-only continuation, branch-time crossing,
+small changed work beside large storage, and native load-line continuation.
 
 ## Solid-vapor constitutive laws
 

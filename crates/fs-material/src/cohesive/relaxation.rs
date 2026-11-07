@@ -6,7 +6,9 @@
 //! identify them. Bondline inertia and spatial lateral fields are neglected.
 //! The two shear coordinates are isotropic. Compression remains
 //! the same intact material. There is no fracture, contact opening, damage,
-//! healing, temperature transfer or finite-rotation interpretation.
+//! healing or finite-rotation interpretation. The explicit `temperature`
+//! continuation preserves original branch memory and accounts for coefficient
+//! work at held jump; it introduces no thermal strain or caloric model.
 //!
 //! The existing PronyState and exact PronyRamp own branch memory and physical
 //! heat. Surface work/storage/heat are h times their volume densities. Prepared
@@ -23,6 +25,10 @@ use super::{CohesiveError, finite, norm, positive};
 use crate::visco::{GeneralizedMaxwell, PronyRamp, PronyState};
 
 pub mod source;
+
+/// Held-jump temperature continuation of the original Maxwell spring strains.
+pub mod temperature;
+pub use temperature::ViscoelasticBondTemperatureStep;
 
 /// Explicit local model-use bounds, not inferred experimental qualification.
 #[derive(Debug, Clone, Copy, PartialEq)]

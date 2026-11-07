@@ -8,6 +8,8 @@ use crate::visco::GeneralizedMaxwell;
 use fs_matdb::{InterfaceSystemCard, QueryPoint, SurfaceSpec};
 use fs_qty::{Dims, Length, Pressure, QuantitySpec, Time};
 
+mod temperature;
+
 pub const BONDLINE_THICKNESS_PROPERTY: &str = "cohesive_bondline_thickness";
 pub const NORMAL_RELAXATION_PREFIX: &str = "cohesive_normal_relaxation";
 pub const SHEAR_RELAXATION_PREFIX: &str = "cohesive_shear_relaxation";
