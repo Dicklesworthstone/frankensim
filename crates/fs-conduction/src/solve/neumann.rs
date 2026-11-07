@@ -19,8 +19,8 @@ use fs_sparse::Coo;
 
 mod nonlinear;
 pub use nonlinear::{
-    MeanTemperatureNewtonConfig, solve_mean_temperature_newton,
-    solve_mean_temperature_newton_with_interfaces,
+    MeanTemperatureContactSolution, MeanTemperatureNewtonConfig, solve_mean_temperature_newton,
+    solve_mean_temperature_newton_with_contacts, solve_mean_temperature_newton_with_interfaces,
 };
 
 use super::{

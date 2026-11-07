@@ -1,5 +1,32 @@
 # CONTRACT: fs-conduction
 
+## Mean-constrained equilibrium with live contact sources
+
+`solve::solve_mean_temperature_newton_with_contacts` joins the existing
+mean-constrained Newton solve to `TemperatureContacts`. Each residual and
+line-search trial queries the original pinned contact sources at its actual
+ordered trace temperatures. Matching face means, pointwise matching and retained
+nonmatching quadrature keep their existing geometry and source owners. Fixed
+pressure, finish and medium coordinates are retained; their evolution is not
+inferred. Material contacts needing latent fractions still require original
+enthalpy coordinates and refuse this temperature-only entry point.
+
+The full tangent adds only `dK_contact/dT * T` to bulk, sheet and frozen-contact
+terms. Both reduced solves retain that feedback and the reference-column
+response, so enforcing the P1 volume mean does not change the solved law.
+Source-domain misses permit bounded Armijo backtracking without switching
+claims or extrapolating; other source failures abort. Initial and accepted heat
+operators must remain connected. Every original heat equation and global heat
+compatibility are checked, with no artificial reservoir reaction. The returned
+`MeanTemperatureContactSolution` retains the exact accepted contact evaluation
+alongside its physical conduction solution; no replacement endpoint solve runs.
+
+Focused G1 definitions in `tests/nonmatching_contact/newton.rs` cover analytic
+matching and unequal-trace equilibria, original source/pressure receipts, and
+independent inadmissible-full-step/admissible-half-step source-domain trials.
+These are discrete implementation checks, not experimental validation or an
+inference of the mean from conserved caloric energy.
+
 ## Mean-constrained contact assemblies
 
 `solve::solve_mean_temperature_with_interfaces` and

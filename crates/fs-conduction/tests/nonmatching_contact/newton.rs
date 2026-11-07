@@ -8,6 +8,10 @@ use fs_conduction::interface::temperature::steady::SteadyContactConfig;
 use fs_conduction::interface::temperature::steady::newton::{
     ContactSteadyNewtonSolution, SteadyContactNewtonConfig,
 };
+use fs_conduction::solve::{
+    MeanTemperatureContactSolution, MeanTemperatureNewtonConfig,
+    solve_mean_temperature_newton_with_contacts,
+};
 
 // Two unit slabs, k=10 W/(m K), with 300/330 K reservoirs. Each bulk
 // resistance is 0.1 K/W. This positive source law has deliberately strong
@@ -390,5 +394,393 @@ fn g0_newton_work_source_and_cancellation_refusals_are_transactional() {
         assert_eq!(initial, before);
         let solved = set.solve_steady_newton(cx, problem, &initial, config()).unwrap();
         check_solution(cx, problem, split, &card, &set, &solved);
+    });
+}
+
+fn mean_boundary(mesh: &ConductionMesh) -> ThermalBoundary {
+    ThermalBoundaryBuilder::new(mesh)
+        .region(
+            "out",
+            |f| on_box_face(f.centroid[0], 0.0),
+            ThermalBc::neumann(100.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "in",
+            |f| on_box_face(f.centroid[0], 2.0),
+            ThermalBc::neumann(-100.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap()
+}
+
+fn mean_config(initial: &[f64]) -> MeanTemperatureNewtonConfig {
+    let mut result = MeanTemperatureNewtonConfig::default();
+    result.initial_temperature = Some(initial.to_vec());
+    result.linear.tolerance = 1e-12;
+    result.linear.max_iterations = 2048;
+    result.linear.restart = 64;
+    result.stop.residual_rtol = 1e-12;
+    result.stop.residual_atol = 1e-9;
+    result.stop.step_atol = 0.0;
+    result.stop.max_iterations = 12;
+    result
+}
+
+// Independent affine states with mean 315 K. The Neumann boundaries do not
+// fix the far-end temperatures: trace temperature and bulk heat are separate.
+fn mean_field(mesh: &ConductionMesh, split: usize, ta: f64, heat: f64) -> Vec<f64> {
+    mesh.positions()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let trace = if i < split { ta } else { 630.0 - ta };
+            trace + 0.1 * heat * (p[0] - 1.0)
+        })
+        .collect()
+}
+
+fn mean_residual(
+    cx: &fs_exec::Cx<'_>,
+    problem: ConductionProblem<'_>,
+    set: &TemperatureContacts<'_, '_>,
+    temperature: &[f64],
+) -> Vec<f64> {
+    let physical = set.evaluate(cx, problem.boundary, temperature).unwrap();
+    let system = assemble_operator_with_interfaces(
+        cx,
+        problem.mesh,
+        problem.boundary,
+        problem.material,
+        problem.source,
+        temperature,
+        physical.frozen_interfaces(),
+    )
+    .unwrap();
+    let mut residual = vec![0.0; temperature.len()];
+    system.operator.spmv(temperature, &mut residual);
+    for (value, load) in residual.iter_mut().zip(&system.load) {
+        *value -= load;
+    }
+    residual
+}
+
+fn check_mean_solution(
+    cx: &fs_exec::Cx<'_>,
+    problem: ConductionProblem<'_>,
+    split: usize,
+    card: &InterfaceSystemCard,
+    set: &TemperatureContacts<'_, '_>,
+    solved: &MeanTemperatureContactSolution,
+) {
+    let mesh = problem.mesh;
+    let temperature = &solved.conduction.temperature;
+    let report = &solved.conduction.report;
+    // Q=100 is imposed by the flux boundaries. Equal slab volumes give
+    // TA+TB=630; TB-TA=100*(.04+.06*(TA-309)) then fixes TA=310, TB=320.
+    assert_eq!(temperature.len(), mesh.vertex_count());
+    for (&actual, expected) in temperature.iter().zip(field(mesh, split, 100.0)) {
+        near(actual, expected, 2e-7);
+    }
+    let volume_mean = mesh
+        .complex()
+        .tets
+        .iter()
+        .enumerate()
+        .map(|(e, tet)| {
+            mesh.element_volume(e) * tet.iter().map(|&v| temperature[v as usize]).sum::<f64>() / 4.0
+        })
+        .sum::<f64>()
+        / mesh.total_volume();
+    near(volume_mean, 315.0, 2e-10);
+
+    // Check EVERY original row, including the algebraically eliminated row 0,
+    // against a fresh source query at the unchanged returned field.
+    let residual = mean_residual(cx, problem, set, temperature);
+    for value in &residual {
+        assert!(value.abs() <= 1e-8, "unbalanced original row: {value} W");
+    }
+    let norm = residual
+        .iter()
+        .map(|value| value * value)
+        .sum::<f64>()
+        .sqrt();
+    near(report.final_residual, norm, 2e-10);
+    assert!(norm <= 1e-8);
+    assert!(report.final_residual <= report.residual_threshold);
+    assert_eq!(report.stop_reason, StopReason::ResidualTolerance);
+    assert!(report.iterations > 0 && report.iterations <= 12);
+    assert_eq!(report.free_dofs, mesh.vertex_count());
+    assert!(
+        DofMap::new(problem.boundary, mesh.vertex_count())
+            .unwrap()
+            .fixed()
+            .is_empty()
+    );
+    assert_eq!(report.energy.dirichlet_in_w, 0.0);
+    near(report.energy.source_w, 0.0, 1e-12);
+    near(report.energy.neumann_out_w, 0.0, 1e-10);
+    near(report.energy.closure_w, 0.0, 1e-10);
+    assert!(report.robin_fluxes.is_empty());
+
+    let flux = solved
+        .physical_contacts
+        .frozen_interfaces()
+        .fluxes(temperature)
+        .unwrap();
+    assert_eq!(flux.len(), 1);
+    assert_eq!(report.interface_fluxes.len(), 1);
+    near(flux[0].heat_rate_a_to_b_w, -100.0, 2e-6);
+    near(report.interface_fluxes[0].heat_rate_a_to_b_w, -100.0, 2e-6);
+    near(flux[0].area_m2, 1.0, 2e-12);
+    let contact = set
+        .linearize_temperature(cx, problem.boundary, temperature, 10_000)
+        .unwrap();
+    near(
+        contact.nodal_outflow_w()[..split].iter().sum(),
+        -100.0,
+        2e-6,
+    );
+    near(contact.nodal_outflow_w()[split..].iter().sum(), 100.0, 2e-6);
+    near(contact.nodal_outflow_w().iter().sum(), 0.0, 2e-10);
+
+    let pinned = InterfaceResistance::from_card(
+        "bond",
+        card,
+        &reference_point(),
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    let states = solved
+        .physical_contacts
+        .states()
+        .iter()
+        .map(|state| {
+            (
+                state.side_a_temperature_k,
+                state.side_b_temperature_k,
+                &state.resistance,
+            )
+        })
+        .chain(
+            solved
+                .physical_contacts
+                .quadrature_states()
+                .iter()
+                .map(|state| {
+                    (
+                        state.side_a_temperature_k,
+                        state.side_b_temperature_k,
+                        &state.resistance,
+                    )
+                }),
+        );
+    let mut count = 0;
+    for (ta, tb, resistance) in states {
+        count += 1;
+        near(ta, 310.0, 2e-7);
+        near(tb, 320.0, 2e-7);
+        near(resistance.value_m2_k_per_w(), 0.1, 2e-8);
+        assert_eq!(resistance.card_identity(), card.content_hash());
+        assert_eq!(resistance.receipt().selected, pinned.receipt().selected);
+        for (axis, value) in [("TA", ta), ("TB", tb), ("normal_pressure", 1e6)] {
+            assert!(
+                resistance
+                    .receipt()
+                    .query_point
+                    .contains(&(axis.into(), value))
+            );
+        }
+    }
+    assert!(count > 0);
+}
+
+#[test]
+fn g1_mean_temperature_newton_resolves_live_contact_without_a_thermostat() {
+    with_cx(|cx| {
+        for matching in [true, false] {
+            let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+            let bc = mean_boundary(&mesh);
+            let card = steep_card();
+            let set = contacts(cx, &mesh, &bc, &card, split, matching);
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let problem = ConductionProblem {
+                mesh: &mesh,
+                boundary: &bc,
+                material: &material,
+                element_materials: None,
+                source: &source,
+            };
+            let initial = field(&mesh, split, 110.0);
+            let before = initial.clone();
+
+            // The complete Newton full step has TA=309.4 and Q=100. Its
+            // contact heat is 175 W, so Armijo accepts the half step instead.
+            // Its independent residual pins dR/dT, not merely the final root.
+            let half_trial = mean_field(&mesh, split, 310.2, 105.0);
+            let expected = mean_residual(cx, problem, &set, &half_trial);
+            let expected_norm = expected.iter().map(|r| r * r).sum::<f64>().sqrt();
+            let mut one_step = mean_config(&initial);
+            one_step.stop.max_iterations = 1;
+            match solve_mean_temperature_newton_with_contacts(
+                cx, problem, &set, 315.0, 10_000, one_step,
+            ) {
+                Err(ConductionError::NotConverged {
+                    iterations: 1,
+                    residual,
+                    ..
+                }) => {
+                    near(residual, expected_norm, 2e-7);
+                }
+                other => panic!("expected the first complete contact Newton step, got {other:?}"),
+            }
+            let solved = solve_mean_temperature_newton_with_contacts(
+                cx,
+                problem,
+                &set,
+                315.0,
+                10_000,
+                mean_config(&initial),
+            )
+            .unwrap();
+            check_mean_solution(cx, problem, split, &card, &set, &solved);
+            if !matching {
+                // The finer B trace has more nodes, but does not own more volume.
+                let nodal_mean =
+                    solved.conduction.temperature.iter().sum::<f64>() / mesh.vertex_count() as f64;
+                assert!((nodal_mean - 315.0).abs() > 1.0);
+            }
+            assert_eq!(initial, before);
+        }
+    });
+}
+
+#[test]
+fn g1_mean_temperature_contact_backtracks_original_source_domain_refusals() {
+    with_cx(|cx| {
+        for matching in [true, false] {
+            let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+            let bc = mean_boundary(&mesh);
+            let card = steep_card();
+            let set = contacts(cx, &mesh, &bc, &card, split, matching);
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let problem = ConductionProblem {
+                mesh: &mesh,
+                boundary: &bc,
+                material: &material,
+                element_materials: None,
+                source: &source,
+            };
+            let initial = field(&mesh, split, 119.0);
+            let before = initial.clone();
+            // At TA=311.9, TB=318.1, R=.214: the complete constrained
+            // Newton correction is dTA=(6.2-100*.214)*.214/(2*.214+.06*6.2)
+            // = -4.066 K. The bulk flux reaches 100 W on the full step.
+            let full_trial = mean_field(&mesh, split, 307.834, 100.0);
+            let half_trial = mean_field(&mesh, split, 309.867, 109.5);
+            assert!(set.evaluate(cx, &bc, &full_trial).is_err());
+            assert!(set.evaluate(cx, &bc, &half_trial).is_ok());
+            let mut no_backtracking = mean_config(&initial);
+            no_backtracking.line_search.max_backtracks = 0;
+            assert!(matches!(
+                solve_mean_temperature_newton_with_contacts(
+                    cx, problem, &set, 315.0, 10_000, no_backtracking,
+                ),
+                Err(ConductionError::Interface { interface, what, .. })
+                    if interface == "bond" && what.contains("fs-matdb refused")
+            ));
+            assert_eq!(initial, before);
+
+            let expected = mean_residual(cx, problem, &set, &half_trial);
+            let expected_norm = expected.iter().map(|r| r * r).sum::<f64>().sqrt();
+            let mut one_step = mean_config(&initial);
+            one_step.stop.max_iterations = 1;
+            match solve_mean_temperature_newton_with_contacts(
+                cx, problem, &set, 315.0, 10_000, one_step,
+            ) {
+                Err(ConductionError::NotConverged {
+                    iterations: 1,
+                    residual,
+                    ..
+                }) => {
+                    near(residual, expected_norm, 2e-7);
+                }
+                other => panic!("expected the source-admitted half step, got {other:?}"),
+            }
+            let solved = solve_mean_temperature_newton_with_contacts(
+                cx,
+                problem,
+                &set,
+                315.0,
+                10_000,
+                mean_config(&initial),
+            )
+            .unwrap();
+            check_mean_solution(cx, problem, split, &card, &set, &solved);
+            assert_eq!(initial, before);
+        }
+    });
+}
+
+#[test]
+fn g0_mean_temperature_contact_work_balance_and_cancellation_limits_hold() {
+    with_cx(|cx| {
+        let (mesh, split) = mesh([1, 2, 3], 0.0);
+        let bc = mean_boundary(&mesh);
+        let card = steep_card();
+        let set = contacts(cx, &mesh, &bc, &card, split, false);
+        let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &bc,
+            material: &material,
+            element_materials: None,
+            source: &source,
+        };
+        let initial = field(&mesh, split, 110.0);
+        let before = initial.clone();
+        let error = solve_mean_temperature_newton_with_contacts(
+            cx,
+            problem,
+            &set,
+            315.0,
+            1,
+            mean_config(&initial),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("contact tangent exceeds"));
+        let unbalanced = ScalarField::Uniform(1.0);
+        let error = solve_mean_temperature_newton_with_contacts(
+            cx,
+            ConductionProblem {
+                source: &unbalanced,
+                ..problem
+            },
+            &set,
+            315.0,
+            10_000,
+            mean_config(&initial),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("no steady heat balance"));
+        support::with_cancelled_cx(|cancelled| {
+            assert!(matches!(
+                solve_mean_temperature_newton_with_contacts(
+                    cancelled,
+                    problem,
+                    &set,
+                    315.0,
+                    10_000,
+                    mean_config(&initial),
+                ),
+                Err(ConductionError::Cancelled { .. })
+            ));
+        });
+        assert_eq!(initial, before);
     });
 }

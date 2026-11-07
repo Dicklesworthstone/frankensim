@@ -10,6 +10,8 @@ use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
 use fs_solver::{CsrOp, norm2};
 use fs_sparse::Coo;
 
+use crate::interface::temperature::{TemperatureContactEvaluation, TemperatureContacts};
+
 use super::super::{
     AssembledSystem, ConductionError, ConductionProblem, ConductionReport, ConductionSolution,
     DofMap, ElementMaterials, InitialGuess, LineSearch, LinearConfig, LinearSolveEvidence,
@@ -50,6 +52,32 @@ impl Default for MeanTemperatureNewtonConfig {
     }
 }
 
+/// One accepted mean-constrained field and the original contact queries made
+/// at that field. The source states are retained from the accepted residual;
+/// no frozen-contact replacement solve or second endpoint query is performed.
+#[derive(Debug)]
+pub struct MeanTemperatureContactSolution {
+    /// Accepted temperature field, complete original heat residual and fluxes.
+    pub conduction: ConductionSolution,
+    /// Original pinned interface source queries at the accepted field.
+    pub physical_contacts: TemperatureContactEvaluation,
+}
+
+#[derive(Clone, Copy)]
+enum ContactBinding<'a, 'm, 'c> {
+    Fixed(Option<&'a ThermalInterfaces>),
+    Live(&'a TemperatureContacts<'m, 'c>, usize),
+}
+
+impl<'a, 'm, 'c> ContactBinding<'a, 'm, 'c> {
+    fn fixed(self) -> Option<&'a ThermalInterfaces> {
+        match self {
+            Self::Fixed(interfaces) => interfaces,
+            Self::Live(..) => None,
+        }
+    }
+}
+
 /// Solve temperature-dependent conduction without an artificial thermostat.
 ///
 /// All original Neumann/adiabatic heat equations, including the algebraically
@@ -79,7 +107,14 @@ pub fn solve_mean_temperature_newton(
     mean_temperature_k: f64,
     config: MeanTemperatureNewtonConfig,
 ) -> Result<ConductionSolution, ConductionError> {
-    solve_mean_temperature_newton_impl(cx, problem, None, mean_temperature_k, config)
+    solve_mean_temperature_newton_impl(
+        cx,
+        problem,
+        ContactBinding::Fixed(None),
+        mean_temperature_k,
+        config,
+    )
+    .map(|(conduction, _)| conduction)
 }
 
 /// Mean-constrained nonlinear conduction through a finite-resistance assembly.
@@ -99,17 +134,69 @@ pub fn solve_mean_temperature_newton_with_interfaces(
     mean_temperature_k: f64,
     config: MeanTemperatureNewtonConfig,
 ) -> Result<ConductionSolution, ConductionError> {
-    solve_mean_temperature_newton_impl(cx, problem, Some(interfaces), mean_temperature_k, config)
+    solve_mean_temperature_newton_impl(
+        cx,
+        problem,
+        ContactBinding::Fixed(Some(interfaces)),
+        mean_temperature_k,
+        config,
+    )
+    .map(|(conduction, _)| conduction)
+}
+
+/// Equilibrate a connected assembly with source-backed temperature-dependent
+/// contact resistance and one prescribed P1 volume-mean temperature.
+///
+/// Matching face means, pointwise matching and nonmatching trace quadrature
+/// retain their original source owner, ordered thermal coordinates and pinned
+/// claims. Fixed pressure, finish, medium and other source coordinates are
+/// retained. Every trial queries the actual two-sided temperature field; both
+/// constrained Newton solves include the original contact feedback derivative.
+/// Source-domain misses permit Armijo backtracking; other source failures are
+/// fatal. A source pin is never replaced, and neither the caller's field nor
+/// the contact binding is mutated.
+///
+/// `max_face_pairs` bounds each contact tangent's matching pairs and retained
+/// overlap triangles. The contact binding's own quadrature allowance also
+/// applies. Phase-dependent contacts require original enthalpy coordinates and
+/// remain refused by the existing temperature-only contact owner. The mean is
+/// an independent datum, not an inference from conserved energy.
+pub fn solve_mean_temperature_newton_with_contacts(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    contacts: &TemperatureContacts<'_, '_>,
+    mean_temperature_k: f64,
+    max_face_pairs: usize,
+    config: MeanTemperatureNewtonConfig,
+) -> Result<MeanTemperatureContactSolution, ConductionError> {
+    contacts.check_mesh(problem.mesh)?;
+    if max_face_pairs == 0 {
+        return Err(invalid(
+            "a positive contact tangent work allowance is required",
+        ));
+    }
+    let (conduction, physical_contacts) = solve_mean_temperature_newton_impl(
+        cx,
+        problem,
+        ContactBinding::Live(contacts, max_face_pairs),
+        mean_temperature_k,
+        config,
+    )?;
+    Ok(MeanTemperatureContactSolution {
+        conduction,
+        physical_contacts: physical_contacts
+            .ok_or_else(|| invalid("missing accepted contact state"))?,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
 fn solve_mean_temperature_newton_impl(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
-    interfaces: Option<&ThermalInterfaces>,
+    binding: ContactBinding<'_, '_, '_>,
     mean_temperature_k: f64,
     mut config: MeanTemperatureNewtonConfig,
-) -> Result<ConductionSolution, ConductionError> {
+) -> Result<(ConductionSolution, Option<TemperatureContactEvaluation>), ConductionError> {
     let weights = volume_weights(cx, problem, mean_temperature_k)?;
     SolveConfig {
         nonlinearity: Nonlinearity::Newton {
@@ -158,7 +245,8 @@ fn solve_mean_temperature_newton_impl(
             "mean-adjusted initial temperatures must be finite and positive",
         ));
     }
-    let mut system = assemble(cx, problem, interfaces, &temperature)?;
+    let (mut system, mut physical_contacts) =
+        assemble(cx, problem, binding, &temperature, &mut false)?;
     require_connected(cx, &system.operator)?;
     compatible_heat(
         problem,
@@ -191,6 +279,10 @@ fn solve_mean_temperature_newton_impl(
                 .copied()
                 .fold(mean_temperature_k, f64::max);
         if rnorm <= threshold && mean_residual.abs() <= mean_floor {
+            // A live coefficient can become numerically negligible even when
+            // the declared contact topology has not changed. One mean must
+            // still fix exactly one thermal component at the accepted field.
+            require_connected(cx, &system.operator)?;
             compatible_heat(
                 problem,
                 &system,
@@ -198,35 +290,42 @@ fn solve_mean_temperature_newton_impl(
                 &temperature,
                 config.net_heat_tolerance_w,
             )?;
+            let interfaces = physical_contacts
+                .as_ref()
+                .map(TemperatureContactEvaluation::frozen_interfaces)
+                .or(binding.fixed());
             let physical = physical_report(problem, interfaces, &system, &dofs, &temperature)?;
             poll(cx, iteration)?;
-            return Ok(ConductionSolution {
-                temperature,
-                report: ConductionReport {
-                    iterations: iteration,
-                    residual_history: history,
-                    final_residual: rnorm,
-                    residual_threshold: threshold,
-                    stop_reason: StopReason::ResidualTolerance,
-                    linear,
-                    energy: physical.energy,
-                    material_provenance: problem.element_materials.map_or_else(
-                        || problem.material.provenance(),
-                        ElementMaterials::provenance,
-                    ),
-                    material_receipts: problem.element_materials.map_or_else(
-                        || problem.material.receipts().len(),
-                        |assigned| assigned.receipts().len(),
-                    ),
-                    element_material_identity: problem
-                        .element_materials
-                        .map(ElementMaterials::identity),
-                    interface_fluxes: physical.interface_fluxes,
-                    robin_fluxes: physical.robin_fluxes,
-                    free_dofs: n,
-                    elements: problem.mesh.element_count(),
+            return Ok((
+                ConductionSolution {
+                    temperature,
+                    report: ConductionReport {
+                        iterations: iteration,
+                        residual_history: history,
+                        final_residual: rnorm,
+                        residual_threshold: threshold,
+                        stop_reason: StopReason::ResidualTolerance,
+                        linear,
+                        energy: physical.energy,
+                        material_provenance: problem.element_materials.map_or_else(
+                            || problem.material.provenance(),
+                            ElementMaterials::provenance,
+                        ),
+                        material_receipts: problem.element_materials.map_or_else(
+                            || problem.material.receipts().len(),
+                            |assigned| assigned.receipts().len(),
+                        ),
+                        element_material_identity: problem
+                            .element_materials
+                            .map(ElementMaterials::identity),
+                        interface_fluxes: physical.interface_fluxes,
+                        robin_fluxes: physical.robin_fluxes,
+                        free_dofs: n,
+                        elements: problem.mesh.element_count(),
+                    },
                 },
-            });
+                physical_contacts,
+            ));
         }
         if iteration == config.stop.max_iterations || last_step <= config.stop.step_atol {
             return Err(ConductionError::NotConverged {
@@ -238,7 +337,11 @@ fn solve_mean_temperature_newton_impl(
         let direction = direction(
             cx,
             problem,
-            interfaces,
+            binding,
+            physical_contacts
+                .as_ref()
+                .map(TemperatureContactEvaluation::frozen_interfaces)
+                .or(binding.fixed()),
             &temperature,
             &residual,
             &weights,
@@ -258,17 +361,21 @@ fn solve_mean_temperature_newton_impl(
                 .map(|(&t, &d)| alpha.mul_add(d, t))
                 .collect();
             if candidate.iter().all(|t| t.is_finite() && *t > 0.0) {
-                match assemble(cx, problem, interfaces, &candidate) {
-                    Ok(trial_system) => {
+                let mut source_domain = false;
+                match assemble(cx, problem, binding, &candidate, &mut source_domain) {
+                    Ok((trial_system, trial_contacts)) => {
                         let trial = norm2(&full_residual(&trial_system, &candidate));
                         if trial.is_finite()
                             && trial <= config.line_search.armijo_c.mul_add(-alpha, 1.0) * rnorm
                         {
-                            accepted = Some((candidate, trial_system));
+                            accepted = Some((candidate, trial_system, trial_contacts));
                             break;
                         }
                     }
-                    Err(span @ ConductionError::OutsideTemperatureSpan { .. }) => {
+                    Err(span)
+                        if source_domain
+                            || matches!(span, ConductionError::OutsideTemperatureSpan { .. }) =>
+                    {
                         if backtracks == 0 {
                             full_step_span = Some(span);
                         }
@@ -280,7 +387,7 @@ fn solve_mean_temperature_newton_impl(
                 alpha *= config.line_search.shrink;
             }
         }
-        let (next, next_system) = accepted.ok_or_else(|| {
+        let (next, next_system, next_contacts) = accepted.ok_or_else(|| {
             full_step_span.unwrap_or(ConductionError::LineSearchFailed {
                 iteration,
                 backtracks: config.line_search.max_backtracks,
@@ -295,6 +402,7 @@ fn solve_mean_temperature_newton_impl(
         history.push(rnorm);
         temperature = next;
         system = next_system;
+        physical_contacts = next_contacts;
     }
     unreachable!("the declared final iteration returns convergence or refusal")
 }
@@ -302,10 +410,32 @@ fn solve_mean_temperature_newton_impl(
 fn assemble(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
-    interfaces: Option<&ThermalInterfaces>,
+    binding: ContactBinding<'_, '_, '_>,
     temperature: &[f64],
-) -> Result<AssembledSystem, ConductionError> {
-    assemble_operator_scaled_with_interfaces(
+    source_domain: &mut bool,
+) -> Result<(AssembledSystem, Option<TemperatureContactEvaluation>), ConductionError> {
+    let physical_contacts = match binding {
+        ContactBinding::Fixed(_) => None,
+        ContactBinding::Live(contacts, _) => Some(contacts.evaluate_with_query_refusal(
+            cx,
+            problem.boundary,
+            temperature,
+            &mut |error| {
+                *source_domain = matches!(
+                    error,
+                    fs_matdb::MatDbError::NoClaimInDomain { .. }
+                        | fs_matdb::MatDbError::PinnedClaimOutOfDomain { .. }
+                        | fs_matdb::MatDbError::OutsideKnotSpan { .. }
+                        | fs_matdb::MatDbError::OutsideSurfaceSupport { .. }
+                );
+            },
+        )?),
+    };
+    let interfaces = physical_contacts
+        .as_ref()
+        .map(TemperatureContactEvaluation::frozen_interfaces)
+        .or(binding.fixed());
+    let system = assemble_operator_scaled_with_interfaces(
         cx,
         problem.mesh,
         problem.boundary,
@@ -315,7 +445,8 @@ fn assemble(
         None,
         interfaces,
         problem.element_materials,
-    )
+    )?;
+    Ok((system, physical_contacts))
 }
 
 fn mean_error(weights: &[f64], temperature: &[f64], mean: f64) -> f64 {
@@ -333,6 +464,7 @@ fn mean_error(weights: &[f64], temperature: &[f64], mean: f64) -> f64 {
 fn direction(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
+    binding: ContactBinding<'_, '_, '_>,
     interfaces: Option<&ThermalInterfaces>,
     temperature: &[f64],
     residual: &[f64],
@@ -342,6 +474,21 @@ fn direction(
     iteration: usize,
     evidence: &mut Vec<LinearSolveEvidence>,
 ) -> Result<Vec<f64>, ConductionError> {
+    let contact_tangent = match binding {
+        ContactBinding::Fixed(_) => None,
+        ContactBinding::Live(contacts, max_face_pairs) => {
+            Some(contacts.linearize_temperature_for_newton(
+                cx,
+                problem.boundary,
+                temperature,
+                max_face_pairs,
+            )?)
+        }
+    };
+    let interfaces = contact_tangent
+        .as_ref()
+        .map(|contact| contact.physical_contacts().frozen_interfaces())
+        .or(interfaces);
     let jacobian = assemble_jacobian_with_optional_interfaces(
         cx,
         problem.mesh,
@@ -358,13 +505,22 @@ fn direction(
         if row % crate::assemble::ASSEMBLY_TILE == 0 {
             poll(cx, row)?;
         }
-        let (columns, values) = jacobian.row(row);
-        for (&column, &value) in columns.iter().zip(values) {
-            crate::require_finite("Neumann Jacobian", value)?;
-            if column == 0 {
-                reference_rhs[row - 1] = -value;
-            } else {
-                coo.push(row - 1, column - 1, value);
+        // The bulk Jacobian already contains the frozen contact matrix.
+        // Add only dK_contact/dT * T, including its reference-column response.
+        for matrix in std::iter::once(&jacobian)
+            .chain(contact_tangent.as_ref().map(|contact| contact.feedback()))
+        {
+            let (columns, values) = matrix.row(row);
+            for (&column, &value) in columns.iter().zip(values) {
+                crate::require_finite("Neumann Jacobian", value)?;
+                if column == 0 {
+                    reference_rhs[row - 1] = crate::require_finite(
+                        "Neumann reference response",
+                        reference_rhs[row - 1] - value,
+                    )?;
+                } else {
+                    coo.push(row - 1, column - 1, value);
+                }
             }
         }
     }
