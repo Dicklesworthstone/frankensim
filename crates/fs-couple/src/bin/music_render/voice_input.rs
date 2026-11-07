@@ -69,6 +69,10 @@ pub(super) fn run_with_gas_sources(
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
     let tract_gas = tract_gas_json(&description);
+    let observer = performance.observer_gas_report().map_or_else(String::new, |report| {
+        format!(",\"observer_gas\":{}",
+            super::duct_metadata::observer_gas_provenance(Some(report)))
+    });
     // Rigid-end limit of this tract, mouth load and wall; see VoiceInfo::passive_formants_hz.
     let passive = match &info.passive_formants_hz {
         Ok(formants) => format!(
@@ -143,7 +147,7 @@ pub(super) fn run_with_gas_sources(
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
          \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}\
-         \"model_scope\":\"{scope}\"}}{gas_sources}{tract_gas}}}",
+         \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
         info.glottal_radius_m, info.mouth_radius_m, info.sound_speed_m_s,

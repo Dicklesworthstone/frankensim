@@ -7,11 +7,11 @@
 /// Source-gas heat transfer with the same retained composition and material laws.
 pub mod convection;
 
-use super::{ObserverFilter, legacy_relative_humidity};
+use super::{GasAbsorptionModel, ObserverFilter, legacy_relative_humidity};
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::{gas::GasState, gas_species::input::GasRecord};
 use fs_material::relaxation::{
-    RelaxationAbsorption,
+    RelaxationAbsorption, RelaxationState,
     input::{medium_from_record, read_relaxation},
 };
 
@@ -100,37 +100,50 @@ pub fn observer_filter(
     range_m: f64,
     rate: u32,
 ) -> Result<ObserverFilter, AcousticRealizeError> {
+    if let Some(declared) = declared {
+        let (law, relaxation) = resolve_observer_law(declared, gas, records)?;
+        return ObserverFilter::for_law(law, gas, relaxation.as_ref(), range_m, rate);
+    }
+    let record = records.iter().find(|record| record.state() == gas);
+    match iso_admission(record, gas) {
+        Ok(Some((air, rh)))
+            if matches!(record, Some(GasRecord::Legacy(_)))
+                && fs_material::iso9613::iso9613_absorption(&air, gas, rh, 1.0).is_ok() =>
+        {
+            ObserverFilter::iso9613(&air, gas, rh, range_m, rate)
+        }
+        _ => ObserverFilter::stokes_kirchhoff(gas, range_m, rate),
+    }
+}
+
+/// Admit one explicit law once before it is realized on one or many paths.
+/// The numerical filter and every spatial receiver share this source binding;
+/// neither geometry nor a similar gas state can substitute another composition.
+pub(crate) fn resolve_observer_law(
+    declared: &ObserverLawInput,
+    gas: &GasState,
+    records: &[GasRecord],
+) -> Result<(GasAbsorptionModel, Option<RelaxationState>), AcousticRealizeError> {
     let record = records.iter().find(|record| record.state() == gas);
     match declared {
-        Some(ObserverLawInput::Lossless) => ObserverFilter::lossless(gas, range_m, rate),
-        Some(ObserverLawInput::StokesKirchhoff) => {
-            ObserverFilter::stokes_kirchhoff(gas, range_m, rate)
-        }
-        Some(ObserverLawInput::Iso9613) => match iso_admission(record, gas)? {
-            Some((air, rh)) => ObserverFilter::iso9613(&air, gas, rh, range_m, rate),
+        ObserverLawInput::Lossless => Ok((GasAbsorptionModel::Lossless, None)),
+        ObserverLawInput::StokesKirchhoff => Ok((GasAbsorptionModel::StokesKirchhoff, None)),
+        ObserverLawInput::Iso9613 => match iso_admission(record, gas)? {
+            Some((air, relative_humidity)) => Ok((
+                GasAbsorptionModel::Iso9613Air { relative_humidity, air }, None,
+            )),
             None => Err(AcousticRealizeError::InvalidDescription {
                 what: "observer_law iso9613 needs a legacy or thermochemical observer gas record",
             }),
         },
-        Some(ObserverLawInput::MolecularRelaxation(law)) => match record {
-            Some(record) => {
-                medium_from_record(record)
-                    .and_then(|medium| law.evaluate(&medium))
-                    .map_err(|error| AcousticRealizeError::Ambient(error.to_string()))
-                    .and_then(|state| ObserverFilter::molecular_relaxation(&state, range_m, rate))
-            }
-            _ => Err(AcousticRealizeError::InvalidDescription {
+        ObserverLawInput::MolecularRelaxation(law) => match record {
+            Some(record) => medium_from_record(record)
+                .and_then(|medium| law.evaluate(&medium))
+                .map(|state| (GasAbsorptionModel::MolecularRelaxation, Some(state)))
+                .map_err(|error| AcousticRealizeError::Ambient(error.to_string())),
+            None => Err(AcousticRealizeError::InvalidDescription {
                 what: "observer_law relaxation needs the matching explicit-species observer gas record",
             }),
-        },
-        None => match iso_admission(record, gas) {
-            Ok(Some((air, rh)))
-                if matches!(record, Some(GasRecord::Legacy(_)))
-                    && fs_material::iso9613::iso9613_absorption(&air, gas, rh, 1.0).is_ok() =>
-            {
-                ObserverFilter::iso9613(&air, gas, rh, range_m, rate)
-            }
-            _ => ObserverFilter::stokes_kirchhoff(gas, range_m, rate),
         },
     }
 }

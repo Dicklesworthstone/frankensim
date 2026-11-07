@@ -27,6 +27,7 @@
 //! ambient moist_air <temperature_k> <pressure_pa> <relative_humidity>
 //! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
+//! observer_law <none|iso9613|stokes-kirchhoff|relaxation LAW> (optional; exterior propagation)
 //! fold <two_mass|body_cover|one_dof> <m_lower_kg> <m_upper_kg> <k_lower_n_m> <k_upper_n_m>
 //!      <k_couple_n_m> <damping_ratio> <rest_gap_m> <fold_length_m> <thickness_m>
 //!      [<thickness_upper_m>]      (the second viscous section; default 0.05 cm)
@@ -62,6 +63,18 @@
 //! and the two gases share one static pressure (mean flow is not modeled). The medium is stationary: the breath does not
 //! mix with the room or replace the tract's air over a note. Without the row the one `ambient` gas fills the tract and the
 //! exterior exactly as before.
+//!
+//! `observer_law` binds the existing causal gas law to that exterior record on
+//! every mouth-quadrature path. Absorption, dispersion and physical travel
+//! reach the microphone before the paths are summed; the receiver reports any
+//! common causal padding separately. The law never changes the tract, its load
+//! or the fold mechanics. `relaxation LAW` uses the shared material grammar
+//! (`iso9613-terrestrial-air` or explicit species data). No law is inferred
+//! for arbitrary mixtures. Without this row the original lossless receiver
+//! remains; `none` is an explicit lossless comparison. Preparation uses the
+//! finite `GasPropagationLimits::surface_reference()` work ceilings. An
+//! optional head/torso FIR retains its existing lossless scattering model;
+//! this does not solve scattering in a dissipative, dispersive medium.
 //!
 //! `head_sphere` observes the mouth as a cap of its own area on a rigid sphere of that radius, centred `radius` behind
 //! the mouth plane, instead of a disk in an infinite baffle ([`crate::pcm_wav::baffled::head::HeadSphere`]: the
@@ -187,6 +200,9 @@ use crate::glottis::{
 };
 use crate::pcm_wav::baffled::head::{HeadSphere, TorsoSphere, head_mouth_load, head_torso_mouth_load};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
+use crate::air_path::input::{ObserverLawInput, resolve_observer_law};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits, GasPropagationReport};
+use crate::pcm_wav::baffled::openings::CircularOpening;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use crate::tract::{TractChart, TractSection};
@@ -231,6 +247,8 @@ pub struct VoiceDescription {
     gas: GasRecord,
     /// Opt-in `tract_gas`: the gas inside the tract (module doc); `None` fills the tract with `gas`.
     tract_gas: Option<GasRecord>,
+    /// Explicit exterior absorption/dispersion; absent keeps the lossless microphone.
+    pub observer_law: Option<ObserverLawInput>,
     /// `true` for the two-mass fold, `false` for the one-mass image.
     pub two_mass: bool,
     /// Lumped fold parameters.
@@ -370,6 +388,7 @@ impl VoiceDescription {
         let mut full_scale = None;
         let mut gas = None;
         let mut tract_gas = None;
+        let mut observer_law = None;
         let mut fold = None;
         let mut wall = None;
         let mut termination = None;
@@ -430,6 +449,11 @@ impl VoiceDescription {
                         return Err("ambient gas contains extra fields".into());
                     }
                     once(&mut gas, record, key)?;
+                }
+                "observer_law" => {
+                    let law = ObserverLawInput::parse(&rest)
+                        .map_err(|why| format!("observer_law refused: {why}"))?;
+                    once(&mut observer_law, law, key)?;
                 }
                 "tract_gas" => {
                     let record_text = rest.join(" ");
@@ -760,6 +784,7 @@ impl VoiceDescription {
             full_scale_pa,
             gas,
             tract_gas,
+            observer_law,
             two_mass,
             fold,
             fold_shape,
@@ -818,6 +843,17 @@ impl VoiceDescription {
         // spheres read `exterior`. Without the row the two are one state.
         let gas = self.tract_gas();
         let exterior = self.ambient_gas();
+        let observer = match &self.observer_law {
+            Some(declared) => {
+                let (law, relaxation) = resolve_observer_law(
+                    declared, exterior, core::slice::from_ref(&self.gas),
+                ).map_err(|error| format!("voice observer law refused: {error}"))?;
+                Some(GasPropagation {
+                    law, relaxation, limits: GasPropagationLimits::surface_reference(),
+                })
+            }
+            None => None,
+        };
         let chart = TractChart::try_new(
             self.sections.clone(),
             &self.tract_source,
@@ -912,13 +948,25 @@ impl VoiceDescription {
             density: exterior.density,
             sound_speed: exterior.sound_speed,
         };
-        let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
-            mouth_radius_m,
-            mechanics_rate,
-            self.output_rate_hz,
-            self.microphone,
-            medium,
-        )?;
+        let (receiver, observer_paths) = match observer.as_ref() {
+            Some(propagation) => {
+                let opening = CircularOpening {
+                    center_m: [0.0, 0.0], radius_m: mouth_radius_m,
+                };
+                let (receiver, report) = BaffledPressure::circular_openings_multirate_gas_differentiating(
+                    &[opening], mechanics_rate, self.output_rate_hz, self.microphone,
+                    exterior, propagation, &mut || false,
+                ).map_err(|error| format!("voice observer paths refused: {error}"))?;
+                (receiver, Some(report))
+            }
+            None => (
+                BaffledPressure::circular_outlet_multirate_differentiating(
+                    mouth_radius_m, mechanics_rate, self.output_rate_hz,
+                    self.microphone, medium,
+                )?,
+                None,
+            ),
+        };
         let head = match &self.head_sphere {
             Some(card) => Some(
                 match &self.torso_sphere {
@@ -970,6 +1018,7 @@ impl VoiceDescription {
             island,
             mouth,
             receiver,
+            observer_paths,
             head,
             aspiration,
             jet_noise,
@@ -1232,6 +1281,7 @@ pub struct VoicePerformance {
     island: GlottalIsland,
     mouth: DelayedFilter,
     receiver: BaffledPressure,
+    observer_paths: Option<GasPropagationReport>,
     /// Opt-in head: the baffled pressure through the rigid sphere's causal FIR.
     head: Option<HeadSphere>,
     schedule: Schedule,
@@ -1272,8 +1322,15 @@ impl VoicePerformance {
         &self.info
     }
 
-    /// Existing microphone filter latency, in output samples, with the head
-    /// FIR's when the `head_sphere` row is present. Physical
+    /// Complete exterior gas and original per-path filter receipts; no report
+    /// is synthesized for the legacy lossless microphone.
+    #[must_use]
+    pub fn observer_gas_report(&self) -> Option<&GasPropagationReport> {
+        self.observer_paths.as_ref()
+    }
+
+    /// Existing microphone filter latency, in output samples, with any common
+    /// material-path padding and the head FIR's when present. Physical
     /// source-to-listener travel remains in the pressure and is not included.
     #[must_use]
     pub fn filter_delay_samples(&self) -> f64 {
@@ -1524,6 +1581,115 @@ mod tests {
         assert!(result.iter().all(|value| value.is_finite()));
         assert!(result.iter().any(|value| value.abs() > 1e-12));
         result
+    }
+
+    #[test]
+    fn observer_law_rows_are_explicit_and_refuse_invalid_source_bindings() {
+        for row in ["none", "iso9613", "stokes-kirchhoff"] {
+            let description = VoiceDescription::from_bytes(
+                fixture(&format!("observer_law {row}\n")).as_bytes(),
+            ).unwrap();
+            assert!(description.observer_law.is_some());
+        }
+        for rows in [
+            "observer_law\n",
+            "observer_law guessed-air\n",
+            "observer_law iso9613 ignored\n",
+            "observer_law none\nobserver_law stokes-kirchhoff\n",
+            "observer_law relaxation declared 0\n",
+        ] {
+            let error = VoiceDescription::from_bytes(fixture(rows).as_bytes()).unwrap_err();
+            assert!(error.contains("observer_law"), "{error}");
+        }
+        let text = with_gas("mixture 310.15 101325 mole 2 N2 0.8 CO2 0.2")
+            + "observer_law iso9613\n";
+        let description = VoiceDescription::from_bytes(text.as_bytes()).unwrap();
+        let error = description.build().err().expect("a named mixture cannot borrow ISO air data");
+        assert!(error.contains("observer law refused"), "{error}");
+    }
+
+    /// G3: explicitly lossless material paths keep the original microphone's
+    /// pressure, physical travel and numerical latency, up to summation roundoff.
+    #[test]
+    fn declared_lossless_voice_matches_the_original_microphone() {
+        let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        let explicit = VoiceDescription::from_bytes(fixture("observer_law none\n").as_bytes()).unwrap();
+        let (mut a, mut b) = (plain.build().unwrap(), explicit.build().unwrap());
+        assert!(a.observer_gas_report().is_none());
+        let report = b.observer_gas_report().unwrap();
+        assert_eq!(report.law, crate::air_path::GasAbsorptionModel::Lossless);
+        assert_eq!(report.additional_latency_samples, 0);
+        assert_eq!(a.filter_delay_samples(), b.filter_delay_samples());
+        let (mut before, mut after) = (vec![0.0; 1200], vec![0.0; 1200]);
+        a.block(&mut before).unwrap();
+        b.block(&mut after).unwrap();
+        assert!(before.iter().any(|value| value.abs() > 1e-12));
+        for (x, y) in before.iter().zip(&after) {
+            assert!((x - y).abs() < 1e-11 * x.abs().max(1.0));
+        }
+        assert_eq!(a.stats(), b.stats(), "observation must not change the fold mechanics");
+    }
+
+    /// G3/G5: the same exterior law reaches every physical path and real
+    /// pressure, with a callback-independent state and unchanged source motion.
+    #[test]
+    fn voice_absorption_uses_original_path_filters_and_is_partition_independent() {
+        let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        let selected = VoiceDescription::from_bytes(fixture("observer_law iso9613\n").as_bytes()).unwrap();
+        let (mut before, mut whole, mut split) = (
+            plain.build().unwrap(), selected.build().unwrap(), selected.build().unwrap(),
+        );
+        let report = whole.observer_gas_report().unwrap();
+        assert_eq!(report.gas, *selected.ambient_gas());
+        assert!(report.filters.len() > 1, "the aperture must retain distinct physical paths");
+        for filter in &report.filters {
+            let expected = crate::air_path::ObserverFilter::for_law(
+                report.law, &report.gas, None, filter.range_m, selected.output_rate_hz,
+            ).unwrap();
+            assert_eq!(filter, expected.receipt());
+        }
+        let (mut lossless, mut a, mut b) = (vec![0.0; 1200], vec![0.0; 1200], vec![0.0; 1200]);
+        before.block(&mut lossless).unwrap();
+        whole.block(&mut a).unwrap();
+        for block in b.chunks_mut(37) { split.block(block).unwrap(); }
+        assert_eq!(a, b);
+        assert_ne!(a, lossless, "declared absorption must reach the actual microphone");
+        assert!(a.iter().all(|value| value.is_finite()));
+        assert_eq!(before.stats(), whole.stats());
+        assert_eq!(whole.stats(), split.stats());
+    }
+
+    /// G3: a separate tract gas cannot replace the exterior composition at the
+    /// observer. Its molecular reservoirs reach each existing filter exactly once.
+    #[test]
+    fn voice_molecular_observer_binds_the_exterior_beside_a_separate_tract() {
+        let rows = format!(
+            "{HEAD_LOAD}tract_gas moist_air 293.15 101325 0.5\n\
+             observer_law relaxation declared 3 N2 0 O2 0 CO2 1 vibration 1 960 2 power 10 293.15 0 200 400\n"
+        );
+        let text = fixture(&rows).replace(
+            "ambient moist_air 310.15 101325 1.0",
+            "ambient mixture 310.15 101325 mole 3 N2 0.4 O2 0.2 CO2 0.4",
+        );
+        let description = VoiceDescription::from_bytes(text.as_bytes()).unwrap();
+        let performance = description.build().unwrap();
+        let report = performance.observer_gas_report().unwrap();
+        assert_eq!(report.gas, *description.ambient_gas());
+        assert_ne!(report.gas, *description.tract_gas());
+        assert_eq!(report.law, crate::air_path::GasAbsorptionModel::MolecularRelaxation);
+        let ObserverLawInput::MolecularRelaxation(law) = description.observer_law.as_ref().unwrap() else {
+            panic!("the authored relaxation law must be retained");
+        };
+        let state = law.evaluate(
+            &fs_material::relaxation::input::medium_from_record(description.gas_record()).unwrap(),
+        ).unwrap();
+        for filter in &report.filters {
+            let expected = crate::air_path::ObserverFilter::molecular_relaxation(
+                &state, filter.range_m, description.output_rate_hz,
+            ).unwrap();
+            assert_eq!(filter, expected.receipt());
+            assert!(filter.absorption.relaxation_omitted.is_none());
+        }
     }
 
     #[test]

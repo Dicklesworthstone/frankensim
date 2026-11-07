@@ -250,7 +250,11 @@ fn load_with_gas_sources(
             let p = description.build()?;
             let i = p.info();
             let listener = Listener::Gas(ListenerMedium::of(description.ambient_gas()));
-            let exterior_json = format!("{},\"observation_scope\":\"glottal-driven tract mouth flow through its original multirate baffled exterior receiver\",\"control_item_kind\":\"source subglottal pressure breakpoints\",\"mode_count_kind\":\"one or two glottal fold coordinates\"{}",
+            let observer_gas = p.observer_gas_report().map_or_else(String::new, |report| {
+                format!(",\"observer_gas\":{}",
+                    super::duct_metadata::observer_gas_provenance(Some(report)))
+            });
+            let exterior_json = format!("{}{observer_gas},\"observation_scope\":\"glottal-driven tract mouth flow through its original multirate baffled exterior receiver\",\"control_item_kind\":\"source subglottal pressure breakpoints\",\"mode_count_kind\":\"one or two glottal fold coordinates\"{}",
                 super::thermochemical::provenance(std::slice::from_ref(description.gas_record())),
                 super::voice_input::tract_gas_json(&description));
             let mechanics_samples = i.samples.checked_mul(u64::from(description.mechanics_per_output))
