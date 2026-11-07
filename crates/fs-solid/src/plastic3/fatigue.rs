@@ -55,6 +55,9 @@ use super::{
     SmallStrainLawField, SmallStrainTetError, SmallStrainTetProblem, SmallStrainTetSolution,
 };
 
+mod loading;
+pub use loading::J2FatigueLoading;
+
 /// Fixed-plane observation at one original tetrahedron, with explicit source
 /// identity and total mechanical strain-life calibration.
 #[derive(Debug, Clone)]
@@ -288,8 +291,10 @@ pub(super) struct J2FatigueCheckpoint {
     finished: bool,
 }
 
-/// Resumable observation of one immutable native load path. `advance` commits
+/// Resumable observation of one declared native load path. `advance` commits
 /// a requested block only after every mechanical increment and gauge accepts.
+/// Independent boundary fields may replace the original reference values at
+/// each target; support DOFs, source laws and planned load factors stay fixed.
 /// Cloning retains the complete current plastic and unresolved cycle histories.
 /// Only the latest native increment record is retained, not the whole trace.
 /// The default law preserves the original linear J2 API; source-bound Voce and
@@ -496,7 +501,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2FatiguePath<'p, 'm, L> {
     /// Nonconvergence, cancellation, strain/calibration refusal or any gauge
     /// failure preserves the complete prior mechanics and fatigue histories.
     pub fn advance(&mut self, count: usize, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
-        self.advance_block(count, false, cx)
+        self.advance_block(count, None, false, cx)
     }
 
     /// Advance native increments and require all critical windows to be closed
@@ -505,12 +510,13 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2FatiguePath<'p, 'm, L> {
     /// Results describe the observed cycle, without repeated-history scaling.
     pub fn advance_cycle(&mut self, count: usize, cx: &Cx<'_>) -> Result<(), J2FatigueError> {
         self.observer.require_critical(cx)?;
-        self.advance_block(count, true, cx)
+        self.advance_block(count, None, true, cx)
     }
 
     fn advance_block(
         &mut self,
         count: usize,
+        loading: Option<&[J2FatigueLoading<'_>]>,
         close_cycle: bool,
         cx: &Cx<'_>,
     ) -> Result<(), J2FatigueError> {
@@ -525,12 +531,48 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> J2FatiguePath<'p, 'm, L> {
         }
         self.observer.check_sample(cx)?;
         let end = self.accepted_increments + count;
+        let factors = &self.problem.load_path[self.accepted_increments..end];
+        // One support buffer for the whole block. The original proportional
+        // path does not need this allocation. Validate every supplied field
+        // before starting any native proposal or extending a fatigue history.
+        let mut prescribed = Vec::new();
+        if let Some(loading) = loading {
+            if loading.len() != count {
+                return Err(J2FatigueError::Invalid(
+                    "explicit loading must cover every requested native endpoint",
+                ));
+            }
+            for (&loading, &factor) in loading.iter().zip(factors) {
+                loading.validate(self.problem, factor, cx)?;
+            }
+            prescribed
+                .try_reserve_exact(self.problem.prescribed_m.len())
+                .map_err(|_| J2FatigueError::Budget)?;
+            prescribed.extend_from_slice(self.problem.prescribed_m);
+        }
         let mut solution = self.solution.clone();
         let checkpoint = self.observer.checkpoint();
         let proposal = (|| {
-            for &factor in &self.problem.load_path[self.accepted_increments..end] {
+            for (index, &factor) in factors.iter().enumerate() {
                 poll(cx)?;
-                solution = with_path(self.problem, &[factor]).solve_from(
+                let path = [factor];
+                let mut endpoint = with_path(self.problem, &path);
+                if let Some(loading) = loading {
+                    let fields = loading[index];
+                    for (support, ((_, value), &reference)) in prescribed
+                        .iter_mut()
+                        .zip(fields.prescribed_values_m)
+                        .enumerate()
+                    {
+                        if support % 256 == 0 {
+                            poll(cx)?;
+                        }
+                        *value = reference;
+                    }
+                    endpoint.prescribed_m = &prescribed;
+                    endpoint.nodal_forces_n = fields.nodal_forces_n;
+                }
+                solution = endpoint.solve_from(
                     solution.displacement_m.as_flattened(),
                     &solution.element_states,
                     cx,

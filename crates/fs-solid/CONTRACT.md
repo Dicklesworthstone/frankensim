@@ -10910,6 +10910,31 @@ intervals; this path reports its heat account but does not add caloric transport
 All original small-geometry, source, clock and atomic refusal gates remain.
 Native compilation and test execution are still pending the prescribed runner.
 
+## Independent boundary histories for native cyclic solid fatigue
+
+`J2FatigueLoading` supplies reference prescribed displacements in the original
+support order and dead nodal forces in the original mesh frame. The quasistatic
+`J2FatiguePath::advance_with_loading` and `advance_cycle_with_loading` consume
+the next original load factors; unit factors admit absolute endpoint histories.
+This enables independently phased normal and shear loading while preserving
+the original support DOFs, source-bound J2/Voce/Chaboche laws and complete
+constitutive history. Additive duplicate nodal loads retain native semantics.
+
+Every endpoint still calls the native `solve_from` owner. Its actual accepted
+stress and total mechanical strain feed the same fixed-plane, representative
+SWT, Fatemi-Socie and variable-amplitude banks. Changing boundary values does
+not inject stress, erase plastic memory or imply cyclic stabilization. Original
+paired Morrow/SWT rainflow refusals remain in force for unsupported phase-lag
+histories; representative tensor-cycle models retain their own closure rules.
+
+One reusable prescribed-field buffer serves an entire independent-loading
+block. All input fields are checked before native work, and one original
+mechanics/fatigue checkpoint covers the block. A later native solve, gauge,
+closure or cancellation refusal publishes no partial state or samples. Ordinary
+`advance` continues to use the original reference fields. Source validity,
+fixed-temperature calibration, small-strain geometry, finite plane/sample/work
+budgets and the need to resolve actual physical turning points are unchanged.
+
 ## Tabulated malleability in native structural consumers
 
 The original small-strain continuum and plane-stress owners accept

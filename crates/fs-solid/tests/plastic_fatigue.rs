@@ -20,6 +20,9 @@ use fs_qty::{Dims, Pressure};
 use fs_solid::plastic3::fatigue::{J2FatigueConfig, J2FatigueError, J2FatigueGauge, J2FatiguePath};
 use fs_solid::{IncrementSettings, SmallStrainLawField, SmallStrainTetProblem, TetAssemblyBudget};
 
+#[path = "plastic_fatigue/loading.rs"]
+mod loading;
+
 const NODES: [[f64; 3]; 8] = [
     [0.0, 0.0, 0.0],
     [2.0, 0.0, 0.0],
