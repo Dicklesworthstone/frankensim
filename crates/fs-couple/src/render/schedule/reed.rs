@@ -44,7 +44,7 @@
 //! see `ReedBoreVoice::set_constriction_noise`). It is an extrapolation in size, speed and shape, from dampers and
 //! plates in a 300 mm duct to a reed slit; the printed law fixes neither the jet speed nor the pressure drop to use
 //! for a viscous slit (they span 40 dB here), and the row takes the Bernoulli speed of the total drop as the brass row does.
-//! Optional `open_hole_orifice N` (N = 1..=12; N above the open-hole count uses all of them) after those rows, before `compile_limits`, solves the quasi-steady
+//! Optional `open_hole_orifice N` (N = 1..=16; N above the open-hole count uses all of them) after those rows, before `compile_limits`, solves the quasi-steady
 //! sharp-edged orifice law of the first N open tone holes TOGETHER, coupled through the bore, instead of the first hole
 //! alone. N = 1, or no row, is the unchanged first-hole shunt. N above 1 needs a constant-medium bore or a
 //! `gas_field continuous` binding; a molecular bore and a midpoint (segment-gas) `gas_field` refuse. On a field each
@@ -173,7 +173,7 @@ impl std::error::Error for ReedPerformanceError {
 fn bad(line: usize, what: &'static str) -> ReedPerformanceError {
     ReedPerformanceError::Input { line, what }
 }
-const _: () = assert!(fs_duct::exterior::MAX_ORIFICE_PORTS == 12, "the `open_hole_orifice takes 1..=12 holes` text names the cap: update it with the cap");
+const _: () = assert!(fs_duct::exterior::MAX_ORIFICE_PORTS == 16, "the `open_hole_orifice takes 1..=16 holes` text names the cap: update it with the cap");
 
 /// The observer law applied to a performance's emitted pressure.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -988,7 +988,7 @@ impl ReedPerformance {
             let ports = row.count(fs_duct::exterior::MAX_ORIFICE_PORTS)?;
             row.finish()?;
             if ports == 0 {
-                return Err(bad(line, "open_hole_orifice takes 1..=12 holes"));
+                return Err(bad(line, "open_hole_orifice takes 1..=16 holes"));
             }
             if ports > 1 && (molecular.is_some()
                 || matches!(&gas_field, Some((_, GasFieldResolution::Midpoint(_))))) {

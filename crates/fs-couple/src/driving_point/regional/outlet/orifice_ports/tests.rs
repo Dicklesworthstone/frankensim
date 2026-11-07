@@ -75,7 +75,7 @@ fn the_card_count_is_bounded() {
 fn the_coupled_orifice_solve_converges_to_a_small_residual() {
     let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
     for trial in 0..1200 {
-        // n runs over 1..=NP (the cap, 12); the coupling amplitude is 0.3 up to three ports, as before, and
+        // n runs over 1..=NP (the cap, 16); the coupling amplitude is 0.3 up to three ports, as before, and
         // 0.9 / n beyond, so every row sum of |D| stays under 0.45 and the system stays passive.
         let n = 1 + trial % NP;
         let amp = 0.3 * 3.0 / n.max(3) as f64;
@@ -116,7 +116,7 @@ fn the_coupled_orifice_solve_converges_to_a_small_residual() {
 
 #[test]
 fn zero_loss_leaves_the_linear_flow_untouched() {
-    // The solver arrays are NP (the cap, 12) wide; the three active ports sit in the leading block.
+    // The solver arrays are NP (the cap, 16) wide; the three active ports sit in the leading block.
     let block = [[1.0e-5, 2.0e-6, 0.0], [2.0e-6, 1.5e-5, 0.0], [0.0, 0.0, 1.0e-5]];
     let mut a = [[0.0_f64; NP]; NP];
     for i in 0..3 {

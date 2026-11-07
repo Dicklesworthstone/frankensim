@@ -37,7 +37,7 @@ use fs_math::{c64::C64, det};
 use fs_vfit::scattering::FirScatteringPort;
 
 const NP: usize = MAX_ORIFICE_PORTS;
-const _: () = assert!(NP == 12, "the `1..=12` refusal text in `realize_orifice_ports_with` names the cap: update it with the cap");
+const _: () = assert!(NP == 16, "the `1..=16` refusal text in `realize_orifice_ports_with` names the cap: update it with the cap");
 type Mat = [[f64; NP]; NP];
 type CMat = [[C64; NP]; NP];
 
@@ -584,7 +584,7 @@ impl RegionalDuct {
         if m == 0 || m > NP || m > sites.len() || sample_rate_hz == 0 || !(256..=super::MAX_OUTLET_FFT_SAMPLES).contains(&n)
             || !n.is_power_of_two()
         {
-            return Err(invalid("orifice ports need 1..=12 open holes and a power-of-two grid in 256..=65536").into());
+            return Err(invalid("orifice ports need 1..=16 open holes and a power-of-two grid in 256..=65536").into());
         }
         let zc = self.inlet_impedance();
         if !zc.is_finite() || zc <= 0.0 {

@@ -13,7 +13,7 @@ fn card(holes: usize, row: &str) -> String {
         "hole 0.00235 0.0069 0.00745 1\n",
         "hole 0.0020 0.0050 0.00745 1\n",
     ];
-    for hole in hole_rows.iter().take(holes) {
+    for hole in hole_rows.iter().cycle().take(holes) {
         segments += hole;
         segments += "cylinder 0.00745 0.02\n";
     }
@@ -75,13 +75,23 @@ fn two_and_three_coupled_holes_change_the_sound_and_differ_from_each_other() {
 
 #[test]
 fn counts_outside_one_to_the_cap_refuse() {
-    // The cap is 12 (`fs_duct::exterior::MAX_ORIFICE_PORTS`); a count above the open holes is clamped, not refused.
-    for row in ["open_hole_orifice 0\n", "open_hole_orifice 13\n", "open_hole_orifice\n", "open_hole_orifice 2 3\n"] {
+    // The cap is 16 (`fs_duct::exterior::MAX_ORIFICE_PORTS`); a count above the open holes is clamped, not refused.
+    for row in ["open_hole_orifice 0\n", "open_hole_orifice 17\n", "open_hole_orifice\n", "open_hole_orifice 2 3\n"] {
         assert!(render(&card(3, row)).is_err(), "{row:?} must refuse");
     }
-    let clamped = render(&card(3, "open_hole_orifice 12\n")).unwrap();
+    let clamped = render(&card(3, "open_hole_orifice 16\n")).unwrap();
     let three = render(&card(3, "open_hole_orifice 3\n")).unwrap();
-    assert_eq!(bits(&clamped.0), bits(&three.0), "12 on a three-hole bore is the three-port render");
+    assert_eq!(bits(&clamped.0), bits(&three.0), "16 on a three-hole bore is the three-port render");
+}
+
+#[test]
+fn fourteen_open_holes_take_fourteen_ports() {
+    // The clarinet's G4 fingering has 14 open holes: the cap lets N = 14 take all of them, and 16 is clamped to 14.
+    let three = render(&card(14, "open_hole_orifice 3\n")).unwrap();
+    let all = render(&card(14, "open_hole_orifice 14\n")).unwrap();
+    let more = render(&card(14, "open_hole_orifice 16\n")).unwrap();
+    assert_ne!(bits(&three.0), bits(&all.0), "the other eleven holes must add their loss");
+    assert_eq!(bits(&all.0), bits(&more.0), "16 on a fourteen-hole bore is the fourteen-port render");
 }
 
 // ---- N above 1 on a `gas_field continuous` binding: each orifice reads its own local gas ----

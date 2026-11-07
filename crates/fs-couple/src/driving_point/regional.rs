@@ -61,7 +61,7 @@ pub struct RegionalDuct {
 }
 
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
-const _: () = assert!(fs_duct::exterior::MAX_ORIFICE_PORTS == 12, "the `1..=12` refusal texts name the cap: update them with it");
+const _: () = assert!(fs_duct::exterior::MAX_ORIFICE_PORTS == 16, "the `1..=16` refusal texts name the cap: update them with it");
 
 impl RegionalDuct {
     /// Bind exactly one resolved state to every authored geometry record.
@@ -142,7 +142,7 @@ impl RegionalDuct {
     /// `ports` outside `1..=fs_duct::exterior::MAX_ORIFICE_PORTS`.
     pub fn with_open_hole_orifice_ports(mut self, ports: usize) -> Result<Self, DuctError> {
         if ports == 0 || ports > fs_duct::exterior::MAX_ORIFICE_PORTS {
-            return Err(invalid("open_hole_orifice takes 1..=12 holes"));
+            return Err(invalid("open_hole_orifice takes 1..=16 holes"));
         }
         self.orifice_ports = ports;
         Ok(self)

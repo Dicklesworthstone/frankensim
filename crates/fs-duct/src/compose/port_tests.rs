@@ -138,7 +138,7 @@ fn eight_hole_duct() -> Duct {
 
 #[test]
 fn eight_ports_are_reciprocal_passive_and_leave_the_leading_block_alone() {
-    // The ladder is general in the port count (the cap is 12): the same laws as for three ports hold for eight.
+    // The ladder is general in the port count (the cap is 16): the same laws as for three ports hold for eight.
     assert!(crate::compose::MAX_ORIFICE_PORTS >= 8);
     let duct = eight_hole_duct();
     for f in [200.0, 700.0, 1500.0, 3000.0] {
@@ -168,6 +168,54 @@ fn eight_ports_are_reciprocal_passive_and_leave_the_leading_block_alone() {
             for j in 0..4 {
                 let (a, b) = (y4[i * 4 + j], y8[i * 8 + j]);
                 assert!((a - b).abs() <= 1.0e-9 * scale, "{f} Hz: block ({i},{j}) differs between 4 and 8 ports");
+            }
+        }
+    }
+}
+
+/// Fourteen open holes of graded size and spacing on the same 7.45 mm bore: the clarinet's G4 fingering has 14.
+fn fourteen_hole_duct() -> Duct {
+    let mut segments = vec![cylinder(0.06)];
+    for k in 0..14 {
+        segments.push(hole(0.0012 + 0.00012 * k as f64, 0.004 + 0.0005 * k as f64, HoleState::Open));
+        segments.push(cylinder(0.012 + 0.0015 * k as f64));
+    }
+    segments.push(cylinder(0.15));
+    Duct { segments }
+}
+
+#[test]
+fn fourteen_ports_are_reciprocal_passive_and_leave_the_leading_block_alone() {
+    // Beyond the old cap of 12: the same laws hold for fourteen, and the leading 8 x 8 block is the eight-port network.
+    assert!(crate::compose::MAX_ORIFICE_PORTS >= 14);
+    let duct = fourteen_hole_duct();
+    for f in [200.0, 700.0, 1500.0, 3000.0] {
+        let (flows, y14) = run(&duct, f, 14);
+        assert_eq!((flows.len(), y14.len()), (14, 196));
+        let scale = y14.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        for i in 0..14 {
+            for j in 0..14 {
+                let d = (y14[i * 14 + j] - y14[j * 14 + i]).abs();
+                assert!(d <= 1.0e-9 * scale, "{f} Hz: Y[{i}][{j}] != Y[{j}][{i}] by {d:e}");
+            }
+        }
+        for k in 0..64 {
+            let x: Vec<C64> = (0..14)
+                .map(|i| C64::new(((k * 7 + i * 3) as f64).sin(), ((k * 5 + i * 11) as f64).cos()))
+                .collect();
+            let mut q = C64::ZERO;
+            for i in 0..14 {
+                for j in 0..14 {
+                    q = q + C64::new(x[i].re, -x[i].im) * y14[i * 14 + j] * x[j];
+                }
+            }
+            assert!(q.re >= -1.0e-9 * scale, "{f} Hz, probe {k}: Re(x^H Y x) = {:e}", q.re);
+        }
+        let (_, y8) = run(&duct, f, 8);
+        for i in 0..8 {
+            for j in 0..8 {
+                let (a, b) = (y8[i * 8 + j], y14[i * 14 + j]);
+                assert!((a - b).abs() <= 1.0e-9 * scale, "{f} Hz: block ({i},{j}) differs between 8 and 14 ports");
             }
         }
     }
