@@ -40,6 +40,8 @@ pub mod array;
 pub mod layer;
 /// Reflected and coherent total fields in the original incident fluid.
 pub mod reflection;
+/// Spherical reflection from a passive, locally reacting impedance plane.
+pub mod wall;
 /// Original symmetric volume-stress sources through the refracting interface.
 pub mod quadrupole;
 

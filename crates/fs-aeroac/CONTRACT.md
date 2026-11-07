@@ -1,5 +1,46 @@
 # fs-aeroac — Contract
 
+## Spherical reflection at a local impedance plane
+
+`curle3d::refraction::full_wave::wall` propagates a prescribed compact volume
+source through the outgoing angular spectrum of an infinite locally reacting
+wall. Its outward normal points from fluid into wall, `p=Z*u_n`, with specific
+impedance in Pa s/m and exp(-i omega t). The original lossless fluid supplies
+density and sound speed. Frequency-dependent wall laws must be evaluated by
+their original material/mechanical owner at the requested frequency.
+
+The reflection is `(Z*zeta-rho*omega)/(Z*zeta+rho*omega)` for every propagating
+and evanescent component. The same integral supplies pressure and all particle
+velocity components, including induction and coherent direct/reflected
+interference. Normal-incidence matching therefore does not erase a spherical
+near-field reflection. Exact rigid and pressure-release walls use analytic
+images without numerical quadrature.
+
+Finite passive impedances retain evanescent amplification, including a lossy
+compliant surface mode. Its analytic maximum enters the omitted-tail bound;
+splitting at that maximum prevents a narrow mode from escaping panel resolution.
+Fractional coefficient-variation controls resolve high gain without requiring
+work proportional to the peak amplitude; the requested field-error tolerances
+still govern quadrature acceptance.
+Pure compliance with zero resistance has a pole on the real contour and
+explicitly refuses pending a lossless surface-wave contour owner. No resistance
+floor or reflection clipping is introduced. Nonlocal/porous tangential motion,
+finite edges, multiple walls, mean flow, bulk attenuation and source feedback
+are outside this model.
+
+Preparation shares the existing evaluation/depth budgets, compensated adaptive
+Gauss--Kronrod integrator, cancellation polls and Bessel accuracy limitations.
+Quadrature estimates and the separate floating-point analytic tail bound cover
+the reflected transfer, not geometry or roundoff; no interval certificate is
+claimed. Application reuses four cached complex coefficients without allocation
+or transcendental work. A coincident source/receiver may query the finite
+reflected field but cannot query the singular total field. G1/G3 tests in
+`impedance_wall_reflection` check independent analytic ideal images, the Robin
+boundary law and wall absorption, lossy surface-mode response, reciprocity,
+an independent exponential-integral reference for a narrow passive surface mode
+within a fixed work budget, three quadrature tolerance rungs, cancellation and
+work/physical refusals.
+
 ## Exact physical records and sampled harmonic receivers
 
 Material-bound 2D and periodic 3D jets retain every admitted recording step,

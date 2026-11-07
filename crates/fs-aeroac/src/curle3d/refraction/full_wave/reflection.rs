@@ -326,6 +326,16 @@ impl ReflectionCoordinates {
         source: [f64; 3],
         observer: [f64; 3],
     ) -> Result<Self, AeroacError> {
+        Self::with_boundary_receiver(interface, frequency_hz, source, observer, false)
+    }
+
+    pub(super) fn with_boundary_receiver(
+        interface: PlanarFluidInterface,
+        frequency_hz: f64,
+        source: [f64; 3],
+        observer: [f64; 3],
+        allow_boundary: bool,
+    ) -> Result<Self, AeroacError> {
         let omega = TAU * frequency_hz;
         if !positive(omega) {
             return Err(invalid("reflected monopole frequency"));
@@ -336,7 +346,8 @@ impl ReflectionCoordinates {
         let a = -interface.distance(source);
         let b = -interface.distance(observer);
         let height = a + b;
-        if !positive(a.to_f64()) || !positive(b.to_f64()) || !positive(height.to_f64()) {
+        let receiver_inside = positive(b.to_f64()) || (allow_boundary && b.to_f64() == 0.0);
+        if !positive(a.to_f64()) || !receiver_inside || !positive(height.to_f64()) {
             return Err(invalid(
                 "source and observer must lie strictly in the incident fluid",
             ));
