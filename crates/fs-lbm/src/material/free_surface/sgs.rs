@@ -1,4 +1,4 @@
-//! Source-bound SI inputs and receipts for the original wall/WALE/Vreman step.
+//! Source-bound SI inputs and receipts for the original native SGS steps.
 
 use fs_exec::CancelGate;
 
@@ -19,7 +19,7 @@ use crate::sgs3::{SgsConfig, SgsModel, SgsUse};
 /// Explicit exploration controls. No coefficient or physical filter is inferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceSgsConfig3 {
-    /// WALE or Vreman; the native stress-only Smagorinsky path is separate.
+    /// Smagorinsky for the stress path; WALE or Vreman for full gradients.
     pub model: SgsModel,
     /// Isotropic spatial filter width [m], converted through the original dx.
     pub filter_width_m: f64,
@@ -29,14 +29,17 @@ pub struct MaterialFreeSurfaceSgsConfig3 {
 }
 
 /// Instantaneous pre-step liquid diagnostics in the original physical units.
-/// Powers are fill/density-weighted deviatoric shear dissipation, not heat
-/// deposited into this isothermal owner or a whole-fluid energy balance.
+/// Powers distinguish molecular shear, molecular bulk and modeled deviatoric
+/// shear dissipation. They are not heat deposited into this isothermal owner
+/// or a whole-fluid energy balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFreeSurfaceSgsReport3 {
     /// Includes zero-fill interface reconstruction carriers.
     pub wet_cells: usize,
     pub liquid_volume_m3: f64,
     pub resolved_dissipation_w: f64,
+    /// Molecular `zeta (div u)^2`, excluding tied eddy volumetric damping.
+    pub resolved_bulk_dissipation_w: f64,
     pub sgs_dissipation_w: f64,
     pub maximum_eddy_viscosity_m2_s: f64,
     pub maximum_eddy_to_molecular: f64,
@@ -118,6 +121,9 @@ impl SgsUnits {
             resolved_dissipation_w: scaled(
                 raw.resolved_dissipation_lu, self.power, "resolved liquid power is unrepresentable",
             )?,
+            resolved_bulk_dissipation_w: scaled(
+                raw.resolved_bulk_dissipation_lu, self.power, "molecular bulk power is unrepresentable",
+            )?,
             sgs_dissipation_w: scaled(
                 raw.sgs_dissipation_lu, self.power, "modeled liquid power is unrepresentable",
             )?,
@@ -146,6 +152,57 @@ fn poll(gate: &CancelGate) -> Result<(), MaterialFreeSurfaceSgsError3> {
 }
 
 impl MaterialFreeSurface3<'_> {
+    /// Advance the original native Smagorinsky flow with an explicit physical
+    /// filter width. Molecular shear/bulk coefficients and source selections
+    /// remain frozen; only deviatoric shear receives modeled eddy viscosity
+    /// when independent central-moment bulk relaxation is selected.
+    ///
+    /// Native transport, physical power conversion, both endpoint speed bounds
+    /// and cancellation finish on one private candidate before publication.
+    /// No thermal state, pressure work or turbulent-flow validation is implied.
+    pub fn step_with_sgs_si(
+        &mut self,
+        gate: &CancelGate,
+        config: MaterialFreeSurfaceSgsConfig3,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+    ) -> Result<MaterialFreeSurfaceSgsReport3, MaterialFreeSurfaceSgsError3> {
+        poll(gate)?;
+        let config = config.lattice(self.scaling.cell_size_m)?;
+        let units = SgsUnits::new(&self.scaling)?;
+        self.lattice.admit_sgs_speed(self.scaling.flow.u_lattice, gate)?;
+        let (candidate, report) = self.lattice.sgs_candidate(gate, config, workspace)?;
+        candidate.admit_sgs_speed(self.scaling.flow.u_lattice, gate)?;
+        let report = units.report(report)?;
+        poll(gate)?;
+        self.lattice = candidate;
+        Ok(report)
+    }
+
+    /// Advance WALE/Vreman from the original full force-centered liquid
+    /// gradient using the same physical/cancellation admission as
+    /// [`Self::step_with_sgs_si`]. Occupied cells require resolved second-order
+    /// liquid stencils; empty interface carriers retain molecular relaxation.
+    pub fn step_with_gradient_sgs_si(
+        &mut self,
+        gate: &CancelGate,
+        config: MaterialFreeSurfaceSgsConfig3,
+        kinematics: &mut FreeSurfaceKinematicsWorkspace3,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+    ) -> Result<MaterialFreeSurfaceSgsReport3, MaterialFreeSurfaceSgsError3> {
+        poll(gate)?;
+        let config = config.lattice(self.scaling.cell_size_m)?;
+        let units = SgsUnits::new(&self.scaling)?;
+        self.lattice.admit_sgs_speed(self.scaling.flow.u_lattice, gate)?;
+        let (candidate, report) = self.lattice.gradient_sgs_candidate(
+            gate, config, kinematics, workspace,
+        )?;
+        candidate.admit_sgs_speed(self.scaling.flow.u_lattice, gate)?;
+        let report = units.report(report)?;
+        poll(gate)?;
+        self.lattice = candidate;
+        Ok(report)
+    }
+
     /// Propose one source-bound moving-wall WALE/Vreman step in physical units.
     ///
     /// The original molecular material, force frame, capillarity and scaling

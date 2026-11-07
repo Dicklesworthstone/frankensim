@@ -19,6 +19,8 @@ impl FreeSurface3 {
     /// their native molecular relaxation, without an invented gradient or liquid
     /// modeled dissipation. No gas velocity, wall velocity or curl is invented.
     /// BGK/TRT and its authored TRT even/odd product remain the native family.
+    /// Independent central moment retains every molecular bulk/higher rate;
+    /// modeled eddy viscosity changes only deviatoric shear relaxation.
     pub fn prepare_gradient_sgs(
         &self,
         gate: &CancelGate,
@@ -37,14 +39,7 @@ impl FreeSurface3 {
             ));
         }
         let model = self.collision_model();
-        let molecular_tau = match model {
-            CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
-            _ => {
-                return Err(FreeSurfaceSgsError3::Invalid(
-                    "gradient SGS requires native BGK or TRT collision",
-                ));
-            }
-        };
+        let molecular_tau = molecular_relaxation(model)?;
         let molecular_nu = (molecular_tau - 0.5) / 3.0;
         if !molecular_nu.is_finite() || molecular_nu <= 0.0 {
             return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
@@ -63,6 +58,7 @@ impl FreeSurface3 {
                 if tile.cells[lane] == Cell3::Gas {
                     continue;
                 }
+                let local_model = self.collision_with_bulk(key, lane, model)?;
                 let (x, y, z) = Self::global_of(key, lane);
                 let coordinates = [x as usize, y as usize, z as usize];
                 let invalid = |reason| FreeSurfaceSgsError3::Cell {
@@ -110,7 +106,7 @@ impl FreeSurface3 {
                 } else {
                     molecular_tau + 3.0 * eddy
                 };
-                D3q19::with_shear_relaxation(model, tau).map_err(|source| {
+                D3q19::with_shear_relaxation(local_model, tau).map_err(|source| {
                     FreeSurfaceError3::Collision {
                         tile_key: key,
                         lane,
@@ -132,19 +128,26 @@ impl FreeSurface3 {
                 }
                 let (rho, _) = self.grid.cell_macros(slot, lane);
                 let power = fill * rho * rate_squared;
-                if !power.is_finite() {
-                    return Err(invalid("unrepresentable liquid shear dissipation"));
+                let divergence = 3.0 * third_trace;
+                let bulk_power = (fill * rho * local_model.kinematic_bulk_viscosity())
+                    * divergence * divergence;
+                if !power.is_finite() || !bulk_power.is_finite() {
+                    return Err(invalid("unrepresentable liquid viscous dissipation"));
                 }
                 report.wet_cells += 1;
                 report.liquid_volume_lu += fill;
                 report.resolved_dissipation_lu += power * molecular_nu;
+                report.resolved_bulk_dissipation_lu += bulk_power;
                 report.sgs_dissipation_lu += power * eddy;
                 report.maximum_eddy_viscosity_lu = report.maximum_eddy_viscosity_lu.max(eddy);
                 report.maximum_eddy_to_molecular = report.maximum_eddy_to_molecular.max(ratio);
             }
         }
         check_cancel(gate)?;
-        if !report.resolved_dissipation_lu.is_finite() || !report.sgs_dissipation_lu.is_finite() {
+        if !report.resolved_dissipation_lu.is_finite()
+            || !report.resolved_bulk_dissipation_lu.is_finite()
+            || !report.sgs_dissipation_lu.is_finite()
+        {
             return Err(FreeSurfaceSgsError3::Invalid(
                 "SGS dissipation sum overflow",
             ));
@@ -163,6 +166,21 @@ impl FreeSurface3 {
         kinematics: &mut FreeSurfaceKinematicsWorkspace3,
         workspace: &mut FreeSurfaceSgsWorkspace3,
     ) -> Result<FreeSurfaceSgsReport3, FreeSurfaceSgsError3> {
+        let (candidate, report) = self.gradient_sgs_candidate(gate, config, kinematics, workspace)?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Propose the full-gradient native step on one private population state.
+    /// No accepted state changes; reports describe its pre-step liquid field.
+    pub fn gradient_sgs_candidate(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        kinematics: &mut FreeSurfaceKinematicsWorkspace3,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+    ) -> Result<(Self, FreeSurfaceSgsReport3), FreeSurfaceSgsError3> {
         let report = self.prepare_gradient_sgs(gate, config, kinematics, workspace)?;
         let mut candidate = self.clone();
         if config.model.coefficient() == 0.0 {
@@ -170,8 +188,8 @@ impl FreeSurface3 {
         } else {
             candidate.step_with_material_relaxation_and_pressure(gate, &workspace.tau, None)?;
         }
+        candidate.admit_sgs_bulk_field(gate)?;
         check_cancel(gate)?;
-        *self = candidate;
-        Ok(report)
+        Ok((candidate, report))
     }
 }

@@ -43,7 +43,7 @@ impl FreeSurface3 {
         Ok(())
     }
 
-    fn admit_bulk_relaxations(
+    pub(super) fn admit_bulk_relaxations(
         &self,
         field: &BTreeMap<(u64, usize), f64>,
         gate: &CancelGate,

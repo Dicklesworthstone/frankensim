@@ -48,6 +48,7 @@ impl FreeSurface3 {
         let tau = (config.model.coefficient() != 0.0).then_some(&workspace.tau);
         let (candidate, wall) =
             self.planar_wall_field_candidate_with_relaxation(motion, controls, tau, gate)?;
+        candidate.admit_sgs_bulk_field(gate)?;
         check_cancel(gate)?;
         Ok((candidate, wall, sgs))
     }

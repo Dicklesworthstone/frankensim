@@ -166,6 +166,7 @@ fn g1_enabled_wall_sgs_changes_actual_flow_and_keeps_native_wrench_and_si_power(
         near(report.maximum_eddy_viscosity_m2_s, raw_sgs.maximum_eddy_viscosity_lu * dx.powi(2) / dt);
         let power_unit = source.density_kg_m3() * dx.powi(5) / dt.powi(3);
         near(report.resolved_dissipation_w, raw_sgs.resolved_dissipation_lu * power_unit);
+        near(report.resolved_bulk_dissipation_w, raw_sgs.resolved_bulk_dissipation_lu * power_unit);
         near(report.sgs_dissipation_w, raw_sgs.sgs_dissipation_lu * power_unit);
         assert!(report.sgs_dissipation_w > 0.0);
         near(report.maximum_eddy_to_molecular, raw_sgs.maximum_eddy_to_molecular);
@@ -185,6 +186,74 @@ fn g1_enabled_wall_sgs_changes_actual_flow_and_keeps_native_wrench_and_si_power(
             }
         }}}
         assert!(change > 1e-12, "SGS must change physical wall-driven evolution: {change}");
+    }
+}
+
+#[test]
+fn g1_ordinary_si_sgs_preserves_independent_bulk_native_flow_and_power_units() {
+    let source = liquid(0, 300.0, None);
+    let mut original = primed(&source);
+    original.set_bulk_viscosity(0.23, 1.2).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let dx = original.scaling().cell_size_m();
+    let dt = original.scaling().timestep_s();
+    let power_unit = source.density_kg_m3() * dx.powi(5) / dt.powi(3);
+    let mut kinematics = cache(original.lattice());
+    let mut workspace = FreeSurfaceSgsWorkspace3::default();
+    for (model, disabled) in [
+        (SgsModel::Smagorinsky { cs: 0.2 }, SgsModel::Smagorinsky { cs: 0.0 }),
+        (SgsModel::Wale { cw: 0.5 }, SgsModel::Wale { cw: 0.0 }),
+        (SgsModel::Vreman { cv: 0.1 }, SgsModel::Vreman { cv: 0.0 }),
+    ] {
+        let mut native = original.lattice().clone();
+        let mut physical = original.clone();
+        let stress = matches!(model, SgsModel::Smagorinsky { .. });
+        let raw = if stress {
+            native.step_with_sgs(&gate, native_config(model), &mut workspace).unwrap()
+        } else {
+            native.step_with_gradient_sgs(
+                &gate, native_config(model), &mut kinematics, &mut workspace,
+            ).unwrap()
+        };
+        let report = if stress {
+            physical.step_with_sgs_si(&gate, config(model, dx), &mut workspace).unwrap()
+        } else {
+            physical.step_with_gradient_sgs_si(
+                &gate, config(model, dx), &mut kinematics, &mut workspace,
+            ).unwrap()
+        };
+        same(physical.lattice(), &native);
+        assert_eq!(physical.lattice().collision_model(), original.lattice().collision_model());
+        assert_eq!(physical.scaling().material(), &source);
+        assert_eq!(physical.scaling().bulk_viscosity_pa_s(), Some(0.23));
+        near(report.resolved_dissipation_w, raw.resolved_dissipation_lu * power_unit);
+        near(report.resolved_bulk_dissipation_w, raw.resolved_bulk_dissipation_lu * power_unit);
+        near(report.sgs_dissipation_w, raw.sgs_dissipation_lu * power_unit);
+        assert!(report.sgs_dissipation_w > 0.0);
+
+        let mut ordinary = original.clone();
+        let mut zero = original.clone();
+        ordinary.step_with_gate(&gate).unwrap();
+        if stress {
+            zero.step_with_sgs_si(&gate, config(disabled, dx), &mut workspace).unwrap();
+        } else {
+            zero.step_with_gradient_sgs_si(
+                &gate, config(disabled, dx), &mut kinematics, &mut workspace,
+            ).unwrap();
+        }
+        same(zero.lattice(), ordinary.lattice());
+        let cancelled = CancelGate::new_clock_free();
+        cancelled.request();
+        let before = physical.clone();
+        let result = if stress {
+            physical.step_with_sgs_si(&cancelled, config(model, dx), &mut workspace)
+        } else {
+            physical.step_with_gradient_sgs_si(
+                &cancelled, config(model, dx), &mut kinematics, &mut workspace,
+            )
+        };
+        assert!(result.is_err());
+        same(physical.lattice(), before.lattice());
     }
 }
 

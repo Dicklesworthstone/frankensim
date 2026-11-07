@@ -14,6 +14,7 @@ fn controls(cs: f64) -> SgsConfig {
 
 fn assert_same(a: &FreeSurface3, b: &FreeSurface3) {
     assert_eq!(a.collision_model(), b.collision_model());
+    assert_eq!(a.local_bulk_relaxation, b.local_bulk_relaxation);
     assert_eq!(a.grid.state_bits(), b.grid.state_bits());
     assert_eq!(a.mass_snapshot(), b.mass_snapshot());
     assert_eq!(a.conversions(), b.conversions());
@@ -81,10 +82,12 @@ fn gradient_sgs_advances_finite_liquid_with_molecular_empty_interface_shell() {
         assert!(field.sample_at(x, y, z).unwrap().is_none());
     }
     assert!(field.sample_at(2, 2, 2).unwrap().is_some());
-    for trt in [false, true] {
+    for collision in 0..3 {
         let mut input = liquid.clone();
-        if trt {
+        if collision == 1 {
             input.set_trt_magic(0.25).unwrap();
+        } else if collision == 2 {
+            input.set_central_moment_bulk(0.9, 1.2).unwrap();
         }
         let mass = input.ledger_mass();
         let mut native = input.clone();
@@ -136,6 +139,155 @@ fn gradient_sgs_advances_finite_liquid_with_molecular_empty_interface_shell() {
             assert_ne!(active.grid.state_bits(), input.grid.state_bits());
         }
     }
+}
+
+#[test]
+fn g1_sgs_retains_local_molecular_bulk_stress_power_and_actual_collision() {
+    let gate = CancelGate::new_clock_free();
+    let molecular_tau = 0.65;
+    let molecular_nu = (molecular_tau - 0.5) / 3.0;
+    let force = [0.0004, -0.0003, 0.0002];
+    let strain: [[f64; 3]; 3] = [
+        [0.004, 0.002, -0.001],
+        [0.002, -0.003, 0.0015],
+        [-0.001, 0.0015, -0.001],
+    ];
+    let rate_squared = 2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>();
+    let eddy = (0.2_f64 * 1.7).powi(2) * rate_squared.sqrt();
+    let effective_tau = molecular_tau + 3.0 * eddy;
+    let dilation = 0.007;
+    let mut flow = FreeSurface3::new(
+        4, 4, 4, molecular_tau, force, 0.0, ContactModel3::Neutral, |_, _, _| true,
+    ).unwrap();
+    flow.set_central_moment_bulk(1.1, 1.3).unwrap();
+    let bulk: BTreeMap<_, _> = (0..TILE_CELLS)
+        .map(|lane| ((0, lane), 0.6 + 0.015 * lane as f64)).collect();
+    flow.rebind_bulk_relaxations(bulk.clone(), &gate).unwrap();
+    let mut expected_bulk = 0.0;
+    let mut expected_resolved = 0.0;
+    let mut expected_modeled = 0.0;
+    for lane in 0..TILE_CELLS {
+        let rho = 0.8 + 0.03 * (lane % 4) as f64;
+        let rate = bulk[&(0, lane)];
+        // Independent Hermite populations: the trace carries tau_bulk,
+        // whereas the deviatoric stress carries the total shear tau.
+        flow.grid.set_populations(0, lane, populations(
+            rho, [0.03, -0.02, 0.01], force, effective_tau, strain,
+            dilation / (rate * effective_tau),
+        ));
+        expected_resolved += rho * molecular_nu * rate_squared;
+        expected_modeled += rho * eddy * rate_squared;
+        expected_bulk += rho * (2.0 / 9.0) * (1.0 / rate - 0.5)
+            * (3.0_f64 * dilation).powi(2);
+    }
+    let mut workspace = FreeSurfaceSgsWorkspace3::default();
+    let report = flow.prepare_sgs(&gate, controls(0.2), &mut workspace).unwrap();
+    assert!((report.resolved_dissipation_lu - expected_resolved).abs() < 2e-14);
+    assert!((report.sgs_dissipation_lu - expected_modeled).abs() < 2e-14);
+    assert!((report.resolved_bulk_dissipation_lu - expected_bulk).abs() < 2e-14);
+    for lane in 0..TILE_CELLS {
+        assert!((workspace.tau[&(0, lane)] - effective_tau).abs() < 2e-13);
+    }
+    // Pull independently collided populations from each actual source cell.
+    // A retuned bulk rate or substituted collision family changes this oracle.
+    let mut expected = [0.0; Q3];
+    for (q, e) in E3.iter().enumerate() {
+        let p = [2 - e.0, 2 - e.1, 2 - e.2];
+        let (slot, lane) = flow.grid.resolve_source(
+            i64::from(p[0]), i64::from(p[1]), i64::from(p[2]),
+        ).unwrap();
+        expected[q] = crate::d3q19::collide_cell3(
+            flow.grid.populations(slot, lane),
+            CollisionModel3::CentralMomentBulk {
+                shear_rate: 1.0 / effective_tau,
+                bulk_rate: bulk[&(0, lane)],
+                higher_order_rate: 1.3,
+            }, force,
+        ).unwrap()[q];
+    }
+    let mut ordinary = flow.clone();
+    let mut disabled = flow.clone();
+    ordinary.step_with_gate(&gate).unwrap();
+    disabled.step_with_sgs(&gate, controls(0.0), &mut workspace).unwrap();
+    assert_same(&ordinary, &disabled);
+
+    let mut incomplete = flow.clone();
+    incomplete.local_bulk_relaxation.as_mut().unwrap().remove(&(0, 3));
+    let before = incomplete.clone();
+    assert!(incomplete.step_with_sgs(&gate, controls(0.2), &mut workspace).is_err());
+    assert_same(&incomplete, &before);
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    let before = flow.clone();
+    assert!(flow.step_with_sgs(&cancelled, controls(0.2), &mut workspace).is_err());
+    assert_same(&flow, &before);
+
+    flow.step_with_sgs(&gate, controls(0.2), &mut workspace).unwrap();
+    assert_eq!(flow.local_bulk_relaxation.as_ref(), Some(&bulk));
+    assert_eq!(flow.collision_model(), before.collision_model());
+    let (slot, lane) = flow.grid.resolve_source(2, 2, 2).unwrap();
+    for (actual, expected) in flow.grid.populations(slot, lane).iter().zip(expected) {
+        assert!((actual - expected).abs() < 4e-14);
+    }
+}
+
+#[test]
+fn g1_gradient_sgs_keeps_bulk_power_separate_from_modeled_shear() {
+    let gate = CancelGate::new_clock_free();
+    let gradient = [[0.003, 0.004, 0.0], [0.0, 0.003, 0.002], [0.001, 0.0, 0.003]];
+    let mut input = FreeSurface3::new(
+        4, 4, 4, 0.8, [0.0; 3], 0.0, ContactModel3::Neutral, |_, _, _| true,
+    ).unwrap();
+    input.set_central_moment_bulk(1.1, 1.2).unwrap();
+    let bulk: BTreeMap<_, _> = (0..TILE_CELLS)
+        .map(|lane| ((0, lane), 0.7 + 0.01 * lane as f64)).collect();
+    input.rebind_bulk_relaxations(bulk.clone(), &gate).unwrap();
+    for lane in 0..TILE_CELLS {
+        let p = [lane % 4, (lane / 4) % 4, lane / 16].map(|x| x as f64 - 1.5);
+        let velocity = core::array::from_fn(|a| (0..3).map(|b| gradient[a][b] * p[b]).sum());
+        input.grid.set_populations(0, lane, equilibrium3(1.0, velocity));
+    }
+    let expected_bulk: f64 = bulk.values().map(|rate| {
+        (2.0 / 9.0) * (1.0 / rate - 0.5) * 0.009_f64.powi(2)
+    }).sum();
+    let mut kinematics = super::super::FreeSurfaceKinematicsWorkspace3::new(1, usize::MAX).unwrap();
+    let mut workspace = FreeSurfaceSgsWorkspace3::default();
+    for model in [SgsModel::Wale { cw: 0.4 }, SgsModel::Vreman { cv: 0.1 }] {
+        let config = SgsConfig { model, ..controls(0.0) };
+        let report = input.prepare_gradient_sgs(&gate, config, &mut kinematics, &mut workspace).unwrap();
+        assert!((report.resolved_bulk_dissipation_lu - expected_bulk).abs() < 2e-14);
+        assert!(report.sgs_dissipation_lu > 0.0);
+        let mut active = input.clone();
+        active.step_with_gradient_sgs(&gate, config, &mut kinematics, &mut workspace).unwrap();
+        assert_eq!(active.local_bulk_relaxation.as_ref(), Some(&bulk));
+        assert_eq!(active.collision_model(), input.collision_model());
+    }
+}
+
+#[test]
+fn g4_sgs_refuses_new_wet_cells_without_a_source_bulk_response() {
+    let gate = CancelGate::new_clock_free();
+    let mut flow = FreeSurface3::new(
+        8, 8, 8, 0.8, [0.0; 3], 0.0, ContactModel3::Neutral,
+        |x, _, _| x < 5,
+    ).unwrap();
+    flow.set_central_moment_bulk(1.0, 1.2).unwrap();
+    let bulk = flow.mass_snapshot().into_iter().filter_map(|(location, _)| {
+        if let MassLocation3::Cell(key, lane) = location { Some(((key, lane), 1.0)) } else { None }
+    }).collect();
+    flow.rebind_bulk_relaxations(bulk, &gate).unwrap();
+    let MassLocation3::Cell(key, lane) = FreeSurface3::transport_location([4, 3, 3]).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(flow.tiles[&key].cells[lane], Cell3::Interface);
+    flow.tiles.get_mut(&key).unwrap().mass[lane] = 2.0;
+    let before = flow.clone();
+    let mut native = flow.clone();
+    native.step_with_gate(&gate).unwrap();
+    assert!(native.sample_at(5, 3, 3).is_some());
+    let mut workspace = FreeSurfaceSgsWorkspace3::default();
+    assert!(flow.step_with_sgs(&gate, controls(0.0), &mut workspace).is_err());
+    assert_same(&flow, &before);
 }
 
 // Independent Hermite population reconstruction with physical Guo half-source.

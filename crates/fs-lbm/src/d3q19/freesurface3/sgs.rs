@@ -11,8 +11,9 @@
 //! trace is removed before fitting shear, and the original Guo half-source
 //! correction is retained. BGK/TRT retain their tied shear/bulk relaxation;
 //! TRT preserves the authored even/odd product as the even viscosity changes.
-//! This does not supply independent bulk-viscosity control. This is weakly
-//! compressible, isothermal exploration:
+//! Independent central-moment collision instead retains its molecular bulk
+//! rate at every cell while adding modeled viscosity only to deviatoric shear.
+//! This is weakly compressible, isothermal exploration:
 //! no subgrid free-surface, entrainment, wall damping, resolved heating, or
 //! turbulent-flow validation is supplied. The separate `prepare_gradient_sgs`
 //! and `step_with_gradient_sgs` path admits WALE/Vreman from the native full
@@ -69,7 +70,12 @@ pub struct FreeSurfaceSgsReport3 {
     /// All collision-bearing fluid/interface cells, including empty ghosts.
     pub wet_cells: usize,
     pub liquid_volume_lu: f64,
+    /// Molecular deviatoric shear power `2 rho nu D_dev:D_dev`.
     pub resolved_dissipation_lu: f64,
+    /// Molecular volumetric power `zeta (div u)^2`, separate from shear.
+    /// BGK/TRT's additional tied eddy bulk damping is not molecular power.
+    pub resolved_bulk_dissipation_lu: f64,
+    /// Modeled deviatoric power only; no eddy bulk viscosity is authored.
     pub sgs_dissipation_lu: f64,
     pub maximum_eddy_viscosity_lu: f64,
     pub maximum_eddy_to_molecular: f64,
@@ -99,8 +105,10 @@ impl FreeSurfaceSgsWorkspace3 {
 /// Cancellation and closure refusal leave the native accepted state untouched.
 impl FreeSurface3 {
     /// Prepare an explicitly authored Smagorinsky closure at every wet cell.
-    /// The native molecular law must be BGK or TRT; its family and, for TRT,
-    /// even/odd product are retained. No collision family is replaced.
+    /// The native molecular law must be BGK, TRT or independent central moment;
+    /// its family, TRT even/odd product and independent molecular bulk/higher
+    /// rates are retained. No collision family is replaced. A bound bulk field
+    /// must supply every wet cell, including empty interface carriers.
     /// Coefficient zero retains the exact original relaxation. The viscosity
     /// ratio is refused, never clipped, even in a zero-mass interface ghost.
     pub fn prepare_sgs(
@@ -117,16 +125,7 @@ impl FreeSurface3 {
             ));
         }
         let model = self.collision_model();
-        let molecular_tau = match model {
-            CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
-            CollisionModel3::CentralMoment { .. }
-            | CollisionModel3::CentralMomentBulk { .. }
-            | CollisionModel3::ReducedCumulant { .. } => {
-                return Err(FreeSurfaceSgsError3::Invalid(
-                    "free-surface stress SGS requires native BGK or TRT collision",
-                ));
-            }
-        };
+        let molecular_tau = molecular_relaxation(model)?;
         let molecular_nu = (molecular_tau - 0.5) / 3.0;
         if !molecular_nu.is_finite() || molecular_nu <= 0.0 {
             return Err(SgsError::InvalidMolecularViscosity { cell: 0 }.into());
@@ -144,6 +143,7 @@ impl FreeSurface3 {
                 if tile.cells[lane] == Cell3::Gas {
                     continue;
                 }
+                let local_model = self.collision_with_bulk(key, lane, model)?;
                 let (x, y, z) = Self::global_of(key, lane);
                 let invalid = |reason| FreeSurfaceSgsError3::Cell {
                     coordinates: [x as usize, y as usize, z as usize],
@@ -184,7 +184,7 @@ impl FreeSurface3 {
                 }
                 // A finite even tau can still round TRT's derived odd tau to
                 // one half. Admit the exact same model the native owner uses.
-                D3q19::with_shear_relaxation(model, tau).map_err(|source| {
+                D3q19::with_shear_relaxation(local_model, tau).map_err(|source| {
                     FreeSurfaceError3::Collision {
                         tile_key: key,
                         lane,
@@ -199,19 +199,32 @@ impl FreeSurface3 {
                     .sum();
                 let fill = self.fill(key, lane);
                 let shear_power = fill * rho * rate_squared;
-                if !shear_power.is_finite() {
-                    return Err(invalid("unrepresentable liquid shear dissipation"));
+                // Guo-corrected spherical stress carries tau_bulk*div(u).
+                // An independent local bulk rate is never retuned by SGS.
+                let bulk_rate = match local_model {
+                    CollisionModel3::CentralMomentBulk { bulk_rate, .. } => bulk_rate,
+                    _ => 1.0 / tau,
+                };
+                let divergence = (-4.5 * (trace / rho)) * bulk_rate;
+                let bulk_power = (fill * rho * local_model.kinematic_bulk_viscosity())
+                    * divergence * divergence;
+                if !shear_power.is_finite() || !bulk_power.is_finite() {
+                    return Err(invalid("unrepresentable liquid viscous dissipation"));
                 }
                 report.wet_cells += 1;
                 report.liquid_volume_lu += fill;
                 report.resolved_dissipation_lu += shear_power * molecular_nu;
+                report.resolved_bulk_dissipation_lu += bulk_power;
                 report.sgs_dissipation_lu += shear_power * eddy;
                 report.maximum_eddy_viscosity_lu = report.maximum_eddy_viscosity_lu.max(eddy);
                 report.maximum_eddy_to_molecular = report.maximum_eddy_to_molecular.max(ratio);
             }
         }
         check_cancel(gate)?;
-        if !report.resolved_dissipation_lu.is_finite() || !report.sgs_dissipation_lu.is_finite() {
+        if !report.resolved_dissipation_lu.is_finite()
+            || !report.resolved_bulk_dissipation_lu.is_finite()
+            || !report.sgs_dissipation_lu.is_finite()
+        {
             return Err(FreeSurfaceSgsError3::Invalid(
                 "SGS dissipation sum overflow",
             ));
@@ -229,6 +242,23 @@ impl FreeSurface3 {
         config: SgsConfig,
         workspace: &mut FreeSurfaceSgsWorkspace3,
     ) -> Result<FreeSurfaceSgsReport3, FreeSurfaceSgsError3> {
+        let (candidate, report) = self.sgs_candidate(gate, config, workspace)?;
+        check_cancel(gate)?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    /// Propose the same native SGS step without publishing it. Physical-unit
+    /// owners can admit the returned state and diagnostics without a second
+    /// population clone. The report and workspace describe the input state.
+    /// If a local bulk field is bound, a wet-topology change requires source
+    /// rebinding and refuses here; this isothermal native path cannot supply it.
+    pub fn sgs_candidate(
+        &self,
+        gate: &CancelGate,
+        config: SgsConfig,
+        workspace: &mut FreeSurfaceSgsWorkspace3,
+    ) -> Result<(Self, FreeSurfaceSgsReport3), FreeSurfaceSgsError3> {
         let report = self.prepare_sgs(gate, config, workspace)?;
         let mut candidate = self.clone();
         if config.model.coefficient() == 0.0 {
@@ -236,9 +266,55 @@ impl FreeSurface3 {
         } else {
             candidate.step_with_material_relaxation_and_pressure(gate, &workspace.tau, None)?;
         }
+        candidate.admit_sgs_bulk_field(gate)?;
         check_cancel(gate)?;
-        *self = candidate;
-        Ok(report)
+        Ok((candidate, report))
+    }
+
+    fn admit_sgs_bulk_field(&self, gate: &CancelGate) -> Result<(), FreeSurfaceSgsError3> {
+        if let Some(field) = &self.local_bulk_relaxation {
+            self.admit_bulk_relaxations(field, gate)?;
+        }
+        Ok(())
+    }
+
+    /// Allocation-free endpoint gate for the original physical scenario speed.
+    pub(crate) fn admit_sgs_speed(
+        &self,
+        maximum: f64,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceSgsError3> {
+        check_cancel(gate)?;
+        for (&key, tile) in &self.tiles {
+            check_cancel(gate)?;
+            let slot = self.grid.slot_of(key).expect("active");
+            for lane in 0..TILE_CELLS {
+                if tile.cells[lane] == Cell3::Gas {
+                    continue;
+                }
+                let (rho, raw) = self.grid.cell_macros(slot, lane);
+                let force = self.force_at_lane(key, lane);
+                let velocity: [f64; 3] = core::array::from_fn(|a| raw[a] + 0.5 * force[a] / rho);
+                let speed = velocity[0].hypot(velocity[1]).hypot(velocity[2]);
+                if !speed.is_finite() || speed > maximum {
+                    return Err(FreeSurfaceSgsError3::Invalid(
+                        "SGS liquid exceeds the original material scenario speed",
+                    ));
+                }
+            }
+        }
+        check_cancel(gate)?;
+        Ok(())
+    }
+}
+
+fn molecular_relaxation(model: CollisionModel3) -> Result<f64, FreeSurfaceSgsError3> {
+    match model {
+        CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => Ok(tau),
+        CollisionModel3::CentralMomentBulk { shear_rate, .. } => Ok(1.0 / shear_rate),
+        _ => Err(FreeSurfaceSgsError3::Invalid(
+            "free-surface SGS requires native BGK, TRT or independent central-moment collision",
+        )),
     }
 }
 

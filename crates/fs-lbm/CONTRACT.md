@@ -958,12 +958,16 @@ new measured accuracy, convergence or performance claim.
 
 `FreeSurface3::prepare_sgs` and `step_with_sgs` accept explicit shared
 `SgsConfig` controls and a reusable `FreeSurfaceSgsWorkspace3`. This path
-requires native BGK or TRT and Smagorinsky; central/cumulant collisions refuse.
+requires Smagorinsky with native BGK, TRT or independent `CentralMomentBulk`;
+other central/cumulant collisions refuse. The full-gradient WALE/Vreman path
+admits the same three families. Independent central-moment collision preserves
+each actual uniform or source-local molecular bulk rate and higher-order rate
+while modeled viscosity changes only deviatoric shear relaxation.
 WALE and Vreman need information absent from a symmetric local moment and
 refuse on this stress path; the separate full-gradient path is described below.
 Acceptance use, invalid controls, and excess eddy/molecular viscosity
 refuse without changing accepted flow. The zero coefficient follows the
-original native BGK or TRT collision path bit for bit.
+original native collision path bit for bit when the endpoint bulk field remains complete.
 
 `FreeSurface3::set_trt_magic` selects TRT with an explicit positive even/odd
 relaxation product while preserving the exact molecular even relaxation and
@@ -985,7 +989,8 @@ without a lagged viscosity or a stencil through gas. This follows Chiappini,
 Water 12 (2020), 1212, equations (6)-(8), doi:10.3390/w12041212, restricted to
 deviatoric shear. TRT's stress is even, so the same root supplies its even
 relaxation; the native collision applies each Guo parity at its own rate.
-Both BGK and TRT still tie shear/bulk relaxation.
+Both BGK and TRT still tie shear/bulk relaxation. Independent central moment
+uses its original bulk rate to reconstruct the spherical stress separately.
 
 Morton-key/lane cache entries survive sparse slot changes; newly wet cells
 are resolved on the next preparation. Only one native candidate is cloned.
@@ -994,8 +999,20 @@ conversion finish before publication, so native or cancellation refusal
 preserves every accepted component. Scratch is consumable only on success.
 `FreeSurfaceSgsReport3` describes the pre-step input: instantaneous resolved
 and modeled shear dissipation are weighted by native bounded liquid fill.
+`resolved_bulk_dissipation_lu` separately reports molecular `zeta*(div u)^2`.
+BGK/TRT's extra tied eddy volumetric damping is excluded from molecular power
+and modeled deviatoric power. A bound local bulk field must exactly cover all
+endpoint wet cells; native SGS refuses a topology change that needs a source
+response it cannot resolve. The accepted flow remains unchanged on refusal.
 Empty interface ghosts and unlocated carry add no liquid dissipation. No
 diagnostic power is added as heat to this isothermal owner.
+
+`MaterialFreeSurface3::{step_with_sgs_si,step_with_gradient_sgs_si}` expose
+these ordinary steps with an authored physical filter width, original frozen
+molecular coefficients and one native candidate. Both endpoint scenario-speed
+bounds, SI power conversion and cancellation finish before publication. The
+three reported SI powers distinguish molecular shear, molecular bulk and
+modeled shear; they add no heat deposition or pressure-work account.
 
 Six focused G0/G1/G4/G5 regressions in `d3q19::freesurface3::sgs::tests`
 cover independently reconstructed forced populations and actual collision,
@@ -13615,7 +13632,8 @@ refusals. Isotropic stress changes neither this shear query nor its apparent
 viscosity, while independently relaxed dilation remains available for physical
 bulk heating. Native boundary and immersed-solid relaxation
 continue to use the shear rate for their viscous response. The separate
-free-surface stress SGS path retains its explicit BGK/TRT-only admission.
+free-surface stress SGS path also admits independent central moment while
+preserving the original bulk and higher-order rates.
 
 This is a weakly compressible, isothermal collision capability. Longitudinal
 continuum waves decay at `Gamma = (4nu/3 + zeta/rho) k²/2`, while transverse waves
