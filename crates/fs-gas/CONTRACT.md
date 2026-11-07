@@ -7489,3 +7489,50 @@ and rejected work bounds, exact endpoints, source-domain and late cancellation
 rollback, and fixed-volume compatibility. The exponential analytic fixture
 explicitly declares irreversible first-order A-to-B chemistry; the shared
 reversible material fixture remains unchanged.
+
+## Reacting electron and heavy thermal pools with radiation
+
+`chemistry::collisional_radiative::advance_collisional_radiative_with_thermal`
+extends the existing simultaneous impact/three-body/photoionization/radiative
+capture owner with original neutral and Coulomb heat exchange, independent held
+electron/heavy powers and evolving heavy temperature. The basic entry retains
+its fixed-heavy, zero-exchange behavior. `CollisionalRadiativeThermal` carries
+the original collision sources, signed powers, heavy temperature support and
+caloric inversion bound; the result retains those inputs.
+
+The same `PreparedExchange` owner used by existing gas energy evolution queries
+actual trial populations, volume and both temperatures. No collision coefficient
+is reused at an unrelated state. The original atomic channel has equal constant
+monatomic neutral/ion molar heat capacities; its heavy nucleus count is
+conserved, while spectator amounts remain fixed. Original-source heavy sensible
+energy differences and capacities therefore support the shared bounded caloric
+inversion without double-counting the chemical gap or imposing a constant
+mixture heat capacity on spectators.
+
+The midpoint stage freezes conductance and capacities and integrates the
+linearized thermal difference exponentially. Its forcing includes changing
+electron population as well as chemical/radiative energy and external work.
+Constant capacities, conductance, populations and powers recover the exact
+linear exchange solution; general temperature-dependent reaction/transport
+feedback retains the local midpoint estimate and is not unconditionally stiff
+stable. The full/two-half comparison includes both temperatures and the
+accumulated transfer/work accounts. Trials allocate no species vector.
+
+Electron-to-heavy transfer appears once with opposite signs in the two pool
+balances. Neutral and Coulomb contributions remain distinct. Published pool
+and total balances independently use actual endpoint populations and original
+source calorics, including final population roundoff. Pure thermal/power
+evolution proceeds even when chemical rates vanish. A nonzero held electron
+power at exact initial electron absence refuses; photoionization with zero
+held electron power can create the first carriers and activate exchange.
+Source/domain exits, exhausted work or caloric inversion, and cancellation
+publish no partial endpoint. The model remains a rigid ground-state Maxwellian
+parcel with escaping emitted photons and immediate electron thermalization.
+
+Focused regressions compare neutral thermal relaxation in both directions with
+its independent nonlinear closed form, and the full reacting/radiating parcel
+with independently integrated analytic Maxwellian/Milne/Landau moment equations
+(DOP853 and Radau references). They also exercise variable spectator calorics,
+formation-reference shifts, pure power with inactive chemistry, initial neutral
+photoelectron creation, original-source admission and cancellation. Numerical
+agreement on these manufactured laws is not experimental atom/plasma validation.

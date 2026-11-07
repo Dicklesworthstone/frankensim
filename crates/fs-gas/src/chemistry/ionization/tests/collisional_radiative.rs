@@ -1,4 +1,5 @@
 use super::{EV, KB, ME, NA, id, initial};
+mod thermal;
 use crate::chemistry::collisional_radiative::*;
 use fs_matdb::Provenance;
 use fs_qty::{Area, Energy, Temperature, Time, Volume};
@@ -17,7 +18,7 @@ use fs_thermochem::kinetics::atomic_ionization::{AtomicIonizationV1, AtomicStati
 
 const SIGMA: f64 = 1e-22;
 
-fn fixture(
+pub(super) fn fixture(
     x: f64,
     te: f64,
     impact: f64,

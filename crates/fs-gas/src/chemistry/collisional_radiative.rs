@@ -12,9 +12,10 @@
 //! inventory. Each absorbed photon supplies its original source energy; each
 //! radiative capture emits the chemical gap plus captured kinetic energy.
 //! Emitted photons escape. Photoelectrons thermalize immediately. The parcel
-//! is rigid, the heavy temperature is unchanged, and no LTE projection,
-//! electron/heavy heat exchange, stimulated emission or excited-state channel
-//! is inferred. See the rate-equation formulation in NIST's FLYCHK manual,
+//! is rigid. The basic entry holds the heavy temperature fixed; the explicit
+//! thermal entry adds original-source neutral/Coulomb exchange, separate held
+//! pool powers and evolving heavy temperature. No LTE projection, stimulated
+//! emission or excited-state channel is inferred. See NIST's FLYCHK manual,
 //! <https://nlte.nist.gov/FLY/Doc/Manual_FLYCHK_Nov08.pdf>, section II.B.2.
 //!
 //! Exponential midpoint freezes all production/destruction coefficients at a
@@ -41,8 +42,10 @@ use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::{
 };
 use fs_thermochem::kinetics::{KineticsErrorV1, admit_caloric_interval};
 
-mod solve;
+pub(in crate::chemistry) mod solve;
 use solve::Problem;
+mod thermal;
+pub use thermal::CollisionalRadiativeThermal;
 
 /// Electron source support and separate temporal, energy and moment allowances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,7 +96,7 @@ impl CollisionalRadiativeSolve {
             },
         }
     }
-    fn validate(self) -> Result<(), CollisionalRadiativeError> {
+    pub(in crate::chemistry) fn validate(self) -> Result<(), CollisionalRadiativeError> {
         if [
             self.minimum_electron_temperature_k,
             self.maximum_electron_temperature_k,
@@ -134,6 +137,8 @@ pub enum CollisionalRadiativeError {
     Recombination(RadiativeRecombinationErrorV1),
     /// Original caloric source cannot support the declared temperature path.
     Admission(KineticsErrorV1),
+    /// Original neutral/Coulomb exchange or heavy caloric inversion refused.
+    Thermal(super::energy::ElectronHeavyEnergyError),
     /// Positive electron temperature left the admitted source interval.
     OutsideDomain,
     /// Explicit work, minimum-step or representable-time budget exhausted.
@@ -175,7 +180,23 @@ pub struct CollisionalRadiativeBalance {
     pub chemical_storage_change_j: f64,
     /// Actual electron sensible-energy change, including population dilution [J].
     pub electron_sensible_energy_change_j: f64,
-    /// Gas energy change + emitted radiation - absorbed radiation [J].
+    /// Actual original-source heavy sensible-energy change [J].
+    pub heavy_sensible_energy_change_j: f64,
+    /// Signed external work supplied to electrons [J].
+    pub electron_deposited_energy_j: f64,
+    /// Signed external work supplied to heavy particles [J].
+    pub heavy_deposited_energy_j: f64,
+    /// Signed cumulative electron-to-heavy transfer [J].
+    pub electron_to_heavy_energy_j: f64,
+    /// Neutral-collision part of electron-to-heavy transfer [J].
+    pub electron_to_heavy_neutral_energy_j: f64,
+    /// Coulomb part of electron-to-heavy transfer [J].
+    pub electron_to_heavy_coulomb_energy_j: f64,
+    /// Electron sensible + chemical + emitted - absorbed + transfer - work [J].
+    pub electron_sensible_energy_residual_j: f64,
+    /// Heavy sensible - transfer - heavy work [J].
+    pub heavy_sensible_energy_residual_j: f64,
+    /// Gas energy change + emitted - absorbed radiation - both pool works [J].
     pub energy_residual_j: f64,
     /// Largest accepted estimated fine-step error divided by its allowance.
     pub maximum_normalized_local_error: f64,
@@ -196,6 +217,7 @@ pub struct CollisionalRadiativeResult {
     state: FrozenIonizedGasStateV1,
     source: AtomicRadiativeRecombinationV1,
     photons: Vec<PhotonNumberFluxV1>,
+    thermal: Option<CollisionalRadiativeThermal>,
     controls: CollisionalRadiativeSolve,
     elapsed: Time,
     extent: Amount,
@@ -217,6 +239,10 @@ impl CollisionalRadiativeResult {
     /// Prescribed local fluxes held over the completed interval.
     pub fn photon_field(&self) -> &[PhotonNumberFluxV1] {
         &self.photons
+    }
+    /// Original optional collision inputs, held powers and heavy source bounds.
+    pub const fn thermal_inputs(&self) -> Option<&CollisionalRadiativeThermal> {
+        self.thermal.as_ref()
     }
     /// Applied source, quadrature and temporal controls.
     pub const fn controls(&self) -> CollisionalRadiativeSolve {
@@ -249,6 +275,48 @@ pub fn advance_collisional_radiative(
     photons: &[PhotonNumberFluxV1],
     duration: Time,
     controls: CollisionalRadiativeSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<CollisionalRadiativeResult, CollisionalRadiativeError> {
+    advance(
+        initial, source, photons, None, duration, controls, cancelled,
+    )
+}
+
+/// Evolve reacting populations, both thermal pools and radiation together.
+///
+/// Collision laws are refreshed at actual stage populations and temperatures.
+/// Powers are independently supplied, signed and held over this interval; no
+/// electrical work is inferred or added twice. Nonzero electron power requires
+/// an initial electron population. Photoionization can still create electrons
+/// from exact absence when that held power is zero. Heavy calorics include
+/// every original populated spectator, with explicit continuous source support.
+pub fn advance_collisional_radiative_with_thermal(
+    initial: &FrozenIonizedGasStateV1,
+    source: &AtomicRadiativeRecombinationV1,
+    photons: &[PhotonNumberFluxV1],
+    thermal: &CollisionalRadiativeThermal,
+    duration: Time,
+    controls: CollisionalRadiativeSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<CollisionalRadiativeResult, CollisionalRadiativeError> {
+    advance(
+        initial,
+        source,
+        photons,
+        Some(thermal),
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+fn advance(
+    initial: &FrozenIonizedGasStateV1,
+    source: &AtomicRadiativeRecombinationV1,
+    photons: &[PhotonNumberFluxV1],
+    thermal: Option<&CollisionalRadiativeThermal>,
+    duration: Time,
+    controls: CollisionalRadiativeSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<CollisionalRadiativeResult, CollisionalRadiativeError> {
     controls.validate()?;
@@ -257,7 +325,8 @@ pub fn advance_collisional_radiative(
     if !nonnegative(end) {
         return Err(CollisionalRadiativeError::Invalid("nonnegative duration"));
     }
-    let problem = Problem::new(initial, source, photons, controls, &mut cancelled)?;
+    let problem =
+        Problem::new_with_thermal(initial, source, photons, thermal, controls, &mut cancelled)?;
     let mut point = problem.initial_point();
     let mut balance = CollisionalRadiativeBalance::default();
     let mut rates = problem.rates(point, &mut balance, &mut cancelled)?;
@@ -325,6 +394,7 @@ pub fn advance_collisional_radiative(
         state,
         source: source.clone(),
         photons: photons.to_vec(),
+        thermal: thermal.cloned(),
         controls,
         elapsed: duration,
         extent: Amount::new(point.extent.value),
