@@ -23,6 +23,9 @@ mod remap;
 #[path = "density_transport/ssprk2.rs"]
 mod ssprk2;
 
+#[path = "density_transport/linear.rs"]
+mod linear;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

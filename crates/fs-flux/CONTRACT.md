@@ -1229,6 +1229,65 @@ physical density-weighted acceleration and traction pressure, recovery of the
 original uniform-density Oseen matrix/load, and cancellation, CFL, invalid-source
 and unrepresentable-history refusals.
 
+### Bounded linear density with compatible native momentum
+
+`FluxSystem::with_density_reconstruction(DensityReconstruction::BoundedLinear)`
+selects an opt-in spatial density reconstruction for the existing Euler,
+subcycled and SSPRK2 transport owners and all native conservative momentum
+entry points that prepare transport from that system. `DonorCell` remains the
+default, including its original transfer arithmetic and allocation-free warm
+path. No alternate momentum solver or material inventory is introduced.
+
+The original mesh prepares weighted least-squares density slopes once. Each
+step limits the three reconstructed vertex densities against the minimum and
+maximum densities of their incident cells and actual incoming boundary states.
+Those vertex patches preserve affine interior profiles; face-neighbor bounds
+alone could unnecessarily limit every affine triangle. The limiter contracts
+a bound-touching slope towards its positive cell mean rather than clipping an
+accepted density or repairing mass. Singular one-sided stencils and
+unrepresentable slopes retain the original constant donor. No exterior ghost
+density is invented at an outflow or impermeable boundary.
+
+Each sign-separated BDM face stream uses the exact volume-flux-weighted
+centroid of its affine normal velocity. Evaluating the limited affine density
+there gives that stream's integrated reconstructed mass flux. Both directions
+survive a reversing face. Specific inventories keep their original donor values
+and use those SAME mass transfers, so constant specific states and convex
+specific bounds are preserved. This raises density's smooth spatial accuracy;
+it does not raise the spatial order of specific enthalpy/species transport or
+the temporal order of native BDF1 momentum.
+
+For a triangle, the mean of the three affine vertex densities is the stored
+cell density. Every nonnegative vertex value is therefore at most three cell
+means. A sufficient positivity restriction is the original volume Courant
+allowance divided by three, applied automatically by `maximum_timestep_s`,
+Euler admission and dyadic stage selection. Reports retain ACTUAL volume
+Courant numbers. Nonnegative retained vertex weights and incoming streams
+preserve positive density and global density bounds, subject to the existing
+volume-divergence and floating-point allowances. This is a conservative
+sufficient bound, not a claim of the largest stable timestep.
+
+The exact directional mass is shared with the original compatible BDM2 mass
+flux. Each effective directional density multiplies the original affine normal
+velocity, retaining its quadratic test moments and constant cell divergence.
+This adopted momentum trace need not equal the pointwise product of the two
+affine fields; no higher spatial-order momentum claim is made. SSPRK2 and
+subcycling accumulate actual limited directional donors with their accepted
+time weights. Reconstructing an averaged cell state would be incorrect because
+the limiter is nonlinear. The native density-weighted inertia, pressure,
+momentum flux and kinetic-energy identity consequently remain consistent with
+the accepted density transfers.
+
+Prepared stencils, one vertex-bound pass and reusable reconstruction/mean
+buffers keep warm work linear in cells, vertices and edges, without new heap
+allocations during a step. All added storage is included in existing per-owner
+caps. No measured speedup or sharp-interface reconstruction is claimed.
+`tests/density_transport/linear.rs` checks smooth translating density error,
+affine counterflow integration, positivity and carried-inventory bounds across
+a large density jump, and every accepted Euler/RK face transfer against its
+momentum flux. `tests/density_momentum/ssprk2.rs` also checks reconstructed-density
+free streams and the closed native kinetic-energy identity.
+
 ### Conservative SSPRK2 density stages and accepted flux weights
 
 `ns::transport::density::ssprk2` adds bounded second-order TIME integration of
@@ -1237,8 +1296,9 @@ Each physical subinterval evaluates the original positive donor-cell Euler
 map twice, `U1=E_h(U0)` and `U2=E_h(U1)`, then accepts `0.5*(U0+U2)` in
 EXTENSIVE coordinates `(mass, mass*specific[0..N])`. The fixed mesh, depth,
 original divergence-free BDM volume advector and exterior donor states remain
-unchanged throughout the macro interval. P0 spatial transport still has its
-original first-order mixing; this owner neither sharpens interfaces nor raises
+unchanged throughout the macro interval. Default P0 donor-cell spatial transport
+retains its original first-order mixing; the bounded linear density option is
+described above. This owner neither sharpens interfaces nor raises
 the temporal order of a caller's native BDF1 momentum step.
 
 Both stages satisfy the original outgoing-volume Courant cap in `(0,1)`.

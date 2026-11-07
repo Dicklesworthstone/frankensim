@@ -1,9 +1,9 @@
 //! Conservative density subcycling for one frozen native volume advector.
 //!
-//! Equal dyadic subintervals reuse the original positive donor-cell Euler map.
-//! The arithmetic mean of their PRE-step donor densities defines the integrated
+//! Equal dyadic subintervals reuse the positive conservative Euler map.
+//! The arithmetic mean of their actual PRE-step directional donors defines the integrated
 //! mass flux because every original directional volume rate remains fixed.
-//! Reconstructing that mean once retains the original constant cell divergence
+//! Reconstructing that face flux once retains the original constant cell divergence
 //! and quadratic face moments needed by a native macrostep momentum balance.
 //! The averaged density is an integration weight, not an accepted material state.
 //!
@@ -22,6 +22,7 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DensitySubcycleControls {
     /// Largest outgoing volume fraction in EACH density substep, in (0,1).
+    /// Bounded linear density uses one third of this sufficient volume allowance.
     pub maximum_courant: f64,
     /// Maximum admitted number of equal dyadic substeps. No global momentum
     /// solves occur in this owner, and no unbounded retry loop is hidden here.
@@ -56,6 +57,7 @@ pub struct DensitySubcycleWorkspace<'p, 'm, const N: usize> {
     average: Vec<Mean>,
     average_cells: Vec<DensityTransportCell<0>>,
     average_inflow: Vec<Option<DensityTransportCell<0>>>,
+    face_average: Vec<[Mean; 2]>,
     transfers: Vec<TransferSum<N>>,
     accepted: bool,
 }
@@ -90,6 +92,35 @@ impl Mean {
             "time-averaged donor density",
         )
     }
+}
+
+pub(super) fn add_face_means(
+    means: &mut [[Mean; 2]],
+    donors: &[[f64; 2]],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<()> {
+    for (mean, donor) in means.iter_mut().zip(donors) {
+        poll(cancelled)?;
+        for direction in 0..2 {
+            mean[direction].add(donor[direction])?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn finish_face_means(
+    donors: &mut [[f64; 2]],
+    means: &[[Mean; 2]],
+    count: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<()> {
+    for (donor, mean) in donors.iter_mut().zip(means) {
+        poll(cancelled)?;
+        for direction in 0..2 {
+            donor[direction] = mean[direction].value(count)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +170,8 @@ impl<'m> PreparedDensityTransport<'m> {
     ) -> Result<DensitySubcycleWorkspace<'_, 'm, N>> {
         let nc = self.volumes.len();
         let ne = self.volume_rates.len();
+        let linear_cells = if self.linear.is_some() { nc } else { 0 };
+        let linear_edges = if self.linear.is_some() { ne } else { 0 };
         admit_storage(
             &[
                 // Keep generic-N sizes separate so every addition and
@@ -152,6 +185,16 @@ impl<'m> PreparedDensityTransport<'m> {
                 (ne, size_of::<EdgeDensityTransfer<N>>()),
                 (ne, size_of::<TransferSum<N>>()),
                 (ne, size_of::<Option<DensityTransportCell<0>>>()),
+                (linear_cells, size_of::<[f64; 3]>()),
+                (
+                    if self.linear.is_some() {
+                        self.mesh.verts.len()
+                    } else {
+                        0
+                    },
+                    size_of::<[f64; 2]>(),
+                ),
+                (linear_edges, size_of::<[f64; 2]>() + size_of::<[Mean; 2]>()),
             ],
             max_storage_bytes,
         )?;
@@ -163,6 +206,7 @@ impl<'m> PreparedDensityTransport<'m> {
             average: allocate(nc, Mean::default())?,
             average_cells: allocate(nc, DensityTransportCell::default())?,
             average_inflow: allocate(ne, None)?,
+            face_average: allocate(linear_edges, [Mean::default(); 2])?,
             transfers: allocate(ne, TransferSum::default())?,
             accepted: false,
         })
@@ -179,16 +223,21 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
     /// Equal-time average of the PRE-substep donor densities. The empty
     /// specific array makes explicit that these are mass-flux integration
     /// weights, not averaged enthalpy/species or accepted material states.
+    /// With bounded linear reconstruction these cell means select the local
+    /// momentum bubble; the actual face flux uses separately averaged limited
+    /// directional donors from every accepted substep.
     pub fn average_donor_density(&self) -> Option<&[DensityTransportCell<0>]> {
         self.accepted.then_some(self.average_cells.as_slice())
     }
 
     /// Reconstruct the one time-averaged compatible mass flux of the accepted
-    /// substeps using their original frozen advector. Reconstruction is linear
-    /// in donor densities in exact arithmetic, so its divergence gives the
+    /// substeps using their original frozen advector. Momentum reconstruction
+    /// is linear in directional donor densities in exact arithmetic, so its divergence gives the
     /// macro density change and its quadratic face moments give the native
     /// momentum energy identity, up to conversion/averaging roundoff.
-    /// Boundary donors are held constant over this macro interval.
+    /// Boundary donors are held constant over this macro interval. Bounded
+    /// linear density averages the limited face donors from each substep;
+    /// its nonlinear limiter is never applied to an averaged cell state.
     pub fn prepare_mass_flux(
         &self,
         max_storage_bytes: usize,
@@ -199,9 +248,13 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
                 "an accepted density subcycle is required before reconstructing its mass flux",
             ));
         }
-        self.plan.prepare_mass_flux(
+        self.plan.prepare_mass_flux_with_donors(
             &self.average_cells,
             &self.average_inflow,
+            self.plan
+                .linear
+                .as_ref()
+                .map(|_| self.euler.face_densities.as_slice()),
             max_storage_bytes,
             cancelled,
         )
@@ -245,7 +298,9 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
         let mut dt = timestep_s;
         loop {
             let courant = dt * self.plan.maximum_outgoing_rate_s;
-            if courant.is_finite() && courant <= controls.maximum_courant {
+            if courant.is_finite()
+                && courant <= self.plan.volume_courant_limit(controls.maximum_courant)
+            {
                 break;
             }
             count = count
@@ -287,6 +342,9 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
                 specific: [],
             });
             self.transfers[edge] = TransferSum::default();
+            if let Some(mean) = self.face_average.get_mut(edge) {
+                *mean = [Mean::default(); 2];
+            }
         }
         let mut maximum_substep_courant: f64 = 0.0;
         let mut absolute_boundary = [Sum::default(); N];
@@ -302,6 +360,11 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
                 &mut cancelled,
             )?;
             maximum_substep_courant = maximum_substep_courant.max(step.maximum_courant);
+            add_face_means(
+                &mut self.face_average,
+                &self.euler.face_densities,
+                &mut cancelled,
+            )?;
             for (mean, state) in self.average.iter_mut().zip(&self.current) {
                 poll(&mut cancelled)?;
                 mean.add(state.density_kg_m3)?;
@@ -329,6 +392,12 @@ impl<'m, const N: usize> DensitySubcycleWorkspace<'_, 'm, N> {
             poll(&mut cancelled)?;
             target.density_kg_m3 = mean.value(count)?;
         }
+        finish_face_means(
+            &mut self.euler.face_densities,
+            &self.face_average,
+            count,
+            &mut cancelled,
+        )?;
         // Reuse the original Euler transfer storage for the accepted complete
         // interval. Its last microstep view is no longer needed.
         for (target, sum) in self.euler.transfers.iter_mut().zip(&self.transfers) {

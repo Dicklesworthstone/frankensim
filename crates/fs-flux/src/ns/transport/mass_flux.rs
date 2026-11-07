@@ -5,6 +5,11 @@
 //! trace. Its moments through degree two are essential: BDM1 kinetic energy
 //! is quadratic, so keeping only the mean or a BDM1 trace loses the discrete
 //! integration-by-parts identity needed by the momentum energy balance.
+//! With bounded linear density, each directional donor is the exact volume-
+//! flux-weighted mean of its limited affine density. It still multiplies the
+//! original affine normal velocity in this momentum owner. Thus the accepted
+//! directional mass and kinetic moments remain compatible, without claiming
+//! a pointwise quadratic mass trace or higher spatial order for momentum.
 //!
 //! On each reference triangle, a vector P2 polynomial matches all nine face
 //! moments and has constant divergence. Its one remaining divergence-free,
@@ -79,7 +84,8 @@ impl<'m> PreparedDensityTransport<'m> {
     /// Both signs of a reversing face are retained, including zero net volume.
     ///
     /// `max_storage_bytes` bounds the retained vectors, excluding this original
-    /// plan and caller inputs; constructor scratch is fixed-size stack storage.
+    /// plan and caller inputs. Bounded linear density also admits its temporary
+    /// vertex/directional reconstruction arrays within this same allowance.
     /// Errors and per-face/per-cell cancellation publish no partial operator.
     pub fn prepare_mass_flux<const N: usize>(
         &self,
@@ -89,23 +95,45 @@ impl<'m> PreparedDensityTransport<'m> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedDensityMassFlux<'m>> {
         poll(&mut cancelled)?;
+        let required = mass_flux_storage(self.mesh)?;
+        let donors = self.reconstructed_mass_flux_donors(
+            cells,
+            inflow,
+            required,
+            max_storage_bytes,
+            &mut cancelled,
+        )?;
+        self.prepare_mass_flux_with_donors(
+            cells,
+            inflow,
+            donors.as_deref(),
+            max_storage_bytes,
+            &mut cancelled,
+        )
+    }
+
+    // Time integration passes the actual mean of its limited directional
+    // donors. Reconstructing an averaged cell state would change the mass flux
+    // because the spatial limiter is nonlinear.
+    pub(super) fn prepare_mass_flux_with_donors<const N: usize>(
+        &self,
+        cells: &[DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        directional_donors: Option<&[[f64; 2]]>,
+        max_storage_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedDensityMassFlux<'m>> {
+        poll(&mut cancelled)?;
         let mesh = self.mesh;
-        if cells.len() != mesh.tris.len() || inflow.len() != mesh.edges.len() {
+        if cells.len() != mesh.tris.len()
+            || inflow.len() != mesh.edges.len()
+            || directional_donors.is_some_and(|donors| donors.len() != mesh.edges.len())
+        {
             return Err(invalid(
                 "original cell and boundary-state dimensions required",
             ));
         }
-        let required = mesh
-            .tris
-            .len()
-            .checked_mul(size_of::<Cell>())
-            .and_then(|n| {
-                mesh.edges
-                    .len()
-                    .checked_mul(size_of::<Face>())
-                    .and_then(|m| n.checked_add(m))
-            })
-            .ok_or(invalid("mass-flux storage size overflow"))?;
+        let required = mass_flux_storage(mesh)?;
         if required > max_storage_bytes {
             return Err(DensityTransportError::Storage {
                 required,
@@ -130,7 +158,7 @@ impl<'m> PreparedDensityTransport<'m> {
                 admit_state(state)?;
             }
             let rates = self.edge_volume_rates()[index];
-            let density = [
+            let original_density = [
                 cells[first].density_kg_m3,
                 if second != usize::MAX {
                     cells[second].density_kg_m3
@@ -143,6 +171,12 @@ impl<'m> PreparedDensityTransport<'m> {
                     cells[first].density_kg_m3
                 },
             ];
+            let density = directional_donors.map_or(original_density, |donors| donors[index]);
+            if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+                return Err(invalid(
+                    "positive reconstructed directional donor densities required",
+                ));
+            }
             let directional = [
                 product(density[0], rates.along_normal_m2_s())?,
                 product(density[1], rates.against_normal_m2_s())?,
@@ -490,6 +524,18 @@ fn product(a: f64, b: f64) -> Result<f64> {
     } else {
         Err(DensityTransportError::Arithmetic("mass-flux rate"))
     }
+}
+fn mass_flux_storage(mesh: &crate::TriMesh) -> Result<usize> {
+    mesh.tris
+        .len()
+        .checked_mul(size_of::<Cell>())
+        .and_then(|cells| {
+            mesh.edges
+                .len()
+                .checked_mul(size_of::<Face>())
+                .and_then(|faces| cells.checked_add(faces))
+        })
+        .ok_or(invalid("mass-flux storage size overflow"))
 }
 fn signed_product(a: f64, b: f64) -> Result<f64> {
     product(a, b.abs()).map(|v| v.copysign(b))

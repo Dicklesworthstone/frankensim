@@ -8,9 +8,12 @@
 //! it does not solve the BDM momentum equations, pressure, an EOS, or heat flow.
 //! In particular it is not a changing-density Navier–Stokes time integrator.
 //!
-//! Synchronous donor-cell Euler is first order and numerically mixes material.
-//! Positive remaining donor mass requires an outgoing-volume Courant number
-//! strictly below one. No density clipping, mass repair, or interface sharpening
+//! Synchronous donor-cell Euler is the default and is first order in space.
+//! An opt-in bounded linear reconstruction reduces smooth-density diffusion
+//! while retaining the same directional mass transfers and momentum owner.
+//! Positive remaining donor mass uses a volume Courant cap below one for the
+//! default, or one third of that allowance for bounded linear density.
+//! No accepted-density clipping, mass repair, or interface sharpening
 //! is performed. Fixed volumes and divergence-free prescribed flow exclude
 //! compressibility, phase-volume sources and moving-mesh geometric conservation.
 
@@ -23,8 +26,24 @@ pub mod subcycle;
 /// Conservative material-inventory continuation between prepared native meshes.
 pub mod remap;
 
-/// Conservative second-order time stages with the original donor-cell flux.
+/// Conservative second-order time stages with the selected spatial density flux.
 pub mod ssprk2;
+
+mod linear;
+
+/// Spatial density trace used by the original conservative transport owners.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DensityReconstruction {
+    /// Original first-order donor-cell density; unchanged default arithmetic.
+    #[default]
+    DonorCell,
+    /// Limited linear density on each triangle. The flux-weighted density of
+    /// each directional face stream multiplies its original affine volume
+    /// trace, preserving compatible native momentum and kinetic moments.
+    /// Specific inventories retain their original donor-cell reconstruction.
+    /// A sufficient positivity CFL is one THIRD of the donor-cell allowance.
+    BoundedLinear,
+}
 
 /// Cell-average density and N quantities per unit mass. Components may have
 /// different units: velocity gives momentum, specific enthalpy gives enthalpy,
@@ -147,6 +166,7 @@ pub struct PreparedDensityTransport<'m> {
     donor_rates: Vec<[f64; 2]>,
     maximum_outgoing_rate_s: f64,
     maximum_relative_volume_divergence: f64,
+    linear: Option<linear::LinearReconstruction>,
 }
 
 /// Caller-owned reusable scratch. A warm step allocates no heap storage.
@@ -158,6 +178,9 @@ pub struct DensityTransportWorkspace<const N: usize> {
     mass_change: Vec<Sum>,
     specific_change: Vec<[Sum; N]>,
     transfers: Vec<EdgeDensityTransfer<N>>,
+    vertex_densities: Vec<[f64; 3]>,
+    vertex_bounds: Vec<[f64; 2]>,
+    face_densities: Vec<[f64; 2]>,
     accepted: bool,
 }
 
@@ -170,6 +193,27 @@ impl<const N: usize> DensityTransportWorkspace<N> {
 }
 
 impl<'m> FluxSystem<'m> {
+    /// Select density reconstruction for this system's conservative transport
+    /// and ALL native conservative density/momentum entry points. Existing
+    /// constructors default to [`DensityReconstruction::DonorCell`].
+    ///
+    /// Bounded linear reconstruction uses a prepared least-squares stencil,
+    /// vertex bounds from incident cells/inflow, and the original sign-split
+    /// face streams. SSPRK2/subcycling average the actual limited directional
+    /// donors, never a reconstruction of averaged cell states. Momentum keeps
+    /// the same mass balance, quadratic face moments and BDF1 time order.
+    #[must_use]
+    pub fn with_density_reconstruction(mut self, reconstruction: DensityReconstruction) -> Self {
+        self.density_reconstruction = reconstruction;
+        self
+    }
+
+    /// Spatial reconstruction selected for conservative density transport.
+    #[must_use]
+    pub const fn density_reconstruction(&self) -> DensityReconstruction {
+        self.density_reconstruction
+    }
+
     /// Bind conservative density transport to this original mesh and velocity.
     /// `depth_m` converts 2-D areas/rates to physical volumes/mass. The per-cell
     /// relative volume-divergence allowance lies in [0,1e-12] and is numerical
@@ -207,6 +251,10 @@ impl<'m> FluxSystem<'m> {
             }
             .into());
         }
+        let linear_cells =
+            usize::from(self.density_reconstruction == DensityReconstruction::BoundedLinear) * nc;
+        let linear_edges =
+            usize::from(self.density_reconstruction == DensityReconstruction::BoundedLinear) * ne;
         admit_storage(
             &[
                 (nc, size_of::<f64>() + 2 * size_of::<Sum>()),
@@ -214,6 +262,8 @@ impl<'m> FluxSystem<'m> {
                     ne,
                     size_of::<EdgeVolumeTransport>() + 2 * size_of::<[f64; 2]>(),
                 ),
+                (linear_cells, size_of::<linear::LinearCell>()),
+                (linear_edges, size_of::<[f64; 2]>()),
             ],
             max_storage_bytes,
         )?;
@@ -313,6 +363,16 @@ impl<'m> FluxSystem<'m> {
             maximum_outgoing_rate_s =
                 maximum_outgoing_rate_s.max(quotient(outgoing, mesh.areas[cell])?);
         }
+        let linear = if self.density_reconstruction == DensityReconstruction::BoundedLinear {
+            Some(linear::LinearReconstruction::prepare(
+                mesh,
+                &velocity_moments,
+                &volume_rates,
+                &mut cancelled,
+            )?)
+        } else {
+            None
+        };
         poll(&mut cancelled)?;
         Ok(PreparedDensityTransport {
             mesh,
@@ -322,11 +382,48 @@ impl<'m> FluxSystem<'m> {
             donor_rates,
             maximum_outgoing_rate_s,
             maximum_relative_volume_divergence,
+            linear,
         })
     }
 }
 
 impl PreparedDensityTransport<'_> {
+    pub(super) fn reconstructed_mass_flux_donors<const N: usize>(
+        &self,
+        cells: &[DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        retained_flux_bytes: usize,
+        max_storage_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Option<Vec<[f64; 2]>>> {
+        let Some(linear) = &self.linear else {
+            return Ok(None);
+        };
+        admit_storage(
+            &[
+                (1, retained_flux_bytes),
+                (self.volumes.len(), size_of::<[f64; 3]>()),
+                (self.mesh.verts.len(), size_of::<[f64; 2]>()),
+                (self.volume_rates.len(), size_of::<[f64; 2]>()),
+            ],
+            max_storage_bytes,
+        )?;
+        let mut vertices = allocate(self.volumes.len(), [0.0; 3])?;
+        let mut bounds = allocate(self.mesh.verts.len(), [0.0; 2])?;
+        let mut donors = allocate(self.volume_rates.len(), [0.0; 2])?;
+        linear.reconstruct_into(
+            self.mesh,
+            cells,
+            inflow,
+            &self.volume_rates,
+            &mut vertices,
+            &mut bounds,
+            &mut donors,
+            cancelled,
+        )?;
+        Ok(Some(donors))
+    }
+
     /// Physical volumes [m³] in original triangle order.
     pub fn cell_volumes_m3(&self) -> &[f64] {
         &self.volumes
@@ -340,11 +437,21 @@ impl PreparedDensityTransport<'_> {
         self.maximum_relative_volume_divergence
     }
 
-    /// Largest admissible interval [s] for a Courant cap strictly in (0,1).
+    /// Sufficient admissible interval [s] for a Courant cap strictly in (0,1).
+    /// Bounded linear reconstruction uses one third of that volume allowance:
+    /// each triangle's positive linear trace is bounded by three cell means.
     /// Returns infinity at rest or when no finite positive timestep exceeds it.
     pub fn maximum_timestep_s(&self, maximum_courant: f64) -> Result<f64> {
         admit_courant(maximum_courant)?;
-        Ok(maximum_courant / self.maximum_outgoing_rate_s)
+        Ok(self.volume_courant_limit(maximum_courant) / self.maximum_outgoing_rate_s)
+    }
+
+    fn volume_courant_limit(&self, maximum_courant: f64) -> f64 {
+        if self.linear.is_some() {
+            maximum_courant / 3.0
+        } else {
+            maximum_courant
+        }
     }
 
     /// Allocate bounded scratch once for N specific quantities. This cap covers
@@ -365,6 +472,22 @@ impl PreparedDensityTransport<'_> {
                         + size_of::<[Sum; N]>(),
                 ),
                 (ne, size_of::<EdgeDensityTransfer<N>>()),
+                (
+                    if self.linear.is_some() { nc } else { 0 },
+                    size_of::<[f64; 3]>(),
+                ),
+                (
+                    if self.linear.is_some() {
+                        self.mesh.verts.len()
+                    } else {
+                        0
+                    },
+                    size_of::<[f64; 2]>(),
+                ),
+                (
+                    if self.linear.is_some() { ne } else { 0 },
+                    size_of::<[f64; 2]>(),
+                ),
             ],
             max_storage_bytes,
         )?;
@@ -374,6 +497,16 @@ impl PreparedDensityTransport<'_> {
             mass_change: allocate(nc, Sum::default())?,
             specific_change: allocate(nc, [Sum::default(); N])?,
             transfers: allocate(ne, EdgeDensityTransfer::default())?,
+            vertex_densities: allocate(if self.linear.is_some() { nc } else { 0 }, [0.0; 3])?,
+            vertex_bounds: allocate(
+                if self.linear.is_some() {
+                    self.mesh.verts.len()
+                } else {
+                    0
+                },
+                [0.0; 2],
+            )?,
+            face_densities: allocate(if self.linear.is_some() { ne } else { 0 }, [0.0; 2])?,
             accepted: false,
         })
     }
@@ -391,6 +524,10 @@ impl PreparedDensityTransport<'_> {
     /// constant specific quantities exactly, and preserve positivity under the
     /// outgoing-volume CFL limit. Density bounds additionally use the admitted
     /// local volume balance; numerical divergence is not erased.
+    /// Bounded linear density uses one third of `maximum_courant` as its
+    /// sufficient volume limit; reports still contain the actual volume CFL.
+    /// Specific inventories use the same accepted reconstructed mass transfers
+    /// with their original donor values, preserving a convex specific mixture.
     ///
     /// Work is O((cells+edges)*N), with no warm heap allocation. Scratch can be
     /// reused across equal-sized plans. Output is unchanged on any refusal or
@@ -423,10 +560,11 @@ impl PreparedDensityTransport<'_> {
         }
         admit_courant(maximum_courant)?;
         let courant = finite(timestep_s * self.maximum_outgoing_rate_s, "Courant number")?;
-        if courant > maximum_courant {
+        let volume_limit = self.volume_courant_limit(maximum_courant);
+        if courant > volume_limit {
             return Err(DensityTransportError::Courant {
                 actual: courant,
-                maximum: maximum_courant,
+                maximum: volume_limit,
             });
         }
         let mut mass_before = Sum::default();
@@ -448,6 +586,18 @@ impl PreparedDensityTransport<'_> {
                 carried_before[component].add(value)?;
                 absolute_before[component].add(value.abs())?;
             }
+        }
+        if let Some(linear) = &self.linear {
+            linear.reconstruct_into(
+                self.mesh,
+                cells,
+                inflow,
+                &self.volume_rates,
+                &mut scratch.vertex_densities,
+                &mut scratch.vertex_bounds,
+                &mut scratch.face_densities,
+                &mut cancelled,
+            )?;
         }
         let mut inlet_mass = Sum::default();
         let mut outlet_mass = Sum::default();
@@ -484,7 +634,15 @@ impl PreparedDensityTransport<'_> {
                 } else {
                     &cells[donor]
                 };
-                let mass = if donor == usize::MAX {
+                let mass = if self.linear.is_some()
+                    && scratch.face_densities[index][direction] != state.density_kg_m3
+                {
+                    let volume = self.volumes[if donor == usize::MAX { receiver } else { donor }];
+                    dimensional_rate(fraction, scratch.face_densities[index][direction], volume)
+                        .ok_or(DensityTransportError::Arithmetic(
+                            "reconstructed mass transfer",
+                        ))?
+                } else if donor == usize::MAX {
                     dimensional_rate(fraction, state.density_kg_m3, self.volumes[receiver])
                         .ok_or(DensityTransportError::Arithmetic("inlet mass transfer"))?
                 } else {

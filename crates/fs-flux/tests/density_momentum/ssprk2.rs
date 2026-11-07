@@ -6,6 +6,7 @@ use super::{
 };
 use fs_flux::ns::boundary::conservative::ssprk2::DensityMomentumSspRk2Controls;
 use fs_flux::ns::boundary::conservative::subcycle::DensityMomentumSubcycleControls;
+use fs_flux::ns::transport::density::DensityReconstruction;
 
 fn options(reference: f64, depth: f64) -> DensityMomentumSspRk2Controls {
     let mut momentum = controls(reference, depth);
@@ -18,8 +19,17 @@ fn options(reference: f64, depth: f64) -> DensityMomentumSspRk2Controls {
 
 #[test]
 fn rk_density_weights_preserve_macro_free_stream_pressure_and_boundary_accounts() {
+    check_free_stream(DensityReconstruction::DonorCell);
+}
+
+#[test]
+fn bounded_linear_density_preserves_macro_free_stream_pressure_and_boundary_accounts() {
+    check_free_stream(DensityReconstruction::BoundedLinear);
+}
+
+fn check_free_stream(reconstruction: DensityReconstruction) {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 1));
-    let system = FluxSystem::new(&mesh);
+    let system = FluxSystem::new(&mesh).with_density_reconstruction(reconstruction);
     let u = [0.4, -0.2];
     let uniform = |_: [f64; 2]| u;
     let traction = |_: [f64; 2], normal: [f64; 2]| normal.map(|n| -7.0 * n);
@@ -133,6 +143,107 @@ fn rk_density_weights_preserve_macro_free_stream_pressure_and_boundary_accounts(
             assert!(step.observations.temporal_dissipation_j < 1e-18 * scale);
         }
     }
+}
+
+#[test]
+fn bounded_linear_density_keeps_the_original_closed_momentum_kinetic_identity() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
+    let system =
+        FluxSystem::new(&mesh).with_density_reconstruction(DensityReconstruction::BoundedLinear);
+    let previous = moments(&system, &|[x, y]| {
+        [
+            x * (1.0 - x) * (1.0 - 2.0 * y),
+            -(1.0 - 2.0 * x) * y * (1.0 - y),
+        ]
+    });
+    let cells: Vec<_> = mesh
+        .centroids
+        .iter()
+        .map(|p| Cell {
+            density_kg_m3: 2.0 + p[0] + 2.0 * p[1],
+            specific: [123.0],
+        })
+        .collect();
+    let inflow = vec![None; mesh.edges.len()];
+    let zero = |_: [f64; 2]| [0.0; 2];
+    let selected: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .collect();
+    let boundaries: Vec<_> = selected
+        .iter()
+        .map(|&edge| Boundary::Velocity { edge, value: &zero })
+        .collect();
+    let native: Vec<_> = selected
+        .iter()
+        .map(|&edge| StokesBoundary::Velocity { edge, value: &zero })
+        .collect();
+    let reference = 4.0;
+    let depth = 1.7;
+    let dt = 0.7;
+    let mu = 0.03;
+    let viscosity = system
+        .assemble_stokes_mixed_variable_viscosity(
+            FluxParams {
+                nu: mu / reference,
+                sigma: numerics().penalty,
+                ..FluxParams::default()
+            },
+            &|_, _| mu / reference,
+            &zero,
+            &native,
+        )
+        .unwrap();
+    let coupled = system
+        .density_momentum_ssprk2_bdf1_step(
+            numerics(),
+            &|_, _, _| mu,
+            &|_, _, _| [0.0; 2],
+            &boundaries,
+            &previous,
+            &previous,
+            &cells,
+            &inflow,
+            dt,
+            options(reference, depth),
+            || false,
+        )
+        .unwrap();
+    assert!(coupled.density_stages.substeps > 1);
+    let step = coupled.momentum;
+    near(step.transport.relative_mass_balance_residual, 0.0, 3e-14);
+    assert!(step.cells.iter().all(|cell| cell.specific == [123.0]));
+    assert!(
+        step.cells
+            .iter()
+            .zip(&cells)
+            .any(|(new, old)| (new.density_kg_m3 - old.density_kg_m3).abs() > 1e-3)
+    );
+    let mut velocity = step.flow.field.x.clone();
+    velocity[system.n_u..].fill(0.0);
+    let mut action = vec![0.0; system.n];
+    viscosity.matrix().spmv(&velocity, &mut action);
+    let viscous_work = velocity
+        .iter()
+        .zip(action)
+        .map(|(u, au)| u * au)
+        .sum::<f64>()
+        * dt
+        * reference
+        * depth;
+    let obs = step.observations;
+    assert!(
+        obs.temporal_dissipation_j > 0.0
+            && obs.interior_upwind_dissipation_j > 0.0
+            && viscous_work > 0.0
+    );
+    near(
+        obs.kinetic_energy_after_j - obs.kinetic_energy_before_j
+            + obs.temporal_dissipation_j
+            + obs.interior_upwind_dissipation_j
+            + viscous_work,
+        0.0,
+        2e-11,
+    );
 }
 
 #[test]

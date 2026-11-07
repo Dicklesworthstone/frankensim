@@ -87,8 +87,10 @@ impl<'m> FluxSystem<'m> {
     /// their original meanings. There are no density-stage momentum solves.
     ///
     /// Only the frozen-advector density/inventory ODE has second-order time
-    /// integration here. P0 spatial mixing, the native BDF1 momentum map and
-    /// its frozen-advector nonlinear coupling remain first order. No new EOS,
+    /// integration here. Density uses this system's configured donor-cell or
+    /// bounded linear reconstruction. Specific-inventory spatial mixing, the
+    /// native BDF1 momentum map and its frozen-advector nonlinear coupling
+    /// remain first order. No new EOS,
     /// diffusion, phase source, moving geometry or nonlinear adjoint is supplied.
     ///
     /// Original per-owner storage caps include the ENTIRE density stage

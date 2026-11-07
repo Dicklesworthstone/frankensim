@@ -47,6 +47,7 @@ pub struct DensityMomentumControls {
     /// Positive out-of-plane depth [m] for physical inventory observations.
     pub depth_m: f64,
     /// Outgoing-volume Courant cap, strictly between zero and one.
+    /// Bounded linear density applies one third of this sufficient allowance.
     pub maximum_courant: f64,
     /// Admitted relative cell volume divergence, from zero through 1e-12.
     pub relative_volume_divergence_tolerance: f64,
@@ -237,7 +238,7 @@ impl<'a, 'm, const N: usize> DensityMomentumAssembly<'a, 'm, N> {
 impl<'m> FluxSystem<'m> {
     /// Prepare first-order variable-density incompressible momentum on the
     /// original BDM1/P0 mesh. Density and N mass-specific quantities use the
-    /// same donor-cell face transfers. The N slots are passive specific
+    /// same selected directional mass transfers. The N slots are passive specific
     /// quantities (e.g. enthalpy or species); forces act on the native velocity,
     /// not on passive slots that happen to contain a velocity-like quantity.
     /// Native momentum retains ALL affine

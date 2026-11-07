@@ -1,18 +1,19 @@
 //! Conservative SSPRK2 density stages under one fixed original BDM advector.
 //!
-//! Each physical subinterval uses TWO original positive donor-cell Euler maps,
+//! Each physical subinterval uses TWO positive conservative Euler maps,
 //! then averages the initial and second-stage EXTENSIVE states. The accepted
 //! face amounts are the half-sum of the two stage transfers; the compatible
-//! mass flux uses the equal-time mean of their PRE-stage donor densities.
+//! mass flux uses the equal-time mean of their PRE-stage directional donors.
 //! All stages use the same volume advector, geometry and exterior donors.
 //!
 //! This is second order in TIME for the fixed-advector spatially discrete
-//! transport problem. The original P0 donor-cell spatial scheme still mixes
-//! material at first order. A native BDF1 momentum macrostep remains first
+//! transport problem. Density uses the configured donor-cell or bounded linear
+//! spatial reconstruction; specific inventories retain donor-cell mixing.
+//! A native BDF1 momentum macrostep remains first
 //! order; neither interface sharpening nor a nonlinear coupling is implied.
 
 use super::super::mass_flux::PreparedDensityMassFlux;
-use super::subcycle::{Mean, TransferSum, audit};
+use super::subcycle::{Mean, TransferSum, add_face_means, audit, finish_face_means};
 use super::{
     DensityTransportCell, DensityTransportError, DensityTransportReport, DensityTransportWorkspace,
     EdgeDensityTransfer, PreparedDensityTransport, Result, Sum, admit_cell, admit_courant,
@@ -23,6 +24,7 @@ use super::{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DensitySspRk2Controls {
     /// Maximum outgoing-volume fraction of EACH original Euler stage, in (0,1).
+    /// Bounded linear density uses one third of this sufficient volume allowance.
     pub maximum_courant: f64,
     /// Maximum equal dyadic physical subintervals. Each executes exactly TWO
     /// Euler evaluations; the accepted report records both work counts.
@@ -58,6 +60,7 @@ pub struct DensitySspRk2Workspace<'p, 'm, const N: usize> {
     average: Vec<Mean>,
     average_cells: Vec<DensityTransportCell<0>>,
     average_inflow: Vec<Option<DensityTransportCell<0>>>,
+    face_average: Vec<[Mean; 2]>,
     transfers: Vec<TransferSum<N>>,
     accepted: bool,
 }
@@ -74,6 +77,8 @@ impl<'m> PreparedDensityTransport<'m> {
     ) -> Result<DensitySspRk2Workspace<'_, 'm, N>> {
         let nc = self.volumes.len();
         let ne = self.volume_rates.len();
+        let linear_cells = if self.linear.is_some() { nc } else { 0 };
+        let linear_edges = if self.linear.is_some() { ne } else { 0 };
         admit_storage(
             &[
                 (nc, size_of::<DensityTransportCell<N>>()),
@@ -87,6 +92,16 @@ impl<'m> PreparedDensityTransport<'m> {
                 (ne, size_of::<EdgeDensityTransfer<N>>()),
                 (ne, size_of::<TransferSum<N>>()),
                 (ne, size_of::<Option<DensityTransportCell<0>>>()),
+                (linear_cells, size_of::<[f64; 3]>()),
+                (
+                    if self.linear.is_some() {
+                        self.mesh.verts.len()
+                    } else {
+                        0
+                    },
+                    size_of::<[f64; 2]>(),
+                ),
+                (linear_edges, size_of::<[f64; 2]>() + size_of::<[Mean; 2]>()),
             ],
             max_storage_bytes,
         )?;
@@ -100,6 +115,7 @@ impl<'m> PreparedDensityTransport<'m> {
             average: allocate(nc, Mean::default())?,
             average_cells: allocate(nc, DensityTransportCell::default())?,
             average_inflow: allocate(ne, None)?,
+            face_average: allocate(linear_edges, [Mean::default(); 2])?,
             transfers: allocate(ne, TransferSum::default())?,
             accepted: false,
         })
@@ -116,6 +132,8 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
 
     /// Equal-weight mean of the two PRE-Euler donor densities in every physical
     /// subinterval. These are flux integration weights, not material states.
+    /// Bounded linear reconstruction separately averages the actual limited
+    /// directional donors; reconstructing these averaged cells is not equivalent.
     pub fn average_donor_density(&self) -> Option<&[DensityTransportCell<0>]> {
         self.accepted.then_some(self.average_cells.as_slice())
     }
@@ -135,9 +153,13 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
                 "accepted SSPRK2 density stages are required before reconstructing their flux",
             ));
         }
-        self.plan.prepare_mass_flux(
+        self.plan.prepare_mass_flux_with_donors(
             &self.average_cells,
             &self.average_inflow,
+            self.plan
+                .linear
+                .as_ref()
+                .map(|_| self.euler.face_densities.as_slice()),
             max_storage_bytes,
             cancelled,
         )
@@ -187,7 +209,9 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
         let mut dt = timestep_s;
         loop {
             let courant = dt * self.plan.maximum_outgoing_rate_s;
-            if courant.is_finite() && courant <= controls.maximum_courant {
+            if courant.is_finite()
+                && courant <= self.plan.volume_courant_limit(controls.maximum_courant)
+            {
                 break;
             }
             count = count
@@ -232,6 +256,9 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
                 specific: [],
             });
             self.transfers[edge] = TransferSum::default();
+            if let Some(mean) = self.face_average.get_mut(edge) {
+                *mean = [Mean::default(); 2];
+            }
         }
         let mut maximum_stage_courant: f64 = 0.0;
         let mut absolute_boundary = [Sum::default(); N];
@@ -247,6 +274,11 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
                 &mut cancelled,
             )?;
             maximum_stage_courant = maximum_stage_courant.max(first.maximum_courant);
+            add_face_means(
+                &mut self.face_average,
+                &self.euler.face_densities,
+                &mut cancelled,
+            )?;
             for (saved, transfer) in self.first_transfers.iter_mut().zip(&self.euler.transfers) {
                 poll(&mut cancelled)?;
                 *saved = *transfer;
@@ -261,6 +293,11 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
                 &mut cancelled,
             )?;
             maximum_stage_courant = maximum_stage_courant.max(second.maximum_courant);
+            add_face_means(
+                &mut self.face_average,
+                &self.euler.face_densities,
+                &mut cancelled,
+            )?;
             for cell in 0..self.current.len() {
                 poll(&mut cancelled)?;
                 self.average[cell].add(self.current[cell].density_kg_m3)?;
@@ -304,6 +341,12 @@ impl<'m, const N: usize> DensitySspRk2Workspace<'_, 'm, N> {
             poll(&mut cancelled)?;
             target.density_kg_m3 = mean.value(stage_evaluations)?;
         }
+        finish_face_means(
+            &mut self.euler.face_densities,
+            &self.face_average,
+            stage_evaluations,
+            &mut cancelled,
+        )?;
         for (target, sum) in self.euler.transfers.iter_mut().zip(&self.transfers) {
             poll(&mut cancelled)?;
             *target = sum.value()?;

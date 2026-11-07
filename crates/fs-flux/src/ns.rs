@@ -303,6 +303,8 @@ pub struct FluxSystem<'m> {
     pressure_roots: Vec<usize>,
     // Signed local f = 2 Omega_z [1/s], zero on the original inertial path.
     coriolis_parameter_s_inv: f64,
+    // Shared by scalar transport and every conservative momentum owner.
+    density_reconstruction: transport::density::DensityReconstruction,
 }
 
 impl<'m> FluxSystem<'m> {
@@ -345,6 +347,7 @@ impl<'m> FluxSystem<'m> {
             pressure_component,
             pressure_roots,
             coriolis_parameter_s_inv: 0.0,
+            density_reconstruction: transport::density::DensityReconstruction::DonorCell,
         }
     }
 
