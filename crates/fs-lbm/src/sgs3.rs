@@ -73,6 +73,10 @@ pub struct LagrangianSgsWorkspace3<C> {
 
 impl<C> LagrangianSgsWorkspace3<C> {
     pub fn collisions(&self) -> &[C] { self.local.collisions() }
+    /// Fixed halfway-wall normal, or `None` for a fully periodic trajectory.
+    pub fn normal_axis(&self) -> Option<usize> {
+        self.filter.normal_axis()
+    }
     /// Incoming lattice time of the last successfully used fit.
     pub fn accepted_fit_time(&self) -> Option<f64> { self.filter.accepted_time() }
     /// Actual numerical storage, excluding fixed metadata and the flow grid.

@@ -15,7 +15,7 @@ use crate::sgs3::dynamic::channel::{ChannelDynamicSgs, ChannelDynamicSgsConfig};
 use crate::sgs3::{ChannelDynamicSgsWorkspace3, DynamicSgsStepReport};
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
-    fn admit_channel_sgs_topology(
+    pub(super) fn admit_channel_sgs_topology(
         &self,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<usize, SgsStepError<L::Error>> {
@@ -46,7 +46,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     // links. On this admitted all-fluid rectangle, its exact full link count
     // therefore proves that both physical walls are represented completely.
     // No per-cell lookup or additional workspace is needed for uniform planes.
-    fn channel_sgs_wall_velocities(
+    pub(super) fn channel_sgs_wall_velocities(
         &self,
         normal: usize,
         motion: &WallMotion3<'_, L, Q>,

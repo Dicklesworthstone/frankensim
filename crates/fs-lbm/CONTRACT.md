@@ -14671,6 +14671,39 @@ data, periodic agreement with native force-centered curl, and incomplete
 thermodynamic stencils (G0/G1/G3). Independent analytic checks were performed;
 native Rust execution was unavailable when this extension was introduced.
 
+## Native lattice channel trajectories with turbulence memory
+
+`Grid3::channel_lagrangian_sgs_workspace` binds the unique fixed halfway-wall
+normal and reuses the original byte-admitted local collision fields and two
+history banks. The existing serial/pooled Lagrangian step methods now accept
+stationary all-fluid channels as well as periodic domains. Explicit
+`step_serial_with_channel_lagrangian_sgs_and_moving_walls` and pooled
+counterparts bind the complete native reflected-link probe and one uniform
+tangential velocity per wall to the same accepted step.
+
+The current wall velocities enter the shared Favre contractions, native
+halfway-wall strain diagnostics and original moving bounce-back. Only
+tangential filtering/backtracking wraps periodically; normal histories never
+connect opposite walls. Fits and pathline departures use the incoming
+Guo-centered physical velocity. Original molecular collision fields and
+D3Q27 independent trace/higher rates remain authoritative.
+
+The native owner must publish populations, lattice clock and any wall
+impulse/work receipt before the infallible history commit. Preparation,
+collision, streaming, wall-drive, Mach or cancellation refusals retain the
+accepted history and native state. A workspace cannot silently change wall
+normal, become periodic or admit interior solids. No additional field
+arrays or per-preparation allocations are introduced.
+
+Six native regression sources cover both stencils, all wall normals,
+independent shared-history/native-transport references, molecular fields,
+serial/pooled identity, moving-wall impulse/work, Couette/comotion,
+storage/topology refusals and late-step rollback. Changed sources passed
+pinned Rust formatting/parsing and bounded production review; these native
+consumer tests were not compiled or executed here. The shared core's prior
+74-test run is not a native-consumer test claim. Authored memory times,
+first-order trajectories and exploratory-model limits remain.
+
 ## Lagrangian SGS with spatial and changing body forces
 
 `ForcedGrid3` composes the original periodic Lagrangian SGS workspace with
