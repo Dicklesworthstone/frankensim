@@ -51,7 +51,7 @@ use fs_solid::linear3::{
 };
 use fs_solid::loads3::transient::checkpoint::TetTransientCheckpoint3;
 use fs_solid::loads3::transient::thermal::ThermalTransientStep3;
-use fs_solid::loads3::transient::{TetTransientRun3, TransientError3};
+use fs_solid::loads3::transient::{TetTransientRun3, TransientConfig3, TransientError3};
 use fs_solid::loads3::{LoadError3, TetLoadCase3, TetLoadGeometry3};
 
 use super::{
@@ -423,6 +423,7 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         Ok(SpatialSolidState {
             nodes_m: self.thermal.mesh().positions(),
             tetrahedra: &self.tetrahedra,
+            nodal_reference_density_kg_m3: self.thermal.nodal_reference_density_kg_m3(),
             materials,
             strains,
             samples,
@@ -437,7 +438,7 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
     /// time. The heat owner has no implicit absolute clock: the caller must use
     /// the start/endpoint times of the actual admitted heat interval. Untimed
     /// [`Self::resolve`] states remain valid for equilibrium and modal queries,
-    /// but cannot advance a full inertial trajectory.
+    /// but cannot start or advance a full inertial trajectory.
     pub fn resolve_at(
         &self,
         specific_h: &[f64],
@@ -577,7 +578,7 @@ impl<'a, 'm: 'a, 'c: 'a> SpatialSolidEnthalpy<'a, 'm, 'c> {
         let previous = self.resolve_at(old_specific_h, start_s, cx)?;
         if !previous.matches_transient(run) {
             return Err(SpatialSolidEnthalpyError::Invalid(
-                "accepted motion must consume the material and thermal strain of the supplied nodal heat history",
+                "accepted motion must consume the material, thermal strain and reference density of the supplied nodal heat history",
             ));
         }
         // The source and every old corner have already been admitted above.
@@ -693,6 +694,7 @@ pub struct SpatialTetMaterialSample {
 pub struct SpatialSolidState<'a> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
+    nodal_reference_density_kg_m3: Option<&'a [f64]>,
     materials: Vec<TetElasticMaterial>,
     strains: Vec<TetThermalStrainState>,
     samples: Vec<SpatialTetMaterialSample>,
@@ -743,7 +745,63 @@ impl SpatialSolidState<'_> {
         self.time_s
             .is_some_and(|time| time.to_bits() == run.state().time_s.to_bits())
             && self.matches_problem(run.material_problem())
+            && self.nodal_reference_density_kg_m3 == run.nodal_reference_density_kg_m3()
             && thermal_matches
+    }
+
+    /// Start native inertial motion at this state's explicit thermal time.
+    ///
+    /// Resolve through [`SpatialSolidEnthalpy::resolve_at`] and supply this
+    /// state's `problem()`; it remains borrowed by the run. The heat owner's
+    /// exact reference inventory supplies inertia, including any explicit P1
+    /// density field. Material cards still supply stiffness and source identity.
+    /// Motion, supports and allowances retain their native meanings; no static
+    /// equilibration or replacement thermal inventory is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_transient<'g, 'm, 'p, 's>(
+        &self,
+        problem: &'p TetLinearElasticProblem<'s>,
+        loads: &TetLoadCase3<'g, 'm>,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        config: TransientConfig3,
+        cx: &Cx<'_>,
+    ) -> Result<TetTransientRun3<'g, 'm, 'p, 's>, SpatialSolidEnthalpyError> {
+        poll(cx)?;
+        let Some(time_s) = self.time_s else {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "initial inertial motion requires an explicitly timed spatial state",
+            ));
+        };
+        if !self.matches_problem(problem) {
+            return Err(SpatialSolidEnthalpyError::Invalid(
+                "initial motion must use the exact spatial material problem",
+            ));
+        }
+        let thermal = Some(self.thermal_strains());
+        let run = match self.nodal_reference_density_kg_m3 {
+            Some(density) => loads.begin_transient_with_nodal_reference_density(
+                problem,
+                density,
+                thermal,
+                time_s,
+                displacement_m,
+                velocity_m_s,
+                config,
+                cx,
+            ),
+            None => loads.begin_transient(
+                problem,
+                thermal,
+                time_s,
+                displacement_m,
+                velocity_m_s,
+                config,
+                cx,
+            ),
+        }?;
+        poll(cx)?;
+        Ok(run)
     }
 
     /// Continue the original full tetrahedral motion through this native nodal
@@ -801,12 +859,13 @@ impl SpatialSolidState<'_> {
             || self.nodes_m != previous.nodes_m
             || self.tetrahedra != previous.tetrahedra
             || self.mesh_frame != previous.mesh_frame
+            || self.nodal_reference_density_kg_m3 != previous.nodal_reference_density_kg_m3
             || self.maximum_absolute_mandel_strain.to_bits()
                 != previous.maximum_absolute_mandel_strain.to_bits()
             || self.samples.len() != previous.samples.len()
         {
             return Err(SpatialSolidEnthalpyError::Invalid(
-                "spatial transient endpoints must retain exact mesh, frame, material, thermal and clock bindings",
+                "spatial transient endpoints must retain exact mesh, frame, material, thermal, reference inventory and clock bindings",
             ));
         }
         for (old, next) in previous.samples.iter().zip(&self.samples) {

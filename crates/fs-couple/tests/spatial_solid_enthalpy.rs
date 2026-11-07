@@ -2,7 +2,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionProblem;
-use fs_conduction::bc::{ThermalBoundary, ThermalBoundaryBuilder};
+use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;
 use fs_conduction::material::{CONDUCTIVITY_DIMS, LiquidMassFractionConductivity};
 use fs_conduction::mesh::ConductionMesh;
@@ -791,6 +791,228 @@ fn g4_joint_spatial_heat_and_motion_refuse_without_publishing_either_history() {
         );
         near(retry.mechanical.physical_balance_error_j, 0., 1e-13);
         assert_eq!(run.state(), &original);
+        assert_eq!(old, [0.; 4]);
+    });
+}
+
+#[test]
+fn g1_spatial_inertial_paths_share_the_native_graded_reference_inventory() {
+    with_cx(|cx| {
+        let (card, caloric) = fixture(2., 60., 1e-5, 10., 500., 45.);
+        let mesh = mesh();
+        let density = [3., 6., 9., 12.];
+        let thermal_owner = native(&mesh, caloric.curve(), 6., cx)
+            .with_nodal_reference_density(cx, &density)
+            .unwrap();
+        let context = point(300.);
+        let model = bind(&thermal_owner, source(&card, caloric.curve(), &context), cx).unwrap();
+        let geometry = model.geometry(cx).unwrap();
+        let loads = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let old = [0.; 4];
+        let fixed: Vec<_> = (0..12).filter(|&d| d != 3).collect();
+        let zero = [[0.; 3]; 4];
+        let start_s = 2.;
+        let dt = 0.01;
+        let initial = model.resolve_at(&old, start_s, cx).unwrap();
+        let initial_problem = initial.problem(&fixed);
+        let run = initial
+            .begin_transient(
+                &initial_problem,
+                &loads,
+                &zero,
+                &zero,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(run.state().time_s, start_s);
+        assert_eq!(
+            run.nodal_reference_density_kg_m3(),
+            Some(density.as_slice())
+        );
+        near(run.reference_mass_kg(), 1.25, 1e-14);
+        near(
+            thermal_owner.reference_nodal_masses_kg().iter().sum(),
+            run.reference_mass_kg(),
+            1e-14,
+        );
+        let untimed = model.resolve(&old, cx).unwrap();
+        assert!(matches!(
+            untimed.begin_transient(
+                &initial_problem,
+                &loads,
+                &zero,
+                &zero,
+                Default::default(),
+                cx,
+            ),
+            Err(SpatialSolidEnthalpyError::Invalid(_))
+        ));
+
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .remainder("heated", ThermalBc::dirichlet(310.).unwrap())
+            .unwrap()
+            .finish()
+            .unwrap();
+        let generation = ScalarField::Uniform(0.);
+        let accepted_motion = run.state().clone();
+        let first = model
+            .advance_transient(
+                &old,
+                dt,
+                &boundary,
+                None,
+                &generation,
+                thermal_config(),
+                EnthalpyRadiation::None,
+                &run,
+                &loads,
+                cx,
+            )
+            .unwrap();
+        near(
+            first.thermal.conduction().stored_energy_change_j,
+            125.,
+            1e-8,
+        );
+        near(first.thermal.physical_energy_residual_j(), 0., 1e-8);
+        assert_eq!(first.state.time_s(), Some(start_s + dt));
+        let first_problem = first.state.problem(&fixed);
+        let restored = first.motion.bind(&first_problem, cx).unwrap();
+        assert_eq!(
+            restored.nodal_reference_density_kg_m3(),
+            Some(density.as_slice())
+        );
+        near(restored.reference_mass_kg(), 1.25, 1e-14);
+        // Exact cubic integral of rho_0*N_1^2 on the unit tetrahedron:
+        // V*(sum(rho)+2*rho_1)/60. For nu=1/4, K=E/5 and the
+        // isotropic eigenstrain force is E*epsilon_free/3.
+        let mass = (30. + 2. * density[1]) / 360.;
+        let young = 58.5;
+        let strain = 1.05e-4;
+        let b = dt * dt / 4.;
+        let acceleration = young * strain / 3. / (mass + b * young / 5.);
+        near(restored.state().displacement[0], b * acceleration, 1e-14);
+        near(restored.state().velocity[0], 0.5 * dt * acceleration, 1e-12);
+        near(
+            restored.state().kinetic_energy_j,
+            0.5 * mass * (0.5 * dt * acceleration).powi(2),
+            1e-14,
+        );
+        near(first.mechanical.physical_balance_error_j, 0., 1e-13);
+        assert_eq!(run.state(), &accepted_motion);
+        assert_eq!(first.state.materials()[0].density_kg_m3, 6.);
+
+        // The manual timed handoff must preserve the same native profile.
+        // Its documented clock difference can differ slightly from the exact
+        // duration retained by the joint heat/motion API.
+        let (manual, _) = first
+            .state
+            .advance_transient_candidate(&initial, &run, &first_problem, &loads, cx)
+            .unwrap();
+        assert_eq!(
+            manual.nodal_reference_density_kg_m3(),
+            Some(density.as_slice())
+        );
+        near(manual.reference_mass_kg(), 1.25, 1e-14);
+        near(
+            manual.state().displacement[0],
+            restored.state().displacement[0],
+            1e-14,
+        );
+
+        let permuted = [12., 9., 6., 3.];
+        let wrong_runs = [
+            loads
+                .begin_transient(
+                    &initial_problem,
+                    Some(initial.thermal_strains()),
+                    start_s,
+                    &zero,
+                    &zero,
+                    Default::default(),
+                    cx,
+                )
+                .unwrap(),
+            loads
+                .begin_transient_with_nodal_reference_density(
+                    &initial_problem,
+                    &permuted,
+                    Some(initial.thermal_strains()),
+                    start_s,
+                    &zero,
+                    &zero,
+                    Default::default(),
+                    cx,
+                )
+                .unwrap(),
+        ];
+        // Equal TOTAL mass is insufficient: the spatial mass operator differs.
+        near(
+            wrong_runs[1].reference_mass_kg(),
+            run.reference_mass_kg(),
+            1e-14,
+        );
+        for wrong in &wrong_runs {
+            let before = wrong.state().clone();
+            assert!(matches!(
+                first.state.advance_transient_candidate(
+                    &initial,
+                    wrong,
+                    &first_problem,
+                    &loads,
+                    cx,
+                ),
+                Err(SpatialSolidEnthalpyError::Invalid(_))
+            ));
+            assert!(matches!(
+                model.advance_transient(
+                    &old,
+                    dt,
+                    &boundary,
+                    None,
+                    &generation,
+                    thermal_config(),
+                    EnthalpyRadiation::None,
+                    wrong,
+                    &loads,
+                    cx,
+                ),
+                Err(SpatialSolidEnthalpyError::Invalid(_))
+            ));
+            assert_eq!(wrong.state(), &before);
+        }
+
+        // An endpoint from another heat inventory is also invalid even when
+        // the accepted run, material sources, temperatures and total mass match.
+        let replaced_thermal = native(&mesh, caloric.curve(), 6., cx)
+            .with_nodal_reference_density(cx, &permuted)
+            .unwrap();
+        let replaced = bind(
+            &replaced_thermal,
+            source(&card, caloric.curve(), &context),
+            cx,
+        )
+        .unwrap();
+        let replacement_state = replaced
+            .resolve_at(
+                &first.thermal.conduction().specific_enthalpy_j_kg,
+                start_s + dt,
+                cx,
+            )
+            .unwrap();
+        let replacement_problem = replacement_state.problem(&fixed);
+        assert!(matches!(
+            replacement_state.advance_transient_candidate(
+                &initial,
+                &run,
+                &replacement_problem,
+                &loads,
+                cx,
+            ),
+            Err(SpatialSolidEnthalpyError::Invalid(_))
+        ));
+        assert_eq!(run.state(), &accepted_motion);
         assert_eq!(old, [0.; 4]);
     });
 }
