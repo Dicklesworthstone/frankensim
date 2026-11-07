@@ -9,14 +9,17 @@
 //! Mass flow, pressure, composition and h are prescribed. Only actual fluid
 //! temperatures require source support; a hotter or colder wall may lie outside
 //! it. This does not add pressure work, phase change, h(T), hydraulic feedback,
-//! mixing junctions or a coupled gradient claim. The fixed-wall inlet response
-//! differentiates this same source-caloric march. The constant-Cp adjoint/transfer APIs
-//! accept `AirPath`, never this distinct source-caloric path.
+//! mixing junctions or hydraulic/solid feedback derivatives. Its inlet and wall
+//! responses differentiate this same original source-caloric march. The
+//! constant-Cp adjoint/transfer APIs accept `AirPath`, never this distinct path.
+
+mod linearization;
+pub use linearization::{CaloricPathLinearization, CaloricPathTangent, CaloricSegmentTangent};
 
 use std::sync::Arc;
 
 use fs_exec::Cx;
-use fs_material::thermal::transport::isobaric::IsobaricHeatCapacityLaw;
+use fs_material::thermal::transport::isobaric::{IsobaricHeatCapacityLaw, LinearHeatExchange};
 
 use super::{
     AirMarch, AirPath, AirSegment, AirflowError, ConjugateConfig, ConjugateSolution, IqnIls,
@@ -130,6 +133,14 @@ impl CaloricAirPath {
         &self,
         wall_temperatures_k: &[f64],
     ) -> Result<(AirMarch, f64), AirflowError> {
+        self.march_with_response(wall_temperatures_k, |_, _| Ok(()))
+    }
+
+    fn march_with_response(
+        &self,
+        wall_temperatures_k: &[f64],
+        mut retain: impl FnMut(&LinearHeatExchange, f64) -> Result<(), AirflowError>,
+    ) -> Result<(AirMarch, f64), AirflowError> {
         if wall_temperatures_k.len() != self.segments().len() {
             return Err(AirflowError::SolidResponseArity {
                 expected: self.segments().len(),
@@ -196,6 +207,7 @@ impl CaloricAirPath {
                     value_bits: reference.to_bits(),
                 });
             }
+            retain(&exchange, exposure)?;
             states.push(SegmentState {
                 region: segment.region().to_owned(),
                 inlet_temperature_k: inlet,

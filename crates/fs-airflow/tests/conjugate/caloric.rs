@@ -1,5 +1,7 @@
 //! Original source Cp(T), analytic channel heat, and native coupled admission.
 
+mod linearization;
+
 use std::sync::Arc;
 
 use fs_airflow::conjugate::caloric::CaloricAirPath;

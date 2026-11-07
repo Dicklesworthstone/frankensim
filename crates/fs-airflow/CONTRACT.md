@@ -1,5 +1,41 @@
 # CONTRACT: fs-airflow
 
+## Original coolant inlet and wall linearization
+
+`CaloricAirPath::linearize` prepares the complete inlet/wall temperature
+response during one native source-Cp march. It retains each original
+segment's enthalpy gain, stable gain complement, wall enthalpy response and
+conductance-weighted mean response. All caloric derivatives use the original
+variable Cp at the actual fluid states; wall reservoirs need no extrapolated
+material law. The prepared operator borrows the immutable path and wall
+operating point, and refuses actual fluid endpoints on the source boundary
+where a two-sided derivative is not admitted.
+
+`CaloricPathLinearization::apply` propagates one inlet/wall direction to every
+outlet temperature, heat rate and Robin reference, plus the final outlet and
+total heat. `apply_transpose` returns inlet and ordered wall gradients for
+arbitrary seeds on those same outputs. The two recurrences take O(segments)
+work, use caller-owned output buffers and allocate nothing on success. They
+perform no material re-query, caloric inversion, finite difference, dense
+Jacobian assembly or additional nonlinear solve. Preparation owns O(segments)
+coefficients and the returned native march.
+
+Weak heat derivatives use the retained gain complement instead of subtracting
+nearly equal endpoint enthalpy tangents. Total heat tangents use a compensated
+sum of the same local watt changes. The original positive mean-response
+moments retain small wall sensitivity and the exact equilibrium limit.
+Cancellation and invalid input return no physical state change; action output
+is explicitly scratch storage and may be partly written on error.
+
+This is the derivative of the prescribed-flow channel at fixed geometry,
+pressure, composition and film coefficients. Solid response, hydraulic or
+mass-flow feedback, return-loop controls and coupled design adjoints require
+their own existing owners; they are not inferred by this channel operator.
+Regressions cover independent variable-Cp channel integrals, inlet and wall
+actions, transpose gradients, weak transfer, equilibrium, source admission
+and cancellation. Pinned parser and arithmetic checks are distinct from
+native execution; native tests were not run in this environment.
+
 ## Source-caloric thermal networks
 
 `graph::thermal::transport::caloric::CaloricTransportNetwork` binds one
@@ -87,7 +123,8 @@ the response.
 
 The model remains steady, single-phase, one-dimensional and isobaric, at fixed
 composition, mass flow and heat-transfer coefficient. It adds no hydraulic
-feedback, pressure work, temperature-dependent h, mixing junctions or adjoint.
+feedback, pressure work, temperature-dependent h, mixing junctions or a coupled
+solid/hydraulic adjoint.
 Walls may be outside the fluid's caloric support; the actual traversed fluid
 temperatures may not. A source refusal returns no partial march or solution.
 Tests compare constant/affine-Cp analytic channels, weak exchange, heating and
