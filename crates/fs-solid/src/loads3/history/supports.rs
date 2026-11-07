@@ -19,6 +19,33 @@ pub struct SupportMotion3<'a> {
     pub components: [bool; 3],
     pub displacement: &'a VectorPayload,
 }
+impl<'a> SupportMotion3<'a> {
+    /// Bind a canonical Elasticity/Dirichlet displacement row to explicitly
+    /// resolved nodes and WORLD restraint components. The borrowed payload
+    /// keeps its frame, interpolation and physical clock for both equilibrium
+    /// and inertial support histories. Legacy scalar rows have no implied
+    /// vector direction; node and component binding remains with the sampler.
+    pub fn from_scenario(
+        nodes: &'a [usize], components: [bool; 3], row: &'a BoundaryCondition,
+    ) -> Result<Self, LoadHistoryError3> {
+        let mut violations = Vec::new();
+        row.check(&mut violations);
+        if let Some(first) = violations.first() {
+            return Err(LoadHistoryError3::Scenario(first.what.clone()));
+        }
+        if row.physics != Physics::Elasticity || row.kind != BcKind::Dirichlet {
+            return Err(LoadHistoryError3::Invalid(
+                "only an Elasticity/Dirichlet vector row is admitted",
+            ));
+        }
+        match &row.value {
+            Some(BcValue::Typed(Payload::Vector(displacement))) => {
+                Ok(Self { nodes, components, displacement })
+            }
+            _ => Err(LoadHistoryError3::Invalid("typed vector displacement required")),
+        }
+    }
+}
 
 /// SI acceleration history on selected fixed WORLD components. The authored
 /// vector may rotate through the declared frame tree; it does not rotate the

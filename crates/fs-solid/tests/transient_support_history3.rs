@@ -4,10 +4,11 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_ga::Vec3;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::payload::{
-    OrientationParity, OutsideDomainPolicy, PayloadId, PayloadMeta, QuantityContract,
+    OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta, QuantityContract,
     ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
 };
-use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
+use fs_scenario::{BcKind, BcValue, BoundaryCondition, Frame, FrameId, FrameMotion,
+    FrameTree, Physics, WORLD};
 use fs_solid::linear3::*;
 use fs_solid::loads3::history::supports::{DISPLACEMENT_DIMS, SupportMotion3};
 use fs_solid::loads3::history::{TRACTION_DIMS, TetLoadHistory3, VolumeHistory3};
@@ -421,11 +422,15 @@ fn g3_rotating_support_keeps_physical_frame_time_beyond_clamped_value_table() {
             [amplitude, 0.0, 0.0],
             OutsideDomainPolicy::Clamp,
         );
-        let rows = [SupportMotion3 {
-            nodes: &ALL,
-            components: [true; 3],
-            displacement: &motion,
-        }];
+        let boundary = BoundaryCondition {
+            region: "rotating-support".into(),
+            physics: Physics::Elasticity,
+            kind: BcKind::Dirichlet,
+            value: Some(BcValue::Typed(Payload::Vector(motion))),
+            compatibility: None,
+            frame: 1,
+        };
+        let rows = [SupportMotion3::from_scenario(&ALL, [true; 3], &boundary).unwrap()];
         // Use the exact admitted endpoint for q0; the history adapter forbids
         // mixing an independently rounded initialization with the sampled BC.
         let start = 1.25;

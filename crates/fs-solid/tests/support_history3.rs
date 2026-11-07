@@ -5,8 +5,9 @@ use support::{block, material, with_cx};
 use fs_blake3::ContentHash;
 use fs_ga::Vec3;
 use fs_qty::{Dims, QtyAny};
-use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, TimeSignal, WORLD};
-use fs_scenario::payload::{OrientationParity, OutsideDomainPolicy, PayloadId, PayloadMeta,
+use fs_scenario::{BcKind, BcValue, BoundaryCondition, Frame, FrameId, FrameMotion,
+    FrameTree, Physics, TimeSignal, WORLD};
+use fs_scenario::payload::{OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta,
     QuantityContract, ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload};
 use fs_solid::linear3::*;
 use fs_solid::loads3::{LoadError3, SurfaceLoad3, TetLoadGeometry3, VolumeLoad3};
@@ -106,9 +107,12 @@ fn g1_driven_support_extension_without_external_force_changes_actual_stress() {
         let history = empty_history(&frames); let thermal = state(&mat, 0.0);
         let geometry = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, p.budget, 4*mesh.tets.len(), cx).unwrap();
         let zero = motion([0.0;3], [0.0;3]); let stretch = motion([0.0;3], [1.0/512.0, 0.0, 0.0]);
+        let boundary = BoundaryCondition { region: "driven-end".into(),
+            physics: Physics::Elasticity, kind: BcKind::Dirichlet,
+            value: Some(BcValue::Typed(Payload::Vector(stretch))), compatibility: None, frame: 0 };
         let rows = [
             SupportMotion3 { nodes: &sets[0], components: [true,false,false], displacement: &zero },
-            SupportMotion3 { nodes: &sets[1], components: [true,false,false], displacement: &stretch },
+            SupportMotion3::from_scenario(&sets[1], [true,false,false], &boundary).unwrap(),
             SupportMotion3 { nodes: &sets[2], components: [false,true,false], displacement: &zero },
             SupportMotion3 { nodes: &sets[3], components: [false,false,true], displacement: &zero },
         ];
@@ -123,6 +127,30 @@ fn g1_driven_support_extension_without_external_force_changes_actual_stress() {
             for s in result.stress.elements() { assert!((s.stress_mandel_pa()[0]-2000.0*t/512.0).abs() < 1e-6); }
         }
     });
+}
+
+#[test]
+fn g0_scenario_support_binding_preserves_displacement_units_frame_and_role() {
+    let value = motion([0.0; 3], [0.001; 3]);
+    let mut row = BoundaryCondition { region: "support".into(), physics: Physics::Elasticity,
+        kind: BcKind::Dirichlet, value: Some(BcValue::Typed(Payload::Vector(value))),
+        compatibility: None, frame: 0 };
+    assert!(SupportMotion3::from_scenario(&[0], [true; 3], &row).is_ok());
+    row.frame = 1;
+    assert!(SupportMotion3::from_scenario(&[0], [true; 3], &row).is_err());
+    row.frame = 0;
+    row.value = Some(BcValue::Typed(Payload::Vector(source(TRACTION_DIMS, WORLD,
+        [1.0; 3], [2.0; 3], OutsideDomainPolicy::Refuse))));
+    assert!(SupportMotion3::from_scenario(&[0], [true; 3], &row).is_err());
+    row.kind = BcKind::Neumann;
+    let mut violations = Vec::new(); row.check(&mut violations);
+    assert!(violations.is_empty());
+    assert!(SupportMotion3::from_scenario(&[0], [true; 3], &row).is_err());
+    row.kind = BcKind::Dirichlet;
+    row.value = Some(BcValue::Uniform(QtyAny::new(0.0, DISPLACEMENT_DIMS)));
+    row.check(&mut violations);
+    assert!(violations.is_empty(), "legacy scalar rows still validate");
+    assert!(SupportMotion3::from_scenario(&[0], [true; 3], &row).is_err());
 }
 
 #[test]
