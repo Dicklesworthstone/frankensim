@@ -133,6 +133,9 @@ impl MultiBowStringBank {
     /// several ribbon cells on one string. String/body force and displacement
     /// maps remain reciprocal; retained modes are unchanged. Torsional modes
     /// remain resolved explicitly, with no invented omitted torsional response.
+    /// Both admitted orthogonal bridge axes contribute, including oblique bow
+    /// tangents. Their nonzero corrections must share one receiving body per
+    /// bow; its actual surface or resolved hair reaction remains independent.
     ///
     /// The omitted bending tail is quasi-static. Its separately reported
     /// backward-Euler loss is numerical and vanishes with modal enrichment;
@@ -152,32 +155,28 @@ impl MultiBowStringBank {
         -> Result<Self, ReciprocalStringError>
     {
         poll(gate)?;
-        if !self.source.bank.residual_flexibility() || self.bow_stations.is_some()
-            || !self.source.bank.translational_body_connections().is_empty() {
-            return Err(invalid("bow residual flexibility requires condensed single bridges and fixed bow maps"));
+        if !self.source.bank.residual_flexibility() || self.bow_stations.is_some() {
+            return Err(invalid("bow residual flexibility requires condensed bridges and fixed bow maps"));
         }
         let strings = self.source.bank.strings();
-        let bridges = residual::residual_bridges(strings, &self.cards)?;
         let points: Vec<_> = self.source.bows.iter().map(|bow| residual::ResidualStop {
             string: bow.location.string, station_fraction: bow.location.station_fraction,
             direction: residual::directions(&strings[bow.location.string].source).0,
         }).collect();
         // The omitted-mode algebra is independent of the force law: stop and
         // bow point forces use the SAME Green function and Schur complement.
-        let (cross, compliance) = residual::stop_residual(&bridges, &points)?;
+        let (projected, compliance) = residual::point_residual(strings, &self.cards,
+            self.source.bank.translational_body_connections(), &points, gate)?;
         let mut geometry = Vec::with_capacity(points.len());
         let mut corrections = Vec::with_capacity(points.len());
-        for (i, (point, factor)) in points.iter().zip(cross).enumerate() {
+        for (i, correction) in projected.into_iter().enumerate() {
             poll(gate)?;
             let original = self.system.port(i).ok_or_else(|| invalid("missing material bow port"))?;
-            let member = &strings[point.string];
-            let connection = &member.connections[0];
-            let bridge = member.source.bridge_shape(&self.cards[point.string], connection.station_fraction)?;
             let mut left = original.left.clone();
-            if left.shapes.len() != bridge.len() {
+            if left.shapes.len() != correction.string_shapes.len() {
                 return Err(invalid("bow and bridge maps must use the same material string basis"));
             }
-            for (shape, b) in left.shapes.iter_mut().zip(&bridge) { *shape -= factor*b; }
+            for (shape, b) in left.shapes.iter_mut().zip(&correction.string_shapes) { *shape -= b; }
             // The Schur complement changes the string-side displacement by
             // -factor*(bridge_string - bridge_body). Preserve the actual
             // receiving surface; its reciprocal -F must not become a body
@@ -185,9 +184,7 @@ impl MultiBowStringBank {
             geometry.push(crate::render::schedule::force::coupled::contact::friction::multiple::surfaces::geometry::FrictionGeometry {
                 left, right: original.right.clone(),
             });
-            corrections.push(ModalAttachment { component: self.cards.len()+connection.body.component,
-                shapes: connection.body.shapes.iter().map(|b| factor*b).collect(),
-            });
+            corrections.push(correction.body);
         }
         self.system = self.system.with_friction_residual_ports_and_corrections(geometry, corrections, compliance, gate)
             .map_err(ReciprocalStringError::Friction)?;

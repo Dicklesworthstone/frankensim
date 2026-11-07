@@ -9,6 +9,9 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{
     StringBodyTranslationConnection, TransverseDirection, TransverseDirections,
 };
 
+#[path = "polarization/residual.rs"]
+mod residual;
+
 fn directions(bow: [f64; 2], bridge: [f64; 2]) -> TransverseDirections {
     TransverseDirections::try_new(bow, bridge).unwrap()
 }

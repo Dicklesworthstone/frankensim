@@ -2505,3 +2505,24 @@ energy dynamics. Five authored regressions cover Maxwell-to-caloric closure
 and a new field solve, signed Coulomb allocations and internal exchange,
 zero-field thermal relaxation, original source/volume/domain binding,
 temperature limits, cancellation and refusal of scalar-only electron drag.
+
+## Two-axis string bridges in omitted-mode contact response
+
+Fixed material bows and stops with residual flexibility include every already
+admitted orthogonal transverse bridge axis. Each axis contributes its own
+static Green-function Schur term to the joint contact compliance and to the
+reciprocal string/body force and displacement maps. Oblique tangents and stop
+normals therefore retain both physical bridge reactions; no retained frequency,
+material loss or torsional coordinate is changed. Preparation occurs once at
+binding, with no additional per-sample projection or integration path.
+
+Nonzero support corrections for one contact must share one receiving body;
+distinct support bodies refuse explicitly. The actual opposite contact surface
+remains independent and retains its original reaction. The omitted bending
+response remains quasi-static, and its numerical loss stays separate from
+physical dissipation. Existing restrictions on nonorthogonal residual bridges,
+moving contacts and incompatible nonlinear/history mechanisms remain in force.
+`tests/material_string_torsion/polarization/residual.rs` specifies a bowed X/Y
+mirror with energy checks, an independent omitted-mode sine-series comparison
+for oblique bow cross-compliance, active oblique-stop rotation covariance, and
+the receiving-body boundary.

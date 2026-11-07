@@ -19,6 +19,9 @@
 use super::*;
 use fs_math::det;
 
+mod polarization;
+pub(super) use polarization::point_residual;
+
 /// Exact static deflection [m/N] at span fraction `x` under a unit transverse
 /// force at `y`: EI w'''' - T w'' = delta(y), pinned at both ends of the span.
 /// EI = 0 is the taut string, x(L - y)/(T L) for x <= y.

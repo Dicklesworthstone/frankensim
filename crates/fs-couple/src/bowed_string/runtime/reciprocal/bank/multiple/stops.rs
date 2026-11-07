@@ -7,7 +7,7 @@
 use super::*;
 use super::performance::force::{StringForceCoupling, StringForcePort};
 use crate::bowed_string::runtime::reciprocal::bank::polarization::TransverseDirection;
-use crate::bowed_string::runtime::reciprocal::bank::residual::{ResidualStop, directions, residual_bridges, stop_residual};
+use crate::bowed_string::runtime::reciprocal::bank::residual::{ResidualStop, directions, point_residual};
 use crate::render::RenderError;
 use crate::render::schedule::force::coupled::contact::{ModalContact, ModalContactConfig};
 use crate::render::schedule::force::coupled::contact::friction::multiple::obstacles::FrictionObstacleConfig;
@@ -94,6 +94,8 @@ impl MultiBowStringBank {
     /// With residual flexibility, the omitted bending tail adds its condensed
     /// bridge reaction alongside the original receiver, including a receiver
     /// on a different body. Both reactions use the same closure/force map.
+    /// Oblique stops include both admitted orthogonal bridge axes. Their
+    /// nonzero bridge corrections must share one receiving body per stop.
     /// Prescribed support translation follows the declared fixed normals.
     /// `with_stop_station_motion` also admits migration along the original span,
     /// retaining the complete source basis and accounting for attachment work.
@@ -150,7 +152,6 @@ impl MultiBowStringBank {
         gate: &CancelGate) -> Result<(Vec<ModalAttachment>, Vec<f64>), RenderError>
     {
         let strings = self.source.bank().strings();
-        let string_count = self.cards.len();
         let mut ports = Vec::with_capacity(stops.len());
         for stop in stops {
             let member = strings.get(stop.location.string).ok_or_else(|| error("stop names an unknown string"))?;
@@ -159,34 +160,22 @@ impl MultiBowStringBank {
                 _ => directions(&member.source).0,
             };
             let sign = stop.side.sign();
-            // A directed bridge condenses on its own (bank/polarization.rs); a stop it is not
-            // orthogonal to would need their omitted-mode cross term, which is not wired.
-            if self.source.bank().translational_body_connections().iter()
-                .filter(|t| t.string == stop.location.string).map(|t| t.direction.components())
-                .any(|[tx, ty]| (tx*unsigned[0] + ty*unsigned[1]).abs() > 1e-12) {
-                return Err(error("with residual flexibility a stop must be orthogonal to its string's directed bridges"));
-            }
             ports.push(ResidualStop { string: stop.location.string, station_fraction: stop.location.station_fraction,
                 direction: [sign*unsigned[0], sign*unsigned[1]] });
         }
-        let bridges = residual_bridges(strings, &self.cards).map_err(source_error)?;
-        let (cross, compliance) = stop_residual(&bridges, &ports).map_err(source_error)?;
+        let (projected, compliance) = point_residual(strings, &self.cards,
+            self.source.bank().translational_body_connections(), &ports, gate).map_err(source_error)?;
         let mut corrections = Vec::with_capacity(stops.len());
-        for ((stop, geometry), factor) in stops.iter().zip(geometry.iter_mut()).zip(cross) {
+        for (geometry, correction) in geometry.iter_mut().zip(projected) {
             if gate.is_requested() { return Err(RenderError::Coupled(ModalCouplingError::Cancelled)); }
-            let index = stop.location.string;
-            let connection = &strings[index].connections[0];
-            let bridge = strings[index].source.bridge_shape(&self.cards[index], connection.station_fraction)
-                .map_err(source_error)?;
-            if bridge.len() != geometry.left.shapes.len() {
+            if correction.string_shapes.len() != geometry.left.shapes.len() {
                 return Err(error("stop and bridge maps differ from the string's actual basis"));
             }
-            for (left, b) in geometry.left.shapes.iter_mut().zip(&bridge) { *left -= factor*b; }
+            for (left, b) in geometry.left.shapes.iter_mut().zip(&correction.string_shapes) { *left -= b; }
             // Closure is left - receiver + factor*bridge_body. Its transpose
             // must load ALL participants; substituting the bridge for the
             // receiver would disconnect the stop's actual opposite reaction.
-            corrections.push(ModalAttachment { component: string_count + connection.body.component,
-                shapes: connection.body.shapes.iter().map(|b| factor*b).collect() });
+            corrections.push(correction.body);
         }
         Ok((corrections, compliance))
     }
