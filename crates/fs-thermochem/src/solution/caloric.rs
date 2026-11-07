@@ -26,7 +26,8 @@ mod bounds;
 mod entropy;
 mod heat_capacity;
 mod response;
-pub(crate) mod temperature;
+/// Shared bounded scalar caloric inverse for source-owned thermal responses.
+pub mod temperature;
 
 pub use heat_capacity::{MAX_CALORIC_KNOTS_V1, MolarHeatCapacityCurveV1};
 pub use response::{BinaryCaloricHeatCapacityQualificationV1, BinaryCaloricHeatCapacityResponseV1};
@@ -368,8 +369,12 @@ impl BinaryLiquidCaloricModelV1 {
                 maximum_iterations: controls.maximum_iterations,
             },
             sample,
-            |state| state.isobaric_heat_capacity_response().ok()
-                .map(|response| response.heat_capacity_j_per_k()),
+            |state| {
+                state
+                    .isobaric_heat_capacity_response()
+                    .ok()
+                    .map(|response| response.heat_capacity_j_per_k())
+            },
         )?;
         let result = BinaryCaloricBalanceV1 {
             entropy_change_j_per_k: self.entropy_increment(inputs, &root.sample.state)?,

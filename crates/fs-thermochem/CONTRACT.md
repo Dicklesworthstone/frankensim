@@ -552,6 +552,19 @@ ternary feed with positive local curvature but lower three-phase free energy,
 unequal pair interactions, finite traces, exact absent species, pure feeds,
 spurious stationary/coincident roots, bounded work and atomic cancellation.
 
+### Shared safeguarded caloric temperature inverse
+
+`solution::caloric::temperature` exposes the existing bracketed inverse through
+`TemperatureControl`, `TemperatureSample`, `TemperatureRoot` and `solve`.
+Original binary, multicomponent and finite-solid callers retain their own
+energy evaluator, source admission, cancellation and error type. The shared
+owner validates finite positive increasing temperature bounds, positive
+temperature tolerance, nonnegative energy tolerance and 1..256 iterations.
+An admitted positive capacity supplies a safeguarded Newton proposal; an
+unusable optional tangent falls back to bisection without replacing the
+physical energy residual. This numerical inverse does not itself certify a
+material branch, positive capacity between samples or global uniqueness.
+
 ### Homogeneous multicomponent liquid calorics
 
 `solution::multicomponent::caloric` binds every original species to one

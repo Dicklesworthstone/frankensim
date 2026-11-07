@@ -22,6 +22,7 @@ use super::acoustic::HyperelasticAcousticState;
 use super::reference::ReferenceDeformation;
 use super::{Hyperelastic, det3};
 use crate::MaterialError;
+use fs_math::dd::Dd;
 
 /// Original elastic-source derivatives for the admitted Neo-Hookean model.
 pub mod source;
@@ -111,6 +112,7 @@ impl ThermalReferenceJet {
 /// tangent at a fibre activation surface or an arbitrary source kink.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteThermoelasticState {
+    law: Hyperelastic,
     deformation_gradient: [f64; 9],
     elastic_deformation_gradient: [f64; 9],
     temperature_k: f64,
@@ -260,6 +262,7 @@ impl FiniteThermoelasticState {
             return Err(unrepresentable());
         }
         Ok(Self {
+            law,
             deformation_gradient: *total_deformation_gradient,
             elastic_deformation_gradient,
             temperature_k,
@@ -297,6 +300,46 @@ impl FiniteThermoelasticState {
     /// Mechanical internal energy Psi+T*S per ORIGINAL volume [J/m³].
     pub const fn internal_energy_j_m3(&self) -> f64 {
         self.internal_energy_j_m3
+    }
+    /// Direct change of the original-volume mechanical Helmholtz potential.
+    /// Native source-amplitude and deformation increments, including changing
+    /// natural volume, are retained independently of large absolute storage.
+    /// The caller owns the physical source/trajectory relationship of the two
+    /// states; this operation does not label their difference as work or heat.
+    pub fn free_energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        let before_f = &self.elastic_deformation_gradient;
+        let after_f = &after.elastic_deformation_gradient;
+        let increment = self.reference_jet.reference.original_density_increment_to(
+            &after.reference_jet.reference,
+            self.law.energy(before_f),
+            after.law.energy(after_f),
+            self.law.energy_increment_to(before_f, &after.law, after_f),
+        );
+        if increment.is_finite() {
+            Ok(increment)
+        } else {
+            Err(unrepresentable())
+        }
+    }
+    /// Mechanical ΔU=ΔPsi+Δ(T*S) on the original endpoint potentials.
+    /// The symmetric product identity avoids subtracting two large rounded
+    /// internal energies. Entropy values retain their original source-derived
+    /// numerical precision; this is not a new constitutive derivative model.
+    pub fn internal_energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        let before_t = Dd::from_f64(self.temperature_k);
+        let after_t = Dd::from_f64(after.temperature_k);
+        let before_s = Dd::from_f64(self.entropy_j_m3_k);
+        let after_s = Dd::from_f64(after.entropy_j_m3_k);
+        let half = Dd::from_f64(0.5);
+        let change = (Dd::from_f64(self.free_energy_increment_to(after)?)
+            + (half * before_t + half * after_t) * (after_s - before_s)
+            + (half * before_s + half * after_s) * (after_t - before_t))
+            .to_f64();
+        if change.is_finite() {
+            Ok(change)
+        } else {
+            Err(unrepresentable())
+        }
     }
     /// Mechanical addition to fixed-total-F capacity [J/(m³ K)], which may
     /// be negative. Positivity belongs to the complete caloric+mechanical sum.

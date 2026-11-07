@@ -421,8 +421,47 @@ neighborhoods and unresolved states refuse.
 
 The original stress-free zero-pressure caloric convention remains explicit.
 This is a local reversible full-compressible response; constrained mixed or
-incompressible projections, finite-temperature parameter evolution, heat
-transport and attenuation require their existing separate owners.
+incompressible projections, heat transport and attenuation require their
+existing separate owners. Finite temperature evolution at held deformation is
+available through the caloric transaction below.
+
+## Finite heating and cooling at held deformation
+
+`FiniteSolidMaterial::fixed_deformation_caloric_state` retains one immutable
+original material, coefficient source, fully solid caloric curve, total F,
+manufacturing reference map, reference mass and reference volume.
+`FiniteSolidCaloricState` explicitly uses internal-energy storage with the
+existing `CaloricReference::StressFreeZeroPressure` convention:
+`U = m*h0(T) + V0*(Psi - T*Psi_T)` and
+`dU/dT = m*Cp(T) - V0*T*Psi_TT`. Mechanical caloric coupling enters once.
+Each temperature query evaluates the original E(T), nu(T) and natural stretch,
+then returns the evolved native stress, tangent and adiabatic response.
+
+`add_heat` accepts signed finite heat and reuses the shared safeguarded caloric
+inverse. Original Cp and Cp/T finite-pair integrals cross retained source knots;
+direct native mechanical increments avoid cancellation against large absolute
+caloric or elastic baselines. A bounded sampled temperature bracket requires
+positive combined capacity and increasing energy at every accepted sample.
+The final result independently checks heat closure and endpoint Clausius
+bounds. Explicit spacing, state-evaluation, root and entropy controls bound
+work. Refusal or cancellation leaves the original state unchanged; zero heat
+returns that state without claiming an unsampled branch.
+
+This is a fixed-F, fixed-reference-volume transaction on the original fully
+solid smooth source branch. Expansion must remain affine across the prepared
+path; unsupported kinks, foreign sources, unbracketed heat and nonpositive
+sampled capacity refuse. Numerical sampling does not establish global
+monotonicity, stability between samples or a thermal CFL bound. Free mechanical
+motion, phase change, finite-pressure Cp conversion and spatial heat transport
+remain outside this transaction.
+
+Six original consumer tests pass in the native selected finite-solid closure,
+using rebuilt original material and thermochemical code with real dependencies.
+They cover heating/cooling across a Cp knot, refreshed stress and waves, a
+sub-ULP caloric datum, weak mechanical energy increments, constant-source
+reduction and atomic source/budget/cancellation refusals. Unrelated FE/time
+adapters and thermal-field wrappers were not included in that validation;
+this is not a full workspace build.
 
 ## Circuit-driven spatial hysteresis and finite heat
 

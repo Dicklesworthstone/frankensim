@@ -18,6 +18,9 @@
 
 mod coefficients;
 
+/// Finite heat transactions at fixed total deformation on the same sources.
+pub mod heating;
+
 use super::conservative::ConservativeThermalField;
 use super::{
     ExpansionThermalFrame, ExpansionThermalReference, FiniteSolidMaterial, ThermalReference,
@@ -66,10 +69,19 @@ fn expansion_jet(
     source: &ExpansionThermalReference,
     before_thermal: ReferenceDeformation,
 ) -> Result<ThermalReferenceJet, FiniteThermoelasticSourceError> {
-    let path = source.source();
     let temperature = source.geometry().temperature_k();
+    expansion_jet_at_temperature(source, before_thermal, temperature, true)
+}
+
+fn expansion_jet_at_temperature(
+    source: &ExpansionThermalReference,
+    before_thermal: ReferenceDeformation,
+    temperature: f64,
+    two_sided: bool,
+) -> Result<ThermalReferenceJet, FiniteThermoelasticSourceError> {
+    let path = source.source();
     let [lower, upper] = path.temperature_span_k();
-    if temperature <= lower || temperature >= upper {
+    if two_sided && (temperature <= lower || temperature >= upper) {
         return Err(invalid(
             "adiabatic waves require a two-sided expansion-source temperature neighborhood",
         ));
@@ -80,7 +92,7 @@ fn expansion_jet(
     let slopes = tangent.principal_stretch_derivatives_per_k();
     let mut previous = None;
     for knot in path.temperatures_k() {
-        if knot == temperature {
+        if knot == temperature && temperature > lower {
             // At the preceding knot the native right-interval derivative is
             // exactly the left derivative at this knot. No differencing or
             // resampling of mechanical energy is used to infer a source slope.
@@ -125,8 +137,11 @@ fn expansion_jet(
             .map(|k| thermal_derivative[3 * (ij / 3) + k] * before[3 * k + ij % 3])
             .sum()
     });
+    let thermal_reference =
+        ReferenceDeformation::from_principal_stretches(tangent.geometry().principal_stretches(), q)
+            .map_err(FiniteThermoelasticSourceError::Material)?;
     let reference = before_thermal
-        .followed_by(*source.reference_deformation())
+        .followed_by(thermal_reference)
         .map_err(FiniteThermoelasticSourceError::Material)?;
     // The original engineering-length path is piecewise linear with fixed
     // principal axes. At the admitted smooth point G_TT is exactly zero;
@@ -135,25 +150,18 @@ fn expansion_jet(
         .map_err(FiniteThermoelasticSourceError::Material)
 }
 
-fn caloric_capacity(
+fn admit_caloric_source(
     material: &FiniteSolidMaterial,
     caloric: &ResolvedHeatCapacityCurve,
-    h: f64,
     temperature: f64,
     reference: CaloricReference,
-) -> Result<(EquilibriumPhaseState, f64), FiniteThermoelasticSourceError> {
+) -> Result<(), FiniteThermoelasticSourceError> {
     match reference {
         CaloricReference::StressFreeZeroPressure => {}
     }
     let curve = caloric.curve();
-    let phase = curve
-        .state_at_specific_enthalpy(h)
-        .map_err(FiniteThermoelasticSourceError::Caloric)?;
     let context = material.law().context();
-    if curve.material_card_identity() != material.density().card_identity()
-        || !phase.is_fully_solid()
-        || phase.temperature_k() != temperature
-    {
+    if curve.material_card_identity() != material.density().card_identity() {
         return Err(invalid(
             "adiabatic elasticity requires the same solid material card and actual caloric temperature",
         ));
@@ -201,6 +209,26 @@ fn caloric_capacity(
     {
         return Err(invalid(
             "caloric data must retain the original density claim, pinned capacity source and fixed typed context",
+        ));
+    }
+    Ok(())
+}
+
+fn caloric_capacity(
+    material: &FiniteSolidMaterial,
+    caloric: &ResolvedHeatCapacityCurve,
+    h: f64,
+    temperature: f64,
+    reference: CaloricReference,
+) -> Result<(EquilibriumPhaseState, f64), FiniteThermoelasticSourceError> {
+    admit_caloric_source(material, caloric, temperature, reference)?;
+    let curve = caloric.curve();
+    let phase = curve
+        .state_at_specific_enthalpy(h)
+        .map_err(FiniteThermoelasticSourceError::Caloric)?;
+    if !phase.is_fully_solid() || phase.temperature_k() != temperature {
+        return Err(invalid(
+            "the actual caloric temperature and fully solid state must match",
         ));
     }
     let knots = curve.knots();

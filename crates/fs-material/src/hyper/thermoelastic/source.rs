@@ -10,7 +10,7 @@
 use super::{ElasticTemperatureDerivatives, FiniteThermoelasticState, ThermalReferenceJet};
 use crate::MaterialError;
 use crate::hyper::cards::ResolvedHyperelastic;
-use crate::hyper::{HyperelasticModel, neo_hookean_energy};
+use crate::hyper::{Hyperelastic, HyperelasticModel, neo_hookean_energy};
 use crate::state_point::{
     MaterialStatePointError, POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint,
     YOUNG_MODULUS_PROPERTY, affine_temperature_slope,
@@ -54,12 +54,61 @@ fn same_coefficient(left: f64, right: f64) -> bool {
             || (left - right).abs() <= 128.0 * f64::EPSILON * left.abs().max(right.abs()))
 }
 
+struct CoefficientJet {
+    values: [f64; 2],
+    first: [f64; 2],
+    second: [f64; 2],
+}
+
+fn coefficient_jet(values: [f64; 2], slopes: [f64; 2]) -> Result<CoefficientJet> {
+    let [youngs, poisson] = values;
+    let [youngs_t, poisson_t] = slopes;
+    if !youngs.is_finite() || youngs <= 0.0 || !(-1.0..0.5).contains(&poisson) {
+        return Err(invalid(
+            "original E/nu coefficients are outside their elastic domain",
+        ));
+    }
+    let shear = youngs / (2.0 * (1.0 + poisson));
+    let ratio = poisson / (1.0 - 2.0 * poisson);
+    let lame = 2.0 * shear * ratio;
+    let (first, second) = if slopes == [0.0; 2] {
+        ([0.0; 2], [0.0; 2])
+    } else {
+        let poisson_shear_rate = poisson_t / (1.0 + poisson);
+        let shear_t = youngs_t / (2.0 * (1.0 + poisson)) - shear * poisson_shear_rate;
+        let shear_tt = -2.0 * poisson_shear_rate * shear_t;
+        let poisson_bulk_rate = poisson_t / (1.0 - 2.0 * poisson);
+        let ratio_t = poisson_bulk_rate / (1.0 - 2.0 * poisson);
+        let ratio_tt = 4.0 * poisson_bulk_rate * ratio_t;
+        let lame_t = 2.0 * (shear_t * ratio + shear * ratio_t);
+        let lame_tt = 2.0 * (shear_tt * ratio + 2.0 * shear_t * ratio_t + shear * ratio_tt);
+        ([shear_t, lame_t], [shear_tt, lame_tt])
+    };
+    if [shear, lame]
+        .iter()
+        .chain(&first)
+        .chain(&second)
+        .any(|value| !value.is_finite())
+        || (slopes != [0.0; 2] && first == [0.0; 2])
+    {
+        return Err(invalid(
+            "original coefficient temperature derivatives are unrepresentable",
+        ));
+    }
+    Ok(CoefficientJet {
+        values: [shear, lame],
+        first,
+        second,
+    })
+}
+
 /// One source/model snapshot with exact coefficient derivatives at its actual T.
 ///
 /// E and nu are independently affine over the explicit source interval. Their
 /// derived Lamé coefficients generally have nonzero second derivatives. This
-/// immutable local binding admits no automatic parameter update along a finite
-/// thermal trajectory; a changed mechanical snapshot needs its own admission.
+/// The original model remains the anchor snapshot. Explicit temperature
+/// evaluation derives a new native response from these same pinned source
+/// paths; it does not mutate or relabel the anchor model card.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedNeoHookeanThermalCoefficients {
     model: ResolvedHyperelastic,
@@ -67,6 +116,8 @@ pub struct ResolvedNeoHookeanThermalCoefficients {
     source_lines: [PropertyLineSlice; 2],
     temperature_range_k: [f64; 2],
     temperature_k: f64,
+    source_values: [f64; 2],
+    source_slopes: [f64; 2],
     first_derivatives_pa_k: [f64; 2],
     second_derivatives_pa_k2: [f64; 2],
 }
@@ -227,34 +278,10 @@ impl ResolvedNeoHookeanThermalCoefficients {
             }
             lines.push(line);
         }
-        let [youngs, poisson] = values;
-        let [youngs_t, poisson_t] = slopes;
-        let shear = youngs / (2.0 * (1.0 + poisson));
-        let ratio = poisson / (1.0 - 2.0 * poisson);
-        let lame = 2.0 * shear * ratio;
-        if !same_coefficient(shear, mu) || !same_coefficient(lame, lambda) {
+        let jet = coefficient_jet(values, slopes)?;
+        if !same_coefficient(jet.values[0], mu) || !same_coefficient(jet.values[1], lambda) {
             return Err(invalid(
                 "original E/nu sources disagree with the selected native mu/lambda",
-            ));
-        }
-        let (first, second) = if slopes == [0.0; 2] {
-            ([0.0; 2], [0.0; 2])
-        } else {
-            let poisson_shear_rate = poisson_t / (1.0 + poisson);
-            let shear_t = youngs_t / (2.0 * (1.0 + poisson)) - shear * poisson_shear_rate;
-            let shear_tt = -2.0 * poisson_shear_rate * shear_t;
-            let poisson_bulk_rate = poisson_t / (1.0 - 2.0 * poisson);
-            let ratio_t = poisson_bulk_rate / (1.0 - 2.0 * poisson);
-            let ratio_tt = 4.0 * poisson_bulk_rate * ratio_t;
-            let lame_t = 2.0 * (shear_t * ratio + shear * ratio_t);
-            let lame_tt = 2.0 * (shear_tt * ratio + 2.0 * shear_t * ratio_t + shear * ratio_tt);
-            ([shear_t, lame_t], [shear_tt, lame_tt])
-        };
-        if first.iter().chain(&second).any(|value| !value.is_finite())
-            || (slopes != [0.0; 2] && first == [0.0; 2])
-        {
-            return Err(invalid(
-                "original coefficient temperature derivatives are unrepresentable",
             ));
         }
         let mut lines = lines.into_iter();
@@ -267,8 +294,10 @@ impl ResolvedNeoHookeanThermalCoefficients {
             ],
             temperature_range_k,
             temperature_k,
-            first_derivatives_pa_k: first,
-            second_derivatives_pa_k2: second,
+            source_values: values,
+            source_slopes: slopes,
+            first_derivatives_pa_k: jet.first,
+            second_derivatives_pa_k2: jet.second,
         })
     }
 
@@ -305,36 +334,107 @@ impl ResolvedNeoHookeanThermalCoefficients {
         total_deformation_gradient: &[f64; 9],
         reference_jet: ThermalReferenceJet,
     ) -> Result<FiniteThermoelasticState> {
-        if self.first_derivatives_pa_k == [0.0; 2] && self.second_derivatives_pa_k2 == [0.0; 2] {
-            return Ok(FiniteThermoelasticState::try_new(
-                self.model.law(),
-                total_deformation_gradient,
-                self.temperature_k,
-                reference_jet,
-            )?);
-        }
-        Ok(
-            FiniteThermoelasticState::with_elastic_temperature_derivatives(
-                self.model.law(),
-                total_deformation_gradient,
-                self.temperature_k,
-                reference_jet,
-                |elastic_f| {
-                    let [mu_t, lambda_t] = self.first_derivatives_pa_k;
-                    let [mu_tt, lambda_tt] = self.second_derivatives_pa_k2;
-                    // The original native potential is linear in mu and lambda.
-                    // Signed derivative coefficients are not substitute physical
-                    // laws; the original positive-modulus owner admits actual Fe.
-                    let (energy_j_m3_k, piola_pa_k) = fs_ad::gradient::<9>(*elastic_f, |f| {
-                        neo_hookean_energy(&f, mu_t, lambda_t)
-                    });
-                    Ok(ElasticTemperatureDerivatives {
-                        energy_j_m3_k,
-                        energy_j_m3_k2: neo_hookean_energy(elastic_f, mu_tt, lambda_tt),
-                        piola_pa_k,
-                    })
-                },
-            )?,
+        thermal_state(
+            self.model.law(),
+            self.temperature_k,
+            self.first_derivatives_pa_k,
+            self.second_derivatives_pa_k2,
+            total_deformation_gradient,
+            reference_jet,
         )
     }
+
+    /// Evaluate a new native response on the original affine E(T)/nu(T) paths.
+    /// The caller supplies the natural-map jet at this SAME temperature. All
+    /// original source receipts, fixed conditions and the anchor model remain
+    /// retained on this owner; no property re-selection or numerical derivative
+    /// is performed. The original elastic stretch envelope still gates Fe.
+    /// Interval endpoints use the admitted path's one-sided thermal derivative.
+    pub fn thermoelastic_state_at_temperature(
+        &self,
+        temperature_k: f64,
+        total_deformation_gradient: &[f64; 9],
+        reference_jet: ThermalReferenceJet,
+    ) -> Result<FiniteThermoelasticState> {
+        if !temperature_k.is_finite()
+            || temperature_k < self.temperature_range_k[0]
+            || temperature_k > self.temperature_range_k[1]
+        {
+            return Err(invalid(
+                "temperature leaves the original coefficient source interval",
+            ));
+        }
+        if temperature_k == self.temperature_k {
+            return self.thermoelastic_state(total_deformation_gradient, reference_jet);
+        }
+        if self.source_slopes == [0.0; 2] {
+            return thermal_state(
+                self.model.law(),
+                temperature_k,
+                [0.0; 2],
+                [0.0; 2],
+                total_deformation_gradient,
+                reference_jet,
+            );
+        }
+        let values = core::array::from_fn(|i| {
+            self.source_slopes[i].mul_add(temperature_k - self.temperature_k, self.source_values[i])
+        });
+        let jet = coefficient_jet(values, self.source_slopes)?;
+        let law = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: jet.values[0],
+                lambda: jet.values[1],
+            },
+            self.model.law().stretch_limit,
+        )?;
+        thermal_state(
+            &law,
+            temperature_k,
+            jet.first,
+            jet.second,
+            total_deformation_gradient,
+            reference_jet,
+        )
+    }
+}
+
+fn thermal_state(
+    law: &Hyperelastic,
+    temperature_k: f64,
+    first: [f64; 2],
+    second: [f64; 2],
+    total_deformation_gradient: &[f64; 9],
+    reference_jet: ThermalReferenceJet,
+) -> Result<FiniteThermoelasticState> {
+    if first == [0.0; 2] && second == [0.0; 2] {
+        return Ok(FiniteThermoelasticState::try_new(
+            law,
+            total_deformation_gradient,
+            temperature_k,
+            reference_jet,
+        )?);
+    }
+    Ok(
+        FiniteThermoelasticState::with_elastic_temperature_derivatives(
+            law,
+            total_deformation_gradient,
+            temperature_k,
+            reference_jet,
+            |elastic_f| {
+                let [mu_t, lambda_t] = first;
+                let [mu_tt, lambda_tt] = second;
+                // The original native potential is linear in mu and lambda.
+                // Signed derivative coefficients are not substitute physical
+                // laws; the original positive-modulus owner admits actual Fe.
+                let (energy_j_m3_k, piola_pa_k) =
+                    fs_ad::gradient::<9>(*elastic_f, |f| neo_hookean_energy(&f, mu_t, lambda_t));
+                Ok(ElasticTemperatureDerivatives {
+                    energy_j_m3_k,
+                    energy_j_m3_k2: neo_hookean_energy(elastic_f, mu_tt, lambda_tt),
+                    piola_pa_k,
+                })
+            },
+        )?,
+    )
 }

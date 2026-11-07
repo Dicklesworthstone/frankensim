@@ -15794,14 +15794,26 @@ from that one potential. Signed derivative coefficients are used only in the
 derivative of the original energy; they are not substitute mechanical laws.
 The existing fixed-coefficient entry and exact constant-source limit remain.
 
-This immutable local snapshot retains current energy, stress and isothermal
-tangent. It does not automatically update model parameters along a finite
-thermal trajectory or supply a heat integrator. The original caloric owner
-and reference density still supply base storage; total capacity must remain
-positive before the existing adiabatic acoustic response is admitted. Focused
-native checks compare independent potential/entropy/internal-energy and stress
-derivatives under simultaneous changing coefficients and noncommuting natural
-maps, constant limits, coefficient-curvature Cp and actual wave responses.
+The retained affine sources also support explicit
+`thermoelastic_state_at_temperature` evaluation throughout their original
+interval. Each query rebuilds the actual native coefficients, their exact
+derivatives, stress and tangent at the requested temperature with the original
+stretch envelope. The original model metadata remains anchored at its
+preparation temperature. The original caloric owner and reference density
+still supply base storage; total capacity must remain positive before the
+existing adiabatic acoustic response is admitted.
+
+`FiniteThermoelasticState` retains its native law and exposes direct free-energy
+and internal-energy changes between compatible finite states. These reuse the
+original native finite-pair potential and reference-volume increment owners;
+a symmetric compensated change of T times mechanical entropy preserves weak
+caloric coupling against large stored-energy baselines. No difference of two
+rounded absolute internal energies is required. The finite-solid consumer
+owns the heat transaction and its branch limits. Focused native checks compare
+independent potential/entropy/internal-energy and stress derivatives,
+noncommuting natural maps, constant limits, coefficient-curvature Cp and actual
+wave responses; finite heating tests additionally retain a 5,000 J/m3 change
+when both absolute internal energies round to the same value near 1.125e20.
 
 ## Objective discrete-gradient elastic work
 

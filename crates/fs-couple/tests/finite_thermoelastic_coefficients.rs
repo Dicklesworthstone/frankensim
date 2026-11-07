@@ -1,5 +1,8 @@
 //! Same-source finite coefficient curvature reaches actual capacity and waves.
 
+#[path = "finite_thermoelastic_coefficients/heating.rs"]
+mod heating;
+
 use fs_couple::finite_solid::FiniteSolidMaterial;
 use fs_couple::finite_solid::thermal::thermodynamics::{
     CaloricReference, FiniteThermoelasticSourceError,
@@ -43,6 +46,9 @@ fn point(t: f64) -> QueryPoint {
         .unwrap()
 }
 fn card(slopes: [f64; 2], cp_scale: f64) -> MaterialCard {
+    card_with_expansion(slopes, cp_scale, [-0.01, 0.0, 0.01])
+}
+fn card_with_expansion(slopes: [f64; 2], cp_scale: f64, expansion: [f64; 3]) -> MaterialCard {
     let artifact = fs_blake3::hash_bytes(b"authored original finite thermal coefficient consumer");
     let provenance = Provenance {
         source: "authored E/nu, Cp and engineering expansion; not measurements".into(),
@@ -73,7 +79,7 @@ fn card(slopes: [f64; 2], cp_scale: f64) -> MaterialCard {
             CP_DIMS,
             [10.0 * cp_scale, 12.0 * cp_scale, 16.0 * cp_scale],
         ),
-        ("engineering_length_change", Dims::NONE, [-0.01, 0.0, 0.01]),
+        ("engineering_length_change", Dims::NONE, expansion),
     ] {
         claims
             .insert_claim(PropertyClaim {
