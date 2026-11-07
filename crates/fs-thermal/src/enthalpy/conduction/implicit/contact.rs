@@ -20,8 +20,9 @@ pub struct ImplicitContactState {
 }
 impl ImplicitContactState {
     /// Check the passive resistance and its finite constitutive tangents.
-    /// Complete-flux adapters use this same admission as native series links;
-    /// zero resistance requires zero tangents at the admitted state.
+    /// Complete-flux adapters use this same admission as native series links.
+    /// At zero resistance a material owner may select finite one-sided
+    /// tangents; every subsequent source query must still remain nonnegative.
     pub fn admit(self) -> Result<(), DepositionError> {
         if !self.resistance_m2_k_w.is_finite()
             || self.resistance_m2_k_w < 0.0
@@ -29,8 +30,6 @@ impl ImplicitContactState {
                 .resistance_enthalpy_derivatives_m2_kg_k_w_j
                 .iter()
                 .any(|v| !v.is_finite())
-            || (self.resistance_m2_k_w == 0.0
-                && self.resistance_enthalpy_derivatives_m2_kg_k_w_j != [0.0; 2])
         {
             return Err(DepositionError::MaterialDomain);
         }
@@ -46,6 +45,12 @@ impl ImplicitContactState {
         let derivative = self.resistance_enthalpy_derivatives_m2_kg_k_w_j[side];
         if g == 0.0 || derivative == 0.0 {
             return Ok(0.0);
+        }
+        if self.resistance_m2_k_w == 0.0 {
+            // The bulk half-cell resistances keep G finite at perfect
+            // contact: dG/dh = -G*(G/A)*dR''/dh. The ratio R''/D below
+            // cannot represent this legitimate one-sided onset.
+            return finite(-g * finite((g / area) * derivative)?);
         }
         // The resistance fraction R''/D is bounded. Do not form G² directly.
         finite(

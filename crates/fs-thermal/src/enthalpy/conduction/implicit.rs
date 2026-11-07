@@ -513,7 +513,6 @@ impl<'a> ImplicitConductionChain<'a> {
                 || state.temperature_slope_kg_k_j > max_slope
                 || !nonnegative(state.conductivity_w_m_k)
                 || !state.conductivity_slope_kg_w_m_k_j.is_finite()
-                || (state.conductivity_w_m_k == 0.0 && state.conductivity_slope_kg_w_m_k_j != 0.0)
             {
                 return Err(DepositionError::MaterialDomain.into());
             }
@@ -877,15 +876,36 @@ impl<'a> ImplicitConductionChain<'a> {
                 let a = endpoint.states[ia];
                 let b = endpoint.states[ib];
                 let g = endpoint.link_values[&id];
-                let mut ga =
-                    conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[0], a)?;
-                let mut gb =
-                    conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[1], b)?;
+                let difference = b.temperature_k - a.temperature_k;
+                if link.area_m2 != 0.0
+                    && a.conductivity_w_m_k == 0.0
+                    && b.conductivity_w_m_k == 0.0
+                    && a.conductivity_slope_kg_w_m_k_j != 0.0
+                    && b.conductivity_slope_kg_w_m_k_j != 0.0
+                    && difference != 0.0
+                {
+                    // Two independently opening insulators give a
+                    // direction-dependent harmonic-mean derivative. At equal
+                    // temperatures the complete heat flux is second order;
+                    // otherwise a source-owned complete link tangent is needed.
+                    return Err(ImplicitConductionError::Invalid(
+                        "simultaneous insulating onsets at unequal temperatures require a complete link law",
+                    ));
+                }
+                let mut ga = if b.conductivity_w_m_k == 0.0 {
+                    0.0
+                } else {
+                    conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[0], a)?
+                };
+                let mut gb = if a.conductivity_w_m_k == 0.0 {
+                    0.0
+                } else {
+                    conductance_derivative(g, link.area_m2, link.geometry.half_distances_m[1], b)?
+                };
                 if let Some(contact) = endpoint.contacts.get(&id) {
                     ga = finite(ga + contact.conductance_derivative(g, link.area_m2, 0)?)?;
                     gb = finite(gb + contact.conductance_derivative(g, link.area_m2, 1)?)?;
                 }
-                let difference = b.temperature_k - a.temperature_k;
                 (
                     finite(
                         (ga * difference - g * a.temperature_slope_kg_k_j)
@@ -1242,7 +1262,16 @@ fn conductance_derivative(
     distance: f64,
     state: ImplicitConductionState,
 ) -> Result<f64, DepositionError> {
-    if g == 0.0 || state.conductivity_slope_kg_w_m_k_j == 0.0 {
+    if area == 0.0 || state.conductivity_slope_kg_w_m_k_j == 0.0 {
+        return Ok(0.0);
+    }
+    if state.conductivity_w_m_k == 0.0 {
+        // G=A*k/(d+k*R_other): at k=0 its admitted one-sided derivative
+        // is A*k'/d, even though the present conductance and heat are zero.
+        // For a link the caller first excludes an insulating opposite side.
+        return finite((area / distance) * state.conductivity_slope_kg_w_m_k_j);
+    }
+    if g == 0.0 {
         return Ok(0.0);
     }
     // G*(bulk resistance / total resistance)*(k'/k), keeping the geometric

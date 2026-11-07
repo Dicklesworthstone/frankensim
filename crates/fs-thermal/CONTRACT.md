@@ -416,13 +416,15 @@ and cancellation failures publish no changed thermal history.
 
 ## State-dependent contact in implicit thermal networks
 
-`enthalpy::conduction::implicit::contact::ImplicitContactLaw` supplies positive
+`enthalpy::conduction::implicit::contact::ImplicitContactLaw` supplies nonnegative
 area-specific contact resistance and its two specific-enthalpy derivatives on
 the original ordered caloric objects. Chain and graph `with_contacts` attachment
 requires unique active links and zero authored resistance on those links, so
 source and fixed contact resistance cannot be counted twice. Unselected links
-retain the original fixed-resistance path. Explicit zero resistance requires
-zero tangents; isolation still checks the source domain.
+retain the original fixed-resistance path. At zero resistance the source may
+select finite one-sided tangents; the native Jacobian uses the finite bulk-limited
+`-G*(G/A)*dR''/dh_i` limit. Every source query still requires nonnegative resistance,
+and isolation still checks the source domain.
 
 The existing endpoint supplies `G=A/(d_a/k_a+R''+d_b/k_b)` to the same conservative
 backward-Euler residual. Each Jacobian column includes both its bulk-k response
@@ -1521,6 +1523,27 @@ and an explicit admitted enthalpy interval. Physical latent plateaus retain
 zero dT/dh while their conductivity may continue changing with phase inventory.
 The exact endpoint Jacobian differentiates both the temperature difference and
 the half-cell/contact/surface conductance, in cell ENERGY coordinates.
+
+An initially insulating half-cell may have a source-declared one-sided
+conductivity onset. Against a conducting neighbor or a finite boundary film,
+`G=A*k/(d+k*R_other)` gives `dG/dh=A*(dk/dh)/d` at zero conductivity. The native
+chain/graph Jacobian retains that finite derivative for links and both bath
+channels while the current heat remains exactly zero. If the opposite half-cell
+is also insulating, varying only one side cannot conduct. Equal-temperature
+double onsets have zero complete-flux derivative and may evolve under independent
+sources. Two active insulating onsets at unequal temperatures have a
+direction-dependent harmonic-mean derivative; native Newton refuses that case
+unless a complete link law supplies its own admitted tangent. Negative or
+nonfinite conductivity/resistance and invalid source trials still refuse; no
+coefficient clipping, artificial conductivity or extra heat storage is introduced.
+G1 tests in `conduction/implicit/tests.rs` check analytic onset Jacobians, a
+driven two-body cubic balance through both chain and graph, both bath channels,
+and the exact quadratic two-body response from initially perfect contact.
+Those three native regression definitions are syntax checked but unexecuted in
+this environment because the complete dependency build is unavailable. Three
+isolated tests of the unchanged production conductance/tangent functions passed
+against independent resistance formulas and one-sided differences; this does
+not establish a whole-solver or continuum-validation result.
 
 Only three matrix diagonals are assembled. The reusable `fs-la` adjacent-pivot
 workspace keeps the linear solve O(cells) in work and storage; original

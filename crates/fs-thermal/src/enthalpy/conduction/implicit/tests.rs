@@ -185,6 +185,299 @@ pub(super) fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a - b).abs() <= tolerance, "{a:.15e} != {b:.15e}");
 }
 
+/// Declared one-sided conducting phase on h >= 300, with cp = 1 J/(kg K).
+/// The source refuses negative conductivity instead of extending or smoothing it.
+struct ConductivityOnset;
+impl ThermalLaw for ConductivityOnset {
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        if !(300.0..=1000.0).contains(&h) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(h)
+    }
+    fn maximum_temperature_slope(&self) -> f64 {
+        1.0
+    }
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        a: f64,
+        b: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        self.temperature_k(a)?;
+        self.temperature_k(b)?;
+        Ok(Some(((b - a) / a).ln_1p()))
+    }
+}
+impl ConductivityLaw for ConductivityOnset {
+    fn conductivity_w_m_k(&self, h: f64) -> Result<f64, DepositionError> {
+        Ok(0.01 * (self.temperature_k(h)? - 300.0))
+    }
+}
+impl ImplicitConductionLaw for ConductivityOnset {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self
+    }
+    fn conductivity_law(&self) -> &dyn ConductivityLaw {
+        self
+    }
+    fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
+        [300.0, 1000.0]
+    }
+    fn state_at_specific_enthalpy(
+        &self,
+        h: f64,
+    ) -> Result<ImplicitConductionState, DepositionError> {
+        Ok(ImplicitConductionState {
+            temperature_k: self.temperature_k(h)?,
+            temperature_slope_kg_k_j: 1.0,
+            conductivity_w_m_k: self.conductivity_w_m_k(h)?,
+            conductivity_slope_kg_w_m_k_j: 0.01,
+        })
+    }
+}
+
+#[test]
+fn g1_zero_conductivity_onset_has_finite_link_and_bath_tangents() {
+    let law = ConductivityOnset;
+    let (thermal, observer) = setup(&law, &[300.0, 400.0], None, vec![]);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let endpoint = chain.endpoint(&thermal, &mut || Ok(())).unwrap();
+    assert_eq!(endpoint.link_values[&0], 0.0);
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    chain
+        .jacobian(&thermal, &endpoint, 0.1, &mut workspace, &mut || Ok(()))
+        .unwrap();
+    // G = 2*k_a*k_b/(k_a+k_b); at k_a=0, k_b=1,
+    // dQ_into_a/dh_a = (2*0.01)*(400-300) = 2 W kg/J.
+    near(workspace.diagonal[0], 0.8, 1e-15);
+    near(workspace.lower[0], 0.2, 1e-15);
+    near(workspace.upper[0], 0.0, 0.0);
+    near(workspace.diagonal[1], 1.0, 0.0);
+    let eps = 1e-5;
+    let step = BackwardEulerStep::new(&thermal, 0.1, || Ok(())).unwrap();
+    let trial = chain
+        .evaluate(
+            &step,
+            &[eps, 0.0],
+            &BTreeMap::new(),
+            &[],
+            false,
+            controls(0.1),
+            &mut empty_report(),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    near(trial.residual_j()[0] / eps, 0.8, 1e-7);
+    near(trial.residual_j()[1] / eps, 0.2, 1e-7);
+
+    // The same limit is needed for BOTH boundary channels, including a finite
+    // film. At k=0 the first derivative is independent of that film resistance.
+    let mut baths = boundary(Some(500.0));
+    baths.ambient_k = 400.0;
+    let (thermal, observer) = setup(
+        &law,
+        &[300.0],
+        Some(500.0),
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Boundary(CellId(0), baths),
+        }],
+    );
+    let observer = observer
+        .with_ambient_faces(
+            &thermal,
+            &[ConductiveAmbient {
+                cell_id: CellId(0),
+                half_distance_m: 0.5,
+                surface_resistance_m2_k_w: 0.2,
+            }],
+            || Ok(()),
+        )
+        .unwrap();
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let endpoint = chain.endpoint(&thermal, &mut || Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    chain
+        .jacobian(&thermal, &endpoint, 0.1, &mut workspace, &mut || Ok(()))
+        .unwrap();
+    // Reservoir: 1*0.01/1 * 200 = 2; ambient: 1*0.01/0.5 * 100 = 2.
+    near(workspace.diagonal[0], 0.6, 1e-15);
+    assert!(law.state_at_specific_enthalpy(299.0).is_err());
+}
+
+#[test]
+fn g1_driven_conductivity_onset_transfers_heat_on_native_chain_and_graph() {
+    let law = ConductivityOnset;
+    let mut heated = boundary(None);
+    heated.source_w = 10.0;
+    let (thermal, observer) = setup(
+        &law,
+        &[300.0, 400.0],
+        None,
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Boundary(CellId(0), heated),
+        }],
+    );
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let dt = 0.1;
+    // Eliminate the second cell with the independent total-energy equation:
+    // x=T_a-300, y=T_b-300, x+y=101. The native backward-Euler endpoint
+    // solves x-1 = dt*(0.02*x*y/101)*(y-x), a scalar cubic.
+    let (mut lo, mut hi) = (1.0, 50.5);
+    for _ in 0..60 {
+        let x = 0.5 * (lo + hi);
+        let y = 101.0 - x;
+        if x - 1.0 - dt * (0.02 * x * y / 101.0) * (y - x) > 0.0 {
+            hi = x;
+        } else {
+            lo = x;
+        }
+    }
+    let expected = 300.0 + 0.5 * (lo + hi);
+    for (next, report) in [
+        chain
+            .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+            .unwrap(),
+        graph
+            .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+            .unwrap(),
+    ] {
+        near(next.temperature_k(CellId(0)).unwrap(), expected, 1e-9);
+        near(
+            next.temperature_k(CellId(1)).unwrap(),
+            701.0 - expected,
+            1e-9,
+        );
+        assert!(next.temperature_k(CellId(1)).unwrap() < 400.0);
+        assert!(report.entropy.conduction_generation_j_k > 0.0);
+        near(report.energy.external_heat_j, 1.0, 1e-12);
+        near(report.energy.stored_energy_change_j, 1.0, 1e-9);
+        assert_eq!(report.energy.substeps, 1);
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.temperature_k(CellId(0)).unwrap(), 300.0);
+
+    // Both sides may start at the same insulating onset: the complete heat
+    // flux has zero first derivative there. Independent forcing opens them.
+    let (thermal, observer) = setup(
+        &law,
+        &[300.0, 300.0],
+        None,
+        vec![
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Boundary(CellId(0), heated),
+            },
+            TimedEvent {
+                time_s: 0.0,
+                event: Event::Boundary(
+                    CellId(1),
+                    Boundary {
+                        source_w: 20.0,
+                        ..heated
+                    },
+                ),
+            },
+        ],
+    );
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap();
+    let (next, report) = chain
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    assert!(next.temperature_k(CellId(0)).unwrap() > 301.0);
+    assert!(next.temperature_k(CellId(1)).unwrap() < 302.0);
+    near(report.energy.stored_energy_change_j, 3.0, 1e-9);
+    near(report.energy.external_heat_j, 3.0, 1e-12);
+}
+
+#[test]
+fn g1_perfect_contact_onset_retains_source_tangent_and_two_body_heat_balance() {
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    struct OpeningContact<'a>(&'a Law);
+    impl ImplicitContactLaw for OpeningContact<'_> {
+        fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+            [self.0, self.0]
+        }
+        fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+            [[300.0, 1000.0], [100.0, 1000.0]]
+        }
+        fn state_at_specific_enthalpies(
+            &self,
+            h: [f64; 2],
+        ) -> Result<ImplicitContactState, DepositionError> {
+            Ok(ImplicitContactState {
+                resistance_m2_k_w: 0.01 * (h[0] - 300.0),
+                resistance_enthalpy_derivatives_m2_kg_k_w_j: [0.01, 0.0],
+            })
+        }
+    }
+    let contact = OpeningContact(&law);
+    let (thermal, observer) = setup(&law, &[300.0, 400.0], None, vec![]);
+    let chain =
+        ImplicitConductionChain::new(&thermal, &observer, &[(MaterialId(0), &law)], || Ok(()))
+            .unwrap()
+            .with_contacts(&thermal, &[(0, &contact)], || Ok(()))
+            .unwrap();
+    let endpoint = chain.endpoint(&thermal, &mut || Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    chain
+        .jacobian(&thermal, &endpoint, 0.1, &mut workspace, &mut || Ok(()))
+        .unwrap();
+    // Q_into_a=(T_b-T_a)/(1+0.01*(h_a-300)): the contact response
+    // doubles the initial derivative with respect to the cold body's energy.
+    near(workspace.diagonal[0], 1.2, 1e-15);
+    near(workspace.lower[0], -0.2, 1e-15);
+    near(workspace.upper[0], -0.1, 1e-15);
+    near(workspace.diagonal[1], 1.1, 1e-15);
+    let dt = 1.0;
+    let (next, report) = chain
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    // x=dt*(100-2*x)/(1+0.01*x), using only conservation and the declared R.
+    let x = 200.0 / (3.0 + 13.0_f64.sqrt());
+    near(next.temperature_k(CellId(0)).unwrap(), 300.0 + x, 1e-9);
+    near(next.temperature_k(CellId(1)).unwrap(), 400.0 - x, 1e-9);
+    near(report.energy.stored_energy_change_j, 0.0, 1e-9);
+    near(report.energy.external_heat_j, 0.0, 0.0);
+    assert!(report.entropy.conduction_generation_j_k > 0.0);
+    assert!(
+        contact
+            .state_at_specific_enthalpies([299.0, 400.0])
+            .unwrap()
+            .admit()
+            .is_err()
+    );
+    assert!(
+        ImplicitContactState {
+            resistance_m2_k_w: 0.0,
+            resistance_enthalpy_derivatives_m2_kg_k_w_j: [f64::NAN, 0.0],
+        }
+        .admit()
+        .is_err()
+    );
+}
+
 #[test]
 fn stiff_pair_and_latent_crossing_use_original_storage_and_local_residual_gates() {
     let law = Law {
@@ -1209,4 +1502,3 @@ mod advection;
 
 #[path = "tests/source.rs"]
 mod heat_source;
-
