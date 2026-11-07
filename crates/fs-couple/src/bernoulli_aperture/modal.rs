@@ -19,7 +19,8 @@ use crate::unilateral_contact::distributed::ApertureContactStep;
 use fs_dcontact::{ContactStorage, Obstacle};
 use fs_phs::Storage;
 use fs_phs::{
-    NewtonSite, SolveBudget, SolveCertificate, admit_newton_iterate, arithmetic_rounding_floor,
+    NewtonSite, SolveBudget, SolveCertificate, admit_default_newton_iterate, admit_newton_iterate,
+    arithmetic_rounding_floor,
 };
 use std::rc::Rc;
 mod exact;
@@ -956,6 +957,18 @@ impl ModalAperture {
             })
             .collect();
         let flow_scale = jet.abs() + swept.abs() + drive.body_flow_m3_s.abs() + wave.abs();
+        // `wave` is a difference of pressures over the impedance, so its arithmetic carries the rounding of
+        // those pressures, not of the (possibly tiny) net flows: at a near-closed aperture the flow scale is
+        // far below `eps |P| / z`. The floor of the flow certificate counts that; the budget does not change.
+        let flow_rounding_scale = flow_scale
+            + drive
+                .upstream_pressure_pa
+                .abs()
+                .max(no_drop.abs())
+                .max(trial.dp.abs())
+                .max(drive.incoming_pressure_pa.abs())
+                .max(load_pressure.abs())
+                / z;
         let scale = self.stored_energy_j()
             + energy
             + aperture.pressure_work_j.abs()
@@ -969,6 +982,7 @@ impl ModalAperture {
             wave,
             scale,
             flow_scale,
+            flow_rounding_scale,
             aperture.balance_residual_j(),
             aperture.flow_residual_m3_s,
             aperture.dissipated_energy_j,
@@ -983,7 +997,9 @@ impl ModalAperture {
             ));
         }
         let (work_certificate, flow_certificate) =
-            self.admit_balance(&aperture, scale, flow_scale, trial.evaluations)?;
+            self.admit_balance_with_rounding(
+                &aperture, scale, flow_scale, flow_rounding_scale, trial.evaluations,
+            )?;
         let volume = dt * (wave - drive.body_flow_m3_s);
         let plate_work = |column: usize| {
             dt * forces[column]
@@ -1036,6 +1052,20 @@ impl ModalAperture {
         flow_scale: f64,
         evaluations: usize,
     ) -> Result<(SolveCertificate, SolveCertificate), AcousticRealizeError> {
+        self.admit_balance_with_rounding(frame, energy_scale, flow_scale, flow_scale, evaluations)
+    }
+
+    /// `admit_balance` with the magnitude the flow certificate's arithmetic rounding floor is taken
+    /// over given apart from the flow scale the relative budget is taken over (`flow_rounding_scale`
+    /// of at least `flow_scale`).
+    fn admit_balance_with_rounding(
+        &self,
+        frame: &ApertureFrame,
+        energy_scale: f64,
+        flow_scale: f64,
+        flow_rounding_scale: f64,
+        evaluations: usize,
+    ) -> Result<(SolveCertificate, SolveCertificate), AcousticRealizeError> {
         let budget = SolveBudget {
             relative: self.spec.limits.relative_tolerance,
             absolute: 0.0,
@@ -1056,13 +1086,23 @@ impl ModalAperture {
             NewtonSite::ModalFlow,
             frame.flow_residual_m3_s.abs(),
             flow_scale.max(f64::MIN_POSITIVE),
-            arithmetic_rounding_floor(2 * self.state.len() + 8, flow_scale),
+            arithmetic_rounding_floor(
+                2 * self.state.len() + 8,
+                flow_rounding_scale.max(flow_scale),
+            ),
             evaluations,
             0,
-        );
+        )
+        // The declared relative tolerance is converted to an absolute ceiling over the NET flows, which
+        // shrink to nothing as the aperture closes; no declaration can resolve an equation formed from
+        // kPa-sized pressures over the impedance below the rounding of those pressures. This gate
+        // therefore takes the default-API allowance, recorded in the certificate (`floor_raised`),
+        // instead of refusing a declared budget that sits below the evaluated floor. Where the floor is
+        // under the declared ceiling the certificate is exactly the explicit one.
+        .with_rounding_allowance();
         Ok((
             admit_newton_iterate(work).map_err(AcousticRealizeError::AlgebraicSolve)?,
-            admit_newton_iterate(flow).map_err(AcousticRealizeError::AlgebraicSolve)?,
+            admit_default_newton_iterate(flow).map_err(AcousticRealizeError::AlgebraicSolve)?,
         ))
     }
 }

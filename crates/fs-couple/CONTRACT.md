@@ -5955,3 +5955,42 @@ Evidence (G0/G1): `dg_port::channel::orifice_tests` (the first sample is the pla
 is `K |Q_prev| Q` and equals the observed duct-minus-exterior drop; the work is nonnegative and equals `Z Q^2 dt`; the ledger drift
 stays under 1e-9; a settled flow has no lag; halving the step cuts the lag share; refusals; a dropped trial restores everything),
 `dg_port::input::tests::terminal_channels` (the row, its refusals), and the existing terminal-channel tests unchanged.
+
+## Modal aperture flow balance at a near-closed gap
+
+`ModalAperture` certifies the flow balance `jet + swept + body - wave` of every step against the card's relative
+tolerance times `flow_scale = |jet| + |swept| + |body| + |wave|`. `wave = (outgoing - incoming) / z` is a difference of
+pressures over the bore impedance, so its arithmetic carries the rounding of those pressures, `eps max|P| / z` with `P` over
+the upstream, no-drop, junction-drop, incoming and load pressures, however small the net flows are. As the gap closes the net
+flows go to zero while that rounding does not, and the declared budget `relative x flow_scale` falls below it.
+
+The flow gate therefore takes the default-API certificate: its rounding floor is taken over `flow_scale + max|P| / z` and,
+where that floor is above the declared ceiling, the allowance is taken and recorded (`floor_raised`, `effective_budget` equal
+to the floor). Where the floor is under the declared ceiling the certificate is exactly the explicit one (same effective
+budget, `floor_raised` false), so every step that was admitted before is admitted with the same ceiling. The work gate is
+unchanged and still an explicit declaration. A residual above the raised floor still refuses (`modal/refusal_tests.rs`:
+1e-15 at the failing scale, six orders above the rounding). The gate admits or refuses; it changes no number of the step.
+Measured on the refusal that motivated it (a 2.65 s D4 render on the typed DG reed, 1.047 s in): residual 4.2e-21 m^3/s on a
+flow scale of 6.2e-11, `eps x 6178 Pa / 1.7e8 Pa s/m^3` = 8e-21 m^3/s.
+
+## Per-opening quadrature of a circular opening array
+
+An array of coplanar circular openings (`BaffledPressure::circular_openings*`) used to give every opening the receiver's one
+declared (rings, angular points). The surface rule (cell phase `2 pi f (R/sqrt(rings) + 2 pi R/angles)/c <= pi/4` over the
+declared band) is per opening, so one large opening could refuse a card the small ones resolve at the same grid. Now an opening
+the declared grid resolves keeps it exactly (the local receiver is the one the unrefined build used, bit for bit, so every
+downstream arithmetic step is untouched); an opening it does not resolve takes the grid with rings' in rings..=128 and
+angles' in angles..=512 that resolves the band with the fewest points (ties to fewer rings); where none does the declared grid
+stays and `circular_surface` refuses with its own text. The shared point budget counts each opening's own grid and refuses
+above 120 000 with the same text (with equal grids it is the former `openings x rings x angles` rule, which is still checked on
+the declared grid first). `BaffledPressure::resolved_circular_grids(openings, receiver, medium)` returns the grids in opening
+order. The grid rule's phase test copies `circular_surface`'s expression and is checked against it on a sweep.
+On the oboe DG card (the 19 mm bell and its three open chimneys, receiver on axis at 0.5 m, 20 kHz band, declared 32 x 128)
+the bell refines to (128, 257), the minimum by exhaustive search, and the chimneys keep (32, 128): 45 184 points, with 6 287
+distinct source-to-receiver paths for the gas-absorption observer against 43 202 for the shared 128 x 224 grid that resolves
+the same band (computed from the surface rule; the card's `observer_gas` budget is 16 384 paths). The 20 kHz pilot that the
+shared grid refused at the gesture phase renders on this rule (rc 0), and its wav equals the 9.6 kHz-observed pilot's byte for
+byte (both quadratures are converged where the note has energy, and its 9.6 to 19 kHz band is 67 dB under the total, about
+one 16-bit step).
+This is a quadrature resolution of a prescribed uniform-velocity piston in an infinite rigid baffle; it adds no cross-mode
+physics of the real mouth above the bell's first cutoff (about 5.3 kHz for 19 mm).

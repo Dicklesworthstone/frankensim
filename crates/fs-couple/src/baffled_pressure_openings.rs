@@ -14,6 +14,9 @@ use fs_material::gas::GasState;
 pub mod duct;
 
 
+/// Total midpoint-quadrature points an opening array may carry (the sum over its openings).
+const OPENING_POINT_BUDGET: usize = 120_000;
+
 /// One physical circular opening in a shared stationary z=0 baffle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CircularOpening {
@@ -208,7 +211,7 @@ impl BaffledPressure {
     pub fn circular_openings(openings: &[CircularOpening], rate: u32,
         receiver: CircularOutletReceiver, medium: RayleighMedium) -> Result<Self, String>
     {
-        Self::assemble_openings(openings, receiver, 1, |radius, local| {
+        Self::assemble_openings(openings, receiver, 1, medium.sound_speed, |radius, local| {
             Self::circular_outlet(radius, rate, local, medium)
         })
     }
@@ -254,7 +257,7 @@ impl BaffledPressure {
         medium: RayleighMedium) -> Result<Self, String>
     {
         let ratio = Self::opening_clock_ratio(mechanics_rate, output_rate)?;
-        Self::assemble_openings(openings, receiver, ratio, |radius, local| {
+        Self::assemble_openings(openings, receiver, ratio, medium.sound_speed, |radius, local| {
             Self::circular_outlet_multirate_differentiating(radius, mechanics_rate,
                 output_rate, local, medium)
         })
@@ -327,13 +330,11 @@ impl BaffledPressure {
         if receiver.maximum_frequency_hz > 0.45 * f64::from(output_rate) {
             return Err("differentiating outlet band exceeds 0.45 of its output clock".into());
         }
+        let locals = Self::refined_local_receivers(openings, receiver, medium.sound_speed)?;
         let mut surface = Vec::new();
         for (index, opening) in openings.iter().enumerate() {
             if cancelled() { return Err("material opening propagation cancelled".into()); }
-            let local = CircularOutletReceiver { position_m: [
-                receiver.position_m[0] - opening.center_m[0],
-                receiver.position_m[1] - opening.center_m[1], receiver.position_m[2]], ..receiver };
-            for mut sample in Self::circular_surface(opening.radius_m, local, medium)? {
+            for mut sample in Self::circular_surface(opening.radius_m, locals[index], medium)? {
                 sample.position_m[0] += opening.center_m[0];
                 sample.position_m[1] += opening.center_m[1];
                 let weight = sample.mode_shape[0];
@@ -354,17 +355,16 @@ impl BaffledPressure {
     }
 
     fn assemble_openings(openings: &[CircularOpening], receiver: CircularOutletReceiver,
-        ratio: usize, mut disk_receiver: impl FnMut(f64, CircularOutletReceiver) -> Result<Self, String>)
+        ratio: usize, sound_speed: f64,
+        mut disk_receiver: impl FnMut(f64, CircularOutletReceiver) -> Result<Self, String>)
         -> Result<Self, String>
     {
         Self::admit_openings(openings, receiver)?;
+        let locals = Self::refined_local_receivers(openings, receiver, sound_speed)?;
         let mut bins = BTreeMap::<usize, Vec<f64>>::new();
         let mut first = None;
         for (i, opening) in openings.iter().enumerate() {
-            let local = CircularOutletReceiver { position_m: [
-                receiver.position_m[0] - opening.center_m[0],
-                receiver.position_m[1] - opening.center_m[1], receiver.position_m[2]], ..receiver };
-            let mut disk = disk_receiver(opening.radius_m, local)?;
+            let mut disk = disk_receiver(opening.radius_m, locals[i])?;
             if openings.len() == 1 {
                 disk.position_m = receiver.position_m;
                 return Ok(disk); // Preserve the original one-port arithmetic/history exactly.
@@ -396,13 +396,87 @@ impl BaffledPressure {
         Ok(result)
     }
 
+    /// The (rings, angular points) each opening is quadratured with, in opening order, for the
+    /// declared receiver: the declared grid wherever it resolves the band (bit for bit what an
+    /// unrefined build uses), and for an opening it does NOT resolve the smallest grid at or
+    /// above the declared one that does (see [`Self::refined_local_receivers`]).
+    ///
+    /// # Errors
+    /// The opening array's own admission, or a refined sum above 120000 quadrature points.
+    pub fn resolved_circular_grids(openings: &[CircularOpening], receiver: CircularOutletReceiver,
+        medium: RayleighMedium) -> Result<Vec<(usize, usize)>, String>
+    {
+        Self::admit_openings(openings, receiver)?;
+        Ok(Self::refined_local_receivers(openings, receiver, medium.sound_speed)?
+            .iter().map(|local| (local.radial_rings, local.angular_points)).collect())
+    }
+
+    /// Cell phase of a circular opening's midpoint quadrature over the declared band: the same
+    /// expression, in the same operation order, as the refusal in `circular_surface`.
+    fn circular_cell_phase(radius_m: f64, rings: usize, angles: usize, band_hz: f64,
+        sound_speed: f64) -> f64
+    {
+        let cell = radius_m / fs_math::det::sqrt(rings as f64)
+            + core::f64::consts::TAU * radius_m / angles as f64;
+        core::f64::consts::TAU * band_hz * cell / sound_speed
+    }
+
+    fn circular_grid_resolves(radius_m: f64, rings: usize, angles: usize, band_hz: f64,
+        sound_speed: f64) -> bool
+    {
+        let phase = Self::circular_cell_phase(radius_m, rings, angles, band_hz, sound_speed);
+        phase.is_finite() && phase <= core::f64::consts::FRAC_PI_4
+    }
+
+    /// The local receiver of every opening. A grid the declared (rings, angles) resolve is kept
+    /// exactly. A grid the band is NOT resolved on, which the shared rule refuses, is replaced for
+    /// that opening alone by the grid with rings' in rings..=128 and angles' in angles..=512 that
+    /// resolves it with the fewest points (ties to fewer rings); where none does, or the sound
+    /// speed is not usable, the declared grid is kept and `circular_surface` refuses as before.
+    /// The shared point budget counts each opening's own grid; with equal grids it is the
+    /// unrefined rule.
+    fn refined_local_receivers(openings: &[CircularOpening], receiver: CircularOutletReceiver,
+        sound_speed: f64) -> Result<Vec<CircularOutletReceiver>, String>
+    {
+        let mut points = 0usize;
+        let locals = openings.iter().map(|opening| {
+            let mut local = CircularOutletReceiver { position_m: [
+                receiver.position_m[0] - opening.center_m[0],
+                receiver.position_m[1] - opening.center_m[1], receiver.position_m[2]], ..receiver };
+            let resolves = |rings: usize, angles: usize| Self::circular_grid_resolves(
+                opening.radius_m, rings, angles, receiver.maximum_frequency_hz, sound_speed);
+            if !resolves(receiver.radial_rings, receiver.angular_points) {
+                let mut best: Option<(usize, usize, usize)> = None;
+                for rings in receiver.radial_rings..=128 {
+                    if let Some(angles) = (receiver.angular_points..=512)
+                        .find(|&angles| resolves(rings, angles))
+                    {
+                        if best.is_none_or(|(count, _, _)| rings * angles < count) {
+                            best = Some((rings * angles, rings, angles));
+                        }
+                    }
+                }
+                if let Some((_, rings, angles)) = best {
+                    local.radial_rings = rings;
+                    local.angular_points = angles;
+                }
+            }
+            points += local.radial_rings * local.angular_points;
+            local
+        }).collect::<Vec<_>>();
+        if points > OPENING_POINT_BUDGET {
+            return Err("circular opening array exceeds the shared input or surface budget".into());
+        }
+        Ok(locals)
+    }
+
     fn admit_openings(openings: &[CircularOpening], receiver: CircularOutletReceiver)
         -> Result<(), String>
     {
         if !(1..=MAX_RAYLEIGH_INPUTS).contains(&openings.len())
             || !(1..=128).contains(&receiver.radial_rings)
             || !(8..=512).contains(&receiver.angular_points)
-            || openings.len() * receiver.radial_rings * receiver.angular_points > 120_000 {
+            || openings.len() * receiver.radial_rings * receiver.angular_points > OPENING_POINT_BUDGET {
             return Err("circular opening array exceeds the shared input or surface budget".into());
         }
         for (i, opening) in openings.iter().enumerate() {
@@ -423,3 +497,7 @@ impl BaffledPressure {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "baffled_pressure_openings_refine_tests.rs"]
+mod refine_tests;
