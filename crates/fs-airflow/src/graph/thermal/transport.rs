@@ -139,6 +139,12 @@ pub enum TransportError {
         max_mixing_residual_k: f64,
         mixing_heat_residual_w: f64,
     },
+    /// The closed source-caloric solve exhausted its correction/mixer budgets.
+    CaloricCirculationNotConverged {
+        iterations: usize,
+        temperature_correction_bound_k: f64,
+        mixing_heat_residual_w: f64,
+    },
     /// A bounded work checkpoint refused more work.
     Interrupted,
     /// Existing channel or conjugate solver refusal, preserved without promotion.
@@ -485,17 +491,29 @@ impl<'a> TransportNetwork<'a> {
         mut caloric_capture: Option<caloric::CaloricCapture<'_>>)
         -> Result<TransportMarch, TransportError> {
         poll(cx)?;
-        if source.is_some() && (solved_nodes.is_some() || self.feedback.is_some() || self.circulation.is_some()) {
-            return Err(TransportError::InvalidInput("source-caloric transport requires the native once-through DAG"));
+        if source.is_some() && (self.feedback.is_some()
+            || self.circulation.is_some() != solved_nodes.is_some()) {
+            return Err(TransportError::InvalidInput(
+                "source-caloric transport requires a native DAG or solved closed circulation"));
         }
         let reference_k = source.and_then(|source| source.reference_k).unwrap_or_else(||
             inlets.iter().flatten().next().copied().unwrap_or(self.reference_k));
         let n = self.order.len();
+        let source_circulation = source.is_some() && solved_nodes.is_some();
+        let circulation_trial = source_circulation && caloric_capture.as_ref()
+            .is_some_and(|capture| capture.circulation_residuals_w.is_some());
         if caloric_capture.as_ref().is_some_and(|capture|
-            capture.node_enthalpies.len() != n || capture.branch_enthalpy_gains.len() != self.models.len())
+            capture.node_enthalpies.len() != n || capture.branch_enthalpy_gains.len() != self.models.len()
+                || capture.circulation_residuals_w.as_ref().is_some_and(|values|
+                    values.len() != n || !source_circulation))
+            || solved_nodes.is_some_and(|values| values.len() != n)
             || source.and_then(|source| source.inlet_enthalpies).is_some_and(|values| values.len() != n) {
             return Err(TransportError::InvalidInput("source enthalpy coordinate shape"));
         }
+        // Keep closed-loop mixer watts in relative form. Subtracting rounded
+        // outlet enthalpies would erase a weak wall anchor at a large h.
+        let mut circulation_residuals = source_circulation
+            .then(|| vec![fs_math::dd::Dd::from_f64(0.0); n]);
         let mut mixers = vec![Mixer::default(); n];
         for (node, &temperature) in inlets.iter().enumerate() {
             poll(cx)?;
@@ -558,6 +576,7 @@ impl<'a> TransportNetwork<'a> {
                 poll(cx)?;
                 let mut outlet = temperature;
                 let mut outlet_coordinate = coordinate;
+                let mut source_heat_w = 0.0;
                 let mut air_march = None;
                 if let BranchThermalModel::Exchange(_) = &self.models[branch] {
                     let range = self.row_range(branch);
@@ -578,6 +597,7 @@ impl<'a> TransportNetwork<'a> {
                         result.reference_temperatures_k[range].copy_from_slice(&marched.reference_temperatures_k());
                         outlet = marched.outlet_temperature_k;
                         if source.is_some() {
+                            source_heat_w = marched.total_heat_rate_w;
                             // Keep the original relative heat through junctions;
                             // re-integrating rounded absolute endpoints would
                             // erase weak but representable branch heat.
@@ -595,6 +615,18 @@ impl<'a> TransportNetwork<'a> {
                     }
                 }
                 positive(outlet, "branch outlet temperature")?;
+                if let Some(residuals) = &mut circulation_residuals {
+                    use fs_math::dd::Dd;
+                    let down = self.downstream[branch];
+                    let values = solved_nodes.expect("source circulation coordinates");
+                    let contribution = Dd::from_f64(self.mass_flows[branch])
+                        * (Dd::from_f64(coordinate) - Dd::from_f64(values[down]))
+                        + Dd::from_f64(source_heat_w);
+                    let next = residuals[down] + contribution;
+                    finite(next.hi, "source circulation mixer sum")?;
+                    finite(next.lo, "source circulation mixer tail")?;
+                    residuals[down] = next;
+                }
                 if source.is_some() {
                     mixers[self.downstream[branch]].add_coordinate(self.mass_flows[branch], outlet_coordinate)?;
                 } else {
@@ -609,21 +641,28 @@ impl<'a> TransportNetwork<'a> {
         let threshold = finite(self.config.absolute_heat_tolerance_w
             + self.config.relative_heat_tolerance * gross_wall.max(gross_external), "global heat threshold")?;
         if let Some(values) = solved_nodes {
-            let circulation = self.circulation.as_ref().expect("native circulation solve");
             let mut residual = 0.0;
             for (node, mixer) in mixers.iter().enumerate() {
                 poll(cx)?;
-                if let Some(recomputed) = mixer.temperature {
-                    residual = finite(residual + circulation.incoming_capacities[node]
-                        * (values[node] - recomputed).abs(), "circulation mixing power residual")?;
+                let watts = if let Some(exact) = &circulation_residuals {
+                    finite(exact[node].to_f64(), "source circulation mixer watts")?
+                } else {
+                    mixer.temperature.map_or(0.0, |recomputed|
+                        mixer.capacity * (values[node] - recomputed))
+                };
+                residual = finite(residual + watts.abs(), "circulation mixing power residual")?;
+                if let Some(capture) = &mut caloric_capture {
+                    if let Some(output) = &mut capture.circulation_residuals_w {
+                        output[node] = watts;
+                    }
                 }
             }
-            if residual > threshold {
+            if !circulation_trial && residual > threshold {
                 return Err(TransportError::CirculationResidual { residual_w: residual,
                     tolerance_w: threshold });
             }
         }
-        if result.heat_imbalance_w.abs() > threshold {
+        if !circulation_trial && result.heat_imbalance_w.abs() > threshold {
             return Err(TransportError::HeatImbalance { residual_w: result.heat_imbalance_w,
                 tolerance_w: threshold, hydraulic_defect_w: result.hydraulic_energy_defect_w });
         }

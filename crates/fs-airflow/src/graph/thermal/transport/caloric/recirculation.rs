@@ -66,6 +66,11 @@ impl CaloricTransportNetwork<'_> {
             config.temperature_tolerance_k,
             "recirculation temperature tolerance",
         )?;
+        if self.circulation.is_some() {
+            return Err(TransportError::InvalidInput(
+                "imposed return links cannot be added to a closed source-caloric circulation",
+            ));
+        }
         if self.feedback.is_some() || !(1..=256).contains(&config.max_iterations) {
             return Err(TransportError::InvalidInput(
                 "source-caloric returns already bound or iteration budget outside 1..=256",
@@ -234,6 +239,7 @@ impl CaloricFeedback {
             Some(CaloricCapture {
                 node_enthalpies: &mut node_enthalpies,
                 branch_enthalpy_gains: &mut branch_enthalpy_gains,
+                circulation_residuals_w: None,
             }),
         )?;
         let mut mismatch = vec![0.0; self.sources.len()];

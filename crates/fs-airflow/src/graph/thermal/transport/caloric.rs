@@ -1,4 +1,4 @@
-//! Original Cp(T) through the native hydraulic DAG and its mixing junctions.
+//! Original Cp(T) through native hydraulic graphs and their mixing junctions.
 //!
 //! One immutable, fixed-composition isobar owns every supply, branch and node.
 //! Junctions mix mass-weighted sensible enthalpy, then recover temperature with
@@ -11,7 +11,8 @@
 //! of the graph's hydraulic pressure drops. No pressure work, phase change,
 //! composition mixing or density/flow feedback is inferred. Imposed return-air
 //! links close a bounded nonlinear enthalpy balance using the original source
-//! response. Closed native circulations and return-loop adjoints are not supplied.
+//! response. Closed native circulations use simultaneous source-enthalpy balances;
+//! hydraulic feedback and return-loop adjoints are not supplied.
 
 use std::sync::Arc;
 
@@ -27,8 +28,10 @@ use crate::conjugate::{ConjugateConfig, IqnIlsConfig, RegionBalance, SolidRegion
 
 mod recirculation;
 pub use recirculation::CaloricRecirculationConfig;
+mod circulation;
+pub use circulation::CaloricCirculationConfig;
 
-/// Source-caloric specialization of the existing admitted once-through network.
+/// Source-caloric specialization of the existing admitted hydraulic network.
 /// The source is shared, never selected independently at a junction or branch.
 #[derive(Debug)]
 pub struct CaloricTransportNetwork<'a> {
@@ -38,6 +41,7 @@ pub struct CaloricTransportNetwork<'a> {
     external_mass: Vec<f64>,
     mass_residual: Vec<f64>,
     feedback: Option<recirculation::CaloricFeedback>,
+    circulation: Option<circulation::CaloricCirculation>,
 }
 
 impl<'a> CaloricTransportNetwork<'a> {
@@ -59,21 +63,35 @@ impl<'a> CaloricTransportNetwork<'a> {
         inlets: &[TransportInlet],
         config: TransportConfig,
     ) -> Result<Self, TransportError> {
+        Self::new_inner(cx, flow, reference_density, reference_temperature, caloric,
+            models, inlets, config, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_inner(
+        cx: &Cx<'_>,
+        flow: &'a GraphSolution,
+        reference_density: Density,
+        reference_temperature: Temperature,
+        caloric: Arc<IsobaricHeatCapacityLaw>,
+        models: Vec<BranchThermalModel>,
+        inlets: &[TransportInlet],
+        config: TransportConfig,
+        circulation: Option<CaloricCirculationConfig>,
+    ) -> Result<Self, TransportError> {
         poll(cx)?;
         let cp = caloric
             .specific_heat_cp_j_kg_k(reference_temperature.value())
             .map_err(source_error)?;
-        let mut topology = TransportNetwork::new(
-            cx,
-            flow,
-            TransportAir {
-                density: reference_density,
-                specific_heat_j_kg_k: cp,
-            },
-            models,
-            inlets,
-            config,
-        )?;
+        let air = TransportAir {
+            density: reference_density,
+            specific_heat_j_kg_k: cp,
+        };
+        let mut topology = if circulation.is_some() {
+            TransportNetwork::new_circulating(cx, flow, air, models, reference_temperature, config)?
+        } else {
+            TransportNetwork::new(cx, flow, air, models, inlets, config)?
+        };
         for inlet in inlets {
             poll(cx)?;
             caloric
@@ -109,7 +127,7 @@ impl<'a> CaloricTransportNetwork<'a> {
         for node in 0..count {
             poll(cx)?;
             let residual = finite(outgoing[node] - incoming[node], "source mass residual")?;
-            if fixed.contains(&node) {
+            if fixed.contains(&node) && circulation.is_none() {
                 external_mass[node] = residual;
             } else {
                 mass_residual[node] = residual;
@@ -121,14 +139,19 @@ impl<'a> CaloricTransportNetwork<'a> {
                 });
             }
         }
-        Ok(Self {
+        let mut network = Self {
             topology,
             caloric,
             reference_temperature,
             external_mass,
             mass_residual,
             feedback: None,
-        })
+            circulation: None,
+        };
+        if let Some(config) = circulation {
+            network.circulation = Some(circulation::CaloricCirculation::new(&network, cx, config)?);
+        }
+        Ok(network)
     }
 
     /// Exact original Cp source, including its pressure, identity and datum.
@@ -162,7 +185,12 @@ impl<'a> CaloricTransportNetwork<'a> {
     }
 
     /// Zero-wall-heat initialization with actual enthalpy mixing of all supplies.
+    /// A closed circulation instead uses its declared reference as an initial
+    /// solid guess; there is no unique adiabatic closed-loop temperature.
     pub fn initial_references(&self, cx: &Cx<'_>) -> Result<Vec<f64>, TransportError> {
+        if self.circulation.is_some() {
+            return self.topology.initial_references(cx);
+        }
         Ok(self.march_inner(cx, None)?.reference_temperatures_k)
     }
 
@@ -186,6 +214,11 @@ impl<'a> CaloricTransportNetwork<'a> {
         cx: &Cx<'_>,
         walls: Option<&[f64]>,
     ) -> Result<TransportMarch, TransportError> {
+        if let Some(circulation) = &self.circulation {
+            return circulation.march(self, cx, walls.ok_or(TransportError::InvalidInput(
+                "closed source-caloric circulation needs actual wall temperatures",
+            ))?);
+        }
         if let Some(feedback) = &self.feedback {
             return feedback.march(self, cx, walls);
         }
@@ -291,6 +324,9 @@ fn source_error(error: ThermalTransportError) -> TransportError {
 pub(super) struct CaloricCapture<'a> {
     pub(super) node_enthalpies: &'a mut [Option<f64>],
     pub(super) branch_enthalpy_gains: &'a mut [f64],
+    // Private nonlinear closed-loop trials retain their physical mixer watts
+    // before final native admission. Published marches always run both gates.
+    pub(super) circulation_residuals_w: Option<&'a mut [f64]>,
 }
 
 /// Borrowed constitutive data for the native graph walk; topology stays native.

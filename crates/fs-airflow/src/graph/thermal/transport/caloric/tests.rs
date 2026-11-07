@@ -1,6 +1,7 @@
 //! Source enthalpy through real hydraulic splits, merges and solid coupling.
 
 mod recirculation;
+mod circulation;
 
 use super::*;
 use crate::graph::LossGraph;

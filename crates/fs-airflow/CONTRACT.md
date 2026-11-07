@@ -105,7 +105,8 @@ native execution; native tests were not run in this environment.
 ## Source-caloric thermal networks
 
 `graph::thermal::transport::caloric::CaloricTransportNetwork` binds one
-immutable `IsobaricHeatCapacityLaw` to the original solved hydraulic DAG.
+immutable `IsobaricHeatCapacityLaw` to the original solved hydraulic DAG or
+closed, thermally anchored hydraulic circulation.
 All supplies, branch exchanges and junctions share the same fixed-composition
 isobar. Junctions mix mass-weighted relative enthalpy and recover temperature
 with the original source inverse. Branches reuse `CaloricAirPath`, including
@@ -139,9 +140,27 @@ then closes the outer heat balance. Reports retain actual mass rates and mark
 the physical reference temperature of diagnostic Cp capacity rates; those
 rates do not enter the nonlinear heat balance.
 
+`new_circulating` admits closed native hydraulic loops and simultaneous
+mass-weighted node enthalpy balances. Pressure boundaries are hydraulic datums,
+not external fluid supplies. Original direction, continuity, reference-state,
+64-node and resolved thermal-anchor checks remain with native admission.
+Every nonlinear trial recomputes source channel heat and analytic inlet gains.
+A bounded damped Newton solve requires both mixer watt closure and a small
+correction measured through the minimum source Cp; a small heat residual alone
+does not establish convergence under weak wall exchange. This is a local
+convergence check, not a certified nonlinear or physical error bound.
+
+Closed-loop residuals retain compensated relative enthalpy differences and
+original branch heat. The final native march independently repeats mixer and
+whole-network watt admission. The supported wall-temperature midpoint is an
+initial guess; an unsupported trial may fall back once to the admitted physical
+reference. Neither guess is a reservoir. Bath temperatures may exceed source
+support only while every fluid state and trajectory remains supported. The
+existing shared-solid drivers consume the same accepted loop response.
+Imposed return links cannot be added to a closed circulation.
+
 Hydraulic flow, density and film coefficients remain prescribed. This path is
-steady and single-phase; its internal hydraulic graph remains acyclic.
-Native closed circulation, composition mixing, return-path fan/pressure work,
+steady and single-phase. Composition mixing, return-path fan/pressure work,
 density/flow feedback and their adjoints are not supplied by this specialization.
 
 Focused regressions exercise real hydraulic split/merge and reverse-flow
