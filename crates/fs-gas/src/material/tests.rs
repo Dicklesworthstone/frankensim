@@ -22,6 +22,7 @@ use fs_thermochem::{
     UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R, required_nasa9_parameter_dims,
 };
 
+mod compression;
 mod isobaric;
 mod isochoric;
 

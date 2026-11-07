@@ -7026,3 +7026,41 @@ entropy reconstruction, work exhaustion after an accepted prefix, late
 cancellation and reuse, zero-duration admission, represented clock refusal,
 and rejection when individually tolerated local entropy decreases exceed the
 single original-window allowance.
+
+## Reacting compression of the common material parcel
+
+With `material`, `material::compression::advance_closed_parcel_compression`
+advances the original `ClosedGasParcel` through a finite-time prescribed volume
+stroke while its original mechanism reacts. Volume follows a constant
+logarithmic rate from the current to the requested volume. Each caller-bounded
+interval applies an original-material isentropic half-volume map, original
+finite-rate rigid chemistry, then another isentropic half-volume map. Product
+composition, NASA calorics, pressure, transport and acoustic properties remain
+owned by the existing material and chemistry sources. Formation heat is already
+in those calorics and is never added a second time.
+
+This symmetric composition has second-order splitting accuracy for exact
+subflows; native chemistry error remains controlled by its selected integrator.
+The caller must refine `substeps` to assess compression/reaction coupling error;
+there is no automatic splitting-error certificate. Work is the sum of original
+isentropic caloric increments, with positive work delivered to the gas on
+compression. The report retains stored energy change, energy-minus-work defect,
+source-stage entropy change and chemical step counts. The energy defect is
+compensated directly from the chemical material-reconciliation residuals, so
+large work totals cannot erase a small reported defect by subtraction. The
+entropy diagnostic sums original material volume-step changes and native
+reactor changes before material endpoint reconciliation; it excludes that
+reconciliation's entropy correction and does not independently bound the
+published parcel's total entropy change. This is thermodynamic volume work,
+not an independent pressure quadrature or piston force measurement.
+
+Requests are bounded to 1..=4096 trajectory intervals. Fixed-volume evolution
+uses one original reactor call; zero duration cannot move volume. Invalid,
+nonrepresentable, cancelled, out-of-domain or failed intermediate states never
+publish partial parcels. No constant-gamma surrogate, immediate equilibrium,
+piston dynamics, shock, wall heat transfer or phase-change model is implied.
+Manufactured regressions cover adiabatic compression/expansion laws, an analytic
+exothermic reacting-compression solution and second-order refinement, independent
+endpoint energy/work closure, original rigid-reactor compatibility, late
+cancellation and source-domain refusal. They are numerical/physical coupling
+checks, not empirical kinetic validation.

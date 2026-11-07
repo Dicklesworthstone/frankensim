@@ -3,8 +3,12 @@
 //! The L3 kinetics owner evolves composition and any declared thermal exchange
 //! over the actual elapsed time. The existing material owner reconstructs one
 //! endpoint at the original mass and fixed volume through [`isochoric`], or at
-//! prescribed pressure through [`isobaric`]. Transport and acoustics use those
-//! same products and sources. No additional reaction heat is applied.
+//! prescribed pressure through [`isobaric`], or during a prescribed volume stroke
+//! through [`compression`]. Transport and acoustics use those same products and
+//! sources. No additional reaction heat is applied.
+
+/// Finite-rate chemistry during prescribed closed-parcel compression/expansion.
+pub mod compression;
 
 /// Constant-pressure chemistry and heat exchange on the common material parcel.
 pub mod isobaric;
