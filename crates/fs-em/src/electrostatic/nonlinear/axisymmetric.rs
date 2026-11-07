@@ -9,7 +9,12 @@
 //! Radial source laws and explicitly framed meridional tensors are admitted.
 //! A fixed Cartesian anisotropy is not implicitly revolved. The angular span
 //! is a symmetry sector, not independently driven azimuthal faces. There is
-//! no inferred leakage, polarization history, breakdown or electrostriction.
+//! no inferred leakage, breakdown or electrostriction. Retained polarization
+//! has a separate typed owner in the opt-in `hysteretic` module.
+
+/// Retained cylindrical polarization and bounded quasistatic loading paths.
+#[cfg(feature = "dielectric-hysteresis")]
+pub mod hysteretic;
 
 use super::{
     DielectricMaterial, ElectrodeControl, Error, NonlinearElectricField, NonlinearElectrodes,

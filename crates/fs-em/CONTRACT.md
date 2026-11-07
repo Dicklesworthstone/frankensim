@@ -4363,11 +4363,28 @@ span. The typed result keeps planar force/history APIs inaccessible.
 For frozen isotropic laws without volume charge, meridional `virtual_work`
 differentiates the actual discrete functional, including the variation of the
 radial Jacobian as well as the field gradient and planar area. Axis vertices
-remain on the axis. Tensor-axis transport, moving charge, retained cylindrical
-polarization, leakage and finite mechanical trajectories are not inferred.
+remain on the axis. Tensor-axis transport, moving charge, leakage and finite
+mechanical trajectories are not inferred.
 Synthetic native tests cover nonlinear disk and coaxial responses, charge
 control, differential capacitance, exact source moments and re-solved
 voltage/charge shape derivatives; they do not qualify empirical materials.
+
+`electrostatic::nonlinear::axisymmetric::hysteretic::AxisymmetricHystereticElectrostatics`
+retains cylindrical polarization behind `dielectric-hysteresis`. The isotropic
+vector-play law acts in local `[r,z,theta]` coordinates with zero azimuthal
+component. Native endpoint solves and adaptive affine paths share the original
+Gauss iteration, electrical-component references, source support and work
+budgets. Cell storage, physical switching heat and numerical endpoint loss use
+the actual revolved volumes and stay separately accounted. Changing volume
+charge pairs voltage with the exact radial P1 charge moments used by Gauss;
+an arithmetic potential mean is invalid on a general radial triangle.
+Typed endpoint/path candidates retain cylindrical geometry and do not expose
+planar mechanical or thermal adapters. The public planar history constructor
+continues to reject radial metrics. Source coefficients and geometry stay fixed;
+rate effects, leakage, moving charge/geometry and coefficient-changing thermal
+work are not inferred. Synthetic regressions cover saturation and reversals,
+angular-span scaling, changing space charge on an off-center radial mesh,
+independent extreme common biases, control changes and bounded cancellation.
 
 Nonlinear fields and retained polarization histories use one independent
 voltage reference per electrical component, including components joined by a

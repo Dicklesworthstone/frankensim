@@ -476,9 +476,9 @@ impl PlanarHystereticElectrostatics {
     /// Continue from the accepted field along one affine electrode/volume-charge
     /// segment. Each target electrode's control mode is fixed over the segment;
     /// its initial value is the actually accepted voltage or charge. Voltages
-    /// are interpolated relative to the first voltage-controlled electrode,
-    /// preserving small fields beneath large common biases. The returned field
-    /// restores the target's authored reference voltage.
+    /// are interpolated relative to the first voltage-controlled electrode in
+    /// each electrical component, preserving small fields beneath independent
+    /// common biases. The returned field restores every authored reference.
     ///
     /// Absolute error allowances are scaled by interval fraction; relative ones
     /// scale local polarization increments and physical heat/work. The estimates

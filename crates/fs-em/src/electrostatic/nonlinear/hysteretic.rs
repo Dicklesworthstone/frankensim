@@ -1,4 +1,6 @@
-//! Retained planar polarization on the original nonlinear Gauss/electrode solve.
+//! Retained two-component polarization on the original nonlinear Gauss solve.
+//! The public planar owner keeps its planar metric guard. The cylindrical
+//! history owner reuses the private core with its original radial measure.
 //!
 //! The frozen-history voltage potential is Phi = E.D - W - Q, whose gradient
 //! is D and Hessian is the consistent dD/dE. Physical W and switching Q remain
@@ -48,9 +50,10 @@ impl FrozenHystereticDielectric {
         Self::from_history(source, history, controls, cancelled)
     }
 
-    /// Explicit prepared memory must belong to this fit and lie in the mesh
-    /// plane. A standalone frozen solve leaves ownership of prior global field
-    /// consistency with its caller; PlanarHystereticElectrostatics owns both.
+    /// Explicit prepared memory must belong to this fit and lie in its two
+    /// represented material directions. A standalone frozen solve leaves prior
+    /// global field consistency with its caller; retained geometry owners carry
+    /// both the field and its polarization history.
     pub fn from_history(
         source: ResolvedVectorDielectricHysteresis,
         history: VectorDielectricHysteresisState,
@@ -87,7 +90,7 @@ impl FrozenHystereticDielectric {
                 .any(|p| p[2] != 0.0)
         {
             return Err(invalid(
-                "planar history cannot hide out-of-plane polarization or displacement",
+                "two-component history cannot hide transverse polarization or displacement",
             ));
         }
         self.source
@@ -237,6 +240,25 @@ impl PlanarHystereticElectrostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(cancelled)?;
+        if !matches!(mesh.metric(), Metric2::Planar { .. }) {
+            return Err(invalid(
+                "planar retained polarization requires a planar metric",
+            ));
+        }
+        Self::assemble_metric(mesh, materials, terminals, local, limits, cancelled)
+    }
+
+    // Only the planar and cylindrical public owners can reach this common
+    // preparation. A cylindrical history never escapes as a planar owner.
+    pub(super) fn assemble_metric(
+        mesh: TriComplex2,
+        materials: Vec<ResolvedVectorDielectricHysteresis>,
+        terminals: &[&[usize]],
+        local: VectorDielectricHysteresisControls,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        poll(cancelled)?;
         if terminals.is_empty() {
             return Err(invalid("original electrode traces are required"));
         }
@@ -247,7 +269,8 @@ impl PlanarHystereticElectrostatics {
                 FrozenHystereticDielectric::new(source, local, cancelled)?,
             ));
         }
-        let problem = PlanarNonlinearElectrostatics::new(mesh, laws, limits, cancelled)?;
+        let problem =
+            PlanarNonlinearElectrostatics::assemble_metric(mesh, laws, limits, cancelled)?;
         let relative_voltage_v = vec![0.0; problem.mesh.vertices().len()];
         let prepared = problem.prepare_electrodes(terminals, cancelled)?;
         let (_, _, references) = prepared.coordinates(
@@ -270,6 +293,10 @@ impl PlanarHystereticElectrostatics {
     }
     pub fn problem(&self) -> &PlanarNonlinearElectrostatics {
         &self.problem
+    }
+    /// Original equipotential traces in terminal order.
+    pub fn terminals(&self) -> &[Vec<usize>] {
+        &self.layout.terminals
     }
     /// Potentials relative to each vertex's electrical component reference.
     pub fn relative_voltage_v(&self) -> &[f64] {
@@ -463,12 +490,21 @@ impl PlanarHystereticElectrostatics {
                 element.volume_m3
                     * (free_charge_density_c_m3[cell] - self.free_charge_density_c_m3[cell]),
             )?;
-            let mean = element
-                .vertices
-                .iter()
-                .map(|&v| solved.relative_voltage_v[v] / 3.0)
-                .sum::<f64>();
-            add(&mut supplied, &mut cs, charge * mean)?;
+            // The source work must use the SAME weak charge moments as Gauss.
+            // On a revolved triangle the radius-weighted P1 moments are not
+            // thirds, even though the electric field is constant in the cell.
+            let loads = super::super::sources::volume_nodal_loads(
+                &self.problem.mesh,
+                self.problem.mesh.faces()[cell],
+                charge,
+            );
+            for (vertex, load) in element.vertices.into_iter().zip(loads) {
+                add(
+                    &mut supplied,
+                    &mut cs,
+                    solved.relative_voltage_v[vertex] * load,
+                )?;
+            }
         }
         supplied = finite(supplied + cs)?;
         let work_residual = finite(supplied - totals[3])?;
