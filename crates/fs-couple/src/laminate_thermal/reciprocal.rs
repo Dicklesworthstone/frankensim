@@ -46,7 +46,7 @@ pub const MAX_RECIPROCAL_LAMINATE_ITERATIONS: usize = 256;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LaminateThermoelasticControls {
     pub maximum_iterations: usize,
-    /// Relaxation of the per-cell reversible joule input, in (0,1].
+    /// Relaxation of the per-cell material joule input, in (0,1].
     pub heat_relaxation: f64,
     pub cell_heat_tolerance_j: f64,
     /// Independent material-work, sum-of-absolute-heat-defects and combined
@@ -64,6 +64,8 @@ pub enum LaminateThermoelasticError {
     Thermal(DepositionError),
     HeatSolve(LayeredThermalSolveError),
     Capacity(ThermalTransportError),
+    Viscosity(fs_material::MaterialError),
+    ViscosityQuery(fs_material::state_point::MaterialStatePointError),
     NotConverged {
         iterations: usize,
         maximum_heat_defect_j: f64,
@@ -146,8 +148,12 @@ pub struct LaminateThermoelasticCellReport {
     /// Change of T_i S_i for the nonlocal shear entropy conjugate.
     pub shear_temperature_entropy_change_j: f64,
     pub shear_reversible_heat_j: f64,
-    /// Total original-cell exchange: in-plane plus nonlocal shear heat.
+    /// Signed reversible exchange: in-plane plus nonlocal elastic shear heat.
     pub reversible_heat_j: f64,
+    /// Independent nonnegative material strain-rate heat in this original cell.
+    /// This is separate from the signed reversible thermoelastic exchange.
+    pub dissipated_energy_j: f64,
+    /// Actual supplied heat, including reversible exchange and viscous heat.
     pub applied_heat_j: f64,
     pub heat_defect_j: f64,
     pub free_energy_residual_j: f64,
@@ -156,14 +162,17 @@ pub struct LaminateThermoelasticCellReport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LaminateThermoelasticReport {
     pub cells: Vec<LaminateThermoelasticCellReport>,
-    /// The original thermal account includes the explicit reversible input.
+    /// The original thermal account includes the explicit material heat input.
     pub heat: LayeredThermalSolveReport,
     pub iterations: usize,
     /// Heat from authored sources and boundary reservoirs, excluding exchange
-    /// with the elastic field. No thermal event is consumed inside the step.
+    /// with the mechanical field, including viscosity. No thermal event is
+    /// consumed inside the step.
     pub external_heat_j: f64,
     pub external_mechanical_work_j: f64,
     pub reversible_heat_j: f64,
+    /// Sum of the original-cell physical viscous heat; excludes numerical loss.
+    pub dissipated_energy_j: f64,
     pub elastic_internal_energy_change_j: f64,
     pub transverse_shear_energy_change_j: f64,
     pub transverse_shear_internal_energy_change_j: f64,
@@ -781,7 +790,7 @@ fn account(
     heat: LayeredThermalSolveReport,
     iterations: usize,
     tolerance: f64,
-    inertia: Option<InertialWork>,
+    inertia: Option<InertialWork<'_>>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<LaminateThermoelasticReport, LaminateThermoelasticError> {
     let next = &proposal.state;
@@ -792,6 +801,19 @@ fn account(
     let mut reversible = 0.0;
     let mut shear_reversible = 0.0;
     let mut internal_change = 0.0;
+    let viscous = inertia
+        .as_ref()
+        .map_or(&[][..], |work| work.cell_dissipated_energy_j);
+    if !viscous.is_empty() && viscous.len() != applied.len()
+        || viscous
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(invalid(
+            "one nonnegative physical heat per original thermal cell required",
+        ));
+    }
+    let mut dissipated = 0.0;
     for i in 0..applied.len() {
         check(cancelled)?;
         let a = &old.cells[i];
@@ -816,12 +838,15 @@ fn account(
         // sum_i T_i S_i. This is an original-coordinate thermal work split,
         // not a per-layer allocation of stored energy or a residual repair.
         let shear_heat = finite(-proposal.shear_temperature_work[i] - shear_ts_change)?;
-        let desired = finite(mechanical - du + shear_heat)?;
+        let reversible_heat = finite(mechanical - du + shear_heat)?;
+        let viscous_heat = viscous.get(i).copied().unwrap_or(0.0);
+        let desired = finite(reversible_heat + viscous_heat)?;
         let defect = finite(desired - applied[i])?;
         heat_defect_sum = finite(heat_defect_sum + defect)?;
         heat_defect_abs = finite(heat_defect_abs + defect.abs())?;
         maximum = maximum.max(defect.abs());
-        reversible = finite(reversible + desired)?;
+        reversible = finite(reversible + reversible_heat)?;
+        dissipated = finite(dissipated + viscous_heat)?;
         shear_reversible = finite(shear_reversible + shear_heat)?;
         internal_change = finite(internal_change + du)?;
         cells.push(LaminateThermoelasticCellReport {
@@ -834,7 +859,8 @@ fn account(
             shear_entropy_change_j_k: shear_entropy_change,
             shear_temperature_entropy_change_j: shear_ts_change,
             shear_reversible_heat_j: shear_heat,
-            reversible_heat_j: desired,
+            reversible_heat_j: reversible_heat,
+            dissipated_energy_j: viscous_heat,
             applied_heat_j: applied[i],
             heat_defect_j: defect,
             free_energy_residual_j: residual,
@@ -908,7 +934,11 @@ fn account(
         "numerical gauge mechanical and parameter work do not close its storage",
     )?;
     let mechanical_residual = finite(
-        inertia.kinetic_energy_change_j + membrane_work + proposal.shear_work + gauge_work
+        inertia.kinetic_energy_change_j
+            + membrane_work
+            + proposal.shear_work
+            + gauge_work
+            + dissipated
             - external_work,
     )?;
     gate(
@@ -933,6 +963,7 @@ fn account(
         iterations,
         external_mechanical_work_j: external_work,
         reversible_heat_j: reversible,
+        dissipated_energy_j: dissipated,
         elastic_internal_energy_change_j: internal_change,
         transverse_shear_energy_change_j: shear_change,
         transverse_shear_internal_energy_change_j: shear_internal_change,
@@ -951,10 +982,12 @@ fn account(
 // The static owner supplies zero. The full native transient owner supplies
 // independent internal-director work and actual consistent kinetic storage;
 // neither quantity is deposited as heat or inferred from an energy residual.
+// Optional viscous heat is evaluated independently on the native rate field.
 #[derive(Clone, Copy, Default)]
-struct InertialWork {
+struct InertialWork<'a> {
     kinetic_energy_change_j: f64,
     bubble_material_work_j: f64,
+    cell_dissipated_energy_j: &'a [f64],
 }
 
 fn principal(point: ShellStrainPoint, z: f64, [c, s]: [f64; 2]) -> [f64; 3] {

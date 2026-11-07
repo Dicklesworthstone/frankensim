@@ -5585,3 +5585,43 @@ second-order integrator or calibrated moving-wall transport model.
 `FiniteMoistureSolution::advance_layered_sdirk2_adaptive_to` and `advance_layered_radial_sdirk2_adaptive_to` complete a slab, coated sphere, or coated cylinder duration with the original coupled SDIRK stages. Each full and half proposal solves the material storage, source diffusion, interface and exposed-face resistances, and finite solution activity together. The existing temporal controller uses its second-order correction once, charges both implicit stages (including rejected probes), and compares every local content/activity, actual solvent mass/activity, and the L1 water discrepancy weighted by each original cell's dry mass. Only the accepted fine path contributes exterior and intermaterial transfers; first-stage diagnostic reports are not additional physical transfers.
 
 Each original layer retains its own water account, and one fixed original-to-final conservation tolerance applies to the whole requested duration. A work, source, balance, native-solve, or cancellation failure discards the complete private bath/body candidate, including previously accepted intervals. This is local temporal error control for held geometry, temperature, and exposed faces; smooth source and algebraic phase branches are required for the second-order estimate, and finite-rate phases retain the native SDIRK refusal. Three authored regressions cover refinement against independent continuous finite-bath equations for planar/spherical/cylindrical geometry, exact recovery of two native half steps without stage double counting, and work exhaustion after an accepted private prefix. These integration tests were source-reviewed and formatted but were not executed in this environment; independent fixture calculations do not substitute for their native execution.
+
+## Original-layer Kelvin heat in the dynamic thermal shell
+
+`DynamicLayeredThermalShell::with_layer_viscosity` explicitly binds one existing
+`PlaneStressViscosity` to each original thermal control volume / mechanical
+sublamina. Card identity, physical reference conditions and material axes 1,2
+must match that same source layer. Frequency applicability coordinates do not
+replace physical conditions; every viscosity must cover the caller-declared
+motion bandwidth and the original temperature interval. Runtime temperature
+refreshes retain the exact selected claims. The interval law is evaluated at
+the mean accepted/trial temperature and frozen on both native mechanical
+endpoint owners. No accepted state or source snapshot advances on a failed
+thermal, mechanical, material or convergence trial.
+
+Original layer faces, orientations and the laminate integration owner supply
+the complete viscous A/B/D, including eccentric membrane/bending coupling.
+The original enriched MITC midpoint owner retains physical mass, support
+coordinates, independent director motion and all nodal/internal cross terms.
+Unchanged operators retain its prepared factorization. The reduced source law
+is viscous stress = V times total engineering strain rate. Transverse viscous
+resultants are explicitly zero because this source does not characterize them;
+elastic shear coefficients, correction factors and thermal eigenstrain rates
+do not manufacture a different viscosity law.
+
+Native midpoint strain-rate readback uses mean velocities directly in the
+original kinematic evaluator. Each source's nonnegative work contraction is
+integrated with the original positive triangle rule and exact two-point
+through-thickness rule, then summed over facets into its own original thermal
+cell. This physical heat must independently agree with native mechanical
+dissipation at a heat-scaled roundoff allowance. It enters the existing heat
+solve once, separately from signed reversible exchange, numerical drilling,
+kinetic storage and external heating. Mechanical and combined energy accounts
+include the same dissipation without treating a residual as heat.
+
+The opt-in path retains the original zero-loss trajectory. Focused regressions
+exercise independent scalar Kelvin decay, unequal original-layer heat,
+temperature-dependent pinned midpoint coefficients, finite caloric heating
+and rejected-trial preservation. This is reduced in-plane Kelvin damping on
+fixed reference geometry, not full 3-D dissipation, hereditary memory, a
+spectral certificate, or lateral thermal transport.

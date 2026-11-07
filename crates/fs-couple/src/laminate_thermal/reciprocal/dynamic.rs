@@ -16,8 +16,13 @@
 //! follow each actual temperature. The numerical drilling stiffness stays
 //! fixed at launch; it is not a material heating or inertia mechanism.
 //! The parent's full-temperature-box capacity and strain admission apply.
-//! It is not finite-rotation dynamics, moving thermal geometry, viscoelastic
-//! loss or exact discrete isentropy.
+//! Explicit source-bound in-plane Kelvin viscosity may add physical damping
+//! and return its independently evaluated heat to each original thermal cell.
+//! It is not finite-rotation dynamics, moving thermal geometry, hereditary
+//! material memory or exact discrete isentropy.
+
+mod viscosity;
+pub use viscosity::LaminateViscosityControls;
 
 use super::*;
 use fs_plate::shell::mitc::thermal::transient::{
@@ -96,9 +101,10 @@ pub struct DynamicLaminateReport {
     /// combined residuals INCLUDE the kinetic-energy change reported below.
     pub thermoelastic: LaminateThermoelasticReport,
     pub kinetic_energy_change_j: f64,
-    /// Physical stress work on independent residual director coordinates.
+    /// Elastic stress work on independent residual director coordinates.
     pub bubble_material_work_j: f64,
-    /// Work on nodal and internal coordinates, excluding numerical drilling.
+    /// Elastic plus viscous work on nodal and internal coordinates, excluding
+    /// numerical drilling. Viscous heat is also reported separately per cell.
     pub generalized_material_work_j: f64,
     /// Native linear mechanical identity; its load includes thermal forcing.
     /// It is an independent check, not an additional heat or energy credit.
@@ -117,6 +123,7 @@ pub struct DynamicLayeredThermalShell<'s, 'b, 'a> {
     native: EnrichedMitcShell,
     fixed_elasticity: bool,
     midpoint: Option<PreparedMitcMidpoint>,
+    viscosity: Option<viscosity::LayerViscosity>,
     state: DynamicLaminateState,
     quadrature: Vec<([f64; 3], f64)>,
 }
@@ -222,6 +229,7 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
             native,
             fixed_elasticity,
             midpoint: None,
+            viscosity: None,
             state: DynamicLaminateState {
                 thermomechanical: proposal.state,
                 motion,
@@ -338,14 +346,38 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
             // The basis and mass belong to launch. Only the physical material
             // coefficients change; the two internal directors remain actual
             // unknowns in the same coordinates through EVERY thermal trial.
+            let trial_viscosity = self
+                .viscosity
+                .as_ref()
+                .map(|loss| {
+                    loss.prepare_midpoint(
+                        self.source,
+                        self.state.temperatures_k(),
+                        &prepared.temperatures_k,
+                        &mut cancelled,
+                    )
+                })
+                .transpose()?;
+            let same_viscosity = match (&self.viscosity, &trial_viscosity) {
+                (Some(loss), Some(prepared)) => prepared.same_operator(&loss.accepted),
+                _ => true,
+            };
+            // One frozen midpoint law applies to BOTH endpoint mechanical
+            // owners. Rebinding changes no state, mass or elastic operator.
+            let interval_native = match (&self.viscosity, &trial_viscosity) {
+                (Some(loss), Some(prepared)) => {
+                    loss.interval_native(&self.native, prepared, &mut cancelled)?
+                }
+                _ => self.native.clone(),
+            };
             let trial_native = if self.fixed_elasticity {
-                self.native.clone()
+                interval_native.clone()
             } else {
-                self.native
+                interval_native
                     .with_material_model(Arc::clone(&prepared.model), &mut cancelled)
                     .map_err(LaminateThermoelasticError::Native)?
             };
-            let trial_factor = if self.fixed_elasticity {
+            let trial_factor = if self.fixed_elasticity && same_viscosity {
                 None
             } else {
                 Some(
@@ -367,7 +399,7 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                 .map_err(LaminateThermoelasticError::Native)?;
             let candidate = mechanical
                 .advance_from(
-                    &self.native,
+                    &interval_native,
                     &self.state.motion,
                     &old_load,
                     &new_load,
@@ -430,6 +462,25 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
             // rounded totals here would discard small physical stress work
             // beside an unchanged large kinetic inventory.
             let kinetic_change = finite(candidate.report.kinetic_energy_change_j)?;
+            let cell_dissipated = if let Some(loss) = &trial_viscosity {
+                let rates = trial_native
+                    .midpoint_strain_rate_fields(
+                        &self.state.motion,
+                        &candidate.state,
+                        &mut cancelled,
+                    )
+                    .map_err(LaminateThermoelasticError::Native)?;
+                loss.cell_heat(
+                    self.source,
+                    &rates,
+                    &self.quadrature,
+                    dt,
+                    candidate.report.dissipated_energy_j,
+                    &mut cancelled,
+                )?
+            } else {
+                Vec::new()
+            };
             let thermoelastic = account(
                 old,
                 &proposal,
@@ -440,6 +491,7 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                 Some(InertialWork {
                     kinetic_energy_change_j: kinetic_change,
                     bubble_material_work_j: bubble_work,
+                    cell_dissipated_energy_j: &cell_dissipated,
                 }),
                 &mut cancelled,
             )?;
@@ -451,8 +503,11 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                 && thermoelastic.total_absolute_heat_defect_j <= controls.energy_tolerance_j
                 && thermoelastic.combined_energy_residual_j.abs() <= controls.energy_tolerance_j
             {
-                let generalized_material_work_j =
-                    finite(proposal.mechanical_work.iter().sum::<f64>() + proposal.shear_work)?;
+                let generalized_material_work_j = finite(
+                    proposal.mechanical_work.iter().sum::<f64>()
+                        + proposal.shear_work
+                        + thermoelastic.dissipated_energy_j,
+                )?;
                 let report = DynamicLaminateReport {
                     thermoelastic,
                     kinetic_energy_change_j: kinetic_change,
@@ -461,6 +516,14 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                     native: candidate.report,
                 };
                 check(&mut cancelled)?;
+                if self.fixed_elasticity
+                    && let Some(factor) = trial_factor
+                {
+                    self.midpoint = Some(factor);
+                }
+                if let (Some(loss), Some(prepared)) = (&mut self.viscosity, trial_viscosity) {
+                    loss.accepted = prepared;
+                }
                 self.native = trial_native;
                 self.state = DynamicLaminateState {
                     thermomechanical: proposal.state,

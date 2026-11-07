@@ -2,6 +2,8 @@
 //! All cards are synthetic implementation oracles, not material measurements.
 
 mod laminate_thermal_common;
+#[path = "laminate_thermal_dynamic/viscosity.rs"]
+mod viscosity;
 use laminate_thermal_common::*;
 
 use fs_couple::laminate_thermal::reciprocal::{

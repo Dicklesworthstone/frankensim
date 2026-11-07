@@ -10,6 +10,47 @@ pub(super) struct EnrichedViscosity {
 }
 
 impl EnrichedMitcShell {
+    /// Actual midpoint total strain-rate fields in the original reference
+    /// basis, including the independent internal director rates. The returned
+    /// Bernstein polynomials use the same kinematic evaluator as the native
+    /// viscous power. They are rates, with no thermal eigenstrain subtraction.
+    ///
+    /// This readback permits a source owner to integrate physical heat over
+    /// its original material layers. It averages accepted/trial velocities
+    /// directly, avoiding cancellation in differences of large displacements.
+    /// Both states must belong to this exact original native model.
+    pub fn midpoint_strain_rate_fields(
+        &self,
+        before: &MitcTransientState,
+        after: &MitcTransientState,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<RealElementStrain>, PlateError> {
+        check(&mut cancelled)?;
+        self.admit_state(before)?;
+        self.admit_state(after)?;
+        let mut out = Vec::with_capacity(self.reference_fields.len());
+        for (element, field) in self.reference_fields.iter().enumerate() {
+            check(&mut cancelled)?;
+            let triangle = self.model.mesh.tris[element];
+            let local = core::array::from_fn(|i| {
+                let dof = 6 * triangle[i / 6] + i % 6;
+                0.5 * before.nodal_velocity_6n[dof] + 0.5 * after.nodal_velocity_6n[dof]
+            });
+            let mut rate = field.expand(&local);
+            for axis in 0..2 {
+                rate[18 + axis] += 0.5 * before.bubble_velocity[element][axis]
+                    + 0.5 * after.bubble_velocity[element][axis];
+            }
+            out.push(crate::shell::mitc::strain::real_field_from_expanded(
+                field,
+                &rate,
+                &mut cancelled,
+            )?);
+        }
+        check(&mut cancelled)?;
+        Ok(out)
+    }
+
     /// Attach one explicit passive A/B/D/shear viscosity per original facet.
     /// Resultants use the facet strain frame and their original SI units. All
     /// nodal/internal cross terms survive in the fixed reference basis; neither
