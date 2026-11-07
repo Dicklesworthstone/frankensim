@@ -3,8 +3,10 @@
 #[path = "stokes_motion_heat/planar.rs"]
 mod planar;
 
+use std::collections::BTreeMap;
+
 use fs_couple::stokes_motion::heating::{
-    GuidedStokesHeatError, StokesSlipHeatRoute, StokesThermalCells,
+    GuidedStokesHeatError, GuidedStokesObservedHeatError, StokesSlipHeatRoute, StokesThermalCells,
 };
 use fs_couple::stokes_motion::{
     GuidedStokesConfig, GuidedStokesControls, GuidedStokesError, GuidedStokesMotion,
@@ -16,7 +18,8 @@ use fs_mbd::{MassProperties, Pose, RigidBodyState, Vec3};
 use fs_solid::Mesh2;
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
-    DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalLink, TimedEvent,
+    DepositionObserver, DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw,
+    ThermalLink, TimedEvent,
 };
 
 const RHO: f64 = 2.0;
@@ -882,4 +885,246 @@ fn slip_routes_refuse_before_callbacks_and_late_cancellation_rolls_back_every_re
         .unwrap();
     assert_eq!(retry.state(), owner.state());
     assert_eq!(retry_thermal.cells(), control_thermal.cells());
+}
+
+
+#[derive(Clone, Debug, PartialEq)]
+enum CoupledHeatRefusal {
+    Thermal(DepositionError),
+    Endpoint,
+}
+impl From<DepositionError> for CoupledHeatRefusal {
+    fn from(error: DepositionError) -> Self { Self::Thermal(error) }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ClockedHeat {
+    cell: CellId,
+    starts_and_durations: Vec<(f64, f64)>,
+    prepared: Option<(f64, f64, f64)>,
+    heat_j: f64,
+    begins: usize,
+    events: usize,
+    refuse_at_s: Option<f64>,
+}
+impl ClockedHeat {
+    fn new(cell: CellId) -> Self {
+        Self {
+            cell, starts_and_durations: Vec::new(), prepared: None,
+            heat_j: 0.0, begins: 0, events: 0, refuse_at_s: None,
+        }
+    }
+    fn source_w(time_s: f64) -> f64 {
+        if time_s < 0.015 { 0.01 } else { 0.03 }
+    }
+}
+impl DepositionObserver for ClockedHeat {
+    type Error = CoupledHeatRefusal;
+
+    fn begin(&mut self) -> Result<(), Self::Error> {
+        self.begins += 1;
+        Ok(())
+    }
+    fn next_transition_time_s(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        checkpoint()?;
+        Ok((thermal.time_s() < 0.015).then_some(0.015))
+    }
+    fn sources(
+        &mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        checkpoint()?;
+        Ok(BTreeMap::from([(self.cell, Self::source_w(thermal.time_s()))]))
+    }
+    fn conductances(
+        &mut self, _: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<u64, f64>, Self::Error> {
+        checkpoint()?;
+        Ok(BTreeMap::from([(71, 0.4)]))
+    }
+    fn limit_timestep_s(
+        &mut self, _: &DepositionSimulation<'_>, proposed_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        checkpoint()?;
+        Ok(proposed_s.min(0.007))
+    }
+    fn requires_step_interval(&self) -> bool { true }
+    fn step_sources(
+        &mut self, thermal: &DepositionSimulation<'_>, start_s: f64, dt_s: f64, end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        checkpoint()?;
+        assert_eq!(thermal.time_s(), start_s);
+        assert!(self.prepared.is_none());
+        self.prepared = Some((start_s, dt_s, end_s));
+        // Exact average of the additional ramp q(t) = 0.4 t watts.
+        Ok(BTreeMap::from([(self.cell, 0.2 * (start_s + end_s))]))
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        self.events += 1;
+        Ok(())
+    }
+    fn step(
+        &mut self, start_s: f64, dt_s: f64, _: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        checkpoint()?;
+        let (start, duration, end) = self.prepared.take().expect("interval hook was forwarded");
+        assert_eq!((start, duration, end), (start_s, dt_s, thermal.time_s()));
+        self.heat_j += dt_s * (Self::source_w(start_s) + 0.2 * (start_s + end));
+        self.starts_and_durations.push((start_s, dt_s));
+        if self.refuse_at_s.is_some_and(|time| end >= time) {
+            return Err(CoupledHeatRefusal::Endpoint);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn observed_stokes_heat_shares_physical_clock_and_commits_all_histories_atomically() {
+    let law = Caloric { maximum_h: 100.0 };
+    for with_slip in [false, true] {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+        let system = FluxSystem::new(&mesh);
+        let fluid = fluid();
+        let edges = top_edges(&mesh);
+        let gamma = if with_slip { SPEED / 2.0 } else { SPEED };
+        let slip = SPEED - gamma;
+        let field = |x: [f64; 2]| [slip + gamma * x[1], 0.0];
+        let stress = MU * gamma;
+        let traction = |_: [f64; 2], n: [f64; 2]| [stress * n[1], stress * n[0]];
+        let boundaries = if with_slip {
+            slip_exterior(&mesh, &edges, MU, &zero, &traction)
+        } else {
+            exterior(&mesh, &edges)
+        };
+        let routes = slip_routes(&boundaries, 0.25);
+        let (original, ids) = initial_thermal_with_events(
+            &mesh, &law, true,
+            |i, cell| { if i == 0 { cell.specific_h_j_kg = 1.0; } },
+            vec![TimedEvent { time_s: 0.0, event: Event::Birth(wall_cell(DEPTH)) }],
+        );
+        let advance = |
+            owner: &mut GuidedStokesMotion<'_, '_, '_, FluidTransportState>,
+            thermal: &mut DepositionSimulation<'_>,
+            observer: &mut ClockedHeat,
+            cancelled: &mut dyn FnMut() -> bool,
+        | {
+            if with_slip {
+                owner.step_with_slip_heating_observed(
+                    thermal, observer, binding(&ids), &routes, 0.05, &zero, &boundaries,
+                    &[None], DEPTH * stress, GuidedStokesControls::default(),
+                    thermal_config(), cancelled,
+                )
+            } else {
+                owner.step_with_heating_observed(
+                    thermal, observer, binding(&ids), 0.05, &zero, &boundaries,
+                    &[None], DEPTH * stress, GuidedStokesControls::default(),
+                    thermal_config(), cancelled,
+                )
+            }
+        };
+
+        let mut owner = motion(&system, &fluid, &edges, config(), field, SPEED);
+        let mut thermal = original.clone();
+        let mut observer = ClockedHeat::new(ids[0]);
+        let mut polls = 0;
+        let step = advance(&mut owner, &mut thermal, &mut observer, &mut || {
+            polls += 1;
+            false
+        }).unwrap();
+        let bulk_heat = 0.05 * DEPTH * MU * gamma * gamma;
+        let slip_heat = 0.05 * DEPTH * MU * slip * slip;
+        let added_heat = 0.015 * 0.01 + 0.035 * 0.03 + 0.2 * 0.05 * 0.05;
+        let total_heat = bulk_heat + slip_heat + added_heat + 0.03 * 0.8;
+        near(step.deposited_viscous_heat_j, bulk_heat, 2e-10);
+        near(step.deposited_slip_heat_j, slip_heat, 2e-10);
+        near(observer.heat_j, added_heat, 1e-14);
+        near(step.thermal.external_heat_j, total_heat, 2e-10);
+        near(step.thermal.stored_energy_change_j, total_heat, 2e-10);
+        near(step.thermal.residual_j, 0.0, 1e-12);
+        assert_eq!(observer.begins, 1);
+        assert_eq!(observer.events, 1);
+        assert_eq!(step.thermal.events, 1);
+        assert_eq!(step.thermal.substeps, observer.starts_and_durations.len());
+        assert_eq!(thermal.time_s(), 0.05);
+        assert_eq!(thermal.time_s(), owner.state().time_s());
+        assert!(observer.starts_and_durations.iter().any(|&(start, _)| start == 0.015));
+        assert!(observer.starts_and_durations.iter().any(|&(start, _)| start == 0.02));
+        assert!(observer.starts_and_durations.iter().all(|&(_, dt)| dt <= 0.007 + 1e-15));
+        assert_eq!(thermal.links(), original.links());
+
+        // Independent explicit energy recurrence checks the overridden link,
+        // pulse, ramp and fluid-side slip heat on the actual accepted intervals.
+        let mut h = [1.0, 0.0];
+        for &(start, dt) in &observer.starts_and_durations {
+            let conduction_w = 0.4 * (h[0] - h[1]) / CP;
+            for i in 0..2 {
+                let edge_length: f64 = routes.iter()
+                    .filter(|route| mesh.edges[route.edge].tris.0 == i)
+                    .map(|route| mesh.edges[route.edge].len).sum();
+                let mut watts = DEPTH * MU * gamma * gamma * mesh.areas[i]
+                    + DEPTH * MU * slip * slip * 0.25 * edge_length;
+                watts += if i == 0 { -conduction_w } else { conduction_w };
+                if i == 0 {
+                    watts += ClockedHeat::source_w(start) + 0.2 * (2.0 * start + dt);
+                    if start >= 0.02 { watts += 0.8; }
+                }
+                h[i] += dt * watts / original.cells()[&ids[i]].mass_kg;
+            }
+        }
+        for (i, id) in ids.iter().enumerate() {
+            near(thermal.cells()[id].specific_h_j_kg, h[i], 2e-9);
+        }
+        near(
+            thermal.cells()[&WALL].specific_h_j_kg,
+            0.75 * slip_heat / thermal.cells()[&WALL].mass_kg,
+            2e-9,
+        );
+
+        // Both a late typed refusal and the final cancellation must discard
+        // already completed thermal substeps and all tentative observer history.
+        for refuse in [true, false] {
+            let mut retry = motion(&system, &fluid, &edges, config(), field, SPEED);
+            let old_motion = retry.state().clone();
+            let mut retry_thermal = original.clone();
+            let mut retry_observer = ClockedHeat::new(ids[0]);
+            retry_observer.refuse_at_s = refuse.then_some(0.03);
+            let old_observer = retry_observer.clone();
+            let mut attempts = 0;
+            let result = advance(
+                &mut retry, &mut retry_thermal, &mut retry_observer, &mut || {
+                    attempts += 1;
+                    !refuse && attempts == polls
+                },
+            );
+            if refuse {
+                assert!(matches!(result, Err(GuidedStokesObservedHeatError::Observer(
+                    CoupledHeatRefusal::Endpoint
+                ))));
+            } else {
+                assert!(matches!(result, Err(GuidedStokesObservedHeatError::Heat(
+                    GuidedStokesHeatError::Motion(GuidedStokesError::Cancelled)
+                ))));
+            }
+            assert_eq!(retry.state(), &old_motion);
+            assert_eq!(retry_thermal.time_s(), original.time_s());
+            assert_eq!(retry_thermal.cells(), original.cells());
+            assert_eq!(retry_thermal.links(), original.links());
+            assert_eq!(retry_observer, old_observer);
+
+            retry_observer.refuse_at_s = None;
+            advance(&mut retry, &mut retry_thermal, &mut retry_observer, &mut || false).unwrap();
+            assert_eq!(retry.state(), owner.state());
+            assert_eq!(retry_thermal.cells(), thermal.cells());
+            assert_eq!(retry_thermal.time_s(), thermal.time_s());
+            assert_eq!(retry_observer, observer);
+        }
+    }
 }

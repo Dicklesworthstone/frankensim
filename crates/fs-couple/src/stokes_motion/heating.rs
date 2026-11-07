@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use fs_flux::{MaterialFluxError, MaterialStokesSolution, TriMesh};
 use fs_material::fluid_transport::FluidTransport;
+use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
     StepConfig,
@@ -81,11 +82,77 @@ impl From<DepositionError> for GuidedStokesHeatError {
     }
 }
 
+/// A refused observed step preserves motion, thermal state and observer history.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuidedStokesObservedHeatError<E> {
+    /// Original map, motion, thermal, heat-accounting or cancellation refusal.
+    Heat(GuidedStokesHeatError),
+    /// Refusal of the additional owner, retaining its original error type.
+    Observer(E),
+}
+
+impl<E> From<GuidedStokesHeatError> for GuidedStokesObservedHeatError<E> {
+    fn from(error: GuidedStokesHeatError) -> Self { Self::Heat(error) }
+}
+impl<E> From<GuidedStokesError> for GuidedStokesObservedHeatError<E> {
+    fn from(error: GuidedStokesError) -> Self { Self::Heat(error.into()) }
+}
+impl<E> From<DepositionError> for GuidedStokesObservedHeatError<E> {
+    fn from(error: DepositionError) -> Self { Self::Heat(error.into()) }
+}
+impl<E> From<StokesHeatFailure> for GuidedStokesObservedHeatError<E> {
+    fn from(error: StokesHeatFailure) -> Self { Self::Heat(error.into()) }
+}
+impl<E> From<ObserverCouplingError<StokesHeatFailure, E>> for GuidedStokesObservedHeatError<E> {
+    fn from(error: ObserverCouplingError<StokesHeatFailure, E>) -> Self {
+        match error {
+            ObserverCouplingError::Second(error) => Self::Observer(error),
+            ObserverCouplingError::First(error) => Self::Heat(error.into()),
+            ObserverCouplingError::Thermal(error) => Self::Heat(error.into()),
+            ObserverCouplingError::ConflictingConductance(_) => Self::Heat(
+                GuidedStokesHeatError::Binding("conflicting thermal-link conductance owners"),
+            ),
+            ObserverCouplingError::ConflictingReservoirConductance(_) => Self::Heat(
+                GuidedStokesHeatError::Binding("conflicting reservoir-conductance owners"),
+            ),
+            ObserverCouplingError::ConflictingAmbientConductance(_) => Self::Heat(
+                GuidedStokesHeatError::Binding("conflicting ambient-conductance owners"),
+            ),
+        }
+    }
+}
+impl<E: std::fmt::Display> std::fmt::Display for GuidedStokesObservedHeatError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Heat(error) => std::fmt::Display::fmt(error, f),
+            Self::Observer(error) => write!(f, "Stokes thermal observer refusal: {error}"),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for GuidedStokesObservedHeatError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Heat(error) => Some(error),
+            Self::Observer(error) => Some(error),
+        }
+    }
+}
+
+fn unobserved_error(
+    error: GuidedStokesObservedHeatError<DepositionError>,
+) -> GuidedStokesHeatError {
+    match error {
+        GuidedStokesObservedHeatError::Heat(error) => error,
+        GuidedStokesObservedHeatError::Observer(error) => error.into(),
+    }
+}
+
 /// Receipts from the two original owners, committed at one identical time.
 pub struct GuidedStokesHeatStep {
     /// Original body/fluid endpoint and its separate work accounts.
     pub motion: GuidedStokesStep,
-    /// Native thermal audit, including viscous heat and all authored sources.
+    /// Native thermal audit, including viscous heat, authored sources and any
+    /// additional observer's heat. Internal heat transfers remain conservative.
     pub thermal: EnergyAudit,
     /// Physical bulk heat actually supplied during native thermal substeps [J].
     /// Already included in `thermal.external_heat_j`; never add it twice.
@@ -175,6 +242,25 @@ impl From<StokesHeatFailure> for PlanarStokesHeatError {
     }
 }
 
+fn unobserved_heat_failure(
+    error: ObserverCouplingError<StokesHeatFailure, DepositionError>,
+) -> StokesHeatFailure {
+    match error {
+        ObserverCouplingError::First(error) => error,
+        ObserverCouplingError::Thermal(error)
+        | ObserverCouplingError::Second(error) => StokesHeatFailure::Thermal(error),
+        ObserverCouplingError::ConflictingConductance(_) => {
+            StokesHeatFailure::Binding("conflicting thermal-link conductance owners")
+        }
+        ObserverCouplingError::ConflictingReservoirConductance(_) => {
+            StokesHeatFailure::Binding("conflicting reservoir-conductance owners")
+        }
+        ObserverCouplingError::ConflictingAmbientConductance(_) => {
+            StokesHeatFailure::Binding("conflicting ambient-conductance owners")
+        }
+    }
+}
+
 /// Frozen geometry, transport and start clock, without a mutable physical owner.
 pub(super) struct StokesHeatBinding<'m> {
     pub(super) mesh: &'m TriMesh,
@@ -219,6 +305,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
     ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
         self.step_heating(
             thermal,
+            &mut (),
             cells,
             None,
             timestep_s,
@@ -230,6 +317,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             thermal_config,
             cancelled,
         )
+        .map_err(unobserved_error)
     }
 
     /// Advance with both bulk strain heat and physical Navier-slip heating.
@@ -268,6 +356,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
     ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
         self.step_heating(
             thermal,
+            &mut (),
             cells,
             Some(routes),
             timestep_s,
@@ -279,12 +368,86 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             thermal_config,
             cancelled,
         )
+        .map_err(unobserved_error)
+    }
+
+    /// Advance bulk viscous heating with another owner on the same thermal clock.
+    ///
+    /// Every observer hook is composed through the original thermal protocol,
+    /// including source transitions, accepted-interval sources, conductance
+    /// overrides, conservative exchanges and timestep restrictions. Nested
+    /// `CoupledObservers` may supply several additional owners. Its heat is
+    /// counted once in the native thermal audit; Stokes heat receipts continue
+    /// to account only for the native viscous loss.
+    ///
+    /// The observer's `Clone` must isolate mutable physical history as required
+    /// by `DepositionObserver`. Motion, thermal state and the cloned observer
+    /// publish together only after all acceptance and cancellation checks pass.
+    /// A refusal preserves all three inputs and retains the other owner's
+    /// original error type. The fixed-reference, frozen-transport and
+    /// time-refinement requirements of [`Self::step_with_heating`] still apply;
+    /// additional thermal physics does not rebind the fluid's viscosity.
+    ///
+    /// # Errors
+    /// Original map, motion, thermal or observer failures refuse the complete
+    /// step. No accepted history changes, including on final cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_heating_observed<O: DepositionObserver>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        observer: &mut O,
+        cells: StokesThermalCells<'_>,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: f64,
+        controls: GuidedStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GuidedStokesHeatStep, GuidedStokesObservedHeatError<O::Error>> {
+        self.step_heating(
+            thermal, observer, cells, None, timestep_s, force_density, exterior,
+            pressure_offsets_pa, external_force_n, controls, thermal_config, cancelled,
+        )
+    }
+
+    /// The same observed advance with explicit Navier-slip heat routes.
+    ///
+    /// [`Self::step_with_slip_heating`] owns route admission and physical heat
+    /// partition. [`Self::step_with_heating_observed`] owns observer composition
+    /// and the shared transaction; both sets of requirements apply.
+    ///
+    /// # Errors
+    /// Invalid routes and all original motion, thermal, observer or cancellation
+    /// failures preserve every accepted owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_slip_heating_observed<O: DepositionObserver>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        observer: &mut O,
+        cells: StokesThermalCells<'_>,
+        routes: &[StokesSlipHeatRoute],
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: f64,
+        controls: GuidedStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GuidedStokesHeatStep, GuidedStokesObservedHeatError<O::Error>> {
+        self.step_heating(
+            thermal, observer, cells, Some(routes), timestep_s, force_density, exterior,
+            pressure_offsets_pa, external_force_n, controls, thermal_config, cancelled,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn step_heating(
+    fn step_heating<O: DepositionObserver>(
         &mut self,
         thermal: &mut DepositionSimulation<'_>,
+        observer: &mut O,
         cells: StokesThermalCells<'_>,
         routes: Option<&[StokesSlipHeatRoute]>,
         timestep_s: f64,
@@ -295,7 +458,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         controls: GuidedStokesControls,
         thermal_config: StepConfig,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
+    ) -> Result<GuidedStokesHeatStep, GuidedStokesObservedHeatError<O::Error>> {
         poll(&mut cancelled)?;
         let binding = StokesHeatBinding {
             mesh: self.system.mesh,
@@ -319,8 +482,9 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             controls,
             &mut cancelled,
         )?;
-        let (candidate, audit, heat_j) = binding.advance_heat(
+        let (candidate, accepted_observer, audit, heat_j) = binding.advance_heat_observed(
             thermal,
+            observer,
             cells,
             &routes,
             &motion.flow,
@@ -334,6 +498,7 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         poll(&mut cancelled)?;
         self.state = state;
         *thermal = candidate;
+        *observer = accepted_observer;
         Ok(GuidedStokesHeatStep {
             motion,
             thermal: audit,
@@ -358,6 +523,30 @@ impl StokesHeatBinding<'_> {
         thermal_config: StepConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(DepositionSimulation<'a>, EnergyAudit, [f64; 2]), StokesHeatFailure> {
+        self.advance_heat_observed(
+            thermal, &(), cells, routes, flow, pressure_offsets_pa, timestep_s,
+            end_time_s, bulk_viscous_heat_j, thermal_config, cancelled,
+        )
+        .map(|(thermal, (), audit, heat)| (thermal, audit, heat))
+        .map_err(unobserved_heat_failure)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn advance_heat_observed<'a, O: DepositionObserver>(
+        &self,
+        thermal: &DepositionSimulation<'a>,
+        observer: &O,
+        cells: StokesThermalCells<'_>,
+        routes: &BTreeMap<usize, StokesSlipHeatRoute>,
+        flow: &MaterialStokesSolution,
+        pressure_offsets_pa: &[Option<f64>],
+        timestep_s: f64,
+        end_time_s: f64,
+        bulk_viscous_heat_j: f64,
+        thermal_config: StepConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(DepositionSimulation<'a>, O, EnergyAudit, [f64; 2]),
+        ObserverCouplingError<StokesHeatFailure, O::Error>> {
         let mut source = ViscousHeat {
             watts: BTreeMap::new(),
             heat_j: [0.0; 2],
@@ -365,13 +554,13 @@ impl StokesHeatBinding<'_> {
         };
         let heating = flow.viscous_dissipation().cell_heating_w_m3();
         if heating.len() != cells.triangle_cells.len() {
-            return Err(StokesHeatFailure::Binding(
+            return Err(ObserverCouplingError::First(StokesHeatFailure::Binding(
                 "incomplete native strain field",
-            ));
+            )));
         }
         for (index, (&id, &rate)) in cells.triangle_cells.iter().zip(heating).enumerate() {
             if index % 256 == 0 {
-                heat_poll(cancelled)?;
+                heat_poll(cancelled).map_err(ObserverCouplingError::First)?;
             }
             let watts = rate * self.mesh.areas[index] * self.depth_m;
             if !nonnegative(watts) {
@@ -382,10 +571,11 @@ impl StokesHeatBinding<'_> {
         let mut slip_power_w = 0.0;
         for (index, (&edge, route)) in routes.iter().enumerate() {
             if index % 256 == 0 {
-                heat_poll(cancelled)?;
+                heat_poll(cancelled).map_err(ObserverCouplingError::First)?;
             }
             let loss = flow
-                .boundary_loads(&[edge], [0.0; 2], pressure_offsets_pa)?
+                .boundary_loads(&[edge], [0.0; 2], pressure_offsets_pa)
+                .map_err(|error| ObserverCouplingError::First(StokesHeatFailure::Flow(error)))?
                 .slip_dissipation_w_per_m;
             let watts = loss * self.depth_m;
             if !nonnegative(watts) || (loss > 0.0 && watts == 0.0) {
@@ -419,14 +609,16 @@ impl StokesHeatBinding<'_> {
         {
             return Err(DepositionError::Arithmetic.into());
         }
-        let (candidate, source, audit) =
-            thermal.advance_observed(&source, end_time_s, thermal_config, || {
+        let owners = CoupledObservers::new(source, observer.clone());
+        let (candidate, owners, audit) =
+            thermal.advance_observed(&owners, end_time_s, thermal_config, || {
                 if cancelled() {
                     Err(DepositionError::Cancelled)
                 } else {
                     Ok(())
                 }
             })?;
+        let (source, accepted_observer) = owners.into_parts();
         // This checks conversion and substep integration, not a new fluid
         // energy theorem. Thermal storage has its own original energy gate.
         let residual = [
@@ -441,7 +633,7 @@ impl StokesHeatBinding<'_> {
         {
             return Err(DepositionError::EnergyBalance(residual).into());
         }
-        Ok((candidate, audit, source.heat_j))
+        Ok((candidate, accepted_observer, audit, source.heat_j))
     }
 
     pub(super) fn check_slip_heat_routes(
@@ -592,7 +784,7 @@ impl ViscousHeat {
 }
 
 impl DepositionObserver for ViscousHeat {
-    type Error = DepositionError;
+    type Error = StokesHeatFailure;
 
     fn sources(
         &mut self,
@@ -606,7 +798,7 @@ impl DepositionObserver for ViscousHeat {
             }
             let total = watts[0] + watts[1];
             if !nonnegative(total) {
-                return Err(DepositionError::Arithmetic);
+                return Err(DepositionError::Arithmetic.into());
             }
             sources.insert(id, total);
         }
@@ -637,7 +829,7 @@ impl DepositionObserver for ViscousHeat {
             self.supplied_heat_j += dt * (watts[0] + watts[1]);
             if !self.heat_j.iter().all(|heat| heat.is_finite()) || !self.supplied_heat_j.is_finite()
             {
-                return Err(DepositionError::Arithmetic);
+                return Err(DepositionError::Arithmetic.into());
             }
         }
         Ok(())
