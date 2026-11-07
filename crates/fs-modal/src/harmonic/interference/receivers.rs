@@ -14,6 +14,9 @@ use fs_math::dd::Dd;
 
 mod control;
 pub use control::{
+    HarmonicReceiverOptimumError, HarmonicReceiverOptimumLimits,
+    HarmonicReceiverOptimumRequest, HarmonicReceiverOptimumSolution,
+    PreparedHarmonicReceiverOptimum,
     HarmonicReceiverControlEvaluation, HarmonicReceiverControlLimits,
     MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicReceiverControl,
 };

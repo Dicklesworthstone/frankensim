@@ -18,6 +18,9 @@ use fs_math::{c64::C64, dd::Dd};
 
 mod receivers;
 pub use receivers::{
+    HarmonicReceiverOptimumError, HarmonicReceiverOptimumLimits,
+    HarmonicReceiverOptimumRequest, HarmonicReceiverOptimumSolution,
+    PreparedHarmonicReceiverOptimum,
     HarmonicReceiverControlEvaluation, HarmonicReceiverControlLimits,
     MAX_RECEIVER_CONTROL_SOURCES, PreparedHarmonicReceiverControl,
     HarmonicReceiver, HarmonicReceiverControls, HarmonicReceiverPairMoments,

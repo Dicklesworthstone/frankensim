@@ -1345,3 +1345,47 @@ refusal the caller's gradient is unchanged; subsequent calls rebuild private
 scratch. Source backward residuals remain available. This does not impose
 actuator constraints, establish a causal broadband control filter, add startup
 motion, or certify relative error near a null.
+
+### Optimal source gains with an authored actuator-effort law
+
+`PreparedHarmonicReceiverControl::prepare_optimum` caches the real gain-space
+quadratic for one physical window and an explicitly supplied full SPD effort
+metric W. The real coordinates are [Re(g0), Im(g0), Re(g1), Im(g1), ...].
+DD contractions of the original response bases retain cross-source,
+cross-frequency and shared real/proper factor terms. The bias/source and
+source/source terms are assembled directly, not obtained by subtracting large
+objectives or finite-differencing gradients. Receiver weights and source clocks
+remain those of the original owner.
+
+A query minimizes expected window-averaged vibration plus lambda*x^T*W*x for
+an authored strictly positive lambda. The effort metric and coefficient carry
+the caller's physical calibration; they are not inferred mechanical input
+power, material loss, or hidden numerical regularization. W can retain
+cross-actuator/quadrature coupling. An optional strictly positive total effort
+cap uses a nonnegative multiplier mu and the gain system
+(Q+(lambda+mu)*W)x=-b. Existing cancellable Cholesky factors operate on
+diagonally equilibrated real systems. No additional damping, altered source
+pencil, pseudoinverse threshold or automatic ridge is inserted.
+
+Without a binding effort cap, one gain-system factorization suffices. A
+binding cap uses the metric dual-norm estimate to bracket its monotone
+multiplier, then retains a feasible endpoint throughout bounded bisection.
+A query reports no approximate optimum when its factorization, effort
+resolution or original-gradient stationarity requirements are unmet. Different
+effort weights and caps reuse the physical quadratic.
+
+Published vibration is recomputed by the original receiver-control owner
+after DD field recomposition. Original-metric effort and componentwise
+stationarity are checked independently of evaluating Q*x+b. The result
+reports complex gains, coherent/stochastic vibration, effort, the penalized
+objective, effort multiplier and numerical residual. These are floating
+discrete-model optimality diagnostics, not interval or near-null forward-error
+certificates. The specialized solve covers this fixed harmonic model and one
+total quadratic effort cap; general nonlinear/per-actuator control constraints
+remain authored optimization problems outside this owner.
+
+Preparation admits source-quadratic product work and conservative additional
+payload, including the original blocked factor's packing scratch. Queries
+bound gain factorizations and poll cancellation in the original numerical
+kernels. The borrowed controller freezes the source model for the query family;
+the physical model is not modified by preparation or a refused query.

@@ -13,6 +13,13 @@ use fs_exec::Cx;
 use fs_fft::harmonic_window::HarmonicWindow;
 use fs_math::{c64::C64, dd::Dd};
 
+mod optimum;
+pub use optimum::{
+    HarmonicReceiverOptimumError, HarmonicReceiverOptimumLimits,
+    HarmonicReceiverOptimumRequest, HarmonicReceiverOptimumSolution,
+    PreparedHarmonicReceiverOptimum,
+};
+
 /// Hard ceiling on independently controlled complex source gains.
 pub const MAX_RECEIVER_CONTROL_SOURCES: usize = 32;
 
