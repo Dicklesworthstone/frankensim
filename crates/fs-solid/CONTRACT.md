@@ -11404,3 +11404,46 @@ independent simplex/tensor polynomial moments, shifted mass centroid and
 forcing, actual plane motion, reference-change preservation and constant-field
 bit parity. This is authored reference inventory, with no inferred material
 calibration, mass transfer, transverse inertia or current-density resampling.
+
+## Dispersive structural harmonic frequency derivatives
+
+`ViscoHarmonicOperator::with_frequency_derivative` retains the existing physical
+factor and prepares its material frequency direction once. Original tensor-Prony
+laws supply `dC'/domega` and the directly evaluated `d(C''/omega)/domega`; the
+shared const-generic tensor assembly retains every original quadrature point,
+Mandel cross term, B-bar column, physical measure and free-DOF map. Symmetric
+entries are mirrored from one contraction. The primal spectral path retains
+exact reuse of the original equilibrium stiffness when all storage tensors
+equal their equilibrium values. Reference geometry, supports and mass are fixed.
+
+The resulting `ViscoHarmonicFrequencyOperator` reuses the same harmonic factor
+for each source. It passes `M_omega=0`, assembled `K'_omega` and effective-viscosity
+slope, and the explicit frequency direction one to the shared total-parameter
+solver. Thus `A_omega=K'_omega-2*omega*M-i*K''_omega`, including the actual
+constitutive dispersion. Authored complex force slopes and complete attachment
+and impedance slopes are optional; an absent port direction explicitly fixes
+B and Z, while retaining their kinematic frequency action. No sampled material
+slope, extra factorization or material law reconstruction is introduced.
+
+The response includes original motion plus displacement/velocity slopes and
+separately differentiated source work, intrinsic material heat and boundary
+work. Its original displacement must pass the existing full-cycle material
+strain admission at every retained quadrature point, including compatible
+strain for B-bar. A derivative is not itself an additional strain cycle or a
+certificate that neighboring frequencies satisfy the source domain. Refusal or
+cancellation returns no partial response; the prepared factor remains reusable.
+
+Derivative preparation admits exactly `24*n*n` additional retained dense source
+bytes before assembly: zero mass slope, effective-viscosity slope and storage
+slope. Original sparse assembly and constitutive temporaries keep their own
+ownership. Per-solve tangent scratch/work uses `HarmonicParameterControls`.
+The primal structural preflight now matches the shared dense owner's
+`144*n*n+128*n` bytes plus its existing `24*n*n` dense source matrices.
+
+`tests/visco_harmonic_frequency.rs` defines scalar closed-form dispersion and
+heat slopes with complex source variation, full anisotropic/coupled spatial
+derivatives with consistent mass, independently perturbed boundary/source
+responses, and budget/cancellation/full-cycle refusals. The existing primal
+one-coordinate resource boundary is updated from 280 to 296 bytes. These native
+regressions remain unexecuted pending the real dependency graph's build resource
+blocker; no measured material, modal-truncation or throughput claim follows.

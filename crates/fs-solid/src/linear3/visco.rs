@@ -61,7 +61,10 @@ pub use dynamics::{
     ViscoDynamicPortResponse, ViscoDynamicPortStep, ViscoDynamicState, ViscoDynamicStep,
 };
 mod harmonic;
-pub use harmonic::{ViscoHarmonicError, ViscoHarmonicOperator, ViscoHarmonicResponse};
+pub use harmonic::{
+    ViscoHarmonicError, ViscoHarmonicFrequencyOperator, ViscoHarmonicFrequencyResponse,
+    ViscoHarmonicOperator, ViscoHarmonicResponse,
+};
 mod poles;
 pub use poles::{
     PreparedViscoPoles, ViscoJointHarmonicBudget, ViscoJointHarmonicError,
@@ -1035,68 +1038,87 @@ impl ViscoElements {
             .iter()
             .map(|e| {
                 checkpoint(cx)?;
-                Ok(e.law.complex_modulus(omega_rad_s)?)
+                let (storage, loss) = e.law.complex_modulus(omega_rad_s)?;
+                Ok([storage, loss])
             })
             .collect::<Result<Vec<_>, ViscoElementError>>()?;
-        let n = self.equilibrium.free_dofs.len();
-        let mut reduced = vec![None; self.full_dofs];
-        for (i, &dof) in self.equilibrium.free_dofs.iter().enumerate() {
-            reduced[dof] = Some(i);
-        }
-        let mut real = Coo::new(n, n);
-        let mut imag = Coo::new(n, n);
-        let mut equilibrium_storage = true;
-        for (element, (storage, loss)) in self.elements.iter().zip(tensors) {
-            checkpoint(cx)?;
-            equilibrium_storage &= storage == *element.law.c_eq();
-            let d = element.dofs.len();
-            let mut kr = vec![0.0; d * d];
-            let mut ki = vec![0.0; d * d];
-            for p in &element.points {
-                checkpoint(cx)?;
-                for i in 0..d {
-                    for j in i..d {
-                        kr[i * d + j] += p.volume_m3 * bilinear(&p.b[i], &storage, &p.b[j]);
-                        ki[i * d + j] += p.volume_m3 * bilinear(&p.b[i], &loss, &p.b[j]);
-                    }
-                }
-            }
-            for i in 0..d {
-                for j in i..d {
-                    let (r, l) = (kr[i * d + j], ki[i * d + j]);
-                    if !r.is_finite() || !l.is_finite() {
-                        return Err(ViscoElementError::NonFiniteResult);
-                    }
-                    if let (Some(row), Some(col)) =
-                        (reduced[element.dofs[i]], reduced[element.dofs[j]])
-                    {
-                        real.push(row, col, r);
-                        imag.push(row, col, l);
-                        if row != col {
-                            real.push(col, row, r);
-                            imag.push(col, row, l);
-                        }
-                    }
-                }
-            }
-        }
-        let real = if equilibrium_storage {
-            self.equilibrium.stiffness.clone()
-        } else {
-            real.assemble()
-        };
-        let imag = imag.assemble();
-        checkpoint(cx)?;
-        for a in [&real, &imag] {
-            if (0..n).any(|i| a.row(i).1.iter().any(|v| !v.is_finite())) {
-                return Err(ViscoElementError::NonFiniteResult);
-            }
-        }
+        let equilibrium_storage = self
+            .elements
+            .iter()
+            .zip(&tensors)
+            .all(|(element, tensors)| tensors[0] == *element.law.c_eq());
+        let [real, imag] = self.assemble_spectral_tensors(tensors, equilibrium_storage, cx)?;
         Ok(ComplexStiffness {
             real,
             imag,
             omega_rad_s,
         })
+    }
+
+    // Original quadrature and retained B columns serve every spectral
+    // tensor component, including frequency derivatives. Callers evaluate ALL
+    // source bands before entering this assembly. Mirroring the same scalar
+    // preserves exact matrix symmetry without separately rounded contractions.
+    fn assemble_spectral_tensors<const N: usize>(
+        &self,
+        tensors: Vec<[Mandel6; N]>,
+        equilibrium_storage: bool,
+        cx: &Cx<'_>,
+    ) -> Result<[Csr; N], ViscoElementError> {
+        let n = self.equilibrium.free_dofs.len();
+        let mut reduced = vec![None; self.full_dofs];
+        for (i, &dof) in self.equilibrium.free_dofs.iter().enumerate() {
+            reduced[dof] = Some(i);
+        }
+        let mut matrices: [Coo; N] = core::array::from_fn(|_| Coo::new(n, n));
+        for (element, components) in self.elements.iter().zip(tensors) {
+            checkpoint(cx)?;
+            let d = element.dofs.len();
+            let mut local: [Vec<f64>; N] = core::array::from_fn(|_| vec![0.0; d * d]);
+            for p in &element.points {
+                checkpoint(cx)?;
+                for i in 0..d {
+                    for j in i..d {
+                        for (values, tensor) in local.iter_mut().zip(&components) {
+                            values[i * d + j] += p.volume_m3 * bilinear(&p.b[i], tensor, &p.b[j]);
+                        }
+                    }
+                }
+            }
+            for i in 0..d {
+                for j in i..d {
+                    for (matrix, values) in matrices.iter_mut().zip(&local) {
+                        let value = values[i * d + j];
+                        if !value.is_finite() {
+                            return Err(ViscoElementError::NonFiniteResult);
+                        }
+                        if let (Some(row), Some(col)) =
+                            (reduced[element.dofs[i]], reduced[element.dofs[j]])
+                        {
+                            matrix.push(row, col, value);
+                            if row != col {
+                                matrix.push(col, row, value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut reuse_equilibrium = equilibrium_storage;
+        let assembled = matrices.map(|matrix| {
+            if core::mem::take(&mut reuse_equilibrium) {
+                self.equilibrium.stiffness.clone()
+            } else {
+                matrix.assemble()
+            }
+        });
+        checkpoint(cx)?;
+        for a in &assembled {
+            if (0..n).any(|i| a.row(i).1.iter().any(|v| !v.is_finite())) {
+                return Err(ViscoElementError::NonFiniteResult);
+            }
+        }
+        Ok(assembled)
     }
 
     /// Check the complete displacement against every original material point.

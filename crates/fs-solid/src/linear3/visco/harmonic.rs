@@ -12,10 +12,13 @@ use super::{ViscoElementError, ViscoElements, checkpoint};
 use fs_exec::Cx;
 use fs_math::{c64::C64, det};
 use fs_modal::harmonic::{
-    HarmonicPortControls, HarmonicPortResponse, HarmonicResponseControls, HarmonicResponseError,
-    PreparedHarmonicResponse,
+    HarmonicPortControls, HarmonicPortResponse, HarmonicResponse, HarmonicResponseControls,
+    HarmonicResponseError, PreparedHarmonicResponse,
 };
 use fs_sparse::Csr;
+
+mod frequency;
+pub use frequency::{ViscoHarmonicFrequencyOperator, ViscoHarmonicFrequencyResponse};
 
 /// A source-material refusal or a failure of the shared harmonic solve.
 #[derive(Clone, Debug, PartialEq)]
@@ -179,11 +182,11 @@ impl ViscoElements {
             .checked_mul(n)
             .and_then(|x| x.checked_mul(24))
             .ok_or_else(|| invalid("harmonic source payload extent overflow"))?;
-        // The shared owner admits 128*n*n + 128*n bytes. Include its complete
+        // The shared owner admits 144*n*n + 128*n bytes. Include its complete
         // declared peak before allocating any of the additional dense inputs.
         let total = n
             .checked_mul(n)
-            .and_then(|x| x.checked_mul(128))
+            .and_then(|x| x.checked_mul(144))
             .and_then(|x| n.checked_mul(128).and_then(|y| x.checked_add(y)))
             .and_then(|x| x.checked_add(source_bytes))
             .ok_or_else(|| invalid("harmonic total payload extent overflow"))?;
@@ -275,15 +278,20 @@ impl ViscoHarmonicOperator<'_> {
         self.source
             .validate_harmonic_displacement(&result.displacement, cx)?;
         checkpoint(cx)?;
-        Ok(ViscoHarmonicResponse {
-            displacement_m: result.displacement,
-            velocity_m_s: result.velocity,
-            relative_residual: result.relative_residual,
-            average_input_power_w: result.average_input_power_w,
-            average_material_heat_w: result.average_viscous_power_w,
-            port_load: result.port_load,
-            power_balance_residual_w: result.power_balance_residual_w,
-        })
+        Ok(material_response(result))
+    }
+}
+
+// Called only after the original full-cycle material admission succeeds.
+fn material_response(result: HarmonicResponse) -> ViscoHarmonicResponse {
+    ViscoHarmonicResponse {
+        displacement_m: result.displacement,
+        velocity_m_s: result.velocity,
+        relative_residual: result.relative_residual,
+        average_input_power_w: result.average_input_power_w,
+        average_material_heat_w: result.average_viscous_power_w,
+        port_load: result.port_load,
+        power_balance_residual_w: result.power_balance_residual_w,
     }
 }
 

@@ -251,15 +251,15 @@ fn g0_source_band_resource_and_unrepresentable_frequency_refuse() {
             ))
         ));
         budget = controls();
-        // One coordinate: 24 source + 128 matrix + 128 vector bytes.
-        budget.maximum_payload_bytes = 279;
+        // One coordinate: 24 source + 144 matrix + 128 vector bytes.
+        budget.maximum_payload_bytes = 295;
         assert!(matches!(
             source.prepare_harmonic_response(1.0, budget, cx),
             Err(ViscoHarmonicError::Harmonic(
-                HarmonicResponseError::Budget { requested: 280, .. }
+                HarmonicResponseError::Budget { requested: 296, .. }
             ))
         ));
-        budget.maximum_payload_bytes = 280;
+        budget.maximum_payload_bytes = 296;
         assert!(source.prepare_harmonic_response(1.0, budget, cx).is_ok());
     });
 }
