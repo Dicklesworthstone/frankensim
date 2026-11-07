@@ -28,11 +28,22 @@ use fs_qty::{
 };
 
 pub mod oscillator;
-pub use oscillator::{LorentzError, LorentzPole, LorentzState, LorentzStep, PreparedLorentzStep};
+pub use oscillator::{
+    LorentzError, LorentzPole, LorentzState, LorentzStep, PreparedLorentzHarmonic,
+    PreparedLorentzStep,
+};
 
 impl From<LorentzError> for FieldStorageError {
     fn from(value: LorentzError) -> Self {
-        Self::Lorentz(value)
+        Self::Invalid(match value {
+            LorentzError::Invalid(what) => what,
+            LorentzError::SingularResonance => {
+                "lossless Lorentz resonance has no finite periodic response"
+            }
+            LorentzError::Evolution(_) => {
+                "exact Lorentz polarization evolution is not representable"
+            }
+        })
     }
 }
 

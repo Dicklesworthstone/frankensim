@@ -14,6 +14,9 @@
 use fs_math::{c64::C64, det};
 use fs_modal::time::{LinearForceTransition, ModalAcousticState, ModalAcousticTimeError};
 
+mod harmonic;
+pub use harmonic::PreparedLorentzHarmonic;
+
 /// Invalid physical data, an unresolved arithmetic range, or an actual pole.
 #[derive(Clone, Debug, PartialEq)]
 pub enum LorentzError {
@@ -91,7 +94,7 @@ pub struct LorentzStep<const N: usize> {
     pub state: LorentzState<N>,
     pub stored_before_j_m3: f64,
     pub stored_after_j_m3: f64,
-    /// Integral of `E(t) dot P'(t)` for the supplied linear field record.
+    /// Integral of `E(t) dot P'(t)` for the supplied electric-field history.
     pub supplied_work_j_m3: f64,
     /// Independent nonnegative integral of physical polarization friction.
     pub heat_j_m3: f64,
