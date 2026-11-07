@@ -41,7 +41,7 @@ fn rate_law(
     }
 }
 
-fn with_source<R>(
+pub(super) fn with_source<R>(
     origin: EquilibriumAngleOrigin,
     upper_temperature: f64,
     run: impl FnOnce(MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,

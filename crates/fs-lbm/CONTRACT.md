@@ -8421,6 +8421,25 @@ and molecular equations, original thermal adhesion receipts, native population
 response, and rollback; they do not establish experimental calibration or
 unconditional stability.
 
+`MaterialFreeSurfaceEnthalpy3::with_dynamic_equilibrium_gas_wetting` attaches
+the original source-resolved two-phase Cox owner to that equilibrium binding.
+The microscopic angle remains the original angle or Young--Dupre work claim;
+the wedge ratio uses the actual outer-gas viscosity divided by the local liquid
+viscosity. Gas and liquid keep distinct temperatures, source identities and
+state coordinates. No contact-speed axis is added to the equilibrium receipt.
+
+Ordinary steps retain the explicit gas snapshot. Existing finite-atmosphere
+heat-transfer entry points instead refresh the same original gas parcel at
+thermal preparation and accepted endpoints, including its admitted temperature,
+pressure and transport coefficients. Original source matching and both phases'
+low-capillary-number limits remain mandatory. This selector shares rate-law
+exclusivity and the constant/uniform-tension, Newtonian and planar-wall domain;
+it adds no separate gas evolution or contact-line heat model. Three focused
+synthetic integration regressions specify fixed-snapshot parity, the independent
+two-wedge equation, finite-gas feedback into native momentum, original adhesion
+receipts, combined thermal balance and transactional refusal. Their native
+execution remains unverified in the current environment.
+
 `free_surface3_from_cells_with_uniform_thermal_capillarity` extends that same
 owner to time-varying sigma(T) in the exact zero-Marangoni domain. Every actual
 wet-cell source value must agree exactly in SI units before lattice conversion,

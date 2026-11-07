@@ -240,6 +240,47 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         Ok(self)
     }
 
+    /// Drive the original equilibrium adhesion boundary with two-phase Cox
+    /// kinetics using an explicitly sourced outer gas. The microscopic angle
+    /// still comes from the original equilibrium angle or Young--Dupre work;
+    /// the wedge ratio is mu_gas(T_gas, p_gas, composition) / mu_liquid(T_liquid).
+    /// These phases keep distinct temperatures and original source receipts.
+    ///
+    /// Ordinary stepping holds this gas snapshot. Existing finite-atmosphere
+    /// heat-transfer entry points refresh the SAME original gas parcel during
+    /// thermal preparation and accepted flow endpoints. Source substitution or
+    /// a source/model-domain exit refuses the complete coupled candidate.
+    /// The original Newtonian, low-Ca, constant/uniform-tension and stationary
+    /// planar-wall restrictions apply. This adds neither a second gas momentum
+    /// owner nor a contact-line heat source.
+    pub fn with_dynamic_equilibrium_gas_wetting(
+        mut self,
+        controls: CoxVoinovControls,
+        gas: &ResolvedThermochemicalGasState,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
+        if self.thermocapillary.is_some() && !self.uniform_thermal_capillarity() {
+            return Err(Error::Invalid(
+                "dynamic equilibrium wetting needs constant or spatially uniform surface tension",
+            ));
+        }
+        if self.rheology.is_some() {
+            return Err(Error::Invalid("Cox wetting requires a Newtonian liquid"));
+        }
+        let binding = self.wetting.take()
+            .ok_or(Error::Invalid(
+                "dynamic equilibrium wetting requires an original equilibrium source",
+            ))?
+            .with_equilibrium_cox_voinov_gas(controls, gas, &self.flow.scaling, gate)?;
+        let temperatures = temperatures(&self.states, self.law.temperature_axis(), gate)?;
+        let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        poll(gate)?;
+        self.wetting = Some(binding);
+        Ok(self)
+    }
+
     /// Add a hydrodynamic Cox law to an existing STATIC hysteresis binding.
     /// The actual local source viscosity and native surface tension follow the
     /// enthalpy trajectory. Surface tension is constant unless the uniform

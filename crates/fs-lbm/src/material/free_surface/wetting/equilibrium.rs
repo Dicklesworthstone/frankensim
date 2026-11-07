@@ -104,6 +104,27 @@ impl<'m> WettingBinding<'m> {
         scaling: &MaterialFreeSurfaceScaling<'_>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
+        self.select_equilibrium_rate_law(gate)?;
+        match law {
+            EquilibriumWettingRateLaw::CoxVoinov(law) => self.with_cox_voinov(law, scaling, gate),
+            EquilibriumWettingRateLaw::MolecularKinetic(law) => {
+                self.with_molecular_kinetic(law, temperature_axis, scaling, gate)
+            }
+        }
+    }
+
+    pub(in crate::material::free_surface) fn with_equilibrium_cox_voinov_gas(
+        mut self,
+        controls: CoxVoinovControls,
+        gas: &ResolvedThermochemicalGasState,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        self.select_equilibrium_rate_law(gate)?;
+        self.with_cox_voinov_gas(controls, gas, scaling, gate)
+    }
+
+    fn select_equilibrium_rate_law(&mut self, gate: &CancelGate) -> Result<(), Error> {
         checkpoint(gate)?;
         let equilibrium = self.physics.equilibrium.as_mut().ok_or(Error::Invalid(
             "an equilibrium rate law requires an original equilibrium wetting source",
@@ -112,12 +133,7 @@ impl<'m> WettingBinding<'m> {
             return Err(Error::Invalid("equilibrium wetting already owns a rate law"));
         }
         equilibrium.dynamic = true;
-        match law {
-            EquilibriumWettingRateLaw::CoxVoinov(law) => self.with_cox_voinov(law, scaling, gate),
-            EquilibriumWettingRateLaw::MolecularKinetic(law) => {
-                self.with_molecular_kinetic(law, temperature_axis, scaling, gate)
-            }
-        }
+        Ok(())
     }
 }
 

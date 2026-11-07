@@ -11,6 +11,9 @@ mod height_graph;
 #[path = "equilibrium_dynamic.rs"]
 mod dynamic;
 
+#[path = "equilibrium_gas.rs"]
+mod outer_gas;
+
 fn equilibrium_interface(
     liquid: &MaterialCard,
     solid: &MaterialCard,

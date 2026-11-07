@@ -45,7 +45,7 @@ fn liquid_card(changing: bool) -> MaterialCard {
     MaterialCard::assemble(base.id().clone(), claims, base.models().to_vec()).unwrap()
 }
 
-fn gas_model(viscosity_scale: f64) -> ThermochemicalGasModel {
+pub(super) fn gas_model(viscosity_scale: f64) -> ThermochemicalGasModel {
     let base = gas_source::model(100000.0, 250000.0, 100.0);
     let mut transport = base.transport_materials().to_vec();
     for binding in &mut transport {
