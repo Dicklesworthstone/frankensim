@@ -13,6 +13,9 @@ mod nonlinear;
 #[path = "spatial_induction_enthalpy/orthotropic.rs"]
 mod orthotropic;
 
+#[path = "spatial_induction_enthalpy/circuit.rs"]
+mod circuit;
+
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
     material::MaterialCell,

@@ -79,6 +79,40 @@ thermal attachment and successive releases; full native execution is pending.
 The source remains an already-liquid no-storage rigid constraint, not a
 stressed solid whose constitutive history can be discarded.
 
+## Native solid-electrode circuits with temperature feedback and finite heat
+
+`SpatialMagneticThermalNetwork::step_terminal_circuit_candidate` closes the
+original 3D Whitney A–phi electrodes, native RLC graph and finite caloric cells
+in one accepted candidate. Every thermal proposal resolves scalar or oriented
+tensor conductivity and induced-linear permeability from the original material
+sources. Field-response probes retain the same accepted magnetic potential,
+native charge/flux and thermal history; their actual count consumes the shared
+thermal trial budget. Endpoint operators are prepared once per proposal and
+the native field response is invalidated when material coefficients change.
+
+Original local conductor-frame Joule heat enters whole-volume field receivers.
+Every authored graph resistor additionally requires one explicit finite heat
+destination, which may be a separate thermal body. These physical losses are
+deposited once; artificial reference-resistor dissipation is excluded. Native
+capacitor/inductor storage and external source work retain their own accounts,
+while electrode interface power cancels internally. The existing magnetic
+caloric owner preserves signed parameter work, field entropy and reversible
+heat instead of treating every magnetic energy change as Joule loss.
+
+The joint receipt checks `delta U_field + delta W_circuit + delta H_caloric
++ W_mechanical = W_impressed + W_external + Q_external`. Original sources,
+clocks, volume correspondences, thermal laws, material and solve budgets remain
+admitted before joint publication. Refused heat routing, source changes,
+cancellation and failed field or enthalpy trials preserve all three histories.
+
+The graph R/L/C coefficients, geometry and conducting occupancy remain fixed;
+prescribed motion represents external mechanical work. This is a linear
+magnetic, fully solid MQS coupling with endpoint material/enthalpy feedback,
+generally first order in the coupled temperature update. Independent Whitney
+element elimination tests exercise both electrical property bases, signed
+permeability slopes, separate resistor heating and retained capacitor charge.
+
+
 ## Physical nonlinear and hysteretic electrodes with finite heat
 
 ## Finite-strain Maxwell membrane relaxation into original enthalpy cells

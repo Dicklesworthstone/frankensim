@@ -64,6 +64,9 @@ pub enum MagneticThermalError {
     NonlinearWinding(fs_em::winding::nonlinear::NonlinearWindingError),
     Induction(EddyError),
     SpatialInduction(fs_em::spatial::SpatialMagneticError),
+    SpatialTerminalCircuit(
+        fs_em::spatial::vector_potential::induction::terminals::circuit::SpatialTerminalCircuitError,
+    ),
     SpatialNonlinearInduction(
         fs_em::spatial::vector_potential::induction::nonlinear::SpatialNonlinearInductionError,
     ),
@@ -324,7 +327,9 @@ impl MagneticThermalNetwork<'_> {
     // Conductivity, caloric correspondence, fixed geometry and source refresh
     // are common. Only the magnetic law's supported refresh admission differs.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn materials_at_using<C: fs_material::conductor::spatial::SpatialConductorMaterial>(
+    pub(super) fn materials_at_using<
+        C: fs_material::conductor::spatial::SpatialConductorMaterial,
+    >(
         &self,
         thermal: &DepositionSimulation<'_>,
         originals: &[&ResolvedMaterialStatePoint],
@@ -338,13 +343,7 @@ impl MagneticThermalNetwork<'_> {
             &ResolvedMaterialStatePoint,
             &MaterialCell<'_>,
         ) -> Result<(), Error>,
-    ) -> Result<
-        (
-            Vec<(usize, C)>,
-            Vec<MagneticThermalSample>,
-        ),
-        Error,
-    > {
+    ) -> Result<(Vec<(usize, C)>, Vec<MagneticThermalSample>), Error> {
         let bindings: BTreeMap<_, _> = self.cells.iter().map(|c| (c.cell, c)).collect();
         let phases: BTreeMap<_, _> = sample.cells.iter().map(|c| (c.cell, c.phase)).collect();
         let mut result = Vec::with_capacity(conductors.len());
