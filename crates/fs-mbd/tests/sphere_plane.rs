@@ -21,6 +21,9 @@ mod directional;
 #[path = "sphere_plane/torque.rs"]
 mod torque;
 
+#[path = "sphere_plane/hertz_impacts.rs"]
+mod hertz_impacts;
+
 const MASS: f64 = 2.0;
 const RADIUS: f64 = 0.5;
 const INERTIA: f64 = 0.2;

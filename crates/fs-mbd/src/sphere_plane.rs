@@ -24,6 +24,10 @@ pub mod rolling;
 /// Source-compatible directional support on the original moving sphere.
 pub mod directional;
 
+/// Joint finite-Hertz-patch shear and spin at actual impact events.
+#[path = "sphere_plane/hertz_impacts.rs"]
+pub mod hertz_impacts;
+
 use crate::{DynamicsError, MassProperties, Pose, RigidBodyState, Vec3};
 use core::fmt;
 use fs_contact::ballistic::{
@@ -145,7 +149,8 @@ impl Default for SpherePlaneConfig {
 /// Discrete events in chronological order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpherePlaneEventKind {
-    /// Normal/tangential instantaneous contact response.
+    /// Normal/tangential instantaneous response, including a free patch couple
+    /// when the selected finite-patch impact law supplies one.
     Impact,
     /// Entry into persistent normal support.
     Support,
@@ -169,6 +174,9 @@ pub struct SpherePlaneEvent {
     pub normal_impulse: f64,
     /// Tangential impact impulse; zero for mode-only events.
     pub tangent_impulse_world: Vec3,
+    /// Free normal-axis angular impulse at a finite-patch impact [N m s].
+    /// Point-contact and mode-only events have exactly zero free couple.
+    pub spin_angular_impulse_world: Vec3,
 }
 
 /// Complete advance, published only after momentum and work admission.
@@ -192,7 +200,7 @@ pub struct SpherePlaneAdvance {
     pub external_torque_impulse_world: Vec3,
     /// Signed work supplied by the moving plane, in J.
     pub plane_work: f64,
-    /// Normal impact and actual tangent-force work loss, in J; not a heat
+    /// Normal impact and actual shear/spin contact-work loss, in J; not a heat
     /// allocation. Curved-sliding loss belongs to the declared time-discrete
     /// trajectory and converges with its sliding timestep.
     pub dissipated_energy: f64,
@@ -284,6 +292,8 @@ struct Ledger {
 /// A constitutive impact candidate; the original body/normal owner applies it.
 struct TangentialImpactAdvance {
     impulse: [f64; 2],
+    /// Free angular impulse about the plane normal, in addition to r cross J.
+    spin_impulse: f64,
     velocity_after: [f64; 2],
     dissipated: f64,
 }
@@ -491,6 +501,16 @@ impl Engine {
         normal: f64,
         tangent: Vec3,
     ) -> Result<(), SpherePlaneError> {
+        self.event_with_spin(time, kind, normal, tangent, Vec3::ZERO)
+    }
+    fn event_with_spin(
+        &mut self,
+        time: f64,
+        kind: SpherePlaneEventKind,
+        normal: f64,
+        tangent: Vec3,
+        spin: Vec3,
+    ) -> Result<(), SpherePlaneError> {
         if self.events.len() >= self.config.max_events {
             return Err(SpherePlaneError::EventBudget);
         }
@@ -499,6 +519,7 @@ impl Engine {
             kind,
             normal_impulse: normal,
             tangent_impulse_world: tangent,
+            spin_angular_impulse_world: spin,
         });
         Ok(())
     }
@@ -533,6 +554,7 @@ impl Engine {
                     self.friction(slip, normal.normal_impulse, self.scene.friction_coefficient)?;
                 TangentialImpactAdvance {
                     impulse: response.tangent_impulse,
+                    spin_impulse: 0.0,
                     velocity_after: response.relative_tangent_velocity_after,
                     dissipated: response.dissipated_energy,
                 }
@@ -544,6 +566,7 @@ impl Engine {
             .iter()
             .chain(&friction.velocity_after)
             .any(|x| !x.is_finite())
+            || !friction.spin_impulse.is_finite()
             || !friction.dissipated.is_finite()
             || friction.dissipated < 0.0
         {
@@ -554,8 +577,28 @@ impl Engine {
         let tangent = self.tangent_vector(friction.impulse);
         let impulse = self.n.scale(normal.normal_impulse).add(tangent);
         let arm_body = body.pose().orientation().rotate_world_to_body(self.arm);
-        let result = body.apply_impulse_at_body_point(self.scene.properties, arm_body, impulse)?;
-        let angular = body.pose().position_world().add(self.arm).cross(impulse);
+        let spin_impulse = self.n.scale(friction.spin_impulse);
+        vector(spin_impulse)?;
+        let after = if friction.spin_impulse == 0.0 {
+            // Preserve the original point-impact arithmetic when no free
+            // couple is present. Finite-patch impulses update both momenta
+            // together, without a second sequential angular kick.
+            body.apply_impulse_at_body_point(self.scene.properties, arm_body, impulse)?
+                .state_after
+        } else {
+            let orientation = body.pose().orientation();
+            let angular_body = arm_body
+                .cross(orientation.rotate_world_to_body(impulse))
+                .add(orientation.rotate_world_to_body(spin_impulse));
+            body.apply_momentum_impulse(self.scene.properties, impulse, angular_body)?
+                .state_after
+        };
+        let angular = body
+            .pose()
+            .position_world()
+            .add(self.arm)
+            .cross(impulse)
+            .add(spin_impulse);
         self.ledger.contact = self.ledger.contact.add(impulse);
         self.ledger.contact_angular = self.ledger.contact_angular.add(angular);
         self.ledger.plane_work =
@@ -566,7 +609,7 @@ impl Engine {
             finite(self.ledger.impact_loss + normal.dissipated_energy + friction.dissipated)?;
         self.ledger.impulse_scale = finite(self.ledger.impulse_scale + norm(impulse)?)?;
         self.ledger.angular_scale = finite(self.ledger.angular_scale + norm(angular)?)?;
-        let (actual_normal, actual_slip) = self.kinematics(result.state_after)?;
+        let (actual_normal, actual_slip) = self.kinematics(after)?;
         let allowance = 4096.0 * f64::EPSILON * self.velocity_scale;
         if (actual_normal - normal.relative_normal_speed_after).abs() > allowance
             || (actual_slip[0] - friction.velocity_after[0]).abs() > allowance
@@ -574,16 +617,28 @@ impl Engine {
         {
             return Err(SpherePlaneError::Unresolved("impact endpoint velocity"));
         }
-        self.event(
+        if friction.spin_impulse != 0.0 {
+            let before_spin = world_spin(body).scale(self.inertia.recip());
+            let after_spin = world_spin(after).scale(self.inertia.recip());
+            let spin_change = finite(friction.spin_impulse / self.inertia)?;
+            let target = finite(before_spin.dot(self.n) + spin_change)?;
+            let spin_allowance = 4096.0
+                * f64::EPSILON
+                * norm(before_spin)?
+                    .max(norm(after_spin)?)
+                    .max(spin_change.abs());
+            if (after_spin.dot(self.n) - target).abs() > spin_allowance {
+                return Err(SpherePlaneError::Unresolved("impact endpoint spin"));
+            }
+        }
+        self.event_with_spin(
             time,
             SpherePlaneEventKind::Impact,
             normal.normal_impulse,
             tangent,
+            spin_impulse,
         )?;
-        Ok((
-            result.state_after,
-            normal.relative_normal_speed_after == 0.0,
-        ))
+        Ok((after, normal.relative_normal_speed_after == 0.0))
     }
     fn segment(
         &mut self,

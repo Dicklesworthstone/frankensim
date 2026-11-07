@@ -1060,6 +1060,46 @@ forged-work refusal with deterministic retry. The single-sphere prescribed-
 plane geometry admits decoupled normal and tangent mobility; this entry point
 does not extend the contact law to general coupled rigid-body impacts.
 
+## Finite Hertz shear/spin through sphere impact trajectories
+
+`sphere_plane::hertz_impacts` applies the original finite-patch Hertz impulse
+law at actual detected sphere/plane impacts. The real mass, isotropic inertia,
+sphere radius and contact arm determine the two shear mobilities and normal
+spin mobility. Normal restitution remains with the original normal owner;
+normal and shear/spin responses decouple for this particular geometry. The
+native Hertz surface couples shear and spin in one impulse budget, retaining
+pure spinning, mixed sliding/spinning, complete arrest and zero-friction limits.
+No independent saturated torque is added to an already saturated shear impulse.
+
+One native momentum update applies the point impulse and its free normal-axis
+angular impulse together. The original event receipt exposes that free couple,
+and the whole-trajectory angular balance includes it about the world origin.
+Changed spin propagates through the actual subsequent attitude, flight and
+support motion. The independent unscaled midpoint work check includes both
+shear and spin, before the original native endpoint and full-trajectory
+geometry/momentum/energy gates. A translating plane supplies point-impulse
+work; its zero angular velocity supplies no free-couple work. Held force and
+motor work remain separate. Directly accumulated impact loss includes normal
+plus shear/spin loss and is already part of the trajectory's total dissipation.
+It is not an extra heat allocation.
+
+The effective Hertz radius and normalized pressure-impulse profile are supplied
+physical assumptions, never inferred from undeformed rigid sphere geometry.
+The source-callback entry point receives actual incoming slip/spin, event time,
+normal impulse and native body state, and returns an original admitted impulse
+law plus candidate source history. It does not supply an arbitrary impulse.
+There is no invented impact duration, normal pressure, finite travel or thermal
+partition. Persistent support retains the separately supplied point-Coulomb
+static/kinetic law and its explicitly zero torsional resistance; the impact
+footprint is not extrapolated into a sustained constitutive model.
+
+Only complete trajectory acceptance publishes source history and motion.
+Later source failure, native law refusal, exhausted event/impulse budgets or
+cancellation discard earlier private candidates. Six regression groups cover
+analytic spin braking/arrest and attitude, mixed-budget recoil, detected
+motor-driven impacts and continuation, rotation/boost/plane-work covariance,
+separate sustained support, event-dependent source radius and atomic refusal.
+
 ## Directional friction on moving sphere/plane trajectories
 
 `sphere_plane::directional` advances the original sphere's position,

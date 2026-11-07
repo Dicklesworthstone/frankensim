@@ -209,6 +209,7 @@ pub(super) fn admit_impact(
     }
     Ok(TangentialImpactAdvance {
         impulse: report.impulse_ns,
+        spin_impulse: 0.0,
         velocity_after: report.velocity_after_m_s,
         dissipated: report.dissipated_j,
     })
