@@ -7,6 +7,9 @@ mod common;
 #[path = "source_depth_hardness_wear/control.rs"]
 mod control;
 
+#[path = "source_depth_hardness_wear/integration.rs"]
+mod integration;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{

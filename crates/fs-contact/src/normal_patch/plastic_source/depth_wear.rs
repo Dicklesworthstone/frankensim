@@ -42,6 +42,7 @@ use crate::normal_patch::{
 };
 
 mod control;
+pub mod integration;
 pub use control::{
     DepthHardnessNormalDriveAdvance, DepthHardnessNormalLoadAdvance, DepthHardnessWearDriveAdvance,
     DepthHardnessWearLoadAdvance,

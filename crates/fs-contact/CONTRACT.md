@@ -3599,3 +3599,27 @@ late physical refusal publishes no partial successor. Numerical regressions
 cover affine-profile force integration, spring relaxation and plastic softening,
 work/storage closure, constant-profile native equivalence in all three solver
 lanes, zero slip and atomic final-cap refusal.
+
+## Adaptive depth-hardness wear with pressure feedback
+
+`SourceDepthHardnessWear::{integrate_wear,integrate_wear_at_load,integrate_wear_with_drive}`
+refines a fixed proportional path of actual unsigned local slip. It compares
+one full exact-depth step with two half steps, retaining only the complete fine
+history. Existing `WearIntegrationControls` bound local recession, indentation,
+approach and pressure error; their pressure tolerance also bounds each body's
+original exposed hardness and the native softer-body cap. Depth relative scales
+use current-interval physical increments, not old accumulated dents or wear.
+
+Only accepted fine steps contribute both original continuation work accounts,
+separate body volumes and pressure-weighted sliding. Endpoint-difference slip
+preserves the prescribed total. Finite step/evaluation budgets, representable
+increments, original source support and cancellation guard the whole immutable
+candidate. Coarse source-support overshoot may be retried only against the
+original profile integral; accepted leaves never extrapolate. Invalid fixed
+boundary controls and native arithmetic or work-budget failures refuse directly.
+These are local error estimates, not rigorous global enclosures or a friction law.
+
+Numerical regressions cover graded-cap feedback and plastic-work convergence,
+maintained-force exact-profile integration, finite-spring relaxation with coarse
+support recovery, hardness-only refinement, and atomic late refusal. They do not
+constitute empirical material validation.
