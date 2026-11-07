@@ -15,14 +15,24 @@
 //! constitutive laws are outside this adapter. A finite plane bank uses the
 //! existing bounded rainflow/Miner owner and explicit uncorrected, Morrow or
 //! SWT policy. Paired policies retain its coincident-extrema admission rules.
+//! Separate Fatemi-Socie windows observe representative shear cycles with their
+//! original torsional calibration and full-tensor closure. They neither count
+//! arbitrary shear reversals nor contribute an invented Miner damage term.
 //! These empirical estimates do not change stiffness, deposit heat, create
 //! cracks, establish cyclic stabilization or certify component service life.
+
+mod shear;
+
+pub use shear::{ShellFatemiSocieConfig, ShellFatemiSocieGauge};
 
 use std::sync::Arc;
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::critical_plane::TensorFatigueSample;
+use fs_material::fatigue::critical_plane::fatemi_socie::{
+    FatemiSocieCalibration, FatemiSocieCycleResult, FatemiSocieError,
+};
 use fs_material::fatigue::critical_plane::miner::{
     CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
 };
@@ -38,6 +48,7 @@ use super::{
     Element, PlasticShellSections, SmallStrainShellProblem, SmallStrainShellSolution,
     SmallStrainTetError,
 };
+use shear::ShearBank;
 
 /// One original material integration point and a declared finite plane bank.
 #[derive(Debug, Clone)]
@@ -55,13 +66,15 @@ pub struct ShellFatigueGauge {
     pub limits: CriticalPlaneMinerLimits,
 }
 
-/// Combined bounds across gauges; each plane bank retains its own limits too.
+/// Normal-strain bank bounds and the combined normal/shear gauge count.
+/// Representative shear windows have separate aggregate sample/work limits.
 #[derive(Debug, Clone, Copy)]
 pub struct ShellFatigueConfig {
+    /// Combined normal-strain and representative shear-cycle gauge count.
     pub maximum_gauges: usize,
-    /// Sum of declared plane counts times each plane's rainflow residue bound.
+    /// Sum of normal-strain plane counts times each plane's rainflow residue bound.
     pub maximum_total_residue: usize,
-    /// Sum of planes times samples for the complete declared load path,
+    /// Sum of normal-strain planes times samples for the complete declared load path,
     /// including its initial zero-load observation.
     pub maximum_total_projection_work: u64,
 }
@@ -71,12 +84,17 @@ pub enum ShellFatigueError {
     Invalid(&'static str),
     Budget,
     SourceMismatch {
+        /// Combined index: normal-strain gauges, then representative shear gauges.
         gauge: usize,
         what: &'static str,
     },
     Gauge {
         gauge: usize,
         error: CriticalPlaneMinerError,
+    },
+    FatemiSocie {
+        gauge: usize,
+        error: FatemiSocieError,
     },
     Mechanics(SmallStrainTetError),
     Cancelled,
@@ -121,6 +139,7 @@ pub struct ShellFatiguePath<'p, 'm, L: SourceBoundFatigueLaw = ResolvedJ2Plastic
     velocity: Vec<[f64; 6]>,
     gauges: Vec<GaugeState>,
     samples: Vec<TensorFatigueSample>,
+    shear: ShearBank,
     accepted_increments: usize,
     inertia: Option<&'p PlasticShellReferenceInertia<'m>>,
     elapsed_time_s: f64,
@@ -131,6 +150,7 @@ impl<L: SourceBoundFatigueLaw> core::fmt::Debug for ShellFatiguePath<'_, '_, L> 
         f.debug_struct("ShellFatiguePath")
             .field("accepted_increments", &self.accepted_increments)
             .field("gauges", &self.gauges)
+            .field("fatemi_socie_gauges", &self.shear.len())
             .field("elapsed_time_s", &self.elapsed_time_s)
             .field("finished", &self.finished)
             .finish_non_exhaustive()
@@ -147,11 +167,36 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         config: ShellFatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, ShellFatigueError> {
+        Self::new_with_fatemi_socie(
+            problem,
+            gauges,
+            Vec::new(),
+            config,
+            ShellFatemiSocieConfig::default(),
+            cx,
+        )
+    }
+
+    /// Observe normal-strain Miner damage, separately calibrated representative
+    /// Fatemi-Socie cycles, or both on the same native shell trajectory. Shear
+    /// windows start at the actual zero-load state; explicit restart selects a
+    /// later accepted checkpoint after conditioning. Their limits apply to each
+    /// declared window, independently of the whole-path normal-strain history.
+    pub fn new_with_fatemi_socie(
+        problem: &'p SmallStrainShellProblem<'m, L>,
+        gauges: Vec<ShellFatigueGauge>,
+        shear_gauges: Vec<ShellFatemiSocieGauge>,
+        config: ShellFatigueConfig,
+        shear_config: ShellFatemiSocieConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, ShellFatigueError> {
         poll(cx)?;
-        if gauges.is_empty()
-            || gauges.len() > config.maximum_gauges
-            || config.maximum_total_residue == 0
-            || config.maximum_total_projection_work == 0
+        if gauges
+            .len()
+            .checked_add(shear_gauges.len())
+            .is_none_or(|count| count == 0 || count > config.maximum_gauges)
+            || !gauges.is_empty()
+                && (config.maximum_total_residue == 0 || config.maximum_total_projection_work == 0)
         {
             return Err(ShellFatigueError::Budget);
         }
@@ -184,6 +229,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
             }
         }
         let elements = Arc::new(problem.prepare(cx)?);
+        let mut shear = ShearBank::new(problem, shear_gauges, gauges.len(), shear_config, cx)?;
         let mut bank = Vec::with_capacity(gauges.len());
         for (index, gauge) in gauges.into_iter().enumerate() {
             poll(cx)?;
@@ -205,7 +251,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         let zero = endpoint(problem, problem.prescribed, problem.nodal_loads, &[0.0]);
         let solution = zero.solve_prepared(&elements, None, None, cx)?;
         let initial_samples = observe(problem, &solution, &mut bank, cx)?;
-        poll(cx)?;
+        shear.observe(problem, &solution, false, cx)?;
         Ok(Self {
             problem,
             elements,
@@ -213,6 +259,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
             velocity: vec![[0.0; 6]; problem.mesh.nodes.len()],
             gauges: bank,
             samples: initial_samples,
+            shear,
             accepted_increments: 0,
             inertia: None,
             elapsed_time_s: 0.0,
@@ -251,7 +298,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
     }
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         let gauge = self.gauges.get(gauge)?;
-        Some(point_law(self.problem, gauge).fatigue_source())
+        Some(point_law(self.problem, gauge.element, gauge.thickness_point).fatigue_source())
     }
     /// Closed-cycle damage accumulated so far, before unresolved endpoint halves.
     pub fn plane_summaries(&self, gauge: usize) -> Option<Vec<StrainLifeSummary>> {
@@ -264,10 +311,70 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
             .collect()
     }
 
+    /// Completed representative shear windows, without repetition or damage
+    /// accumulation. Open windows have no life result.
+    pub fn fatemi_socie_results(&self) -> Vec<Option<FatemiSocieCycleResult>> {
+        self.shear.results()
+    }
+
+    /// Latest accepted physical tensors in shear-gauge order and facet frames.
+    pub fn fatemi_socie_samples(&self) -> &[TensorFatigueSample] {
+        self.shear.samples()
+    }
+
+    pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
+        self.shear.calibration(gauge)
+    }
+
+    pub fn fatemi_socie_material_source(
+        &self,
+        gauge: usize,
+    ) -> Option<&ResolvedMaterialStatePoint> {
+        self.shear.material_source(self.problem, gauge)
+    }
+
+    /// Begin every shear window at the CURRENT accepted native tensor state.
+    /// This discards only the previous representative windows/results. Normal
+    /// rainflow history, mechanics, velocity and physical time are preserved;
+    /// discarded conditioning windows receive no implicit fatigue credit.
+    pub fn restart_fatemi_socie_cycle(&mut self, cx: &Cx<'_>) -> Result<(), ShellFatigueError> {
+        self.require_shear(cx)?;
+        self.shear.restart(self.problem, &self.solution, cx)
+    }
+
+    /// Close the current representative shear windows together. Full stress
+    /// and strain closure is required; one late refusal preserves every prior
+    /// window. This changes no accepted mechanics or normal-strain history.
+    pub fn close_fatemi_socie_cycle(
+        &mut self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<FatemiSocieCycleResult>, ShellFatigueError> {
+        self.require_shear(cx)?;
+        self.shear.close(cx)
+    }
+
     /// Accept one native quasistatic target. `false` means the path is complete.
     /// Static preload may precede dynamics at zero velocity; static continuation
     /// after a dynamic step refuses rather than silently discarding momentum.
     pub fn advance_next(&mut self, cx: &Cx<'_>) -> Result<bool, ShellFatigueError> {
+        self.advance_next_with_fields(self.problem.prescribed, self.problem.nodal_loads, false, cx)
+    }
+
+    /// Accept the next static endpoint and close all representative shear
+    /// cycles as one transaction. Failed closure publishes neither mechanics
+    /// nor any normal/shear observation from the proposed endpoint.
+    pub fn advance_next_cycle(&mut self, cx: &Cx<'_>) -> Result<bool, ShellFatigueError> {
+        self.require_shear(cx)?;
+        self.advance_next_with_fields(self.problem.prescribed, self.problem.nodal_loads, true, cx)
+    }
+
+    fn advance_next_with_fields(
+        &mut self,
+        prescribed: &[(usize, f64)],
+        nodal_loads: &[(usize, f64)],
+        close_shear: bool,
+        cx: &Cx<'_>,
+    ) -> Result<bool, ShellFatigueError> {
         self.admit_advance(cx)?;
         if self.inertia.is_some() {
             return Err(ShellFatigueError::Invalid(
@@ -278,12 +385,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
             return Ok(false);
         };
         let factors = [factor];
-        let problem = endpoint(
-            self.problem,
-            self.problem.prescribed,
-            self.problem.nodal_loads,
-            &factors,
-        );
+        let problem = endpoint(self.problem, prescribed, nodal_loads, &factors);
         let solution = problem.solve_prepared(
             &self.elements,
             Some((&self.solution.coordinates, &self.solution.section_states)),
@@ -292,7 +394,8 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         )?;
         let mut gauges = self.gauges.clone();
         let samples = observe(self.problem, &solution, &mut gauges, cx)?;
-        poll(cx)?;
+        self.shear
+            .observe(self.problem, &solution, close_shear, cx)?;
         self.solution = solution;
         self.gauges = gauges;
         self.samples = samples;
@@ -309,6 +412,44 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         &mut self,
         reference: &'p PlasticShellReferenceInertia<'m>,
         dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Option<ShellInertialEnergy>, ShellFatigueError> {
+        self.advance_next_backward_euler_with_fields(
+            reference,
+            dt_s,
+            self.problem.prescribed,
+            self.problem.nodal_loads,
+            false,
+            cx,
+        )
+    }
+
+    /// Accept the next physical endpoint and close all representative shear
+    /// cycles atomically, including velocity, time and original inertia receipt.
+    pub fn advance_next_backward_euler_cycle(
+        &mut self,
+        reference: &'p PlasticShellReferenceInertia<'m>,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Option<ShellInertialEnergy>, ShellFatigueError> {
+        self.require_shear(cx)?;
+        self.advance_next_backward_euler_with_fields(
+            reference,
+            dt_s,
+            self.problem.prescribed,
+            self.problem.nodal_loads,
+            true,
+            cx,
+        )
+    }
+
+    fn advance_next_backward_euler_with_fields(
+        &mut self,
+        reference: &'p PlasticShellReferenceInertia<'m>,
+        dt_s: f64,
+        prescribed: &[(usize, f64)],
+        nodal_loads: &[(usize, f64)],
+        close_shear: bool,
         cx: &Cx<'_>,
     ) -> Result<Option<ShellInertialEnergy>, ShellFatigueError> {
         self.admit_advance(cx)?;
@@ -329,15 +470,11 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
                 "dynamic fatigue needs a positive representable physical interval",
             ));
         }
-        let prescribed: Vec<_> = self
-            .problem
-            .prescribed
+        let prescribed: Vec<_> = prescribed
             .iter()
             .map(|&(dof, value)| (dof, factor * value))
             .collect();
-        let loads: Vec<_> = self
-            .problem
-            .nodal_loads
+        let loads: Vec<_> = nodal_loads
             .iter()
             .map(|&(dof, value)| (dof, factor * value))
             .collect();
@@ -355,7 +492,8 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         // The native bridge uses a factor-one endpoint with scaled fields;
         // retain the caller's actual absolute path factor in the public record.
         step.solution.increments[0].load_factor = factor;
-        poll(cx)?;
+        self.shear
+            .observe(self.problem, &step.solution, close_shear, cx)?;
         self.solution = step.solution;
         self.velocity = step.velocity;
         self.gauges = gauges;
@@ -366,8 +504,9 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         Ok(Some(step.inertia))
     }
 
-    /// Read-only hypothetical end of the accepted prefix, including its residual
-    /// half cycles. Does not consume reversals, seal gauges or complete the path.
+    /// Read-only hypothetical end of the normal-strain history, including its
+    /// residual half cycles. Does not consume reversals, complete the path, or
+    /// close/evaluate any representative Fatemi-Socie window.
     pub fn preview_finish(
         &self,
         cx: &Cx<'_>,
@@ -386,7 +525,9 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         Ok(results)
     }
 
-    /// Finish every plane bank atomically after all declared targets are accepted.
+    /// Finish every normal-strain bank and representative shear cycle atomically
+    /// after all declared targets are accepted. A shear closure/calibration
+    /// refusal preserves the prior normal endpoint state and every shear window.
     pub fn finish(
         &mut self,
         cx: &Cx<'_>,
@@ -405,7 +546,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
                     .map_err(|error| gauge_error(index, error))?,
             );
         }
-        poll(cx)?;
+        self.shear.close(cx)?;
         self.gauges = gauges;
         self.finished = true;
         Ok(results)
@@ -415,6 +556,20 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
         poll(cx)?;
         if self.finished {
             return Err(ShellFatigueError::Finished);
+        }
+        self.shear.admit_advance()?;
+        Ok(())
+    }
+
+    fn require_shear(&self, cx: &Cx<'_>) -> Result<(), ShellFatigueError> {
+        poll(cx)?;
+        if self.finished {
+            return Err(ShellFatigueError::Finished);
+        }
+        if self.shear.len() == 0 {
+            return Err(ShellFatigueError::Invalid(
+                "no representative Fatemi-Socie gauges were declared",
+            ));
         }
         Ok(())
     }
@@ -460,10 +615,31 @@ fn endpoint<'a, L: SourceBoundFatigueLaw>(
 
 fn point_law<'a, L: SourceBoundFatigueLaw>(
     problem: &'a SmallStrainShellProblem<'_, L>,
-    gauge: &GaugeState,
+    element: usize,
+    thickness_point: usize,
 ) -> &'a L {
-    let section = problem.sections.at(gauge.element);
-    &section.layers()[section.points()[gauge.thickness_point].layer].law
+    let section = problem.sections.at(element);
+    &section.layers()[section.points()[thickness_point].layer].law
+}
+
+fn accepted_sample<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainShellProblem<'_, L>,
+    solution: &SmallStrainShellSolution<L::State>,
+    element: usize,
+    surface_point: usize,
+    thickness_point: usize,
+) -> Result<TensorFatigueSample, ShellFatigueError> {
+    let point = &solution.section_states[3 * element + surface_point].points[thickness_point];
+    point_law(problem, element, thickness_point)
+        .accepted_fatigue_sample(&point.strain, &point.history)
+        .map_err(|error| {
+            SmallStrainTetError::InvalidInput {
+                what: format!(
+                    "shell fatigue element {element}, surface point {surface_point}, thickness point {thickness_point}: {error}"
+                ),
+            }
+            .into()
+        })
 }
 
 fn observe<L: SourceBoundFatigueLaw>(
@@ -475,13 +651,13 @@ fn observe<L: SourceBoundFatigueLaw>(
     let mut samples = Vec::with_capacity(gauges.len());
     for (index, gauge) in gauges.iter_mut().enumerate() {
         poll(cx)?;
-        let point = &solution.section_states[3 * gauge.element + gauge.surface_point].points
-            [gauge.thickness_point];
-        let sample = point_law(problem, gauge)
-            .accepted_fatigue_sample(&point.strain, &point.history)
-            .map_err(|error| SmallStrainTetError::InvalidInput {
-                what: format!("shell fatigue gauge {index} accepted history: {error}"),
-            })?;
+        let sample = accepted_sample(
+            problem,
+            solution,
+            gauge.element,
+            gauge.surface_point,
+            gauge.thickness_point,
+        )?;
         gauge
             .counter
             .push_with_cancel(sample, &mut || cx.checkpoint().is_err())

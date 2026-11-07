@@ -167,17 +167,21 @@ fn card_with_properties(
             })
             .unwrap();
     }
-    MaterialCard::assemble(
+    let mut card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "synthetic shell alloy".into(),
             phase: "solid".into(),
             process: "synthetic cyclic coupon".into(),
-            revision,
+            revision: 0,
         },
         claims,
         vec![],
     )
-    .unwrap()
+    .unwrap();
+    for _ in 0..revision {
+        card = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+    }
+    card
 }
 fn material(card: &MaterialCard, quantity: QuantitySpec) -> ResolvedJ2Plasticity {
     resolve_j2_plasticity(
@@ -326,6 +330,8 @@ fn gauge<L: SourceBoundFatigueLaw>(
 
 #[path = "plastic_shell_fatigue/cyclic.rs"]
 mod cyclic;
+#[path = "plastic_shell_fatigue/shear.rs"]
+mod shear;
 fn membrane_prescribed() -> Vec<(usize, f64)> {
     // epsilon_x is prescribed, but the free y translation supplies the actual
     // uniaxial Poisson/plastic contraction through native shell equilibrium.

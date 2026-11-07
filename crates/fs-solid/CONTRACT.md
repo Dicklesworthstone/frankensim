@@ -1849,6 +1849,40 @@ source refuses even when material labels, modulus and temperature match.
 These synthetic comparisons establish implementation references, not measured
 cyclic calibration or service-life qualification.
 
+### Representative shear-cycle life on the native shell path
+
+`ShellFatiguePath::new_with_fatemi_socie` admits original material-point
+`ShellFatemiSocieGauge` windows alongside normal-strain Miner gauges, or alone.
+The existing Fatemi-Socie owner evaluates engineering shear-strain paths with
+its minimum-enclosing-circle amplitude, whole-cycle maximum normal stress and
+original maximum-shear-plane selection. It consumes the complete accepted
+facet-frame stress and mechanical strain, including the native plane-stress
+contraction and every Voce/Chaboche history variable. No extra return map,
+backstress subtraction or axial-to-torsional calibration substitution occurs.
+
+Admission binds the original immutable material identity, typed absolute
+temperature, shear modulus and initial yield reference; sourced calibrations
+also match the exact card, operating query and selected E/nu/yield answers.
+Combined gauge counts and checked aggregate window sample/projection/circle
+budgets supplement each window's original limits. Ordinary native steps retain
+shear histories in place, with accepted-prefix rollback on late refusal rather
+than copying the entire retained trace at every endpoint.
+
+Explicit restart seeds a new representative window at the current accepted
+material point while preserving normal rainflow history and native motion.
+Full tensor stress/strain closure remains required. Static and backward-Euler
+cycle endpoint methods accept mechanics and all observations together; failed
+closure, calibration or cancellation preserves the previous solution, velocity,
+time and counters. Finalization closes both kinds of observation atomically;
+normal-history preview does not close or reinterpret a shear window.
+
+Representative shear-life results remain separate from Miner accumulation.
+Neither repetitions, arbitrary variable-amplitude shear cycles, stabilization
+nor creep/thermal interactions are inferred. Five focused synthetic regressions
+in `tests/plastic_shell_fatigue/shear.rs` cover an independent engineering-shear
+life formula, native conditioned Voce/Chaboche histories, original inertia and
+clone continuation, late-gauge rollback, source mismatches and window budgets.
+
 ## Fatigue at fixed material points in spatial rods
 
 `rod::material_field::fatigue::SpatialRodFatiguePath` observes chronological
