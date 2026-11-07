@@ -15,8 +15,25 @@ use fs_modal::ModePair;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Outward-oriented boundary triangles of a structured grid, as grid-node index triples.
-fn boundary(mesh: &Mesh) -> Vec<[usize; 3]> {
+/// Outward-oriented boundary triangles of a structured grid, as grid-node index triples. Each grid face
+/// is split along its shorter diagonal: under the cut a side face is sheared, and fs-bem resolves a
+/// wavelength along a panel's longest edge, so the longer diagonal would only lower the floor. A tie
+/// (every rectangular face, so every face of an uncut bar) keeps the a-c split.
+pub(crate) fn boundary(mesh: &Mesh) -> Vec<[usize; 3]> {
+    split_boundary(mesh, true)
+}
+
+/// The split before the shorter-diagonal rule, every face along a-c, for the tests that compare.
+#[cfg(test)]
+pub(crate) fn boundary_along_ac(mesh: &Mesh) -> Vec<[usize; 3]> {
+    split_boundary(mesh, false)
+}
+
+fn split_boundary(mesh: &Mesh, shorter: bool) -> Vec<[usize; 3]> {
+    let squared = |u: usize, v: usize| {
+        let (p, q) = (mesh.nodes[u], mesh.nodes[v]);
+        (0..3).map(|k| (p[k] - q[k]) * (p[k] - q[k])).sum::<f64>()
+    };
     let counts = mesh.counts;
     let index = |q: [usize; 3]| (q[0] * (counts[1] + 1) + q[1]) * (counts[2] + 1) + q[2];
     let mut faces = Vec::new();
@@ -36,7 +53,12 @@ fn boundary(mesh: &Mesh) -> Vec<[usize; 3]> {
                     let c = index(q);
                     q[other[0]] -= 1;
                     let d = index(q);
-                    for mut face in [[a, b, c], [a, c, d]] {
+                    let pair = if shorter && squared(b, d) < squared(a, c) {
+                        [[a, b, d], [b, c, d]]
+                    } else {
+                        [[a, b, c], [a, c, d]]
+                    };
+                    for mut face in pair {
                         let p = face.map(|v| mesh.nodes[v]);
                         let ab: [f64; 3] = core::array::from_fn(|k| p[1][k] - p[0][k]);
                         let ac: [f64; 3] = core::array::from_fn(|k| p[2][k] - p[0][k]);

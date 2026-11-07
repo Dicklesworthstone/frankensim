@@ -1229,3 +1229,120 @@ fn long_bar_with_steep_cut_edge() -> Card {
     card.mesh_counts = [56, 6, 3];
     card
 }
+
+/// The marimba Eb6 bar (La Favre's outline, the landed card's cut) on 56 x 12 x 6, where the arc's slope makes a
+/// side-face panel the longest edge of the a-c surface.
+fn eb6_on_fine_mesh() -> Card {
+    let mut card = blank();
+    card.length_m = 0.22701249999999998;
+    card.width_m = 0.044449999999999996;
+    card.thickness_m = 0.022098;
+    card.profile = Profile::Arc {
+        stone_radius_m: 0.07513242474461428,
+        middle_thickness_m: 0.013487192967262874,
+        straight_length_m: 0.0,
+    };
+    card.mesh_counts = [56, 12, 6];
+    card
+}
+
+/// The shorter-diagonal surface's longest panel edge against the a-c surface's, after checking that it keeps the
+/// area and enclosed volume, gives no grid face's panels a longer edge, and leaves every vertex on the bar's own
+/// surface.
+fn shorter_diagonal_against_ac(card: &Card) -> (f64, f64) {
+    let mesh = bar::mesh(card, card.mesh_counts);
+    let ours = radiation::boundary(&mesh);
+    let before = radiation::boundary_along_ac(&mesh);
+    assert_eq!(ours.len(), before.len());
+    let tri = |f: &[usize; 3]| f.map(|v| mesh.nodes[v]);
+    let sub = |p: [f64; 3], q: [f64; 3]| -> [f64; 3] { core::array::from_fn(|k| p[k] - q[k]) };
+    let cross = |u: [f64; 3], v: [f64; 3]| {
+        [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ]
+    };
+    let norm = |u: [f64; 3]| (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+    let area = |t: [[f64; 3]; 3]| 0.5 * norm(cross(sub(t[1], t[0]), sub(t[2], t[0])));
+    let edge = |t: [[f64; 3]; 3]| {
+        (0..3)
+            .map(|m| norm(sub(t[(m + 1) % 3], t[m])))
+            .fold(0.0, f64::max)
+    };
+    // Signed volume of the cone from the origin: summed over an outward closed surface, its enclosed volume.
+    let cone = |t: [[f64; 3]; 3]| {
+        let c = cross(t[1], t[2]);
+        (t[0][0] * c[0] + t[0][1] * c[1] + t[0][2] * c[2]) / 6.0
+    };
+    let total = |faces: &[[usize; 3]], g: &dyn Fn([[f64; 3]; 3]) -> f64| {
+        faces.iter().map(|f| g(tri(f))).sum::<f64>()
+    };
+    let (a1, a0) = (total(&ours, &area), total(&before, &area));
+    let (v1, v0) = (total(&ours, &cone), total(&before, &cone));
+    assert!(
+        v0 > 0.0 && (v1 - v0).abs() <= 1e-12 * v0,
+        "volume {v1} against {v0}"
+    );
+    assert!((a1 - a0).abs() <= 1e-12 * a0, "area {a1} against {a0}");
+    let mut changed = 0;
+    for (p, q) in ours.chunks(2).zip(before.chunks(2)) {
+        let mine = edge(tri(&p[0])).max(edge(tri(&p[1])));
+        let theirs = edge(tri(&q[0])).max(edge(tri(&q[1])));
+        assert!(
+            mine <= theirs,
+            "a grid face's panels got a longer edge: {mine} against {theirs}"
+        );
+        changed += usize::from(p != q);
+    }
+    assert!(changed > 0, "the cut shears some side face");
+    let (l, w, t) = (card.length_m, card.width_m, card.thickness_m);
+    for f in &ours {
+        for p in tri(f) {
+            let lower = 0.5 * t - card.profile.thickness(l, t, p[0]);
+            let on = [
+                p[0],
+                l - p[0],
+                0.5 * w - p[1].abs(),
+                0.5 * t - p[2],
+                p[2] - lower,
+            ];
+            assert!(
+                on.iter().all(|&d| d >= -1e-12) && on.iter().any(|&d| d.abs() <= 1e-12),
+                "vertex {p:?} is not on the bar's surface"
+            );
+        }
+    }
+    let resolution = |faces: &[[usize; 3]]| {
+        fs_bem::panel3d::SpherePanels::from_triangles(faces.iter().map(tri).collect())
+            .expect("a panel surface")
+            .resolution_length()
+    };
+    (resolution(&ours), resolution(&before))
+}
+
+/// The shorter-diagonal split keeps each cut bar's surface (area, enclosed volume, vertices on the bar) and never
+/// lengthens a panel edge. On the steep-cut long bar the longest edge is a rectangle's diagonal and stays; on the
+/// Eb6 bar at 56 x 12 x 6 it is a sheared side face's and falls from 6.41370 to 5.77715 mm, the numbers worked by
+/// hand from the same geometry, so the lambda/6 floor rises from 8919.3 to 9902.1 Hz. On an uncut bar every face is
+/// a rectangle and the split is the a-c split, face for face.
+#[test]
+fn shorter_diagonal_keeps_the_surface_and_never_lengthens_an_edge() {
+    let (r1, r0) = shorter_diagonal_against_ac(&long_bar_with_steep_cut_edge());
+    assert!(
+        r1 <= r0,
+        "the steep-cut bar's longest edge {r1} against {r0}"
+    );
+    let (r1, r0) = shorter_diagonal_against_ac(&eb6_on_fine_mesh());
+    assert!((r0 * 1e3 - 6.41370).abs() < 1e-5, "a-c longest edge {r0}");
+    assert!(
+        (r1 * 1e3 - 5.77715).abs() < 1e-5,
+        "shorter-diagonal longest edge {r1}"
+    );
+    let uncut = blank();
+    let prism = bar::mesh(&uncut, uncut.mesh_counts);
+    assert_eq!(
+        radiation::boundary(&prism),
+        radiation::boundary_along_ac(&prism)
+    );
+}
