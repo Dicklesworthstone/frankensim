@@ -525,7 +525,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             radiance_brushing,
             observe_surface,
             0,
-            |_, _| Ok(None),
+            |_, _, _| Ok(None),
             |_, _, _, _| Err(CurvedSceneError::NumericalRange),
         )
         .map(|(path, _)| path)
@@ -555,7 +555,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             thermal_sources,
             observe_event,
             0,
-            |_, _| Ok(None),
+            |_, _, _| Ok(None),
             |_, _, _, _| Err(CurvedSceneError::NumericalRange),
         )
         .map(|(path, _)| path)
@@ -573,7 +573,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         radiance_brushing: bool,
         mut observe_surface: impl FnMut(&CurvedPathResult) -> Result<(), CurvedSceneError>,
         max_volume_events: u32,
-        flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
+        flight: impl FnMut(usize, f64, Ray) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         scatter: impl FnMut(
             usize,
             &CurvedPathResult,
@@ -614,7 +614,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         thermal_sources: &SpatialSources<'_>,
         mut observe_event: impl FnMut(CurvedTraceEvent<'_>) -> Result<(), CurvedSceneError>,
         max_volume_events: u32,
-        mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
+        mut flight: impl FnMut(usize, f64, Ray) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
         mut scatter: impl FnMut(
             usize,
             &CurvedPathResult,
@@ -667,7 +667,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 result.termination = PathTermination::Extinguished;
                 break;
             }
-            let volume_flight = flight(result.medium, result.beam.wavelength_nm())?;
+            let volume_flight = flight(result.medium, result.beam.wavelength_nm(), result.beam.ray())?;
             if volume_flight.is_none()
                 && self.straight_ray_escapes(
                     result.medium,

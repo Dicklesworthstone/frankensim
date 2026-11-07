@@ -18,6 +18,7 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod cells;
+pub(crate) use cells::{grid_forward_interval, grid_scattering_optical_depth};
 /// Exact per-cell beam absorption and the separate scattered-power balance.
 pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.

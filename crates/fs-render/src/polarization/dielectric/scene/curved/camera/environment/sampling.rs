@@ -27,6 +27,10 @@ mod source;
 mod visibility;
 mod weights;
 
+/// Environment connections on native molecular and retained particle walks.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 use visibility::{clear_to_environment, supports_segment};
 use weights::{positive_product, power_weight};
 
@@ -419,7 +423,7 @@ impl<'a, 's, 'm> CurvedEnvironmentCameraScene<'a, 's, 'm> {
         let visibility = clear_to_environment(
             cx,
             self.camera.scene,
-            contact,
+            Some(contact),
             Ray {
                 origin: path.beam().ray().origin,
                 dir: source.direction,

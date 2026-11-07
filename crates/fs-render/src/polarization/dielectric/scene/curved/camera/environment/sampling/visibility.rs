@@ -1,6 +1,7 @@
 //! First-boundary visibility in a declared straight, nonabsorbing medium.
 //!
-//! The real receiving contact owns departure. A finite integration budget
+//! The real receiving contact owns surface departure; volume vertices have
+//! no artificial contact or positional offset. A finite integration budget
 //! does not stand in for infinity: the original outward-bounded scene oracle
 //! must also prove that the remaining forward halfline misses every surface.
 
@@ -49,7 +50,7 @@ pub(super) fn supports_segment(
 pub(super) fn clear_to_environment(
     cx: &Cx<'_>,
     scene: &CurvedPolarizedScene<'_>,
-    contact: CurvedContact,
+    contact: Option<CurvedContact>,
     ray: Ray,
     transverse_axis: Vec3,
     wavelength: f64,
@@ -64,16 +65,18 @@ pub(super) fn clear_to_environment(
     let SceneMedium::Homogeneous(material) = scene.media[medium] else {
         return Err(EnvironmentCameraError::NumericalRange);
     };
-    let instance = scene
-        .geometry
-        .instances()
-        .get(contact.witness.boundary_id)
-        .ok_or(EnvironmentCameraError::NumericalRange)?;
-    if instance.object_id() != contact.object_id
-        || instance.geometry_identity() != contact.geometry_identity
-        || instance.frame_identity() != contact.frame_identity
-    {
-        return Err(EnvironmentCameraError::NumericalRange);
+    if let Some(contact) = contact {
+        let instance = scene
+            .geometry
+            .instances()
+            .get(contact.witness.boundary_id)
+            .ok_or(EnvironmentCameraError::NumericalRange)?;
+        if instance.object_id() != contact.object_id
+            || instance.geometry_identity() != contact.geometry_identity
+            || instance.frame_identity() != contact.frame_identity
+        {
+            return Err(EnvironmentCameraError::NumericalRange);
+        }
     }
     let tolerance = settings.visibility.surface_tolerance_m;
     if scene
@@ -90,17 +93,21 @@ pub(super) fn clear_to_environment(
     if remaining_work == 0 {
         return Err(EnvironmentCameraError::GeometryLimit);
     }
-    let cosine = contact.witness.normal.dot(ray.dir);
-    if !cosine.is_finite() || cosine == 0.0 {
-        return Err(EnvironmentCameraError::NumericalRange);
-    }
-    let departure = GradientDeparture {
-        witness: contact.witness,
-        side: if cosine > 0.0 {
-            BoundarySide::Positive
-        } else {
-            BoundarySide::Negative
-        },
+    let departure = if let Some(contact) = contact {
+        let cosine = contact.witness.normal.dot(ray.dir);
+        if !cosine.is_finite() || cosine == 0.0 {
+            return Err(EnvironmentCameraError::NumericalRange);
+        }
+        Some(GradientDeparture {
+            witness: contact.witness,
+            side: if cosine > 0.0 {
+                BoundarySide::Positive
+            } else {
+                BoundarySide::Negative
+            },
+        })
+    } else {
+        None
     };
     let mut oracle = scene.boundaries.oracle(cx, remaining_work, tolerance);
     let field = HomogeneousIndexField::new(material);
@@ -111,7 +118,7 @@ pub(super) fn clear_to_environment(
         transverse_axis,
         wavelength,
         settings.visibility_distance_m,
-        Some(departure),
+        departure,
         settings.visibility,
         || cx.checkpoint().is_ok(),
     )

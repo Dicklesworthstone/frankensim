@@ -9514,9 +9514,10 @@ A homogeneous absorbing infinite tail has the original exact-zero environment
 response; curved-index source segments retain camera transport without an
 invented angular Jacobian.
 
-This consumer does not estimate scattering survival to infinity. Active
-molecular/particle fields and heterogeneous infinite tails need an original
-finite-support or tail law before their environment proposal can be admitted.
+This surface-only view has no participating-medium law. With `volumes`, the
+participating environment consumer below composes the same source sampler and
+visibility owner with the original finite-grid scattering support. Arbitrary
+active fields and unresolved infinite tails remain outside that proposal.
 Focused native regressions specify original-texel spectral/frame consistency,
 analytic diffuse MIS with independent surface emission, rough-metal linear and
 circular polarization, native blockers, unresolved distance limits and delta
@@ -9589,3 +9590,75 @@ anchor arithmetic was executed separately with actual native phase owners.
 Native material-state and complete camera/grid scene integration are not
 claimed by those bounded executions; the infrared material regression is
 authored for the full native build.
+
+## Polarized environment connections through native finite density grids
+
+With `volumes`,
+`camera::environment::sampling::participating::CurvedParticipatingEnvironmentCameraScene`
+borrows the already identity-checked `CurvedRayleighCameraScene`. Continuous
+surface vertices and accepted physical volume collisions use the original
+environment direction/texel sampler. Rayleigh, depolarized Rayleigh, retained
+spherical Mie tables, spectral tables, and admitted physical mixtures reuse
+`PhaseFunction::polarized_connection_factor` and its wavelength-specific
+`eval_at` PDF. The physical source frame and full Stokes state enter the
+original reciprocal phase response. No scalar particle law is promoted to
+Mueller polarization, and no additional cosine is applied at a volume vertex.
+
+The original `try_new_volume_grid` binding retains its exact density grid and
+finite support. In a homogeneous host, the native cell traversal supplies the
+forward intersection interval and integrates the piecewise-constant mass
+column. An unobstructed source connection uses
+`log(T_s) = -kappa_s(lambda) * sum_cells(rho_cell * length_cell)`.
+Its finite extent is a property of the original grid constructor, not an
+inference from one sampled zero or from a caller's distance limit. Erasing the
+grid behind an arbitrary density-field binding does not retain this admission.
+Absent or globally zero scattering needs no cell visits; a known positive
+uniform infinite tail has exact zero unscattered source radiance. GRIN hosts
+and other active fields remain unsupported by this straight source proposal.
+
+Camera majorant flights use the same retained grid interval: they skip only
+the proven empty prefix and stop at the native far face when the sampled
+majorant flight leaves support. Within support, the original exponential,
+independent acceptance draw, local density, polarized phase sampler and
+surface-versus-collision arbitration remain authoritative. This avoids an
+unbounded exterior null-collision tail without changing an active arbitrary
+field or treating a rejected candidate as a physical scattering event.
+Scattering survival is already represented by these camera flights; it is
+never multiplied into the camera endpoint a second time.
+
+The source leg retains the original native first-boundary visibility query.
+Surface receivers carry their real departure witness; volume receivers start
+at their actual collision point without a fictitious surface or offset. Any
+intervening interface blocks this direct technique. Only homogeneous,
+nonabsorbing geometric source segments with a proven clear infinite geometric
+tail participate. True absorption, refractive images and curved angular maps
+retain their existing camera paths.
+
+Both techniques use a deterministic complementary angular partition from the
+same environment and BSDF/phase solid-angle PDFs. Source survival multiplies
+the direct radiance only; neither a stochastic survival estimate nor a new
+collision rate enters the MIS weight. This does not claim the full marginal
+path-density power heuristic or variance optimality. Physical volume vertices
+replace the continuous anchor, null tracking candidates preserve it, and delta
+surface events clear it. Independent environment streams use native surface
+ordinals or accepted volume ordinals; original surface and flight Philox
+domains are unchanged. Encountered surface and thermal emission remain in
+their original accumulator and are never reweighted by the environment PDF.
+
+Source-grid visits, environment samples and geometric work have cumulative
+explicit caps. Finite log survival is combined with radiometric factors before
+a potentially underflowing exponential can erase a representable bright
+source. Exact optical zeros and the declared infinite-tail zero stay zero;
+unresolved positive range, support, work or cancellation failures refuse the
+complete sample. There is no per-ray heap allocation or copied grid/phase/CDF.
+
+Five focused consumer regression groups specify exact zero-law surface
+parity, heterogeneous source columns and null-collision MIS retention, native
+Rayleigh and spectral-Mie volume connections, refusal to infer arbitrary-field
+support, and positive radiometric recovery from a very small survival factor.
+The native integration regressions and new Rust parsing/format checks were
+not executed in this continuation because the execution environment became
+unavailable. These source-reviewed tests are not a claim of end-to-end build,
+render convergence, or experimental model validation.
+
+Four additional native-cell regression groups specify directional face ownership, layered and oblique density columns, finite support, zero-work misses, crossing budgets, cancellation and numerical-range refusal. A fifth support-distance regression specifies preserved vacuum prefixes and far-face truncation. These five core regression groups are also unexecuted after the workspace interruption; finite-column overflow refuses rather than being relabeled as an infinite uniform tail.

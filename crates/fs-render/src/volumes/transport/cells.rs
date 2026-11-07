@@ -4,6 +4,103 @@ use super::{VolumeGrid, VolumeTransportError, checkpoint};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 
+/// Finite forward support in the native grid's original face convention.
+/// Return entry distance and the rebased length, avoiding a second box law.
+pub(crate) fn grid_forward_interval(
+    grid: &VolumeGrid<'_>,
+    origin: Point3,
+    direction: Vec3,
+) -> Result<Option<(f64, f64)>, VolumeTransportError> {
+    validate_ray(origin, direction, f64::INFINITY)?;
+    let Some(ray) = CellRay::clip(grid, origin, direction, f64::INFINITY, 1)? else {
+        return Ok(None);
+    };
+    if !ray.end.is_finite() || ray.end <= 0.0 || ray.entry_m + ray.end <= ray.entry_m {
+        return Err(VolumeTransportError::Unrepresentable);
+    }
+    Ok(Some((ray.entry_m, ray.end)))
+}
+
+/// Integrate the original piecewise-constant mass density to infinity.
+/// The positive coefficient is m²/kg; every visited cell consumes its native
+/// crossing budget. Zero rate and geometric misses require no cell visits.
+pub(crate) fn grid_scattering_optical_depth(
+    cx: &Cx<'_>,
+    grid: &VolumeGrid<'_>,
+    origin: Point3,
+    direction: Vec3,
+    mass_scattering_m2_kg: f64,
+    max_cells: u32,
+) -> Result<(f64, u32), VolumeTransportError> {
+    grid_column_with_checkpoint(
+        grid, origin, direction, mass_scattering_m2_kg, max_cells,
+        &mut || checkpoint(cx),
+    )
+}
+
+fn grid_column_with_checkpoint(
+    grid: &VolumeGrid<'_>,
+    origin: Point3,
+    direction: Vec3,
+    mass_scattering_m2_kg: f64,
+    max_cells: u32,
+    check: &mut impl FnMut() -> Result<(), VolumeTransportError>,
+) -> Result<(f64, u32), VolumeTransportError> {
+    check()?;
+    validate_ray(origin, direction, f64::INFINITY)?;
+    if !mass_scattering_m2_kg.is_finite() || mass_scattering_m2_kg < 0.0 {
+        return Err(VolumeTransportError::ScatteringSpectrum);
+    }
+    if mass_scattering_m2_kg == 0.0 {
+        return Ok((0.0, 0));
+    }
+    let Some(mut ray) = CellRay::clip(grid, origin, direction, f64::INFINITY, max_cells)? else {
+        return Ok((0.0, 0));
+    };
+    if !ray.end.is_finite() || ray.end <= 0.0 {
+        return Err(VolumeTransportError::Unrepresentable);
+    }
+    let (mut depth, mut correction, mut visits) = (0.0_f64, 0.0_f64, 0_u32);
+    while let Some(segment) = ray.next_with_checkpoint(check)? {
+        visits = visits.checked_add(1).ok_or(VolumeTransportError::Budget)?;
+        let density = grid.data[segment.cell];
+        if !density.is_finite() || density < 0.0 {
+            return Err(VolumeTransportError::Density { index: segment.cell });
+        }
+        if density == 0.0 || segment.length_m == 0.0 {
+            continue;
+        }
+        let increment = super::positive_product(density, mass_scattering_m2_kg, segment.length_m);
+        if increment.is_nan() || increment <= 0.0 {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        // Keep traversing after a range failure so cancellation, invalid
+        // input and work budgets remain exact. A finite column overflow must
+        // not impersonate the separately declared infinite uniform tail.
+        if depth == f64::INFINITY {
+            continue;
+        }
+        let next = depth + increment;
+        if next == f64::INFINITY {
+            depth = next;
+            correction = 0.0;
+        } else {
+            correction += if depth >= increment {
+                (depth - next) + increment
+            } else {
+                (increment - next) + depth
+            };
+            depth = next;
+        }
+    }
+    check()?;
+    let total = depth + correction;
+    if !total.is_finite() || total < 0.0 {
+        return Err(VolumeTransportError::Unrepresentable);
+    }
+    Ok((total, visits))
+}
+
 pub(super) fn validate_ray(
     origin: Point3,
     direction: Vec3,
@@ -223,3 +320,6 @@ impl<'g, 'a> CellRay<'g, 'a> {
         self.entry_m + rebased_distance_m
     }
 }
+
+#[cfg(test)]
+mod finite_support_tests;

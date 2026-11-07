@@ -43,6 +43,9 @@ use fs_rand::philox::philox4x32_10;
 /// Scattering survival along a solved native source-to-receiver branch.
 pub mod transmittance;
 
+mod environment;
+pub(crate) use environment::EnvironmentScatteringSurvival;
+
 /// Immutable density snapshot queried only at delta-tracking candidates.
 /// Implementations must return kg/m³ for one frozen physical state.
 pub trait CurvedDensityField: Sync {
@@ -200,6 +203,8 @@ enum CurvedDensityProfile<'a> {
     Uniform(f64),
     Field {
         field: &'a (dyn CurvedDensityField + Sync),
+        /// Retain the original finite support; arbitrary fields cannot infer it.
+        grid: Option<&'a VolumeGrid<'a>>,
         majorant_kg_m3: f64,
         identity: ContentHash,
     },
@@ -270,6 +275,11 @@ impl<'a> CurvedRayleighMedium<'a> {
         {
             return Err(volume_error(VolumeTransportError::Grid));
         }
+        let (lower, upper) = density.bounds();
+        if (0..3).any(|axis| !upper[axis].is_finite() || upper[axis] <= lower[axis]
+            || !(upper[axis] - lower[axis]).is_finite()) {
+            return Err(volume_error(VolumeTransportError::Grid));
+        }
         let mut majorant = 0.0_f64;
         let mut hash = DomainHasher::new("org.frankensim.render.curved-density-grid.v1");
         for axis in 0..3 {
@@ -287,7 +297,11 @@ impl<'a> CurvedRayleighMedium<'a> {
         if majorant == 0.0 {
             return Self::try_new(scattering, 0.0, phase);
         }
-        Self::try_new_heterogeneous(scattering, density, majorant, hash.finalize(), phase)
+        let mut law = Self::try_new_heterogeneous(scattering, density, majorant, hash.finalize(), phase)?;
+        if let CurvedDensityProfile::Field { grid, .. } = &mut law.density {
+            *grid = Some(density);
+        }
+        Ok(law)
     }
 
     /// Bind a frozen heterogeneous density field. The positive finite majorant
@@ -313,6 +327,7 @@ impl<'a> CurvedRayleighMedium<'a> {
             scattering,
             density: CurvedDensityProfile::Field {
                 field: density,
+                grid: None,
                 majorant_kg_m3: density_majorant_kg_m3,
                 identity: density_identity,
             },
@@ -906,7 +921,7 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
             thermal_sources,
             |event| (observe_event.borrow_mut())(CurvedRayleighEvent::Surface(event)),
             settings.max_volume_events,
-            |medium, wavelength| {
+            |medium, wavelength, ray| {
                 let Some(law) = self.media.get(medium) else {
                     return Ok(None);
                 };
@@ -934,6 +949,23 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 if matches!(law, CurvedRayleighBinding::Field(_)) && !heterogeneous_samples {
                     return Err(volume_error(VolumeTransportError::Sample));
                 }
+                // A retained finite grid in a homogeneous host has exact
+                // straight support. Skip its vacuum prefix and truncate the
+                // original majorant flight at the far face. Other fields keep
+                // the existing arc-length tracking and cannot infer a tail.
+                let support = if let CurvedRayleighBinding::Density(density) = law
+                    && matches!(self.scene.media[medium], SceneMedium::Homogeneous(_))
+                    && let Some(grid) = density.finite_grid()
+                {
+                    match crate::volumes::transport::grid_forward_interval(grid, ray.origin, ray.dir)
+                        .map_err(volume_error)?
+                    {
+                        Some(interval) => Some(interval),
+                        None => return Ok(None),
+                    }
+                } else {
+                    None
+                };
                 let draws = flight_samples(free_flight_draws);
                 free_flight_draws = free_flight_draws
                     .checked_add(1)
@@ -956,6 +988,14 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
                 if distance_m.is_nan() || distance_m < 0.0 || (depth > 0.0 && distance_m == 0.0) {
                     return Err(volume_error(VolumeTransportError::Unrepresentable));
                 }
+                let distance_m = if let Some(interval) = support {
+                    let Some(distance) = environment::supported_distance(interval, distance_m)? else {
+                        return Ok(None);
+                    };
+                    distance
+                } else {
+                    distance_m
+                };
                 Ok(Some(CurvedVolumeFlight {
                     distance_m,
                     phase_samples: [draws[1], draws[2]],

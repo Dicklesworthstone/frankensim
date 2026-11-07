@@ -55,3 +55,47 @@ pub(super) fn positive_product(
         Err(EnvironmentCameraError::NumericalRange)
     }
 }
+
+/// Combine an exact source optical depth with positive radiometric factors.
+/// A finite depth always denotes positive survival. Only the explicit
+/// infinite-tail marker may yield exact zero; intermediate exponential
+/// underflow cannot erase a representable bright-source contribution.
+#[cfg(feature = "volumes")]
+pub(super) fn positive_product_with_log_survival(
+    numerator: &[f64],
+    denominator: f64,
+    log_survival: f64,
+) -> Result<f64, EnvironmentCameraError> {
+    if log_survival == 0.0 {
+        return positive_product(numerator, denominator);
+    }
+    if log_survival.is_nan()
+        || log_survival > 0.0
+        || !denominator.is_finite()
+        || denominator <= 0.0
+        || numerator
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(EnvironmentCameraError::NumericalRange);
+    }
+    if numerator.contains(&0.0) || log_survival == f64::NEG_INFINITY {
+        return Ok(0.0);
+    }
+    let survival = det::exp(log_survival);
+    if survival >= f64::MIN_POSITIVE {
+        let value = (numerator.iter().product::<f64>() / denominator) * survival;
+        if value.is_finite() && value > 0.0 {
+            return Ok(value);
+        }
+    }
+    let exponent = log_survival
+        + numerator.iter().map(|&value| det::ln(value)).sum::<f64>()
+        - det::ln(denominator);
+    let value = det::exp(exponent);
+    if value.is_finite() && value > 0.0 {
+        Ok(value)
+    } else {
+        Err(EnvironmentCameraError::NumericalRange)
+    }
+}

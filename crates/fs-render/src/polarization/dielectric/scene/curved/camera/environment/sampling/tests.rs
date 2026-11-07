@@ -21,6 +21,9 @@ use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 
+#[cfg(feature = "volumes")]
+mod participating;
+
 const X: Vec3 = Vec3::new(1.0, 0.0, 0.0);
 const Y: Vec3 = Vec3::new(0.0, 1.0, 0.0);
 const Z: Vec3 = Vec3::new(0.0, 0.0, 1.0);
