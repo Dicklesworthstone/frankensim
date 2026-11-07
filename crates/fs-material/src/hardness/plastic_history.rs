@@ -262,11 +262,16 @@ impl ResolvedJ2Hardness {
             alpha.is_finite() && alpha >= 0.0 && alpha <= self.maximum_alpha,
             "accumulated plastic strain exceeds the prepared hardness-source interval",
         )?;
+        // The virgin endpoint is an exact supported knot. A lower_bound at
+        // zero returns index 0; never index the fictitious preceding segment.
+        // Treat every sourced knot exactly, including the maximum endpoint.
         let right = self.knots.partition_point(|knot| knot.0 < alpha);
         let (x1, y1) = self.knots[right];
         if x1 == alpha {
             return Ok(y1);
         }
+        // Strict positivity of the input and the first knot at zero guarantee
+        // a preceding segment for a non-knot interior point.
         let (x0, y0) = self.knots[right - 1];
         let value = y0 + ((alpha - x0) / (x1 - x0)) * (y1 - y0);
         require(
