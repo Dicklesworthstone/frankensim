@@ -9075,8 +9075,8 @@ responses, exact extinction, body rotation, spectral changes, independently
 expanded total-internal-reflection phase, delayed source exposures and molecular
 scattering. These are authored source laws and numerical model checks, not
 measured emitter calibration, coherent interference between scene paths,
-polarized environment emission, bulk birefringence or a resolved physical
-polarizer. The original opt-in tracer/volume feature boundaries remain in force.
+bulk birefringence or a resolved physical polarizer. The original opt-in
+tracer/volume feature boundaries remain in force.
 
 ## Directional polarized coating heat reaches native camera observations
 
@@ -9117,7 +9117,50 @@ multilayer/transmitting native scene representations and nonvacuum emitting
 hosts refuse. Directional thermal sources currently enter through camera hits;
 the uniform-source finite-area proposal API does not substitute a fixed-angle
 thermal spectrum. Time-varying thermal states, directional thermal area NEE,
-bulk birefringence and polarized environment laws remain separate work.
+and bulk birefringence remain separate work.
+
+## Directional and spectral polarized environment observations
+
+`EnvironmentRadiance::with_polarization` borrows one explicit source Stokes law;
+`with_polarization_map` instead borrows one independently authored spectral law
+per original row-major texel. Full visible RGB-reconstruction support is checked
+before publication. Fractional Q/U/V retain the source owner's physical-cone
+admission and convex spectral interpolation. The native map still determines
+scalar intensity, spectral reconstruction, angular support and calibration;
+color and brightness never imply polarization or measured spectral accuracy.
+
+`EnvironmentEvaluation::texel_index` exposes the texel already selected by the
+original direction/rotation lookup. Polarization uses that same result without
+a second trigonometric lookup, resampling or interpolation across differently
+oriented Stokes frames. Source axes live in the map's Cartesian coordinates;
+the exact map rotation is prepared once and applied before transverse
+projection. Source travel is opposite the escaped camera ray, and the original
+reciprocal contraction retains A=diag(1,1,-1,1). Circular-only states have no
+linear orientation and use the existing transverse camera axis at degeneracies;
+a singular declared axis with a nonzero linear component refuses.
+
+The shared camera endpoint observes these states through native dielectric,
+conductor and molecular paths, camera analyzers, spectral/raster observations,
+and the existing steady environment term of transient observations. Physical
+camera-prefix intensity and the local phase-index conversion remain separate
+and apply once. Exact source/analyzer extinction is zero emitted contribution,
+while unresolved traversal and positive-response underflow remain refusals.
+The original proven-escape rule applies; infinite true absorption is exactly
+zero before source lookup. Unpolarized declarations preserve scalar arithmetic.
+
+Map admission polls cancellation at bounded texel intervals and borrows storage;
+queries allocate nothing, select one texel and perform at most one bounded
+spectral lookup. Four focused numerical regressions execute the actual source
+evaluation, original texel lookup and reciprocal polarization owner, alongside
+the prior optical/thermal checks. They cover independent full-Stokes detector
+rows, spectral/directional maps, map-axis rotation, circular-frame degeneracy,
+identity, support and range behavior. Native scene regressions additionally
+specify total-internal-reflection phase, actual escaped-path admission and
+infinite absorption; those scene regressions have not yet been executed.
+
+This is an explicitly authored, piecewise-constant angular source law. It adds
+no atmospheric solution, polarized EXR decoding, environment next-event
+sampling, time-varying polarization or coherence between distinct paths.
 
 ## Intensity-dependent two-photon beam absorption and native heat
 

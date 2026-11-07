@@ -1,10 +1,11 @@
-//! Physical source Stokes fractions in an original emitting-body frame.
+//! Physical source Stokes fractions in an original emitting-source frame.
 //!
 //! The intensity spectrum stays with `SurfaceEmitter`. These coordinates are
 //! its normalized (I=1) polarization at each vacuum wavelength, expressed in
 //! the frame obtained by projecting the body-local reference axis transverse
 //! to the actual outward light direction. Proper rigid placement precedes
-//! that projection. A parallel axis refuses for a polarized query.
+//! that projection. Environment bindings instead use map-local coordinates
+//! and the original map rotation. A parallel axis refuses for a polarized query.
 //!
 //! This is incoherent Stokes emission, not a coherent Jones amplitude or a
 //! polarization law inferred from an RGB color or material name. Convex
@@ -18,7 +19,8 @@ use fs_geom::Vec3;
 use fs_math::det;
 
 /// Authored constant or spectral normalized emission polarization. The
-/// positive-Q axis is in the original geometry's local coordinates. Both
+/// positive-Q axis is in the original geometry's local coordinates for a
+/// surface source, or the original map coordinates for an environment. Both
 /// emitting sides use the same declared Stokes coordinates in their own
 /// right-handed outward travel frames; in particular V follows that frame.
 /// Area-bundle preparation retains this declared frame even at unpolarized
@@ -72,7 +74,8 @@ impl SourcePolarization {
         })
     }
 
-    /// Unit reference axis before the native body's proper-rigid placement.
+    /// Unit reference axis before the native source's proper-rigid placement
+    /// or environment-map rotation.
     pub const fn reference_axis(&self) -> Vec3 {
         self.reference_axis
     }

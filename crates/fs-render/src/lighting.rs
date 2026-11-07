@@ -548,7 +548,8 @@ impl EnvironmentMap {
         let column = ((phi / TAU) * f64::from(self.width)).floor() as usize;
         let row = row.min(self.height as usize - 1);
         let column = column.min(self.width as usize - 1);
-        let pixel = self.pixels[row * self.width as usize + column];
+        let texel_index = row * self.width as usize + column;
+        let pixel = self.pixels[texel_index];
         let conditional_pdf = if self.total_weight > 0.0 {
             linear_srgb_luminance(pixel.map(f64::from)) / self.total_weight
         } else {
@@ -557,6 +558,7 @@ impl EnvironmentMap {
         Some(EnvironmentEvaluation {
             emission: environment_emission(pixel),
             pdf_solid_angle: conditional_pdf,
+            texel_index,
         })
     }
 }
@@ -628,6 +630,10 @@ pub struct EnvironmentEvaluation {
     /// Directional PDF, including environment selection probability when
     /// returned by [`AdmittedLighting::environment_evaluation`].
     pub pdf_solid_angle: f64,
+    /// Original row-major texel selected by the same direction/rotation lookup
+    /// as this radiance. Directional source attributes can share that exact
+    /// support without repeating trigonometry or inventing a second mapping.
+    pub texel_index: usize,
 }
 
 /// One direct-light sample.

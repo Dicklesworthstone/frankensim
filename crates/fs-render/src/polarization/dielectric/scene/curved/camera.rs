@@ -45,6 +45,8 @@
 //! a matching smooth conductor face, retaining each film's own temperature.
 //! An environment is evaluated only after proven homogeneous escape. Nonzero
 //! homogeneous absorption over the remaining infinite path gives exactly zero;
+//! explicitly authored environment Stokes fractions follow that escaped
+//! direction, the original map texel/rotation, and the reciprocal camera frame.
 //! optional isothermal LTE volume sources supply their own finite thermal tail.
 //! Numerical distance/event limits are errors,
 //! never background. Native zero power cannot distinguish exact extinction from
@@ -69,6 +71,7 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 
 mod emission;
+mod environment;
 mod polarized_source;
 pub use polarized_source::SourcePolarization;
 /// Finite-source emission histories on native group-delay paths.
@@ -299,10 +302,13 @@ impl SurfaceEmitter {
 /// by `scale_w_m2_sr_nm`. This is a caller-authored spectrum and calibration;
 /// the RGB samples do not determine a measured spectral power distribution.
 /// Calibration applies in the final homogeneous surrounding medium.
+/// Optional explicit polarization is declared in the environment map's local
+/// coordinates and follows its original rotation and piecewise-constant texels.
 #[derive(Clone, Copy, Debug)]
 pub struct EnvironmentRadiance<'a> {
     map: &'a EnvironmentMap,
     scale_w_m2_sr_nm: f64,
+    polarization: Option<environment::EnvironmentPolarization<'a>>,
 }
 
 impl<'a> EnvironmentRadiance<'a> {
@@ -316,6 +322,7 @@ impl<'a> EnvironmentRadiance<'a> {
         Ok(Self {
             map,
             scale_w_m2_sr_nm,
+            polarization: None,
         })
     }
 
@@ -328,6 +335,14 @@ impl<'a> EnvironmentRadiance<'a> {
     }
 
     fn evaluate(&self, direction: Vec3, wavelength_nm: f64) -> Result<f64, CameraRadianceError> {
+        self.evaluate_texel(direction, wavelength_nm).map(|(radiance, _)| radiance)
+    }
+
+    fn evaluate_texel(
+        &self,
+        direction: Vec3,
+        wavelength_nm: f64,
+    ) -> Result<(f64, usize), CameraRadianceError> {
         // RGB reconstruction only declares a visible spectrum. Admitting an
         // infrared ray through native glass must not extrapolate that source.
         if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
@@ -336,15 +351,16 @@ impl<'a> EnvironmentRadiance<'a> {
             ));
         }
         if self.scale_w_m2_sr_nm == 0.0 {
-            return Ok(0.0);
+            return Ok((0.0, 0));
         }
         let sample = self
             .map
             .evaluate(direction)
             .ok_or(CameraRadianceError::NumericalRange)?;
-        finite_nonnegative(
+        let radiance = finite_nonnegative(
             sample.emission.0.eval(wavelength_nm) * sample.emission.1 * self.scale_w_m2_sr_nm,
-        )
+        )?;
+        Ok((radiance, sample.texel_index))
     }
 }
 
@@ -431,6 +447,9 @@ impl CameraRadianceSample {
     pub const fn launch_phase_index(&self) -> f64 {
         self.launch_phase_index
     }
+    /// Native scalar prefix including the local phase-index conversion.
+    /// An environment's source polarization is contracted separately into
+    /// the reported radiance, as with source contributions along the path.
     pub const fn transport_weight(&self) -> f64 {
         self.transport_weight
     }
@@ -692,7 +711,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         let beam = path.beam();
         let wavelength = beam.wavelength_nm();
         let mut tail_transmission = 1.0;
-        let (endpoint, emitted) = match path.termination() {
+        let (endpoint, emitted, polarization_weight) = match path.termination() {
             PathTermination::Opaque => {
                 let contact = path
                     .last_contact()
@@ -705,6 +724,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                         object_id: contact.object_id,
                     },
                     0.0,
+                    1.0,
                 )
             }
             PathTermination::Escaped => {
@@ -719,16 +739,16 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                     }
                     tail_transmission = 0.0;
                 }
-                let emitted = if tail_transmission == 0.0 {
+                let (emitted, polarization_weight) = if tail_transmission == 0.0 {
                     // Infinite absorbing propagation has exactly zero response,
                     // including arbitrarily bright finite calibrated sources.
-                    0.0
+                    (0.0, 1.0)
                 } else if let Some(environment) = self.environment {
-                    environment.evaluate(beam.ray().dir, wavelength)?
+                    environment.evaluate_for_camera(*beam)?
                 } else {
-                    0.0
+                    (0.0, 1.0)
                 };
-                (RadianceEndpoint::Environment, emitted)
+                (RadianceEndpoint::Environment, emitted, polarization_weight)
             }
             other => return Err(CameraRadianceError::Unresolved(other)),
         };
@@ -744,10 +764,9 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
         } else {
             finite_nonnegative(beam.power().i * (ratio * ratio))?
         };
-        let endpoint_emission = finite_nonnegative(emitted * transport_weight)?;
-        if emitted > 0.0 && endpoint_emission == 0.0 {
-            return Err(CameraRadianceError::NumericalRange);
-        }
+        let endpoint_emission = environment::endpoint_radiance(
+            emitted, transport_weight, polarization_weight,
+        )?;
         let radiance_w_m2_sr_nm = finite_nonnegative(surface_emission + endpoint_emission)?;
         cx.checkpoint()?;
         Ok(CameraRadianceSample {
