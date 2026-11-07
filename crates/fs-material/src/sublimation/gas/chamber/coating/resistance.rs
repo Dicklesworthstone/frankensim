@@ -14,6 +14,9 @@
 //! thickness-dependent conductance require separate physical models. These are
 //! first-order frozen-rate intervals, not a complete coating lifecycle.
 
+/// Accuracy-controlled histories carrying both condensed temperatures and one gas.
+pub mod advance;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use fs_thermal::sublimation::coating::resistance::{

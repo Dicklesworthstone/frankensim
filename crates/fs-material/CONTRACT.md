@@ -61,6 +61,39 @@ ideal-gas balances, independent caloric datums, positive-film re-entry, reflecte
 heat, finite gas films, inventory refusal and transactional cancellation.
 
 
+### Adaptive two-temperature deposition against a finite gas
+
+`sublimation::gas::chamber::coating::resistance::advance` evolves the original
+resistive coating owner over a complete duration. Every trial compares one full
+interval with two half intervals and accepts only the conservative fine history;
+it does not extrapolate states or clip species withdrawals. Both condensed
+inventories must initially be positive. Bare-film birth requires its explicit
+single-interval owner before this history can be admitted.
+
+Local error includes deposit mass independently of support mass, every retained
+gas species, support/deposit/gas temperatures, separate original support/deposit
+specific-enthalpy increments, integrated interface heat, and gas sensible energy
+from the original active-mixture caloric integral. Relative caloric scales use
+changes from the current state, so a large enthalpy datum cannot relax thermal
+accuracy. Gas formation constants cancel inside the original caloric owner.
+
+One whole-call trial allowance includes coarse, rejected and inventory-refused
+work, with at most three bounded chamber invocations per trial. The audit counts
+attempted invocations; only accepted half steps contribute to physical streams,
+reflection, interface heat and separate condensed storage. Canonical surface
+order and compensated original-owner sums retain deterministic reductions.
+Whole-window total/species mass and gas/support/deposit energy defects must pass
+the original physical tolerances. Late cancellation or any refusal returns no
+partial candidate. Only the original inventory-limit error is retryable.
+
+The fixed-geometry entry points retain authored areas, thermal conductances and
+independent mass-film coefficients. This is first-order local temporal control,
+not a global error bound, source-fit accuracy claim, nucleation/extinction model,
+or spatial temperature solution. G1 regressions define independent two-body
+exponential and finite-gas ODE limits; G3 covers accepted integrals, datums and
+surface order; G4 covers inventory retry, work/minimum-step limits and cancellation.
+
+
 ## Source-bound finite membrane entropy and thermal stress
 
 `HyperelasticMembrane::thermoelastic_state` prepares the original expansion
