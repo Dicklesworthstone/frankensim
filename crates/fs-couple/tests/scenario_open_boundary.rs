@@ -1,28 +1,37 @@
 //! G0/G3: one control-time transaction reaches both native boundary operators.
 
+use fs_couple::scenario_open_boundary::lattice3;
 use fs_couple::scenario_open_boundary::{
     BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError, rebind_open_faces3,
 };
-use fs_couple::scenario_open_boundary::lattice3;
-use fs_couple::scenario_pressure::{PressureBoundary3, PressureReference};
-use fs_exec::{CancelGate, Cx};
-use fs_lbm::d3q19::{BoundaryGrid3, BoundarySpec3, Face3, FaceBoundary3};
+use fs_couple::scenario_pressure::{
+    PressureBoundary3, PressureReference, ScenarioPressureError, lattice3 as pressure_lattice3,
+};
+use fs_exec::{CancelGate, Cx, KernelRunner, RunError, RunReport, TileKernel, TilePool};
+use fs_lbm::d3q19::{BoundaryGrid3, BoundarySpec3, CollisionModel3, Face3, FaceBoundary3};
 use fs_lbm::d3q27::{CollisionConfig27, CollisionModel27, D3q27, Equilibrium27};
 use fs_lbm::lattice3::open_boundaries::OpenBoundaryGrid3;
-use fs_lbm::lattice3::{Grid3, GridBudget3, GridError3};
+use fs_lbm::lattice3::{D3q19, EquilibriumLattice3, Grid3, GridBudget3, GridError3};
 use fs_lbm::material::plan_scaling_from_material;
 use fs_material::fluid_transport::FluidTransportState;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::payload::{
-    OrientationParity, Payload, PayloadId, PayloadMeta, QuantityContract, ReferenceSemantics,
-    SampleSource, VectorPayload,
+    OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta, QuantityContract,
+    ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
 };
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameTree, Physics, TimeSignal, WORLD};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 
 fn velocity(value: [f64; 3]) -> BoundaryCondition {
+    velocity_source(SampleSource::Fixed(
+        value.map(|v| QtyAny::new(v, VELOCITY)).to_vec(),
+    ))
+}
+
+fn velocity_source(source: SampleSource<Vec<QtyAny>>) -> BoundaryCondition {
     let meta = PayloadMeta::new(
         QuantityContract::Dimensions(VELOCITY),
         PayloadId::new("basis/world-cartesian").unwrap(),
@@ -38,11 +47,7 @@ fn velocity(value: [f64; 3]) -> BoundaryCondition {
         compatibility: None,
         frame: WORLD.0,
         value: Some(BcValue::Typed(Payload::Vector(
-            VectorPayload::new(
-                meta,
-                SampleSource::Fixed(value.map(|v| QtyAny::new(v, VELOCITY)).to_vec()),
-            )
-            .unwrap(),
+            VectorPayload::new(meta, source).unwrap(),
         ))),
     }
 }
@@ -112,8 +117,7 @@ fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
 }
 
 fn generic_grid(cx: &Cx<'_>, tau: f64, maximum_mach: f64) -> OpenBoundaryGrid3<D3q27, 27> {
-    let grid = Grid3::<D3q27, 27>::try_new_equilibrium(
-        [4, 4, 5],
+    grid_with_collision(cx,
         CollisionConfig27 {
             model: CollisionModel27::Bgk {
                 tau,
@@ -121,6 +125,16 @@ fn generic_grid(cx: &Cx<'_>, tau: f64, maximum_mach: f64) -> OpenBoundaryGrid3<D
             },
             maximum_mach,
         },
+    )
+}
+
+fn grid_with_collision<L: EquilibriumLattice3<Q>, const Q: usize>(
+    cx: &Cx<'_>,
+    collision: L::Collision,
+) -> OpenBoundaryGrid3<L, Q> {
+    let grid = Grid3::<L, Q>::try_new_equilibrium(
+        [4, 4, 5],
+        collision,
         [2e-5, -1e-5, 3e-5],
         [true, true, false],
         GridBudget3 { maximum_cells: 80, maximum_mach: 0.2 },
@@ -320,6 +334,338 @@ fn mixed_profile_refusal_keeps_both_controls_at_the_same_time() {
             for x in 0..4 {
                 near(flow.macroscopic((4 * 4 + y) * 4 + x).unwrap().0, 1.0);
             }
+        }
+    });
+}
+
+fn exercise_scenario_steps<L: EquilibriumLattice3<Q>, const Q: usize>(collision: L::Collision) {
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let inlet = velocity_source(
+        SampleSource::table(
+            vec![
+                QtyAny::new(0.0, Dims([0, 0, 1, 0, 0, 0])),
+                QtyAny::new(1.0, Dims([0, 0, 1, 0, 0, 0])),
+            ],
+            [[0.1, -0.05, 0.2], [0.3, -0.15, 0.6]]
+                .into_iter()
+                .map(|v| v.map(|value| QtyAny::new(value, VELOCITY)).to_vec())
+                .collect(),
+            TableInterpolation::Linear,
+            OutsideDomainPolicy::Refuse,
+        )
+        .unwrap(),
+    );
+    let mut outlet = pressure(0.0);
+    outlet.value = Some(BcValue::Signal(TimeSignal::Ramp {
+        t_start: 0.0,
+        t_end: 1.0,
+        from: QtyAny::new(100.0, PRESSURE),
+        to: QtyAny::new(300.0, PRESSURE),
+    }));
+    let frames = FrameTree::new();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let mut serial = grid_with_collision::<L, Q>(cx, collision);
+        let mut parallel = grid_with_collision::<L, Q>(cx, collision);
+        let mut reference = grid_with_collision::<L, Q>(cx, collision);
+        let pool = TilePool::for_host(2, 0xB0A0);
+        let origin = [0.5, -0.25, 1.0];
+        for (step, time_s) in [0.25, 0.75].into_iter().enumerate() {
+            let previous_targets = serial.boundaries();
+            let samples = lattice3::rebind_open_faces3(
+                &mut reference,
+                controls(&inlet, &outlet),
+                &frames,
+                time_s,
+                &scaling,
+                &gate,
+            )
+            .unwrap();
+            let transport = reference.step_serial(cx, None, origin).unwrap();
+            let accepted = lattice3::step_serial(
+                &mut serial,
+                controls(&inlet, &outlet),
+                &frames,
+                time_s,
+                &scaling,
+                cx,
+                None,
+                origin,
+            )
+            .unwrap();
+            let pooled = lattice3::step_pooled(
+                &mut parallel,
+                controls(&inlet, &outlet),
+                &frames,
+                time_s,
+                &scaling,
+                &pool,
+                &gate,
+                None,
+                origin,
+            )
+            .unwrap();
+            assert_eq!(accepted.samples, samples);
+            assert_eq!(accepted.transport, transport);
+            assert_eq!(pooled, accepted);
+            assert_eq!(serial.populations(), reference.populations());
+            assert_eq!(parallel.populations(), serial.populations());
+            assert_ne!(serial.boundaries(), previous_targets);
+            assert_eq!(serial.boundaries(), reference.boundaries());
+            assert_eq!(parallel.boundaries(), serial.boundaries());
+            assert_eq!(serial.completed_steps(), step + 1);
+            assert_eq!(parallel.completed_steps(), step + 1);
+
+            let expected_velocity = [
+                (0.1 + 0.2 * time_s) / 20.0,
+                (-0.05 - 0.1 * time_s) / 20.0,
+                (0.2 + 0.4 * time_s) / 20.0,
+            ];
+            let expected_density =
+                1.0 + (100.0 + 200.0 * time_s) / ((1.0 / 3.0) * 1000.0 * 20.0 * 20.0);
+            for cell in 0..16 {
+                for (actual, expected) in serial
+                    .macroscopic(cell)
+                    .unwrap()
+                    .1
+                    .into_iter()
+                    .zip(expected_velocity)
+                {
+                    near(actual, expected);
+                }
+                near(serial.macroscopic(64 + cell).unwrap().0, expected_density);
+            }
+        }
+    });
+}
+
+#[test]
+fn changing_scenario_histories_advance_both_lattices_and_execution_paths() {
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let tau = scaling.flow().tau;
+    exercise_scenario_steps::<D3q19, 19>(CollisionModel3::Bgk { tau });
+    exercise_scenario_steps::<D3q27, 27>(CollisionConfig27 {
+        model: CollisionModel27::Bgk {
+            tau,
+            equilibrium: Equilibrium27::Factorized,
+        },
+        maximum_mach: 0.2,
+    });
+}
+
+#[test]
+fn refused_native_step_keeps_scenario_controls_and_the_accepted_fluid_prefix() {
+    struct CancelAfterStream {
+        pool: TilePool,
+        calls: AtomicUsize,
+    }
+    impl KernelRunner for CancelAfterStream {
+        fn workers(&self) -> usize {
+            self.pool.workers()
+        }
+        fn run_with_gate<K: TileKernel>(
+            &self,
+            kernel: &K,
+            gate: &CancelGate,
+        ) -> (Result<K::Out, RunError>, RunReport) {
+            let result = self.pool.run_with_gate(kernel, gate);
+            if self.calls.fetch_add(1, Ordering::AcqRel) == 1 {
+                gate.request();
+            }
+            result
+        }
+    }
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let inlet = velocity([0.0, 0.0, 0.4]);
+    let outlet = pressure(200.0);
+    let frames = FrameTree::new();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let mut flow = generic_grid(cx, scaling.flow().tau, 0.2);
+        flow.step_serial(cx, None, [0.0; 3]).unwrap();
+        let targets = flow.boundaries();
+        let populations = flow.populations().to_vec();
+        let mut laws = vec![
+            CollisionConfig27 {
+                model: CollisionModel27::Bgk {
+                    tau: scaling.flow().tau,
+                    equilibrium: Equilibrium27::Factorized,
+                },
+                maximum_mach: 0.2,
+            };
+            80
+        ];
+        // The accepted near-rest state admits this law. The changed inlet
+        // fails only after collision and the earlier reconstructed face cells.
+        laws[15].maximum_mach = 0.01;
+        assert!(matches!(
+            lattice3::step_serial(
+                &mut flow,
+                controls(&inlet, &outlet),
+                &frames,
+                0.5,
+                &scaling,
+                cx,
+                Some(&laws),
+                [0.0; 3],
+            ),
+            Err(lattice3::Error::Boundary(GridError3::Mach { cell: 15, .. }))
+        ));
+        assert_eq!(flow.boundaries(), targets);
+        assert_eq!(flow.populations(), populations);
+        assert_eq!(flow.completed_steps(), 1);
+
+        let runner = CancelAfterStream {
+            pool: TilePool::for_host(2, 0xB0A0),
+            calls: AtomicUsize::new(0),
+        };
+        assert!(matches!(
+            lattice3::step_pooled(
+                &mut flow,
+                controls(&inlet, &outlet),
+                &frames,
+                0.5,
+                &scaling,
+                &runner,
+                &CancelGate::new_clock_free(),
+                None,
+                [0.0; 3],
+            ),
+            Err(lattice3::Error::Boundary(GridError3::Cancelled))
+        ));
+        assert_eq!(runner.calls.load(Ordering::Acquire), 2);
+        assert_eq!(flow.boundaries(), targets);
+        assert_eq!(flow.populations(), populations);
+        assert_eq!(flow.completed_steps(), 1);
+
+        let mut reference = generic_grid(cx, scaling.flow().tau, 0.2);
+        reference.step_serial(cx, None, [0.0; 3]).unwrap();
+        let expected_samples = lattice3::rebind_open_faces3(
+            &mut reference,
+            controls(&inlet, &outlet),
+            &frames,
+            0.5,
+            &scaling,
+            &gate,
+        )
+        .unwrap();
+        let expected_transport = reference.step_serial(cx, None, [0.0; 3]).unwrap();
+        let retry = lattice3::step_serial(
+            &mut flow,
+            controls(&inlet, &outlet),
+            &frames,
+            0.5,
+            &scaling,
+            cx,
+            None,
+            [0.0; 3],
+        )
+        .unwrap();
+        assert_eq!(retry.samples, expected_samples);
+        assert_eq!(retry.transport, expected_transport);
+        assert_eq!(flow.populations(), reference.populations());
+        assert_eq!(flow.boundaries(), reference.boundaries());
+        assert_eq!(flow.completed_steps(), 2);
+    });
+}
+
+#[test]
+fn selected_pressure_history_cannot_be_hidden_by_an_installed_profile() {
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let inlet = velocity([0.0, 0.0, 0.4]);
+    // This maps to the dormant uniform density already held by the grid.
+    let outlet = pressure(0.0);
+    let frames = FrameTree::new();
+    let gate = CancelGate::new_clock_free();
+    with_cx(&gate, |cx| {
+        let mut flow = generic_grid(cx, scaling.flow().tau, 0.2);
+        flow.set_pressure_profile(Face3::ZMax, &gate, |p| Ok(1.01 + 0.001 * p[0] as f64))
+            .unwrap();
+        let profile = flow.pressure_profile(Face3::ZMax).unwrap().to_vec();
+        let targets = flow.boundaries();
+        let populations = flow.populations().to_vec();
+        let input = PressureBoundary3 {
+            boundary: &outlet,
+            reference: PressureReference::Gauge,
+        };
+        assert!(matches!(
+            pressure_lattice3::rebind_pressure_face3(
+                &mut flow, Face3::ZMax, input, &frames, 0.5, &scaling, &gate,
+            ),
+            Err(pressure_lattice3::Error::Scenario(ScenarioPressureError::Boundary(_)))
+        ));
+        let mut pressures = [None; 6];
+        pressures[Face3::ZMax as usize] = Some(input);
+        assert!(matches!(
+            pressure_lattice3::rebind_pressure_faces3(
+                &mut flow, pressures, &frames, 0.5, &scaling, &gate,
+            ),
+            Err(pressure_lattice3::Error::Scenario(ScenarioPressureError::Boundary(_)))
+        ));
+        assert!(matches!(
+            lattice3::rebind_open_faces3(
+                &mut flow,
+                controls(&inlet, &outlet),
+                &frames,
+                0.5,
+                &scaling,
+                &gate,
+            ),
+            Err(lattice3::Error::Scenario(ScenarioBoundaryError::Pressure(
+                _
+            )))
+        ));
+        assert!(matches!(
+            lattice3::step_serial(
+                &mut flow,
+                controls(&inlet, &outlet),
+                &frames,
+                0.5,
+                &scaling,
+                cx,
+                None,
+                [0.0; 3],
+            ),
+            Err(lattice3::Error::Scenario(ScenarioBoundaryError::Pressure(
+                _
+            )))
+        ));
+        assert!(matches!(
+            lattice3::step_pooled(
+                &mut flow,
+                controls(&inlet, &outlet),
+                &frames,
+                0.5,
+                &scaling,
+                &TilePool::for_host(2, 0xB0A0),
+                &gate,
+                None,
+                [0.0; 3],
+            ),
+            Err(lattice3::Error::Scenario(ScenarioBoundaryError::Pressure(
+                _
+            )))
+        ));
+        assert_eq!(flow.boundaries(), targets);
+        assert_eq!(flow.populations(), populations);
+        assert_eq!(flow.completed_steps(), 0);
+        assert_eq!(flow.pressure_profile(Face3::ZMax), Some(profile.as_slice()));
+
+        let mut inlet_only = controls(&inlet, &outlet);
+        inlet_only[Face3::ZMax as usize] = None;
+        let accepted = lattice3::step_serial(
+            &mut flow, inlet_only, &frames, 0.5, &scaling, cx, None, [0.0; 3],
+        )
+        .unwrap();
+        assert_eq!(accepted.samples[5], None);
+        assert_eq!(flow.completed_steps(), 1);
+        assert_eq!(flow.pressure_profile(Face3::ZMax), Some(profile.as_slice()));
+        for (cell, density) in profile.into_iter().enumerate() {
+            near(flow.macroscopic(64 + cell).unwrap().0, density);
         }
     });
 }

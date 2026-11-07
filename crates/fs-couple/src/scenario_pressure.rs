@@ -187,12 +187,36 @@ pub(crate) fn prepare_pressure_faces3<F: FluidTransport + ?Sized>(
     time_s: f64,
     scaling: &MaterialScaling<'_, F>,
     gate: &CancelGate,
+    has_profile: impl FnMut(Face3) -> bool,
+) -> Result<PreparedPressureFaces3, ScenarioPressureError> {
+    prepare_pressure_faces3_with_checkpoint(
+        before,
+        boundaries,
+        frames,
+        time_s,
+        scaling,
+        &mut || {
+            if gate.is_requested() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+        has_profile,
+    )
+}
+
+/// Share sampling with native steps using the caller's original context.
+pub(crate) fn prepare_pressure_faces3_with_checkpoint<F: FluidTransport + ?Sized>(
+    before: BoundarySpec3,
+    boundaries: [Option<PressureBoundary3<'_>>; 6],
+    frames: &FrameTree,
+    time_s: f64,
+    scaling: &MaterialScaling<'_, F>,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
     mut has_profile: impl FnMut(Face3) -> bool,
 ) -> Result<PreparedPressureFaces3, ScenarioPressureError> {
-    let mut checkpoint = || {
-        if gate.is_requested() { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
-    };
-    poll(&mut checkpoint)?;
+    poll(checkpoint)?;
     if !time_s.is_finite() {
         return Err(ScenarioPressureError::Invalid("pressure sample time must be finite"));
     }
@@ -200,7 +224,7 @@ pub(crate) fn prepare_pressure_faces3<F: FluidTransport + ?Sized>(
     let mut samples = [None; 6];
     for (index, input) in boundaries.into_iter().enumerate() {
         let Some(input) = input else { continue; };
-        let sample = sample_pressure3(input, frames, time_s, scaling, &mut checkpoint)?;
+        let sample = sample_pressure3(input, frames, time_s, scaling, checkpoint)?;
         // Even an unchanged dormant uniform target must not claim to have
         // applied a history while an installed spatial profile still wins.
         if has_profile(Face3::ALL[index]) {
@@ -211,7 +235,7 @@ pub(crate) fn prepare_pressure_faces3<F: FluidTransport + ?Sized>(
         targets[index] = FaceBoundary3::Pressure { density: sample.density_lattice };
         samples[index] = Some(sample);
     }
-    poll(&mut checkpoint)?;
+    poll(checkpoint)?;
     Ok(PreparedPressureFaces3 { targets: BoundarySpec3::new(targets), samples })
 }
 

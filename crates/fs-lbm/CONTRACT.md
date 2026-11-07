@@ -178,6 +178,16 @@ reflection and every actual regularization change, with canonical compensated
 reduction; it is not a pressure-work or thermodynamic-energy balance. Target
 rebinds alter held values atomically without advancing or resetting fluid state.
 
+`OpenBoundaryGrid3::{step_serial_with_open_boundaries,
+step_pooled_with_open_boundaries}` accepts new uniform reservoir targets in the
+same native transaction as fluid advancement. Existing topology, boundary-kind,
+profile-ownership and collision-envelope admission still apply. The original
+collision/stream/measurement path uses the candidate face plan; the plan publishes
+at the population/step-count commit point after the final cancellation checkpoint.
+A late failure therefore retains both the old controls and the old fluid state.
+The held-target step and explicit rebind APIs share the same preparation and
+stepping implementation without a second solver or population copy.
+
 `OpenBoundaryGrid3::set_pressure_profile` supplies a held scalar density field
 on either pressure face for transverse hydrostatic heads and localized pressure
 loads, including full D3Q27 collisions. Two reusable face buffers preserve the

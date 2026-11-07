@@ -176,15 +176,35 @@ pub(crate) fn prepare_velocity_faces3<F: FluidTransport + ?Sized>(
     time_s: f64,
     scaling: &MaterialScaling<'_, F>,
     gate: &CancelGate,
+    has_profile: impl FnMut(Face3) -> bool,
+) -> Result<PreparedVelocityFaces3, ScenarioVelocityError> {
+    prepare_velocity_faces3_with_checkpoint(
+        before,
+        boundaries,
+        frames,
+        time_s,
+        scaling,
+        &mut || {
+            if gate.is_requested() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+        has_profile,
+    )
+}
+
+/// Share sampling with native steps using the caller's original context.
+pub(crate) fn prepare_velocity_faces3_with_checkpoint<F: FluidTransport + ?Sized>(
+    before: BoundarySpec3,
+    boundaries: [Option<&BoundaryCondition>; 6],
+    frames: &FrameTree,
+    time_s: f64,
+    scaling: &MaterialScaling<'_, F>,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
     mut has_profile: impl FnMut(Face3) -> bool,
 ) -> Result<PreparedVelocityFaces3, ScenarioVelocityError> {
-    let mut checkpoint = || {
-        if gate.is_requested() {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        }
-    };
     if checkpoint().is_break() {
         return Err(ScenarioVelocityError::Scenario(
             VectorEvaluationError::Cancelled,
@@ -201,7 +221,7 @@ pub(crate) fn prepare_velocity_faces3<F: FluidTransport + ?Sized>(
         let Some(boundary) = boundary else {
             continue;
         };
-        let sample = sample_velocity3(boundary, frames, time_s, scaling, &mut checkpoint)?;
+        let sample = sample_velocity3(boundary, frames, time_s, scaling, checkpoint)?;
         // Unchanged native profiles remain authoritative. A selected scenario
         // target must never report success while an installed profile hides it.
         if has_profile(Face3::ALL[index]) {

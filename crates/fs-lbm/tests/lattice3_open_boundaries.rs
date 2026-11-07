@@ -282,31 +282,39 @@ fn pooled_open_step_and_receipt_match_serial_and_cancel_before_publication() {
     }
     with_cx(|cx| {
         let mut serial = fixture(cx);
-        let expected = serial.step_serial(cx, None, [1.25, -0.5, 2.0]).unwrap();
+        let targets = boundaries(2, [0.03, -0.02, 0.015], 1.202);
+        assert_ne!(serial.boundaries(), targets);
+        let expected = serial
+            .step_serial_with_open_boundaries(cx, targets, None, [1.25, -0.5, 2.0])
+            .unwrap();
+        assert_eq!(serial.boundaries(), targets);
         for workers in [1, 2, 7] {
             let mut parallel = fixture(cx);
             let actual = parallel
-                .step_pooled(
+                .step_pooled_with_open_boundaries(
                     &TilePool::for_host(workers, SEED),
                     &CancelGate::new_clock_free(),
+                    targets,
                     None,
                     [1.25, -0.5, 2.0],
                 )
                 .unwrap();
             assert_eq!(bits(&parallel), bits(&serial));
+            assert_eq!(parallel.boundaries(), targets);
             assert_eq!(actual, expected);
         }
         let mut cancelled = fixture(cx);
         let before = bits(&cancelled);
-        let targets = cancelled.boundaries();
+        let previous_targets = cancelled.boundaries();
         let runner = CancelAfterStream {
             pool: TilePool::for_host(2, SEED),
             calls: AtomicUsize::new(0),
         };
         assert!(matches!(
-            cancelled.step_pooled(
+            cancelled.step_pooled_with_open_boundaries(
                 &runner,
                 &CancelGate::new_clock_free(),
+                targets,
                 None,
                 [1.25, -0.5, 2.0],
             ),
@@ -314,13 +322,18 @@ fn pooled_open_step_and_receipt_match_serial_and_cancel_before_publication() {
         ));
         assert_eq!(bits(&cancelled), before);
         assert_eq!(cancelled.completed_steps(), 0);
-        assert_eq!(cancelled.boundaries(), targets);
-        let retry = cancelled.step_serial(cx, None, [1.25, -0.5, 2.0]).unwrap();
+        assert_eq!(cancelled.boundaries(), previous_targets);
+        let retry = cancelled
+            .step_serial_with_open_boundaries(cx, targets, None, [1.25, -0.5, 2.0])
+            .unwrap();
         assert_eq!(bits(&cancelled), bits(&serial));
+        assert_eq!(cancelled.boundaries(), targets);
         assert_eq!(retry, expected);
         let mut shifted = fixture(cx);
         let other_origin = [2.25, 1.5, -1.0];
-        let actual = shifted.step_serial(cx, None, other_origin).unwrap();
+        let actual = shifted
+            .step_serial_with_open_boundaries(cx, targets, None, other_origin)
+            .unwrap();
         let shift = [1.0, 2.0, -3.0];
         for a in 0..3 {
             let (b, c) = ((a + 1) % 3, (a + 2) % 3);
@@ -418,7 +431,7 @@ fn invalid_topology_targets_and_late_cell_mach_refusal_are_atomic() {
         assert_eq!(bits(&grid), before);
         let mut both = [FaceBoundary3::Periodic; 6];
         both[4] = FaceBoundary3::Velocity {
-            velocity: [0.0, 0.0, 0.03],
+            velocity: [0.0; 3],
         };
         both[5] = both[4];
         let mut late =
@@ -426,13 +439,21 @@ fn invalid_topology_targets_and_late_cell_mach_refusal_are_atomic() {
                 .unwrap();
         let mut laws = vec![bgk(); 320];
         laws[319].maximum_mach = 0.01; // Rest collision passes; the final face target does not.
+        let previous_targets = late.boundaries();
+        both[4] = FaceBoundary3::Velocity { velocity: [0.0, 0.0, 0.03] };
+        both[5] = both[4];
+        let targets = BoundarySpec3::new(both);
         let late_before = bits(&late);
         assert!(matches!(
-            late.step_serial(cx, Some(&laws), [0.0; 3]),
+            late.step_serial_with_open_boundaries(cx, targets, Some(&laws), [0.0; 3]),
             Err(GridError3::Mach { cell: 319, .. })
         ));
         assert_eq!(bits(&late), late_before);
         assert_eq!(late.completed_steps(), 0);
+        assert_eq!(late.boundaries(), previous_targets);
+        late.step_serial_with_open_boundaries(cx, targets, None, [0.0; 3]).unwrap();
+        assert_eq!(late.completed_steps(), 1);
+        assert_eq!(late.boundaries(), targets);
         let cancelled = CancelGate::new_clock_free();
         cancelled.request();
         assert!(matches!(

@@ -1248,6 +1248,24 @@ copies no histories or population fields. G0/G3 regressions in
 `tests/scenario_open_boundary.rs` exercise mixed native velocity/density
 response and all-or-none refusal, including the original collision Mach bound.
 
+For the shared native D3Q19/D3Q27 owner,
+`scenario_open_boundary::lattice3::{step_serial, step_pooled}` samples the same
+typed histories and advances the original fluid operator as one transaction.
+Candidate targets drive collision/stream reconstruction and measured reservoir
+transport. Held controls, populations and completed-step count publish together
+only after the final native checkpoint; a late local-Mach refusal or cancellation
+retains the entire accepted prefix. `BoundaryStep3` returns the accepted physical
+samples alongside the original native mass/momentum transport receipt.
+
+All generic mixed and pressure-only adapters reject a selected installed pressure
+profile, even when a sampled uniform target equals its dormant default. Unselected
+profiles keep their original face fields and still drive the step. The caller
+retains the physical sample time and material scaling; no pressure-work or thermal
+energy certificate is inferred. Focused tests exercise changing histories on both
+lattices, serial/pooled parity, late refusal, cancellation/retry and profile
+ownership across the mixed and pressure-only entry points.
+
+
 
 ## Hardness-dependent changing contact area in finite heat feedback
 

@@ -1,20 +1,23 @@
-//! One control-time transaction for typed velocity inlets and pressure outlets.
+//! Typed velocity inlets and pressure outlets on the original fluid owners.
 //!
 //! This composes the existing scenario adapters before one native boundary
-//! publication. It does not introduce another fluid solver, interpolation law,
-//! mass-balance certificate, or time integrator.
+//! publication. The generic lattice owner also accepts these controls in the
+//! same transaction as collision, streaming and measured reservoir transport.
+//! Interpolation, physical admission and fluid stepping retain their owners.
 
 use crate::scenario_pressure::{
-    PressureBoundary3, PressureSample3, ScenarioPressureError, prepare_pressure_faces3,
+    PressureBoundary3, PressureSample3, ScenarioPressureError,
+    prepare_pressure_faces3_with_checkpoint,
 };
 use crate::scenario_velocity::{
-    ScenarioVelocityError, VelocitySample3, prepare_velocity_faces3,
+    ScenarioVelocityError, VelocitySample3, prepare_velocity_faces3_with_checkpoint,
 };
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{BoundaryForcingError3, BoundaryGrid3, BoundarySpec3, Face3};
 use fs_lbm::material::MaterialScaling;
 use fs_material::fluid_transport::FluidTransport;
 use fs_scenario::{BoundaryCondition, FrameTree};
+use std::ops::ControlFlow;
 
 /// One explicit scenario-region binding on an already configured open face.
 ///
@@ -85,7 +88,7 @@ pub fn rebind_open_faces3<F: FluidTransport + ?Sized>(
         frames,
         time_s,
         scaling,
-        gate,
+        &mut || gate_checkpoint(gate),
         |face| grid.velocity_profile(face).is_some(),
         |face| grid.pressure_profile(face).is_some(),
     )?;
@@ -99,13 +102,21 @@ struct PreparedOpenFaces3 {
     samples: [Option<BoundarySample3>; 6],
 }
 
+fn gate_checkpoint(gate: &CancelGate) -> ControlFlow<()> {
+    if gate.is_requested() {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
+}
+
 fn prepare_open_faces3<F: FluidTransport + ?Sized>(
     before: BoundarySpec3,
     boundaries: [Option<ScenarioBoundary3<'_>>; 6],
     frames: &FrameTree,
     time_s: f64,
     scaling: &MaterialScaling<'_, F>,
-    gate: &CancelGate,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
     has_velocity_profile: impl FnMut(Face3) -> bool,
     has_pressure_profile: impl FnMut(Face3) -> bool,
 ) -> Result<PreparedOpenFaces3, ScenarioBoundaryError> {
@@ -117,23 +128,23 @@ fn prepare_open_faces3<F: FluidTransport + ?Sized>(
         Some(ScenarioBoundary3::Pressure(value)) => Some(value),
         _ => None,
     });
-    let velocity = prepare_velocity_faces3(
+    let velocity = prepare_velocity_faces3_with_checkpoint(
         before,
         velocities,
         frames,
         time_s,
         scaling,
-        gate,
+        checkpoint,
         has_velocity_profile,
     )
     .map_err(ScenarioBoundaryError::Velocity)?;
-    let pressure = prepare_pressure_faces3(
+    let pressure = prepare_pressure_faces3_with_checkpoint(
         velocity.targets,
         pressures,
         frames,
         time_s,
         scaling,
-        gate,
+        checkpoint,
         has_pressure_profile,
     )
     .map_err(ScenarioBoundaryError::Pressure)?;
@@ -151,16 +162,30 @@ fn prepare_open_faces3<F: FluidTransport + ?Sized>(
 /// The same mixed transaction on the shared native D3Q19/D3Q27 owner.
 pub mod lattice3 {
     use super::{
-        BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError, prepare_open_faces3,
+        BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError, gate_checkpoint,
+        prepare_open_faces3,
     };
-    use fs_exec::CancelGate;
+    use fs_exec::{CancelGate, Cx, KernelRunner};
+    use fs_lbm::d3q19::OpenBoundaryMomentumTransport3;
     use fs_lbm::lattice3::open_boundaries::OpenBoundaryGrid3;
     use fs_lbm::lattice3::{EquilibriumLattice3, GridError3};
     use fs_lbm::material::MaterialScaling;
     use fs_material::fluid_transport::FluidTransport;
     use fs_scenario::FrameTree;
+    use std::ops::ControlFlow;
+
+    /// Accepted physical controls and their original native reservoir exchange.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct BoundaryStep3 {
+        /// Samples used by this step, in the original Face3::ALL ordering.
+        pub samples: [Option<BoundarySample3>; 6],
+        /// Measured population mass, momentum and angular momentum transport
+        /// in lattice units; this is not a thermal or pressure-work balance.
+        pub transport: OpenBoundaryMomentumTransport3,
+    }
 
     /// Preserve both adapter diagnostics and the selected collision's admission.
+    /// Refusal preserves all accepted targets, populations and completed steps.
     #[derive(Debug)]
     pub enum Error<E> {
         /// Typed scenario, material-scaling or cancellation refusal.
@@ -200,7 +225,7 @@ pub mod lattice3 {
             frames,
             time_s,
             scaling,
-            gate,
+            &mut || gate_checkpoint(gate),
             |_| false,
             |face| grid.pressure_profile(face).is_some(),
         )
@@ -208,5 +233,96 @@ pub mod lattice3 {
         grid.rebind_open_boundaries(prepared.targets, gate)
             .map_err(Error::Boundary)?;
         Ok(prepared.samples)
+    }
+
+    /// Sample the selected controls and advance one native serial fluid step.
+    ///
+    /// The explicit sample time may be an interval endpoint or midpoint, as
+    /// chosen by the caller's time integrator. Both histories share that time,
+    /// material scale and cancellation context. None preserves the complete
+    /// held control, including an unselected spatial pressure profile; a
+    /// selected profiled face refuses even if its uniform target is unchanged.
+    ///
+    /// Targets, populations and completed-step count publish only after the
+    /// original collision, streaming and reservoir measurement all succeed.
+    /// The returned samples therefore describe the accepted physical step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_serial<L, F, const Q: usize>(
+        grid: &mut OpenBoundaryGrid3<L, Q>,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        scaling: &MaterialScaling<'_, F>,
+        cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<BoundaryStep3, Error<L::Error>>
+    where
+        L: EquilibriumLattice3<Q>,
+        F: FluidTransport + ?Sized,
+    {
+        let prepared = prepare_open_faces3(
+            grid.boundaries(),
+            boundaries,
+            frames,
+            time_s,
+            scaling,
+            &mut || {
+                if cx.checkpoint().is_err() {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            },
+            |_| false,
+            |face| grid.pressure_profile(face).is_some(),
+        )
+        .map_err(Error::Scenario)?;
+        let transport = grid
+            .step_serial_with_open_boundaries(cx, prepared.targets, collisions, origin)
+            .map_err(Error::Boundary)?;
+        Ok(BoundaryStep3 {
+            samples: prepared.samples,
+            transport,
+        })
+    }
+
+    /// Executor counterpart of [`step_serial`], sharing one cancellation gate
+    /// across scenario sampling and the original tiled fluid transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_pooled<L, F, P, const Q: usize>(
+        grid: &mut OpenBoundaryGrid3<L, Q>,
+        boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+        frames: &FrameTree,
+        time_s: f64,
+        scaling: &MaterialScaling<'_, F>,
+        pool: &P,
+        gate: &CancelGate,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<BoundaryStep3, Error<L::Error>>
+    where
+        L: EquilibriumLattice3<Q>,
+        F: FluidTransport + ?Sized,
+        P: KernelRunner,
+    {
+        let prepared = prepare_open_faces3(
+            grid.boundaries(),
+            boundaries,
+            frames,
+            time_s,
+            scaling,
+            &mut || gate_checkpoint(gate),
+            |_| false,
+            |face| grid.pressure_profile(face).is_some(),
+        )
+        .map_err(Error::Scenario)?;
+        let transport = grid
+            .step_pooled_with_open_boundaries(pool, gate, prepared.targets, collisions, origin)
+            .map_err(Error::Boundary)?;
+        Ok(BoundaryStep3 {
+            samples: prepared.samples,
+            transport,
+        })
     }
 }

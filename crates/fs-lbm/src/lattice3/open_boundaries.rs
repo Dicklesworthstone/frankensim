@@ -107,9 +107,23 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         boundaries: BoundarySpec3,
         gate: &CancelGate,
     ) -> Result<(), GridError3<L::Error>> {
-        if gate.is_requested() {
-            return Err(GridError3::Cancelled);
-        }
+        let candidate = self.prepare_open_boundaries(boundaries, &mut || {
+            if gate.is_requested() {
+                Err(GridError3::Cancelled)
+            } else {
+                Ok(())
+            }
+        })?;
+        self.plan = candidate;
+        Ok(())
+    }
+
+    fn prepare_open_boundaries(
+        &self,
+        boundaries: BoundarySpec3,
+        poll: &mut impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<FacePlan, GridError3<L::Error>> {
+        poll()?;
         for face in Face3::ALL {
             match (self.plan.boundaries.face(face), boundaries.face(face)) {
                 (FaceBoundary3::Velocity { .. }, FaceBoundary3::Velocity { .. })
@@ -130,11 +144,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             }
         }
         let candidate = FacePlan::admit(&self.grid, boundaries)?;
-        if gate.is_requested() {
-            return Err(GridError3::Cancelled);
-        }
-        self.plan = candidate;
-        Ok(())
+        poll()?;
+        Ok(candidate)
     }
 
     /// Advance the original collision/stream operator with held reservoirs.
@@ -144,6 +155,37 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     pub fn step_serial(
         &mut self,
         cx: &Cx<'_>,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        self.step_serial_with_plan(cx, self.plan, collisions, origin)
+    }
+
+    /// Advance with new reservoir targets in the same native transaction.
+    ///
+    /// Boundary kinds, geometry and spatial-profile ownership retain the
+    /// checks of [`Self::rebind_open_boundaries`]. The candidate targets drive
+    /// this step's reconstruction and measured transport, but become held
+    /// controls only when populations and the completed-step count publish.
+    /// Collision, streaming, measurement or cancellation failure preserves
+    /// the previous accepted targets as well as the previous fluid state.
+    pub fn step_serial_with_open_boundaries(
+        &mut self,
+        cx: &Cx<'_>,
+        boundaries: BoundarySpec3,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        let plan = self.prepare_open_boundaries(boundaries, &mut || {
+            cx.checkpoint().map_err(|_| GridError3::Cancelled)
+        })?;
+        self.step_serial_with_plan(cx, plan, collisions, origin)
+    }
+
+    fn step_serial_with_plan(
+        &mut self,
+        cx: &Cx<'_>,
+        plan: FacePlan,
         collisions: Option<&[L::Collision]>,
         origin: [f64; 3],
     ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
@@ -167,7 +209,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         }
         let view = OpenStep {
             data,
-            plan: self.plan,
+            plan,
             pressure_profiles: &self.pressure_profiles,
         };
         for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
@@ -178,6 +220,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         poll()?;
         core::mem::swap(&mut grid.f, &mut grid.next);
         grid.completed_steps = step;
+        self.plan = plan;
         Ok(receipt)
     }
 
@@ -188,6 +231,38 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         &mut self,
         pool: &P,
         gate: &CancelGate,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        self.step_pooled_with_plan(pool, gate, self.plan, collisions, origin)
+    }
+
+    /// Executor counterpart of [`Self::step_serial_with_open_boundaries`].
+    /// The same candidate targets feed the original tiled operator and
+    /// canonical receipt reduction; all accepted state publishes together.
+    pub fn step_pooled_with_open_boundaries<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        boundaries: BoundarySpec3,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        let plan = self.prepare_open_boundaries(boundaries, &mut || {
+            if gate.is_requested() {
+                Err(GridError3::Cancelled)
+            } else {
+                Ok(())
+            }
+        })?;
+        self.step_pooled_with_plan(pool, gate, plan, collisions, origin)
+    }
+
+    fn step_pooled_with_plan<P: KernelRunner>(
+        &mut self,
+        pool: &P,
+        gate: &CancelGate,
+        plan: FacePlan,
         collisions: Option<&[L::Collision]>,
         origin: [f64; 3],
     ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
@@ -214,7 +289,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         run_pass(&data, &grid.f, &mut grid.post, false, pool, gate)?;
         let view = OpenStep {
             data,
-            plan: self.plan,
+            plan,
             pressure_profiles: &self.pressure_profiles,
         };
         {
@@ -234,6 +309,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         poll()?;
         core::mem::swap(&mut grid.f, &mut grid.next);
         grid.completed_steps = step;
+        self.plan = plan;
         Ok(receipt)
     }
 
