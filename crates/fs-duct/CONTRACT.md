@@ -310,7 +310,10 @@ orifice terminals: `U_i = - sum_j Y_ij dp_j`, `U_i` the flow leaving the bore th
 and `dp_j` the pressure drop across hole `j`'s orifice, in series with that chimney. Every other hole stays linear, the
 inlet is the chain's matched reference and the load is the termination's own. It is built as a nodal ladder of the
 blocks' admittances (a port's T-junction split into its two series halves around a node, a block with no series part
-such as a sealed hole stamped as a shunt on its node), so no block is inverted and no ABCD product is formed. `Y` is
+such as a sealed hole stamped as a shunt on its node), so no block is inverted and no ABCD product is formed. The nodal
+matrix is tridiagonal (every stamp joins a node to the next), so it is solved with `fs_la::eigen_complex::solve_tridiagonal_complex`,
+the dense `lu_complex` operation graph without its structural zeros: the same bits as the dense factorization (pinned
+against a frozen dense copy over the sweep bins of a 113-segment bore), in O(size) per frequency instead of O(size^3). `Y` is
 reciprocal and passive; for one port `1 / Y_11` is the `Z_net` of `OpenHoleFlow::shunt_port_reflection`, and `Y_11` does
 not depend on how many further holes are made ports. More ports than open holes use all of them; more than
 `MAX_ORIFICE_PORTS` refuses. The coupled orifice law that consumes it lives in `fs-couple` (`open_hole_orifice N`).
