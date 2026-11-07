@@ -2976,6 +2976,25 @@ cannot discard induction memory. This lower owner does not choose temperature
 or deposit reversible heat: the finite-caloric consumer must account for
 magnetic entropy/internal energy and positive combined heat capacity.
 
+### Source-pinned temperature refresh of physical 3D electrodes
+
+`SpatialTerminalInduction::step_voltage_with_materials_candidate` and
+`SpatialCurrentInduction::step_current_with_materials_candidate` apply the same
+complete original source admission to physical equipotential electrodes.
+Only material-weighted magnetic and conductivity operators are rebuilt; the
+original trace, relative gauge, electrode layout and grouped scalar rows remain
+intact. Every solve pairs the accepted old magnetic effort with the new endpoint
+effort. Updating the material cannot replace or re-equilibrate the old A history.
+The total-current path still requires one sparse field solve and recovers the
+electrode voltage, spatial current distribution and terminal work together.
+Original charge, Ampere and work checks include the signed permeability
+parameter transfer separately from physical Joule heat. These entries accept
+original source-pinned induced-linear cells, not temperature-varying recoil or
+nonlinear magnetics; they neither choose temperature nor mutate a heat receiver.
+Focused six-tetrahedron transient tests change both permeability and conductivity,
+compare independent endpoint-coefficient equations and voltage/current duality,
+and exercise source/support/cancellation refusal without accepted-state mutation.
+
 `SpatialNonlinearInduction::step_with_conductors_candidate` provides the same
 source-pinned conductivity refresh for retained saturating, linear and fixed-
 recoil magnetic histories. The complete original conductor bundle, electrical

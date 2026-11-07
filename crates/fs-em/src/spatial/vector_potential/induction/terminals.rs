@@ -17,12 +17,14 @@
 //! terminal supply is dt*sum_t (V_t-V_ref)*I_t. The full field update independently
 //! checks charge conservation, Ampere's law and magnetic/Ohmic/mechanical balance.
 //!
-//! Geometry, occupancy, conductivity and linear/fixed-recoil magnetics stay
-//! fixed. This does not add electrode contact impedance, external lead fields,
+//! Geometry and occupancy stay fixed. The explicit source-pinned refresh path
+//! permits temperature-dependent induced-linear permeability and conductivity.
+//! This does not add electrode contact impedance, external lead fields,
 //! moving interfaces, displacement current or a nonlinear material time step.
 
 use super::mechanical::{SpatialLorentzLoadError, SpatialLorentzLoadLimits, SpatialLorentzLoads};
 use super::*;
+use fs_feec::weighted::WeightedAssemblyLimits;
 use std::collections::BTreeSet;
 
 /// Physical electrode closure against the native RLC circuit and sources.
@@ -414,11 +416,64 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialTerminalInductionCandidate<'m, C>> {
+        self.step_voltage_prepared_candidate(
+            Arc::clone(&self.field.prepared),
+            midpoint_voltage_v,
+            endpoint_impressed_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Advance the accepted magnetic history with source-pinned endpoint
+    /// conductivity and induced-linear permeability. The electrode layout and
+    /// original before-state remain unchanged; parameter work is reported
+    /// separately from physical Joule heat and electrode supply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_voltage_with_materials_candidate(
+        &self,
+        midpoint_voltage_v: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<C>>,
+        assembly: WeightedAssemblyLimits,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialTerminalInductionCandidate<'m, C>> {
+        let prepared = self
+            .field
+            .prepare_materials(materials, conductors, assembly, cancelled)?;
+        self.step_voltage_prepared_candidate(
+            prepared,
+            midpoint_voltage_v,
+            endpoint_impressed_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_voltage_prepared_candidate(
+        &self,
+        prepared: Arc<Prepared<'m, C>>,
+        midpoint_voltage_v: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialTerminalInductionCandidate<'m, C>> {
         let drive = self
             .terminals
             .voltage_drive(midpoint_voltage_v, cancelled)?;
         let native = self.field.step_driven_candidate(
-            Arc::clone(&self.field.prepared),
+            prepared,
             endpoint_impressed_current_a_m2,
             velocity_m_s,
             duration_s,

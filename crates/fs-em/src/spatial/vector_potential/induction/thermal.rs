@@ -45,6 +45,26 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialInductionCandidate<'m, C>> {
+        let prepared = self.prepare_materials(materials, conductors, assembly, cancelled)?;
+        self.step_prepared_candidate(
+            prepared,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Prepare endpoint operators without replacing the accepted source history.
+    /// Electrode owners reuse this allocation for every trial of one interval.
+    pub(super) fn prepare_materials(
+        &self,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<C>>,
+        assembly: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Arc<Prepared<'m, C>>> {
         poll(cancelled)?;
         let old = &self.prepared;
         if materials.len() != old.problem.materials().len() || conductors.len() != materials.len() {
@@ -104,18 +124,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             cancelled,
         )?;
         let magnetic = coupling.restrict(&problem.stiffness, cancelled)?;
-        let prepared = Arc::new(Prepared {
+        Ok(Arc::new(Prepared {
             problem: MagneticOwner::Owned(problem),
             coupling,
             magnetic,
-        });
-        self.step_prepared_candidate(
-            prepared,
-            endpoint_current_a_m2,
-            velocity_m_s,
-            duration_s,
-            controls,
-            cancelled,
-        )
+        }))
     }
 }

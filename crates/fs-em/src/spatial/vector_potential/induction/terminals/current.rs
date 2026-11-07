@@ -107,6 +107,59 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialCurrentInductionCandidate<'m, C>> {
+        self.step_current_prepared_candidate(
+            Arc::clone(&self.field.prepared),
+            midpoint_incoming_current_a,
+            endpoint_impressed_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Prescribe total electrode currents while refreshing original
+    /// source-backed conductivity and induced-linear permeability. The single
+    /// sparse solve retains the original A history and grouped electrode rows;
+    /// signed magnetic parameter work is distinct from Ohmic heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_current_with_materials_candidate(
+        &self,
+        midpoint_incoming_current_a: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        materials: Vec<SpatialMagneticMaterial>,
+        conductors: Vec<Option<C>>,
+        assembly: WeightedAssemblyLimits,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialCurrentInductionCandidate<'m, C>> {
+        let prepared = self
+            .field
+            .prepare_materials(materials, conductors, assembly, cancelled)?;
+        self.step_current_prepared_candidate(
+            prepared,
+            midpoint_incoming_current_a,
+            endpoint_impressed_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_current_prepared_candidate(
+        &self,
+        prepared: Arc<Prepared<'m, C>>,
+        midpoint_incoming_current_a: &[f64],
+        endpoint_impressed_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        controls: SpatialInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialCurrentInductionCandidate<'m, C>> {
         let drive = self.terminals.current_drive(
             midpoint_incoming_current_a,
             &self.terminal_unknown,
@@ -114,7 +167,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
             cancelled,
         )?;
         let candidate = self.field.step_driven_candidate(
-            Arc::clone(&self.field.prepared),
+            prepared,
             endpoint_impressed_current_a_m2,
             velocity_m_s,
             duration_s,

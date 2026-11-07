@@ -4,6 +4,8 @@ use super::*;
 mod circuit;
 #[path = "terminals/current.rs"]
 mod current;
+#[path = "terminals/thermal.rs"]
+mod thermal;
 #[cfg(feature = "magnetic-hysteresis")]
 #[path = "terminals/hysteretic.rs"]
 mod hysteretic;
