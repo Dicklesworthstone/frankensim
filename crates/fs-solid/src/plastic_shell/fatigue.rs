@@ -21,8 +21,10 @@
 //! These empirical estimates do not change stiffness, deposit heat, create
 //! cracks, establish cyclic stabilization or certify component service life.
 
+mod loading;
 mod shear;
 
+pub use loading::ShellFatigueLoading;
 pub use shear::{ShellFatemiSocieConfig, ShellFatemiSocieGauge};
 
 use std::sync::Arc;

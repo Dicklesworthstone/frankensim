@@ -1948,6 +1948,31 @@ in `tests/plastic_shell_fatigue/shear.rs` cover an independent engineering-shear
 life formula, native conditioned Voce/Chaboche histories, original inertia and
 clone continuation, late-gauge rollback, source mismatches and window budgets.
 
+### Independently phased shell loading and native fatigue
+
+`ShellFatigueLoading` supplies new reference prescribed values and dead nodal
+forces/couples for the next original load-path entry. The original factor scales
+both fields; unit factors admit arbitrary absolute endpoint histories. Values
+follow the original support-DOF order, so changing the load path cannot replace
+supports, geometry, source laws or the reference-inertia owner. New field counts,
+DOFs and finite values are admitted before the prepared native solve; its
+coordinate-scaling, overflow, rotation and material-domain checks still apply.
+
+Static and backward-Euler loading methods reuse the existing prepared shell
+geometry and accepted-state observation. Their cycle variants close shear
+windows in the same transaction. Independent membrane, bending and shear phases
+therefore produce actual native tensor paths without imported stress arrays or
+a second time/constitutive solver. A failed endpoint or closure consumes no load
+entry and preserves displacement, velocity, time, plastic state and all counters.
+
+Three focused regressions in `tests/plastic_shell_fatigue/loading.rs` exercise
+a nonproportional triangle in engineering-shear space with an independent
+enclosing-circle/normal-stress/life oracle in both static and dynamic motion,
+native independently forced support motion with nonunit factors and original
+inertial energy, and invalid-field/late-closure rollback. Sample endpoints must
+resolve physical extrema; these controls do not infer an unobserved load path
+or establish that the complete mechanical state is periodic.
+
 ## Fatigue at fixed material points in spatial rods
 
 `rod::material_field::fatigue::SpatialRodFatiguePath` observes chronological

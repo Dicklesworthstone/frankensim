@@ -330,6 +330,8 @@ fn gauge<L: SourceBoundFatigueLaw>(
 
 #[path = "plastic_shell_fatigue/cyclic.rs"]
 mod cyclic;
+#[path = "plastic_shell_fatigue/loading.rs"]
+mod loading;
 #[path = "plastic_shell_fatigue/shear.rs"]
 mod shear;
 fn membrane_prescribed() -> Vec<(usize, f64)> {
