@@ -118,7 +118,15 @@ pub struct WindBoundary {
 /// no filter equation or wave propagation law is duplicated here. A junction
 /// uses `boundary_response`, then commits its solved outgoing wave with `push`.
 /// The original `incoming` accessor remains a LAST-sample observation.
+///
+/// The bank owns the exact fingering ducts, gas snapshot and termination used
+/// to build its characteristic lines. Hold images consume these same immutable
+/// sources. A change of atmosphere, geometry or termination requires a new bank;
+/// an image hop preserves the physical source and its sample clock.
 pub struct WindLineBank {
+    ducts: Vec<Duct>,
+    gas: GasState,
+    termination: Termination,
     fir_lines: Vec<DelayedFilter>,
     fir_taps: Vec<Vec<f64>>,
     vfit_lines: Vec<Option<DelayedFilter>>,
@@ -164,6 +172,7 @@ impl WindLineBank {
             });
         }
         let dt = 1.0 / f64::from(sample_rate_hz);
+        let mut ducts = Vec::new();
         let mut fir_lines = Vec::new();
         let mut fir_taps = Vec::new();
         let mut labels = Vec::new();
@@ -176,6 +185,7 @@ impl WindLineBank {
             let taps = probe_taps(&line)?;
             fir_lines.push(history_line(dt, &taps, &[])?);
             fir_taps.push(taps);
+            ducts.push(duct);
             labels.push(label.to_string());
         }
         let n = fir_lines.len();
@@ -184,6 +194,9 @@ impl WindLineBank {
         }
         let history_capacity = fir_taps.iter().map(Vec::len).max().unwrap_or(0);
         Ok(WindLineBank {
+            ducts,
+            gas: *gas,
+            termination,
             fir_lines,
             fir_taps,
             vfit_lines: vec![None; n],
@@ -359,24 +372,21 @@ impl WindLineBank {
     /// recent outgoing history into it (outputs discarded — the D17
     /// replay-prime lift), then crossfade. REFUSES when the hold
     /// image's gate is not green (scope 4: structurally impossible).
+    /// The active duct, atmosphere and termination are retained from construction;
+    /// callers cannot resupply different physics for a cached numerical image.
     ///
     /// # Errors
     /// [`WindLineError::ImageNotGated`] / realization refusals.
-    pub fn hop_to_hold(
-        &mut self,
-        duct: &Duct,
-        gas: &GasState,
-        termination: Termination,
-        fade_samples: usize,
-    ) -> Result<(), WindLineError> {
+    pub fn hop_to_hold(&mut self, fade_samples: usize) -> Result<(), WindLineError> {
         self.check_live()?;
         if !self.vfit_gate_green {
             return Err(WindLineError::ImageNotGated { image: "vfit-hold" });
         }
         if self.image == ActiveImage::VfitHold { return Ok(()); }
         if self.vfit_templates[self.active].is_none() {
-            self.vfit_templates[self.active] =
-                Some(realize_hold_line(duct, gas, termination, self.dt, self.zc)?);
+            self.vfit_templates[self.active] = Some(realize_hold_line(
+                &self.ducts[self.active], &self.gas, self.termination, self.dt, self.zc,
+            )?);
         }
         // A finite replay window is still an approximate IIR-state lift, not
         // the infinite prehistory. Never replay it on top of a previous visit.
@@ -1009,10 +1019,7 @@ mod wind_articulation_tests {
         let gas = air20();
         let table = fingerings(0.30);
         let mut lp = Loop::new(&table, &gas, false);
-        let duct = table.duct("low").expect("duct");
-        let refused = lp
-            .bank
-            .hop_to_hold(&duct, &gas, Termination::FlangedOpen, 96);
+        let refused = lp.bank.hop_to_hold(96);
         let pass = matches!(refused, Err(WindLineError::ImageNotGated { .. }));
         verdict(
             "wa-003-gate-refusal",
@@ -1025,7 +1032,6 @@ mod wind_articulation_tests {
 #[cfg(test)]
 mod wind_hop_tests {
     use super::wind_articulation_tests::helpers::*;
-    use fs_duct::Termination;
 
     fn verdict(case: &str, pass: bool, detail: &str) {
         println!(
@@ -1046,7 +1052,6 @@ mod wind_hop_tests {
         // The VFIT hold image's registry gate IS green (the .6.1 wind
         // gates review) — the hop is legitimately enterable.
         let mut lp = Loop::new(&table, &gas, true);
-        let duct = table.duct("low").expect("duct");
         let len = 600usize;
         let mut signal = Vec::new();
         let mut block = vec![0.0f64; len];
@@ -1056,9 +1061,7 @@ mod wind_hop_tests {
         let mut hopped_at = usize::MAX;
         for b in 0..40usize {
             if Some(b) == hop_block {
-                lp.bank
-                    .hop_to_hold(&duct, &gas, Termination::FlangedOpen, 96)
-                    .expect("hop");
+                lp.bank.hop_to_hold(96).expect("hop");
                 hopped_at = b;
             }
             lp.block(&mut block);
@@ -1224,6 +1227,136 @@ mod wind_hop_tests {
 }
 
 
+
+#[cfg(test)]
+mod wind_source_tests {
+    use super::*;
+    use super::wind_articulation_tests::{air20, fingerings};
+    use fs_duct::{Fingering, HoleState};
+    use fs_material::gas::GasSpec;
+    use fs_material::gas_species::GasSpecies;
+
+    const RATE: u32 = 24_000;
+    const RADIUS: f64 = 0.0075;
+
+    fn close(a: f64, b: f64) {
+        assert!((a-b).abs() <= 2.0e-12 * a.abs().max(b.abs()).max(1.0), "{a} != {b}");
+    }
+
+    // Compare the bank's source routing and accepted wave history with a direct
+    // realization by the original owner. Some sources can legitimately refuse
+    // the bounded VFIT image; that refusal must also agree, without advancing
+    // the phrase image or falling back to coefficients from another source.
+    fn assert_hold_source(
+        bank: &mut WindLineBank,
+        duct: &Duct,
+        gas: &GasState,
+        termination: Termination,
+    ) -> bool {
+        assert_eq!(bank.image(), ActiveImage::CharLine);
+        for n in 0..64 {
+            bank.push(f64::from(n % 13) - 6.0).unwrap();
+        }
+        let history = bank.history.clone();
+        let boundary = bank.boundary_response().unwrap();
+        let last_incoming = bank.incoming();
+        let lift_count = bank.lift_log().len();
+        let expected = realize_hold_line(
+            duct, gas, termination, 1.0 / f64::from(RATE),
+            gas.characteristic_impedance / (core::f64::consts::PI * RADIUS * RADIUS),
+        );
+        match expected {
+            Err(expected) => {
+                let actual = bank.hop_to_hold(0).unwrap_err();
+                assert_eq!(actual.to_string(), expected.to_string());
+                assert_eq!(bank.image(), ActiveImage::CharLine);
+                assert_eq!(bank.boundary_response().unwrap(), boundary);
+                assert_eq!(bank.history, history);
+                assert_eq!(bank.incoming(), last_incoming);
+                assert_eq!(bank.lift_log().len(), lift_count);
+                false
+            }
+            Ok(mut expected) => {
+                for &x in &history { expected.push(x).unwrap(); }
+                bank.hop_to_hold(0).unwrap();
+                assert_eq!(bank.image(), ActiveImage::VfitHold);
+                assert_eq!(bank.history, history);
+                assert_eq!(bank.incoming(), last_incoming);
+                assert_eq!(bank.lift_log().last().unwrap().carried, history.len());
+                for n in 0..256 {
+                    let incoming = expected.incoming();
+                    let boundary = bank.boundary_response().unwrap();
+                    assert_eq!(boundary.direct_reflection, 0.0);
+                    close(boundary.history_pressure_pa, incoming);
+                    let outgoing = f64::from(n % 17) - 8.0;
+                    close(bank.push(outgoing).unwrap(), incoming);
+                    expected.push(outgoing).unwrap();
+                }
+                true
+            }
+        }
+    }
+
+    #[test]
+    fn hold_and_characteristic_images_share_pressure_composition_and_termination() {
+        // Keep one original low fingering so each independent source change
+        // is compared on the same geometry and sample clock.
+        let duct = fingerings(0.30).duct("low").unwrap();
+        let table = FingeringTable::try_new(duct.clone(), vec![Fingering {
+            label: "low".to_string(),
+            holes: vec![HoleState::Closed, HoleState::Closed],
+        }]).unwrap();
+        let thin_air = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 50_000.0).unwrap();
+        let helium = GasState::try_new(&GasSpecies::Helium.spec(), 293.15, 101_325.0).unwrap();
+        let cases = [
+            ("air", air20(), Termination::FlangedOpen),
+            ("pressure", thin_air, Termination::FlangedOpen),
+            ("composition", helium, Termination::FlangedOpen),
+            ("termination", air20(), Termination::IdealOpen),
+        ];
+        let mut baseline: Option<Vec<f64>> = None;
+        for (case, gas, termination) in cases {
+            let zc = gas.characteristic_impedance / (core::f64::consts::PI * RADIUS * RADIUS);
+            let mut bank = WindLineBank::new(&table, &gas, termination, RATE, zc, true).unwrap();
+            if let Some(reference) = &baseline {
+                let change = bank.fir_taps[0].iter().zip(reference)
+                    .map(|(a, b)| (a-b).abs()).fold(0.0_f64, f64::max);
+                assert!(change > 1.0e-8, "{case} did not reach the characteristic image");
+            } else {
+                baseline = Some(bank.fir_taps[0].clone());
+            }
+            let admitted = assert_hold_source(&mut bank, &duct, &gas, termination);
+            if case == "air" {
+                assert!(admitted, "the existing qualified low-fingering fixture must still hop");
+            }
+            // Re-enter after the FIR has evolved: cached hold coefficients must
+            // still describe this same source, with freshly replayed history.
+            bank.hop_back_to_char(0).unwrap();
+            assert_eq!(assert_hold_source(&mut bank, &duct, &gas, termination), admitted);
+        }
+    }
+
+    #[test]
+    fn hold_image_uses_active_fingering_after_switch_and_cached_reentry() {
+        let gas = air20();
+        let table = fingerings(0.30);
+        let labels = table.labels();
+        let zc = gas.characteristic_impedance / (core::f64::consts::PI * RADIUS * RADIUS);
+        let mut bank = WindLineBank::new(
+            &table, &gas, Termination::FlangedOpen, RATE, zc, true,
+        ).unwrap();
+        assert_ne!(bank.fir_taps[0], bank.fir_taps[1]);
+        assert_ne!(bank.fir_taps[0], bank.fir_taps[2]);
+        for index in [0, 1, 2, 0, 2] {
+            bank.switch_fingering(index, 0).unwrap();
+            assert_eq!(bank.active_label(), labels[index]);
+            let duct = table.duct(labels[index]).unwrap();
+            let admitted = assert_hold_source(&mut bank, &duct, &gas, Termination::FlangedOpen);
+            if index == 0 { assert!(admitted); }
+        }
+    }
+}
+
 #[cfg(test)]
 mod same_sample_boundary_tests {
     use super::*;
@@ -1234,6 +1367,10 @@ mod same_sample_boundary_tests {
         let n = taps.len();
         let capacity = taps.iter().map(Vec::len).max().unwrap();
         WindLineBank {
+            // These synthetic-tap fixtures never sweep a physical duct.
+            ducts: vec![Duct { segments: Vec::new() }; n],
+            gas: super::wind_articulation_tests::air20(),
+            termination: Termination::FlangedOpen,
             fir_lines: taps.iter().map(|h| history_line(dt, h, &[]).unwrap()).collect(),
             fir_taps: taps, vfit_lines: vec![None; n], vfit_templates: vec![None; n],
             labels: (0..n).map(|i| i.to_string()).collect(), active: 0,
@@ -1315,21 +1452,19 @@ mod same_sample_boundary_tests {
     fn hold_reentry_replays_a_fresh_template_and_uses_actual_recent_waves() {
         let taps = vec![0.1, 0.2, 0.0, -0.1, 0.05, 0.0, 0.0, 0.0];
         let mut bank = bank(vec![taps.clone(), taps.clone()]);
-        // The template is already realized; the supplied dummy duct is never
-        // swept. Test the state lift, not TMM fitting or source calibration.
+        // The template is already realized. Test the state lift independently
+        // of TMM fitting or source calibration.
         let template = DelayedFilter::new(2.5, filter(bank.dt)).unwrap();
         bank.vfit_templates[0] = Some(template.clone());
-        let gas = super::wind_articulation_tests::air20();
-        let duct = Duct { segments: Vec::new() };
         for x in [1.0, 2.0, -1.0, 4.0] { bank.push(x).unwrap(); }
-        bank.hop_to_hold(&duct, &gas, Termination::FlangedOpen, 4).unwrap();
+        bank.hop_to_hold(4).unwrap();
         for x in [3.0, -2.0, 0.5] { bank.push(x).unwrap(); }
         bank.hop_back_to_char(0).unwrap();
         assert!(bank.fade_old.is_none());
         for x in [5.0, -3.0, 1.0] { bank.push(x).unwrap(); }
         let mut expected = template;
         for &x in &bank.history { expected.push(x).unwrap(); }
-        bank.hop_to_hold(&duct, &gas, Termination::FlangedOpen, 0).unwrap();
+        bank.hop_to_hold(0).unwrap();
         assert!(bank.fade_old.is_none());
         close(bank.boundary_response().unwrap().history_pressure_pa, expected.incoming());
         // Switch DIRECTLY from hold: the dormant char ring must not be used.
