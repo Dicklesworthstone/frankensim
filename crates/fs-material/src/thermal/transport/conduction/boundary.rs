@@ -26,8 +26,10 @@ use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 /// never evaluated as though it were another material sample.
 ///
 /// The source is single-phase and the normal profile is quasi-steady within
-/// the half-cell. Geometry, composition and the original Cp/Cv constraint
-/// remain fixed. Spatial/time accuracy still requires the original solver's
+/// the half-cell. Area, film, composition and the original Cp/Cv constraint
+/// remain fixed. The explicit geometry-aware query admits density-driven normal
+/// half-thickness while preserving this same source-integrated surface solve.
+/// Spatial/time accuracy still requires the original solver's
 /// refinement; this constitutive integral does not establish it by itself.
 pub struct IntegratedCaloricBoundary<'l, 'a, 'm> {
     layer: &'l CaloricConductionLayer<'a, 'm>,
@@ -97,6 +99,69 @@ impl<'l, 'a, 'm> IntegratedCaloricBoundary<'l, 'a, 'm> {
             checkpoint,
         )
     }
+
+    fn implicit_state(
+        &self,
+        specific_energy_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        relative_distance_slope_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitBoundaryState, DepositionError> {
+        let state = self.layer.state_at_specific_energy(specific_energy_j_kg)?;
+        let flux_geometry = if geometry == self.geometry {
+            self.flux_geometry
+        } else {
+            ReservoirLayerGeometry::planar(geometry.area_m2, geometry.half_distance_m)?
+        };
+        let response = flux_geometry.evaluate_material_to_bath(
+            self.layer.conductivity_curve(),
+            [state.temperature_k, bath_temperature_k],
+            self.film_resistance_k_w,
+            self.config,
+            &mut *checkpoint,
+        )?;
+        // Admit the SAME heat applied by the native residual before publishing
+        // its complete derivative. No flux or stored energy is repaired.
+        let applied = response.conductance_w_k * (state.temperature_k - bath_temperature_k);
+        let allowance = self.config.absolute_heat_tolerance_w
+            + self.config.relative_heat_tolerance
+                * applied.abs().max(response.power_to_reservoir_w.abs());
+        let mut derivative = response.endpoint_derivative_w_k[0] * state.temperature_slope_kg_k_j;
+        if relative_distance_slope_kg_j != 0.0 {
+            // Q=(A/d)*integral(Ts..T) k dT; Ts=Tbath+Rfilm*Q.
+            // The geometry term is -Q*(d'/d)/(1+(A/d)*k(Ts)*Rfilm).
+            // Resolve k at the SAME accepted material face, not at the bath.
+            let kface = self
+                .layer
+                .conductivity_curve()
+                .conductivity_w_m_k(response.material_face_temperature_k)?;
+            let material_resistance = geometry.half_distance_m / kface;
+            let total_resistance = material_resistance + geometry.surface_resistance_m2_k_w;
+            if !material_resistance.is_finite()
+                || material_resistance <= 0.0
+                || !total_resistance.is_finite()
+                || total_resistance <= 0.0
+            {
+                return Err(DepositionError::Arithmetic);
+            }
+            let geometry_term =
+                -response.power_to_reservoir_w * (material_resistance / total_resistance);
+            derivative = geometry_term.mul_add(relative_distance_slope_kg_j, derivative);
+        }
+        if !applied.is_finite()
+            || !allowance.is_finite()
+            || (applied - response.power_to_reservoir_w).abs() > allowance
+            || !derivative.is_finite()
+        {
+            return Err(DepositionError::Arithmetic);
+        }
+        checkpoint()?;
+        Ok(ImplicitBoundaryState {
+            conductance_w_k: response.conductance_w_k,
+            power_enthalpy_derivative_w_kg_j: derivative,
+        })
+    }
 }
 
 impl ImplicitBoundaryLaw for IntegratedCaloricBoundary<'_, '_, '_> {
@@ -117,33 +182,39 @@ impl ImplicitBoundaryLaw for IntegratedCaloricBoundary<'_, '_, '_> {
                 "integrated caloric boundary requires its original area, distance and film",
             ));
         }
-        let state = self.layer.state_at_specific_energy(specific_energy_j_kg)?;
-        let response = self.flux_geometry.evaluate_material_to_bath(
-            self.layer.conductivity_curve(),
-            [state.temperature_k, bath_temperature_k],
-            self.film_resistance_k_w,
-            self.config,
-            &mut *checkpoint,
-        )?;
-        // The original thermal residual applies G*(Tcell-Tbath). Admit that
-        // very power against the original layer solve before returning its
-        // analytic derivative; never repair the physical energy afterward.
-        let applied = response.conductance_w_k * (state.temperature_k - bath_temperature_k);
-        let allowance = self.config.absolute_heat_tolerance_w
-            + self.config.relative_heat_tolerance
-                * applied.abs().max(response.power_to_reservoir_w.abs());
-        let derivative = response.endpoint_derivative_w_k[0] * state.temperature_slope_kg_k_j;
-        if !applied.is_finite()
-            || !allowance.is_finite()
-            || (applied - response.power_to_reservoir_w).abs() > allowance
-            || !derivative.is_finite()
-        {
-            return Err(DepositionError::Arithmetic);
-        }
+        self.implicit_state(
+            specific_energy_j_kg,
+            bath_temperature_k,
+            geometry,
+            0.0,
+            checkpoint,
+        )
+    }
+
+    fn state_at_specific_enthalpy_with_geometry_tangent(
+        &self,
+        specific_energy_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        half_distance_relative_enthalpy_derivative_kg_j: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitBoundaryState>, DepositionError> {
         checkpoint()?;
-        Ok(ImplicitBoundaryState {
-            conductance_w_k: response.conductance_w_k,
-            power_enthalpy_derivative_w_kg_j: derivative,
-        })
+        if geometry.area_m2 != self.geometry.area_m2
+            || geometry.surface_resistance_m2_k_w != self.geometry.surface_resistance_m2_k_w
+            || !half_distance_relative_enthalpy_derivative_kg_j.is_finite()
+        {
+            return Err(DepositionError::InvalidInput(
+                "density-driven integrated boundary requires its original area, film and finite length tangent",
+            ));
+        }
+        self.implicit_state(
+            specific_energy_j_kg,
+            bath_temperature_k,
+            geometry,
+            half_distance_relative_enthalpy_derivative_kg_j,
+            checkpoint,
+        )
+        .map(Some)
     }
 }

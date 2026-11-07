@@ -27,8 +27,12 @@ pub mod surface_link;
 pub use surface_link::IntegratedCaloricSurfaceLink;
 
 use super::{
-    isobaric::conduction::IsobaricConductionLaw, isochoric::conduction::IsochoricConductionLaw,
-    storage::conduction::HeatStorageConductionLaw, volumetric::timeline::FixedVolumeThermalLaw,
+    isobaric::{
+        conduction::IsobaricConductionLaw, expansion::conduction::IsobaricExpansionConductionLaw,
+    },
+    isochoric::conduction::IsochoricConductionLaw,
+    storage::conduction::HeatStorageConductionLaw,
+    volumetric::timeline::FixedVolumeThermalLaw,
 };
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerConductionResponse, LayerGeometry,
@@ -46,6 +50,7 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 #[derive(Clone, Copy, Debug)]
 enum OriginalConduction<'a, 'm> {
     Isobaric(&'a IsobaricConductionLaw<'m>),
+    ExpandingIsobaric(&'a IsobaricExpansionConductionLaw<'m>),
     Isochoric(&'a IsochoricConductionLaw<'m>),
     FixedVolume(&'m FixedVolumeThermalLaw<'m>),
     HeatStorage(&'a HeatStorageConductionLaw<'m, 'm>),
@@ -70,6 +75,18 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     pub fn from_isobaric(law: &'a IsobaricConductionLaw<'m>) -> Result<Self, DepositionError> {
         Ok(Self {
             original: OriginalConduction::Isobaric(law),
+            conductivity: law.integrated_conductivity_curve()?,
+        })
+    }
+
+    /// Retain the same isobaric Cp/k chart and its explicitly qualified
+    /// free-expansion density. Planar geometry may follow the native conserved
+    /// mass/fixed-footprint closure; no second heat or pressure-work account.
+    pub fn from_expanding_isobaric(
+        law: &'a IsobaricExpansionConductionLaw<'m>,
+    ) -> Result<Self, DepositionError> {
+        Ok(Self {
+            original: OriginalConduction::ExpandingIsobaric(law),
             conductivity: law.integrated_conductivity_curve()?,
         })
     }
@@ -113,6 +130,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     pub fn caloric_law(&self) -> &'m dyn ThermalLaw {
         match self.original {
             OriginalConduction::Isobaric(law) => law.caloric(),
+            OriginalConduction::ExpandingIsobaric(law) => law.caloric(),
             OriginalConduction::Isochoric(law) => law.caloric(),
             OriginalConduction::FixedVolume(law) => law,
             OriginalConduction::HeatStorage(law) => law.caloric(),
@@ -129,6 +147,9 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     pub fn supports_material_card(&self, card: ContentHash) -> bool {
         match self.original {
             OriginalConduction::Isobaric(law) => law.caloric().material_card_identity() == card,
+            OriginalConduction::ExpandingIsobaric(law) => {
+                law.caloric().caloric().material_card_identity() == card
+            }
             OriginalConduction::Isochoric(law) => law.caloric().material_card_identity() == card,
             OriginalConduction::FixedVolume(law) => law.path().material_card_identity() == card,
             OriginalConduction::HeatStorage(law) => {
@@ -151,6 +172,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     pub fn source_line(&self) -> &PropertyLineSlice {
         match self.original {
             OriginalConduction::Isobaric(law) => law.source_line(),
+            OriginalConduction::ExpandingIsobaric(law) => law.source_line(),
             OriginalConduction::Isochoric(law) => law.source_line(),
             OriginalConduction::FixedVolume(law) => &law.path().source_lines()[1],
             OriginalConduction::HeatStorage(law) => law.source_line(),
@@ -162,6 +184,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     pub fn energy_bounds_j_kg(&self) -> [f64; 2] {
         match self.original {
             OriginalConduction::Isobaric(law) => law.enthalpy_bounds_j_kg(),
+            OriginalConduction::ExpandingIsobaric(law) => law.enthalpy_bounds_j_kg(),
             OriginalConduction::Isochoric(law) => law.enthalpy_bounds_j_kg(),
             OriginalConduction::FixedVolume(law) => law.specific_storage_span_j_kg(),
             OriginalConduction::HeatStorage(law) => law.enthalpy_bounds_j_kg(),
@@ -175,6 +198,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     ) -> Result<ImplicitConductionState, DepositionError> {
         match self.original {
             OriginalConduction::Isobaric(law) => law.state_at_specific_enthalpy(energy),
+            OriginalConduction::ExpandingIsobaric(law) => law.state_at_specific_enthalpy(energy),
             OriginalConduction::Isochoric(law) => law.state_at_specific_internal_energy(energy),
             OriginalConduction::FixedVolume(law) => law.conduction_state_at_specific_storage(energy),
             OriginalConduction::HeatStorage(law) => law.state_at_specific_storage(energy),
@@ -228,7 +252,8 @@ fn admit_original_link(
 /// One bound source-integrated face of the original implicit chain or graph.
 ///
 /// The caller declares homogeneous, source-free, quasi-steady layers aligned
-/// with each scalar conductivity and fixed planar/radial geometry. The native
+/// with each scalar conductivity. Radial geometry remains fixed; the explicit
+/// geometry-aware query permits density-driven planar half-distances. The native
 /// timeline owns all finite-cell storage, mass, entropy and accepted time steps.
 /// Layers add no separate heat inventory, convection or mechanical work.
 /// Each ordered side retains its declared storage: heat exchange does not
@@ -439,13 +464,15 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         energies_j_kg: [f64; 2],
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<LayerConductionResponse, DepositionError> {
-        self.response(energies_j_kg, &mut checkpoint)
+        self.response(energies_j_kg, self.geometry, [0.0; 2], &mut checkpoint)
             .map(|(response, _)| response)
     }
 
     fn response(
         &self,
         energies_j_kg: [f64; 2],
+        geometry: LayerGeometry,
+        relative_distance_slopes_kg_j: [f64; 2],
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(LayerConductionResponse, [f64; 2]), DepositionError> {
         checkpoint()?;
@@ -457,8 +484,7 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
             None
         };
         let resistance = contact.map_or(self.resistance_m2_k_w, |state| state.resistance_m2_k_w);
-        let response = self
-            .geometry
+        let response = geometry
             .conduction(
                 self.layers.map(CaloricConductionLayer::conductivity_curve),
                 resistance,
@@ -486,11 +512,28 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
                 );
             }
         }
+        for side in 0..2 {
+            let relative_slope = relative_distance_slopes_kg_j[side];
+            if relative_slope != 0.0 {
+                // I_a(Tia,Ta)=q*d_a; I_b(Tb,Tib)=q*d_b.
+                // At fixed bulk T, dQ/dd_i = (dQ/dR'')/k(Tinterface_i).
+                // Use the SAME accepted interface and original contact query.
+                let kface = self.layers[side]
+                    .conductivity_curve()
+                    .conductivity_w_m_k(response.interface_temperature_k[side])?;
+                let distance_response =
+                    (geometry.equivalent_distances_m()[side] / kface) * relative_slope;
+                derivatives[side] = response
+                    .contact_resistance_derivative_w2_m2_k
+                    .mul_add(distance_response, derivatives[side]);
+            }
+        }
         if !applied.is_finite()
             || !allowance.is_finite()
             || (applied - response.power_a_to_b_w).abs() > allowance
             || derivatives.iter().any(|value| !value.is_finite())
             || (contact.is_none()
+                && relative_distance_slopes_kg_j == [0.0; 2]
                 && (!super::positive(derivatives[0]) || !super::positive(-derivatives[1])))
         {
             return Err(DepositionError::Arithmetic);
@@ -518,11 +561,51 @@ impl ImplicitLinkLaw for IntegratedCaloricLink<'_, '_, '_> {
                 "integrated caloric link requires its original geometry and contact coverage",
             ));
         }
-        let (response, derivatives) = self.response(energies_j_kg, checkpoint)?;
+        let (response, derivatives) =
+            self.response(energies_j_kg, self.geometry, [0.0; 2], checkpoint)?;
         Ok(ImplicitLinkState {
             conductance_w_k: response.conductance_w_k,
             power_enthalpy_derivatives_w_kg_j: derivatives,
         })
+    }
+
+    fn state_at_specific_enthalpies_with_geometry_tangent(
+        &self,
+        energies_j_kg: [f64; 2],
+        geometry: ConductiveLink,
+        patch: ContactPatch,
+        half_distance_relative_enthalpy_derivatives_kg_j: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<ImplicitLinkState>, DepositionError> {
+        checkpoint()?;
+        // Equivalent radial distances are not physical normal thicknesses.
+        // Updating them from planar volume would silently change that model.
+        if self.geometry.radial_coordinates_m().is_some() {
+            return Ok(None);
+        }
+        if patch != self.patch
+            || geometry.link_id != self.link_id()
+            || geometry.contact_resistance_m2_k_w != self.resistance_m2_k_w
+            || half_distance_relative_enthalpy_derivatives_kg_j
+                .iter()
+                .any(|slope| !slope.is_finite())
+        {
+            return Err(DepositionError::InvalidInput(
+                "density-driven integrated link requires its original area, contact and finite length tangents",
+            ));
+        }
+        let current =
+            LayerGeometry::planar(geometry.half_distances_m, self.geometry.contact_area_m2())?;
+        let (response, derivatives) = self.response(
+            energies_j_kg,
+            current,
+            half_distance_relative_enthalpy_derivatives_kg_j,
+            checkpoint,
+        )?;
+        Ok(Some(ImplicitLinkState {
+            conductance_w_k: response.conductance_w_k,
+            power_enthalpy_derivatives_w_kg_j: derivatives,
+        }))
     }
 }
 

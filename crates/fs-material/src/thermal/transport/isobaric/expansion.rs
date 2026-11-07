@@ -6,6 +6,10 @@
 //! Cp is never relabeled Cv. This is a uniform quasistatic specimen, with only
 //! pressure-volume work, not a constrained solid, pressure solver or moving mesh.
 
+/// Original Cp/conductivity and free density on native implicit thermal networks.
+#[path = "expansion/conduction.rs"]
+pub mod conduction;
+
 use super::IsobaricHeatCapacityLaw;
 use crate::thermal::transport::{
     ThermalTransportError,
@@ -14,6 +18,7 @@ use crate::thermal::transport::{
 };
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::MaterialCard;
+use fs_thermal::enthalpy::{DepositionError, ThermalLaw, ThermalStorageBasis};
 
 /// Original caloric and free-expansion sources qualified at one maintained pressure.
 /// Preparation checks the complete shared material and query context once.
@@ -127,6 +132,37 @@ impl<'a> IsobaricFreeExpansion<'a> {
     #[must_use]
     pub const fn density(&self) -> &'a PreparedFreeExpansionDensity {
         self.density
+    }
+
+    /// Exact d(1/rho)/dh [m³/J] on this SAME source isobar.
+    ///
+    /// With rho=rho_ref/J and dh/dT=Cp(T), this is J_T/(rho_ref*Cp).
+    /// Cp is evaluated at the original inverse temperature, never frozen at
+    /// the density reference or replaced by Cv. Original expansion knots use
+    /// their right tangent, except the final endpoint which uses the left.
+    /// A zero or negative volume response is retained without clipping.
+    pub fn specific_volume_derivative_at_specific_enthalpy(
+        &self,
+        h: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        let temperature = self
+            .caloric
+            .temperature_k(h)
+            .map_err(|_| invalid("enthalpy outside the original isobaric expansion path"))?;
+        let cp = self.caloric.specific_heat_cp_j_kg_k(temperature)?;
+        let tangent = self
+            .density
+            .expansion()
+            .at_temperature_with_tangent(temperature)?;
+        let volume_slope = tangent.relative_volume_derivative_per_k();
+        let reference_density = self.density.reference_density_answer().evidence.value.value;
+        let derivative = (volume_slope / reference_density) / cp;
+        if !derivative.is_finite() || (volume_slope != 0.0 && derivative == 0.0) {
+            return Err(invalid(
+                "isobaric specific-volume tangent is unrepresentable",
+            ));
+        }
+        Ok(derivative)
     }
 
     /// Heat/cool the conserved mass at the source's maintained absolute pressure.
@@ -264,6 +300,45 @@ impl<'a> IsobaricFreeExpansion<'a> {
             return Err(invalid("original free-volume change is unrepresentable"));
         }
         Ok(sign * sum)
+    }
+}
+
+impl ThermalLaw for IsobaricFreeExpansion<'_> {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some(*self.identity.as_bytes())
+    }
+
+    fn storage_basis(&self) -> ThermalStorageBasis {
+        ThermalStorageBasis::Enthalpy
+    }
+
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        self.caloric.temperature_k(h)
+    }
+
+    fn maximum_temperature_slope(&self) -> f64 {
+        self.caloric.maximum_temperature_slope()
+    }
+
+    /// Current material density from the original reference density and J(T).
+    /// Stored mass and the reference mesh remain owned by the native timeline.
+    /// A geometric consumer explicitly chooses how that volume affects heat
+    /// transfer; this does not turn free expansion into constrained-solid data.
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        let temperature = self.caloric.temperature_k(h)?;
+        self.density
+            .at_temperature(temperature)
+            .map(|state| Some(state.density_kg_m3()))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
+    fn specific_entropy_change_j_kg_k(
+        &self,
+        initial_h: f64,
+        final_h: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        self.caloric
+            .specific_entropy_change_j_kg_k(initial_h, final_h)
     }
 }
 

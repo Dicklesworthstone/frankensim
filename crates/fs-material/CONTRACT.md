@@ -9779,8 +9779,10 @@ keep their previous admission, arithmetic and identity conventions.
 
 Either side may use Cp or Cv; a heat transfer does not identify h with u or
 supply unmodeled pressure-volume work. The layer profile is source-free,
-single-phase and quasi-steady within each leg, at fixed source context and
-geometry. This adds no separate half-cell storage, latent account, flow,
+single-phase and quasi-steady within each leg, at fixed source context.
+The ordinary query retains its fixed planar/radial geometry; the explicit
+density-aware planar extension below includes changing normal half-distances.
+This adds no separate half-cell storage, latent account, flow,
 mechanical work or time integrator. Original source-domain, contact, geometry
 and cancellation refusals publish no candidate. Spatial and temporal accuracy
 still require the consuming discretization's independent refinement.
@@ -10177,9 +10179,11 @@ Its historical h-labelled native fields do not change the storage basis.
 The native reservoir or ambient channel supplies its current bath temperature,
 area and energy/entropy accounts. The selected source-integrated face replaces
 that channel's bulk-frozen coefficient; it does not add another authored htc,
-heat source or face inventory. Fixed geometry and original caloric-object
-identity are checked by the existing attachment path. Successful queries use
-the original bounded scalar solve without source queries or allocation.
+heat source or face inventory. Original caloric-object identity and fixed
+area/film are checked by the attachment path. The ordinary query also requires
+the original distance; the explicit density-aware query below carries its
+changing normal distance and complete tangent through the same bounded scalar
+solve without material-card queries or allocation.
 
 Material support applies to the material trace and solved material face. A
 bath outside that support may exchange heat through a finite film while the
@@ -10304,6 +10308,52 @@ visits only crossed intervals and performs no allocation, hashing or material
 source query. Four focused regressions cover affine Cp, heating/cooling,
 anisotropic source breaks, constant volume, tiny datum-independent increments,
 and incompatible or pressure-unqualified source refusal.
+
+### Original isobaric density in native integrated conduction
+
+`IsobaricFreeExpansion` also implements the native `ThermalLaw`: temperature,
+enthalpy basis and Cp/T entropy delegate to its SAME original Cp owner, while
+`bulk_density_kg_m3` evaluates the retained reference density and original
+free-volume ratio, rho=rho_ref/J(T). Its identity includes both original
+sources. It never changes stored mass or reference mesh geometry by itself.
+
+`isobaric::expansion::conduction::IsobaricExpansionConductionLaw` composes
+that exact caloric object with its existing `IsobaricConductionLaw`. Object
+identity, fixed pressure/composition and the original enthalpy datum are
+retained. Preparation borrows the original tables; runtime uses the original
+inverse and conductivity knots. The exact specific-volume tangent is
+d(1/rho)/dh = J_T/(rho_ref*Cp(T)), with the CURRENT original Cp and the
+original one-sided expansion-knot convention. Zero and negative volume
+responses remain intact. No Cp-to-Cv substitution or second p dV heat occurs.
+
+`CaloricConductionLayer::from_expanding_isobaric` carries this same source
+into `IntegratedCaloricLink` and `IntegratedCaloricBoundary`. Their optional
+geometry-aware native queries accept current planar half-distances and each
+(dd/dh)/d, retaining original area, contact coverage, coating/film and source
+ownership. The existing Kirchhoff integral and bounded surface solve remain
+the flux owners. At the accepted link face,
+dQ/dd_i = (dQ/dR'')/k(T_interface_i); the complete enthalpy tangent combines
+this length response with original dT/dh and original contact dR''/dh.
+The material-to-bath geometry term is
+-Q*(d'/d)/(1+(A/d)*k(T_surface)*R_film), with R_film in K/W.
+Each response uses the SAME accepted interface and original contact sample.
+
+The native fixed-footprint reduction is a separate physical applicability
+declaration. Free tangential expansion does not establish a constrained-solid
+density law or fixed footprint; evolving area, 3-D strain compatibility,
+stress and radial motion need their original physical owners. This extension
+does not reinterpret equivalent radial resistance distances as physical
+thicknesses. Cv, fixed-volume storage and the other prepared gray/surface
+integrated owners keep their existing constraints and admission.
+
+Five regressions in `isobaric/expansion/tests/conduction.rs` cover current-Cp
+volume tangents and source corners, complete integrated boundary/contact
+finite differences with one original contact sample, an independently
+eliminated heating/cooling energy equation with nonzero pressure work, and
+closed graph SDIRK energy, entropy and inventory. The physical planar fixture
+has normal-only free expansion and unchanged tangential stretches. These
+regressions are authored and syntax checked; native execution remains blocked
+by workspace storage and dependency-build resource limits.
 
 
 ## Saturated-water boiling and condensation

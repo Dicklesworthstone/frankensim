@@ -345,3 +345,6 @@ fn incompatible_or_pressure_unqualified_sources_cannot_supply_expansion_work() {
         density.at_temperature(300.0).unwrap()
     );
 }
+
+#[path = "tests/conduction.rs"]
+mod conduction;
