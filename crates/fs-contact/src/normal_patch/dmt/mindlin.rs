@@ -9,8 +9,9 @@
 //! This selects decoupled, isotropic, proportional scalar shear, with constant
 //! material/interface data at fixed external conditions. It is not JKR partial
 //! slip, a constant-junction-strength model, torsion or shear-induced peeling.
-//! Both endpoint indentations must be nonnegative. An affine path through a
-//! finite gap needs contact-event timing and must not clamp signed indentation.
+//! Signed affine paths retain exact contact-entry/exit timing. Zero-area gap
+//! motion carries no shear, releases no additional heat, and remains in the
+//! accumulated displacement before subsequent stress-free recontact.
 //!
 //! The normal DMT approximation follows Maugis (1992),
 //! DOI 10.1016/0021-9797(92)90285-T; the exact retained Hertz--Mindlin/MDR
@@ -42,7 +43,7 @@ pub struct SourceDmtMindlinContact {
     identity: ContentHash,
 }
 
-/// Complete attached contact history; fields are sealed against source swaps.
+/// Complete contact/gap history; fields are sealed against source swaps.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DmtMindlinState {
     identity: ContentHash,
@@ -82,6 +83,12 @@ impl DmtMindlinState {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DmtMindlinPathTrial {
     pub tangential: MindlinPathTrial,
+    /// Fraction of the original affine path with positive real contact area.
+    /// Retain directly: subtracting event endpoints can lose short intervals.
+    pub contact_fraction: f64,
+    /// Normalized contact interval, [0, 0] when inactive. Boundary instants
+    /// may have zero area; the independent duration above retains small spans.
+    pub contact_interval_fraction: [f64; 2],
     pub normal_response: DmtResponse,
     pub mean_normal_force_n: f64,
     pub normal_work_j: f64,
@@ -92,6 +99,8 @@ pub struct DmtMindlinPathTrial {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DmtMindlinPathStep {
     pub tangential: TangentialStep<DmtMindlinState>,
+    pub contact_fraction: f64,
+    pub contact_interval_fraction: [f64; 2],
     pub normal_response: DmtResponse,
     pub mean_normal_force_n: f64,
     pub normal_work_j: f64,
@@ -231,11 +240,10 @@ impl SourceDmtMindlinContact {
         self.temperature_kelvin
     }
 
-    /// Initialize an admitted attached/touching normal state with zero shear.
+    /// Initialize an admitted signed normal state with zero shear.
     /// Initial normal storage is present, not newly supplied mechanical work.
     /// This cannot consume or erase an existing loaded shear checkpoint.
     pub fn initialize(&self, indentation_m: f64) -> Result<DmtMindlinState, DmtMindlinError> {
-        attached(indentation_m)?;
         let normal = self.normal.evaluate(indentation_m)?;
         let constitutive = self
             .law
@@ -260,13 +268,18 @@ impl SourceDmtMindlinContact {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DmtMindlinPathTrial, DmtMindlinError> {
         let (normal, native) = self.admit(state, input, cancelled)?;
-        let tangential = self
-            .law
-            .trial_coupled_path(&state.constitutive, &native, cancelled)?;
+        let path = self.law.trial_coupled_gap_path(
+            &state.constitutive,
+            &native,
+            [state.indentation_m(), input.indentation_m],
+            cancelled,
+        )?;
         let (mean, work) = self.normal_work(state, input)?;
         poll(cancelled)?;
         Ok(DmtMindlinPathTrial {
-            tangential,
+            tangential: path.tangential,
+            contact_fraction: path.contact_fraction,
+            contact_interval_fraction: path.contact_interval_fraction,
             normal_response: normal,
             mean_normal_force_n: mean,
             normal_work_j: work,
@@ -277,7 +290,11 @@ impl SourceDmtMindlinContact {
     /// Advance simultaneous affine indentation and scalar shear, including
     /// unloading/reversal memory. Optional scalar body recoil uses the SAME
     /// exact-work average force. Positive or tensile net normal effort is
-    /// admitted while real repulsive contact remains.
+    /// admitted; only real repulsive contact carries shear. Signed paths use
+    /// the exact positive-area interval of the original affine indentation.
+    /// Gap drift remains in accumulated slip, and its attraction contributes
+    /// only the original conservative DMT work. Heat and shear storage change
+    /// are never multiplied by the fraction of the step spent in contact.
     ///
     /// The immutable result is a candidate only. Complete native mechanics
     /// owns normal motion, frame transport, step/rate limits and publication.
@@ -288,11 +305,14 @@ impl SourceDmtMindlinContact {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DmtMindlinPathStep, DmtMindlinError> {
         let (normal, native) = self.admit(state, input, cancelled)?;
-        let path = self
-            .law
-            .advance_coupled_path(&state.constitutive, &native, cancelled)?;
+        let path = self.law.advance_coupled_gap_path(
+            &state.constitutive,
+            &native,
+            [state.indentation_m(), input.indentation_m],
+            cancelled,
+        )?;
         let (mean, work) = self.normal_work(state, input)?;
-        let candidate = path.tangential;
+        let candidate = path.path.tangential;
         match_normal(&candidate.state, &normal)?;
         let energy = self.law.stored_energy_j(&candidate.state);
         if !energy.is_finite() || energy < 0.0 {
@@ -318,6 +338,8 @@ impl SourceDmtMindlinContact {
                 compatibility_residual_m: candidate.compatibility_residual_m,
                 iterations: candidate.iterations,
             },
+            contact_fraction: path.contact_fraction,
+            contact_interval_fraction: path.contact_interval_fraction,
             normal_response: normal,
             mean_normal_force_n: mean,
             normal_work_j: work,
@@ -355,7 +377,6 @@ impl SourceDmtMindlinContact {
     ) -> Result<(DmtResponse, TangentialStepInput), DmtMindlinError> {
         poll(cancelled)?;
         self.owns(state)?;
-        attached(input.indentation_m)?;
         let normal = self.normal.evaluate(input.indentation_m)?;
         if !input.dt_s.is_finite()
             || input.dt_s <= 0.0
@@ -393,15 +414,6 @@ impl SourceDmtMindlinContact {
     }
 }
 
-fn attached(indentation_m: f64) -> Result<(), DmtMindlinError> {
-    if !indentation_m.is_finite() || indentation_m < 0.0 {
-        Err(DmtMindlinError::Invalid(
-            "DMT--Mindlin path requires attached endpoints; resolve gap events explicitly",
-        ))
-    } else {
-        Ok(())
-    }
-}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DmtMindlinError> {
     if cancelled() {
         Err(MindlinPathError::Cancelled.into())
@@ -424,12 +436,12 @@ fn same(actual: f64, expected: f64) -> Result<(), DmtMindlinError> {
 }
 fn match_normal(native: &HertzMindlinState, normal: &DmtResponse) -> Result<(), DmtMindlinError> {
     for (actual, expected) in [
-        (native.indentation_m(), normal.indentation_m),
+        (native.indentation_m(), normal.indentation_m.max(0.0)),
         (native.normal_force_n(), normal.repulsive_normal_force_n),
         (native.contact_radius_m(), normal.contact_radius_m),
         (
             native.normal_energy_j(),
-            0.4 * normal.repulsive_normal_force_n * normal.indentation_m,
+            0.4 * normal.repulsive_normal_force_n * normal.indentation_m.max(0.0),
         ),
     ] {
         same(actual, expected)?;

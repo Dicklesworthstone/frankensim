@@ -3843,23 +3843,35 @@ DMT potential supplies normal work and its stable piecewise analytic
 `mean_force_between`, including the equal-endpoint limit. Adhesive normal
 storage and native friction heat remain separate; neither is counted twice.
 
-Both endpoint indentations must be nonnegative. The source refuses a finite-gap
-crossing instead of silently clamping the path or inventing contact-entry
-timing. Touch releases the native memory through its physical microslip work;
-subsequent contact can grow from that explicit zero-area state. Original DMT
-applicability limits, exact source/checkpoint identity, fixed external property
-coordinates, input/force/iteration budgets and cancellation remain enforced.
+Signed finite endpoint indentations retain the exact positive-area interval
+of the original affine normal/shear path. For contact duration fraction f, the
+native active solve receives f times released shear travel and f² times scalar
+body compliance; returned mean force uses f and its actual-travel tangent uses
+f². Heat and storage changes remain unscaled. Entry/exit metadata includes both
+the contact duration and normalized interval, preserving tiny durations when
+event endpoints round together.
+
+Zero-load gap drift is advanced in chronological order. Departure releases
+native shear memory through physical microslip work; reentry adds unstrained
+material after the actual gap motion. Gap attraction supplies only the original
+DMT conservative normal force/work, with zero real area and zero shear capacity.
+Initialization can retain an original signed gap checkpoint. Fully attached
+paths keep the original native solve. Original DMT applicability limits, exact
+source/checkpoint identity, fixed external property coordinates, numerical
+representation, input/force/iteration budgets and cancellation remain enforced.
 Normal mechanics, step/rate limits, finite-rotation transport, heat partition,
 JKR partial slip, finite junction shear strength and shear-induced peeling
 remain with their declared physical owners. This is the decoupled scalar
 Hertz--Mindlin approximation on the DMT repulsive disk, not a general adhesive
 friction model.
 
-Five G1/G3/G4 source regressions check independent zero/tensile-load Cattaneo
-forces and radial tractions, native evolving-area history and unloading heat,
-adhesion-dependent normal work and force-controlled area, exact mean force
-through gap/contact branches and adjacent endpoints, original evidence and
-atomic source/domain/cancellation refusals. The native changing-load trial
-owner's 19 tests passed in a focused original-source Rust build with actual
-`fs-math`; the full source-bound contact tests and workspace build are not
-claimed by that limited run.
+Nine G1/G3/G4 source regression groups cover independent zero/tensile-load
+Cattaneo forces and radial tractions, evolving-area history and unloading heat,
+adhesion-dependent normal work and force-controlled area, exact mean force,
+explicit contact/gap decomposition, full release/flight/recontact, independent
+DMT potential work, initial/equal-gap attraction, original evidence and atomic
+source/domain/cancellation refusals. The native changing-load/path owner's
+26 tests pass in a focused original-source Rust build with actual `fs-math`,
+including seven executed signed-gap groups. Source adapter/tests parse with
+the pinned Rust formatter; the source-bound contact suite and full workspace
+build are not claimed by that limited run.

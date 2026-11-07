@@ -1,6 +1,8 @@
 //! G1/G3/G4: sourced adhesion, actual-area microslip, reversible work and refusals.
 #[path = "adhesive_dmt_mindlin/common.rs"]
 mod common;
+#[path = "adhesive_dmt_mindlin/gaps.rs"]
+mod gaps;
 use common::*;
 use core::f64::consts::PI;
 use fs_contact::normal_patch::dmt::mindlin::*;
@@ -307,7 +309,7 @@ fn normal_mean_force_matches_exact_work_across_gap_contact_and_adjacent_endpoint
 }
 
 #[test]
-fn original_sources_gap_boundary_and_failed_proposals_preserve_accepted_memory() {
+fn original_sources_and_failed_proposals_preserve_accepted_memory() {
     let source = source(0.01, Some(0.6), "initial").unwrap();
     let state = source.initialize(0.1 * Z).unwrap();
     let saved = state.clone();
@@ -334,10 +336,10 @@ fn original_sources_gap_boundary_and_failed_proposals_preserve_accepted_memory()
         )
         .is_err()
     );
-    assert!(source.initialize(-0.1 * Z).is_err());
+    assert!(source.initialize(f64::NAN).is_err());
     for invalid in [
         SourceMindlinPathInput {
-            indentation_m: -0.1 * Z,
+            indentation_m: f64::NEG_INFINITY,
             ..request
         },
         SourceMindlinPathInput {
