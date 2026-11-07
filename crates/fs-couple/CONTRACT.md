@@ -3218,6 +3218,28 @@ eigenmode, nonlinear dry-front balance and finite surface flux define the focuse
 verification in `tests/moisture/radial.rs`; they are not measured validation or
 a continuum-error certificate for an arbitrary mesh or time step.
 
+### Source-partitioned coatings and curved material layers
+
+`moisture::radial::layered::{MoistureRadialLayer, MoistureLayeredRadial}` joins
+contiguous native cylindrical or spherical shells while retaining each original
+dry inventory, nonlinear diffusivity and same-card monotone sorption source.
+The shared layered activity/storage/Picard kernel serves both slabs and curved
+stacks; each geometry supplies its actual face paths. Radial layers use exact
+cylindrical/spherical resistance integrals, unequal shell masses and the actual
+curved interface and exterior areas. Existing slab deformation-metric feedback
+continues to resolve the proposed state at each nonlinear assembly.
+
+Ideal contact equalizes activity while allowing material-specific dry-basis
+moisture jumps. Explicit finite activity conductance permits an interface
+activity jump with one equal/opposite water transfer. A zero-area center stays
+sealed. Source/context, geometry, temperature, clock and support mismatches
+refuse; native source/range/work/residual/water checks precede publication of
+the entire stack. Geometry and temperature are held fixed; this rung does not
+add hysteresis, moving interfaces, sorption heat or liquid capillary flow.
+Five authored physical regressions define curved steady partition/transfer,
+unequal-density closed transients, homogeneous-owner reduction, nonlinear dry
+core/coating uptake and transactional geometry/source/admission refusals.
+
 ### Finite solution activity on radial geometry
 
 `FiniteMoistureSolution::advance_radial` and `advance_shared_radial` connect

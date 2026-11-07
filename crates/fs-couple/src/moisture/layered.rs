@@ -14,14 +14,66 @@
 //! moving-mesh transport and an entropy certificate remain outside this reduction.
 
 use super::*;
-use fs_la::tridiagonal::TridiagonalWorkspace;
 use fs_material::state_point::MonotoneMoistureSorption;
 
 /// Original finite vapor inventory coupled to one or more heterogeneous stacks.
 #[path = "layered/atmosphere.rs"]
 pub mod atmosphere;
 #[path = "layered/interface.rs"]
-mod interface;
+pub(super) mod interface;
+#[path = "layered/kernel.rs"]
+pub(super) mod kernel;
+
+use kernel::{LayeredSource, LayeredStorage, LayeredSystem};
+
+/// Bind equilibrium to the original current transport context, including a
+/// supported prescribed-temperature event, while retaining reference density.
+pub(in crate::moisture) fn admit_sorption(
+    card: &MaterialCard,
+    transport: &ResolvedMaterialStatePoint,
+    maximum_moisture: f64,
+    moisture: &[f64],
+    sorption: &MonotoneMoistureSorption,
+    cx: &Cx<'_>,
+) -> Result<(), MoistureError> {
+    poll(cx)?;
+    if sorption.card_identity() != card.content_hash()
+        || sorption.moisture_bounds()[1] > maximum_moisture
+    {
+        return Err(MoistureError::Invalid(
+            "layer sorption must use the same original material and moisture domain",
+        ));
+    }
+    let point = sorption.source_point();
+    let coordinates_match = point
+        .axes()
+        .iter()
+        .filter(|(name, _)| name.as_str() != "relative_humidity")
+        .map(|(name, value)| (name.as_str(), value.to_bits()))
+        .eq(transport
+            .query_point()
+            .iter()
+            .filter(|(name, _)| name.as_str() != "moisture_content")
+            .map(|(name, value)| (name.as_str(), value.to_bits())));
+    let quantities_match = point
+        .axis_quantities()
+        .iter()
+        .filter(|(name, _)| name.as_str() != "relative_humidity")
+        .eq(transport
+            .axis_quantities()
+            .iter()
+            .filter(|(name, _)| name.as_str() != "moisture_content"));
+    if !coordinates_match || !quantities_match {
+        return Err(MoistureError::Invalid(
+            "layer sorption and transport must hold identical external coordinates and quantities",
+        ));
+    }
+    for &m in moisture {
+        poll(cx)?;
+        sorption.activity(m)?;
+    }
+    Ok(())
+}
 
 /// One original material/specimen owner and its compatible equilibrium source.
 #[derive(Clone, Debug)]
@@ -38,44 +90,14 @@ impl MoistureLayer {
         sorption: MonotoneMoistureSorption,
         cx: &Cx<'_>,
     ) -> Result<Self, MoistureError> {
-        poll(cx)?;
-        if sorption.card_identity() != slab.card.content_hash()
-            || sorption.moisture_bounds()[1] > slab.geometry.maximum_moisture
-        {
-            return Err(MoistureError::Invalid(
-                "layer sorption must use the same original material and moisture domain",
-            ));
-        }
-        let point = sorption.source_point();
-        let coordinates_match = point
-            .axes()
-            .iter()
-            .filter(|(name, _)| name.as_str() != "relative_humidity")
-            .map(|(name, value)| (name.as_str(), value.to_bits()))
-            .eq(slab
-                .transport
-                .query_point()
-                .iter()
-                .filter(|(name, _)| name.as_str() != "moisture_content")
-                .map(|(name, value)| (name.as_str(), value.to_bits())));
-        let quantities_match = point
-            .axis_quantities()
-            .iter()
-            .filter(|(name, _)| name.as_str() != "relative_humidity")
-            .eq(slab
-                .transport
-                .axis_quantities()
-                .iter()
-                .filter(|(name, _)| name.as_str() != "moisture_content"));
-        if !coordinates_match || !quantities_match {
-            return Err(MoistureError::Invalid(
-                "layer sorption and transport must hold identical external coordinates and quantities",
-            ));
-        }
-        for &m in &slab.moisture {
-            poll(cx)?;
-            sorption.activity(m)?;
-        }
+        admit_sorption(
+            &slab.card,
+            &slab.transport,
+            slab.geometry.maximum_moisture,
+            &slab.moisture,
+            &sorption,
+            cx,
+        )?;
         Ok(Self { slab, sorption })
     }
 
@@ -111,7 +133,7 @@ pub enum MoistureActivityTransfer {
 }
 
 impl MoistureActivityTransfer {
-    fn conductance(self, area: f64) -> Result<Option<f64>, MoistureError> {
+    pub(in crate::moisture) fn conductance(self, area: f64) -> Result<Option<f64>, MoistureError> {
         match self {
             Self::IdealContact => Ok(None),
             Self::Sealed => Ok(Some(0.0)),
@@ -345,231 +367,84 @@ impl MoistureLayeredSlab {
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureLayeredReport), MoistureError> {
         poll(cx)?;
-        controls.validate()?;
         let end = self.time_s() + dt;
-        if !positive(dt)
-            || !end.is_finite()
-            || end <= self.time_s()
-            || !positive(step.water_balance_tolerance_kg)
-            || !positive(step.maximum_content_increment)
-        {
-            return Err(MoistureError::Invalid(
-                "representable forward layered interval and positive limits required",
-            ));
-        }
         let reservoir = std::array::from_fn(|side| match faces[side] {
             _ if self.exterior_transfer[side] == MoistureActivityTransfer::Sealed => None,
             MoistureLayeredFace::Sealed => None,
             MoistureLayeredFace::PrescribedRelativeHumidity(a) => Some(a),
         });
-        if reservoir
-            .into_iter()
-            .flatten()
-            .any(|a| !a.is_finite() || a < self.activity_bounds[0] || a > self.activity_bounds[1])
-        {
-            return Err(MoistureError::Invalid(
-                "boundary activity lies outside the layers' common source support",
-            ));
-        }
-        let mut span = [f64::INFINITY, f64::NEG_INFINITY];
-        for (i, a) in self
-            .activity
-            .iter()
-            .copied()
-            .chain(reservoir.into_iter().flatten())
-            .enumerate()
-        {
-            if i % 128 == 0 {
-                poll(cx)?;
-            }
-            span[0] = span[0].min(a);
-            span[1] = span[1].max(a);
-        }
-        let mut profiles = Vec::with_capacity(self.layers.len());
-        for layer in &self.layers {
-            poll(cx)?;
-            profiles.push(KirchhoffMoistureDiffusivity::from_binding(
-                &layer.slab.card,
-                &layer.slab.transport,
-                &layer.slab.diffusivity_property,
-                [
-                    layer.sorption.moisture(span[0])?,
-                    layer.sorption.moisture(span[1])?,
-                ],
-            )?);
-        }
-        // Solve deviations from a common activity, so even arbitrarily stiff
-        // exact equilibrium has a zero RHS instead of cancelling large fluxes.
-        let reference = span[0];
         let original: Vec<f64> = self
             .layers
             .iter()
             .flat_map(|l| l.slab.moisture.iter().copied())
             .collect();
-        let mut iterate = self.activity.clone();
-        let initial_metric = resolve_metric
-            .as_mut()
-            .map(|resolve| resolve(self))
-            .transpose()?;
-        let mut system = self.system(
+        let dry_masses: Vec<_> = self
+            .layer_for_cell
+            .iter()
+            .map(|&layer| self.layers[layer].slab.dry_mass_per_cell_kg)
+            .collect();
+        let sources: Vec<_> = self
+            .layers
+            .iter()
+            .map(|layer| LayeredSource {
+                card: &layer.slab.card,
+                transport: &layer.slab.transport,
+                property: &layer.slab.diffusivity_property,
+                sorption: &layer.sorption,
+            })
+            .collect();
+        let state = LayeredStorage {
+            sources: &sources,
+            layer_for_cell: &self.layer_for_cell,
+            activity: &self.activity,
+            original: &original,
+            dry_masses: &dry_masses,
+            activity_bounds: self.activity_bounds,
+            time_s: self.time_s(),
+            dry_mass_kg: self.dry_mass_kg(),
+            water_mass_kg: self.water_mass_kg(),
+        };
+        let mut first_metric = true;
+        let mut proposed = None;
+        let candidate = kernel::advance(
+            state,
             dt,
             reservoir,
-            &profiles,
-            &original,
-            &iterate,
-            reference,
-            initial_metric.as_ref(),
-            cx,
-        )?;
-        let mut workspace =
-            TridiagonalWorkspace::new(self.activity.len()).map_err(MoistureError::Tridiagonal)?;
-        let mut solves = 0usize;
-        for iteration in 1..=controls.maximum_iterations {
-            poll(cx)?;
-            let solution =
-                system
-                    .operator
-                    .solve_tridiagonal(&system.rhs, step.linear, &mut workspace, cx)?;
-            solves = solves
-                .checked_add(solution.report.iters)
-                .ok_or(MoistureError::Invalid("layered solve work count overflow"))?;
-            if !solution.report.converged_euclidean() {
-                return Err(MoistureError::NotConverged(solution.report));
-            }
-            let candidate: Vec<f64> = solution.x.iter().map(|delta| reference + delta).collect();
-            let mut moisture = Vec::with_capacity(candidate.len());
-            let mut transport = Vec::with_capacity(candidate.len());
-            let mut water_change = 0.0;
-            let roundoff = 128.0 * f64::EPSILON;
-            for (i, &a) in candidate.iter().enumerate() {
-                poll(cx)?;
-                if !a.is_finite() || a < span[0] - roundoff || a > span[1] + roundoff {
-                    return Err(MoistureError::Invalid(
-                        "layered candidate violates the activity maximum principle",
-                    ));
-                }
-                let layer = &self.layers[self.layer_for_cell[i]];
-                let m = layer.sorption.moisture(a)?;
-                let source = layer
-                    .slab
-                    .transport
-                    .at_query_point(&layer.slab.card, &layer.slab.point_at(m)?)?;
-                water_change += layer.slab.dry_mass_per_cell_kg
-                    * (layer.sorption.moisture_change(self.activity[i], a)?
-                        + (layer.sorption.moisture(self.activity[i])? - original[i]));
-                moisture.push(m);
-                transport.push(source);
-            }
-            let mut proposed = if resolve_metric.is_some() {
-                Some(self.with_profile(&candidate, &moisture, end, cx)?)
-            } else {
-                None
-            };
-            let metric = match (&mut resolve_metric, &proposed) {
-                (Some(resolve), Some(state)) => Some(resolve(state)?),
-                _ => None,
-            };
-            let endpoint = self.system(
-                dt,
-                reservoir,
-                &profiles,
-                &original,
-                &candidate,
-                reference,
-                metric.as_ref(),
-                cx,
-            )?;
-            let (_, relative) = endpoint.operator.defect(&solution.x, &endpoint.rhs, cx)?;
-            let boundary = std::array::from_fn(|side| {
-                let cell = if side == 0 { 0 } else { candidate.len() - 1 };
-                reservoir[side].map_or(0.0, |a| endpoint.boundary[side] * (a - candidate[cell]))
-            });
-            let water_after = moisture
-                .iter()
-                .zip(&self.layer_for_cell)
-                .map(|(m, &k)| m * self.layers[k].slab.dry_mass_per_cell_kg)
-                .sum::<f64>();
-            let received = boundary[0] + boundary[1];
-            let balance = water_change - received;
-            let stored_balance = water_after - self.water_mass_kg() - received;
-            let nonlinear = MoistureNonlinearReport {
-                iterations: iteration,
-                tridiagonal_solves: solves,
-                relative_residual: relative,
-                water_balance_residual_kg: balance,
-            };
-            if relative < controls.relative_tolerance
-                && balance.is_finite()
-                && balance.abs() <= step.water_balance_tolerance_kg
-                && stored_balance.is_finite()
-                && stored_balance.abs() <= step.water_balance_tolerance_kg
-            {
-                for (cell, (&m, &old)) in moisture.iter().zip(&original).enumerate() {
-                    let increment = (m - old).abs();
-                    if increment > step.maximum_content_increment {
-                        return Err(MoistureError::ContentIncrement {
-                            cell,
-                            increment,
-                            maximum: step.maximum_content_increment,
-                        });
-                    }
-                }
-                if !positive(self.dry_mass_kg() + water_after) {
-                    return Err(MoistureError::Invalid(
-                        "layered endpoint wet inventory is unrepresentable",
-                    ));
-                }
-                let report = MoistureLayeredReport {
-                    interval_s: [self.time_s(), end],
-                    boundary_water_kg: boundary,
-                    surface_activities: endpoint.surfaces,
-                    interfaces: endpoint.interfaces,
-                    stored_water_kg: [self.water_mass_kg(), water_after],
-                    water_balance_residual_kg: balance,
-                    diffusivity_sources: profiles
-                        .iter()
-                        .map(KirchhoffMoistureDiffusivity::identity)
-                        .collect(),
-                    sorption_sources: self.layers.iter().map(|l| l.sorption.identity()).collect(),
-                    transport_end: transport,
-                    linear: solution.report,
-                    nonlinear,
-                };
-                let next = match proposed.take() {
-                    Some(state) => state,
-                    None => self.with_profile(&candidate, &moisture, end, cx)?,
-                };
-                poll(cx)?;
-                return Ok((next, report));
-            }
-            if iteration == controls.maximum_iterations {
-                return Err(MoistureError::NonlinearNotConverged(nonlinear));
-            }
-            if controls.relaxation == 1.0 {
-                iterate = candidate;
-                system = endpoint;
-            } else {
-                for (a, candidate) in iterate.iter_mut().zip(candidate) {
-                    *a = controls.relaxation.mul_add(candidate - *a, *a);
-                }
+            step,
+            controls,
+            |profiles, activity, reference, system, cx| {
                 let metric = if let Some(resolve) = &mut resolve_metric {
-                    Some(resolve(&self.with_activity(&iterate, end, cx)?)?)
+                    if first_metric {
+                        first_metric = false;
+                        Some(resolve(self)?)
+                    } else {
+                        let next = self.with_activity(activity, end, cx)?;
+                        let metric = resolve(&next)?;
+                        proposed = Some(next);
+                        Some(metric)
+                    }
                 } else {
                     None
                 };
-                system = self.system(
+                self.assemble_paths(
                     dt,
                     reservoir,
-                    &profiles,
-                    &original,
-                    &iterate,
+                    profiles,
+                    activity,
                     reference,
                     metric.as_ref(),
+                    system,
                     cx,
-                )?;
-            }
-        }
-        unreachable!("validated positive layered iteration budget")
+                )
+            },
+            cx,
+        )?;
+        let next = match proposed {
+            Some(state) => state,
+            None => self.with_profile(&candidate.activity, &candidate.moisture, end, cx)?,
+        };
+        poll(cx)?;
+        Ok((next, candidate.report))
     }
 
     fn with_activity(
@@ -610,17 +485,17 @@ impl MoistureLayeredSlab {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn system(
+    fn assemble_paths(
         &self,
         dt: f64,
         reservoir: [Option<f64>; 2],
         profiles: &[KirchhoffMoistureDiffusivity],
-        original: &[f64],
         activity: &[f64],
         reference: f64,
         metric: Option<&MoistureLayeredMetric>,
+        system: &mut LayeredSystem,
         cx: &Cx<'_>,
-    ) -> Result<LayeredSystem, MoistureError> {
+    ) -> Result<(), MoistureError> {
         let n = activity.len();
         if metric.is_some_and(|m| {
             m.inverse_axial_stretch_squared.len() != n
@@ -630,37 +505,6 @@ impl MoistureLayeredSlab {
                     .any(|&x| !positive(x))
         }) {
             return Err(MoistureError::Invalid("invalid layered deformation metric"));
-        }
-        let mut system = LayeredSystem {
-            operator: DiffusionStep {
-                diagonal: Vec::with_capacity(n),
-                storage_boundary: Vec::with_capacity(n),
-                off: vec![0.0; n - 1],
-            },
-            rhs: Vec::with_capacity(n),
-            boundary: [0.0; 2],
-            surfaces: [None; 2],
-            interfaces: Vec::new(),
-        };
-        for i in 0..n {
-            poll(cx)?;
-            let layer = &self.layers[self.layer_for_cell[i]];
-            let mass = layer.slab.dry_mass_per_cell_kg;
-            let capacity = mass
-                * layer
-                    .sorption
-                    .mean_capacity(self.activity[i], activity[i])?;
-            if !positive(capacity) {
-                return Err(MoistureError::Invalid(
-                    "layered water capacity is unrepresentable",
-                ));
-            }
-            let offset = original[i] - layer.sorption.moisture(self.activity[i])?;
-            system.operator.diagonal.push(capacity);
-            system.operator.storage_boundary.push(capacity);
-            system
-                .rhs
-                .push(capacity.mul_add(self.activity[i] - reference, mass * offset));
         }
         for i in 0..n - 1 {
             poll(cx)?;
@@ -742,23 +586,6 @@ impl MoistureLayeredSlab {
                 system.rhs[cell] += coefficient * (a - reference);
             }
         }
-        if system.operator.diagonal.iter().any(|&x| !positive(x))
-            || system.rhs.iter().any(|x| !x.is_finite())
-            || system
-                .interfaces
-                .iter()
-                .any(|face| !face.water_left_to_right_kg.is_finite())
-        {
-            return Err(MoistureError::Invalid("layered diffusion system overflow"));
-        }
-        Ok(system)
+        Ok(())
     }
-}
-
-struct LayeredSystem {
-    operator: DiffusionStep,
-    rhs: Vec<f64>,
-    boundary: [f64; 2],
-    surfaces: [Option<f64>; 2],
-    interfaces: Vec<MoistureLayerInterfaceReport>,
 }

@@ -17,6 +17,8 @@ use super::*;
 
 /// Finite vapor inventories coupled to native radial moisture diffusion.
 pub mod atmosphere;
+/// Source-partitioned diffusion through concentric coatings and material layers.
+pub mod layered;
 mod sdirk;
 
 /// Physical area and storage measure for a radial reduction.

@@ -7,10 +7,12 @@ use fs_material::state_point::{
     resolve_material_state_point,
 };
 
-#[path = "layered/atmosphere.rs"]
-mod atmosphere;
 #[path = "layered/adaptive.rs"]
 mod adaptive;
+#[path = "layered/atmosphere.rs"]
+mod atmosphere;
+#[path = "layered/radial.rs"]
+mod radial;
 #[path = "layered/transfer.rs"]
 mod transfer;
 
@@ -22,9 +24,17 @@ fn nonlinear() -> MoistureNonlinearConfig {
     }
 }
 fn material(rho: f64, sorption: Vec<(f64, f64)>, diffusion: [f64; 2]) -> MaterialCard {
-    material_profile(rho, sorption, vec![(0.0, diffusion[0]), (0.6, diffusion[1])])
+    material_profile(
+        rho,
+        sorption,
+        vec![(0.0, diffusion[0]), (0.6, diffusion[1])],
+    )
 }
-fn material_profile(rho: f64, sorption: Vec<(f64, f64)>, diffusion: Vec<(f64, f64)>) -> MaterialCard {
+fn material_profile(
+    rho: f64,
+    sorption: Vec<(f64, f64)>,
+    diffusion: Vec<(f64, f64)>,
+) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (key, axis, axis_quantity, knots, lo, hi) in [
         (

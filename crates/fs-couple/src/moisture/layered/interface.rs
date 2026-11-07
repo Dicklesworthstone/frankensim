@@ -1,6 +1,51 @@
 //! Equal/opposite Kirchhoff fluxes through material and transfer resistances.
 use super::*;
 
+/// One original source integrated along a geometric half path. The metric is
+/// rho_dry divided by integral(dx / physical_area), without material D or dM/da.
+#[derive(Clone, Copy)]
+pub(in crate::moisture) struct ActivityPath<'a> {
+    pub sorption: &'a MonotoneMoistureSorption,
+    pub diffusion: &'a KirchhoffMoistureDiffusivity,
+    pub metric: f64,
+    /// Explicit spatial pullback, applied after source evaluation as in the
+    /// original deforming slab. Fixed reference paths use one.
+    pub pullback: f64,
+}
+
+impl ActivityPath<'_> {
+    pub(in crate::moisture) fn conductance(self, a: f64, b: f64) -> Result<f64, MoistureError> {
+        let left = self.sorption.moisture(a)?;
+        let right = self.sorption.moisture(b)?;
+        let mean = self.diffusion.mean_diffusivity(left, right)?;
+        if mean == 0.0 {
+            return Ok(0.0);
+        }
+        let capacity = self.sorption.mean_capacity(a, b)?;
+        let value = self.metric * mean * capacity * self.pullback;
+        if !positive(value) {
+            return Err(MoistureError::Invalid(
+                "layered half-cell conductance overflow or underflow",
+            ));
+        }
+        Ok(value)
+    }
+}
+
+fn slab_path<'a>(
+    layer: &'a MoistureLayer,
+    diffusion: &'a KirchhoffMoistureDiffusivity,
+    pullback: f64,
+) -> ActivityPath<'a> {
+    let dx = layer.spacing();
+    ActivityPath {
+        sorption: &layer.sorption,
+        diffusion,
+        metric: 2.0 * layer.slab.dry_mass_per_cell_kg / dx / dx,
+        pullback,
+    }
+}
+
 /// kg water / (s * unit activity), including the physical area and dry density.
 pub(super) fn half_conductance(
     layer: &MoistureLayer,
@@ -9,21 +54,7 @@ pub(super) fn half_conductance(
     b: f64,
     pullback: f64,
 ) -> Result<f64, MoistureError> {
-    let left = layer.sorption.moisture(a)?;
-    let right = layer.sorption.moisture(b)?;
-    let mean = diffusion.mean_diffusivity(left, right)?;
-    if mean == 0.0 {
-        return Ok(0.0);
-    }
-    let capacity = layer.sorption.mean_capacity(a, b)?;
-    let dx = layer.spacing();
-    let value = 2.0 * layer.slab.dry_mass_per_cell_kg / dx / dx * mean * capacity * pullback;
-    if !positive(value) {
-        return Err(MoistureError::Invalid(
-            "layered half-cell conductance overflow or underflow",
-        ));
-    }
-    Ok(value)
+    slab_path(layer, diffusion, pullback).conductance(a, b)
 }
 
 fn series(left: f64, right: f64) -> Result<(f64, f64), MoistureError> {
@@ -55,17 +86,15 @@ fn close(a: f64, b: f64) -> bool {
 /// A common interface activity, never a common dry-basis moisture content.
 /// The physical residual is monotone because each source D and dM/da is
 /// nonnegative. Bisection is limited to 128 steps, including degenerate D=0.
-pub(super) fn join(
-    layers: [&MoistureLayer; 2],
-    profiles: [&KirchhoffMoistureDiffusivity; 2],
+fn join(
+    paths: [ActivityPath<'_>; 2],
     activity: [f64; 2],
-    pullback: [f64; 2],
     cx: &Cx<'_>,
 ) -> Result<(f64, f64), MoistureError> {
     let evaluate = |fraction: f64| -> Result<(f64, f64), MoistureError> {
         let a = fraction.mul_add(activity[1] - activity[0], activity[0]);
-        let left = half_conductance(layers[0], profiles[0], activity[0], a, pullback[0])?;
-        let right = half_conductance(layers[1], profiles[1], a, activity[1], pullback[1])?;
+        let left = paths[0].conductance(activity[0], a)?;
+        let right = paths[1].conductance(a, activity[1])?;
         series(left, right)
     };
     locate(activity, evaluate, cx)
@@ -115,20 +144,29 @@ pub(super) fn surface(
     pullback: f64,
     cx: &Cx<'_>,
 ) -> Result<(f64, f64), MoistureError> {
+    surface_path(
+        slab_path(layer, profile, pullback),
+        activity,
+        conductance,
+        cx,
+    )
+}
+
+/// The same exterior law with the supplied native geometric path.
+pub(in crate::moisture) fn surface_path(
+    path: ActivityPath<'_>,
+    activity: [f64; 2],
+    conductance: Option<f64>,
+    cx: &Cx<'_>,
+) -> Result<(f64, f64), MoistureError> {
     match conductance {
-        None => Ok((
-            half_conductance(layer, profile, activity[0], activity[1], pullback)?,
-            activity[1],
-        )),
+        None => Ok((path.conductance(activity[0], activity[1])?, activity[1])),
         Some(0.0) => Ok((0.0, activity[0])),
         Some(h) => locate(
             activity,
             |fraction| {
                 let a = fraction.mul_add(activity[1] - activity[0], activity[0]);
-                series(
-                    half_conductance(layer, profile, activity[0], a, pullback)?,
-                    h,
-                )
+                series(path.conductance(activity[0], a)?, h)
             },
             cx,
         ),
@@ -172,28 +210,35 @@ pub(super) fn transfer_join(
     pullback: [f64; 2],
     cx: &Cx<'_>,
 ) -> Result<(f64, [f64; 2]), MoistureError> {
+    transfer_paths(
+        [
+            slab_path(layers[0], profiles[0], pullback[0]),
+            slab_path(layers[1], profiles[1], pullback[1]),
+        ],
+        activity,
+        conductance,
+        cx,
+    )
+}
+
+/// Partition at a native geometric interface, using the same nonlinear root
+/// and exact material-specific Kirchhoff paths as the slab owner.
+pub(in crate::moisture) fn transfer_paths(
+    paths: [ActivityPath<'_>; 2],
+    activity: [f64; 2],
+    conductance: Option<f64>,
+    cx: &Cx<'_>,
+) -> Result<(f64, [f64; 2]), MoistureError> {
     let Some(h) = conductance else {
-        let (g, a) = join(layers, profiles, activity, pullback, cx)?;
+        let (g, a) = join(paths, activity, cx)?;
         return Ok((g, [a; 2]));
     };
     if h == 0.0 {
         return Ok((0.0, activity));
     }
     let delta = activity[1] - activity[0];
-    let gl = half_conductance(
-        layers[0],
-        profiles[0],
-        activity[0],
-        activity[1],
-        pullback[0],
-    )?;
-    let gr = half_conductance(
-        layers[1],
-        profiles[1],
-        activity[0],
-        activity[1],
-        pullback[1],
-    )?;
+    let gl = paths[0].conductance(activity[0], activity[1])?;
+    let gr = paths[1].conductance(activity[0], activity[1])?;
     // A completely impermeable half path carries no water. Its interface
     // activities follow the transmitting neighbor and the finite transfer law.
     if gl == 0.0 || gr == 0.0 {
@@ -213,9 +258,9 @@ pub(super) fn transfer_join(
     let evaluate = |drops: [f64; 2]| -> Result<(f64, [f64; 2]), MoistureError> {
         let a = surfaces(drops);
         triple(
-            half_conductance(layers[0], profiles[0], activity[0], a[0], pullback[0])?,
+            paths[0].conductance(activity[0], a[0])?,
             h,
-            half_conductance(layers[1], profiles[1], a[1], activity[1], pullback[1])?,
+            paths[1].conductance(a[1], activity[1])?,
         )
     };
     // The affine case needs only one consistency check and retains a stable
@@ -235,13 +280,7 @@ pub(super) fn transfer_join(
             return Ok((checked.0, surfaces(checked.1)));
         }
         let left_surface = fraction.mul_add(delta, activity[0]);
-        let left = half_conductance(
-            layers[0],
-            profiles[0],
-            activity[0],
-            left_surface,
-            pullback[0],
-        )?;
+        let left = paths[0].conductance(activity[0], left_surface)?;
         let flux = left * fraction;
         let right_fraction = fraction + flux / h;
         if !right_fraction.is_finite() || right_fraction >= 1.0 {
@@ -251,13 +290,7 @@ pub(super) fn transfer_join(
             continue;
         }
         let right_surface = right_fraction.mul_add(delta, activity[0]);
-        let right = half_conductance(
-            layers[1],
-            profiles[1],
-            right_surface,
-            activity[1],
-            pullback[1],
-        )?;
+        let right = paths[1].conductance(right_surface, activity[1])?;
         if left == 0.0 && right == 0.0 {
             // Both actual half paths are impermeable at this common surface,
             // so the transfer jump and all three physical fluxes are zero.
@@ -270,20 +303,8 @@ pub(super) fn transfer_join(
         } else {
             bracket[1] = fraction;
         }
-        let dl = half_conductance(
-            layers[0],
-            profiles[0],
-            left_surface,
-            left_surface,
-            pullback[0],
-        )?;
-        let dr = half_conductance(
-            layers[1],
-            profiles[1],
-            right_surface,
-            right_surface,
-            pullback[1],
-        )?;
+        let dl = paths[0].conductance(left_surface, left_surface)?;
+        let dr = paths[1].conductance(right_surface, right_surface)?;
         let slope = dl + dr + (dl / h) * dr;
         let trial = fraction - residual / slope;
         let next =
