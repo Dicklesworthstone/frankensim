@@ -15,6 +15,8 @@
 //! This frozen, small-strain, steady harmonic response does not evolve a
 //! thermal state, infer measured source authority, resolve oblique P/S waves,
 //! move a porous frame or model a finite aperture.
+//! The optional [`thermal`] adapter deposits its cycle-mean work on the original
+//! thermal timeline while keeping these acoustic laws frozen.
 
 use crate::MaterialError;
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -26,6 +28,9 @@ mod kernel;
 
 /// Coherent bonded solid stacks with the original loss law in every layer.
 pub mod layers;
+
+/// Spatially resolved acoustic heat on the original enthalpy timeline.
+pub mod thermal;
 
 /// Bounded total number of bulk plus shear Maxwell branches at preparation.
 pub const MAX_VISCOELASTIC_SLAB_BRANCHES: usize = 64;

@@ -21156,3 +21156,43 @@ analytic and nonlinear calorimetry, phase boundaries, reversal, subdivision,
 source support, representation budgets, bounded work and cancellation.
 Pinned Rust parsing was available; native Cargo compilation and test execution
 were unavailable in this resource-exhausted session.
+
+## Spatial acoustic absorption on native thermal histories
+
+`elastic::acoustic::viscoelastic::thermal::ViscoelasticHeating` binds a complete
+nonoverlapping depth partition of the original physical solid layers to active
+native thermal cells. Every bin retains its original material identity and
+positive bulk/shear work integral. Cell volume and mass must agree with the
+authored area, depth and original density. No acoustic interfaces, uniform
+layer-heating approximation, midpoint source samples or fitted loss law are
+introduced to obtain thermal resolution.
+
+The original enthalpy owner performs storage, latent heat, conduction, boundary
+events and acceptance. Exact prepared cycle-mean powers enter its interval source
+hook once; the accepted native duration owns each thermal credit. Independent
+incident, outgoing and constitutive absorbed energies remain separate from the
+actual cell heat credit. Positive depth powers are never renormalized to force
+boundary closure. Cumulative arithmetic discrepancies use an explicit joule
+allowance. A failed endpoint, changed mass/geometry/caloric binding, exhausted
+work allowance or cancellation publishes no acoustic or thermal state.
+
+A bounded optional affine power envelope scales a fixed coherent two-face
+carrier. Its exact mean intensity, jumps and dark gaps use native transition
+clipping; no acoustic wave solve or acoustic material/exterior query is repeated
+during thermal advances. Preparation sorts bins once and evaluates each physical
+layer/bin. Repeated source work makes bounded passes over bins with the native
+ordered-cell and source-map lookups. Immutable prepared data is
+shared across candidate clones. Restart preserves cumulative acoustic energy.
+
+The laws, density, geometry and carrier frequency remain frozen within explicitly
+declared temperature support. This is quasi-steady cycle-mean heating: envelope
+changes must be slow relative to carrier, propagation and ring-up scales.
+Temperature/phase-dependent acoustic response, carrier transients, changing
+mechanical stored energy, streaming, deformation and measured material authority
+are not inferred. Spatial and temporal thermal refinement retain the native
+cell-uniformity and supplied-conductance assumptions.
+
+Focused native regressions cover heterogeneous depth heating, scalar pulse
+fluence, boundary/contact events and restart, original latent storage, a
+three-rung conduction convergence ladder against an independent two-cell solution,
+and partition/inventory/source-domain/work/cancellation refusals.
