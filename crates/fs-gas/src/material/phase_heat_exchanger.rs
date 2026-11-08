@@ -6,6 +6,8 @@
 
 /// Original-source parallel and counterflow plug-flow heat exchange.
 pub mod spatial;
+/// Original-phase steady mixed flow against a prescribed wall temperature.
+pub mod wall_stream;
 
 use crate::chemistry::ThermalConductance;
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
