@@ -9828,6 +9828,51 @@ for 128 coupled consistent-mass coordinates with analytic phase/work/heat,
 exact and near resonance, the damped initial transient, DC rigid drag,
 source/state refusal atomicity, and impulses following harmonic dissipation.
 
+### Simultaneous tones and affine modulation on the complete spectrum
+
+`dynamics::spectral::MultiToneDampedSpectralSolid` applies a fixed caller-ordered
+frequency list to every original free coordinate. Physical force arrays are
+DOF-major: `i*K+j` is tone j on free row i, in N. Preparation retains the
+original complete M/K basis and the same classical-viscosity admission as
+`DampedSpectralSolid`; no mass lumping or mode truncation is introduced.
+The shared model-independent `PreparedModalTones` bank receives physical
+modal damping rates, including positive drag at zero natural frequency.
+
+Each mode has one total displacement/velocity state. Supplied work and
+positive viscous heat retain every cross-frequency term and the initial
+transient, using the existing paired-QR power owner. They are never sums of
+isolated-tone dissipations. Exactly repeated frequencies coalesce coherently;
+near frequencies remain distinct and retain beats. Zero-frequency sources
+are physical DC forces. No acoustic or sample-Nyquist gate changes the source.
+
+An explicit preparation flag selects constant or affine quadrature envelopes.
+Affine endpoints share the interval-start carrier basis, so attack/release
+and changing spatial phases act on the actual continuous force trajectory.
+`advance_affine_continuous` publishes the rotated END coefficients as the next
+start only after motion and original M/K work/heat gates accept. Constant
+continuation has the same transactional rule. Cancellation, invalid arrays,
+phase overflow and energy refusal leave physical state, caller source arrays
+and all accounts unchanged. Impulses retain earlier heat and consume no source
+phase or interval. The immutable `solid()` view exposes the existing state
+and energy accounts without allowing a source-law bypass.
+
+The overall solid byte cap reserves `96*n^2+4096*n+32*n*K` for physical
+matrices and projection scratch, then clamps the aggregate native bank's
+storage budget to the remaining bytes. The caller's smaller tone-storage cap
+still applies. Work envelopes are additional: the solid controls cover its
+original preparation and `16*n^2+512*n+P*n^2*K` warm terms (P=2 or 4), while
+`ModalToneBudget` bounds the complete bank's native preparation and step
+work scores. No budget is reset per mode. Preparation polls between native
+cost rows, modes and tones; warm projections and mode evaluations poll by row.
+One explicitly bounded native power preparation remains atomic.
+
+`tests/solid_spectral_tones.rs` adds G1/G3/G4 cases for 128 coupled coordinates
+against analytic phase and cross-frequency work/heat, affine manufactured
+motion with direct original-C dissipation quadrature, coherent duplicates,
+source/state rollback, global storage admission and impulses after loss.
+Exact integration concerns the declared fixed carriers and their envelopes;
+it does not resolve continuous peaks or remove aliasing from sparse outputs.
+
 
 ## Exact cubic force histories on the complete elastic spectrum
 

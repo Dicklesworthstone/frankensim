@@ -12,6 +12,8 @@ use fs_sparse::Csr;
 
 mod harmonic;
 pub use harmonic::HarmonicDampedSpectralSolid;
+mod tones;
+pub use tones::MultiToneDampedSpectralSolid;
 
 /// Every original elastic and rigid coordinate, with physical viscous damping.
 ///

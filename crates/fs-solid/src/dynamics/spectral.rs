@@ -21,7 +21,9 @@ use fs_sparse::Csr;
 /// Exact cubic forces and continuous displacement moments for moving supports.
 pub mod polynomial;
 mod damping;
-pub use damping::{DampedSpectralSolid, HarmonicDampedSpectralSolid};
+pub use damping::{
+    DampedSpectralSolid, HarmonicDampedSpectralSolid, MultiToneDampedSpectralSolid,
+};
 mod sustained;
 
 /// Required capacities and numerical allowances; no implicit defaults.
