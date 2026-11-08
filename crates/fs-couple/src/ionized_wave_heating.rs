@@ -5,37 +5,50 @@
 //! caloric sources and neutral/Coulomb exchange at actual temperatures. The
 //! endpoint refreshes the original carrier drag and bound-charge background.
 //!
-//! This is a uniformly mixed, frozen-population, fixed-volume control parcel
+//! This is a uniformly mixed, fixed-volume control parcel
 //! inside the original homogeneous half-space. Field and absorption rates are
 //! held over an explicit cycle-averaged heating interval. A refreshed result
 //! seeds a NEW Maxwell solve; it never mutates the original wave or promises a
 //! continuously coupled optical/thermal solution. There is no second reflecting
-//! boundary, spatial conduction, chemistry, flow or fast carrier transient.
+//! boundary, spatial conduction, flow or fast carrier transient. `advance`
+//! freezes populations; `advance_reacting` spends the same work through the
+//! native atomic ionization/recombination network before refreshing transport.
 
 use fs_em::plane_wave::plasma::magnetized::MagnetizedIonizedGasSlabAbsorption;
 use fs_gas::chemistry::energy::{
     ElectronHeavyEnergyError, ElectronHeavyEnergyResult, ElectronHeavyEnergySolve,
     advance_frozen_energy, advance_frozen_energy_with_coulomb,
 };
+use fs_gas::chemistry::ionization_network::IonizationNetworkError;
 use fs_matdb::MaterialCard;
 use fs_material::{
     ionized_gas::{CarrierMomentumSource, IonizedGasConductivity, IonizedGasRefreshError},
     state_point::{MaterialStatePointError, ResolvedMaterialStatePoint},
 };
 use fs_qty::{Power, Time};
+use fs_thermochem::SpeciesId;
 use fs_thermochem::electron_collision::ElectronCrossSectionV1;
+
+mod reacting;
+pub use reacting::{IonizedGasReactingHeatControls, MagnetizedIonizedGasReactingHeatStep};
 
 /// Refusal leaves the original wave, material sources and gas unchanged.
 #[derive(Clone, Debug, PartialEq)]
 pub enum IonizedWaveHeatingError {
     Invalid(&'static str),
     Gas(ElectronHeavyEnergyError),
+    Reaction(IonizationNetworkError),
     Transport(IonizedGasRefreshError),
     Background(MaterialStatePointError),
     TemperatureIncrement {
         heavy_k: f64,
         electron_k: f64,
         maximum_k: f64,
+    },
+    PopulationIncrement {
+        species: SpeciesId,
+        change_mol: f64,
+        maximum_mol: f64,
     },
     Cancelled,
 }

@@ -29,6 +29,9 @@ use fs_qty::{
 };
 use fs_thermochem::electron_collision::MaxwellianRateControlsV1;
 
+#[path = "ionized_wave_heating/reacting.rs"]
+mod reacting;
+
 fn magnetic_limits() -> IonizedGasMagneticLimits {
     IonizedGasMagneticLimits {
         maximum_cyclotron_to_thermal_energy_ratio: 0.01,

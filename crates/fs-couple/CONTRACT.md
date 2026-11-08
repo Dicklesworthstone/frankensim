@@ -3914,6 +3914,45 @@ and a new field solve, signed Coulomb allocations and internal exchange,
 zero-field thermal relaxation, original source/volume/domain binding,
 temperature limits, cancellation and refusal of scalar-only electron drag.
 
+`advance_reacting` uses the same held Maxwell powers with the existing
+`fs-gas::chemistry::ionization_network` owner. Source-bound electron-impact
+ionization, three-body recombination and spontaneous radiative recombination
+share the original electron/heavy energy pools. Formation energy is stored or
+released by the reaction owner, never added as a second heating source. The
+coherent incident field supplies collisional work only; no separate ionizing
+photon beam is inferred. Emitted recombination photons escape under the native
+optically thin closure and remain a distinct energy account.
+
+A complete `IonizedGasTransportBank` must reproduce the wave's current carrier
+sources, Coulomb law and constitutive limits exactly. Its original neutral
+cross sections supply thermal exchange, including any neutral target that
+chemistry can create. Native reaction quadrature, adaptive time stepping,
+caloric admission and conservation checks remain intact. Endpoint refresh uses
+actual amounts, both temperatures and pressure, with no equilibrium reset,
+population floor, inferred collision law or second charge-carrier model.
+
+The caller bounds both pool temperature changes and every species' amount
+change by `absolute_mol + relative * original_amount_mol`. Thus trace-carrier
+growth is not normalized by the much larger neutral population, and initially
+absent species require an explicit absolute allowance. These are endpoint
+held-field limits, not error bounds on intermediate transport or proof of
+continuous optical feedback. The original ion-drag and bound-charge material
+cards must still apply to the resulting mixture; coordinate refresh does not
+establish an unprovided composition dependence. A new Maxwell solve must admit
+its own complete-field drift domain. Exactly neutral endpoints return no
+free-carrier conductivity rather than a numerical floor.
+
+Reaction evolution, increment checks, and all next-source evaluations publish
+atomically. The result retains its original wave and complete transport bank,
+native network result, refreshed transport/background, and separate Maxwell
+work. Focused G0/G1/G3/G4 tests reconstruct monatomic sensible and ionization
+storage independently, exercise the next Maxwell solve, distinguish signed
+Coulomb drift work from internal exchange, permit zero-field chemical
+evolution, and cover population/temperature/source/cancellation refusal. No
+spatial reacting flow, line/free-free loss, diffuse recombination transport,
+photoionization of the coherent wave, material-path validity or transient
+field-storage claim is added.
+
 ## Two-axis string bridges in omitted-mode contact response
 
 Each material string's original plain bridge plus one independently directed
