@@ -12,7 +12,10 @@ use super::{
     C64, Cx, Dd, StructuralInterior, StructuralInteriorError, StructuralInteriorPoleEnergy,
 };
 use super::{poll, response};
-use fs_modal::relaxation_modes::{MaxwellModeError, PreparedMaxwellModes};
+use fs_modal::relaxation_modes::{MaxwellMode, MaxwellModeError, PreparedMaxwellModes};
+
+/// Excitation residues and physical parameter slopes of the same simple pole.
+pub mod residue;
 
 /// Original scalar channels and shared numerical accuracy/resource controls.
 pub use fs_modal::relaxation_modes::{MaxwellDampingBranch, PoleOptions};
@@ -215,9 +218,20 @@ impl PreparedStructuralInteriorRelaxationModes<'_, '_, '_, '_> {
         let mut seed = Vec::with_capacity(ns + na);
         seed.extend_from_slice(structural_displacement_seed);
         seed.extend_from_slice(pressure_potential_seed_pa_s);
-        let mut mode = self
+        let mode = self
             .modes
             .refine(laplace_seed_per_s, &seed, || cx.checkpoint().is_err())?;
+        self.observe(mode, cx)
+    }
+
+    fn observe(
+        &self,
+        mut mode: MaxwellMode,
+        cx: &Cx<'_>,
+    ) -> Result<StructuralInteriorRelaxationPole, StructuralInteriorRelaxationError> {
+        poll(cx)?;
+        let ns = self.model.structural_dofs;
+        let na = self.model.pressure_dofs();
         let potential = mode.displacement.split_off(ns);
         let pressure = mode.velocity.split_off(ns);
         let mut cancelled = || cx.checkpoint().is_err();

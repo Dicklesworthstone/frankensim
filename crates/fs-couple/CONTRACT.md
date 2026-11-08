@@ -6496,6 +6496,59 @@ Four complete FE adapter regressions are additionally authored but remain
 unexecuted while the canonical dependency closure is unavailable. The native
 checks do not establish whole-adapter compilation or broader MR56 qualification.
 
+### Excitation residues and parameter slopes of full-field memory poles
+
+`PreparedStructuralInteriorRelaxationModes::refine_residue` resolves one
+original right/transpose pair through the existing shared Maxwell owner.
+The transpose uses T(s)^T without conjugation: original reciprocal B blocks,
+gyroscopic terms and nonproportional damping remain in the nonsymmetric
+pencil. Independent original transpose residuals are evaluated at the right
+pole, with both equilibrated derivative alignment and original cancellation
+admitted against the caller's floor. The physical baseline is observed from
+that genuine retained right mode without a second refinement.
+
+`force_residues` reuses the pair for complete batches of original generalized
+structural forces and inward pressure-test-function flow loads. Results are
+Laurent coefficients of 1/(s-s0), including every original displacement,
+velocity, pressure potential, pressure, reciprocal interface force/flow and
+branch stress. Pressure residue is s0 times potential residue, including
+real decay. Field names preserve the additional inverse-second residue unit.
+No analytic background, initial history, other poles, complete frequency
+response or full modal expansion is supplied by this local coefficient.
+
+`pole_derivatives` contracts the same pair through complete signed original
+M/C/K directions and both reciprocal dB blocks, sharing the existing physical
+direction assembly with the quadratic-pole owner. Explicit branch derivatives
+include stiffness, d ln(tau) and every original strain entry. Native factored
+DD source contractions retain cancellation; no eigensolve, finite difference,
+mode normalization or numerical equilibration is differentiated. Returned
+slopes include complex ds, signed amplitude-decay change and d|Im(s)| only
+for oscillatory poles. A real pole reports no selected absolute-frequency
+derivative. Mode-shape and force-residue derivatives are outside this API.
+
+For n original coordinates and b branches, separate physical preparation
+ceilings admit 320*n+128*b+1024 bytes and work 256*n*n+512*n+512*b.
+A k-load batch admits 256*n+128*b+1024+k*(80*n+32*b+512) bytes and work
+k*(64*ns*na+512*n+128*b+512). A k-direction batch assembles one direction
+at a time, admitting 24*n*n+256*n+128*b+1024+64*k bytes and work
+k*(1024*n*n*(b+1)+128*n+256*b+512). These include the retained physical
+baseline and complete current batch, excluding the original/native source,
+caller arrays, earlier results and allocator overhead. Original PoleOptions
+independently admit both native refinements. Cancellation, ill-conditioned
+normalization, invalid directions and resource refusals return no partial
+batch and preserve the immutable pair. Material poles, dark material modes,
+repeated roots and mode crossings retain the shared owner's local limits.
+
+The native validation lane exercises the actual shared Maxwell residue owner,
+the shared original-block direction assembly and physical residue mapping
+against the exact five-coordinate P1 fluid-loaded cubic. It covers force and
+inward-flow excitation at all three roots, full pressure/force/flow/stress,
+material and spatial pole slopes, gyroscopic direction retention, invalid
+source dimensions, and cancellation. Three full FE/Cx integration tests are
+also authored; the missing frankenscipy/fsci-special manifest prevents their
+Cargo compilation in this environment. Native evidence is not a claim that
+the complete adapter or workspace has compiled.
+
 ### Adaptive physical time for retained porous gas/wall compression
 
 `ThermalPorousGasSystem::advance_adaptive` resolves a complete physical stroke

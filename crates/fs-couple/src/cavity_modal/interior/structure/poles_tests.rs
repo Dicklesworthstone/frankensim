@@ -9,6 +9,8 @@ use super::super::poles::{PoleOptions, StructuralInteriorPole, StructuralInterio
 use super::super::time::StructuralInteriorTimeLimits;
 use super::*;
 
+#[path = "poles/relaxation/residue_tests.rs"]
+mod relaxation_residue_tests;
 #[path = "poles/relaxation_tests.rs"]
 mod relaxation_tests;
 
