@@ -12818,6 +12818,31 @@ and B-bar strain in a nonuniform HEX8 field. These integration regressions remai
 unexecuted because the original runtime dependency build is resource-blocked;
 the material observer's production arithmetic was exercised separately.
 
+`ViscoHarmonicMaterialObserver::observe_window` uses the same original spatial
+maps and reference quadrature to observe a finite physical interval. It retains
+the actual phase, every compatible/B-bar strain and every Kelvin/Maxwell source
+channel. One prepared material window per element supplies allocation-free point
+evaluation. The returned field separately integrates start/end recoverable
+storage, direct stored-energy change, Kelvin heat, Maxwell heat and stress work;
+the signed work-minus-storage-minus-heat residual is never forced to zero. Direct
+pointwise storage increments are summed rather than subtracting rounded total
+endpoint stores. Uniform time intervals are required: a triangular detector
+sensitivity is not unweighted physical heat or endpoint energy conservation.
+
+The original supplied payload/work caps also apply to this operation. Its actual
+returned point type is sized explicitly, alongside the existing spectrum/maps
+and one local nodal buffer. Before any result allocation the window path admits
+the conservative work bound `262144*sum(points*(1+branches)) +
+8192*sum(1+branches)`. A cap that admits cycle means but refuses interval work
+leaves the original mean observer usable. No extra constitutive history or
+thermal solve is created, and cancellation/domain refusal publishes no field.
+`visco_harmonic_window` checks affine tetrahedral and nonuniform HEX8 B-bar fields
+against independent real-field Maxwell/Simpson calculations, physical full-cycle
+and split-interval limits, and budget/profile/strain/cancellation refusals.
+Those four new solid integration tests are present but remain unexecuted under
+the shared runtime build constraint. Their material owner passed seven native
+selected-source interval tests and eighteen existing numerical regressions.
+
 ### Thermal retained porous solids with independently sealed cavities
 
 `hyper3::plastic::porous::thermal::FiniteThermalPorousTetSolid::advance_with_cavities`
