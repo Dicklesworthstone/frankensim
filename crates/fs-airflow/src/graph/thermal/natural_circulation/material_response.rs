@@ -27,6 +27,7 @@ use crate::graph::thermal::medium::series::hydraulic::{
 use crate::graph::thermal::transport::BranchThermalModel;
 use crate::graph::{
     GraphBranch, GraphError, LinearLossElement, LinearLossResistance, LossGraph, PassiveBranch,
+    TurbulentPipeLoss,
 };
 use crate::{AirflowError, LossElement, LossResistance, SourceProvenance, ToleranceBasis};
 
@@ -60,7 +61,10 @@ pub struct MaterialBranchLaw {
 pub struct MaterialBranchEvaluation<M> {
     pub medium: M,
     pub evaluation: ResistanceEvaluation,
+    /// Constant linear component; zero for a retained nonlinear pipe law.
     pub linear_volume_resistance_pa_s_m3: f64,
+    /// Constant quadratic component; zero for a retained nonlinear pipe law.
+    /// These zeros never replace the actual law in `graph.turbulent_losses()`.
     pub quadratic_volume_resistance_pa_s2_m6: f64,
 }
 
@@ -207,10 +211,19 @@ pub fn evaluate_material_graph<M: FluidTransport>(
             .resistance
             .evaluate_snapshot(state, MassFlowRate::new(mass), density.reference_kg_m3())
             .map_err(|source| MaterialResponseError::Resistance { branch, source })?;
-        let (linear, quadratic) = law
-            .resistance
-            .volume_coefficients(state, density.reference_kg_m3())
-            .map_err(|source| MaterialResponseError::Resistance { branch, source })?;
+        let turbulent = if law.resistance.relative_sand_roughness().is_some() {
+            Some(TurbulentPipeLoss::new(edge.loss.name.clone(), law.resistance, state,
+                density.reference_kg_m3(), law.uncertainty_rel, law.source.clone(), law.tolerance_basis)
+                .map_err(|source| MaterialResponseError::Resistance { branch, source })?)
+        } else {
+            None
+        };
+        let (linear, quadratic) = if turbulent.is_some() {
+            (0.0, 0.0)
+        } else {
+            law.resistance.volume_coefficients(state, density.reference_kg_m3())
+                .map_err(|source| MaterialResponseError::Resistance { branch, source })?
+        };
         let linear_loss = if linear > 0.0 {
             Some(LinearLossElement::new(
                 edge.loss.name.clone(),
@@ -222,7 +235,9 @@ pub fn evaluate_material_graph<M: FluidTransport>(
         } else {
             None
         };
-        let replacement = if quadratic > 0.0 {
+        let replacement = if let Some(loss) = turbulent {
+            PassiveBranch::Turbulent { from: edge.from, to: edge.to, loss }
+        } else if quadratic > 0.0 {
             let loss = LossElement::new(
                 edge.loss.name.clone(),
                 LossResistance::new(quadratic),

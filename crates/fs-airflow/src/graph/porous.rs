@@ -208,6 +208,15 @@ pub enum PassiveBranch {
         /// Source-backed linear drag.
         loss: LinearLossElement,
     },
+    /// Original Reynolds-dependent Colebrook pipe at one material snapshot.
+    Turbulent {
+        /// Positive-flow origin.
+        from: usize,
+        /// Positive-flow destination.
+        to: usize,
+        /// Original pipe geometry, material state, tangent and support.
+        loss: super::TurbulentPipeLoss,
+    },
     /// Independent linear and quadratic losses on the same flow path.
     ///
     /// A Forchheimer interpretation requires a source-backed quadratic
@@ -225,13 +234,16 @@ impl From<GraphBranch> for PassiveBranch {
 }
 
 impl PassiveBranch {
-    pub(super) fn into_parts(self) -> (GraphBranch, Option<LinearLossElement>) {
+    pub(super) fn into_parts(self) -> (GraphBranch, Option<LinearLossElement>, Option<super::TurbulentPipeLoss>) {
         match self {
-            Self::Quadratic(branch) => (branch, None),
+            Self::Quadratic(branch) => (branch, None, None),
             Self::Linear { from, to, loss } => (
-                GraphBranch { from, to, loss: loss.zero_quadratic_metadata() }, Some(loss),
+                GraphBranch { from, to, loss: loss.zero_quadratic_metadata() }, Some(loss), None,
             ),
-            Self::LinearQuadratic { branch, linear_loss } => (branch, Some(linear_loss)),
+            Self::LinearQuadratic { branch, linear_loss } => (branch, Some(linear_loss), None),
+            Self::Turbulent { from, to, loss } => (
+                GraphBranch { from, to, loss: loss.zero_quadratic_metadata() }, None, Some(loss),
+            ),
         }
     }
 }

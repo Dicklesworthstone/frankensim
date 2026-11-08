@@ -130,7 +130,8 @@ fn material_viscosity_and_flow_dependent_h_reach_one_native_circulation() {
         assert!(result.max_relative_coefficient_residual <= controls.relative_coefficient_tolerance);
         let actual=solved_state(&result.solution);
         let confirmed=response(&fixture,&actual);
-        assert!(coefficient_residual(&result.response,&confirmed) <= controls.relative_coefficient_tolerance);
+        assert!(coefficient_residual(&result.response,&confirmed,&actual.volume_flows_m3_s).unwrap()
+            <= controls.relative_coefficient_tolerance);
         let q=result.solution.hydraulics.branches[0].flow.value();
         assert!(q > 0.0 && q < 1e-3);
         assert!((result.solution.hydraulics.branches[1].flow.value()-q).abs() < 1e-12);
@@ -214,4 +215,32 @@ fn response_cannot_change_physical_regions_and_global_work_budgets_are_enforced(
         assert!(matches!(run(&fixture,cx,limits,&fixture.initial()),
             Err(CirculationClosureError::Natural(NaturalCirculationError::MaterialBudget { .. }))));
     });
+}
+
+#[test]
+fn nonlinear_response_residual_checks_original_pressure_and_tangent_at_solved_flow() {
+    use crate::graph::TurbulentPipeLoss;
+    use crate::graph::thermal::medium::series::hydraulic::{MaterialFlowResistance, ResistanceError};
+    use fs_material::fluid_transport::FluidTransportState;
+    let make = |mu| {
+        let law = MaterialFlowResistance::circular_turbulent(Length::new(1.0),
+            Length::new(0.01), Length::new(1e-5), (4000.0, 1e6)).unwrap();
+        let material = FluidTransportState::try_new(1000.0, 2000.0, 0.5, mu).unwrap();
+        let loss = TurbulentPipeLoss::new("pipe", law, material, 1000.0, 0.0,
+            crate::SourceProvenance::new("authored developed pipe", "closure-pipe"),
+            crate::ToleranceBasis::Analytic).unwrap();
+        CirculationResponse { graph: LossGraph::new_mixed(2,
+            vec![PassiveBranch::Turbulent { from: 0, to: 1, loss }]).unwrap(),
+            models: vec![BranchThermalModel::Adiabatic], payload: () }
+    };
+    let a = make(0.001);
+    let b = make(0.002);
+    // Both scalar coefficient slots are zero; a comparison of them alone
+    // would falsely declare this changed-viscosity response fully closed.
+    assert_eq!(a.graph.branches()[0].loss.resistance.value(), 0.0);
+    assert_eq!(b.graph.branches()[0].loss.resistance.value(), 0.0);
+    assert!(coefficient_residual(&a, &b, &[1e-4]).unwrap() > 0.1);
+    assert_eq!(coefficient_residual(&a, &a, &[1e-4]).unwrap(), 0.0);
+    assert!(matches!(coefficient_residual(&a, &b, &[0.0]),
+        Err(GraphError::Resistance { source: ResistanceError::Reynolds { .. }, .. })));
 }

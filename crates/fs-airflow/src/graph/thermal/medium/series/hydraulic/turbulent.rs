@@ -16,7 +16,8 @@ impl MaterialFlowResistance {
     /// sampled together, and the mass-flow tangent differentiates that same
     /// implicit friction equation. Signed loss and `dp Q` remain passive.
     /// Existing liquid pressure, pump and viscous-heating paths accept this law.
-    /// Fixed-coefficient graph exports reject it instead of freezing friction.
+    /// Native steady graphs retain this nonlinear law; fixed-coefficient exports
+    /// reject it instead of freezing friction.
     ///
     /// Reference: Colebrook (1939), DOI 10.1680/ijoti.1939.13150;
     /// NASA KSC-STD-Z-0017 Rev A, section 7.4.1, equation 4:
@@ -48,6 +49,36 @@ impl MaterialFlowResistance {
         let mut law = Self::try_new(0.0, geometry, Area::new(area), Length::new(diameter), reynolds_range)?;
         law.relative_roughness = Some(relative_roughness);
         Ok(law)
+    }
+
+
+    /// Numerical pressure-to-flow inverse of this same Colebrook law. Graph
+    /// brackets may use it only inside their precomputed Reynolds endpoints;
+    /// accepted flows must still pass `evaluate_snapshot`. This is algebraic,
+    /// not an explicit approximation to the friction factor.
+    pub(crate) fn turbulent_trial_volume_flow(
+        &self, transport: fs_material::fluid_transport::FluidTransportState,
+        rho: f64, pressure_magnitude: f64,
+    ) -> Result<f64, ResistanceError> {
+        let roughness = self.relative_roughness
+            .ok_or(ResistanceError::Invalid("Colebrook pipe required for nonlinear inverse"))?;
+        if !positive(rho) || !positive(pressure_magnitude) {
+            return Err(ResistanceError::Invalid("positive density and pressure required for pipe inverse"));
+        }
+        // dp = (b rho) f Q^2 and Re = rho Q D / (mu A).
+        // With t = Q sqrt(f), Colebrook gives Q directly:
+        // Q = -2 t log10(eps/(3.7 D) + 2.51 mu A/(rho D t)).
+        // Separate roots avoid forming a dimensional b*rho product.
+        let t = (det::sqrt(pressure_magnitude) / det::sqrt(self.inertial_geometry))
+            / det::sqrt(rho);
+        let argument = roughness / 3.7
+            + ((2.51 * transport.dynamic_viscosity_pa_s() / rho)
+                * (self.flow_area.value() / self.reynolds_length.value())) / t;
+        let q = (-2.0 * core::f64::consts::LOG10_E * det::ln(argument)) * t;
+        if !positive(t) || !positive(argument) || !positive(q) {
+            return Err(ResistanceError::Invalid("Colebrook pressure inverse is unrepresentable"));
+        }
+        Ok(q)
     }
 
     /// Equivalent sand roughness / diameter for the selected Colebrook pipe.

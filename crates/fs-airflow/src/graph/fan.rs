@@ -141,7 +141,7 @@ impl LossGraph {
             let network = self.solve(&[fixed(inlet, 0.0), fixed(outlet, 0.0)], graph_config, cx)?;
             return checked_operating_point(network, inlet, outlet, fan, 0.0, 0, fan_config, cx);
         }
-        if self.has_linear_losses() {
+        if self.has_linear_losses() || self.has_turbulent_losses() {
             return self.solve_mixed_with_fan(inlet, outlet, fan, graph_config, fan_config,
                 minimum, maximum, peak, cx);
         }

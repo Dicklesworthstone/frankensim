@@ -20,7 +20,7 @@ use super::{NaturalCirculationBranch, NaturalCirculationConfig, NaturalCirculati
     NaturalCirculationProblem, NaturalCirculationSolution, poll, positive, relative,
     solve_with_density_seed};
 use super::super::transport::BranchThermalModel;
-use crate::graph::LossGraph;
+use crate::graph::{GraphError, LossGraph};
 
 /// Actual fluid means and signed flow in the ORIGINAL branch/segment order.
 /// Segment means are axial means of the exponential profile, not wall values.
@@ -56,7 +56,8 @@ pub struct CirculationClosureConfig {
     pub temperature_tolerance_k: f64,
     pub absolute_flow_tolerance: VolumetricFlowRate,
     pub relative_flow_tolerance: f64,
-    /// Symmetric relative change in EACH linear/quadratic drag and hA term.
+    /// Symmetric relative change in EACH linear/quadratic drag and hA term,
+    /// plus nonlinear pressure and differential resistance at the solved flow.
     /// A mechanism appearing/disappearing has relative change one.
     pub relative_coefficient_tolerance: f64,
     pub relaxation: f64,
@@ -172,7 +173,8 @@ where M: FluidTransport,
         // A small state change cannot hide a discontinuous constitutive jump.
         let confirmed = evaluate_response(cx, problem, &next, &mut response,
             &mut responses, config.max_response_evaluations)?;
-        last_coefficients = coefficient_residual(&applied, &confirmed);
+        last_coefficients = coefficient_residual(&applied, &confirmed, &next.volume_flows_m3_s)
+            .map_err(NaturalCirculationError::from)?;
         if !last_coefficients.is_finite() {
             return Err(CirculationClosureError::Invalid("nonfinite closure coefficients"));
         }
@@ -275,9 +277,35 @@ fn relative_change(a: f64, b: f64) -> f64 {
     if scale == 0.0 { 0.0 } else { (a/scale-b/scale).abs() }
 }
 
-fn coefficient_residual<P>(a: &CirculationResponse<P>, b: &CirculationResponse<P>) -> f64 {
+fn coefficient_residual<P>(
+    a: &CirculationResponse<P>, b: &CirculationResponse<P>, flows: &[f64],
+) -> Result<f64, GraphError> {
     let mut maximum = 0.0_f64;
-    for i in 0..a.graph.branches().len() {
+    for (i, &q) in flows.iter().enumerate() {
+        match (&a.graph.turbulent_losses()[i], &b.graph.turbulent_losses()[i]) {
+            (Some(x), Some(y)) => {
+                // The constant coefficient slots are intentionally zero. Compare
+                // the two ORIGINAL laws at the actual solved flow instead.
+                let evaluate = |loss: &std::sync::Arc<crate::graph::TurbulentPipeLoss>| {
+                    loss.evaluate(VolumetricFlowRate::new(q))
+                        .map_err(|source| GraphError::Resistance { branch: i, source })
+                };
+                let x = evaluate(x)?;
+                let y = evaluate(y)?;
+                for (x, y) in [
+                    (x.pressure_drop_pa.abs(), y.pressure_drop_pa.abs()),
+                    (x.dpressure_dmass_flow * x.momentum_density_kg_m3,
+                     y.dpressure_dmass_flow * y.momentum_density_kg_m3),
+                ] {
+                    let change = relative_change(x, y);
+                    if !change.is_finite() { return Ok(f64::NAN); }
+                    maximum = maximum.max(change);
+                }
+            }
+            (None, None) => {}
+            // Switching constitutive mechanisms is a full response change.
+            _ => maximum = maximum.max(1.0),
+        }
         let pairs = [
             (a.graph.branches()[i].loss.resistance.value(), b.graph.branches()[i].loss.resistance.value()),
             (a.graph.linear_losses()[i].as_ref().map_or(0.0, |l| l.resistance.value()),
@@ -285,7 +313,7 @@ fn coefficient_residual<P>(a: &CirculationResponse<P>, b: &CirculationResponse<P
         ];
         for (x,y) in pairs {
             let value = relative_change(x,y);
-            if !value.is_finite() { return f64::NAN; }
+            if !value.is_finite() { return Ok(f64::NAN); }
             maximum = maximum.max(value);
         }
         if let (BranchThermalModel::Exchange(x), BranchThermalModel::Exchange(y)) =
@@ -295,12 +323,12 @@ fn coefficient_residual<P>(a: &CirculationResponse<P>, b: &CirculationResponse<P
                 // Areas have already been checked identical, so comparing h
                 // is exactly the relative hA change without product overflow.
                 let value = relative_change(x.htc_w_per_m2_k(), y.htc_w_per_m2_k());
-                if !value.is_finite() { return f64::NAN; }
+                if !value.is_finite() { return Ok(f64::NAN); }
                 maximum = maximum.max(value);
             }
         }
     }
-    maximum
+    Ok(maximum)
 }
 
 fn residual(a: &CirculationClosureState, b: &CirculationClosureState,

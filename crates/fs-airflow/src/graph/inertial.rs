@@ -774,6 +774,11 @@ fn admit_topology(c: &Compiled, graph: &LossGraph) -> Result<(), InertialGraphEr
     Ok(())
 }
 fn admit_reference(graph: &LossGraph, rho: f64) -> Result<(), InertialGraphError> {
+    if graph.has_turbulent_losses() {
+        return Err(InertialGraphError::Invalid(
+            "inertial descriptor requires constant linear/quadratic drag; Reynolds-dependent pipes need a nonlinear transient owner",
+        ));
+    }
     if graph
         .gravity()
         .is_some_and(|g| g.reference_transport().density_kg_m3() != rho)

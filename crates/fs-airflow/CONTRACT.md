@@ -5424,3 +5424,45 @@ a compressible pressure profile, choking model, resolved velocity/thermal bounda
 layer or complete energy solve. Existing tests add independent Poiseuille density
 scaling, heated/cooled mass/enthalpy/momentum balances, retained profile factors,
 and bracket, profile, shared-work, pressure, power and cancellation refusals.
+
+## Reynolds-dependent turbulent resistance in native pressure graphs
+
+`LossGraph::new_mixed` accepts `PassiveBranch::Turbulent`, retaining a
+`TurbulentPipeLoss` with the original `MaterialFlowResistance::circular_turbulent`
+geometry, equivalent sand roughness, Reynolds support, coherent material
+snapshot and provenance. Its signed Darcy-Weisbach pressure loss and passive
+`dp Q` use the same original Colebrook equation and fixed-material tangent.
+Source-bound edges share one conserved momentum density; gravity must use that
+same reference. The material-response compiler retains this nonlinear branch
+when viscosity changes, without fitting constant linear/quadratic coefficients.
+
+The existing nodal bracket solver remains the network owner. Algebraic
+inversion of the original Colebrook equation avoids an inner friction root
+solve at each pressure trial. Private monotone continuations below and above
+the authored Reynolds interval support numerical bracketing through zero;
+they are not laminar, transition or extrapolated physical models. Every
+accepted graph/fan solution re-evaluates the original Reynolds support,
+pressure, positive differential resistance and dissipated power. Unsupported
+roots refuse, including zero/transition flow. Exact endpoints are rounded
+inward and inverse roundoff is bounded before the unchanged source admission.
+
+Fan intersections use actual nonlinear graph pressure trials rather than
+quadratic homogeneity. Native tangent/adjoint solves reuse the existing
+grounded Laplacian with `dQ/d(dp) = 1/(rho_ref d(dp)/dm)`. A resistance-scale
+direction multiplies the whole pipe loss, such as changing length at fixed
+diameter, roughness and fluid; it is not a viscosity or roughness derivative.
+The thermal circulation closure compares fresh original pressure and
+differential resistance at actual solved flow, in addition to its unchanged
+coefficient and hA gates. Its existing omitted-dissipation watt budget still
+accounts for actual `dp Q`; no power is silently deposited twice.
+
+Constant-coefficient axial aggregation and the constant-drag inertial
+descriptor explicitly refuse nonlinear pipe branches. This feature adds no
+second network solver, transient turbulence model, rough-wall heat-transfer
+correlation, source-domain extension or uncertainty certificate. Five added
+regressions in existing test files cover junction/reversed flow and pressure
+work, original length/pressure derivatives and adjoints, viscosity refresh,
+fan closure, original Reynolds endpoints/refusals, coefficient-only owner
+refusal and nonlinear thermal-response confirmation. The touched Rust sources
+were parsed with the pinned formatter; native Cargo test execution was not
+available during this batch.

@@ -314,6 +314,12 @@ impl LossGraph {
                     reason: "gravity reference density differs from the bound Darcy material",
                 });
             }
+            if self.turbulent_losses[edge].as_ref()
+                .is_some_and(|loss| loss.momentum_density_kg_m3() != rho0)
+            {
+                return Err(GraphError::InvalidBranch { branch: edge,
+                    reason: "gravity reference density differs from the bound turbulent material" });
+            }
             let (perturbation, absolute) = match &samples {
                 GravitySamples::Branches(materials) => {
                     let departure =

@@ -258,3 +258,198 @@ fn g0_source_density_reynolds_and_boundary_condition_refusals_remain_terminal() 
         );
     });
 }
+
+
+fn turbulent_law(length_m: f64, roughness_m: f64) -> MaterialBranchLaw {
+    let mut result = law(0.0, 1.0);
+    result.resistance = MaterialFlowResistance::circular_turbulent(
+        Length::new(length_m), Length::new(0.01), Length::new(roughness_m), (4000.0, 1e6),
+    ).unwrap();
+    result.exchange.clear();
+    result
+}
+
+// Independent algebraic inversion of the original Colebrook equation using
+// platform sqrt/log10, with explicit geometry rather than production helpers.
+fn colebrook_flow(dp: f64, length: f64, roughness: f64, mu: f64) -> f64 {
+    let diameter = 0.01;
+    let area = core::f64::consts::FRAC_PI_4 * diameter * diameter;
+    let t = area * (2.0 * diameter * dp.abs() / (length * 1000.0)).sqrt();
+    let q = -2.0 * t * (roughness / (3.7 * diameter)
+        + 2.51 * mu * area / (1000.0 * diameter * t)).log10();
+    q.copysign(dp)
+}
+
+fn turbulent_response(cx: &Cx<'_>, length: f64, mu: f64) -> MaterialGraphResponse<Source> {
+    evaluate_material_graph(cx, &template(), density(), &[turbulent_law(length, 1e-5)],
+        &[1e-4], vec![source("current bulk", 900.0, mu, 0.5)], vec![vec![]]).unwrap()
+}
+
+#[test]
+fn turbulent_junction_preserves_material_laws_reverse_flow_and_pressure_work() {
+    with_cx(|cx| {
+        let topology = LossGraph::new(3, vec![
+            edge("feed", 0, 1, 1.0), edge("smooth outlet", 1, 2, 1.0),
+            edge("rough reverse outlet", 2, 1, 1.0),
+        ]).unwrap();
+        let pressure = 5000.0;
+        let forward = colebrook_flow(pressure, 1.0, 1e-5, 0.001);
+        let reverse = colebrook_flow(pressure, 2.5, 5e-5, 0.001);
+        let feed_resistance = 3.7e7;
+        let mut feed = law(feed_resistance / 0.001, 0.0);
+        feed.exchange.clear();
+        let laws = [feed, turbulent_law(1.0, 1e-5), turbulent_law(2.5, 5e-5)];
+        let expected = [forward + reverse, forward, -reverse];
+        let response = evaluate_material_graph(cx, &topology, density(), &laws, &expected,
+            (0..3).map(|_| source("bulk", 900.0, 0.001, 0.5)).collect(),
+            vec![vec![], vec![], vec![]]).unwrap();
+        let inlet = pressure + feed_resistance * expected[0];
+        let mut controls = config();
+        controls.absolute_flow_tolerance = fs_qty::VolumetricFlowRate::new(1e-16);
+        controls.relative_flow_tolerance = 1e-12;
+        let solved = response.graph.solve(&[boundary(0, inlet), boundary(2, 0.0)], controls, cx).unwrap();
+        assert!((solved.pressures[1].value() / pressure - 1.0).abs() < 2e-10);
+        for (index, (branch, &q)) in solved.branches.iter().zip(&expected).enumerate() {
+            assert!((branch.flow.value() / q - 1.0).abs() < 2e-10);
+            assert_eq!(response.momentum[index].medium.queries.get(), 1);
+            assert_eq!(response.momentum[index].evaluation.transport.density_kg_m3(), 900.0);
+            if index > 0 {
+                let loss = branch.turbulent_loss.as_ref().unwrap();
+                assert_eq!(loss.law(), laws[index].resistance);
+                assert_eq!(loss.source(), &laws[index].source);
+                let actual = loss.evaluate(branch.flow).unwrap();
+                near(actual.pressure_drop_pa, branch.dissipative_pressure_drop.value());
+                near(actual.dissipated_power_w,
+                    branch.dissipative_pressure_drop.value() * branch.flow.value());
+                assert!(actual.dissipated_power_w > 0.0);
+                assert!(actual.dpressure_dmass_flow > 0.0);
+                assert_eq!(branch.loss.resistance.value(), 0.0);
+                assert!(branch.linear_loss.is_none());
+            }
+        }
+        let dissipated: f64 = solved.branches.iter().map(|b|
+            b.dissipative_pressure_drop.value() * b.flow.value()).sum();
+        assert!((dissipated / (inlet * solved.node_outflows[0].value()) - 1.0).abs() < 2e-10);
+        assert!(solved.node_outflows[1].value().abs() < 1e-15);
+    });
+}
+
+#[test]
+fn turbulent_exact_graph_tangent_and_adjoint_follow_length_and_pressure_perturbations() {
+    use crate::graph::sensitivity::{FlowWeight, GraphSensitivityConfig, PressureWeight};
+    use fs_qty::{Pressure, VolumetricFlowRate};
+    use fs_solver::CheckedCgConfig;
+    with_cx(|cx| {
+        let length = 1.25;
+        let pressure = 4000.0;
+        let response = turbulent_response(cx, length, 0.001);
+        let linear = response.graph.solve_linearized(
+            &[boundary(0, pressure), boundary(1, 0.0)], config(),
+            GraphSensitivityConfig { minimum_absolute_flow: VolumetricFlowRate::new(0.0),
+                linear: CheckedCgConfig { tolerance: 1e-12, max_iterations: 64, max_corrections: 2 } },
+            cx).unwrap();
+        let tangent = linear.tangent(&[0.4], &[Pressure::new(120.0), Pressure::new(-30.0)], cx).unwrap();
+        let gradient = linear.adjoint(&[PressureWeight::new(0.0); 2], &[FlowWeight::new(1.0)], cx).unwrap();
+        let step = 1e-5;
+        let expected = (colebrook_flow(pressure + step * 150.0, length * (1.0 + step * 0.4), 1e-5, 0.001)
+            - colebrook_flow(pressure - step * 150.0, length * (1.0 - step * 0.4), 1e-5, 0.001))
+            / (2.0 * step);
+        assert!((tangent.flows[0].value() / expected - 1.0).abs() < 1e-8);
+        let length_derivative = (colebrook_flow(pressure, length * (1.0 + step), 1e-5, 0.001)
+            - colebrook_flow(pressure, length * (1.0 - step), 1e-5, 0.001)) / (2.0 * step);
+        assert!((gradient.log_resistances[0] / length_derivative - 1.0).abs() < 1e-8);
+        let dual = 0.4 * gradient.log_resistances[0]
+            + 120.0 * gradient.boundary_pressures[0].value()
+            - 30.0 * gradient.boundary_pressures[1].value();
+        assert!((dual / tangent.flows[0].value() - 1.0).abs() < 1e-12);
+        let q = linear.solution().branches[0].flow.value();
+        // Freezing f would incorrectly recover the quadratic q/2 response.
+        assert!((gradient.log_resistances[0] + 0.5 * q).abs() > 0.01 * q);
+        let viscous = turbulent_response(cx, length, 0.002).graph
+            .solve(&[boundary(0, pressure), boundary(1, 0.0)], config(), cx).unwrap();
+        let expected_viscous = colebrook_flow(pressure, length, 1e-5, 0.002);
+        assert!((viscous.branches[0].flow.value() / expected_viscous - 1.0).abs() < 1e-12);
+        assert!(viscous.branches[0].flow.value() < q);
+    });
+}
+
+#[test]
+fn turbulent_fan_intersection_uses_actual_nonlinear_curve_and_private_zero_flow_brackets() {
+    use crate::graph::GraphFanConfig;
+    use crate::{FanArrangement, FanBank, FanCurve, FanPoint};
+    use fs_qty::{Pressure, VolumetricFlowRate};
+    with_cx(|cx| {
+        let pressure = 6000.0;
+        let q = colebrook_flow(pressure, 1.0, 1e-5, 0.001);
+        let fan = FanBank::new(FanCurve::new("analytic crossing",
+            vec![FanPoint::new(VolumetricFlowRate::new(0.0), Pressure::new(2.0 * pressure)),
+                FanPoint::new(VolumetricFlowRate::new(2.0 * q), Pressure::new(0.0))],
+            SourceProvenance::new("authored fan fixture", "colebrook-crossing"),
+            0.0, ToleranceBasis::Analytic, VolumetricFlowRate::new(0.0), (0.5, 2.0),
+        ).unwrap(), 1, FanArrangement::Series, 1.0).unwrap();
+        let response = turbulent_response(cx, 1.0, 0.001);
+        let point = response.graph.solve_with_fan(0, 1, &fan, config(),
+            GraphFanConfig { max_iterations: 128,
+                absolute_flow_tolerance: VolumetricFlowRate::new(1e-14),
+                absolute_pressure_tolerance: Pressure::new(1e-7) }, cx).unwrap();
+        assert!((point.network.branches[0].flow.value() / q - 1.0).abs() < 1e-9);
+        assert!((point.network.pressures[0].value() / pressure - 1.0).abs() < 1e-9);
+        assert!(point.network.branches[0].turbulent_loss.is_some());
+    });
+}
+
+#[test]
+fn turbulent_continuation_and_fixed_coefficient_consumers_never_admit_unsupported_physics() {
+    use crate::graph::inertial::{InertialBranch, InertialGraph, InertialGraphError};
+    use crate::graph::thermal::natural_circulation::distributed_response::{
+        DistributedResponseError, evaluate_distributed_material_graph,
+    };
+    use fs_qty::{Density, VolumetricFlowRate};
+    with_cx(|cx| {
+        let response = turbulent_response(cx, 1.0, 0.001);
+        let pipe = response.graph.turbulent_losses()[0].as_ref().unwrap();
+        for re in [0.0, 2000.0, 2e6] {
+            // Endpoint losses bound the original supported pressure range.
+            let endpoint = if re < 4000.0 { 5000.0 } else { 9e5 };
+            let mass = endpoint * 0.001 * pipe.law().flow_area().value() / 0.01;
+            let admitted = pipe.law().evaluate(&source("reference", 1000.0, 0.001, 0.5),
+                MassFlowRate::new(mass)).unwrap();
+            let dp = if re == 0.0 { 0.0 } else if re < 4000.0 {
+                admitted.pressure_drop_pa * 0.01
+            } else {
+                admitted.pressure_drop_pa * 100.0
+            };
+            assert!(matches!(response.graph.solve(&[boundary(0, dp), boundary(1, 0.0)], config(), cx),
+                Err(GraphError::Resistance { branch: 0, source: ResistanceError::Reynolds { .. } })));
+        }
+        for (re, lower) in [(4000.0, true), (1e6, false)] {
+            let mut q = re * 0.001 * pipe.law().flow_area().value() / (1000.0 * 0.01);
+            let mut supported = None;
+            for _ in 0..16 {
+                if let Ok(value) = pipe.evaluate(VolumetricFlowRate::new(q)) {
+                    supported = Some(value);
+                    break;
+                }
+                q = if lower { q.next_up() } else { q.next_down() };
+            }
+            let dp = supported.unwrap().pressure_drop_pa;
+            for sign in [-1.0, 1.0] {
+                let value = response.graph.solve(
+                    &[boundary(0, sign * dp), boundary(1, 0.0)], config(), cx).unwrap();
+                assert!((value.branches[0].flow.value() / (sign * q) - 1.0).abs() < 1e-12);
+            }
+        }
+        assert!(pipe.evaluate(VolumetricFlowRate::new(0.0)).is_err());
+        assert!(matches!(InertialGraph::try_new(cx, &response.graph, Density::new(1000.0),
+            &[InertialBranch { length_m: 1.0, flow_area_m2: pipe.law().flow_area().value() }],
+            &[boundary(0, 6000.0), boundary(1, 0.0)], &[1e-4], 0.0, 8),
+            Err(InertialGraphError::Invalid(_))));
+        assert!(matches!(evaluate_distributed_material_graph(cx, &template(), density(),
+            &[vec![turbulent_law(1.0, 1e-5)]], &[1e-4],
+            vec![vec![source("bulk", 900.0, 0.001, 0.5)]], vec![vec![vec![]]]),
+            Err(DistributedResponseError::Branch { branch: 0, .. })));
+        assert!(response.graph.clone().with_gravity(
+            &source("wrong reference", 900.0, 0.001, 0.5), &[[0.0; 3], [0.0, 0.0, 1.0]],
+            [0.0, 0.0, -9.81], cx).is_err());
+    });
+}

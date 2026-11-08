@@ -3,7 +3,9 @@
 //! For `dp = A q + B q |q|`, `g = 1/(A + 2 B |q|)` and a common
 //! coefficient scale gives `dq = g d(dp) - g dp d(log scale)`. This reduces
 //! to the original `q/2` response for quadratic edges and to `q` for Darcy
-//! edges. Eliminating fixed pressures gives the symmetric
+//! edges. Colebrook pipes use the original fixed-material implicit tangent;
+//! their scale direction multiplies the whole pressure law (e.g. pipe length),
+//! not viscosity, roughness or Reynolds number. Eliminating fixed pressures gives the symmetric
 //! positive-definite, grounded weighted graph Laplacian. We solve that system,
 //! not a differentiation of the primal iteration history. Storage is O(V+E).
 //!
@@ -195,7 +197,13 @@ impl LossGraph {
                     branch: edge, flow: branch.flow,
                 });
             }
-            let g = if linear == 0.0 {
+            let g = if let Some(loss) = &self.turbulent_losses[edge] {
+                let original = loss.evaluate(branch.flow)
+                    .map_err(|source| GraphError::Resistance { branch: edge, source })?;
+                let tangent = finite(original.dpressure_dmass_flow * loss.momentum_density_kg_m3(),
+                    "turbulent branch differential resistance")?;
+                finite(1.0 / tangent, "turbulent branch conductance")?
+            } else if linear == 0.0 {
                 // Preserve the original separate-root quadratic evaluation.
                 finite((0.5 / self.sqrt_resistance[edge])
                     / det::sqrt(branch.dissipative_pressure_drop.value().abs()), "branch conductance")?
@@ -206,7 +214,7 @@ impl LossGraph {
                 finite((1.0 / (linear / scale + 2.0 * (quadratic / scale))) / scale,
                     "mixed branch conductance")?
             };
-            let response = if linear == 0.0 { 0.5 * q }
+            let response = if linear == 0.0 && self.turbulent_losses[edge].is_none() { 0.5 * q }
                 else { finite(g * branch.dissipative_pressure_drop.value(), "resistance scale response")? };
             if g <= 0.0 || (q != 0.0 && response == 0.0) {
                 return Err(GraphError::NonFinite("branch derivative underflowed").into());

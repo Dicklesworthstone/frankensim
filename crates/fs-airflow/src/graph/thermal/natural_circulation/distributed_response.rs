@@ -143,6 +143,12 @@ pub fn evaluate_distributed_material_graph<M: FluidTransport>(
                 reason: "nonempty sections, finite flow and matching material counts required",
             });
         }
+        if template.turbulent_losses()[branch].is_some()
+            || sections.iter().any(|law| law.resistance.relative_sand_roughness().is_some())
+        {
+            return Err(DistributedResponseError::Branch { branch,
+                reason: "axial coefficient aggregation cannot retain Reynolds-dependent turbulent pipe sections" });
+        }
         section_count = bounded_count(section_count, sections.len())?;
         for (section, law) in sections.iter().enumerate() {
             poll(cx)?;

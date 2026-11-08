@@ -1,10 +1,12 @@
-//! Steady passive linear/quadratic-loss networks with arbitrary graph topology.
+//! Steady passive linear, quadratic and source-backed turbulent pipe networks.
 //!
 //! An edge directed from `u` to `v` obeys
 //! `p[u] - p[v] + rho g·(x[v]-x[u]) = A Q + B Q |Q|` when gravity is bound.
 //! The direction is bookkeeping: negative flow is permitted. Free nodes obey
 //! volume conservation; every connected component needs a prescribed pressure.
 //! Node-wise bracketed equilibration avoids dividing by a zero-flow derivative.
+//! A retained turbulent pipe instead evaluates its original Colebrook law;
+//! numerical bracketing continuation never relaxes final Reynolds admission.
 //!
 //! Results are nominal numerical estimates, NOT interval certificates. Retained
 //! coefficient uncertainty and validity cards are not propagated or validated by
@@ -34,6 +36,8 @@ pub mod rheology;
 pub mod thermal;
 pub mod porous;
 pub use porous::{LinearLossElement, LinearLossResistance, PassiveBranch};
+mod turbulent;
+pub use turbulent::TurbulentPipeLoss;
 /// Material-derived hydrostatic heads and bounded Boussinesq circulation.
 pub mod gravity;
 pub use gravity::GraphGravity;
@@ -106,15 +110,18 @@ pub struct GraphBranchFlow {
     pub from: usize,
     /// Positive-flow destination.
     pub to: usize,
-    /// Original quadratic coefficient and metadata; zero for a pure Darcy edge.
+    /// Original quadratic coefficient and metadata; zero for pure Darcy or
+    /// turbulent branches, whose physical laws are retained separately.
     pub loss: LossElement,
     /// Additional linear loss and its original physical metadata, when present.
     pub linear_loss: Option<Arc<LinearLossElement>>,
+    /// Original Reynolds-dependent pipe and coherent material snapshot, if present.
+    pub turbulent_loss: Option<Arc<TurbulentPipeLoss>>,
     /// Signed `pressure[from] - pressure[to]` in Pa.
     pub pressure_drop: Pressure,
     /// Signed gravitational pressure supply `rho g·(x[to]-x[from])` in Pa.
     pub gravity_pressure_head: Pressure,
-    /// Actual passive loss `A Q + B Q |Q|` in Pa, including gravity's drive.
+    /// Actual passive constitutive loss in Pa, including gravity's drive.
     /// Its product with signed flow is dissipation; static dp alone is not.
     pub dissipative_pressure_drop: Pressure,
     /// Signed nominal flow in m^3/s.
@@ -161,6 +168,13 @@ pub enum GraphError {
     Interrupted,
     /// The source material refused its gas state, geometry or constitutive regime.
     Material(fs_material::MaterialError),
+    /// The original source-backed pipe refused flow, power, tangent or Reynolds support.
+    Resistance {
+        /// Input branch index.
+        branch: usize,
+        /// Original hydraulic material refusal, without changing its support.
+        source: thermal::medium::series::hydraulic::ResistanceError,
+    },
     /// Floating-point arithmetic could not represent the requested operation.
     NonFinite(&'static str),
     /// The iteration budget ended without meeting conservation tolerances.
@@ -190,6 +204,7 @@ pub struct LossGraph {
     sqrt_resistance: Vec<f64>,
     linear_resistance: Vec<f64>,
     linear_losses: Vec<Option<Arc<LinearLossElement>>>,
+    turbulent_losses: Vec<Option<Arc<TurbulentPipeLoss>>>,
     gravity: Option<Arc<GraphGravity>>,
 }
 
@@ -197,27 +212,35 @@ impl LossGraph {
     /// Validate topology and retain the original loss data without promotion.
     pub fn new(node_count: usize, branches: Vec<GraphBranch>) -> Result<Self, GraphError> {
         let linear_losses = vec![None; branches.len()];
-        Self::from_parts(node_count, branches, linear_losses)
+        let turbulent_losses = vec![None; branches.len()];
+        Self::from_parts(node_count, branches, linear_losses, turbulent_losses)
     }
 
-    /// Build a graph containing Darcy, quadratic, or combined passive losses.
+    /// Build a graph containing Darcy, quadratic, combined or Colebrook losses.
     ///
-    /// Each edge obeys `dp = A Q + B Q |Q|`, with nonnegative coefficients
-    /// and at least one positive coefficient. Flow remains a signed volume
-    /// flow at one frozen density; this is not a compressible mass-flow solve.
-    /// All material-bound Darcy edges must retain the identical coherent gas
-    /// snapshot. Quadratic-only coefficients remain caller-declared.
+    /// Constant-coefficient edges obey `dp = A Q + B Q |Q|`. Turbulent pipes
+    /// retain the original material law, including its Reynolds support and
+    /// implicit derivative. Flow remains a signed volume flow at one conserved
+    /// density; this is not a compressible mass-flow solve. Material-bound Darcy
+    /// edges must retain one identical gas snapshot. Source-bound momentum
+    /// densities must agree; quadratic-only coefficients remain caller-declared.
     pub fn new_mixed(node_count: usize, branches: Vec<PassiveBranch>) -> Result<Self, GraphError> {
-        let (branches, linear_losses) = branches.into_iter().map(|branch| {
-            let (branch, linear) = branch.into_parts();
-            (branch, linear.map(Arc::new))
-        }).unzip();
-        Self::from_parts(node_count, branches, linear_losses)
+        let mut topology = Vec::with_capacity(branches.len());
+        let mut linear_losses = Vec::with_capacity(branches.len());
+        let mut turbulent_losses = Vec::with_capacity(branches.len());
+        for branch in branches {
+            let (branch, linear, turbulent) = branch.into_parts();
+            topology.push(branch);
+            linear_losses.push(linear.map(Arc::new));
+            turbulent_losses.push(turbulent.map(Arc::new));
+        }
+        Self::from_parts(node_count, topology, linear_losses, turbulent_losses)
     }
 
     fn from_parts(
         node_count: usize, branches: Vec<GraphBranch>,
         linear_losses: Vec<Option<Arc<LinearLossElement>>>,
+        turbulent_losses: Vec<Option<Arc<TurbulentPipeLoss>>>,
     ) -> Result<Self, GraphError> {
         if node_count == 0 {
             return Err(GraphError::InvalidInput("node count must be positive"));
@@ -226,6 +249,7 @@ impl LossGraph {
         let mut sqrt_resistance = Vec::with_capacity(branches.len());
         let mut linear_resistance = Vec::with_capacity(branches.len());
         let mut common_gas: Option<fs_material::gas::GasState> = None;
+        let mut common_density = None;
         for (index, branch) in branches.iter().enumerate() {
             let invalid = |reason| GraphError::InvalidBranch { branch: index, reason };
             if branch.from >= node_count || branch.to >= node_count || branch.from == branch.to {
@@ -236,6 +260,10 @@ impl LossGraph {
             }
             let resistance = branch.loss.resistance.value();
             let linear = linear_losses[index].as_ref();
+            let turbulent = turbulent_losses[index].as_ref();
+            if turbulent.is_some() && (linear.is_some() || resistance != 0.0) {
+                return Err(invalid("a turbulent branch must retain its original law without fitted coefficients"));
+            }
             if let Some(loss) = linear {
                 loss.validate().map_err(invalid)?;
                 loss.validate_quadratic(resistance).map_err(invalid)?;
@@ -246,9 +274,17 @@ impl LossGraph {
                 }
                 common_gas = Some(binding.gas);
             }
+            let density = turbulent.map(|loss| loss.momentum_density_kg_m3())
+                .or_else(|| linear.and_then(|loss| loss.material()).map(|binding| binding.gas.density));
+            if let Some(rho) = density {
+                if common_density.is_some_and(|previous| previous != rho) {
+                    return Err(invalid("source-bound branches require one conserved momentum density"));
+                }
+                common_density = Some(rho);
+            }
             linear_resistance.push(linear.map_or(0.0, |loss| loss.resistance.value()));
             if !(resistance.is_finite() && resistance >= 0.0
-                && (resistance > 0.0 || linear.is_some()))
+                && (resistance > 0.0 || linear.is_some() || turbulent.is_some()))
             {
                 return Err(invalid("nonnegative quadratic and positive total resistance required"));
             }
@@ -257,7 +293,7 @@ impl LossGraph {
                 return Err(invalid("resistance uncertainty must be in [0, 1)"));
             }
             let root = det::sqrt(resistance);
-            if !(root.is_finite() && (root > 0.0 || linear.is_some())) {
+            if !(root.is_finite() && (root > 0.0 || linear.is_some() || turbulent.is_some())) {
                 return Err(invalid("resistance square root is not representable"));
             }
             sqrt_resistance.push(root);
@@ -267,7 +303,7 @@ impl LossGraph {
             adjacency[branch.from].push(index);
             adjacency[branch.to].push(index);
         }
-        Ok(Self { branches, adjacency, sqrt_resistance, linear_resistance, linear_losses, gravity: None })
+        Ok(Self { branches, adjacency, sqrt_resistance, linear_resistance, linear_losses, turbulent_losses, gravity: None })
     }
 
     /// Number of nodes, including explicit isolated nodes.
@@ -278,8 +314,9 @@ impl LossGraph {
 
     /// Input endpoints and quadratic metadata in edge order.
     ///
-    /// The quadratic coefficient is zero for a pure Darcy edge; its actual
-    /// positive resistance is retained by [`Self::linear_losses`].
+    /// The quadratic coefficient is zero for a pure Darcy or turbulent edge;
+    /// its physical law is retained by [`Self::linear_losses`] or
+    /// [`Self::turbulent_losses`].
     #[must_use]
     pub fn branches(&self) -> &[GraphBranch] {
         &self.branches
@@ -289,7 +326,12 @@ impl LossGraph {
     #[must_use]
     pub fn linear_losses(&self) -> &[Option<Arc<LinearLossElement>>] { &self.linear_losses }
 
+    /// Original Reynolds-dependent pipe laws in the same edge order.
+    #[must_use]
+    pub fn turbulent_losses(&self) -> &[Option<Arc<TurbulentPipeLoss>>] { &self.turbulent_losses }
+
     fn has_linear_losses(&self) -> bool { self.linear_losses.iter().any(Option::is_some) }
+    fn has_turbulent_losses(&self) -> bool { self.turbulent_losses.iter().any(Option::is_some) }
 
     /// Solve arbitrary looped or disconnected-but-anchored pressure networks.
     ///
@@ -354,6 +396,26 @@ impl LossGraph {
                     solution.pressures[branch.to].value(), branch.flow.value())
                     .map_err(|reason| GraphError::InvalidBranch { branch: edge, reason })?;
             }
+            if let Some(loss) = &self.turbulent_losses[edge] {
+                // No numerical continuation is physically admissible. Recheck
+                // original support, signed pressure, power and exact tangent.
+                let original = loss.evaluate(branch.flow)
+                    .map_err(|source| GraphError::Resistance { branch: edge, source })?;
+                let dp = branch.dissipative_pressure_drop.value();
+                let power = finite(dp * branch.flow.value(), "turbulent branch dissipation")?;
+                let tangent = finite(original.dpressure_dmass_flow * loss.momentum_density_kg_m3(),
+                    "turbulent branch differential resistance")?;
+                let agrees = |a: f64, b: f64| {
+                    let scale = a.abs().max(b.abs());
+                    scale > 0.0 && (a / scale - b / scale).abs() <= 256.0 * f64::EPSILON
+                };
+                if tangent <= 0.0 || !agrees(original.pressure_drop_pa, dp)
+                    || !agrees(original.dissipated_power_w, power)
+                {
+                    return Err(GraphError::InvalidBranch { branch: edge,
+                        reason: "turbulent numerical root does not satisfy its original pressure/power law" });
+                }
+            }
         }
         checkpoint(cx)
     }
@@ -408,6 +470,10 @@ impl LossGraph {
     }
 
     fn flow_from_difference(&self, edge: usize, difference: f64) -> Result<f64, GraphError> {
+        if let Some(loss) = &self.turbulent_losses[edge] {
+            return loss.numerical_flow(difference)
+                .map_err(|source| GraphError::Resistance { branch: edge, source });
+        }
         if difference == 0.0 {
             return Ok(0.0);
         }
@@ -641,6 +707,7 @@ impl LossGraph {
                 to: branch.to,
                 loss: branch.loss.clone(),
                 linear_loss: self.linear_losses[edge].clone(),
+                turbulent_loss: self.turbulent_losses[edge].clone(),
                 pressure_drop: Pressure::new(finite(physical[branch.from]
                     - physical[branch.to], "static branch pressure drop")?),
                 gravity_pressure_head: Pressure::new(self.gravity.as_ref()
