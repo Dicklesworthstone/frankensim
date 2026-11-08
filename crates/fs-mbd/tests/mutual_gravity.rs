@@ -108,7 +108,10 @@ fn direct_pair_work_retains_transverse_recoil_below_binding_energy_roundoff() {
     let expected = 0.5 * (1e12 * 2.0 * 3.0 / 1e24) * 0.625_f64.powi(2);
     for shift in [Vec3::ZERO, Vec3::new(2e9, 1024.0, -512.0)] {
         let states = initial.map(|s| {
-            state(s.pose().position_world().add(shift), s.linear_momentum_world())
+            state(
+                s.pose().position_world().add(shift),
+                s.linear_momentum_world(),
+            )
         });
         let receipt = model
             .step(FRAME, &states, &properties, 1e-4, || false)
@@ -146,7 +149,10 @@ fn direct_pair_work_retains_transverse_recoil_below_binding_energy_roundoff() {
             .states_after
             .iter()
             .map(|s| {
-                state(s.pose().position_world(), s.linear_momentum_world().scale(-1.0))
+                state(
+                    s.pose().position_world(),
+                    s.linear_momentum_world().scale(-1.0),
+                )
             })
             .collect();
         let back = model
@@ -169,8 +175,14 @@ fn source_displacement_survives_a_rounded_unchanged_pair_separation() {
         .unwrap();
     assert_eq!(receipt.states_after[0].pose().position_world().x, 1.0);
     assert_eq!(receipt.states_after[1].pose().position_world().x, 1e20);
-    assert_eq!(receipt.diagnostics_after.gravitational_potential_energy, -6.0);
-    assert_eq!(receipt.diagnostics_before.gravitational_potential_energy, -6.0);
+    assert_eq!(
+        receipt.diagnostics_after.gravitational_potential_energy,
+        -6.0
+    );
+    assert_eq!(
+        receipt.diagnostics_before.gravitational_potential_energy,
+        -6.0
+    );
     // -6/(1 - 1e-20) + 6 = -6e-20 + O(1e-40); the source moves, too.
     close(receipt.potential_energy_change_j, -6e-20, 2e-35);
 }
@@ -591,9 +603,10 @@ fn separation_guard_catches_interior_source_crossing_with_separated_endpoints() 
     );
     assert_eq!(
         model.step(FRAME, &initial, &properties, 1.0, || false),
-        Err(GravityError::Invalid(
-            "mutual gravity separation cutoff reached"
-        ))
+        Err(GravityError::SeparationCutoff {
+            separation_m: 0.0,
+            minimum_separation_m: 1e-6,
+        })
     );
 
     // The closest interpolation at t=1/3 leaves a false 1.1e-16 gap unless
@@ -605,9 +618,10 @@ fn separation_guard_catches_interior_source_crossing_with_separated_endpoints() 
     ];
     assert_eq!(
         unsoftened.step(FRAME, &crossing, &properties, 1.0, || false),
-        Err(GravityError::Invalid(
-            "mutual gravity separation cutoff reached"
-        ))
+        Err(GravityError::SeparationCutoff {
+            separation_m: 0.0,
+            minimum_separation_m: 0.0,
+        })
     );
 }
 
@@ -641,11 +655,14 @@ fn nearly_collinear_drift_preserves_cutoff_and_quadrupole_domain() {
             ];
             let model = MutualGravity::new(FRAME, 1e-30, 4e-17 * scale, 1).unwrap();
             assert!(model.load(FRAME, &states, &properties, || false).is_ok());
-            assert_eq!(
-                model.step(FRAME, &states, &properties, 1.0, || false),
-                Err(GravityError::Invalid(
-                    "mutual gravity separation cutoff reached"
-                )),
+            assert!(
+                matches!(
+                    model.step(FRAME, &states, &properties, 1.0, || false),
+                    Err(GravityError::SeparationCutoff { separation_m, minimum_separation_m })
+                        if separation_m > 2e-17 * scale
+                            && separation_m < minimum_separation_m
+                            && minimum_separation_m == 4e-17 * scale
+                ),
                 "scale {scale:e}, axes {axes:?}",
             );
             // A resolved near miss remains admissible; cancellation must not
@@ -660,15 +677,13 @@ fn nearly_collinear_drift_preserves_cutoff_and_quadrupole_domain() {
 
             // Both product residuals must cancel for an exact diagonal crossing.
             let unsoftened = MutualGravity::new(FRAME, 1e-30, 0.0, 1).unwrap();
-            let crossing = [
-                states[0],
-                state(permute(start), permute(start).scale(-2.0)),
-            ];
+            let crossing = [states[0], state(permute(start), permute(start).scale(-2.0))];
             assert_eq!(
                 unsoftened.step(FRAME, &crossing, &properties, 1.0, || false),
-                Err(GravityError::Invalid(
-                    "mutual gravity separation cutoff reached"
-                )),
+                Err(GravityError::SeparationCutoff {
+                    separation_m: 0.0,
+                    minimum_separation_m: 0.0,
+                }),
                 "exact crossing: scale {scale:e}, axes {axes:?}",
             );
             // The same drift guard also protects the extended-body far field,

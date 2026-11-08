@@ -40,6 +40,14 @@ pub enum GravityError {
     FrameMismatch,
     /// The caller's finite-body expansion limit was exceeded.
     OutsideExpansionDomain,
+    /// A pair endpoint or straight split drift reached its declared cutoff.
+    /// Adaptive owners may refine a trial only after admitting the initial state.
+    SeparationCutoff {
+        /// Rejected endpoint or closest straight-drift separation [m].
+        separation_m: f64,
+        /// Required strict lower bound on separation [m].
+        minimum_separation_m: f64,
+    },
     /// The native rigid-body owner refused a state or arithmetic result.
     Dynamics(DynamicsError),
     /// No candidate state was published.

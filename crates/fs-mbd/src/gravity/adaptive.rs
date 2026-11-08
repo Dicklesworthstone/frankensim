@@ -121,7 +121,7 @@ pub struct GravityAdvanceStats {
     pub trials: usize,
     /// Accepted trials; each contributes two native half steps.
     pub accepted_trials: usize,
-    /// Error or typed expansion-domain refusals that were refined.
+    /// Error or typed separation/expansion-domain refusals that were refined.
     pub rejected_trials: usize,
     /// Native step invocations, including discarded coarse and refused steps.
     pub native_steps: usize,
@@ -248,7 +248,9 @@ pub(super) fn advance_native<S: AsRef<[RigidBodyState]>>(
         })();
         let (fine, first_change, error) = match trial {
             Ok(trial) => trial,
-            Err(GravityError::OutsideExpansionDomain) if h > options.minimum_step_seconds => {
+            Err(GravityError::OutsideExpansionDomain | GravityError::SeparationCutoff { .. })
+                if h > options.minimum_step_seconds =>
+            {
                 // Initial loads were already admitted. This typed refusal can
                 // be caused by the attempted path, so bounded refinement is safe.
                 stats.rejected_trials += 1;

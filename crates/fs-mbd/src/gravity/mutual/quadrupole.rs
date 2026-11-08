@@ -339,8 +339,8 @@ impl MutualQuadrupoleGravity<'_> {
     /// Variable step selection is not claimed symplectic or time reversible.
     ///
     /// Initial domain admission happens before any trials. A later typed
-    /// expansion-domain refusal may trigger bounded refinement; cancellation,
-    /// invalid arithmetic, pair-budget and separation-cutoff refusals propagate
+    /// expansion-domain or separation-cutoff refusal may trigger bounded refinement;
+    /// cancellation, invalid arithmetic and pair-budget refusals propagate
     /// immediately. Neither local error estimates nor split-drift guards certify
     /// the true curved path, multipole truncation error or global time error.
     pub fn advance(

@@ -256,8 +256,9 @@ impl MutualGravity {
     /// The variable-step sequence is not claimed symplectic or reversible.
     ///
     /// The pair budget still bounds every native pass; `maximum_trials` bounds
-    /// the additional time-integration work. The original separation-cutoff,
-    /// invalid-input/arithmetic and cancellation errors return immediately.
+    /// the additional time-integration work. Initial separation admission is
+    /// mandatory; a later typed cutoff refusal may trigger bounded refinement.
+    /// Invalid-input/arithmetic and cancellation errors return immediately.
     /// Local error estimates do not certify the true path or its global error.
     pub fn advance(
         self,
@@ -340,9 +341,10 @@ impl MutualGravity {
 
     fn admit_radius(self, radius: f64) -> Result<f64, GravityError> {
         if radius <= self.minimum_separation_m {
-            Err(GravityError::Invalid(
-                "mutual gravity separation cutoff reached",
-            ))
+            Err(GravityError::SeparationCutoff {
+                separation_m: radius,
+                minimum_separation_m: self.minimum_separation_m,
+            })
         } else {
             Ok(radius)
         }

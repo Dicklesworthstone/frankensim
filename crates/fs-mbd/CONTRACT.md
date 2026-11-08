@@ -973,8 +973,11 @@ diagnostics retain the native original mass, pose, momenta and potential owners.
 Cancellation, invalid data, unrepresentable arithmetic, exhausted budgets or an
 unresolved minimum step return no candidate interval and leave inputs untouched.
 Initial domain admission is mandatory; only an explicit finite-body expansion
-domain refusal during a trial may be refined. Other native/source errors retain
-their identity and are not silently retried.
+domain or pair-separation cutoff refusal during a trial may be refined. The
+typed `GravityError::SeparationCutoff` retains the rejected separation and its
+declared strict lower bound. Other native/source errors retain their identity
+and are not silently retried. The original drift guard remains active at every
+trial size; retrying does not authorize a trajectory inside the excluded region.
 
 The estimate is local and asymptotic, not a certified global error bound or a
 continuous-path enclosure. Native cutoff and expansion-domain checks remain
@@ -984,6 +987,9 @@ fixed-step map retains its original structure. No discrete adjoint or bitwise
 equivalence between differently partitioned interval requests is claimed.
 `tests/adaptive_gravity.rs` exercises physical orbit accuracy/refinement, native
 rotational dynamics, momentum/work accounting and bounded atomic refusals.
+`tests/adaptive_gravity_encounters.rs` resolves a circular orbit whose coarse
+split drift falsely crosses the cutoff, for both monopole and spherical
+quadrupole models, and refuses actual cutoff entry and inadmissible initial data.
 
 `gravity::advance_in_field` applies the same controller to the original
 `step_in_field_with_loads` map for uniform, central, quadrupole, superposed and
