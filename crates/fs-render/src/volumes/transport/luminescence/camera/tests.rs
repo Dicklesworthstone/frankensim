@@ -406,3 +406,119 @@ fn g1_infrared_nodes_remain_physical_and_do_not_gain_a_visible_observer() {
         close(image.pixels()[0].composite([2.0]).unwrap()[0], 3.0);
     });
 }
+
+#[test]
+fn g1_observed_luminescence_combines_original_bin_powers_without_width_factors() {
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let medium = grid(
+            cx,
+            &density,
+            [1; 3],
+            [-0.5, -0.5, 0.0],
+            [1.0; 3],
+            MassAbsorptionSpectrum::table(&[
+                (380.0, 0.25),
+                (500.0, 0.25),
+                (650.0, 1.5),
+                (780.0, 1.5),
+            ])
+            .unwrap(),
+        );
+        let field = LuminescenceGrid::try_new(
+            cx,
+            &medium,
+            SOURCE,
+            [500.0, 650.0],
+            &[(0, [2.0 * FOUR_PI, 3.0 * FOUR_PI])],
+            1,
+        )
+        .unwrap();
+        let image = render_luminescence_camera(
+            cx,
+            &field,
+            &camera(-1.0, 0.0, 0.1, 2.0, 0.0),
+            settings([1, 1], 1),
+        )
+        .unwrap();
+        let background = [2.0, 5.0];
+        let xyz = image.approximate_composited_xyz(cx, background).unwrap()[0];
+        let emission = [
+            2.0 * -(-0.25_f64).exp_m1() / 0.25,
+            3.0 * -(-1.5_f64).exp_m1() / 1.5,
+        ];
+        let observed = [
+            emission[0] + background[0] * (-0.25_f64).exp(),
+            emission[1] + background[1] * (-1.5_f64).exp(),
+        ];
+        let cmf: [fn(f64) -> f64; 3] = [cie_x, cie_y, cie_z];
+        for channel in 0..3 {
+            close(
+                xyz[channel],
+                (observed[0] * cmf[channel](500.0) + observed[1] * cmf[channel](650.0))
+                    / y_integral(),
+            );
+        }
+        assert_eq!(
+            image
+                .approximate_composited_xyz_over_image(cx, &[background])
+                .unwrap(),
+            vec![xyz],
+        );
+        assert_eq!(
+            image.approximate_composited_xyz(cx, [0.0; 2]).unwrap(),
+            image.approximate_emission_xyz(cx).unwrap(),
+        );
+        assert_eq!(
+            image.approximate_composited_xyz_over_image(cx, &[]),
+            Err(LuminescenceCameraError::Image(
+                DvrError::InvalidBackgroundSize
+            )),
+        );
+        assert_eq!(
+            image.approximate_composited_xyz_over_image(cx, &[[2.0, f64::NAN]]),
+            Err(LuminescenceCameraError::Image(
+                DvrError::InvalidBackgroundRadiance
+            )),
+        );
+    });
+}
+
+#[test]
+fn g0_direct_xyz_projection_does_not_require_representable_spectral_composites() {
+    with_cx(|cx, _| {
+        let density = [0.0];
+        let medium = grid(
+            cx,
+            &density,
+            [1; 3],
+            [-0.15, -0.15, 0.0],
+            [0.3, 0.3, 1.0],
+            MassAbsorptionSpectrum::constant(0.0).unwrap(),
+        );
+        let field =
+            LuminescenceGrid::try_new(cx, &medium, SOURCE, [550.0], &[(0, [1e308])], 1).unwrap();
+        let image = render_luminescence_camera(
+            cx,
+            &field,
+            &camera(-1.0, 0.0, 0.1, 2.0, 0.0),
+            settings([1, 1], 1),
+        )
+        .unwrap();
+        let emission = 1e308 / FOUR_PI / 0.09;
+        close(image.pixels()[0].emitted_radiance_w_m2_sr()[0], emission);
+        assert_eq!(
+            image.pixels()[0].composite([1e308]),
+            Err(LuminescenceCameraError::Transport(
+                VolumeTransportError::Unrepresentable
+            )),
+        );
+        let xyz = image.approximate_composited_xyz(cx, [1e308]).unwrap()[0];
+        let cmf = [cie_x(550.0), cie_y(550.0), cie_z(550.0)];
+        for channel in 0..3 {
+            let weight = cmf[channel] / y_integral();
+            assert!(xyz[channel].is_finite() && xyz[channel] > 0.0);
+            close(xyz[channel], emission * weight + 1e308 * weight);
+        }
+    });
+}

@@ -11,6 +11,7 @@ use super::{
 use fs_math::det;
 
 mod indexed;
+mod observer;
 pub use indexed::{
     IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
     render_density_spectral_indexed_box, render_density_spectral_indexed_transmittance_box,

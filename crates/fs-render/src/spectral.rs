@@ -30,6 +30,9 @@ pub mod detector;
 /// Vacuum photon frequencies, directions and radiance between inertial frames.
 pub mod doppler;
 
+#[cfg(feature = "volumes")]
+pub(crate) mod observer;
+
 pub(crate) mod reflectance;
 pub use reflectance::{LAMBDA_MAX, LAMBDA_MIN, SpectralReflectance, SpectralReflectanceError};
 

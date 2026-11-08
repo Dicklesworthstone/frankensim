@@ -145,6 +145,15 @@ pub enum DvrError {
         /// Admitted palette materials.
         limit: usize,
     },
+    /// Background spectra do not match the image's pixels and wavelengths.
+    InvalidBackgroundSize,
+    /// Spectral quadrature weights have the wrong length or an invalid value.
+    InvalidSpectralWeights,
+    /// The approximate visible observer does not cover a supplied wavelength.
+    InvalidObserverWavelength {
+        /// Wavelength index outside the observer's 380--780 nm interval.
+        lane: usize,
+    },
     /// Background radiance is negative or non-finite.
     InvalidBackgroundRadiance,
     /// Accumulated or composited source radiance cannot be represented.

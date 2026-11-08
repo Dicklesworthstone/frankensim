@@ -6,7 +6,8 @@
 
 use super::{AbsorbingGrid, VolumeTransportError, checkpoint};
 use crate::camera::{CameraError, LensSample, PhysicalCamera};
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, cie_x, cie_y, cie_z, y_integral};
+use crate::spectral::observer::{XyzAccumulator, XyzObserverError, XyzObserverLane};
+use crate::spectral::y_integral;
 use crate::volumes::DvrError;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -163,11 +164,76 @@ impl<const M: usize> AbsorbingCameraImage<M> {
         cx: &Cx<'_>,
         quadrature_weights_nm: [f64; M],
     ) -> Result<Vec<[f64; 3]>, VolumeCameraError> {
+        self.approximate_composited_xyz(cx, quadrature_weights_nm, [0.0; M])
+    }
+
+    /// Approximate relative XYZ including background spectral radiance at the
+    /// original wavelength nodes, in W/(m² sr nm). The explicit quadrature
+    /// weights are in nm, with the same observer and accuracy limits as
+    /// [Self::approximate_emission_xyz].
+    ///
+    /// Background values must be finite and nonnegative. The uniform background
+    /// must be constant over every pixel/pupil footprint. Foreground emission
+    /// and transmitted illumination are projected separately, so their
+    /// unweighted spectral sum need not be representable.
+    /// Finite opaque columns retain attenuation of bright backgrounds even when
+    /// stored unit-radiance transmission has underflowed to zero.
+    pub fn approximate_composited_xyz(
+        &self,
+        cx: &Cx<'_>,
+        quadrature_weights_nm: [f64; M],
+        background_w_m2_sr_nm: [f64; M],
+    ) -> Result<Vec<[f64; 3]>, VolumeCameraError> {
         approximate_xyz(
             cx,
             &self.wavelengths_nm,
             &quadrature_weights_nm,
-            self.pixels.iter().map(|pixel| &pixel.emission),
+            self.pixels.len(),
+            |pixel, lane| {
+                let pixel = &self.pixels[pixel];
+                (
+                    pixel.emission[lane],
+                    pixel.transmission[lane],
+                    pixel.effective_depth[lane],
+                    background_w_m2_sr_nm[lane],
+                )
+            },
+        )
+    }
+
+    /// Approximate relative XYZ over one background spectrum per pixel.
+    /// Spectra are W/(m² sr nm); quadrature weights are nm. Backgrounds must
+    /// exactly match [Self::pixels] in top-row-first row-major order.
+    ///
+    /// Each supplied spectrum must be constant over its pixel/pupil footprint.
+    /// Subpixel or pupil variation requires per-ray background transport to
+    /// preserve its correlation with opacity. As in
+    /// [Self::approximate_composited_xyz], projection uses separate emission
+    /// and transmitted-background contributions and returns no partial image
+    /// on cancellation, an invalid background, or an unrepresentable XYZ value.
+    pub fn approximate_composited_xyz_over_image(
+        &self,
+        cx: &Cx<'_>,
+        quadrature_weights_nm: [f64; M],
+        backgrounds_w_m2_sr_nm: &[[f64; M]],
+    ) -> Result<Vec<[f64; 3]>, VolumeCameraError> {
+        checkpoint(cx)?;
+        if backgrounds_w_m2_sr_nm.len() != self.pixels.len() {
+            return Err(DvrError::InvalidBackgroundSize.into());
+        }
+        approximate_xyz(
+            cx,
+            &self.wavelengths_nm,
+            &quadrature_weights_nm,
+            self.pixels.len(),
+            |pixel, lane| {
+                (
+                    self.pixels[pixel].emission[lane],
+                    self.pixels[pixel].transmission[lane],
+                    self.pixels[pixel].effective_depth[lane],
+                    backgrounds_w_m2_sr_nm[pixel][lane],
+                )
+            },
         )
     }
 }
@@ -289,48 +355,45 @@ pub(super) fn composite<const M: usize>(
     Ok(result)
 }
 
-pub(super) fn approximate_xyz<'a, const M: usize>(
+pub(super) fn approximate_xyz<const M: usize>(
     cx: &Cx<'_>,
     wavelengths_nm: &[f64; M],
     spectral_weights: &[f64; M],
-    pixels: impl ExactSizeIterator<Item = &'a [f64; M]>,
+    pixels: usize,
+    sample: impl Fn(usize, usize) -> (f64, f64, f64, f64),
 ) -> Result<Vec<[f64; 3]>, VolumeCameraError> {
     checkpoint(cx)?;
     let normalization = 1.0 / y_integral();
-    let mut observer = [[0.0; 3]; M];
+    let mut observer = [XyzObserverLane::ZERO; M];
     for (lane, &wavelength) in wavelengths_nm.iter().enumerate() {
-        if !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength) {
-            return Err(VolumeCameraError::ObserverWavelength { lane });
-        }
-        let weight = spectral_weights[lane];
-        if !weight.is_finite() || weight < 0.0 {
-            return Err(VolumeTransportError::Sample.into());
-        }
-        observer[lane] = [cie_x(wavelength), cie_y(wavelength), cie_z(wavelength)]
-            .map(|value| (value * normalization) * weight);
+        observer[lane] = XyzObserverLane::new(wavelength, spectral_weights[lane], normalization)
+            .map_err(|error| observer_error(error, lane))?;
     }
     let mut image = Vec::new();
     image
-        .try_reserve_exact(pixels.len())
-        .map_err(|_| DvrError::ImageAllocationRefused {
-            pixels: pixels.len(),
-        })?;
-    for emission in pixels {
+        .try_reserve_exact(pixels)
+        .map_err(|_| DvrError::ImageAllocationRefused { pixels })?;
+    for pixel in 0..pixels {
         checkpoint(cx)?;
-        let mut xyz = [Compensated::default(); 3];
-        for (radiance, weights) in emission.iter().zip(&observer) {
-            for channel in 0..3 {
-                xyz[channel].add(radiance * weights[channel]);
-            }
+        let mut xyz = XyzAccumulator::default();
+        for (lane, observer) in observer.iter().enumerate() {
+            let (emission, transmission, depth, background) = sample(pixel, lane);
+            xyz.add(observer, emission, transmission, depth, background)
+                .map_err(|error| observer_error(error, lane))?;
         }
-        let xyz = xyz.map(|sum| sum.value);
-        if xyz.iter().any(|value| !value.is_finite() || *value < 0.0) {
-            return Err(VolumeTransportError::Unrepresentable.into());
-        }
-        image.push(xyz);
+        image.push(xyz.finish().map_err(|error| observer_error(error, 0))?);
     }
     checkpoint(cx)?;
     Ok(image)
+}
+
+fn observer_error(error: XyzObserverError, lane: usize) -> VolumeCameraError {
+    match error {
+        XyzObserverError::Wavelength => VolumeCameraError::ObserverWavelength { lane },
+        XyzObserverError::Weight => VolumeTransportError::Sample.into(),
+        XyzObserverError::Radiance => DvrError::InvalidBackgroundRadiance.into(),
+        XyzObserverError::Unrepresentable => VolumeTransportError::Unrepresentable.into(),
+    }
 }
 
 // One original raster/pupil stream and one stable average serve each native

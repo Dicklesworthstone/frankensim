@@ -9772,6 +9772,36 @@ effective log-survival semantics. Six regressions cover independent layered
 Beer–Lambert references, colored subpixel coverage/refinement, uniform and SI
 parity, range limits, palette/map refusal and exact spectral work admission.
 
+### Spectral illumination and visible observation
+
+`SpectralOpacityImage::approximate_transmitted_xyz` and its per-image-background
+variant project the original wavelength-resolved transmission under an explicit
+incident radiance spectrum. `AbsorbingCameraImage` and `LuminescenceCameraImage`
+provide corresponding `approximate_composited_xyz` methods that include native
+foreground emission. Uniform or exactly pixel-matched backgrounds are supported;
+each background spectrum must be constant within its own filtered pixel/pupil
+footprint. Averaged opacity cannot reconstruct unresolved background correlation.
+
+The lean and thermal observers consume radiance per nanometre plus explicit
+nonnegative quadrature widths in nanometres. Luminescence consumes integrated
+bin radiance and uses unit weights; it never invents bin widths. The shared
+allocation-free lane accumulator prepares the existing analytic CIE fits once
+per image and projects emission and transmitted illumination separately into
+compensated XYZ sums. It avoids an overflowing intermediate spectral sum,
+retains original factors when an observer-weight product underflows, and uses
+retained optical depth to recover finite bright-background transmission. Only
+the resulting XYZ image is allocated. Physical-camera cancellation returns no
+partial image, and sampling/native transport behavior is preserved.
+
+These are approximate relative visible observations using the existing
+380–780 nm observer and `1/integral(y_bar)` normalization, not calibrated
+luminance, broadband radiative power, exposure or display RGB. Unsupported
+wavelengths, malformed weights/background layout, negative/nonfinite radiance
+and unrepresentable XYZ are refused. Primary spectra remain available outside
+the visible band. Seven lean/common regressions are typechecked by the targeted
+native volumes-enabled metadata build; five additional physical-camera
+regressions have parser and independent source review but have not run.
+
 ### Continuous scalar-field transfer preintegration
 
 `volumes::preintegrated` adds bounded source/extinction integration for linear

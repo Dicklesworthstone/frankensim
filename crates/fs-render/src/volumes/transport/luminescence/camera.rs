@@ -4,8 +4,10 @@
 //! each original spectral node, using the native absorption/emission integral.
 
 use super::super::camera::{CameraSample, approximate_xyz, composite, render_camera};
+use super::super::checkpoint;
 use super::LuminescenceGrid;
 use crate::camera::PhysicalCamera;
+use crate::volumes::DvrError;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 
@@ -131,11 +133,75 @@ impl<const M: usize> LuminescenceCameraImage<M> {
         &self,
         cx: &Cx<'_>,
     ) -> Result<Vec<[f64; 3]>, LuminescenceCameraError> {
+        self.approximate_composited_xyz(cx, [0.0; M])
+    }
+
+    /// Approximate relative XYZ including one uniform background spectrum.
+    /// Each background lane is already line/bin-integrated in W/(m² sr), in
+    /// the image's original wavelength order. No bin width or node spacing is
+    /// multiplied in. Observer support and the limitations of representing a
+    /// finite bin by its declared node are the same as
+    /// [Self::approximate_emission_xyz].
+    ///
+    /// Background values must be finite and nonnegative and constant over every
+    /// pixel/pupil footprint. Foreground emission and transmitted illumination
+    /// are projected separately, without requiring their unweighted sum to fit in
+    /// f64. Effective log transmission preserves bright-background attenuation
+    /// through finite opaque columns whose stored transmission is zero.
+    pub fn approximate_composited_xyz(
+        &self,
+        cx: &Cx<'_>,
+        background_w_m2_sr: [f64; M],
+    ) -> Result<Vec<[f64; 3]>, LuminescenceCameraError> {
         approximate_xyz(
             cx,
             &self.wavelengths_nm,
             &[1.0; M],
-            self.pixels.iter().map(|pixel| &pixel.emission),
+            self.pixels.len(),
+            |pixel, lane| {
+                let pixel = &self.pixels[pixel];
+                (
+                    pixel.emission[lane],
+                    pixel.transmission[lane],
+                    pixel.effective_depth[lane],
+                    background_w_m2_sr[lane],
+                )
+            },
+        )
+    }
+
+    /// Approximate relative XYZ over one bin-integrated background per pixel.
+    /// Backgrounds must exactly match [Self::pixels] in top-row-first
+    /// row-major order, with each lane in W/(m² sr) at its original node.
+    ///
+    /// Each supplied spectrum must be constant over its pixel/pupil footprint.
+    /// Subpixel or pupil variation requires per-ray background transport to
+    /// preserve its correlation with opacity. Projection uses the same separate
+    /// contributions and observer convention as
+    /// [Self::approximate_composited_xyz], with no intermediate spectral image
+    /// and no partial result on cancellation or refusal.
+    pub fn approximate_composited_xyz_over_image(
+        &self,
+        cx: &Cx<'_>,
+        backgrounds_w_m2_sr: &[[f64; M]],
+    ) -> Result<Vec<[f64; 3]>, LuminescenceCameraError> {
+        checkpoint(cx)?;
+        if backgrounds_w_m2_sr.len() != self.pixels.len() {
+            return Err(DvrError::InvalidBackgroundSize.into());
+        }
+        approximate_xyz(
+            cx,
+            &self.wavelengths_nm,
+            &[1.0; M],
+            self.pixels.len(),
+            |pixel, lane| {
+                (
+                    self.pixels[pixel].emission[lane],
+                    self.pixels[pixel].transmission[lane],
+                    self.pixels[pixel].effective_depth[lane],
+                    backgrounds_w_m2_sr[pixel][lane],
+                )
+            },
         )
     }
 }

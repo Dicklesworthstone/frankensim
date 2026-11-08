@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::camera::{Aperture, CameraProjection, FocusedDiffraction};
+use crate::spectral::{cie_x, cie_y, cie_z, y_integral};
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::{
     AbsorbingGridBudget, CellPalette, CellPaletteBudget, MassAbsorptionSpectrum,
@@ -497,5 +498,167 @@ fn g0_absorption_only_camera_charges_cells_once_per_packet_and_preserves_refusal
                 VolumeTransportError::Cancelled
             )),
         );
+    });
+}
+
+#[test]
+fn g1_cold_spectral_absorber_projects_transmitted_background_with_nm_quadrature() {
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [-0.5, -0.5, 0.0], [1.0; 3]),
+            MassAbsorptionSpectrum::table(&[
+                (380.0, 0.25),
+                (500.0, 0.25),
+                (650.0, 1.0),
+                (780.0, 1.0),
+            ])
+            .unwrap(),
+            None,
+            budget(),
+        )
+        .unwrap();
+        let wavelengths = [500.0, 650.0];
+        let image = render_absorbing_camera(
+            cx,
+            &medium,
+            &camera(-1.0, 0.0, 0.1, 0.0),
+            wavelengths,
+            settings([1, 1], 1),
+        )
+        .unwrap();
+        let weights = [20.0, 80.0];
+        let background = [2.0, 5.0];
+        assert_eq!(
+            image.approximate_emission_xyz(cx, weights).unwrap(),
+            vec![[0.0; 3]]
+        );
+        assert_eq!(
+            image
+                .approximate_composited_xyz(cx, weights, [0.0; 2])
+                .unwrap(),
+            image.approximate_emission_xyz(cx, weights).unwrap(),
+        );
+        let xyz = image
+            .approximate_composited_xyz(cx, weights, background)
+            .unwrap()[0];
+        let cmf: [fn(f64) -> f64; 3] = [cie_x, cie_y, cie_z];
+        for channel in 0..3 {
+            let expected = (background[0] * (-0.25_f64).exp() * weights[0] * cmf[channel](500.0)
+                + background[1] * (-1.0_f64).exp() * weights[1] * cmf[channel](650.0))
+                / y_integral();
+            close(xyz[channel], expected);
+        }
+        assert_eq!(
+            image
+                .approximate_composited_xyz_over_image(cx, weights, &[background])
+                .unwrap(),
+            vec![xyz],
+        );
+        // Invalid illumination cannot be hidden by a zero quadrature weight.
+        for bad in [[-1.0, 5.0], [f64::NAN, 5.0], [f64::INFINITY, 5.0]] {
+            assert_eq!(
+                image.approximate_composited_xyz(cx, [0.0; 2], bad),
+                Err(VolumeCameraError::Image(
+                    DvrError::InvalidBackgroundRadiance
+                )),
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_per_pixel_spectral_backgrounds_keep_image_order_shape_and_cancellation() {
+    with_cx(|cx, gate| {
+        let density = [0.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [-2.0, -2.0, 0.0], [4.0, 4.0, 1.0]),
+            MassAbsorptionSpectrum::constant(1.0).unwrap(),
+            None,
+            budget(),
+        )
+        .unwrap();
+        let image = render_absorbing_camera(
+            cx,
+            &medium,
+            &camera(-1.0, 0.0, 0.1, 0.0),
+            [500.0, 650.0],
+            settings([2, 2], 1),
+        )
+        .unwrap();
+        let backgrounds = [[1.0, 0.0], [0.0, 1.0], [2.0, 3.0], [4.0, 5.0]];
+        let weights = [10.0, 40.0];
+        let xyz = image
+            .approximate_composited_xyz_over_image(cx, weights, &backgrounds)
+            .unwrap();
+        let cmf: [fn(f64) -> f64; 3] = [cie_x, cie_y, cie_z];
+        for (pixel, background) in backgrounds.iter().enumerate() {
+            for channel in 0..3 {
+                close(
+                    xyz[pixel][channel],
+                    (background[0] * weights[0] * cmf[channel](500.0)
+                        + background[1] * weights[1] * cmf[channel](650.0))
+                        / y_integral(),
+                );
+            }
+        }
+        for bad in [&backgrounds[..3], &[[1.0; 2]; 5][..]] {
+            assert_eq!(
+                image.approximate_composited_xyz_over_image(cx, weights, bad),
+                Err(VolumeCameraError::Image(DvrError::InvalidBackgroundSize)),
+            );
+        }
+        gate.request();
+        assert_eq!(
+            image.approximate_composited_xyz(cx, weights, [1.0; 2]),
+            Err(VolumeCameraError::Transport(
+                VolumeTransportError::Cancelled
+            )),
+        );
+        assert_eq!(
+            image.approximate_composited_xyz_over_image(cx, weights, &backgrounds),
+            Err(VolumeCameraError::Transport(
+                VolumeTransportError::Cancelled
+            )),
+        );
+    });
+}
+
+#[test]
+fn g0_projected_bright_background_survives_underflowed_camera_transmission() {
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [-0.5, -0.5, 0.0], [1.0; 3]),
+            MassAbsorptionSpectrum::constant(800.0).unwrap(),
+            None,
+            budget(),
+        )
+        .unwrap();
+        let image = render_absorbing_camera(
+            cx,
+            &medium,
+            &camera(-1.0, 0.0, 0.1, 0.0),
+            [550.0],
+            settings([1, 1], 1),
+        )
+        .unwrap();
+        assert_eq!(image.pixels()[0].transmittance(), &[0.0]);
+        close(image.pixels()[0].effective_optical_depth()[0], 800.0);
+        let xyz = image
+            .approximate_composited_xyz(cx, [25.0], [1e300])
+            .unwrap()[0];
+        let attenuated = (1e300_f64.ln() - 800.0).exp();
+        let cmf = [cie_x(550.0), cie_y(550.0), cie_z(550.0)];
+        for channel in 0..3 {
+            assert!(xyz[channel] > 0.0);
+            close(
+                xyz[channel],
+                attenuated * cmf[channel] * 25.0 / y_integral(),
+            );
+        }
     });
 }
