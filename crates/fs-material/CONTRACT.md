@@ -21624,3 +21624,11 @@ the isobaric mixture gas density and bracket, and two explicit PCM conduction
 steps with updated resistance and conserved mass and energy. Conductivity,
 finite-step accuracy, pressure work and the geometric constraints remain the
 responsibilities of their existing consumers.
+
+## Sourced temperature-dependent thermo-creep elasticity
+
+`ExpandingCreepSource::from_norton` and `from_norton_with_strain_hardening` admit independently affine original `E(T)`, `nu(T)` and `alpha(T)` through the existing thermoelastic potential. `from_norton_j2` and `from_norton_j2_with_strain_hardening` additionally retain simultaneous J2 yielding and independently sourced yield softening. Norton reference/primary coefficients remain constant over the complete selected temperature span. J2 energetic hardening must be a constant, directly sourced plastic-strain modulus; a post-yield tangent basis is refused because its converted energetic modulus changes with E. Unsupported interior knots, missing expansion data and changed source roles are refused.
+
+The native mechanical return uses actual endpoint stiffness and retains all accepted irreversible histories. The thermal owner corrects accepted free-energy storage by `delta(Psi_T) = e_0:[C(T_1)-C(T_0)]:e_0/2` and transfers reversible heat `sigma_1:I delta(f) - delta(Psi_T) - delta(Ts)`. Physical creep/plastic heat, signed reciprocal heat, entropy storage and numerical dissipation remain separate. The original potential owns the full-span thermal-capacity bound. Free-sided reductions reconstruct accepted transverse strain with its retained temperature's Poisson ratio and share the same resolved source with the tensor audit.
+
+Existing bare source constructors retain their constant-storage requirement. A source prepared for varying elasticity refuses bare `at_temperature` continuation; its `at_thermoelastic_temperature` decomposition is for the complete thermal owner. These laws remain bounded small-strain models. The separate recovering-source families retain their existing fixed-elasticity construction. `tests/creep_thermal_softening.rs` checks analytic thermal cycles, mixed-shear relaxation and tangent, nonvirgin axial/J2 continuation and source refusals. These manufactured cases do not constitute measured material calibration.

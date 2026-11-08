@@ -1,29 +1,36 @@
 //! Sourced thermal expansion around the original permanent-creep owners.
 //!
-//! The underlying family keeps E, nu and energetic hardening fixed. Its actual
-//! temperature still controls Arrhenius kinetics and the selected yield offset.
+//! The original constructors retain fixed E/nu. Explicit thermal constructors
+//! also admit independently affine E(T)/nu(T); energetic hardening stays fixed.
+//! Actual temperature controls Arrhenius kinetics and the selected yield offset.
 //! The existing affine thermoelastic potential owns integrated expansion,
 //! entropy and its full-interval capacity bound. There is no second return map.
 //!
 //! With e = epsilon - epsilon_c - epsilon_p - f(T) I, the native increment
 //! supplies free-energy storage and physical/numerical losses. Reciprocal heat
-//! is sigma_1:I delta(f) - delta(T s). Thus total stress work equals change of
+//! is sigma_1:I delta(f) - delta(Psi_T) - delta(T s), where delta(Psi_T) is the
+//! change of elastic storage at the accepted elastic strain due to C(T) alone.
+//! Thus total stress work equals change of
 //! free energy plus delta(T s), physical heat, reciprocal heat and numerical
 //! loss. Only the two physical heat-transfer terms enter the caloric chart.
 
 use std::sync::Arc;
 
 use crate::creep::plastic::NortonJ2State;
-use crate::creep::source::{CreepSourceError, CreepSourceFamily, NortonCreepSource};
+use crate::creep::plastic::source::NortonJ2Source;
+use crate::creep::source::{
+    CreepSourceError, CreepSourceFamily, NortonCreepSource, NortonSourceQuery,
+};
 use crate::creep::{
     CreepError, CreepIncrement, CreepLaw, CreepState, CreepTolerances, NortonCreep,
 };
 use crate::elastic::thermal::{
     AffineIsotropicThermoelastic, ResolvedThermoelastic, ThermoelasticError, ThermoelasticState,
 };
+use crate::plastic::source::HardeningPropertyBasis;
 use crate::state_point::{
     LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, MaterialPropertySelection,
-    ResolvedMaterialStatePoint, integrate_isotropic_thermal_expansion,
+    POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint, integrate_isotropic_thermal_expansion,
 };
 use crate::tensor::{contract, trace};
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
@@ -107,15 +114,13 @@ where
                 "expansion and creep require one original card and fixed external conditions",
             ));
         }
-        let reference_law =
-            source.at_temperature(source.parameters().temperature_range_k[0], 1.0)?;
         // The potential sees epsilon - sum(inelastic strains). Its full-interval
         // capacity envelope includes each original tensor's independent bound;
         // cancellation cannot conceal a larger internal strain.
         let envelope = (1
             + <<S::Material as SmallStrainLaw>::State as CreepHistoryStrain>::STRAIN_FIELDS)
             as f64
-            * reference_law.law().elastic().strain_limit;
+            * source.strain_limit();
         let potential = AffineIsotropicThermoelastic::new(
             card,
             reference,
@@ -125,8 +130,8 @@ where
         )
         .map_err(|e| CreepSourceError::Mechanical(thermal_error(e)))?;
         poll(&mut cancelled)?;
-        // E/nu were admitted constant by the original source, not weakened here.
-        // Admission also proves that the full thermal-capacity bound is finite.
+        // This owner admits the complete smooth E/nu/alpha paths and proves that
+        // the full thermal-capacity bound, including coefficient work, is finite.
         potential
             .minimum_heat_capacity_j_k(1.0)
             .map_err(|e| CreepSourceError::Mechanical(thermal_error(e)))?;
@@ -147,16 +152,78 @@ where
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<ThermalCreep<S::Material>, CreepSourceError> {
-        let mechanical = self.mechanical.at_temperature(temperature_k, duration_s)?;
         let thermal = self
             .potential
             .at_temperature(temperature_k)
             .map_err(|e| CreepSourceError::Mechanical(thermal_error(e)))?;
+        let mechanical = self
+            .mechanical
+            .at_thermoelastic_temperature(temperature_k, duration_s)?;
         Ok(ThermalCreep {
             mechanical,
             thermal,
             potential: self.potential.clone(),
         })
+    }
+}
+
+impl<'a> ExpandingCreepSource<NortonCreepSource<'a>> {
+    /// Bind sourced Norton kinetics and independently affine E(T), nu(T), alpha(T)
+    /// to one thermal potential. Every nonelastic Norton coefficient remains
+    /// constant over the admitted span. Missing expansion is never inferred zero.
+    pub fn from_norton(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        expansion_reference: &ResolvedMaterialStatePoint,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        let mechanical =
+            NortonCreepSource::prepare_thermoelastic(card, query, false, &mut cancelled)?;
+        Self::new(card, mechanical, expansion_reference, cancelled)
+    }
+
+    /// The same thermal path with three explicitly selected primary-creep
+    /// claims. Accumulated irreversible strain remains with the native law.
+    pub fn from_norton_with_strain_hardening(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        expansion_reference: &ResolvedMaterialStatePoint,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        let mechanical =
+            NortonCreepSource::prepare_thermoelastic(card, query, true, &mut cancelled)?;
+        Self::new(card, mechanical, expansion_reference, cancelled)
+    }
+}
+
+impl<'a> ExpandingCreepSource<NortonJ2Source<'a>> {
+    /// Simultaneous sourced creep, yield softening and affine elastic softening.
+    /// Energetic hardening must use a constant, directly sourced plastic-strain
+    /// modulus; a post-yield tangent would change its converted storage with E.
+    pub fn from_norton_j2(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        basis: HardeningPropertyBasis,
+        expansion_reference: &ResolvedMaterialStatePoint,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        let mechanical =
+            NortonJ2Source::prepare_thermoelastic(card, query, basis, false, &mut cancelled)?;
+        Self::new(card, mechanical, expansion_reference, cancelled)
+    }
+
+    /// Affine thermoelasticity with independently retained primary-creep and J2
+    /// plastic histories. All source roles are explicitly selected and pinned.
+    pub fn from_norton_j2_with_strain_hardening(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        basis: HardeningPropertyBasis,
+        expansion_reference: &ResolvedMaterialStatePoint,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        let mechanical =
+            NortonJ2Source::prepare_thermoelastic(card, query, basis, true, &mut cancelled)?;
+        Self::new(card, mechanical, expansion_reference, cancelled)
     }
 }
 
@@ -251,6 +318,41 @@ where
         self.thermal.free_strain().map_err(thermal_error)
     }
 
+    // Reconstruct an accepted free-sided tensor with its ORIGINAL Poisson ratio.
+    // The endpoint law may have a different nu and cannot reconstruct old lateral
+    // strain without changing the accepted energy/history behind the caller.
+    pub(super) fn uniaxial_history_strain(
+        &self,
+        axial_strain: f64,
+        state: &M::State,
+        temperature_k: f64,
+    ) -> Result<Voigt, CreepError> {
+        let thermal = self
+            .potential
+            .at_temperature(temperature_k)
+            .map_err(thermal_error)?;
+        let free = thermal.free_strain().map_err(thermal_error)?;
+        let poisson = thermal
+            .elastic
+            .property(POISSON_RATIO_PROPERTY)
+            .ok_or(CreepError::Invalid("original Poisson-ratio claim is missing"))?
+            .value_si();
+        let inelastic = state.inelastic_strain();
+        let transverse_elastic = -poisson * (axial_strain - free - inelastic[0]);
+        let strain = [
+            axial_strain,
+            transverse_elastic + inelastic[1] + free,
+            transverse_elastic + inelastic[2] + free,
+            inelastic[3],
+            inelastic[4],
+            inelastic[5],
+        ];
+        let mechanical = self.mechanical_strain(&strain, &thermal)?;
+        self.mechanical.validate_creep_history(&mechanical, state)?;
+        self.thermal_state(&strain, state, &thermal)?;
+        Ok(strain)
+    }
+
     fn mechanical_strain(
         &self,
         total: &Voigt,
@@ -300,7 +402,8 @@ where
     }
 
     /// Audit the original return map and the reciprocal thermal transfer.
-    /// Coefficients storing elastic/hardening energy remain fixed in this family.
+    /// Account for actual endpoint elastic storage while the native return map
+    /// uses frozen current-temperature stiffness. Energetic hardening stays fixed.
     pub fn advance_with_energy(
         &self,
         old_strain: &Voigt,
@@ -322,6 +425,23 @@ where
         )?;
         let initial = self.thermal_state(old_strain, &old.mechanical, &old_thermal)?;
         let final_state = self.thermal_state(strain, &native.state, &self.thermal)?;
+        let initial_stiffness = old_thermal.stiffness_mandel_pa();
+        let final_stiffness = self.thermal.stiffness_mandel_pa();
+        // Difference the stiffness first, not two large stored energies. This is
+        // Psi(e_0,T_1)-Psi(e_0,T_0) with e_0 fixed, excluding free expansion.
+        // Retain the native energetic-hardening contribution untouched.
+        let coefficient_storage_change = 0.5
+            * (0..6)
+                .map(|i| {
+                    initial.elastic_strain_mandel[i]
+                        * (0..6)
+                            .map(|j| {
+                                (final_stiffness[i][j] - initial_stiffness[i][j])
+                                    * initial.elastic_strain_mandel[j]
+                            })
+                            .sum::<f64>()
+                })
+                .sum::<f64>();
         let root_two = fs_math::det::sqrt(2.0);
         let stress_residual = final_state
             .stress_mandel_pa
@@ -358,6 +478,7 @@ where
         .map_err(CreepError::Source)?
         .free_linear_strain();
         let mut energy = native.energy;
+        energy.initial_stored_j_m3 -= coefficient_storage_change;
         energy.mechanical_work_j_m3 = contract(
             &native.stress_pa,
             &core::array::from_fn(|i| strain[i] - old_strain[i]),
@@ -365,8 +486,9 @@ where
         energy.thermoelastic_storage_change_j_m3 = self.thermal.temperature_k()
             * final_state.entropy_j_k
             - old.temperature_k * initial.entropy_j_k;
-        energy.reversible_heat_j_m3 =
-            trace(&native.stress_pa) * delta_free - energy.thermoelastic_storage_change_j_m3;
+        energy.reversible_heat_j_m3 = trace(&native.stress_pa) * delta_free
+            - coefficient_storage_change
+            - energy.thermoelastic_storage_change_j_m3;
         energy.residual_j_m3 = energy.mechanical_work_j_m3
             - (energy.final_stored_j_m3 - energy.initial_stored_j_m3)
             - energy.thermoelastic_storage_change_j_m3
@@ -374,6 +496,8 @@ where
             - energy.numerical_dissipation_j_m3;
         if [
             energy.mechanical_work_j_m3,
+            energy.initial_stored_j_m3,
+            energy.final_stored_j_m3,
             energy.thermoelastic_storage_change_j_m3,
             energy.reversible_heat_j_m3,
             energy.caloric_heat_j_m3(),

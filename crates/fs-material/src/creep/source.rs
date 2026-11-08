@@ -6,8 +6,10 @@
 //! This permits temperature changes without silently discarding coefficient
 //! work. Primary strain hardening is explicitly selected with three additional
 //! original claims, never inferred from the secondary reference coefficients.
-//! Temperature-dependent elasticity, tertiary creep, damage and fitted-data
-//! qualification require other explicit models.
+//! Temperature-dependent elasticity is admitted only by the explicit
+//! `ExpandingCreepSource` constructors, whose thermal potential accounts for
+//! changing storage, entropy and reciprocal heat. A bare source cannot bypass
+//! that owner. Tertiary creep, damage and fitted-data qualification remain separate.
 
 use super::{
     CreepError, CreepIncrement, CreepLaw, CreepState, CreepTolerances, NortonCreep,
@@ -207,6 +209,18 @@ pub trait CreepSourceFamily<'a>: Clone + core::fmt::Debug {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<Self::Material, CreepSourceError>;
+
+    /// Resolve the mechanical part for the explicit thermoelastic owner. This
+    /// endpoint law alone does not account for a change of elastic storage;
+    /// `ExpandingCreepSource` must retain it together with its thermal potential.
+    /// Fixed-storage families keep their original resolution unchanged.
+    fn at_thermoelastic_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Material, CreepSourceError> {
+        self.at_temperature(temperature_k, duration_s)
+    }
 }
 
 /// Supported, source-pinned family of physical steps. Preparation checks the
@@ -219,6 +233,7 @@ pub struct NortonCreepSource<'a> {
     parameters: NortonCreepParameters,
     strain_hardening: Option<StrainHardeningCreep>,
     temperature_axis: String,
+    thermal_elasticity: bool,
 }
 impl<'a> NortonCreepSource<'a> {
     /// Admit the complete interval, with unchanged nonthermal coordinates and
@@ -229,7 +244,7 @@ impl<'a> NortonCreepSource<'a> {
         query: NortonSourceQuery<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
-        Self::prepare(card, query, false, cancelled)
+        Self::prepare(card, query, false, false, cancelled)
     }
 
     /// Select primary strain hardening from three additional original claims.
@@ -242,13 +257,25 @@ impl<'a> NortonCreepSource<'a> {
         query: NortonSourceQuery<'_>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
-        Self::prepare(card, query, true, cancelled)
+        Self::prepare(card, query, true, false, cancelled)
+    }
+
+    // The public thermal wrapper finishes admission with the original smooth
+    // potential. This intermediate source is never usable as a bare step family.
+    pub(crate) fn prepare_thermoelastic(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        with_strain_hardening: bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, with_strain_hardening, true, cancelled)
     }
 
     fn prepare(
         card: &'a MaterialCard,
         query: NortonSourceQuery<'_>,
         with_strain_hardening: bool,
+        thermal_elasticity: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
         poll(&mut cancelled)?;
@@ -291,7 +318,13 @@ impl<'a> NortonCreepSource<'a> {
                 if index % 256 == 0 {
                     poll(&mut cancelled)?;
                 }
-                if answer.evidence.value.value != property.value_si() {
+                let elastic_coefficient = matches!(
+                    property.requirement().name(),
+                    YOUNG_MODULUS_PROPERTY | POISSON_RATIO_PROPERTY
+                );
+                if !(thermal_elasticity && elastic_coefficient)
+                    && answer.evidence.value.value != property.value_si()
+                {
                     return Err(CreepSourceError::Invalid(
                         "Norton reference coefficients and elastic storage must be constant over the complete thermal span",
                     ));
@@ -330,10 +363,16 @@ impl<'a> NortonCreepSource<'a> {
             parameters,
             strain_hardening,
             temperature_axis: query.temperature_axis.into(),
+            thermal_elasticity,
         };
         // Unit duration is admission only; every executed step supplies its own dt.
-        source.prepared_law(range[0], 1.0)?;
-        source.prepared_law(range[1], 1.0)?;
+        if thermal_elasticity {
+            source.resolve_temperature(range[0], 1.0, true)?;
+            source.resolve_temperature(range[1], 1.0, true)?;
+        } else {
+            source.prepared_law(range[0], 1.0)?;
+            source.prepared_law(range[1], 1.0)?;
+        }
         Ok(source)
     }
 
@@ -355,6 +394,20 @@ impl<'a> NortonCreepSource<'a> {
         &self.temperature_axis
     }
 
+    pub(crate) fn strain_limit(&self) -> f64 {
+        self.elastic.strain_limit
+    }
+
+    pub(crate) fn admit_fixed_storage(&self) -> Result<(), CreepSourceError> {
+        if self.thermal_elasticity {
+            Err(CreepSourceError::Invalid(
+                "temperature-dependent elasticity requires the complete thermo-creep owner",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     /// Bind the exact physical interval and endpoint temperature. This refreshes
     /// receipts with pinned claims and changes kinetics only; it owns no history
     /// and cannot advance a solver clock or mutate an accepted material state.
@@ -363,7 +416,21 @@ impl<'a> NortonCreepSource<'a> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<ResolvedNortonCreep, CreepSourceError> {
-        let law = self.prepared_law(temperature_k, duration_s)?;
+        self.resolve_temperature(temperature_k, duration_s, false)
+    }
+
+    fn resolve_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+        with_thermal_storage: bool,
+    ) -> Result<ResolvedNortonCreep, CreepSourceError> {
+        // Preserve the original fixed-storage validation and resolution order.
+        let fixed_law = if with_thermal_storage {
+            None
+        } else {
+            Some(self.prepared_law(temperature_k, duration_s)?)
+        };
         let point = self
             .reference
             .query()
@@ -373,6 +440,10 @@ impl<'a> NortonCreepSource<'a> {
                 reason: e.to_string(),
             })?;
         let material = self.reference.at_query_point(self.card, &point)?;
+        let law = match fixed_law {
+            Some(law) => law,
+            None => self.prepared_thermoelastic_law(&material, temperature_k, duration_s)?,
+        };
         Ok(ResolvedNortonCreep { material, law })
     }
 
@@ -383,8 +454,45 @@ impl<'a> NortonCreepSource<'a> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<NortonCreep, CreepSourceError> {
+        self.admit_fixed_storage()?;
+        self.law_with_elasticity(self.elastic.clone(), temperature_k, duration_s)
+    }
+
+    // The caller already resolved its original pinned bundle at this temperature.
+    // In particular the joint source includes the same E/nu and additional J2
+    // claims; no second material query or constitutive owner is required.
+    pub(crate) fn prepared_thermoelastic_law(
+        &self,
+        material: &ResolvedMaterialStatePoint,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<NortonCreep, CreepSourceError> {
+        let elastic = if self.thermal_elasticity {
+            let value = |name| {
+                material.property(name).map(|p| p.value_si()).ok_or(
+                    CreepSourceError::Invalid("thermal creep requires its original elastic claims"),
+                )
+            };
+            IsotropicElastic::new(
+                value(YOUNG_MODULUS_PROPERTY)?,
+                value(POISSON_RATIO_PROPERTY)?,
+                self.elastic.strain_limit,
+            )
+            .map_err(CreepError::Elastic)?
+        } else {
+            self.elastic.clone()
+        };
+        self.law_with_elasticity(elastic, temperature_k, duration_s)
+    }
+
+    fn law_with_elasticity(
+        &self,
+        elastic: IsotropicElastic,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<NortonCreep, CreepSourceError> {
         let law = NortonCreep::new(
-            self.elastic.clone(),
+            elastic,
             self.parameters.clone(),
             temperature_k,
             duration_s,
@@ -462,6 +570,13 @@ impl<'a> CreepSourceFamily<'a> for NortonCreepSource<'a> {
         duration_s: f64,
     ) -> Result<Self::Material, CreepSourceError> {
         NortonCreepSource::at_temperature(self, temperature_k, duration_s)
+    }
+    fn at_thermoelastic_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Material, CreepSourceError> {
+        self.resolve_temperature(temperature_k, duration_s, true)
     }
 }
 

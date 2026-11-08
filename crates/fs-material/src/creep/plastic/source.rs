@@ -7,6 +7,9 @@
 //! Selecting primary strain hardening adds three original kinetic claims to
 //! this same bundle, preserving accumulated creep independently of plasticity.
 //! A monotonic post-yield tangent is converted only by the original J2 owner.
+//! Explicit thermoelastic construction additionally permits sourced affine E/nu,
+//! with constant directly sourced plastic-strain hardening. Its thermal owner
+//! accounts for changing elastic storage; bare source continuation is refused.
 //! Nonzero translated yield surfaces require a noncoaxial coupled return map;
 //! this source family therefore does not accept the mixed-hardening basis.
 
@@ -152,7 +155,7 @@ impl<'a> NortonJ2Source<'a> {
         basis: HardeningPropertyBasis,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
-        Self::prepare(card, query, basis, false, cancelled)
+        Self::prepare(card, query, basis, false, false, cancelled)
     }
 
     /// Explicitly select primary creep and resolve all twelve original claims
@@ -164,7 +167,25 @@ impl<'a> NortonJ2Source<'a> {
         basis: HardeningPropertyBasis,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
-        Self::prepare(card, query, basis, true, cancelled)
+        Self::prepare(card, query, basis, true, false, cancelled)
+    }
+
+    pub(crate) fn prepare_thermoelastic(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        basis: HardeningPropertyBasis,
+        with_strain_hardening: bool,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        // Constant post-yield tangent does not imply constant energetic H when
+        // E changes: H=E*Et/(E-Et). That different thermal potential is not owned
+        // here, so require the original plastic-strain modulus explicitly.
+        if basis != HardeningPropertyBasis::PlasticStrainModulus {
+            return Err(CreepSourceError::Invalid(
+                "thermoelastic creep/plasticity requires directly sourced plastic-strain hardening",
+            ));
+        }
+        Self::prepare(card, query, basis, with_strain_hardening, true, cancelled)
     }
 
     fn prepare(
@@ -172,6 +193,7 @@ impl<'a> NortonJ2Source<'a> {
         query: NortonSourceQuery<'_>,
         basis: HardeningPropertyBasis,
         with_strain_hardening: bool,
+        thermal_elasticity: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
         poll(&mut cancelled)?;
@@ -207,7 +229,14 @@ impl<'a> NortonJ2Source<'a> {
             selection,
             strain_limit: query.strain_limit,
         };
-        let creep = if with_strain_hardening {
+        let creep = if thermal_elasticity {
+            NortonCreepSource::prepare_thermoelastic(
+                card,
+                creep_query,
+                with_strain_hardening,
+                &mut cancelled,
+            )?
+        } else if with_strain_hardening {
             NortonCreepSource::new_with_strain_hardening(card, creep_query, &mut cancelled)?
         } else {
             NortonCreepSource::new(card, creep_query, &mut cancelled)?
@@ -224,7 +253,11 @@ impl<'a> NortonJ2Source<'a> {
         let plastic =
             ResolvedJ2Plasticity::try_from_material(reference.clone(), basis, query.strain_limit)?;
         NortonJ2::new(
-            creep.prepared_law(creep.parameters().temperature_range_k[0], 1.0)?,
+            creep.prepared_thermoelastic_law(
+                &reference,
+                creep.parameters().temperature_range_k[0],
+                1.0,
+            )?,
             plastic.law().clone(),
         )?;
         poll(&mut cancelled)?;
@@ -260,7 +293,21 @@ impl<'a> NortonJ2Source<'a> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<ResolvedNortonJ2, CreepSourceError> {
-        let native = self.binding.creep.prepared_law(temperature_k, duration_s)?;
+        self.resolve_temperature(temperature_k, duration_s, false)
+    }
+
+    fn resolve_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+        with_thermal_storage: bool,
+    ) -> Result<ResolvedNortonJ2, CreepSourceError> {
+        // Preserve the original fixed-storage validation and resolution order.
+        let fixed_law = if with_thermal_storage {
+            None
+        } else {
+            Some(self.binding.creep.prepared_law(temperature_k, duration_s)?)
+        };
         let point = self
             .reference()
             .query()
@@ -270,6 +317,14 @@ impl<'a> NortonJ2Source<'a> {
                 reason: error.to_string(),
             })?;
         let material = self.reference().at_query_point(self.binding.card, &point)?;
+        let native = match fixed_law {
+            Some(law) => law,
+            None => self.binding.creep.prepared_thermoelastic_law(
+                &material,
+                temperature_k,
+                duration_s,
+            )?,
+        };
         let plastic = ResolvedJ2Plasticity::try_from_material(
             material.clone(),
             self.binding.basis,
@@ -368,5 +423,12 @@ impl<'a> CreepSourceFamily<'a> for NortonJ2Source<'a> {
         duration_s: f64,
     ) -> Result<Self::Material, CreepSourceError> {
         NortonJ2Source::at_temperature(self, temperature_k, duration_s)
+    }
+    fn at_thermoelastic_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Material, CreepSourceError> {
+        self.resolve_temperature(temperature_k, duration_s, true)
     }
 }

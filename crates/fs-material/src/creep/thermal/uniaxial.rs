@@ -78,11 +78,11 @@ impl UniaxialThermalNorton {
         axial_strain: f64,
         state: &UniaxialThermalNortonState,
     ) -> Result<Voigt, CreepError> {
-        let free = self.tensor.free_strain_at_temperature(state.temperature_k)?;
-        let mechanical = self
-            .mechanical
-            .tensor_strain(axial_strain - free, &state.mechanical)?;
-        Ok(add_free(mechanical, free))
+        self.tensor.uniaxial_history_strain(
+            axial_strain,
+            &state.mechanical.tensor_history(),
+            state.temperature_k,
+        )
     }
 
     pub fn response(
@@ -244,11 +244,11 @@ impl UniaxialThermalNortonJ2 {
         axial_strain: f64,
         state: &UniaxialThermalNortonJ2State,
     ) -> Result<Voigt, CreepError> {
-        let free = self.tensor.free_strain_at_temperature(state.temperature_k)?;
-        let mechanical = self
-            .mechanical
-            .tensor_strain(axial_strain - free, &state.mechanical)?;
-        Ok(add_free(mechanical, free))
+        self.tensor.uniaxial_history_strain(
+            axial_strain,
+            &state.mechanical.tensor_history(),
+            state.temperature_k,
+        )
     }
 
     pub fn response(
@@ -379,13 +379,11 @@ impl<'a> ExpandingCreepSource<NortonCreepSource<'a>> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<UniaxialThermalNorton, CreepSourceError> {
-        let mechanical = UniaxialNorton::from_source(
-            self.mechanical_source()
-                .at_temperature(temperature_k, duration_s)?,
-        );
+        let tensor = self.at_temperature(temperature_k, duration_s)?;
+        let mechanical = UniaxialNorton::from_source(tensor.mechanical().clone());
         Ok(UniaxialThermalNorton {
             mechanical,
-            tensor: self.at_temperature(temperature_k, duration_s)?,
+            tensor,
         })
     }
 }
@@ -397,13 +395,11 @@ impl<'a> ExpandingCreepSource<NortonJ2Source<'a>> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<UniaxialThermalNortonJ2, CreepSourceError> {
-        let mechanical = UniaxialNortonJ2::from_source(
-            self.mechanical_source()
-                .at_temperature(temperature_k, duration_s)?,
-        );
+        let tensor = self.at_temperature(temperature_k, duration_s)?;
+        let mechanical = UniaxialNortonJ2::from_source(tensor.mechanical().clone());
         Ok(UniaxialThermalNortonJ2 {
             mechanical,
-            tensor: self.at_temperature(temperature_k, duration_s)?,
+            tensor,
         })
     }
 }
