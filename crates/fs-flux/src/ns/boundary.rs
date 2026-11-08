@@ -27,10 +27,13 @@ pub use rheology::{StokesRheologyControls, StokesRheologySolution};
 /// Conservative changing-density transport and native BDM momentum.
 #[path = "boundary/conservative.rs"]
 pub mod conservative;
+#[path = "boundary/flow_control.rs"]
+mod flow_control;
 #[path = "boundary/navier_stokes.rs"]
 mod navier_stokes;
 #[path = "boundary/transient.rs"]
 mod transient;
+pub use flow_control::{PreparedStokesFlowControl, StokesFlowControlSolution};
 pub use navier_stokes::{
     NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
 };
@@ -141,6 +144,17 @@ pub enum StokesBoundaryError {
     Rheology(crate::ns::FluxRheologyError),
     /// The assembled linear system could not be factored.
     SingularSystem,
+    /// A solved pressure did not meet the separately checked integral flow target.
+    FlowRateNotConverged {
+        /// Controlled port in caller order.
+        port: usize,
+        /// Signed outward requested flow per unit depth [m²/s].
+        requested_m2_s: f64,
+        /// Flow integrated from the accepted-candidate BDM moments [m²/s].
+        actual_m2_s: f64,
+        /// Absolute plus relative flow allowance [m²/s].
+        tolerance_m2_s: f64,
+    },
     /// An explicitly recomputed residual did not meet the requested tolerance.
     NotConverged {
         /// Linear iterations performed.
@@ -442,6 +456,38 @@ impl<'m> FluxSystem<'m> {
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let admitted = self.admit_stokes_problem(params, boundaries)?;
         self.assemble_stokes_admitted_viscosity(params, viscosity, force, &admitted)
+    }
+
+    /// Steady Stokes with a fixed spatial density metric for physical reporting.
+    ///
+    /// Density is rho/rho_reference; viscosity, force density, traction and
+    /// pressure use that SAME fixed reference. No artificial transient term
+    /// is added. The original weighted quadrature retains kinetic energy for
+    /// material-field and prescribed-flow results; `params.nu` is unused.
+    ///
+    /// # Errors
+    /// Preserves native mixed-boundary and positive density/viscosity admission.
+    pub fn assemble_stokes_mixed_variable_density<'a>(
+        &'a self,
+        params: FluxParams,
+        relative_density: &dyn Fn(usize, [f64; 2]) -> f64,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        let admitted = self.admit_stokes_problem(params, boundaries)?;
+        self.assemble_stokes_admitted_density(
+            params,
+            viscosity,
+            force,
+            &admitted,
+            None,
+            0.0,
+            None,
+            None,
+            None,
+            Some(relative_density),
+        )
     }
 
     fn assemble_stokes_admitted_viscosity<'a>(

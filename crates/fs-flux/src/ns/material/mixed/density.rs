@@ -8,7 +8,8 @@ use super::super::{
     MaterialFluxError, MaterialFluxSystem, MaterialViscousDissipation, physical_viscous_dissipation,
 };
 use super::{
-    MaterialBoundaryLoad, MaterialStokesBoundary, physical_boundary_load, with_physical_boundaries,
+    MaterialBoundaryLoad, MaterialStokesBoundary, MaterialStokesFlowControlSolution,
+    flow_control::physical_control, physical_boundary_load, with_physical_boundaries,
 };
 use crate::ns::boundary::{StokesPressureReference, StokesSolution};
 use crate::ns::{FluxParams, FluxSolution, FluxSystem};
@@ -133,6 +134,55 @@ impl<G> MaterialStokesField<'_, '_, G> {
         self.reference_density_kg_m3
     }
 
+    /// Resolve the pressures needed for total port flows through frozen materials.
+    ///
+    /// Input force density is N/m³, total traction is Pa, and signed outward
+    /// target flows are m²/s per unit depth. Each controlled port contains only
+    /// original traction edges; every controlled component retains a separate
+    /// uncontrolled traction datum. No normal velocity profile is invented.
+    /// Original one-sided viscosities, density-weighted energy, source owners
+    /// and pressure/load normalization are retained without source re-query.
+    ///
+    /// # Errors
+    /// Preserves native flow/datum/residual admission and physical SI recovery.
+    pub fn solve_stokes_mixed_flow_control(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        absolute_tolerance_m2_s: f64,
+    ) -> Result<MaterialStokesFlowControlSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        let reference = self.reference_density_kg_m3;
+        with_physical_boundaries(boundaries, reference, |primitive| {
+            let prepared = self
+                .system
+                .assemble_stokes_mixed_variable_density(
+                    self.params,
+                    &|cell, _| self.samples[cell].relative_density,
+                    &|cell, _| self.samples[cell].normalized_viscosity,
+                    &|point| {
+                        let force = force_density(point);
+                        [force[0] / reference, force[1] / reference]
+                    },
+                    primitive,
+                )
+                .and_then(|assembly| assembly.prepare_flow_control(ports))
+                .map_err(MaterialFluxError::Boundary)?;
+            let result = prepared
+                .solve(outward_volume_rates_m2_s, absolute_tolerance_m2_s)
+                .map_err(MaterialFluxError::Boundary)?;
+            let energy = reference
+                * prepared
+                    .kinetic_energy(&result.flow.field.x)
+                    .map_err(MaterialFluxError::Boundary)?;
+            physical_control(result, reference, |flow| {
+                self.recover_solution(flow, energy)
+            })
+        })
+    }
+
     /// Advance weighted Stokes by one backward-Euler step in coherent SI.
     ///
     /// Force is per volume [N/m³], traction is total stress [Pa], velocity is
@@ -240,30 +290,38 @@ impl<G> MaterialStokesField<'_, '_, G> {
                 )
                 .map_err(MaterialFluxError::Boundary)?;
             let flow = assembly.solve().map_err(MaterialFluxError::Boundary)?;
-            let pressure_pa: Vec<_> = flow.pressure.iter().map(|p| reference * p).collect();
             let kinetic_energy_j_per_m = reference
                 * assembly
                     .kinetic_energy(&flow.field.x)
                     .map_err(MaterialFluxError::Boundary)?;
-            let viscous_dissipation =
-                physical_viscous_dissipation(self.system, &flow.field.x, &|cell| {
-                    self.samples[cell].transport.dynamic_viscosity_pa_s()
-                })?;
-            if pressure_pa.iter().any(|value| !value.is_finite())
-                || !kinetic_energy_j_per_m.is_finite()
-            {
-                return Err(MaterialFluxError::Invalid(
-                    "physical pressure or energy is not representable",
-                ));
-            }
-            Ok(MaterialStokesFieldSolution {
-                flow,
-                reference_density_kg_m3: reference,
-                samples: Arc::clone(&self.samples),
-                pressure_pa,
-                kinetic_energy_j_per_m,
-                viscous_dissipation,
-            })
+            self.recover_solution(flow, kinetic_energy_j_per_m)
+        })
+    }
+
+    fn recover_solution(
+        &self,
+        flow: StokesSolution,
+        kinetic_energy_j_per_m: f64,
+    ) -> Result<MaterialStokesFieldSolution<G>, MaterialFluxError> {
+        let reference = self.reference_density_kg_m3;
+        let pressure_pa: Vec<_> = flow.pressure.iter().map(|p| reference * p).collect();
+        let viscous_dissipation =
+            physical_viscous_dissipation(self.system, &flow.field.x, &|cell| {
+                self.samples[cell].transport.dynamic_viscosity_pa_s()
+            })?;
+        if pressure_pa.iter().any(|value| !value.is_finite()) || !kinetic_energy_j_per_m.is_finite()
+        {
+            return Err(MaterialFluxError::Invalid(
+                "physical pressure or energy is not representable",
+            ));
+        }
+        Ok(MaterialStokesFieldSolution {
+            flow,
+            reference_density_kg_m3: reference,
+            samples: Arc::clone(&self.samples),
+            pressure_pa,
+            kinetic_energy_j_per_m,
+            viscous_dissipation,
         })
     }
 }

@@ -42,7 +42,7 @@ mod rheology;
 pub use mixed::{
     MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
     MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
-    MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialStokesFlowControlSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
 };
 pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{

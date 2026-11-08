@@ -416,3 +416,170 @@ fn sourced_bdf2_physical_normalization(previous_dt: f64) {
     assert_eq!(previous, snapshots[0]);
     assert_eq!(older, snapshots[1]);
 }
+
+#[test]
+fn layered_flow_control_retains_source_viscosity_energy_pressure_and_loads() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 4));
+    let system = FluxSystem::new(&mesh);
+    let lower = Counted {
+        material: transport(2.0, 1.0),
+        queries: Cell::new(0),
+    };
+    let upper = Counted {
+        material: transport(5.0, 4.0),
+        queries: Cell::new(0),
+    };
+    // Continuous shear stress 0.8: u=0.8y below and u=0.3+0.2y above.
+    // The exact integral is 0.325 m²/s; only the walls prescribe velocity.
+    let velocity = |point: [f64; 2]| {
+        [
+            if point[1] < 0.5 {
+                0.8 * point[1]
+            } else {
+                0.3 + 0.2 * point[1]
+            },
+            0.0,
+        ]
+    };
+    let traction = |_: [f64; 2], n: [f64; 2]| [0.8 * n[1] - 3.2 * n[0], 0.8 * n[0] - 3.2 * n[1]];
+    let inlet: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge) && mesh.edges[edge].normal[0] < -0.5)
+        .collect();
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| {
+            if mesh.edges[edge].normal[1].abs() > 0.5 {
+                MaterialStokesBoundary::Velocity {
+                    edge,
+                    value: &velocity,
+                }
+            } else {
+                MaterialStokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    for reference_density in [1.3, 8.0] {
+        let reference = transport(reference_density, 0.7);
+        let binding =
+            MaterialFluxSystem::new(&system, &reference, MaterialFluxNumerics::default()).unwrap();
+        let sources: Vec<&dyn FluidTransport> = mesh
+            .centroids
+            .iter()
+            .map(|point| {
+                if point[1] < 0.5 {
+                    &lower as &dyn FluidTransport
+                } else {
+                    &upper as &dyn FluidTransport
+                }
+            })
+            .collect();
+        let field = binding.bind_stokes_materials(sources).unwrap();
+        let queries = [lower.queries.get(), upper.queries.get()];
+        let controlled = field
+            .solve_stokes_mixed_flow_control(
+                &|_| [-1.7, 0.0],
+                &boundaries,
+                &[&inlet],
+                &[-0.325],
+                1e-12,
+            )
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&controlled.flow.discrete().x, &velocity);
+        assert!(error < 3e-10 && divergence < 3e-10, "{error}, {divergence}");
+        near(controlled.pressure_offsets_pa[0], 1.7, 3e-9);
+        near(controlled.outward_volume_rates_m2_s[0], -0.325, 1e-12);
+        for (cell, point) in mesh.centroids.iter().enumerate() {
+            near(
+                controlled.flow.pressure_pa()[cell],
+                3.2 + 1.7 * (1.0 - point[0]),
+                3e-9,
+            );
+            assert!(std::ptr::eq(
+                &field.samples()[cell],
+                &controlled.flow.samples()[cell]
+            ));
+        }
+        // Independent integrals of rho*u²/2 and mu*(du/dy)² on the two layers.
+        near(
+            controlled.flow.kinetic_energy_j_per_m(),
+            337.0 / 1200.0,
+            3e-10,
+        );
+        near(
+            controlled.flow.viscous_dissipation().total_power_w_per_m(),
+            0.4,
+            3e-10,
+        );
+        let load = controlled
+            .flow
+            .boundary_loads(&inlet, [0.0; 2], &[None])
+            .unwrap();
+        near(load.stress.force_n_per_m[0], -4.9, 3e-9);
+        near(load.stress.force_n_per_m[1], 0.8, 3e-9);
+        near(load.stress.moment_n, 2.45, 3e-9);
+        assert_eq!([lower.queries.get(), upper.queries.get()], queries);
+    }
+}
+
+#[test]
+fn homogeneous_flow_control_uses_integrated_area_and_physical_pressure_units() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 2.0, 2, 4));
+    let system = FluxSystem::new(&mesh);
+    let velocity = |point: [f64; 2]| [0.25 * point[1], 0.0];
+    let traction = |_: [f64; 2], n: [f64; 2]| [0.5 * n[1] - 3.2 * n[0], 0.5 * n[0] - 3.2 * n[1]];
+    let inlet: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge) && mesh.edges[edge].normal[0] < -0.5)
+        .collect();
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| {
+            if mesh.edges[edge].normal[1].abs() > 0.5 {
+                MaterialStokesBoundary::Velocity {
+                    edge,
+                    value: &velocity,
+                }
+            } else {
+                MaterialStokesBoundary::TotalTraction {
+                    edge,
+                    value: &traction,
+                }
+            }
+        })
+        .collect();
+    for density in [0.6, 6.2] {
+        let source = transport(density, 2.0);
+        let binding =
+            MaterialFluxSystem::new(&system, &source, MaterialFluxNumerics::default()).unwrap();
+        let controlled = binding
+            .solve_stokes_mixed_flow_control(
+                &|_| [-1.7, 0.0],
+                &boundaries,
+                &[&inlet],
+                &[-0.5],
+                1e-12,
+            )
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&controlled.flow.discrete().x, &velocity);
+        assert!(error < 3e-10 && divergence < 3e-10, "{error}, {divergence}");
+        near(controlled.pressure_offsets_pa[0], 1.7, 3e-9);
+        near(controlled.outward_volume_rates_m2_s[0], -0.5, 1e-12);
+        near(
+            controlled.flow.kinetic_energy_j_per_m(),
+            density / 12.0,
+            3e-10,
+        );
+        near(
+            controlled.flow.viscous_dissipation().total_power_w_per_m(),
+            0.25,
+            3e-10,
+        );
+        let load = controlled
+            .flow
+            .boundary_loads(&inlet, [0.0; 2], &[None])
+            .unwrap();
+        near(load.stress.force_n_per_m[0], -9.8, 3e-9);
+    }
+}

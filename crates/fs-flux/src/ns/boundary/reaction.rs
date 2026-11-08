@@ -223,6 +223,35 @@ pub struct BoundaryReactions {
 }
 
 impl BoundaryReactions {
+    // A controlled port adds -p*n to its original natural traction. Its
+    // fluid-on-exterior reaction therefore gains +p*integral(n). Velocity
+    // constraint reactions already see the solved pressure in the field.
+    pub(super) fn add_port_pressures(
+        &mut self,
+        ports: &[Vec<usize>],
+        pressures: &[f64],
+    ) -> Result<(), StokesBoundaryError> {
+        for (port, &pressure) in ports.iter().zip(pressures) {
+            for &edge in port {
+                let index = self
+                    .edges
+                    .binary_search_by_key(&edge, |face| face.edge)
+                    .expect("admitted controlled traction edge");
+                let face = &mut self.edges[index];
+                let increment = BoundaryWrench {
+                    force: face.normal_measure.map(|normal| pressure * normal),
+                    moment: pressure * face.normal_moment_measure,
+                };
+                face.load.stress.add(increment);
+                face.load.imposed.add(increment);
+                if !face.load.finite() {
+                    return Err(invalid("unrepresentable controlled-pressure reaction"));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Original edge order. Evaluation requires each component's pressure datum.
     #[must_use]
     pub fn edges(&self) -> &[DiscreteBoundaryReaction] {
@@ -490,6 +519,12 @@ pub(super) struct ReactionOperator {
 }
 
 impl ReactionOperator {
+    pub(super) fn is_traction(&self, edge: usize) -> bool {
+        self.faces
+            .binary_search_by_key(&edge, |face| face.edge)
+            .is_ok_and(|index| matches!(self.faces[index].samples, Samples::Traction(_)))
+    }
+
     #[allow(clippy::too_many_lines)] // one boundary's constraint, stress and advective exchange
     pub(super) fn evaluate(
         &self,
