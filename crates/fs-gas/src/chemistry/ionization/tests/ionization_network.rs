@@ -16,6 +16,7 @@ use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicR
 use fs_thermochem::kinetics::atomic_ionization::{AtomicIonizationV1, AtomicStatisticalWeightsV1};
 use fs_thermochem::{ChargeVector, ElementId, ElementalMatrix, ReactionId};
 
+mod cooling;
 mod thermal;
 mod transport;
 

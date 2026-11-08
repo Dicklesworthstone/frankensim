@@ -65,13 +65,17 @@ pub struct NetworkDiffuseEvolutionBalance {
     pub incident_energy_j: f64,
     pub escaped_photons: f64,
     pub escaped_energy_j: f64,
+    /// Additional escaped energy from the explicitly thin free-free closure.
+    /// It is not part of the bound-free directional interfaces or photon count.
+    pub free_free_escaped_energy_j: f64,
     pub net_ionization_extent_mol: f64,
     pub net_radiation_energy_j: f64,
     /// N_A times the direct net radiative extent plus escape minus incidence.
     pub photon_residual: f64,
     /// Direct signed gas radiation source plus escape minus incidence.
     pub radiation_energy_residual_j: f64,
-    /// Actual gas storage plus escape minus incidence minus external work.
+    /// Actual gas storage plus bound-free and free-free escape, minus incidence
+    /// and external work.
     pub energy_residual_j: f64,
     /// Allowance confined to subtraction of bright incoming/outgoing energy.
     /// The independent gas-source audit keeps its original absolute tolerance.

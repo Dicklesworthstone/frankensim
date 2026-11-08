@@ -8503,6 +8503,42 @@ This entry evaluates a frozen field. It does not assume excited-state cascades,
 case-B branching, a fitted escape fraction, an average emitted photon,
 scattering, photon travel time or atomic source data beyond the originals.
 
+## Optically-thin free-free cooling in atomic charge-state evolution
+
+`advance_ionization_network_with_optically_thin_bremsstrahlung` and
+`NetworkRadiationCell::with_optically_thin_bremsstrahlung` attach the original
+`ElectronIonBremsstrahlungV1` to the shared atomic electron pool. The exact
+source bank and structural electron must match. At least one admitted atomic
+edge establishes the original Maxwellian electron caloric convention. Constant
+or original Itoh nonrelativistic integrated Gaunt laws retain their source
+temperature, charge, nondegeneracy, relativity and stationary-ion limits.
+
+Each cooling stage refreshes the actual electron and charge-squared ion
+densities and the temperature-dependent Gaunt factor. In the coordinate
+sqrt(Te), a source-evaluated midpoint freezes C=P/sqrt(Te) for the interval.
+The step is exact for a constant Gaunt law at frozen populations and second
+order otherwise. Stable direct energy loss avoids subtracting nearly equal
+thermal stores. Predictor and endpoint admission reject source-boundary or
+zero-temperature crossings. Cooling surrounds the complete shared reaction
+sweep, not each channel, and therefore applies once independently of edge count.
+
+The native adaptive comparison includes escaped continuum energy and the
+direct combined radiation source. Initial source admission and every rejected
+query consume the shared rate budget. Bound-free photon counts and
+`net_radiation_energy_j` retain their original meaning.
+`free_free_escaped_energy_j` records only continuum escape;
+`net_gas_radiation_energy_j` independently retains bound-free deposition
+minus that escape before separately published components are rounded. Strict
+electron and gas storage audits use this direct combined source. Finite-beam,
+diffuse and thermal owners share the same cooling implementation.
+
+This is an explicit optically-thin escape closure for the free-free component,
+including when bound-free photons are separately transported or recycled.
+Neither a spectrum, free-free photon count, absorption/reprocessing nor an
+escape factor is inferred from a bolometric Gaunt source. The bare-Coulomb-ion,
+weak-coupling and negligible collective-effect scope of that source remains
+the caller's physical model.
+
 ## Evolving mixed ionization networks with diffuse recycling
 
 `advance_network_diffuse_recombination` shares the native network time

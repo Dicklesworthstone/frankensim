@@ -139,6 +139,8 @@ pub enum CollisionalRadiativeError {
     Admission(KineticsErrorV1),
     /// Original neutral/Coulomb exchange or heavy caloric inversion refused.
     Thermal(super::energy::ElectronHeavyEnergyError),
+    /// Original optically-thin electron-ion free-free source refused.
+    Bremsstrahlung(fs_thermochem::plasma_radiation::BremsstrahlungErrorV1),
     /// Positive electron temperature left the admitted source interval.
     OutsideDomain,
     /// Explicit work, minimum-step or representable-time budget exhausted.

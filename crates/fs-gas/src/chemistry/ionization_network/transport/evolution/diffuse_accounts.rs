@@ -124,9 +124,14 @@ impl Accounts {
         {
             return Err(Error::Arithmetic("integrated diffuse photon balance"));
         }
-        let boundary_roundoff = 128.0 * f64::EPSILON * (incoming_energy + outgoing_energy).to_f64();
+        let boundary_roundoff = 128.0
+            * f64::EPSILON
+            * (incoming_energy + outgoing_energy + Dd::from_f64(gas.free_free_escaped_energy_j))
+                .to_f64();
         let radiation_residual = (totals[9] + outgoing_energy - incoming_energy).to_f64();
-        let gas_residual = (Dd::from_f64(gas.gas_energy_change_j) + outgoing_energy
+        let gas_residual = (Dd::from_f64(gas.gas_energy_change_j)
+            + outgoing_energy
+            + Dd::from_f64(gas.free_free_escaped_energy_j)
             - incoming_energy
             - Dd::from_f64(gas.external_work_j))
         .to_f64();
@@ -170,6 +175,7 @@ impl Accounts {
                 incident_energy_j: incoming_energy.to_f64(),
                 escaped_photons: outgoing.to_f64(),
                 escaped_energy_j: outgoing_energy.to_f64(),
+                free_free_escaped_energy_j: gas.free_free_escaped_energy_j,
                 net_ionization_extent_mol: totals[7].to_f64(),
                 net_radiation_energy_j: totals[9].to_f64(),
                 photon_residual,

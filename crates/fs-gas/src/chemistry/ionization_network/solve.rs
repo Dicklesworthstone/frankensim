@@ -12,6 +12,9 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
 };
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::RadiativeRecombinationErrorV1;
 use fs_thermochem::kinetics::{KineticsErrorV1, admit_caloric_interval};
+use fs_thermochem::plasma_radiation::ElectronIonBremsstrahlungV1;
+
+mod cooling;
 
 const CV: f64 = 1.5 * R;
 
@@ -39,6 +42,8 @@ pub(super) struct Point {
     te: f64,
     th: f64,
     net_radiation: Dd,
+    // Independently accumulated optically thin continuum escape [J].
+    free_free: Dd,
     // Total, neutral and Coulomb electron-to-heavy transfers [J].
     exchange: [Sum; 3],
 }
@@ -50,6 +55,7 @@ impl Point {
             te: 0.0,
             th: 0.0,
             net_radiation: Dd::ZERO,
+            free_free: Dd::ZERO,
             exchange: [Sum::default(); 3],
         }
     }
@@ -59,6 +65,7 @@ impl Point {
         self.te = source.te;
         self.th = source.th;
         self.net_radiation = source.net_radiation;
+        self.free_free = source.free_free;
         self.exchange = source.exchange;
     }
     pub fn electron_temperature(&self) -> f64 {
@@ -71,6 +78,10 @@ impl Point {
     /// can erase a small physical escape or interspecies exchange.
     pub fn net_radiation_energy_j(&self) -> f64 {
         self.net_radiation.to_f64()
+    }
+    /// Bolometric free-free escape. It has no inferred bound-free photon count.
+    pub fn free_free_escaped_energy_j(&self) -> f64 {
+        self.free_free.to_f64()
     }
 }
 
@@ -89,6 +100,7 @@ pub(super) struct Problem<'a> {
     level_energies: [f64; MAX_EQUILIBRIUM_SPECIES_V1],
     controls: IonizationNetworkSolve,
     thermal: Option<PreparedThermal<'a>>,
+    cooling: Option<&'a ElectronIonBremsstrahlungV1>,
 }
 impl<'a> Problem<'a> {
     pub fn new(
@@ -96,6 +108,20 @@ impl<'a> Problem<'a> {
         sources: &'a [AtomicRadiativeRecombinationV1],
         photons: &[PhotonNumberFluxV1],
         thermal: Option<&'a CollisionalRadiativeThermal>,
+        controls: IonizationNetworkSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, IonizationNetworkError> {
+        Self::new_with_cooling(
+            initial, sources, photons, thermal, None, controls, cancelled,
+        )
+    }
+
+    pub fn new_with_cooling(
+        initial: &'a FrozenIonizedGasStateV1,
+        sources: &'a [AtomicRadiativeRecombinationV1],
+        photons: &[PhotonNumberFluxV1],
+        thermal: Option<&'a CollisionalRadiativeThermal>,
+        cooling: Option<&'a ElectronIonBremsstrahlungV1>,
         controls: IonizationNetworkSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, IonizationNetworkError> {
@@ -126,6 +152,7 @@ impl<'a> Problem<'a> {
             level_energies: [0.0; MAX_EQUILIBRIUM_SPECIES_V1],
             controls,
             thermal: None,
+            cooling,
         };
         if !sources.is_empty() {
             result.admit_temperature(initial.electron_temperature().value())?;
@@ -259,7 +286,14 @@ impl<'a> Problem<'a> {
                 cancelled,
             )?);
         }
+        result.prepare_cooling(cancelled)?;
         Ok(result)
+    }
+
+    /// Original initial-state cooling admission, performed once by construction.
+    /// The owner charges this to its shared rate budget before evolving cells.
+    pub fn cooling_preparation_evaluations(&self) -> usize {
+        usize::from(self.cooling.is_some())
     }
 
     pub fn sources(&self) -> impl Iterator<Item = &AtomicRadiativeRecombinationV1> {
@@ -283,6 +317,7 @@ impl<'a> Problem<'a> {
             te: self.initial.electron_temperature().value(),
             th: self.initial.heavy_temperature().value(),
             net_radiation: Dd::ZERO,
+            free_free: Dd::ZERO,
             exchange: [Sum::default(); 3],
         }
     }
@@ -300,6 +335,7 @@ impl<'a> Problem<'a> {
                         || point.th == point.te
                         || self.electron.is_none_or(|i| point.amounts[i] == 0.0))
             })
+            && (self.cooling.is_none() || self.electron.is_none_or(|i| point.amounts[i] == 0.0))
     }
 
     pub fn compose(
@@ -312,8 +348,9 @@ impl<'a> Problem<'a> {
         self.compose_impl(point, dt, true, balance, cancelled)
     }
 
-    /// Impact, three-body capture and thermal exchange only. A common radiation
-    /// owner supplies both photon processes through simultaneous edge moments.
+    /// Impact, three-body capture, thermal exchange and optional free-free
+    /// escape. A common radiation owner supplies both bound-free photon
+    /// processes through simultaneous edge moments.
     pub fn collisional_compose(
         &self,
         point: &mut Point,
@@ -333,6 +370,7 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), IonizationNetworkError> {
         poll(cancelled)?;
+        self.cooling_step(point, 0.5 * dt, balance, cancelled)?;
         self.thermal_step(point, 0.5 * dt, balance, cancelled)?;
         if let Some(last) = self.edges.len().checked_sub(1) {
             for index in 0..last {
@@ -344,6 +382,7 @@ impl<'a> Problem<'a> {
             }
         }
         self.thermal_step(point, 0.5 * dt, balance, cancelled)?;
+        self.cooling_step(point, 0.5 * dt, balance, cancelled)?;
         Ok(())
     }
 
@@ -933,6 +972,30 @@ impl<'a> Problem<'a> {
                             .max(coarse.net_radiation.to_f64().abs())
                             .max(fine.net_radiation.to_f64().abs())),
         );
+        if self.cooling.is_some() {
+            // A fresh step's escaped energy, not all previous emission, controls
+            // continuum cooling accuracy. The direct total also retains a small
+            // imbalance between bright bound-free heating and continuum escape.
+            let coarse_cooling = coarse.free_free - start.free_free;
+            let fine_cooling = fine.free_free - start.free_free;
+            error = error.max(
+                (coarse_cooling - fine_cooling).to_f64().abs()
+                    / (controls.energy_tolerance_j
+                        + controls.relative_tolerance
+                            * coarse_cooling
+                                .to_f64()
+                                .abs()
+                                .max(fine_cooling.to_f64().abs())),
+            );
+            let coarse_gas = (coarse.net_radiation - start.net_radiation) - coarse_cooling;
+            let fine_gas = (fine.net_radiation - start.net_radiation) - fine_cooling;
+            error = error.max(
+                (coarse_gas - fine_gas).to_f64().abs()
+                    / (controls.energy_tolerance_j
+                        + controls.relative_tolerance
+                            * coarse_gas.to_f64().abs().max(fine_gas.to_f64().abs())),
+            );
+        }
         // Exchange accuracy follows actual sensible pool scales, never large
         // formation offsets or a cumulative transfer that can change sign.
         let electron = self.electron.map_or(0.0, |i| start.amounts[i]);
@@ -1073,12 +1136,14 @@ impl<'a> Problem<'a> {
         let [exchange, neutral_exchange, coulomb_exchange] = point.exchange.map(|s| s.value);
         let [photo, capture, absorbed, emitted] = totals.map(|sum| sum.value);
         let net_radiation = point.net_radiation.to_f64();
+        let free_free = point.free_free_escaped_energy_j();
+        let net_gas_radiation = (point.net_radiation - point.free_free).to_f64();
         let mut residual = Sum::default();
         for value in [
             sensible,
             chemical.value,
             heavy,
-            -net_radiation,
+            -net_gas_radiation,
             -electron_work,
             -heavy_work,
         ] {
@@ -1089,7 +1154,7 @@ impl<'a> Problem<'a> {
         for value in [
             sensible,
             chemical.value,
-            -net_radiation,
+            -net_gas_radiation,
             -electron_work,
             exchange,
         ] {
@@ -1104,6 +1169,8 @@ impl<'a> Problem<'a> {
             || !heavy_residual.is_finite()
             || !electron_residual.value.is_finite()
             || !net_radiation.is_finite()
+            || !nonnegative(free_free)
+            || !net_gas_radiation.is_finite()
         {
             return Err(IonizationNetworkError::Arithmetic(
                 "network photon/gas energy",
@@ -1166,6 +1233,8 @@ impl<'a> Problem<'a> {
         balance.absorbed_radiation_energy_j = absorbed;
         balance.emitted_radiation_energy_j = emitted;
         balance.net_radiation_energy_j = net_radiation;
+        balance.free_free_escaped_energy_j = free_free;
+        balance.net_gas_radiation_energy_j = net_gas_radiation;
         balance.chemical_storage_change_j = chemical.value;
         balance.electron_sensible_energy_change_j = sensible;
         balance.heavy_sensible_energy_change_j = heavy;

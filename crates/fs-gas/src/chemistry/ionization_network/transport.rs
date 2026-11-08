@@ -23,6 +23,7 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
     MAX_PHOTON_GROUPS_V1, PhotoionizationErrorV1,
 };
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
+use fs_thermochem::plasma_radiation::ElectronIonBremsstrahlungV1;
 
 /// Spectral recombination emission and cross-species photon recycling.
 pub mod diffuse;
@@ -39,6 +40,9 @@ pub struct NetworkRadiationCell<'a> {
     pub initial: &'a FrozenIonizedGasStateV1,
     pub sources: &'a [AtomicRadiativeRecombinationV1],
     pub thermal: Option<&'a CollisionalRadiativeThermal>,
+    /// Optional frequency-integrated free-free source, explicitly assumed to
+    /// escape. It cools evolving electrons independently of bound-free transport.
+    pub optically_thin_bremsstrahlung: Option<&'a ElectronIonBremsstrahlungV1>,
 }
 impl<'a> NetworkRadiationCell<'a> {
     pub const fn new(
@@ -49,10 +53,18 @@ impl<'a> NetworkRadiationCell<'a> {
             initial,
             sources,
             thermal: None,
+            optically_thin_bremsstrahlung: None,
         }
     }
     pub const fn with_thermal(mut self, thermal: &'a CollisionalRadiativeThermal) -> Self {
         self.thermal = Some(thermal);
+        self
+    }
+    pub const fn with_optically_thin_bremsstrahlung(
+        mut self,
+        source: &'a ElectronIonBremsstrahlungV1,
+    ) -> Self {
+        self.optically_thin_bremsstrahlung = Some(source);
         self
     }
 }
@@ -285,15 +297,23 @@ fn prepare_problems<'a>(
     controls: NetworkRadiationSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<Problem<'a>>, Error> {
+    let cooling_queries = cells
+        .iter()
+        .filter(|cell| cell.optically_thin_bremsstrahlung.is_some())
+        .count();
+    if cooling_queries > controls.network.maximum_rate_evaluations {
+        return Err(Error::WorkBudget);
+    }
     let mut problems = reserved(cells.len())?;
     for (c, cell) in cells.iter().enumerate() {
         poll(cancelled)?;
         problems.push(
-            Problem::new(
+            Problem::new_with_cooling(
                 cell.initial,
                 cell.sources,
                 &[],
                 cell.thermal,
+                cell.optically_thin_bremsstrahlung,
                 controls.network,
                 cancelled,
             )

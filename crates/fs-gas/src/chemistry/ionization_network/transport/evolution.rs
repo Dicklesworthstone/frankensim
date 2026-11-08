@@ -27,6 +27,7 @@ pub struct NetworkRadiationCellResult {
     beams: Vec<RadiationTransportBandBalance>,
     balance: IonizationNetworkBalance,
     diffuse: Option<NetworkDiffuseCellExposure>,
+    free_free: Option<ElectronIonBremsstrahlungV1>,
 }
 impl NetworkRadiationCellResult {
     pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 {
@@ -53,6 +54,9 @@ impl NetworkRadiationCellResult {
     pub const fn diffuse_radiation(&self) -> Option<&NetworkDiffuseCellExposure> {
         self.diffuse.as_ref()
     }
+    pub const fn free_free_cooling_source(&self) -> Option<&ElectronIonBremsstrahlungV1> {
+        self.free_free.as_ref()
+    }
 }
 
 /// Whole-column physical balances and all accepted/rejected numerical work.
@@ -63,8 +67,13 @@ pub struct NetworkRadiationBalance {
     pub absorbed_radiation_energy_j: f64,
     /// Gross spontaneous emission; the optional diffuse summary records escape.
     pub emitted_radiation_energy_j: f64,
-    /// Direct signed gas radiation source, before gross-traffic subtraction.
+    /// Direct signed bound-free source, before gross-traffic subtraction.
     pub net_radiation_energy_j: f64,
+    /// Escaping free-free energy under the separately selected thin closure.
+    pub free_free_escaped_energy_j: f64,
+    /// Direct total gas source: bound-free deposition minus free-free escape.
+    /// This is retained before the two published component totals are rounded.
+    pub net_gas_radiation_energy_j: f64,
     pub gas_energy_change_j: f64,
     pub external_work_j: f64,
     /// Actual gas storage minus the direct radiation source and held work.
@@ -83,6 +92,8 @@ pub struct NetworkRadiationBalance {
     /// single `network.maximum_rate_evaluations` budget.
     pub rate_evaluations: usize,
     pub thermal_evaluations: usize,
+    /// Included in rate_evaluations, across preparation and all trial work.
+    pub free_free_evaluations: usize,
 }
 
 /// Complete source-retained evolution; refusal publishes no partial endpoint.
@@ -188,6 +199,13 @@ pub(super) fn advance_impl(
     let mut fine = trial_points(&points)?;
     let mut predictor = trial_points(&points)?;
     let mut statistics = buffer(cells.len(), IonizationNetworkBalance::default())?;
+    for (statistics, problem) in statistics.iter_mut().zip(&column.problems) {
+        let preparation = problem.cooling_preparation_evaluations();
+        statistics.rate_evaluations = preparation;
+        statistics.free_free_evaluations = preparation;
+        column.balance.rate_evaluations += preparation;
+        column.balance.free_free_evaluations += preparation;
+    }
     let mut increments = reserved(cells.len())?;
     for point in &points {
         increments.push(buffer(point.events.len(), DiffuseIncrement::default())?);
@@ -344,6 +362,7 @@ impl Column<'_> {
             let before_total = self.balance.rate_evaluations;
             let before_cell = statistics[c].rate_evaluations;
             let thermal_before = statistics[c].thermal_evaluations;
+            let free_free_before = statistics[c].free_free_evaluations;
             statistics[c].rate_evaluations = before_total;
             let result = if self.field.is_diffuse() {
                 self.problems[c].collisional_compose(
@@ -359,6 +378,8 @@ impl Column<'_> {
             self.balance.rate_evaluations = after_total;
             statistics[c].rate_evaluations = before_cell + (after_total - before_total);
             self.balance.thermal_evaluations += statistics[c].thermal_evaluations - thermal_before;
+            self.balance.free_free_evaluations +=
+                statistics[c].free_free_evaluations - free_free_before;
             result.map_err(|error| cell_error(c, error))?;
         }
         Ok(())
@@ -418,8 +439,9 @@ impl Column<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkRadiationResult, Error> {
         let mut results = reserved(cells.len())?;
-        // Gas storage, direct radiation, gross recombination, work, emitted photons.
-        let mut totals = [Dd::ZERO; 5];
+        // Gas storage, bound-free source, recombination, work, photons,
+        // free-free escape and the direct combined radiation source.
+        let mut totals = [Dd::ZERO; 7];
         for (c, cell) in cells.iter().enumerate() {
             poll(cancelled)?;
             statistics[c].accepted_steps = self.balance.accepted_steps;
@@ -476,6 +498,8 @@ impl Column<'_> {
                 totals[3] = sum(totals[3], Dd::from_f64(value))?;
             }
             totals[4] = sum(totals[4], Dd::from_f64(b.emitted_photons))?;
+            totals[5] = sum(totals[5], Dd::from_f64(b.free_free_escaped_energy_j))?;
+            totals[6] = sum(totals[6], Dd::from_f64(b.net_gas_radiation_energy_j))?;
             results.push(NetworkRadiationCellResult {
                 initial: cell.initial.clone(),
                 state,
@@ -485,6 +509,7 @@ impl Column<'_> {
                 beams: band_results,
                 balance: b,
                 diffuse: diffuse.map(radiation::exposure),
+                free_free: cell.optically_thin_bremsstrahlung.cloned(),
             });
         }
         let mut band_results = reserved(beams.len())?;
@@ -502,8 +527,16 @@ impl Column<'_> {
             absorbed = sum(absorbed, a[1] + a[2] + a[3])?;
             absorbed_energy = sum(absorbed_energy, a[4])?;
         }
-        let [gas, radiation, emitted, work, emitted_photons] = totals;
-        let residual = (gas - radiation - work).to_f64();
+        let [
+            gas,
+            radiation,
+            emitted,
+            work,
+            emitted_photons,
+            free_free,
+            net_gas_radiation,
+        ] = totals;
+        let residual = (gas - net_gas_radiation - work).to_f64();
         energy_check(residual, self.controls.network.local.energy_tolerance_j)?;
         let photon_residual = (radiation + emitted - absorbed_energy).to_f64();
         let roundoff = 128.0
@@ -521,6 +554,8 @@ impl Column<'_> {
         self.balance.absorbed_radiation_energy_j = absorbed_energy.to_f64();
         self.balance.emitted_radiation_energy_j = emitted.to_f64();
         self.balance.net_radiation_energy_j = radiation.to_f64();
+        self.balance.free_free_escaped_energy_j = free_free.to_f64();
+        self.balance.net_gas_radiation_energy_j = net_gas_radiation.to_f64();
         self.balance.gas_energy_change_j = gas.to_f64();
         self.balance.external_work_j = work.to_f64();
         self.balance.energy_residual_j = residual;

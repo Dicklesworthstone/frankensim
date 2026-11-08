@@ -39,6 +39,7 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
     MAX_PHOTON_GROUPS_V1, PhotonNumberFluxV1,
 };
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
+use fs_thermochem::plasma_radiation::ElectronIonBremsstrahlungV1;
 
 mod solve;
 use solve::{Point, Problem};
@@ -107,9 +108,15 @@ pub struct IonizationNetworkBalance {
     pub absorbed_radiation_energy_j: f64,
     /// Energy carried away by spontaneous recombination photons [J].
     pub emitted_radiation_energy_j: f64,
-    /// Direct signed photon energy deposited in gas [J]. Diffuse owners cancel
+    /// Direct signed bound-free photon energy deposited in gas [J]. Diffuse owners cancel
     /// internal recycling before this accumulation, independently of gross flux.
     pub net_radiation_energy_j: f64,
+    /// Explicitly escaping electron-ion free-free energy [J]. No photon count
+    /// or spectrum is inferred from this frequency-integrated source.
+    pub free_free_escaped_energy_j: f64,
+    /// Direct total gas radiation source: bound-free minus escaped free-free
+    /// energy, accumulated before separately published components are rounded.
+    pub net_gas_radiation_energy_j: f64,
     /// Original level storage change reconstructed from actual populations [J].
     pub chemical_storage_change_j: f64,
     /// Actual shared electron sensible-energy change [J].
@@ -153,6 +160,9 @@ pub struct IonizationNetworkBalance {
     /// Actual neutral/Coulomb thermal stages, including rejected work.
     /// Each stage retains the source quadrature and caloric work bounds.
     pub thermal_evaluations: usize,
+    /// Original free-free queries, including preparation and rejected trials.
+    /// These also consume the common maximum_rate_evaluations budget.
+    pub free_free_evaluations: usize,
 }
 
 /// Complete source-retained reacting endpoint on the original thermodynamic bank.
@@ -163,6 +173,7 @@ pub struct IonizationNetworkResult {
     sources: Vec<AtomicRadiativeRecombinationV1>,
     photons: Vec<PhotonNumberFluxV1>,
     thermal: Option<CollisionalRadiativeThermal>,
+    free_free: Option<ElectronIonBremsstrahlungV1>,
     channels: Vec<IonizationChannelBalance>,
     balance: IonizationNetworkBalance,
     controls: IonizationNetworkSolve,
@@ -190,6 +201,10 @@ impl IonizationNetworkResult {
     /// Original optional collision laws, held powers and heavy source support.
     pub const fn thermal_inputs(&self) -> Option<&CollisionalRadiativeThermal> {
         self.thermal.as_ref()
+    }
+    /// Original source under the explicitly selected optically-thin closure.
+    pub const fn free_free_cooling_source(&self) -> Option<&ElectronIonBremsstrahlungV1> {
+        self.free_free.as_ref()
     }
     pub const fn balance(&self) -> IonizationNetworkBalance {
         self.balance
@@ -219,7 +234,7 @@ pub fn advance_ionization_network(
     cancelled: impl FnMut() -> bool,
 ) -> Result<IonizationNetworkResult, IonizationNetworkError> {
     advance(
-        initial, sources, photons, None, duration, controls, cancelled,
+        initial, sources, photons, None, None, duration, controls, cancelled,
     )
 }
 
@@ -252,6 +267,44 @@ pub fn advance_ionization_network_with_thermal(
         sources,
         photons,
         Some(thermal),
+        None,
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+/// Evolve the same atomic network with explicit optically-thin free-free loss.
+///
+/// The original frequency-integrated bremsstrahlung source refreshes at actual
+/// ionic charge populations and electron temperature. Escaped energy debits the
+/// shared electron pool and feeds back into all reaction rates; it creates no
+/// atomic event or inferred photon count. The optional thermal owner supplies
+/// the same original collision exchange and held pool powers as the thermal
+/// entry. Cooling, thermal exchange and reactions share one temporal controller.
+///
+/// Selecting this entry asserts that these free-free photons escape. It does
+/// not synthesize a spectrum from an integrated Gaunt factor, infer free-free
+/// absorption, or send this energy through bound-free diffuse transport. The
+/// source's original nonrelativistic, nondegenerate, stationary-ion and
+/// temperature bounds remain mandatory. At least one original atomic edge is
+/// required to establish the shared Maxwellian electron caloric convention.
+pub fn advance_ionization_network_with_optically_thin_bremsstrahlung(
+    initial: &FrozenIonizedGasStateV1,
+    sources: &[AtomicRadiativeRecombinationV1],
+    photons: &[PhotonNumberFluxV1],
+    thermal: Option<&CollisionalRadiativeThermal>,
+    cooling: &ElectronIonBremsstrahlungV1,
+    duration: Time,
+    controls: IonizationNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<IonizationNetworkResult, IonizationNetworkError> {
+    advance(
+        initial,
+        sources,
+        photons,
+        thermal,
+        Some(cooling),
         duration,
         controls,
         cancelled,
@@ -263,6 +316,7 @@ fn advance(
     sources: &[AtomicRadiativeRecombinationV1],
     photons: &[PhotonNumberFluxV1],
     thermal: Option<&CollisionalRadiativeThermal>,
+    cooling: Option<&ElectronIonBremsstrahlungV1>,
     duration: Time,
     controls: IonizationNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
@@ -285,11 +339,24 @@ fn advance(
             ));
         }
     }
-    let problem = Problem::new(initial, sources, photons, thermal, controls, &mut cancelled)?;
+    let problem = Problem::new_with_cooling(
+        initial,
+        sources,
+        photons,
+        thermal,
+        cooling,
+        controls,
+        &mut cancelled,
+    )?;
     let mut point = problem.initial_point();
     let mut full = Point::new(point.amounts.len(), point.events.len());
     let mut fine = Point::new(point.amounts.len(), point.events.len());
-    let mut balance = IonizationNetworkBalance::default();
+    let preparation = problem.cooling_preparation_evaluations();
+    let mut balance = IonizationNetworkBalance {
+        rate_evaluations: preparation,
+        free_free_evaluations: preparation,
+        ..IonizationNetworkBalance::default()
+    };
     let mut time = 0.0;
     let mut step = controls.local.initial_step_s;
     while time < duration.value() && !problem.inactive(&point) {
@@ -351,6 +418,7 @@ fn advance(
         sources: problem.sources().map(Clone::clone).collect(),
         photons: photons.to_vec(),
         thermal: thermal.cloned(),
+        free_free: cooling.cloned(),
         channels,
         balance,
         controls,
