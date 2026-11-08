@@ -154,6 +154,12 @@ impl EquilibriumEnthalpyPhaseCurve {
                 mean_temperature_k: initial_t, mean_temperature_change_k: 0.0,
             });
         }
+        // Source-only storage has one authoritative update. Segment travel and
+        // residence retain heat/temperature moments; their rounding must not
+        // change the final native h or its original support admission.
+        let source_state = if feedback == 0.0 {
+            Some(self.advance_specific_energy(initial, drive)?)
+        } else { None };
         let heating = drive > 0.0;
         let knots = self.knots();
         let upper = if heating {
@@ -196,14 +202,20 @@ impl EquilibriumEnthalpyPhaseCurve {
             if to_boundary.is_nan() || to_boundary <= 0.0 {
                 return Err(invalid("phase boundary residence is not representable"));
             }
-            let finished = remaining <= to_boundary;
-            let duration = if finished { remaining } else { to_boundary };
+            // Exact source endpoints can differ by one residence-time ULP from
+            // 1-used. Rounded h alone is insufficient: partial storage
+            // quantization must not lengthen the physical source trajectory.
+            let source_endpoint = source_state.is_some_and(|state|
+                state.specific_enthalpy_j_kg() == boundary.specific_enthalpy_j_kg
+                    && drive == boundary.specific_enthalpy_j_kg - initial_h);
+            let finished = source_endpoint || remaining <= to_boundary;
+            let duration = if finished && !source_endpoint { remaining } else { to_boundary };
             let (local_heat, delta_t, local_mean) = if plateau {
                 if let Some(response) = response.as_deref_mut() {
                     response.push_driven(1.0, 0.0, duration, 0.0, 0.0, driving, duration)?;
                 }
                 (
-                    if !finished || remaining == to_boundary {
+                    if !finished || remaining == to_boundary || source_endpoint {
                         boundary.specific_enthalpy_j_kg - h
                     } else {
                         duration * driving
@@ -230,7 +242,9 @@ impl EquilibriumEnthalpyPhaseCurve {
             if !local_heat.is_finite() || local_heat == 0.0 || (local_heat > 0.0) != heating {
                 return Err(invalid("nonzero phase-driven heat is not representable"));
             }
-            let next_h = if !finished || remaining == to_boundary {
+            let next_h = if finished && let Some(state) = source_state {
+                state.specific_enthalpy_j_kg()
+            } else if !finished || remaining == to_boundary {
                 boundary.specific_enthalpy_j_kg
             } else {
                 let next = h + local_heat;
@@ -249,7 +263,8 @@ impl EquilibriumEnthalpyPhaseCurve {
                 if feedback == 0.0 { heat = drive; }
                 let represented = next_h - initial_h;
                 if represented == 0.0 { return Err(PhaseStateError::LostSpecificEnergyIncrement.into()); }
-                let state = self.state_at_specific_enthalpy(next_h)?;
+                let state = if let Some(state) = source_state { state }
+                    else { self.state_at_specific_enthalpy(next_h)? };
                 let mean = initial_t + mean_change;
                 let delta = (temperature - initial_t) + delta_t;
                 let residual = heat - represented;
