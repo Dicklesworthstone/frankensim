@@ -7603,6 +7603,44 @@ tests, passed in an exact-physics slice. Source/native integration targets remai
 unexecuted in this worker: compiling the unchanged pinned `asupersync` dependency
 was SIGKILLed even with single-threaded metadata-only compilation.
 
+## Source-bound relaxing adhesive bondlines in thermal series joints
+
+`cohesive::thermal_joint::relaxation::SourceRelaxingJoint` consumes the original
+`SourceMember` geometries and `ResolvedThermoMaxwell` bulk laws together with an
+ordered `ResolvedViscoelasticBond`. It retains the adhesive's independent normal
+and shear Maxwell spectra and original thickness; no Kelvin dashpot or bulk
+modulus substitutes for adhesive memory. The axial consumer advances the normal
+branch bank, while the original zero shear histories remain intact. Actual
+receiving member identities must match both ordered interface sides. Combined
+member and branch-state budgets are checked before accepted state is built.
+
+Prescribed endpoint extension and endpoint force use the same scalar series
+compatibility. Each original member supplies its native affine endpoint stress,
+and the adhesive supplies its exact prepared straight-jump-ramp response. Their
+affine equation is solved directly, followed by independent original material
+updates, common-force and total-extension checks. Bulk Maxwell histories and
+the selected backward-Euler or exact-strain-ramp integration survive each step.
+All memories, displacement and time publish together; source, temperature,
+strain/rate/time, energy and late-cancellation refusals leave the old state
+retryable. The complete adhesive query remains fixed, including temperature;
+bulk heating does not silently change adhesive coefficients or source claims.
+
+The report separates exact adhesive work, stored change and physical relaxation
+heat from original bulk heat and backward-Euler numerical dissipation. Signed
+bond and bulk endpoint-work quadrature corrections close the common actuator
+account, including exact-ramp bulk laws; neither correction is heat. Thermal
+eigenstrain work and modulus-change work retain their original native meaning.
+The combined balance uses constitutive increments rather than subtracting large
+whole-joint energy inventories. This is a fixed-geometry, massless, small-strain
+axial model; endpoint control requires time refinement. It adds no damage,
+healing, thermal transport, heat destination, inertial or 3D peel model.
+
+`tests/relaxing_adhesive_joint.rs` checks the independent standard-linear-solid
+series relaxation time and constant-force creep retardation time, second-order
+time refinement and integrated adhesive heat, unequal heated members with both
+native bulk history integrators, signed work corrections, ordered source and
+domain refusal, and identical retry after late cancellation.
+
 ## Original thermal eigenstrain in tensor-Prony projection
 
 The existing tetrahedral tensor-Prony projector carries each explicitly supplied

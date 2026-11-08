@@ -16,6 +16,9 @@
 /// Original bulk and ordered interface sources on the same joint history.
 pub mod source;
 
+/// Original-source intact adhesive relaxation in the same restrained members.
+pub mod relaxation;
+
 use std::collections::BTreeMap;
 use fs_exec::Cx;
 use fs_material::cohesive::{BilinearCohesive, CohesiveEnergy, CohesivePoint};
