@@ -4310,3 +4310,33 @@ independent point-force work, subdivision/reversal, all sixteen endpoint
 derivatives, one-ULP work and sealed caches, reversal-driven area expansion,
 pure-mode limits and an unsafe interior opening edge. Rust test execution
 remains unverified in the resource-constrained shared environment.
+
+### Coupled normal, shear and torsional source dynamics
+
+`JkrCombinedMotion` advances `q=[approach,shear1,shear2,twist]` and their
+physical rates against the original jointly relaxed adhesive disk. A reciprocal,
+resolved positive 4x4 native mobility retains every normal/shear/twist cross
+term. Diagonal square-root normalization separates metre and radian units;
+fixed Cholesky factors supply the mass metric, and a bounded analytic Newton
+solve retains the nonsymmetric original discrete endpoint tangent.
+
+Each accepted phase reports the original reversible storage change, equivalent
+applied work, projected kinetic change, their residuals, and conjugate effort
+impulses plus first time moments. The full constant-effort quadratic trajectory
+must remain within one attached original branch and the joint rim-strain,
+traction, coordinate, rate and effort budgets. Interior turns enter the same
+source box even when both endpoints coincide. The conservative box and resolved
+inertial-tangent screen can require physical step refinement; they are not
+global uniqueness or interval-error certificates.
+
+The immutable owner and sealed cached endpoint bind source, full mobility and
+numerical policy while retaining clock and step count. Proposals allocate no
+scratch, and cancellation or refusal leaves accepted history unchanged. This
+inherits the circular ideal bonded full-stick approximation: no independent
+Coulomb clipping, slip loss, heat, bond nucleation, temperature transfer or
+finite-geometry reset is inferred.
+
+`tests/adhesive_combined/motion.rs` specifies independent physical mass/work
+checks, point-force ODE convergence and reversal, tangent-frame covariance,
+the original normal/torsion limit, combined hidden-turn refusal and atomic
+inertia, budget, source and cancellation guards.

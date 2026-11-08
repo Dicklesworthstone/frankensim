@@ -21,6 +21,9 @@ mod radius;
 /// Work-consistent four-coordinate exchange and whole-path source admission.
 pub mod path;
 
+/// Fully coupled normal, two-shear and torsional inertia on the original area.
+pub mod motion;
+
 use super::{
     JkrMixedModeError, SourceJkrMixedMode,
     torsion::{JkrTorsionalError, JkrTorsionalLimitKind},
