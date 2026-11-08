@@ -55,6 +55,11 @@ pub mod multirate;
 /// Complete reciprocal physical power-port composition.
 mod interconnection;
 pub use interconnection::{InterconnectionBudget, interconnect_mapped};
+mod modal_bank;
+pub use modal_bank::{
+    modal_bank_ports_with_damping_matrix, modal_bank_ports_with_damping_rates,
+    modal_bank_with_damping_matrix, modal_bank_with_damping_rates,
+};
 mod vector_field;
 pub(crate) use vector_field::port_input_row;
 /// Physical outlet volume flow on the original acoustic-chain state.
@@ -5678,6 +5683,8 @@ pub fn slice_linear_taper(
 /// the eig/plate beads: per mode `i`, `H_i = (p_i^2 + w_i^2 q_i^2)/2`,
 /// damping `R = diag(0, 2 zeta_i w_i)` per mode, and the drive port
 /// weights `phi_i` (mode shape at the drive point, mass-normalized).
+/// Use [`modal_bank_with_damping_rates`] for physical drag on free coordinates,
+/// or [`modal_bank_with_damping_matrix`] for coupled modal viscosity.
 ///
 /// # Errors
 /// Admission errors on negative damping or mismatched lengths.

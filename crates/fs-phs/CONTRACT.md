@@ -575,6 +575,40 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Physical modal damping and rigid coordinates
+
+`modal_bank[_ports]_with_damping_rates` admits the physical coefficients c
+[1/s] of `q'' + c*q' + omega^2*q = B*u`, including exactly zero frequency
+with positive drag. `modal_bank[_ports]_with_damping_matrix` retains the full
+row-major symmetric PSD C in `p' = -Omega^2*q - C*p + B*u`. Off-diagonal
+viscosity, either coupling sign and lossless relative-motion directions remain
+in their original coordinates. No damping-ratio conversion, frequency floor,
+diagonal/Rayleigh fit, state rescaling or added damping is performed.
+
+The basis is explicitly mass-normalized: `Phi^T M Phi = I`,
+`C = Phi^T C_physical Phi`, and force columns use the same Phi. States remain
+interleaved q/p with p=q', storage `sum(p_i^2+omega_i^2*q_i^2)/2`, and conjugate
+outputs `B^T*p`. The constructor never infers a physical mass from a frequency.
+The legacy ratio constructors keep their existing behavior and positive-mode
+admission. All existing pHS composition and exact/quadratic propagation owners
+consume the new systems without another time integrator.
+
+The full matrix requires exact represented symmetry, finite entries and the
+existing positive-resistance factor's componentwise reconstruction admission.
+Numerically unresolved negative eigenvalues refuse without clipping. The
+unchanged resistance and its factor remain together for composition and
+independently integrated heat. Empty/mismatched shapes, nonfinite drives,
+negative frequencies/rates, unrepresentable nonzero squared frequencies and
+the existing dense admission ceiling refuse before publishing a system.
+Preparation is dense and synchronous; this adds no spatial discretization,
+modal truncation estimate, interval certificate or cancellation guarantee.
+
+`tests/modal_damping.rs` checks a dragged rigid coordinate beside an oscillator
+over five cycles in one exact interval, full nonproportional viscosity against
+independent physical equations with unequal masses and separately integrated
+dashpot heat/source work, a lossless common-motion nullspace and analytic
+relative decay, unchanged legacy matrices, and invalid/nonpassive refusals.
+
 ### Reciprocal conducting fields in the original circuit descriptor
 
 `circuit::conductance::ConductanceBlock` carries a complete grounded reciprocal
