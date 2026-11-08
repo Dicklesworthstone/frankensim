@@ -38,6 +38,35 @@ fn product(a: f64, b: f64, c: f64) -> f64 {
     (Dd::from_f64(a) * Dd::from_f64(b) * Dd::from_f64(c)).to_f64()
 }
 
+/// An external terminal's current at the accepted discrete output voltage.
+///
+/// `I_into_bus = constant_a + slope_a_per_v * V_output`. Both coefficients are
+/// held over one interval; positive current supplies the electrical subsystem.
+/// This can represent an analytically condensed dynamic load. It is NOT a
+/// resistor heat owner: its complete signed work belongs to the external
+/// component, whose own storage/work balance must be checked by that caller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AffineOutputCurrent {
+    pub constant_a: f64,
+    pub slope_a_per_v: f64,
+}
+
+impl AffineOutputCurrent {
+    /// Evaluate the same current law used by the original implicit equation.
+    pub fn current_into_bus_a(self, voltage_v: f64) -> Result<f64, PhsError> {
+        let current = (Dd::from_f64(self.constant_a)
+            + Dd::from_f64(self.slope_a_per_v) * Dd::from_f64(voltage_v))
+        .to_f64();
+        if [self.constant_a, self.slope_a_per_v, voltage_v, current]
+            .into_iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(invalid("affine output current is unrepresentable"));
+        }
+        Ok(current)
+    }
+}
+
 fn admit_balances(
     controls: PowerLoadControls,
     balances: &[(f64, f64)],
@@ -202,7 +231,7 @@ pub struct BatteryFedStep {
     /// Positive from battery bus to converter input, negative for regeneration.
     pub lead_current_a: f64,
     pub lead_heat_j: f64,
-    /// Held external current's signed work entering the output bus.
+    /// External terminal's signed work entering the output bus.
     pub external_work_j: f64,
     pub load: PowerLoadPoint,
     pub load_work_j: f64,
@@ -492,20 +521,54 @@ impl PreparedBatteryFedBuckBoost {
         output_current_a: f64,
         load: Option<RegulatedPowerLoad>,
         next: &mut [f64; 6],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<BatteryFedStep, PreparedStepError> {
+        self.step_affine_output_current_controlled(
+            initial,
+            AffineOutputCurrent {
+                constant_a: output_current_a,
+                slope_a_per_v: 0.0,
+            },
+            load,
+            next,
+            cancelled,
+        )
+    }
+
+    /// Solve an affine external terminal and optional demand at the SAME native
+    /// discrete output voltage. Its exact analytic tangent joins the existing
+    /// Newton equation; no lagged current, extra integrator or energy correction
+    /// is used. All canonical battery, lead, converter and load accounts remain
+    /// unchanged. A failed solve or account leaves `next` unchanged.
+    ///
+    /// An active coefficient is permitted because this is an externally
+    /// supplied port. The caller must account for that external component's
+    /// energy and admit its operating limits before publishing either state.
+    pub fn step_affine_output_current_controlled(
+        &mut self,
+        initial: &[f64; 6],
+        terminal: AffineOutputCurrent,
+        load: Option<RegulatedPowerLoad>,
+        next: &mut [f64; 6],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<BatteryFedStep, PreparedStepError> {
         poll(&mut cancelled)?;
         let p = self.model.parameters();
         load_point(load, initial[5] / p.bus_capacitance_f[1])?;
+        terminal.current_into_bus_a(initial[5] / p.bus_capacitance_f[1])?;
         let port = |_: &[f64], effort: &[f64], out: &mut [f64]| {
             if effort.len() != 6 || out.len() != 6 {
                 return None;
             }
             let point = load_point(load, effort[5]).ok()?;
             out.fill(0.0);
-            out[5] = point.current_a;
+            let dependent_current = terminal.slope_a_per_v * effort[5];
+            out[5] = sum([point.current_a, -dependent_current]);
             Some(NonlinearPortPower {
-                supplied_power_w: -point.delivered_power_w,
+                supplied_power_w: sum([
+                    -point.delivered_power_w,
+                    product(terminal.slope_a_per_v, effort[5], effort[5]),
+                ]),
                 dissipated_power_w: 0.0,
             })
         };
@@ -517,7 +580,7 @@ impl PreparedBatteryFedBuckBoost {
                 return false;
             };
             out.fill(0.0);
-            out[5] = point.incremental_conductance_s * de[5];
+            out[5] = (point.incremental_conductance_s - terminal.slope_a_per_v) * de[5];
             out[5].is_finite()
         };
         let (mut candidate, mut voltage) = ([0.0; 6], [0.0; 3]);
@@ -525,7 +588,7 @@ impl PreparedBatteryFedBuckBoost {
         let native = self.workspace.step_into_supplied_controlled(
             &self.model.system,
             initial,
-            &[0.0, 0.0, output_current_a],
+            &[0.0, 0.0, terminal.constant_a],
             dt,
             &mut candidate,
             &mut voltage,
@@ -539,6 +602,7 @@ impl PreparedBatteryFedBuckBoost {
             .last_step_discrete_effort()
             .ok_or_else(|| invalid("battery-fed converter requires accepted native efforts"))?;
         let effort = core::array::from_fn(|i| e[i]);
+        let output_current_a = terminal.current_into_bus_a(effort[5])?;
         let interval = self.model.account_interval(
             initial,
             &candidate,

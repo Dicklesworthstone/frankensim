@@ -26,6 +26,9 @@ use super::{
     directional_average, finite, midpoint, pairing, poll, power_fraction, voltage_interval,
 };
 
+/// Finite battery/converter feedback into this original mechanical model.
+pub mod battery;
+
 /// Constant reciprocal motor parameters plus strictly positive winding storage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RotorWindingMotor {
@@ -287,6 +290,42 @@ impl RotorVoltageMotor<'_, '_> {
         self.stepper.duration_seconds
     }
 
+    fn free_current_rhs(
+        &self,
+        state: &RotorWindingState,
+        external_force: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, RotorVoltageError> {
+        let shaft = self.motor.drive.shaft_coordinate;
+        let free_increment =
+            self.stepper
+                .velocity_increment(&state.rotor, external_force, cancelled)?;
+        let free_mid_speed = Dd::from_f64(state.rotor.velocity[shaft])
+            + Dd::from_f64(0.5) * Dd::from_f64(free_increment[shaft]);
+        Ok(-self.back_emf_impulse_per_speed * free_mid_speed
+            - self.feedback_impedance_time * Dd::from_f64(state.current_a))
+    }
+
+    // Exact scalar elimination of the ORIGINAL midpoint winding and mechanical
+    // equations: I_mid(V) = constant + slope * V. The borrowed full-coordinate
+    // stepper supplies the response; no replacement inertia is introduced.
+    fn midpoint_current_response(
+        &self,
+        state: &RotorWindingState,
+        external_force: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64), RotorVoltageError> {
+        self.stepper.admit_state(&state.rotor)?;
+        self.stepper.admit_vector(external_force)?;
+        finite(state.current_a)?;
+        let free_rhs = self.free_current_rhs(state, external_force, cancelled)?;
+        let constant = Dd::from_f64(state.current_a)
+            + Dd::from_f64(0.5) * (free_rhs / self.current_increment_denominator);
+        let slope = (Dd::from_f64(0.5) * Dd::from_f64(self.duration_s()))
+            / self.current_increment_denominator;
+        Ok((finite(constant.to_f64())?, finite(slope.to_f64())?))
+    }
+
     /// Rebind winding resistance to a caller-supplied material operating point.
     ///
     /// Returns a cheap immutable clone, with no mechanical solve or matrix
@@ -380,14 +419,9 @@ impl RotorVoltageMotor<'_, '_> {
             -drive.maximum_terminal_voltage_v,
             drive.maximum_terminal_voltage_v,
         );
-        let free_increment =
-            stepper.velocity_increment(&state.rotor, external_force, &mut cancelled)?;
-        let free_mid_speed = Dd::from_f64(state.rotor.velocity[shaft])
-            + Dd::from_f64(0.5) * Dd::from_f64(free_increment[shaft]);
         // Eliminate the mechanical response without subtracting a large
         // unchanged L I term: solve directly for the winding-current increment.
-        let free_rhs = -self.back_emf_impulse_per_speed * free_mid_speed
-            - self.feedback_impedance_time * Dd::from_f64(state.current_a);
+        let free_rhs = self.free_current_rhs(state, external_force, &mut cancelled)?;
         let free_current_increment = free_rhs / self.current_increment_denominator;
         let voltage_current_increment =
             (Dd::from_f64(h) * Dd::from_f64(bounded_voltage)) / self.current_increment_denominator;

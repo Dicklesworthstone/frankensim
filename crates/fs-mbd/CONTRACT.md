@@ -8332,3 +8332,12 @@ G1/G3/G4 tests cover elastic recoil with rotated full inertia, tensile yielding,
 common-translation invariance, safe elastic turns, hidden-yield refusal and
 atomic source/geometry/budget/cancellation refusal. Existing rolling tests
 remain the regression seam for the shared native arithmetic.
+
+
+## Finite battery power in original rotor motion
+
+`rotordynamics::transient::drive::voltage::battery` connects the original finite battery/converter to `RotorVoltageMotor`. Its cached mechanical Schur response gives an affine midpoint winding current at the converter's discrete output voltage. That current and its exact tangent enter the original six-state electrical solve; the accepted voltage recovers the original full-coordinate M/C/K/G motion. There is no second inertia, staggered voltage/current interface iteration, clipping after acceptance, or energy correction.
+
+`BatteryRotorStep` retains the original source and mechanical records, checks current and work continuity, and closes electrical/magnetic/kinetic changes plus original C/K/gyroscopic work, electrical/winding heat and auxiliary export against external generalized-load work. The nine heat channels are the original eight battery/converter channels followed by winding Joule heat. Active damping and nonsymmetric stiffness retain signed operator work and are not relabeled heat. The direct winding connection requires unit empirical bridge efficiencies because converter losses already have physical owners.
+
+Voltage curtailment, current/domain/power admission failure, finite SOC exhaustion, nonlinear refusal or cancellation publishes neither state. Motor power limits apply to the original held-discrete-voltage/linear-current reconstruction at the winding terminal, not total battery demand including converter loss and auxiliary demand or unresolved bus peaks. Original averaged electrical and constant-operating-point mechanical limits remain: no switching/protection events, thermal drift, stability/uniqueness or arbitrary-step accuracy claim. `rotordynamics_battery_drive` covers independent full physical equations and work, analytic mechanical regeneration into chemistry, and transactional refusal/retry.
