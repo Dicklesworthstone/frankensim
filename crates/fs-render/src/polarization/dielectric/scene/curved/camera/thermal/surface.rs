@@ -4,14 +4,18 @@
 //! emissivity that emits. Planck radiance is evaluated at the actual path
 //! wavelength, without resampling it into a tabulated light spectrum. The
 //! accepted thermal state is observed only; this binding never advances heat.
+//! Rough EON sources retain their explicit facet spectrum and roughness in
+//! the native interaction; emitted radiance uses its directional absorptance.
 
 use super::super::{CameraRadianceError, CurvedCameraScene, Interaction};
 use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
 use crate::spectral::SpectralReflectance;
 use crate::thermal_surface::{
-    DiffuseThermalSurface, GrayDiffuseThermalSurface, SpectralDiffuseThermalSurface,
+    DiffuseThermalSurface, GrayDiffuseThermalSurface, RoughDiffuseThermalSurface,
+    SpectralDiffuseThermalSurface,
 };
 use fs_exec::Cx;
+use fs_geom::Vec3;
 
 /// An isothermal opaque diffuse surface with one original spectral law.
 /// Both faces emit into their own hemisphere, as in the original diffuse
@@ -26,6 +30,7 @@ pub struct DiffuseThermalEmitter {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ThermalSource {
     Spectral(SpectralDiffuseThermalSurface),
+    Rough(RoughDiffuseThermalSurface),
     Gray {
         surface: GrayDiffuseThermalSurface,
         // The gray source itself retains its original all-wavelength law.
@@ -35,6 +40,14 @@ enum ThermalSource {
 }
 
 impl DiffuseThermalEmitter {
+    /// Bind explicit EON facets and their reciprocal directional thermal law.
+    pub const fn new_rough(object_id: u64, surface: RoughDiffuseThermalSurface) -> Self {
+        Self {
+            object_id,
+            source: ThermalSource::Rough(surface),
+        }
+    }
+
     pub const fn new(object_id: u64, surface: SpectralDiffuseThermalSurface) -> Self {
         Self {
             object_id,
@@ -73,8 +86,35 @@ impl DiffuseThermalEmitter {
     pub const fn surface(&self) -> DiffuseThermalSurface<'_> {
         match &self.source {
             ThermalSource::Spectral(surface) => DiffuseThermalSurface::Spectral(surface),
+            ThermalSource::Rough(surface) => DiffuseThermalSurface::Rough(surface),
             ThermalSource::Gray { surface, .. } => DiffuseThermalSurface::Gray(*surface),
         }
+    }
+
+    /// Original two-sided source law on a native geometric face and ray.
+    /// Inputs retain the native unit-normal/unit-direction contract. Both
+    /// camera hits and converged area images use this same directional owner.
+    pub(crate) fn radiance_along(
+        &self,
+        wavelength_nm: f64,
+        normal: Vec3,
+        outgoing: Vec3,
+    ) -> Result<f64, crate::thermal_surface::ThermalSurfaceError> {
+        let cosine = normal.dot(outgoing).abs();
+        if !cosine.is_finite() {
+            return Err(crate::thermal_surface::ThermalSurfaceError::Direction);
+        }
+        self.surface()
+            .directional_radiance_w_m2_sr_nm(wavelength_nm, cosine.min(1.0))
+    }
+
+    fn matches_rough_reflection(
+        &self,
+        reflectance: &SpectralReflectance,
+        reflection: crate::rough_diffuse::RoughDiffuseSurface,
+    ) -> bool {
+        matches!(&self.source, ThermalSource::Rough(original)
+            if reflection == original.reflection() && reflectance == original.facet_albedo())
     }
 
     /// Prepare the exact opaque reciprocal curve for the native scene's
@@ -82,8 +122,11 @@ impl DiffuseThermalEmitter {
     /// no light/ray stores an independently fitted emissivity or RGB value.
     /// A gray source uses two identical values at its declared transport-band
     /// endpoints; this is the exact constant law, not a spectral approximation.
+    /// A rough source instead retains its explicit facet albedo for the
+    /// matching `RoughDiffuse` interaction; it is not macroscopic reflectance.
     pub fn reflectance_spectrum(&self) -> Result<SpectralReflectance, CameraRadianceError> {
         let curve = match &self.source {
+            ThermalSource::Rough(surface) => Ok(*surface.facet_albedo()),
             ThermalSource::Gray {
                 surface,
                 wavelength_bounds_nm,
@@ -106,6 +149,11 @@ impl DiffuseThermalEmitter {
 
     fn is_blackbody(&self) -> bool {
         match &self.source {
+            ThermalSource::Rough(surface) => surface
+                .facet_albedo()
+                .knots()
+                .iter()
+                .all(|&(_, rho)| rho == 0.0),
             ThermalSource::Gray { surface, .. } => surface.emissivity() == 1.0,
             ThermalSource::Spectral(surface) => surface
                 .emissivity()
@@ -130,7 +178,19 @@ impl DiffuseThermalEmitter {
             .map_err(|_| invalid())?;
         match scene.bindings[index].interaction {
             Interaction::DepolarizingDiffuse { reflectance, .. } => {
+                if matches!(self.source, ThermalSource::Rough(_)) {
+                    return Err(invalid());
+                }
                 if scene.reflectances[reflectance] != self.reflectance_spectrum()? {
+                    return Err(invalid());
+                }
+            }
+            Interaction::RoughDiffuse {
+                reflectance,
+                surface,
+                ..
+            } => {
+                if !self.matches_rough_reflection(&scene.reflectances[reflectance], surface) {
                     return Err(invalid());
                 }
             }
@@ -147,6 +207,8 @@ impl CurvedCameraScene<'_, '_> {
     /// both knots and values; an `Opaque` termination is admitted only for a
     /// blackbody (gray emissivity one or one at every spectral source knot). A calibrated emitter
     /// on the same object or any duplicate thermal binding refuses.
+    /// Rough sources require the exact original facet spectrum and EON law
+    /// on a `RoughDiffuse` interaction, including in the zero-roughness limit.
     ///
     /// Preparation allocates one indexed table bounded by native surface
     /// count. Paths and detector lanes query it without allocation. Empty
@@ -188,5 +250,83 @@ impl CurvedCameraScene<'_, '_> {
         cx.checkpoint()?;
         self.diffuse_thermal_emitters = slots;
         Ok(self)
+    }
+}
+
+#[cfg(test)]
+mod rough_tests {
+    use super::*;
+    use crate::rough_diffuse::RoughDiffuseSurface;
+    use crate::thermal_surface::{SpectralEmissivity, ThermalSurfaceError};
+    use fs_blake3::ContentHash;
+
+    fn source(roughness: f64) -> RoughDiffuseThermalSurface {
+        RoughDiffuseThermalSurface::try_new(
+            1800.0,
+            SpectralReflectance::constant(0.6).unwrap(),
+            RoughDiffuseSurface::try_new(roughness).unwrap(),
+            ContentHash([69; 32]),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g0_native_rough_thermal_requires_original_facets_and_roughness() {
+        let surface = source(0.7);
+        let emitter = DiffuseThermalEmitter::new_rough(31, surface);
+        assert_eq!(emitter.surface().identity(), surface.identity());
+        assert!(emitter.matches_rough_reflection(surface.facet_albedo(), surface.reflection()));
+        assert!(!emitter.matches_rough_reflection(
+            &SpectralReflectance::constant(0.61).unwrap(),
+            surface.reflection()
+        ));
+        assert!(!emitter.matches_rough_reflection(
+            surface.facet_albedo(),
+            RoughDiffuseSurface::try_new(0.6).unwrap()
+        ));
+        let measured = DiffuseThermalEmitter::new(
+            31,
+            SpectralDiffuseThermalSurface::try_new(
+                1800.0,
+                SpectralEmissivity::constant(0.4).unwrap(),
+                ContentHash([69; 32]),
+            )
+            .unwrap(),
+        );
+        assert!(!measured.matches_rough_reflection(surface.facet_albedo(), surface.reflection()));
+    }
+
+    #[test]
+    fn g1_native_rough_thermal_camera_and_area_source_share_geometric_angle() {
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        for roughness in [0.0, 0.5, 1.0] {
+            let surface = source(roughness);
+            let emitter = DiffuseThermalEmitter::new_rough(31, surface);
+            for mu in [0.02, 0.5, 1.0] {
+                for side in [-1.0, 1.0] {
+                    let outgoing = Vec3::new((1.0_f64 - mu * mu).sqrt(), 0.0, side * mu);
+                    assert_eq!(
+                        emitter.radiance_along(550.0, normal, outgoing).unwrap(),
+                        surface.directional_radiance_w_m2_sr_nm(550.0, mu).unwrap()
+                    );
+                }
+            }
+            assert_eq!(
+                emitter.radiance_along(900.0, normal, normal),
+                Err(ThermalSurfaceError::Wavelength)
+            );
+            assert_eq!(
+                emitter.radiance_along(550.0, normal, Vec3::new(0.0, 0.0, f64::NAN)),
+                Err(ThermalSurfaceError::Direction)
+            );
+            if roughness > 0.0 {
+                assert!(
+                    surface.directional_radiance_w_m2_sr_nm(550.0, 1.0).unwrap()
+                        > surface
+                            .directional_radiance_w_m2_sr_nm(550.0, 0.02)
+                            .unwrap()
+                );
+            }
+        }
     }
 }

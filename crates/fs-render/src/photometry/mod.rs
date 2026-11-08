@@ -616,7 +616,8 @@ impl<'a> PhotometricScene<'a> {
                         Some("anisotropic tangent-frame shading is not yet supported")
                     }
                     Material::GrayDiffuseThermal { .. }
-                    | Material::SpectralDiffuseThermal { .. } => {
+                    | Material::SpectralDiffuseThermal { .. }
+                    | Material::RoughDiffuseThermal { .. } => {
                         Some("thermal sources require a separate calibrated emission integral")
                     }
                     _ => None,

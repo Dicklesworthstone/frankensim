@@ -1045,6 +1045,11 @@ pub enum Material {
         /// Accepted temperature, bounded spectral law and source identity.
         surface: crate::thermal_surface::SpectralDiffuseThermalSurface,
     },
+    /// Original EON facet spectrum with directional Kirchhoff/Planck emission.
+    /// `Primitive::emission` must be absent; this is the physical source owner.
+    RoughDiffuseThermal {
+        surface: crate::thermal_surface::RoughDiffuseThermalSurface,
+    },
     /// GGX microfacet (Smith separable shadowing, Schlick Fresnel with
     /// the spectral reflectance as F0).
     Ggx {
@@ -1099,6 +1104,9 @@ impl Material {
             ),
             Self::SpectralDiffuseThermal { surface } => Some(
                 crate::thermal_surface::DiffuseThermalSurface::Spectral(surface),
+            ),
+            Self::RoughDiffuseThermal { surface } => Some(
+                crate::thermal_surface::DiffuseThermalSurface::Rough(surface),
             ),
             _ => None,
         }
@@ -1159,6 +1167,10 @@ impl Material {
             }
             Self::SpectralDiffuseThermal { surface } => {
                 hasher.update(&[7]);
+                hasher.update(surface.identity().as_bytes());
+            }
+            Self::RoughDiffuseThermal { surface } => {
+                hasher.update(&[13]);
                 hasher.update(surface.identity().as_bytes());
             }
             Self::Ggx { reflectance, alpha } => {
@@ -9603,6 +9615,18 @@ impl AovAlbedoCache {
                     Ok(Some(rgb.map(|value| value.clamp(0.0, 1.0))))
                 }
             }
+            Material::RoughDiffuseThermal { surface } => {
+                // Display projection of declared facet albedo only.
+                let xyz = crate::spectral::xyz_of_spectrum(|lambda| {
+                    surface.facet_albedo().at(lambda).unwrap_or(f64::NAN)
+                });
+                let rgb = xyz_to_linear_srgb(xyz_e_to_d65(xyz));
+                if rgb.iter().any(|value| !value.is_finite()) {
+                    Err(())
+                } else {
+                    Ok(Some(rgb.map(|value| value.clamp(0.0, 1.0))))
+                }
+            }
             Material::Lambertian { reflectance } | Material::Ggx { reflectance, .. } => {
                 let rgb = reflectance.rgb();
                 if rgb.iter().any(|value| !value.is_finite()) {
@@ -10883,6 +10907,7 @@ fn discover_parallel_slab_with_probe(
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
         | Material::RoughDiffuse { .. }
+        | Material::RoughDiffuseThermal { .. }
         | Material::CoatedDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
@@ -11783,6 +11808,7 @@ fn discover_planar_manifold_boundary(
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
         | Material::RoughDiffuse { .. }
+        | Material::RoughDiffuseThermal { .. }
         | Material::CoatedDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
@@ -14744,7 +14770,14 @@ fn trace_path_with_regions<'scene>(
             };
             for (lane, &lambda) in lambdas.iter().enumerate() {
                 let emitted = surface
-                    .radiance_w_m2_sr_nm(lambda)
+                    .directional_radiance_w_m2_sr_nm(
+                        lambda,
+                        hit.normal
+                            .ok_or(TracerError::MissingNormal)?
+                            .dot(ray.dir)
+                            .abs()
+                            .min(1.0),
+                    )
                     .map_err(|_| TracerError::InvalidInput)?;
                 let contribution = throughput[lane] * emitted * weight;
                 radiance[lane] += contribution;
@@ -14764,6 +14797,7 @@ fn trace_path_with_regions<'scene>(
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
             | Material::RoughDiffuse { .. }
+            | Material::RoughDiffuseThermal { .. }
             | Material::CoatedDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
@@ -15121,6 +15155,7 @@ fn trace_path_with_regions<'scene>(
                 Material::Lambertian { .. }
                 | Material::SpectralDiffuse { .. }
                 | Material::RoughDiffuse { .. }
+                | Material::RoughDiffuseThermal { .. }
                 | Material::CoatedDiffuse { .. }
                 | Material::GrayDiffuseThermal { .. }
                 | Material::SpectralDiffuseThermal { .. }
@@ -16039,6 +16074,7 @@ fn trace_path_with_regions<'scene>(
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
             | Material::RoughDiffuse { .. }
+            | Material::RoughDiffuseThermal { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
@@ -22972,6 +23008,7 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
         // These families use fallible wavelength admission in opaque_bsdf_eval.
         Material::SpectralDiffuse { .. }
         | Material::RoughDiffuse { .. }
+        | Material::RoughDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
         | Material::CoatedDiffuse { .. }
         | Material::Conductor { .. }
@@ -23007,7 +23044,17 @@ fn opaque_bsdf_eval(
     incident_medium: Option<DielectricGlass>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Result<f64, TracerError> {
-    if let Material::RoughDiffuse { reflectance, surface } = mat {
+    let rough_diffuse = match mat {
+        Material::RoughDiffuse {
+            reflectance,
+            surface,
+        } => Some((reflectance, *surface)),
+        Material::RoughDiffuseThermal { surface } => {
+            Some((surface.facet_albedo(), surface.reflection()))
+        }
+        _ => None,
+    };
+    if let Some((reflectance, surface)) = rough_diffuse {
         let rho = reflectance.at(lambda).map_err(|_| TracerError::InvalidInput)?;
         let (cos_o, cos_i) = (n.dot(wo), n.dot(wi));
         if cos_o <= 0.0 || cos_i <= 0.0 { return Ok(0.0); }
@@ -23138,6 +23185,7 @@ fn bsdf_pdf(
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
         | Material::RoughDiffuse { .. }
+        | Material::RoughDiffuseThermal { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => cos_i / PI,
         Material::CoatedDiffuse { coating, .. } => coated_diffuse::pdf(*coating, n, wo, wi),
@@ -23218,6 +23266,7 @@ fn bsdf_sample(
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
         | Material::RoughDiffuse { .. }
+        | Material::RoughDiffuseThermal { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => {
             let (wi, pdf) = cosine_sample(n, u1, u2);

@@ -422,7 +422,10 @@ pub(super) fn direct_contribution(
         let emitted = match light {
             LightSample::ThermalSurface(light) => light
                 .surface
-                .radiance_w_m2_sr_nm(wavelength)
+                .directional_radiance_w_m2_sr_nm(
+                    wavelength,
+                    light.normal.dot(direction).abs().min(1.0),
+                )
                 .map_err(|_| TracerError::InvalidInput)?,
             LightSample::Rectangle(light) => light.emission.0.eval(wavelength) * light.emission.1,
             LightSample::Environment(light) => light.emission.0.eval(wavelength) * light.emission.1,

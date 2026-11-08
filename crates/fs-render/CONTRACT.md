@@ -10806,3 +10806,62 @@ log columns, source-range recovery, native/cumulative cell budgets and cancellat
 Original constituent-source coverage also checks the observed transfer against the
 same retained source palette. Native execution uses the required `tracer,volumes`
 features; unrelated photometry-only unit-test compilation failures are separate.
+
+
+## Rough diffuse thermal reflection and emission
+
+`RoughDiffuseThermalSurface` binds the original finite-band spectral **facet
+single-scattering albedo**, `RoughDiffuseSurface`, positive source temperature,
+and nonzero physical-source identity. The facet spectrum is an explicit input;
+a measured hemispherical reflectance or emissivity is not fitted or reinterpreted
+as facet data. Both reciprocal reflection and directional thermal emission use
+the same EON roughness and multiple-return closure. Source identity includes the
+original knots, roughness, temperature, source hash and constitutive-law domain.
+
+Kirchhoff emissivity is the original EON directional absorptance, evaluated at
+the actual outward cosine. Spectral radiance is that emissivity times the shared
+vacuum SI Planck source in W/(m² sr nm). The stable absorptance factors `1-rho`
+and retains representable weak absorption near a white reflector. Exact black
+facets emit a blackbody, exact white facets emit zero, and zero roughness retains
+the original spectral Lambertian radiance arithmetic. Hemispherical mean
+emissivity and one-face spectral exitance use the same analytic EON angular
+integral. They do not supply an unmeasured out-of-band tail or advance cooling.
+The admitted source remains isothermal, opaque, depolarizing and two-sided;
+each face emits into its own hemisphere in an index-one medium.
+
+`Material::RoughDiffuseThermal` is the sole thermal emission owner on its
+primitive. Scalar camera hits, thermal next-event proposals and volume-phase
+source connections evaluate directional emission at the source's actual normal
+and path direction. Reflected continuation and direct receiver evaluation use
+the same original EON BRDF and explicit facet spectrum as nonthermal rough
+surfaces. Prepared visible light selection uses hemispherical mean radiance only
+as a proposal weight; it never substitutes that mean for transported radiance.
+The wavelength support remains the declared source support, and visible proposal
+preparation refuses spectra that do not cover its complete visible band.
+
+`NativeOpticalScene` retains the original thermal owner and binds its exact
+facet spectrum and roughness to a native `RoughDiffuse` interaction. Native
+emitter admission rejects a substituted facet curve, substituted roughness or
+Lambertian reinterpretation. Native camera hits and converged area-source images
+share the same geometric directional-radiance method. Rough area emission is
+evaluated on the original converged source ray; its unpolarized source reuses the
+original transported bundle without an extra image search or polarization replay.
+Area geometry, projected Jacobians, proposal densities and complementary MIS
+remain unchanged. Smooth, black and nonemitting sources retain the earlier
+uniform-source fast path. Existing refractive-host refusals remain binding.
+
+Direction-free borrowed-source radiance and reflectance queries refuse rough
+sources explicitly. Existing direction-free Doppler/exposure and Lambertian
+visible-observable entry points also refuse them rather than silently using an
+angular average. Scalar thermal BDPT light subpaths and calibrated-fixture
+thermal emission remain outside their existing supported contracts. This does
+not claim measured rough-material authority, thermal polarization, resolved
+surface microgeometry, nonisothermal rough cavities or a bolometric heat debit.
+
+Validation probes independently integrate the original BRDF over the projected
+hemisphere to verify that reflected blackbody illumination plus emitted radiance
+equals the same Planck source in each tested direction. A separate angular
+emission quadrature verifies spectral exitance. Controls also cover exact
+smooth/black/white limits, positive near-white absorption, original-source
+identity, finite-band and angle refusals, exact native facet/roughness admission,
+and both geometric sides.

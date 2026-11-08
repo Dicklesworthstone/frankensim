@@ -236,8 +236,15 @@ pub(super) fn visible_luminance(
     surface: DiffuseThermalSurface<'_>,
     checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
 ) -> Result<f64, LightingError> {
-    if let DiffuseThermalSurface::Spectral(surface) = surface {
-        return spectral_visible_luminance(surface, checkpoint);
+    match surface {
+        DiffuseThermalSurface::Spectral(source) => {
+            let emissivity = source.emissivity();
+            return spectral_visible_luminance(surface, emissivity.knots(), checkpoint);
+        }
+        DiffuseThermalSurface::Rough(source) => {
+            return spectral_visible_luminance(surface, source.facet_albedo().knots(), checkpoint);
+        }
+        DiffuseThermalSurface::Gray(_) => {}
     }
     // Keep the established gray sampling arithmetic and stream unchanged.
     let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
@@ -278,11 +285,11 @@ pub(super) fn visible_luminance(
 /// maximum bin width. This is cached once per source state, never per triangle
 /// or ray, and does not replace the pointwise transported spectrum.
 fn spectral_visible_luminance(
-    surface: &crate::thermal_surface::SpectralDiffuseThermalSurface,
+    surface: DiffuseThermalSurface<'_>,
+    knots: &[(f64, f64)],
     checkpoint: &mut impl FnMut() -> Result<(), LightingError>,
 ) -> Result<f64, LightingError> {
-    let emissivity = surface.emissivity();
-    let (minimum_nm, maximum_nm) = emissivity.wavelength_bounds_nm();
+    let (minimum_nm, maximum_nm) = (knots[0].0, knots[knots.len() - 1].0);
     // This is a visible-observer proposal. Unknown visible radiance is not
     // zero, and an infrared source must not trigger unbounded visible-bin work.
     if minimum_nm > LAMBDA_MIN || maximum_nm < LAMBDA_MAX {
@@ -291,7 +298,7 @@ fn spectral_visible_luminance(
     let dl = (LAMBDA_MAX - LAMBDA_MIN) / QUAD_BINS as f64;
     let mut luminance = 0.0;
     let mut normalization = 0.0;
-    for interval in emissivity.knots().windows(2) {
+    for interval in knots.windows(2) {
         checkpoint()?;
         let lower = interval[0].0.max(LAMBDA_MIN);
         let upper = interval[1].0.min(LAMBDA_MAX);
@@ -308,7 +315,7 @@ fn spectral_visible_luminance(
             let lambda = lower + (bin as f64 + 0.5) * step;
             let observer_weight = cie_y(lambda) * step;
             let radiance = surface
-                .radiance_w_m2_sr_nm(lambda)
+                .hemispherical_mean_radiance_w_m2_sr_nm(lambda)
                 .map_err(|_| LightingError::InvalidThermalTriangle { light_index: 0 })?;
             luminance += radiance * observer_weight;
             normalization += observer_weight;
@@ -321,7 +328,7 @@ fn spectral_visible_luminance(
     // Adjacent binary64 knots can round both midpoints away from a positive
     // peak; extreme Wien-tail products can also underflow. This proposal-only
     // floor preserves support without asserting a bolometric surface power.
-    if luminance == 0.0 && DiffuseThermalSurface::Spectral(surface).is_emitting() {
+    if luminance == 0.0 && surface.is_emitting() {
         luminance = f64::MIN_POSITIVE;
     }
     Ok(luminance)

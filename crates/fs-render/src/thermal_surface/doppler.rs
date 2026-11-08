@@ -69,12 +69,18 @@ pub struct ObservedThermalSurface<'source> {
 }
 
 impl<'source> ObservedThermalSurface<'source> {
+    /// The original gray and spectral sources are direction independent in
+    /// their rest frame. A rough thermal surface additionally needs a physical
+    /// rest-frame surface normal, which this Doppler-only view does not own.
     pub fn try_new(
         source: DiffuseThermalSurface<'source>,
         doppler: VacuumDoppler,
     ) -> Result<Self, ThermalDopplerError> {
         let receiver_band_nm = match source {
             DiffuseThermalSurface::Gray(_) => None,
+            DiffuseThermalSurface::Rough(_) => {
+                return Err(ThermalSurfaceError::DirectionRequired.into());
+            }
             DiffuseThermalSurface::Spectral(surface) => {
                 let (low, high) = surface.emissivity().wavelength_bounds_nm();
                 let band = (
@@ -154,6 +160,9 @@ impl<'source> ObservedThermalSurface<'source> {
         let emissivity = match self.source {
             DiffuseThermalSurface::Gray(surface) => surface.emissivity(),
             DiffuseThermalSurface::Spectral(surface) => surface.emissivity().at(source_nm)?,
+            DiffuseThermalSurface::Rough(_) => {
+                return Err(ThermalSurfaceError::DirectionRequired.into());
+            }
         };
         if emissivity == 0.0 {
             return Ok(0.0);

@@ -197,7 +197,7 @@ pub(super) fn direct_contribution(
         };
         let emitted = light
             .surface
-            .radiance_w_m2_sr_nm(wavelength)
+            .directional_radiance_w_m2_sr_nm(wavelength, light.normal.dot(incoming).abs().min(1.0))
             .map_err(|_| TracerError::InvalidInput)?;
         result[lane] = value * cosine.abs() * emitted / light.pdf_solid_angle * weight;
         #[cfg(feature = "volumes")]

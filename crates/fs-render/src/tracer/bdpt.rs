@@ -280,6 +280,7 @@ impl<'scene> Vertex<'scene> {
             | Material::CoatedDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
+            | Material::RoughDiffuseThermal { .. }
             | Material::Ggx { .. }
             | Material::Conductor { .. }
             | Material::BrushedConductor { .. } => {
@@ -326,6 +327,7 @@ impl<'scene> Vertex<'scene> {
                     | Material::CoatedDiffuse { .. }
                     | Material::GrayDiffuseThermal { .. }
                     | Material::SpectralDiffuseThermal { .. }
+                    | Material::RoughDiffuseThermal { .. }
                     | Material::Ggx { .. }
                     | Material::BrushedConductor { .. } => true,
                 }
@@ -563,9 +565,9 @@ fn surface_scattering(
             wavelength_nm,
             mode,
         ),
-        Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
-            Err(TracerError::ThermalSurfaceUnsupported)
-        }
+        Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. }
+        | Material::RoughDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
         Material::Dielectric { surface, .. } => {
             let surface = dielectric_surface_in_frame(*surface, vertex.brushed_frame.as_ref())?;
             let Some(alpha) = surface.roughness_alpha() else {
@@ -634,9 +636,9 @@ fn surface_pdf_solid_angle(
             next_direction,
             vertex.brushed_frame.as_ref(),
         )),
-        Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
-            Err(TracerError::ThermalSurfaceUnsupported)
-        }
+        Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. }
+        | Material::RoughDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
         Material::Dielectric { surface, .. } => {
             let surface = dielectric_surface_in_frame(*surface, vertex.brushed_frame.as_ref())?;
             let Some(alpha) = surface.roughness_alpha() else {
@@ -680,10 +682,13 @@ fn sample_surface(
         Material::BrushedConductor { .. } => {
             brushed::sample(material, vertex, normal, wo, wavelength_nm, mode, random)
         }
-        Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
-            Err(TracerError::ThermalSurfaceUnsupported)
-        }
-        Material::CoatedDiffuse { coating, reflectance } => {
+        Material::GrayDiffuseThermal { .. }
+        | Material::SpectralDiffuseThermal { .. }
+        | Material::RoughDiffuseThermal { .. } => Err(TracerError::ThermalSurfaceUnsupported),
+        Material::CoatedDiffuse {
+            coating,
+            reflectance,
+        } => {
             let incident = vertex.medium_toward(wo).map(|entry| *entry.glass);
             coated_diffuse::admit_medium(*coating, incident, wavelength_nm)?;
             let rho = reflectance.at(wavelength_nm).map_err(|_| TracerError::InvalidInput)?;

@@ -101,6 +101,35 @@ fn thermal_table_error(error: SpectralFractionTableError) -> ThermalSurfaceError
     }
 }
 
+// Shared finite-band blackbody representability admission. This is a source
+// envelope check, never a conversion between facet and macroscopic optical laws.
+pub(super) fn admit_source_band_temperature(
+    temperature_k: f64,
+    minimum_nm: f64,
+) -> Result<(), ThermalSurfaceError> {
+    // exp(x)-1 >= x gives the Rayleigh–Jeans upper bound B_lambda <=
+    // 2*c*k*T/lambda^4. Its largest value is at the source band's lower
+    // endpoint, which need not be a visible wavelength.
+    // This check avoids both a broadband T^4 restriction and a source
+    // that overflows before the accepted emissivity can be applied.
+    let lambda2 = minimum_nm * minimum_nm;
+    let upper_per_kelvin = 2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27 / (lambda2 * lambda2);
+    let unrepresentable = if upper_per_kelvin.is_finite() && upper_per_kelvin > 0.0 {
+        temperature_k > f64::MAX / upper_per_kelvin
+    } else {
+        // Retain the same bound when a declared wavelength makes an
+        // intermediate fourth power overflow or underflow.
+        fs_math::det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27) + fs_math::det::ln(temperature_k)
+            - 4.0 * fs_math::det::ln(minimum_nm)
+            > fs_math::det::ln(f64::MAX)
+    };
+    if unrepresentable {
+        return Err(ThermalSurfaceError::Unrepresentable);
+    }
+    planck_radiance_w_m2_sr_nm(temperature_k, minimum_nm)?;
+    Ok(())
+}
+
 /// Accepted source-band opaque diffuse surface in local thermal equilibrium.
 ///
 /// The source identity binds this declared optical law and temperature to the
@@ -137,28 +166,7 @@ impl SpectralDiffuseThermalSurface {
             return Err(ThermalSurfaceError::SourceIdentity);
         }
         if emissivity.table.has_positive_value() {
-            // exp(x)-1 >= x gives the Rayleigh–Jeans upper bound B_lambda <=
-            // 2*c*k*T/lambda^4. Its largest value is at the source band's lower
-            // endpoint, which need not be a visible wavelength.
-            // This check avoids both a broadband T^4 restriction and a source
-            // that overflows before the accepted emissivity can be applied.
-            let minimum_nm = emissivity.wavelength_bounds_nm().0;
-            let lambda2 = minimum_nm * minimum_nm;
-            let upper_per_kelvin = 2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27 / (lambda2 * lambda2);
-            let unrepresentable = if upper_per_kelvin.is_finite() && upper_per_kelvin > 0.0 {
-                temperature_k > f64::MAX / upper_per_kelvin
-            } else {
-                // Retain the same bound when a declared wavelength makes an
-                // intermediate fourth power overflow or underflow.
-                fs_math::det::ln(2.0 * LIGHT_M_S * BOLTZMANN_J_K * 1.0e27)
-                    + fs_math::det::ln(temperature_k)
-                    - 4.0 * fs_math::det::ln(minimum_nm)
-                    > fs_math::det::ln(f64::MAX)
-            };
-            if unrepresentable {
-                return Err(ThermalSurfaceError::Unrepresentable);
-            }
-            planck_radiance_w_m2_sr_nm(temperature_k, minimum_nm)?;
+            admit_source_band_temperature(temperature_k, emissivity.wavelength_bounds_nm().0)?;
         }
         Ok(Self {
             temperature_k,
@@ -225,13 +233,16 @@ impl SpectralDiffuseThermalSurface {
 /// Compact source view used by camera hits and prepared direct-light proposals.
 ///
 /// Gray values retain their existing spectrum and identity exactly. Spectral
-/// laws stay borrowed, so light triangles and samples do not copy knot tables.
+/// and rough laws stay borrowed, so light triangles and samples do not copy
+/// knot tables. Rough source queries require the actual outgoing direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DiffuseThermalSurface<'a> {
     /// Existing gray source, with its original all-wavelength behavior.
     Gray(GrayDiffuseThermalSurface),
     /// Accepted finite-band spectral source, borrowed from its material owner.
     Spectral(&'a SpectralDiffuseThermalSurface),
+    /// Original EON facets; actual outgoing angle is required for radiance.
+    Rough(&'a super::RoughDiffuseThermalSurface),
 }
 
 impl<'a> From<GrayDiffuseThermalSurface> for DiffuseThermalSurface<'a> {
@@ -246,6 +257,12 @@ impl<'a> From<&'a SpectralDiffuseThermalSurface> for DiffuseThermalSurface<'a> {
     }
 }
 
+impl<'a> From<&'a super::RoughDiffuseThermalSurface> for DiffuseThermalSurface<'a> {
+    fn from(surface: &'a super::RoughDiffuseThermalSurface) -> Self {
+        Self::Rough(surface)
+    }
+}
+
 impl DiffuseThermalSurface<'_> {
     /// Accepted thermodynamic temperature of the original source, in kelvin.
     #[must_use]
@@ -253,10 +270,13 @@ impl DiffuseThermalSurface<'_> {
         match self {
             Self::Gray(surface) => surface.temperature_k(),
             Self::Spectral(surface) => surface.temperature_k(),
+            Self::Rough(surface) => surface.temperature_k(),
         }
     }
 
     /// Opaque reciprocal reflectance within the source's wavelength domain.
+    /// Rough sources refuse: facet albedo is not macroscopic reflectance, and
+    /// their reflected path response belongs to the original EON BRDF.
     pub fn reflectance(self, wavelength_nm: f64) -> Result<f64, ThermalSurfaceError> {
         match self {
             Self::Gray(surface) => {
@@ -266,14 +286,47 @@ impl DiffuseThermalSurface<'_> {
                 Ok(surface.reflectance())
             }
             Self::Spectral(surface) => surface.reflectance(wavelength_nm),
+            Self::Rough(_) => Err(ThermalSurfaceError::DirectionRequired),
         }
     }
 
     /// Emitted radiance in W/(m² sr nm) from the same accepted source law.
+    /// Rough sources require `directional_radiance_w_m2_sr_nm` instead.
     pub fn radiance_w_m2_sr_nm(self, wavelength_nm: f64) -> Result<f64, ThermalSurfaceError> {
         match self {
             Self::Gray(surface) => surface.radiance_w_m2_sr_nm(wavelength_nm),
             Self::Spectral(surface) => surface.radiance_w_m2_sr_nm(wavelength_nm),
+            Self::Rough(_) => Err(ThermalSurfaceError::DirectionRequired),
+        }
+    }
+
+    /// Evaluate the original emission law in its actual outgoing hemisphere.
+    /// The cosine is relative to the physical face, not a sampled microfacet.
+    pub fn directional_radiance_w_m2_sr_nm(
+        self,
+        wavelength_nm: f64,
+        outgoing_cosine: f64,
+    ) -> Result<f64, ThermalSurfaceError> {
+        if !outgoing_cosine.is_finite() || !(0.0..=1.0).contains(&outgoing_cosine) {
+            return Err(ThermalSurfaceError::Direction);
+        }
+        match self {
+            Self::Rough(surface) => {
+                surface.directional_radiance_w_m2_sr_nm(wavelength_nm, outgoing_cosine)
+            }
+            _ => self.radiance_w_m2_sr_nm(wavelength_nm),
+        }
+    }
+
+    /// Projected-hemisphere mean used for source proposals, never as a
+    /// direction-independent replacement for a rough source's path radiance.
+    pub fn hemispherical_mean_radiance_w_m2_sr_nm(
+        self,
+        wavelength_nm: f64,
+    ) -> Result<f64, ThermalSurfaceError> {
+        match self {
+            Self::Rough(surface) => surface.hemispherical_mean_radiance_w_m2_sr_nm(wavelength_nm),
+            _ => self.radiance_w_m2_sr_nm(wavelength_nm),
         }
     }
 
@@ -283,6 +336,7 @@ impl DiffuseThermalSurface<'_> {
         match self {
             Self::Gray(surface) => surface.identity(),
             Self::Spectral(surface) => surface.identity(),
+            Self::Rough(surface) => surface.identity(),
         }
     }
 
@@ -292,6 +346,7 @@ impl DiffuseThermalSurface<'_> {
         match self {
             Self::Gray(surface) => surface.emissivity() > 0.0,
             Self::Spectral(surface) => surface.is_emitting(),
+            Self::Rough(surface) => surface.is_emitting(),
         }
     }
 }

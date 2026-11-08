@@ -312,7 +312,8 @@ impl NativeOpticalScene {
                         reflectance_count += 1
                     }
                     Material::GrayDiffuseThermal { .. }
-                    | Material::SpectralDiffuseThermal { .. } => {
+                    | Material::SpectralDiffuseThermal { .. }
+                    | Material::RoughDiffuseThermal { .. } => {
                         reflectance_count += 1;
                         thermal_count += 1;
                     }
@@ -516,6 +517,13 @@ impl NativeOpticalScene {
                             &mut reflectances,
                             &mut thermal_emitters,
                         )?,
+                        Material::RoughDiffuseThermal { surface } => bind_thermal_surface(
+                            index,
+                            medium,
+                            DiffuseThermalEmitter::new_rough(instance.object_id(), surface),
+                            &mut reflectances,
+                            &mut thermal_emitters,
+                        )?,
                     }
                 }
             };
@@ -667,9 +675,18 @@ fn bind_thermal_surface(
             .map_err(|_| NativeOpticalSceneError::InvalidMaterial { primitive })?,
     );
     emitters.push(emitter);
-    Ok(Interaction::DepolarizingDiffuse {
-        medium,
-        reflectance,
+    Ok(match emitter.surface() {
+        crate::thermal_surface::DiffuseThermalSurface::Rough(surface) => {
+            Interaction::RoughDiffuse {
+                medium,
+                reflectance,
+                surface: surface.reflection(),
+            }
+        }
+        _ => Interaction::DepolarizingDiffuse {
+            medium,
+            reflectance,
+        },
     })
 }
 

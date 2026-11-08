@@ -22,6 +22,11 @@
 //! That finite-band law makes no claim about bolometric cooling or out-of-band
 //! continuation; its thermal owner remains responsible for total energy.
 //!
+//! [`RoughDiffuseThermalSurface`] retains explicitly declared EON facet albedo
+//! and roughness. Its directional emissivity is the absorptance of that same
+//! reciprocal reflection law, evaluated at the actual outgoing direction.
+//! Macroscopic emissivity measurements are not converted into facet data.
+//!
 //! [`CoatingThermalEmission`] resolves reciprocal directional emission from
 //! passive coherent films at separate temperatures. Its selected outgoing port
 //! is vacuum, its spectrum remains inside the original optical support, and
@@ -39,6 +44,9 @@ pub(crate) use planck::{
 
 mod spectral;
 pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity};
+
+mod rough;
+pub use rough::RoughDiffuseThermalSurface;
 
 #[cfg(feature = "photometry")]
 mod observables;
@@ -239,6 +247,10 @@ pub enum ThermalSurfaceError {
     SourceIdentity,
     /// Wavelength must be finite and inside the model's declared domain.
     Wavelength,
+    /// An emission or absorption cosine must be finite and in [0,1].
+    Direction,
+    /// A directional rough source requires its actual outgoing cosine.
+    DirectionRequired,
     /// A Planck exchange coefficient or quadrature weight was negative or nonfinite.
     ExchangeCoefficient,
     /// The requested physical radiance or power cannot be represented.

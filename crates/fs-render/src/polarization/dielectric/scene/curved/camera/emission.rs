@@ -257,8 +257,11 @@ impl<'a, 's, 'm> SurfaceEmission<'a, 's, 'm> {
                     return Err(CameraRadianceError::UnsupportedSurface { object_id });
                 }
                 thermal
-                    .surface()
-                    .radiance_w_m2_sr_nm(beam.wavelength_nm())
+                    .radiance_along(
+                        beam.wavelength_nm(),
+                        contact.witness.normal,
+                        beam.ray().dir.scale(-1.0),
+                    )
                     .map_err(CameraRadianceError::Thermal)?
             }
             (None, None, Some(thermal)) => {

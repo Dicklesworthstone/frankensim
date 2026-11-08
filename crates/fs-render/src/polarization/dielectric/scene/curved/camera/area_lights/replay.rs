@@ -5,7 +5,9 @@
 //! of the same branch. No Newton correction, second image search, angular
 //! source fit, or reconstruction of a weak channel from rounded I/Q occurs.
 
-use super::{AreaEmission, AreaEmitterError, AreaEmitterSample, CurvedAreaEmitter};
+use super::{
+    AreaEmission, AreaEmitterError, AreaEmitterSample, CameraRadianceError, CurvedAreaEmitter,
+};
 use crate::gradient_index::event::BoundarySide;
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
@@ -43,11 +45,6 @@ impl CurvedAreaEmitter<'_, '_, '_> {
                 ..ImageEmission::default()
             });
         }
-        let AreaEmission::Coating(emitter) = &self.emitter else {
-            return Err(AreaEmitterError::InvalidEmitter {
-                object_id: self.emitter.object_id(),
-            });
-        };
         let path = original.path();
         let contact = path
             .source_contact()
@@ -56,8 +53,8 @@ impl CurvedAreaEmitter<'_, '_, '_> {
         if !core::ptr::eq(sample.emitter, &self.emitter)
             || !core::ptr::eq(sample.instance, self.instance)
             || !core::ptr::eq(sample.support, &self.support)
-            || side != emitter.side()
-            || contact.object_id != emitter.object_id()
+            || !self.emitter.supports_side(side)
+            || contact.object_id != self.emitter.object_id()
             || contact.geometry_identity != self.instance.geometry_identity()
             || contact.frame_identity != self.instance.frame_identity()
             || initial.origin != sample.position_m()
@@ -74,6 +71,24 @@ impl CurvedAreaEmitter<'_, '_, '_> {
                     .phase_index(),
             )
             .map_err(AreaEmitterError::Camera)?;
+        if let AreaEmission::Thermal(emitter) = &self.emitter {
+            // EON emission is unpolarized but directional. Evaluate it on
+            // the converged original source ray without another image search
+            // or polarization replay. Proposal geometry and MIS are unchanged.
+            let radiance = emitter
+                .radiance_along(launch.wavelength_nm, contact.witness.normal, initial.dir)
+                .map_err(CameraRadianceError::Thermal)
+                .map_err(AreaEmitterError::Camera)?;
+            return Ok(ImageEmission {
+                channels: [Some((*original, radiance)), None],
+                ..ImageEmission::default()
+            });
+        }
+        let AreaEmission::Coating(emitter) = &self.emitter else {
+            return Err(AreaEmitterError::InvalidEmitter {
+                object_id: self.emitter.object_id(),
+            });
+        };
         // The coherent Planck/work solve runs once at the converged source
         // direction, never at the seed guess. Its frame is physical s/p.
         let (radiance, frame) = emitter

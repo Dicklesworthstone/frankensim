@@ -91,9 +91,12 @@ impl DiffuseThermalSurface<'_> {
     /// no copied spectral table. The observer remains constant within each
     /// original 5 nm bin; this report does not change tracer packet semantics.
     /// Floating-point overflow refuses instead of publishing infinite light.
+    /// Rough emission needs a viewing direction; this report's Lambertian
+    /// relation between luminance and exitance does not apply to that source.
     pub fn visible_observables(self) -> Result<ThermalVisibleObservables, ThermalSurfaceError> {
         let knots = match self {
             Self::Gray(_) => &[][..],
+            Self::Rough(_) => return Err(ThermalSurfaceError::DirectionRequired),
             Self::Spectral(surface) => {
                 let knots = surface.emissivity_knots();
                 if knots[0].0 > LAMBDA_MIN || knots[knots.len() - 1].0 < LAMBDA_MAX {

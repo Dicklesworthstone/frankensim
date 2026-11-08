@@ -42,18 +42,38 @@ impl<'e> AreaEmission<'e> {
     }
 
     /// A direction-independent source can be evaluated before image discovery.
-    /// A coating retains its actual finite band here, but its radiance and
-    /// polarization require the converged outgoing direction of each image.
+    /// Rough sources and coatings retain their actual finite band here; their
+    /// radiance requires the converged outgoing direction of each image.
+    /// Coatings additionally retain the physical source polarization.
     pub(super) fn uniform_radiance(
         &self, wavelength_nm: f64,
     ) -> Result<Option<f64>, CameraRadianceError> {
         match self {
             Self::Calibrated(emitter) => emitter.spectrum().evaluate(wavelength_nm).map(Some),
-            Self::Thermal(emitter) => emitter
-                .surface()
-                .radiance_w_m2_sr_nm(wavelength_nm)
-                .map(Some)
-                .map_err(CameraRadianceError::Thermal),
+            Self::Thermal(emitter) => {
+                let source = emitter.surface();
+                if let crate::thermal_surface::DiffuseThermalSurface::Rough(surface) = source {
+                    let rho = surface.facet_albedo().at(wavelength_nm).map_err(|_| {
+                        CameraRadianceError::Thermal(
+                            crate::thermal_surface::ThermalSurfaceError::Wavelength,
+                        )
+                    })?;
+                    if rho == 1.0 {
+                        return Ok(Some(0.0));
+                    }
+                    if rho != 0.0 && surface.reflection().roughness() != 0.0 {
+                        return Ok(None);
+                    }
+                    return source
+                        .directional_radiance_w_m2_sr_nm(wavelength_nm, 1.0)
+                        .map(Some)
+                        .map_err(CameraRadianceError::Thermal);
+                }
+                source
+                    .radiance_w_m2_sr_nm(wavelength_nm)
+                    .map(Some)
+                    .map_err(CameraRadianceError::Thermal)
+            }
             Self::Coating(emitter) => {
                 let (low, high) = emitter.source().wavelength_bounds_nm();
                 if !wavelength_nm.is_finite() || !(low..=high).contains(&wavelength_nm) {
