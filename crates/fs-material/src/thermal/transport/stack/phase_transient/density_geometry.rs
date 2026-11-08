@@ -337,4 +337,5 @@ impl DepositionObserver for SphericalLiquidDensityObserver<'_, '_, '_> {
 }
 
 #[cfg(test)]
+#[path = "density_geometry/tests.rs"]
 mod tests;

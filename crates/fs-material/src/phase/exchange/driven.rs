@@ -172,7 +172,7 @@ impl EquilibriumEnthalpyPhaseCurve {
         }
         let mut index = upper - 1;
         let (mut h, mut temperature) = (initial_h, initial_t);
-        let (mut used, mut used_correction) = (0.0, 0.0);
+        let (mut used, mut used_correction) = (0.0_f64, 0.0_f64);
         let (mut heat, mut heat_correction) = (0.0, 0.0);
         let (mut mean_change, mut mean_correction) = (0.0, 0.0);
         for _ in 0..knots.len() - 1 {

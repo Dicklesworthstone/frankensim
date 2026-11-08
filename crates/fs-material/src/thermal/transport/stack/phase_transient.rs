@@ -9,6 +9,7 @@
 //! opt-in density_geometry observer closes current volume for free liquid spheres.
 
 /// Quasistatic liquid density and current radial geometry on native heat substeps.
+#[path = "phase_transient/density_geometry.rs"]
 pub mod density_geometry;
 pub use density_geometry::{
     SphericalLiquidCellGeometry, SphericalLiquidDensityObserver, SphericalLiquidGeometry,
