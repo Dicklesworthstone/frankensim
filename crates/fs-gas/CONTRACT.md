@@ -8206,6 +8206,38 @@ sections are manufactured test sources; these checks do not validate an
 empirical multielement plasma model or certify global temporal error.
 
 
+## Prescribed ionizing beams with diffuse recombination radiation
+
+`chemistry::diffuse_recombination::evaluate_diffuse_recombination_with_illumination`
+admits explicit discrete photon energies, directional fluxes and signed direction
+cosines at either plane-parallel boundary. A ray's face throughput is its flux
+times face area times the absolute direction cosine; its path optical depth is
+the normal column depth divided by that cosine. Original cross sections are
+resolved once into a bounded source table. Exact homogeneous-slab attenuation
+uses `expm1` for absorption so optically thin losses survive when transmission
+rounds to one. Subthreshold photons pass without ionization or heating.
+
+The incident field adds to the existing spectral/angular diffuse solution.
+Incident absorption, self-recycling and photons received from other slabs remain
+separate accounts. All three feed the same net ionization, original chemical
+storage and photoelectron excess-energy moments. Every cell and the full column
+close emission plus incidence against absorption plus outgoing photons/power.
+An empty column transmits both directions unchanged. Positive beams must lie
+inside every original absorber's support, including initially absent absorbers;
+invalid directions, source support, work/allocation or cancellation refuse
+without changing caller state. The vacuum entry point is unchanged.
+
+G1/G3/G4 tests compare independent Beer--Lambert attenuation for two slabs,
+opposite oblique beams and different photon energies, exact frozen-field
+superposition, subthreshold transparency, absorption below transmission
+roundoff, empty columns and transactional refusal. These are numerical tests,
+not validation of the supplied atomic data or a spectral/angular discretization
+error bound for the caller's illumination. The formal transfer equation and
+beam/diffuse decomposition are consistent with
+<https://journals.ametsoc.org/view/journals/atsc/57/10/1520-0469_2000_057_1635_rtiwim_2.0.co_2.xml>;
+ionization and heating by transported recombination photons are discussed in
+Raičević et al. (2014), <https://arxiv.org/abs/1311.0182>.
+
 ## Evolving diffuse recombination radiation and gas feedback
 
 `chemistry::diffuse_recombination::evolution::advance_diffuse_recombination`

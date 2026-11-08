@@ -1,7 +1,7 @@
 //! Spectral, bidirectional reabsorption of spontaneous recombination radiation.
 //!
 //! Ordered, individually mixed plane-parallel slabs have a common face area
-//! and vacuum boundaries. Their ORIGINAL Milne spectra emit isotropically;
+//! and optional prescribed boundary beams. Their ORIGINAL Milne spectra emit isotropically;
 //! original bound-free cross sections absorb at every photon energy. Exact
 //! uniform-slab characteristics include self-absorption and illumination from
 //! both directions. Positive angular quadrature and adaptive spectral
@@ -9,7 +9,7 @@
 //!
 //! This is a frozen-state, quasi-static radiation query. Its per-cell reaction
 //! and electron-energy rates are useful inputs to coupled evolution; this
-//! owner does not itself change populations or temperatures. No incoming beam,
+//! owner does not itself change populations or temperatures. No inferred illumination,
 //! scattering, excited-level cascade, stimulated emission, finite propagation
 //! delay, line radiation or radiation-pressure work is inferred. Geometry is
 //! transversely infinite; the area scales inventories and face throughput.
@@ -17,7 +17,9 @@
 use fs_qty::Area;
 use fs_thermochem::electron_collision::MaxwellianRateControlsV1;
 use fs_thermochem::equilibrium::composition::FrozenIonizedGasStateV1;
-use fs_thermochem::kinetics::atomic_ionization::photoionization::PhotoionizationErrorV1;
+use fs_thermochem::kinetics::atomic_ionization::photoionization::{
+    PhotoionizationErrorV1, PhotonNumberFluxV1,
+};
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::{
     AtomicRadiativeRecombinationV1, RadiativeRecombinationErrorV1,
 };
@@ -33,6 +35,23 @@ pub struct DiffuseRecombinationCell<'a> {
     pub state: &'a FrozenIonizedGasStateV1,
     /// Original reciprocal emission and absorption source.
     pub source: &'a AtomicRadiativeRecombinationV1,
+}
+
+/// One prescribed monochromatic boundary beam, held constant during a query.
+///
+/// The photon flux is measured perpendicular to the ray. Its throughput across
+/// the slab face is `area * abs(direction_cosine) * number_flux_per_m2_s`.
+/// Positive directions enter the left boundary; negative directions enter the
+/// right. Optical depth along the ray is the normal depth divided by `abs(mu)`.
+/// Multiple entries explicitly represent discrete energies and directions;
+/// no spectral bandwidth, angular weight or diffuse-background model is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiffuseRecombinationBeam {
+    /// Original photon energy and directional number flux in SI units.
+    pub photons: PhotonNumberFluxV1,
+    /// Signed direction cosine with the increasing slab coordinate, in
+    /// `[-1, 1]` excluding zero.
+    pub direction_cosine: f64,
 }
 
 /// Numerical controls for all transported number and energy moments.
@@ -103,6 +122,10 @@ pub struct DiffuseRecombinationCellBalance {
     pub self_absorbed_photons_per_s: f64,
     /// Absorption of photons emitted in other cells [s⁻¹].
     pub nonlocal_absorbed_photons_per_s: f64,
+    /// Absorption of photons supplied at either external boundary [s⁻¹].
+    pub incident_absorbed_photons_per_s: f64,
+    /// Energy absorbed from those prescribed boundary beams [W].
+    pub incident_absorbed_power_w: f64,
     /// Total absorbed photon energy [W].
     pub absorbed_power_w: f64,
     /// Photoelectron kinetic energy deposited after local threshold cost [W].
@@ -158,6 +181,10 @@ impl DiffuseRecombinationCellResult {
 /// Whole-column radiation conservation and explicit numerical limitations.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DiffuseRecombinationBalance {
+    /// Prescribed photon throughput entering both boundaries [s⁻¹].
+    pub incident_photons_per_s: f64,
+    /// Prescribed incoming photon power [W].
+    pub incident_power_w: f64,
     /// Gross emission and reabsorption are separate, including self-absorption.
     pub emitted_photons_per_s: f64,
     /// Gross emitted photon power [W].
@@ -166,13 +193,13 @@ pub struct DiffuseRecombinationBalance {
     pub absorbed_photons_per_s: f64,
     /// Total absorbed photon power [W].
     pub absorbed_power_w: f64,
-    /// Escapes through both vacuum boundaries [s⁻¹].
+    /// Outgoing photons through both boundaries, including transmitted beams [s⁻¹].
     pub escaped_photons_per_s: f64,
     /// Power escaping through both boundaries [W].
     pub escaped_power_w: f64,
-    /// Emission minus absorption and escape [s⁻¹].
+    /// Emission plus incidence minus absorption and escape [s⁻¹].
     pub photon_residual_per_s: f64,
-    /// Emission minus absorption and escape [W].
+    /// Emission plus incidence minus absorption and escape [W].
     pub energy_residual_w: f64,
     /// Conditional upper bound on all omitted emitted photon rates [s⁻¹].
     pub omitted_photon_rate_bound_per_s: f64,
@@ -200,13 +227,14 @@ pub struct DiffuseRecombinationResult {
     balance: DiffuseRecombinationBalance,
     area: Area,
     controls: DiffuseRecombinationSolve,
+    incident_beams: Vec<DiffuseRecombinationBeam>,
 }
 impl DiffuseRecombinationResult {
     /// Original cells and their radiative reaction/energy rates.
     pub fn cells(&self) -> &[DiffuseRecombinationCellResult] {
         &self.cells
     }
-    /// N+1 interfaces, including the two vacuum boundaries.
+    /// N+1 interfaces, including the two externally illuminated boundaries.
     pub fn interfaces(&self) -> &[DiffuseRecombinationFlux] {
         &self.interfaces
     }
@@ -221,6 +249,10 @@ impl DiffuseRecombinationResult {
     /// Retained numerical controls.
     pub const fn controls(&self) -> DiffuseRecombinationSolve {
         self.controls
+    }
+    /// Original prescribed boundary beams, with their energy and direction.
+    pub fn incident_beams(&self) -> &[DiffuseRecombinationBeam] {
+        &self.incident_beams
     }
 }
 
@@ -278,5 +310,23 @@ pub fn evaluate_diffuse_recombination(
     controls: DiffuseRecombinationSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<DiffuseRecombinationResult, DiffuseRecombinationError> {
-    solve::evaluate(cells, area, controls, cancelled)
+    solve::evaluate(cells, area, &[], controls, cancelled)
+}
+
+/// Evaluate diffuse recombination and prescribed boundary illumination together.
+///
+/// The original absorption source attenuates each incident energy/direction
+/// exactly through each homogeneous slab. Absorbed photons enter the same
+/// ionization and excess-energy accounts as diffuse photons. Incoming beams
+/// pass unchanged through an empty column. Source support is checked for every
+/// cell before transport, including initially absent but reachable absorbers.
+/// This does not estimate the accuracy of the caller's discrete illumination.
+pub fn evaluate_diffuse_recombination_with_illumination(
+    cells: &[DiffuseRecombinationCell<'_>],
+    area: Area,
+    incident_beams: &[DiffuseRecombinationBeam],
+    controls: DiffuseRecombinationSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiffuseRecombinationResult, DiffuseRecombinationError> {
+    solve::evaluate(cells, area, incident_beams, controls, cancelled)
 }

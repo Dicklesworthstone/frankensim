@@ -3,10 +3,11 @@ use fs_math::dd::Dd;
 use fs_math::det::{exp, expm1};
 use fs_qty::{Energy, Temperature};
 use fs_thermochem::electron_collision::AVOGADRO_PER_MOL as NA;
+use fs_thermochem::kinetics::atomic_ionization::photoionization::MAX_PHOTON_GROUPS_V1;
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::spectrum::RecombinationSpectrumV1;
 
 type Error = DiffuseRecombinationError;
-const CELL: usize = 10;
+const CELL: usize = 12;
 const FACE: usize = 4;
 
 // Positive halves of the standard Gauss-Legendre 8- and 16-point rules.
@@ -77,6 +78,14 @@ struct Prepared<'a> {
     controls: DiffuseRecombinationSolve,
     panels: usize,
     work: usize,
+    beams: Vec<PreparedBeam>,
+}
+
+struct PreparedBeam {
+    original: DiffuseRecombinationBeam,
+    incoming_per_s: f64,
+    // Immutable cross sections are resolved once, not at each thermal/RHS query.
+    cross_sections: Vec<f64>,
 }
 
 /// Raw state supplied only by an already admitted same-source evolution owner.
@@ -135,10 +144,12 @@ impl Scratch {
 pub(super) fn evaluate(
     cells: &[DiffuseRecombinationCell<'_>],
     area: Area,
+    incident_beams: &[DiffuseRecombinationBeam],
     controls: DiffuseRecombinationSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiffuseRecombinationResult, Error> {
-    let mut workspace = Workspace::new(cells, area, controls, &mut cancelled)?;
+    let mut workspace =
+        Workspace::with_illumination(cells, area, incident_beams, controls, &mut cancelled)?;
     workspace.run(&mut cancelled)?;
     let mut results = Vec::new();
     results
@@ -160,6 +171,7 @@ pub(super) fn evaluate(
         balance: workspace.balance,
         area,
         controls,
+        incident_beams: retained_beams(incident_beams)?,
     })
 }
 
@@ -170,8 +182,20 @@ impl<'a> Workspace<'a> {
         controls: DiffuseRecombinationSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
+        Self::with_illumination(cells, area, &[], controls, cancelled)
+    }
+
+    pub fn with_illumination(
+        cells: &[DiffuseRecombinationCell<'a>],
+        area: Area,
+        incident_beams: &[DiffuseRecombinationBeam],
+        controls: DiffuseRecombinationSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        let mut prepared = Prepared::new(cells, area, controls, cancelled)?;
+        prepared.prepare_beams(incident_beams, cancelled)?;
         Ok(Self {
-            prepared: Prepared::new(cells, area, controls, cancelled)?,
+            prepared,
             scratch: Scratch::new(cells.len())?,
             grid: Vec::new(),
             fine_angles: Vec::new(),
@@ -267,6 +291,7 @@ impl<'a> Workspace<'a> {
                 break;
             }
         }
+        prepared.illuminate(&mut self.scratch.values, cancelled)?;
         self.balance = prepared.balances(
             &self.scratch,
             normalized,
@@ -314,6 +339,7 @@ impl<'a> Prepared<'a> {
             controls,
             panels: 0,
             work: 0,
+            beams: Vec::new(),
         };
         result
             .cells
@@ -389,6 +415,129 @@ impl<'a> Prepared<'a> {
             });
         }
         Ok(result)
+    }
+
+    fn prepare_beams(
+        &mut self,
+        beams: &[DiffuseRecombinationBeam],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if beams.len() > MAX_PHOTON_GROUPS_V1 {
+            return Err(Error::Invalid("boundary photon group limit"));
+        }
+        // Admission accounts for every source query before allocating the table.
+        self.spend(
+            beams
+                .len()
+                .checked_mul(self.cells.len() + 1)
+                .ok_or(Error::WorkBudget)?,
+        )?;
+        self.beams
+            .try_reserve_exact(beams.len())
+            .map_err(|_| Error::Allocation)?;
+        for &beam in beams {
+            poll(cancelled)?;
+            let mu = beam.direction_cosine.abs();
+            let energy = beam.photons.photon_energy.value();
+            let flux = beam.photons.number_flux_per_m2_s;
+            if !positive(mu) || mu > 1.0 || !positive(energy) || !nonnegative(flux) {
+                return Err(Error::Invalid(
+                    "boundary beam energy, directional flux or cosine",
+                ));
+            }
+            let incoming = (self.area * mu) * flux;
+            if !nonnegative(incoming)
+                || (flux > 0.0 && incoming == 0.0)
+                || !nonnegative(incoming * energy)
+                || (incoming > 0.0 && incoming * energy == 0.0)
+            {
+                return Err(Error::Arithmetic("boundary beam throughput"));
+            }
+            let mut cross_sections = buffer(self.cells.len(), 0.0)?;
+            if incoming > 0.0 {
+                for (index, cell) in self.cells.iter().enumerate() {
+                    poll(cancelled)?;
+                    cross_sections[index] = cell
+                        .source
+                        .source()
+                        .cross_section(beam.photons.photon_energy)
+                        .map_err(|error| Error::Absorption { index, error })?
+                        .value();
+                }
+            }
+            self.beams.push(PreparedBeam {
+                original: beam,
+                incoming_per_s: incoming,
+                cross_sections,
+            });
+        }
+        Ok(())
+    }
+
+    fn illuminate(
+        &mut self,
+        values: &mut [Sum],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        let n = self.cells.len();
+        self.spend(
+            self.beams
+                .len()
+                .checked_mul(n + 1)
+                .ok_or(Error::WorkBudget)?,
+        )?;
+        for beam in &self.beams {
+            poll(cancelled)?;
+            let energy = beam.original.photons.photon_energy.value();
+            let mu = beam.original.direction_cosine.abs();
+            let right = beam.original.direction_cosine > 0.0;
+            let offset = if right { 0 } else { 2 };
+            let entry = if right { 0 } else { n };
+            let mut incoming = beam.incoming_per_s;
+            values[CELL * n + FACE * entry + offset].add(incoming);
+            values[CELL * n + FACE * entry + offset + 1].add(energy * incoming);
+            for step in 0..n {
+                poll(cancelled)?;
+                let c = if right { step } else { n - step - 1 };
+                let normal_depth = beam.cross_sections[c] * self.cells[c].opacity_per_sigma;
+                if normal_depth.is_nan() || normal_depth < 0.0 {
+                    return Err(Error::Arithmetic("boundary beam optical depth"));
+                }
+                let (transmission, absorption, _, _) = characteristic(normal_depth / mu);
+                let absorbed = incoming * absorption;
+                let outgoing = incoming * transmission;
+                let power = energy * absorbed;
+                let heat = if absorbed == 0.0 {
+                    0.0
+                } else {
+                    (energy - self.cells[c].gap) * absorbed
+                };
+                if !nonnegative(power) || !nonnegative(heat) {
+                    return Err(Error::Arithmetic("boundary beam absorption"));
+                }
+                // Keep incident absorption separate from diffuse self/nonlocal
+                // recycling; all three enter the same net physical moments.
+                for (slot, value) in [
+                    (5, power),
+                    (6, heat),
+                    (7, absorbed),
+                    (8, heat),
+                    (9, power),
+                    (10, absorbed),
+                    (11, power),
+                ] {
+                    values[CELL * c + slot].add(value);
+                }
+                let face = if right { c + 1 } else { c };
+                values[CELL * n + FACE * face + offset].add(outgoing);
+                values[CELL * n + FACE * face + offset + 1].add(energy * outgoing);
+                incoming = outgoing;
+            }
+        }
+        if values.iter().any(|value| !value.value.is_finite()) {
+            return Err(Error::Arithmetic("illuminated radiation moments"));
+        }
+        Ok(())
     }
 
     fn refresh(
@@ -798,7 +947,7 @@ impl<'a> Prepared<'a> {
 
     fn allowance(&self, index: usize, value: f64) -> f64 {
         let number = if index < CELL * self.cells.len() {
-            matches!(index % CELL, 0 | 3 | 4 | 7)
+            matches!(index % CELL, 0 | 3 | 4 | 7 | 10)
         } else {
             (index - CELL * self.cells.len()) % 2 == 0
         };
@@ -812,7 +961,7 @@ impl<'a> Prepared<'a> {
     fn errors(&self, scratch: &Scratch) -> Result<[f64; 3], Error> {
         let mut errors = [0.0_f64; 3];
         for (j, value) in scratch.values.iter().enumerate() {
-            let signed = j < CELL * self.cells.len() && j % CELL >= 7;
+            let signed = j < CELL * self.cells.len() && matches!(j % CELL, 7..=9);
             if !value.value.is_finite() || (!signed && value.value < 0.0) {
                 return Err(Error::Arithmetic("integrated radiation moment"));
             }
@@ -870,7 +1019,9 @@ impl<'a> Prepared<'a> {
         for (c, binding) in self.cells.iter().enumerate() {
             poll(cancelled)?;
             let v = &scratch.values[CELL * c..CELL * (c + 1)];
-            let absorbed = Dd::from_f64(v[3].value) + Dd::from_f64(v[4].value);
+            let absorbed = Dd::from_f64(v[3].value)
+                + Dd::from_f64(v[4].value)
+                + Dd::from_f64(v[10].value);
             let net_events = Dd::from_f64(v[7].value);
             let net_electron = Dd::from_f64(v[8].value);
             let chemical = binding.gap * net_events.to_f64();
@@ -943,6 +1094,8 @@ impl<'a> Prepared<'a> {
                 captured_electron_power_w: v[2].value,
                 self_absorbed_photons_per_s: v[3].value,
                 nonlocal_absorbed_photons_per_s: v[4].value,
+                incident_absorbed_photons_per_s: v[10].value,
+                incident_absorbed_power_w: v[11].value,
                 absorbed_power_w: v[5].value,
                 photoelectron_power_w: v[6].value,
                 net_ionization_rate_mol_per_s: net_events.to_f64() / NA,
@@ -971,16 +1124,22 @@ impl<'a> Prepared<'a> {
             + Dd::from_f64(interfaces[n].right_photons_per_s);
         let escaped_power =
             Dd::from_f64(interfaces[0].left_power_w) + Dd::from_f64(interfaces[n].right_power_w);
-        let photon_residual = (sums[0] - sums[2] - escaped).to_f64();
-        let energy_residual = (sums[1] - sums[3] - escaped_power).to_f64();
+        let incident = Dd::from_f64(interfaces[0].right_photons_per_s)
+            + Dd::from_f64(interfaces[n].left_photons_per_s);
+        let incident_power = Dd::from_f64(interfaces[0].right_power_w)
+            + Dd::from_f64(interfaces[n].left_power_w);
+        let photon_residual = (sums[0] + incident - sums[2] - escaped).to_f64();
+        let energy_residual = (sums[1] + incident_power - sums[3] - escaped_power).to_f64();
         self.check_balance(
             photon_residual,
             energy_residual,
-            sums[0].to_f64(),
-            sums[1].to_f64(),
+            (sums[0] + incident).to_f64(),
+            (sums[1] + incident_power).to_f64(),
         )?;
         poll(cancelled)?;
         Ok(DiffuseRecombinationBalance {
+            incident_photons_per_s: incident.to_f64(),
+            incident_power_w: incident_power.to_f64(),
             emitted_photons_per_s: sums[0].to_f64(),
             emitted_power_w: sums[1].to_f64(),
             absorbed_photons_per_s: sums[2].to_f64(),
@@ -1079,6 +1238,16 @@ fn buffer<T: Clone>(n: usize, value: T) -> Result<Vec<T>, Error> {
     v.try_reserve_exact(n).map_err(|_| Error::Allocation)?;
     v.resize(n, value);
     Ok(v)
+}
+pub(super) fn retained_beams(
+    beams: &[DiffuseRecombinationBeam],
+) -> Result<Vec<DiffuseRecombinationBeam>, Error> {
+    let mut retained = Vec::new();
+    retained
+        .try_reserve_exact(beams.len())
+        .map_err(|_| Error::Allocation)?;
+    retained.extend_from_slice(beams);
+    Ok(retained)
 }
 fn source_error(index: usize, error: RadiativeRecombinationErrorV1) -> Error {
     if matches!(error, RadiativeRecombinationErrorV1::Cancelled) {

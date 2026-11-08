@@ -1,6 +1,7 @@
 use super::collisional_radiative::fixture;
 use super::{EV, KB, ME, NA};
 mod evolution;
+mod illumination;
 use crate::chemistry::diffuse_recombination::*;
 use fs_matdb::Provenance;
 use fs_qty::{Amount, Area, Energy, Volume};
