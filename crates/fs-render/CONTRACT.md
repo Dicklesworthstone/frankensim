@@ -10166,6 +10166,42 @@ the visible band. Seven lean/common regressions are typechecked by the targeted
 native volumes-enabled metadata build; five additional physical-camera
 regressions have parser and independent source review but have not run.
 
+### Spectral beam power on original density cells
+
+The `volumes` feature exposes `deposit_density_spectral_beam` and its indexed
+material counterpart. They integrate explicit incident spectral irradiance in
+W/(m² nm), caller-supplied nonnegative quadrature widths in nm, and each original
+column's physical XY area. Sources may be uniform or original-column resolved;
+propagation may enter either Z face. This is collimated, normal-incidence,
+independent absorption: camera resolution, RGB observation and exposure do not
+define incident energy.
+
+The result retains exact nodes and weights, per-node incident/absorbed/transmitted
+watts, original-cell absorbed watts, and original-column transmitted watts.
+Cell and column maps sum wavelengths and retain original X-fastest ordering.
+The original density, material index, SI density scale and SI length scale
+participate in every optical depth; coefficients and illumination are never
+spatially averaged before the energy calculation. Compensated cumulative depth
+and `expm1` retain thin-cell absorption and deep-column transmission; logarithmic
+fallbacks preserve representable watts when intermediate optical depth, area or
+transmission underflows. Nonrepresentable power refuses.
+
+Grid cells, complete cells-times-wavelength work, indexed material rows, and
+cell-plus-column output values are admitted before allocation. The report owns
+one final buffer: three global power totals, the cell map, then the column map.
+`into_power_buffer` transfers that allocation to downstream consumers. Fixed-size
+per-node totals require no additional heap allocation.
+
+G0/G3 checks cover independent layered Beer integrals, both directions, original
+material/source correlation, energy accounting, spatial refinement, unit changes,
+10,000 sub-ULP optical depths, extreme representable powers, zero quadrature and
+input/work/storage refusals. The real pinned-compiler `fs-render` test target with
+`volumes` passed **148 tests**, including all seven new beam checks. This establishes
+the tested finite spectral quadrature, not broadband integration accuracy or a
+measured performance target. Deposited watts are absorbed incident power; this
+owner does not add scattering, subtract LTE cooling, infer a thermalization
+fraction, or advance temperature.
+
 ### Direct illuminated density observations
 
 `SpectralIllumination` supplies either one explicit spectral radiance or one

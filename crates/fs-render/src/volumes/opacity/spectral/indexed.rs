@@ -110,6 +110,19 @@ impl ColumnAbsorption for IndexedColumns<'_> {
         self.spectrum.wavelengths_nm
     }
 
+    fn cell_coefficients(&self, cell: usize) -> &[f64] {
+        let lanes = self.spectrum.wavelengths_nm.len();
+        let first = self.spectrum.cell_materials[cell] as usize * lanes;
+        &self.spectrum.mass_absorption_m2_kg[first..first + lanes]
+    }
+
+    fn physical_units(&self) -> (f64, f64) {
+        (
+            self.spectrum.density_unit_kg_m3,
+            self.spectrum.length_unit_m,
+        )
+    }
+
     fn admit(&self, grid: &VolumeGrid<'_>) -> Result<(), DvrError> {
         let lanes = self.spectrum.wavelengths_nm.len();
         // Reuse the bounded uniform spectral/unit admission on the first row.

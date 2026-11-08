@@ -19,6 +19,9 @@ pub mod preintegrated;
 /// Exact scalar-transfer transport and physical mass-density opacity.
 pub mod opacity;
 pub use opacity::{
+    BeamPropagation, IndexedSpectralBeamDepositionSettings, SpectralBeamDeposition,
+    SpectralBeamDepositionSettings, SpectralBeamIrradiance, deposit_density_spectral_beam,
+    deposit_density_spectral_indexed_beam,
     AbsorptionMixtureSettings, DensityAbsorption, DensityAbsorptionSpectrum,
     IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
     MAX_OPACITY_WAVELENGTHS, SpectralAbsorptionImageSettings, SpectralOpacityImage,
@@ -167,6 +170,24 @@ pub enum DvrError {
     },
     /// Background spectra do not match the image's pixels and wavelengths.
     InvalidBackgroundSize,
+    /// Beam irradiance does not match its explicit uniform or column layout.
+    InvalidBeamIrradianceSize,
+    /// Beam irradiance must be finite, nonnegative W/(m² nm).
+    InvalidBeamIrradiance,
+    /// A physical beam power or sum cannot be represented in finite watts.
+    UnrepresentableBeamPower,
+    /// The original-cell and transmitted-column maps exceed their storage limit.
+    BeamOutputBudgetExceeded {
+        /// Requested scalar map values, excluding three fixed summary values.
+        requested: usize,
+        /// Admitted scalar map values.
+        limit: usize,
+    },
+    /// Storage for the complete beam-power report could not be reserved.
+    BeamAllocationRefused {
+        /// Requested scalar values, including three fixed summary values.
+        values: usize,
+    },
     /// Spectral quadrature weights have the wrong length or an invalid value.
     InvalidSpectralWeights,
     /// The approximate visible observer does not cover a supplied wavelength.

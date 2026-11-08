@@ -10,10 +10,16 @@ use super::{
 };
 use fs_math::det;
 
+mod deposition;
 mod illumination;
 mod indexed;
 mod mixture;
 mod observer;
+pub use deposition::{
+    BeamPropagation, IndexedSpectralBeamDepositionSettings, SpectralBeamDeposition,
+    SpectralBeamDepositionSettings, SpectralBeamIrradiance, deposit_density_spectral_beam,
+    deposit_density_spectral_indexed_beam,
+};
 pub use illumination::{
     SpectralIllumination, render_density_spectral_indexed_radiance_box,
     render_density_spectral_indexed_xyz_box, render_density_spectral_radiance_box,
@@ -348,6 +354,8 @@ impl<'g, 'd, S: ColumnAbsorption> ColumnRender<'g, 'd, S> {
 // allocating per-cell extinction or introducing per-wavelength density scans.
 trait ColumnAbsorption {
     fn wavelengths(&self) -> &[f64];
+    fn cell_coefficients(&self, cell: usize) -> &[f64];
+    fn physical_units(&self) -> (f64, f64);
     fn admit(&self, grid: &VolumeGrid<'_>) -> Result<(), DvrError>;
     fn validate_values(&self) -> Result<(), DvrError> {
         Ok(())
@@ -365,6 +373,14 @@ trait ColumnAbsorption {
 impl ColumnAbsorption for DensityAbsorptionSpectrum<'_> {
     fn wavelengths(&self) -> &[f64] {
         self.wavelengths_nm
+    }
+
+    fn cell_coefficients(&self, _cell: usize) -> &[f64] {
+        self.mass_absorption_m2_kg
+    }
+
+    fn physical_units(&self) -> (f64, f64) {
+        (self.density_unit_kg_m3, self.length_unit_m)
     }
 
     fn admit(&self, _grid: &VolumeGrid<'_>) -> Result<(), DvrError> {

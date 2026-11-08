@@ -18,6 +18,9 @@ pub use area::{
 
 mod spectral;
 pub use spectral::{
+    BeamPropagation, IndexedSpectralBeamDepositionSettings, SpectralBeamDeposition,
+    SpectralBeamDepositionSettings, SpectralBeamIrradiance, deposit_density_spectral_beam,
+    deposit_density_spectral_indexed_beam,
     AbsorptionMixtureSettings, DensityAbsorptionSpectrum, IndexedDensityAbsorptionSpectrum,
     IndexedSpectralAbsorptionImageSettings, MAX_OPACITY_WAVELENGTHS,
     SpectralAbsorptionImageSettings, SpectralOpacityImage, SpectralOpacitySample,
