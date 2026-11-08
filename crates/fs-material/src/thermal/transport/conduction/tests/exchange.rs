@@ -270,6 +270,23 @@ fn g1_volume_assembly_and_free_expansion_keep_original_capacity_and_energy_basis
             near(step.mean_temperature_k, expected.mean_temperature_k, 2e-10);
             near(step.reservoir_energy_derivative_j_kg_k, expected.reservoir_energy_derivative_j_kg_k, 2e-8);
             near(step.inlet_energy_gain, expected.inlet_energy_gain, 2e-12);
+            // Source power and conductance exposure convert in the SAME original
+            // mass/volume basis, including the derivative with respect to Q0.
+            let drive = energy(1, target) - input;
+            for feedback in [0.0, 100.0] {
+                let driven = layer.driven_heat_exchange(input, drive, feedback).unwrap();
+                let reference = cp_layer.driven_heat_exchange(input, drive, feedback).unwrap();
+                assert_eq!(driven.storage_basis, basis);
+                near(driven.temperature_k, reference.temperature_k, 2e-10);
+                near(driven.specific_heat_j_kg, reference.specific_heat_j_kg, 2e-7);
+                near(driven.mean_temperature_change_k, reference.mean_temperature_change_k, 2e-10);
+                near(driven.source_heat_gain, reference.source_heat_gain, 2e-12);
+                near(driven.mean_source_derivative_kg_k_j, reference.mean_source_derivative_kg_k_j, 2e-14);
+                if feedback == 0.0 {
+                    assert_eq!(driven.specific_heat_j_kg, drive);
+                    assert_eq!(driven.source_heat_gain, 1.0);
+                }
+            }
             // A native energy increment at the datum also survives the basis conversion.
             let weak = layer.linear_heat_exchange(0.0, 600.0, 1e-20).unwrap();
             assert_eq!(weak.temperature_k, 300.0);
@@ -312,3 +329,45 @@ fn g4_exchange_keeps_canonical_endpoints_and_refuses_unsupported_paths() {
         assert!(layer.linear_heat_exchange(e, 600.0, 0.0).is_err());
     }
 }
+
+
+#[test]
+fn g1_native_cp_cv_source_exchange_retains_original_energy_and_time_mean() {
+    let (cp_source, cv_source) = (Fixture::new(false), Fixture::new(true));
+    let (cp, cv) = (cp_source.cp(), cv_source.cv());
+    let cp_k = IsobaricConductionLaw::try_new(
+        &cp_source.card, &cp, &cp_source.conductivity, SELECTION,
+    ).unwrap();
+    let cv_k = IsochoricConductionLaw::try_new(
+        &cv_source.card, &cv, &cv_source.conductivity, SELECTION,
+    ).unwrap();
+    let cp_layer = CaloricConductionLayer::from_isobaric(&cp_k).unwrap();
+    let cv_layer = CaloricConductionLayer::from_isochoric(&cv_k).unwrap();
+    for (layer, side, basis) in [
+        (&cp_layer, 1, ThermalStorageBasis::Enthalpy),
+        (&cv_layer, 0, ThermalStorageBasis::InternalEnergy),
+    ] {
+        for (initial, target) in [(350.0, 650.0), (650.0, 350.0)] {
+            let input = energy(side, initial);
+            let drive = energy(side, target) - input;
+            let response = layer.driven_heat_exchange(input, drive, 0.0).unwrap();
+            assert_eq!(response.storage_basis, basis);
+            assert_eq!(response.specific_heat_j_kg, drive);
+            assert_eq!(response.source_heat_gain, 1.0);
+            near(response.temperature_k, target, 2e-10);
+            near(response.final_specific_energy_j_kg, energy(side, target), 2e-7);
+            near(response.mean_temperature_k, 508.3333333333333, 2e-10);
+            near(response.mean_source_derivative_kg_k_j, (target - response.mean_temperature_k) / drive, 2e-14);
+            assert_eq!(response.heat_residual_j_kg,
+                response.specific_heat_j_kg - response.represented_energy_change_j_kg);
+        }
+        let weak = layer.driven_heat_exchange(0.0, 1e-18, 5.0).unwrap();
+        assert_eq!(weak.temperature_k, 300.0);
+        assert_eq!(weak.mean_temperature_k, 300.0);
+        assert!(weak.temperature_change_k > 0.0 && weak.mean_temperature_change_k > 0.0);
+        assert!(weak.final_specific_energy_j_kg > 0.0);
+        assert_eq!(weak.final_specific_energy_j_kg, weak.specific_heat_j_kg);
+        assert_eq!(weak.heat_residual_j_kg, 0.0);
+    }
+}
+

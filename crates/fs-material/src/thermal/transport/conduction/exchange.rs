@@ -1,7 +1,7 @@
 //! Exact fixed-temperature-bath exchange in the original energy coordinate.
 
 use super::{CaloricConductionLayer, OriginalConduction};
-use super::super::capacity::{CapacityCurve, CapacityExchange, CapacityKnot};
+use super::super::capacity::{CapacityCurve, CapacityDrivenExchange, CapacityExchange, CapacityKnot};
 use fs_matdb::MaterialAnswer;
 use fs_thermal::enthalpy::{DepositionError, ThermalStorageBasis};
 
@@ -41,6 +41,45 @@ pub struct CaloricHeatExchange {
     /// Exposure times d(mean_temperature)/d(exposure) [K].
     /// Equals the endpoint-minus-mean gap before absolute-temperature rounding.
     pub mean_log_exposure_derivative_k: f64,
+}
+
+/// Exact constant applied-source plus linear-bath response on native storage.
+///
+/// Inputs obey C_specific(T) dT/ds = Q0 - X*(T-T0), 0 <= s <= 1.
+/// Q0 is the signed initial driving power integrated over the whole window;
+/// X is its nonnegative conductance exposure. A virtual equilibrium may be
+/// negative or unrepresentable: only the actual material trajectory is a
+/// physical temperature and must remain inside the original source support.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaloricDrivenHeatExchange {
+    pub storage_basis: ThermalStorageBasis,
+    pub initial_specific_energy_j_kg: f64,
+    pub final_specific_energy_j_kg: f64,
+    /// Original inverse of the returned final native energy [K].
+    pub temperature_k: f64,
+    /// Endpoint minus initial temperature, retained before absolute rounding.
+    pub temperature_change_k: f64,
+    /// Exact time mean, rounded to absolute kelvin.
+    pub mean_temperature_k: f64,
+    /// Time mean minus initial temperature, retained before absolute rounding.
+    pub mean_temperature_change_k: f64,
+    /// Signed integrated heat into the material [J/kg], before storage rounding.
+    pub specific_heat_j_kg: f64,
+    pub represented_energy_change_j_kg: f64,
+    pub heat_residual_j_kg: f64,
+    /// d(e_out)/d(e_in) holding the physical applied power, baths and X fixed.
+    /// Q0 therefore changes by -X*dT0 under this perturbation.
+    pub inlet_energy_gain: f64,
+    /// One minus inlet_energy_gain, retained directly for weak feedback.
+    pub inlet_energy_loss: f64,
+    /// d(e_out)/d(Q0), holding inlet energy and X fixed; dimensionless.
+    pub source_heat_gain: f64,
+    /// d(T_mean)/d(Q0) at fixed inlet energy and X [kg K/J].
+    pub mean_source_derivative_kg_k_j: f64,
+    /// Q0 - X*(T_out-T0), retained before cancellation or absolute-T rounding.
+    pub remaining_drive_j_kg: f64,
+    /// d(T_mean)/d(log duration) when Q0 and X scale together [K].
+    pub mean_log_duration_derivative_k: f64,
 }
 
 // Original source pairs already retain their positive affine capacity. Borrow
@@ -129,25 +168,9 @@ impl CaloricConductionLayer<'_, '_> {
             )?,
         };
         let heat = exchange.energy_change;
-        let bounds = self.energy_bounds_j_kg();
-        let final_energy = if heat == 0.0 {
-            initial_specific_energy_j_kg
-        } else if heat < 0.0 && exchange.temperature == temperatures[0] {
-            bounds[0]
-        } else if heat > 0.0 && exchange.temperature == temperatures[1] {
-            bounds[1]
-        } else {
-            initial_specific_energy_j_kg + heat
-        };
-        if !final_energy.is_finite() {
-            return Err(DepositionError::Arithmetic);
-        }
-        let temperature_k = caloric.temperature_k(final_energy)?;
-        let represented = final_energy - initial_specific_energy_j_kg;
-        let residual = heat - represented;
-        if !represented.is_finite() || !residual.is_finite() {
-            return Err(DepositionError::Arithmetic);
-        }
+        let (final_energy, temperature_k, represented, residual) = self.finish_energy(
+            initial_specific_energy_j_kg, heat, exchange.temperature, temperatures,
+        )?;
         Ok(CaloricHeatExchange {
             storage_basis: caloric.storage_basis(),
             initial_specific_energy_j_kg,
@@ -165,6 +188,125 @@ impl CaloricConductionLayer<'_, '_> {
             mean_log_exposure_derivative_k: exchange.mean_log_exposure_derivative,
         })
     }
+
+    /// Exact constant source plus held linear baths, expressed without an
+    /// absolute weighted bath or virtual-equilibrium temperature.
+    ///
+    /// Let Q0 = dt*(P_source + sum G_i*(T_i-T0))/m [J/kg] and
+    /// X = dt*sum G_i/m [J/(kg K)], where T0 is the original inverse of the
+    /// input energy. This method integrates C(T)dT/ds=Q0-X*(T-T0) on 0..1.
+    /// The caller retains the individual bath temperatures/conductances and
+    /// applied-source account; their model validity and cell inventory remain
+    /// with that owner. Positive and negative applied power are supported.
+    ///
+    /// Zero X is exact calorimetry with the capacity-weighted cubic time mean,
+    /// not an arithmetic midpoint. Zero Q0 still retains the correct source
+    /// and bath sensitivities. Cp, Cv, reference-volume and amount-bound laws
+    /// retain their original storage basis and source support. All crossed
+    /// capacities and analytic moments use the SAME shared exchange kernel.
+    ///
+    /// Equilibrium-phase layers retain their original phase exchange API and
+    /// are not admitted by this sensible-storage response.
+    ///
+    /// Successful queries allocate nothing, query no material card and mutate
+    /// no thermal state. Relative heat and temperature moments survive absolute
+    /// rounding; the returned energy is admitted by the original native inverse.
+    pub fn driven_heat_exchange(
+        &self,
+        initial_specific_energy_j_kg: f64,
+        initial_drive_j_kg: f64,
+        exposure_j_kg_k: f64,
+    ) -> Result<CaloricDrivenHeatExchange, DepositionError> {
+        if !initial_drive_j_kg.is_finite()
+            || !exposure_j_kg_k.is_finite() || exposure_j_kg_k < 0.0
+        {
+            return Err(DepositionError::InvalidInput(
+                "driven caloric exchange requires finite initial drive and nonnegative exposure",
+            ));
+        }
+        let caloric = self.caloric_law();
+        let initial_temperature = caloric.temperature_k(initial_specific_energy_j_kg)?;
+        let (exchange, temperatures) = match self.original {
+            OriginalConduction::EquilibriumPhase(_) => {
+                return Err(DepositionError::InvalidInput(
+                    "driven caloric response is unsupported for equilibrium-phase storage",
+                ));
+            }
+            OriginalConduction::Isobaric(law) => solve_driven(
+                &law.caloric().source_line().knots, 1.0,
+                initial_temperature, initial_drive_j_kg, exposure_j_kg_k,
+            )?,
+            OriginalConduction::ExpandingIsobaric(law) => solve_driven(
+                &law.caloric().caloric().source_line().knots, 1.0,
+                initial_temperature, initial_drive_j_kg, exposure_j_kg_k,
+            )?,
+            OriginalConduction::Isochoric(law) => solve_driven(
+                &law.caloric().source_line().knots, 1.0,
+                initial_temperature, initial_drive_j_kg, exposure_j_kg_k,
+            )?,
+            OriginalConduction::FixedVolume(law) => solve_driven(
+                &law.path().source_lines()[0].knots, law.reference_density_kg_m3(),
+                initial_temperature, initial_drive_j_kg, exposure_j_kg_k,
+            )?,
+            OriginalConduction::HeatStorage(law) => solve_driven(
+                law.caloric().storage().capacity_knots(), law.caloric().reference_mass_kg(),
+                initial_temperature, initial_drive_j_kg, exposure_j_kg_k,
+            )?,
+        };
+        let (final_energy, temperature_k, represented, residual) = self.finish_energy(
+            initial_specific_energy_j_kg, exchange.energy_change, exchange.temperature, temperatures,
+        )?;
+        Ok(CaloricDrivenHeatExchange {
+            storage_basis: caloric.storage_basis(),
+            initial_specific_energy_j_kg,
+            final_specific_energy_j_kg: final_energy,
+            temperature_k,
+            temperature_change_k: exchange.temperature_change,
+            mean_temperature_k: exchange.mean_temperature,
+            mean_temperature_change_k: exchange.mean_temperature_change,
+            specific_heat_j_kg: exchange.energy_change,
+            represented_energy_change_j_kg: represented,
+            heat_residual_j_kg: residual,
+            inlet_energy_gain: exchange.inlet_energy_gain,
+            inlet_energy_loss: exchange.inlet_energy_loss,
+            source_heat_gain: exchange.source_gain,
+            mean_source_derivative_kg_k_j: exchange.mean_source_derivative,
+            remaining_drive_j_kg: exchange.remaining_drive,
+            mean_log_duration_derivative_k: exchange.mean_log_duration_derivative,
+        })
+    }
+
+    // Both exchange entry points retain the same native energy admission and
+    // canonical support endpoints; neither reconstructs heat from rounded T.
+    fn finish_energy(
+        &self,
+        initial: f64,
+        heat: f64,
+        solved_temperature: f64,
+        temperatures: [f64; 2],
+    ) -> Result<(f64, f64, f64, f64), DepositionError> {
+        let bounds = self.energy_bounds_j_kg();
+        let final_energy = if heat == 0.0 {
+            initial
+        } else if heat < 0.0 && solved_temperature == temperatures[0] {
+            bounds[0]
+        } else if heat > 0.0 && solved_temperature == temperatures[1] {
+            bounds[1]
+        } else {
+            initial + heat
+        };
+        if !final_energy.is_finite() {
+            return Err(DepositionError::Arithmetic);
+        }
+        let temperature = self.caloric_law().temperature_k(final_energy)?;
+        let represented = final_energy - initial;
+        let residual = heat - represented;
+        if !represented.is_finite() || !residual.is_finite() {
+            return Err(DepositionError::Arithmetic);
+        }
+        Ok((final_energy, temperature, represented, residual))
+    }
+
 }
 
 // Capacity is J/(kg K), J/(m3 K), or J/K. Solve in that original source basis,
@@ -197,3 +339,47 @@ fn solve<K: CapacityKnot>(
     }
     Ok((exchange, [knots[0].temperature(), knots[knots.len() - 1].temperature()]))
 }
+
+
+fn solve_driven<K: CapacityKnot>(
+    knots: &[K],
+    energy_scale: f64,
+    initial: f64,
+    specific_drive: f64,
+    specific_exposure: f64,
+) -> Result<(CapacityDrivenExchange, [f64; 2]), DepositionError> {
+    let drive = specific_drive * energy_scale;
+    let exposure = specific_exposure * energy_scale;
+    if !drive.is_finite() || !exposure.is_finite()
+        || (specific_drive != 0.0 && drive == 0.0)
+        || (specific_exposure != 0.0 && exposure == 0.0)
+    {
+        return Err(DepositionError::Arithmetic);
+    }
+    let mut exchange = CapacityCurve::new(knots)
+        .driven_heat_exchange(initial, drive, exposure)
+        .map_err(|_| DepositionError::MaterialDomain)?;
+    let native_heat = exchange.energy_change;
+    let native_mean_response = exchange.mean_source_derivative;
+    exchange.energy_change /= energy_scale;
+    exchange.remaining_drive /= energy_scale;
+    // Output heat and input drive scale together, so source_gain is invariant.
+    // The derivative of a temperature with respect to specific input energy is
+    // instead the native derivative multiplied by the original mass or density.
+    exchange.mean_source_derivative *= energy_scale;
+    if specific_exposure == 0.0 {
+        // Preserve the exact specific source input through mass/volume scaling.
+        exchange.energy_change = specific_drive;
+        exchange.remaining_drive = specific_drive;
+    }
+    if !exchange.energy_change.is_finite()
+        || !exchange.remaining_drive.is_finite()
+        || !exchange.mean_source_derivative.is_finite()
+        || (native_heat != 0.0 && exchange.energy_change == 0.0)
+        || (native_mean_response != 0.0 && exchange.mean_source_derivative == 0.0)
+    {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok((exchange, [knots[0].temperature(), knots[knots.len() - 1].temperature()]))
+}
+

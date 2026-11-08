@@ -37,6 +37,24 @@ pub(super) struct CapacityExchange {
     pub mean_log_exposure_derivative: f64,
 }
 
+
+/// Same exact response for C(T) dT/du = drive - feedback*(T-T_initial).
+/// Drive, feedback and duration carry the caller's original compatible units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct CapacityDrivenExchange {
+    pub temperature: f64,
+    pub temperature_change: f64,
+    pub energy_change: f64,
+    pub mean_temperature: f64,
+    pub mean_temperature_change: f64,
+    pub inlet_energy_gain: f64,
+    pub inlet_energy_loss: f64,
+    pub source_gain: f64,
+    pub mean_source_derivative: f64,
+    pub remaining_drive: f64,
+    pub mean_log_duration_derivative: f64,
+}
+
 /// Prepared search coordinates for repeated caloric queries from one fixed datum.
 ///
 /// The coordinates locate an original capacity segment; they do not replace
@@ -352,193 +370,237 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         reservoir: f64,
         exposure: f64,
     ) -> Result<CapacityExchange, ThermalTransportError> {
-        self.check_temperature(initial)?;
-        if !positive(reservoir) || !exposure.is_finite() || exposure < 0.0 {
-            return Err(invalid(
-                "linear heat exchange needs positive reservoir temperature and finite nonnegative exposure",
-            ));
+        if !positive(reservoir) {
+            return Err(invalid("linear heat exchange needs positive reservoir temperature"));
         }
-        if exposure == 0.0 || initial == reservoir {
+        // Keep the original bath as an endpoint hint, without multiplying its
+        // temperature difference by a potentially very large exposure.
+        let answer = self.exchange_driven::<PRESERVE_HEAT>(
+            initial, reservoir - initial, 1.0, exposure, Some(reservoir),
+        )?;
+        Ok(CapacityExchange {
+            temperature: answer.temperature,
+            energy_change: answer.energy_change,
+            mean_temperature: answer.mean_temperature,
+            inlet_energy_gain: answer.inlet_energy_gain,
+            inlet_energy_loss: answer.inlet_energy_loss,
+            reservoir_energy_derivative: answer.source_gain,
+            mean_reservoir_derivative: answer.mean_source_derivative,
+            remaining_temperature_difference: answer.remaining_drive,
+            mean_log_exposure_derivative: answer.mean_log_duration_derivative,
+        })
+    }
+
+    /// Normalized-time source and linear-loss exchange. No absolute virtual
+    /// reservoir or division of initial drive by feedback is required.
+    pub(super) fn driven_heat_exchange(
+        &self,
+        initial: f64,
+        initial_drive: f64,
+        exposure: f64,
+    ) -> Result<CapacityDrivenExchange, ThermalTransportError> {
+        self.exchange_driven::<true>(initial, initial_drive, exposure, 1.0, None)
+    }
+
+    fn exchange_driven<const PRESERVE_HEAT: bool>(
+        &self,
+        initial: f64,
+        initial_drive: f64,
+        feedback: f64,
+        duration: f64,
+        reservoir: Option<f64>,
+    ) -> Result<CapacityDrivenExchange, ThermalTransportError> {
+        self.check_temperature(initial)?;
+        if !initial_drive.is_finite()
+            || !feedback.is_finite() || feedback < 0.0
+            || !duration.is_finite() || duration < 0.0
+        {
+            return Err(invalid("driven exchange needs finite drive and nonnegative feedback and duration"));
+        }
+        if duration == 0.0 || initial_drive == 0.0 {
             let capacity = self.capacity(initial)?;
-            let attenuation = exposure / capacity;
-            let loss = -(-attenuation).exp_m1();
-            let response = if attenuation == 0.0 {
-                exposure
-            } else if attenuation <= 0.5 {
-                exposure * (loss / attenuation)
-            } else {
-                capacity * loss
-            };
-            let mean_response = if exposure == 0.0 {
-                0.0
-            } else if loss <= 0.5 {
-                let [a0, a1, _, _] = exchange_moment_weights(loss);
-                loss * a1 / (a0 + a1)
-            } else {
-                1.0 - response / exposure
-            };
-            return Ok(CapacityExchange {
+            let (gain, loss, response, mean_response) =
+                equilibrium_response(capacity, feedback, duration);
+            return Ok(CapacityDrivenExchange {
                 temperature: initial,
+                temperature_change: 0.0,
                 energy_change: 0.0,
                 mean_temperature: initial,
-                inlet_energy_gain: (-attenuation).exp(),
+                mean_temperature_change: 0.0,
+                inlet_energy_gain: gain,
                 inlet_energy_loss: loss,
-                reservoir_energy_derivative: response,
-                mean_reservoir_derivative: mean_response,
-                remaining_temperature_difference: reservoir - initial,
-                mean_log_exposure_derivative: 0.0,
+                source_gain: response,
+                mean_source_derivative: mean_response,
+                remaining_drive: initial_drive,
+                mean_log_duration_derivative: 0.0,
             });
         }
-        let heating = reservoir > initial;
+        let heating = initial_drive > 0.0;
         let direction = if heating { 1.0 } else { -1.0 };
+        let drive_magnitude = initial_drive.abs();
         let mut index = if heating {
             self.segment(initial)
         } else {
-            self.knots
-                .partition_point(|k| k.temperature() < initial)
-                .saturating_sub(1)
+            self.knots.partition_point(|k| k.temperature() < initial).saturating_sub(1)
         };
         let mut current = initial;
-        let mut cumulative = 0.0;
-        let mut correction = 0.0;
+        let (mut cumulative, mut correction) = (0.0, 0.0);
         let (mut energy, mut energy_correction) = (0.0, 0.0);
         let (mut mean_travel, mut mean_correction) = (0.0, 0.0);
         let (mut inlet_energy_gain, mut inlet_energy_loss) = (1.0, 0.0);
-        let mut reservoir_energy_derivative = 0.0;
-        let (mut mean_response_numerator, mut response_correction) = (0.0, 0.0);
-        let (mut mean_exposure_response, mut exposure_response_correction) = (0.0, 0.0);
+        let mut source_gain = 0.0;
+        let (mut mean_response_integral, mut response_correction) = (0.0, 0.0);
+        let (mut mean_duration_response, mut duration_response_correction) = (0.0, 0.0);
         for _ in 0..self.knots.len() - 1 {
-            let end = if heating {
-                self.knots[index + 1].temperature().min(reservoir)
+            let boundary = if heating {
+                self.knots[index + 1].temperature()
             } else {
-                self.knots[index].temperature().max(reservoir)
+                self.knots[index].temperature()
             };
-            if end == current {
+            let source_width = (boundary - current).abs();
+            if source_width == 0.0 {
                 break;
             }
-            let segment = ExchangeSegment {
-                distance: (reservoir - current).abs(),
-                width: (end - current).abs(),
-                initial_capacity: self.on_segment(index, current),
-                end_capacity: self.on_segment(index, end),
+            let drive = reservoir.map_or_else(
+                || (-feedback).mul_add((current - initial).abs(), drive_magnitude),
+                |bath| (bath - current).abs(),
+            );
+            if !positive(drive) {
+                return Err(invalid("source-relative driving power is not representable"));
+            }
+            // An infinite drive/feedback ratio is harmless: the finite original
+            // source interval still bounds the travel, and z is computed directly.
+            let equilibrium_width = if feedback == 0.0 { f64::INFINITY } else { drive / feedback };
+            let width = source_width.min(equilibrium_width);
+            if !positive(width) {
+                return Err(invalid("driven exchange travel is not representable"));
+            }
+            let end = if width == source_width {
+                boundary
+            } else {
+                reservoir.unwrap_or(current + direction * width)
             };
-            let amount = segment.exposure(segment.width)?;
+            let initial_capacity = self.on_segment(index, current);
+            let boundary_capacity = self.on_segment(index, boundary);
+            let fraction = width / source_width;
+            let end_capacity = if width == source_width {
+                boundary_capacity
+            } else {
+                (1.0 - fraction) * initial_capacity + fraction * boundary_capacity
+            };
+            let segment = ExchangeSegment {
+                drive, feedback, width, initial_capacity, end_capacity,
+            };
+            let amount = segment.exposure(width)?;
             let corrected = amount - correction;
             let next = cumulative + corrected;
-            let finished = exposure <= next;
-            let local_exposure = if finished {
-                exposure - cumulative
+            let finished = duration <= next;
+            let local_duration = if finished { duration - cumulative } else { amount };
+            let travel = if !finished || duration == next {
+                width
             } else {
-                amount
+                segment.inverse(local_duration)?
             };
-            let travel = if !finished || exposure == next {
-                segment.width
-            } else {
-                segment.inverse(local_exposure)?
-            };
-            let heat = (0.5 * segment.initial_capacity + 0.5 * segment.capacity(travel)) * travel;
-            if !heat.is_finite() || !positive(local_exposure) {
-                return Err(invalid(
-                    "heat-exchange energy or exposure is not representable",
-                ));
+            let heat = (0.5 * initial_capacity + 0.5 * segment.capacity(travel)) * travel;
+            if !positive(heat) || !positive(local_duration) {
+                return Err(invalid("driven exchange heat or duration is not representable"));
             }
-            let gain = segment.inlet_energy_gain(travel, local_exposure)?;
-            let loss = if segment.initial_capacity == segment.end_capacity {
-                -(-local_exposure / segment.initial_capacity).exp_m1()
+            let gain = segment.inlet_energy_gain(travel, local_duration)?;
+            let loss = if initial_capacity == end_capacity {
+                -(-product_over(feedback, local_duration, initial_capacity)).exp_m1()
             } else {
-                travel / segment.distance
+                segment.fraction(travel)
             };
             let (local_mean, response, mean_response, local_mean_gap) =
-                segment.exchange_moments(travel, local_exposure, heat, gain);
-            // X*dTmean/dX = Tout-Tmean. Accumulate its positive interval
-            // moment before rounding either absolute temperature. Moving the
-            // endpoint by `travel` also moves its gap from all earlier states.
-            // Normalize first so even very large finite exposures need no X*T.
+                segment.exchange_moments(travel, local_duration, heat, gain);
+            // The endpoint-minus-mean moment retains even sub-ULP absolute T.
             compensated_add(
-                &mut mean_exposure_response,
-                &mut exposure_response_correction,
-                (cumulative / exposure) * travel
-                    + (local_exposure / exposure) * local_mean_gap,
+                &mut mean_duration_response,
+                &mut duration_response_correction,
+                (cumulative / duration) * travel + (local_duration / duration) * local_mean_gap,
             );
-            // X-B stays a positive integral even when B rounds to X. This
-            // preserves a weak wall response of the stream's Robin mean.
+            // (u - dE/dD)/feedback, accumulated without subtraction or
+            // division by feedback. travel/drive is the exact zero-feedback limit.
+            let previous_response = if initial_capacity == end_capacity {
+                product_over(response, source_gain, initial_capacity)
+            } else {
+                product_over(travel, source_gain, drive)
+            };
             compensated_add(
-                &mut mean_response_numerator,
+                &mut mean_response_integral,
                 &mut response_correction,
-                loss * reservoir_energy_derivative + local_exposure * mean_response,
+                previous_response + local_duration * mean_response,
             );
-            reservoir_energy_derivative = gain.mul_add(reservoir_energy_derivative, response);
+            source_gain = gain.mul_add(source_gain, response);
             inlet_energy_loss = gain.mul_add(inlet_energy_loss, loss);
             inlet_energy_gain *= gain;
-            if !reservoir_energy_derivative.is_finite()
-                || !mean_response_numerator.is_finite()
-                || !mean_exposure_response.is_finite()
-                || reservoir_energy_derivative < 0.0
-                || mean_response_numerator < 0.0
-                || mean_exposure_response < 0.0
+            if !source_gain.is_finite()
+                || !mean_response_integral.is_finite()
+                || !mean_duration_response.is_finite()
+                || source_gain < 0.0 || mean_response_integral < 0.0 || mean_duration_response < 0.0
             {
-                return Err(invalid("heat-exchange wall response is not representable"));
+                return Err(invalid("driven exchange response is not representable"));
             }
             compensated_add(&mut energy, &mut energy_correction, heat);
             compensated_add(
                 &mut mean_travel,
                 &mut mean_correction,
-                (local_exposure / exposure) * ((current - initial).abs() + local_mean),
+                (local_duration / duration) * ((current - initial).abs() + local_mean),
             );
             if finished {
-                let temperature = if travel == segment.width {
+                let temperature = if travel == width {
                     end
-                } else if travel <= 0.5 * segment.distance {
-                    current + direction * travel
+                } else if let Some(bath) = reservoir
+                    && travel > 0.5 * drive
+                {
+                    bath - direction * (drive - travel)
                 } else {
-                    reservoir - direction * (segment.distance - travel)
+                    current + direction * travel
                 };
                 if temperature == initial && !PRESERVE_HEAT {
-                    return Err(invalid(
-                        "nonzero heat exchange is below temperature resolution",
-                    ));
+                    return Err(invalid("nonzero heat exchange is below temperature resolution"));
                 }
-                let mean_temperature = initial + direction * mean_travel;
-                if !positive(energy)
-                    || !positive(temperature)
-                    || !positive(mean_temperature)
+                let temperature_change = direction * ((current - initial).abs() + travel);
+                let mean_temperature_change = direction * mean_travel;
+                let mean_temperature = initial + mean_temperature_change;
+                if !positive(temperature) || !positive(mean_temperature)
                     || mean_temperature < initial.min(temperature)
                     || mean_temperature > initial.max(temperature)
-                    || temperature < current.min(end)
-                    || temperature > current.max(end)
+                    || temperature < current.min(end) || temperature > current.max(end)
                 {
-                    return Err(invalid("heat-exchange state or mean is not representable"));
+                    return Err(invalid("driven exchange state or mean is not representable"));
                 }
-                return Ok(CapacityExchange {
-                    temperature,
-                    energy_change: direction * energy,
-                    mean_temperature,
-                    inlet_energy_gain,
-                    inlet_energy_loss,
-                    reservoir_energy_derivative,
-                    mean_reservoir_derivative: mean_response_numerator / exposure,
-                    remaining_temperature_difference: (reservoir - initial) * inlet_energy_gain,
-                    mean_log_exposure_derivative: direction * mean_exposure_response,
+                // With no loss the exact source heat is the native input, not
+                // a reconstruction from its rounded inverse temperature travel.
+                let energy_change = if feedback == 0.0 {
+                    initial_drive * duration
+                } else {
+                    direction * energy
+                };
+                if !energy_change.is_finite() {
+                    return Err(invalid("driven exchange energy is not representable"));
+                }
+                return Ok(CapacityDrivenExchange {
+                    temperature, temperature_change, energy_change, mean_temperature,
+                    mean_temperature_change, inlet_energy_gain, inlet_energy_loss,
+                    source_gain: if feedback == 0.0 { duration } else { source_gain },
+                    mean_source_derivative: mean_response_integral / duration,
+                    remaining_drive: initial_drive * inlet_energy_gain,
+                    mean_log_duration_derivative: direction * mean_duration_response,
                 });
             }
             correction = (next - cumulative) - corrected;
             cumulative = next;
             current = end;
             if heating {
-                if index + 2 == self.knots.len() {
-                    break;
-                }
+                if index + 2 == self.knots.len() { break; }
                 index += 1;
             } else {
-                if index == 0 {
-                    break;
-                }
+                if index == 0 { break; }
                 index -= 1;
             }
         }
-        Err(invalid(
-            "heat exchange exceeds the source temperature support",
-        ))
+        Err(invalid("heat exchange exceeds the source temperature support"))
     }
 
     /// Exposure required to traverse part of one original affine-Cp interval.
@@ -566,7 +628,8 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         }
         if initial == final_t { return Ok(0.0); }
         let segment = ExchangeSegment {
-            distance: (reservoir - initial).abs(),
+            drive: (reservoir - initial).abs(),
+            feedback: 1.0,
             width: (final_t - initial).abs(),
             initial_capacity: self.on_segment(index, initial),
             end_capacity: self.on_segment(index, final_t),
@@ -735,7 +798,8 @@ fn entropy_weights_with_width(low: f64, high: f64, width: f64) -> [f64; 2] {
 // Positive travel toward the reservoir, with the original affine capacity.
 // Solving in travel preserves small heat that an absolute-T inverse quantizes.
 struct ExchangeSegment {
-    distance: f64,
+    drive: f64,
+    feedback: f64,
     width: f64,
     initial_capacity: f64,
     end_capacity: f64,
@@ -747,30 +811,76 @@ impl ExchangeSegment {
         (1.0 - fraction) * self.initial_capacity + fraction * self.end_capacity
     }
 
+    fn fraction(&self, travel: f64) -> f64 {
+        if self.feedback > 0.0
+            && travel == self.width && self.width == self.drive / self.feedback
+        {
+            1.0
+        } else {
+            product_over(self.feedback, travel, self.drive)
+        }
+    }
+
     fn exposure(&self, travel: f64) -> Result<f64, ThermalTransportError> {
-        if travel == 0.0 {
-            return Ok(0.0);
+        if travel == 0.0 { return Ok(0.0); }
+        let z = self.fraction(travel);
+        if z == 1.0 { return Ok(f64::INFINITY); }
+        if !z.is_finite() || !(0.0..1.0).contains(&z) {
+            return Err(invalid("driven exchange exceeded its positive driving interval"));
         }
-        if travel == self.distance {
-            return Ok(f64::INFINITY);
-        }
-        let [near, far] = entropy_weights_with_width(self.distance - travel, self.distance, travel);
-        let amount = self.capacity(travel) * near + self.initial_capacity * far;
+        let end_capacity = self.capacity(travel);
+        let amount = if self.feedback == 1.0 {
+            // Preserve the original fast, cancellation-resistant bath integral.
+            let [near, far] = entropy_weights_with_width(self.drive - travel, self.drive, travel);
+            end_capacity * near + self.initial_capacity * far
+        } else {
+            let heat = (0.5 * self.initial_capacity + 0.5 * end_capacity) * travel;
+            if self.feedback == 0.0 {
+                heat / self.drive
+            } else {
+                let [a0, a1, _, _] = exchange_moment_weights(z);
+                let scale = self.initial_capacity.max(end_capacity);
+                let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
+                let shape = 2.0 * (c0 * a0 + c1 * a1) / (c0 + c1);
+                product_over(heat, shape, self.drive)
+            }
+        };
         if amount.is_nan() || amount < 0.0 {
             return Err(invalid("heat-exchange integral is not representable"));
         }
         Ok(amount)
     }
 
-    fn inverse(&self, exposure: f64) -> Result<f64, ThermalTransportError> {
-        let exponential = self.distance * -(-exposure / self.initial_capacity).exp_m1();
+    fn inverse(&self, duration: f64) -> Result<f64, ThermalTransportError> {
+        if self.feedback == 0.0 {
+            // Exact affine caloric inverse at constant applied power.
+            let mean = 0.5 * self.initial_capacity + 0.5 * self.end_capacity;
+            let amount = mean * self.width;
+            let f = if amount.is_finite() {
+                product_over(self.drive, duration, amount)
+            } else {
+                product_over(self.drive, duration, mean) / self.width
+            };
+            let scale = self.initial_capacity.max(self.end_capacity);
+            let (a, b) = (self.initial_capacity / scale, self.end_capacity / scale);
+            let root = ((1.0 - f) * a * a + f * b * b).sqrt();
+            let travel = self.width * (f * (a + b) / (a + root));
+            if travel.is_finite() && (0.0..=self.width).contains(&travel) {
+                return Ok(travel);
+            }
+            return Err(invalid("constant-source exchange left its admitted segment"));
+        }
+        let attenuation = product_over(self.feedback, duration, self.initial_capacity);
+        let exponential = if attenuation == 0.0 {
+            product_over(self.drive, duration, self.initial_capacity)
+        } else {
+            product_over(self.drive, -(-attenuation).exp_m1(), self.feedback)
+        };
         if self.initial_capacity == self.end_capacity {
-            if exponential.is_finite() && exponential >= 0.0 && exponential <= self.width {
+            if exponential.is_finite() && (0.0..=self.width).contains(&exponential) {
                 return Ok(exponential);
             }
-            return Err(invalid(
-                "constant-capacity exchange left its admitted segment",
-            ));
+            return Err(invalid("constant-capacity exchange left its admitted segment"));
         }
         let (mut lower, mut upper) = (0.0, self.width);
         let (mut low_value, mut high_value) = (0.0, self.exposure(self.width)?);
@@ -781,10 +891,10 @@ impl ExchangeSegment {
         };
         for iteration in 0..128 {
             let value = self.exposure(trial)?;
-            if value == exposure || (value - exposure).abs() <= 4.0 * f64::EPSILON * exposure {
+            if value == duration || (value - duration).abs() <= 4.0 * f64::EPSILON * duration {
                 return Ok(trial);
             }
-            if value < exposure {
+            if value < duration {
                 lower = trial;
                 low_value = value;
             } else {
@@ -792,37 +902,31 @@ impl ExchangeSegment {
                 high_value = value;
             }
             if lower.next_up() >= upper {
-                // Finite exposure can place the solution closer to equilibrium
-                // than a representable travel. The exact supplied exposure still
-                // owns the mean below; never integrate a rounded infinite log.
                 return Ok(
-                    if upper == self.distance || high_value - exposure < exposure - low_value {
+                    if self.fraction(upper) == 1.0 || high_value - duration < duration - low_value {
                         upper
                     } else {
                         lower
                     },
                 );
             }
-            let newton =
-                trial + ((exposure - value) / self.capacity(trial)) * (self.distance - trial);
+            let remaining = (-self.feedback).mul_add(trial, self.drive);
+            let newton = trial + ((duration - value) / self.capacity(trial)) * remaining;
             trial = if iteration % 2 == 0 && newton > lower && newton < upper {
                 newton
             } else {
                 lower + 0.5 * (upper - lower)
             };
         }
-        Err(invalid(
-            "heat-exchange inverse exceeded its bounded iteration budget",
-        ))
+        Err(invalid("heat-exchange inverse exceeded its bounded iteration budget"))
     }
 
-    // The same positive moments give the stream mean, its wall response, and
-    // the endpoint-minus-mean gap needed by exposure/control derivatives.
-    // B=dEout/dTw=Dout*integral C(T)/(Tw-T)^2 dT. For affine C,
-    // B=C0*w0+C1*w1, w0=(1-z)*[-log(1-z)-z]/z and w1=z-w0.
-    fn exchange_moments(&self, travel: f64, exposure: f64, heat: f64, gain: f64) -> (f64, f64, f64, f64) {
-        let heat_per_exposure = heat / exposure;
-        let z = travel / self.distance;
+    // The existing positive affine-capacity moments in source-relative drive
+    // coordinates. At zero feedback they are the exact cubic time moment of C(T).
+    fn exchange_moments(
+        &self, travel: f64, duration: f64, heat: f64, gain: f64,
+    ) -> (f64, f64, f64, f64) {
+        let z = self.fraction(travel);
         let end_capacity = self.capacity(travel);
         if z <= 0.5 {
             let [a0, a1, b0, b1] = exchange_moment_weights(z);
@@ -830,59 +934,49 @@ impl ExchangeSegment {
             let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
             let denominator = c0 * a0 + c1 * a1;
             let w0 = gain * a1;
-            let response = exposure * ((c0 * w0 + c1 * (1.0 - w0)) / denominator);
-            let mean_response = z * ((2.0 * c0 * b0 + c1 * (b1 - b0)) / denominator);
-            let mean = if heat_per_exposure <= 0.75 * self.distance {
-                self.distance - heat_per_exposure
-            } else {
-                travel * ((c0 * b0 + c1 * b1) / denominator)
-            };
-            // Integral (1-y)*C(y)/(1-z*y), expressed with positive weights.
-            // Unlike travel-mean this also retains a sub-ulp absolute gap.
+            let response = duration * ((c0 * w0 + c1 * (1.0 - w0)) / denominator);
+            let mean_response = product_over(
+                travel, (2.0 * c0 * b0 + c1 * (b1 - b0)) / denominator, self.drive,
+            );
+            let mean = travel * ((c0 * b0 + c1 * b1) / denominator);
             let mean_gap = travel * ((c0 * (a0 - b0) + c1 * b0) / denominator);
             (mean, response, mean_response, mean_gap)
         } else {
             let w0 = if gain == 0.0 { 0.0 } else { gain * (-gain.ln() - z) / z };
-            let response = self.initial_capacity * w0 + end_capacity * (z - w0);
-            let mean = if heat_per_exposure <= 0.75 * self.distance {
-                self.distance - heat_per_exposure
+            let scale = self.initial_capacity.max(end_capacity);
+            let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
+            let response = product_over(scale, c0 * w0 + c1 * (z - w0), self.feedback);
+            let heat_rate = heat / duration;
+            let mean = if heat_rate <= 0.75 * self.drive {
+                (self.drive - heat_rate) / self.feedback
             } else {
                 let [a0, a1, b0, b1] = exchange_moment_weights(z);
-                let scale = self.initial_capacity.max(end_capacity);
-                let (c0, c1) = (self.initial_capacity / scale, end_capacity / scale);
                 travel * ((c0 * b0 + c1 * b1) / (c0 * a0 + c1 * a1))
             };
-            // Here more than half the reservoir gap has been traversed, so
-            // this subtraction is well conditioned for positive affine Cp.
-            // The analytic gain survives even if travel rounds to distance.
-            let mean_gap = heat_per_exposure - self.distance * gain;
-            (mean, response, 1.0 - response / exposure, mean_gap)
+            let mean_gap = (heat_rate - self.drive * gain) / self.feedback;
+            (mean, response, (1.0 - response / duration) / self.feedback, mean_gap)
         }
     }
 
-    // dE_out/dE_in=(Tw-Tout)/(Tw-Tin). The original affine law gives
-    // X=-C(Tw)*log(gain)-(C(Tw)-C(Tin))*travel/distance at rounded equilibrium.
-    fn inlet_energy_gain(&self, travel: f64, exposure: f64) -> Result<f64, ThermalTransportError> {
-        let gain = if self.initial_capacity == self.end_capacity {
-            (-exposure / self.initial_capacity).exp()
-        } else if travel < self.distance {
-            // A resolved relative gap avoids subtracting opposing caloric
-            // terms when a decreasing law has a very small reservoir Cp.
-            (self.distance - travel) / self.distance
-        } else if self.width == self.distance {
+    // Physical fixed-intercept response dE_out/dE_in = driving_out/driving_in.
+    // At rounded equilibrium retain the original finite-duration exponential.
+    fn inlet_energy_gain(&self, travel: f64, duration: f64) -> Result<f64, ThermalTransportError> {
+        let gain = if self.feedback == 0.0 {
+            1.0
+        } else if self.initial_capacity == self.end_capacity {
+            (-product_over(self.feedback, duration, self.initial_capacity)).exp()
+        } else if self.fraction(travel) < 1.0 {
+            (-self.feedback).mul_add(travel, self.drive) / self.drive
+        } else if self.width == self.drive / self.feedback {
             let capacity_change = self.end_capacity - self.initial_capacity;
+            let exposure = self.feedback * duration;
             let attenuation = if capacity_change < 0.0 {
-                // Keep Cp(Tw) when subtracting it directly from a much larger
-                // inlet capacity would erase it before the exposure cancels.
                 let (head, tail) = fs_math::eft::two_sum(exposure, -self.initial_capacity);
                 ((head + self.end_capacity) + tail) / self.end_capacity
             } else {
                 exposure / self.end_capacity + capacity_change / self.end_capacity
             };
             let value = (-attenuation).exp();
-            // The omitted relative gap changes this exponent by approximately
-            // (Cp_in-Cp_wall)*gain/Cp_wall. It must be at rounding scale; an
-            // unresolved saturated temperature must not invent a unit response.
             let gap_correction = (capacity_change.abs() * value) / self.end_capacity;
             if value == 1.0 || gap_correction > 16.0 * f64::EPSILON * attenuation.max(1.0) {
                 return Err(invalid("saturated heat-exchange response is unresolved"));
@@ -896,6 +990,41 @@ impl ExchangeSegment {
         }
         Ok(gain)
     }
+}
+
+// Nonnegative a*b/c without an avoidable intermediate product or ratio overflow.
+fn product_over(a: f64, b: f64, c: f64) -> f64 {
+    if a == 0.0 || b == 0.0 { return 0.0; }
+    let (large, small) = if a >= b { (a, b) } else { (b, a) };
+    let ratio = large / c;
+    if ratio.is_finite() { ratio * small } else { (small / c) * large }
+}
+
+// Response to an infinitesimal drive around the actual equilibrium temperature.
+// In particular, zero feedback has dE/dD=u and dT_mean/dD=u/(2*C), not zero.
+fn equilibrium_response(capacity: f64, feedback: f64, duration: f64) -> (f64, f64, f64, f64) {
+    if duration == 0.0 { return (1.0, 0.0, 0.0, 0.0); }
+    let attenuation = product_over(feedback, duration, capacity);
+    let gain = (-attenuation).exp();
+    let loss = -(-attenuation).exp_m1();
+    let response = if attenuation == 0.0 {
+        duration
+    } else if attenuation <= 0.5 {
+        duration * (loss / attenuation)
+    } else {
+        product_over(capacity, loss, feedback)
+    };
+    let mean_response = if attenuation < 0.125 {
+        let (mut sum, mut term) = (0.5, 0.5);
+        for n in 1..=18 {
+            term *= -attenuation / f64::from(n + 2);
+            sum += term;
+        }
+        product_over(duration, sum, capacity)
+    } else {
+        (1.0 - response / duration) / feedback
+    };
+    (gain, loss, response, mean_response)
 }
 
 // Integrals of (1-y), y, y(1-y), y² over 1-z*y on [0,1].
@@ -1691,4 +1820,146 @@ mod tests {
             assert_eq!(inverse.temperature(&curve, heat).unwrap(), target);
         }
     }
+    fn close_driven(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
+        );
+    }
+
+    #[test]
+    fn g1_driven_exchange_matches_affine_source_and_allows_negative_virtual_equilibrium() {
+        let knots = [[300.0, 350.0], [440.0, 420.0], [700.0, 550.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, target, virtual_t) in [(360.0, 600.0, 720.0), (650.0, 350.0, -200.0)] {
+            // Independent integral for C(T)=200+T/2. The virtual intercept is
+            // used only by this oracle; production accepts the relative drive.
+            let x = affine_exchange(initial, target, virtual_t, 200.0, 0.5);
+            let drive = x * (virtual_t - initial);
+            let response = curve.driven_heat_exchange(initial, drive, x).unwrap();
+            let heat = (200.0 + 0.25 * (initial + target)) * (target - initial);
+            close_driven(response.temperature, target, 2e-10);
+            close_driven(response.temperature_change, target - initial, 2e-10);
+            close_driven(response.energy_change, heat, 2e-7);
+            close_driven(response.mean_temperature_change, (drive - heat) / x, 2e-10);
+            close_driven(response.remaining_drive, drive * (virtual_t - target) / (virtual_t - initial), 2e-7);
+            close_driven(response.inlet_energy_gain, (virtual_t - target) / (virtual_t - initial), 2e-12);
+            close_driven(response.mean_log_duration_derivative,
+                response.temperature_change - response.mean_temperature_change, 2e-10);
+        }
+    }
+
+    #[test]
+    fn g1_pure_source_keeps_exact_heat_and_capacity_weighted_cubic_time_mean() {
+        let knots = [[300.0, 350.0], [440.0, 420.0], [700.0, 550.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, target) in [(350.0, 650.0), (650.0, 350.0)] {
+            let heat = (200.0 + 0.25 * (initial + target)) * (target - initial);
+            let response = curve.driven_heat_exchange(initial, heat, 0.0).unwrap();
+            let mean = (100.0 * (initial + target)
+                + (initial * initial + initial * target + target * target) / 6.0)
+                / (200.0 + 0.25 * (initial + target));
+            assert_eq!(response.energy_change, heat);
+            assert_eq!(response.inlet_energy_gain, 1.0);
+            assert_eq!(response.inlet_energy_loss, 0.0);
+            assert_eq!(response.source_gain, 1.0);
+            close_driven(response.temperature, target, 2e-10);
+            close_driven(response.mean_temperature, mean, 2e-10);
+            close_driven(response.mean_source_derivative, (target - mean) / heat, 2e-14);
+            assert!((mean - 0.5 * (initial + target)).abs() > 8.0);
+        }
+        let equilibrium = curve.driven_heat_exchange(500.0, 0.0, 0.0).unwrap();
+        assert_eq!(equilibrium.source_gain, 1.0);
+        assert_eq!(equilibrium.mean_source_derivative, 1.0 / 900.0);
+    }
+
+    #[test]
+    fn g1_driven_exchange_keeps_weak_heat_moments_and_equilibrium_source_response() {
+        let knots = [[300.0, 350.0], [700.0, 550.0]];
+        let curve = CapacityCurve::new(&knots);
+        let capacity = 450.0;
+        for x in [0.0, 1e-20, 5.0, 200.0, 1e8] {
+            let a: f64 = x / capacity;
+            let (phi, psi) = if a < 1e-4 {
+                (1.0 - a / 2.0 + a * a / 6.0, 0.5 - a / 6.0 + a * a / 24.0)
+            } else {
+                let phi = -(-a).exp_m1() / a;
+                (phi, (1.0 - phi) / a)
+            };
+            for drive in [-1e-20, 0.0, 1e-20] {
+                let response = curve.driven_heat_exchange(500.0, drive, x).unwrap();
+                assert_eq!(response.temperature, 500.0);
+                assert_eq!(response.mean_temperature, 500.0);
+                close_driven(response.energy_change, drive * phi, 3e-14 * (drive * phi).abs());
+                close_driven(response.temperature_change, drive * phi / capacity, 3e-14 * (drive * phi / capacity).abs());
+                close_driven(response.mean_temperature_change, drive * psi / capacity, 3e-14 * (drive * psi / capacity).abs());
+                close_driven(response.source_gain, phi, 3e-14 * phi);
+                close_driven(response.mean_source_derivative, psi / capacity, 3e-14 * psi / capacity);
+                close_driven(response.inlet_energy_gain, (-a).exp(), 3e-14);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_driven_exchange_does_not_erase_feedback_when_virtual_difference_overflows() {
+        let knots = [[1.0, 1.0], [1.7e308, 1.0]];
+        let curve = CapacityCurve::new(&knots);
+        let (drive, x): (f64, f64) = (1e308, 0.1);
+        assert!((drive / x).is_infinite());
+        let response = curve.driven_heat_exchange(1.0, drive, x).unwrap();
+        let phi = -(-x).exp_m1() / x;
+        let psi = (1.0 - phi) / x;
+        close_driven(response.energy_change / drive, phi, 2e-14);
+        close_driven(response.mean_temperature_change / drive, psi, 2e-14);
+        close_driven(response.source_gain, phi, 2e-14);
+        close_driven(response.mean_source_derivative, psi, 2e-14);
+        assert!(response.energy_change < 0.96 * drive);
+    }
+
+    #[test]
+    fn g3_driven_exchange_retains_physical_inlet_and_source_derivatives_across_knots() {
+        let knots = [[300.0, 350.0], [440.0, 420.0], [700.0, 550.0]];
+        let curve = CapacityCurve::new(&knots);
+        let (initial, drive, x) = (350.0, 160000.0, 150.0);
+        let response = curve.driven_heat_exchange(initial, drive, x).unwrap();
+        let [lo, hi] = [-0.1, 0.1].map(|d| curve.driven_heat_exchange(initial, drive + d, x).unwrap());
+        close_driven((hi.energy_change - lo.energy_change) / 0.2, response.source_gain, 2e-7);
+        close_driven((hi.mean_temperature - lo.mean_temperature) / 0.2, response.mean_source_derivative, 2e-9);
+        let [lo, hi] = [-0.001, 0.001].map(|d| {
+            let shifted = curve.driven_heat_exchange(initial + d, drive - x * d, x).unwrap();
+            curve.energy_change(initial, initial + d).unwrap() + shifted.energy_change
+        });
+        let inlet_change = curve.energy_change(initial - 0.001, initial + 0.001).unwrap();
+        close_driven((hi - lo) / inlet_change, response.inlet_energy_gain, 2e-7);
+        let [lo, hi] = [-1e-4, 1e-4].map(|d| {
+            curve.driven_heat_exchange(initial, drive * (1.0 + d), x * (1.0 + d)).unwrap()
+        });
+        close_driven((hi.mean_temperature - lo.mean_temperature) / 2e-4,
+            response.mean_log_duration_derivative, 2e-6);
+        let first = curve.driven_heat_exchange(initial, drive / 2.0, x / 2.0).unwrap();
+        let second = curve.driven_heat_exchange(first.temperature, first.remaining_drive, x / 2.0).unwrap();
+        close_driven(first.energy_change + second.energy_change, response.energy_change, 2e-7);
+        close_driven(0.5 * (first.mean_temperature_change + first.temperature_change + second.mean_temperature_change),
+            response.mean_temperature_change, 2e-10);
+    }
+
+    #[test]
+    fn g4_driven_exchange_refuses_invalid_inputs_and_unsupported_source_trajectories() {
+        let knots = [[300.0, 350.0], [440.0, 420.0], [700.0, 550.0]];
+        let curve = CapacityCurve::new(&knots);
+        for initial in [299.0, 701.0, f64::NAN, f64::INFINITY] {
+            assert!(curve.driven_heat_exchange(initial, 0.0, 0.0).is_err());
+        }
+        for drive in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(curve.driven_heat_exchange(500.0, drive, 1.0).is_err());
+        }
+        for x in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(curve.driven_heat_exchange(500.0, 0.0, x).is_err());
+        }
+        for x in [0.0, 100.0] {
+            assert!(curve.driven_heat_exchange(500.0, 1e9, x).is_err());
+            assert!(curve.driven_heat_exchange(500.0, -1e9, x).is_err());
+        }
+    }
+
 }
