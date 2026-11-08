@@ -4,7 +4,10 @@ use super::{
     CellLoad, SpatialConductorMaterial, SpatialHarmonicInductionResponse, SpatialLorentzLoadError,
     SpatialLorentzLoadLimits, SpatialLorentzLoads, integrate,
 };
-use crate::spatial::{cross, vector_potential::SpatialVectorField};
+use crate::spatial::{
+    cross,
+    vector_potential::{SpatialVectorField, induction::SpatialInduction},
+};
 use fs_math::c64::C64;
 
 /// Peak conduction-current force at the AC carrier in a static magnetic bias.
@@ -35,6 +38,63 @@ impl SpatialHarmonicBiasLorentzLoads {
     pub fn imaginary(&self) -> &SpatialLorentzLoads {
         &self.imaginary
     }
+}
+
+// Share the original static-field admission with coherent finite-window
+// forcing. The original response remains the geometry/material/motion owner.
+pub(crate) fn admit_static_bias<C: SpatialConductorMaterial>(
+    source: &SpatialInduction<'_, C>,
+    velocity_m_s: &[[f64; 3]],
+    bias: &SpatialVectorField<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), SpatialLorentzLoadError> {
+    use SpatialLorentzLoadError::{Cancelled, Invalid};
+    if cancelled() {
+        return Err(Cancelled);
+    }
+    if !std::ptr::eq(source.problem(), bias.problem()) {
+        return Err(Invalid(
+            "static bias requires one original source and a bounded nonempty selection",
+        ));
+    }
+    for velocity in velocity_m_s {
+        if cancelled() {
+            return Err(Cancelled);
+        }
+        if velocity.iter().any(|v| *v != 0.0) {
+            return Err(Invalid(
+                "static-bias force requires stationary conductors without motional DC current",
+            ));
+        }
+    }
+    for (dc, ac) in bias
+        .prescribed_edges()
+        .iter()
+        .zip(&source.prepared.fixed_edges)
+    {
+        if cancelled() {
+            return Err(Cancelled);
+        }
+        if dc != ac {
+            return Err(Invalid("static and harmonic magnetic trace masks differ"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn admit_static_bias_cell(
+    bias: &SpatialVectorField<'_>,
+    cell: usize,
+) -> Result<(), SpatialLorentzLoadError> {
+    if bias.impressed_current_density_a_m2()[cell]
+        .iter()
+        .any(|j| *j != 0.0)
+    {
+        return Err(SpatialLorentzLoadError::Invalid(
+            "static-bias selection contains DC current requiring the full DC/AC force",
+        ));
+    }
+    Ok(())
 }
 
 impl<C: SpatialConductorMaterial> SpatialHarmonicInductionResponse<'_, '_, C> {
@@ -84,28 +144,7 @@ impl<C: SpatialConductorMaterial> SpatialHarmonicInductionResponse<'_, '_, C> {
                 "static bias requires one original source and a bounded nonempty selection",
             ));
         }
-        for velocity in &self.velocity_m_s {
-            if cancelled() {
-                return Err(Cancelled);
-            }
-            if velocity.iter().any(|v| *v != 0.0) {
-                return Err(Invalid(
-                    "static-bias force requires stationary conductors without motional DC current",
-                ));
-            }
-        }
-        for (dc, ac) in bias
-            .prescribed_edges()
-            .iter()
-            .zip(&self.source.prepared.fixed_edges)
-        {
-            if cancelled() {
-                return Err(Cancelled);
-            }
-            if dc != ac {
-                return Err(Invalid("static and harmonic magnetic trace masks differ"));
-            }
-        }
+        admit_static_bias(self.source, &self.velocity_m_s, bias, cancelled)?;
         let mut selected = Vec::with_capacity(selected_cells.len());
         for &cell in selected_cells {
             if cancelled() {
@@ -115,14 +154,7 @@ impl<C: SpatialConductorMaterial> SpatialHarmonicInductionResponse<'_, '_, C> {
                 .cells()
                 .binary_search_by_key(&cell, |record| record.cell)
                 .map_err(|_| Invalid("static-bias selection requires original conducting cells"))?;
-            if bias.impressed_current_density_a_m2()[cell]
-                .iter()
-                .any(|j| *j != 0.0)
-            {
-                return Err(Invalid(
-                    "static-bias selection contains DC current requiring the full DC/AC force",
-                ));
-            }
+            admit_static_bias_cell(bias, cell)?;
             let record = &self.cells()[index];
             selected.push((
                 cell,

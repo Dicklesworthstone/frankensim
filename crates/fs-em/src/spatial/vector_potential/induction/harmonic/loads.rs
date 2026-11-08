@@ -25,6 +25,8 @@ use fs_material::conductor::spatial::SpatialConductorMaterial;
 
 mod bias;
 pub use bias::SpatialHarmonicBiasLorentzLoads;
+#[cfg(feature = "harmonic-exposure")]
+pub(super) use bias::{admit_static_bias, admit_static_bias_cell};
 mod cross;
 pub use cross::SpatialHarmonicLorentzCrossLoads;
 

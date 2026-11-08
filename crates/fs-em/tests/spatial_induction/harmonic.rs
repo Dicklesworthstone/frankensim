@@ -1,4 +1,6 @@
 //! G1/G3: independently integrated cube mode and time-domain AC agreement.
+#[path = "harmonic/bias.rs"]
+mod bias;
 #[path = "harmonic/circuit.rs"]
 mod circuit;
 #[cfg(feature = "harmonic-exposure")]

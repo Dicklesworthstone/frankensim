@@ -9,9 +9,10 @@
 //!
 //! Every response must belong to the SAME unchanged source and prescribed
 //! steady velocity. The source's scalar/oriented tensor conductivity therefore
-//! remains the constitutive owner. These are settled AC observations, excluding
-//! DC fields and DC/AC cross terms, switch-on transients, nonlinear/hysteretic
-//! mixing, moving geometry and mechanical feedback. Physical heat must be
+//! remains the constitutive owner. An optional admitted static magnetic bias
+//! contributes its carrier-frequency force on stationary AC conduction current.
+//! DC current forces/heat, switch-on transients, nonlinear/hysteretic mixing,
+//! moving geometry and mechanical feedback remain outside this owner. Heat must be
 //! deposited once, without adding the original cycle means again. No new
 //! continuum error or complete source/storage-balance certificate is supplied.
 
@@ -19,8 +20,14 @@ use super::super::mechanical::{
     SpatialLorentzLoadError, SpatialLorentzLoadLimits, SpatialLorentzLoads,
     load::{CellLoad, integrate},
 };
-use super::{SpatialHarmonicInductionResponse, SpatialInduction};
-use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, HarmonicWindowProfile, WindowError};
+use super::{
+    SpatialHarmonicInductionResponse, SpatialInduction,
+    loads::{admit_static_bias, admit_static_bias_cell},
+};
+use crate::spatial::vector_potential::SpatialVectorField;
+use fs_fft::harmonic_window::{
+    HarmonicProduct, HarmonicWindow, HarmonicWindowProfile, WindowError,
+};
 use fs_material::conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial};
 use fs_math::{c64::C64, dd::Dd};
 
@@ -34,8 +41,13 @@ pub struct SpatialHarmonicInductionExposureLimits {
     /// Conservative scalar temporal contractions per observation: 39 for each
     /// original conductor and ordered pair of authored lines. Equal-frequency
     /// grouping may reduce the actual work, but never bypasses this admission.
+    /// A DC-biased observation additionally needs 12 contractions for each
+    /// original conductor and authored line, within this same bound.
     pub maximum_pair_products: usize,
     /// Prepared bank, velocity, grouping, cached pair kernels and cell output.
+    /// Allocator metadata and constant-size stack scratch are excluded.
+    /// A DC-biased observation also caches one moment kernel per authored line;
+    /// the original static field is borrowed without a field-sized copy.
     /// Optional nodal loads have their own `SpatialLorentzLoadLimits`.
     pub maximum_workspace_bytes: usize,
 }
@@ -132,6 +144,10 @@ pub struct SpatialHarmonicInductionExposure<
     source: &'s SpatialInduction<'m, C>,
     velocity_m_s: Vec<[f64; 3]>,
     lines: Vec<Line>,
+    authored_lines: usize,
+    limits: SpatialHarmonicInductionExposureLimits,
+    base_products: usize,
+    base_workspace_bytes: usize,
 }
 
 fn invalid(message: &'static str) -> SpatialHarmonicInductionExposureError {
@@ -183,14 +199,17 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         poll(cancelled)?;
         let count = responses.len();
         if count == 0 || count > MAX_EXPOSURE_LINES || count > limits.maximum_lines {
-            return Err(invalid("nonempty bounded original AC response list required"));
+            return Err(invalid(
+                "nonempty bounded original AC response list required",
+            ));
         }
         let cells = self.prepared.cells.len();
         let vertices = self.problem().mesh().vertex_count;
         let pairs = count.checked_mul(count);
         let products = pairs
             .and_then(|n| n.checked_mul(cells))
-            .and_then(|n| n.checked_mul(39));
+            .and_then(|n| n.checked_mul(39))
+            .ok_or_else(|| invalid("3D exposure work size overflow"))?;
         let bytes = cells
             .checked_mul(core::mem::size_of::<LineCell>())
             .and_then(|n| n.checked_add(core::mem::size_of::<Line>()))
@@ -207,27 +226,40 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             })
             .and_then(|n| {
                 cells
-                    .checked_mul(core::mem::size_of::<SpatialHarmonicInductionCellExposure<'_, C>>())
+                    .checked_mul(core::mem::size_of::<
+                        SpatialHarmonicInductionCellExposure<'_, C>,
+                    >())
                     .and_then(|v| n.checked_add(v))
             })
-            .and_then(|n| count.checked_mul(core::mem::size_of::<usize>()).and_then(|v| n.checked_add(v)));
-        if products.is_none_or(|n| n > limits.maximum_pair_products)
-            || bytes.is_none_or(|n| n > limits.maximum_workspace_bytes)
-        {
+            .and_then(|n| {
+                count
+                    .checked_mul(core::mem::size_of::<usize>())
+                    .and_then(|v| n.checked_add(v))
+            })
+            .and_then(|n| {
+                n.checked_add(core::mem::size_of::<
+                    SpatialHarmonicInductionExposure<'_, '_, C>,
+                >())
+            })
+            .ok_or_else(|| invalid("3D exposure workspace size overflow"))?;
+        if products > limits.maximum_pair_products || bytes > limits.maximum_workspace_bytes {
             return Err(invalid("3D exposure exceeds pair or workspace budget"));
         }
         let first = responses[0];
         for response in responses {
             poll(cancelled)?;
-            if !core::ptr::eq(response.source, self)
-                || response.velocity_m_s != first.velocity_m_s
+            if !core::ptr::eq(response.source, self) || response.velocity_m_s != first.velocity_m_s
             {
-                return Err(invalid("3D exposure requires the same original source and steady velocity"));
+                return Err(invalid(
+                    "3D exposure requires the same original source and steady velocity",
+                ));
             }
         }
         let mut order: Vec<_> = (0..count).collect();
         order.sort_unstable_by(|&a, &b| {
-            responses[a].omega_rad_s.total_cmp(&responses[b].omega_rad_s)
+            responses[a]
+                .omega_rad_s
+                .total_cmp(&responses[b].omega_rad_s)
                 .then_with(|| a.cmp(&b))
         });
         let mut lines = Vec::with_capacity(count);
@@ -247,10 +279,19 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                     let response = responses[response_index];
                     let record = &response.cells[index];
                     for axis in 0..3 {
-                        add(&mut field.magnetic[axis], response.flux_density_t[record.cell][axis]);
+                        add(
+                            &mut field.magnetic[axis],
+                            response.flux_density_t[record.cell][axis],
+                        );
                         for vertex in 0..4 {
-                            add(&mut field.electric[vertex][axis], record.conductor_electric_field_v_m[vertex][axis]);
-                            add(&mut field.current[vertex][axis], record.current_density_a_m2[vertex][axis]);
+                            add(
+                                &mut field.electric[vertex][axis],
+                                record.conductor_electric_field_v_m[vertex][axis],
+                            );
+                            add(
+                                &mut field.current[vertex][axis],
+                                record.current_density_a_m2[vertex][axis],
+                            );
                         }
                     }
                 }
@@ -260,8 +301,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                         for vertex in 0..4 {
                             real(field.electric[vertex][axis][part])?;
                             real(field.current[vertex][axis][part])?;
-                            field.electric_sum[axis][part] = field.electric_sum[axis][part] + field.electric[vertex][axis][part];
-                            field.current_sum[axis][part] = field.current_sum[axis][part] + field.current[vertex][axis][part];
+                            field.electric_sum[axis][part] =
+                                field.electric_sum[axis][part] + field.electric[vertex][axis][part];
+                            field.current_sum[axis][part] =
+                                field.current_sum[axis][part] + field.current[vertex][axis][part];
                         }
                         real(field.electric_sum[axis][part])?;
                         real(field.current_sum[axis][part])?;
@@ -269,7 +312,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 }
                 fields.push(field);
             }
-            lines.push(Line { omega_rad_s, cells: fields });
+            lines.push(Line {
+                omega_rad_s,
+                cells: fields,
+            });
             start = end;
         }
         poll(cancelled)?;
@@ -277,6 +323,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             source: self,
             velocity_m_s: first.velocity_m_s.clone(),
             lines,
+            authored_lines: count,
+            limits,
+            base_products: products,
+            base_workspace_bytes: bytes,
         })
     }
 }
@@ -301,9 +351,75 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicInductionExposure<'s, '
         window: HarmonicWindow,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialHarmonicInductionExposureResult<'s, 'm, C>> {
+        self.observe_inner(window, None, cancelled)
+    }
+
+    /// Integrate the AC fields with the additional force `J_ac(t) cross B_dc`.
+    ///
+    /// The admitted native static field must share the original magnetic
+    /// problem and prescribed-edge support. All AC responses must have zero
+    /// prescribed velocity: the static magnetic owner supplies no DC motional
+    /// current. All original conducting cells must also have zero impressed
+    /// DC current, preserving the native static-bias load admission. Static
+    /// sources in insulating cells may supply the field. No transient
+    /// induction state is relabeled as a steady bias.
+    ///
+    /// Each line's mean current uses the shared analytic zero-carrier moment,
+    /// retaining phase and finite-window carrier impulse without sampling.
+    /// Grouped DD currents combine before multiplication by the static field.
+    /// The original preparation limits must also admit 12*C*F additional
+    /// temporal contractions and F additional cached kernels, using AUTHORED
+    /// line count F even when equal-frequency lines coalesced. Refusal precedes
+    /// the extra workspace allocation; the native DC field is only borrowed.
+    ///
+    /// AC Joule heat is unchanged. This result concerns the original resolved
+    /// AC conduction current only. Impressed DC source forces/heat and their
+    /// AC interaction are outside this observation, and DC-driven conducting
+    /// cells refuse rather than omitting their additional force. DC terminal
+    /// currents, source/storage closure and mechanical feedback also require
+    /// their own coupled owners.
+    pub fn observe_with_static_bias(
+        &self,
+        bias: &SpatialVectorField<'_>,
+        window: HarmonicWindow,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialHarmonicInductionExposureResult<'s, 'm, C>> {
+        poll(cancelled)?;
+        let products = self
+            .authored_lines
+            .checked_mul(self.source.prepared.cells.len())
+            .and_then(|n| n.checked_mul(12))
+            .and_then(|n| n.checked_add(self.base_products));
+        let bytes = self
+            .authored_lines
+            .checked_mul(core::mem::size_of::<HarmonicProduct>())
+            .and_then(|n| n.checked_add(self.base_workspace_bytes));
+        if products.is_none_or(|n| n > self.limits.maximum_pair_products)
+            || bytes.is_none_or(|n| n > self.limits.maximum_workspace_bytes)
+        {
+            return Err(invalid(
+                "DC-biased exposure exceeds its original work or workspace budget",
+            ));
+        }
+        admit_static_bias(self.source, &self.velocity_m_s, bias, cancelled)?;
+        for cell in &self.source.prepared.cells {
+            poll(cancelled)?;
+            admit_static_bias_cell(bias, cell.cell)?;
+        }
+        self.observe_inner(window, Some(bias), cancelled)
+    }
+
+    fn observe_inner(
+        &self,
+        window: HarmonicWindow,
+        bias: Option<&SpatialVectorField<'_>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialHarmonicInductionExposureResult<'s, 'm, C>> {
         poll(cancelled)?;
         if window.profile() != HarmonicWindowProfile::Uniform {
-            return Err(invalid("physical heat and work require a uniform time interval"));
+            return Err(invalid(
+                "physical heat and work require a uniform time interval",
+            ));
         }
         let count = self.lines.len();
         let mut kernels = Vec::with_capacity(count * count);
@@ -311,6 +427,13 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicInductionExposure<'s, '
             for b in &self.lines {
                 poll(cancelled)?;
                 kernels.push(window.product_kernel(a.omega_rad_s, b.omega_rad_s)?);
+            }
+        }
+        let mut bias_kernels = Vec::with_capacity(if bias.is_some() { count } else { 0 });
+        if bias.is_some() {
+            for line in &self.lines {
+                poll(cancelled)?;
+                bias_kernels.push(window.product_kernel(line.omega_rad_s, 0.0)?);
             }
         }
         let source: &'s SpatialInduction<'m, C> = self.source;
@@ -327,14 +450,52 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicInductionExposure<'s, '
                     poll(cancelled)?;
                     let (a, b, kernel) = (&a.cells[index], &b.cells[index], kernels[i * count + j]);
                     for axis in 0..3 {
-                        product = product + kernel.mean_real_product_parts_dd(a.current_sum[axis], b.electric_sum[axis])?;
+                        product = product
+                            + kernel.mean_real_product_parts_dd(
+                                a.current_sum[axis],
+                                b.electric_sum[axis],
+                            )?;
                         let (next, last) = ((axis + 1) % 3, (axis + 2) % 3);
                         for vertex in 0..4 {
-                            product = product + kernel.mean_real_product_parts_dd(a.current[vertex][axis], b.electric[vertex][axis])?;
+                            product = product
+                                + kernel.mean_real_product_parts_dd(
+                                    a.current[vertex][axis],
+                                    b.electric[vertex][axis],
+                                )?;
                             force[vertex][axis] = force[vertex][axis]
-                                + kernel.mean_real_product_parts_dd(a.current[vertex][next], b.magnetic[last])?
-                                - kernel.mean_real_product_parts_dd(a.current[vertex][last], b.magnetic[next])?;
+                                + kernel.mean_real_product_parts_dd(
+                                    a.current[vertex][next],
+                                    b.magnetic[last],
+                                )?
+                                - kernel.mean_real_product_parts_dd(
+                                    a.current[vertex][last],
+                                    b.magnetic[next],
+                                )?;
                         }
+                    }
+                }
+            }
+            if let Some(bias) = bias {
+                let magnetic = bias.flux_density_t()[original.cell].map(Dd::from_f64);
+                let mut mean_current = [[Dd::ZERO; 3]; 4];
+                for (line, kernel) in self.lines.iter().zip(&bias_kernels) {
+                    poll(cancelled)?;
+                    for vertex in 0..4 {
+                        for axis in 0..3 {
+                            mean_current[vertex][axis] = mean_current[vertex][axis]
+                                + kernel.mean_real_product_parts_dd(
+                                    line.cells[index].current[vertex][axis],
+                                    [Dd::from_f64(1.0), Dd::ZERO],
+                                )?;
+                        }
+                    }
+                }
+                for vertex in 0..4 {
+                    for axis in 0..3 {
+                        let (next, last) = ((axis + 1) % 3, (axis + 2) % 3);
+                        force[vertex][axis] = force[vertex][axis]
+                            + mean_current[vertex][next] * magnetic[last]
+                            - mean_current[vertex][last] * magnetic[next];
                     }
                 }
             }
@@ -362,7 +523,9 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicInductionExposure<'s, '
             mechanical = mechanical + work;
             cells.push(SpatialHarmonicInductionCellExposure {
                 cell: original.cell,
-                source: source.conductors()[original.cell].as_ref().ok_or_else(|| invalid("missing original conductor source"))?,
+                source: source.conductors()[original.cell]
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing original conductor source"))?,
                 volume_m3: original.volume,
                 mean_ohmic_power_w,
                 ohmic_heat_j: nonnegative(duration * watts)?,
@@ -409,7 +572,9 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicInductionExposureResult
         let mut selected = Vec::with_capacity(selected_cells.len());
         for &cell in selected_cells {
             poll(cancelled)?;
-            let index = self.cells.binary_search_by_key(&cell, |record| record.cell)
+            let index = self
+                .cells
+                .binary_search_by_key(&cell, |record| record.cell)
                 .map_err(|_| invalid("exposure load selection requires original conductors"))?;
             selected.push(&self.cells[index]);
         }

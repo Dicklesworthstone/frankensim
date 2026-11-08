@@ -44,8 +44,28 @@ observations never advance accepted histories. Tests in
 quadrature, moving and rotated anisotropic conductors, full-cycle recovery,
 coherent cancellation, interval additivity and source/motion refusals.
 
-These are settled AC observations, excluding DC/AC cross terms, switch-on
-transients, nonlinear/hysteretic frequency mixing and mechanical feedback.
+`observe_with_static_bias` also retains the finite-window carrier impulse
+`mean(J_ac) cross B_dc` from an admitted original static magnetic field with
+the same problem and prescribed-edge support. It reuses the native static-bias
+admission: conductors must be stationary, and all original conducting cells
+must have zero impressed DC current. Each distinct carrier uses one shared
+analytic zero-carrier moment;
+DD currents sum before multiplication by the static field. The original limits
+must admit an additional `12*C*F` temporal contractions and `F` cached kernels,
+using the authored line count even when coherent lines coalesce. The native
+bias field is borrowed without a field-sized copy. Tests in
+`tests/spatial_induction/harmonic/bias.rs` independently reconstruct multitone
+force, torque, virtual work and impulse; they check interval additivity,
+full-period and short-window limits, linear bias-force scaling, exact added
+work/storage bounds and transactional refusals.
+
+These remain settled linear observations, excluding DC current forces/heat,
+switch-on transients, nonlinear/hysteretic frequency mixing and feedback.
+The bias extension transfers force on the resolved AC conduction current.
+Static sources in insulating cells may provide the bias, but their own
+forces/heat and AC interactions are outside the observation. DC-driven
+conducting cells refuse, preserving the existing native force admission.
+AC Joule heat is unchanged by the static magnetic bias in this admitted model.
 Only the reported physical Joule heat may be deposited; adding the original
 cycle-mean losses again would double count it. No complete finite-window
 source/storage balance, continuum error bound or empirical validation is
