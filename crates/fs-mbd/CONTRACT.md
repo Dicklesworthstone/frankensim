@@ -1040,6 +1040,33 @@ full rotated inertia, body permutation, closed-system tidal momentum exchange
 and reversal, a resolved 36-pair mass-cloud potential oracle with fourth-moment
 refinement, combined-radius/interior-drift refusal, budgets and late cancellation.
 
+### Exact mutual gravity of finite spherical mass distributions
+
+`MutualGravity::uniform_spheres` binds a positive COM radius to each original
+body. Every native principal inertia must agree with `2*m*R^2/5` within a
+128-epsilon relative roundoff allowance; source density and rigid inertia thus
+describe the same uniform sphere. Original masses, poses, momenta, frame, G and
+pair budget remain authoritative. No replacement mass or rotational state is
+introduced.
+
+`MutualSphericalGravity::load` integrates the Newtonian interaction of both
+uniform densities. Exterior pairs recover the original point-source owner;
+full containment has a quadratic separation potential; partial overlap uses an
+analytic spherical-cap integral. Force differentiates the same potential, with
+one equal/opposite pair contribution and no COM torque. Coincident centers have
+finite interaction energy and zero force. The pair law uses bounded dimensionless
+overlap factors and scaled coefficients, rather than radius cubes or runtime
+volume quadrature. Compensated sums retain deterministic input order.
+
+In this finite-source model, a zero cutoff admits coincidence. A positive cutoff
+retains the original strict exclusion. Source/radius/inertia/count/budget errors
+and cancellation return no partial load. Overlapping density distributions are
+mathematically admitted by gravity; contact and deformation remain with their
+separate physical owners. The pair diagnostic excludes each body's constant
+internal self-energy. `tests/mutual_spheres.rs` compares against independent
+shell-volume quadrature, analytic containment/exterior/equal-radius limits,
+potential derivatives, coordinate/body-order covariance and native admission.
+
 ### Adaptive gravitational encounters on native states
 
 `MutualGravity::advance` and `MutualQuadrupoleGravity::advance` advance a requested

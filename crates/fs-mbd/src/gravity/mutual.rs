@@ -13,6 +13,10 @@
 pub mod quadrupole;
 pub use quadrupole::{MutualQuadrupoleGravity, MutualQuadrupoleLoad};
 
+/// Exact mutual gravity of declared uniform-density spherical mass distributions.
+pub mod spheres;
+pub use spheres::MutualSphericalGravity;
+
 use super::adaptive::{NativeStep, advance_native};
 use super::{
     GravityAdvanceError, GravityAdvanceOptions, GravityAdvanceReceipt, GravityError, finite,
@@ -38,7 +42,9 @@ pub struct MutualGravity {
 pub struct MutualGravityLoad {
     /// World COM forces; the reaction on every source is included.
     pub forces_world: Vec<Vec3>,
-    /// Sum over i < j of -G m_i m_j / r_ij [J], zero at infinite separation.
+    /// Selected-model pair potential summed over i < j [J], zero at infinity.
+    /// The point model uses -G m_i m_j / r_ij; the uniform-sphere extension
+    /// integrates both declared finite mass distributions.
     pub potential_energy_j: f64,
     /// Number of unordered interactions evaluated once in this sample.
     pub pair_count: usize,
