@@ -40,6 +40,9 @@ use std::collections::BTreeSet;
 /// Consistent-reference-mass motion with the original eight point histories.
 pub mod dynamics;
 
+/// Original source-bound thermal histories, heat and mechanical work.
+pub mod thermal;
+
 /// Allocation and geometry bounds checked before quadrature preparation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HexAssemblyBudget {

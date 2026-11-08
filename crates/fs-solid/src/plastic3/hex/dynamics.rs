@@ -16,7 +16,7 @@
 //! Density is immutable reference inventory, not a current-temperature update.
 //! Finite deformation, follower loads, contact and mass transfer are not added.
 
-use super::{SmallStrainHexProblem, SmallStrainHexSolution, checkpoint, invalid};
+use super::{Element, SmallStrainHexProblem, SmallStrainHexSolution, checkpoint, invalid};
 use crate::inertia::{BackwardEulerInertia, InertiaError, ReferenceMass};
 use crate::linear3::hex::hex8_point;
 use crate::plastic3::SmallStrainTetError;
@@ -39,7 +39,7 @@ pub struct BackwardEulerHexStep<S> {
 }
 
 #[derive(Clone, Copy)]
-enum ReferenceDensity<'a> {
+pub(super) enum ReferenceDensity<'a> {
     Cell(&'a [f64]),
     Corners(&'a [[f64; 8]]),
 }
@@ -112,6 +112,31 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
             ));
         }
         let elements = self.prepare(cx)?;
+        self.advance_prepared(
+            &elements,
+            displacement_m,
+            velocity_mps,
+            quadrature_states,
+            density,
+            dt_s,
+            cx,
+        )
+    }
+
+    /// Reuse geometry already admitted for this exact one-endpoint problem.
+    /// Thermal history admission and the inertial solve share that preparation.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn advance_prepared(
+        &self,
+        elements: &[Element],
+        displacement_m: &[f64],
+        velocity_mps: &[[f64; 3]],
+        quadrature_states: &[L::State],
+        density: ReferenceDensity<'_>,
+        dt_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<BackwardEulerHexStep<L::State>, SmallStrainTetError> {
+        checkpoint(cx)?;
         self.check(displacement_m, quadrature_states)?;
         let (count, values) = match density {
             ReferenceDensity::Cell(values) => (values.len(), values),
@@ -187,7 +212,7 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
             cx,
         )?;
         let solution = self.solve_prepared(
-            &elements,
+            elements,
             Some((displacement_m, quadrature_states)),
             Some(&inertia),
             cx,

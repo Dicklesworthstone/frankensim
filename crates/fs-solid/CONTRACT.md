@@ -13018,3 +13018,40 @@ loading, hot stress-free dwell, reload and full energy accounts to independent
 scalar equations; graded-mass impulse continuation and simultaneous yielding
 retain their original owners. No measured calibration, life prediction, locking-
 free P1 behavior or automatic remeshing/state transfer is claimed.
+
+### Native source-bound thermal Hex8 continuation
+
+The small-strain Standard/B-bar Hex8 owner now exposes
+`plastic3::hex::thermal::ThermalHexProblem`. It binds one original
+`ThermalSectionSourceFamily` per reference cell and eight independent specific
+enthalpies/native histories per cell. Each physical interval resolves all eight
+endpoint laws once, validates accepted strain/history at its **old** temperature,
+and freezes those histories throughout the existing Newton/backtracking solve.
+Original families, geometry, connectivity and formulation must remain bound
+across continuation; no material or history remapping is inferred.
+
+The static and consistent-mass backward-Euler entries use the same assumed
+strain, projected tangent, quadrature and history owner. Timed source laws
+receive exactly the supplied positive physical duration. Motion density comes
+from each original source family; it is never recomputed from endpoint
+temperature. Accepted stresses retain the old-history constitutive endpoint.
+
+Before returning a candidate, the original source owner independently audits
+every point and must reproduce the native history/stress. Reference-volume
+point and whole-solid receipts retain physical heat (with creep as a
+subaccount), reversible caloric transfer, free-energy change (with coefficient
+work as a subaccount), change in temperature times mechanical entropy, and
+material numerical loss. Actual applied/support work must close both mechanical
+equilibrium and the complete energy balance. Dynamic support reactions include
+consistent inertia; kinetic change and backward-Euler numerical kinetic loss
+remain separate from material heat.
+
+The returned displacement, native histories, point enthalpy/temperature,
+energies and optional velocity are one complete candidate. Source-domain,
+history, convergence, cancellation or energy refusal changes no accepted input.
+A caloric owner must jointly accept this candidate and its heat transaction;
+this adapter does not predict temperature or add heat transport, finite strain,
+phase change, moving mass, or a new constitutive return map. Focused regressions
+cover free/restrained heating, thermal softening and residual set, nonuniform
+warped B-bar quadrature/tangents, consistent inertial support work, and
+source-bound Hill-Voce rate loading/holds at distinct physical durations.
