@@ -69,6 +69,7 @@ pub(super) fn run_with_gas_sources(
     let gas_sources =
         super::thermochemical::provenance(core::slice::from_ref(description.gas_record()));
     let tract_gas = tract_gas_json(&description);
+    let tract_motion = tract_motion_json(&description, info);
     let observer = performance.observer_gas_report().map_or_else(String::new, |report| {
         format!(",\"observer_gas\":{}",
             super::duct_metadata::observer_gas_provenance(Some(report)))
@@ -163,7 +164,7 @@ pub(super) fn run_with_gas_sources(
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
          \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}{airway}\
-         \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}}}",
+         \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}{tract_motion}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
         info.glottal_radius_m, info.mouth_radius_m, info.sound_speed_m_s,
@@ -199,6 +200,59 @@ pub(super) fn tract_gas_json(description: &VoiceDescription) -> String {
             super::thermochemical::provenance(core::slice::from_ref(record))
         )
     })
+}
+
+/// The moving tract's block, `,"tract_motion":{...}`, or nothing without `tract_move` rows, so a sidecar without them
+/// is byte for byte what it was.
+pub(super) fn tract_motion_json(
+    description: &VoiceDescription,
+    info: &fs_couple::voice_performance::VoiceInfo,
+) -> String {
+    if description.tract_moves.is_empty() {
+        return String::new();
+    }
+    let name = |target: Option<usize>| target.map_or("card", |at| description.keyframes[at].name.as_str());
+    let moves = description
+        .tract_moves
+        .iter()
+        .map(|m| {
+            format!(
+                "{{\"start_s\":{:e},\"end_s\":{:e},\"target\":{},\"steps\":{}}}",
+                m.start_s, m.end_s, json_string(name(m.target)), m.steps
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let keyframes = description
+        .keyframes
+        .iter()
+        .map(|k| {
+            format!(
+                "{{\"name\":{},\"source\":{},\"licence\":{},\"sections\":{},\"first_area_m2\":{:e}}}",
+                json_string(&k.name), json_string(&k.source), json_string(&k.licence), k.sections.len(),
+                k.sections[0].area_m2
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let formants = info
+        .keyframe_formants_hz
+        .iter()
+        .map(|(target, f)| {
+            let value = match f {
+                Ok(f) => format!("[{}]", f.iter().map(|x| format!("{x:.1}")).collect::<Vec<_>>().join(",")),
+                Err(why) => format!("{{\"refused\":{}}}", json_string(why)),
+            };
+            format!("{{\"target\":{},\"passive_tract_formants_hz\":{value}}}", json_string(target))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        ",\"tract_motion\":{{\"shapes\":{},\"moves\":[{moves}],\"keyframes\":[{keyframes}],\"targets\":[{formants}],\
+         \"limits\":\"frozen linear shapes crossfaded with the outgoing history carried (no volume source from moving \
+         walls); the glottal section held at the card's first area; the card's mouth radius at the microphone\"}}",
+        info.tract_shapes
+    )
 }
 
 #[cfg(test)]

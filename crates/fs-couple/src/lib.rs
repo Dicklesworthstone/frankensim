@@ -155,6 +155,8 @@ pub mod gesture_path;
 mod gas_field_input;
 pub mod glottis;
 pub mod iqn_ils;
+/// Characteristic lines whose taps move between frozen shapes in one render, with the outgoing history carried.
+pub mod keyframe_line;
 /// Source-bound incandescent heating on the original finite enthalpy owner.
 pub mod incandescent;
 /// Shared native impulse and work stage for finite-inertia induction rotors.

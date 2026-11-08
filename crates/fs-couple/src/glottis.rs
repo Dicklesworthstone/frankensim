@@ -181,6 +181,7 @@ use fs_material::gas::GasState;
 use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, WallPin, mass_spring_damper};
 use fs_vfit::discretize::DelayedFilter;
+use crate::keyframe_line::{KeyframeLineError, ShapeLine};
 
 /// Where a fold card's numbers came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,7 +695,7 @@ pub struct GlottalIsland {
     valve: Valve,
     linear: fs_phs::linear_exact::LinearSplit,
     card: FoldCard,
-    line: DelayedFilter,
+    line: ShapeLine,
     zc_flow: f64,
     /// Tract inlet area [m^2], the `A_1` of the two-mass exit recovery.
     tract_inlet_area_m2: f64,
@@ -1418,6 +1419,100 @@ struct TensionedFold {
     springs: [FoldSpring; 2],
 }
 
+/// The island's tract line for `tract`, with its volume-normalized characteristic impedance `rho c / S` and its inlet
+/// area `S`: the realization [`GlottalIsland::new_with_wall`] and [`GlottalIsland::new_with_wall_exterior`] make, so
+/// a further shape of a moving tract ([`glottal_tract_line_taps`]) is realized exactly as the card's own shape is.
+fn glottal_tract_line(
+    tract: &Duct,
+    gas: &GasState,
+    exterior: Option<&GasState>,
+    termination: MouthLoad<'_>,
+    sample_rate_hz: u32,
+    wall: Option<&WallPin>,
+) -> Result<(DelayedFilter, f64, f64), GlottisError> {
+    let inlet_r = tract
+        .segments
+        .first()
+        .and_then(|s| match *s {
+            fs_duct::Segment::Profile { ref profile, .. } => Some(profile.inlet_radius()),
+            fs_duct::Segment::Cylinder { radius, .. } => Some(radius),
+            fs_duct::Segment::Cone { inlet_radius, .. } => Some(inlet_radius),
+            fs_duct::Segment::ToneHole { .. } => None,
+        })
+        .ok_or(GlottisError::Invalid {
+            what: "tract needs a leading tube segment",
+        })?;
+    let area = core::f64::consts::PI * inlet_r * inlet_r;
+    let zc_flow = gas.density * gas.sound_speed / area;
+    // The MM-bank lesson: a short wrap-truncated FIR overshoots |R| > 1
+    // between realization bins, and the active line self-rings at the
+    // wrap period (measured: a 179 Hz pressure-independent ring at
+    // fs/256). The convergence ladder sizes the line until its tail and
+    // peaks converge and refuses a converged line that is not passive
+    // on the 4x-oversampled grid, so nothing is clipped here (DEF-02).
+    let ladder = LineLadder {
+        max_taps: GLOTTAL_LINE_MAX_TAPS,
+        ..LineLadder::default()
+    };
+    let (line, _) = match (exterior, termination) {
+        (None, termination) => characteristic_line_realized_with_ladder(
+            tract,
+            gas,
+            termination,
+            sample_rate_hz,
+            8192,
+            zc_flow, // VOLUME-normalized zc (rho c / S) — input_impedance
+            // returns volume impedance; the specific rho*c here
+            // flattened R toward +1 (found via the tract lane)
+            wall,
+            None,
+            Some(&ladder),
+        )?,
+        (Some(exterior), MouthLoad::Tabulated(table)) => characteristic_line_realized_with_ladder_exterior(
+            tract, gas, exterior, table, sample_rate_hz, 8192, zc_flow, wall, None, Some(&ladder),
+        )?,
+        (Some(_), _) => {
+            return Err(GlottisError::Invalid {
+                what: "a tract gas apart from the exterior needs a mouth load tabulated in that exterior",
+            });
+        }
+    };
+    Ok((line, zc_flow, area))
+}
+
+/// The taps of the island's tract line for a further shape of a moving tract, and that shape's `rho c / S`: the line
+/// [`GlottalIsland::new_with_wall`] (with `exterior` `None`) or [`GlottalIsland::new_with_wall_exterior`] would
+/// realize for `tract`. The shape's first section must be the island's own, so that both share one `zc` (the caller
+/// checks the returned value against [`GlottalIsland::port_impedance`]; [`GlottalIsland::with_tract_keyframes`] takes
+/// the taps).
+///
+/// # Errors
+/// As the island's own line, or a line that is not a plain FIR.
+pub fn glottal_tract_line_taps(
+    tract: &Duct,
+    gas: &GasState,
+    exterior: Option<&GasState>,
+    termination: MouthLoad<'_>,
+    sample_rate_hz: u32,
+    wall: Option<&WallPin>,
+) -> Result<(Vec<f64>, f64), GlottisError> {
+    let (line, zc_flow, _) = glottal_tract_line(tract, gas, exterior, termination, sample_rate_hz, wall)?;
+    let (_, taps) = line.quiescent_fir().ok_or(GlottisError::Invalid {
+        what: "a moving tract needs every shape's line to be a plain FIR",
+    })?;
+    Ok((taps.to_vec(), zc_flow))
+}
+
+/// A keyframe-line refusal as an island refusal: its name, or one for the FIR's own refusal.
+fn keyframe_refusal(error: KeyframeLineError, otherwise: &'static str) -> GlottisError {
+    GlottisError::Invalid {
+        what: match error {
+            KeyframeLineError::Invalid(what) => what,
+            _ => otherwise,
+        },
+    }
+}
+
 impl GlottalIsland {
     /// Build an island (`two_mass = false` selects the 1-DOF image)
     /// against a tract duct realized as a characteristic line.
@@ -1490,53 +1585,7 @@ impl GlottalIsland {
         wall: Option<&WallPin>,
     ) -> Result<Self, GlottisError> {
         card.validate()?;
-        let inlet_r = tract
-            .segments
-            .first()
-            .and_then(|s| match *s {
-                fs_duct::Segment::Profile { ref profile, .. } => Some(profile.inlet_radius()),
-                fs_duct::Segment::Cylinder { radius, .. } => Some(radius),
-                fs_duct::Segment::Cone { inlet_radius, .. } => Some(inlet_radius),
-                fs_duct::Segment::ToneHole { .. } => None,
-            })
-            .ok_or(GlottisError::Invalid {
-                what: "tract needs a leading tube segment",
-            })?;
-        let area = core::f64::consts::PI * inlet_r * inlet_r;
-        let zc_flow = gas.density * gas.sound_speed / area;
-        // The MM-bank lesson: a short wrap-truncated FIR overshoots |R| > 1
-        // between realization bins, and the active line self-rings at the
-        // wrap period (measured: a 179 Hz pressure-independent ring at
-        // fs/256). The convergence ladder sizes the line until its tail and
-        // peaks converge and refuses a converged line that is not passive
-        // on the 4x-oversampled grid, so nothing is clipped here (DEF-02).
-        let ladder = LineLadder {
-            max_taps: GLOTTAL_LINE_MAX_TAPS,
-            ..LineLadder::default()
-        };
-        let (line, _) = match (exterior, termination) {
-            (None, termination) => characteristic_line_realized_with_ladder(
-                tract,
-                gas,
-                termination,
-                sample_rate_hz,
-                8192,
-                zc_flow, // VOLUME-normalized zc (rho c / S) — input_impedance
-                // returns volume impedance; the specific rho*c here
-                // flattened R toward +1 (found via the tract lane)
-                wall,
-                None,
-                Some(&ladder),
-            )?,
-            (Some(exterior), MouthLoad::Tabulated(table)) => characteristic_line_realized_with_ladder_exterior(
-                tract, gas, exterior, table, sample_rate_hz, 8192, zc_flow, wall, None, Some(&ladder),
-            )?,
-            (Some(_), _) => {
-                return Err(GlottisError::Invalid {
-                    what: "a tract gas apart from the exterior needs a mouth load tabulated in that exterior",
-                });
-            }
-        };
+        let (line, zc_flow, area) = glottal_tract_line(tract, gas, exterior, termination, sample_rate_hz, wall)?;
         let TensionedFold {
             phs,
             linear,
@@ -1564,7 +1613,7 @@ impl GlottalIsland {
             valve,
             linear,
             card,
-            line,
+            line: ShapeLine::Fixed(line),
             zc_flow,
             tract_inlet_area_m2: area,
             momentum_pa_s: 0.0,
@@ -1669,6 +1718,39 @@ impl GlottalIsland {
         self.springs = springs;
         self.gap_response = [None; 4];
         Ok(self)
+    }
+
+    /// Give a new island the further shapes of a tract that moves during the render (pexfp.327.1). Shape 0 is the
+    /// island's own line; `taps` are the lines of shapes 1.., each from [`glottal_tract_line_taps`] for a tract with
+    /// the island's glottal section (the caller checks that each shape's `zc` is [`GlottalIsland::port_impedance`]).
+    /// [`GlottalIsland::switch_tract`] then moves the line. With no call the island keeps its one line on its own path,
+    /// and a call with no further shapes plays bit for bit as that line does (the module doc of `keyframe_line`).
+    ///
+    /// # Errors
+    /// An island that has already stepped or already has keyframes, an own line that is not a plain FIR, or a refused
+    /// shape, by name.
+    pub fn with_tract_keyframes(mut self, taps: Vec<Vec<f64>>) -> Result<Self, GlottisError> {
+        if self.force_passes.1 != 0 || self.tension != 1.0 {
+            return Err(GlottisError::Invalid {
+                what: "tract keyframes are set before the island's first step",
+            });
+        }
+        self.line = self
+            .line
+            .to_moving(taps)
+            .map_err(|e| keyframe_refusal(e, "a tract keyframe line was refused"))?;
+        Ok(self)
+    }
+
+    /// Move the tract line to shape `index` of [`GlottalIsland::with_tract_keyframes`], crossfading the reflected wave
+    /// over `fade_samples` steps with the outgoing history carried (`keyframe_line`).
+    ///
+    /// # Errors
+    /// An island without keyframes, an unknown shape, or a switch during a running crossfade, by name.
+    pub fn switch_tract(&mut self, index: usize, fade_samples: usize) -> Result<(), GlottisError> {
+        self.line
+            .switch(index, fade_samples)
+            .map_err(|e| keyframe_refusal(e, "a tract keyframe switch was refused"))
     }
 
     /// The present fold tension (1.0 = the card as written).

@@ -177,6 +177,102 @@ impl TractChart {
         &self.source_id
     }
 
+    /// Licence of the data.
+    #[must_use]
+    pub fn license(&self) -> &str {
+        &self.license
+    }
+
+    /// The shape `fraction` of the way from this chart to `target`, by [`TractVoice::morph_step`]'s law: log area
+    /// interpolated, length linear. With equal section counts that law applies section by section, exactly as
+    /// `morph_step` applies it. With unequal counts it is read at equal normalized distance from the glottis: both
+    /// charts are put onto `n = max(n_self, n_target)` equal sections, each taking its chart's length-weighted mean
+    /// area over its span, and every section of the result is `((1 - f) L_self + f L_target) / n` long. `fraction` 0
+    /// and 1 return the two charts as written, with no resampling, so a movement starts and ends on the measured
+    /// shapes.
+    ///
+    /// # Errors
+    /// A fraction outside `[0, 1]`, by name.
+    pub fn log_area_morph(&self, target: &TractChart, fraction: f64) -> Result<TractChart, TractError> {
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err(TractError::Invalid {
+                what: "morph fraction must lie in [0, 1]",
+            });
+        }
+        if fraction == 0.0 {
+            return Ok(self.clone());
+        }
+        if fraction == 1.0 {
+            return Ok(target.clone());
+        }
+        let blend = |a: f64, b: f64| det::exp((1.0 - fraction) * det::ln(a) + fraction * det::ln(b));
+        let sections = if self.sections.len() == target.sections.len() {
+            self.sections
+                .iter()
+                .zip(&target.sections)
+                .map(|(a, b)| TractSection {
+                    area_m2: blend(a.area_m2, b.area_m2),
+                    length_m: (1.0 - fraction) * a.length_m + fraction * b.length_m,
+                })
+                .collect()
+        } else {
+            let n = self.sections.len().max(target.sections.len());
+            let length = ((1.0 - fraction) * self.total_length_m() + fraction * target.total_length_m()) / n as f64;
+            self.resampled_areas(n)
+                .into_iter()
+                .zip(target.resampled_areas(n))
+                .map(|(a, b)| TractSection {
+                    area_m2: blend(a, b),
+                    length_m: length,
+                })
+                .collect()
+        };
+        let license = if self.license == target.license {
+            self.license.clone()
+        } else {
+            format!("{}; {}", self.license, target.license)
+        };
+        Ok(TractChart {
+            sections,
+            source_id: format!(
+                "log-area morph {fraction} of the way from ({}) to ({})",
+                self.source_id, target.source_id
+            ),
+            license,
+        })
+    }
+
+    fn total_length_m(&self) -> f64 {
+        self.sections.iter().map(|s| s.length_m).sum()
+    }
+
+    /// The chart's areas on `n` equal spans of its own length, each the length-weighted mean of the sections it
+    /// overlaps.
+    fn resampled_areas(&self, n: usize) -> Vec<f64> {
+        let total = self.total_length_m();
+        let mut edges = Vec::with_capacity(self.sections.len() + 1);
+        let mut at = 0.0;
+        edges.push(0.0);
+        for s in &self.sections {
+            at += s.length_m;
+            edges.push(at / total);
+        }
+        (0..n)
+            .map(|k| {
+                let (lo, hi) = (k as f64 / n as f64, (k + 1) as f64 / n as f64);
+                let (mut weight, mut sum) = (0.0, 0.0);
+                for (j, s) in self.sections.iter().enumerate() {
+                    let w = edges[j + 1].min(hi) - edges[j].max(lo);
+                    if w > 0.0 {
+                        weight += w;
+                        sum += w * s.area_m2;
+                    }
+                }
+                sum / weight
+            })
+            .collect()
+    }
+
     /// The duct (test-visible for oracle probes).
     #[must_use]
     pub fn to_duct_for_test(&self) -> Duct {
@@ -873,5 +969,57 @@ mod tract_tests {
             Err(TractError::Invalid { .. })
         ));
         println!("{{\"suite\":\"fs-couple\",\"case\":\"vt-004-refusals\",\"verdict\":\"pass\"}}");
+    }
+
+    #[test]
+    fn log_area_morph_keeps_the_ends_and_follows_the_morph_law() {
+        let (a, u) = (TractChart::assaneo_a(), TractChart::assaneo_u());
+        // The ends are the charts as written, with no resampling.
+        assert_eq!(a.log_area_morph(&u, 0.0).expect("f 0"), a);
+        assert_eq!(a.log_area_morph(&u, 1.0).expect("f 1"), u);
+        // Equal counts: morph_step's law, section by section.
+        let f = 0.3;
+        let m = a.log_area_morph(&u, f).expect("equal counts");
+        assert_eq!(m.sections().len(), 10);
+        for ((s, x), y) in m.sections().iter().zip(a.sections()).zip(u.sections()) {
+            let area = det::exp((1.0 - f) * det::ln(x.area_m2) + f * det::ln(y.area_m2));
+            assert_eq!(s.area_m2, area);
+            assert_eq!(s.length_m, (1.0 - f) * x.length_m + f * y.length_m);
+        }
+        // Unequal counts: n = max, equal sections, and the midpoint of two uniform charts is their geometric mean.
+        let four = TractChart::try_new(
+            vec![TractSection { area_m2: 1.0e-4, length_m: 0.04 }; 4],
+            "four",
+            "CC0",
+        )
+        .expect("four");
+        let six = TractChart::try_new(
+            vec![TractSection { area_m2: 4.0e-4, length_m: 0.03 }; 6],
+            "six",
+            "CC0",
+        )
+        .expect("six");
+        let mid = four.log_area_morph(&six, 0.5).expect("unequal counts");
+        assert_eq!(mid.sections().len(), 6);
+        assert_eq!(mid.license(), "CC0");
+        for s in mid.sections() {
+            assert!((s.area_m2 - 2.0e-4).abs() < 1e-16, "{}", s.area_m2);
+            assert!((s.length_m - 0.17 / 6.0).abs() < 1e-15, "{}", s.length_m);
+        }
+        // A step in a resampled chart keeps its length-weighted mean: 1 and 3 over halves, read on three spans.
+        let step = TractChart::try_new(
+            vec![TractSection { area_m2: 1.0e-4, length_m: 0.05 }, TractSection { area_m2: 3.0e-4, length_m: 0.05 }],
+            "step",
+            "CC0",
+        )
+        .expect("step");
+        let areas = step.resampled_areas(3);
+        assert!((areas[0] - 1.0e-4).abs() < 1e-16 && (areas[2] - 3.0e-4).abs() < 1e-16);
+        assert!((areas[1] - 2.0e-4).abs() < 1e-16, "{}", areas[1]);
+        assert!(matches!(
+            a.log_area_morph(&u, 1.5),
+            Err(TractError::Invalid { what: "morph fraction must lie in [0, 1]" })
+        ));
+        assert!(a.log_area_morph(&u, f64::NAN).is_err());
     }
 }
