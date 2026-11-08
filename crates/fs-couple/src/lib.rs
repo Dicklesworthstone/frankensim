@@ -284,6 +284,8 @@ pub mod voice_performance;
 // TOMBSTONE-3ez8g.13.5: dead module, deny new consumers (see its header).
 pub mod traveling_wave_line;
 pub mod unilateral_contact;
+/// The airway upstream of a valve (the trachea and bronchial tree below the glottis): reflectance and source FIRs.
+pub mod upstream_airway;
 pub mod vibroacoustic;
 pub mod wind_line;
 

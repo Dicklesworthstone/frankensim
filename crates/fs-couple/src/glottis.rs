@@ -156,12 +156,25 @@
 //!
 //! BOUNDARY: no formant filters, no vocoder, no glottal-waveform
 //! playback — the waveform must EMERGE from the valve + tract loop.
+//!
+//! Upstream side (opt-in, [`GlottalIsland::with_upstream`]): without it the
+//! pressure handed to [`GlottalIsland::step`] is applied under the folds
+//! as an ideal source, exactly as before the seam existed. With an
+//! [`UpstreamAirway`] (the trachea and bronchial tree,
+//! [`crate::upstream_airway`]) that pressure is the lungs' at the
+//! airway's far end, and every sample the folds see the airway's port:
+//! the junction solves `P = p_oc - 2 p-` against `Z + Z_up`, and the
+//! fold forces and the frame's `p_sub_pa` take the port pressure `p_oc -
+//! Z_up U` at the solved flow. A series source at the glottis (noise)
+//! adds to `p_oc` through [`GlottalIsland::step_lung`]; the airway itself
+//! sees only the flow.
 
 use crate::driving_point::{
     DrivingPointError, LineLadder, characteristic_line_realized_with_ladder,
     characteristic_line_realized_with_ladder_exterior,
 };
 use crate::unilateral_contact::slit_contact_force;
+use crate::upstream_airway::{UpstreamAirway, UpstreamPort};
 use fs_dcontact::{DContactError, Obstacle};
 use fs_duct::{Duct, MouthLoad, TabulatedLoad, Termination};
 use fs_material::gas::GasState;
@@ -645,6 +658,9 @@ pub struct GlottalFrame {
     pub flow_m3_s: f64,
     /// Supraglottal (tract-input) pressure [Pa].
     pub p_supra_pa: f64,
+    /// Pressure under the folds this step [Pa]: the step's pressure as given, or with an upstream airway its port
+    /// pressure at this step's flow (with any series source), the pressure the fold forces took.
+    pub p_sub_pa: f64,
     /// Effective aperture gap [m] (min of the two for the two-mass).
     pub gap_m: f64,
     /// Energy dissipated by the fold's own damping this step [J].
@@ -714,6 +730,9 @@ pub struct GlottalIsland {
     tension_work_j: f64,
     /// The opt-in fold shape's strips; `None` is the printed island, by its own path.
     strips: Option<Box<FoldStrips>>,
+    /// The opt-in airway below the folds ([`GlottalIsland::with_upstream`]); `None` applies the step's pressure
+    /// under the folds as an ideal source.
+    upstream: Option<Box<UpstreamAirway>>,
 }
 
 /// `eta_k`, the nonlinear coefficient of eq 1 (p. 1237), printed as 100 for both masses (p. 1250) [m^-2]. The print
@@ -1566,6 +1585,7 @@ impl GlottalIsland {
             tension: 1.0,
             tension_work_j: 0.0,
             strips: None,
+            upstream: None,
         })
     }
 
@@ -1852,12 +1872,76 @@ impl GlottalIsland {
         Ok(response)
     }
 
-    /// Advance one audio sample under subglottal pressure `p_sub_pa`.
+    /// Put an airway below the folds (module doc, [`crate::upstream_airway`]): from now on [`Self::step`]'s pressure is
+    /// the pressure at the airway's far end (the lungs), and the folds see the airway's port. Without this call the
+    /// island is untouched.
+    ///
+    /// # Errors
+    /// An island that has already stepped or already has an airway, or an airway realized on another clock, by name.
+    pub fn with_upstream(mut self, airway: UpstreamAirway) -> Result<Self, GlottisError> {
+        if self.force_passes.1 != 0 || self.tension != 1.0 || self.upstream.is_some() {
+            return Err(GlottisError::Invalid {
+                what: "an upstream airway is set once, before the island's first step",
+            });
+        }
+        if 1.0 / f64::from(airway.sample_rate_hz()) != self.dt {
+            return Err(GlottisError::Invalid {
+                what: "the upstream airway must be realized on the island's clock",
+            });
+        }
+        self.upstream = Some(Box::new(airway));
+        Ok(self)
+    }
+
+    /// Whether an airway is below the folds ([`Self::with_upstream`]).
+    #[must_use]
+    pub fn has_upstream(&self) -> bool {
+        self.upstream.is_some()
+    }
+
+    /// The airway below the folds, if any.
+    #[must_use]
+    pub fn upstream(&self) -> Option<&UpstreamAirway> {
+        self.upstream.as_deref()
+    }
+
+    /// Advance one audio sample. Without an airway `p_sub_pa` is the pressure under the folds, an ideal source, exactly
+    /// as before the upstream seam existed; with one ([`Self::with_upstream`]) it is the lung pressure at the airway's
+    /// far end, with no series source.
     ///
     /// # Errors
     /// pHS step or line refusal (non-finite state); the two-mass fold step's Newton solve refused by name when it
-    /// does not converge.
+    /// does not converge; an airway refusal.
     pub fn step(&mut self, p_sub_pa: f64) -> Result<GlottalFrame, GlottisError> {
+        if self.upstream.is_some() {
+            return self.step_lung(p_sub_pa, 0.0);
+        }
+        self.step_port(UpstreamPort::ideal(p_sub_pa))
+    }
+
+    /// Advance one audio sample with the lung pressure `p_lung_pa` at the airway's far end and a pressure source
+    /// `p_series_pa` in series at the glottis (a noise source; the airway sees only the flow).
+    ///
+    /// # Errors
+    /// No airway ([`Self::with_upstream`]), by name; as [`Self::step`].
+    pub fn step_lung(&mut self, p_lung_pa: f64, p_series_pa: f64) -> Result<GlottalFrame, GlottisError> {
+        let airway = self.upstream.as_mut().ok_or(GlottisError::Invalid {
+            what: "a lung pressure needs an upstream airway (with_upstream)",
+        })?;
+        let port = airway.port(p_lung_pa)?;
+        let frame = self.step_port(port.in_series(p_series_pa))?;
+        if let Some(airway) = self.upstream.as_mut() {
+            airway.commit(frame.flow_m3_s)?;
+        }
+        Ok(frame)
+    }
+
+    /// Advance one audio sample against the upstream source `port` (module doc): the valve-generic seam. An
+    /// [`UpstreamPort::ideal`] port is [`Self::step`] without an airway, bit for bit.
+    ///
+    /// # Errors
+    /// As [`Self::step`].
+    pub fn step_port(&mut self, port: UpstreamPort) -> Result<GlottalFrame, GlottisError> {
         let gap = self.gap_m();
         // The 1-DOF island's flow sees the DELAYED gap (the Titze
         // surface-wave mechanism); the two-mass island's vertical
@@ -1881,9 +1965,11 @@ impl GlottalIsland {
         // form. The two-mass island solves the printed g-loop (module doc)
         // in the same form: a = 2 / (rho K), and the backward difference of
         // the momentum adds L/dt to Z and p_prev / dt to the drive; then
-        // p = L U.
+        // p = L U. The upstream port puts its open-circuit pressure in P and
+        // its impedance in series with Z; an ideal port adds 0.0 to Z, which
+        // leaves Z unchanged, bit for bit.
         let h_open = flow_gap.max(0.0);
-        let p_drive = p_sub_pa - 2.0 * self.p_minus;
+        let p_drive = port.open_circuit_pa - 2.0 * self.p_minus;
         let channel = self.if72_channel();
         let (flow, momentum) = match channel {
             Some(ch) if ch.open() => {
@@ -1892,7 +1978,7 @@ impl GlottalIsland {
                 let u = if drive.abs() > 1.0e-12 {
                     junction_flow(
                         2.0 / (self.rho * ch.kinetic()),
-                        self.zc_flow + ch.series_resistance() + inertance / self.dt,
+                        self.zc_flow + port.impedance + ch.series_resistance() + inertance / self.dt,
                         drive,
                     )
                 } else {
@@ -1907,13 +1993,15 @@ impl GlottalIsland {
                 let a_coef = 2.0 * wh * wh / self.rho;
                 let u = junction_flow(
                     a_coef,
-                    self.zc_flow + self.viscous_resistance(flow_gap),
+                    self.zc_flow + port.impedance + self.viscous_resistance(flow_gap),
                     p_drive,
                 );
                 (u, 0.0)
             }
             None => (0.0, 0.0),
         };
+        // The pressure under the folds at the solved flow: the ideal port's own pressure, bit for bit.
+        let p_sub_pa = port.pressure_pa(flow);
         let dp_dt = (momentum - self.momentum_pa_s) / self.dt;
         self.momentum_pa_s = momentum;
         let p_supra = 2.0 * self.p_minus + self.zc_flow * flow;
@@ -1948,6 +2036,7 @@ impl GlottalIsland {
         Ok(GlottalFrame {
             flow_m3_s: flow,
             p_supra_pa: p_supra,
+            p_sub_pa,
             gap_m,
             dissipated_j: record.dissipated,
             fold_energy_j,
@@ -3285,7 +3374,17 @@ mod glottis_tests {
     /// `L dU/dt`, whose step gains `(L - L_prev) U_prev^2 / 2` each time the glottis narrows.
     #[test]
     fn gl_015_fold_and_flow_energy_close_on_the_ideal_open_tube() {
-        let mut isl = island(true, 1.0);
+        let (n, shut) = fold_and_flow_ledger(island(true, 1.0), "gl-015-fold-flow-ledger");
+        assert!(
+            shut > 0 && shut < n / 2,
+            "the fold must start shut and then phonate ({shut})"
+        );
+    }
+
+    /// The ledger of gl_015 on any two-mass island over one second, every step and cumulatively, with `p_sub` the
+    /// pressure the folds saw (the frame's `p_sub_pa`: the step's own pressure without an airway, bit for bit, or the
+    /// airway's port pressure with one). Returns the step count and the shut steps.
+    fn fold_and_flow_ledger(mut isl: GlottalIsland, case: &str) -> (usize, usize) {
         let gas = air();
         let (rho, mu) = (gas.density, gas.dynamic_viscosity);
         let card = isl.card;
@@ -3342,12 +3441,13 @@ mod glottis_tests {
         let (mut reverse, mut shut) = (0_usize, 0_usize);
         for k in 0..n {
             let attack = (k as f64 / (0.03 * f64::from(RATE))).min(1.0);
-            let p_sub = 1400.0 * attack;
+            let p_set = 1400.0 * attack;
             let x0 = state(&isl);
             let (h1, h2) = (rest + x0[0], rest + x0[2]);
             let p_prev = isl.momentum_pa_s;
             let s0 = stored(&isl);
-            let f = isl.step(p_sub).expect("step");
+            let f = isl.step(p_set).expect("step");
+            let p_sub = f.p_sub_pa;
             let x1 = state(&isl);
             let s1 = stored(&isl);
             let (u, p) = (f.flow_m3_s, isl.momentum_pa_s);
@@ -3430,7 +3530,7 @@ mod glottis_tests {
         }
         let (max_passes, all_passes) = isl.force_passes();
         println!(
-            "{{\"suite\":\"fs-couple\",\"case\":\"gl-015-fold-flow-ledger\",\"steps\":{n},\"reverse_steps\":{reverse},\"shut_steps\":{shut},\"worst_step_rel_miss\":{worst:e},\"cumulative_miss_j\":{miss_sum:e},\"scale_sum_j\":{scale_sum:e},\"subglottal_and_tract_j\":{:e},\"eq13_less_suction_j\":{:e},\"contact_j\":{:e},\"fold_damping_j\":{:e},\"kinetic_loss_j\":{:e},\"viscous_loss_j\":{:e},\"difference_loss_j\":{:e},\"max_passes\":{max_passes},\"mean_passes\":{:.3}}}",
+            "{{\"suite\":\"fs-couple\",\"case\":\"{case}\",\"steps\":{n},\"reverse_steps\":{reverse},\"shut_steps\":{shut},\"worst_step_rel_miss\":{worst:e},\"cumulative_miss_j\":{miss_sum:e},\"scale_sum_j\":{scale_sum:e},\"subglottal_and_tract_j\":{:e},\"eq13_less_suction_j\":{:e},\"contact_j\":{:e},\"fold_damping_j\":{:e},\"kinetic_loss_j\":{:e},\"viscous_loss_j\":{:e},\"difference_loss_j\":{:e},\"max_passes\":{max_passes},\"mean_passes\":{:.3}}}",
             totals[0],
             totals[1],
             totals[2],
@@ -3441,10 +3541,6 @@ mod glottis_tests {
             all_passes as f64 / n as f64
         );
         assert!(
-            shut > 0 && shut < n / 2,
-            "the fold must start shut and then phonate ({shut})"
-        );
-        assert!(
             worst < 1.0e-9,
             "fold plus flow ledger: worst step miss {worst:e}"
         );
@@ -3452,6 +3548,85 @@ mod glottis_tests {
             miss_sum.abs() < 1.0e-9 * scale_sum,
             "fold plus flow ledger: cumulative miss {miss_sum:e} J of {scale_sum:e} J"
         );
+        (n, shut)
+    }
+
+    /// Weibel's tree to 17 generations (Saab et al. 2021 Table 1 column B) with the voice cards' wall, on the fixture
+    /// clock and gas.
+    fn weibel_airway() -> UpstreamAirway {
+        let wall = WallPin {
+            surface_density: 15.0,
+            stiffness_per_area: 1.48e6,
+            resistance: 1.6e4,
+        };
+        let chain = crate::upstream_airway::AirwayChain::weibel_saab_2021_b(17, Some(wall)).expect("tree");
+        let ladder = LineLadder {
+            max_taps: GLOTTAL_LINE_MAX_TAPS,
+            ..LineLadder::default()
+        };
+        UpstreamAirway::realize(&chain, &air(), RATE, &ladder).expect("airway realizes")
+    }
+
+    /// With the airway below the folds, the fold and flow ledger of gl_015 closes on the port pressure the folds saw,
+    /// every step; the port pressure is the airway's own (the Thevenin form at the solved flow against the wave the
+    /// airway sends), and it is not the lung pressure once the glottis passes flow.
+    #[test]
+    fn gl_up_001_the_fold_and_flow_ledger_closes_on_the_airway_port_pressure() {
+        let airway = weibel_airway();
+        let isl = island(true, 1.0).with_upstream(airway.clone()).expect("airway admits");
+        let (n, shut) = fold_and_flow_ledger(isl, "gl-up-001-fold-flow-ledger-on-airway-port");
+        assert!(shut > 0, "the fold starts shut ({shut} of {n})");
+        let mut isl = island(true, 1.0).with_upstream(airway.clone()).expect("airway admits");
+        let mut mirror = airway.clone();
+        let (mut worst, mut drop) = (0.0_f64, 0.0_f64);
+        for k in 0..4800 {
+            let p_lung = 1400.0 * (f64::from(k) / 1440.0).min(1.0);
+            let port = mirror.port(p_lung).expect("port");
+            let f = isl.step(p_lung).expect("step");
+            let p_mirror = mirror.commit(f.flow_m3_s).expect("commit");
+            worst = worst.max((f.p_sub_pa - port.pressure_pa(f.flow_m3_s)).abs().max((f.p_sub_pa - p_mirror).abs()));
+            drop = drop.max((p_lung - f.p_sub_pa).abs());
+        }
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"gl-up-001-airway-port-pressure\",\"worst_port_miss_pa\":{worst:e},\"largest_lung_minus_port_pa\":{drop:e}}}"
+        );
+        assert!(worst < 1.0e-9, "the folds did not see the airway's port pressure ({worst:e} Pa)");
+        assert!(drop > 1.0, "a flowing glottis loads the airway ({drop:e} Pa)");
+        assert!(
+            island(true, 1.0)
+                .with_upstream(airway.clone())
+                .and_then(|isl| isl.with_upstream(airway.clone()))
+                .is_err(),
+            "one airway per island"
+        );
+        let mut stepped = island(true, 1.0);
+        stepped.step(100.0).expect("step");
+        assert!(stepped.with_upstream(airway).is_err(), "an airway is set before the first step");
+    }
+
+    /// The ideal upstream port is the plain step, bit for bit, on the two-mass and the one-mass island: every frame
+    /// field and the incident wave over 20000 steps of a ramp to 1400 Pa and a fall back through zero. The plain step
+    /// is that port by construction; this holds the seam to it.
+    #[test]
+    fn gl_up_002_an_ideal_upstream_port_is_the_plain_step_bit_for_bit() {
+        for two_mass in [true, false] {
+            let (mut plain, mut seam) = (island(two_mass, 1.0), island(two_mass, 1.0));
+            for k in 0..20_000_u32 {
+                let t = f64::from(k) / 20_000.0;
+                let p = 1400.0 * (4.0 * t).min(1.0) - if t > 0.9 { 1600.0 * (t - 0.9) / 0.1 } else { 0.0 };
+                let a = plain.step(p).expect("plain");
+                let b = seam.step_port(UpstreamPort::ideal(p)).expect("seam");
+                let bits = |f: &GlottalFrame| {
+                    [f.flow_m3_s, f.p_supra_pa, f.p_sub_pa, f.gap_m, f.dissipated_j, f.fold_energy_j, f.tension_work_j]
+                        .map(f64::to_bits)
+                };
+                assert_eq!(bits(&a), bits(&b), "frame {k} (two_mass {two_mass})");
+                assert_eq!(a.shut, b.shut, "shut {k}");
+                assert_eq!(a.p_sub_pa.to_bits(), p.to_bits(), "the folds saw the given pressure at {k}");
+                assert_eq!(plain.incident_wave_pa().to_bits(), seam.incident_wave_pa().to_bits(), "wave {k}");
+            }
+        }
+        println!("{{\"suite\":\"fs-couple\",\"case\":\"gl-up-002-ideal-port-bit-identical\",\"steps\":20000,\"verdict\":\"pass\"}}");
     }
 
     /// IF72's folds are a mirror pair whose displacements `x_f` double into the gap (p. 1237): `h = h0 + 2 x_f`.

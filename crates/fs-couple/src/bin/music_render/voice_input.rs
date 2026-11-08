@@ -88,6 +88,22 @@ pub(super) fn run_with_gas_sources(
             c.open_gate(), c.whole, c.truncated, c.silent
         )
     });
+    // Only a performance with the `subglottal_airway` row writes this block; without it the sidecar is byte for byte what
+    // it was. The wall is the card's `tract_wall` on every tube's perimeter, or rigid without one.
+    let airway = match (&info.subglottal_airway, description.subglottal_airway) {
+        (Some(receipt), Some(generations)) => format!(
+            "\"subglottal_airway\":{{\"tree\":\"{}\",\"geometry\":\"{}\",\"generations\":{generations},\
+             \"wall\":\"{}\",\"port_impedance_pa_s_m3\":{:e},\"dc_resistance_pa_s_m3\":{:e},\
+             \"same_sample_reflection\":{:e},\"series_impedance_pa_s_m3\":{:e},\"reflectance_taps\":{},\
+             \"source_taps\":{},\"schedule\":\"lung pressure at the tree's far end\"}},",
+            fs_couple::voice_performance::SUBGLOTTAL_AIRWAY_TREE,
+            fs_couple::voice_performance::SUBGLOTTAL_AIRWAY_GEOMETRY,
+            if description.wall.is_some() { "the card's tract_wall pin on every tube's perimeter" } else { "rigid" },
+            receipt.port_impedance, receipt.dc_resistance, receipt.same_sample_reflection,
+            receipt.series_impedance, receipt.reflectance.n_fft, receipt.source_taps,
+        ),
+        _ => String::new(),
+    };
     // Only a performance with the `head_sphere` row writes this block and the sphere's scope; without it the sidecar is byte
     // for byte what it was. `filter_delay_samples` is the microphone's whole filter latency, the head's FIR included.
     // Only one with `head_load` as well names the lips' load inside the block and in the scope. Only one with
@@ -146,7 +162,7 @@ pub(super) fn run_with_gas_sources(
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
-         \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}\
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}{airway}\
          \"model_scope\":\"{scope}\"{observer}}}{gas_sources}{tract_gas}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,

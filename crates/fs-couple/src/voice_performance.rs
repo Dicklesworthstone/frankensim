@@ -17,7 +17,9 @@
 //! Limits, not hidden: infinite-baffle radiation (no head diffraction) unless the
 //! opt-in `head_sphere` row puts the mouth on a rigid sphere, a plane-wave series
 //! tract (no side branches or nasal coupling), a lumped two-mass, body-cover or
-//! one-mass fold, and a rigid or single-pin yielding wall.
+//! one-mass fold, a rigid or single-pin yielding wall, and an ideal pressure
+//! source under the folds unless the opt-in `subglottal_airway` row puts a
+//! symmetric tree there.
 //!
 //! ```text
 //! frankensim-voice-performance-v1
@@ -40,6 +42,7 @@
 //! section <area_m2> <length_m>                       (repeat, glottis first)
 //! microphone <x_m> <y_m> <z_m> <radial_rings> <angular_points> <max_frequency_hz>
 //! subglottal <time_s> <pressure_pa>                  (repeat, strictly increasing time)
+//! subglottal_airway weibel-1963 saab-2021-table-1-B <generations>   (optional; the trachea and bronchial tree below the folds)
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
 //! tension_flutter <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional; pitch movement, adds to any vibrato)
 //! tension_flutter_second <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional, needs tension_flutter; a second filter)
@@ -63,6 +66,17 @@
 //! and the two gases share one static pressure (mean flow is not modeled). The medium is stationary: the breath does not
 //! mix with the room or replace the tract's air over a note. Without the row the one `ambient` gas fills the tract and the
 //! exterior exactly as before.
+//!
+//! `subglottal_airway` puts an airway below the folds ([`crate::upstream_airway`]): the first `<generations>` of
+//! Weibel's symmetric tree as Saab, Issa, Zeineddine, Tartakovsky and Lakkis (2021, arXiv:2111.07627) print it in Table
+//! 1 column B, generation `n` being `2^(n-1)` cylinders with Bessel losses in the tract's gas, and every tube carrying
+//! the card's `tract_wall` pin on its own perimeter (rigid without one). The `subglottal` schedule then becomes the lung
+//! pressure at the tree's far end, and every step the folds see the airway's port ([`GlottalIsland::with_upstream`]).
+//! The aspiration, jet and constriction sources stay in series at the glottis, and their laws still read the schedule
+//! as the blowing pressure. How many generations a card takes, and by which rule, is the card's to state; nothing here
+//! picks them. No measured per-generation airway wall is carried, so a page showing a render must say which wall the
+//! airway took. Without the row the schedule is the pressure under the folds and a performance is bit-identical to one
+//! written before the row existed.
 //!
 //! `observer_law` binds the existing causal gas law to that exterior record on
 //! every mouth-quadrature path. Absorption, dispersion and physical travel
@@ -210,6 +224,7 @@ use crate::turbulence_noise::{
     AspirationCard, ConstrictionNoise, ConstrictionNoiseCard, GlottalAspiration, GlottalJetNoise, JetNoiseCard,
     RE_CRIT_SONDHI_SCHROETER,
 };
+use crate::upstream_airway::{AirwayChain, AirwayReceipt, UpstreamAirway, WEIBEL_SAAB_2021_TABLE_1_B_MM};
 use fs_duct::{MouthLoad, Termination};
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
@@ -225,6 +240,10 @@ const HEAD_LOAD_NEEDS_FLANGED: &str = "head_load needs `termination flanged`: it
 const TORSO_NEEDS_SPHERE: &str = "torso_sphere needs the head_sphere row: the torso sits under that head";
 const TRACT_GAS_NEEDS_HEAD_LOAD: &str =
     "tract_gas needs the head_load row: the lips' load must be computed in the exterior, not the tract's gas";
+/// The `subglottal_airway` row's tree token: Weibel's symmetric model.
+pub const SUBGLOTTAL_AIRWAY_TREE: &str = "weibel-1963";
+/// The `subglottal_airway` row's geometry token: the dimensions as Saab et al. (2021) print them, Table 1 column B.
+pub const SUBGLOTTAL_AIRWAY_GEOMETRY: &str = "saab-2021-table-1-B";
 /// Largest accepted file.
 pub const MAX_VOICE_PERFORMANCE_BYTES: usize = 1 << 20;
 const MAX_SECTIONS: usize = 1024;
@@ -270,8 +289,12 @@ pub struct VoiceDescription {
     /// Microphone in the mouth-plane frame (origin at the mouth centre,
     /// +z out of the baffle) and its spatial resolution.
     pub microphone: CircularOutletReceiver,
-    /// Subglottal pressure breakpoints `(time_s, pressure_pa)`.
+    /// Subglottal pressure breakpoints `(time_s, pressure_pa)`: the pressure under the folds, or with
+    /// `subglottal_airway` the lung pressure at the airway's far end.
     pub subglottal: Vec<(f64, f64)>,
+    /// Opt-in `subglottal_airway`: this many generations of Weibel's tree as Saab et al. (2021) print it in Table 1
+    /// column B, below the glottis (module doc); `None` applies the schedule under the folds.
+    pub subglottal_airway: Option<usize>,
     /// Vibrato as a fold-tension gesture `(rate_hz, relative_amplitude)`: the stiffnesses scale by
     /// `1 + a sin(2 pi r t)`. `None` leaves the tension at the card's value for the whole performance.
     pub tension_modulation: Option<(f64, f64)>,
@@ -397,6 +420,7 @@ impl VoiceDescription {
         let mut microphone = None;
         let mut sections: Vec<TractSection> = Vec::new();
         let mut subglottal: Vec<(f64, f64)> = Vec::new();
+        let mut subglottal_airway = None;
         let mut tension_modulation = None;
         let mut tension_flutter = None;
         let mut tension_flutter_second = None;
@@ -571,6 +595,19 @@ impl VoiceDescription {
                         return Err("subglottal times must be strictly increasing".into());
                     }
                     subglottal.push(point);
+                }
+                "subglottal_airway" => {
+                    arity(&rest, 3, key)?;
+                    if rest[0] != SUBGLOTTAL_AIRWAY_TREE || rest[1] != SUBGLOTTAL_AIRWAY_GEOMETRY {
+                        return Err(format!(
+                            "subglottal_airway takes `{SUBGLOTTAL_AIRWAY_TREE} {SUBGLOTTAL_AIRWAY_GEOMETRY} <generations>`"
+                        ));
+                    }
+                    let generations = whole(&rest, 2, "subglottal_airway generations")?;
+                    if !(1..=WEIBEL_SAAB_2021_TABLE_1_B_MM.len() as u64).contains(&generations) {
+                        return Err("subglottal_airway generations must be in 1..=24".into());
+                    }
+                    once(&mut subglottal_airway, generations as usize, key)?;
                 }
                 "tension_modulation" => {
                     arity(&rest, 2, key)?;
@@ -796,6 +833,7 @@ impl VoiceDescription {
             tract_licence: licence.ok_or_else(|| missing("tract_licence"))?,
             microphone: microphone.ok_or_else(|| missing("microphone"))?,
             subglottal,
+            subglottal_airway,
             tension_modulation,
             tension_flutter,
             tension_flutter_second,
@@ -890,6 +928,19 @@ impl VoiceDescription {
             (Some(_), Some(table)) => Some(table),
             (Some(_), None) => return Err(TRACT_GAS_NEEDS_HEAD_LOAD.into()),
         };
+        // `subglottal_airway`: Weibel's tree below the folds in the tract's gas, every tube carrying the card's
+        // `tract_wall` (rigid without one), on the mechanics clock. Without the row the island takes no airway.
+        let airway = match self.subglottal_airway {
+            Some(generations) => Some(
+                AirwayChain::weibel_saab_2021_b(generations, self.wall)
+                    .and_then(|chain| {
+                        let ladder = LineLadder { max_taps: GLOTTAL_LINE_MAX_TAPS, ..LineLadder::default() };
+                        UpstreamAirway::realize(&chain, gas, mechanics_rate, &ladder)
+                    })
+                    .map_err(|e| format!("subglottal airway refused: {e}"))?,
+            ),
+            None => None,
+        };
         let island = match split {
             None => GlottalIsland::new_with_wall(
                 self.fold,
@@ -917,6 +968,10 @@ impl VoiceDescription {
         })
         .and_then(|island| match self.fold_body {
             Some(body) => island.with_body(body),
+            None => Ok(island),
+        })
+        .and_then(|island| match airway {
+            Some(airway) => island.with_upstream(airway),
             None => Ok(island),
         })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
@@ -1001,6 +1056,7 @@ impl VoiceDescription {
             head_sphere_radius_m: self.head_sphere.as_ref().map(|card| card.radius_m),
             head_load: head_load.is_some(),
             torso_sphere: self.torso_sphere.as_ref().map(|card| card.torso),
+            subglottal_airway: island.upstream().map(|airway| airway.receipt().clone()),
         };
         let aspiration = match self.aspiration_noise {
             Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
@@ -1092,6 +1148,8 @@ pub struct VoiceInfo {
     pub head_load: bool,
     /// The `torso_sphere` row's torso; `None` for the head alone.
     pub torso_sphere: Option<TorsoSphere>,
+    /// The `subglottal_airway` row's realized airway; `None` without the row.
+    pub subglottal_airway: Option<AirwayReceipt>,
 }
 
 /// Source-side summaries over the physical substeps rendered so far.
@@ -1395,12 +1453,16 @@ impl VoicePerformance {
             }
             let gesture = self.schedule.at(t);
             let mut drive = gesture;
+            // The same sources summed alone, for an airway below the folds: there the gesture is the lung pressure and
+            // the sources stay in series at the glottis. Without the row this sum is never read.
+            let mut series = 0.0;
             if let Some(source) = self.constriction_noise.as_mut() {
                 // K(St) times the gesture's own pressure, not the noisy drive: the law's blowing pressure is a held value. Series
                 // like the sources below; zero is not added, so a silent source leaves the drive bit for bit what it was.
                 let noise = source.pressure_pa(gesture, self.gas_density);
                 if noise != 0.0 {
                     drive += noise;
+                    series += noise;
                 }
             }
             if let Some(source) = self.jet_noise.as_mut() {
@@ -1417,6 +1479,7 @@ impl VoicePerformance {
                 );
                 if noise != 0.0 {
                     drive += noise;
+                    series += noise;
                 }
             }
             if let Some(source) = self.aspiration.as_mut() {
@@ -1425,12 +1488,15 @@ impl VoicePerformance {
                 let noise = source.pressure_pa(self.gas_density, self.gas_viscosity, 1.0 / f64::from(self.mechanics_rate));
                 if noise != 0.0 {
                     drive += noise;
+                    series += noise;
                 }
             }
-            let frame = self
-                .island
-                .step(drive)
-                .map_err(|e| format!("glottal island refused: {e:?}"))?;
+            let frame = if self.island.has_upstream() {
+                self.island.step_lung(gesture, series)
+            } else {
+                self.island.step(drive)
+            }
+            .map_err(|e| format!("glottal island refused: {e:?}"))?;
             if let Some(source) = self.aspiration.as_mut() {
                 source.record(frame.flow_m3_s, self.fold_length_m * frame.gap_m.max(0.0));
             }
@@ -2954,5 +3020,46 @@ mod tests {
             (0.3 * 0.08 * per_a..=0.8 * 0.08 * per_a).contains(&full),
             "f0 swing {full:.1} cents peak for a = 0.08"
         );
+    }
+
+    /// The `subglottal_airway` row parses, is refused by name, and reaches the folds: the airway is realized on the
+    /// mechanics clock in the tract's gas with the card's wall, its receipt is reported, and the radiated pressure
+    /// moves; without the row nothing is reported and nothing moves.
+    #[test]
+    fn subglottal_airway_parses_is_refused_by_name_and_loads_the_folds() {
+        let row = "subglottal_airway weibel-1963 saab-2021-table-1-B 17\n";
+        let description = VoiceDescription::from_bytes(fixture(row).as_bytes()).unwrap();
+        assert_eq!(description.subglottal_airway, Some(17));
+        assert_eq!(VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap().subglottal_airway, None);
+        for rows in [
+            "subglottal_airway weibel-1963 saab-2021-table-1-B\n",
+            "subglottal_airway horsfield-1971 saab-2021-table-1-B 17\n",
+            "subglottal_airway weibel-1963 saab-2021-table-1-A 17\n",
+            "subglottal_airway weibel-1963 saab-2021-table-1-B 0\n",
+            "subglottal_airway weibel-1963 saab-2021-table-1-B 25\n",
+            "subglottal_airway weibel-1963 saab-2021-table-1-B 17.5\n",
+            "subglottal_airway weibel-1963 saab-2021-table-1-B 17\nsubglottal_airway weibel-1963 saab-2021-table-1-B 16\n",
+        ] {
+            let error = VoiceDescription::from_bytes(fixture(rows).as_bytes()).unwrap_err();
+            assert!(error.contains("subglottal_airway"), "{rows:?}: {error}");
+        }
+        let wall = "tract_wall 15 1.48e+06 1.6e4\n";
+        let plain = VoiceDescription::from_bytes(fixture(wall).as_bytes()).unwrap();
+        let walled = VoiceDescription::from_bytes(fixture(&format!("{wall}{row}")).as_bytes()).unwrap();
+        let performance = walled.build().expect("the airway realizes");
+        let receipt = performance.info().subglottal_airway.clone().expect("receipt");
+        assert_eq!(receipt.sections, 17);
+        assert!(plain.build().unwrap().info().subglottal_airway.is_none());
+        let (without, with) = (pressure(&plain), pressure(&walled));
+        let moved = without.iter().zip(&with).any(|(a, b)| a.to_bits() != b.to_bits());
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-subglottal-airway-row\",\"zs\":{:e},\"r_dc\":{:e},\"r0\":{:e},\"reflectance_taps\":{},\"source_taps\":{}}}",
+            receipt.port_impedance,
+            receipt.dc_resistance,
+            receipt.same_sample_reflection,
+            receipt.reflectance.n_fft,
+            receipt.source_taps
+        );
+        assert!(moved, "the airway must reach the radiated pressure");
     }
 }
