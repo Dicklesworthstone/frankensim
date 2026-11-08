@@ -5,9 +5,12 @@
 //! fs-math's expm1 exists for). Krylov φ-actions for large nonsymmetric
 //! A are recorded follow-up (needs Arnoldi).
 
-use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
+use fs_exec::reduce::Compensated;
+use fs_ivl::expansion::fast_expansion_sum_zeroelim;
+use fs_la::eigen::{MAX_EIGEN_WORK_ELEMENTS, admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::{Lu, lu};
 use fs_math::det;
+use fs_math::eft::two_sum;
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport};
 use std::fmt;
 
@@ -557,6 +560,17 @@ pub struct ExpEuler {
     split_exp: Vec<bool>,
     /// h·φ₁(hλ) per eigenvalue.
     hphi1: Vec<f64>,
+    /// Exact constant modes of explicitly reciprocal diffusion components.
+    constant_modes: Vec<ConstantDiffusionMode>,
+    /// Component nodes in the same order as `constant_modes`.
+    component_nodes: Vec<usize>,
+}
+
+struct ConstantDiffusionMode {
+    column: usize,
+    start: usize,
+    end: usize,
+    normalization: f64,
 }
 
 /// A refusal from spectral preparation or exponential stepping.
@@ -625,13 +639,28 @@ impl ExpEuler {
     /// their mean then defines the symmetric operator. The scaled Jacobi
     /// eigenpairs must pass residual and orthogonality checks at roundoff
     /// scale. Unresolved dynamic range and unrepresentable growth refuse.
+    /// Exactly reciprocal diffusion matrices with nonnegative off-diagonal
+    /// entries and exactly zero row sums use [`Self::try_new_diffusion`]'s
+    /// conserved modes. Exact expansion sums distinguish a true nullspace
+    /// from a small physical growth or decay rate; no eigenvalue is clipped.
     ///
     /// # Errors
     /// Returns [`ExpEulerError`] before creating a usable stepper when the
     /// inputs, spectrum, or scalar propagator cannot be admitted.
     pub fn try_new(a: &[f64], n: usize, h: f64) -> Result<Self, ExpEulerError> {
+        Self::try_new_symmetric(a, n, h, false)
+    }
+
+    fn try_new_symmetric(
+        a: &[f64],
+        n: usize,
+        h: f64,
+        require_decay: bool,
+    ) -> Result<Self, ExpEulerError> {
         if !h.is_finite() || h <= 0.0 {
-            return Err(ExpEulerError::InvalidInput("require a positive finite step"));
+            return Err(ExpEulerError::InvalidInput(
+                "require a positive finite step",
+            ));
         }
         let admission = admit_jacobi_eigh(n)
             .map_err(|_| ExpEulerError::InvalidInput("dense eigensolve exceeds its work cap"))?;
@@ -644,6 +673,9 @@ impl ExpEuler {
         }
         if a.iter().any(|value| !value.is_finite()) {
             return Err(ExpEulerError::InvalidInput("require a finite matrix"));
+        }
+        if !require_decay && n > 0 && exact_diffusion_generator(a, n) {
+            return Self::prepare_diffusion(a, n, h);
         }
         let maximum = a
             .iter()
@@ -713,7 +745,14 @@ impl ExpEuler {
         for value in vals {
             let lambda = value * scale;
             if !lambda.is_finite() || (value != 0.0 && scale > 0.0 && lambda == 0.0) {
-                return Err(ExpEulerError::Spectrum("eigenvalue scaling is unrepresentable"));
+                return Err(ExpEulerError::Spectrum(
+                    "eigenvalue scaling is unrepresentable",
+                ));
+            }
+            if require_decay && lambda >= 0.0 {
+                return Err(ExpEulerError::Spectrum(
+                    "unresolved diffusion contrast mode",
+                ));
             }
             let x = h * lambda;
             let retention = det::exp(x);
@@ -728,7 +767,9 @@ impl ExpEuler {
                 det::expm1(x) / lambda
             };
             if !retention.is_finite() || !source.is_finite() || source <= 0.0 {
-                return Err(ExpEulerError::Spectrum("scalar response is unrepresentable"));
+                return Err(ExpEulerError::Spectrum(
+                    "scalar response is unrepresentable",
+                ));
             }
             let split = retention < f64::MIN_POSITIVE;
             exp_h.push(if split { det::exp(0.25 * x) } else { retention });
@@ -742,7 +783,186 @@ impl ExpEuler {
             exp_h,
             split_exp,
             hphi1,
+            constant_modes: Vec::new(),
+            component_nodes: Vec::new(),
         })
+    }
+
+    /// Prepare reciprocal diffusion from a row-major symmetric rate table.
+    ///
+    /// The diagonal must be zero and off-diagonal rates must be finite,
+    /// nonnegative and exactly reciprocal. They define
+    /// `u_i' = sum_j rate_ij * (u_j - u_i) + N_i(u)` for equal-capacity
+    /// states. Rates have units of inverse time; geometry, diffusivity and
+    /// boundary conductance remain the caller's physical model. No transport
+    /// across absent edges or unequal-capacity interpretation is inferred.
+    ///
+    /// Each connected component retains its constant mode analytically. Only
+    /// its orthogonal contrasts enter the eigensolver, so eigenvalue roundoff
+    /// cannot turn conserved material into growth or decay at long times.
+    /// Compensated component sums also retain balanced sources and sinks.
+    /// The existing workspace and allocation-free step path are reused.
+    /// Constant additive forcing is exact up to eigensolve and roundoff error;
+    /// nonlinear forcing remains first order. This bounded dense owner adds
+    /// no positivity, sparse-field scaling or internal cancellation guarantee.
+    ///
+    /// # Errors
+    /// Refuses invalid rates, durations or shapes, the aggregate dense work
+    /// cap, and unresolved/nonrepresentable decaying contrast spectra.
+    pub fn try_new_diffusion(rates: &[f64], n: usize, h: f64) -> Result<Self, ExpEulerError> {
+        let square = admit_jacobi_eigh(n)
+            .map_err(|_| ExpEulerError::InvalidInput("dense eigensolve exceeds its work cap"))?
+            .matrix_entries();
+        if rates.len() != square {
+            return Err(ExpEulerError::Dimension {
+                expected: square,
+                actual: rates.len(),
+            });
+        }
+        if (0..n).any(|i| rates[i * n + i] != 0.0) {
+            return Err(ExpEulerError::InvalidInput(
+                "exchange-rate diagonal must be zero",
+            ));
+        }
+        Self::prepare_diffusion(rates, n, h)
+    }
+
+    // The diagonal is ignored here: the public rate-table constructor checks
+    // zero entries, while the matrix constructor proves exact row closure.
+    fn prepare_diffusion(rates: &[f64], n: usize, h: f64) -> Result<Self, ExpEulerError> {
+        if n == 0 || !h.is_finite() || h <= 0.0 {
+            return Err(ExpEulerError::InvalidInput(
+                "require positive dimension and finite step",
+            ));
+        }
+        let square = admit_jacobi_eigh(n)
+            .map_err(|_| ExpEulerError::InvalidInput("dense eigensolve exceeds its work cap"))?
+            .matrix_entries();
+        // The complete output basis, contrast matrix and original eigensolver
+        // coexist. Count their aggregate payload before constructing any graph.
+        if square
+            .checked_mul(6)
+            .and_then(|value| {
+                n.checked_mul(12)
+                    .and_then(|linear| value.checked_add(linear))
+            })
+            .is_none_or(|value| value > MAX_EIGEN_WORK_ELEMENTS)
+        {
+            return Err(ExpEulerError::InvalidInput(
+                "diffusion eigensolve exceeds its work cap",
+            ));
+        }
+        for i in 0..n {
+            for j in i + 1..n {
+                let rate = rates[i * n + j];
+                if !rate.is_finite() || rate < 0.0 {
+                    return Err(ExpEulerError::InvalidInput(
+                        "require finite nonnegative exchange rates",
+                    ));
+                }
+                if rate != rates[j * n + i] {
+                    return Err(ExpEulerError::NonSymmetric { row: i, column: j });
+                }
+            }
+        }
+        let mut result = Self {
+            n,
+            h,
+            vecs: vec![0.0; square],
+            exp_h: vec![1.0; n],
+            split_exp: vec![false; n],
+            hphi1: vec![h; n],
+            constant_modes: Vec::new(),
+            component_nodes: Vec::with_capacity(n),
+        };
+        let mut visited = vec![false; n];
+        let mut column = 0;
+        for root in 0..n {
+            if visited[root] {
+                continue;
+            }
+            let start = result.component_nodes.len();
+            result.component_nodes.push(root);
+            visited[root] = true;
+            let mut cursor = start;
+            while cursor < result.component_nodes.len() {
+                let node = result.component_nodes[cursor];
+                for next in 0..n {
+                    if !visited[next] && rates[node * n + next] > 0.0 {
+                        visited[next] = true;
+                        result.component_nodes.push(next);
+                    }
+                }
+                cursor += 1;
+            }
+            let end = result.component_nodes.len();
+            result.component_nodes[start..end].sort_unstable();
+            let nodes = &result.component_nodes[start..end];
+            let count = nodes.len();
+            let root_count = det::sqrt(count as f64);
+            let normalization = 1.0 / root_count;
+            result.constant_modes.push(ConstantDiffusionMode {
+                column,
+                start,
+                end,
+                normalization,
+            });
+            for &node in nodes {
+                result.vecs[node * n + column] = normalization;
+            }
+            column += 1;
+            if count == 1 {
+                continue;
+            }
+            let mut diagonal = Vec::with_capacity(count);
+            for &node in nodes {
+                let sum = nodes
+                    .iter()
+                    .filter(|&&other| other != node)
+                    .fold(Compensated::zero(), |sum, &other| {
+                        sum.accumulate(rates[node * n + other])
+                    });
+                diagonal.push(-sum.value());
+            }
+            // H maps the first coordinate to minus the normalized constant.
+            // With A*1 = 0 known from pair exchange, the contrast block of
+            // H A H is A_ij - b(A_i0 + A_0j) + b² A_00, b=1/(sqrt(m)+1).
+            // The known zero row/column never enters a numerical eigensolve.
+            let b = 1.0 / (root_count + 1.0);
+            let dimension = count - 1;
+            let mut contrast = vec![0.0; dimension * dimension];
+            for i in 1..count {
+                for j in i..count {
+                    let entry = if i == j {
+                        diagonal[i]
+                    } else {
+                        rates[nodes[i] * n + nodes[j]]
+                    };
+                    let root_edges =
+                        rates[nodes[i] * n + nodes[0]] + rates[nodes[0] * n + nodes[j]];
+                    let value = (b * b).mul_add(diagonal[0], (-b).mul_add(root_edges, entry));
+                    contrast[(i - 1) * dimension + j - 1] = value;
+                    contrast[(j - 1) * dimension + i - 1] = value;
+                }
+            }
+            let reduced = Self::try_new_symmetric(&contrast, dimension, h, true)?;
+            for mode in 0..dimension {
+                let sum = (0..dimension).fold(Compensated::zero(), |sum, row| {
+                    sum.accumulate(reduced.vecs[row * dimension + mode])
+                });
+                let first = -normalization * sum.value();
+                result.vecs[nodes[0] * n + column] = first;
+                for row in 1..count {
+                    result.vecs[nodes[row] * n + column] =
+                        b.mul_add(first, reduced.vecs[(row - 1) * dimension + mode]);
+                }
+                result.exp_h[column] = reduced.exp_h[mode];
+                result.split_exp[column] = reduced.split_exp[mode];
+                result.hphi1[column] = reduced.hphi1[mode];
+                column += 1;
+            }
+        }
+        Ok(result)
     }
 
     /// The step size.
@@ -788,7 +1008,10 @@ impl ExpEuler {
         let n = self.n;
         for actual in [u.len(), workspace.source.len()] {
             if actual != n {
-                return Err(ExpEulerError::Dimension { expected: n, actual });
+                return Err(ExpEulerError::Dimension {
+                    expected: n,
+                    actual,
+                });
             }
         }
         for (index, value) in u.iter().enumerate() {
@@ -804,7 +1027,23 @@ impl ExpEuler {
             }
         }
         // Transform to eigenbasis: û = Vᵀu, n̂ = VᵀN.
+        let mut constants = self.constant_modes.iter().peekable();
         for i in 0..n {
+            if constants.peek().is_some_and(|mode| mode.column == i) {
+                let mode = constants.next().expect("constant mode was matched");
+                let nodes = &self.component_nodes[mode.start..mode.end];
+                // Exact zero-eliminating sums preserve cancellation across
+                // arbitrarily mixed finite magnitudes. A compensated scalar
+                // sum can still invent a small source which a long h amplifies.
+                // Endpoint scratch is unused until all modal values exist.
+                let state = component_sum(u, nodes, &mut workspace.next)?;
+                let source = component_sum(&workspace.source, nodes, &mut workspace.next)?;
+                workspace.modal[i] = mode.normalization * self.h.mul_add(source, state);
+                if !workspace.modal[i].is_finite() {
+                    return Err(ExpEulerError::Arithmetic);
+                }
+                continue;
+            }
             let (mut au, mut an) = (0.0f64, 0.0f64);
             for j in 0..n {
                 au = self.vecs[j * n + i].mul_add(u[j], au);
@@ -840,4 +1079,88 @@ impl ExpEuler {
         u.copy_from_slice(&workspace.next);
         Ok(())
     }
+}
+
+// Grow a nonoverlapping expansion in existing endpoint scratch, with the
+// shared error-free TwoSum primitive. Each input adds at most one component;
+// writes never overtake unread components, so nodes.len() slots suffice.
+// Exact balance becomes the empty expansion before any binary64 estimate.
+// Refuse overflow of an intermediate expansion instead of publishing a false
+// conserved amount. The caller owns finite inputs and scratch of length >= n.
+fn component_sum(
+    values: &[f64],
+    nodes: &[usize],
+    scratch: &mut [f64],
+) -> Result<f64, ExpEulerError> {
+    let mut length = 0;
+    for &node in nodes {
+        let mut carry = values[node];
+        let mut output = 0;
+        for input in 0..length {
+            let (sum, error) = two_sum(carry, scratch[input]);
+            if !sum.is_finite() || !error.is_finite() {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            if error != 0.0 {
+                scratch[output] = error;
+                output += 1;
+            }
+            carry = sum;
+        }
+        if carry != 0.0 {
+            scratch[output] = carry;
+            output += 1;
+        }
+        length = output;
+    }
+    let sum = fs_ivl::expansion::estimate(&scratch[..length]);
+    if !sum.is_finite() {
+        return Err(ExpEulerError::Arithmetic);
+    }
+    Ok(sum)
+}
+
+// Recognize only an exact reciprocal diffusion generator, not a near-zero
+// eigenvalue. Expansion arithmetic preserves the distinction between a closed
+// row and a physical loss smaller than a compensated reduction can resolve.
+fn exact_diffusion_generator(a: &[f64], n: usize) -> bool {
+    for i in 0..n {
+        if a[i * n + i] > 0.0 {
+            return false;
+        }
+        for j in i + 1..n {
+            if a[i * n + j] < 0.0 || a[i * n + j] != a[j * n + i] {
+                return false;
+            }
+        }
+    }
+    for i in 0..n {
+        let diagonal = a[i * n + i];
+        let mut sum = Compensated::zero().accumulate(diagonal);
+        for j in 0..n {
+            if i != j {
+                sum = sum.accumulate(a[i * n + j]);
+            }
+        }
+        if sum.value() != 0.0 {
+            return false;
+        }
+        // Negative diagonal first, followed only by positive entries. The
+        // finite near-zero fast sum above excludes overflow of this monotone
+        // exact accumulation; no unrepresentable expansion is attempted.
+        let mut exact = if diagonal == 0.0 {
+            Vec::new()
+        } else {
+            vec![diagonal]
+        };
+        for j in 0..n {
+            if i != j && a[i * n + j] != 0.0 {
+                exact = fast_expansion_sum_zeroelim(&exact, &[a[i * n + j]]);
+            }
+        }
+        if exact.iter().any(|&value| value != 0.0) {
+            return false;
+        }
+    }
+    true
 }

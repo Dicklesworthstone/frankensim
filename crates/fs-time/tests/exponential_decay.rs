@@ -210,3 +210,205 @@ fn checked_refusals_leave_the_entire_state_unchanged() {
     assert_eq!(state[0], initial[0]);
     assert!(state[1].is_nan());
 }
+
+fn path_rates(n: usize, rate: f64) -> Vec<f64> {
+    let mut rates = vec![0.0; n * n];
+    for i in 0..n - 1 {
+        rates[i * n + i + 1] = rate;
+        rates[(i + 1) * n + i] = rate;
+    }
+    rates
+}
+
+#[test]
+fn insulated_diffusion_retains_equilibrium_in_long_stiff_windows() {
+    for n in [3, 5, 9] {
+        let rates = path_rates(n, 1.0);
+        let mut generator = rates.clone();
+        for i in 0..n {
+            generator[i * n + i] = -rates[i * n..(i + 1) * n].iter().sum::<f64>();
+        }
+        // A numerical zero eigenvalue used to become spurious growth or loss
+        // here. Both the existing matrix API and authored-rate API must retain
+        // the analytic constant mode, independently of the stiff duration.
+        let matrix = ExpEuler::try_new(&generator, n, 1e16).unwrap();
+        let exchange = ExpEuler::try_new_diffusion(&rates, n, 1e16).unwrap();
+        let mut from_matrix: Vec<_> = (0..n).map(|i| (i + 1) as f64).collect();
+        let mut from_rates = from_matrix.clone();
+        matrix.step(&mut from_matrix, &zero);
+        exchange.step(&mut from_rates, &zero);
+        assert_eq!(from_matrix, from_rates);
+        let mean = 0.5 * (n + 1) as f64;
+        for &value in &from_matrix {
+            relative(value, mean, 3e-14);
+        }
+        relative(from_matrix.iter().sum(), n as f64 * mean, 3e-14);
+
+        let mut uniform = vec![2.5; n];
+        matrix.step(&mut uniform, &zero);
+        for value in uniform {
+            relative(value, 2.5, 3e-14);
+        }
+    }
+}
+
+#[test]
+fn disconnected_insulated_regions_keep_separate_material_balances() {
+    let n = 6;
+    let mut rates = vec![0.0; n * n];
+    for (i, j) in [(0, 2), (1, 3), (3, 5)] {
+        rates[i * n + j] = 1.0;
+        rates[j * n + i] = 1.0;
+    }
+    let method = ExpEuler::try_new_diffusion(&rates, n, 1e16).unwrap();
+    let mut state = [2.0, 1.0, 6.0, 3.0, -7.0, 5.0];
+    method.step(&mut state, &zero);
+    for (value, expected) in state.into_iter().zip([4.0, 3.0, 4.0, 3.0, -7.0, 3.0]) {
+        relative(value, expected, 3e-14);
+    }
+}
+
+#[test]
+fn balanced_sources_do_not_create_a_mean_in_stiff_diffusion() {
+    let method = ExpEuler::try_new_diffusion(&path_rates(3, 1.0), 3, 1e16).unwrap();
+    let mut state = [3.0; 3];
+    method.step(&mut state, &|_, out| out.copy_from_slice(&[0.4, -0.4, 0.0]));
+    // At equilibrium u0-u1=0.4, u1=u2, and total material remains nine.
+    let lower = (9.0 - 0.4) / 3.0;
+    for (value, expected) in state.into_iter().zip([lower + 0.4, lower, lower]) {
+        relative(value, expected, 3e-14);
+    }
+    relative(state.iter().sum(), 9.0, 3e-14);
+
+    // A real component source advances its mean by exactly the held source
+    // integral; it must neither disappear nor be treated as an eigenvalue.
+    state = [1.0; 3];
+    method.step(&mut state, &|_, out| out.fill(1e-16));
+    for value in state {
+        relative(value, 2.0, 3e-14);
+    }
+}
+
+#[test]
+fn multiscale_component_balances_survive_stiff_source_integration() {
+    let n = 6;
+    let large = (1_u64 << 53) as f64;
+    let tiny = 1.0 / large;
+    let mut rates = vec![(1_u64 << 60) as f64; n * n];
+    for i in 0..n {
+        rates[i * n + i] = 0.0;
+    }
+    let method = ExpEuler::try_new_diffusion(&rates, n, large).unwrap();
+    let mut workspace = method.workspace();
+    // All six values are exactly binary64. Neumaier's compensated sum
+    // leaves -2^-53 in this order despite their exactly zero real sum.
+    // Integrating that residual over h=2^53 used to remove one unit.
+    let balanced = [large, 1.0, tiny, -large, -1.0, -tiny];
+    for offset in 0..n {
+        for net in [0.0, tiny, -tiny] {
+            let mut source = balanced;
+            source[5] += net;
+            source.rotate_left(offset);
+            let mut state = [0.0; 6];
+            method
+                .step_checked(
+                    &mut state,
+                    &|_, out| out.copy_from_slice(&source),
+                    &mut workspace,
+                )
+                .unwrap();
+            let expected = large * net;
+            assert!(
+                (state.iter().sum::<f64>() - expected).abs() <= 2e-14,
+                "offset={offset}, net={net:e}, state={state:?}",
+            );
+        }
+        let mut state = balanced;
+        state.rotate_left(offset);
+        method
+            .step_checked(&mut state, &zero, &mut workspace)
+            .unwrap();
+        assert_eq!(state, [0.0; 6]);
+    }
+
+    // An intermediate expansion that overflows is refused atomically. Scratch
+    // from that refusal must not contaminate a later representable balance.
+    let mut state = [1.0; 6];
+    assert_eq!(
+        method.step_checked(
+            &mut state,
+            &|_, out| out.copy_from_slice(&[f64::MAX, f64::MAX, -f64::MAX, -f64::MAX, 0.0, 0.0],),
+            &mut workspace,
+        ),
+        Err(ExpEulerError::Arithmetic),
+    );
+    assert_eq!(state, [1.0; 6]);
+    method
+        .step_checked(
+            &mut state,
+            &|_, out| out.copy_from_slice(&balanced),
+            &mut workspace,
+        )
+        .unwrap();
+    relative(state.iter().sum(), 6.0, 3e-14);
+}
+
+#[test]
+fn driven_exchange_matches_the_independent_two_cell_solution() {
+    let rate: f64 = 3.0;
+    let h: f64 = 0.2;
+    let method = ExpEuler::try_new_diffusion(&path_rates(2, rate), 2, h).unwrap();
+    let mut state = [1.0, 0.0];
+    let source = |_: &[f64], out: &mut [f64]| out.copy_from_slice(&[0.7, -0.1]);
+    let mut workspace = method.workspace();
+    for step in 1..=20 {
+        method
+            .step_checked(&mut state, &source, &mut workspace)
+            .unwrap();
+        let time = f64::from(step) * h;
+        let mean = 0.5 + 0.3 * time;
+        let difference =
+            0.8 / (2.0 * rate) + (1.0 - 0.8 / (2.0 * rate)) * (-2.0 * rate * time).exp();
+        relative(state[0], mean + 0.5 * difference, 8e-14);
+        relative(state[1], mean - 0.5 * difference, 8e-14);
+    }
+}
+
+#[test]
+fn genuine_small_diffusion_growth_and_decay_rates_are_retained() {
+    let method = ExpEuler::try_new_diffusion(&path_rates(2, 1e-18), 2, 1e18).unwrap();
+    let mut state = [1.0, 0.0];
+    method.step(&mut state, &zero);
+    let difference = (-2.0_f64).exp();
+    relative(state[0], 0.5 * (1.0 + difference), 8e-15);
+    relative(state[1], 0.5 * (1.0 - difference), 8e-15);
+
+    for small in [-1e-18, 1e-18] {
+        let generic = ExpEuler::try_new(&[-1.0, 0.0, 0.0, small], 2, 1e18).unwrap();
+        state = [0.0, 1.0];
+        generic.step(&mut state, &zero);
+        assert_eq!(state[0], 0.0);
+        relative(state[1], (small * 1e18).exp(), 4e-15);
+    }
+}
+
+#[test]
+fn diffusion_admission_rejects_nonreciprocal_or_invalid_models() {
+    for rates in [
+        [0.0, -1.0, -1.0, 0.0],
+        [0.0, 1.0, 2.0, 0.0],
+        [-1.0, 1.0, 1.0, -1.0],
+        [0.0, f64::NAN, f64::NAN, 0.0],
+        [0.0, f64::INFINITY, f64::INFINITY, 0.0],
+    ] {
+        assert!(ExpEuler::try_new_diffusion(&rates, 2, 1.0).is_err());
+    }
+    assert!(ExpEuler::try_new_diffusion(&[], 0, 1.0).is_err());
+    assert!(ExpEuler::try_new_diffusion(&[0.0], 2, 1.0).is_err());
+    assert!(ExpEuler::try_new_diffusion(&[], usize::MAX, 1.0).is_err());
+    assert!(ExpEuler::try_new_diffusion(&[0.0], 1, 0.0).is_err());
+    let isolated = ExpEuler::try_new_diffusion(&[0.0], 1, 0.5).unwrap();
+    let mut state = [2.0];
+    isolated.step(&mut state, &|_, out| out[0] = 3.0);
+    assert_eq!(state, [3.5]);
+}

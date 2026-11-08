@@ -921,6 +921,28 @@ where claimed below.
   zero and extreme decay rates, large coupled spectra, retained tails, and
   transactional refusal. Existing `new`/`step` convenience calls delegate to
   these checks and panic on refusal.
+- `stiff::ExpEuler::try_new_diffusion(rates, n, h)` prepares equal-capacity
+  reciprocal exchange `u_i' = sum_j rates_ij (u_j-u_i) + N_i`. The authored
+  dense rate table has zero diagonal and finite nonnegative, exactly symmetric
+  off-diagonal entries. Each connected component's constant mode is retained
+  analytically; a Householder contrast basis sends only decaying modes to the
+  existing eigensolver. Long stiff windows therefore cannot amplify eigenvalue
+  roundoff into artificial creation or loss of the conserved field. A
+  reusable zero-eliminating expansion of each component's state and source
+  preserves exact cancellation even across widely separated magnitudes;
+  intermediate expansion overflow refuses without publishing. This reuses
+  endpoint scratch and adds no per-step allocation. The ordinary matrix
+  constructor automatically takes
+  this route only for exactly symmetric nonnegative-off-diagonal generators
+  whose row sums are exactly zero under the existing expansion arithmetic.
+  Small physical growth/decay rates are not clipped. Disconnected components
+  retain separate balances, including isolated cells. Existing workspace,
+  transactional refusals and constant-source/nonlinear-source accuracy limits
+  remain in force. The complete dense preparation has an aggregate work cap;
+  no sparse scaling, unequal-capacity interpretation, positivity certificate,
+  or extra cancellation guarantee is claimed. `tests/exponential_decay.rs`
+  adds insulated long-window equilibrium, disconnected conservation, driven
+  analytical exchange, balanced and net sources, and small-rate regressions.
 - `adaptive::{AdaptiveState, PiController, rk45_adaptive}` —
   Dormand–Prince 5(4), max-norm error against atol + rtol·|u|, PI
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
