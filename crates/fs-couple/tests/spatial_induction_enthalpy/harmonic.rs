@@ -1,4 +1,6 @@
 //! Independent AC diffusion and two-body caloric balance, with source feedback.
+#[path = "harmonic/circuit.rs"]
+mod circuit;
 #[path = "harmonic/terminals.rs"]
 mod terminals;
 

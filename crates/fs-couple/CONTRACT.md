@@ -8096,3 +8096,42 @@ geometry, finite forming, contact or phase change. Four authored regressions
 cover force-held self-heating/softening/permanent set, timed relaxation,
 nonuniform warped B-bar point heat/conduction and consistent inertia with atomic
 late refusal. Native Cargo execution remains a separate verification requirement.
+
+## Loaded physical-electrode AC circuits on the finite caloric residual
+
+`circuit_enthalpy::spatial_induction::harmonic::circuit::heat_assembly_candidate`
+closes the native affine electrode field, original RLC/transformer circuit and
+complete `HeatAssembly` on the same proposed temperatures. Each proposal refreshes
+the original conductor conductivity and every source-bound external resistor,
+then recovers actual loaded fields and branch efforts. Spatial Joule heat and
+original resistor heat enter their finite caloric receivers exactly once.
+Graph-source plus impressed-field work is external supply; electrode transfer
+remains an internal field diagnostic and is not added to total supply again.
+
+Graph resistor destinations come from the same material bindings that resolve
+their laws. Every resistor needs one complete whole-volume receiver separate
+from resolved magnetic bodies. Source identity and geometry stay pinned across
+trials. The accepted state is source-lowered before admission, so consecutive
+thermal intervals reuse the original immutable graph template. Instantaneous
+E/J-, frequency- or rate-dependent resistor laws refuse before field work;
+electrical interface contacts retain their separate owner and are not discarded.
+
+The shared existing field-material refresh and Joule recovery also serve the
+isolated, prescribed-current and prescribed-voltage thermal entrypoints. No
+second electromagnetic, circuit or thermal nonlinear solver is introduced.
+Each loaded thermal proposal reserves and reports one native solve per port,
+one additional solve for nonzero independent excitation, and one actual loaded
+recovery. Discarded Newton stencils count too; descriptor and assembly work keep
+their own native limits. Cancellation and typed provider refusal publish no
+thermal endpoint and leave the borrowed field and graph templates unchanged.
+
+The admitted regime is stationary, fixed-permeability, settled-carrier thermal
+feedback. Reactive field/network energy remains diagnostic; carrier startup,
+envelope-storage change, magnetic entropy, hysteresis and moving occupancy need
+their physical transient owners. Complete thermal contacts, radiation, layers
+and coolant retain the original heat provider and its same-temperature residual.
+Independent regression definitions solve a driven and a passive loaded cube
+against separate field/circuit and two-body caloric equations over consecutive
+intervals. They check both temperature-dependent electrical laws, source work,
+internal transfer, local heat, reactive energy, original source identity,
+ownership refusals, exact work counts, typed failures, cancellation and retry.

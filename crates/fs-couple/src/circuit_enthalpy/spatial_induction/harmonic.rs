@@ -12,8 +12,12 @@
 //! independent. Use retained transient induction for startup, rapid modulation,
 //! magnetic entropy, moving material, saturation or hysteretic losses.
 
+/// Source-bound loaded circuits and conductor/resistor thermal feedback.
+pub mod circuit;
 /// Physical voltage/current electrodes on the same settled thermal residual.
 pub mod terminals;
+
+mod field;
 
 use super::{
     SpatialMagneticMaterialSample, SpatialMagneticRegion, SpatialMagneticThermalNetwork,
@@ -21,14 +25,14 @@ use super::{
     induction, native_error,
 };
 use crate::circuit_enthalpy::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
-    DriverAccount, ThermalDriver, admit_driver_unknowns, cell_driver_candidate,
+    CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients, DriverAccount, ThermalDriver,
+    admit_driver_unknowns, cell_driver_candidate,
     contacts::heat::{HeatAssembly, closed_balance},
     finite,
-    magnetic::{MagneticThermalError, MagneticThermalNetwork, check, invalid, material},
-    material::MaterialNetworkError,
+    magnetic::{MagneticThermalNetwork, check, invalid},
     spatial_induction::SpatialInductionHeatError,
 };
+use field::{HarmonicFieldMaterials, recover_field_heat};
 use fs_em::spatial::{
     SpatialMagneticMaterial,
     vector_potential::induction::{
@@ -41,9 +45,7 @@ use fs_em::spatial::{
 };
 use fs_exec::Cx;
 use fs_feec::weighted::WeightedAssemblyLimits;
-use fs_material::{
-    conductor::spatial::SpatialConductorMaterial, field_storage::admit_source_temperature_refresh,
-};
+use fs_material::conductor::spatial::SpatialConductorMaterial;
 use fs_math::{c64::C64, dd::Dd};
 use fs_solver::SolveReport;
 use fs_thermal::enthalpy::{CellId, DepositionSimulation};
@@ -238,33 +240,10 @@ fn heat_assembly_with_drive<'t, A: HeatAssembly + ?Sized, C: SpatialConductorMat
         volume_tolerance_m3,
     };
     let problem = template.problem();
-    let originals = problem
-        .materials()
-        .iter()
-        .map(|m| match m {
-            SpatialMagneticMaterial::Linear(m) => Ok(m),
-            SpatialMagneticMaterial::Recoil(_) => Err(native_error(invalid(
-                "settled AC heating requires original induced-linear magnetic materials",
-            ))),
-        })
-        .collect::<Result<Vec<_>, HeatError<A::Error>>>()?;
-    let volumes = (0..problem.mesh().tets.len())
-        .map(|cell| {
-            check(&cancel).map_err(native_error)?;
-            problem.cell_volume_m3(cell).ok_or_else(|| {
-                native_error(invalid("original AC tetrahedron has no physical volume"))
-            })
-        })
-        .collect::<Result<Vec<_>, HeatError<A::Error>>>()?;
-    let conductors = template
-        .conductors()
-        .iter()
-        .enumerate()
-        .filter_map(|(cell, source)| source.as_ref().map(|source| (cell, source)))
-        .collect::<BTreeMap<_, _>>();
-    let conducting_cells = conductors.keys().copied().collect::<Vec<_>>();
-    let routes = network
-        .routes_for_volumes(thermal, &volumes, &conducting_cells, &cancel)
+    let field_materials = HarmonicFieldMaterials::new(problem, template.conductors(), &cancel)
+        .map_err(native_error)?;
+    let routes = field_materials
+        .routes(&network, thermal, &cancel)
         .map_err(native_error)?;
     let resolve = |state: &DepositionSimulation<'_>| {
         check(&cancel).map_err(native_error)?;
@@ -276,46 +255,13 @@ fn heat_assembly_with_drive<'t, A: HeatAssembly + ?Sized, C: SpatialConductorMat
                 "settled AC heating cannot discard graph electrical work",
             )));
         }
-        let (sources, magnetic) = network
-            .materials_at_using(
+        let (sources, magnetic) = field_materials
+            .resolve(
+                &network,
                 state,
-                &originals,
-                &conductors,
                 &coefficients.bulk.source.as_ref().material,
                 &routes,
                 &cancel,
-                |cell, before, after, binding| {
-                    let field_error =
-                        |e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e));
-                    admit_source_temperature_refresh(before, after).map_err(field_error)?;
-                    let law = problem.magnetic_laws()[cell];
-                    if law.resolve(before).map_err(field_error)?
-                        != law.resolve(after).map_err(field_error)?
-                    {
-                        return Err(invalid(
-                            "settled AC heating cannot change magnetic storage laws",
-                        ));
-                    }
-                    for name in law.source_property_names() {
-                        let property = after.property(name).ok_or_else(|| {
-                            invalid("settled AC heating lost its original magnetic source")
-                        })?;
-                        if property
-                            .source_axes()
-                            .iter()
-                            .any(|(axis, _)| axis == binding.point.temperature_axis)
-                        {
-                            return Err(invalid(
-                                "settled AC permeability must be independent of temperature",
-                            ));
-                        }
-                        binding
-                            .point
-                            .admit_static(property)
-                            .map_err(|e| material(MaterialNetworkError::Material(e)))?;
-                    }
-                    Ok(())
-                },
             )
             .map_err(native_error)?;
         Ok((coefficients.bulk, sources, magnetic))
@@ -331,7 +277,7 @@ fn heat_assembly_with_drive<'t, A: HeatAssembly + ?Sized, C: SpatialConductorMat
         initial_energy_increments_j,
         |trial, _remaining| {
             let (coefficients, sources, magnetic) = resolve(trial)?;
-            let mut refreshed = vec![None; originals.len()];
+            let mut refreshed = vec![None; field_materials.cell_count()];
             for (cell, source) in sources {
                 refreshed[cell] = Some(source);
             }
@@ -348,50 +294,11 @@ fn heat_assembly_with_drive<'t, A: HeatAssembly + ?Sized, C: SpatialConductorMat
                     field_controls,
                     assembly,
                     &mut || (*cancel.borrow_mut())(),
-                    |response| {
-                        if response.cells().len() != routes.conductors.len() {
-                            return Err(native_error(invalid(
-                                "AC heat omitted original conducting cells",
-                            )));
-                        }
-                        let mut cells = Vec::with_capacity(response.cells().len());
-                        for loss in response.cells() {
-                            check(&cancel).map_err(native_error)?;
-                            let cell = *routes.conductors.get(&loss.cell).ok_or_else(|| {
-                                native_error(invalid("AC heat lost its original caloric receiver"))
-                            })?;
-                            let heat_j = finite(dt * loss.mean_ohmic_power_w)?;
-                            if heat_j < 0.0 || loss.mean_ohmic_power_w != 0.0 && heat_j == 0.0 {
-                                return Err(native_error(invalid(
-                                    "AC cell heat is negative or unrepresentable",
-                                )));
-                            }
-                            cells.push(SpatialHarmonicHeatingCell {
-                                tetrahedron: loss.cell,
-                                cell,
-                                volume_m3: loss.volume_m3,
-                                mean_ohmic_power_w: loss.mean_ohmic_power_w,
-                                heat_j,
-                            });
-                        }
-                        let balance = *response.balance();
-                        Ok(SpatialHarmonicHeatingStep {
-                            omega_rad_s,
-                            duration_s: dt,
-                            cells,
-                            terminals: response.terminals().to_vec(),
-                            balance,
-                            field: response.report().clone(),
-                            maximum_ampere_residual_a: response.maximum_ampere_residual_a(),
-                            maximum_charge_residual_a: response.maximum_charge_residual_a(),
-                            maximum_cell_skin_ratio: response.maximum_cell_skin_ratio(),
-                            heat_j: finite(dt * balance.mean_ohmic_power_w)?,
-                            supplied_work_j: finite(dt * balance.mean_supplied_power_w)?,
-                        })
-                    },
+                    |response| recover_field_heat(response, dt, &routes, &cancel),
                 )
                 .map_err(induction)
-                .map_err(native_error)??;
+                .map_err(native_error)?
+                .map_err(native_error)?;
             Ok(DrivenCoefficients {
                 circuit: CycleMeanDriver(step),
                 sources_w: coefficients.sources_w,
