@@ -11,8 +11,10 @@
 //! Source-backed thermal expansion additionally supplies mechanical entropy
 //! storage and signed reciprocal caloric heat through the same material account.
 //! Physical creep/plastic dissipation is separate from backward-Euler loss;
-//! only physical loss and reciprocal transfer enter caloric heat. Inertia, finite strain,
-//! primary/tertiary creep and service-life qualification are not implied.
+//! only physical loss and reciprocal transfer enter caloric heat. The inertial
+//! route couples the original consistent reference mass to this same interval;
+//! its numerical kinetic loss remains separate. Finite strain, tertiary creep
+//! and service-life qualification are not implied.
 
 use fs_material::creep::{CreepEnergy, CreepError, CreepLaw, CreepState, CreepTolerances};
 
@@ -56,6 +58,17 @@ pub struct CreepTetStep<S = CreepState> {
     /// heat densities by these volumes when transferring to a thermal owner.
     pub element_volume_m3: Vec<f64>,
     pub energy: CreepTetEnergy,
+}
+
+/// One checked creep/inertia proposal from the original reference mass owner.
+/// The material account retains actual applied/support work; its residuals
+/// include inertial work and kinetic change/loss. Material storage and physical
+/// heat remain separate from the numerical kinetic loss in `inertia`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreepTetDynamicStep<S = CreepState> {
+    pub creep: CreepTetStep<S>,
+    pub velocity_mps: Vec<[f64; 3]>,
+    pub inertia: dynamics::InertialEnergy,
 }
 
 #[derive(Debug)]
@@ -172,6 +185,82 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
         tolerances: CreepTetTolerances,
         cx: &Cx<'_>,
     ) -> Result<CreepTetStep<L::State>, CreepTetError> {
+        let (elements, old_strains, duration_s) =
+            self.admit_creep_from(displacement_m, element_states, tolerances, cx)?;
+        let solution = self.solve_from(displacement_m, element_states, cx)?;
+        self.audit_creep_solution(
+            displacement_m,
+            element_states,
+            &elements,
+            &old_strains,
+            duration_s,
+            solution,
+            None,
+            tolerances,
+            cx,
+        )
+    }
+
+    /// Advance creep and consistent-mass inertia through the original sparse
+    /// Newton owner, then check their complete work balance before publication.
+    ///
+    /// Every material clock must equal `dt_s` and `load_path` must be `[1.0]`.
+    /// Absolute endpoint supports may move; their full internal-plus-inertial
+    /// reactions supply support work. Newton trials freeze the accepted creep
+    /// history. Reference densities belong to the original closed inventory and
+    /// must be retained across calls. This first-order step needs physical time
+    /// refinement; its numerical kinetic loss is not material heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_creep_backward_euler(
+        &self,
+        displacement_m: &[f64],
+        velocity_mps: &[[f64; 3]],
+        element_states: &[L::State],
+        reference_density_kg_m3: &[f64],
+        dt_s: f64,
+        tolerances: CreepTetTolerances,
+        cx: &Cx<'_>,
+    ) -> Result<CreepTetDynamicStep<L::State>, CreepTetError> {
+        let (elements, old_strains, duration_s) =
+            self.admit_creep_from(displacement_m, element_states, tolerances, cx)?;
+        if dt_s != duration_s {
+            return Err(CreepTetError::Invalid(
+                "inertia and every creep law must use the same physical duration",
+            ));
+        }
+        let motion = self.advance_backward_euler(
+            displacement_m,
+            velocity_mps,
+            element_states,
+            reference_density_kg_m3,
+            dt_s,
+            cx,
+        )?;
+        let creep = self.audit_creep_solution(
+            displacement_m,
+            element_states,
+            &elements,
+            &old_strains,
+            duration_s,
+            motion.solution,
+            Some(&motion.energy),
+            tolerances,
+            cx,
+        )?;
+        Ok(CreepTetDynamicStep {
+            creep,
+            velocity_mps: motion.velocity_mps,
+            inertia: motion.energy,
+        })
+    }
+
+    fn admit_creep_from(
+        &self,
+        displacement_m: &[f64],
+        element_states: &[L::State],
+        tolerances: CreepTetTolerances,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<Element>, Vec<Voigt>, f64), CreepTetError> {
         checkpoint(cx)?;
         if self.load_path.len() != 1 {
             return Err(CreepTetError::Invalid(
@@ -220,7 +309,22 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
                 })?;
             old_strains.push(old_strain);
         }
-        let solution = self.solve_from(displacement_m, element_states, cx)?;
+        Ok((elements, old_strains, duration_s))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn audit_creep_solution(
+        &self,
+        displacement_m: &[f64],
+        element_states: &[L::State],
+        elements: &[Element],
+        old_strains: &[Voigt],
+        duration_s: f64,
+        solution: SmallStrainTetSolution<L::State>,
+        inertia: Option<&dynamics::InertialEnergy>,
+        tolerances: CreepTetTolerances,
+        cx: &Cx<'_>,
+    ) -> Result<CreepTetStep<L::State>, CreepTetError> {
         let next_u: Vec<_> = solution.displacement_m.iter().flatten().copied().collect();
         let mut element_energy = Vec::with_capacity(elements.len());
         let mut element_volume_m3 = Vec::with_capacity(elements.len());
@@ -308,6 +412,11 @@ impl<L: CreepLaw> SmallStrainTetProblem<'_, L> {
             - energy.physical_dissipation_j
             - energy.reversible_heat_j
             - energy.numerical_dissipation_j;
+        if let Some(inertia) = inertia {
+            audit_residual(inertia.balance_error_j, tolerances.energy_j)?;
+            energy.equilibrium_work_residual_j -= inertia.inertial_work_j;
+            energy.balance_residual_j -= inertia.kinetic_change_j + inertia.numerical_loss_j;
+        }
         audit_residual(energy.equilibrium_work_residual_j, tolerances.energy_j)?;
         audit_residual(energy.balance_residual_j, tolerances.energy_j)?;
         checkpoint(cx)?;

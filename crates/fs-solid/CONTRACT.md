@@ -5881,10 +5881,25 @@ dissipation and backward-Euler numerical loss. Numerical loss is not heat.
 All local and global gates and cancellation precede publication; caller-owned
 displacements and histories are never mutated.
 
+`advance_creep_backward_euler` couples that same checked material interval to
+the original `plastic3::dynamics` consistent reference mass and sparse Newton
+owner. Its explicit duration must equal every element's material duration;
+inertia requires the absolute load endpoint `[1.0]`. The returned
+`CreepTetDynamicStep` contains the checked material account, accepted velocity,
+and separate inertial account. Applied and moving-support endpoint work balance
+material work plus inertial work; the complete energy balance includes kinetic
+change and backward-Euler kinetic loss. Neither kinetic loss nor the material
+integration loss is caloric heat. Reference density and geometry remain the
+original closed inventory. The scheme is first order and requires timestep
+refinement; this extension does not establish a transient accuracy envelope.
+`tests/plastic3_creep_dynamics.rs` checks repeated accepted steps against an
+independent one-coordinate mass/creep recurrence, inertia in moving-support
+work, stress-free rigid translation, mismatched clocks and cancellation.
+
 Elastic coefficients and geometry must remain fixed across an interval.
 Prescribed temperature may change Norton kinetics between intervals while
 retaining creep history; elastic parameter work, thermal expansion, reciprocal
-thermal evolution and inertia require their separate owners. This is a
+thermal evolution require their separate owners. This is a
 small-strain, secondary-creep model, with no primary/tertiary creep, rupture,
 confined-flow accuracy or material-population qualification claim.
 
