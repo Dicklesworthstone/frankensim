@@ -28,6 +28,9 @@ pub mod path;
 /// Coupled normal/twist inertia using the original reversible contact work.
 pub mod motion;
 
+/// Prescribed twist, first attached boundary and explicit radial-fold release.
+pub mod loading;
+
 use super::{JkrMixedModeError, SourceJkrMixedMode, finite, positive};
 use crate::normal_patch::adhesive::JkrError;
 use core::f64::consts::PI;

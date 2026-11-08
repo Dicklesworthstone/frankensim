@@ -4112,3 +4112,35 @@ tests/adhesive_torsion_equilibrium/temperature.rs exercise live-history transfer
 independent full-potential work, independently prescribed temperatures and
 pinned claims, exact no-op/reversible cycles, torsional stability and effort
 refusals, original claim-domain loss, cancellation and query limits.
+
+## Prescribed torsional loading and explicit radial-fold release
+
+`mixed_mode::torsion::loading::JkrTorsionalLoading` follows the original
+source's fixed-approach I/III equilibrium under prescribed twist. It returns the
+first attached boundary and unused angular travel, retains reversible work on
+loading/unloading/reversal, and never crosses a source envelope to reach an
+ideal fold. Endpoints and zero twist on reversal enclose every radius; the
+original monotone/convex radius screens and monotone twist screens cover the
+whole accepted segment. Bounds are floating-point screens, not interval proof.
+
+The work-only part of the existing factored discrete potential is shared with
+the dynamic path owner. It retains small work without subtracting large
+endpoint energies, and reaches a marginal endpoint without inverting its
+singular tangent. A cached original endpoint makes each continuation use at
+most two source equilibrium queries; cancellation and the declared work budget
+apply before those queries. No new constitutive model or root search is added.
+
+`detach_at_fold` accepts only a sealed radial-fold endpoint at negative
+approach. The original stationarity and zero-curvature equations imply
+`U_fold = E*a*(delta^2/3 + a^4/(5*R^2)) > 0`. At held coordinates this
+mechanical potential becomes an explicit retained release account. No heat
+fraction, rigid-body impulse, crack speed or radiation split is inferred.
+A positive-approach opening edge is not a detachment instability. Detached
+history retains its release under subsequent twist, cannot release twice, and
+cannot silently rebond. All candidate state is immutable until accepted.
+
+Five regression cases cover both signed folds and independent fold-energy
+elimination, torque quadrature and reversible work, radius expansion on
+reversal, the distinct opening edge and zero-approach case, tiny work, budget
+and identity refusals, cancellation and exact retry. Native Cargo execution
+remains unverified in the resource-constrained shared environment.

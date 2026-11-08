@@ -1,6 +1,8 @@
 //! G0/G1/G3: changing-area I/III equilibrium, coupled work and physical limits.
 #[path = "source_point/common.rs"]
 mod common;
+#[path = "adhesive_torsion_equilibrium/loading.rs"]
+mod loading;
 #[path = "adhesive_torsion_equilibrium/motion.rs"]
 mod motion;
 #[path = "adhesive_torsion_equilibrium/temperature.rs"]

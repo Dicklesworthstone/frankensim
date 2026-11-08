@@ -226,7 +226,7 @@ impl SourceJkrMixedMode {
         let radial = radial0.midpoint(radial1) + da * (e * normal_inner - b * torsion_inner);
         let ratio = radial / curvature;
         let mean_effort = core::array::from_fn(|i| uncondensed[i] - ratio * cross[i]);
-        let reversible_work_j = dot(uncondensed, dq) + radial * da;
+        let reversible_work_j = self.torsional_endpoint_work(before, contact)?;
         let work_residual_j = dot(mean_effort, dq) - reversible_work_j;
 
         // Implicit differentiation of the endpoint equilibrium, da1/dq1.
@@ -291,6 +291,44 @@ impl SourceJkrMixedMode {
             maximum_contact_radius_m,
             evaluations: *evaluations - started,
         })
+    }
+
+    /// Factored original potential change, including a marginal endpoint.
+    /// This part of the discrete gradient needs no inverse radial curvature
+    /// or endpoint tangent, so controlled loading can reach a genuine fold.
+    /// The arguments must be original, source-authenticated responses.
+    pub(super) fn torsional_endpoint_work(
+        &self,
+        before: JkrTorsionalResponse,
+        contact: JkrTorsionalResponse,
+    ) -> Result<f64, JkrTorsionalPathError> {
+        let e = self.normal.normal_state().elastic().reduced_modulus_pa();
+        let b = (8.0 / 3.0) * self.torsional_reduced_shear_modulus_pa();
+        let r = self.normal.effective_radius_m();
+        let a0 = before.contact_radius_m;
+        let a1 = contact.contact_radius_m;
+        let a = a0.midpoint(a1);
+        let da = a1 - a0;
+        let delta = before.indentation_m.midpoint(contact.indentation_m);
+        let dd = contact.indentation_m - before.indentation_m;
+        let phi = before.twist_angle_rad.midpoint(contact.twist_angle_rad);
+        let dp = contact.twist_angle_rad - before.twist_angle_rad;
+        let phi_square = phi * phi + 0.25 * dp * dp;
+        let radius_cube = a * (a * a + 0.75 * da * da);
+        let normal_factor = delta - a * (a / r) / 3.0 - da * (da / r) / 4.0;
+        let radial_factor = delta / (3.0 * r) - (a / r).powi(2) - (da / r).powi(2) / 20.0;
+        let normal_inner = (a / r) * dd + da * radial_factor;
+        let torsion_inner = 3.0 * a * phi * dp + 0.5 * da * phi_square;
+        let radial0 = 2.0 * PI * a0 * before.griffith_residual_j_m2;
+        let radial1 = 2.0 * PI * a1 * contact.griffith_residual_j_m2;
+        let radial = radial0.midpoint(radial1) + da * (e * normal_inner - b * torsion_inner);
+        let work =
+            (2.0 * e * a * normal_factor) * dd + (2.0 * b * radius_cube * phi) * dp + radial * da;
+        if work.is_finite() {
+            Ok(work)
+        } else {
+            Err(JkrTorsionalPathError::UnresolvedSecant)
+        }
     }
 
     /// Original radius/applicability bounds shared by straight and inertial
