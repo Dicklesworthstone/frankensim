@@ -5503,3 +5503,50 @@ native cells for density gradients. The existing gas battery adds zero-gravity
 parity, independent downhill Poiseuille/density/signed-drive oracles, a sourced
 heated stack and neutral-column refusal, plus closed-loop buoyancy, regional
 energy/pressure admission, geometry and cancellation checks.
+
+## Parallel source-density gas branches at common pressure ports
+
+`steady_gas::pressure::parallel::solve_parallel_pressure_driven_material_gas`
+selects positive mass flow independently in each native axial branch at one
+common imposed static-pressure difference. The branch pressure/gravity owners
+retain local source density, viscosity, convection, thermal acceleration and
+the original enthalpy/species solution. Different temperatures or areas change
+the actual split; no frozen volume-flow fraction is supplied. Zero branches
+refuse and a single branch is supported. The complete set is bounded by
+`MAX_PARALLEL_GAS_BRANCHES` and the native total steady-cell cap.
+
+Branches must retain identical source objects, external conditions, common EOS
+pressure, phase and inlet composition/temperature. Original branch pressure
+controls are admitted before shared-work clipping. All branches either omit
+gravity or author paths with identical acceleration and physical inlet/outlet
+vertices; interior routes can differ within native cell-length admission.
+Signed or zero drive remains confined to the original gravity entry. Every
+branch receives only the remaining aggregate full-solve/substep allowance.
+Any failure terminates the calculation without partial publication or retries;
+accepted native solutions are retained without an additional flow solve.
+
+The ideal adiabatic, zero-storage outlet mixes the same source's specific
+enthalpy. `GasEnthalpyLaw` integrates original NASA Cp for each inlet-to-outlet
+increment before mass weighting. The existing pressure/enthalpy-increment
+reconstructor finds the common mixture and retains gas/water phase admission.
+Formation-energy origins are not subtracted after rounding, and neither
+temperature nor volume flow substitutes for conserved mass/enthalpy.
+Reported inlet and mixed-outlet volume rates use their actual source densities.
+
+Aggregate omission limits sum hydraulic dissipation, absolute regional kinetic
+changes, and absolute regional potential changes over all accepted branches.
+The kinetic bound additionally includes each branch's inlet and outlet kinetic
+energy flux magnitudes, using its original profile factor. This explicitly
+bounds energy ignored by the ideal split/merge; it is not a hydraulic junction
+loss, manifold momentum closure, or kinetic heat deposition. Any authored
+hydraulic junction loss remains in the native branch resistance. These are
+common-pressure, low-Mach positive-flow ports, not a general pressure graph,
+recirculating inventory, compressible pressure field, or complete manifold
+momentum/energy solve.
+
+The existing gas battery adds independent parallel Poiseuille and density
+scaling, scalar parity, nonlinear NASA enthalpy mixing, thermally redistributed
+flow, common-port gravity, discarded manifold kinetic flux, shared-work and
+source/geometry/control/cancellation refusals. Product and tests were parsed
+with the pinned formatter; native Cargo compilation/test execution was not
+available in this resource-exhausted session.

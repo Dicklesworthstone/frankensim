@@ -7,6 +7,9 @@
 //! pressure envelope and omitted mechanical-energy powers are explicitly bounded.
 //! Opt-in gravity reuses the same source-density head and conservative work owner.
 
+/// Source-consistent flow splitting and enthalpy mixing between pressure ports.
+pub mod parallel;
+
 use fs_exec::Cx;
 use fs_material::gas_field::steady::{MAX_STEADY_GAS_CELLS, SteadyAxialGas, SteadyGasSolve};
 use fs_qty::Pressure;

@@ -9,6 +9,9 @@ mod network;
 #[path = "steady_material_gas/gravity.rs"]
 mod gravity;
 
+#[path = "steady_material_gas/parallel.rs"]
+mod parallel;
+
 use fs_airflow::graph::thermal::medium::convection::ForcedConvectionSettings;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
 use fs_airflow::graph::thermal::medium::steady_gas::*;
