@@ -1,3 +1,24 @@
+## Nonuniform incandescent emission and physical exposure
+
+`ThermalVisibleEmission::observe` combines original diffuse thermal surfaces
+only after integrating each source spectrum. Explicit per-face areas yield
+absolute visible watts, lumens and flux-scaled XYZ; hot spots and differing
+spectral emissivities survive. No representative temperature or white
+normalization enters the physical result.
+
+`ThermalVisibleExposure::integrate` clips explicitly held accepted emission
+intervals against the existing rectangular shutter. It returns visible joules,
+lumen-seconds, integrated XYZ and mean flux. This is gross emitted energy;
+camera collection still belongs to the original geometry/transport owner.
+The held reconstruction is an explicit time approximation and adds no heat.
+
+Both paths use bounded work and cancellation, compensated sums and no heap
+allocation. Unsupported spectral coverage, nonpositive areas, time gaps,
+overlaps, missing shutter coverage and numerical overflow/underflow refuse.
+Three focused regression groups define hotspot/area scaling, clipped pulse
+exposure and refusal behavior. Pinned formatting and source/API checks passed;
+native integration execution remains pending the missing sibling dependencies.
+
 # CONTRACT: fs-render
 
 Unbiased spectral path-tracing core: the verifiable Monte-Carlo foundations.

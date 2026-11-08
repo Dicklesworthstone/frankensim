@@ -42,7 +42,10 @@ pub use spectral::{DiffuseThermalSurface, SpectralDiffuseThermalSurface, Spectra
 #[cfg(feature = "photometry")]
 mod observables;
 #[cfg(feature = "photometry")]
-pub use observables::ThermalVisibleObservables;
+pub use observables::{
+    HeldThermalEmissionInterval, ThermalEmissionError, ThermalEmissionPatch, ThermalVisibleEmission,
+    ThermalVisibleExposure, ThermalVisibleObservables,
+};
 
 /// Original thermal spectra observed from moving inertial vacuum frames.
 pub mod doppler;

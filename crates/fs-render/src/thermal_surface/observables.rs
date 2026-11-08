@@ -10,10 +10,12 @@
 
 use core::f64::consts::PI;
 
-use fs_blake3::ContentHash;
+use fs_blake3::{ContentHash, DomainHasher};
+use fs_exec::{Cancelled, Cx};
 use fs_math::eft::two_sum;
 
 use super::{DiffuseThermalSurface, ThermalSurfaceError};
+use crate::motion::ShutterInterval;
 use crate::photometry::{observer, source::LUMINOUS_EFFICACY_LM_W};
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS};
 
@@ -75,13 +77,7 @@ impl ThermalVisibleObservables {
     /// Scaling before summation keeps the ratio defined for large finite XYZ.
     #[must_use]
     pub fn chromaticity_xy(self) -> Option<[f64; 2]> {
-        let scale = self.xyz.into_iter().fold(0.0_f64, f64::max);
-        if scale == 0.0 {
-            return None;
-        }
-        let [x, y, z] = self.xyz.map(|value| value / scale);
-        let total = x + y + z;
-        Some([x / total, y / total])
+        chromaticity_xy(self.xyz)
     }
 }
 
@@ -159,6 +155,305 @@ impl DiffuseThermalSurface<'_> {
             luminous_exitance_lm_m2,
         })
     }
+}
+
+/// One accepted diffuse source and the physical area of its emitting face.
+/// Both sides of a sheet require both areas. No projected area, visibility,
+/// distance or detector solid angle is inferred by this intrinsic observation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermalEmissionPatch<'a> {
+    pub surface: DiffuseThermalSurface<'a>,
+    pub emitting_area_m2: f64,
+}
+
+/// Refusal before any aggregate light or finite-exposure result is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThermalEmissionError {
+    Surface(ThermalSurfaceError),
+    InvalidArea,
+    InvalidHistory,
+    IncompleteExposure,
+    WorkLimit,
+    NumericalRange,
+    Cancelled,
+}
+impl core::fmt::Display for ThermalEmissionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "thermal emission observation: {self:?}")
+    }
+}
+impl core::error::Error for ThermalEmissionError {}
+impl From<ThermalSurfaceError> for ThermalEmissionError {
+    fn from(error: ThermalSurfaceError) -> Self {
+        Self::Surface(error)
+    }
+}
+impl From<Cancelled> for ThermalEmissionError {
+    fn from(_: Cancelled) -> Self {
+        Self::Cancelled
+    }
+}
+
+/// Intrinsic visible emission of possibly nonuniform accepted surface patches.
+/// Source spectra are integrated BEFORE area weighting; no average temperature
+/// or normalized RGB replaces a hot spot, phase-dependent source or spectral law.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermalVisibleEmission {
+    identity: ContentHash,
+    visible_power_w: f64,
+    xyz_flux_lm: [f64; 3],
+}
+
+impl ThermalVisibleEmission {
+    /// Sum gross 380–780 nm emission using each original surface observation.
+    ///
+    /// Empty patches explicitly describe no emitting area. Every listed patch
+    /// needs positive area and complete source coverage of the observer band.
+    /// Work is bounded by `maximum_patches`, at most 376 spectral evaluations
+    /// each, with a cancellation poll before every patch. Accumulation uses
+    /// compensated sums and allocates nothing. Spectral/observer approximation
+    /// remains that of [`DiffuseThermalSurface::visible_observables`].
+    pub fn observe(
+        cx: &Cx<'_>,
+        patches: &[ThermalEmissionPatch<'_>],
+        maximum_patches: usize,
+    ) -> Result<Self, ThermalEmissionError> {
+        cx.checkpoint()?;
+        if patches.len() > maximum_patches {
+            return Err(ThermalEmissionError::WorkLimit);
+        }
+        let mut hash = DomainHasher::new("org.frankensim.render.thermal-visible-emission.v1");
+        hash.update(&(patches.len() as u64).to_le_bytes());
+        let mut sums = [0.0; 4];
+        let mut corrections = [0.0; 4];
+        for patch in patches {
+            cx.checkpoint()?;
+            let area = patch.emitting_area_m2;
+            if !area.is_finite() || area <= 0.0 {
+                return Err(ThermalEmissionError::InvalidArea);
+            }
+            let source = patch.surface.visible_observables()?;
+            let mut flux = [0.0; 4];
+            flux[0] = product(source.visible_exitance_w_m2(), area)?;
+            for (channel, radiance) in source.xyz().into_iter().enumerate() {
+                let exitance = PI * radiance;
+                flux[channel + 1] = if exitance.is_finite() {
+                    product(exitance, area)?
+                } else {
+                    product(product(radiance, area)?, PI)?
+                };
+            }
+            accumulate(&mut sums, &mut corrections, flux)?;
+            hash.update(source.surface_identity().as_bytes());
+            hash.update(&area.to_bits().to_le_bytes());
+        }
+        let [visible_power_w, x, y, z] = finish(sums, corrections)?;
+        cx.checkpoint()?;
+        Ok(Self {
+            identity: hash.finalize(),
+            visible_power_w,
+            xyz_flux_lm: [x, y, z],
+        })
+    }
+
+    /// Original sources, accepted temperatures and declared emitting areas.
+    pub const fn identity(self) -> ContentHash {
+        self.identity
+    }
+    pub const fn observer_id(self) -> &'static str {
+        observer::OBSERVER_ID
+    }
+    pub const fn visible_power_w(self) -> f64 {
+        self.visible_power_w
+    }
+    pub const fn luminous_flux_lm(self) -> f64 {
+        self.xyz_flux_lm[1]
+    }
+    /// Absolute flux-scaled XYZ. Y is lumens; X/Z use the same 683 lm/W scaling.
+    pub const fn xyz_flux_lm(self) -> [f64; 3] {
+        self.xyz_flux_lm
+    }
+    pub fn chromaticity_xy(self) -> Option<[f64; 2]> {
+        chromaticity_xy(self.xyz_flux_lm)
+    }
+}
+
+/// Explicit constant emission reconstruction over an accepted physical interval.
+/// A native implicit step may supply its accepted endpoint observation here.
+/// Using that endpoint throughout the interval is a declared time approximation,
+/// not an interpolation of temperature or a continuous thermal solution.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldThermalEmissionInterval {
+    pub start_s: f64,
+    pub end_s: f64,
+    pub emission: ThermalVisibleEmission,
+}
+
+/// Visible emitted energy during one original rectangular shutter interval.
+/// This is gross source emission, not camera irradiance, collected photons or
+/// an additional cooling debit. Those observations require their native geometry,
+/// transport and detector owners. No display exposure multiplier is applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermalVisibleExposure {
+    identity: ContentHash,
+    shutter: ShutterInterval,
+    visible_energy_j: f64,
+    xyz_lm_s: [f64; 3],
+}
+
+impl ThermalVisibleExposure {
+    /// Integrate the held reconstruction exactly in time, up to rounding.
+    ///
+    /// Intervals must be finite, positive, contiguous and chronologically
+    /// ordered, with complete shutter coverage. Integration clips exactly at
+    /// the native interval edges; a gap, overlap or missing tail refuses rather
+    /// than extrapolating. Topology/source changes remain at their original
+    /// edges. A zero-duration shutter uses the snapshot observation instead.
+    /// All supplied rows count against the work limit, including outside rows.
+    /// No thermal, spectral or temporal accuracy certification is inferred.
+    pub fn integrate(
+        cx: &Cx<'_>,
+        shutter: ShutterInterval,
+        history: &[HeldThermalEmissionInterval],
+        maximum_intervals: usize,
+    ) -> Result<Self, ThermalEmissionError> {
+        cx.checkpoint()?;
+        if history.len() > maximum_intervals {
+            return Err(ThermalEmissionError::WorkLimit);
+        }
+        let duration = shutter.duration_s();
+        if history.is_empty() || !duration.is_finite() || duration <= 0.0 {
+            return Err(ThermalEmissionError::InvalidHistory);
+        }
+        if history[0].start_s > shutter.open_s()
+            || history[history.len() - 1].end_s < shutter.close_s()
+        {
+            return Err(ThermalEmissionError::IncompleteExposure);
+        }
+        let mut hash = DomainHasher::new("org.frankensim.render.thermal-visible-exposure.v1");
+        hash.update(&shutter.open_s().to_bits().to_le_bytes());
+        hash.update(&shutter.close_s().to_bits().to_le_bytes());
+        let mut sums = [0.0; 4];
+        let mut corrections = [0.0; 4];
+        let mut previous_end = history[0].start_s;
+        for row in history {
+            cx.checkpoint()?;
+            if !row.start_s.is_finite()
+                || !row.end_s.is_finite()
+                || row.end_s <= row.start_s
+                || !(row.end_s - row.start_s).is_finite()
+                || row.start_s != previous_end
+            {
+                return Err(ThermalEmissionError::InvalidHistory);
+            }
+            previous_end = row.end_s;
+            let start = row.start_s.max(shutter.open_s());
+            let end = row.end_s.min(shutter.close_s());
+            if start >= end {
+                continue;
+            }
+            let [x, y, z] = row.emission.xyz_flux_lm;
+            let mut energy = [row.emission.visible_power_w, x, y, z];
+            for value in &mut energy {
+                *value = product(*value, end - start)?;
+            }
+            accumulate(&mut sums, &mut corrections, energy)?;
+            hash.update(&(start + 0.0).to_bits().to_le_bytes());
+            hash.update(&(end + 0.0).to_bits().to_le_bytes());
+            hash.update(row.emission.identity.as_bytes());
+        }
+        let [visible_energy_j, x, y, z] = finish(sums, corrections)?;
+        for value in [visible_energy_j, x, y, z] {
+            let mean = value / duration;
+            if !mean.is_finite() || (value != 0.0 && mean == 0.0) {
+                return Err(ThermalEmissionError::NumericalRange);
+            }
+        }
+        cx.checkpoint()?;
+        Ok(Self {
+            identity: hash.finalize(),
+            shutter,
+            visible_energy_j,
+            xyz_lm_s: [x, y, z],
+        })
+    }
+
+    /// Actual contributing source/area identities and represented exposure edges.
+    pub const fn identity(self) -> ContentHash {
+        self.identity
+    }
+    pub const fn shutter(self) -> ShutterInterval {
+        self.shutter
+    }
+    pub const fn observer_id(self) -> &'static str {
+        observer::OBSERVER_ID
+    }
+    pub const fn visible_energy_j(self) -> f64 {
+        self.visible_energy_j
+    }
+    pub const fn luminous_energy_lm_s(self) -> f64 {
+        self.xyz_lm_s[1]
+    }
+    /// Time-integrated absolute flux-scaled XYZ, with Y in lumen-seconds.
+    pub const fn xyz_lm_s(self) -> [f64; 3] {
+        self.xyz_lm_s
+    }
+    pub fn mean_visible_power_w(self) -> f64 {
+        self.visible_energy_j / self.shutter.duration_s()
+    }
+    pub fn mean_luminous_flux_lm(self) -> f64 {
+        self.xyz_lm_s[1] / self.shutter.duration_s()
+    }
+    pub fn chromaticity_xy(self) -> Option<[f64; 2]> {
+        chromaticity_xy(self.xyz_lm_s)
+    }
+}
+
+fn product(value: f64, weight: f64) -> Result<f64, ThermalEmissionError> {
+    let result = value * weight;
+    if !result.is_finite() || (value != 0.0 && weight != 0.0 && result == 0.0) {
+        Err(ThermalEmissionError::NumericalRange)
+    } else {
+        Ok(result)
+    }
+}
+
+fn accumulate(
+    sums: &mut [f64; 4],
+    corrections: &mut [f64; 4],
+    values: [f64; 4],
+) -> Result<(), ThermalEmissionError> {
+    for i in 0..4 {
+        let (sum, correction) = two_sum(sums[i], values[i]);
+        sums[i] = sum;
+        corrections[i] += correction;
+        if !sum.is_finite() || !corrections[i].is_finite() {
+            return Err(ThermalEmissionError::NumericalRange);
+        }
+    }
+    Ok(())
+}
+
+fn finish(sums: [f64; 4], corrections: [f64; 4]) -> Result<[f64; 4], ThermalEmissionError> {
+    let values = core::array::from_fn(|i| sums[i] + corrections[i]);
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        Err(ThermalEmissionError::NumericalRange)
+    } else {
+        Ok(values)
+    }
+}
+
+fn chromaticity_xy(xyz: [f64; 3]) -> Option<[f64; 2]> {
+    let scale = xyz.into_iter().fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return None;
+    }
+    let [x, y, z] = xyz.map(|value| value / scale);
+    let total = x + y + z;
+    Some([x / total, y / total])
 }
 
 #[cfg(test)]
