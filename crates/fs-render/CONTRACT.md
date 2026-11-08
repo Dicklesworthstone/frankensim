@@ -4510,6 +4510,19 @@ and absorption over the actual distance inside each glass. Cumulative Stokes
 transport retains interface-generated polarization when computing unpolarized
 direct-image transmission. It does not multiply independent Fresnel averages.
 
+`LensSurface::with_coating` binds the existing coherent dielectric coating
+owner at each physical hit, with layers explicitly ordered sensor to scene.
+Its original Fresnel/Mueller response retains spectral interference, s/p phase
+and film absorption. Adjacent bulk indices continue to determine Snell geometry;
+the locally parallel films are collapsed onto the surface. Compact Cauchy
+coatings retain their 380--780 nm source support, including zero-thickness
+stacks. Active films refuse timed generation because coherent residence delay
+is not modeled; zero-thickness films preserve the original bulk timing.
+Every authored coating enters camera continuity, including its source identity.
+Focused regressions cover quarter-wave anti-reflection transmission, unchanged
+geometric refraction, bulk Beer loss, asymmetric absorbing stacks, polarization
+correlation, source-band admission and the explicit timing boundary.
+
 `LensSurface::try_new_aspheric` retains the original vertex curvature, a
 dimensionless conic constant and seven SI even-polynomial coefficients A4
 through A16. Excluding A2 keeps the paraxial reference curvature unchanged.
@@ -4544,7 +4557,7 @@ The film convention is direct sensor irradiance divided by
 `pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers
 irradiance from a radiometric scene. Exposure, ISO and QE remain explicit.
 This finite-thickness direct-image model omits reflected ghosts,
-coatings, diffraction and autofocus. Its unweighted ray and optical-centre
+diffraction and autofocus. Its unweighted ray and optical-centre
 projection entry points refuse; a distorted lens has no single projective
 centre. Pose animation retains the authored prescription and fixed focus.
 The rear sampling aperture is not an entrance-pupil measurement, so no f-number

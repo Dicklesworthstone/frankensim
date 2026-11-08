@@ -59,3 +59,45 @@ fn every_aspheric_parameter_changes_continuity_without_changing_paraxial_focus()
         assert_eq!(identity(&asphere), identity(&asphere.clone()));
     }
 }
+
+#[test]
+fn lens_coating_changes_cannot_reuse_progressive_camera_accumulation() {
+    use crate::conductor::{
+        CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
+    };
+    use crate::dielectric::DielectricCoating;
+
+    let bare = camera(0.0, [0.0; 7], false);
+    let baseline = identity(&bare);
+    let coated = |surface_index: usize, thickness: f64, source_byte: u8| {
+        let source = ConductorSource::try_new(
+            ContentHash([source_byte; 32]),
+            ConductorDataStatus::Representative,
+        )
+        .unwrap();
+        let layer =
+            CauchyCoatingLayer::try_new(CauchyIor::try_constant(1.3).unwrap(), 0.0, thickness)
+                .unwrap();
+        let coating = DielectricCoating::try_new(
+            CoherentPeriodicCoating::try_new(&[layer], 1, source).unwrap(),
+        )
+        .unwrap();
+        let mut surfaces = bare.sequential_lens().unwrap().surfaces().to_vec();
+        surfaces[surface_index] = surfaces[surface_index].with_coating(coating);
+        bare.clone()
+            .with_sequential_lens(SequentialLens::try_new(550.0, &surfaces).unwrap())
+            .unwrap()
+    };
+    let reference = coated(0, 100e-9, 1);
+    assert_eq!(bare.focus_distance_m(), reference.focus_distance_m());
+    let reference_identity = identity(&reference);
+    assert_ne!(baseline, reference_identity);
+    assert_eq!(reference_identity, identity(&coated(0, 100e-9, 1)));
+    for variant in [
+        coated(1, 100e-9, 1),
+        coated(0, 110e-9, 1),
+        coated(0, 100e-9, 2),
+    ] {
+        assert_ne!(reference_identity, identity(&variant));
+    }
+}

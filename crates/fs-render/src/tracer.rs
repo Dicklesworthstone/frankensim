@@ -10128,6 +10128,10 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
             update_continuity_f64s(hasher, [
                 surface.vertex_z_m(), surface.curvature_per_m(), surface.clear_radius_m(),
             ]);
+            if let Some(coating) = surface.coating() {
+                hasher.update(b"native-sequential-coating.v1");
+                hasher.update(coating.content_identity().as_bytes());
+            }
             let coefficients = surface.even_aspheric_coefficients();
             if surface.conic_constant() != 0.0 || coefficients.iter().any(|&v| v != 0.0) {
                 // A change in off-axis sag changes refraction even when the

@@ -16,9 +16,8 @@ use std::sync::Arc;
 
 use super::{Aperture, CameraError, CameraProjection, LensSample, PhysicalCamera};
 use crate::charts::Ray;
-use crate::dielectric::{DielectricGlass, refract};
+use crate::dielectric::{DielectricCoating, DielectricGlass, DielectricSurface, refract};
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::fresnel_dielectric_polarized;
 use crate::polarization::dielectric::transport::{PolarizationFrame, physical_roundoff};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -36,6 +35,7 @@ pub struct LensSurface {
     clear_radius_m: f64,
     medium_after: Option<DielectricGlass>,
     asphere: Option<asphere::AsphericSurface>,
+    optical_surface: DielectricSurface,
 }
 
 impl LensSurface {
@@ -65,6 +65,7 @@ impl LensSurface {
             clear_radius_m,
             medium_after,
             asphere: None,
+            optical_surface: DielectricSurface::SMOOTH,
         };
         let edge = vertex_z_m + surface.sag(clear_radius_m * clear_radius_m);
         if !edge.is_finite() || edge <= 0.0 {
@@ -114,6 +115,7 @@ impl LensSurface {
             clear_radius_m,
             medium_after,
             asphere: Some(asphere),
+            optical_surface: DielectricSurface::SMOOTH,
         };
         let [low, high] = surface.bounds();
         if !low.is_finite() || !high.is_finite() || low <= 0.0 {
@@ -147,6 +149,27 @@ impl LensSurface {
     }
     pub const fn medium_after(&self) -> Option<&DielectricGlass> {
         self.medium_after.as_ref()
+    }
+
+    /// Attach a passive coherent coating in **sensor-to-scene layer order**.
+    /// Every lens surface uses this same convention, including the front face
+    /// of an element. The original films' spectral interference, absorption,
+    /// and s/p phase act on the complete reciprocal detector state. Snell
+    /// geometry still uses the adjacent bulk indices; the locally parallel
+    /// films are collapsed onto this face and do not displace the ray.
+    ///
+    /// Compact Cauchy coatings restrict the prescription to 380--780 nm.
+    /// Nonzero film thickness requires steady generation: timed queries refuse
+    /// because coherent coating group delay is not part of this lens model.
+    #[must_use]
+    pub const fn with_coating(mut self, coating: DielectricCoating) -> Self {
+        self.optical_surface = self.optical_surface.with_coating(coating);
+        self
+    }
+
+    /// Borrow the complete authored coating, including its source identity.
+    pub const fn coating(&self) -> Option<&DielectricCoating> {
+        self.optical_surface.coating()
     }
 
     fn sag(&self, radius_squared: f64) -> f64 {
@@ -410,6 +433,12 @@ impl SequentialLens {
                 .extinction_per_m(reference_wavelength_nm)
                 .map_err(|_| CameraError::InvalidSequentialLens)?;
         }
+        if surfaces.iter().any(|surface| surface.coating().is_some()) {
+            band = (
+                band.0.max(crate::spectral::LAMBDA_MIN),
+                band.1.min(crate::spectral::LAMBDA_MAX),
+            );
+        }
         if reference_wavelength_nm < band.0 || reference_wavelength_nm > band.1 {
             return Err(CameraError::InvalidSequentialLens);
         }
@@ -530,6 +559,22 @@ impl SequentialLens {
         {
             return Err(CameraError::SequentialLensOutsideModel);
         }
+        // Coherent films can have dispersive residence times even when the
+        // geometric bulk ray is unchanged. Do not report bulk-only transit as
+        // the delay of a coated detector, including for a later clipped ray.
+        if timed
+            && self.surfaces().iter().any(|surface| {
+                surface.coating().is_some_and(|coating| {
+                    coating
+                        .periodic()
+                        .unit_cell()
+                        .iter()
+                        .any(|layer| layer.thickness_m() != 0.0)
+                })
+            })
+        {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
         let mut indices = [1.0; Self::MAX_SURFACES + 1];
         let mut extinction = [0.0; Self::MAX_SURFACES + 1];
         let mut group_indices = [1.0; Self::MAX_SURFACES];
@@ -589,7 +634,12 @@ impl SequentialLens {
             if cosine == 0.0 {
                 return Ok(None);
             }
-            let response = fresnel_dielectric_polarized(cosine, indices[i], indices[i + 1])
+            let response = surface
+                .optical_surface
+                .interface(wavelength_nm, false)
+                .and_then(|interface| {
+                    interface.fresnel_polarized(cosine, indices[i], indices[i + 1])
+                })
                 .map_err(|_| CameraError::SequentialLensOutsideModel)?;
             if response.scalar.total_internal_reflection {
                 return Ok(None);

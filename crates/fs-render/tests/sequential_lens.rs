@@ -9,7 +9,11 @@ use fs_render::camera::{
     SequentialLens, SequentialLensRay,
 };
 use fs_render::charts::Ray;
+use fs_render::conductor::{
+    CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
+};
 use fs_render::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
+use fs_render::dielectric::{DielectricCoating, DielectricSurface};
 
 fn with_cx(f: impl FnOnce(&CancelGate, &Cx<'_>)) {
     let gate = CancelGate::new();
@@ -71,6 +75,181 @@ fn ray(sensor_x: f64, slope: f64) -> Ray {
 
 fn axial_intercept(ray: Ray) -> f64 {
     ray.origin.z - ray.origin.x * ray.dir.z / ray.dir.x
+}
+
+fn coating(layers: &[(f64, f64, f64)]) -> DielectricCoating {
+    let layers: Vec<_> = layers
+        .iter()
+        .map(|&(n, k, thickness)| {
+            CauchyCoatingLayer::try_new(CauchyIor::try_constant(n).unwrap(), k, thickness).unwrap()
+        })
+        .collect();
+    let source = ConductorSource::try_new(
+        fs_blake3::hash_domain("org.frankensim.test.sequential-lens", b"authored coating"),
+        ConductorDataStatus::Representative,
+    )
+    .unwrap();
+    DielectricCoating::try_new(CoherentPeriodicCoating::try_new(&layers, 1, source).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn quarter_wave_lens_coatings_remove_fresnel_loss_without_changing_refraction() {
+    let index = 1.5_f64;
+    let film_index = index.sqrt();
+    let ar = coating(&[(film_index, 0.0, 550e-9 / (4.0 * film_index))]);
+    let uncoated = biconvex(glass(CauchyIor::try_constant(index).unwrap(), 7.0));
+    let coated = lens(&[
+        uncoated.surfaces()[0].with_coating(ar),
+        uncoated.surfaces()[1].with_coating(ar),
+    ]);
+    assert_eq!(coated.surfaces()[0].coating(), Some(&ar));
+    assert_eq!(coated.reference_focus(), uncoated.reference_focus());
+    with_cx(|_, cx| {
+        let bare = trace(&uncoated, cx, ray(0.0, 0.0), 550.0);
+        let coated_axis = trace(&coated, cx, ray(0.0, 0.0), 550.0);
+        // Quarter-wave n_f=sqrt(n_air*n_glass) cancels both normal reflections.
+        let expected = (-7.0_f64 * 0.01).exp();
+        close(coated_axis.transmittance, expected, 8e-14);
+        close(bare.transmittance, 0.96_f64.powi(2) * expected, 8e-14);
+        for slope in [0.0, 0.015, 0.075] {
+            for wavelength in [450.0, 550.0, 650.0] {
+                let bare = trace(&uncoated, cx, ray(0.0, slope), wavelength);
+                let coated = trace(&coated, cx, ray(0.0, slope), wavelength);
+                assert_eq!(coated.ray, bare.ray);
+                assert_eq!(coated.distance_m, bare.distance_m);
+                assert_eq!(coated.optical_path_m, bare.optical_path_m);
+                assert!(coated.transmittance > bare.transmittance);
+                let glass_path = (coated.optical_path_m - coated.distance_m) / (index - 1.0);
+                assert!(coated.transmittance <= (-7.0 * glass_path).exp() + 1e-13);
+            }
+        }
+        assert!(trace(&coated, cx, ray(0.0, 0.0), 450.0).transmittance < expected - 1e-3);
+    });
+}
+
+#[test]
+fn absorbing_lens_films_retain_authored_order_and_polarization_correlation() {
+    let stack = coating(&[(1.3, 0.08, 120e-9), (2.2, 0.0, 80e-9)]);
+    let material = glass(CauchyIor::try_constant(1.5).unwrap(), 0.7);
+    let coated = lens(&[
+        surface(0.02, 0.0, 0.1, Some(material)).with_coating(stack),
+        surface(0.03, 0.0, 0.1, None).with_coating(stack),
+    ]);
+    with_cx(|_, cx| {
+        let si = 0.8_f64;
+        let ci = (1.0 - si * si).sqrt();
+        let ct = (1.0 - (si / 1.5).powi(2)).sqrt();
+        let film = DielectricSurface::SMOOTH.with_coating(stack);
+        let response = film.interface(550.0, false).unwrap();
+        let first = response.fresnel_polarized(ci, 1.0, 1.5).unwrap();
+        let second = response.fresnel_polarized(ct, 1.5, 1.0).unwrap();
+        let one = fs_render::polarization::Stokes::unpolarized(1.0);
+        let expected = second
+            .transmission
+            .apply_diagonal_jones(first.transmission.apply_diagonal_jones(one))
+            .i
+            * (-0.7_f64 * 0.01 / ct).exp();
+        let traced = trace(&coated, cx, ray(0.0, si / ci), 550.0);
+        close(traced.transmittance, expected, 5e-13);
+        close(traced.ray.dir.x, si, 3e-14);
+        assert!(first.scalar.absorption_residual() > 0.05);
+        let independent_averages =
+            first.scalar.transmittance * second.scalar.transmittance * (-0.7_f64 * 0.01 / ct).exp();
+        assert!((expected - independent_averages).abs() > 1e-3);
+        // The front face is authored sensor-first too, not implicitly reversed.
+        let wrong_order = film
+            .interface(550.0, true)
+            .unwrap()
+            .fresnel_polarized(ct, 1.5, 1.0)
+            .unwrap()
+            .transmission
+            .apply_diagonal_jones(first.transmission.apply_diagonal_jones(one))
+            .i
+            * (-0.7_f64 * 0.01 / ct).exp();
+        assert!((expected - wrong_order).abs() > 1e-3);
+    });
+}
+
+#[test]
+fn lens_coatings_admit_source_band_and_refuse_unmodeled_group_delay() {
+    let zero = coating(&[(1.3, 0.1, 0.0)]);
+    let active = coating(&[(1.3, 0.0, 100e-9)]);
+    let stop = surface(0.02, 0.0, 0.01, None).with_coating(zero);
+    assert!(SequentialLens::try_new(1000.0, &[stop]).is_err());
+    let stopped = lens(&[stop]);
+    assert_eq!(stopped.wavelength_bounds_nm(), (380.0, 780.0));
+    let bare = biconvex(glass(CauchyIor::try_constant(1.5).unwrap(), 0.0));
+    let camera = |coating| {
+        PhysicalCamera::try_look_at(
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            CameraProjection::try_focal_sensor(0.05, 0.024).unwrap(),
+            1.0,
+            Aperture::try_circular(0.001).unwrap(),
+        )
+        .unwrap()
+        .with_sequential_lens(lens(&[
+            bare.surfaces()[0].with_coating(coating),
+            bare.surfaces()[1],
+        ]))
+        .unwrap()
+    };
+    with_cx(|_, cx| {
+        assert_eq!(
+            stopped.trace_ray(cx, ray(1.0, 0.0), 1000.0),
+            Err(CameraError::SequentialLensOutsideModel)
+        );
+        let zero_lens = camera(zero);
+        for slope in [0.0, 0.015, 0.075] {
+            assert_eq!(
+                trace(
+                    zero_lens.sequential_lens().unwrap(),
+                    cx,
+                    ray(0.0, slope),
+                    550.0
+                ),
+                trace(&bare, cx, ray(0.0, slope), 550.0)
+            );
+        }
+        let timed = zero_lens
+            .generate_sequential_spectral_timed_beams_from_tangent_offsets(
+                cx,
+                0.0,
+                0.0,
+                LensSample::CENTER,
+                &[550.0],
+            )
+            .unwrap()[0]
+            .unwrap();
+        assert!(timed.group_delay_s().is_some());
+        let active_lens = camera(active);
+        assert!(
+            active_lens
+                .generate_sequential_spectral_beams_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::CENTER,
+                    &[550.0],
+                )
+                .unwrap()[0]
+                .is_some()
+        );
+        for x in [0.0, 20.0] {
+            assert_eq!(
+                active_lens.generate_sequential_spectral_timed_beams_from_tangent_offsets(
+                    cx,
+                    x,
+                    0.0,
+                    LensSample::CENTER,
+                    &[550.0],
+                ),
+                Err(CameraError::SequentialLensOutsideModel)
+            );
+        }
+    });
 }
 
 // Thick-lens power P=P1+P2-d*P1*P2/n; reduced-angle ABCD imaging.
