@@ -5631,6 +5631,27 @@ cancellation, budget and late-jump rollback.
   envelope with softmax-weighted derivatives, because individual
   eigenvalues are not differentiable where branches cross (measured
   in the battery).
+  `stability::sensitivity::element_scale_sensitivities[_cancellable]` computes
+  total P1/Q1 element-modulus derivatives through the accepted reference
+  equilibrium. `LinearProblem::solve_with_element_scales` and
+  `reduced_pencil_with_element_scales` use the same finite positive per-element
+  multipliers in elastic stiffness, prescribed-column lifting and recovered
+  prestress; geometry, Poisson ratio and dead loads remain fixed. Direct elastic
+  and geometric terms plus one native checked-CG adjoint per mode supply all
+  element derivatives. The actual Standard/B-bar strain operator and its
+  transpose retain full prescribed displacements and homogeneous incremental
+  supports. No perturbed forward solve or third-order derivative tensor is
+  needed. Returned scales, modes, gradients and true adjoint residuals remain
+  paired; each adjoint must pass a 1e-8 physical relative-residual gate.
+  One extra eigenpair checks the retained-spectrum boundary; relative gaps
+  <=1e-6 refuse individual gradients rather than publishing a branch choice
+  inside an unresolved cluster. The existing factorization/workspace caps
+  remain. This is a fixed-geometry, fixed-load-parameterization sizing
+  derivative, not a changing-support, follower-load or nonlinear stability
+  derivative. `tests/buckling_sensitivity.rs` checks independently re-solved
+  finite differences on heterogeneous triangles/distorted quads, plane stress/
+  strain and Standard/B-bar, plus force/displacement homogeneity, mixed nonzero
+  support lifting, cluster refusal and cancellation.
 - `continuation` (bead tfz.15): `PathResidual` (generic equilibrium
   residual R(u,λ) = R_int − λF_ext; `HyperProblem` implements it for
   homogeneous clamps + ramped dead tractions), `advance` — Keller
@@ -6684,9 +6705,11 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
 - fs-scenario dimensioned-value resolution (units plumbing stays with
   the scenario consumer; kind/physics validation ships here).
 - Production-scale pencil solves (shift-invert/sparse factorizations
-  beyond the fixture-gated dense reduction) and the
-  prebuckling-adjoint chain dλ/ds through σ₀(s) (fs-ad/ASCENT
-  integration successor); LOBPCG preconditioning hooks.
+  beyond the fixture-gated dense reduction), LOBPCG preconditioning hooks,
+  complete-cluster total spectral gradients and higher-dimensional/nonlinear
+  buckling sensitivities. The fixed-load P1/Q1 element-modulus equilibrium
+  adjoint is supplied by `stability::sensitivity`; wiring those derivatives
+  into a dedicated sizing optimizer remains consumer work.
 - Plate/shell buckling references (needs bending elements — the
   shells bead); the 2D canonical here is the strut.
 - Kirchhoff--Love/bending-continuum claims,

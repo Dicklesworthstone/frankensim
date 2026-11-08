@@ -19,8 +19,10 @@
 //! optimization consumes the smooth Kreisselmeier–Steinhauser
 //! aggregate `λ_ks = −ln(Σ e^{−ρλᵢ})/ρ` whose derivative is the
 //! softmax-weighted mode sum (the classic trap, measured in the
-//! battery). The prebuckling-adjoint chain (σ₀ depending on s) is the
-//! fs-ad/ASCENT integration successor.
+//! battery). [`sensitivity`] supplies the complete element-modulus derivative:
+//! direct elastic and geometric terms plus one reference-equilibrium adjoint
+//! per mode, with the original Standard/B-bar strain operator and supports.
+//! It conservatively refuses unresolved eigenvalue clusters.
 
 use crate::SolidError;
 use crate::linear::{Formulation, LinearProblem};
@@ -29,6 +31,8 @@ use fs_la::eigen::{EigenPair, LobpcgState, householder_eigh, lobpcg_run};
 use fs_la::factor::{FactorRunError, cholesky_cancellable};
 use fs_sparse::{Coo, Csr};
 
+/// Total buckling derivatives through the reference elastic equilibrium.
+pub mod sensitivity;
 /// Proportional buckling of source-bound three-dimensional prestress assemblies.
 pub mod solid3;
 
@@ -58,7 +62,29 @@ pub type ReducedPencil = (Csr, Csr, Vec<Option<usize>>, Vec<[f64; 2]>);
 /// # Errors
 /// Propagates the prebuckling solve's [`SolidError`].
 pub fn reduced_pencil(problem: &LinearProblem<'_>) -> Result<ReducedPencil, SolidError> {
-    let u0 = problem.solve()?;
+    reduced_pencil_scaled(problem, None, &|| false)
+}
+
+/// Reference equilibrium and buckling pencil with one positive Young's-modulus
+/// multiplier per original element. The same multipliers enter stiffness,
+/// prescribed-displacement lifting and recovered geometric prestress.
+/// Dead loads, geometry, Poisson ratio and supports remain fixed.
+///
+/// # Errors
+/// Propagates scale admission and the reference equilibrium's `SolidError`.
+pub fn reduced_pencil_with_element_scales(
+    problem: &LinearProblem<'_>,
+    scales: &[f64],
+) -> Result<ReducedPencil, SolidError> {
+    reduced_pencil_scaled(problem, Some(scales), &|| false)
+}
+
+fn reduced_pencil_scaled(
+    problem: &LinearProblem<'_>,
+    scales: Option<&[f64]>,
+    cancelled: &impl Fn() -> bool,
+) -> Result<ReducedPencil, SolidError> {
+    let u0 = problem.solve_scaled(scales, cancelled)?;
     let (lambda, mu) = crate::linear::lame(problem.youngs, problem.poisson, problem.plane);
     let mesh = problem.mesh;
     let n = mesh.node_count();
@@ -88,7 +114,10 @@ pub fn reduced_pencil(problem: &LinearProblem<'_>) -> Result<ReducedPencil, Soli
     }
     let mut kc = Coo::new(nf, nf);
     let mut gc = Coo::new(nf, nf);
-    for conn in &mesh.elems {
+    for (element, conn) in mesh.elems.iter().enumerate() {
+        check_cancelled(cancelled)?;
+        let scale = scales.map_or(1.0, |values| values[element]);
+        let (lambda, mu) = (lambda * scale, mu * scale);
         let nn = conn.len();
         let (ke, _) = problem.element(conn, lambda, mu);
         let pts = quad_points(nn);
@@ -158,6 +187,7 @@ pub fn reduced_pencil(problem: &LinearProblem<'_>) -> Result<ReducedPencil, Soli
             }
         }
     }
+    check_cancelled(cancelled)?;
     Ok((kc.assemble(), gc.assemble(), dof_map, u0))
 }
 

@@ -112,7 +112,64 @@ impl LinearProblem<'_> {
     /// # Errors
     /// [`SolidError::SolveFailed`], [`SolidError::UnknownPatch`].
     pub fn solve(&self) -> Result<Vec<[f64; 2]>, SolidError> {
+        self.solve_scaled(None, &|| false)
+    }
+
+    /// Solve with a positive, dimensionless Young's-modulus multiplier per
+    /// original element. Poisson ratio, body forces, tractions and prescribed
+    /// displacements retain their original values. Fixed-column lifting uses
+    /// the scaled stiffness, including nonzero prescribed displacements.
+    ///
+    /// # Errors
+    /// Invalid scale count, nonpositive/nonfinite or unrepresentable elastic
+    /// coefficients return `InvalidInput`; equilibrium failures propagate.
+    pub fn solve_with_element_scales(&self, scales: &[f64]) -> Result<Vec<[f64; 2]>, SolidError> {
+        self.solve_scaled(Some(scales), &|| false)
+    }
+
+    pub(crate) fn solve_scaled(
+        &self,
+        scales: Option<&[f64]>,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<Vec<[f64; 2]>, SolidError> {
+        let checkpoint = || {
+            if cancelled() {
+                Err(SolidError::Cancelled)
+            } else {
+                Ok(())
+            }
+        };
+        checkpoint()?;
         let (lambda, mu) = lame(self.youngs, self.poisson, self.plane);
+        if let Some(scales) = scales {
+            if scales.len() != self.mesh.elems.len()
+                || self.symmetry.iter().any(|(_, component)| *component >= 2)
+                || self.mesh.elems.iter().any(|conn| {
+                    crate::mesh2::checked_reference_element(&self.mesh.nodes, conn).is_none()
+                })
+                || self.mesh.patches.iter().any(|(_, edges)| {
+                    edges
+                        .iter()
+                        .any(|&(a, b)| a >= self.mesh.node_count() || b >= self.mesh.node_count())
+                })
+                || !self.youngs.is_finite()
+                || self.youngs <= 0.0
+                || !self.poisson.is_finite()
+                || !(-1.0..0.5).contains(&self.poisson)
+                || self.poisson == -1.0
+                || scales.iter().any(|&s| {
+                    !s.is_finite()
+                        || s <= 0.0
+                        || !(mu * s > 0.0)
+                        || !(lambda * s).is_finite()
+                        || !((lambda + 2.0 * mu) * s).is_finite()
+                })
+            {
+                return Err(SolidError::InvalidInput {
+                    what: "element-scaled elasticity requires valid P1/Q1 geometry and supports, one finite positive multiplier per element and representable stable isotropic coefficients".into(),
+                });
+            }
+        }
         let n = self.mesh.node_count();
         let ndof = 2 * n;
         // Strong Dirichlet values by node/component.
@@ -145,8 +202,10 @@ impl LinearProblem<'_> {
         }
         let mut coo = Coo::new(ndof, ndof);
         let mut rhs = vec![0.0f64; ndof];
-        for conn in &self.mesh.elems {
-            let (k, fl) = self.element(conn, lambda, mu);
+        for (element, conn) in self.mesh.elems.iter().enumerate() {
+            checkpoint()?;
+            let scale = scales.map_or(1.0, |values| values[element]);
+            let (k, fl) = self.element(conn, lambda * scale, mu * scale);
             scatter_constrained(&mut coo, &mut rhs, conn, &k, &fl, &fixed);
         }
         // Traction terms (dead loads along patch edges, 2-pt Gauss).
@@ -194,7 +253,7 @@ impl LinearProblem<'_> {
                 max_iterations: 40_000,
                 max_corrections: 2,
             },
-            |_| Ok::<_, SolidError>(()),
+            |_| checkpoint(),
         )
         .map_err(|error| match error {
             CheckedCgError::InvalidInput(what) => SolidError::InvalidInput { what: what.into() },
@@ -210,6 +269,7 @@ impl LinearProblem<'_> {
         for (&dof, &value) in &fixed {
             solved.x[dof] = value;
         }
+        checkpoint()?;
         Ok((0..n)
             .map(|i| [solved.x[2 * i], solved.x[2 * i + 1]])
             .collect())
