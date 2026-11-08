@@ -1516,8 +1516,9 @@ prescribed volume-source lane to a constant laboratory-frame fluid velocity.
 The original `FluidAcousticState` supplies density and adiabatic sound speed;
 all sources and the observer remain fixed. The source injects volume at the
 mean velocity with no extra force or entropy. Force-dipole wakes, nonuniform
-or vortical mean flows, boundaries, absorption, source compactness validation
-and reciprocal source loading remain outside this owner.
+or vortical mean flows, finite-impedance boundaries, absorption, source
+compactness validation and reciprocal source loading remain outside this
+owner. The ideal reflection adapters are specified below.
 
 The original `moving::flow::UniformFlowCompactObserver` supplies every source
 path's pressure coefficient and travel time through its Galilean moving-source
@@ -1663,14 +1664,28 @@ pressure/velocity coefficients per physical source, preserving O(N) runtime
 and source-factor work counts of N. Each physical source remains coherent
 with all its images, including under independent-source statistics.
 
+`with_wedge` and its cancellable counterpart extend the same convected
+potential to ideal wedges of opening `pi/m`, `2 <= m <= 128`, with flow
+parallel to the edge (or zero). The shared `WedgeImages` geometry supplies
+the complete `2m` dihedral group. Reflection preserves both distance and
+the mean-flow displacement projection when the flow is tangent to both
+faces, so this is an exact image solution for the admitted geometry.
+Both walls may be rigid or pressure release; mixed conditions require even
+`m` so their image signs close consistently around the edge. Other angles
+and normal flow are refused. Preparation costs O(mN) work and O(N) scratch;
+the same four coefficients per physical source preserve O(N) warm evaluation,
+source coherence, material and direct-path travel-time metadata. The retained
+`reflection_wedge_order` and every output scope identify the admitted model.
+
 The same uniform-flow perturbation energy flux `<p u> + U <E>` is formed from
 the folded field. Both ideal boundary conditions give zero wall-normal flux
-for tangential flow. Shear flow, finite impedance, general wedges, enclosed
-rooms and source feedback remain outside this owner. The five reflection
-test families check an independent convected Green-function derivative oracle
-for corners, rotated walls and edge flux, zero-flow parity with the original
-compact owner, source coherence and clock, and domain/budget/cancellation
-refusals.
+for tangential flow. Shear flow, finite impedance, general wedge diffraction,
+enclosed rooms and source feedback remain outside this owner. G1/G3/G4
+reflection regressions check independent convected Green-function derivatives
+and polar image locations through `m=128`, both flow directions, rotated and
+translated faces, zero normal energy flux, zero-flow parity with the original
+compact owner, the right-angle corner limit, physical-source coherence and
+clock, and domain/budget/cancellation refusals with deterministic replay.
 
 ## Measured three-dimensional compact-source interference
 

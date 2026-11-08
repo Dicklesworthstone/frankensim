@@ -22,7 +22,8 @@
 //! positive quadratic perturbation energy and its transport separately from
 //! the pressure-work intensity p u. These are not mean-flow energy change,
 //! a turbulence model or a source-validation claim. The ideal-plane adapter
-//! adds exact image reflections when this SAME flow is tangent to every wall.
+//! adds exact image reflections in perpendicular corners and pi/m wedges when
+//! this SAME flow is tangent to every wall.
 
 use super::super::statistics::{ComplexSum, StatisticsSum, finite, invalid, nonfinite};
 use super::{CoherenceBudget, CoherentCompactField, CompactFieldStatistics};
@@ -95,6 +96,8 @@ pub struct PreparedConvectedMonopoleObserver {
     limits: ConvectedMonopoleLimits,
     // Images are folded into each original source, not statistical sources.
     reflection_planes: Vec<super::IdealAcousticPlane>,
+    // The exact pi/m wedge class, otherwise independent perpendicular planes.
+    reflection_wedge_order: Option<usize>,
 }
 
 impl PreparedConvectedMonopoleObserver {
@@ -230,6 +233,7 @@ impl PreparedConvectedMonopoleObserver {
             paths,
             limits,
             reflection_planes: Vec::new(),
+            reflection_wedge_order: None,
         })
     }
 
@@ -264,9 +268,17 @@ impl PreparedConvectedMonopoleObserver {
         &self.reflection_planes
     }
 
+    /// Exact wedge opening pi/m, or None for free space/perpendicular planes.
+    /// All 2m paths per physical source are folded during preparation.
+    pub const fn reflection_wedge_order(&self) -> Option<usize> {
+        self.reflection_wedge_order
+    }
+
     /// Physical propagation model retained by every field/statistical query.
     pub const fn scope(&self) -> &'static str {
-        if self.reflection_planes.is_empty() {
+        if self.reflection_wedge_order.is_some() {
+            reflection::CONVECTED_WEDGE_SCOPE
+        } else if self.reflection_planes.is_empty() {
             CONVECTED_MONOPOLE_SCOPE
         } else {
             reflection::CONVECTED_IDEAL_BOUNDARY_SCOPE
@@ -415,11 +427,8 @@ impl PreparedConvectedMonopoleObserver {
 
     fn finish(&self, sum: StatisticsSum) -> Result<ConvectedMonopoleStatistics, AeroacError> {
         let field = sum.finish(self.scope())?;
-        let energy = crate::curle3d::energy::time_averaged(
-            self.acoustic,
-            self.flow_velocity_m_s,
-            &field,
-        )?;
+        let energy =
+            crate::curle3d::energy::time_averaged(self.acoustic, self.flow_velocity_m_s, &field)?;
         Ok(ConvectedMonopoleStatistics {
             field,
             mean_perturbation_energy_density_j_m3: energy.energy_density_j_m3,

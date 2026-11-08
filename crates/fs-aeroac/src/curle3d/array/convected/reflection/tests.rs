@@ -1,4 +1,4 @@
-//! G1: independent convected-potential images, wall work and source coherence.
+//! G1/G3/G4: independent convected-potential images, wall work and source coherence.
 
 use super::*;
 use crate::curle3d::{CompactSourcePhasor, IdealPlaneBoundary, PreparedCompactSourceObserver};
@@ -292,4 +292,316 @@ fn boundary_admission_refuses_normal_flow_invalid_groups_and_partial_work() {
         polls >= 15
     });
     assert!(matches!(result, Err(AeroacError::Cancelled { .. })));
+}
+
+fn polar(radius: f64, angle: f64, z: f64) -> [f64; 3] {
+    [radius * angle.cos(), radius * angle.sin(), z]
+}
+
+fn wedge(order: usize, boundaries: [IdealPlaneBoundary; 2]) -> [IdealAcousticPlane; 2] {
+    let alpha = core::f64::consts::PI / order as f64;
+    [
+        plane(1, boundaries[0]),
+        IdealAcousticPlane::new([0.0; 3], [alpha.sin(), -alpha.cos(), 0.0], boundaries[1]).unwrap(),
+    ]
+}
+
+#[test]
+fn wedge_matches_independent_polar_images_in_both_flow_directions() {
+    use IdealPlaneBoundary::{PressureRelease as Soft, Rigid};
+    let flows = [C64::new(0.002, -0.003), C64::new(-0.001, 0.004)];
+    for (order, boundaries) in [
+        (3, [Rigid, Rigid]),
+        (3, [Soft, Soft]),
+        (4, [Rigid, Soft]),
+        (4, [Soft, Rigid]),
+        (7, [Rigid, Rigid]),
+        (128, [Rigid, Rigid]),
+    ] {
+        let alpha = core::f64::consts::PI / order as f64;
+        let source_polar = [[0.41, 0.24 * alpha, 0.2], [0.63, 0.69 * alpha, -0.35]];
+        let sources = source_polar.map(|[r, theta, z]| polar(r, theta, z));
+        let point = polar(1.1, 0.56 * alpha, -0.6);
+        let walls = wedge(order, boundaries);
+        for axial_speed in [124.0, -217.0] {
+            let flow = [0.0, 0.0, axial_speed];
+            let original = prepared(flow, point, &sources);
+            let direct_delays = [original.source_delay_s(0), original.source_delay_s(1)];
+            let owner = original.with_wedge(walls, order, 4 * order).unwrap();
+            let result = owner.evaluate(&flows).unwrap();
+            let mut expected = [C64::ZERO; 4];
+            // Independent polar images theta_s + 2j alpha and -theta_s +
+            // 2j alpha; no affine image maps or reflection matrices are reused.
+            for (&[radius, angle, z], &q) in source_polar.iter().zip(&flows) {
+                for j in 0..order {
+                    let rotation_sign = if boundaries[0] != boundaries[1] && j % 2 == 1 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    for mirror in [false, true] {
+                        let theta = 2.0 * j as f64 * alpha + if mirror { -angle } else { angle };
+                        let sign = if mirror && boundaries[0] == Soft {
+                            -rotation_sign
+                        } else {
+                            rotation_sign
+                        };
+                        let image = analytic(flow, point, polar(radius, theta, z), q.scale(sign));
+                        for i in 0..4 {
+                            expected[i] = expected[i] + image[i];
+                        }
+                    }
+                }
+            }
+            close(result.field.pressure_pa, expected[0], 1e-3);
+            for i in 0..3 {
+                close(result.field.particle_velocity_m_s[i], expected[i + 1], 1e-6);
+            }
+            let energy = expected[0].norm_sq() / (4.0 * 1.7 * 310.0 * 310.0)
+                + 1.7 * expected[1..].iter().map(|v| v.norm_sq()).sum::<f64>() / 4.0;
+            assert!((result.mean_perturbation_energy_density_j_m3 - energy).abs() < 5e-12 * energy);
+            for i in 0..3 {
+                let flux = 0.5 * (expected[0] * expected[i + 1].conj()).re + flow[i] * energy;
+                assert!(
+                    (result.mean_perturbation_energy_flux_w_m2[i] - flux).abs()
+                        < 5e-12 * flux.abs().max(1e-8)
+                );
+            }
+            assert_eq!(owner.reflection_planes(), &walls);
+            assert_eq!(owner.reflection_wedge_order(), Some(order));
+            assert_eq!(owner.source_count(), 2);
+            assert_eq!(owner.source_position_m(1), Some(sources[1]));
+            assert_eq!(
+                [owner.source_delay_s(0), owner.source_delay_s(1)],
+                direct_delays
+            );
+            assert_eq!(result.field.scope, CONVECTED_WEDGE_SCOPE);
+        }
+    }
+}
+
+fn rotate(v: [f64; 3]) -> [f64; 3] {
+    [
+        0.36 * v[0] - 0.8 * v[1] - 0.48 * v[2],
+        0.48 * v[0] + 0.6 * v[1] - 0.64 * v[2],
+        0.8 * v[0] + 0.6 * v[2],
+    ]
+}
+
+fn world_point(point: [f64; 3]) -> [f64; 3] {
+    let rotated = rotate(point);
+    core::array::from_fn(|i| rotated[i] + [3.0, -2.0, 4.0][i])
+}
+
+#[test]
+fn translated_rotated_wedge_faces_enforce_pressure_velocity_and_no_normal_transport() {
+    use IdealPlaneBoundary::{PressureRelease as Soft, Rigid};
+    for (order, boundaries) in [
+        (3, [Rigid, Rigid]),
+        (3, [Soft, Soft]),
+        (4, [Rigid, Soft]),
+        (4, [Soft, Rigid]),
+    ] {
+        let alpha = core::f64::consts::PI / order as f64;
+        let local_walls = wedge(order, boundaries);
+        let points = [[0.9, 0.0, 0.25], polar(1.0, alpha, -0.4)];
+        let walls = core::array::from_fn(|i| {
+            IdealAcousticPlane::new(
+                world_point(points[i]),
+                rotate(local_walls[i].inward_normal()),
+                boundaries[i],
+            )
+            .unwrap()
+        });
+        let flow = rotate([0.0, 0.0, 124.0]);
+        let source = world_point(polar(0.41, 0.37 * alpha, 0.7));
+        for wall in walls {
+            // Exactly the retained face point, avoiding roundoff that could
+            // otherwise put a nominal boundary receiver outside its half-space.
+            let result = prepared(flow, wall.point_m(), &[source])
+                .with_wedge(walls, order, 2 * order)
+                .unwrap()
+                .evaluate(&[C64::new(0.002, -0.003)])
+                .unwrap();
+            let normal = wall.inward_normal();
+            let un = (0..3).fold(C64::ZERO, |sum, i| {
+                sum + result.field.particle_velocity_m_s[i].scale(normal[i])
+            });
+            match wall.boundary() {
+                Rigid => assert!(un.abs() < 1e-14, "normal velocity={un:?}"),
+                Soft => assert!(result.field.pressure_pa.abs() < 5e-11),
+            }
+            let normal_flux: f64 = (0..3)
+                .map(|i| normal[i] * result.mean_perturbation_energy_flux_w_m2[i])
+                .sum();
+            assert!(
+                normal_flux.abs() < 1e-14,
+                "normal energy flux={normal_flux}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wedge_quiescent_limit_and_source_statistics_retain_original_owners_semantics() {
+    use IdealPlaneBoundary::{PressureRelease as Soft, Rigid};
+    let flows = [C64::new(0.003, 0.002), C64::new(-0.002, 0.004)];
+    for (order, boundaries) in [(2, [Rigid, Soft]), (3, [Soft, Soft]), (4, [Rigid, Soft])] {
+        let alpha = core::f64::consts::PI / order as f64;
+        let walls = wedge(order, boundaries);
+        let sources = [polar(0.4, 0.3 * alpha, 0.4), polar(0.5, 0.6 * alpha, -0.1)];
+        let point = polar(0.9, 0.7 * alpha, -0.3);
+        let owner = prepared([0.0; 3], point, &sources)
+            .with_wedge(walls, order, 4 * order)
+            .unwrap();
+        let original = PreparedCompactSourceObserver::new(medium(), 117.0, point, &sources, 2)
+            .unwrap()
+            .with_wedge(walls, order, 4 * order)
+            .unwrap()
+            .evaluate(&flows.map(CompactSourcePhasor::monopole))
+            .unwrap();
+        let actual = owner.evaluate(&flows).unwrap();
+        close(actual.field.pressure_pa, original.pressure_pa, 1e-4);
+        for i in 0..3 {
+            close(
+                actual.field.particle_velocity_m_s[i],
+                original.particle_velocity_m_s[i],
+                1e-7,
+            );
+            assert_eq!(
+                actual.mean_perturbation_energy_flux_w_m2[i],
+                actual.field.active_intensity_w_m2[i]
+            );
+        }
+        if order == 2 {
+            let corner = prepared([0.0; 3], point, &sources)
+                .with_orthogonal_planes(&walls, 8)
+                .unwrap()
+                .evaluate(&flows)
+                .unwrap();
+            close(actual.field.pressure_pa, corner.field.pressure_pa, 1e-4);
+            for i in 0..3 {
+                close(
+                    actual.field.particle_velocity_m_s[i],
+                    corner.field.particle_velocity_m_s[i],
+                    1e-7,
+                );
+            }
+        }
+        let flowing = prepared([0.0, 0.0, 124.0], point, &sources)
+            .with_wedge(walls, order, 4 * order)
+            .unwrap();
+        let a = [flows[0], C64::ZERO];
+        let b = [C64::ZERO, flows[1]];
+        let moments = flowing
+            .evaluate_coherence_modes(
+                &[&a, &b],
+                CoherenceBudget {
+                    max_modes: 2,
+                    max_source_mode_pairs: 4,
+                },
+                || false,
+            )
+            .unwrap();
+        let fa = flowing.evaluate(&a).unwrap();
+        let fb = flowing.evaluate(&b).unwrap();
+        let mean_square = 0.5 * (fa.field.pressure_pa.norm_sq() + fb.field.pressure_pa.norm_sq());
+        assert!((moments.field.mean_square_pressure_pa2 - mean_square).abs() < 1e-12 * mean_square);
+        let energy =
+            fa.mean_perturbation_energy_density_j_m3 + fb.mean_perturbation_energy_density_j_m3;
+        assert!((moments.mean_perturbation_energy_density_j_m3 - energy).abs() < 1e-12 * energy);
+        assert_eq!(moments.field.scope, CONVECTED_WEDGE_SCOPE);
+        let line = flowing.evaluate_harmonic_line(&flows).unwrap();
+        let total = flowing.evaluate(&flows).unwrap();
+        assert_eq!(line.frequency_hz, 117.0);
+        assert_eq!(line.pressure_pa, total.field.pressure_pa);
+        assert_eq!(
+            line.particle_velocity_m_s,
+            total.field.particle_velocity_m_s
+        );
+    }
+}
+
+#[test]
+fn wedge_refuses_incompatible_geometry_flow_and_budget_and_cancels_without_partial_bank() {
+    use IdealPlaneBoundary::{PressureRelease as Soft, Rigid};
+    let walls = wedge(4, [Rigid, Soft]);
+    let point = [0.8, 0.3, -0.2];
+    let sources = [[0.4, 0.1, 0.3], [0.6, 0.2, 0.1]];
+    let free = prepared([0.0, 0.0, 124.0], point, &sources);
+    assert!(free.clone().with_wedge(walls, 4, 15).is_err());
+    for order in [0, 1, 3, 129, usize::MAX] {
+        assert!(free.clone().with_wedge(walls, order, usize::MAX).is_err());
+    }
+    assert!(
+        free.clone()
+            .with_wedge(wedge(3, [Rigid, Soft]), 3, 12)
+            .is_err()
+    );
+    assert!(free.clone().with_wedge([walls[0]; 2], 4, 16).is_err());
+    assert!(
+        free.clone()
+            .with_wedge(wedge(3, [Rigid, Rigid]), 4, 16)
+            .is_err()
+    );
+    for flow in [[1e-100, 0.0, 0.0], [2.0, 0.0, 124.0], [0.0, 2.0, 124.0]] {
+        assert!(
+            prepared(flow, point, &sources)
+                .with_wedge(walls, 4, 16)
+                .is_err()
+        );
+    }
+    assert!(
+        prepared([0.0, 0.0, 124.0], [0.3, -0.1, 0.2], &sources)
+            .with_wedge(walls, 4, 16)
+            .is_err()
+    );
+    for source in [[0.4, 0.0, 0.3], [0.1, 0.4, 0.3]] {
+        assert!(
+            prepared([0.0, 0.0, 124.0], point, &[source])
+                .with_wedge(walls, 4, 8)
+                .is_err()
+        );
+    }
+    let corner = free.clone().with_orthogonal_planes(&walls[..1], 4).unwrap();
+    assert!(corner.with_wedge(walls, 4, 16).is_err());
+    let mut full_polls = 0;
+    let complete = free
+        .clone()
+        .with_wedge_cancellable(walls, 4, 16, || {
+            full_polls += 1;
+            false
+        })
+        .unwrap();
+    assert!(complete.clone().with_wedge(walls, 4, 16).is_err());
+    assert!(
+        complete
+            .clone()
+            .with_orthogonal_planes(&walls[..1], 4)
+            .is_err()
+    );
+    for stop in [1, full_polls / 2, full_polls] {
+        let mut polls = 0;
+        let result = free.clone().with_wedge_cancellable(walls, 4, 16, || {
+            polls += 1;
+            polls == stop
+        });
+        assert!(matches!(result, Err(AeroacError::Cancelled { .. })));
+    }
+    let flows = [C64::new(0.002, -0.003), C64::ONE];
+    let replay = free
+        .with_wedge(walls, 4, 16)
+        .unwrap()
+        .evaluate(&flows)
+        .unwrap();
+    let expected = complete.evaluate(&flows).unwrap();
+    assert_eq!(replay.field.pressure_pa, expected.field.pressure_pa);
+    assert_eq!(
+        replay.field.particle_velocity_m_s,
+        expected.field.particle_velocity_m_s
+    );
+    assert_eq!(
+        replay.mean_perturbation_energy_flux_w_m2,
+        expected.mean_perturbation_energy_flux_w_m2
+    );
 }
