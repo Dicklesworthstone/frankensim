@@ -8614,3 +8614,52 @@ position refinement, a full moving six-axis source against independent
 continuous Newton-Euler RK4 dynamics, native zero-law equivalence, common
 boost/world-translation covariance, original rotating material-point work,
 gravity/heat separation, and late cancellation with exact retry.
+
+## Sparse full-spatial viscous connector networks
+
+`spatial_loads::internal_impulse::viscous::network::PreparedViscousNetwork`
+binds original poses, full mass/inertia, attachment arms, passive six-coordinate
+laws, source duration and an explicit positive subdivision count. Arbitrary
+shared-body graphs, cycles, parallel connectors and isolated bodies are supported.
+Each active edge reuses the original exact finite-body connector, including
+material-frame force/couple cross-coupling and opposite-wrench moment transport.
+
+A forward-half/reverse-half composition merges the central active edge into one
+full exchange. Each subdivision uses at most twice the active edge count minus
+one native pair relaxation. Zero-duration and zero-law edges perform no pair
+work; per-edge heat remains indexed in the original supplied order. The retained
+responses perform no source-loop eigensolve or exponential evaluation. Preparation
+admits body, connector, pair-call and logical peak storage limits before allocation,
+including the original bounded small-eigenproblem scratch. Source work scales with
+active edges times subdivisions, with linear body/edge admission and readback.
+
+The composition is second order under subdivision for this fixed-geometry source;
+edge order is part of the finite-step method. Local stiffness stability does not
+certify a coarse simultaneous-network solution. No pose, clock, constraint,
+elastic storage or thermal state is advanced. Reprepare after any original
+geometry, inertia, law or interval changes.
+
+All source updates remain in a private native state bank. The original pair
+receipts admit each local physical response; a final all-body audit additionally
+compares accumulated unrounded intended force/moment transport with actual
+represented body increments. Total linear and orbital-plus-spin angular
+momentum close about the caller's declared origin. The original
+`RigidKineticEnergyChange` retains all bodies' endpoint products before
+rounding; both that kinetic increment and independently accumulated connector
+work must balance analytically integrated nonnegative dissipation. Per-connector
+heat is reported for explicit thermal coupling. Refusal or cancellation exposes
+no intermediate accepted body states.
+
+The underlying pair preparation exposes
+`maximum_decay_rate_per_s()` for downstream material applicability
+and subdivision admission. It retains the largest original squared kinetic mode
+rate without another eigensolve. Zero-duration or zero-law preparation returns
+zero because no active spectrum was prepared; this is not a claim that a
+nonzero constitutive law has zero physical decay.
+
+Focused regressions cover exact single-edge equivalence, analytic three-body
+graph modes, shared cycles with full nonprincipal inertia against independently
+integrated force/torque/heat equations, quadratic refinement, common rigid and
+isolated free modes, distant origins and common velocity boosts, inactive
+sources, explicit resource boundaries, late physical refusal, and cancellation
+with unchanged-input retry.

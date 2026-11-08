@@ -20,6 +20,10 @@
 //! changes. A symmetric composition with native free motion still requires
 //! temporal refinement for changing geometry; no thermal destination is inferred.
 
+/// Sparse symmetric compositions of the original finite-body connector source.
+#[path = "viscous/network.rs"]
+pub mod network;
+
 use super::{
     InternalWrenchImpulse, InternalWrenchImpulseControls, InternalWrenchImpulseError,
     InternalWrenchImpulseReceipt, apply_internal_wrench_impulse, dd, dot, finite, finite_vector,
@@ -137,6 +141,7 @@ pub struct PreparedViscousConnector {
     angular_columns_body: [[Vec3; 2]; 6],
     damping: PassiveBushingMatrix,
     duration_s: f64,
+    maximum_decay_rate_per_s: f64,
     relative_modes: Matrix,
     source_modes: Matrix,
     integrated_decay: [f64; 6],
@@ -216,6 +221,7 @@ impl PreparedViscousConnector {
             angular_columns_body,
             damping,
             duration_s,
+            maximum_decay_rate_per_s: 0.0,
             relative_modes: [[0.0; 6]; 6],
             source_modes: [[0.0; 6]; 6],
             integrated_decay: [0.0; 6],
@@ -238,6 +244,14 @@ impl PreparedViscousConnector {
     /// Original interval [s], held during this fixed-geometry source.
     pub const fn duration_s(&self) -> f64 {
         self.duration_s
+    }
+
+    /// Largest active decay rate retained by the original prepared kinetic
+    /// eigensystem [1/s]. This is zero when a zero duration or zero damping law
+    /// skipped spectral preparation; zero duration does not certify a zero
+    /// physical decay rate for a nonzero law.
+    pub const fn maximum_decay_rate_per_s(&self) -> f64 {
+        self.maximum_decay_rate_per_s
     }
 
     /// Original supplied passive form; no matrix projection or fitted damping.
@@ -461,6 +475,7 @@ impl PreparedViscousConnector {
                     "positive resolved active damping rate",
                 ));
             }
+            self.maximum_decay_rate_per_s = self.maximum_decay_rate_per_s.max(rate);
             let normalized_rate = rate / rate_scale;
             for i in 0..count {
                 let mut applied = Dd::ZERO;
