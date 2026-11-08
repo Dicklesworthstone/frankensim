@@ -5,6 +5,12 @@
 
 use super::*;
 
+mod observation;
+pub use observation::MolecularPointFrequencyResponse;
+
+mod aperture;
+pub use aperture::MolecularApertureFrequencyResponse;
+
 /// Original radiation and its analytic tangent per rad/s, with geometry,
 /// equilibrium gas and reservoir parameters held. The derivative includes the
 /// original molecular phase AND attenuation slopes and any supplied drive slope.

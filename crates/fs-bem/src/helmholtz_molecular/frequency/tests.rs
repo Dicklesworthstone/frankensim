@@ -2,7 +2,7 @@ use super::*;
 use fs_material::gas::{GasSpec, GasState};
 use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
 
-fn model(relaxing: bool) -> MolecularExterior {
+pub(super) fn model(relaxing: bool) -> MolecularExterior {
     // Synthetic reservoir tests constitutive dispersion, not measured dry air.
     let data = if relaxing {
         "declared 1 synthetic 1 vibration 1 900 1 power 101.325 293.15 0 200 500"
@@ -15,7 +15,7 @@ fn model(relaxing: bool) -> MolecularExterior {
     MolecularExterior::new(law.evaluate(&medium).unwrap(), [100.0, 2000.0]).unwrap()
 }
 
-fn limits(n: usize) -> ComplexOptions {
+pub(super) fn limits(n: usize) -> ComplexOptions {
     ComplexOptions {
         max_panels: n,
         max_bytes: 64 * n * n,
@@ -23,7 +23,7 @@ fn limits(n: usize) -> ComplexOptions {
     }
 }
 
-fn close(actual: C64, expected: C64, tolerance: f64) {
+pub(super) fn close(actual: C64, expected: C64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance * expected.abs().max(1e-12),
         "{actual:?} != {expected:?}"

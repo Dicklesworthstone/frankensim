@@ -25,7 +25,10 @@ use std::sync::Arc;
 
 #[path = "helmholtz_molecular/frequency.rs"]
 mod frequency;
-pub use frequency::MolecularRadiationFrequencyResponse;
+pub use frequency::{
+    MolecularApertureFrequencyResponse, MolecularPointFrequencyResponse,
+    MolecularRadiationFrequencyResponse,
+};
 
 #[path = "helmholtz_molecular/scattering.rs"]
 mod scattering;
@@ -390,6 +393,28 @@ impl MolecularExterior {
         let refs: Vec<_> = fields.iter().map(Vec::as_slice).collect();
         let solutions =
             self.solve_batch(surface, omega, &refs, formulation, options, &mut cancelled)?;
+        self.aperture_response_from_solutions(
+            surface,
+            apertures,
+            omega,
+            formulation,
+            solutions,
+            cancelled,
+        )
+    }
+
+    // The value and frequency-tangent paths retain identical force projection,
+    // source declaration, plane-port normalization and diagnostic arithmetic.
+    fn aperture_response_from_solutions(
+        &self,
+        surface: &SpherePanels,
+        apertures: &[Aperture],
+        omega: f64,
+        formulation: Formulation,
+        solutions: Vec<MolecularRadiation>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularApertureResponse, MolecularError> {
+        poll(&mut cancelled)?;
         let pressures: Vec<_> = solutions.iter().map(|s| s.pressure.as_slice()).collect();
         let impedance = aperture::project_pressures(surface, apertures, &pressures)?;
         let mut declaration = aperture::mix(

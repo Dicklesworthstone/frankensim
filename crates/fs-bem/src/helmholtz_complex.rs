@@ -359,7 +359,7 @@ fn wave(k: C64) -> DampedWaveNumber {
     }
 }
 
-fn point_with_derivative<const DERIVATIVES: bool>(
+pub(crate) fn point_with_derivative<const DERIVATIVES: bool>(
     k: C64,
     x: [f64; 3],
     nx: [f64; 3],

@@ -2360,6 +2360,23 @@ receiver traversal; solved outward opening flows and their reaction see one
 source gas. Generalized shapes with zero net flow keep their mechanical matrix
 meaning but refuse conversion to plane-port flow observation.
 
+`MolecularRadiationFrequencyResponse::observe` carries the same frequency
+tangent into finite pressure and Cartesian gradients. It contracts the original
+analytic complex Green derivatives with both boundary-trace slopes and
+`q'=i*rho*(v+omega*v')`. Three point-kernel evaluations per panel return values
+and slopes in one traversal, with original geometry/clearance and receiver caps.
+The logarithmic pressure slope gives amplitude slope and, for exp(-i omega t),
+positive-phase-slope group delay; a zero response has no defined phase.
+`aperture_response_with_frequency_derivative` reuses one assembly/LU and the
+original aperture projection/declaration to return generalized and plane-port
+impedance slopes. Its receiver accepts optional volume-flow slopes and retains
+both `U*p'` and `U'*p` after combining traces. The derivative is signed, not
+a new passive impedance. These observers retain the original centroid spatial
+quadrature limits; they add no near-field accuracy certificate. Focused tests
+compare complete frequency solves, a radial sphere, zero-crossing flows and
+normalization/identity/cancellation refusals. Native execution remains pending;
+independent numerical kernel/chain-rule checks are not native BEM test results.
+
 Focused tests cover values/derivative-owner bit parity and half-storage budget,
 a three-mesh absorbing-sphere impedance/receiver/gradient ladder, empty-source
 parity and source-rate liveness, original molecular duct/full-aperture closure,
