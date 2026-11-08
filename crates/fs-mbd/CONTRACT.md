@@ -184,6 +184,36 @@ invalid sources, load counts and zero-load parity. These added tests have not
 been executed in the current resource-limited environment; the broad rigid-body
 lane remains open.
 
+### Spatial point loads on finite actuator networks
+
+Finite internal actuation accepts `HeldSpatialLoads` through
+`step_internal_wrench_with_spatial_loads` and
+`network::step_internal_wrench_network_with_spatial_loads`. One borrowed
+`PreparedSpatialLoads` per original body retains world-held COM/material-point
+forces plus body/world free couples. Existing simultaneous actuator half-kicks
+surround the original bounded full-inertia spatial midpoint owner. Native point
+geometry, nonlinear replay and Cayley limits remain authoritative. Exact zero
+prepared loads retain the original free-body chart.
+
+Source force work is the actual material-point force-displacement contraction,
+including rotation of the lever arm. Free-couple, gravitational and internal
+actuator work remain distinct. Source angular impulse uses original compensated
+prepared first moments and endpoint rotation averages about the declared
+origin, independently of observed momentum change. Each native middle motion
+and the complete network must pass the original dimensional work/momentum
+gates. Embedded native step receipts use the finite-step torque pullback;
+`external_loads` carries the physical force/free-couple work classification.
+
+Pair motion remains allocation-free. Network work/storage remains linear in
+bodies plus connectors, independent of original point count after preparation.
+Continuous phase/source work require time refinement. No follower force,
+contact, passive connector or callback law is inferred. Focused tests add
+independent endpoint point work and quaternion-derived couple work, source
+impulses and origin covariance, full-tensor three-body trajectory/power
+refinement, native limit refusal, cancellation and zero-load parity. These
+added native tests have not been executed in the current resource-limited
+environment.
+
 ## Native internal spatial-wrench impulse transfer
 
 `spatial_loads::internal_impulse::apply_internal_wrench_impulse` transfers a

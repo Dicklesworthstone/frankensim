@@ -17,6 +17,7 @@ use super::internal_impulse::{
     InternalWrenchImpulse, InternalWrenchImpulseControls, InternalWrenchImpulseError,
     InternalWrenchImpulseReceipt, apply_internal_wrench_impulse,
 };
+use super::midpoint::SpatialMidpointError;
 use crate::{
     DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3,
     Wrench,
@@ -26,6 +27,11 @@ use fs_math::dd::Dd;
 /// Finite trajectories with simultaneous internal actuators on shared bodies.
 #[path = "internal_motion/network.rs"]
 pub mod network;
+
+#[path = "internal_motion/spatial.rs"]
+mod spatial;
+use spatial::BodyLoads;
+pub use spatial::HeldSpatialLoads;
 
 /// A constant world wrench prescribed on attachment B over one finite step.
 ///
@@ -57,9 +63,11 @@ pub struct HeldExternalLoads<'a> {
 /// Source work and impulse, independently evaluated from the prescribed loads.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExternalLoadAccount {
-    /// Force work on the actual COM displacements, excluding gravity [J].
+    /// Force work on the actual COM/material-point displacements, excluding
+    /// gravity [J]. Rotating lever-arm work remains force work.
     pub applied_force_work_j: f64,
-    /// Body-couple work at the native conjugate midpoint angular velocity [J].
+    /// Free-couple work at the native conjugate finite rotation [J].
+    /// Couples may be held in body or world coordinates.
     pub applied_torque_work_j: f64,
     /// Signed force plus couple work; negative means energy recovery [J].
     pub applied_work_j: f64,
@@ -115,6 +123,9 @@ pub enum InternalWrenchStepError {
     Dynamics(DynamicsError),
     /// The original impulse owner refused the supplied transfer or its accounts.
     Impulse(InternalWrenchImpulseError),
+    /// The original geometric point-load midpoint owner refused its solve,
+    /// configuration, finite rotation or original-state replay.
+    SpatialMidpoint(SpatialMidpointError),
     /// The duration cannot be halved exactly, or a nonzero held wrench produces
     /// an underflowed/overflowed half-impulse. No source is silently discarded.
     UnrepresentableImpulse,
@@ -144,6 +155,14 @@ impl From<InternalWrenchImpulseError> for InternalWrenchStepError {
         match error {
             InternalWrenchImpulseError::Cancelled => Self::Cancelled,
             error => Self::Impulse(error),
+        }
+    }
+}
+impl From<SpatialMidpointError> for InternalWrenchStepError {
+    fn from(error: SpatialMidpointError) -> Self {
+        match error {
+            SpatialMidpointError::Cancelled => Self::Cancelled,
+            error => Self::SpatialMidpoint(error),
         }
     }
 }
@@ -222,10 +241,69 @@ pub fn step_internal_wrench_with_loads(
     loads: HeldExternalLoads<'_>,
     duration_s: f64,
     controls: InternalWrenchImpulseControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<InternalWrenchStep, InternalWrenchStepError> {
+    step_pair(
+        states,
+        properties,
+        drive,
+        BodyLoads::Held(loads),
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Advance internal actuation under forces at rotating material points.
+///
+/// The original [`RigidBodyIntegrator::step_spatial_midpoint`] supplies each
+/// body's intervening full-inertia motion, re-evaluating the prepared material
+/// arms at the accepted poses. Held point-force work is the force contracted
+/// with its actual material-point displacement, including lever-arm rotation.
+/// Body/world free-couple work, gravity, and signed internal actuator work
+/// remain separate. Their independent source impulses use the same declared
+/// angular origin as the original-state momentum checks.
+///
+/// This retains the native spatial solve's explicit nonlinear/rotation limits
+/// and atomic refusal. The existing symmetric internal kicks still act once at
+/// each endpoint geometry. Prepared loads are borrowed and constant-sized per
+/// body, so warm work never revisits the original point-force list. A body's
+/// exact zero prepared load uses the original unloaded native step (with the
+/// supplied gravity), preserving its phase and zero-load motion.
+///
+/// Continuous orientation and actuator work require timestep refinement. This
+/// does not supply follower forces, contact, load callbacks or passive links.
+pub fn step_internal_wrench_with_spatial_loads(
+    states: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    drive: PrescribedInternalWrench,
+    loads: HeldSpatialLoads<'_>,
+    duration_s: f64,
+    controls: InternalWrenchImpulseControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<InternalWrenchStep, InternalWrenchStepError> {
+    step_pair(
+        states,
+        properties,
+        drive,
+        BodyLoads::Spatial(loads),
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+fn step_pair(
+    states: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    drive: PrescribedInternalWrench,
+    loads: BodyLoads<'_>,
+    duration_s: f64,
+    controls: InternalWrenchImpulseControls,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<InternalWrenchStep, InternalWrenchStepError> {
     poll(&mut cancelled)?;
-    check_load_count(2, loads)?;
+    loads.check_count(2)?;
     if !duration_s.is_finite() || duration_s <= 0.0 {
         return Err(DynamicsError::InvalidStepDuration.into());
     }
@@ -246,12 +324,13 @@ pub fn step_internal_wrench_with_loads(
     let mut external = LoadChange::ZERO;
     for i in 0..2 {
         poll(&mut cancelled)?;
-        let step = native_loaded_step(
+        let (step, source) = loads.step(
+            i,
             kicked[i],
             properties[i],
-            loads.wrenches[i],
-            loads.gravity,
             duration_s,
+            controls.angular_origin_world_m,
+            &mut cancelled,
         )?;
         drifted[i] = step.state_after;
         poll(&mut cancelled)?;
@@ -261,13 +340,6 @@ pub fn step_internal_wrench_with_loads(
             properties[i],
             controls.angular_origin_world_m,
         )?;
-        let source = LoadChange::from_step(
-            &step,
-            properties[i],
-            loads.wrenches[i],
-            loads.gravity,
-            controls.angular_origin_world_m,
-        );
         accept(source.residual(change), source.work(), controls, Some(i))?;
         drift_energy = drift_energy + change.energy - source.work();
         external = external.add(source);
@@ -315,19 +387,6 @@ pub fn step_internal_wrench_with_loads(
     };
     poll(&mut cancelled)?;
     Ok(result)
-}
-
-fn check_load_count(
-    bodies: usize,
-    loads: HeldExternalLoads<'_>,
-) -> Result<(), InternalWrenchStepError> {
-    if bodies != loads.wrenches.len() {
-        return Err(InternalWrenchStepError::ExternalLoadCount {
-            bodies,
-            wrenches: loads.wrenches.len(),
-        });
-    }
-    Ok(())
 }
 
 fn native_loaded_step(

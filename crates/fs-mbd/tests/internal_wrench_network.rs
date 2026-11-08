@@ -1,5 +1,8 @@
 //! Simultaneous internal actuation: recoil, source work and finite trajectories.
 
+#[path = "internal_wrench_network/spatial.rs"]
+mod spatial;
+
 use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulse, InternalWrenchImpulseControls, InternalWrenchImpulseError,
     apply_internal_wrench_impulse,

@@ -1,10 +1,10 @@
 //! One native body step, optionally loaded, between complete internal network kicks.
 
 use super::{
-    Change, Dd, DynamicsError, ExternalLoadAccount, Gravity, HeldExternalLoads,
+    BodyLoads, Change, Dd, DynamicsError, ExternalLoadAccount, HeldExternalLoads, HeldSpatialLoads,
     InternalWrenchImpulse, InternalWrenchStepError, LoadChange, MassProperties,
-    PrescribedInternalWrench, RigidBodyState, Vec3, Wrench, accept, add, check_load_count, finite,
-    native_loaded_step, poll, rounded, scaled_impulse, state_change,
+    PrescribedInternalWrench, RigidBodyState, Vec3, accept, add, finite, poll, rounded,
+    scaled_impulse, state_change,
 };
 use crate::StepReceipt;
 use crate::spatial_loads::internal_impulse::network::{
@@ -29,6 +29,8 @@ pub struct InternalWrenchNetworkStep {
     pub half_impulses: [InternalWrenchNetworkReceipt; 2],
     /// Exactly one original unconstrained native step per body, in body order.
     /// These include external loads when using the loaded entry point.
+    /// For spatial loads the native torque is the finite-step pullback; physical
+    /// material-point force/free-couple work is retained in `external_loads`.
     pub free_steps: Vec<StepReceipt>,
     pub angular_origin_world_m: Vec3,
     pub kinetic_energy_change_j: f64,
@@ -112,7 +114,13 @@ pub fn step_internal_wrench_network(
     cancelled: impl FnMut() -> bool,
 ) -> Result<InternalWrenchNetworkStep, InternalWrenchNetworkStepError> {
     step_network(
-        states, properties, links, None, duration_s, controls, cancelled,
+        states,
+        properties,
+        links,
+        BodyLoads::Unloaded,
+        duration_s,
+        controls,
+        cancelled,
     )
 }
 
@@ -142,7 +150,41 @@ pub fn step_internal_wrench_network_with_loads(
         states,
         properties,
         links,
-        Some(loads),
+        BodyLoads::Held(loads),
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Advance shared-body actuation together with rotating material-point loads.
+///
+/// Each body uses the original geometric point-load midpoint owner, except
+/// exact zero prepared loads retain their native free chart. Complete network
+/// half-kicks remain simultaneous and use actual endpoint attachment geometry;
+/// no per-connector body drift or newly frozen point moment is introduced.
+///
+/// Force work includes the actual rotation of each material arm. World/body
+/// free-couple work, gravity, and every internal actuator's signed work remain
+/// separate. Per-body and complete-network work/momentum gates use original
+/// source moments about the declared origin, independent of measured storage
+/// changes. The supplied point reductions are reused, so warm complexity and
+/// heap storage remain linear in bodies plus links. See
+/// [`super::step_internal_wrench_with_spatial_loads`] for chart/refinement limits.
+pub fn step_internal_wrench_network_with_spatial_loads(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[PrescribedInternalLink],
+    loads: HeldSpatialLoads<'_>,
+    duration_s: f64,
+    controls: InternalWrenchNetworkControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<InternalWrenchNetworkStep, InternalWrenchNetworkStepError> {
+    step_network(
+        states,
+        properties,
+        links,
+        BodyLoads::Spatial(loads),
         duration_s,
         controls,
         cancelled,
@@ -153,7 +195,7 @@ fn step_network(
     states: &[RigidBodyState],
     properties: &[MassProperties],
     links: &[PrescribedInternalLink],
-    loads: Option<HeldExternalLoads<'_>>,
+    loads: BodyLoads<'_>,
     duration_s: f64,
     controls: InternalWrenchNetworkControls,
     mut cancelled: impl FnMut() -> bool,
@@ -169,9 +211,7 @@ fn step_network(
     if states.len() != properties.len() {
         return Err(InternalWrenchNetworkError::Invalid("body/property counts differ").into());
     }
-    if let Some(loads) = loads {
-        check_load_count(states.len(), loads)?;
-    }
+    loads.check_count(states.len())?;
     let (n, e) = (states.len(), links.len());
     admit_limit("bodies", n as u128, controls.maximum_bodies as u128)?;
     admit_limit("connectors", e as u128, controls.maximum_connectors as u128)?;
@@ -214,14 +254,19 @@ fn step_network(
         native_controls,
         &mut cancelled,
     )?;
-    let gravity = loads.map_or(Gravity::ZERO, |loads| loads.gravity);
     let mut external = LoadChange::ZERO;
     let mut drift_energy = Dd::ZERO;
     for (i, event) in first.bodies.iter().enumerate() {
         poll(&mut cancelled)?;
         let before = event.state_after;
-        let wrench = loads.map_or(Wrench::ZERO, |loads| loads.wrenches[i]);
-        let step = native_loaded_step(before, properties[i], wrench, gravity, duration_s)?;
+        let (step, source) = loads.step(
+            i,
+            before,
+            properties[i],
+            duration_s,
+            controls.balance.angular_origin_world_m,
+            &mut cancelled,
+        )?;
         poll(&mut cancelled)?;
         let change = state_change(
             before,
@@ -229,13 +274,6 @@ fn step_network(
             properties[i],
             controls.balance.angular_origin_world_m,
         )?;
-        let source = LoadChange::from_step(
-            &step,
-            properties[i],
-            wrench,
-            gravity,
-            controls.balance.angular_origin_world_m,
-        );
         accept(
             source.residual(change),
             source.work(),
