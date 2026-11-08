@@ -423,6 +423,12 @@ pub(super) fn reed_provenance(p: &fs_couple::render::schedule::reed::ReedPerform
                     info.exterior_delay_samples.1))
         }
     };
+    // Bead frankensim-1xe5t: the compile-grid frequencies where the coupled open-hole solve was active and the independent holes were used.
+    let receiver = if receiver.is_empty() { receiver } else {
+        let hz = p.outlet_interaction_fallback_hz();
+        let list: Vec<String> = hz.iter().map(|f| format!("{f:e}")).collect();
+        format!("{receiver},\"open_hole_interaction_fallback\":{{\"bead\":\"frankensim-1xe5t\",\"count\":{},\"hz\":[{}]}}", hz.len(), list.join(","))
+    };
     let regions: Vec<_> = p.segment_gases().iter().map(gas_state).collect();
     let field = reed_field_provenance(p);
     let molecular = reed_molecular_provenance(p);

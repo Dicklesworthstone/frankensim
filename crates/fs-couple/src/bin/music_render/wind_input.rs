@@ -1835,4 +1835,20 @@ mod tests {
             assert_eq!(loaded.source.samples_rendered(), 0, "{label}");
         }
     }
+
+    /// Bead frankensim-1xe5t: the outlet_receiver record carries the receipt of the coupled open-hole solve. G3 and A4 have no active window, so the count is 0 and the list empty.
+    #[test]
+    fn reed_outlet_record_carries_the_interaction_fallback_receipt() {
+        const G3: &str = include_str!(
+            "../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance"
+        );
+        let species = gas_fixture::card_species();
+        let bindings: Vec<_> = species.iter().map(|p| p.binding()).collect();
+        let registry = ThermochemicalSources { species: &bindings, water_species: None,
+            phase: fs_material::gas_species::input::ThermochemicalPhase::FrozenGas };
+        let loaded = load_with_all_sources(G3.as_bytes(), 512, ObservationPolicy::Diagnostic, Some(&registry),
+            |_| Err("no material cards".into()), |_| Err("no radiation artifacts".into()), None, OutletLatency::Retain)
+            .unwrap_or_else(|error| panic!("G3: {error}"));
+        assert!(loaded.source_json.contains("\"open_hole_interaction_fallback\":{\"bead\":\"frankensim-1xe5t\",\"count\":0,\"hz\":[]}"), "{}", loaded.source_json);
+    }
 }

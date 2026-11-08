@@ -334,6 +334,13 @@ impl ReedPerformance {
         self.terminal.as_ref().map(|terminal| terminal.pressure.info())
     }
 
+    /// The receipt of the coupled open-hole solve at the terminal observer (bead frankensim-1xe5t): the compile-grid frequencies [Hz] at which it was
+    /// active and the independent holes were used. Empty without a baffled receiver, without `open_hole_interaction`, or when none fell back.
+    #[must_use]
+    pub fn outlet_interaction_fallback_hz(&self) -> &[f64] {
+        self.terminal.as_ref().map_or(&[], |terminal| terminal.pressure.interaction_fallback_hz())
+    }
+
     /// Side-mouth receivers and their individual exterior laws, in
     /// authored open/vented-hole order. Closed cavities have no radiating mouth.
     /// Each filter acts before summing pressure with the terminal contribution.

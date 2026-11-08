@@ -38,6 +38,9 @@ pub enum CompositionMode {
     LegacyAbcd,
     ImpedanceRecursion,
     Scattering,
+    /// The coupled scattering solve with the mutual radiation impedance switched off at THIS frequency: the TMMI-coupled passive solve
+    /// returned a negative input resistance there and the independent holes were solved instead (bead frankensim-1xe5t).
+    ScatteringIndependentHoles,
 }
 #[derive(Debug, Clone, Copy)]
 pub struct ComposeOptions {

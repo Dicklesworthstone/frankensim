@@ -375,6 +375,59 @@ fn a_doubled_hole_solves_and_shares_the_flow_between_its_two_mouths() {
     assert!(close(free.input_impedance, load.scale(0.5), 1.0e-9));
 }
 
+#[test]
+fn an_active_coupled_window_falls_back_to_independent_holes_and_stays_passive() {
+    // Bead frankensim-1xe5t: the TMMI mutual impedance can make the loaded system active for large adjacent holes. Planted: the doubled-hole setup of the test
+    // above (two zero-chimney mouths at one station, closed bore) at 55 kHz, where k d = 4.23 puts Re zm = s sin(kd) far below -Re z, so the input resistance
+    // (z + zm) / 2 is negative. The coupled solve alone names the refusal; `solve` falls back to the independent holes (z / 2), marks it, and the result is passive.
+    let gas = air();
+    let reference = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.007_f64.powi(2));
+    let load = C64::new(0.6, -0.4).scale(reference);
+    let through = TwoPort::through(reference).unwrap();
+    let chain = PreparedChain { blocks: vec![through; 4], reference_impedance: reference, min_shear_number: f64::INFINITY };
+    let radius = 0.0021;
+    let hole = |block_index: usize| PreparedOpenHole {
+        block_index,
+        axial_position_m: 0.230,
+        effective_radius_m: radius,
+        chimney_length_m: 0.0,
+        sigma: 1.0,
+        half_series_impedance: C64::ZERO,
+        open_chimney_impedance: load,
+        closed_return_coordinates: [C64::ONE, C64::ZERO],
+        chimney_u_mouth_over_u_in: C64::ONE,
+        shunt_port_reference_pa_s_m3: reference,
+        orifice_quadratic_coeff_pa_s2_m6: 0.0,
+    };
+    let holes = [hole(1), hole(2)];
+    let ports = [zero_chimney_port(0.230, radius, load), zero_chimney_port(0.230, radius, load)];
+    let omega = TAU * 55_000.0;
+    let zm = mutual_radiation_impedance(&gas, omega, 2.0 * radius, interaction(2.0)).unwrap();
+    assert!(load.re + zm.re < 0.0, "the planted window must be active: {load:?} {zm:?}");
+    let coupled = solve_coupled(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), 1.0e12);
+    assert!(matches!(coupled, Err(DuctError::BadParameter { what: ACTIVE })), "the coupled solve alone must name the refusal");
+    let solved = solve(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), 1.0e12).unwrap();
+    assert!(solved.independent_fallback);
+    assert!(solved.input_impedance.re > 0.0, "{:?}", solved.input_impedance);
+    // The independent holes in parallel, exactly the network with the mutual impedance off.
+    assert!(close(solved.input_impedance, load.scale(0.5), 1.0e-9));
+    for flow in &solved.hole_mouth_flows {
+        assert!(close(*flow, C64::from_re(0.5), 1.0e-9), "{flow:?}");
+    }
+    let free = solve_coupled(&chain, &holes, &ports, None, &gas, omega, OpenHoleInteraction::independent(), 1.0e12).unwrap();
+    assert_eq!(solved.input_impedance.re.to_bits(), free.input_impedance.re.to_bits());
+    assert_eq!(solved.input_impedance.im.to_bits(), free.input_impedance.im.to_bits());
+    // Where no window is active nothing changes: the same holes at 900 Hz take the coupled solve (the value the test above checks), unmarked, bit for bit.
+    let calm = TAU * 900.0;
+    let direct = solve_coupled(&chain, &holes, &ports, None, &gas, calm, interaction(2.0), 1.0e12).unwrap();
+    let wrapped = solve(&chain, &holes, &ports, None, &gas, calm, interaction(2.0), 1.0e12).unwrap();
+    assert!(!wrapped.independent_fallback && !direct.independent_fallback);
+    assert_eq!(wrapped.input_impedance.re.to_bits(), direct.input_impedance.re.to_bits());
+    assert_eq!(wrapped.input_impedance.im.to_bits(), direct.input_impedance.im.to_bits());
+    // The independent network itself is never a fallback of a fallback.
+    assert!(solve(&chain, &holes, &ports, None, &gas, omega, OpenHoleInteraction::independent(), 1.0e12).is_ok());
+}
+
 fn prepared_coupled_hole(block_index: usize, port: CoupledPort, reference: f64) -> PreparedOpenHole {
     let [a, b, c, d] = port.chimney;
     let inward = c * port.self_radiation + d;

@@ -164,6 +164,9 @@ pub struct OutletPressure {
     radiation: DelayedFilter,
     info: OutletReceiverInfo,
     poisoned: bool,
+    /// Frequencies [Hz] of the compile grid where the coupled open-hole solve was active and the independent holes were solved instead
+    /// (bead frankensim-1xe5t); empty when no frequency fell back or the observer has no open-hole coupling.
+    interaction_fallback_hz: Vec<f64>,
 }
 
 impl OutletPressure {
@@ -206,6 +209,7 @@ impl OutletPressure {
             acceleration,
             radiation,
             poisoned: false,
+            interaction_fallback_hz: Vec::new(),
             info: OutletReceiverInfo {
                 gas,
                 radius_m,
@@ -223,6 +227,10 @@ impl OutletPressure {
     /// Original media, geometry, clocks and delay support.
     #[must_use]
     pub const fn info(&self) -> OutletReceiverInfo { self.info }
+
+    /// The receipt of the coupled open-hole solve (bead frankensim-1xe5t): the compile-grid frequencies [Hz] at which it was active and the independent holes were used.
+    #[must_use]
+    pub fn interaction_fallback_hz(&self) -> &[f64] { &self.interaction_fallback_hz }
 
     /// Advance one source-clock sample from outgoing pressure [Pa] to receiver Pa.
     ///
@@ -654,7 +662,10 @@ impl RegionalDuct {
         }
         let hole_times: Vec<f64> = sites.iter().map(|s| s.one_way_time_s).collect();
         let first_bore_time_s = sites[0].bore_one_way_time_s;
+        // The omegas of the responses the open-hole solve marked as independent (bead frankensim-1xe5t), collected over the grid attempt that is kept.
+        let fallbacks = std::cell::RefCell::new(Vec::<f64>::new());
         let kernels_on = |n: usize| {
+            fallbacks.borrow_mut().clear();
             acceleration_kernels_with_holes(
                 sample_rate_hz,
                 n,
@@ -664,12 +675,18 @@ impl RegionalDuct {
                 self.inlet_impedance(),
                 port_resistance_scale,
                 |omega| {
-                    self.response_with_wall_and_holes(
+                    let answered = self.response_with_wall_and_holes(
                         omega,
                         LossModel::Bessel,
                         Termination::FlangedOpen,
                         wall,
-                    )
+                    );
+                    if let Ok((response, _)) = &answered {
+                        if response.composition == fs_duct::compose::CompositionMode::ScatteringIndependentHoles {
+                            fallbacks.borrow_mut().push(omega / core::f64::consts::TAU);
+                        }
+                    }
+                    answered
                 },
             )
         };
@@ -723,10 +740,14 @@ impl RegionalDuct {
         let bell_acc = DelayedFilter::from_impulse_response(dt, bell_kernel)
             .map_err(DrivingPointError::Discrete)?;
         let bell_rad = rayleigh_filter(bell_rayleigh, sample_rate_hz)?;
+        let mut interaction_fallback_hz = fallbacks.take();
+        interaction_fallback_hz.sort_by(f64::total_cmp);
+        interaction_fallback_hz.dedup();
         let bell = OutletPressure {
             acceleration: bell_acc,
             radiation: bell_rad,
             poisoned: false,
+            interaction_fallback_hz,
             info: OutletReceiverInfo {
                 gas,
                 radius_m,
@@ -752,6 +773,7 @@ impl RegionalDuct {
                 acceleration,
                 radiation,
                 poisoned: false,
+                interaction_fallback_hz: Vec::new(),
                 info: OutletReceiverInfo {
                     gas,
                     radius_m: site.effective_radius_m,

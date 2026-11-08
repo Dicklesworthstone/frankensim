@@ -825,8 +825,10 @@ impl GasFieldDuct {
                 if ports > crate::compose::MAX_ORIFICE_PORTS {
                     return Err(bad("at most sixteen open holes can carry a coupled orifice"));
                 }
+                // A frequency whose coupled solve was active (bead frankensim-1xe5t) takes the independent network for its orifice ports too.
+                let ports_interaction = if solved.independent_fallback { OpenHoleInteraction::independent() } else { interaction };
                 match crate::interaction::port_admittance(
-                    &chain, &holes, &coupled_ports, bell, &coupled_exterior, omega, interaction,
+                    &chain, &holes, &coupled_ports, bell, &coupled_exterior, omega, ports_interaction,
                     ComposeOptions::default().maximum_condition, ports.min(holes.len()),
                 ) {
                     Ok(y) => y,
@@ -847,7 +849,11 @@ impl GasFieldDuct {
                 u_mouth_over_u_in: solved.bell_flow,
                 p_mouth_over_u_in: if load.is_none() { C64::ZERO } else { solved.bell_pressure },
                 condition_estimate: solved.condition,
-                composition: CompositionMode::Scattering,
+                composition: if solved.independent_fallback {
+                    CompositionMode::ScatteringIndependentHoles
+                } else {
+                    CompositionMode::Scattering
+                },
             }, flows, admittance));
         }
         // The uniform shortcut is the original smooth-duct owner, whose holes carry the engine's lengths;

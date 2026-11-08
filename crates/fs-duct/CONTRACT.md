@@ -469,6 +469,17 @@ It inherits the native caps of 32 retained mouths (including an open bell) and
 800 total unknowns. Genuine nonunique or over-bound complete systems still
 refuse, without damping or impedance perturbation.
 
+A frequency where the coupled solve returns a NEGATIVE input resistance (a passive one-port has a nonnegative one) no longer refuses the
+card: that frequency solves the SAME bore with the mutual impedance switched off (`OpenHoleInteraction::independent()`, `epsilon` infinite:
+each opening keeps its own flanged self radiation), marks its response `CompositionMode::ScatteringIndependentHoles`, and takes the
+independent network for its orifice ports (`interaction::solve` around `solve_coupled`; bead `frankensim-1xe5t`). The independent network is
+passive by construction, so a fallback is never a fallback of a fallback. Wherever the coupled solve is passive nothing changes, bit for bit
+(`an_active_coupled_window_falls_back_to_independent_holes_and_stays_passive`, the doubled-hole setup at 55 kHz). Cause, open as its own bead:
+the TMMI mutual impedance uses AXIAL distances, an upper bound, and for large adjacent holes (the WIAT alto holes 23 and 24, `b/a` 0.69 and 0.60,
+centres 56 mm apart) it makes the loaded system active in narrow windows between 11 and 16 kHz (n3d sweeps of the flanged neck cards, 5-cent
+grid: 10.96, 11.75 to 11.99, 14.3 to 14.7, 15.4 to 16.0 kHz; none below 4.6 kHz). The outlet compile of `fs-couple` counts and lists the
+fallback frequencies on the observer (`OutletPressure::interaction_fallback_hz`).
+
 G2 reactive fixtures check the analytic two-mouth inverse through an isolated
 pole and the complete instrument through exact/near joint chimney poles.
 Unequal lossless chimneys and the complete retained solve are checked against

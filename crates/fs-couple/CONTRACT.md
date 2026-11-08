@@ -2622,7 +2622,10 @@ binding (`GasFieldDuct::response_with_wall_holes_and_ports`: each orifice reads 
 reference included). A molecular bore, a midpoint `gas_field` (N > 1) and a segment-gas duct with several regions
 refuse by name. On a continuous field with `open_hole_interaction` the ports sit on the COUPLED network (`Y` is
 `fs_duct::interaction::port_admittance`, the network the flows and the reed's `s12` come from; the independent `Y` is kept only at
-a frequency where the coupled network is singular); without the row `Y` is the independent network of the chimneys. Cost: `N^2 + 2N` kernels of the grid length instead of 3
+a frequency where the coupled network is singular, and at a frequency where the coupled solve is active, i.e. returns a negative input
+resistance, where the independent holes are solved instead: bead `frankensim-1xe5t`, listed on the observer by
+`OutletPressure::interaction_fallback_hz` and printed in the provenance as `outlet_receiver.open_hole_interaction_fallback`
+`{bead, count, hz}`); without the row `Y` is the independent network of the chimneys. Cost: `N^2 + 2N` kernels of the grid length instead of 3
 (15 at N = 3, 143 at N = 11, 288 at N = 16), and one more frequency sweep at build; the passivity step holds one `NP x NP` complex matrix
 per frequency bin (4.1 KB at the cap of 16, about 67 MB on a 8192-point grid, about 540 MB on the largest 65536 grid; 2.3 KB at the cap of 12 that
 preceded it). The cap is a budget (stack arrays and that matrix), not a validity limit. It was 3 until the oboe D5 page (11 open holes), then 12 until the

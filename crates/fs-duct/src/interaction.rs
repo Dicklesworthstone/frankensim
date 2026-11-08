@@ -70,6 +70,17 @@ impl OpenHoleInteraction {
     pub const fn epsilon(self) -> f64 {
         self.epsilon
     }
+
+    /// Every opening radiates alone: the mutual impedance vanishes (`epsilon` infinite). The network a frequency falls back to when the coupled
+    /// solve is active there (bead frankensim-1xe5t).
+    pub(crate) const fn independent() -> Self {
+        Self { epsilon: f64::INFINITY }
+    }
+
+    /// Whether this is the independent network.
+    pub(crate) const fn is_independent(self) -> bool {
+        self.epsilon.is_infinite()
+    }
 }
 
 /// Mutual radiation impedance of two monopole openings a distance `distance_m` apart, radiating
@@ -230,6 +241,8 @@ pub(crate) struct CoupledSolution {
     pub hole_mouth_flows: Vec<C64>,
     pub hole_chimney_inflows: Vec<C64>,
     pub condition: f64,
+    /// The coupled solve was active at this frequency and the independent holes were solved instead (bead frankensim-1xe5t).
+    pub independent_fallback: bool,
 }
 
 /// The openings are one coupled port each, in axial order, and all fully open.
@@ -382,6 +395,33 @@ pub(crate) fn port_admittance(
     Ok(port)
 }
 
+/// The refusal of a coupled solve whose input resistance is negative: a passive one-port has a nonnegative one.
+const ACTIVE: &str = "coupled radiation is active at this frequency";
+
+/// [`solve_coupled`], and where it returns a negative input resistance (the TMMI mutual impedance, an axial-distance upper bound, can make the
+/// loaded system active for large adjacent holes: bead frankensim-1xe5t) the SAME bore with the mutual impedance off: each opening radiates alone.
+/// Marked in the result; a passive network by construction, so it cannot be active in turn. Byte-identical wherever the coupled solve is passive.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve(
+    chain: &PreparedChain,
+    holes: &[PreparedOpenHole],
+    ports: &[CoupledPort],
+    bell: Option<CoupledPort>,
+    exterior: &GasState,
+    omega: f64,
+    interaction: OpenHoleInteraction,
+    maximum_condition: f64,
+) -> Result<CoupledSolution, DuctError> {
+    match solve_coupled(chain, holes, ports, bell, exterior, omega, interaction, maximum_condition) {
+        Err(DuctError::BadParameter { what: ACTIVE }) if !interaction.is_independent() => {
+            let mut independent = solve_coupled(chain, holes, ports, bell, exterior, omega, OpenHoleInteraction::independent(), maximum_condition)?;
+            independent.independent_fallback = true;
+            Ok(independent)
+        }
+        other => other,
+    }
+}
+
 /// Solve the bore between openings and the openings through [`couple_with_limit`].
 /// Singular I+S or A Z+B need not mean a singular loaded instrument. If either
 /// elimination or the final nodal condition fails, retain all bore currents
@@ -389,7 +429,7 @@ pub(crate) fn port_admittance(
 /// `holes` and `ports` are the open holes in axial order; `bell` is the radiating open end, or
 /// `None` for a closed end.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn solve(
+fn solve_coupled(
     chain: &PreparedChain,
     holes: &[PreparedOpenHole],
     ports: &[CoupledPort],
@@ -442,7 +482,7 @@ pub(crate) fn solve(
     };
     // A passive one-port has a nonnegative input resistance.
     if fields.pressure[0].re < -1.0e-9 * fields.pressure[0].abs() {
-        return Err(bad("coupled radiation is active at this frequency"));
+        return Err(bad(ACTIVE));
     }
     Ok(CoupledSolution {
         input_impedance: fields.pressure[0],
@@ -451,5 +491,6 @@ pub(crate) fn solve(
         hole_mouth_flows: fields.mouth[..m].to_vec(),
         hole_chimney_inflows: fields.inflow[..m].to_vec(),
         condition: fields.condition,
+        independent_fallback: false,
     })
 }
