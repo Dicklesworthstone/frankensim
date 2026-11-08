@@ -111,7 +111,8 @@ impl SubstrateAbsorptionSource for AngularSpectrumCoherence<'_, '_, '_> {
 
 /// Preparation and one result's logical adapter storage. Borrowed optical and
 /// thermal owners, native thermal state/workspace and allocator overhead are
-/// separate. The work bound includes every cell plus two boundary-flux queries.
+/// separate. Each source owner documents its mode/cell work, including boundary
+/// flux queries.
 #[derive(Clone, Copy, Debug)]
 pub struct SubstrateWaveHeatingLimits {
     pub maximum_cells: usize,
@@ -390,8 +391,64 @@ fn advance_cells_to<'t>(
     conduction: LayerConductionConfig,
     controls: LayeredThermalSolveControls,
     workspace: &mut LayeredThermalWorkspace,
-    mut cancelled: impl FnMut() -> bool,
+    cancelled: impl FnMut() -> bool,
 ) -> Result<SubstrateWaveStep<'t>, LayeredWaveHeatingError> {
+    let result = advance_cell_heat_to(
+        body,
+        cells,
+        initial,
+        target_s,
+        conduction,
+        controls,
+        workspace,
+        |dt, absorbed| {
+            let entering_j = physical_joules(power.entering_w, dt)?;
+            let leaving_j = physical_joules(power.leaving_w, dt)?;
+            let absorbed_j = absorbed.to_f64();
+            let residual_j =
+                (Dd::from_f64(entering_j) - Dd::from_f64(leaving_j) - absorbed).to_f64();
+            if !absorbed_j.is_finite() || !residual_j.is_finite() {
+                return Err(invalid("substrate interval energy is unrepresentable"));
+            }
+            Ok(SubstrateWaveEnergy {
+                entering_j,
+                leaving_j,
+                absorbed_j,
+                residual_j,
+            })
+        },
+        cancelled,
+    )?;
+    Ok(SubstrateWaveStep {
+        thermal: result.thermal,
+        heat_report: result.heat_report,
+        optical: result.account,
+        cell_energy_j: result.cell_energy_j,
+    })
+}
+
+// The original thermal solve and single heat debit are independent of whether
+// the electromagnetic control volume has two periodic faces or six finite
+// faces. Each source owner supplies its own physical account before solving.
+struct CellHeatStep<'t, A> {
+    thermal: DepositionSimulation<'t>,
+    heat_report: LayeredThermalSolveReport,
+    cell_energy_j: Vec<(CellId, f64)>,
+    account: A,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_cell_heat_to<'t, A>(
+    body: &BoundLayeredThermalBody<'_>,
+    cells: &[SubstrateCellPower],
+    initial: &DepositionSimulation<'t>,
+    target_s: f64,
+    conduction: LayerConductionConfig,
+    controls: LayeredThermalSolveControls,
+    workspace: &mut LayeredThermalWorkspace,
+    account: impl FnOnce(f64, Dd) -> Result<A, LayeredWaveHeatingError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<CellHeatStep<'t, A>, LayeredWaveHeatingError> {
     poll(&mut cancelled)?;
     let step = LayeredThermalStep::new(body, initial, target_s, conduction, || {
         checkpoint(&mut cancelled)
@@ -410,23 +467,16 @@ fn advance_cells_to<'t>(
         cell_energy_j.push((id, joules));
         absorbed = absorbed + Dd::from_f64(joules);
     }
-    let entering_j = physical_joules(power.entering_w, dt)?;
-    let leaving_j = physical_joules(power.leaving_w, dt)?;
-    let absorbed_j = absorbed.to_f64();
-    let residual_j =
-        (Dd::from_f64(entering_j) - Dd::from_f64(leaving_j) - absorbed).to_f64();
-    if !absorbed_j.is_finite() || !residual_j.is_finite() {
-        return Err(invalid("substrate interval energy is unrepresentable"));
-    }
+    let account = account(dt, absorbed)?;
     let step = step.with_cell_energy_j(&additions, || checkpoint(&mut cancelled))?;
     let (thermal, _, heat_report) =
         step.solve(controls, workspace, || checkpoint(&mut cancelled))?;
     poll(&mut cancelled)?;
-    Ok(SubstrateWaveStep {
+    Ok(CellHeatStep {
         thermal,
         heat_report,
-        optical: SubstrateWaveEnergy { entering_j, leaving_j, absorbed_j, residual_j },
         cell_energy_j,
+        account,
     })
 }
 

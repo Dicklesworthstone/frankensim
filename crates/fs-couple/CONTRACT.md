@@ -450,6 +450,37 @@ regressions compare mixed-frequency cell heat with independent depth quadrature
 and a Fourier/caloric temperature reference, rotate an unpolarized factor basis,
 and exercise darkness, work admission and interruption inside factor queries.
 
+`PreparedCoherentCrystalHeating` binds an original same-frequency coherent
+illumination to a rectangular footprint and the original planar thermal cells.
+Each native depth cell receives its integrated physical box absorption,
+including interference between incidence directions and both crystal modes.
+The footprint must have the original cell area; material-card identities,
+fixed optical query context, cell IDs, depth widths and accepted thermal
+clock retain their native owners. The optical volume is a control volume
+inside the original homogeneous half-space, not a new interface or film.
+
+Preparation costs O(cells × modes²), with explicit mode-pair and peak-workspace
+admission and cancellation during optical work. It retains one absorbed power
+per cell; accepted steps reuse those watts through the common native thermal
+solve. Authored heat and the coherent optical joules enter once. No cell-centre
+sampling, incoherent addition across beams, or boundary-power subtraction
+determines the deposited heat.
+
+Signed outward powers and accepted-interval energies use face order
+[xmin, xmax, ymin, ymax, zmin, zmax]. Lateral faces sum across depth cells;
+only the first entrance and final exit faces belong to the exterior account.
+The independently evaluated residual is minus the six-face sum minus absorbed
+heat, and is reported without redistribution. Crossed beams can transport
+energy laterally; a two-face account is insufficient for this footprint.
+
+This is held monochromatic cycle-mean optical heating with one temperature
+per transverse thermal section. Lateral temperature variation, lateral thermal
+conduction and temperature-dependent optical feedback remain outside this
+owner. Regressions cover finite-footprint bright/dark fringes, an independent
+local-field volume/six-face integral, original depth refinement, authored-only
+darkness, native temperature evolution, work/storage limits and cancellation.
+Native Rust execution is required before claiming those regressions passed.
+
 ## Full-coordinate material shells with two-sided open radiation
 
 `tensor_shell_radiation::open::OpenTensorShellRadiation` binds the original

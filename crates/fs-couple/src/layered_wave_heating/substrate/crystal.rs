@@ -30,6 +30,13 @@ use fs_math::dd::Dd;
 pub mod illumination;
 pub use illumination::PreparedCrystalIlluminationHeating;
 
+/// Coherent finite-footprint crystal heat, including lateral optical flux.
+pub mod coherent;
+pub use coherent::{
+    CoherentCrystalWaveEnergy, CoherentCrystalWavePower, CoherentCrystalWaveStep,
+    PreparedCoherentCrystalHeating,
+};
+
 /// Finite absorbing crystal films on the same thermal-cell owner.
 pub mod slab;
 pub use slab::{PreparedCrystalSlabHeating, PreparedCrystalSlabIlluminationHeating};
@@ -227,33 +234,7 @@ fn prepare_column<'b, 'a>(
     {
         return Err(invalid("crystal heat exceeds its work or storage budget"));
     }
-    let original = source.material();
-    for (layer, storage) in body.conduction().layers().iter().zip(body.storages()) {
-        poll(&mut cancelled)?;
-        if original.card_identity() != layer.material_card_identity() {
-            return Err(invalid(
-                "crystal conductivity must retain the original optical material card",
-            ));
-        }
-        admit_context(
-            original,
-            &layer.query_endpoints()[0],
-            layer.temperature_axis(),
-        )?;
-        for component in storage.components() {
-            poll(&mut cancelled)?;
-            if original.card_identity() != component.material_card_identity() {
-                return Err(invalid(
-                    "crystal capacity must retain the original optical material card",
-                ));
-            }
-            admit_context(
-                original,
-                &component.query_endpoints()[0],
-                component.temperature_axis(),
-            )?;
-        }
-    }
+    admit_crystal_material(thermal, source.material(), &mut cancelled)?;
     let area = body.conduction().area_m2();
     let ids = thermal.cell_ids();
     let mut cells = reserve(count)?;
@@ -317,4 +298,39 @@ fn prepare_column<'b, 'a>(
         mode_cell_pairs,
         workspace_bytes,
     })
+}
+
+fn admit_crystal_material(
+    thermal: &BoundLayeredThermalBody<'_>,
+    original: &ResolvedMaterialStatePoint,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), LayeredWaveHeatingError> {
+    let body = thermal.prepared_body();
+    for (layer, storage) in body.conduction().layers().iter().zip(body.storages()) {
+        poll(cancelled)?;
+        if original.card_identity() != layer.material_card_identity() {
+            return Err(invalid(
+                "crystal conductivity must retain the original optical material card",
+            ));
+        }
+        admit_context(
+            original,
+            &layer.query_endpoints()[0],
+            layer.temperature_axis(),
+        )?;
+        for component in storage.components() {
+            poll(cancelled)?;
+            if original.card_identity() != component.material_card_identity() {
+                return Err(invalid(
+                    "crystal capacity must retain the original optical material card",
+                ));
+            }
+            admit_context(
+                original,
+                &component.query_endpoints()[0],
+                component.temperature_axis(),
+            )?;
+        }
+    }
+    Ok(())
 }

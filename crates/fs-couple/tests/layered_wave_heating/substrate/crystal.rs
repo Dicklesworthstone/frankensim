@@ -649,3 +649,6 @@ fn crystal_illumination_darkness_budgets_and_typed_cancellation() {
     assert_eq!(initial.time_s(), 0.0);
     assert_eq!(initial.cells(), &original);
 }
+
+#[path = "crystal/coherent.rs"]
+mod coherent;
