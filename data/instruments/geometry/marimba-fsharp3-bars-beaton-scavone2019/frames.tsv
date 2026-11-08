@@ -1,0 +1,9 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+adams-5-0-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame
+marimba-one-5-0-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame
+musser-4-3-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame
+premier-4-0-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame
+yamaha-4-0-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame
+yamaha-4-5-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame
+yamaha-5-0-octave	one end corner of the bar	+x along the length	+y across the width	+z through the thickness, toward the playing surface	axes follow Table 1's length, width and end thickness; the paper draws no frame

@@ -1,0 +1,14 @@
+frankensim.specimen.v1
+key	value
+specimen_id	marimba-fsharp3-bars-beaton-scavone2019
+maker	Adams, Marimba One, Musser, Premier and Yamaha (one F#3 bar from each of seven instruments, three of them Yamaha); the bars came from instruments of the Schulich School of Music, McGill University (acknowledgements, p. 89)
+model	F#3 bars of 5.0-, 4.5-, 4.3- and 4.0-octave marimbas; instrument models are not stated
+serial	unstated
+year	unstated; measured by 2019 (ISMA 2019, Detmold); the Premier bar is 'much older' than the rest (p. 86)
+system	free undercut marimba bar: vertical flexural modes tuned near 1 : 4 : 10, with untuned torsional and lateral-torsional modes
+holder	the bar rests on small foam blocks under its two bored cord holes; a Bruel and Kjaer Type 8203 impact hammer strikes a grid on the playing surface, and a Polytec PDV-100 laser Doppler vibrometer reads the bottom surface near a corner (p. 85)
+reference_state	unloaded
+environment	unstated
+source_ids	beaton-scavone-2019-fsharp3-marimba-bars
+target_relation	SEVEN measured commercial F#3 bars, outer dimensions and mass only: a check of a marimba card's borrowed outline and of a solved undercut's bar mass at F#3. The undercut is printed only as photographs (Fig. 2, three bars), so this table fixes no undercut, and no bar here is the Iowa recording's bar
+report	D. Beaton and G. Scavone, Measurement-based comparison of marimba bar modal behaviour, Proc. ISMA 2019, Detmold, pp. 84-89, Table 1 p. 86; https://www.pub.dega-akustik.de/ISMA2019/data/articles/000040.pdf

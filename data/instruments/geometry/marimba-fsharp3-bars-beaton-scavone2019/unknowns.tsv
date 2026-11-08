@@ -1,0 +1,8 @@
+frankensim.specimen-unknowns.v1
+id	what	bound	correlation_group	blocks	route
+u-wood-species	the bar wood is not stated for any bar	unbounded	material	any density or elastic-constant claim for these bars, and any use of the masses as a wood density	a later publication by the authors or the makers' statements for these instruments
+u-undercut-profile	the undercut (cutaway) is printed only as photographs of three bars (Fig. 2a-c); no depth, arch length or profile is printed	unbounded	geometry	using any bar as a complete geometry, and any check of a solved undercut's shape	the 3D scans the paper says were under way (p. 84), if published
+u-retuned	Fig. 3 stars the Adams 5.0 and Yamaha 4.0 bars as retuned one or more times since purchase, and p. 85 describes material removed from the flat portion at one end of the Adams bar, read there as retuning work	unbounded	geometry	reading those two bars as the makers' original cut or mass	the paper gives none
+u-rounding	every value is printed to the whole millimetre or gram, with no stated measurement uncertainty	half a printed unit as rounding only	geometry	claims finer than 0.5 mm or 0.5 g per bar	the paper gives none
+u-end-thickness	'end thickness' is one number per bar; whether both ends agree or how it was measured is not stated	unbounded	geometry	an end-to-end thickness asymmetry	the paper gives none
+u-modal-ratios	the measured modal frequencies are printed only as ratios in a figure (Fig. 3), and no absolute frequency or tuning reference (A4) is printed	unbounded	response	any frequency or ratio taken from this specimen	a figure reading with a stated reading error, under its own ledger row
