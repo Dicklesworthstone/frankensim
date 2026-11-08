@@ -10,8 +10,10 @@
 //! This solves the AC component in fixed Eulerian geometry and linear media,
 //! with prescribed steady velocity and homogeneous AC tangential-A traces.
 //! Any original DC field/heat is separate. Permanent-magnet operating envelopes,
-//! saturation, hysteresis, terminal circuits, transported material occupancy,
+//! saturation, hysteresis, transported material occupancy,
 //! displacement current and full-wave radiation need their own owners.
+//! Physical voltage/current electrodes reuse this same solve through the
+//! terminal owners; their reaction currents and power remain explicit.
 //! A skin-depth admission limit screens resolution; it is not an error bound.
 //!
 //! Formulation reference: Ansys Maxwell, "AC Magnetic (Eddy Current) A-Phi
@@ -74,11 +76,32 @@ pub struct SpatialHarmonicInductionBalance {
     pub mean_mechanical_power_w: f64,
     /// Im(integral((conj(J) cross B).v)/2), needed by moving AC balance.
     pub reactive_mechanical_power_var: f64,
+    /// Work entering through impressed volume currents only [W].
+    pub mean_impressed_power_w: f64,
+    pub reactive_impressed_power_var: f64,
+    /// Work entering through physical equipotential electrodes only [W].
+    pub mean_terminal_power_w: f64,
+    pub reactive_terminal_power_var: f64,
+    /// Total impressed plus physical-electrode supply [W].
     pub mean_supplied_power_w: f64,
-    /// Im(sum(conj(j_impressed) * (-i omega A)) / 2).
+    /// Total reactive impressed plus physical-electrode supply [var].
     pub reactive_supplied_power_var: f64,
     pub power_residual_w: f64,
     pub reactive_power_residual_var: f64,
+}
+
+/// Native complex electrode reaction, with current positive INTO the conductor.
+/// Voltages and currents are peak phasors in the `exp(-i omega t)` convention.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpatialHarmonicInductionTerminalTransfer {
+    pub terminal: usize,
+    pub component: usize,
+    pub reference_terminal: usize,
+    /// Relative to the first electrode of this face-connected conductor [V].
+    pub voltage_to_reference_v: C64,
+    pub incoming_current_a: C64,
+    /// `V * conj(I) / 2`: cycle-mean real power and reactive power [VA].
+    pub supplied_power_va: C64,
 }
 
 /// An accepted AC response retaining its original geometry and material sources.
@@ -97,6 +120,7 @@ pub struct SpatialHarmonicInductionResponse<
     potential_wb: Vec<C64>,
     flux_density_t: Vec<[C64; 3]>,
     cells: Vec<SpatialHarmonicInductionCell>,
+    terminals: Vec<SpatialHarmonicInductionTerminalTransfer>,
     balance: SpatialHarmonicInductionBalance,
     report: SolveReport,
     maximum_ampere_residual_a: f64,
@@ -122,6 +146,10 @@ impl<C: SpatialConductorMaterial> SpatialHarmonicInductionResponse<'_, '_, C> {
     }
     pub fn cells(&self) -> &[SpatialHarmonicInductionCell] {
         &self.cells
+    }
+    /// Original electrode order; empty for an electrically isolated response.
+    pub fn terminals(&self) -> &[SpatialHarmonicInductionTerminalTransfer] {
+        &self.terminals
     }
     pub fn balance(&self) -> &SpatialHarmonicInductionBalance {
         &self.balance
@@ -178,6 +206,31 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         seed: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialHarmonicInductionResponse<'_, 'm, C>> {
+        self.solve_harmonic_driven(
+            impressed_current_a_m2,
+            velocity_m_s,
+            omega_rad_s,
+            controls,
+            seed,
+            None,
+            cancelled,
+        )
+    }
+
+    // All terminal spaces are prepared by their original physical electrode
+    // owners. Known voltages and total currents act on the same coupled rows;
+    // there is no separate static conduction solve or fitted AC resistance.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn solve_harmonic_driven(
+        &self,
+        impressed_current_a_m2: &[[C64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        omega_rad_s: f64,
+        controls: SpatialHarmonicInductionControls,
+        seed: Option<&[f64]>,
+        terminal_drive: Option<[&TerminalDrive<'_>; 2]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialHarmonicInductionResponse<'_, 'm, C>> {
         poll(cancelled)?;
         let p = &self.prepared;
         let problem = self.problem();
@@ -215,6 +268,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 rhs[i] = load_re[edge];
                 rhs[n + i] = load_im[edge];
             }
+        }
+        if let Some([real, imaginary]) = terminal_drive {
+            real.add_rhs(p, &mut rhs[..n], cancelled)?;
+            imaginary.add_rhs(p, &mut rhs[n..], cancelled)?;
         }
         let mut maximum_cell_skin_ratio = 0.0_f64;
         for cell in &p.cells {
@@ -381,22 +438,24 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             .iter()
             .map(|v| finite(-omega * v))
             .collect::<Result<_>>()?;
-        let current_re = p.recover(
+        let current_re = p.recover_with_potentials(
             g,
             &derivative_re,
             &rates_re,
             &b_re,
             velocity_m_s,
             1.0,
+            terminal_drive.and_then(|d| d[0].prescribed_potentials()),
             cancelled,
         )?;
-        let current_im = p.recover(
+        let current_im = p.recover_with_potentials(
             g,
             &derivative_im,
             &rates_im,
             &b_im,
             velocity_m_s,
             1.0,
+            terminal_drive.and_then(|d| d[1].prescribed_potentials()),
             cancelled,
         )?;
         let effort_re = apply(&problem.stiffness, &a_re, cancelled)?;
@@ -413,20 +472,59 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                     maximum_ampere_residual_a.max(finite(real.hypot(imaginary))?);
             }
         }
-        let mut maximum_charge_residual_a = 0.0_f64;
-        for (real, imaginary) in current_re
-            .charge_current_a
-            .iter()
-            .zip(&current_im.charge_current_a)
-        {
-            maximum_charge_residual_a =
-                maximum_charge_residual_a.max(finite(real.hypot(*imaginary))?);
-        }
+        let (terminals, terminal_power, maximum_charge_residual_a) =
+            if let Some([real, imaginary]) = terminal_drive {
+                // Unit intervals recover physical phi from (-i omega)*q.
+                // Electrode nodes have nonzero reactions, not failed free
+                // charge rows. Their total/component constraints are checked
+                // by the same owner as the transient terminal solve.
+                let (tr, _, rr) =
+                    real.transfers(&current_re.charge_current_a, 1.0, &rates_re, cancelled)?;
+                let (ti, _, ri) =
+                    imaginary.transfers(&current_im.charge_current_a, 1.0, &rates_im, cancelled)?;
+                let mut terminals = Vec::with_capacity(tr.len());
+                let mut power = C64::ZERO;
+                for (real, imaginary) in tr.into_iter().zip(ti) {
+                    poll(cancelled)?;
+                    let voltage = C64::new(
+                        real.voltage_to_reference_v,
+                        imaginary.voltage_to_reference_v,
+                    );
+                    let current = C64::new(real.incoming_current_a, imaginary.incoming_current_a);
+                    let supply = (voltage * current.conj()).scale(0.5);
+                    power = power + supply;
+                    finite(supply.re)?;
+                    finite(supply.im)?;
+                    finite(power.re)?;
+                    finite(power.im)?;
+                    terminals.push(SpatialHarmonicInductionTerminalTransfer {
+                        terminal: real.terminal,
+                        component: real.component,
+                        reference_terminal: real.reference_terminal,
+                        voltage_to_reference_v: voltage,
+                        incoming_current_a: current,
+                        supplied_power_va: supply,
+                    });
+                }
+                // Conservative complex bound on every original free-node,
+                // electrode-current and conductor-component residual.
+                (terminals, power, finite(rr.hypot(ri))?)
+            } else {
+                let mut residual = 0.0_f64;
+                for (real, imaginary) in current_re
+                    .charge_current_a
+                    .iter()
+                    .zip(&current_im.charge_current_a)
+                {
+                    residual = residual.max(finite(real.hypot(*imaginary))?);
+                }
+                (vec![], C64::ZERO, residual)
+            };
         if maximum_ampere_residual_a > controls.current_tolerance_a
             || maximum_charge_residual_a > controls.current_tolerance_a
         {
             return Err(invalid(
-                "harmonic full Ampere or floating charge equation failed",
+                "harmonic full Ampere or charge/terminal equation failed",
             ));
         }
         let flux_re = apply(&problem.curl, &a_re, cancelled)?;
@@ -520,6 +618,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                             - load_im[edge] * derivative_re[edge]),
             )?;
         }
+        let mean_impressed_power_w = mean_supplied_power_w;
+        let reactive_impressed_power_var = reactive_supplied_power_var;
+        mean_supplied_power_w = finite(mean_supplied_power_w + terminal_power.re)?;
+        reactive_supplied_power_var = finite(reactive_supplied_power_var + terminal_power.im)?;
         let power_residual_w =
             finite(mean_ohmic_power_w + mean_mechanical_power_w - mean_supplied_power_w)?;
         let reactive_power_residual_var = finite(
@@ -530,7 +632,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             || reactive_power_residual_var.abs() > controls.power_tolerance_w
         {
             return Err(invalid(
-                "harmonic magnetic, Ohmic, Lorentz and impressed power do not close",
+                "harmonic magnetic, Ohmic, Lorentz and electrical supply do not close",
             ));
         }
         poll(cancelled)?;
@@ -549,11 +651,16 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 .map(|(a, b)| std::array::from_fn(|j| C64::new(a[j], b[j])))
                 .collect(),
             cells,
+            terminals,
             balance: SpatialHarmonicInductionBalance {
                 mean_magnetic_energy_j,
                 mean_ohmic_power_w,
                 mean_mechanical_power_w,
                 reactive_mechanical_power_var,
+                mean_impressed_power_w,
+                reactive_impressed_power_var,
+                mean_terminal_power_w: terminal_power.re,
+                reactive_terminal_power_var: terminal_power.im,
                 mean_supplied_power_w,
                 reactive_supplied_power_var,
                 power_residual_w,

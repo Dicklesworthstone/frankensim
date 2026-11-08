@@ -93,6 +93,56 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
         SpatialTerminalInduction::new(self.field, &self.terminals.faces, limits, cancelled)
     }
 
+    /// Resolve peak total electrode currents and their physical AC voltages.
+    /// Each electrode retains one grouped scalar-potential unknown; only its
+    /// total current is imposed, not its spatial distribution. Incoming peak
+    /// phasors use `exp(-i omega t)` and must balance on each conductor.
+    ///
+    /// This reuses one native sparse A–phi solve and the same real/reactive
+    /// power, charge, Ampere, skin-depth and motion checks as voltage drive.
+    /// Material, geometry and steady Eulerian velocity are held fixed. Neither
+    /// this history's magnetic cochain nor its physical clock is advanced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_harmonic_current(
+        &self,
+        incoming_current_a: &[fs_math::c64::C64],
+        impressed_current_a_m2: &[[fs_math::c64::C64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        omega_rad_s: f64,
+        controls: super::super::harmonic::SpatialHarmonicInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<super::super::harmonic::SpatialHarmonicInductionResponse<'_, 'm, C>> {
+        poll(cancelled)?;
+        if incoming_current_a.len() != self.terminals.faces.len() {
+            return Err(invalid(
+                "one peak current per original induction electrode required",
+            ));
+        }
+        let real: Vec<_> = incoming_current_a.iter().map(|v| v.re).collect();
+        let imaginary: Vec<_> = incoming_current_a.iter().map(|v| v.im).collect();
+        let real_drive = self.terminals.current_drive(
+            &real,
+            &self.terminal_unknown,
+            controls.current_tolerance_a,
+            cancelled,
+        )?;
+        let imaginary_drive = self.terminals.current_drive(
+            &imaginary,
+            &self.terminal_unknown,
+            controls.current_tolerance_a,
+            cancelled,
+        )?;
+        self.field.solve_harmonic_driven(
+            impressed_current_a_m2,
+            velocity_m_s,
+            omega_rad_s,
+            controls,
+            None,
+            Some([&real_drive, &imaginary_drive]),
+            cancelled,
+        )
+    }
+
     /// Prescribe stage total currents positive INTO each original electrode.
     /// Electrode potential is an output; interior and tangential current remain
     /// part of the same resolved induction/charge system. All input currents,

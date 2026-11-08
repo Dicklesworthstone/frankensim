@@ -6976,9 +6976,10 @@ Krylov residual alone cannot authorize a result.
 This lane supports source-backed linear isotropic or orthotropic magnetic and
 conductive laws and prescribed Eulerian velocity. Recoil magnets refuse because
 a harmonic perturbation alone cannot certify their full-cycle operating
-envelope. Saturation, hysteresis, moving mesh/occupancy transport, physical
-terminal or winding-circuit closure, temperature evolution and displacement
-current are not supplied by this harmonic API. Its source-bound powers and
+envelope. Saturation, hysteresis, moving mesh/occupancy transport, temperature
+evolution and displacement current are not supplied by this harmonic API.
+Physical electrodes and winding circuits use the same native field through
+their respective terminal owners. Its source-bound powers and
 fields are available to receiving models without relabeling mechanical work
 as heat.
 
@@ -7060,3 +7061,31 @@ They do not infer strand-scale eddies, end resistance, thermal updates,
 saturation or evolving mechanical feedback. Focused winding/circuit
 regressions cover independent mutual RL references, declared shared end modes,
 actual moving-field work, phase covariance, source refusal and retry.
+
+### Physical massive-conductor AC electrodes
+
+`SpatialTerminalInduction::solve_harmonic_voltage` and
+`SpatialCurrentInduction::solve_harmonic_current` extend the original physical
+electrodes into the native `K - V - i omega M` solve. Voltage control retains
+the prescribed charge traces; total-current control retains the grouped
+equipotential unknowns. The spatial current distribution and skin/proximity
+response are solved rather than imposed as a uniform or stranded profile.
+Both reuse the original sparse operators, source-bound conductivity tensors,
+gauge, steady Eulerian motion, skin/Peclet limits and cancellation points.
+
+Peak phasors use `exp(-i omega t)`. Each conductor retains its own voltage
+reference. Original charge rows, electrode reactions, component current sums
+and all free Ampere rows are checked. The receipt separates physical-electrode
+and impressed-volume real/reactive supply; their sum closes against magnetic
+storage, conductor-frame Joule heat and signed Lorentz work. These same fields
+support the existing consistent mean/twice-frequency mechanical loads. Solving
+does not change the accepted transient cochain or clock. Materials and geometry
+remain fixed; contact impedance, external lead fields, switch-on transients and
+temperature or mechanical feedback are not inferred.
+
+G1/G3/G4 regressions in `tests/spatial_induction/terminals/harmonic.rs` compare
+independently integrated voltage- and current-driven diffusion modes at four
+frequencies, both source power channels, moving-conductor voltage/current
+equivalence, complex common-mode invariance, second-order transient refinement,
+resource refusal and cancellation/retry. Synthetic source data qualify the
+equations and implementation, not an experimentally validated device.

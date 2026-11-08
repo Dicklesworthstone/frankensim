@@ -406,6 +406,47 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
         current::SpatialCurrentInduction::from_voltage_driven(self, limits, cancelled)
     }
 
+    /// Resolve peak AC electrode voltages in the original Whitney A–phi space.
+    /// The conductor current distribution, electrode reactions, skin/proximity
+    /// response and prescribed-motion work are solved together. Voltages use
+    /// `exp(-i omega t)` and are referenced separately on each conductor before
+    /// assembly, preserving complex common-mode invariance.
+    ///
+    /// This is a fixed-material, fixed-geometry settled AC response. It does
+    /// not advance the accepted transient history, model a switch-on transient
+    /// or infer contact impedance or lead fields. Its source-bound heat and
+    /// Lorentz-load APIs apply to this same accepted harmonic field.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_harmonic_voltage(
+        &self,
+        voltage_v: &[fs_math::c64::C64],
+        impressed_current_a_m2: &[[fs_math::c64::C64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        omega_rad_s: f64,
+        controls: super::harmonic::SpatialHarmonicInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<super::harmonic::SpatialHarmonicInductionResponse<'_, 'm, C>> {
+        poll(cancelled)?;
+        if voltage_v.len() != self.terminals.faces.len() {
+            return Err(invalid(
+                "one peak voltage per original induction electrode required",
+            ));
+        }
+        let real: Vec<_> = voltage_v.iter().map(|v| v.re).collect();
+        let imaginary: Vec<_> = voltage_v.iter().map(|v| v.im).collect();
+        let real = self.terminals.voltage_drive(&real, cancelled)?;
+        let imaginary = self.terminals.voltage_drive(&imaginary, cancelled)?;
+        self.field.solve_harmonic_driven(
+            impressed_current_a_m2,
+            velocity_m_s,
+            omega_rad_s,
+            controls,
+            None,
+            Some([&real, &imaginary]),
+            cancelled,
+        )
+    }
+
     /// Advance the original midpoint A–phi equations with prescribed stage
     /// electrode voltages. The actual current distribution is solved, never
     /// supplied as a uniform current density. Source and velocity conventions

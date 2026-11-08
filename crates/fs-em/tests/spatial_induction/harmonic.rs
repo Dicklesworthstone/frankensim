@@ -9,7 +9,7 @@ use super::*;
 use fs_em::spatial::vector_potential::induction::harmonic::SpatialHarmonicInductionControls;
 use fs_math::c64::C64;
 
-fn harmonic_controls() -> SpatialHarmonicInductionControls {
+pub(super) fn harmonic_controls() -> SpatialHarmonicInductionControls {
     SpatialHarmonicInductionControls {
         relative_tolerance: 2e-11,
         absolute_residual_a: 1e-11,
@@ -25,7 +25,7 @@ fn harmonic_controls() -> SpatialHarmonicInductionControls {
     }
 }
 
-fn complex_near(a: C64, b: C64, tolerance: f64) {
+pub(super) fn complex_near(a: C64, b: C64, tolerance: f64) {
     near(a.re, b.re, tolerance);
     near(a.im, b.im, tolerance);
 }
