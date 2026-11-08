@@ -1,6 +1,7 @@
 //! Fully developed films of the original thermal Carreau-Yasuda law.
 //!
-//! [`CarreauShearedFilm`] resolves signed surface traction at fixed thickness;
+//! [`CarreauShearedFilm`] resolves signed surface traction at fixed thickness
+//! or prescribed signed flux on an explicitly selected thickness branch;
 //! [`CarreauFilm`] below resolves a shear-free film at prescribed positive flux.
 //!
 //! Momentum fixes tau(y)=rho*g_t*(h-y). A symmetric, stationary-wall slit
@@ -17,7 +18,10 @@ use fs_material::fluid_transport::rheology::slit::{
 };
 
 mod sheared;
-pub use sheared::{CarreauShearedFilm, CarreauShearedFilmSpec};
+pub use sheared::{
+    CarreauShearedFilm, CarreauShearedFilmFlowSolution, CarreauShearedFilmFlowSpec,
+    CarreauShearedFilmSpec,
+};
 
 /// Actual SI forcing and liquid density/capillarity; viscosity belongs to the law.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,7 +39,9 @@ pub struct CarreauFilmControls {
     pub slit: CarreauSlitControls,
     /// Relative accepted flux residual AND thickness Newton correction.
     pub relative_flow_tolerance: f64,
-    /// Maximum forward profiles, including the initial upper bracket, 1..=128.
+    /// Maximum forward profiles, including the initial bracket, up to 128.
+    /// A sheared-film inverse requires at least two for its supplied endpoints;
+    /// the shear-free inverse permits one initial upper-bracket profile.
     pub maximum_thickness_iterations: u32,
 }
 impl Default for CarreauFilmControls {
@@ -54,7 +60,20 @@ pub enum CarreauFilmError {
     Film(FilmError),
     Material(MaterialError),
     OutsideRateSupport,
-    UnresolvedFlow { iterations: u32, residual_m2_s: f64 },
+    /// The supplied positive thickness interval crosses a wall-stress zero,
+    /// so its flux is not monotone. Choose one physical thickness branch.
+    NonMonotoneThicknessInterval {
+        wall_shear_at_bounds_pa: [f64; 2],
+    },
+    /// The requested signed flux is outside the selected monotone branch.
+    FlowOutsideThicknessInterval {
+        requested_m2_s: f64,
+        flow_at_bounds_m2_s: [f64; 2],
+    },
+    UnresolvedFlow {
+        iterations: u32,
+        residual_m2_s: f64,
+    },
     Cancelled,
 }
 impl core::fmt::Display for CarreauFilmError {

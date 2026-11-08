@@ -11,9 +11,11 @@
 //! the original local and integrated viscous dissipation remain nonnegative.
 //! The constant-source limit is the native [`crate::film::ShearedFilm`].
 //!
-//! Thickness, temperature, density, acceleration and surface traction are
-//! held. Traction may represent gas drag or a surface-tension gradient, but
-//! neither is inferred here. No gas dynamics, stability, contact line, slip,
+//! Thickness can be prescribed, or resolved from signed flux on an explicitly
+//! selected monotone thickness interval. Temperature, density, acceleration
+//! and surface traction are held. Traction may represent gas drag or a
+//! surface-tension gradient, but neither is inferred here. No gas dynamics,
+//! stability, contact line, slip,
 //! thermal feedback or generalized turbulent threshold is introduced.
 
 use super::{CarreauFilm, CarreauFilmError, CarreauFilmSample, material_call, poll, positive};
@@ -22,6 +24,9 @@ use fs_material::fluid_transport::rheology::ThermalCarreauYasuda;
 use fs_material::fluid_transport::rheology::slit::{
     CarreauSlitControls, CarreauSlitProfile, LaminarCarreauSlit,
 };
+
+mod flow;
+pub use flow::{CarreauShearedFilmFlowSolution, CarreauShearedFilmFlowSpec};
 
 /// Actual SI geometry and forcing of a flat film on a stationary no-slip wall.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +113,18 @@ impl CarreauShearedFilm {
                 check,
             )
         })?;
+        let film = Self::from_profile(spec, profile)?;
+        poll(&mut cancelled)?;
+        Ok(film)
+    }
+
+    // The fixed-thickness and prescribed-flux owners publish exactly the same
+    // source profile, heat and boundary mobilities. The inverse can reuse one
+    // prepared slit while changing only its physical gap.
+    fn from_profile(
+        spec: CarreauShearedFilmSpec,
+        profile: CarreauSlitProfile,
+    ) -> Result<Self, CarreauFilmError> {
         let flow = profile.flow();
         let surface_velocity = flow.accepted_wall_velocities_m_s[1];
         let surface_work = spec.surface_shear_pa * surface_velocity;
@@ -145,7 +162,6 @@ impl CarreauShearedFilm {
             surface_work_w_m2: surface_work,
             viscous_dissipation_w_m2: flow.dissipated_power_w,
         };
-        poll(&mut cancelled)?;
         Ok(Self {
             spec,
             profile,
