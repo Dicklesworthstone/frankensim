@@ -225,6 +225,67 @@ impl UniformVacuumWorldline {
         .admitted(max_residual_m)
     }
 
+    /// First reception of a fixed emission event on this detector's future
+    /// light cone. The returned coordinate event and material clock must both
+    /// fit the finite receiver history and original distance tolerance.
+    ///
+    /// With q=x_receiver(t_emission)-x_emission and ell=c*flight, the equation
+    /// is `(1-beta²) ell² - 2(q.beta) ell - q² = 0`, exactly the same positive
+    /// root as the past-source solve. DD emission positions retain knot detail.
+    pub fn receive_emission(
+        &self,
+        emission_coordinate_time_s: Dd,
+        emission_position_m: [Dd; 3],
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
+        let (time, location) = emission_input(
+            emission_coordinate_time_s,
+            emission_position_m,
+            max_residual_m,
+        )?;
+        let offset = checked(time - self.reference_coordinate_time_s)?;
+        let q = finite_vector(core::array::from_fn(|i| {
+            (self.reference_position_m[i] - location[i]) + self.velocity_m_s[i] * offset
+        }))?;
+        let length = positive_flight_length(q, self.frame)?;
+        let reception_time = checked(time + length / Dd::from_f64(VACUUM_LIGHT_SPEED_M_S))?;
+        self.receive_at(time, location, reception_time, max_residual_m)
+    }
+
+    /// Publish either the analytic future root or an authored exact knot.
+    fn receive_at(
+        &self,
+        emission_time: Dd,
+        emission_position: [Dd; 3],
+        reception_time: Dd,
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
+        let offset = checked(reception_time - self.reference_coordinate_time_s)?;
+        let proper = checked(self.reference_proper_time_s + self.frame.inverse_gamma * offset)?;
+        if proper.lt(self.proper_history_s[0]) || self.proper_history_s[1].lt(proper) {
+            return Err(RetardedVacuumError::OutsideHistory);
+        }
+        let receiver = self.reception_event(reception_time, proper, max_residual_m)?;
+        let range = norm(finite_vector(core::array::from_fn(|i| {
+            receiver.position_m[i] - emission_position[i]
+        }))?)?;
+        let flight = checked(reception_time - emission_time)?;
+        if flight == Dd::ZERO && range == Dd::ZERO {
+            return Err(RetardedVacuumError::Coincident);
+        }
+        if !Dd::ZERO.lt(flight) || !Dd::ZERO.lt(range) {
+            return Err(RetardedVacuumError::NumericalRange);
+        }
+        let residual = checked((range - Dd::from_f64(VACUUM_LIGHT_SPEED_M_S) * flight).abs())?;
+        if Dd::from_f64(max_residual_m).lt(residual) {
+            return Err(RetardedVacuumError::Residual {
+                residual_m: residual.to_f64(),
+                tolerance_m: max_residual_m,
+            });
+        }
+        Ok(receiver)
+    }
+
     /// Unique positive-flight-time null ray, with fixed work and no allocation.
     ///
     /// Let q=x_o-x_s(t_o), beta=v_s/c and ell=c(t_o-t_s). The null equation is
@@ -247,23 +308,9 @@ impl UniformVacuumWorldline {
         let q = finite_vector(core::array::from_fn(|i| {
             (receiver.position_m[i] - self.reference_position_m[i]) - self.velocity_m_s[i] * offset
         }))?;
-        let scale = q.iter().fold(0.0_f64, |a, x| a.max(x.hi.abs()));
-        if scale == 0.0 {
-            return Err(RetardedVacuumError::Coincident);
-        }
-        let scale = Dd::from_f64(scale);
-        let normalized = q.map(|x| x / scale);
-        let squared = dd_dot(normalized, normalized);
-        let b = dd_dot(normalized, self.frame.beta);
-        let a = self.frame.inverse_gamma * self.frame.inverse_gamma;
-        let discriminant = (b * b + a * squared).sqrt();
-        let length = if b.lt(Dd::ZERO) {
-            scale * (squared / (discriminant - b))
-        } else {
-            scale * ((discriminant + b) / a)
-        };
+        let length = positive_flight_length(q, self.frame)?;
         let c = Dd::from_f64(VACUUM_LIGHT_SPEED_M_S);
-        let emission_time_s = checked(receiver.coordinate_time_s - checked(length)? / c)?;
+        let emission_time_s = checked(receiver.coordinate_time_s - length / c)?;
 
         self.observe_emission(receiver, emission_time_s, max_residual_m)
     }
@@ -428,6 +475,38 @@ impl RetardedVacuumRay {
     pub const fn proper_time_rate(&self) -> f64 {
         self.doppler.frequency_ratio()
     }
+}
+
+fn positive_flight_length(q: [Dd; 3], frame: FrameVelocity) -> Result<Dd, RetardedVacuumError> {
+    let scale = q.iter().fold(0.0_f64, |a, x| a.max(x.hi.abs()));
+    if scale == 0.0 {
+        return Err(RetardedVacuumError::Coincident);
+    }
+    let scale = Dd::from_f64(scale);
+    let normalized = q.map(|x| x / scale);
+    let squared = dd_dot(normalized, normalized);
+    let b = dd_dot(normalized, frame.beta);
+    let a = frame.inverse_gamma * frame.inverse_gamma;
+    let discriminant = (b * b + a * squared).sqrt();
+    checked(if b.lt(Dd::ZERO) {
+        scale * (squared / (discriminant - b))
+    } else {
+        scale * ((discriminant + b) / a)
+    })
+}
+
+fn emission_input(
+    time: Dd,
+    location: [Dd; 3],
+    max_residual_m: f64,
+) -> Result<(Dd, [Dd; 3]), RetardedVacuumError> {
+    if !max_residual_m.is_finite() || max_residual_m < 0.0 {
+        return Err(RetardedVacuumError::InvalidTolerance);
+    }
+    let location = finite_vector(location)
+        .and_then(|v| finite_vector(v.map(|x| Dd::from_pair(x.hi, x.lo))))
+        .map_err(|_| RetardedVacuumError::InvalidPosition)?;
+    Ok((clock(time)?, location))
 }
 
 fn clock(value: Dd) -> Result<Dd, RetardedVacuumError> {

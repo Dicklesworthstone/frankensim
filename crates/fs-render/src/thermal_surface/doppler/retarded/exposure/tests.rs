@@ -1,5 +1,7 @@
 use super::*;
-use crate::spectral::doppler::{VACUUM_LIGHT_SPEED_M_S as LIGHT, VacuumDoppler};
+use crate::spectral::doppler::{
+    VACUUM_LIGHT_SPEED_M_S as LIGHT, VacuumDoppler, retarded::VacuumTrajectoryKnot,
+};
 use crate::thermal_surface::{
     GrayDiffuseThermalSurface, SpectralDiffuseThermalSurface, SpectralEmissivity,
 };
@@ -76,6 +78,71 @@ fn reference(temperature: f64, band: (f64, f64)) -> [f64; 2] {
         sum[1] += weight * value * wavelength * 1e-9 / (6.626_070_15e-34 * LIGHT);
     }
     sum.map(|x| x * step / 3.0)
+}
+
+#[test]
+fn g1_motion_aligned_thermal_exposure_receives_the_source_turn_at_its_actual_arrival() {
+    let trajectory = |values: &[(f64, f64)], epoch| {
+        let knots: Vec<_> = values
+            .iter()
+            .map(|&(time, x)| VacuumTrajectoryKnot {
+                coordinate_time_s: dd(time),
+                position_m: [x * LIGHT, 0.0, 0.0],
+            })
+            .collect();
+        PiecewiseVacuumWorldline::try_new(&knots, dd(epoch), values.len() - 1).unwrap()
+    };
+    let source = trajectory(&[(0.0, 0.0), (1.0, 0.0), (4.0, 1.8)], 0.0);
+    let receiver = trajectory(&[(3.0, 3.0), (5.0, 3.0)], 3.0);
+    let sensor = QuantumEfficiencySensor::try_new(vec![(500.0, [1.0]), (800.0, [1.0])]).unwrap();
+    let mut calls = 0;
+    let result = RetardedThermalExposure::piecewise_with_knots(
+        &source,
+        &receiver,
+        &sensor,
+        &[dd(3.8), dd(4.8)],
+        settings(8),
+        |_| {
+            calls += 1;
+            Ok(gray(3000.0))
+        },
+        || false,
+    )
+    .unwrap();
+    // t_emission=1 is received at t=4: the first .2 seconds see D=1;
+    // the remaining .8 seconds see D=2 and a 6000 K apparent blackbody.
+    let before = reference(3000.0, (500.0, 800.0));
+    let after = reference(6000.0, (500.0, 800.0));
+    close(
+        result.qe_weighted_energy_j[0],
+        (0.2 * before[0] + 0.8 * after[0]) * 1e-8,
+        2e-10,
+    );
+    close(
+        result.expected_electrons[0],
+        (0.2 * before[1] + 0.8 * after[1]) * 1e-8,
+        2e-10,
+    );
+    assert_eq!(result.ray_queries, 13);
+    assert_eq!(result.spectral_evaluations, 256);
+    assert_eq!(calls, 8);
+    let mut limited = settings(8);
+    limited.time.max_ray_queries = 12;
+    calls = 0;
+    let refused = RetardedThermalExposure::piecewise_with_knots(
+        &source,
+        &receiver,
+        &sensor,
+        &[dd(3.8), dd(4.8)],
+        limited,
+        |_| {
+            calls += 1;
+            Ok(gray(3000.0))
+        },
+        || false,
+    );
+    assert_eq!(refused, Err(RetardedExposureError::RayBudget));
+    assert_eq!(calls, 0);
 }
 
 #[test]

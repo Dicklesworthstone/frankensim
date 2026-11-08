@@ -16,6 +16,17 @@ fn uniform(x: f64, beta: f64, history: [f64; 2]) -> UniformVacuumWorldline {
     .unwrap()
 }
 
+fn piecewise(values: &[(f64, f64)], proper_epoch: Dd) -> PiecewiseVacuumWorldline {
+    let knots: Vec<_> = values
+        .iter()
+        .map(|&(time, x)| VacuumTrajectoryKnot {
+            coordinate_time_s: dd(time),
+            position_m: [x * LIGHT, 0.0, 0.0],
+        })
+        .collect();
+    PiecewiseVacuumWorldline::try_new(&knots, proper_epoch, values.len() - 1).unwrap()
+}
+
 fn settings() -> RetardedExposureSettings {
     RetardedExposureSettings {
         max_ray_queries: 128,
@@ -28,6 +39,164 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance * expected.abs().max(1e-300),
         "actual {actual:.17e}, expected {expected:.17e}"
     );
+}
+
+#[test]
+fn g1_motion_alignment_splits_at_the_received_source_turn_not_its_emission_time() {
+    let source = piecewise(&[(0.0, 0.0), (1.0, 0.0), (4.0, 1.8)], Dd::ZERO);
+    let receiver = piecewise(&[(3.0, 3.0), (5.0, 3.0)], dd(3.0));
+    let edges = [dd(3.8), dd(4.8)];
+    let rates = |ray: &RetardedVacuumRay, _: &mut dyn FnMut() -> bool| {
+        Ok::<_, ()>([1.0, ray.proper_time_rate()])
+    };
+    let original =
+        integrate_piecewise(&source, &receiver, &edges, settings(), rates, || false).unwrap();
+    let aligned =
+        integrate_piecewise_with_knots(&source, &receiver, &edges, settings(), rates, || false)
+            .unwrap();
+    // Turn at emission t=1 arrives at t=4. D=1 for .2 s, then D=2 for .8 s.
+    close(aligned.integrated[0], 1.0, 3e-15);
+    close(aligned.integrated[1], 1.8, 5e-15);
+    assert!((original.integrated[1] - 1.8).abs() > 0.02);
+    assert_eq!(original.ray_queries, 6);
+    assert_eq!(aligned.ray_queries, 13); // two planning ends + one arrival + 2 + 8
+    assert_eq!(aligned.observable_evaluations, 8);
+}
+
+#[test]
+fn g1_motion_alignment_uses_accumulated_detector_proper_time_at_a_large_epoch() {
+    let source = piecewise(&[(-10.0, 0.0), (10.0, 0.0)], dd(-10.0));
+    let epoch = dd(1e20);
+    let receiver = piecewise(&[(0.0, 3.0), (2.0, 1.8), (4.0, 1.8)], epoch);
+    let result = integrate_piecewise_with_knots(
+        &source,
+        &receiver,
+        &receiver.proper_history_s(),
+        settings(),
+        |ray, _| Ok::<_, ()>([1.0, ray.proper_time_rate()]),
+        || false,
+    )
+    .unwrap();
+    // The detector's turn is at tau=epoch+1.6, not coordinate t=2.
+    close(result.integrated[0], 3.6, 4e-15);
+    close(result.integrated[1], 5.2, 4e-15);
+    assert_eq!(result.ray_queries, 12);
+    assert_eq!(result.observable_evaluations, 8);
+}
+
+#[test]
+fn g3_motion_alignment_filters_irrelevant_knots_and_deduplicates_one_physical_edge() {
+    let source = piecewise(
+        &[
+            (-10.0, 0.0),
+            (-5.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (5.0, 0.0),
+            (10.0, 0.0),
+        ],
+        dd(-10.0),
+    );
+    let receiver = piecewise(&[(3.5, 3.0), (4.0, 3.0), (4.5, 3.0)], dd(3.5));
+    let mut budget = settings();
+    budget.max_ray_queries = 13;
+    let result = integrate_piecewise_with_knots(
+        &source,
+        &receiver,
+        &[dd(3.5), dd(4.0), dd(4.5)],
+        budget,
+        |_, _| Ok::<_, ()>([1.0]),
+        || false,
+    )
+    .unwrap();
+    // All other source-knot arrivals are outside the receiver history. The
+    // authored edge, detector knot and relevant source arrival coincide at 4.
+    close(result.integrated[0], 1.0, 3e-15);
+    assert_eq!(result.ray_queries, 13);
+    assert_eq!(result.observable_evaluations, 8);
+    budget.max_ray_queries = 12;
+    let mut calls = 0;
+    let refused = integrate_piecewise_with_knots(
+        &source,
+        &receiver,
+        &[dd(3.5), dd(4.5)],
+        budget,
+        |_, _| {
+            calls += 1;
+            Ok::<_, ()>([1.0])
+        },
+        || false,
+    );
+    assert_eq!(refused, Err(RetardedExposureError::RayBudget));
+    assert_eq!(calls, 0);
+    budget.max_ray_queries = 8;
+    let clear = integrate_piecewise_with_knots(
+        &source,
+        &receiver,
+        &[dd(3.6), dd(3.9)],
+        budget,
+        |_, _| Ok::<_, ()>([1.0]),
+        || false,
+    )
+    .unwrap();
+    close(clear.integrated[0], 0.3, 3e-15);
+    assert_eq!(clear.ray_queries, 8); // no out-of-exposure arrival queries
+}
+
+#[test]
+fn g4_motion_planning_cancels_and_refuses_missing_history_before_callbacks() {
+    let source = piecewise(
+        &[
+            (-10.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (10.0, 0.0),
+        ],
+        dd(-10.0),
+    );
+    let receiver = piecewise(&[(3.5, 3.0), (4.0, 3.0), (4.5, 3.0)], dd(3.5));
+    for stop in [4, 11] {
+        let mut checks = 0;
+        let mut calls = 0;
+        let cancelled = integrate_piecewise_with_knots(
+            &source,
+            &receiver,
+            &[dd(3.5), dd(4.5)],
+            settings(),
+            |_, _| {
+                calls += 1;
+                Ok::<_, ()>([1.0])
+            },
+            || {
+                checks += 1;
+                checks == stop
+            },
+        );
+        assert_eq!(cancelled, Err(RetardedExposureError::Cancelled));
+        assert_eq!(checks, stop);
+        assert_eq!(calls, 0);
+    }
+    let mut calls = 0;
+    let missing = integrate_piecewise_with_knots(
+        &source,
+        &receiver,
+        &[dd(3.5), dd(4.51)],
+        settings(),
+        |_, _| {
+            calls += 1;
+            Ok::<_, ()>([1.0])
+        },
+        || false,
+    );
+    assert_eq!(
+        missing,
+        Err(RetardedExposureError::Geometry(
+            RetardedVacuumError::OutsideHistory
+        ))
+    );
+    assert_eq!(calls, 0);
 }
 
 #[test]

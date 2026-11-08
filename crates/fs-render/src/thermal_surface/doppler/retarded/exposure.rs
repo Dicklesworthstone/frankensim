@@ -5,7 +5,8 @@
 //! incidence-cosine, aberration Jacobian or second Doppler factor is invented.
 //! Temporal and spectral Gauss quadratures are estimates. QE knots and shifted
 //! source-emissivity knots split every spectral panel, including narrow lines;
-//! caller-authored time panels must resolve temporal source/motion changes.
+//! caller-authored time panels must resolve material-history changes. The
+//! opt-in knot-aligned path resolves retarded source and detector turns too.
 //! No visibility, shutter profile, charge noise, gain or saturation is inferred.
 
 use super::{RetardedThermalError, RetardedThermalSurface, ThermalEmissionState};
@@ -109,6 +110,41 @@ impl<const C: usize> RetardedThermalExposure<C> {
         admit(settings)?;
         let mut work = 0;
         let integral = exposure::integrate_piecewise(
+            source,
+            receiver,
+            panel_edges_s,
+            settings.time,
+            |ray, checkpoint| {
+                rate(
+                    ray,
+                    sensor,
+                    settings,
+                    &mut work,
+                    &mut at_proper_time,
+                    checkpoint,
+                )
+            },
+            cancelled,
+        )?;
+        Ok(Self::from_integral(integral, work))
+    }
+
+    /// Also split time panels at detector turns and received source turns.
+    /// Arrival planning and complete motion-history admission finish before
+    /// reading the thermal source. Other material discontinuities still need
+    /// authored panel edges; both quadratures remain numerical estimates.
+    pub fn piecewise_with_knots<'source>(
+        source: &PiecewiseVacuumWorldline,
+        receiver: &PiecewiseVacuumWorldline,
+        sensor: &QuantumEfficiencySensor<C>,
+        panel_edges_s: &[Dd],
+        settings: ThermalExposureSettings,
+        mut at_proper_time: impl FnMut(Dd) -> Result<ThermalEmissionState<'source>, ThermalSurfaceError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, RetardedExposureError<ThermalExposureError>> {
+        admit(settings)?;
+        let mut work = 0;
+        let integral = exposure::integrate_piecewise_with_knots(
             source,
             receiver,
             panel_edges_s,

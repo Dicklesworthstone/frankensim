@@ -29,6 +29,100 @@ fn receiver(time: Dd, position: [f64; 3], velocity: [f64; 3]) -> VacuumReception
 }
 
 #[test]
+fn g1_future_reception_matches_longitudinal_and_transverse_light_cones() {
+    for (velocity, coordinate, proper) in [
+        ([0.6 * C, 0.0, 0.0], 2.5, 2.0),
+        ([-0.6 * C, 0.0, 0.0], 0.625, 0.5),
+        ([0.0, 0.6 * C, 0.0], 1.25, 1.0),
+    ] {
+        let detector = UniformVacuumWorldline::try_new(
+            Dd::ZERO,
+            Dd::ZERO,
+            [C, 0.0, 0.0],
+            velocity,
+            [dd(0.0), dd(10.0)],
+        )
+        .unwrap();
+        let arrival = detector
+            .receive_emission(Dd::ZERO, [Dd::ZERO; 3], 1e-6)
+            .unwrap();
+        close(arrival.coordinate_time_s().to_f64(), coordinate, 3e-15);
+        close(arrival.proper_time_s().unwrap().to_f64(), proper, 3e-15);
+        let ray = source([0.0; 3]).observe(arrival, 1e-6).unwrap();
+        assert!(ray.emission_coordinate_time_s().to_f64().abs() < 1e-14);
+        assert!(ray.light_cone_residual_m() <= 1e-6);
+        if velocity[1] != 0.0 {
+            close(arrival.position_m()[1].to_f64(), 0.75 * C, 3e-15);
+            close(ray.world_propagation_direction()[0], 0.8, 3e-15);
+            close(ray.world_propagation_direction()[1], 0.6, 3e-15);
+        }
+    }
+}
+
+#[test]
+fn g3_future_reception_preserves_dd_events_and_refuses_unsupported_clocks() {
+    let epoch = dd(1e20);
+    let detector = UniformVacuumWorldline::try_new(
+        epoch,
+        epoch,
+        [2.0 * C, 0.0, 0.0],
+        [0.0; 3],
+        [epoch, epoch + dd(2.0)],
+    )
+    .unwrap();
+    let canonical = [dd(C), Dd::ZERO, Dd::ZERO];
+    let noncanonical = [Dd { hi: 0.0, lo: C }, Dd::ZERO, Dd::ZERO];
+    let arrival = detector.receive_emission(epoch, canonical, 0.0).unwrap();
+    assert_eq!(
+        arrival,
+        detector.receive_emission(epoch, noncanonical, 0.0).unwrap()
+    );
+    assert_eq!(arrival.coordinate_time_s(), epoch + dd(1.0));
+    assert_eq!(arrival.proper_time_s(), Some(epoch + dd(1.0)));
+    let nearby = [dd(2.0 * C) - dd(1.0), Dd::ZERO, Dd::ZERO];
+    let short = detector.receive_emission(epoch, nearby, 1e-6).unwrap();
+    close((short.coordinate_time_s() - epoch).to_f64(), 1.0 / C, 3e-15);
+    assert_eq!(
+        detector.receive_emission(epoch, [dd(f64::NAN); 3], 1e-6),
+        Err(RetardedVacuumError::InvalidPosition)
+    );
+    assert_eq!(
+        detector.receive_emission(epoch + dd(2.1), canonical, 1e-6),
+        Err(RetardedVacuumError::OutsideHistory)
+    );
+    assert_eq!(
+        detector.receive_emission(epoch, [dd(2.0 * C), Dd::ZERO, Dd::ZERO], 1e-6),
+        Err(RetardedVacuumError::Coincident)
+    );
+
+    let huge = dd(2.0_f64.powi(100));
+    let detector = UniformVacuumWorldline::try_new(
+        huge,
+        Dd::ZERO,
+        [1.0, 0.0, 0.0],
+        [0.0; 3],
+        [dd(-1e50), dd(1e50)],
+    )
+    .unwrap();
+    assert!(matches!(
+        detector.receive_emission(huge + dd(2.0_f64.powi(45)), [Dd::ZERO; 3], 1e-6),
+        Err(RetardedVacuumError::NumericalRange | RetardedVacuumError::Residual { .. })
+    ));
+    let detector = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        huge + dd(2.0_f64.powi(45)),
+        [1.0, 0.0, 0.0],
+        [0.0; 3],
+        [dd(-1e50), dd(1e50)],
+    )
+    .unwrap();
+    assert!(matches!(
+        detector.receive_emission(Dd::ZERO, [Dd::ZERO; 3], 1e-6),
+        Err(RetardedVacuumError::ClockResolution { .. })
+    ));
+}
+
+#[test]
 fn g1_stationary_null_ray_retains_reference_proper_clock() {
     let motion = UniformVacuumWorldline::try_new(
         Dd::ZERO,

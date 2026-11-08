@@ -26,6 +26,89 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_future_reception_selects_causal_receiver_leg_and_exact_knot_velocity() {
+    let detector = PiecewiseVacuumWorldline::try_new(
+        &[knot(0.0, 1.0), knot(1.0, 1.5), knot(4.0, 1.5)],
+        dd(10.0),
+        2,
+    )
+    .unwrap();
+    let source = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        Dd::ZERO,
+        [0.0; 3],
+        [0.0; 3],
+        [dd(-10.0), dd(10.0)],
+    )
+    .unwrap();
+    let leg_clock = 0.75_f64.sqrt();
+    for (emitted, received, proper, ratio) in [
+        (-1.0, 0.0, 10.0, 1.0 / 3.0_f64.sqrt()),
+        (-0.75, 0.5, 10.0 + 0.5 * leg_clock, 1.0 / 3.0_f64.sqrt()),
+        (-0.5, 1.0, 10.0 + leg_clock, 1.0),
+        (0.0, 1.5, 10.5 + leg_clock, 1.0),
+        (2.5, 4.0, 13.0 + leg_clock, 1.0),
+    ] {
+        let arrival = detector
+            .receive_emission(dd(emitted), [Dd::ZERO; 3], 1e-6)
+            .unwrap();
+        close(arrival.coordinate_time_s().to_f64(), received, 3e-15);
+        close(arrival.proper_time_s().unwrap().to_f64(), proper, 3e-15);
+        let ray = source.observe(arrival, 1e-6).unwrap();
+        close(ray.emission_coordinate_time_s().to_f64(), emitted, 3e-15);
+        close(ray.proper_time_rate(), ratio, 3e-15);
+        let replay = detector
+            .reception_at_proper_time(arrival.proper_time_s().unwrap(), 1e-6)
+            .unwrap();
+        close(replay.coordinate_time_s().to_f64(), received, 3e-15);
+        assert_eq!(
+            source.observe(replay, 1e-6).unwrap().doppler(),
+            ray.doppler()
+        );
+    }
+    for emitted in [-1.01, 2.51] {
+        assert_eq!(
+            detector.receive_emission(dd(emitted), [Dd::ZERO; 3], 1e-6),
+            Err(RetardedVacuumError::OutsideHistory)
+        );
+    }
+}
+
+#[test]
+fn g3_uniform_receiver_subdivision_preserves_future_arrival_and_large_proper_epoch() {
+    let knots: Vec<_> = (0..=64)
+        .map(|i| knot(f64::from(i) / 16.0, 1.0 + f64::from(i) / 32.0))
+        .collect();
+    let epoch = dd(1e20);
+    let piecewise = PiecewiseVacuumWorldline::try_new(&knots, epoch, 64).unwrap();
+    let uniform = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        epoch,
+        [C, 0.0, 0.0],
+        [0.5 * C, 0.0, 0.0],
+        piecewise.proper_history_s(),
+    )
+    .unwrap();
+    for emitted in [-0.5, 0.0, 0.12345, 0.5] {
+        let a = piecewise
+            .receive_emission(dd(emitted), [Dd::ZERO; 3], 1e-6)
+            .unwrap();
+        let b = uniform
+            .receive_emission(dd(emitted), [Dd::ZERO; 3], 1e-6)
+            .unwrap();
+        close(a.coordinate_time_s().to_f64(), 2.0 * (emitted + 1.0), 3e-15);
+        close(
+            (a.proper_time_s().unwrap() - epoch).to_f64(),
+            (b.proper_time_s().unwrap() - epoch).to_f64(),
+            3e-15,
+        );
+        for (actual, expected) in a.position_m().into_iter().zip(b.position_m()) {
+            assert!((actual - expected).to_f64().abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
 fn g1_retarded_segment_retains_all_previous_proper_clock_rates() {
     let motion = PiecewiseVacuumWorldline::try_new(
         &[knot(0.0, 0.0), knot(2.0, 1.2), knot(4.0, 1.2)],

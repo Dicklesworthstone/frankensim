@@ -9653,6 +9653,15 @@ semantics, uniform subdivision, DD receiver geometry, clock refusal and
 proper-time thermal-to-electron-rate integration. These instantaneous APIs supply
 detector events, not apparent-area geometry or smooth acceleration.
 
+Both worldlines also provide `receive_emission` for the future reception of a
+fixed DD emission event. The receiver uses the same scaled, rationalized null
+quadratic as the past-source owner; piecewise motion first locates the causal
+receiver segment by a monotone binary search. Public DD position pairs are
+normalized before geometry. Published null geometry and receiver proper-clock
+loss are re-admitted against the original distance tolerance, finite history
+and outgoing/interior, incoming/final knot convention. No receiver motion is
+extrapolated into the returned event.
+
 `spectral::doppler::retarded::exposure` integrates nonnegative per-ray rates over
 authored detector-proper-time panels. Uniform and piecewise endpoint owners
 share four-point Gauss--Legendre temporal quadrature, DD accumulation, fixed
@@ -9666,6 +9675,19 @@ rather than advance, the source history. Quadrature is an estimate: authored
 panel edges and refinement must resolve source discontinuities and velocity
 changes. There is no certified error bound or claim about unsampled geometry.
 
+`integrate_piecewise_with_knots` adds detector turns and received source turns
+to those authored panels. Source knots are filtered against the two admitted
+endpoint emission clocks before their future arrivals are queried, so unrelated
+knots outside the exposure neither require receiver history nor consume ray
+queries. Three ordered edge streams merge with exact duplicate removal and one
+fallible allocation capped by the total ray budget. That budget includes two
+planning endpoints, each relevant source-knot arrival, the two integration
+endpoints and four quadrature rays per resulting panel. Planning, allocation,
+history and complete panel-budget admission precede all observable callbacks;
+cancellation remains available during admission and merging. The original
+authored-only functions retain their behavior. Material-history discontinuities
+and smooth-panel refinement still require caller control.
+
 `thermal_surface::doppler::retarded::exposure::RetardedThermalExposure` connects
 that owner to the original thermal history and `QuantumEfficiencySensor`.
 At each temporal node it resolves the original emitting side and source state,
@@ -9678,6 +9700,8 @@ Every spectral point consumes the caller's total Planck/QE-evaluation budget
 and checks cancellation. Fixed-size DD channel sums retain expected collected
 electrons and QE-weighted energy in joules; the latter is a response integral,
 not an absorbed-heat debit. Photon energy uses receiver wavelength exactly once.
+Its `piecewise_with_knots` entry uses the same motion-aligned plan before any
+thermal-history query, sharing the original spectrum, QE and collection rules.
 
 The supplied finite nonnegative etendue is constant in the receiver rest frame
 and already includes projected area, solid angle and throughput. No extra

@@ -2,8 +2,9 @@
 //!
 //! The observable supplies nonnegative rates per receiver proper second at the
 //! original null ray. Four-point Gauss--Legendre quadrature integrates each
-//! authored proper-time panel. Panel edges must resolve source discontinuities
-//! and retarded velocity changes; refinement is the caller's accuracy control.
+//! authored proper-time panel. The opt-in motion-knot path also splits at
+//! detector turns and the received source turns. Material-history changes and
+//! smooth-panel refinement remain the caller's accuracy controls.
 //! This is a deterministic numerical estimate, not an interval error bound or
 //! a guarantee about unsampled source behavior, visibility or coincidences.
 
@@ -25,7 +26,8 @@ pub(crate) const GAUSS4: [(f64, f64); 4] = [
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RetardedExposureSettings {
-    /// Includes both history-preflight endpoints and four nodes per panel.
+    /// Includes history endpoints and four nodes per panel. Automatic alignment
+    /// also charges its two planning endpoints and each source-knot arrival.
     pub max_ray_queries: usize,
     /// Original absolute geometry/clock admission tolerance in metres.
     pub max_residual_m: f64,
@@ -115,6 +117,207 @@ pub fn integrate_piecewise<const C: usize, E>(
     )
 }
 
+/// Add the physical motion boundaries to caller-authored proper-time panels.
+///
+/// Receiver knots split at their accumulated proper times; source knots split
+/// when their emitted light actually reaches this moving receiver. Only source
+/// knots strictly inside the admitted endpoint emission interval are queried.
+/// This resolves velocity jumps, not temperature, visibility or other material
+/// discontinuities. Those still require caller-authored edges and refinement.
+///
+/// One fallible edge allocation is bounded by `max_ray_queries`. Ordered streams
+/// are merged without sorting; exact cross-stream duplicates share one edge.
+/// Planning, history, allocation and total-ray-budget admission finish before
+/// any observable callback. The original authored-only API remains available.
+pub fn integrate_piecewise_with_knots<const C: usize, E>(
+    source: &PiecewiseVacuumWorldline,
+    receiver: &PiecewiseVacuumWorldline,
+    panel_edges_s: &[Dd],
+    settings: RetardedExposureSettings,
+    at_ray: impl FnMut(&RetardedVacuumRay, &mut dyn FnMut() -> bool) -> Result<[f64; C], E>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<RetardedExposureIntegral<C>, RetardedExposureError<E>> {
+    let authored_queries =
+        admit_panels::<C, E>(panel_edges_s, settings.max_ray_queries, &mut cancelled)?;
+    if authored_queries
+        .checked_add(2)
+        .is_none_or(|n| n > settings.max_ray_queries)
+    {
+        return Err(RetardedExposureError::RayBudget);
+    }
+    let interval = [
+        clock(panel_edges_s[0]),
+        clock(panel_edges_s[panel_edges_s.len() - 1]),
+    ];
+    let interval = [
+        interval[0].map_err(RetardedExposureError::Geometry)?,
+        interval[1].map_err(RetardedExposureError::Geometry)?,
+    ];
+    let mut endpoint = |proper| {
+        if cancelled() {
+            return Err(RetardedExposureError::Cancelled);
+        }
+        source
+            .observe(
+                receiver
+                    .reception_at_proper_time(proper, settings.max_residual_m)
+                    .map_err(RetardedExposureError::Geometry)?,
+                settings.max_residual_m,
+            )
+            .map_err(RetardedExposureError::Geometry)
+    };
+    let emission_interval = [
+        endpoint(interval[0])?.emission_coordinate_time_s(),
+        endpoint(interval[1])?.emission_coordinate_time_s(),
+    ];
+    if !emission_interval[0].lt(emission_interval[1]) {
+        return Err(RetardedExposureError::NumericalRange);
+    }
+    let source_range = interior_knots(
+        source.segment_count(),
+        emission_interval,
+        |i| Ok(source.knot(i).0),
+        &mut cancelled,
+    )?;
+    let receiver_range = interior_knots(
+        receiver.segment_count(),
+        interval,
+        |i| receiver.proper_knot_time(i),
+        &mut cancelled,
+    )?;
+    let planning_queries = source_range
+        .len()
+        .checked_add(2)
+        .ok_or(RetardedExposureError::RayBudget)?;
+    let budget = settings
+        .max_ray_queries
+        .checked_sub(planning_queries)
+        .filter(|&n| n >= authored_queries)
+        .ok_or(RetardedExposureError::RayBudget)?;
+    let edge_cap = (budget - 2) / GAUSS4.len() + 1;
+    let worst_edges = panel_edges_s
+        .len()
+        .checked_add(source_range.len())
+        .and_then(|n| n.checked_add(receiver_range.len()))
+        .ok_or(RetardedExposureError::RayBudget)?;
+    let mut edges = Vec::new();
+    edges
+        .try_reserve_exact(worst_edges.min(edge_cap))
+        .map_err(|_| RetardedExposureError::Geometry(RetardedVacuumError::AllocationRefused))?;
+    let (mut authored, mut source_index, mut receiver_index) =
+        (0, source_range.start, receiver_range.start);
+    let mut source_edge = None;
+    let mut previous_source_edge = interval[0];
+    loop {
+        if cancelled() {
+            return Err(RetardedExposureError::Cancelled);
+        }
+        if source_edge.is_none() && source_index < source_range.end {
+            let (time, position) = source.knot(source_index);
+            let arrival = receiver
+                .receive_emission(time, position, settings.max_residual_m)
+                .map_err(RetardedExposureError::Geometry)?;
+            let proper = arrival
+                .proper_time_s()
+                .ok_or(RetardedExposureError::NumericalRange)?;
+            if !previous_source_edge.lt(proper) || !proper.lt(interval[1]) {
+                return Err(RetardedExposureError::NumericalRange);
+            }
+            previous_source_edge = proper;
+            source_edge = Some(proper);
+        }
+        let receiver_edge = if receiver_index < receiver_range.end {
+            let proper = receiver
+                .proper_knot_time(receiver_index)
+                .map_err(RetardedExposureError::Geometry)?;
+            if !receiver
+                .proper_knot_time(receiver_index - 1)
+                .map_err(RetardedExposureError::Geometry)?
+                .lt(proper)
+                || !proper.lt(receiver
+                    .proper_knot_time(receiver_index + 1)
+                    .map_err(RetardedExposureError::Geometry)?)
+            {
+                return Err(RetardedExposureError::NumericalRange);
+            }
+            Some(proper)
+        } else {
+            None
+        };
+        let authored_edge = panel_edges_s
+            .get(authored)
+            .copied()
+            .map(clock)
+            .transpose()
+            .map_err(RetardedExposureError::Geometry)?;
+        let mut next = authored_edge;
+        for candidate in [source_edge, receiver_edge].into_iter().flatten() {
+            if next.is_none_or(|t| candidate.lt(t)) {
+                next = Some(candidate);
+            }
+        }
+        let Some(next) = next else {
+            break;
+        };
+        if edges.last() != Some(&next) {
+            if edges.len() == edge_cap {
+                return Err(RetardedExposureError::RayBudget);
+            }
+            edges.push(next);
+        }
+        if authored_edge == Some(next) {
+            authored += 1;
+        }
+        if receiver_edge == Some(next) {
+            receiver_index += 1;
+        }
+        if source_edge == Some(next) {
+            source_index += 1;
+            source_edge = None;
+        }
+    }
+    let mut result = integrate_piecewise(
+        source,
+        receiver,
+        &edges,
+        RetardedExposureSettings {
+            max_ray_queries: budget,
+            ..settings
+        },
+        at_ray,
+        cancelled,
+    )?;
+    result.ray_queries += planning_queries;
+    Ok(result)
+}
+
+/// Binary bounds exclude endpoint knots before any future-cone query is made.
+fn interior_knots<E>(
+    count: usize,
+    interval: [Dd; 2],
+    mut time_at: impl FnMut(usize) -> Result<Dd, RetardedVacuumError>,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<core::ops::Range<usize>, RetardedExposureError<E>> {
+    let mut bounds = [1, count];
+    for (side, edge) in interval.into_iter().enumerate() {
+        let (mut lower, mut upper) = (1, count);
+        while lower < upper {
+            if cancelled() {
+                return Err(RetardedExposureError::Cancelled);
+            }
+            let middle = lower + (upper - lower) / 2;
+            let time = time_at(middle).map_err(RetardedExposureError::Geometry)?;
+            if time.lt(edge) || (side == 0 && time == edge) {
+                lower = middle + 1;
+            } else {
+                upper = middle;
+            }
+        }
+        bounds[side] = lower;
+    }
+    Ok(bounds[0]..bounds[1])
+}
+
 fn integrate<const C: usize, E>(
     edges: &[Dd],
     settings: RetardedExposureSettings,
@@ -122,30 +325,7 @@ fn integrate<const C: usize, E>(
     mut at_ray: impl FnMut(&RetardedVacuumRay, &mut dyn FnMut() -> bool) -> Result<[f64; C], E>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RetardedExposureIntegral<C>, RetardedExposureError<E>> {
-    if C == 0 || C > MAX_EXPOSURE_CHANNELS {
-        return Err(RetardedExposureError::InvalidChannels);
-    }
-    let queries = edges
-        .len()
-        .checked_sub(1)
-        .filter(|&n| n > 0)
-        .and_then(|n| n.checked_mul(GAUSS4.len()))
-        .and_then(|n| n.checked_add(2))
-        .ok_or(RetardedExposureError::InvalidPanels)?;
-    if queries > settings.max_ray_queries {
-        return Err(RetardedExposureError::RayBudget);
-    }
-    for pair in edges.windows(2) {
-        if cancelled() {
-            return Err(RetardedExposureError::Cancelled);
-        }
-        let lower = clock(pair[0]).map_err(RetardedExposureError::Geometry)?;
-        let upper = clock(pair[1]).map_err(RetardedExposureError::Geometry)?;
-        if !lower.lt(upper) {
-            return Err(RetardedExposureError::InvalidPanels);
-        }
-        checked(upper - lower).map_err(RetardedExposureError::Geometry)?;
-    }
+    let queries = admit_panels::<C, E>(edges, settings.max_ray_queries, &mut cancelled)?;
     let endpoints = [clock(edges[0]), clock(edges[edges.len() - 1])];
     let endpoints = [
         endpoints[0].map_err(RetardedExposureError::Geometry)?,
@@ -205,6 +385,38 @@ fn integrate<const C: usize, E>(
         ray_queries: queries,
         observable_evaluations: queries - 2,
     })
+}
+
+fn admit_panels<const C: usize, E>(
+    edges: &[Dd],
+    budget: usize,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<usize, RetardedExposureError<E>> {
+    if C == 0 || C > MAX_EXPOSURE_CHANNELS {
+        return Err(RetardedExposureError::InvalidChannels);
+    }
+    let queries = edges
+        .len()
+        .checked_sub(1)
+        .filter(|&n| n > 0)
+        .and_then(|n| n.checked_mul(GAUSS4.len()))
+        .and_then(|n| n.checked_add(2))
+        .ok_or(RetardedExposureError::InvalidPanels)?;
+    if queries > budget {
+        return Err(RetardedExposureError::RayBudget);
+    }
+    for pair in edges.windows(2) {
+        if cancelled() {
+            return Err(RetardedExposureError::Cancelled);
+        }
+        let lower = clock(pair[0]).map_err(RetardedExposureError::Geometry)?;
+        let upper = clock(pair[1]).map_err(RetardedExposureError::Geometry)?;
+        if !lower.lt(upper) {
+            return Err(RetardedExposureError::InvalidPanels);
+        }
+        checked(upper - lower).map_err(RetardedExposureError::Geometry)?;
+    }
+    Ok(queries)
 }
 
 #[cfg(test)]

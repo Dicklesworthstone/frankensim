@@ -16,7 +16,7 @@
 
 use super::{
     RetardedVacuumError, RetardedVacuumRay, UniformVacuumWorldline, VacuumReception, checked,
-    clock, finite_vector, norm, position,
+    clock, emission_input, finite_vector, norm, position,
 };
 use crate::spectral::doppler::{FrameVelocity, VACUUM_LIGHT_SPEED_M_S};
 use fs_math::dd::Dd;
@@ -193,7 +193,7 @@ impl PiecewiseVacuumWorldline {
             checked(proper_time_s - self.proper_history_s[0])?
         };
         let segment = &self.segments[lower];
-        let mut receiver = if let Some(knot) = exact_knot {
+        let receiver = if let Some(knot) = exact_knot {
             segment
                 .motion
                 .reception_event(self.knot(knot).0, offset, max_residual_m)?
@@ -202,6 +202,17 @@ impl PiecewiseVacuumWorldline {
                 .motion
                 .reception_at_proper_time(offset, max_residual_m)?
         };
+        self.publish_reception(segment, receiver, proper_time_s, offset, max_residual_m)
+    }
+
+    fn publish_reception(
+        &self,
+        segment: &Segment,
+        mut receiver: VacuumReception,
+        proper_time_s: Dd,
+        offset: Dd,
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
         let epoch_loss = checked(
             checked(((proper_time_s - self.proper_history_s[0]) - offset).abs())?
                 + checked((self.proper_history_s[0] + offset - proper_time_s).abs())?,
@@ -211,6 +222,74 @@ impl PiecewiseVacuumWorldline {
         )?;
         receiver.proper_time_s = Some(proper_time_s);
         receiver.admitted(max_residual_m)
+    }
+
+    /// Receive a fixed emission event on this finite detector trajectory.
+    /// The future-cone residual decreases monotonically over subluminal motion,
+    /// so a binary search selects one segment before the analytic root. Exact
+    /// interior knots use the outgoing velocity; the final knot uses incoming.
+    pub fn receive_emission(
+        &self,
+        emission_coordinate_time_s: Dd,
+        emission_position_m: [Dd; 3],
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
+        let (time, location) = emission_input(
+            emission_coordinate_time_s,
+            emission_position_m,
+            max_residual_m,
+        )?;
+        let residual_at = |index| {
+            let (arrival, position) = self.knot(index);
+            let displacement = finite_vector(core::array::from_fn(|i| position[i] - location[i]))?;
+            checked(
+                norm(displacement)?
+                    - checked(Dd::from_f64(VACUUM_LIGHT_SPEED_M_S) * checked(arrival - time)?)?,
+            )
+        };
+        let count = self.segments.len();
+        let first = residual_at(0)?;
+        let last = residual_at(count)?;
+        if first.lt(Dd::ZERO) || Dd::ZERO.lt(last) {
+            return Err(RetardedVacuumError::OutsideHistory);
+        }
+        let mut lower = 0;
+        let mut upper = count;
+        let mut exact = if first == Dd::ZERO {
+            Some(0)
+        } else if last == Dd::ZERO {
+            lower = count - 1;
+            Some(count)
+        } else {
+            None
+        };
+        while exact.is_none() && upper - lower > 1 {
+            let middle = lower + (upper - lower) / 2;
+            let residual = residual_at(middle)?;
+            if !residual.lt(Dd::ZERO) {
+                lower = middle;
+                if residual == Dd::ZERO {
+                    exact = Some(middle);
+                }
+            } else {
+                upper = middle;
+            }
+        }
+        let segment = &self.segments[lower];
+        let receiver = if let Some(index) = exact {
+            segment
+                .motion
+                .receive_at(time, location, self.knot(index).0, max_residual_m)?
+        } else {
+            segment
+                .motion
+                .receive_emission(time, location, max_residual_m)?
+        };
+        let offset = receiver
+            .proper_time_s
+            .ok_or(RetardedVacuumError::NumericalRange)?;
+        let proper = checked(self.proper_history_s[0] + offset)?;
+        self.publish_reception(segment, receiver, proper, offset, max_residual_m)
     }
 
     /// Select the unique causal segment, then use the original analytic solve.
@@ -255,7 +334,7 @@ impl PiecewiseVacuumWorldline {
         self.observe_segment(lower, None, receiver, max_residual_m)
     }
 
-    fn knot(&self, index: usize) -> (Dd, [Dd; 3]) {
+    pub(super) fn knot(&self, index: usize) -> (Dd, [Dd; 3]) {
         if index == self.segments.len() {
             (self.last_coordinate_time_s, self.last_position_m)
         } else {
@@ -275,7 +354,7 @@ impl PiecewiseVacuumWorldline {
         }
     }
 
-    fn proper_knot_time(&self, index: usize) -> Result<Dd, RetardedVacuumError> {
+    pub(super) fn proper_knot_time(&self, index: usize) -> Result<Dd, RetardedVacuumError> {
         checked(self.proper_history_s[0] + self.proper_knot_offset(index))
     }
 
