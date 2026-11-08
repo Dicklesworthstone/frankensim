@@ -19,8 +19,8 @@ pub enum DuffingBackboneError {
     NoPeriodicOrbit,
     /// An active stress channel drives a different displacement coordinate.
     NonInvariantAxis,
-    /// The positive physical frequency cannot be represented, or bounded AGM
-    /// refinement did not resolve its floating-point limit.
+    /// The physical frequency/derivative cannot be represented, or bounded
+    /// AGM refinement did not resolve its floating-point limit.
     NumericalRange,
 }
 
@@ -30,6 +30,117 @@ impl core::fmt::Display for DuffingBackboneError {
     }
 }
 impl std::error::Error for DuffingBackboneError {}
+
+/// A direction in the ORIGINAL Duffing parameters, per caller-owned parameter.
+/// These are partial input changes, not logarithmic derivatives. In particular,
+/// a nonzero `beta` direction is meaningful at a linear baseline `beta = 0`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DuffingBackboneDirection {
+    pub omega0: f64,
+    pub beta: f64,
+    pub amplitude: f64,
+}
+
+/// Conservative turning-amplitude frequency and its analytic local derivative.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DuffingBackboneDerivative {
+    pub angular_frequency_rad_s: f64,
+    /// rad/s per unit of the parameter defining the supplied direction.
+    pub angular_frequency_derivative: f64,
+}
+
+/// Differentiate the complete conservative period, including large-amplitude
+/// hardening and the steep softening slope approaching the separatrix.
+///
+/// This differentiates the same energy-integral AGM as [`duffing_backbone_exact`],
+/// with no differencing step, weak-amplitude expansion or numerical quadrature.
+/// It does not infer a damped/forced peak or a coupled orbit's stability. Source
+/// and direction units are unchanged. Frequency and derivative products are
+/// independently binary-scaled before quad-double contraction; only the final
+/// physical derivative must fit `f64`. An unrepresentable derivative refuses.
+///
+/// Each of the frequency and tangent passes is bounded by 32 AGM iterations
+/// and uses constant memory. The frequency uses the original owner unchanged.
+/// At zero amplitude the limit is differentiated from the admitted nonnegative
+/// side; a free baseline refuses because it has no finite-period orbit.
+pub fn duffing_backbone_directional_derivative(
+    omega0: f64,
+    beta: f64,
+    amplitude: f64,
+    direction: DuffingBackboneDirection,
+) -> Result<DuffingBackboneDerivative, DuffingBackboneError> {
+    if [direction.omega0, direction.beta, direction.amplitude]
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(DuffingBackboneError::InvalidInput);
+    }
+    let frequency = duffing_backbone_exact(omega0, beta, amplitude)?;
+    if amplitude == 0.0 {
+        return Ok(DuffingBackboneDerivative {
+            angular_frequency_rad_s: frequency,
+            angular_frequency_derivative: direction.omega0,
+        });
+    }
+    let product = |factors: &[f64]| {
+        let mut value = Qd::from_f64(1.0);
+        let mut exponent = 0;
+        for &factor in factors {
+            if factor == 0.0 {
+                return (Qd::ZERO, -8192);
+            }
+            let (mantissa, power) = binary_parts(factor.abs());
+            value = value * mantissa.copysign(factor);
+            exponent += power;
+        }
+        (value, exponent)
+    };
+    let linear = product(&[omega0, omega0]);
+    let nonlinear = product(&[beta, amplitude, amplitude]);
+    let rate_exponent = linear.1.max(nonlinear.1).div_euclid(2);
+    let scaled = |term: (Qd, i32), exponent| term.0.scale_power_of_two(term.1 - exponent);
+    let linear = scaled(linear, 2 * rate_exponent);
+    let nonlinear = scaled(nonlinear, 2 * rate_exponent);
+    let mut a = det::sqrt((linear + nonlinear).to_f64());
+    let mut b = det::sqrt((linear + nonlinear * 0.5).to_f64());
+    let linear_direction = product(&[2.0, omega0, direction.omega0]);
+    let beta_direction = product(&[direction.beta, amplitude, amplitude]);
+    let amplitude_direction = product(&[2.0, beta, amplitude, direction.amplitude]);
+    let derivative_exponent = linear_direction
+        .1
+        .max(beta_direction.1)
+        .max(amplitude_direction.1);
+    let dl = scaled(linear_direction, derivative_exponent);
+    let dn = scaled(beta_direction, derivative_exponent)
+        + scaled(amplitude_direction, derivative_exponent);
+    let mut da = (dl + dn) / (2.0 * a);
+    let mut db = (dl + dn * 0.5) / (2.0 * b);
+    for _ in 0..32 {
+        let mean = 0.5 * (a + b);
+        let mean_direction = (da + db) * 0.5;
+        // At coincident primal iterates the two AGM partial derivatives are
+        // exactly 1/2, even when the two incoming tangent values differ.
+        if (a - b).abs() <= 4.0 * f64::EPSILON * mean {
+            let derivative = mean_direction
+                .scale_power_of_two(derivative_exponent - rate_exponent)
+                .to_f64();
+            if !derivative.is_finite() || (derivative == 0.0 && !mean_direction.is_zero()) {
+                return Err(DuffingBackboneError::NumericalRange);
+            }
+            return Ok(DuffingBackboneDerivative {
+                angular_frequency_rad_s: frequency,
+                angular_frequency_derivative: derivative,
+            });
+        }
+        let geometric = det::sqrt(a * b);
+        let geometric_direction = (da * b + db * a) / (2.0 * geometric);
+        a = mean;
+        b = geometric;
+        da = mean_direction;
+        db = geometric_direction;
+    }
+    Err(DuffingBackboneError::NumericalRange)
+}
 
 /// Exact conservative angular frequency [rad/s] for
 /// `q'' + omega0^2*q + beta*q^3 = 0` with `q(0)=amplitude`, `q'(0)=0`.
@@ -137,6 +248,36 @@ pub(crate) fn invariant_axis_backbone<'a>(
     mode: usize,
     amplitude: f64,
 ) -> Result<f64, DuffingBackboneError> {
+    let (omega, beta) = invariant_axis_parameters(omegas, channels, mode)?;
+    duffing_backbone_exact(omega, beta, amplitude)
+}
+
+/// Source-bound amplitude derivative, with the same exact invariant-axis
+/// admission as the frequency itself.
+pub(crate) fn invariant_axis_backbone_amplitude_derivative<'a>(
+    omegas: &[f64],
+    channels: impl Iterator<Item = (f64, &'a [f64])>,
+    mode: usize,
+    amplitude: f64,
+) -> Result<DuffingBackboneDerivative, DuffingBackboneError> {
+    let (omega, beta) = invariant_axis_parameters(omegas, channels, mode)?;
+    duffing_backbone_directional_derivative(
+        omega,
+        beta,
+        amplitude,
+        DuffingBackboneDirection {
+            omega0: 0.0,
+            beta: 0.0,
+            amplitude: 1.0,
+        },
+    )
+}
+
+fn invariant_axis_parameters<'a>(
+    omegas: &[f64],
+    channels: impl Iterator<Item = (f64, &'a [f64])>,
+    mode: usize,
+) -> Result<(f64, f64), DuffingBackboneError> {
     let n = omegas.len();
     let omega = *omegas.get(mode).ok_or(DuffingBackboneError::InvalidInput)?;
     let square = n.checked_mul(n).ok_or(DuffingBackboneError::InvalidInput)?;
@@ -159,12 +300,16 @@ pub(crate) fn invariant_axis_backbone<'a>(
             beta += term;
         }
     }
-    duffing_backbone_exact(omega, beta, amplitude)
+    Ok((omega, beta))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DuffingBackboneError, duffing_backbone_exact, invariant_axis_backbone};
+    use super::{
+        DuffingBackboneDirection, DuffingBackboneError, duffing_backbone_directional_derivative,
+        duffing_backbone_exact, invariant_axis_backbone,
+        invariant_axis_backbone_amplitude_derivative,
+    };
 
     fn close(got: f64, expected: f64, relative: f64) {
         assert!(
@@ -333,6 +478,23 @@ mod tests {
                 .unwrap(),
                 duffing_backbone_exact(omegas[mode], beta, 0.7).unwrap(),
             );
+            let response = invariant_axis_backbone_amplitude_derivative(
+                &omegas,
+                [(2.0, &first[..]), (3.0, &second[..])].into_iter(),
+                mode,
+                0.7,
+            )
+            .unwrap();
+            let direction = DuffingBackboneDirection {
+                omega0: 0.0,
+                beta: 0.0,
+                amplitude: 1.0,
+            };
+            close(
+                response.angular_frequency_derivative,
+                integral_derivative(omegas[mode], beta, 0.7, direction),
+                3e-12,
+            );
         }
     }
 
@@ -344,6 +506,15 @@ mod tests {
         for mode in 0..2 {
             assert_eq!(
                 invariant_axis_backbone(&omegas, [(1.0, &coupled[..])].into_iter(), mode, 0.7),
+                Err(DuffingBackboneError::NonInvariantAxis),
+            );
+            assert_eq!(
+                invariant_axis_backbone_amplitude_derivative(
+                    &omegas,
+                    [(1.0, &coupled[..])].into_iter(),
+                    mode,
+                    0.7,
+                ),
                 Err(DuffingBackboneError::NonInvariantAxis),
             );
             assert_eq!(
@@ -372,6 +543,194 @@ mod tests {
         assert_eq!(
             invariant_axis_backbone(&[1.0], [(1e-200, &[1e-200][..])].into_iter(), 0, 1e300),
             Err(DuffingBackboneError::NumericalRange),
+        );
+    }
+
+    // Independently differentiate the energy-separated quarter-period integral.
+    // This uses ordinary real quadrature and no differentiated AGM recurrence.
+    fn integral_derivative(w: f64, beta: f64, a: f64, d: DuffingBackboneDirection) -> f64 {
+        let count = 16_384;
+        let step = core::f64::consts::FRAC_PI_2 / f64::from(count);
+        let mut period = 0.0;
+        let mut derivative = 0.0;
+        for i in 0..=count {
+            let sine = (f64::from(i) * step).sin();
+            let shape = 0.5 * (1.0 + sine * sine);
+            let stiffness = w * w + beta * a * a * shape;
+            let tangent =
+                2.0 * w * d.omega0 + (d.beta * a * a + 2.0 * beta * a * d.amplitude) * shape;
+            let weight = if i == 0 || i == count {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            period += weight / stiffness.sqrt();
+            derivative -= 0.5 * weight * tangent / (stiffness * stiffness.sqrt());
+        }
+        -core::f64::consts::TAU * derivative / (4.0 * step * period * period / 3.0)
+    }
+
+    #[test]
+    fn g1_exact_backbone_tuning_matches_independent_period_integral() {
+        for ratio in [-0.99, -0.7, -0.1, 0.0, 0.01, 1.0, 100.0, 1e6] {
+            let (w, a) = (7.0, 0.4);
+            let beta = ratio * w * w / (a * a);
+            for d in [
+                DuffingBackboneDirection {
+                    omega0: 1.0,
+                    beta: 0.0,
+                    amplitude: 0.0,
+                },
+                DuffingBackboneDirection {
+                    omega0: 0.0,
+                    beta: 1.0,
+                    amplitude: 0.0,
+                },
+                DuffingBackboneDirection {
+                    omega0: 0.0,
+                    beta: 0.0,
+                    amplitude: 1.0,
+                },
+                DuffingBackboneDirection {
+                    omega0: 0.3,
+                    beta: -0.2,
+                    amplitude: 0.1,
+                },
+            ] {
+                let actual = duffing_backbone_directional_derivative(w, beta, a, d).unwrap();
+                assert_eq!(
+                    actual.angular_frequency_rad_s,
+                    duffing_backbone_exact(w, beta, a).unwrap()
+                );
+                let expected = integral_derivative(w, beta, a, d);
+                if expected == 0.0 {
+                    assert_eq!(actual.angular_frequency_derivative, 0.0);
+                } else {
+                    close(actual.angular_frequency_derivative, expected, 3e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g1_linear_pure_quartic_and_zero_amplitude_tuning_limits() {
+        let d = DuffingBackboneDirection {
+            omega0: 0.0,
+            beta: 1.0,
+            amplitude: 0.0,
+        };
+        close(
+            duffing_backbone_directional_derivative(7.0, 0.0, 0.4, d)
+                .unwrap()
+                .angular_frequency_derivative,
+            3.0 * 0.4 * 0.4 / (8.0 * 7.0),
+            2e-15,
+        );
+        let d = DuffingBackboneDirection {
+            omega0: 0.2,
+            beta: -2.0,
+            amplitude: 3.0,
+        };
+        assert_eq!(
+            duffing_backbone_directional_derivative(7.0, -30.0, 0.0, d)
+                .unwrap()
+                .angular_frequency_derivative,
+            0.2,
+        );
+        let d = DuffingBackboneDirection {
+            omega0: 0.0,
+            beta: 0.0,
+            amplitude: 1.0,
+        };
+        let response = duffing_backbone_directional_derivative(0.0, 20.0, 0.4, d).unwrap();
+        close(
+            response.angular_frequency_derivative,
+            response.angular_frequency_rad_s / 0.4,
+            2e-15,
+        );
+    }
+
+    #[test]
+    fn g3_tuning_retains_homogeneity_and_cancellation_across_units() {
+        for (rate_exp, amplitude_exp) in [(0, 0), (800, 400), (-800, -400)] {
+            let w = 2.0_f64.powi(rate_exp);
+            let a = 2.0_f64.powi(amplitude_exp);
+            let beta = 2.0_f64.powi(2 * (rate_exp - amplitude_exp));
+            let d = DuffingBackboneDirection {
+                omega0: w,
+                beta: 2.0 * beta,
+                amplitude: 0.0,
+            };
+            let response = duffing_backbone_directional_derivative(w, beta, a, d).unwrap();
+            close(
+                response.angular_frequency_derivative,
+                response.angular_frequency_rad_s,
+                3e-15,
+            );
+            let d = DuffingBackboneDirection {
+                omega0: 0.0,
+                beta: -2.0 * beta,
+                amplitude: a,
+            };
+            assert_eq!(
+                duffing_backbone_directional_derivative(w, beta, a, d)
+                    .unwrap()
+                    .angular_frequency_derivative,
+                0.0
+            );
+        }
+    }
+
+    #[test]
+    fn g1_softening_tuning_diverges_toward_the_physical_separatrix() {
+        let t = 2.0_f64.powi(-53);
+        let a = 1.0 - t;
+        let d = DuffingBackboneDirection {
+            omega0: 0.0,
+            beta: 0.0,
+            amplitude: 1.0,
+        };
+        for (beta, margin) in [
+            (-1.0, (1.0 - a) * (1.0 + a)),
+            // Ordinary binary64 stiffness products erase this well margin.
+            (-(1.0 + 2.0 * t), (3.0 - 2.0 * t) * t * t),
+        ] {
+            let response = duffing_backbone_directional_derivative(1.0, beta, a, d).unwrap();
+            let high = ((1.0 + margin) * 0.5).sqrt();
+            let logarithm = (4.0 * high / margin.sqrt()).ln();
+            let log_high_derivative = beta * a / (1.0 + margin);
+            let expected = response.angular_frequency_rad_s
+                * (log_high_derivative - (log_high_derivative - beta * a / margin) / logarithm);
+            close(response.angular_frequency_derivative, expected, 2e-14);
+            assert!(response.angular_frequency_derivative < -1e12);
+        }
+    }
+
+    #[test]
+    fn g0_tuning_refuses_invalid_or_unrepresentable_results() {
+        let bad = DuffingBackboneDirection {
+            omega0: 0.0,
+            beta: f64::NAN,
+            amplitude: 0.0,
+        };
+        assert_eq!(
+            duffing_backbone_directional_derivative(1.0, 1.0, 1.0, bad),
+            Err(DuffingBackboneError::InvalidInput)
+        );
+        let d = DuffingBackboneDirection {
+            omega0: 0.0,
+            beta: 1.0,
+            amplitude: 0.0,
+        };
+        assert_eq!(
+            duffing_backbone_directional_derivative(1.0, -1.0, 1.0, d),
+            Err(DuffingBackboneError::NoPeriodicOrbit)
+        );
+        assert_eq!(
+            duffing_backbone_directional_derivative(1e-300, 0.0, 1e300, d),
+            Err(DuffingBackboneError::NumericalRange)
         );
     }
 }

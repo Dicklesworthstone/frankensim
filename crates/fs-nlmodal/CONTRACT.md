@@ -279,6 +279,19 @@ the crash cascade with structurally exact energy accounting.
   stability results; turning amplitude differs from the pinned Fourier
   amplitude in harmonic balance. G1/G3 tests independently integrate the energy
   period and check the weak/pure-quartic/separatrix and unit-scaling limits.
+- `duffing_backbone_directional_derivative` supplies the analytic local
+  frequency change for any direction in the original linear frequency,
+  cubic stiffness and turning amplitude. It differentiates the full-period
+  AGM, including a nonlinear-stiffness direction at a linear baseline and the
+  divergent softening slope near the separatrix. Independent binary scaling
+  of source and derivative products retains extreme units; quad-double
+  contractions retain cancellation. No finite-difference step or
+  small-amplitude approximation is used. Nonperiodic sources and
+  unrepresentable derivatives refuse. The storage-bound
+  `invariant_axis_backbone_amplitude_derivative` reuses the same original
+  source reduction and channel-by-channel invariance admission. G1/G3 tests
+  compare an independently differentiated energy-period integral and verify
+  linear, pure-quartic, separatrix, homogeneity and unit-scaling limits.
 - The `assemble*` systems retain fs-phs's original-energy discrete-gradient
   stepping, striking, damping, and work ledger.
 - `sav::{SavStepper, SavConfig, SavState, SavRecord}` is a separate opt-in

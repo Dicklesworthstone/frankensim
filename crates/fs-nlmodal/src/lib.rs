@@ -53,7 +53,10 @@ pub mod backbone;
 pub mod longitudinal;
 pub mod preload;
 pub mod sav;
-pub use backbone::{DuffingBackboneError, duffing_backbone_exact};
+pub use backbone::{
+    DuffingBackboneDerivative, DuffingBackboneDirection, DuffingBackboneError,
+    duffing_backbone_directional_derivative, duffing_backbone_exact,
+};
 pub use preload::PreloadedModalStorage;
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the
@@ -215,6 +218,37 @@ impl SosModalStorage {
                 "backbone axis couples to other displacement coordinates"
             } else {
                 "backbone mode, amplitude or scalar frequency is not representable"
+            },
+        })
+    }
+
+    /// Exact local frequency change per unit of physical turning amplitude.
+    ///
+    /// This differentiates the same source-bound conservative orbit as
+    /// [`Self::invariant_axis_backbone`], including finite-amplitude hardening.
+    /// The derivative uses the original mass-normalized displacement units;
+    /// it is not a weak-amplitude approximation or a forced-peak derivative.
+    /// Every active stress channel must preserve the selected axis. No source
+    /// coefficients, state, damping, or coupled dynamics are changed.
+    pub fn invariant_axis_backbone_amplitude_derivative(
+        &self,
+        mode: usize,
+        amplitude: f64,
+    ) -> Result<DuffingBackboneDerivative, NlModalError> {
+        self.validate()?;
+        backbone::invariant_axis_backbone_amplitude_derivative(
+            &self.omegas,
+            self.channels
+                .iter()
+                .map(|channel| (channel.coefficient, channel.coupling.as_slice())),
+            mode,
+            amplitude,
+        )
+        .map_err(|error| NlModalError::Parameter {
+            what: if error == DuffingBackboneError::NonInvariantAxis {
+                "backbone axis couples to other displacement coordinates"
+            } else {
+                "backbone mode, amplitude, frequency or derivative is not representable"
             },
         })
     }
