@@ -45,12 +45,27 @@ impl ImplicitLinkState {
 /// material owner may integrate k(T) through both half cells and their contact,
 /// then supply the secant and analytic endpoint tangents. It must admit every
 /// trial against its source domains, and must not advance or mutate history.
-/// The supplied patch retains the original ordered cells, area and coverage.
-/// The supplied geometry is the original link's complete resistance model;
+/// The supplied patch retains the original ordered cells and material-reference
+/// covered areas. Its link area and the supplied normal distances are the
+/// current transport measures when mechanical geometry is explicitly bound;
+/// otherwise they retain the original reference/planar-layer values. Geometry
+/// stays fixed during the ordinary query. A geometry-pinned law must reject
+/// unsupported measures instead of substituting its stored reference values.
+/// The supplied geometry retains the original complete resistance model;
 /// independent contact laws cannot also own this link. No internal half-cell
 /// storage, additional heat source or different time integration is introduced.
 pub trait ImplicitLinkLaw {
     fn caloric_laws(&self) -> [&dyn ThermalLaw; 2];
+
+    /// Opt in to externally supplied current area and normal distances.
+    /// The ordinary query must use those measures for BOTH flux and tangent,
+    /// retaining reference coverage separately. Geometry-specific admission
+    /// still applies. The default protects laws prepared on fixed metrics from
+    /// silently using stale dimensions when mechanical geometry is attached.
+    fn supports_current_geometry(&self) -> bool {
+        false
+    }
+
     fn state_at_specific_enthalpies(
         &self,
         enthalpies_j_kg: [f64; 2],
@@ -112,6 +127,11 @@ impl<'a> ImplicitConductionChain<'a> {
         let mut bindings = BTreeMap::new();
         for &(id, law) in links {
             checkpoint()?;
+            if self.conduction.current_geometry.is_some() && !law.supports_current_geometry() {
+                return Err(ImplicitConductionError::Invalid(
+                    "current mechanical link measures require an explicitly compatible flux law",
+                ));
+            }
             let link = self
                 .conduction
                 .links

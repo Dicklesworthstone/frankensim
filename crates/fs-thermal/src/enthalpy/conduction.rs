@@ -619,22 +619,13 @@ impl<'a> ConductionObserver<'a> {
                 ));
             }
             let geometry = binding.geometry;
-            let (area_m2, half_distances_m) = match &self.current_geometry {
-                Some(current) => {
-                    let metric = current.links[&id];
-                    (metric.area_m2, metric.half_distances_m)
-                }
-                None => (
-                    binding.area_m2,
-                    [
-                        self.half_distance(binding.a, geometry.half_distances_m[0]),
-                        self.half_distance(binding.b, geometry.half_distances_m[1]),
-                    ],
-                ),
-            };
+            let metric = self.link_metrics(binding);
             let g = series_contact_conductance_w_k(
-                area_m2,
-                half_distances_m,
+                metric.area_m2,
+                [
+                    self.half_distance(binding.a, metric.half_distances_m[0]),
+                    self.half_distance(binding.b, metric.half_distances_m[1]),
+                ],
                 [self.conductivity[&binding.a], self.conductivity[&binding.b]],
                 geometry.contact_resistance_m2_k_w,
             )?;
@@ -658,16 +649,10 @@ impl<'a> ConductionObserver<'a> {
             }
             let k = self.conductivity[&id];
             let geometry = binding.geometry;
-            let (area_m2, half_distance_m) = match &self.current_geometry {
-                Some(current) => {
-                    let metric = current.reservoirs[&id];
-                    (metric.area_m2, metric.half_distance_m)
-                }
-                None => (binding.area_m2, self.half_distance(id, geometry.half_distance_m)),
-            };
+            let metric = self.reservoir_metrics(binding);
             let g = surface_conductance_w_k(
-                area_m2,
-                half_distance_m,
+                metric.area_m2,
+                self.half_distance(id, metric.half_distance_m),
                 k,
                 geometry.surface_resistance_m2_k_w,
             )?;
@@ -677,16 +662,10 @@ impl<'a> ConductionObserver<'a> {
         for (&id, binding) in &self.ambient_faces {
             checkpoint()?;
             let geometry = binding.geometry;
-            let (area_m2, half_distance_m) = match &self.current_geometry {
-                Some(current) => {
-                    let metric = current.ambient_faces[&id];
-                    (metric.area_m2, metric.half_distance_m)
-                }
-                None => (binding.area_m2, self.half_distance(id, geometry.half_distance_m)),
-            };
+            let metric = self.ambient_metrics(binding);
             let g = surface_conductance_w_k(
-                area_m2,
-                half_distance_m,
+                metric.area_m2,
+                self.half_distance(id, metric.half_distance_m),
                 self.conductivity[&id],
                 geometry.surface_resistance_m2_k_w,
             )?;

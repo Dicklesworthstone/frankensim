@@ -1505,3 +1505,6 @@ mod heat_source;
 
 #[path = "tests/bath_history.rs"]
 mod bath_history;
+
+#[path = "tests/current_geometry.rs"]
+mod current_geometry;

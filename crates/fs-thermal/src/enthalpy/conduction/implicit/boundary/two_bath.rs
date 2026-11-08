@@ -405,6 +405,10 @@ impl<'a> GrayTwoBathBoundary<'a> {
 }
 
 impl ImplicitBoundaryExchangeLaw for GrayTwoBathBoundary<'_> {
+    fn supports_current_geometry(&self) -> bool {
+        true
+    }
+
     fn caloric_law(&self) -> &dyn ThermalLaw {
         self.material.caloric_law()
     }

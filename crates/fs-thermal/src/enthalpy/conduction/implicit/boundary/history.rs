@@ -287,13 +287,14 @@ impl<'a> ImplicitConductionChain<'a> {
             let derivative = if let Some(boundary) = endpoint.reservoir_states.get(&id) {
                 boundary.power_enthalpy_derivative_w_kg_j
             } else {
+                let metric = self.conduction.reservoir_metrics(&binding);
                 let dg = conductance_derivative(
                     g,
-                    binding.area_m2,
+                    metric.area_m2,
                     endpoint_distance(
                         &endpoint.layer_distances,
                         index,
-                        binding.geometry.half_distance_m,
+                        metric.half_distance_m,
                     ),
                     state,
                 )?;
@@ -323,13 +324,14 @@ impl<'a> ImplicitConductionChain<'a> {
                 let derivative = if let Some(boundary) = endpoint.ambient_states.get(&id) {
                     boundary.power_enthalpy_derivative_w_kg_j
                 } else {
+                    let metric = self.conduction.ambient_metrics(binding);
                     let dg = conductance_derivative(
                         g,
-                        binding.area_m2,
+                        metric.area_m2,
                         endpoint_distance(
                             &endpoint.layer_distances,
                             index,
-                            binding.geometry.half_distance_m,
+                            metric.half_distance_m,
                         ),
                         state,
                     )?;

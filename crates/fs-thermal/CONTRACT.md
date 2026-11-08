@@ -3575,17 +3575,43 @@ flux, entropy, source refresh, CFL, event and transactional owners consume those
 metrics; no caloric or density remap occurs. The independent mechanical or
 geometric owner supplies these measures, held for one proposed interval.
 
+Implicit chains and graphs accept the same current measures in backward Euler
+and SDIRK2. Their fluxes, conductivity/contact tangents, finite insulating-onset
+derivatives, and fixed or scheduled reservoir/ambient derivatives all use the
+same current areas and normal distances. Newton trials and both SDIRK stages
+hold this mechanical configuration fixed while the original nonlinear material
+laws continue responding to enthalpy. The sparse/direct solve, conservative
+storage, paired heat, bath entropy and transactional acceptance remain shared.
+Original mass and contact coverage are rechecked both at construction and on
+continuation, so a stale deformed binding cannot admit a changed inventory.
+
+Complete link, boundary and two-bath laws must explicitly opt in through
+`supports_current_geometry`. Its default refusal protects reference-pinned
+adapters before any flux query. Compatible link laws receive current flux area
+and normal distances with original ordered cells and per-side reference
+coverage; boundary laws receive actual area/distance in their existing geometry
+argument. Native gray closures opt in while retaining their geometric domains,
+including equal-area/full-view restrictions on radiative links. Source-owned
+admission may still reject incompatible measures; reference geometry is never
+substituted. Unbound ambient Robin channels retain authored reference areas.
+
 Normal two-point flow, unchanged topology and coverage, and first-order
 physical-interval/substep refinement remain explicit assumptions. Arbitrary
 skewed-tetrahedron Fourier accuracy, opening contacts, remeshing and anisotropy
 are not inferred. Phase-density geometry cannot silently compose with these
-metrics. The implicit chain/graph paths refuse this binding rather than use
-stale reference measures.
+metrics. Removing the explicit thermal CFL does not resolve mechanical motion
+or make the frozen-geometry coupling second order.
 
 Two synthetic regression definitions cover independent mixed-channel heat,
-reference inventory, native CFL/entropy, and failed-admission retry. Focused
-Rust parsing/formatting and independent scalar heat calculations passed; native
-compilation and test execution remain unverified in this environment.
+reference inventory, native CFL/entropy, and failed-admission retry. Seven
+implicit regressions define unequal-capacity analytic BE/SDIRK relaxation,
+branched finite-body balance with asymmetric reference coverage, nonlinear
+contact and scheduled-bath Jacobians, insulating onset, integrated Kirchhoff
+links/baths, separate bath entropy, compatible gray closures, reference-pinned
+source refusal and late-cancellation retry. Focused Rust
+parsing/formatting passed; native compilation and integration-test execution
+remain unverified in this environment because workspace dependencies are
+unavailable.
 
 ### Signed heat channels and latent storage
 

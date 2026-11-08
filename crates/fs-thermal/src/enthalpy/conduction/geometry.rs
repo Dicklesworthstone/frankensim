@@ -127,9 +127,10 @@ impl<'a> ConductionObserver<'a> {
     /// native heat substep; current geometry is held for this proposed interval.
     ///
     /// This first-order endpoint-geometry composition needs independent physical
-    /// interval and thermal-substep refinement. Explicit timeline fluxes and CFL
-    /// consume the same refreshed conductances. The implicit path currently
-    /// refuses this binding instead of silently using its reference metrics.
+    /// interval and thermal-substep refinement. Explicit timeline fluxes and CFL,
+    /// and implicit chain/graph fluxes and Jacobians, consume the same metrics.
+    /// Implicit Newton trials and SDIRK stages hold this configuration fixed;
+    /// removing the thermal CFL does not resolve mechanical geometry evolution.
     pub fn with_current_geometry(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -158,5 +159,37 @@ impl<'a> ConductionObserver<'a> {
     /// `None` retains the original reference/planar-layer behavior.
     pub fn current_geometry(&self) -> Option<&CurrentConductionGeometry> {
         self.current_geometry.as_ref()
+    }
+
+    // Normal transport measures before any separately owned planar-density
+    // response. Current mechanical metrics and planar layers are exclusive.
+    pub(super) fn link_metrics(&self, binding: &BoundLink) -> CurrentConductiveLink {
+        self.current_geometry.as_ref().map_or(
+            CurrentConductiveLink {
+                area_m2: binding.area_m2,
+                half_distances_m: binding.geometry.half_distances_m,
+            },
+            |current| current.links[&binding.geometry.link_id],
+        )
+    }
+
+    pub(super) fn reservoir_metrics(&self, binding: &BoundReservoir) -> CurrentConductiveBoundary {
+        self.current_geometry.as_ref().map_or(
+            CurrentConductiveBoundary {
+                area_m2: binding.area_m2,
+                half_distance_m: binding.geometry.half_distance_m,
+            },
+            |current| current.reservoirs[&binding.geometry.cell_id],
+        )
+    }
+
+    pub(super) fn ambient_metrics(&self, binding: &BoundAmbient) -> CurrentConductiveBoundary {
+        self.current_geometry.as_ref().map_or(
+            CurrentConductiveBoundary {
+                area_m2: binding.area_m2,
+                half_distance_m: binding.geometry.half_distance_m,
+            },
+            |current| current.ambient_faces[&binding.geometry.cell_id],
+        )
     }
 }

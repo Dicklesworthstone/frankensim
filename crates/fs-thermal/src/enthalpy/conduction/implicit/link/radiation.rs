@@ -553,6 +553,10 @@ impl<'a> GrayRadiativeLink<'a> {
 }
 
 impl ImplicitLinkLaw for GrayRadiativeLink<'_> {
+    fn supports_current_geometry(&self) -> bool {
+        true
+    }
+
     fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
         [
             self.materials[0].caloric_law(),

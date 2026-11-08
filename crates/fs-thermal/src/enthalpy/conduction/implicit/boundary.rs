@@ -39,6 +39,8 @@ pub use exterior::{
 /// Original centre-to-face geometry and the external film/contact resistance.
 /// Area is the actual reservoir coverage or exposed ambient area. Resistance
 /// is area-specific; a material owner converts it to total K/W exactly once.
+/// Explicitly bound current mechanical measures replace reference area and
+/// distance, held fixed during a solve; they never replace reference inventory.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitBoundaryGeometry {
     pub area_m2: f64,
@@ -79,6 +81,14 @@ impl ImplicitBoundaryState {
 /// adds no face storage, extra boundary heat or separate time integrator.
 pub trait ImplicitBoundaryLaw {
     fn caloric_law(&self) -> &dyn ThermalLaw;
+
+    /// Opt in to current mechanical area/distance in the supplied geometry.
+    /// Both flux and tangent must use these actual measures, subject to the
+    /// law's geometric domain. The default protects reference-pinned adapters.
+    fn supports_current_geometry(&self) -> bool {
+        false
+    }
+
     fn state_at_specific_enthalpy(
         &self,
         specific_h_j_kg: f64,
@@ -148,6 +158,14 @@ impl ImplicitBoundaryExchangeState {
 /// powers; no effective single reservoir or separate source is inferred.
 pub trait ImplicitBoundaryExchangeLaw {
     fn caloric_law(&self) -> &dyn ThermalLaw;
+
+    /// Opt in to current mechanical area/distance for both bath powers and
+    /// their total tangent. Source geometry admission remains authoritative;
+    /// the default prevents a fixed-metric law from using stale dimensions.
+    fn supports_current_geometry(&self) -> bool {
+        false
+    }
+
     fn state_at_specific_enthalpy(
         &self,
         specific_h_j_kg: f64,
@@ -265,6 +283,11 @@ impl<'a> ImplicitConductionChain<'a> {
         ] {
             for &(id, law) in selected {
                 checkpoint()?;
+                if self.conduction.current_geometry.is_some() && !law.supports_current_geometry() {
+                    return Err(ImplicitConductionError::Invalid(
+                        "current mechanical boundary measures require an explicitly compatible flux law",
+                    ));
+                }
                 let present = if reservoir {
                     self.conduction.reservoirs.contains_key(&id)
                 } else {
@@ -329,6 +352,11 @@ impl<'a> ImplicitConductionChain<'a> {
         ] {
             for &(id, law) in selected {
                 checkpoint()?;
+                if self.conduction.current_geometry.is_some() && !law.supports_current_geometry() {
+                    return Err(ImplicitConductionError::Invalid(
+                        "current mechanical boundary measures require an explicitly compatible exchange law",
+                    ));
+                }
                 let (present, occupied) = if reservoir {
                     (
                         self.conduction.reservoirs.contains_key(&id),
