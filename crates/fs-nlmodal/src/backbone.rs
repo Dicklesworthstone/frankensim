@@ -9,6 +9,9 @@
 
 use fs_math::{det, qd::Qd};
 
+mod spectrum;
+pub use spectrum::{DuffingSpectrum, MAX_DUFFING_HARMONICS, duffing_spectrum_exact};
+
 /// Refusal of the scalar conservative periodic-orbit query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DuffingBackboneError {
@@ -19,8 +22,8 @@ pub enum DuffingBackboneError {
     NoPeriodicOrbit,
     /// An active stress channel drives a different displacement coordinate.
     NonInvariantAxis,
-    /// The physical frequency/derivative cannot be represented, or bounded
-    /// AGM refinement did not resolve its floating-point limit.
+    /// A frequency, derivative, spectral coefficient, or truncation estimate
+    /// cannot be represented, or bounded special-function refinement failed.
     NumericalRange,
 }
 
@@ -185,6 +188,34 @@ pub fn duffing_backbone_exact(
             Err(DuffingBackboneError::NoPeriodicOrbit)
         };
     }
+    let parameters = scaled_parameters(omega0, beta, amplitude)?;
+    let mean = arithmetic_geometric_mean(
+        det::sqrt(parameters.endpoint),
+        det::sqrt(parameters.middle),
+    )?;
+    let frequency = Qd::from_f64(mean)
+        .scale_power_of_two(parameters.rate_exponent)
+        .to_f64();
+    if frequency.is_finite() && frequency > 0.0 {
+        Ok(frequency)
+    } else {
+        Err(DuffingBackboneError::NumericalRange)
+    }
+}
+
+/// Original squared rates in one shared binary scale. Keeping their source
+/// products before rounding is essential near a softening separatrix.
+struct ScaledDuffing {
+    endpoint: f64,
+    middle: f64,
+    rate_exponent: i32,
+}
+
+fn scaled_parameters(
+    omega0: f64,
+    beta: f64,
+    amplitude: f64,
+) -> Result<ScaledDuffing, DuffingBackboneError> {
     let (b, eb) = binary_parts(beta.abs());
     let (a, ea) = binary_parts(amplitude);
     let (w, ew) = if omega0 == 0.0 {
@@ -204,21 +235,20 @@ pub fn duffing_backbone_exact(
         return Err(DuffingBackboneError::NoPeriodicOrbit);
     }
     let middle = (linear + nonlinear * 0.5).to_f64();
-    let endpoint_rate = det::sqrt(endpoint);
-    let middle_rate = det::sqrt(middle);
-    let mut high = endpoint_rate.max(middle_rate);
-    let mut low = endpoint_rate.min(middle_rate);
+    Ok(ScaledDuffing {
+        endpoint,
+        middle,
+        rate_exponent,
+    })
+}
+
+fn arithmetic_geometric_mean(a: f64, b: f64) -> Result<f64, DuffingBackboneError> {
+    let mut high = a.max(b);
+    let mut low = a.min(b);
     for _ in 0..32 {
         let mean = 0.5 * (high + low);
         if high - low <= 4.0 * f64::EPSILON * high {
-            let frequency = Qd::from_f64(mean)
-                .scale_power_of_two(rate_exponent)
-                .to_f64();
-            return if frequency.is_finite() && frequency > 0.0 {
-                Ok(frequency)
-            } else {
-                Err(DuffingBackboneError::NumericalRange)
-            };
+            return Ok(mean);
         }
         low = det::sqrt(high * low);
         high = mean;
@@ -273,7 +303,7 @@ pub(crate) fn invariant_axis_backbone_amplitude_derivative<'a>(
     )
 }
 
-fn invariant_axis_parameters<'a>(
+pub(crate) fn invariant_axis_parameters<'a>(
     omegas: &[f64],
     channels: impl Iterator<Item = (f64, &'a [f64])>,
     mode: usize,

@@ -292,6 +292,26 @@ the crash cascade with structurally exact energy accounting.
   source reduction and channel-by-channel invariance admission. G1/G3 tests
   compare an independently differentiated energy-period integral and verify
   linear, pure-quartic, separatrix, homogeneity and unit-scaling limits.
+- `duffing_spectrum_exact` / `DuffingSpectrum` retain an explicit count of odd
+  cosine harmonics of that same conservative orbit. The Jacobi `cn` (hardening)
+  and `cd` (softening) nome series retain physical amplitudes and the alternating
+  softening signs. DC and even orders are zero by the original equation's
+  symmetry. The fundamental is not silently equated to the turning amplitude.
+  A separately converged infinite-series normalization is independent of the
+  requested retained order: refinement preserves every earlier coefficient.
+  `displacement_tail_bound` numerically evaluates an analytic absolute-sum
+  bound on the omitted displacement at all phases, excluding floating-point
+  evaluation error; it is not an interval certificate or a coupled-model error
+  bound. The work/storage cap is 4096 odd harmonics. Binary scaling retains
+  extreme physical units; split nome multiplication preserves representable
+  harmonics even when the dimensionless nome underflows. Unrepresentable
+  coefficients, moduli or bounds refuse. `SosModalStorage::invariant_axis_spectrum`
+  uses all original stress channels and the same invariant-axis admission as
+  the frequency query; coupled axes refuse. These are explicit conservative
+  references and nonlinear solver seeds, not changes to any render path.
+  G1/G3 tests compare full waveforms and harmonics against independent RK4
+  trajectories using an energy-quadrature period, check weak-nonlinearity and
+  quartic/softening limits, truncation/refinement and physical-unit scaling.
 - The `assemble*` systems retain fs-phs's original-energy discrete-gradient
   stepping, striking, damping, and work ledger.
 - `sav::{SavStepper, SavConfig, SavState, SavRecord}` is a separate opt-in

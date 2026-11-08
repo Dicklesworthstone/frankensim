@@ -54,8 +54,9 @@ pub mod longitudinal;
 pub mod preload;
 pub mod sav;
 pub use backbone::{
-    DuffingBackboneDerivative, DuffingBackboneDirection, DuffingBackboneError,
-    duffing_backbone_directional_derivative, duffing_backbone_exact,
+    DuffingBackboneDerivative, DuffingBackboneDirection, DuffingBackboneError, DuffingSpectrum,
+    MAX_DUFFING_HARMONICS, duffing_backbone_directional_derivative, duffing_backbone_exact,
+    duffing_spectrum_exact,
 };
 pub use preload::PreloadedModalStorage;
 
@@ -249,6 +250,39 @@ impl SosModalStorage {
                 "backbone axis couples to other displacement coordinates"
             } else {
                 "backbone mode, amplitude, frequency or derivative is not representable"
+            },
+        })
+    }
+
+    /// Nonlinear harmonic amplitudes of an original invariant displacement axis.
+    ///
+    /// This shares [`Self::invariant_axis_backbone`]'s source coefficients and
+    /// channel-by-channel invariance admission. `amplitude` is a physical
+    /// turning displacement; the returned fundamental need not equal it.
+    /// `odd_harmonics` retains the explicitly requested odd orders, with a
+    /// separate omitted-displacement bound. Increasing it never renormalizes
+    /// existing coefficients. See [`duffing_spectrum_exact`] for the Fourier
+    /// convention and the conservative reference/solver-seed scope.
+    pub fn invariant_axis_spectrum(
+        &self,
+        mode: usize,
+        amplitude: f64,
+        odd_harmonics: usize,
+    ) -> Result<DuffingSpectrum, NlModalError> {
+        self.validate()?;
+        let result = backbone::invariant_axis_parameters(
+            &self.omegas,
+            self.channels
+                .iter()
+                .map(|channel| (channel.coefficient, channel.coupling.as_slice())),
+            mode,
+        )
+        .and_then(|(omega, beta)| duffing_spectrum_exact(omega, beta, amplitude, odd_harmonics));
+        result.map_err(|error| NlModalError::Parameter {
+            what: if error == DuffingBackboneError::NonInvariantAxis {
+                "spectrum axis couples to other displacement coordinates"
+            } else {
+                "spectrum mode, amplitude, harmonic count or scalar spectrum is not representable"
             },
         })
     }
