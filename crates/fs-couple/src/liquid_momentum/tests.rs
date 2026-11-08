@@ -429,7 +429,7 @@ fn zero_source_is_identity_and_late_refusal_preserves_both_owners() {
         matches!(
             error,
             LiquidMomentumError::Balance {
-                account: "angular momentum and exact source response",
+                account: "angular momentum and reciprocal source response",
                 ..
             }
         ),
@@ -454,4 +454,197 @@ fn zero_source_is_identity_and_late_refusal_preserves_both_owners() {
     ));
     assert_eq!(original, rigid);
     assert_eq!(bits, liquid.grid().state_bits());
+}
+
+fn heterogeneous_controls(substeps: usize) -> heterogeneous::HeterogeneousRigidDragControls {
+    heterogeneous::HeterogeneousRigidDragControls {
+        exchange: controls(),
+        substeps,
+        maximum_pair_exchanges: 512,
+    }
+}
+
+#[test]
+fn directional_single_cell_matches_original_exact_uniform_source() {
+    let mut original_liquid = surface();
+    let mut directional_liquid = surface();
+    let (mut original_body, properties) = body();
+    let mut directional_body = original_body;
+    let indices = [18];
+    let units = units();
+    let gate = CancelGate::new_clock_free();
+    let reference = apply_rigid_drag_native(
+        &mut original_liquid,
+        &mut original_body,
+        properties,
+        &indices,
+        units,
+        4.0,
+        0.2,
+        controls(),
+        &gate,
+    )
+    .unwrap();
+    let report = heterogeneous::apply_rigid_drag_native(
+        &mut directional_liquid,
+        &mut directional_body,
+        properties,
+        &indices,
+        &[heterogeneous::PrincipalLiquidDrag3 {
+            rates_per_s: [4.0; 3],
+            axes_to_world: UnitQuaternion::IDENTITY,
+        }],
+        units,
+        0.2,
+        heterogeneous_controls(1),
+        &gate,
+    )
+    .unwrap();
+    near_vec(
+        original_body.linear_momentum_world(),
+        directional_body.linear_momentum_world(),
+        3e-15,
+    );
+    near_vec(
+        original_body.angular_momentum_body(),
+        directional_body.angular_momentum_body(),
+        3e-15,
+    );
+    near(
+        report.exchange.drag_dissipation_j,
+        reference.drag_dissipation_j,
+        1e-16,
+    );
+    let old = samples(&mut original_liquid, &indices, units)[0];
+    let new = samples(&mut directional_liquid, &indices, units)[0];
+    near_vec(v(old.velocity), v(new.velocity), 3e-15);
+    assert_eq!(report.pair_exchanges, 1);
+}
+
+#[test]
+fn heterogeneous_native_recoil_closes_actual_momentum_and_source_dissipation() {
+    let ids = [5, 6, 17, 18, 21, 22, 33, 34, 37, 38];
+    let mut liquid = surface();
+    let u = units();
+    let (mut rigid, properties) = body();
+    let original_body = rigid;
+    let original_cells = samples(&mut liquid, &ids, u);
+    let before = total(&original_cells, rigid, properties, u);
+    let original_mass = liquid.ledger_mass().to_bits();
+    let original_epoch = liquid.geometry_epoch();
+    let laws: Vec<_> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| heterogeneous::PrincipalLiquidDrag3 {
+            rates_per_s: [
+                0.4 + i as f64 * 0.2,
+                if i % 2 == 0 { 0.0 } else { 2.0 },
+                3.1,
+            ],
+            axes_to_world: UnitQuaternion::from_axis_angle(
+                Vec3::new(1.0, 0.3, -0.2),
+                0.13 * i as f64,
+            )
+            .unwrap(),
+        })
+        .collect();
+    let report = heterogeneous::apply_rigid_drag_native(
+        &mut liquid,
+        &mut rigid,
+        properties,
+        &ids,
+        &laws,
+        u,
+        0.2,
+        heterogeneous_controls(4),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    let final_cells = samples(&mut liquid, &ids, u);
+    let after = total(&final_cells, rigid, properties, u);
+    near_vec(before.0, after.0, 2e-14);
+    near_vec(before.1, after.1, 2e-14);
+    near(
+        before.2 - after.2,
+        report.exchange.drag_dissipation_j,
+        2e-16,
+    );
+    assert!(report.exchange.drag_dissipation_j > 0.0);
+    near(report.exchange.kinetic_balance_residual_j, 0.0, 2e-16);
+    assert_eq!(report.pair_exchanges, (2 * ids.len() - 1) * 4);
+    assert_eq!(rigid.pose(), original_body.pose());
+    assert_eq!(liquid.grid().steps(), 0);
+    assert_eq!(liquid.ledger_mass().to_bits(), original_mass);
+    assert_eq!(liquid.geometry_epoch(), original_epoch);
+    for (a, b) in original_cells.iter().zip(final_cells) {
+        assert_eq!(a.mass.to_bits(), b.mass.to_bits());
+    }
+}
+
+#[test]
+fn heterogeneous_refusals_are_atomic_and_zero_resistance_is_bitwise_idle() {
+    let mut liquid = surface();
+    let (mut rigid, properties) = body();
+    let original_body = rigid;
+    let original_bits = liquid.grid().state_bits();
+    let law = heterogeneous::PrincipalLiquidDrag3 {
+        rates_per_s: [1.0, 2.0, 3.0],
+        axes_to_world: UnitQuaternion::IDENTITY,
+    };
+    let mut invalid_work = heterogeneous_controls(2);
+    invalid_work.maximum_pair_exchanges = 1;
+    let mut invalid_speed = heterogeneous_controls(2);
+    invalid_speed.exchange.maximum_speed_m_s = 1e-6;
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    let fresh = CancelGate::new_clock_free();
+    for (law, limits, gate) in [
+        (law, invalid_work, &fresh),
+        (law, invalid_speed, &fresh),
+        (law, heterogeneous_controls(2), &cancelled),
+        (
+            heterogeneous::PrincipalLiquidDrag3 {
+                rates_per_s: [1.0, -1.0, 0.0],
+                ..law
+            },
+            heterogeneous_controls(2),
+            &fresh,
+        ),
+    ] {
+        assert!(
+            heterogeneous::apply_rigid_drag_native(
+                &mut liquid,
+                &mut rigid,
+                properties,
+                &[18],
+                &[law],
+                units(),
+                0.2,
+                limits,
+                gate,
+            )
+            .is_err()
+        );
+        assert_eq!(rigid, original_body);
+        assert_eq!(liquid.grid().state_bits(), original_bits);
+    }
+    let report = heterogeneous::apply_rigid_drag_native(
+        &mut liquid,
+        &mut rigid,
+        properties,
+        &[18],
+        &[heterogeneous::PrincipalLiquidDrag3 {
+            rates_per_s: [0.0; 3],
+            ..law
+        }],
+        units(),
+        0.2,
+        heterogeneous_controls(2),
+        &fresh,
+    )
+    .unwrap();
+    assert_eq!(rigid, original_body);
+    assert_eq!(liquid.grid().state_bits(), original_bits);
+    assert_eq!(report.pair_exchanges, 0);
+    assert_eq!(report.exchange.drag_dissipation_j, 0.0);
 }

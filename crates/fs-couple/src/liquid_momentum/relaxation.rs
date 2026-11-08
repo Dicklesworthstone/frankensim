@@ -34,7 +34,7 @@ impl Body {
         self.velocity.add(self.omega.cross(arm))
     }
 
-    fn columns(self, arm: Vec3) -> [Vec3; 6] {
+    pub(super) fn columns(self, arm: Vec3) -> [Vec3; 6] {
         let m = self.inverse_sqrt_mass;
         [
             Vec3::new(m, 0.0, 0.0),
@@ -52,7 +52,7 @@ impl Body {
         ]
     }
 
-    fn physical_impulse(self, increment: [f64; 6]) -> (Vec3, Vec3) {
+    pub(super) fn physical_impulse(self, increment: [f64; 6]) -> (Vec3, Vec3) {
         let linear =
             Vec3::new(increment[0], increment[1], increment[2]).scale(1.0 / self.inverse_sqrt_mass);
         let angular = (0..3).fold(Vec3::ZERO, |sum, k| {

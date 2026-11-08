@@ -7576,3 +7576,52 @@ Two focused regression definitions in
 voltage/current and two-body caloric references over consecutive accepted
 intervals, conductivity feedback versus frozen heat, coherent cross heat,
 separate source work, common-mode invariance, typed refusal and cancellation.
+
+## Heterogeneous directional liquid/rigid drag
+
+`liquid_momentum::heterogeneous::apply_rigid_drag_native` and
+`liquid_momentum::material::apply_heterogeneous_rigid_drag` extend the same
+compact native momentum transaction to one authored principal resistance
+tensor per selected wet cell. Each tensor is a proper world-frame rotation
+of three finite nonnegative inverse-time rates. Exact zero rates retain
+free-slip directions. Partial cells use their original tracked liquid mass,
+and the rigid reaction retains the complete original mass and inertia
+tensor. The material entry derives every physical scale and the speed
+domain from the original liquid source.
+
+Each local cell/body exchange uses the symmetric kinetic metric of the
+resistance factor and relative mobility; resistance and off-center mobility
+need not commute. Principal-rate normalization and kinetic-mode normalization
+avoid inverting zero damping or forming an overflowing inverse weak rate.
+Exactly integrated local impulses supply equal and opposite body force/couple,
+and a separate analytic integral supplies nonnegative drag dissipation.
+A forward-half/reverse-half composition, with the central pair combined into
+one full exchange, uses at most
+`(2 * selected_cells - 1) * substeps` exchanges. The caller supplies the
+positive substep count and an explicit work ceiling. Response factors are
+prepared once per selected cell; storage is linear in stencil size.
+
+The heterogeneous simultaneous source is second order under subdivision,
+not globally exact. Stiff local modes decay without timestep-induced modal
+sign reversal, but a coarse multi-cell composition still requires temporal
+refinement. Pose, grid geometry, clocks, original material/force bindings and
+thermal state remain fixed. This adds no impermeable boundary, excluded
+volume, guessed viscosity, heat partition or full flow/drift integration order.
+The existing uniform-rate six-coordinate exact source and its public report
+remain available unchanged.
+
+The same final native population readback and original rigid impulse receipt
+independently gate linear momentum, angular momentum and kinetic work before
+either owner publishes. Cumulative analytic local dissipation is also compared
+with the actual aggregate endpoint kinetic loss; conservation or dissipation
+errors cannot be hidden by assigning heat. Cancellation, invalid coefficients,
+unresolved kinetic modes, unrepresentable positive exposure and exhausted
+work budgets preserve both owners.
+
+Focused regressions cover exact finite-mass recoil, noncommuting anisotropy
+against an independent simultaneous exponential, second-order heterogeneous
+refinement, full-inertia momentum/energy closure, stiff null directions,
+weak-rate extreme scales, underflow refusal, bitwise idle behavior and
+cancellation/work limits. Native liquid/body and original-material regressions
+cover the actual partial-liquid inertia, physical unit bindings, reciprocal
+accepted momentum and kinetic receipts, and state-preserving refusal.

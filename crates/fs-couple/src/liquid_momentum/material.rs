@@ -81,5 +81,56 @@ pub fn apply_rigid_drag(
     )?)
 }
 
+/// Directional, spatially varying reciprocal drag on the ORIGINAL material
+/// liquid. Native mass, physical scales and scenario speed stay source-bound.
+/// The explicit symmetric substep schedule controls composition accuracy;
+/// independent physical dissipation is returned without assigning heating.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_heterogeneous_rigid_drag(
+    liquid: &mut MaterialFreeSurface3<'_>,
+    body: &mut RigidBodyState,
+    properties: MassProperties,
+    indices: &[usize],
+    laws: &[heterogeneous::PrincipalLiquidDrag3],
+    grid_origin_world_m: Vec3,
+    source_duration_s: f64,
+    controls: heterogeneous::HeterogeneousRigidDragControls,
+    gate: &CancelGate,
+) -> Result<heterogeneous::HeterogeneousRigidDragReport, MaterialLiquidMomentumError> {
+    poll(gate)?;
+    controls.admit(indices.len(), laws, source_duration_s)?;
+    let scale = liquid.scaling();
+    let units = LiquidMomentumUnits3 {
+        cell_size_m: scale.cell_size_m(),
+        velocity_unit_m_s: scale
+            .velocity_si(1.0)
+            .map_err(MaterialFreeSurfaceImpulseError::from)?,
+        mass_unit_kg: scale.mass_unit_kg(),
+        grid_origin_world_m,
+    };
+    units.admit()?;
+    let physical = controls.exchange;
+    let stage = liquid.prepare_native_impulse_stencil(
+        indices,
+        MaterialFreeSurfaceImpulseControls3 {
+            max_cells: physical.maximum_cells,
+            maximum_speed_m_s: physical.maximum_speed_m_s,
+            maximum_momentum_defect_kg_m_s: physical.maximum_momentum_defect_kg_m_s,
+            maximum_work_defect_j: physical.maximum_work_defect_j,
+        },
+        gate,
+    )?;
+    Ok(heterogeneous::apply_staged(
+        stage,
+        body,
+        properties,
+        laws,
+        units,
+        source_duration_s,
+        controls,
+        gate,
+    )?)
+}
+
 #[cfg(test)]
 mod tests;

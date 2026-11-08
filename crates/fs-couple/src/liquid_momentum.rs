@@ -1,9 +1,10 @@
 //! Reciprocal viscous momentum exchange between original liquid and rigid owners.
 //!
-//! This is an exact drag SOURCE substep at fixed cell positions and rigid pose.
-//! A uniform authored rate multiplies each cell's actual retained liquid mass.
-//! Fluid translation, spin and nonrigid slip modes recoil against the original
-//! finite body through one six-coordinate kinetic-metric exponential.
+//! The uniform-rate SOURCE is exact at fixed cell positions and rigid pose.
+//! Each cell's actual retained liquid mass recoils against the original finite
+//! body through one six-coordinate kinetic-metric exponential. The heterogeneous
+//! source adds directional per-cell resistance through bounded symmetric
+//! composition of exact local exchanges, with explicit temporal refinement.
 //!
 //! This operation advances neither owner clock, geometry, transport, pressure,
 //! collision, free rotation nor thermodynamic state. Compose it with the native
@@ -11,6 +12,8 @@
 //! volumetric slip resistance on selected wet cells, not an impermeable wall,
 //! excluded volume, inferred hydrodynamic added mass, or contact geometry.
 
+/// Spatially varying directional drag with reciprocal finite-body recoil.
+pub mod heterogeneous;
 /// Same native source on the original material-bound liquid and its exact units.
 pub mod material;
 mod relaxation;
@@ -102,6 +105,65 @@ pub struct LiquidRigidDragReport {
     pub absolute_momentum_defect_kg_m_s: f64,
     pub absolute_angular_momentum_defect_kg_m2_s: f64,
     pub absolute_work_defect_j: f64,
+}
+
+/// Actual native momentum and kinetic accounts shared by reciprocal drag laws.
+/// Source-law parameters and composition controls remain in their own report.
+#[derive(Clone, Debug, PartialEq)]
+#[must_use]
+pub struct LiquidRigidExchangeReport {
+    pub selected_cells: usize,
+    /// Original population receipt in NATIVE lattice units; units are retained.
+    pub native_liquid: ImpulseReport<3>,
+    pub units: LiquidMomentumUnits3,
+    /// Original SI momentum owner, with the fixed before/after pose.
+    pub body: MomentumImpulseReceipt,
+    /// Common fixed COM origin for every angular account below.
+    pub balance_origin_world_m: Vec3,
+    pub liquid_impulse_kg_m_s: Vec3,
+    pub liquid_angular_impulse_kg_m2_s: Vec3,
+    pub liquid_momentum_change_kg_m_s: Vec3,
+    pub liquid_angular_momentum_change_kg_m2_s: Vec3,
+    pub liquid_kinetic_energy_change_j: f64,
+    /// Physical kinetic loss of this declared drag source; no heat is deposited.
+    pub drag_dissipation_j: f64,
+    pub linear_residual_kg_m_s: Vec3,
+    pub angular_residual_kg_m2_s: Vec3,
+    pub kinetic_balance_residual_j: f64,
+    /// Local readback, global balance and source-response defects cannot cancel.
+    pub absolute_momentum_defect_kg_m_s: f64,
+    pub absolute_angular_momentum_defect_kg_m2_s: f64,
+    pub absolute_work_defect_j: f64,
+}
+
+impl LiquidRigidExchangeReport {
+    fn with_uniform_rate(
+        self,
+        source_duration_s: f64,
+        relaxation_rate_per_s: f64,
+    ) -> LiquidRigidDragReport {
+        LiquidRigidDragReport {
+            source_duration_s,
+            relaxation_rate_per_s,
+            selected_cells: self.selected_cells,
+            native_liquid: self.native_liquid,
+            units: self.units,
+            body: self.body,
+            balance_origin_world_m: self.balance_origin_world_m,
+            liquid_impulse_kg_m_s: self.liquid_impulse_kg_m_s,
+            liquid_angular_impulse_kg_m2_s: self.liquid_angular_impulse_kg_m2_s,
+            liquid_momentum_change_kg_m_s: self.liquid_momentum_change_kg_m_s,
+            liquid_angular_momentum_change_kg_m2_s: self.liquid_angular_momentum_change_kg_m2_s,
+            liquid_kinetic_energy_change_j: self.liquid_kinetic_energy_change_j,
+            drag_dissipation_j: self.drag_dissipation_j,
+            linear_residual_kg_m_s: self.linear_residual_kg_m_s,
+            angular_residual_kg_m2_s: self.angular_residual_kg_m2_s,
+            kinetic_balance_residual_j: self.kinetic_balance_residual_j,
+            absolute_momentum_defect_kg_m_s: self.absolute_momentum_defect_kg_m_s,
+            absolute_angular_momentum_defect_kg_m2_s: self.absolute_angular_momentum_defect_kg_m2_s,
+            absolute_work_defect_j: self.absolute_work_defect_j,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -318,7 +380,25 @@ fn apply_staged(
             "finite nonnegative drag rate and source duration required",
         ));
     }
-    let scales = units.admit()?;
+    let (cells, basis) = prepare_source(&stage, body, properties, units, controls, gate)?;
+    // Positive overflow of gamma*duration is the resolved exponential-zero
+    // limit. Both authored factors are finite; no infinity enters the states.
+    let exposure = relaxation_rate_per_s * source_duration_s;
+    let plan = relaxation::solve(&cells, basis, exposure, gate)?;
+    let report = finish_source(
+        stage, body, properties, units, controls, &cells, basis, plan, None, gate,
+    )?;
+    Ok(report.with_uniform_rate(source_duration_s, relaxation_rate_per_s))
+}
+
+fn prepare_source(
+    stage: &FreeSurfaceImpulseStencil3<'_>,
+    body: &RigidBodyState,
+    properties: MassProperties,
+    units: LiquidMomentumUnits3,
+    controls: LiquidRigidDragControls,
+    gate: &CancelGate,
+) -> Result<(Vec<relaxation::Cell>, relaxation::Body), LiquidMomentumError> {
     let count = stage.cells().len();
     controls.admit(count)?;
     body.kinetic_energy(properties)?;
@@ -372,10 +452,27 @@ fn apply_staged(
             velocity,
         });
     }
-    // Positive overflow of gamma*duration is the resolved exponential-zero
-    // limit. Both authored factors are finite; no infinity enters the states.
-    let exposure = relaxation_rate_per_s * source_duration_s;
-    let plan = relaxation::solve(&cells, basis, exposure, gate)?;
+    Ok((cells, basis))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_source(
+    stage: FreeSurfaceImpulseStencil3<'_>,
+    body: &mut RigidBodyState,
+    properties: MassProperties,
+    units: LiquidMomentumUnits3,
+    controls: LiquidRigidDragControls,
+    cells: &[relaxation::Cell],
+    basis: relaxation::Body,
+    plan: relaxation::Plan,
+    physical_dissipation_j: Option<f64>,
+    gate: &CancelGate,
+) -> Result<LiquidRigidExchangeReport, LiquidMomentumError> {
+    let scales = units.admit()?;
+    let count = cells.len();
+    let before = *body;
+    let center = before.pose().position_world();
+    let orientation = before.pose().orientation();
     let mut applied = [Dd::ZERO; 3];
     let mut moment = [Dd::ZERO; 3];
     for (cell, &j) in cells.iter().zip(&plan.impulses) {
@@ -430,12 +527,25 @@ fn apply_staged(
         }
         native_impulses.push(converted);
     }
-    let loss = finite(loss.to_f64())?;
-    if loss < 0.0 {
+    let endpoint_loss = finite(loss.to_f64())?;
+    if endpoint_loss < 0.0 {
         return Err(invalid(
-            "exact liquid drag candidate increases relative kinetic storage",
+            "liquid drag candidate increases relative kinetic storage",
         ));
     }
+    let (loss, source_work_defect) = if let Some(integrated) = physical_dissipation_j {
+        if !integrated.is_finite() || integrated < 0.0 {
+            return Err(invalid(
+                "local drag dissipation must be finite and nonnegative",
+            ));
+        }
+        (
+            integrated,
+            (dd(integrated) - dd(endpoint_loss)).to_f64().abs(),
+        )
+    } else {
+        (endpoint_loss, 0.0)
+    };
     let candidate = stage.with_impulses(&native_impulses, gate)?;
     let mut change = [Dd::ZERO; 3];
     let mut angular_change = [Dd::ZERO; 3];
@@ -444,7 +554,7 @@ fn apply_staged(
     let mut local_work = Dd::ZERO;
     for (index, ((read, cell), &command)) in candidate
         .readback()
-        .zip(&cells)
+        .zip(cells)
         .zip(&plan.impulses)
         .enumerate()
     {
@@ -477,12 +587,12 @@ fn apply_staged(
     let linear_defect = finite(local_linear.to_f64() + l1(linear_residual) + source_linear)?;
     let angular_defect = finite(local_angular.to_f64() + l1(angular_residual) + source_angular)?;
     check(
-        "linear momentum and exact source response",
+        "linear momentum and reciprocal source response",
         linear_defect,
         controls.maximum_momentum_defect_kg_m_s,
     )?;
     check(
-        "angular momentum and exact source response",
+        "angular momentum and reciprocal source response",
         angular_defect,
         controls.maximum_angular_momentum_defect_kg_m2_s,
     )?;
@@ -494,7 +604,8 @@ fn apply_staged(
         kinetic_residual.abs()
             + local_work.to_f64()
             + native.absolute_work_defect * scales.energy
-            + mechanics.work.work_energy_residual_j.abs(),
+            + mechanics.work.work_energy_residual_j.abs()
+            + source_work_defect,
     )?;
     check(
         "relative drag loss and actual kinetic storage",
@@ -506,9 +617,7 @@ fn apply_staged(
     // There is no fallible work between its publication and the body assignment.
     let native_liquid = candidate.commit(gate)?;
     *body = after;
-    Ok(LiquidRigidDragReport {
-        source_duration_s,
-        relaxation_rate_per_s,
+    Ok(LiquidRigidExchangeReport {
         selected_cells: count,
         native_liquid,
         units,

@@ -171,3 +171,56 @@ fn original_material_scenario_speed_is_admitted_before_either_owner_changes() {
     assert_eq!(initial, rigid);
     assert_eq!(bits, liquid.lattice().grid().state_bits());
 }
+
+#[test]
+fn directional_material_source_retains_original_units_and_partial_liquid_inertia() {
+    let source = source();
+    let (mut liquid, mut rigid, properties) = fixture(&source);
+    let original = rigid;
+    let mass_unit = liquid.scaling().mass_unit_kg();
+    let sample = liquid.lattice().sample_at(2, 0, 0).unwrap();
+    let wet_mass = mass_unit * sample.density * sample.fill_fraction;
+    let axes = UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 0.4).unwrap();
+    let law = heterogeneous::PrincipalLiquidDrag3 {
+        rates_per_s: [3.0, 0.0, 0.0],
+        axes_to_world: axes,
+    };
+    let limits = heterogeneous::HeterogeneousRigidDragControls {
+        exchange: controls(),
+        substeps: 1,
+        maximum_pair_exchanges: 1,
+    };
+    let report = apply_heterogeneous_rigid_drag(
+        &mut liquid,
+        &mut rigid,
+        properties,
+        &[2],
+        &[law],
+        Vec3::ZERO,
+        0.2,
+        limits,
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    let axis = axes.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+    let m = properties.mass();
+    let expected = axis.scale(
+        m * wet_mass / (m + wet_mass) * (0.04 * axis.x) * -(-0.6 * (1.0 + wet_mass / m)).exp_m1(),
+    );
+    for (actual, expected) in a(report.exchange.liquid_impulse_kg_m_s)
+        .into_iter()
+        .zip(a(expected))
+    {
+        assert!((actual - expected).abs() < 4e-22);
+    }
+    assert_eq!(report.exchange.units.mass_unit_kg, mass_unit);
+    assert_eq!(report.exchange.units.cell_size_m, 1e-3);
+    assert_eq!(
+        report.exchange.units.velocity_unit_m_s,
+        liquid.scaling().velocity_si(1.0).unwrap()
+    );
+    assert!(core::ptr::eq(liquid.scaling().material(), &source));
+    assert_eq!(liquid.lattice().grid().steps(), 0);
+    assert_eq!(rigid.pose(), original.pose());
+    assert!(report.exchange.drag_dissipation_j > 0.0);
+}
