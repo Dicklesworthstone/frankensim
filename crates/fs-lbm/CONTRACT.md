@@ -232,3 +232,16 @@ in all three orientations. This retains the exploratory closure's topology,
 coefficient, molecular-ratio and departure bounds. It does not supply
 unresolved non-Newtonian stress correlations, an adaptive memory timescale,
 a thermal energy equation or turbulent-DNS validation.
+
+## Density-aware coarse/fine interpolation
+
+`RefinedChannel` interpolates spatial and temporal ghost data in the physical
+Guo population frame `h=f+S(u,F)/2`, whose first moment is `rho*u`.
+Each donor's actual density and force determine its source transform; the
+receiving force frame is applied only after the physical interpolation.
+Restriction likewise blends rescaled physical populations before rebinding
+the coarse force. This preserves the existing mass-weighted velocity and
+physical second moments without a force/velocity covariance artifact at
+nonuniform density. Unforced transfer arithmetic is unchanged. Existing
+rescaling, reflux, timestep order and low-Mach model limits still apply;
+this does not introduce a variable-density incompressible equation of state.

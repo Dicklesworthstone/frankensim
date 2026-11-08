@@ -12,6 +12,8 @@
 //! transformed to the physical population frame before rescaling and back to
 //! the receiving level's frame afterward, keeping physical velocity and
 //! viscous stress continuous when the lattice force changes with resolution.
+//! Spatial and temporal interpolation also use that physical frame: averaging
+//! raw populations loses the force/velocity covariance at unequal density.
 //! Each direction's actual streamed interface populations are also matched
 //! over the complete coarse step: fine-cell volume is one quarter of coarse
 //! volume, and both fine substeps debit/credit adjacent coarse cells along the
@@ -101,6 +103,45 @@ fn rescale(
     out
 }
 
+/// Interpolation is linear in physical populations, whose first moment is
+/// rho*u. The Guo source contains u*F, so reconstructing it AFTER averaging
+/// raw states is not equivalent when density, velocity and force vary.
+fn physical_population(f: [f64; Q], acceleration: [f64; 2], external_force: [f64; 2]) -> [f64; Q] {
+    reframe_population(f, acceleration, external_force, true)
+}
+
+fn stored_population(f: [f64; Q], acceleration: [f64; 2], external_force: [f64; 2]) -> [f64; Q] {
+    reframe_population(f, acceleration, external_force, false)
+}
+
+fn reframe_population(
+    mut f: [f64; Q],
+    acceleration: [f64; 2],
+    external_force: [f64; 2],
+    to_physical: bool,
+) -> [f64; Q] {
+    if acceleration == [0.0; 2] && external_force == [0.0; 2] {
+        return f;
+    }
+    let rho = f.iter().sum::<f64>();
+    let force = core::array::from_fn(|d| acceleration[d].mul_add(rho, external_force[d]));
+    let mut momentum = [0.0; 2];
+    for (&fi, (ex, ey)) in f.iter().zip(crate::E) {
+        momentum[0] += f64::from(ex) * fi;
+        momentum[1] += f64::from(ey) * fi;
+    }
+    let velocity = core::array::from_fn(|d| {
+        (momentum[d] + if to_physical { 0.5 * force[d] } else { 0.0 }) / rho
+    });
+    let (previous, next) = if to_physical {
+        (force, [0.0; 2])
+    } else {
+        ([0.0; 2], force)
+    };
+    crate::thermal::forcing::reframe2(&mut f, velocity, previous, next);
+    f
+}
+
 impl RefinedChannel {
     /// Build with `nx_c` coarse columns, `own_c` coarse fluid rows
     /// below the split and `own_f` fine fluid rows above it, gravity
@@ -164,24 +205,21 @@ impl RefinedChannel {
             } else {
                 (xc + 1) % nxc
             };
-            let blend_x = |row: usize, buf: &mut [f64; Q]| -> [f64; 2] {
+            let blend_x = |row: usize, buf: &mut [f64; Q]| {
                 let ia = self.coarse.idx(xc, row);
                 let ib = self.coarse.idx(xn, row);
-                let a = &self.coarse.f[ia];
-                let b = &self.coarse.f[ib];
+                let a = physical_population(self.coarse.f[ia], self.coarse.g, self.coarse.fext[ia]);
+                let b = physical_population(self.coarse.f[ib], self.coarse.g, self.coarse.fext[ib]);
                 for q in 0..Q {
                     buf[q] = 0.75f64.mul_add(a[q], 0.25 * b[q]);
                 }
-                std::array::from_fn(|d| {
-                    0.75f64.mul_add(self.coarse.fext[ia][d], 0.25 * self.coarse.fext[ib][d])
-                })
             };
             let mut low = [0.0f64; Q];
             let mut mid = [0.0f64; Q];
             let mut high = [0.0f64; Q];
-            let low_force = blend_x(rows[0], &mut low);
-            let mid_force = blend_x(rows[1], &mut mid);
-            let high_force = blend_x(rows[2], &mut high);
+            blend_x(rows[0], &mut low);
+            blend_x(rows[1], &mut mid);
+            blend_x(rows[2], &mut high);
             // Fine ghost k=0 (center Ys−1.5dx_f): 0.25 low + 0.75 mid.
             // Fine ghost k=1 (center Ys−0.5dx_f): 0.75 mid + 0.25 high.
             let mut g0 = [0.0f64; Q];
@@ -193,16 +231,16 @@ impl RefinedChannel {
             out[xf] = rescale(
                 &g0,
                 factor,
-                self.coarse.g,
-                std::array::from_fn(|d| 0.25f64.mul_add(low_force[d], 0.75 * mid_force[d])),
+                [0.0; 2],
+                [0.0; 2],
                 self.fine.g,
                 self.fine.fext[self.fine.idx(xf, 0)],
             );
             out[nxf + xf] = rescale(
                 &g1,
                 factor,
-                self.coarse.g,
-                std::array::from_fn(|d| 0.75f64.mul_add(mid_force[d], 0.25 * high_force[d])),
+                [0.0; 2],
+                [0.0; 2],
                 self.fine.g,
                 self.fine.fext[self.fine.idx(xf, 1)],
             );
@@ -235,15 +273,32 @@ impl RefinedChannel {
                     factor,
                     self.fine.g,
                     self.fine.fext[fi],
-                    self.coarse.g,
-                    self.coarse.fext[gi],
+                    [0.0; 2],
+                    [0.0; 2],
                 );
                 for q in 0..Q {
                     acc[q] += 0.25 * r[q];
                 }
             }
-            self.coarse.f[gi] = acc;
+            self.coarse.f[gi] = stored_population(acc, self.coarse.g, self.coarse.fext[gi]);
         }
+    }
+
+    /// Temporal interpolation uses the same density-weighted physical momentum
+    /// as spatial transfer before restoring each destination's held force.
+    fn midpoint_ghosts(&self, before: &[[f64; Q]], after: &[[f64; Q]]) -> Vec<[f64; Q]> {
+        before
+            .iter()
+            .zip(after)
+            .enumerate()
+            .map(|(cell, (&a, &b))| {
+                let force = self.fine.fext[cell];
+                let a = physical_population(a, self.fine.g, force);
+                let b = physical_population(b, self.fine.g, force);
+                let midpoint = core::array::from_fn(|q| f64::midpoint(a[q], b[q]));
+                stored_population(midpoint, self.fine.g, force)
+            })
+            .collect()
     }
 
     /// Retain the exact populations crossing the coarse ownership boundary.
@@ -336,17 +391,7 @@ impl RefinedChannel {
             self.coarse.f[i] = g;
         }
         let g_t1 = self.prolong();
-        let g_half: Vec<[f64; Q]> = g_t
-            .iter()
-            .zip(&g_t1)
-            .map(|(a, b)| {
-                let mut m = [0.0f64; Q];
-                for q in 0..Q {
-                    m[q] = f64::midpoint(a[q], b[q]);
-                }
-                m
-            })
-            .collect();
+        let g_half = self.midpoint_ghosts(&g_t, &g_t1);
         self.set_fine_ghosts(&g_t);
         self.fine.collide_into(&mut self.scratch);
         self.record_fine_exchange(0.25);
@@ -894,6 +939,131 @@ mod tests {
                 u,
                 strain,
             );
+        }
+    }
+
+    // Compare all physical population moments using the independent analytic
+    // Guo source, including its second moment uF+Fu. Momentum-only comparison
+    // misses the density/force covariance responsible for artificial stress.
+    fn assert_physical_population(
+        stored: [f64; Q],
+        physical: [f64; Q],
+        acceleration: [f64; 2],
+        external_force: [f64; 2],
+    ) {
+        let rho = physical.iter().sum::<f64>();
+        let u: [f64; 2] = core::array::from_fn(|d| {
+            physical
+                .iter()
+                .zip(E)
+                .map(|(f, e)| f * f64::from([e.0, e.1][d]))
+                .sum::<f64>()
+                / rho
+        });
+        let force: [f64; 2] = core::array::from_fn(|d| rho * acceleration[d] + external_force[d]);
+        for q in 0..Q {
+            let e = [f64::from(E[q].0), f64::from(E[q].1)];
+            let eu = e[0] * u[0] + e[1] * u[1];
+            let source: f64 = (0..2)
+                .map(|d| (3.0 * (e[d] - u[d]) + 9.0 * eu * e[d]) * force[d])
+                .sum();
+            let actual = stored[q] + 0.5 * W[q] * source;
+            assert!(
+                (actual - physical[q]).abs() < 3e-14 * rho,
+                "physical population {q}: {actual:e} != {:e}",
+                physical[q],
+            );
+        }
+    }
+
+    /// G3: a spatially varying physical density/momentum/stress field is the
+    /// same interpolated field under arbitrary donor and destination forces.
+    /// Nonuniform velocities expose source covariance that uniform-flow cases
+    /// cannot detect, and unequal density enforces mass-weighted velocities.
+    #[test]
+    fn varying_density_level_transfers_are_force_frame_invariant() {
+        for density_scale in [0.01, 1.0, 100.0] {
+            let mut native = RefinedChannel::new(4, 4, 8, 0.8, 0.0);
+            let mut forced = RefinedChannel::new(4, 4, 8, 0.8, 0.0);
+            forced.coarse.g = [0.004, -0.002];
+            forced.fine.g = [-0.001, 0.003];
+            for (unforced, loaded) in [
+                (&mut native.coarse, &mut forced.coarse),
+                (&mut native.fine, &mut forced.fine),
+            ] {
+                for cell in 0..unforced.f.len() {
+                    let rho = density_scale * (0.4 + 0.31 * (cell % 7) as f64);
+                    let u = [
+                        0.02 * (cell % 5) as f64 - 0.04,
+                        0.03 - 0.015 * (cell % 4) as f64,
+                    ];
+                    let strain = [[0.001, -0.0003], [-0.0003, 0.0002]];
+                    loaded.fext[cell] = [
+                        density_scale * (0.003 - 0.001 * (cell % 6) as f64),
+                        density_scale * (0.002 * (cell % 3) as f64 - 0.001),
+                    ];
+                    unforced.f[cell] =
+                        forced_state(rho, u, strain, unforced.tau[cell], [0.0; 2], [0.0; 2]);
+                    loaded.f[cell] = forced_state(
+                        rho,
+                        u,
+                        strain,
+                        loaded.tau[cell],
+                        loaded.g,
+                        loaded.fext[cell],
+                    );
+                }
+            }
+            let unforced = native.prolong();
+            let loaded = forced.prolong();
+            for (cell, (&stored, &physical)) in loaded.iter().zip(&unforced).enumerate() {
+                assert_physical_population(stored, physical, forced.fine.g, forced.fine.fext[cell]);
+            }
+            native.restrict();
+            forced.restrict();
+            for x in 0..native.coarse.nx {
+                let cell = native.coarse.idx(x, native.own_c + 1);
+                assert_physical_population(
+                    forced.coarse.f[cell],
+                    native.coarse.f[cell],
+                    forced.coarse.g,
+                    forced.coarse.fext[cell],
+                );
+            }
+        }
+    }
+
+    /// G0/G3: temporal interpolation preserves the mean physical populations,
+    /// hence the mass-weighted momentum and the independent second moment.
+    #[test]
+    fn temporal_density_transfer_uses_physical_mass_weighted_moments() {
+        let mut channel = RefinedChannel::new(3, 3, 4, 0.8, 0.0);
+        channel.fine.g = [0.003, -0.001];
+        let count = 2 * channel.fine.nx;
+        let mut before = vec![[0.0; Q]; count];
+        let mut after = before.clone();
+        let mut expected = before.clone();
+        for cell in 0..count {
+            let force = [0.003 * (cell % 3 + 1) as f64, -0.004];
+            channel.fine.fext[cell] = force;
+            let rho0 = 0.4 + 0.2 * (cell % 3) as f64;
+            let rho1 = 2.8 - 0.1 * (cell % 4) as f64;
+            let u0 = [0.05, -0.03];
+            let u1 = [-0.02, 0.04];
+            let strain = [[0.001, 0.0003], [0.0003, -0.0002]];
+            before[cell] = forced_state(rho0, u0, strain, channel.tau_f, channel.fine.g, force);
+            after[cell] = forced_state(rho1, u1, strain, channel.tau_f, channel.fine.g, force);
+            let h0 = forced_state(rho0, u0, strain, channel.tau_f, [0.0; 2], [0.0; 2]);
+            let h1 = forced_state(rho1, u1, strain, channel.tau_f, [0.0; 2], [0.0; 2]);
+            expected[cell] = core::array::from_fn(|q| f64::midpoint(h0[q], h1[q]));
+        }
+        for (cell, (&stored, &physical)) in channel
+            .midpoint_ghosts(&before, &after)
+            .iter()
+            .zip(&expected)
+            .enumerate()
+        {
+            assert_physical_population(stored, physical, channel.fine.g, channel.fine.fext[cell]);
         }
     }
 }
