@@ -990,12 +990,19 @@ chemical evolution, acoustic radiation, turbulence-convergence or SPL claim.
 
 1. EXACT Wronskian: `J1 Y0 - J0 Y1 = 2/(pi x)` holds within 5e-13
    over a log grid 1e-3..3e3 including the series/asymptotic
-   crossover from both sides. Honest limits (review-measured against
-   a 120-digit reference): the identity is blind to COMMON phase
-   errors, and pointwise accuracy beyond the certified grid degrades
-   as ~x*eps from f64 phase representation (~2e-11 at x = 1e6) —
-   stated in the module doc; intended kr ranges sit inside the
-   certified band.
+   crossover from both sides. At large arguments all four J/Y owners
+   retain their pi/4 or 3pi/4 shift by angle addition after one shared
+   reduction of x; the outgoing H1 no longer combines differently
+   rounded J1/Y1 phases. The amplitude uses `sqrt((2/pi)/x)`, retaining
+   finite nonzero waves even where `pi*x` would overflow. Independent
+   256-bit MPFR 4.2.1 references check actual J0/Y0/J1/Y1 phases at
+   exact f64 inputs 1e4, 1e6, 1e12, 1e16, 1e100 and f64::MAX within
+   8e-15 of the asymptotic amplitude envelope. Separate normalized
+   Wronskian/cylindrical-energy-flux and modulus regressions cover the
+   asymptotic crossover through f64::MAX. The Wronskian alone is blind
+   to a common phase error. These are sampled accuracy checks, not
+   uniform relative-error bounds at zeros or bounds on input kr error;
+   downstream quadrature budgets and applicability limits are unchanged.
 2. Independent-path derivatives: central-difference `J0'` matches
    `-J1` and `Y0'` matches `-Y1` at FD accuracy (1e-8) across both
    regimes.

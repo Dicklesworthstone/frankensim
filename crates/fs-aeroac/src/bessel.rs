@@ -19,15 +19,14 @@
 //! both regimes and the crossover; finite-difference derivatives vs
 //! the recurrence identities (independent code paths); and a
 //! cross-implementation oracle against fsci-special (cephes-heritage)
-//! as a dev-dependency. Honest limits of that certificate
-//! (review-measured with a 120-digit reference): the Wronskian is
-//! structurally BLIND to common phase errors (the chi_0 - chi_1
-//! difference is exactly pi/2, so half-ulp(x) phase rounding cancels
-//! identically), and pointwise accuracy at LARGE argument degrades
-//! as ~x*eps from representing the phase in f64 (measured ~2e-11
-//! relative-to-envelope at x = 1e6, ~5e-13 at x = 1e4, under 5e-13
-//! for x <= 3e3 — the certified grid). Intended kr ranges sit well
-//! inside the certified band.
+//! as a dev-dependency. The Wronskian is blind to a shared phase
+//! error, so separate 256-bit MPFR references check the actual J/Y
+//! phases at large arguments through `f64::MAX`. Angle addition
+//! retains the pi/4 and 3pi/4 shifts without rounding them into x,
+//! consistently with the shared J1 owner. The amplitude divides by x
+//! before taking its square root, avoiding overflow of pi*x. These
+//! are sampled envelope-relative accuracy checks, not a uniform
+//! relative bound at zeros or a bound on caller-supplied kr errors.
 //!
 //! Convention: with the workspace's `e^{-i omega t}` time convention
 //! the OUTGOING cylindrical wave is `H0^(1)(kr) = J0 + i Y0`.
@@ -165,10 +164,23 @@ fn asymptotic_pq(nu: f64, x: f64) -> (f64, f64) {
 /// J and Y of order `nu` (0 or 1) via the asymptotic form, `x > SPLIT`.
 fn jy_asymptotic(nu: f64, x: f64) -> (f64, f64) {
     let (p, q) = asymptotic_pq(nu, x);
-    let chi = x - (2.0 * nu + 1.0) * core::f64::consts::FRAC_PI_4;
-    let amp = det::sqrt(2.0 / (core::f64::consts::PI * x));
-    let (s, c) = (det::sin(chi), det::cos(chi));
-    (amp * (p * c - q * s), amp * (p * s + q * c))
+    // DLMF 10.17.2--4: chi=x-(2*nu+1)*pi/4. Apply the exact-angle
+    // rotation AFTER reducing x, as fs_math's shared J1 owner does.
+    // Rounding chi first loses the offset at large x and would combine
+    // an accurate J1 with a differently phased Y1 in the outgoing field.
+    let (s, c) = det::sin_cos(x);
+    let amp = det::sqrt(core::f64::consts::FRAC_2_PI / x) * core::f64::consts::FRAC_1_SQRT_2;
+    if nu == 0.0 {
+        (
+            amp * ((p + q) * c + (p - q) * s),
+            amp * ((q - p) * c + (p + q) * s),
+        )
+    } else {
+        (
+            amp * ((q - p) * c + (p + q) * s),
+            amp * ((q - p) * s - (p + q) * c),
+        )
+    }
 }
 
 /// Bessel function of the first kind, order 0 (even; all finite `x`).
@@ -249,14 +261,17 @@ fn hankel_abs_squared(order: f64, x: f64) -> f64 {
         return 0.0;
     }
     if x <= SPLIT {
-        if order == 0.0 { j0(x).powi(2) + y0(x).powi(2) }
-        else { j1(x).powi(2) + y1(x).powi(2) }
+        if order == 0.0 {
+            j0(x).powi(2) + y0(x).powi(2)
+        } else {
+            j1(x).powi(2) + y1(x).powi(2)
+        }
     } else {
         // J=A(P cos chi-Q sin chi), Y=A(P sin chi+Q cos chi).
-        // Form the norm before introducing the common phase. This avoids the
-        // large-argument phase error that limits the individual J/Y values.
+        // Form the norm before introducing the common phase. Power-only
+        // consumers need neither trigonometry nor phase cancellation.
         let (p, q) = asymptotic_pq(order, x);
-        (core::f64::consts::FRAC_2_PI / x) * (p*p + q*q)
+        (core::f64::consts::FRAC_2_PI / x) * (p * p + q * q)
     }
 }
 
@@ -264,24 +279,124 @@ fn hankel_abs_squared(order: f64, x: f64) -> f64 {
 ///
 /// The defining series supplies the small-argument regime. Above the shared
 /// crossover, the Hankel amplitudes give `2*(P0^2+Q0^2)/(pi*x)` directly
-/// (DLMF 10.17.3–4). No oscillatory phase or argument reduction is needed, so
-/// the individual J/Y phase-accuracy limit at `x=3000` does not apply to this
-/// positive envelope. The large-argument result tends to `2/(pi*x)`, including
+/// (DLMF 10.17.3–4). This positive envelope needs no oscillatory phase or
+/// argument reduction. The large-argument result tends to `2/(pi*x)`, including
 /// finite arguments where multiplying `pi*x` would overflow.
 /// Domain/policy: positive `x`; NaN otherwise; zero at positive infinity.
 #[must_use]
-pub fn hankel0_abs_squared(x: f64) -> f64 { hankel_abs_squared(0.0, x) }
+pub fn hankel0_abs_squared(x: f64) -> f64 {
+    hankel_abs_squared(0.0, x)
+}
 
 /// Squared modulus `J1(x)^2 + Y1(x)^2`, evaluated from the phase-free Hankel
 /// amplitudes in the large-argument regime; same domain as
 /// [`hankel0_abs_squared`]. At tiny positive `x` the physical `4/(pi*x)^2`
 /// divergence can exceed the representable range and returns infinity.
 #[must_use]
-pub fn hankel1_abs_squared(x: f64) -> f64 { hankel_abs_squared(1.0, x) }
+pub fn hankel1_abs_squared(x: f64) -> f64 {
+    hankel_abs_squared(1.0, x)
+}
 
 #[cfg(test)]
 mod modulus_tests {
     use super::*;
+
+    #[test]
+    fn g2_large_argument_phase_matches_independent_mpfr_values() {
+        // MPFR 4.2.1, 256-bit precision, round-to-nearest. Each argument is
+        // imported from its EXACT f64 value; J0,Y0,J1,Y1 are independently
+        // evaluated and divided by sqrt(2/(pi*x)) before rounding to f64.
+        // Wronskians and moduli alone cannot detect a shared phase error.
+        for (x, expected) in [
+            (
+                1e4,
+                [
+                    -0.8893718091559941,
+                    0.4571846277255984,
+                    0.45714015970673255,
+                    0.889394669499038,
+                ],
+            ),
+            (
+                1e6,
+                [
+                    0.41490088917971313,
+                    -0.9098666122887236,
+                    -0.9098664048383927,
+                    -0.41490134411307117,
+                ],
+            ),
+            (
+                1e12,
+                [
+                    0.1274260156107055,
+                    -0.9918480783595743,
+                    -0.9918480783595106,
+                    -0.12742601561120143,
+                ],
+            ),
+            (
+                1e16,
+                [
+                    0.10855489761834945,
+                    0.9940904557448832,
+                    0.9940904557448832,
+                    -0.10855489761834941,
+                ],
+            ),
+            (
+                1e100,
+                [
+                    0.38472725917994366,
+                    -0.9230303007181772,
+                    -0.9230303007181772,
+                    -0.38472725917994366,
+                ],
+            ),
+            (
+                f64::MAX,
+                [
+                    -0.7035894444172146,
+                    0.7106067081759608,
+                    0.7106067081759608,
+                    0.7035894444172146,
+                ],
+            ),
+        ] {
+            let envelope = det::sqrt(core::f64::consts::FRAC_2_PI / x);
+            for (actual, reference) in [j0(x), y0(x), j1(x), y1(x)].into_iter().zip(expected) {
+                let error = (actual / envelope - reference).abs();
+                assert!(
+                    error < 8e-15,
+                    "x={x:e}, envelope-relative phase error={error:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_large_argument_hankel_fields_retain_cylindrical_flux_and_modulus() {
+        for x in [18.001, 40.0, 3000.0, 1e4, 1e6, 1e12, 1e16, 1e100, f64::MAX] {
+            let square = core::f64::consts::FRAC_2_PI / x;
+            let envelope = det::sqrt(square);
+            let h0 = hankel0_outgoing(x).scale(1.0 / envelope);
+            let h1 = hankel1_outgoing(x).scale(1.0 / envelope);
+            // The Wronskian is also the outward radial energy-flux factor
+            // for H0 pressure and its -H1 gradient. Scale before products so
+            // the MAX-argument case checks physics, not subnormal rounding.
+            let outward_flux = h1.re * h0.im - h0.re * h1.im;
+            assert!(
+                (outward_flux - 1.0).abs() < 8e-15,
+                "x={x:e}, flux={outward_flux}"
+            );
+            for (field, modulus) in [(h0, hankel0_abs_squared(x)), (h1, hankel1_abs_squared(x))] {
+                assert!(
+                    (field.norm_sq() - modulus / square).abs() < 8e-15,
+                    "x={x:e}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn phase_free_moduli_match_the_certified_real_bessel_range() {
