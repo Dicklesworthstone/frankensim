@@ -410,12 +410,34 @@ impl<'a> FluidViscoelasticLayer<'a> {
                 rhs[row] = divide(rhs[row], scale);
             }
         }
-        let factor = lu_complex_with_cancel(&matrix, 6, &mut *cancelled).map_err(solve_error)?;
+        // At exact normal incidence, fluid pressure drives only P waves.
+        // Eliminate the identically unforced SV block before factorization:
+        // a free shear thickness resonance must not make the longitudinal
+        // scattering problem singular. The full six boundary equations are
+        // still checked below, including the zero shear tractions.
+        let normal = self.tangential == 0.0;
+        let size = if normal { 4 } else { 6 };
+        let rows = if normal {
+            [0, 1, 3, 4, 2, 5]
+        } else {
+            [0, 1, 2, 3, 4, 5]
+        };
+        let mut active = [C64::ZERO; 36];
+        for row in 0..size {
+            for column in 0..size {
+                active[size * row + column] = matrix[6 * rows[row] + column];
+            }
+        }
+        let factor = lu_complex_with_cancel(&active[..size * size], size, &mut *cancelled)
+            .map_err(solve_error)?;
         for side in 0..2 {
             poll(cancelled)?;
-            let mut solved = inputs[side];
+            let mut solved = [C64::ZERO; 6];
+            for row in 0..size {
+                solved[row] = inputs[side][rows[row]];
+            }
             factor
-                .solve_with_cancel(&mut solved, &mut *cancelled)
+                .solve_with_cancel(&mut solved[..size], &mut *cancelled)
                 .map_err(solve_error)?;
             if solved.iter().any(|a| !finite(*a)) {
                 return Err(Error::Invalid(

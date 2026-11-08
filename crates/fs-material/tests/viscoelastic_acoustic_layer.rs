@@ -203,6 +203,64 @@ fn g1_lossless_half_wave_resonance_and_critical_roots() {
 }
 
 #[test]
+fn g1_normal_scattering_remains_defined_at_unforced_shear_resonances() {
+    let bulk = GeneralizedMaxwell::new(60.0, vec![]).unwrap();
+    let shear = GeneralizedMaxwell::new(16.0, vec![]).unwrap();
+    let left = FluidAcousticState::try_new(1.0, 2.0).unwrap();
+    let right = FluidAcousticState::try_new(2.0, 3.0).unwrap();
+    // rho=4 and G=16 give c_S=2 exactly. These are unforced free shear
+    // thickness resonances; the driven longitudinal solution stays unique.
+    for order in [1.0, 2.0, 7.0] {
+        let thickness = order * core::f64::consts::PI / 10.0;
+        let layer = FluidViscoelasticLayer::try_new(
+            source(&bulk, &shear),
+            [&left, &right],
+            20.0,
+            1.0,
+            thickness,
+            0,
+            &mut || false,
+        )
+        .unwrap();
+        let [k, g] = layer.moduli_pa();
+        let root = (k + g.scale(4.0 / 3.0)).sqrt();
+        let impedance = root.scale(2.0);
+        let phase = exp_minus_i((C64::from_re(2.0) / root).scale(20.0 * thickness));
+        let r01 = (impedance - C64::from_re(2.0)) / (impedance + C64::from_re(2.0));
+        let r12 = (C64::from_re(6.0) - impedance) / (C64::from_re(6.0) + impedance);
+        let denominator = C64::ONE + r01 * r12 * phase * phase;
+        near(
+            layer.pressure_scattering()[0],
+            (r01 + r12 * phase * phase) / denominator,
+            5e-14,
+        );
+        near(
+            layer.pressure_scattering()[2],
+            (C64::ONE + r01) * (C64::ONE + r12) * phase / denominator,
+            5e-14,
+        );
+        let driven = layer
+            .drive(
+                [C64::new(0.02, 0.01), C64::new(-0.01, 0.005)],
+                limits(),
+                &mut || false,
+            )
+            .unwrap();
+        for fraction in [0.0, 0.2, 0.5, 0.9, 1.0] {
+            let field = driven.field(fraction * thickness, &mut || false).unwrap();
+            assert_eq!(field.velocity_m_s[0], C64::ZERO);
+            assert_eq!(field.traction_pa[0], C64::ZERO);
+            assert_eq!(field.strain_mandel[5], C64::ZERO);
+        }
+        let power = driven.power();
+        assert!(
+            power.net_absorbed_power_w_m2.abs()
+                < 5e-14 * power.incident_power_w_m2.iter().sum::<f64>()
+        );
+    }
+}
+
+#[test]
 fn g1_evanescent_ps_waves_tunnel_and_carry_coherent_flux() {
     let bulk = GeneralizedMaxwell::new(60.0, vec![]).unwrap();
     let shear = GeneralizedMaxwell::new(30.0, vec![]).unwrap();
