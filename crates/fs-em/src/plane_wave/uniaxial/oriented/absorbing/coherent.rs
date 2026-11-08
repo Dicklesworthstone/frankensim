@@ -13,6 +13,11 @@ use super::{
     PreparedAbsorbingCrystalField, ReflectionError, kernel,
 };
 
+mod volume;
+pub use volume::{
+    AbsorbingCrystalBox, AbsorbingCrystalBoxLimits, AbsorbingCrystalCoherentBoxAbsorption,
+};
+
 type Result<T> = core::result::Result<T, CrystalIlluminationError>;
 
 /// A borrowed monochromatic coherent sum of the original prepared fields.

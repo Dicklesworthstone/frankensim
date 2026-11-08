@@ -1417,3 +1417,80 @@ fn coherent_absorbing_crystal_illumination_retains_source_frequency_and_global_f
         Err(CrystalIlluminationError::Cancelled)
     ));
 }
+
+#[test]
+fn coherent_crystal_box_retains_original_material_volume_and_resource_admission() {
+    use crate::plane_wave::uniaxial::oriented::{
+        OrientedUniaxialInterface,
+        absorbing::{
+            AbsorbingCrystalBox, AbsorbingCrystalBoxLimits,
+            AbsorbingCrystalCoherentBoxAbsorption, AbsorbingCrystalCoherentIllumination,
+            CrystalIlluminationError,
+        },
+    };
+    let outside = incident(1.0, MU);
+    let (o, e) = axes(
+        [1.5; 2], [1.9; 2], [0.08, 0.2], Some(MU), [400.0, 800.0], 3,
+    );
+    let law = UniaxialOpticalResponse::try_new(&o, &e, SPAN).unwrap();
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&outside), law, [0.0, 0.0, 1.0],
+    ).unwrap();
+    let components = [
+        interface.prepare_absorbing_field_at_tangential_index(
+            frequency(550.0), 0.25, [C64::ZERO, C64::ONE],
+        ).unwrap(),
+        interface.prepare_absorbing_field_at_tangential_index(
+            frequency(550.0), 0.75, [C64::ZERO, C64::new(0.4, 0.9)],
+        ).unwrap(),
+    ];
+    let illumination = AbsorbingCrystalCoherentIllumination::try_new(
+        &interface, &components, 2, || false,
+    ).unwrap();
+    let region = AbsorbingCrystalBox::try_new(
+        [0.13e-6, -0.17e-6, 0.1e-6], [0.31e-6, 0.4e-6, 0.9e-6],
+    ).unwrap();
+    let mut limits = AbsorbingCrystalBoxLimits {
+        maximum_mode_pairs: 16,
+        maximum_workspace_bytes: 1 << 20,
+    };
+    let result = illumination.box_absorption(region, limits, || false).unwrap();
+    assert!(core::ptr::eq(result.illumination(), &illumination));
+    assert!(core::ptr::eq(result.source(), &interface));
+    assert_eq!(result.source().crystal_response().material().identity(), law.material().identity());
+    assert_eq!(result.region(), region);
+    assert_eq!(result.volume_m3(), region.volume_m3());
+    assert_eq!(result.mode_pair_count(), 16);
+    assert!(result.absorbed_power_w() > 0.0);
+    assert!(
+        result.workspace_bytes()
+            >= core::mem::size_of::<AbsorbingCrystalCoherentBoxAbsorption<'_, '_, '_, '_>>()
+    );
+    let faces = result.outward_face_power_w();
+    let scale = faces.iter().map(|v| v.abs()).sum::<f64>();
+    near(result.residual_w(), 0.0, 5e-12 * scale);
+    assert!(faces[0] < 0.0);
+    assert!(faces[1] > 0.0);
+    assert!(faces[4] < 0.0);
+    assert!(faces[5] > 0.0);
+    limits.maximum_workspace_bytes = result.workspace_bytes();
+    let repeated = illumination.box_absorption(region, limits, || false).unwrap();
+    assert_eq!(repeated.absorbed_power_w(), result.absorbed_power_w());
+    assert_eq!(repeated.outward_face_power_w(), faces);
+    limits.maximum_workspace_bytes -= 1;
+    assert!(illumination.box_absorption(region, limits, || false).is_err());
+    limits.maximum_workspace_bytes = 1 << 20;
+    limits.maximum_mode_pairs = 15;
+    assert!(illumination.box_absorption(region, limits, || false).is_err());
+    limits.maximum_mode_pairs = 16;
+    assert!(matches!(
+        illumination.box_absorption(region, limits, || true),
+        Err(CrystalIlluminationError::Cancelled)
+    ));
+    let dark = AbsorbingCrystalCoherentIllumination::try_new(&interface, &[], 0, || false).unwrap();
+    limits.maximum_mode_pairs = 0;
+    let result = dark.box_absorption(region, limits, || false).unwrap();
+    assert_eq!(result.absorbed_power_w(), 0.0);
+    assert_eq!(result.outward_face_power_w(), [0.0; 6]);
+    assert_eq!(result.mode_pair_count(), 0);
+}

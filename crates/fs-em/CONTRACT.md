@@ -7052,6 +7052,59 @@ between large cancelling beams, noncollinear anisotropic three-dimensional
 Poynting balance and boundary continuity, and original-source/frequency
 admission, darkness and cancellation.
 
+`AbsorbingCrystalCoherentIllumination::box_absorption` integrates this same
+source over an authored `AbsorbingCrystalBox` entirely inside the original
+half-space. Finite positive x/y/z extents and the original global origin define
+the actual volume. Origin and extent remain separate; DD face coordinates
+preserve a narrow box whose upper coordinate would round to its lower one.
+The source-bound result retains the complete illumination and box, physical
+volume, absorbed watts, six signed outward face powers and an independent
+power residual. Face order is x_min, x_max, y_min, y_max, z_min, z_max;
+negative face power means net entry. The residual is minus the sum of outward
+powers minus absorbed watts, and is never redistributed as heat.
+
+Equal complex wavevectors are coalesced in DD before propagation or quadratic
+contraction, preserving exact cancellation and weak coherent residuals.
+Fields remain anchored to the original interface; only a common irrelevant
+phase is removed. General boxes use the existing DD transverse harmonic
+integrals and original stable complex depth integrals for all modal products.
+Heat contracts the positive original parallel/perpendicular loss channels;
+it is not computed by subtracting nearly equal boundary powers. Each of the
+six faces integrates the actual coherent Poynting vector independently,
+including both lateral directions and signed backflow.
+
+When all varying relative-phase extents and noncommon depth opacity are at
+most 0.125, a fixed positive eight-point Gauss rule per varying axis sums
+coherent fields before squaring. Exactly shared normal propagation is
+integrated analytically, including opaque tails. This preserves narrow
+dark-fringe heat that separately rounded diagonal and cross integrals would
+erase. The normalized Gauss remainder coefficient and authored modal rates
+screen analytic truncation against the retained positive loss integral.
+This is not an interval or floating-point accuracy certificate. Unresolved
+modal cancellation or unrepresentable geometry, fields or powers refuses;
+there is no adaptive quadrature, stochastic sampling or negative-heat clamp.
+
+`AbsorbingCrystalBoxLimits` admits (2 times component count) squared pairs
+before allocation or coalescing. Each pair has at most seven fixed analytic
+contractions; the short-box route has at most 8 cubed volume plus 6 times
+8 squared surface field samples, each linear in the same admitted count.
+Peak logical workspace is linear in that count and includes numerical and
+public result headers, original-mode buffers, reusable observation buffers
+and explicit integration scratch. Borrowed sources, allocator overhead and
+ordinary call-stack locals are excluded. Cancellation is checked throughout;
+no partial box result is published.
+
+Focused controls include an independent complex-Fresnel six-face fixture with
+nonzero lateral power, translated crossed-beam heat fringes, cubic dark-fringe
+heat through opaque common depth, anisotropic point-quadrature and x/y/z
+partition checks, single-beam slab reduction, large transverse origins,
+darkness, zero loss, exact work/storage admission and cancellation. A thermal
+consumer must bind the actual rectangular footprint and original material,
+choose its hold interval, and retain all external face powers. The box adds
+no second optical interface, lateral thermal resolution or optical feedback.
+Native execution of the new box regressions remains unverified; the validation
+history below predates these box controls and does not report their execution.
+
 Each factor uses a monochromatic passive reciprocal uniaxial half-space with a
 lossless isotropic incident port. This lane does not advance temperature, infer magnetic loss,
 support an absorbing incident port or finite lossy stack, introduce a biaxial

@@ -34,7 +34,10 @@ pub use illumination::{
 };
 
 mod coherent;
-pub use coherent::AbsorbingCrystalCoherentIllumination;
+pub use coherent::{
+    AbsorbingCrystalBox, AbsorbingCrystalBoxLimits, AbsorbingCrystalCoherentBoxAbsorption,
+    AbsorbingCrystalCoherentIllumination,
+};
 
 /// One original material/frequency/illumination snapshot. Point queries have
 /// fixed work, allocate nothing and never resolve source laws or solve the

@@ -23,6 +23,10 @@ type Result<T> = core::result::Result<T, &'static str>;
 #[path = "kernel/absorption.rs"]
 pub(super) mod absorption;
 
+#[path = "kernel/box_integral.rs"]
+mod box_integral;
+pub(super) use box_integral::coherent_box_absorption;
+
 #[path = "kernel/statistics.rs"]
 mod statistics;
 pub use statistics::{AbsorbingCrystalIlluminationPower, AbsorbingCrystalStatistics};
