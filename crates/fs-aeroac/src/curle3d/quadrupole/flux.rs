@@ -25,6 +25,8 @@ use fs_flux::compressible::spatial::{Boundaries3d, CartesianGrid, Euler3d, Froze
 use fs_material::fluid_acoustics::FluidAcousticState;
 
 mod kernel;
+/// Closed stationary permeable-surface mass and momentum sources.
+pub mod surface;
 
 /// Explicit stationary mapping into the acoustic propagation frame.
 #[derive(Clone, Copy, Debug, PartialEq)]

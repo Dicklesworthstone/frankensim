@@ -1,3 +1,39 @@
+## Permeable control-surface sound from accepted compressible flow
+
+`curle3d::quadrupole::flux::surface::PreparedPermeableSurface3` extracts a
+closed stationary Cartesian FW-H surface from the original frozen-gas or
+evolving-mixture flow owner. Each original face supplies volume source
+`Q=rho*(u.n)*dA/rho0` and force source
+`F=[(p-p0)*n+rho*u*(u.n)]*dA`. Conserved momentum and the original EOS provide
+the physical terms; pressure loading includes convective momentum transport.
+Each adjacent cell's flux is formed before centered face interpolation.
+
+The complete face bank retains physical midpoint positions, areas, outward
+orientation, source order and proper stationary frame rotation. Its actual
+accepted-time `[Q,Fx,Fy,Fz]` histories feed the existing coherent compact-field
+and Welch owners. All faces and channels retain their phases before pressure,
+vector velocity or intensity is formed. Preparation checks the explicit
+ambient rho0/p0/c0 against the original EOS; a mixture requires its original
+species-ordered ambient partial-density vector. No reference composition is
+guessed, and no separate propagation speed is fitted.
+
+Sampling uses bounded O(faces) work and reusable adapter storage. It publishes
+all channels and the native clock atomically, so a failed or cancelled sample
+preserves the preceding accepted observation. The selected box requires an
+actual cell on both sides of every face; ghosts and periodic wrapping are not
+invented. Source, geometry, workspace, medium and strictly increasing sample
+clock admission remain explicit.
+
+Scope is inviscid stationary geometry and a quiescent homogeneous exterior
+reference. Face reconstruction and surface quadrature require spatial
+refinement. The FW-H exterior volume term remains necessary wherever exterior
+stresses are significant; enclosed volume stresses must not be added twice.
+No moving-surface, viscous/SGS, wake correction or measured source qualification
+is implied. Five focused tests cover density/momentum/rotation factors,
+independent monopole recovery and exterior-wave cancellation, original mixture
+calorics, transactional refusals, and accepted history through coherent Welch
+pressure/velocity observation against a direct DFT.
+
 ## Full moving volume, force and stress arrays
 
 `PreparedMovingSourceArray::multipole_field_at` composes the original moving
