@@ -16,6 +16,13 @@ pub use area::{
     render_density_transmittance_box, render_density_transport_box, render_transfer_transport_box,
 };
 
+mod spectral;
+pub use spectral::{
+    DensityAbsorptionSpectrum, MAX_OPACITY_WAVELENGTHS, SpectralAbsorptionImageSettings,
+    SpectralOpacityImage, SpectralOpacitySample, render_density_spectral_box,
+    render_density_spectral_transmittance_box,
+};
+
 #[cfg(feature = "tracer")]
 mod camera;
 #[cfg(feature = "tracer")]
@@ -324,6 +331,34 @@ impl TransportAverage {
             let mean = &mut self.emission[channel];
             mean.add(increment(sample.emission_rgb[channel] - mean.value));
         }
+        self.add_survival(sample, weight);
+    }
+
+    // Spectral absorption has no emission channels to average. Reuse the same
+    // thin-opacity and logarithmic survival arithmetic without that RGB work.
+    fn add_absorption(&mut self, depth: f64, weight: u64) {
+        self.weight += weight;
+        self.add_survival(
+            TransferTransportPixel {
+                emission_rgb: [0.0; 3],
+                transmittance: det::exp(-depth),
+                opacity: -det::expm1(-depth),
+                optical_depth: depth,
+            },
+            weight,
+        );
+    }
+
+    fn add_survival(&mut self, sample: TransferTransportPixel, weight: u64) {
+        let count = self.weight as f64;
+        let fraction = weight as f64 / count;
+        let increment = |difference: f64| {
+            if weight == 1 {
+                difference / count
+            } else {
+                difference * fraction
+            }
+        };
         self.opacity
             .add(increment(sample.opacity - self.opacity.value));
         self.transmission

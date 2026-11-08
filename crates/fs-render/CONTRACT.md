@@ -9655,6 +9655,35 @@ radiance balance, exact work admission and integer coverage. They establish
 the represented box average up to floating-point error, not a measured speed
 or optical-data accuracy claim.
 
+### Wavelength-resolved physical opacity
+
+`render_density_spectral_box` and `render_density_spectral_transmittance_box`
+extend the same borrowed density model to 1–16 explicitly supplied increasing
+vacuum wavelengths and matching mass absorption coefficients. The wavelength
+samples retain their original order; there is no spectral interpolation,
+implicit RGB conversion, bin-width inference or material-name calibration.
+A single original-column density reduction supplies every wavelength, and
+exact integer footprints average each wavelength's transported intensity.
+The reduction retains a finite scale when column mass would overflow, so a
+small coefficient can still produce finite optical depth. SI units, physical
+thickness, thin opacity and effective log survival retain the same meanings as
+the monochromatic owner. The full image preserves wavelengths and permits
+stable attenuation of a constant-footprint spectral background.
+
+The direct-transmission entry point writes pixel-major, wavelength-fastest
+scalars without a full-statistics intermediate image, RGB emission work or
+opacity/log-survival evaluation. Both paths share geometry and density reads;
+neither constructs a converted field or one image per wavelength. In addition
+to the existing exact cell-visit budget, `max_spectral_evaluations` admits
+`(nx+w-gcd(nx,w))*(ny+h-gcd(ny,h))*wavelengths` before scanning the field or
+allocating output. This also bounds retained sample count. These synchronous
+absorption views do not infer scattering, emission or unresolved subcell shape.
+Eight spectral regressions cover SI slabs, wavelength-dependent partial
+coverage, refinement, nondivisible footprints, monochromatic parity, finite
+depth behind an overflowing mass sum, thin/opaque backgrounds, flat layout and
+work/input refusal. The targeted native volumes-enabled source build passed
+117 tests, including these eight; this is not a full-workspace or tracer gate.
+
 ### Continuous scalar-field transfer preintegration
 
 `volumes::preintegrated` adds bounded source/extinction integration for linear

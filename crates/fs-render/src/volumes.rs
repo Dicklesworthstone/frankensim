@@ -19,9 +19,11 @@ pub mod preintegrated;
 /// Exact scalar-transfer transport and physical mass-density opacity.
 pub mod opacity;
 pub use opacity::{
-    DensityAbsorption, TransferTransportPixel, render_density_transmittance,
-    render_density_transmittance_box, render_density_transport_box, render_transfer_transport,
-    render_transfer_transport_box,
+    DensityAbsorption, DensityAbsorptionSpectrum, MAX_OPACITY_WAVELENGTHS,
+    SpectralAbsorptionImageSettings, SpectralOpacityImage, SpectralOpacitySample,
+    TransferTransportPixel, render_density_spectral_box, render_density_spectral_transmittance_box,
+    render_density_transmittance, render_density_transmittance_box, render_density_transport_box,
+    render_transfer_transport, render_transfer_transport_box,
 };
 
 /// SI absorption and local-equilibrium emission along surface-tracer rays.
@@ -120,6 +122,9 @@ pub enum DvrError {
     },
     /// SI density/length units or the mass absorption coefficient are invalid.
     InvalidDensityAbsorption,
+    /// Spectral opacity requires 1--16 increasing positive finite wavelengths
+    /// and exactly as many finite nonnegative mass absorption coefficients.
+    InvalidAbsorptionSpectrum,
     /// Background radiance is negative or non-finite.
     InvalidBackgroundRadiance,
     /// Accumulated or composited source radiance cannot be represented.
@@ -159,6 +164,15 @@ pub enum DvrError {
     SampleCountOverflow,
     /// Pixel-count times depth-cell-count overflowed the work counter.
     CellVisitCountOverflow,
+    /// Column/wavelength work or output-sample arithmetic overflowed.
+    SpectralEvaluationCountOverflow,
+    /// Exact spectral opacity exceeds the admitted column/wavelength work.
+    SpectralEvaluationBudgetExceeded {
+        /// Requested column/wavelength evaluations, including zero absorption.
+        requested: u64,
+        /// Admitted column/wavelength evaluations.
+        limit: u64,
+    },
     /// Exact absorption integration exceeds its explicit cell-visit budget.
     CellVisitBudgetExceeded {
         /// Requested pixel/cell intersections.

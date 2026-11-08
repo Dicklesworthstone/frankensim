@@ -1,9 +1,9 @@
 //! Exact orthographic box footprints on the original piecewise-constant field.
 
 use super::{
-    AbsorptionImageSettings, DensityAbsorption, DvrError, TransferFunction,
-    TransferTransportPixel, TransportAverage, VolumeGrid, density_column, reserve_image,
-    transfer_column, validate_transfer_grid,
+    AbsorptionImageSettings, DensityAbsorption, DvrError, TransferFunction, TransferTransportPixel,
+    TransportAverage, VolumeGrid, density_column, reserve_image, transfer_column,
+    validate_transfer_grid,
 };
 
 /// Area-averaged SI absorption, with stable opacity and effective optical depth.
@@ -41,7 +41,10 @@ pub fn render_density_transmittance_box(
     calibration: DensityAbsorption,
 ) -> Result<Vec<f64>, DvrError> {
     render_density_box(
-        grid, settings, calibration, TransferTransportPixel::transmittance,
+        grid,
+        settings,
+        calibration,
+        TransferTransportPixel::transmittance,
     )
 }
 
@@ -57,8 +60,11 @@ fn render_density_box<P>(
         return Err(DvrError::NegativeGridAbsorption { index });
     }
     render_box(
-        grid, settings, pixels,
-        |column| Ok(density_column(grid, column, calibration)), finish,
+        grid,
+        settings,
+        pixels,
+        |column| Ok(density_column(grid, column, calibration)),
+        finish,
     )
 }
 
@@ -77,8 +83,11 @@ pub fn render_transfer_transport_box(
 ) -> Result<Vec<TransferTransportPixel>, DvrError> {
     let pixels = admit(grid, settings)?;
     render_box(
-        grid, settings, pixels,
-        |column| transfer_column(grid, column, transfer), |pixel| pixel,
+        grid,
+        settings,
+        pixels,
+        |column| transfer_column(grid, column, transfer),
+        |pixel| pixel,
     )
 }
 
@@ -110,6 +119,17 @@ fn render_box<P>(
 }
 
 fn admit(grid: &VolumeGrid<'_>, settings: AbsorptionImageSettings) -> Result<usize, DvrError> {
+    let pixels = admit_work(grid, settings)?;
+    validate_transfer_grid(grid)?;
+    Ok(pixels)
+}
+
+// Spectral consumers admit their additional column/wavelength work before
+// validating the borrowed field or reserving output storage.
+pub(super) fn admit_work(
+    grid: &VolumeGrid<'_>,
+    settings: AbsorptionImageSettings,
+) -> Result<usize, DvrError> {
     let [width, height] = settings.resolution;
     let pixels = width
         .checked_mul(height)
@@ -117,12 +137,14 @@ fn admit(grid: &VolumeGrid<'_>, settings: AbsorptionImageSettings) -> Result<usi
         .ok_or(DvrError::InvalidImageSize)?;
     if pixels > settings.max_pixels {
         return Err(DvrError::PixelBudgetExceeded {
-            requested: pixels, limit: settings.max_pixels,
+            requested: pixels,
+            limit: settings.max_pixels,
         });
     }
     if grid.data.len() > settings.max_grid_cells {
         return Err(DvrError::GridCellBudgetExceeded {
-            requested: grid.data.len(), limit: settings.max_grid_cells,
+            requested: grid.data.len(),
+            limit: settings.max_grid_cells,
         });
     }
     let [nx, ny, nz] = grid.dims;
@@ -136,14 +158,14 @@ fn admit(grid: &VolumeGrid<'_>, settings: AbsorptionImageSettings) -> Result<usi
         .ok_or(DvrError::CellVisitCountOverflow)?;
     if visits > settings.max_cell_visits {
         return Err(DvrError::CellVisitBudgetExceeded {
-            requested: visits, limit: settings.max_cell_visits,
+            requested: visits,
+            limit: settings.max_cell_visits,
         });
     }
-    validate_transfer_grid(grid)?;
     Ok(pixels)
 }
 
-fn overlap_count(cells: usize, pixels: usize) -> u128 {
+pub(super) fn overlap_count(cells: usize, pixels: usize) -> u128 {
     let (mut a, mut b) = (cells, pixels);
     while b != 0 {
         (a, b) = (b, a % b);
@@ -154,7 +176,11 @@ fn overlap_count(cells: usize, pixels: usize) -> u128 {
 // Scale normalized coordinates by cells*pixels. Cell faces are multiples of
 // pixels; pixel faces are multiples of cells. Every overlap is then an exact
 // integer, including nondivisible resolutions and very large world origins.
-fn overlaps(pixel: usize, pixels: usize, cells: usize) -> impl Iterator<Item = (usize, usize)> {
+pub(super) fn overlaps(
+    pixel: usize,
+    pixels: usize,
+    cells: usize,
+) -> impl Iterator<Item = (usize, usize)> {
     let left = pixel as u128 * cells as u128;
     let right = (pixel as u128 + 1) * cells as u128;
     let stride = pixels as u128;
