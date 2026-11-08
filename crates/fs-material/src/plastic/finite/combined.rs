@@ -21,8 +21,9 @@
 //! volume. `with_strain_hardening` selects the shared primary multiplier on
 //! creep_alpha only. Its inverse rate is integrated for the reduced potential;
 //! one scalar coupled solve also retains energetic Voce plastic saturation.
-//! Parameter calibration, tertiary creep, cyclic recovery and rupture are not
-//! supplied by this explicitly bounded constitutive family.
+//! Independent primary resistance recovery is selected by
+//! [`super::creep::recovery::FiniteRecoveringNortonJ2`]. Parameter calibration,
+//! tertiary creep and rupture are not supplied by this bounded family.
 
 use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{FiniteJ2, FiniteJ2Error, FiniteJ2Response, FiniteJ2State, RadialReturn, ReturnMap};
@@ -116,8 +117,25 @@ impl FiniteNortonJ2 {
     }
 
     fn return_map(&self, f: &[f64; 9], old: &FiniteJ2State) -> Result<ReturnMap, FiniteJ2Error> {
+        self.return_map_with_creep_memory(f, old, old.creep_alpha)
+    }
+
+    /// The recovery owner supplies kinetic memory independently of both
+    /// permanent paths. Only the primary scalar law sees this override; the
+    /// original history still owns metric reconstruction and energetic alpha.
+    pub(super) fn return_map_with_creep_memory(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        kinetic_memory: f64,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
         let backbone = self.backbone();
         let trial = backbone.elastic_endpoint(f, old)?;
+        if !kinetic_memory.is_finite() || kinetic_memory < 0.0 {
+            return Err(FiniteJ2Error::State(
+                "finite primary kinetic memory must be finite and nonnegative",
+            ));
+        }
         let stress = trial
             .deviator
             .map(|x| 2.0 * backbone.parameters.shear_modulus_pa * x);
@@ -127,7 +145,7 @@ impl FiniteNortonJ2 {
                 "combined trial stress is not finite",
             ));
         }
-        let radial = self.radial_return(q_trial, old.alpha, old.creep_alpha)?;
+        let radial = self.radial_return(q_trial, old.alpha, kinetic_memory)?;
         backbone.finish_return(f, old, trial, q_trial, radial)
     }
 
@@ -135,7 +153,7 @@ impl FiniteNortonJ2 {
         &self,
         trial: f64,
         alpha: f64,
-        creep_alpha: f64,
+        kinetic_memory: f64,
     ) -> Result<RadialReturn, FiniteJ2Error> {
         if let Some(primary) = self.native.active_primary() {
             return super::creep::primary::combined(
@@ -143,7 +161,7 @@ impl FiniteNortonJ2 {
                 primary,
                 trial,
                 alpha,
-                creep_alpha,
+                kinetic_memory,
             );
         }
         let p = self.backbone().parameters();
@@ -295,10 +313,14 @@ impl FiniteNortonJ2 {
         let mut plastic = upper;
         for _ in 0..96 {
             let hardening_increment = if let Some(table) = table {
-                table.strength_increment_pa(alpha, plastic).map_err(FiniteJ2Error::Tabulated)?
+                table
+                    .strength_increment_pa(alpha, plastic)
+                    .map_err(FiniteJ2Error::Tabulated)?
             } else {
                 linear_hardening * plastic
-                    + voce.expect("active saturated branch").strength_increment(alpha, plastic)
+                    + voce
+                        .expect("active saturated branch")
+                        .strength_increment(alpha, plastic)
             };
             let q = yield_old + hardening_increment;
             let log_creep = self.native.log_increment_at_stress(q);
@@ -331,7 +353,8 @@ impl FiniteNortonJ2 {
                 let curvature = if table.is_some() {
                     hardening_increment - hardening * plastic
                 } else {
-                    voce.expect("active saturated branch").curvature_remainder(alpha, plastic)
+                    voce.expect("active saturated branch")
+                        .curvature_remainder(alpha, plastic)
                 };
                 return Ok(RadialReturn {
                     plastic_increment: plastic,

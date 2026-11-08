@@ -7,7 +7,9 @@
 
 use super::combined::FiniteNortonJ2;
 use super::creep::FiniteNortonCreep;
-use super::creep::recovery::{FiniteRecoveringCreepState, FiniteRecoveringNortonCreep};
+use super::creep::recovery::{
+    FiniteRecoveringCreepState, FiniteRecoveringNortonCreep, FiniteRecoveringNortonJ2,
+};
 use super::rate::FiniteOverstressJ2;
 use super::{FiniteJ2Error, FiniteJ2Material, FiniteJ2Response, FiniteJ2State};
 
@@ -188,6 +190,47 @@ impl FiniteInelasticMaterial for FiniteRecoveringNortonCreep {
     ) -> Result<(), FiniteJ2Error> {
         validate_tolerance(yield_tolerance_pa)?;
         Self::validate_committed(self, f, state)
+    }
+}
+
+impl FiniteInelasticMaterial for FiniteRecoveringNortonJ2 {
+    type State = FiniteRecoveringCreepState;
+
+    fn initial_state(&self) -> Self::State {
+        Self::initial_state(self)
+    }
+
+    fn duration_s(&self) -> Option<f64> {
+        Some(Self::duration_s(self))
+    }
+
+    fn response(
+        &self,
+        f: &[f64; 9],
+        old: &Self::State,
+    ) -> Result<FiniteJ2Response<Self::State>, FiniteJ2Error> {
+        Self::response(self, f, old)
+    }
+
+    fn stress_and_potential(
+        &self,
+        f: &[f64; 9],
+        old: &Self::State,
+    ) -> Result<([f64; 9], f64), FiniteJ2Error> {
+        Self::stress_and_potential(self, f, old)
+    }
+
+    fn stored_energy(&self, f: &[f64; 9], state: &Self::State) -> Result<f64, FiniteJ2Error> {
+        Self::stored_energy(self, f, state)
+    }
+
+    fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &Self::State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error> {
+        Self::validate_committed(self, f, state, yield_tolerance_pa)
     }
 }
 
