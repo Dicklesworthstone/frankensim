@@ -235,8 +235,10 @@ impl RegionalDuct {
     ///
     /// A continuous gas field answers from its own Magnus chain (`GasFieldDuct::response_with_wall_holes_and_ports`):
     /// each hole's terminal reference and orifice coefficient come from that hole's local gas. Under
-    /// `open_hole_interaction` each orifice sees its own UNCOUPLED radiation load, while the radiated sound uses the
-    /// coupled flows (the first-hole shunt already works that way).
+    /// `open_hole_interaction` the admittance is that of the COUPLED network (`fs_duct::interaction::port_admittance`: the chimney
+    /// admittance seen from the junctions less its transfer through the whole bore, with the matched inlet and every opening stamped, so a
+    /// port's orifice drop acts through the same coupled network the flows and the reed's `s12` come from; at a frequency where that network
+    /// is singular, a half-wave run, the independent admittance is kept). Without the row it is the independent network of the chimneys.
     ///
     /// # Errors
     /// A segment-gas (multi-region) binding refuses: the ports need the one constant-medium run, or the one

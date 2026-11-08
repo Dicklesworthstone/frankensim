@@ -24,9 +24,10 @@
 //! kind of upper bound (no spacing is invented; the single-station case used to refuse);
 //! every open hole must be fully open (a vent fraction has no single mouth flow); the
 //! bell is one more opening when the termination radiates. The feedback response and reflection
-//! and the hole mouth flows use the coupled solution. The nonlinear orifice port reflection of
-//! each hole keeps its independent chimney.
+//! and the hole mouth flows use the coupled solution. The first-hole shunt's port reflection keeps its independent
+//! chimney; the orifice ports of `open_hole_orifice N` sit on the COUPLED network ([`port_admittance`]).
 
+use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -231,25 +232,9 @@ pub(crate) struct CoupledSolution {
     pub condition: f64,
 }
 
-/// Solve the bore between openings and the openings through [`couple_with_limit`].
-/// Singular I+S or A Z+B need not mean a singular loaded instrument. If either
-/// elimination or the final nodal condition fails, retain all bore currents
-/// and mouth flows until the complete physical system has been loaded.
-/// `holes` and `ports` are the open holes in axial order; `bell` is the radiating open end, or
-/// `None` for a closed end.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn solve(
-    chain: &PreparedChain,
-    holes: &[PreparedOpenHole],
-    ports: &[CoupledPort],
-    bell: Option<CoupledPort>,
-    exterior: &GasState,
-    omega: f64,
-    interaction: OpenHoleInteraction,
-    maximum_condition: f64,
-) -> Result<CoupledSolution, DuctError> {
-    let m = holes.len();
-    if m == 0 || ports.len() != m {
+/// The openings are one coupled port each, in axial order, and all fully open.
+fn check_openings(holes: &[PreparedOpenHole], ports: usize, maximum_condition: f64) -> Result<(), DuctError> {
+    if holes.is_empty() || ports != holes.len() {
         return Err(bad("open-hole interaction needs one coupled port per open hole"));
     }
     if holes.iter().any(|hole| hole.sigma != 1.0) {
@@ -258,6 +243,23 @@ pub(crate) fn solve(
     if !maximum_condition.is_finite() || maximum_condition < 1.0 {
         return Err(bad("open-hole interaction needs a finite condition bound of at least one"));
     }
+    Ok(())
+}
+
+/// The bore between the openings as a nodal admittance matrix: node 0 is the inlet, node `k + 1` the junction of
+/// open hole `k`, the last node the bore end. Nothing of the openings is stamped.
+struct Bore {
+    ytot: Vec<C64>,
+    nodes: usize,
+    condition: f64,
+    propagation_condition: f64,
+    wave_edges: Vec<crate::network::WaveEdge>,
+    /// Some run between two openings has a singular `I + S` (a half-wave run): no nodal matrix exists for it.
+    keep_waves: bool,
+}
+
+fn assemble_bore(chain: &PreparedChain, holes: &[PreparedOpenHole], maximum_condition: f64) -> Result<Bore, DuctError> {
+    let m = holes.len();
     let reference = chain.reference_impedance;
     let half = |hole: &PreparedOpenHole| {
         TwoPort::from_abcd([C64::ONE, hole.half_series_impedance, C64::ZERO, C64::ONE], reference)
@@ -298,6 +300,109 @@ pub(crate) fn solve(
             Err(error) => return Err(error),
         }
     }
+    Ok(Bore { ytot, nodes, condition, propagation_condition, wave_edges, keep_waves })
+}
+
+/// The admittance of the COUPLED linear network seen at the orifice terminals of the first `orifices` open holes, in
+/// the convention of `compose::open_hole_port_admittance`: `U_i = - sum_j Y_ij dp_j`, `U_i` the volume flow leaving the
+/// bore through hole `i`'s chimney and `dp_j` the pressure drop across hole `j`'s orifice, which sits in series with that
+/// chimney at the bore junction. The inlet is the chain's matched reference, as there; every OTHER opening, hole and bell,
+/// stays linear and radiates into the one exterior that couples all of them (the TMMI mutual impedance), which is the one
+/// thing the independent network lacks.
+///
+/// With the chimney inflow `U = Yj (p - dp)` (`Yj` the coupled chimney admittance seen from the junctions, as in
+/// [`Coupling::admittance`]) and the junction pressures `p = G Yj dp` (`G` the junction block of the inverse nodal matrix,
+/// matched inlet and every opening stamped), `Y = Yj - Yj G Yj` on the first `orifices` rows and columns. With no mutual
+/// coupling `Yj` is diagonal and this is the independent network's `Y`.
+///
+/// # Errors
+/// A half-wave run between two openings (singular `I + S`) has no nodal matrix and returns [`DuctError::Singular`]; the
+/// caller falls back to the independent network for that frequency. `orifices` outside `1..=holes.len()` refuses.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn port_admittance(
+    chain: &PreparedChain,
+    holes: &[PreparedOpenHole],
+    ports: &[CoupledPort],
+    bell: Option<CoupledPort>,
+    exterior: &GasState,
+    omega: f64,
+    interaction: OpenHoleInteraction,
+    maximum_condition: f64,
+    orifices: usize,
+) -> Result<Vec<C64>, DuctError> {
+    check_openings(holes, ports.len(), maximum_condition)?;
+    if orifices == 0 || orifices > holes.len() {
+        return Err(bad("coupled orifice terminals need between one and all open holes"));
+    }
+    let Bore { mut ytot, nodes, keep_waves, .. } = assemble_bore(chain, holes, maximum_condition)?;
+    if keep_waves {
+        return Err(DuctError::Singular);
+    }
+    ytot[0] = ytot[0] + C64::from_re(1.0 / chain.reference_impedance);
+    let mut all: Vec<CoupledPort> = ports.to_vec();
+    all.extend(bell);
+    let q = all.len();
+    let coupling = couple_with_limit(&all, exterior, omega, interaction, maximum_condition)?;
+    let yj = &coupling.admittance;
+    for i in 0..q {
+        for j in 0..q {
+            let at = (i + 1) * nodes + j + 1;
+            ytot[at] = ytot[at] + yj[i * q + j];
+        }
+    }
+    let lu = lu_complex(&ytot, nodes).map_err(|_| DuctError::Singular)?;
+    // G: the junction block of the inverse nodal matrix, one unit junction current at a time.
+    let mut g = vec![C64::ZERO; q * q];
+    for j in 0..q {
+        let mut column = vec![C64::ZERO; nodes];
+        column[j + 1] = C64::ONE;
+        lu.solve(&mut column);
+        for i in 0..q {
+            g[i * q + j] = column[i + 1];
+        }
+    }
+    // gy = G Yj; Y[i][j] = Yj[i][j] - sum_k Yj[i][k] gy[k][j] on the orifice rows and columns.
+    let mut gy = vec![C64::ZERO; q * q];
+    for k in 0..q {
+        for j in 0..q {
+            gy[k * q + j] = (0..q).fold(C64::ZERO, |sum, l| sum + g[k * q + l] * yj[l * q + j]);
+        }
+    }
+    let mut port = vec![C64::ZERO; orifices * orifices];
+    for i in 0..orifices {
+        for j in 0..orifices {
+            let through = (0..q).fold(C64::ZERO, |sum, k| sum + yj[i * q + k] * gy[k * q + j]);
+            let entry = yj[i * q + j] - through;
+            if !finite(entry) {
+                return Err(DuctError::Singular);
+            }
+            port[i * orifices + j] = entry;
+        }
+    }
+    Ok(port)
+}
+
+/// Solve the bore between openings and the openings through [`couple_with_limit`].
+/// Singular I+S or A Z+B need not mean a singular loaded instrument. If either
+/// elimination or the final nodal condition fails, retain all bore currents
+/// and mouth flows until the complete physical system has been loaded.
+/// `holes` and `ports` are the open holes in axial order; `bell` is the radiating open end, or
+/// `None` for a closed end.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve(
+    chain: &PreparedChain,
+    holes: &[PreparedOpenHole],
+    ports: &[CoupledPort],
+    bell: Option<CoupledPort>,
+    exterior: &GasState,
+    omega: f64,
+    interaction: OpenHoleInteraction,
+    maximum_condition: f64,
+) -> Result<CoupledSolution, DuctError> {
+    check_openings(holes, ports.len(), maximum_condition)?;
+    let m = holes.len();
+    let Bore { mut ytot, nodes, mut condition, propagation_condition, wave_edges, keep_waves } =
+        assemble_bore(chain, holes, maximum_condition)?;
     let mut all: Vec<CoupledPort> = ports.to_vec();
     all.extend(bell);
     let q = all.len();

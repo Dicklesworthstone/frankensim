@@ -48,8 +48,8 @@
 //! sharp-edged orifice law of the first N open tone holes TOGETHER, coupled through the bore, instead of the first hole
 //! alone. N = 1, or no row, is the unchanged first-hole shunt. N above 1 needs a constant-medium bore or a
 //! `gas_field continuous` binding; a molecular bore and a midpoint (segment-gas) `gas_field` refuse. On a field each
-//! hole's orifice reads its own local gas; under `open_hole_interaction` each orifice sees its own UNCOUPLED radiation
-//! load while the radiated sound uses the coupled flows (the first-hole shunt already works that way).
+//! hole's orifice reads its own local gas; under `open_hole_interaction` the orifice ports sit on the COUPLED network (the one the
+//! flows and the reed's reflectance come from: `fs_duct::interaction::port_admittance`), not on independent chimneys.
 //! Legacy `listener_m` selects bore pressure plus the compact-jet proxy.
 //! `baffled_outlet` selects Rayleigh observation of the admitted openings.
 //! Neither is measured calibration; the underlying reed mechanics are shared.

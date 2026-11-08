@@ -26,6 +26,12 @@
 //!
 //! The returned reed perturbation is `sum_i s12_i * Delta p_i`. Radiated hole sound still comes from the linear
 //! network, as for the first-hole shunt.
+//!
+//! With `open_hole_interaction` on a continuous gas field, that network is the COUPLED one: `Y` is
+//! `fs_duct::interaction::port_admittance` (the coupled chimney admittance seen from the junctions less its transfer through the whole
+//! bore, with the matched inlet and every opening stamped), the same network the reed's base reflectance, the hole flows and `s12` come
+//! from, so the nonlinear drops perturb the network they belong to. Without the row `Y` is the independent network of the chimneys. At a
+//! frequency where the coupled network is singular (a half-wave run) the independent `Y` is kept there.
 
 use super::{OutletError, RegisterHoleShuntLine, invalid};
 use super::super::RegionalDuct;

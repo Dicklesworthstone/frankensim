@@ -21,6 +21,18 @@ use fs_math::{c64::C64, det};
 use fs_phs::WallPin;
 use crate::WallModel;
 
+/// One frequency's coupled problem: the prepared chain, its open holes, the coupled openings (every hole in axial order)
+/// and the bell opening, with the single exterior that couples them.
+struct CoupledSetup {
+    chain: PreparedChain,
+    holes: Vec<PreparedOpenHole>,
+    ports: Vec<CoupledPort>,
+    bell: Option<CoupledPort>,
+    radiation: GasState,
+    load: Option<C64>,
+    mouth_ka: f64,
+}
+
 /// Original source or propagation refusal, without a fallback material law.
 #[derive(Debug)]
 pub enum GasFieldDuctError {
@@ -423,6 +435,23 @@ impl GasFieldDuct {
         exterior: Option<&GasState>,
         wall: WallModel<'_>,
     ) -> Result<(CoupledSolution, PreparedChain, Vec<PreparedOpenHole>, Option<C64>, f64), DuctError> {
+        let setup = self.coupled_setup(omega, loss, termination, exterior, wall)?;
+        let solved = crate::interaction::solve(
+            &setup.chain, &setup.holes, &setup.ports, setup.bell, &setup.radiation, omega, interaction,
+            ComposeOptions::default().maximum_condition)?;
+        Ok((solved, setup.chain, setup.holes, setup.load, setup.mouth_ka))
+    }
+
+    /// The prepared chain, the open holes and the coupled openings (every hole, then the bell) at one frequency:
+    /// what both the coupled solve and the coupled orifice-terminal admittance are built on.
+    fn coupled_setup(
+        &self,
+        omega: f64,
+        loss: LossModel,
+        termination: Termination,
+        exterior: Option<&GasState>,
+        wall: WallModel<'_>,
+    ) -> Result<CoupledSetup, DuctError> {
         if termination == Termination::IdealOpen {
             return Err(bad("open-hole interaction needs a closed or radiating end, not an ideal-open one"));
         }
@@ -451,10 +480,7 @@ impl GasFieldDuct {
         }
         let length: f64 = self.duct.segments.iter().map(Segment::axial_length).sum();
         let bell = load.map(|z| CoupledPort::open_end(length, z));
-        let solved = crate::interaction::solve(
-            &chain, &holes, &ports, bell, radiation, omega, interaction,
-            ComposeOptions::default().maximum_condition)?;
-        Ok((solved, chain, holes, load, mouth_ka))
+        Ok(CoupledSetup { chain, holes, ports, bell, radiation: *radiation, load, mouth_ka })
     }
 
     /// Open and vented mouths in authored order, with no closed-hole sources.
@@ -745,9 +771,11 @@ impl GasFieldDuct {
     /// terminal reference and orifice coefficient come from that hole's own local gas.
     ///
     /// Under `open_hole_interaction` the mouth and chimney flows in the returned holes are the coupled
-    /// ones, but `Y` is the independent-chimney network's: each orifice sees its own UNCOUPLED radiation
-    /// load while the radiated sound uses the coupled flows. The first-hole shunt already works that way;
-    /// the fully coupled orifice network is not built.
+    /// ones, and so is `Y`: every other opening stays linear and all of them radiate into the one exterior with their
+    /// mutual impedance (`interaction::port_admittance`; with no mutual coupling it is the independent network's `Y`).
+    /// A half-wave run between two holes has no nodal matrix and keeps the independent network at that frequency.
+    /// (The `N = 1` first-hole shunt does not use `Y`: it takes the independent network's port reflection from the
+    /// open-hole flows, unchanged.)
     ///
     /// # Errors
     /// `ports` above [`crate::exterior::MAX_ORIFICE_PORTS`], or the usual composition refusals.
@@ -771,10 +799,13 @@ impl GasFieldDuct {
             .expect("admitted duct")
             .outlet_radius();
         if let Some(interaction) = self.active_interaction() {
-            let (solved, chain, holes, load, mouth_ka) =
-                self.coupled_solution(interaction, omega, loss, termination, exterior, wall)?;
-            // The hole mouth and chimney flows are the coupled ones; each hole's nonlinear
-            // orifice port keeps its independent chimney (see the module `interaction`).
+            let setup = self.coupled_setup(omega, loss, termination, exterior, wall)?;
+            let solved = crate::interaction::solve(
+                &setup.chain, &setup.holes, &setup.ports, setup.bell, &setup.radiation, omega, interaction,
+                ComposeOptions::default().maximum_condition)?;
+            let CoupledSetup { chain, holes, ports: coupled_ports, bell, radiation: coupled_exterior, load, mouth_ka } =
+                setup;
+            // The hole mouth and chimney flows are the coupled ones, and so is the orifice-terminal network below.
             let mut flows = if observe_holes {
                 open_hole_flows(&chain, &holes, load, ComposeOptions::default())?
             } else {
@@ -786,10 +817,25 @@ impl GasFieldDuct {
                 flow.u_hole_over_u_in = *mouth;
                 flow.u_chimney_in_over_u_in = *inflow;
             }
-            // The orifice terminals keep the independent-chimney network (`chain`, `holes`, `load` above):
-            // the same approximation the first-hole shunt makes; the coupled mouth coupling is not inside `Y`.
+            // The orifice terminals sit on the COUPLED network: the same matched inlet, every other opening linear, and
+            // all openings radiating into the one exterior with their mutual impedance, as in the solve above. The
+            // independent-chimney network (`open_hole_port_admittance`) would give the reed a perturbation that does not
+            // belong to the network whose base response it perturbs.
             let admittance = if ports > 0 {
-                open_hole_port_admittance(&chain, &holes, ports, load, ComposeOptions::default())?
+                if ports > crate::compose::MAX_ORIFICE_PORTS {
+                    return Err(bad("at most sixteen open holes can carry a coupled orifice"));
+                }
+                match crate::interaction::port_admittance(
+                    &chain, &holes, &coupled_ports, bell, &coupled_exterior, omega, interaction,
+                    ComposeOptions::default().maximum_condition, ports.min(holes.len()),
+                ) {
+                    Ok(y) => y,
+                    // A half-wave run between two holes has no nodal matrix: that frequency keeps the independent network.
+                    Err(DuctError::Singular) => {
+                        open_hole_port_admittance(&chain, &holes, ports, load, ComposeOptions::default())?
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 Vec::new()
             };

@@ -538,10 +538,16 @@ orifice-terminal admittance `Y` as `exterior::input_impedance_holes_and_ports`, 
 junction and orifice read the hole's own local gas (one `PreparedChain` and `PreparedOpenHole` per hole, as for the flows),
 and the segments between them are the field's Riccati-integrated ones. A uniform field returns the homogeneous result bit
 for bit; one port is the inverse of the one-port network impedance; `Y` is reciprocal and passive and does not depend on
-how many further holes are ports (tested on a graded two-gas field). One approximation, stated: with
-`open_hole_interaction` the mouth and chimney flows (and so the radiated sound) are the coupled solution, but `Y` is the
-UNCOUPLED chain's, so each orifice sees its own uncoupled radiation load while the radiated sound uses the coupled flows.
-The fully coupled orifice network is not built. `response` and `response_with_wall_and_holes` are unchanged.
+how many further holes are ports (tested on a graded two-gas field). With `open_hole_interaction` the mouth and chimney flows
+(and so the radiated sound) are the coupled solution AND `Y` is the coupled network's: `interaction::port_admittance(chain, holes,
+ports, bell, exterior, omega, interaction, maximum_condition, orifices)` returns `Y = Yj - Yj G Yj` on the first `ports` rows and
+columns (`Yj` the coupled chimney admittance seen from the junctions, `G` the junction block of the inverse nodal matrix with the
+matched inlet and every opening stamped; every other opening stays linear), in the convention of the independent function (orifice in
+series at the bore junction, `U = - Y dp`), so the nonlinear drops perturb the network the reed's base reflectance, the hole flows and
+`s12` come from. It equals the independent `Y` as the coupling goes to zero (tested at `epsilon` 1e15 and 1e-8) and is reciprocal,
+passive and independent of the port count (tested at `epsilon` 2). At a frequency where the coupled network is singular (a half-wave
+run keeps its waves) `response_with_holes` keeps the independent `Y` there. `solve` is `check_openings` plus `assemble_bore` (pure
+code motion). `response` and `response_with_wall_and_holes` are unchanged.
 
 ## Public types and semantics
 
