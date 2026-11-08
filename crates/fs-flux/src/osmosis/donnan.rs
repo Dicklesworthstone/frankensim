@@ -301,12 +301,15 @@ impl DonnanOsmoticPair {
             &mut *cancelled,
         )?;
         work.ions += equilibrium.iterations;
-        let pressure = [
-            self.compartments[0].pressure.pressure_pa(volumes[0])?,
-            self.compartments[1].pressure.pressure_pa(volumes[1])?,
-        ];
+        // Cancel the common pressure datum before the elastic response can be
+        // rounded away in either individually evaluated absolute pressure.
+        let pressure_drop = self.compartments[0].pressure.pressure_difference_pa(
+            volumes[0],
+            self.compartments[1].pressure,
+            volumes[1],
+        )?;
         let residual = finite(
-            water - mobility * equilibrium.solvent_driving_pressure_pa(pressure)?,
+            water - mobility * equilibrium.solvent_driving_pressure_pa([pressure_drop, 0.0])?,
             "nonfinite Donnan water residual",
         )?;
         let derivative = equilibrium
@@ -441,6 +444,26 @@ impl DonnanOsmoticPair {
         controls: DonnanStepControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DonnanStepReport> {
+        let mut root_evaluations = 0;
+        let mut ion_root_evaluations = 0;
+        self.step_counted(
+            duration_s,
+            controls,
+            &mut root_evaluations,
+            &mut ion_root_evaluations,
+            &mut cancelled,
+        )
+    }
+
+    /// Accumulate attempted work even when an implicit trial is refused.
+    fn step_counted(
+        &mut self,
+        duration_s: f64,
+        controls: DonnanStepControls,
+        root_evaluations: &mut usize,
+        ion_root_evaluations: &mut usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DonnanStepReport> {
         poll(&mut cancelled)?;
         if !positive(duration_s)
             || !positive(controls.absolute_water_tolerance_m3)
@@ -463,7 +486,14 @@ impl DonnanOsmoticPair {
             return Err(OsmoticNetworkError::StepUnderflow.into());
         }
         let mut work = Work::default();
-        let trial = self.solve_water(mobility, controls, &mut work, &mut cancelled)?;
+        let trial = self.solve_water(mobility, controls, &mut work, &mut cancelled);
+        *root_evaluations = root_evaluations
+            .checked_add(work.water)
+            .ok_or(OsmoticNetworkError::WorkBudget)?;
+        *ion_root_evaluations = ion_root_evaluations
+            .checked_add(work.ions)
+            .ok_or(OsmoticNetworkError::WorkBudget)?;
+        let trial = trial?;
         self.candidates[0]
             .solution
             .replace_inventories(trial.volumes[0], &self.trial_left)?;
@@ -496,10 +526,16 @@ impl DonnanOsmoticPair {
                 });
             }
         }
-        let pressure_before =
-            self.compartments[0].pressure_pa()? - self.compartments[1].pressure_pa()?;
-        let pressure_after =
-            self.candidates[0].pressure_pa()? - self.candidates[1].pressure_pa()?;
+        let pressure_before = self.compartments[0].pressure.pressure_difference_pa(
+            self.compartments[0].solution().solvent_volume_m3(),
+            self.compartments[1].pressure,
+            self.compartments[1].solution().solvent_volume_m3(),
+        )?;
+        let pressure_after = self.compartments[0].pressure.pressure_difference_pa(
+            trial.volumes[0],
+            self.compartments[1].pressure,
+            trial.volumes[1],
+        )?;
         let pressure_work = finite(
             (0.5 * pressure_before + 0.5 * pressure_after) * trial.water,
             "Donnan mechanical work is not representable",

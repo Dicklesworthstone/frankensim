@@ -1477,8 +1477,9 @@ fn pair_endpoint(
             .membrane_law()
             .water_flux(
                 left.solution.temperature_k(),
-                left.pressure.pressure_pa(vl)?,
-                right.pressure.pressure_pa(vr)?,
+                left.pressure
+                    .pressure_difference_pa(vl, right.pressure, vr)?,
+                0.0,
                 &cl[..count],
                 &cr[..count],
             )?

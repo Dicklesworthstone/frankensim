@@ -121,6 +121,42 @@ fn preparation_equilibrates_finite_ions_without_changing_water_or_species_totals
 }
 
 #[test]
+fn common_pressure_reference_preserves_charged_swelling_and_work() {
+    let make = |reference_pressure| {
+        pair(
+            [
+                cell(1.0, &[1.0, 0.0], reference_pressure, RT),
+                cell(1.0, &[1.0, 1.0], reference_pressure, RT),
+            ],
+            vec![1, -1],
+            [-1.0, 0.0],
+            [0.0; 2],
+            1.0 / RT,
+        )
+    };
+    let mut baseline = make(0.0);
+    let mut shifted = make(1e20);
+    // The osmotic imbalance moves water against the chamber compliance. The
+    // resulting restoring pressure is smaller than one ULP of the datum.
+    for duration in [0.1, 0.5, 1.0] {
+        let expected = baseline
+            .step(duration, DonnanStepControls::default(), || false)
+            .unwrap();
+        let actual = shifted
+            .step(duration, DonnanStepControls::default(), || false)
+            .unwrap();
+        assert!(expected.solvent_transfer_m3 < -1e-4);
+        assert!(expected.pressure_work_into_solution_j < -1e-3);
+        assert_eq!(snapshot(&shifted), snapshot(&baseline));
+        assert_eq!(
+            actual.pressure_work_into_solution_j.to_bits(),
+            expected.pressure_work_into_solution_j.to_bits()
+        );
+        assert_eq!(actual.root_evaluations, expected.root_evaluations);
+    }
+}
+
+#[test]
 fn pure_water_linear_compliance_has_exact_backward_euler_step_and_mechanical_work() {
     let cells = [cell(1.0, &[], 2.0, 3.0), cell(1.0, &[], 0.0, 2.0)];
     let mut system = DonnanOsmoticPair::new(
@@ -336,12 +372,16 @@ fn late_cancellation_and_both_work_limits_preserve_state_and_retry_exactly() {
         maximum_root_evaluations: 2,
         ..DonnanStepControls::default()
     };
+    let mut roots = 7;
+    let mut ion_roots = 11;
     assert!(matches!(
-        system.step(1.0, outer, || false),
+        system.step_counted(1.0, outer, &mut roots, &mut ion_roots, || false),
         Err(DonnanWaterError::Network(
             OsmoticNetworkError::NonlinearConvergence
         ))
     ));
+    assert_eq!(roots, 7 + outer.maximum_root_evaluations);
+    assert!(ion_roots > 11);
     assert_eq!(snapshot(&system), before);
     let inner = DonnanStepControls {
         ion_equilibrium: DonnanControls {

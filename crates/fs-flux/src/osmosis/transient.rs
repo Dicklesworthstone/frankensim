@@ -1016,10 +1016,16 @@ impl TransientOsmoticPair {
             (trial.faces[0][species], trial.faces[1][species]) =
                 membrane.membrane_face_concentrations(left, right)?;
         }
+        // The pressure datum is arbitrary. Subtract it before combining with
+        // finite chamber compliance, just as the well-mixed network does.
+        let pressure_drop =
+            self.bulks[0]
+                .pressure
+                .pressure_difference_pa(vl, self.bulks[1].pressure, vr)?;
         let predicted = self.membrane.membrane().water_flux(
             self.bulks[0].solution().temperature_k(),
-            self.bulks[0].pressure.pressure_pa(vl)?,
-            self.bulks[1].pressure.pressure_pa(vr)?,
+            pressure_drop,
+            0.0,
             &trial.faces[0][..self.species_count],
             &trial.faces[1][..self.species_count],
         )?;
@@ -1212,9 +1218,15 @@ impl TransientOsmoticPair {
         self.candidate_bulks[1]
             .solution
             .replace_inventories(vr, &self.workspace.trial_amounts[(self.rows - 1) * count..])?;
-        let pressure_before = self.bulks[0].pressure_pa()? - self.bulks[1].pressure_pa()?;
+        let pressure_before = self.bulks[0].pressure.pressure_difference_pa(
+            self.bulks[0].solution().solvent_volume_m3(),
+            self.bulks[1].pressure,
+            self.bulks[1].solution().solvent_volume_m3(),
+        )?;
         let pressure_after =
-            self.candidate_bulks[0].pressure_pa()? - self.candidate_bulks[1].pressure_pa()?;
+            self.bulks[0]
+                .pressure
+                .pressure_difference_pa(vl, self.bulks[1].pressure, vr)?;
         let work = finite((0.5 * pressure_before + 0.5 * pressure_after) * trial.water)?;
         let film_water: f64 = self
             .films

@@ -122,6 +122,50 @@ fn layered_startup() -> TransientOsmoticPair {
 }
 
 #[test]
+fn common_pressure_reference_preserves_finite_film_transport_and_work() {
+    let make = |reference_pressure| {
+        let mut bulks = [bulk(&[50.0], 1e-6, 0.0), bulk(&[100.0], 1e-6, 0.0)];
+        for b in &mut bulks {
+            b.pressure = OsmoticPressureVolume::new(1e-6, reference_pressure, 1e12).unwrap();
+        }
+        TransientOsmoticPair::new(
+            bulks,
+            1e-4,
+            membrane(2e-11, 1.0, 0.0, 1),
+            Some(film(3, 50.0)),
+            Some(film(3, 100.0)),
+            1 << 20,
+        )
+        .unwrap()
+    };
+    let mut baseline = make(0.0);
+    let mut shifted = make(1e24);
+    for duration in [1.0, 10.0, 30.0] {
+        let expected = baseline
+            .step(duration, TransientStepControls::default(), || false)
+            .unwrap();
+        let actual = shifted
+            .step(duration, TransientStepControls::default(), || false)
+            .unwrap();
+        assert!(expected.solvent_transfer_m3 > 1e-12);
+        assert!(expected.pressure_work_into_solution_j < -1e-10);
+        assert_eq!(snapshot(&shifted), snapshot(&baseline));
+        assert_eq!(
+            actual.pressure_work_into_solution_j.to_bits(),
+            expected.pressure_work_into_solution_j.to_bits()
+        );
+        assert_eq!(
+            actual.membrane_left_concentration_mol_m3,
+            expected.membrane_left_concentration_mol_m3
+        );
+        assert_eq!(
+            actual.membrane_right_concentration_mol_m3,
+            expected.membrane_right_concentration_mol_m3
+        );
+    }
+}
+
+#[test]
 fn adaptive_reservoir_diffusion_converges_to_the_analytical_exponential() {
     // Equal, fixed-volume reservoirs: c_L=50+50*exp(-2*A*P*t/V).
     let exact = 50.0 + 50.0 * (-2.0_f64).exp();

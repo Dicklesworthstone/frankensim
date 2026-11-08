@@ -120,6 +120,30 @@ fn soluble_cell(
 }
 
 #[test]
+fn common_pressure_reference_preserves_compliant_ideal_network_transport() {
+    let make = |reference_pressure| {
+        network(
+            vec![
+                cell(1.0, &[1.0], reference_pressure, RT),
+                cell(1.0, &[2.0], reference_pressure, RT),
+            ],
+            vec![membrane(0, 1, 1.0 / RT, &[(1.0, 0.0)])],
+        )
+    };
+    let mut baseline = make(0.0);
+    let mut shifted = make(1e20);
+    let expected = baseline.advance(1.0, controls(0.1), || false).unwrap();
+    let actual = shifted.advance(1.0, controls(0.1), || false).unwrap();
+    // Both water and opposing elastic pressure must actually change: a
+    // zero-gradient comparison would miss the cancelled restoring force.
+    assert!(baseline.cells[0].solution().solvent_volume_m3() < 0.9);
+    assert!(baseline.cells[0].pressure_pa().unwrap() < -100.0);
+    assert_eq!(snapshot(&shifted), snapshot(&baseline));
+    assert_eq!(actual.accepted_steps, expected.accepted_steps);
+    assert_eq!(actual.rejected_steps, expected.rejected_steps);
+}
+
+#[test]
 fn finite_crystal_reservoir_buffers_diffusion_then_exhausts_at_the_analytic_transition() {
     let mut system = network(
         vec![
