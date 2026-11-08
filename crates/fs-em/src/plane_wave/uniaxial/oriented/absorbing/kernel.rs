@@ -21,7 +21,7 @@ type Vector = [C64; 3];
 type Result<T> = core::result::Result<T, &'static str>;
 
 #[path = "kernel/absorption.rs"]
-mod absorption;
+pub(super) mod absorption;
 
 #[path = "kernel/statistics.rs"]
 mod statistics;

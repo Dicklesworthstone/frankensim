@@ -30,7 +30,11 @@ pub(super) fn integrated_heat(
     let alpha = normals.map(|k| -k.im);
     let beat = Dd::from_f64(normals[0].re) - Dd::from_f64(normals[1].re);
     let mut electric = core::array::from_fn::<_, 2, _>(|m| {
-        attenuated(response.transmitted[m].electric_v_m, alpha[m], start)
+        attenuated(
+            response.transmitted[m].electric_v_m,
+            alpha[m],
+            Dd::from_f64(start),
+        )
     });
     let field_scale = electric
         .iter()
@@ -136,8 +140,8 @@ pub(super) fn integrated_heat(
     Ok(power)
 }
 
-fn attenuated(electric: Vector, alpha: f64, start: f64) -> [Complex; 3] {
-    let exposure = product(alpha, Dd::from_f64(start));
+pub(in super::super) fn attenuated(electric: Vector, alpha: f64, start: Dd) -> [Complex; 3] {
+    let exposure = product(alpha, start);
     let remaining = decay::remaining_fraction(exposure);
     let factor = if exposure < 0.5 {
         Dd::ONE + Dd::from_f64(det::expm1(-exposure))
@@ -155,7 +159,7 @@ fn attenuated(electric: Vector, alpha: f64, start: f64) -> [Complex; 3] {
     })
 }
 
-fn product(rate: f64, width: Dd) -> f64 {
+pub(in super::super) fn product(rate: f64, width: Dd) -> f64 {
     let leading = rate * width.hi;
     if leading.is_infinite() {
         leading
@@ -164,7 +168,7 @@ fn product(rate: f64, width: Dd) -> f64 {
     }
 }
 
-fn decay_integral(alpha: f64, width: Dd) -> Dd {
+pub(in super::super) fn decay_integral(alpha: f64, width: Dd) -> Dd {
     if alpha == 0.0 {
         return width;
     }
@@ -185,7 +189,7 @@ fn decay_integral(alpha: f64, width: Dd) -> Dd {
     Dd::from_f64(-0.5 * det::expm1(-2.0 * x)) / Dd::from_f64(alpha)
 }
 
-fn cross_integral(alpha: [f64; 2], beat: Dd, width: Dd) -> Result<Complex> {
+pub(in super::super) fn cross_integral(alpha: [f64; 2], beat: Dd, width: Dd) -> Result<Complex> {
     let reference = alpha[0].max(alpha[1]).max(beat.to_f64().abs());
     if reference == 0.0 {
         return Ok([width, Dd::ZERO]);
@@ -218,16 +222,20 @@ fn cross_integral(alpha: [f64; 2], beat: Dd, width: Dd) -> Result<Complex> {
     Ok(quotient.map(|v| (v / norm) / scale))
 }
 
-fn short_mean(mut modes: [Complex; 2], rates: [Complex; 2]) -> Dd {
-    // |rate| < sqrt(2)/8. The first omitted field coefficient is < 1e-27;
+pub(in super::super) fn short_mean<const N: usize>(
+    mut modes: [Complex; N],
+    rates: [Complex; N],
+) -> Dd {
+    // |rate| < sqrt(2)/8. Per unit modal amplitude, the first omitted field
+    // coefficient is < 1e-27;
     // its effect is below binary64 roundoff even when the constant field
     // cancels, because all higher coefficients retain the same mode sum.
     const TERMS: usize = 17;
     let mut coefficients = [ZERO; TERMS];
     for (n, coefficient) in coefficients.iter_mut().enumerate() {
-        *coefficient = [modes[0][0] + modes[1][0], modes[0][1] + modes[1][1]];
+        *coefficient = [0, 1].map(|part| modes.iter().fold(Dd::ZERO, |sum, mode| sum + mode[part]));
         let divisor = Dd::from_f64((n + 1) as f64);
-        for m in 0..2 {
+        for m in 0..N {
             modes[m] = multiply(modes[m], rates[m]).map(|v| v / divisor);
         }
     }
@@ -241,7 +249,7 @@ fn short_mean(mut modes: [Complex; 2], rates: [Complex; 2]) -> Dd {
     integral
 }
 
-fn physical_power(
+pub(in super::super) fn physical_power(
     integral: f64,
     length: f64,
     loss: f64,
@@ -278,11 +286,11 @@ fn physical_power(
     det::exp(logarithm)
 }
 
-fn multiply(a: Complex, b: Complex) -> Complex {
+pub(in super::super) fn multiply(a: Complex, b: Complex) -> Complex {
     [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
 }
 
-fn dot(a: Complex, b: Complex) -> Dd {
+pub(in super::super) fn dot(a: Complex, b: Complex) -> Dd {
     a[0] * b[0] + a[1] * b[1]
 }
 
@@ -303,6 +311,22 @@ mod tests {
             .to_f64();
             let expected = delta * delta * (1.0 / 3.0 - delta * delta / 60.0);
             assert!((actual - expected).abs() < 3e-15 * expected);
+        }
+    }
+
+    #[test]
+    fn four_coherent_modes_retain_a_third_order_field_node() {
+        // |1-3 exp(i d u)+3 exp(2 i d u)-exp(3 i d u)|²
+        // = |1-exp(i d u)|^6, whose leading mean is d^6/7.
+        for delta in [2.0_f64.powi(-12), 2.0_f64.powi(-20), 2.0_f64.powi(-30)] {
+            let actual = short_mean(
+                [1.0, -3.0, 3.0, -1.0].map(|v| [Dd::from_f64(v), Dd::ZERO]),
+                [0.0, delta, 2.0 * delta, 3.0 * delta].map(|v| [Dd::ZERO, Dd::from_f64(v)]),
+            )
+            .to_f64();
+            let d2 = delta * delta;
+            let expected = d2 * d2 * d2 * (1.0 / 7.0 - d2 / 36.0 + 7.0 * d2 * d2 / 2640.0);
+            assert!((actual / expected - 1.0).abs() < 3e-13);
         }
     }
 

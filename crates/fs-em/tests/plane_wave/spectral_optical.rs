@@ -576,6 +576,36 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
                 > 0.0
         );
 
+        let area = 0.025;
+        let depth = slab.thickness_m();
+        let heat = prepared.slab_absorption(area, 0.0, depth).unwrap();
+        assert!(core::ptr::eq(heat.prepared_field(), prepared));
+        assert!(core::ptr::eq(heat.source(), &slab));
+        assert_eq!(heat.area_m2(), area);
+        assert_eq!(heat.start_depth_m(), 0.0);
+        assert_eq!(heat.end_depth_m(), depth);
+        assert_eq!(heat.volume_m3(), area * depth);
+        assert!(heat.absorbed_power_w() > 0.0);
+        let split = 0.37 * depth;
+        let left = prepared.slab_absorption(area, 0.0, split).unwrap();
+        let right = prepared.slab_absorption(area, split, depth).unwrap();
+        near(
+            left.absorbed_power_w() + right.absorbed_power_w(),
+            heat.absorbed_power_w(),
+            5e-10 * heat.absorbed_power_w(),
+        );
+        assert!(
+            prepared
+                .slab_absorption(area, -f64::MIN_POSITIVE, depth)
+                .is_err()
+        );
+        assert!(
+            prepared
+                .slab_absorption(area, 0.0, f64::from_bits(depth.to_bits() + 1))
+                .is_err()
+        );
+        assert!(prepared.slab_absorption(area, depth, depth).is_err());
+
         for (z, left, right) in [
             (0.0, SlabRegion::TotalIncidentSide, SlabRegion::Crystal),
             (
