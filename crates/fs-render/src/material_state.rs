@@ -17,6 +17,8 @@ mod spectral_optics;
 pub use spectral_optics::MaterialSlabEmissionError;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.
 pub mod thermo_optic;
+/// NASA CHARMS Corning 7980 dispersion and thermal lensing on accepted fields.
+pub mod silica_refraction;
 /// Original temperature/density-dependent ordinary-water phase and group optics.
 pub mod water_refraction;
 /// Source-bound dispersive particle populations in native volume transport.

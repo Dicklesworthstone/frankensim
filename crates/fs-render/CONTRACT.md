@@ -2209,6 +2209,22 @@ differentiable lift). Pure Rust throughout.
 
 ## Material thermo-optic refraction
 
+With `material-state`, `silica_refraction::corning7980_glass` binds NASA CHARMS
+Corning 7980 fused-silica coefficients directly to the native Sellmeier glass
+owner. Lenses, surface refraction, polarization and group propagation retain
+the original absolute-index fit, its 30--300 K and 400--2600 nm domain, and
+explicitly independent Beer absorption. The source class identifies only the
+index fit; it does not authenticate a specimen or its absorption spectrum.
+
+`MaterialSilicaRefractiveField` composes the same material law with the original
+thermal snapshot and its analytic gradient/Hessian. Native rays and bundles
+receive both `n_T Hess(T)` and `n_TT grad(T) grad(T)^T`; a zero central gradient
+does not discard thermal focusing. Wavelength preparation is allocation-free
+and caches absorption while retaining spatial temperature queries at every
+stage. Bounded fields keep their original domain refusals. These derivatives
+come from the published global index fit, not the source's separately processed
+thermal derivative estimates; their endpoint discrepancy remains explicit.
+
 With `material-state`, `MaterialThermoOpticField` binds the original reference
 glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
 thermal snapshot. Its usable wavelengths are the intersection of reference

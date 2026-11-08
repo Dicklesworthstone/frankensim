@@ -1029,6 +1029,9 @@ pub enum GlassProvenance {
     RepresentativeBorosilicateV1,
     /// Representative crown/low-iron-like visual preset v1, not measured stock.
     RepresentativeCrownV1,
+    /// Absolute phase dispersion from NASA CHARMS Corning 7980 Table 3.
+    /// This names the index source only; absorption is independently supplied.
+    CharmsCorning7980V1,
 }
 
 /// A validated homogeneous dielectric medium.

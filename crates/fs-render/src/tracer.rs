@@ -1217,6 +1217,7 @@ impl Material {
                     GlassProvenance::Custom => 0,
                     GlassProvenance::RepresentativeBorosilicateV1 => 1,
                     GlassProvenance::RepresentativeCrownV1 => 2,
+                    GlassProvenance::CharmsCorning7980V1 => 3,
                 }]);
                 match surface.roughness_alpha() {
                     None => hasher.update(&[0]),
