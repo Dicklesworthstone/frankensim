@@ -121,20 +121,32 @@ full-interval transition is reused throughout the record. N samples cover
 N-1 intervals; no free-decay tail, resampling, filter or ground-motion
 frequency content is invented. Empty/single-sample records have zero motion.
 
-The reported displacement peak includes intersample extrema. Under linear
+The reported displacement, relative-velocity and absolute-acceleration peaks
+include intersample extrema, each with its own sign and physical time. Under linear
 forcing, oscillator acceleration satisfies the homogeneous second-order
-equation. Its analytic zeros partition velocity into monotone pieces in
+equation. Its analytic zeros locate velocity extrema and partition velocity into monotone pieces in
 underdamped, critical and overdamped regimes. Velocity-zero brackets on those
 pieces are bisected using the same exact transition owner. This can recover
 a full-period held-load overshoot even when both sampled displacements vanish.
+Inertial acceleration is `y = -2*zeta*omega*v - omega²*u`, not the relative
+acceleration `u''` and not pseudo-spectral acceleration. Its first derivative
+is `y' = -2*zeta*omega*u'' - omega²*v`; its second derivative equals `u''''`
+under affine forcing and is homogeneous. Analytic zeros of that second
+derivative partition monotone `y'` pieces for the same bounded bisection.
+Without damping, `y = -omega²*u`, so the displacement search and scaled
+localization allowance are reused without extra transition evaluations.
 No oversampling grid is used to infer that a peak was resolved.
 
-`LinearSdofControls` declares the sample cap, acceleration-zero cap per input
+`LinearSdofControls` declares the sample cap, analytic-zero cap per input
 interval, total transition-evaluation cap, bisection cap and time tolerance.
-`LinearSdofResponse` returns the peak magnitude/sign/time, endpoint motion,
-original duration, actual evaluation count and largest remaining root bracket.
-The localization allowance is half the bracket width times its largest
-endpoint speed, maximized across searched extrema. It bounds only numerical
+The zero cap applies independently to either derivative partition; both
+searches share the total transition budget. `LinearSdofResponse` returns all
+three peak magnitudes/signs/times, endpoint motion, original duration, actual
+evaluation count and separate remaining brackets/allowances for displacement
+and absolute acceleration. Each localization allowance is half its bracket
+width times the largest endpoint derivative magnitude, maximized across the
+searched extrema. Velocity's analytic-zero times have no bisection allowance.
+These allowances bound only numerical
 root localization under the monotonicity model, excluding floating-point
 transition/root errors, record bandwidth and physical model error; this is
 not an interval-certified peak enclosure. The implementation retains constant
@@ -143,8 +155,9 @@ search, including immediately before returning the complete result. Typed
 refusals expose invalid/unrepresentable inputs, work exhaustion and original
 transition errors without publishing a partial peak.
 
-Six focused tests cover analytic underdamped overshoot hidden by endpoints,
-critical/overdamped held-load limits, an analytic ramp without an appended
+Focused tests cover analytic underdamped overshoot hidden by endpoints,
+critical/overdamped held-load limits and independently located velocity and
+absolute-acceleration peaks, an analytic ramp without an appended
 tail, invariance under exact linear-record subdivision (including both sides
 of critical damping), independent physical-equation RK4 references with
 separate refinement, deterministic replay, and malformed/budget/cancellation
@@ -536,12 +549,14 @@ allocation, and `maximum_transition_evaluations` is one total budget across
 all oscillators and their extremum searches. Cancellation, exhausted limits
 and unrepresentable results return no partial spectrum.
 
-Each `LinearSpectrumPoint` retains the signed relative-displacement peak,
-its physical time, final motion and localization allowance. Pseudo-spectral
+Each `LinearSpectrumPoint` retains signed displacement, relative-velocity and
+absolute-acceleration peaks, their physical times, final motion and localization
+allowances through its embedded `response`. Pseudo-spectral
 velocity is omega times peak displacement; pseudo-spectral acceleration is
 omega squared times peak displacement. Their localization allowances are
-scaled by the same factors. These are not measured peak velocities/absolute
-accelerations, and the allowances exclude transition/root roundoff and
+scaled by the same factors. These pseudo-spectral values generally differ
+from the true velocity/absolute-acceleration peaks; a critical-damping held-load
+test exercises that distinction. All allowances exclude transition/root roundoff and
 input/model error. The original record clock and duration are retained;
 no resampling or implicit decay tail is added. Existing Newmark PSA and IDA
 normalization retain their original semantics.

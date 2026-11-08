@@ -49,8 +49,8 @@ pub struct GroundMotionRecord {
 pub struct LinearSpectrumPoint {
     /// Caller-supplied undamped natural period [s], retained in caller order.
     pub period_s: f64,
-    /// Relative motion, including the signed displacement peak, its time,
-    /// endpoint state and extremum-localization allowance.
+    /// Relative motion and inertial acceleration, including continuous signed
+    /// displacement, velocity and absolute-acceleration peaks with their times.
     pub response: LinearSdofResponse,
     /// Pseudo-spectral velocity `omega * peak_displacement` [m/s].
     /// This is not the maximum relative or absolute oscillator velocity.
@@ -288,7 +288,8 @@ impl GroundMotionRecord {
     /// Exact linear response to this record's piecewise-linear acceleration.
     ///
     /// Starts at rest and observes the entire supplied duration, including
-    /// intersample displacement extrema. The shared oscillator transition is
+    /// intersample displacement, relative-velocity and absolute-acceleration
+    /// extrema. The shared oscillator transition is
     /// prepared once for this period and record clock. No resampling, waveform
     /// allocation, filtering or implicit decay tail is introduced.
     ///
@@ -322,9 +323,10 @@ impl GroundMotionRecord {
     /// borrows the original SI record and uses its original clock and duration.
     ///
     /// Displacement maxima and localization allowances are scaled explicitly
-    /// into pseudo-spectral velocity and acceleration. These quantities do not
-    /// claim actual velocity/absolute-acceleration peaks, measurement bandwidth,
-    /// or a certified physical-error bound. Existing Newmark-based IDA
+    /// into pseudo-spectral velocity and acceleration. The embedded `response`
+    /// separately retains true relative-velocity and absolute-acceleration peaks;
+    /// they generally differ from these pseudo-spectral quantities. Neither path
+    /// certifies measurement bandwidth or physical error. Existing Newmark-based IDA
     /// normalization remains defined by [`Self::pseudo_spectral_acceleration`].
     ///
     /// # Errors

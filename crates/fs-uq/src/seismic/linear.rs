@@ -1,8 +1,10 @@
 //! Exact linear response to the piecewise-linear acceleration actually supplied.
 //!
 //! On each interval acceleration satisfies the homogeneous oscillator equation.
-//! Its analytic zeros partition velocity into monotone pieces; bracketing velocity
-//! zeros on those pieces finds displacement extrema without a sampling grid.
+//! Its analytic zeros locate relative-velocity extrema and partition velocity
+//! into monotone pieces for displacement extrema. Absolute acceleration is
+//! `-2*zeta*omega*v - omega²*u`; zeros of its homogeneous second derivative
+//! partition its first derivative for the same bounded extremum search.
 //! This resolves intersample peaks, not unmeasured ground-motion frequencies.
 
 use fs_math::det;
@@ -13,13 +15,14 @@ use fs_modal::time::{LinearForceTransition, ModalAcousticState, ModalAcousticTim
 pub struct LinearSdofControls {
     /// Maximum supplied acceleration samples, checked before scanning the record.
     pub maximum_samples: usize,
-    /// Maximum acceleration zeros in any one input interval.
+    /// Maximum interior analytic zeros in either acceleration or its second derivative
+    /// in any one input interval. Each partition has this cap independently.
     pub maximum_acceleration_zeros_per_interval: usize,
     /// Total full-interval and search transition evaluations.
     pub maximum_transition_evaluations: usize,
-    /// Bisection ceiling for each displacement extremum.
+    /// Bisection ceiling for each displacement or absolute-acceleration extremum.
     pub maximum_bisections_per_extremum: usize,
-    /// Maximum width [s] of a velocity-zero bracket before evaluating its midpoint.
+    /// Maximum width [s] of an extremum bracket before evaluating its midpoint.
     pub extremum_time_tolerance_s: f64,
 }
 
@@ -38,6 +41,26 @@ pub struct LinearSdofResponse {
     /// This excludes floating-point transition/root errors and input/model errors;
     /// it is not a certified enclosure of the complete physical response.
     pub peak_localization_allowance_m: f64,
+    /// Maximum absolute relative velocity [m/s], including analytic acceleration
+    /// zeros. This is not pseudo-spectral velocity `omega * peak_displacement`.
+    pub peak_velocity_m_s: f64,
+    /// Signed relative velocity [m/s] at its selected peak.
+    pub signed_peak_velocity_m_s: f64,
+    /// Physical time [s] of the selected velocity peak; ties select the first.
+    /// Its analytic localization still has floating-point transition/root error.
+    pub peak_velocity_time_s: f64,
+    /// Maximum absolute inertial acceleration [m/s²], including intersample
+    /// extrema of `-2*zeta*omega*v - omega²*u`.
+    pub peak_absolute_acceleration_m_s2: f64,
+    /// Signed inertial acceleration [m/s²] at its selected peak.
+    pub signed_peak_absolute_acceleration_m_s2: f64,
+    /// Physical time [s] of the selected acceleration peak; ties select the first.
+    pub peak_absolute_acceleration_time_s: f64,
+    /// Largest final bracket width [s] for an absolute-acceleration extremum.
+    pub maximum_absolute_acceleration_extremum_bracket_s: f64,
+    /// Maximum localization allowance [m/s²] from bracket widths and endpoint
+    /// acceleration rates. Excludes floating-point and input/model errors.
+    pub peak_absolute_acceleration_localization_allowance_m_s2: f64,
     /// Endpoint relative displacement [m].
     pub final_displacement_m: f64,
     /// Endpoint relative velocity [m/s].
@@ -108,6 +131,13 @@ struct Interval<'a, C> {
     zeta: f64,
     work: &'a mut Work<C>,
 }
+
+#[derive(Clone, Copy)]
+enum Extremum {
+    Displacement,
+    AbsoluteAcceleration,
+}
+
 impl<C: FnMut() -> bool> Interval<'_, C> {
     fn at(&mut self, t: f64) -> Result<ModalAcousticState, LinearSdofError> {
         if t == 0.0 {
@@ -128,24 +158,39 @@ impl<C: FnMut() -> bool> Interval<'_, C> {
         )
     }
 
-    fn displacement_extremum(
+    fn derivative(
+        &self,
+        quantity: Extremum,
+        state: ModalAcousticState,
+        time: f64,
+    ) -> Result<f64, LinearSdofError> {
+        match quantity {
+            Extremum::Displacement => Ok(state.velocity_m_sqrt_kg_per_s),
+            Extremum::AbsoluteAcceleration => {
+                let damping = 2.0 * self.omega * self.zeta;
+                let stiffness = self.omega * self.omega;
+                let fraction = time / self.dt;
+                let force = finite((1.0 - fraction) * self.force_start + fraction * self.force_end)?;
+                let acceleration = finite(force + absolute_acceleration(state, damping, stiffness)?)?;
+                finite(-damping * acceleration - stiffness * state.velocity_m_sqrt_kg_per_s)
+            }
+        }
+    }
+
+    fn extremum(
         &mut self,
+        quantity: Extremum,
         mut low: f64,
         mut high: f64,
-        mut low_state: ModalAcousticState,
-        mut high_state: ModalAcousticState,
+        mut low_derivative: f64,
+        mut high_derivative: f64,
     ) -> Result<(f64, ModalAcousticState, f64, f64), LinearSdofError> {
         for _ in 0..self.work.controls.maximum_bisections_per_extremum {
             self.work.poll()?;
             let width = high - low;
             let middle = low + 0.5 * width;
             if width <= self.work.controls.extremum_time_tolerance_s {
-                let allowance = 0.5
-                    * width
-                    * low_state
-                        .velocity_m_sqrt_kg_per_s
-                        .abs()
-                        .max(high_state.velocity_m_sqrt_kg_per_s.abs());
+                let allowance = 0.5 * width * low_derivative.abs().max(high_derivative.abs());
                 return Ok((middle, self.at(middle)?, width, finite(allowance)?));
             }
             if middle == low || middle == high {
@@ -154,17 +199,16 @@ impl<C: FnMut() -> bool> Interval<'_, C> {
                 ));
             }
             let state = self.at(middle)?;
-            let velocity = state.velocity_m_sqrt_kg_per_s;
-            if velocity == 0.0 {
+            let derivative = self.derivative(quantity, state, middle)?;
+            if derivative == 0.0 {
                 return Ok((middle, state, 0.0, 0.0));
             }
-            if velocity.is_sign_positive() == low_state.velocity_m_sqrt_kg_per_s.is_sign_positive()
-            {
+            if derivative.is_sign_positive() == low_derivative.is_sign_positive() {
                 low = middle;
-                low_state = state;
+                low_derivative = derivative;
             } else {
                 high = middle;
-                high_state = state;
+                high_derivative = derivative;
             }
         }
         Err(LinearSdofError::Budget("extremum bisections"))
@@ -181,6 +225,14 @@ fn finite(value: f64) -> Result<f64, LinearSdofError> {
     }
 }
 
+fn absolute_acceleration(
+    state: ModalAcousticState,
+    damping: f64,
+    stiffness: f64,
+) -> Result<f64, LinearSdofError> {
+    finite(-damping * state.velocity_m_sqrt_kg_per_s - stiffness * state.displacement_m_sqrt_kg)
+}
+
 // atanh(x)/x with its regular x=0 limit, avoiding subtractive logarithms near zero.
 fn atanh_over_x(x: f64) -> f64 {
     if x < 0.125 {
@@ -195,9 +247,11 @@ fn atanh_over_x(x: f64) -> f64 {
     }
 }
 
-// Returns the first strictly positive acceleration zero and its spacing.
-// Critical/overdamped acceleration has at most one zero (spacing = infinity).
-fn acceleration_zeros(
+// Zeros of the derivative that partitions the selected extremum's first
+// derivative into monotone pieces. For displacement this is u''; for inertial
+// acceleration y = u'' - f, this is y'' = u'''' because the force is affine.
+fn partition_zeros(
+    quantity: Extremum,
     state: ModalAcousticState,
     f0: f64,
     f1: f64,
@@ -208,10 +262,33 @@ fn acceleration_zeros(
     let alpha = omega * zeta;
     let stiffness = omega * omega;
     let velocity = state.velocity_m_sqrt_kg_per_s;
-    let a = finite(f0 - 2.0 * alpha * velocity - stiffness * state.displacement_m_sqrt_kg)?;
+    let a = finite(f0 + absolute_acceleration(state, 2.0 * alpha, stiffness)?)?;
     let slope = finite((f1 - f0) / dt)?;
-    // a'(0) + alpha*a(0); compute directly without cancelling 2*alpha*a.
-    let d = finite(slope - alpha * a - stiffness * velocity)?;
+    let (a, d) = match quantity {
+        Extremum::Displacement => {
+            // a'(0) + alpha*a(0), without cancelling 2*alpha*a.
+            (a, finite(slope - alpha * a - stiffness * velocity)?)
+        }
+        Extremum::AbsoluteAcceleration => {
+            let acceleration_rate = finite(slope - 2.0 * alpha * a - stiffness * velocity)?;
+            let curvature = finite(-2.0 * alpha * acceleration_rate - stiffness * a)?;
+            // u''''' + alpha*u'''' = -alpha*u'''' - omega²*u'''.
+            (curvature, finite(-alpha * curvature - stiffness * acceleration_rate)?)
+        }
+    };
+    homogeneous_zeros(a, d, omega, zeta)
+}
+
+// For x'' + 2*alpha*x' + omega²*x = 0, a = x(0), d = x'(0)+alpha*x(0).
+// Returns the first strictly positive zero and its spacing. Critical and
+// overdamped responses have at most one zero (spacing = infinity).
+fn homogeneous_zeros(
+    a: f64,
+    d: f64,
+    omega: f64,
+    zeta: f64,
+) -> Result<(f64, f64), LinearSdofError> {
+    let alpha = omega * zeta;
     if a == 0.0 && d == 0.0 {
         return Ok((f64::INFINITY, f64::INFINITY));
     }
@@ -245,7 +322,13 @@ fn acceleration_zeros(
 }
 
 impl LinearSdofResponse {
-    fn observe(&mut self, state: ModalAcousticState, time: f64) {
+    fn observe(
+        &mut self,
+        state: ModalAcousticState,
+        time: f64,
+        damping: f64,
+        stiffness: f64,
+    ) -> Result<(), LinearSdofError> {
         let value = state.displacement_m_sqrt_kg;
         if value.abs() > self.peak_displacement_m
             || (value.abs() == self.peak_displacement_m && time < self.peak_time_s)
@@ -254,6 +337,24 @@ impl LinearSdofResponse {
             self.signed_peak_displacement_m = value;
             self.peak_time_s = time;
         }
+        let velocity = state.velocity_m_sqrt_kg_per_s;
+        if velocity.abs() > self.peak_velocity_m_s
+            || (velocity.abs() == self.peak_velocity_m_s && time < self.peak_velocity_time_s)
+        {
+            self.peak_velocity_m_s = velocity.abs();
+            self.signed_peak_velocity_m_s = velocity;
+            self.peak_velocity_time_s = time;
+        }
+        let acceleration = absolute_acceleration(state, damping, stiffness)?;
+        if acceleration.abs() > self.peak_absolute_acceleration_m_s2
+            || (acceleration.abs() == self.peak_absolute_acceleration_m_s2
+                && time < self.peak_absolute_acceleration_time_s)
+        {
+            self.peak_absolute_acceleration_m_s2 = acceleration.abs();
+            self.signed_peak_absolute_acceleration_m_s2 = acceleration;
+            self.peak_absolute_acceleration_time_s = time;
+        }
+        Ok(())
     }
 }
 
@@ -264,8 +365,11 @@ impl LinearSdofResponse {
 /// N samples cover N-1 intervals, with no implicit decay tail. Empty or single-
 /// sample records return zero motion. Units are seconds, rad/s and m/s².
 ///
-/// Every displacement extremum is sought on analytic monotone-velocity pieces.
-/// The tolerance controls root localization, not input bandwidth or model error.
+/// Displacement and absolute-acceleration extrema are sought on analytic
+/// monotone-derivative pieces. Relative-velocity extrema use analytic acceleration
+/// zeros directly. The tolerance controls root localization, not input bandwidth
+/// or model error. Physical velocity and acceleration peaks are distinct from
+/// the pseudo-spectral quantities obtained by scaling peak displacement.
 /// Work is bounded and storage is constant, independent of the record length.
 /// Deterministic repeatability is on the same ISA/toolchain; no interval-certified
 /// extrema or cross-ISA claim is made. The legacy Newmark APIs remain separate.
@@ -307,8 +411,8 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
             "positive finite clock/frequency/tolerance and valid damping/work limits required",
         ));
     }
-    finite(omega_rad_s * omega_rad_s)?;
-    finite(2.0 * omega_rad_s * damping_ratio)?;
+    let stiffness = finite(omega_rad_s * omega_rad_s)?;
+    let damping = finite(2.0 * omega_rad_s * damping_ratio)?;
     let intervals = ground_acceleration_m_s2.len().saturating_sub(1);
     let duration_s = finite(intervals as f64 * dt_s)?;
     for &sample in ground_acceleration_m_s2 {
@@ -327,6 +431,14 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
         peak_time_s: 0.0,
         maximum_extremum_bracket_s: 0.0,
         peak_localization_allowance_m: 0.0,
+        peak_velocity_m_s: 0.0,
+        signed_peak_velocity_m_s: 0.0,
+        peak_velocity_time_s: 0.0,
+        peak_absolute_acceleration_m_s2: 0.0,
+        signed_peak_absolute_acceleration_m_s2: 0.0,
+        peak_absolute_acceleration_time_s: 0.0,
+        maximum_absolute_acceleration_extremum_bracket_s: 0.0,
+        peak_absolute_acceleration_localization_allowance_m_s2: 0.0,
         final_displacement_m: 0.0,
         final_velocity_m_s: 0.0,
         duration_s,
@@ -337,8 +449,6 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
         work.evaluation()?;
         let (f0, f1) = (-samples[0], -samples[1]);
         let end = full.advance(state, f0, f1)?;
-        let (first_zero, spacing) =
-            acceleration_zeros(state, f0, f1, dt_s, omega_rad_s, damping_ratio)?;
         let mut interval = Interval {
             start: state,
             end,
@@ -350,52 +460,80 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
             work: &mut work,
         };
         let base_time = index as f64 * dt_s;
-        let (mut low, mut low_state) = (0.0, state);
-        let mut zero_index = 0usize;
-        loop {
-            interval.work.poll()?;
-            let next_zero = if zero_index == 0 {
-                first_zero
-            } else {
-                first_zero + zero_index as f64 * spacing
-            };
-            let high = next_zero.min(dt_s);
-            if high <= low {
-                return Err(LinearSdofError::Invalid(
-                    "acceleration-zero spacing is below representable time resolution",
-                ));
+        for quantity in [Extremum::Displacement, Extremum::AbsoluteAcceleration] {
+            // With no damping y=-omega²*u, so the displacement search already
+            // visits every acceleration extremum; do not repeat its transitions.
+            if matches!(quantity, Extremum::AbsoluteAcceleration) && damping == 0.0 {
+                continue;
             }
-            if high < dt_s && zero_index >= controls.maximum_acceleration_zeros_per_interval {
-                return Err(LinearSdofError::Budget(
-                    "acceleration zeros per input interval",
-                ));
+            let (first_zero, spacing) =
+                partition_zeros(quantity, state, f0, f1, dt_s, omega_rad_s, damping_ratio)?;
+            let mut low = 0.0;
+            let mut low_derivative = interval.derivative(quantity, state, low)?;
+            let mut zero_index = 0usize;
+            loop {
+                interval.work.poll()?;
+                let next_zero = if zero_index == 0 {
+                    first_zero
+                } else {
+                    first_zero + zero_index as f64 * spacing
+                };
+                let high = next_zero.min(dt_s);
+                if high <= low {
+                    return Err(LinearSdofError::Invalid(
+                        "derivative-zero spacing is below representable time resolution",
+                    ));
+                }
+                if high < dt_s && zero_index >= controls.maximum_acceleration_zeros_per_interval {
+                    return Err(LinearSdofError::Budget(match quantity {
+                        Extremum::Displacement => "acceleration zeros per input interval",
+                        Extremum::AbsoluteAcceleration => {
+                            "absolute-acceleration curvature zeros per input interval"
+                        }
+                    }));
+                }
+                let high_state = interval.at(high)?;
+                report.observe(high_state, base_time + high, damping, stiffness)?;
+                let high_derivative = interval.derivative(quantity, high_state, high)?;
+                if low_derivative != 0.0 && high_derivative != 0.0
+                    && low_derivative.is_sign_positive() != high_derivative.is_sign_positive()
+                {
+                    let (time, peak, width, allowance) =
+                        interval.extremum(quantity, low, high, low_derivative, high_derivative)?;
+                    report.observe(peak, base_time + time, damping, stiffness)?;
+                    match quantity {
+                        Extremum::Displacement => {
+                            report.maximum_extremum_bracket_s =
+                                report.maximum_extremum_bracket_s.max(width);
+                            report.peak_localization_allowance_m =
+                                report.peak_localization_allowance_m.max(allowance);
+                        }
+                        Extremum::AbsoluteAcceleration => {
+                            report.maximum_absolute_acceleration_extremum_bracket_s =
+                                report.maximum_absolute_acceleration_extremum_bracket_s.max(width);
+                            report.peak_absolute_acceleration_localization_allowance_m_s2 =
+                                report.peak_absolute_acceleration_localization_allowance_m_s2.max(allowance);
+                        }
+                    }
+                }
+                if high == dt_s {
+                    break;
+                }
+                low = high;
+                low_derivative = high_derivative;
+                zero_index += 1;
             }
-            let high_state = interval.at(high)?;
-            report.observe(high_state, base_time + high);
-            let (vl, vh) = (
-                low_state.velocity_m_sqrt_kg_per_s,
-                high_state.velocity_m_sqrt_kg_per_s,
-            );
-            if vl != 0.0 && vh != 0.0 && vl.is_sign_positive() != vh.is_sign_positive() {
-                let (time, peak, width, allowance) =
-                    interval.displacement_extremum(low, high, low_state, high_state)?;
-                report.observe(peak, base_time + time);
-                report.maximum_extremum_bracket_s = report.maximum_extremum_bracket_s.max(width);
-                report.peak_localization_allowance_m =
-                    report.peak_localization_allowance_m.max(allowance);
-            }
-            if high == dt_s {
-                break;
-            }
-            low = high;
-            low_state = high_state;
-            zero_index += 1;
         }
         state = end;
     }
     work.poll()?;
     report.final_displacement_m = state.displacement_m_sqrt_kg;
     report.final_velocity_m_s = state.velocity_m_sqrt_kg_per_s;
+    if damping == 0.0 {
+        report.maximum_absolute_acceleration_extremum_bracket_s = report.maximum_extremum_bracket_s;
+        report.peak_absolute_acceleration_localization_allowance_m_s2 =
+            finite(stiffness * report.peak_localization_allowance_m)?;
+    }
     report.transition_evaluations = work.evaluations;
     Ok(report)
 }
@@ -437,6 +575,17 @@ mod tests {
             2.0e-14,
         );
         close(response.peak_time_s, core::f64::consts::PI / omega, 1.0e-11);
+        close(response.peak_velocity_m_s, 3.0 / omega, 2.0e-14);
+        // The full period has two tied velocity magnitudes. Use a half period
+        // with one unique extremum to check its sign and physical time.
+        let half_period = solve(&[3.0, 3.0], 0.5 * dt, omega, 0.0);
+        close(half_period.signed_peak_velocity_m_s, -3.0 / omega, 2.0e-14);
+        close(half_period.peak_velocity_time_s, core::f64::consts::FRAC_PI_2 / omega, 1.0e-11);
+        close(response.peak_absolute_acceleration_m_s2, 6.0, 2.0e-13);
+        close(response.signed_peak_absolute_acceleration_m_s2, 6.0, 2.0e-13);
+        close(response.peak_absolute_acceleration_time_s, response.peak_time_s, 1.0e-11);
+        assert_eq!(response.peak_absolute_acceleration_localization_allowance_m_s2,
+            omega * omega * response.peak_localization_allowance_m);
         assert!(response.peak_localization_allowance_m < 1.0e-18);
         assert!(response.transition_evaluations > 1);
         assert_eq!(response.intervals, 1);
@@ -452,6 +601,18 @@ mod tests {
         let expected = force / (omega * omega) * (1.0 + (-zeta * omega * t_peak).exp());
         close(response.peak_displacement_m, expected, 3.0e-14);
         close(response.peak_time_s, t_peak, 1.0e-11);
+        let velocity_time = zeta.acos() / wd;
+        let velocity = force / omega * (-zeta * omega * velocity_time).exp();
+        let acceleration_time = (core::f64::consts::PI - 2.0 * zeta.asin()) / wd;
+        let acceleration = force * (1.0 + (-zeta * omega * acceleration_time).exp());
+        close(response.peak_velocity_m_s, velocity, 3.0e-14);
+        close(response.signed_peak_velocity_m_s, -velocity, 3.0e-14);
+        close(response.peak_velocity_time_s, velocity_time, 1.0e-11);
+        close(response.peak_absolute_acceleration_m_s2, acceleration, 3.0e-13);
+        close(response.signed_peak_absolute_acceleration_m_s2, acceleration, 3.0e-13);
+        close(response.peak_absolute_acceleration_time_s, acceleration_time, 1.0e-11);
+        assert!(response.peak_absolute_acceleration_m_s2 > omega * omega * response.peak_displacement_m);
+        assert!(response.peak_velocity_m_s < omega * response.peak_displacement_m - 0.1);
 
         let time = 1.7;
         let critical = solve(&[force, force], time, omega, 1.0);
@@ -461,6 +622,11 @@ mod tests {
         close(critical.final_velocity_m_s, v, 2.0e-14);
         close(critical.peak_displacement_m, q.abs(), 2.0e-14);
         assert_eq!(critical.peak_time_s, time);
+        close(critical.peak_velocity_m_s, force / (omega * core::f64::consts::E), 2.0e-14);
+        close(critical.signed_peak_velocity_m_s, -critical.peak_velocity_m_s, 0.0);
+        close(critical.peak_velocity_time_s, 1.0 / omega, 1.0e-11);
+        close(critical.peak_absolute_acceleration_m_s2, force * (1.0 + (-2.0_f64).exp()), 2.0e-13);
+        close(critical.peak_absolute_acceleration_time_s, 2.0 / omega, 1.0e-11);
 
         let zeta = 2.0_f64;
         let rs = -omega / (zeta + (zeta * zeta - 1.0).sqrt());
@@ -473,6 +639,16 @@ mod tests {
         close(overdamped.final_velocity_m_s, v, 3.0e-14);
         close(overdamped.peak_displacement_m, q.abs(), 3.0e-14);
         assert_eq!(overdamped.peak_time_s, time);
+        let velocity_time = (rf / rs).ln() / (rs - rf);
+        let velocity = force * ((rs * velocity_time).exp() - (rf * velocity_time).exp()) / (rf - rs);
+        let acceleration_time = 2.0 * velocity_time;
+        let es = (rs * acceleration_time).exp();
+        let ef = (rf * acceleration_time).exp();
+        let acceleration = force * (1.0 - (rs * es - rf * ef) / (rs - rf));
+        close(overdamped.peak_velocity_m_s, velocity.abs(), 3.0e-14);
+        close(overdamped.peak_velocity_time_s, velocity_time, 1.0e-11);
+        close(overdamped.peak_absolute_acceleration_m_s2, acceleration, 3.0e-13);
+        close(overdamped.peak_absolute_acceleration_time_s, acceleration_time, 1.0e-11);
     }
 
     #[test]
@@ -489,6 +665,8 @@ mod tests {
         for samples in [&[][..], &[9.0][..]] {
             let empty = solve(samples, 0.2, omega, 0.4);
             assert_eq!(empty.peak_displacement_m, 0.0);
+            assert_eq!(empty.peak_velocity_m_s, 0.0);
+            assert_eq!(empty.peak_absolute_acceleration_m_s2, 0.0);
             assert_eq!(empty.duration_s, 0.0);
             assert_eq!(empty.intervals, 0);
             assert_eq!(empty.transition_evaluations, 0);
@@ -522,8 +700,16 @@ mod tests {
                 3.0e-13,
             );
             close(coarse.peak_time_s, fine.peak_time_s, 3.0e-10);
+            close(coarse.peak_velocity_m_s, fine.peak_velocity_m_s, 3.0e-12);
+            close(coarse.signed_peak_velocity_m_s, fine.signed_peak_velocity_m_s, 3.0e-12);
+            close(coarse.peak_velocity_time_s, fine.peak_velocity_time_s, 3.0e-10);
+            close(coarse.peak_absolute_acceleration_m_s2, fine.peak_absolute_acceleration_m_s2, 3.0e-11);
+            close(coarse.signed_peak_absolute_acceleration_m_s2, fine.signed_peak_absolute_acceleration_m_s2, 3.0e-11);
+            close(coarse.peak_absolute_acceleration_time_s, fine.peak_absolute_acceleration_time_s, 3.0e-10);
             close(coarse.duration_s, fine.duration_s, 1.0e-15);
             assert!(coarse.maximum_extremum_bracket_s <= controls().extremum_time_tolerance_s);
+            assert!(coarse.maximum_absolute_acceleration_extremum_bracket_s
+                <= controls().extremum_time_tolerance_s);
             assert_eq!(coarse, solve(&samples, 0.9, 10.0, zeta));
         }
     }
@@ -537,8 +723,9 @@ mod tests {
         omega: f64,
         zeta: f64,
         subdivisions: usize,
-    ) -> (f64, f64, f64) {
+    ) -> (f64, f64, f64, f64, f64) {
         let (mut q, mut v, mut peak) = (0.0_f64, 0.0_f64, 0.0_f64);
+        let (mut velocity_peak, mut acceleration_peak) = (0.0_f64, 0.0_f64);
         let h = dt / subdivisions as f64;
         for segment in samples.windows(2) {
             let acceleration = |t: f64, x: f64, velocity: f64| {
@@ -560,9 +747,11 @@ mod tests {
                 q += h / 6.0 * (k1q + 2.0 * k2q + 2.0 * k3q + k4q);
                 v += h / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
                 peak = peak.max(q.abs());
+                velocity_peak = velocity_peak.max(v.abs());
+                acceleration_peak = acceleration_peak.max((-2.0 * zeta * omega * v - omega * omega * q).abs());
             }
         }
-        (q, v, peak)
+        (q, v, peak, velocity_peak, acceleration_peak)
     }
 
     #[test]
@@ -579,6 +768,12 @@ mod tests {
             // The independent grid underestimates a true peak by O(h²).
             close(response.peak_displacement_m, fine.2, 5.0e-8);
             assert!(response.peak_displacement_m + 2.0e-13 >= fine.2);
+            close(coarse.3, fine.3, 2.0e-7);
+            close(coarse.4, fine.4, 2.0e-6);
+            close(response.peak_velocity_m_s, fine.3, 2.0e-7);
+            close(response.peak_absolute_acceleration_m_s2, fine.4, 2.0e-6);
+            assert!(response.peak_velocity_m_s + 2.0e-12 >= fine.3);
+            assert!(response.peak_absolute_acceleration_m_s2 + 2.0e-11 >= fine.4);
         }
     }
 
@@ -636,5 +831,25 @@ mod tests {
             Err(LinearSdofError::Cancelled)
         ));
         assert_eq!(samples, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn absolute_acceleration_search_obeys_its_partition_and_shared_work_limits() {
+        let samples = [1.0, 1.0];
+        let mut limited = controls();
+        // This interval contains one acceleration zero but two curvature zeros.
+        limited.maximum_acceleration_zeros_per_interval = 1;
+        assert!(matches!(
+            linear_sdof_response(&samples, 1.1, 4.0, 0.2, limited, || false),
+            Err(LinearSdofError::Budget("absolute-acceleration curvature zeros per input interval"))
+        ));
+        let full = solve(&samples, 1.1, 4.0, 0.2);
+        limited = controls();
+        limited.maximum_transition_evaluations = full.transition_evaluations - 1;
+        assert!(matches!(
+            linear_sdof_response(&samples, 1.1, 4.0, 0.2, limited, || false),
+            Err(LinearSdofError::Budget("transition evaluations"))
+        ));
+        assert!(linear_sdof_response(&samples, 1e-110, 1e110, 1.0, controls(), || false).is_err());
     }
 }

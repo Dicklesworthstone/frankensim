@@ -344,6 +344,8 @@ fn continuous_spectrum_resolves_hidden_peaks_and_preserves_period_order() {
         assert!((point.response.signed_peak_displacement_m + expected_peak).abs() < 5e-14);
         assert!((point.pseudo_spectral_velocity_m_s - 6.0 / omega).abs() < 3e-13);
         assert!((point.pseudo_spectral_acceleration_m_s2 - 6.0).abs() < 2e-12);
+        assert!((point.response.peak_velocity_m_s - 3.0 / omega).abs() < 3e-13);
+        assert!((point.response.peak_absolute_acceleration_m_s2 - 6.0).abs() < 2e-12);
         assert_eq!(point.response.duration_s, 1.0);
         assert_eq!(point.response.intervals, 1);
         assert_eq!(
@@ -374,6 +376,28 @@ fn continuous_spectrum_resolves_hidden_peaks_and_preserves_period_order() {
             .sum::<usize>(),
     );
     assert_eq!(motion, before);
+}
+
+#[test]
+fn continuous_spectrum_keeps_true_motion_distinct_from_pseudo_spectral_values() {
+    let omega = 4.0;
+    let ground = 2.0;
+    let motion = record(2.0, vec![ground, ground]);
+    let spectrum = motion.linear_response_spectrum(
+        &[core::f64::consts::TAU / omega], 1.0, 1, linear_controls(), || false,
+    ).unwrap();
+    let point = &spectrum.points[0];
+    let response = point.response;
+    let expected_velocity = ground / (omega * core::f64::consts::E);
+    let expected_acceleration = ground * (1.0 + (-2.0_f64).exp());
+    assert!((response.signed_peak_velocity_m_s + expected_velocity).abs() < 2e-13);
+    assert!((response.peak_velocity_time_s - 1.0 / omega).abs() < 1e-10);
+    assert!((response.signed_peak_absolute_acceleration_m_s2 - expected_acceleration).abs() < 2e-12);
+    assert!((response.peak_absolute_acceleration_time_s - 2.0 / omega).abs() < 1e-10);
+    assert!(response.peak_velocity_m_s < point.pseudo_spectral_velocity_m_s);
+    assert!(response.peak_absolute_acceleration_m_s2 > point.pseudo_spectral_acceleration_m_s2);
+    assert_eq!(response.duration_s, motion.duration_s());
+    assert_eq!(spectrum.transition_evaluations, response.transition_evaluations);
 }
 
 #[test]
@@ -420,6 +444,9 @@ fn recorded_continuous_spectra_preserve_si_units_and_linear_interpolation() {
                     < 2e-12
             );
             assert!((actual.response.peak_time_s - expected.response.peak_time_s).abs() < 2e-9);
+            assert!((actual.response.peak_velocity_m_s - expected.response.peak_velocity_m_s).abs() < 2e-11);
+            assert!((actual.response.peak_absolute_acceleration_m_s2
+                - expected.response.peak_absolute_acceleration_m_s2).abs() < 2e-10);
             assert!(
                 (actual.pseudo_spectral_acceleration_m_s2
                     - expected.pseudo_spectral_acceleration_m_s2)
