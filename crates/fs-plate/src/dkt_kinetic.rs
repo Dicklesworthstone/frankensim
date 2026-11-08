@@ -49,7 +49,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
-            self.reference_density(),
+            self.reference_mass.as_ref(),
             &self.boundary_nodes,
             stiffeners,
             opts,

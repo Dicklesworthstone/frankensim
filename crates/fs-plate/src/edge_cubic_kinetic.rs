@@ -89,7 +89,16 @@ impl PlateChart {
             let area = 0.5*((x[1]-x[0])*(y[2]-y[0])-(x[2]-x[0])*(y[1]-y[0]));
             let h = s.thickness;
             let density = self.reference_density().map_or([s.density;3], |rho| rho[element]);
-            let (lumped, rotary) = if density[0] == density[1] && density[1] == density[2] {
+            let (lumped, rotary) = if let Some(moments) = self.reference_section_mass() {
+                // The independent I2 field owns BOTH the removed slope row
+                // sums and their consistent replacement. I0 owns translation.
+                let (scale, weights) = crate::reference_density::normalized(
+                    moments[element].map(|m| m.second_moment_kg()),
+                );
+                let total = scale * area;
+                (crate::reference_density::lumped(total, weights),
+                    rotary_mass_inner(&x, &y, total, Some(weights))?)
+            } else if density[0] == density[1] && density[1] == density[2] {
                 // Same operation order as the original assembler's slope mass.
                 let total = density[0]*h*h*h/12.0*area;
                 ([total/3.0;3], rotary_mass(&x,&y,total)?)

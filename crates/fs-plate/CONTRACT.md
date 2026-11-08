@@ -2519,3 +2519,39 @@ native moderate-rotation kinematics, without finite-rotation follower gravity
 or centrifugal/angular-acceleration terms. Focused regressions compare the
 complete unrestricted mass projection, reciprocal density/acceleration scaling,
 zero-acceleration parity and refusal before solver publication.
+
+## Independent thickness mass moments in the native flat-plate pencil
+
+`PlateSectionMassMoments` retains positive finite centered reference moments
+`I0 = integral rho dz` [kg/m²] and `I2 = integral rho z² dz` [kg].
+`PlateChart::with_reference_section_mass` supplies each independently as P1
+corner values in triangle order. This inventory is selected exclusively with
+the existing scalar/P1 density inventory; selecting either explicit field
+replaces the other. Elementwise jumps remain explicit. Elastic thickness,
+bending stiffness and stiffener mass have independent owners.
+
+Every chart mass assembly path integrates the original transverse field
+against I0 and the original rotation field against I2. Density placement across
+the thickness therefore distinguishes dense symmetric face layers from a dense
+core at equal areal mass. The consistent P1, edge-cubic and DKT integrals retain
+their original polynomial fields, with separate normalization for the two
+moments. The cubic kinetic owner removes exactly the I2-weighted lumped panel
+slope terms before inserting its analytic gradient inertia, preserving
+stiffener mass. Existing scalar/P1-density arithmetic is unchanged.
+
+The assembled `PlateModel.m` remains the native modal, harmonic and transient
+mass. No thickness density profile, stiffness, eccentric first moment or
+density evolution is inferred from the two moments. Inventory may include
+symmetric nonstructural mass beyond the elastic thickness; it does not assert
+a material support bound. The flat plate has no membrane coordinates, so
+eccentric membrane/bending kinetic coupling belongs to the shell model.
+Geometry changes require an explicitly updated reference inventory.
+Zero-thickness mass sheets with zero I2 are outside this finite-thickness
+plate's positive-mass contract.
+
+Independent Cartesian integrals exercise all seven mass images, quadratic
+kinetic bilinears and the edge-cubic degree-seven transverse/degree-five rotary
+terms. Layer integrals distinguish equal-mass dense faces/core; native checks
+cover beam independence, support reduction, equivalent P1-density inventory,
+field selection and nonrepresentable inertia refusal, including shared-node
+sparse accumulation overflow after finite element matrices.

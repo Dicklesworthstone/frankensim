@@ -55,6 +55,7 @@ mod edge_cubic;
 mod dkt_kinetic;
 mod stiffener_mass;
 mod reference_density;
+pub use reference_density::PlateSectionMassMoments;
 pub use dkt_kinetic::RotaryMass;
 use edge_cubic::edge_cubic_mass;
 pub use edge_cubic::{
@@ -668,7 +669,7 @@ pub struct PlateChart {
     /// Uniform material and thickness section, used when no element field is set.
     pub section: PlateSection,
     element_sections: Option<Vec<PlateSection>>,
-    reference_density: Option<Vec<[f64; 3]>>,
+    reference_mass: Option<reference_density::ReferenceMass>,
     /// Labeled sub-regions (e.g., soundboard, bridge, braces, rim).
     pub regions: Vec<PlateRegion>,
     /// Boundary nodes identified for support.
@@ -688,7 +689,7 @@ impl PlateChart {
             mesh,
             section,
             element_sections: None,
-            reference_density: None,
+            reference_mass: None,
             regions: Vec::new(),
             boundary_nodes,
         })
@@ -719,7 +720,7 @@ impl PlateChart {
             mesh,
             section,
             element_sections: None,
-            reference_density: None,
+            reference_mass: None,
             regions,
             boundary_nodes,
         })
@@ -771,7 +772,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
-            self.reference_density(),
+            self.reference_mass.as_ref(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -795,7 +796,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
-            self.reference_density(),
+            self.reference_mass.as_ref(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -821,7 +822,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
-            self.reference_density(),
+            self.reference_mass.as_ref(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -848,7 +849,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
-            self.reference_density(),
+            self.reference_mass.as_ref(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -1272,7 +1273,7 @@ pub enum TransverseMass {
 fn assemble_with_sections_inner(
     mesh: &PlateMesh,
     sections: PlateSectionField<'_>,
-    reference_density: Option<&[[f64; 3]]>,
+    reference_mass: Option<&reference_density::ReferenceMass>,
     boundary: &[usize],
     stiffeners: &[Stiffener],
     opts: &AssemblyOptions,
@@ -1282,8 +1283,8 @@ fn assemble_with_sections_inner(
 ) -> Result<PlateModel, PlateError> {
     mesh.validate()?;
     sections.validate(mesh.tris.len())?;
-    if let Some(density) = reference_density {
-        reference_density::validate(mesh.tris.len(), density)?;
+    if let Some(inventory) = reference_mass {
+        inventory.validate(mesh.tris.len())?;
     }
     if !opts.pretension.is_finite() {
         return Err(PlateError::BadSection {
@@ -1353,9 +1354,16 @@ fn assemble_with_sections_inner(
                 }
             }
         }
-        let density = reference_density.map_or([section.density; 3], |rho| rho[eidx]);
-        if density[0] != density[1] || density[1] != density[2] {
-            let me = reference_density::panel_mass(
+        let density = reference_mass
+            .and_then(reference_density::ReferenceMass::density)
+            .map_or([section.density; 3], |rho| rho[eidx]);
+        let moments = reference_mass.and_then(reference_density::ReferenceMass::section_moments);
+        let panel_mass = if let Some(moments) = moments {
+            Some(reference_density::section_panel_mass(
+                &x, &y, moments[eidx], area, transverse_mass, rotary_mass,
+            )?)
+        } else if density[0] != density[1] || density[1] != density[2] {
+            Some(reference_density::panel_mass(
                 &x,
                 &y,
                 density,
@@ -1363,7 +1371,11 @@ fn assemble_with_sections_inner(
                 area,
                 transverse_mass,
                 rotary_mass,
-            )?;
+            )?)
+        } else {
+            None
+        };
+        if let Some(me) = panel_mass {
             for r in 0..9 {
                 for c in 0..9 {
                     let value = me[9 * r + c];
@@ -1556,11 +1568,15 @@ fn assemble_with_sections_inner(
     }
 
     let mass = mc.assemble();
-    if matches!(rotary_mass, RotaryMass::Dkt)
+    if (matches!(rotary_mass, RotaryMass::Dkt)
+        || matches!(
+            reference_mass,
+            Some(reference_density::ReferenceMass::SectionMoments(_))
+        ))
         && (0..free).any(|r| mass.row(r).1.iter().any(|v| !v.is_finite()))
     {
         return Err(PlateError::BadSection {
-            what: "assembled DKT kinetic mass overflow",
+            what: "assembled plate kinetic mass overflow",
         });
     }
     Ok(PlateModel {
