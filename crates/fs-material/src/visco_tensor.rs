@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 /// Exact forward and reverse derivatives of the original tensor history.
 pub mod sensitivity;
+/// Joint passive tensor calibration from original multiaxial histories.
+pub mod history_fit;
 pub use sensitivity::{TensorPronyStepDerivative, TensorPronyStepDirection,
     TensorPronyStepLinearization, TensorPronyStrainPullback};
 

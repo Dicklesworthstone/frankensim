@@ -5614,6 +5614,22 @@ focused checks cover tensor-shear duality and actual-history finite differences,
 original-primal equality, independent heat integrals and weak/stiff limits,
 differentiated energy balance, and transactional refusals.
 
+`visco_tensor::history_fit::fit_tensor_prony_histories[_with_cancel]` jointly
+fits a passive Maxwell/Kelvin law to independent multiaxial experiments. Up to
+64 nonnegative strengths multiply authored Gram tensor directions for
+equilibrium, fixed-time Maxwell arms and Kelvin viscosity. Signed cross terms,
+equal-time directions, original order and zero strengths remain explicit.
+Each experiment starts with relaxed Maxwell memory and zero strain rate at its
+supplied first strain. Original linear ramps generate exact history columns;
+each stress component carries its own absolute error bound. Factored column
+equilibration feeds the existing NNLS owner. The equilibrium sum must pass SPD
+admission, and independent original-history replay must satisfy every supplied
+observation bound before publication. Seven focused actual-source checks cover
+coupled recovery, independently integrated held-out heat, complementary
+experiments, frame/unit/factor scaling, error bounds and transactional refusals.
+This is sampled calibration on an authored tensor cone: unknown directions,
+times, prehistory, uniqueness and unsampled applicability are not inferred.
+
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated
 step heat through `TensorPronyMandelStep`. The increments are returned before
