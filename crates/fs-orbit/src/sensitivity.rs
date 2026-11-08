@@ -1,4 +1,4 @@
-//! Derivatives of a complete forced harmonic-balance waveform.
+//! Derivatives of complete forced and autonomous harmonic-balance waveforms.
 //!
 //! At fixed retained order, implicit differentiation gives `R_X X_p = -R_p`.
 //! The original real AFT Jacobian and fs-la LU are the numerical owners. One
@@ -10,11 +10,17 @@
 use crate::{
     AftWorkspace, ForcedParameterPoint, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError,
     OrbitProblem, Packing, TAU, hb_residual,
+    phase::PhaseCondition,
     scaling::{AdmittedScales, length},
     tangent,
 };
 use fs_la::factor::{Lu, lu};
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod autonomous;
+pub use autonomous::{
+    AutonomousOrbitSensitivity, AutonomousSensitivityPoint, PreparedAutonomousSensitivity,
+};
 
 /// Explicit resources and independently authored numerical acceptance limits.
 #[derive(Clone, Copy, Debug)]
@@ -22,7 +28,8 @@ pub struct ForcedSensitivityControls {
     /// Coarse AFT quadrature. An independent `2*samples+1` grid is also used.
     /// Must contain at least `4*N+4` samples for the retained order N.
     pub samples_per_period: usize,
-    /// Full real coefficient dimension, also hard-capped at 1024.
+    /// Full real unknown dimension, including autonomous frequency when present,
+    /// also hard-capped at 1024.
     pub maximum_unknowns: usize,
     /// Conservative peak numerical payload for preparation and one direction.
     /// Excludes caller/source storage, allocator metadata and callback internals.
@@ -31,10 +38,12 @@ pub struct ForcedSensitivityControls {
     /// each reused direction has this same allowance. Callback work is excluded.
     pub maximum_work: u64,
     /// Maximum normalized Parseval norm of the original retained base balance
-    /// on EITHER grid. Previous convergence fields are never trusted.
+    /// on EITHER grid, including the autonomous phase row when present.
+    /// Previous convergence fields are never trusted.
     pub maximum_base_residual: f64,
     /// Frobenius norm of the difference of the two row/column-scaled exact
-    /// coefficient Jacobians. Agreement is measured, not an aliasing proof.
+    /// coefficient Jacobians, including an autonomous frequency/phase border.
+    /// Agreement is measured, not an aliasing proof.
     pub maximum_tangent_sampling_defect: f64,
     /// Maximum fs-la Hager/Higham 1-norm condition ESTIMATE of the scaled
     /// Jacobian. This is not a certified upper bound on forward sensitivity.
@@ -42,7 +51,8 @@ pub struct ForcedSensitivityControls {
     /// Maximum componentwise backward error of the solved differentiated rows.
     pub maximum_relative_residual: f64,
     /// Maximum Parseval norm of the differentiated equations on BOTH grids,
-    /// in equation-scale units per declared parameter-scale increment.
+    /// in equation-scale units per declared parameter-scale increment,
+    /// combined with the normalized autonomous phase defect when present.
     pub maximum_derivative_residual: f64,
 }
 
@@ -102,6 +112,8 @@ pub enum ForcedSensitivityError {
     IllConditioned { estimate: f64, limit: f64 },
     /// A complete residual-direction declaration refused or was incomplete.
     DirectionRefused { samples: usize },
+    /// An autonomous residual-frequency column refused or was incomplete.
+    FrequencyDirectionRefused { samples: usize },
     /// A sampled original island-direction declaration refused or was incomplete.
     IslandDirectionRefused { sample: usize, samples: usize },
     /// Retained backward error or independent differentiated equations failed.
@@ -144,6 +156,7 @@ pub struct PreparedForcedSensitivity {
     normalized: Vec<f64>,
     factor: Lu,
     scales: AdmittedScales,
+    phase: Option<PhaseCondition>,
     controls: ForcedSensitivityControls,
     /// Maximum recomputed normalized original retained base balance.
     pub base_residual: f64,
@@ -167,10 +180,50 @@ impl PreparedForcedSensitivity {
         orbit: &HbOrbit,
         controls: ForcedSensitivityControls,
         scales: &HbScales,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::prepare(problem, orbit, controls, scales, None, None, cancelled)
+    }
+
+    // Forced and autonomous sensitivities share this exact original AFT and
+    // factor owner. Only the independent frequency column and phase border
+    // differ; neither a neutral mode nor an original balance row is removed.
+    fn prepare<P: OrbitProblem>(
+        problem: &P,
+        orbit: &HbOrbit,
+        controls: ForcedSensitivityControls,
+        scales: &HbScales,
+        phase_reference: Option<&[f64]>,
+        mut frequency_column: Option<
+            &mut dyn FnMut(AutonomousSensitivityPoint<'_>, &mut [f64]) -> bool,
+        >,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(&mut cancelled)?;
-        let (pack, coefficients, admitted) = admit(problem, orbit, controls, scales)?;
+        let (pack, coefficients, admitted) =
+            admit(problem, orbit, controls, scales, phase_reference.is_some())?;
+        let phase = phase_reference
+            .map(|reference| {
+                PhaseCondition::new(
+                    problem,
+                    reference,
+                    &HbBudget {
+                        harmonics: pack.n_harm,
+                        max_newton: 1,
+                        tolerance: 0.5,
+                        deflate_equilibrium: false,
+                    },
+                    scales,
+                )
+            })
+            .transpose()?;
+        let phase_defect = phase.as_ref().map_or(0.0, |p| p.value(&coefficients));
+        if !phase_defect.is_finite() || phase_defect.abs() > controls.maximum_base_residual {
+            return Err(ForcedSensitivityError::BaseUnresolved {
+                residual: phase_defect.abs(),
+                limit: controls.maximum_base_residual,
+            });
+        }
         let callback = problem
             .island_state_jacobian()
             .ok_or(ForcedSensitivityError::TangentUnavailable)?;
@@ -200,7 +253,7 @@ impl PreparedForcedSensitivity {
             if residual.iter().any(|v| !v.is_finite()) {
                 return Err(invalid("original base equations refused"));
             }
-            let base = admitted.row_norm(&residual);
+            let base = det::hypot(admitted.row_norm(&residual), phase_defect);
             if !base.is_finite() || base > controls.maximum_base_residual {
                 return Err(ForcedSensitivityError::BaseUnresolved {
                     residual: base,
@@ -209,16 +262,42 @@ impl PreparedForcedSensitivity {
             }
             poll(&mut cancelled)?;
             tangent.prepare(problem, callback, &pack, orbit.omega, &aft)?;
-            let n = pack.coeff_len();
+            let nc = pack.coeff_len();
+            let n = admitted.columns.len();
             let mut original = vec![0.0; n * n];
             let mut normalized = vec![0.0; n * n];
-            for row in 0..n {
+            for row in 0..nc {
                 poll(&mut cancelled)?;
-                for col in 0..n {
+                for col in 0..nc {
                     let entry = tangent.coefficient_entry(row, col, &pack);
                     original[row * n + col] = entry;
                     normalized[row * n + col] =
                         scaled(entry, admitted.columns[col], admitted.rows[row])?;
+                }
+            }
+            if let Some(phase) = &phase {
+                let mut column = vec![f64::NAN; nc];
+                let point = AutonomousSensitivityPoint {
+                    angular_frequency: orbit.omega,
+                    harmonics: pack.n_harm,
+                    aft_samples: samples,
+                    coefficients: &coefficients[..nc],
+                };
+                poll(&mut cancelled)?;
+                if !frequency_column
+                    .as_mut()
+                    .is_some_and(|f| f(point, &mut column))
+                    || column.iter().any(|v| !v.is_finite())
+                {
+                    return Err(ForcedSensitivityError::FrequencyDirectionRefused { samples });
+                }
+                for row in 0..nc {
+                    original[row * n + nc] = column[row];
+                    normalized[row * n + nc] =
+                        scaled(column[row], admitted.columns[nc], admitted.rows[row])?;
+                    // The phase row is dimensionless. Keep it in its normalized
+                    // chart instead of forming possibly overflowing 1/state units.
+                    normalized[nc * n + row] = phase.scaled_derivative(row, admitted.columns[row]);
                 }
             }
             Ok((aft, original, normalized, base))
@@ -242,8 +321,8 @@ impl PreparedForcedSensitivity {
             });
         }
         poll(&mut cancelled)?;
-        let factor =
-            lu(&normalized, pack.coeff_len()).map_err(|_| ForcedSensitivityError::Singular)?;
+        let factor = lu(&normalized, admitted.columns.len())
+            .map_err(|_| ForcedSensitivityError::Singular)?;
         let condition_estimate = factor.condition_1(&normalized);
         if !condition_estimate.is_finite()
             || condition_estimate > controls.maximum_condition_estimate
@@ -265,6 +344,7 @@ impl PreparedForcedSensitivity {
             normalized,
             factor,
             scales: admitted,
+            phase,
             controls,
             base_residual: coarse_base.max(fine_base),
             tangent_sampling_defect,
@@ -309,7 +389,7 @@ impl PreparedForcedSensitivity {
                 angular_frequency: self.omega,
                 harmonics: self.pack.n_harm,
                 aft_samples: samples,
-                coefficients: &self.coefficients,
+                coefficients: &self.coefficients[..self.pack.coeff_len()],
             };
             if !residual_direction(point, &mut column) || column.iter().any(|v| !v.is_finite()) {
                 return Err(ForcedSensitivityError::DirectionRefused { samples });
@@ -364,12 +444,12 @@ impl PreparedForcedSensitivity {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ForcedOrbitSensitivity> {
         poll(cancelled)?;
-        let n = self.pack.coeff_len();
-        let rhs: Vec<_> = fine
-            .iter()
-            .zip(&self.scales.rows)
-            .map(|(value, row)| scaled(-value, direction.parameter_scale, *row))
-            .collect::<Result<_>>()?;
+        let nc = self.pack.coeff_len();
+        let n = self.scales.columns.len();
+        let mut rhs = vec![0.0; n];
+        for row in 0..nc {
+            rhs[row] = scaled(-fine[row], direction.parameter_scale, self.scales.rows[row])?;
+        }
         let mut solution = rhs.clone();
         self.factor.solve(&mut solution);
         let mut correction = vec![0.0; n];
@@ -399,7 +479,7 @@ impl PreparedForcedSensitivity {
         // published derivative, rather than just reassessing the normalized solve.
         for (matrix, column) in [(&self.coarse_jacobian, coarse), (&self.fine_jacobian, fine)] {
             let mut norm = 0.0;
-            for row in 0..n {
+            for row in 0..nc {
                 poll(cancelled)?;
                 let mut sum = Dd::from_f64(column[row]);
                 for col in 0..n {
@@ -416,6 +496,22 @@ impl PreparedForcedSensitivity {
             }
             derivative_residual = derivative_residual.max(norm);
         }
+        if let Some(phase) = &self.phase {
+            let mut defect = Dd::from_f64(0.0);
+            // Check the published physical coefficients in the SAME fixed phase
+            // chart. Normalizing first avoids unrepresentable reciprocal units.
+            for col in 0..nc {
+                let value = scaled(
+                    physical[col],
+                    direction.parameter_scale,
+                    self.scales.columns[col],
+                )?;
+                defect = defect
+                    + Dd::from_f64(phase.scaled_derivative(col, self.scales.columns[col]))
+                        * Dd::from_f64(value);
+            }
+            derivative_residual = det::hypot(derivative_residual, defect.to_f64());
+        }
         if !relative_residual.is_finite()
             || !derivative_residual.is_finite()
             || relative_residual > self.controls.maximum_relative_residual
@@ -427,10 +523,14 @@ impl PreparedForcedSensitivity {
             });
         }
         poll(cancelled)?;
-        let (coeffs, _) = self.pack.unpack(&physical);
+        let (coeffs, frequency) = self.pack.unpack(&physical);
         Ok(ForcedOrbitSensitivity {
             omega: self.omega,
-            angular_frequency_derivative: direction.angular_frequency_derivative,
+            angular_frequency_derivative: if self.pack.omega_slot.is_some() {
+                frequency
+            } else {
+                direction.angular_frequency_derivative
+            },
             coeffs,
             relative_residual,
             derivative_residual,
@@ -495,10 +595,11 @@ fn admit<P: OrbitProblem>(
     orbit: &HbOrbit,
     controls: ForcedSensitivityControls,
     scales: &HbScales,
+    autonomous: bool,
 ) -> Result<(Packing, Vec<f64>, AdmittedScales)> {
     let d = problem.dim();
     let width = orbit.coeffs.first().map_or(0, Vec::len);
-    if problem.autonomous()
+    if problem.autonomous() != autonomous
         || d == 0
         || orbit.coeffs.len() != d
         || width < 2
@@ -526,14 +627,17 @@ fn admit<P: OrbitProblem>(
         || !positive(controls.maximum_derivative_residual)
     {
         return Err(invalid(
-            "complete finite forced orbit and valid sensitivity controls required",
+            "complete finite orbit, matching clock kind and valid sensitivity controls required",
         ));
     }
-    let n = d
+    let nc = d
         .checked_mul(2 * width - 1)
         .ok_or_else(|| invalid("coefficient count overflows"))?;
+    let n = nc
+        .checked_add(usize::from(autonomous))
+        .ok_or_else(|| invalid("sensitivity dimension overflows"))?;
     let bounds = [(
-        "real coefficient dimension",
+        "real sensitivity dimension",
         n as u128,
         controls.maximum_unknowns.min(1024) as u128,
     )];
@@ -579,12 +683,19 @@ fn admit<P: OrbitProblem>(
     let pack = Packing {
         d: d as usize,
         n_harm: h as usize,
-        omega_slot: None,
+        omega_slot: autonomous.then_some(nc),
     };
-    let coefficients = orbit.packed_seed(&HbAnchor::Forced { omega: orbit.omega });
-    let admitted = AdmittedScales::new(
+    let anchor = if autonomous {
+        HbAnchor::Autonomous {
+            omega_guess: orbit.omega,
+        }
+    } else {
+        HbAnchor::Forced { omega: orbit.omega }
+    };
+    let coefficients = orbit.packed_seed(&anchor);
+    let mut admitted = AdmittedScales::new(
         pack.d,
-        HbAnchor::Forced { omega: orbit.omega },
+        anchor,
         &coefficients,
         &HbBudget {
             harmonics: pack.n_harm,
@@ -594,6 +705,9 @@ fn admit<P: OrbitProblem>(
         },
         scales,
     )?;
+    if autonomous {
+        admitted.rows.push(1.0);
+    }
     Ok((pack, coefficients, admitted))
 }
 
@@ -669,4 +783,3 @@ fn linear_residual(matrix: &[f64], solution: &[f64], rhs: &[f64], correction: &m
     }
     maximum
 }
-

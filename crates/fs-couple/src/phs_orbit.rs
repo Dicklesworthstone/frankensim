@@ -93,7 +93,8 @@ mod autonomous;
 pub use autonomous::continuation as autonomous_continuation;
 pub use autonomous::{
     AutonomousPortFeedback, PhsAutonomousControls, PhsAutonomousLevel,
-    PhsAutonomousStability, analyze_autonomous_feedback_stability,
+    PhsAutonomousParameterDirection, PhsAutonomousSensitivityError,
+    PhsAutonomousStability, PreparedPhsAutonomousSensitivity, analyze_autonomous_feedback_stability,
     audit_autonomous_feedback_orbit, solve_autonomous_feedback_harmonic_balance,
     solve_autonomous_feedback_harmonic_balance_adaptive,
 };

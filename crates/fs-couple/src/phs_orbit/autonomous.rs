@@ -12,6 +12,12 @@ use fs_phs::PortHamiltonian;
 /// Original physical-port feedback families on the shared continuation owner.
 pub mod continuation;
 
+mod sensitivity;
+pub use sensitivity::{
+    PhsAutonomousParameterDirection, PhsAutonomousSensitivityError,
+    PreparedPhsAutonomousSensitivity,
+};
+
 mod shooting;
 pub use shooting::{
     PhsAutonomousControls, PhsAutonomousLevel, PhsAutonomousStability,

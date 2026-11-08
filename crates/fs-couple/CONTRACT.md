@@ -5308,6 +5308,38 @@ shear moment; non-resurrecting outflow memory; and hidden excursions, bounded
 work, late source failure and exact retry. These are numerical synthetic-law
 tests, not measured friction calibration or a native body-motion solver.
 
+## Physical frequency and waveform slopes of self-excited resonance
+
+`phs_orbit::PreparedPhsAutonomousSensitivity` differentiates the frequency and
+complete Fourier waveform of an original self-excited pHS cycle. It borrows the
+unchanged source and feedback, uses the existing complete feedback tangent, and
+supplies the original first-order ODE frequency column `i*n*X_n` to fs-orbit's
+shared phase-bordered sensitivity owner. Storage-owned or explicitly supplied
+complete Hessians retain every nonlinear and material-memory coordinate.
+
+`PhsAutonomousParameterDirection` combines original J/R/G directions, a complete
+fixed-state storage-effort partial and a required `PhsFeedbackParameterAction`.
+The source-bound physical parameter owner computes the reciprocal direct flow
+derivative `G^T*h_p+G_p^T*e`; feedback consumes it and supplies the TOTAL fixed-
+state input derivative. The separate state chain is already owned by the cached
+total feedback Jacobian. Signed resistance directions need not be positive;
+original passive resistance and external active supply remain distinct.
+
+One cached factor serves multiple physical directions without source perturbation
+or nonlinear re-solving. Numerical and adapter payloads are admitted together.
+Source callback work remains explicitly excluded from the numerical work cap,
+with calls bounded by the declared grids. Returned coefficients and frequency
+slopes are per physical parameter unit in the fixed authored phase chart.
+
+Three native adapter tests compare simultaneous storage, interconnection,
+damping, port and feedback changes with an independent oscillator containing
+two explicit relaxation stores, check native/authored Hessian parity, and verify
+refusal/cancellation followed by factor reuse. These and the ten forced-parameter
+regressions pass together against the current complete fs-phs/fs-orbit owners
+and actual coupled numerical bodies. The full Cargo graph remains blocked by
+the missing sibling manifest. These local finite-order slopes establish no
+stability, infinite harmonic resolution or constitutive-validity guarantee.
+
 ## Frequency sensitivity of an original forced periodic response
 
 `PreparedPhsPortSidebands::forced_frequency_tangent` factors at zero carrier;

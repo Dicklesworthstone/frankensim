@@ -885,3 +885,31 @@ material derivatives with separately solved parameter perturbations, and checks
 3/7/11/15-harmonic convergence against independently integrated continuous-time
 variational RK4. It also covers complete phased frequency-port/clock derivatives,
 physical unit changes, repeated-factor source-call counts and named refusals.
+
+## Autonomous frequency and waveform parameter derivatives
+
+`sensitivity::PreparedAutonomousSensitivity` extends the same exact AFT
+preparation, physical scaling, LU and residual-refinement owner used by forced
+sensitivities. An unknown physical angular frequency and the existing fixed
+full-waveform Parseval phase hyperplane close the complete autonomous derivative.
+Every original DC/real/imaginary coefficient and balance row remains present;
+neither amplitude nor a selected coordinate is pinned.
+
+The caller supplies a complete packed phase reference and an exact original
+residual-frequency column at fixed coefficients and physical parameters. Both
+original AFT grids independently check the base, tangent and frequency column.
+Parameter directions supply the complete residual partial at fixed coefficients
+and frequency, or an original island partial when the linear frequency port is
+fixed. One cached bordered factor returns frequency and full-waveform derivatives
+in original parameter units. Exact declarations never fall back to probes.
+Invalid budgets, nonoscillatory references, incompatible base phase,
+nonisolated/singular cycles, excessive conditioning, unresolved differentiated
+equations and cancellation refuse without a partial result.
+
+Four actual-source native tests compare with an independent nonlinear oscillator
+with a changing mass/time port, a static first state and second-harmonic
+relaxation memories affecting frequency. They verify fixed-gauge waveform
+derivatives, physical unit conversions and factor reuse after refusal. All seven
+existing forced-sensitivity regressions also pass through the modified shared
+owner. This local fixed-order derivative establishes no existence, primitive
+period, infinite-tail, uniqueness or Floquet-stability guarantee.
