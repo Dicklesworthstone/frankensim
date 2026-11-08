@@ -64,9 +64,16 @@
 //! resets storage. Initial pressure is absolute, whereas the track is relative
 //! to room pressure. Zero feed area seals the supply. Feed and stored gas use
 //! the bore's original thermochemical source. The existing jet/constriction
-//! noise rows refuse with finite storage until their source work is closed.
-//! This compact gas volume supplies no anatomical lung, neck-inertia or
-//! moving-wall model. Without this row the held mouth is unchanged.
+//! noise rows stand beside finite storage in either row order: their summed
+//! pressure is a series offset between the stored gas and the lip face, offered
+//! to the lip at the stored gas's own temperature (an isothermal modulation,
+//! as the original reservoir applies it at the room temperature); the feed and
+//! the stored inventory never see it, and the work such a source would do is
+//! reported by the finite-mouth step and rejected as heat, not drawn from the
+//! storage. The constriction noise keeps its amplitude on the held blowing
+//! pressure, the jet noise reads the stored gas's gauge pressure. This compact
+//! gas volume supplies no anatomical lung, neck-inertia or moving-wall model.
+//! Without this row the held mouth is unchanged.
 //!
 //! `modal_baffle` explicitly selects the complete flanged modal radiation load
 //! and observes every signed mouth mode at the declared finite-distance point.
@@ -816,9 +823,6 @@ impl LipDescription {
             blow_track.ok_or_else(|| "a blowing-pressure track is required".to_string())?;
         if mouth_reservoir.is_some() && nonlinear.is_none() {
             return Err("mouth_reservoir requires bore nonlinear and its original thermochemical source".into());
-        }
-        if mouth_reservoir.is_some() && (jet_noise.is_some() || constriction_noise.is_some()) {
-            return Err("mouth_reservoir does not close the work of jet_noise or constriction_noise".into());
         }
         if modal_baffle.is_some()
             && (termination != Some(Termination::FlangedOpen) || nonlinear.is_some())
@@ -2819,8 +2823,11 @@ mod tests {
         assert!(error.contains("may only appear once"), "{error}");
     }
 
+    // The series noise rows stand beside the finite mouth in either row order. Without the nonlinear engine the description
+    // is still refused for its engine, never for the noise.
+    #[cfg(not(feature = "nonlinear-brass"))]
     #[test]
-    fn finite_mouth_record_refuses_unclosed_series_noise_in_either_row_order() {
+    fn finite_mouth_record_beside_series_noise_is_refused_only_for_its_engine_without_the_feature() {
         for noise in [
             "jet_noise 7 1.3e-3 0.045 0.115 1700\n",
             "constriction_noise 7 0.006\n",
@@ -2830,7 +2837,28 @@ mod tests {
                 format!("{noise}{FINITE_MOUTH_RECORD}{NONLINEAR_RECORD}"),
             ] {
                 let error = LipDescription::from_bytes(fixture(&extra).as_bytes()).unwrap_err();
-                assert!(error.contains("mouth_reservoir") && error.contains("work"), "{error}");
+                assert!(error.contains("nonlinear-brass") && !error.contains("work"), "{error}");
+            }
+        }
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn finite_mouth_record_admits_series_noise_in_either_row_order_and_the_lip_renders() {
+        for noise in [
+            "jet_noise 7 1.3e-3 0.045 0.115 1700\n",
+            "constriction_noise 7 0.006\n",
+        ] {
+            for row in [format!("{FINITE_MOUTH_RECORD}{noise}"), format!("{noise}{FINITE_MOUTH_RECORD}")] {
+                let description = finite_description(&row, "3e3");
+                assert!(description.mouth_reservoir().is_some());
+                let mut performance = description.build().unwrap();
+                assert!(performance.finite_mouth_state().is_some());
+                performance.apply_controls(0).unwrap();
+                performance.record_mouthpiece();
+                let mut radiated = [0.0; 32];
+                performance.block(&mut radiated).unwrap();
+                assert!(radiated.iter().all(|p| p.is_finite()));
             }
         }
     }

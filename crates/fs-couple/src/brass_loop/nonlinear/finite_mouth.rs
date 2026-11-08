@@ -4,6 +4,14 @@
 //! nozzle feed and supplies the lip face. Its mass and internal energy use
 //! exactly the same signed face exchanges as the bore. Incoming jet kinetic
 //! energy thermalizes in the compact volume; its fixed support does no work.
+//!
+//! The opt-in noise rows (`jet_noise`, `constriction_noise`) are SERIES pressure sources between the stored gas and the lip
+//! face. A trial carries their summed pressure `series_pa`; both stages of the step then offer the lip the stored gas at its
+//! own temperature and the pressure raised by `series_pa` (an isothermal modulation: the specific enthalpy of the gas that
+//! passes is the stored gas's own, so the storage is debited exactly what it delivers), while the feed nozzle and the stored
+//! inventory never see the offset. The mechanical work such a source would do, `series_pa x` the volume flow into the bore, is
+//! reported as `series_work_j`; the isothermal modulation rejects it as heat, so it is neither drawn from the storage nor added
+//! to the bore. With `series_pa == 0.0` every expression is the one used before the offset existed, bit for bit.
 
 use fs_gas::dynamics::network::Plenum;
 use fs_gas::dynamics::{Conserved, Error, FaceFlux, FrozenGas, PortStage, Primitive, StepReport};
@@ -67,6 +75,10 @@ pub struct FiniteMouthReport {
     pub energy_residual_j: f64,
     /// Largest compact-volume face-speed CFL over the two accepted stages.
     pub maximum_cfl: f64,
+    /// Mechanical work [J] a series noise source of pressure `series_pa` would do on the volume that crossed the lip face
+    /// (the trapezoid over the two stages of `series_pa x inlet_area x face mass flux / offered density`); exactly zero without
+    /// a series offset. It is rejected as heat by the isothermal modulation and is in no mass or energy account of the storage.
+    pub series_work_j: f64,
 }
 
 pub(super) struct FiniteMouth {
@@ -113,8 +125,10 @@ impl FiniteMouth {
         primitive: Primitive,
         dt: f64,
         inlet_area_m2: f64,
+        series_pa: f64,
     ) -> FiniteMouthTrial {
         FiniteMouthTrial {
+            series_pa,
             initial: self.plenum.clone(),
             initial_primitive: primitive,
             feed: self.feed,
@@ -148,6 +162,7 @@ impl FiniteMouth {
             mass_residual_kg: after.mass_kg - before.mass_kg - next.feed_mass_kg + bore_mass_kg,
             energy_residual_j: after.energy_j - before.energy_j - next.feed_energy_j + bore_energy_j,
             maximum_cfl: next.maximum_cfl,
+            series_work_j: next.series_work_j,
         };
         self.plenum = next.plenum;
         self.report = Some(report);
@@ -171,6 +186,7 @@ struct Exchange {
     feed_energy_rate: f64,
     net_mass_rate: f64,
     net_energy_rate: f64,
+    series_work_rate: f64,
     cfl: f64,
 }
 
@@ -180,11 +196,14 @@ struct Candidate {
     feed_mass_kg: f64,
     feed_energy_j: f64,
     maximum_cfl: f64,
+    series_work_j: f64,
 }
 
 /// Stack-only candidate storage. Every repeated stage zero starts again from
 /// the accepted inventory, including the bore's MUSCL-to-first-order retry.
 pub(super) struct FiniteMouthTrial {
+    /// The summed series noise pressure of this gas step [Pa]; zero when no noise source speaks.
+    series_pa: f64,
     initial: Plenum,
     initial_primitive: Primitive,
     feed: Primitive,
@@ -216,7 +235,14 @@ impl FiniteMouthTrial {
         };
         let (feed_mass, feed_energy, feed_signal) =
             feed_flux(gas, self.feed, mouth, self.feed_area_m2)?;
-        let face = outlet(mouth)?;
+        // The feed nozzle and the inventory use the stored gas as it is; only the lip face is offered the series offset.
+        let offered = if self.series_pa == 0.0 { mouth } else { offer(gas, mouth, self.series_pa)? };
+        let face = outlet(offered)?;
+        let series_work_rate = if self.series_pa == 0.0 {
+            0.0
+        } else {
+            self.series_pa * self.inlet_area_m2 * face.mass / offered.density
+        };
         let cfl = self.dt
             * (self.feed_area_m2 * feed_signal + self.inlet_area_m2 * face.signal_speed)
             / self.initial.volume_m3();
@@ -228,6 +254,7 @@ impl FiniteMouthTrial {
             feed_energy_rate: feed_energy,
             net_mass_rate: feed_mass - self.inlet_area_m2 * face.mass,
             net_energy_rate: feed_energy - self.inlet_area_m2 * face.energy,
+            series_work_rate,
             cfl,
         };
         let initial = self.initial.state();
@@ -259,10 +286,22 @@ impl FiniteMouthTrial {
                 feed_mass_kg: (0.5 * self.dt) * (first.feed_mass_rate + exchange.feed_mass_rate),
                 feed_energy_j: (0.5 * self.dt) * (first.feed_energy_rate + exchange.feed_energy_rate),
                 maximum_cfl: first.cfl.max(exchange.cfl),
+                series_work_j: (0.5 * self.dt) * (first.series_work_rate + exchange.series_work_rate),
             });
         }
         Ok(face)
     }
+}
+
+// The stored gas at rest, raised by a series pressure `series_pa` at its own temperature (the isothermal modulation the
+// original reservoir applies at the room temperature). Its specific enthalpy is the stored gas's own.
+fn offer(gas: &FrozenGas, mouth: Primitive, series_pa: f64) -> Result<Primitive, Error> {
+    let pressure = mouth.pressure + series_pa;
+    if !(series_pa.is_finite() && pressure.is_finite() && pressure > 0.0) {
+        return Err(Error::Invalid("finite mouth series pressure offset leaves no positive pressure"));
+    }
+    let density = pressure / (gas.gas_constant() * mouth.temperature);
+    gas.primitive(gas.conserved(density, 0.0, pressure)?, || false)
 }
 
 // Both compact owners are stationary. The donor supplies its own stagnation

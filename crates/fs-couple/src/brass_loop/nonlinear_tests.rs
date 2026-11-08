@@ -740,7 +740,7 @@ fn refused_finite_mouth_stage_keeps_the_lip_and_storage_at_the_last_accepted_sta
 }
 
 #[test]
-fn finite_mouth_is_attached_once_before_stepping_and_requires_closed_noise_work() {
+fn finite_mouth_is_attached_once_before_stepping_and_admits_noise_rows_in_either_order() {
     let spec = finite_spec(2e-5, 1e-6);
     assert!(probe_lip().with_finite_mouth(spec).unwrap().with_finite_mouth(spec).is_err());
     let mut advanced = probe_lip();
@@ -748,12 +748,115 @@ fn finite_mouth_is_attached_once_before_stepping_and_requires_closed_noise_work(
     let dt = advanced.clock.gas_step_s();
     advanced.gas_step(dt).unwrap();
     assert!(advanced.with_finite_mouth(spec).is_err());
-    assert!(probe_lip().with_finite_mouth(spec).unwrap().with_jet_noise(jet_card(0.0, 7)).is_err());
-    assert!(probe_lip().with_jet_noise(jet_card(0.0, 7)).unwrap().with_finite_mouth(spec).is_err());
+    assert!(probe_lip().with_finite_mouth(spec).unwrap().with_jet_noise(jet_card(0.0, 7)).is_ok());
+    assert!(probe_lip().with_jet_noise(jet_card(0.0, 7)).unwrap().with_finite_mouth(spec).is_ok());
     assert!(probe_lip().with_finite_mouth(spec).unwrap()
-        .with_constriction_noise(constriction_card(7, 0.006)).is_err());
+        .with_constriction_noise(constriction_card(7, 0.006)).is_ok());
     assert!(probe_lip().with_constriction_noise(constriction_card(7, 0.006)).unwrap()
-        .with_finite_mouth(spec).is_err());
+        .with_finite_mouth(spec).is_ok());
+}
+
+// The finite mouth with the opt-in noise rows. `noise_first` puts the noise rows on the lip before the finite mouth is attached.
+fn finite_noise_lip(spec: FiniteMouthSpec, jet: Option<JetNoiseCard>, constriction: Option<ConstrictionNoiseCard>, noise_first: bool) -> NonlinearLip {
+    let attach = |mut lip: NonlinearLip| {
+        if let Some(card) = jet {
+            lip = lip.with_jet_noise(card).expect("jet card");
+        }
+        if let Some(card) = constriction {
+            lip = lip.with_constriction_noise(card).expect("constriction card");
+        }
+        lip
+    };
+    let mut lip = if noise_first {
+        attach(probe_lip()).with_finite_mouth(spec).expect("finite mouth")
+    } else {
+        attach(probe_lip().with_finite_mouth(spec).expect("finite mouth"))
+    };
+    lip.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+    lip
+}
+
+// The closure's order test: the noise rows and the finite mouth give the same lip whichever is attached first, for the jet noise, the
+// constriction noise and both; the noise reaches the cup pressure (it differs from the same finite mouth without it) and stays finite.
+#[test]
+fn finite_mouth_with_series_noise_is_the_same_lip_in_either_builder_order_and_the_noise_reaches_the_cup() {
+    let spec = finite_spec(2e-5, 1e-5);
+    let plain = jet_run(&mut finite_noise_lip(spec, None, None, false), 3000.0);
+    assert!(plain.iter().any(|p| p.abs() > 1.0), "the probe cup must carry pressure for the comparison to mean anything");
+    let cases: [(Option<JetNoiseCard>, Option<ConstrictionNoiseCard>); 3] = [
+        (Some(jet_card(1700.0, 7)), None),
+        (None, Some(constriction_card(7, PROBE_CUP_RADIUS_M))),
+        (Some(jet_card(1700.0, 7)), Some(constriction_card(7, PROBE_CUP_RADIUS_M))),
+    ];
+    for (jet, constriction) in cases {
+        let after = jet_run(&mut finite_noise_lip(spec, jet, constriction, false), 3000.0);
+        let before = jet_run(&mut finite_noise_lip(spec, jet, constriction, true), 3000.0);
+        assert!(after.iter().all(|p| p.is_finite()));
+        assert!(same_bits(&after, &before), "either builder order gives the same lip");
+        assert!(!same_bits(&plain, &after), "the noise must reach the cup pressure through the finite mouth");
+    }
+}
+
+// Gates that never open add exactly zero: the finite mouth with a shut jet gate, with a constriction cutoff above the band, or both
+// is bit-identical to the finite mouth without a noise row (the offset is exactly 0.0, and the step is the one built before the offset).
+#[test]
+fn finite_mouth_with_silent_noise_rows_is_bit_identical_to_the_finite_mouth_alone() {
+    let spec = finite_spec(2e-5, 1e-5);
+    let plain = jet_run(&mut finite_noise_lip(spec, None, None, false), 3000.0);
+    for (jet, constriction) in [
+        (Some(jet_card(1.0e12, 7)), None),
+        (None, Some(constriction_card(7, 12.0))),
+        (Some(jet_card(1.0e12, 7)), Some(constriction_card(7, 12.0))),
+    ] {
+        let silent = jet_run(&mut finite_noise_lip(spec, jet, constriction, false), 3000.0);
+        assert!(same_bits(&plain, &silent), "a silent noise row adds exactly zero to the finite mouth");
+    }
+}
+
+// The large-volume limit, the physics check of the closure. A 1 m3 plenum that starts at the feed pressure and the room temperature does
+// not move during the 8 ms of this run, so it is the original held reservoir: the finite mouth with the noise must give the cup pressure
+// of the ideal mouth with the same noise (same seeds, same blow) to a part in 1e4 of its rms. The check can only see a leak of the noise into
+// the wrong place if the noise is itself well above that tolerance: its precondition is ten times the tolerance, 1e-3 of the rms of the signal.
+// Every case prints its measured ratios before any assertion, so a miss is read as a number and not as a bare failure.
+#[test]
+fn finite_mouth_with_series_noise_in_the_large_volume_limit_is_the_ideal_mouth_with_the_same_noise() {
+    let room = probe_lip().room;
+    let blow = 3000.0;
+    let spec = FiniteMouthSpec {
+        volume_m3: 1.0,
+        feed_area_m2: 1e-2,
+        initial_pressure_pa: room.pressure + blow,
+        initial_temperature_k: room.temperature,
+    };
+    let rms = |v: &[f64]| (v.iter().map(|x| x * x).sum::<f64>() / v.len() as f64).sqrt();
+    let mut report = Vec::new();
+    for (name, jet, constriction) in [
+        ("jet", Some(jet_card(1700.0, 7)), None),
+        ("constriction", None, Some(constriction_card(7, PROBE_CUP_RADIUS_M))),
+        ("both", Some(jet_card(1700.0, 7)), Some(constriction_card(7, PROBE_CUP_RADIUS_M))),
+    ] {
+        let mut ideal = probe_lip();
+        if let Some(card) = jet {
+            ideal = ideal.with_jet_noise(card).expect("jet card");
+        }
+        if let Some(card) = constriction {
+            ideal = ideal.with_constriction_noise(card).expect("constriction card");
+        }
+        ideal.apply(BrassControl::SetLipTension(1.6)).expect("tension");
+        let ideal = jet_run(&mut ideal, blow);
+        let finite = jet_run(&mut finite_noise_lip(spec, jet, constriction, false), blow);
+        let quiet = jet_run(&mut jet_lip(None), blow);
+        let difference: Vec<f64> = ideal.iter().zip(&finite).map(|(a, b)| a - b).collect();
+        let noise: Vec<f64> = ideal.iter().zip(&quiet).map(|(a, b)| a - b).collect();
+        report.push((name, rms(&noise) / rms(&ideal), rms(&difference) / rms(&ideal), rms(&ideal)));
+    }
+    for (name, noise_ratio, difference_ratio, ideal_rms) in &report {
+        eprintln!("T8 {name}: noise / ideal rms {noise_ratio:.3e}, (finite - ideal) / ideal rms {difference_ratio:.3e}, ideal rms {ideal_rms:.3} Pa");
+    }
+    for (name, noise_ratio, difference_ratio, _) in &report {
+        assert!(*noise_ratio > 1e-3, "{name}: the noise is only {noise_ratio:.3e} of the signal, too small for the limit to mean anything");
+        assert!(*difference_ratio <= 1e-4, "{name}: finite mouth differs from the ideal mouth by {difference_ratio:.3e} of the rms");
+    }
 }
 
 // MB 3915: the linear loop's two opt-in lip rows on the nonlinear bore. The probe lip at its default tension 1.0 (the only tension the
