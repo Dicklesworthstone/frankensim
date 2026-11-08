@@ -1537,15 +1537,32 @@ Explicit source-coherence factors add powers between factors and preserve
 interference within each factor; they use peak spectral-line units, not PSD/Hz.
 Source/pair/factor work bounds and cancellation precede result publication.
 
-The `from_observer` adapter preserves a free-space observer's actual source
-geometry; it refuses wall images rather than discarding them. The model assumes
-homogeneous, subsonic, lossless flow and individually compact prescribed sources.
-It adds no force-source vortical wake, nonuniform flow, absorption, boundary
-scattering, source feedback, finite-source validation or measured-SPL authority.
+The `from_observer` adapter preserves the original source geometry and any
+already admitted set of one to three perpendicular infinite ideal rigid or
+pressure-release planes. Mean flow is tangent to every plane. The complete
+signed image group remains coherent within each original physical source and
+each statistical factor. For reflection R, the total energy flux transforms
+as `J(Rx)=R J(x)`, so whole-image power divided by `2^m` is power into the
+physical fluid sector. The original observer owns geometry and tangency
+admission; no new boundary approximation or source feedback is introduced.
+Source/pair/factor budgets include every image path before allocation, and
+the cancellable adapter publishes only complete groups. Input vectors still
+name only physical sources. The boundary scope also survives an empty source
+array. Preparation retains the original analytic pair kernel and evaluation
+allocates no additional storage.
+
+The model assumes homogeneous, subsonic, lossless flow and individually compact
+prescribed sources. It adds no force-source vortical wake, nonuniform flow,
+absorption, wall layers, finite impedance, general diffraction, source feedback,
+finite-source validation or measured-SPL authority.
 `tests/convected_power.rs` compares integrated power with the original full
 pressure/velocity/energy flux on two enclosing spheres and checks the stationary
 limit, Mach scaling, weak directional pairs, coherence, rigid transformations,
 source-owner binding, resource admission and cancellation.
+`tests/convected_power_boundaries.rs` checks independent one/two-wall interference
+formulas, original near-field energy flux integrated over physical hemispheres
+and right-angle sectors at two radii, the stationary image-array limit including
+three planes, original-source coherence, full image budgets and cancellation.
 
 ## Measured force coherence through the original line-dipole observer
 

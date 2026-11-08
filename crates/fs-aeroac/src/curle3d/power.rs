@@ -28,7 +28,10 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 mod multipole;
 mod convected;
-pub use convected::{CONVECTED_MONOPOLE_POWER_SCOPE, PreparedConvectedMonopolePower};
+pub use convected::{
+    CONVECTED_MONOPOLE_IDEAL_BOUNDARY_POWER_SCOPE, CONVECTED_MONOPOLE_POWER_SCOPE,
+    PreparedConvectedMonopolePower,
+};
 pub use multipole::{
     CompactMultipolePhasor, MULTIPOLE_IDEAL_BOUNDARY_POWER_SCOPE, MULTIPOLE_POWER_SCOPE,
     PreparedMultipoleRadiatedPower,

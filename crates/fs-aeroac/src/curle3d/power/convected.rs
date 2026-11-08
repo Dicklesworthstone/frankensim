@@ -17,6 +17,12 @@
 //! Wang, *Flow effects in computational aeroacoustics* (2020), equations
 //! 3.28–3.30: <https://pure.tue.nl/ws/portalfiles/portal/149260007/20200511_Z.Wang.pdf>.
 //! No extra source force, entropy, or mean-flow energy extraction is inferred.
+//!
+//! For the original observer's perpendicular ideal planes, U is tangent to
+//! every wall. Reflection R with parity s therefore gives p(Rx)=s p(x),
+//! u(Rx)=s R u(x), E(Rx)=E(x), and J(Rx)=R J(x). The energy flux through each
+//! reflected sector of an enclosing sphere is equal, and wall flux vanishes.
+//! Whole-image power divided by 2^m is thus power into the physical domain.
 
 use super::{
     CompactRadiatedPower, ComplexDd, PositionGroup, RadiatedPowerBudget, RadiatedPowerModeBudget,
@@ -31,10 +37,20 @@ use fs_math::{c64::C64, dd::Dd, det, special::spherical_bessel_moments};
 /// Physical authority of the integrated quantity and the prescribed source law.
 pub const CONVECTED_MONOPOLE_POWER_SCOPE: &str = "Cycle-average total outward quadratic acoustic perturbation-energy transport <p u> + U <E> of fixed prescribed compact volume sources injecting at the uniform mean velocity; homogeneous subsonic lossless free space, with coherent interference; no extra source force/entropy, nonuniform flow, absorption, scattering, source feedback, finite-source validation or measured-SPL qualification.";
 
+/// Authority of power into an existing observer's ideal reflecting domain.
+pub const CONVECTED_MONOPOLE_IDEAL_BOUNDARY_POWER_SCOPE: &str = "Cycle-average total outward quadratic acoustic perturbation-energy transport <p u> + U <E> of fixed prescribed compact volume sources injecting at the uniform mean velocity into the original homogeneous subsonic lossless domain of one to three perpendicular infinite ideal rigid or pressure-release planes; mean flow is tangent to every plane and each physical source retains coherent images. No extra source force/entropy, nonuniform flow, wall layers, finite impedance, general diffraction, absorption, source feedback, finite-source validation or measured-SPL qualification.";
+
 #[derive(Clone, Copy, Debug)]
 struct ConvectedPair {
     real_minus_one: Dd,
     imaginary: Dd,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConvectedImage {
+    source: usize,
+    position_m: [f64; 3],
+    sign: f64,
 }
 
 /// Analytic radiated power of coherent fixed volume sources in uniform flow.
@@ -60,6 +76,9 @@ pub struct PreparedConvectedMonopolePower {
     pairs: Vec<ConvectedPair>,
     // Physical volume flow times this gain has units sqrt(watt).
     gain: Dd,
+    // Empty in free space; otherwise every path maps to its original source.
+    images: Vec<ConvectedImage>,
+    image_group_size: usize,
 }
 
 impl PreparedConvectedMonopolePower {
@@ -108,33 +127,102 @@ impl PreparedConvectedMonopolePower {
         )
     }
 
-    /// Preserve a free-space observer's material, actual flow, frequency and
-    /// source positions. Its receiver position never enters total power.
-    /// Ideal-wall observers refuse rather than silently discarding their images.
+    /// Preserve an observer's material, actual flow, frequency and source
+    /// positions. Its receiver position never enters total power. Original
+    /// perpendicular ideal planes retain their complete coherent image group;
+    /// power is integrated only over the physical fluid sector. Geometry,
+    /// strict source half-spaces and tangent flow were admitted by that owner.
+    /// Budgets count EVERY direct/image path and its square, while later
+    /// amplitude vectors still contain only the original physical sources.
     pub fn from_observer(
         observer: &PreparedConvectedMonopoleObserver,
         maximum_mach: f64,
         budget: RadiatedPowerBudget,
     ) -> Result<Self, AeroacError> {
-        if !observer.reflection_planes().is_empty() {
-            return Err(invalid(
-                "convected power requires a free-space source owner",
-            ));
+        Self::from_observer_cancellable(observer, maximum_mach, budget, || false)
+    }
+
+    /// Poll during image expansion and the original bounded pair preparation.
+    /// Cancellation or refusal never publishes an incomplete image group.
+    pub fn from_observer_cancellable(
+        observer: &PreparedConvectedMonopoleObserver,
+        maximum_mach: f64,
+        budget: RadiatedPowerBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(&mut cancelled)?;
+        let planes = observer.reflection_planes();
+        if planes.is_empty() {
+            return Self::prepare(
+                observer.acoustic(),
+                observer.flow_velocity_m_s(),
+                observer.frequency_hz(),
+                observer.source_count(),
+                |index| {
+                    observer
+                        .source_position_m(index)
+                        .ok_or_else(|| invalid("convected power source index is unavailable"))
+                },
+                maximum_mach,
+                budget,
+                &mut cancelled,
+            );
         }
-        Self::prepare(
+        // The immutable observer admits exactly one to three perpendicular
+        // planes, with the SAME uniform flow tangent to every plane.
+        let image_group_size = 1usize << planes.len();
+        let paths = observer
+            .source_count()
+            .checked_mul(image_group_size)
+            .ok_or_else(|| invalid("convected power image path count overflows"))?;
+        let pairs = paths
+            .checked_mul(paths)
+            .ok_or_else(|| invalid("convected power image pair count overflows"))?;
+        if paths > budget.max_sources || pairs > budget.max_source_pairs {
+            return Err(invalid("convected images exceed source/pair budget"));
+        }
+        let mut images = Vec::new();
+        images
+            .try_reserve_exact(paths)
+            .map_err(|_| invalid("convected power image allocation exceeds available memory"))?;
+        for source in 0..observer.source_count() {
+            poll(&mut cancelled)?;
+            let position = observer
+                .source_position_m(source)
+                .ok_or_else(|| invalid("convected power source index is unavailable"))?;
+            for mask in 0..image_group_size {
+                poll(&mut cancelled)?;
+                let mut image = ConvectedImage {
+                    source,
+                    position_m: position,
+                    sign: 1.0,
+                };
+                for (index, plane) in planes.iter().enumerate() {
+                    if mask & (1 << index) != 0 {
+                        // Same DD reflection as the admitted observer and the
+                        // stationary power owner; no new geometry is inferred.
+                        image.position_m = plane.reflected_position(image.position_m)?;
+                        image.sign *= plane.boundary().sign();
+                    }
+                }
+                images.push(image);
+            }
+        }
+        let mut prepared = Self::prepare(
             observer.acoustic(),
             observer.flow_velocity_m_s(),
             observer.frequency_hz(),
-            observer.source_count(),
-            |index| {
-                observer
-                    .source_position_m(index)
-                    .ok_or_else(|| invalid("convected power source index is unavailable"))
-            },
+            images.len(),
+            |index| Ok(images[index].position_m),
             maximum_mach,
             budget,
-            &mut || false,
-        )
+            &mut cancelled,
+        )?;
+        prepared.source_count = observer.source_count();
+        prepared.images = images;
+        prepared.image_group_size = image_group_size;
+        poll(&mut cancelled)?;
+        Ok(prepared)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -284,6 +372,8 @@ impl PreparedConvectedMonopolePower {
             members,
             pairs,
             gain,
+            images: Vec::new(),
+            image_group_size: 1,
         })
     }
 
@@ -307,7 +397,7 @@ impl PreparedConvectedMonopolePower {
     pub const fn source_count(&self) -> usize {
         self.source_count
     }
-    /// Exactly distinct physical positions; nearby sources remain distinct.
+    /// Exactly distinct direct/image positions; nearby sources remain distinct.
     #[must_use]
     pub fn position_count(&self) -> usize {
         self.groups.len()
@@ -326,7 +416,7 @@ impl PreparedConvectedMonopolePower {
     ) -> Result<CompactRadiatedPower, AeroacError> {
         let power = self.coherent_power(sources, &mut cancelled)?;
         poll(&mut cancelled)?;
-        finish(power, CONVECTED_MONOPOLE_POWER_SCOPE)
+        finish(power, self.scope())
     }
 
     /// Explicit uncorrelated source factors, with E[xi_r conj(xi_s)]=delta_rs.
@@ -361,7 +451,15 @@ impl PreparedConvectedMonopolePower {
             total = total + power;
         }
         poll(&mut cancelled)?;
-        finish(total, CONVECTED_MONOPOLE_POWER_SCOPE)
+        finish(total, self.scope())
+    }
+
+    fn scope(&self) -> &'static str {
+        if self.image_group_size > 1 {
+            CONVECTED_MONOPOLE_IDEAL_BOUNDARY_POWER_SCOPE
+        } else {
+            CONVECTED_MONOPOLE_POWER_SCOPE
+        }
     }
 
     fn coherent_power(
@@ -381,7 +479,15 @@ impl PreparedConvectedMonopolePower {
             if !finite(source) {
                 return Err(nonfinite("convected power volume-flow amplitude"));
             }
-            baseline.add(source);
+            if self.image_group_size == 1 {
+                baseline.add(source);
+            }
+        }
+        if self.image_group_size > 1 {
+            for image in &self.images {
+                poll(cancelled)?;
+                baseline.add(sources[image.source].scale(image.sign));
+            }
         }
         baseline = baseline.scale(self.gain);
         let mut power = baseline.real_product(baseline);
@@ -399,7 +505,11 @@ impl PreparedConvectedMonopolePower {
                 pair_index += 1;
             }
         }
-        Ok(power)
+        Ok(if self.image_group_size == 1 {
+            power
+        } else {
+            power / Dd::from_f64(self.image_group_size as f64)
+        })
     }
 
     fn group_sum(
@@ -411,7 +521,12 @@ impl PreparedConvectedMonopolePower {
         let mut result = ComplexDd::default();
         for &index in &self.members[group.members.clone()] {
             poll(cancelled)?;
-            result.add(sources[index]);
+            if self.image_group_size == 1 {
+                result.add(sources[index]);
+            } else {
+                let image = self.images[index];
+                result.add(sources[image.source].scale(image.sign));
+            }
         }
         result = result.scale(self.gain);
         if !result.finite() {
