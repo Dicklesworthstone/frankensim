@@ -2,13 +2,15 @@
 //!
 //! A finite-compliance branch differentiates all three transverse equilibrium
 //! equations. F22dot is not zero and is not inferred from incompressibility.
-//! A plane-strain branch instead holds the transverse deformation at identity.
-//! Both reuse the original geometry/material-point ordering and report total
+//! An exact-volume branch differentiates the constrained thickness and relaxed
+//! transverse shear, including the original pressure multiplier. A plane-strain
+//! branch instead holds the transverse deformation at identity.
+//! All reuse the original geometry/material-point ordering and report total
 //! geometric strain rates, without an elastic/plastic/thermal decomposition.
 
 use super::{
-    Geometry, HyperProblem, PlaneStressSettings, checkpoint, invalid, material_error,
-    plane_stress, reference_seed,
+    Element, Geometry, HyperProblem, PlaneStressSettings, Point, checkpoint,
+    incompressible_plane_stress, invalid, material_error, plane_stress, reference_seed,
 };
 use crate::SolidError;
 use fs_exec::Cx;
@@ -50,6 +52,19 @@ pub struct PlaneMaterialPointMotion {
     pub spatial_stress_power_density_w_m3: f64,
 }
 
+/// Exact-volume P1/Q1 motion, retaining the physical pressure multiplier.
+/// The multiplier follows the native remainder's gauge and need not equal
+/// minus the mean Cauchy stress. Material sources and history are held fixed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IncompressiblePlaneMaterialPointMotion {
+    /// Total kinematics and full physical stress/power at the native point.
+    pub motion: PlaneMaterialPointMotion,
+    /// Compression-positive multiplier in P=Pr-p cof(F) [Pa].
+    pub pressure_pa: f64,
+    /// Held-material directional rate of that same multiplier [Pa/s].
+    pub pressure_rate_pa_s: f64,
+}
+
 impl HyperProblem<'_> {
     /// Native plane-strain fields and motion with F22=1 and transverse rates zero.
     ///
@@ -88,6 +103,80 @@ impl HyperProblem<'_> {
         self.held_material_motion(displacement_m, velocity_m_s, Some(local), cx)
     }
 
+    /// Native exact-incompressibility plane-stress motion at held material state.
+    ///
+    /// The supplied xy displacements and velocities determine the in-plane
+    /// motion. Thickness obeys det(F)=J_reference exactly; both transverse shear
+    /// rates follow their consistently differentiated stationary branch. Full
+    /// stress includes the original pressure multiplier, whose rate is returned.
+    /// No bulk penalty is evaluated, including for finite-bulk native laws.
+    ///
+    /// Temperature, coefficients, natural reference (including its volume) and
+    /// accepted internal history are fixed. A frozen inelastic potential gives
+    /// only that directional branch, not an evolving specimen's complete rate.
+    /// Loads, history advancement, shell bending and wrinkling are not supplied.
+    pub fn incompressible_plane_stress_held_material_motion(
+        &self,
+        displacement_m: &[f64],
+        velocity_m_s: &[f64],
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<IncompressiblePlaneMaterialPointMotion>, SolidError> {
+        checkpoint(cx)?;
+        self.validate_materials_with(|| checkpoint(cx))?;
+        let geometry = Geometry::new(self.mesh, cx)?;
+        if velocity_m_s.len() != geometry.ndof || velocity_m_s.iter().any(|v| !v.is_finite()) {
+            return Err(invalid("one finite xy velocity per original node required"));
+        }
+        let mut responses = Vec::new();
+        geometry.for_points(
+            displacement_m,
+            0.0,
+            cx,
+            |index, local_point, element, point, in_plane| {
+                let material = self.point_material(index, local_point)?;
+                let seed = self.material.transverse_seed_at(index, local_point);
+                let response = if let Some(seed) = seed {
+                    incompressible_plane_stress::incompressible_plane_stress_with_kinematics(
+                        material,
+                        &in_plane,
+                        Some([seed[0], seed[1]]),
+                        local,
+                    )
+                } else if let Some(native) = material.native_hyperelastic() {
+                    native.incompressible_plane_stress_with_kinematics(&in_plane, local)
+                } else {
+                    incompressible_plane_stress::incompressible_plane_stress_with_kinematics(
+                        material, &in_plane, None, local,
+                    )
+                }
+                .map_err(|error| material_error(index, error))?;
+                let rate = velocity_gradient(element, point, velocity_m_s);
+                let fdot = response
+                    .deformation_gradient_rate(rate)
+                    .map_err(|error| material_error(index, error))?;
+                let pressure_rate_pa_s = response
+                    .pressure_rate(rate)
+                    .map_err(|error| material_error(index, error))?;
+                let state = response.response;
+                responses.push(IncompressiblePlaneMaterialPointMotion {
+                    motion: recover(
+                        index,
+                        local_point,
+                        point.weight,
+                        state.deformation_gradient,
+                        fdot,
+                        state.full_piola,
+                    )?,
+                    pressure_pa: state.pressure_pa,
+                    pressure_rate_pa_s,
+                });
+                Ok(())
+            },
+        )?;
+        Ok(responses)
+    }
+
     fn held_material_motion(
         &self,
         u: &[f64],
@@ -102,68 +191,86 @@ impl HyperProblem<'_> {
             return Err(invalid("one finite xy velocity per original node required"));
         }
         let mut responses = Vec::new();
-        geometry.for_points(u, 0.0, cx, |index, local_point, element, point, in_plane| {
-            let material = self.point_material(index, local_point)?;
-            // Differentiate from zero, before adding any reference axes. Common
-            // velocity is removed before contraction, as in native displacement.
-            let mut rate = [0.0_f64; 4];
-            for a in 1..element.arity {
-                for i in 0..2 {
-                    let relative = velocity[2 * element.nodes[a] + i]
-                        - velocity[2 * element.nodes[0] + i];
-                    for j in 0..2 {
-                        rate[2 * i + j] =
-                            relative.mul_add(point.gradients[a][j], rate[2 * i + j]);
+        geometry.for_points(
+            u,
+            0.0,
+            cx,
+            |index, local_point, element, point, in_plane| {
+                let material = self.point_material(index, local_point)?;
+                let rate = velocity_gradient(element, point, velocity);
+                let (f, fdot) = if let Some(local) = local {
+                    let seed = self.material.transverse_seed_at(index, local_point);
+                    let response = if let Some(seed) = seed {
+                        plane_stress::plane_stress_with_kinematics(
+                            material,
+                            &in_plane,
+                            Some(seed),
+                            local,
+                        )
+                    } else if let Some(native) = material.native_hyperelastic() {
+                        native.plane_stress_with_kinematics(&in_plane, local)
+                    } else {
+                        plane_stress::plane_stress_with_kinematics(
+                            material,
+                            &in_plane,
+                            Some(reference_seed(material, &in_plane)),
+                            local,
+                        )
                     }
-                }
-            }
-            let (f, fdot) = if let Some(local) = local {
-                let seed = self.material.transverse_seed_at(index, local_point);
-                let response = if let Some(seed) = seed {
-                    plane_stress::plane_stress_with_kinematics(
-                        material, &in_plane, Some(seed), local,
+                    .map_err(|error| material_error(index, error))?;
+                    (
+                        response.response.deformation_gradient,
+                        response
+                            .deformation_gradient_rate(rate)
+                            .map_err(|error| material_error(index, error))?,
                     )
-                } else if let Some(native) = material.native_hyperelastic() {
-                    native.plane_stress_with_kinematics(&in_plane, local)
                 } else {
-                    plane_stress::plane_stress_with_kinematics(
-                        material,
-                        &in_plane,
-                        Some(reference_seed(material, &in_plane)),
-                        local,
+                    (
+                        [
+                            in_plane[0],
+                            in_plane[1],
+                            0.0,
+                            in_plane[2],
+                            in_plane[3],
+                            0.0,
+                            0.0,
+                            0.0,
+                            1.0,
+                        ],
+                        [rate[0], rate[1], 0.0, rate[2], rate[3], 0.0, 0.0, 0.0, 0.0],
                     )
+                };
+                // Preserve the full original stress and its remaining transverse
+                // residual. Setting relaxed entries to zero would hide power error.
+                let (stress, potential) = material
+                    .stress_and_potential(&f)
+                    .map_err(|error| material_error(index, error))?;
+                if !potential.is_finite() {
+                    return Err(SolidError::MaterialRefused {
+                        what: "native motion material potential is nonfinite".into(),
+                    });
                 }
-                .map_err(|error| material_error(index, error))?;
-                (
-                    response.response.deformation_gradient,
-                    response
-                        .deformation_gradient_rate(rate)
-                        .map_err(|error| material_error(index, error))?,
-                )
-            } else {
-                (
-                    [
-                        in_plane[0], in_plane[1], 0.0, in_plane[2], in_plane[3],
-                        0.0, 0.0, 0.0, 1.0,
-                    ],
-                    [rate[0], rate[1], 0.0, rate[2], rate[3], 0.0, 0.0, 0.0, 0.0],
-                )
-            };
-            // Preserve the full original stress and its remaining transverse
-            // residual. Setting relaxed entries to zero would hide power error.
-            let (stress, potential) = material
-                .stress_and_potential(&f)
-                .map_err(|error| material_error(index, error))?;
-            if !potential.is_finite() {
-                return Err(SolidError::MaterialRefused {
-                    what: "native motion material potential is nonfinite".into(),
-                });
-            }
-            responses.push(recover(index, local_point, point.weight, f, fdot, stress)?);
-            Ok(())
-        })?;
+                responses.push(recover(index, local_point, point.weight, f, fdot, stress)?);
+                Ok(())
+            },
+        )?;
         Ok(responses)
     }
+}
+
+fn velocity_gradient(element: &Element, point: &Point, velocity: &[f64]) -> [f64; 4] {
+    // Differentiate from zero, before adding any reference axes. Common velocity
+    // is removed before contraction, as in the native displacement calculation.
+    let mut rate = [0.0_f64; 4];
+    for a in 1..element.arity {
+        for i in 0..2 {
+            let relative = velocity[2 * element.nodes[a] + i] - velocity[2 * element.nodes[0] + i];
+            for j in 0..2 {
+                rate[2 * i + j] = relative.mul_add(point.gradients[a][j], rate[2 * i + j]);
+            }
+        }
+    }
+    rate
 }
 
 fn recover(
@@ -190,9 +297,8 @@ fn recover(
             f[3 * k + ij / 3].mul_add(rate[3 * k + ij % 3], sum)
         })
     });
-    let sym = |a: &[f64; 9]| {
-        core::array::from_fn(|ij| f64::midpoint(a[ij], a[3 * (ij % 3) + ij / 3]))
-    };
+    let sym =
+        |a: &[f64; 9]| core::array::from_fn(|ij| f64::midpoint(a[ij], a[3 * (ij % 3) + ij / 3]));
     let spatial_strain_rate_per_s = sym(&spatial_velocity_gradient_per_s);
     let green_lagrange_strain_rate_per_s = sym(&material_rate);
     let cauchy_pa: [f64; 9] = core::array::from_fn(|ij| {
@@ -206,20 +312,17 @@ fn recover(
     }
     let green_lagrange_strain: [f64; 9] = core::array::from_fn(|ij| {
         let (i, j) = (ij / 3, ij % 3);
-        let quadratic =
-            (0..3).fold(0.0, |sum, k| h[3 * k + i].mul_add(h[3 * k + j], sum));
+        let quadratic = (0..3).fold(0.0, |sum, k| h[3 * k + i].mul_add(h[3 * k + j], sum));
         0.5 * (h[ij] + h[3 * j + i] + quadratic)
     });
     let jacobian_rate_per_s = jacobian
         * (spatial_velocity_gradient_per_s[0]
             + spatial_velocity_gradient_per_s[4]
             + spatial_velocity_gradient_per_s[8]);
-    let contract = |a: &[f64; 9], b: &[f64; 9]| {
-        a.iter().zip(b).fold(0.0, |sum, (x, y)| x.mul_add(*y, sum))
-    };
+    let contract =
+        |a: &[f64; 9], b: &[f64; 9]| a.iter().zip(b).fold(0.0, |sum, (x, y)| x.mul_add(*y, sum));
     let reference_stress_power_density_w_m3 = contract(&first_piola_pa, &rate);
-    let spatial_stress_power_density_w_m3 =
-        contract(&cauchy_pa, &spatial_velocity_gradient_per_s);
+    let spatial_stress_power_density_w_m3 = contract(&cauchy_pa, &spatial_velocity_gradient_per_s);
     if !jacobian.is_finite()
         || jacobian <= 0.0
         || f.iter()

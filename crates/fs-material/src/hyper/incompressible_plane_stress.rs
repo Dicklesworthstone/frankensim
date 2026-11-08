@@ -79,6 +79,65 @@ pub struct IncompressiblePlaneStressResponse {
     pub iterations: usize,
 }
 
+/// Exact-volume plane stress and its held-material kinematic derivatives.
+///
+/// Temperature, the natural reference (including its volume), constitutive
+/// coefficients and accepted internal history are fixed. A frozen inelastic
+/// owner supplies its consistent directional branch, not a complete material
+/// time derivative. Independent source or history rates are not inferred.
+#[derive(Clone, Copy, Debug)]
+pub struct IncompressiblePlaneStressKinematicResponse {
+    /// Original exact-volume response, including full pressure-corrected stress.
+    pub response: IncompressiblePlaneStressResponse,
+    /// d[F02,F12,F22]/d[F00,F01,F10,F11], including shear stationarity and
+    /// the exact derivative of F22=J_reference/det(F_in_plane).
+    pub transverse_deformation_tangent: [[f64; 4]; 3],
+    /// Derivative of the native pressure multiplier with respect to the four
+    /// in-plane deformation entries [Pa]. This retains the remainder's gauge.
+    pub pressure_tangent_pa: [f64; 4],
+}
+
+impl IncompressiblePlaneStressKinematicResponse {
+    /// Full Fdot from the supplied in-plane rate [1/s], preserving the held
+    /// reference-volume constraint. The remaining bottom-row rates are zero.
+    pub fn deformation_gradient_rate(
+        &self,
+        in_plane_rate: [f64; 4],
+    ) -> Result<[f64; 9], MaterialError> {
+        if in_plane_rate.iter().any(|v| !v.is_finite()) {
+            return Err(state_error("nonfinite in-plane deformation rate"));
+        }
+        let mut rate = [0.0; 9];
+        for col in 0..4 {
+            rate[IN_PLANE[col]] = in_plane_rate[col];
+        }
+        for (row, index) in [2, 5, 8].into_iter().enumerate() {
+            rate[index] = (0..4).fold(0.0, |sum, col| {
+                self.transverse_deformation_tangent[row][col].mul_add(in_plane_rate[col], sum)
+            });
+        }
+        if rate.iter().any(|v| !v.is_finite()) {
+            return Err(state_error("unrepresentable exact-volume deformation rate"));
+        }
+        Ok(rate)
+    }
+
+    /// Rate of the compression-positive pressure multiplier [Pa/s] along the
+    /// same held-material exact-volume branch. This is not a source-induced rate.
+    pub fn pressure_rate(&self, in_plane_rate: [f64; 4]) -> Result<f64, MaterialError> {
+        if in_plane_rate.iter().any(|v| !v.is_finite()) {
+            return Err(state_error("nonfinite in-plane deformation rate"));
+        }
+        let rate = (0..4).fold(0.0, |sum, col| {
+            self.pressure_tangent_pa[col].mul_add(in_plane_rate[col], sum)
+        });
+        if !rate.is_finite() {
+            return Err(state_error("unrepresentable pressure rate"));
+        }
+        Ok(rate)
+    }
+}
+
 fn state_error(what: &str) -> MaterialError {
     MaterialError::State {
         what: format!("incompressible hyperelastic plane stress: {what}"),
@@ -273,12 +332,41 @@ pub fn incompressible_plane_stress_with_seed<L: IncompressiblePlaneStressPotenti
     generic_response(state, remainder, in_plane)
 }
 
+/// Exact-volume response with all relaxed transverse and pressure derivatives.
+///
+/// The optional seed contains only the two transverse shears; thickness always
+/// obeys the exact volume constraint. No penalty law or evolving reference,
+/// temperature, material coefficient or internal-history rate is evaluated.
+pub fn incompressible_plane_stress_with_kinematics<
+    L: IncompressiblePlaneStressPotential + ?Sized,
+>(
+    material: &L,
+    in_plane: &[f64; 4],
+    initial_shear: Option<[f64; 2]>,
+    settings: PlaneStressSettings,
+) -> Result<IncompressiblePlaneStressKinematicResponse, MaterialError> {
+    let (state, remainder) = generic_state(material, in_plane, initial_shear, settings)?;
+    let remainder = remainder.ok_or_else(|| state_error("missing accepted remainder tangent"))?;
+    kinematic_response(state, remainder, in_plane)
+}
+
 pub(crate) fn generic_response(
     state: IncompressiblePlaneStressState,
     remainder: Option<RemainderResponse>,
     in_plane: &[f64; 4],
 ) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
     let remainder = remainder.ok_or_else(|| state_error("missing accepted remainder tangent"))?;
+    let (hessian, _) = constrained_hessian(&state, &remainder, in_plane);
+    incompressible_response_from(state, hessian)
+}
+
+// Differentiate the exact constraint before condensing the relaxed shears.
+// Retaining the thickness gradient also supplies the kinematic closure.
+fn constrained_hessian(
+    state: &IncompressiblePlaneStressState,
+    remainder: &RemainderResponse,
+    in_plane: &[f64; 4],
+) -> ([[f64; 6]; 6], [f64; 4]) {
     let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
     let thickness = state.deformation_gradient[8];
     let determinant_gradient = [in_plane[3], -in_plane[2], -in_plane[1], in_plane[0]];
@@ -319,7 +407,44 @@ pub(crate) fn generic_response(
                 + remainder.first_piola_pa[8] * d2t;
         }
     }
-    incompressible_response_from(state, hessian)
+    (hessian, thickness_gradient)
+}
+
+fn kinematic_response(
+    state: IncompressiblePlaneStressState,
+    remainder: RemainderResponse,
+    in_plane: &[f64; 4],
+) -> Result<IncompressiblePlaneStressKinematicResponse, MaterialError> {
+    let (hessian, thickness_gradient) = constrained_hessian(&state, &remainder, in_plane);
+    let (response, shear_gradient) = condensed_response(state, hessian)?;
+    let transverse_deformation_tangent = [shear_gradient[0], shear_gradient[1], thickness_gradient];
+    let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
+    let determinant_gradient = [in_plane[3], -in_plane[2], -in_plane[1], in_plane[0]];
+    let pressure_tangent_pa = core::array::from_fn(|col| {
+        // p=Pr22/d, so pdot=(A22:Fdot-p*ddot)/d. The held reference
+        // volume has zero rate; no artificial bulk stiffness enters.
+        let remainder_rate = [2, 5, 8].into_iter().enumerate().fold(
+            remainder.tangent_pa[8][IN_PLANE[col]],
+            |sum, (row, index)| {
+                remainder.tangent_pa[8][index]
+                    .mul_add(transverse_deformation_tangent[row][col], sum)
+            },
+        );
+        (remainder_rate - state.pressure_pa * determinant_gradient[col]) / determinant
+    });
+    if transverse_deformation_tangent
+        .iter()
+        .flatten()
+        .any(|v| !v.is_finite())
+        || pressure_tangent_pa.iter().any(|v| !v.is_finite())
+    {
+        return Err(state_error("unrepresentable exact-volume motion tangent"));
+    }
+    Ok(IncompressiblePlaneStressKinematicResponse {
+        response,
+        transverse_deformation_tangent,
+        pressure_tangent_pa,
+    })
 }
 
 fn generic_state<L: IncompressiblePlaneStressPotential + ?Sized>(
@@ -625,6 +750,20 @@ fn incompressible_state_with(
 }
 
 impl Hyperelastic {
+    /// Exact-volume kinematics and pressure derivative on the stable relaxed
+    /// branch, at fixed temperature, reference and accepted material history.
+    /// Native Newton uses its two-direction shear block; the full remainder
+    /// tangent is formed once at acceptance for the constrained derivatives.
+    pub fn incompressible_plane_stress_with_kinematics(
+        &self,
+        in_plane: &[f64; 4],
+        settings: PlaneStressSettings,
+    ) -> Result<IncompressiblePlaneStressKinematicResponse, MaterialError> {
+        let state = self.incompressible_plane_stress_state(in_plane, settings)?;
+        let remainder = self.incompressible_remainder_response(&state.deformation_gradient)?;
+        kinematic_response(state, remainder, in_plane)
+    }
+
     /// Exact-incompressibility state plus the constrained-energy tangent,
     /// including consistent elimination of both transverse shear coordinates.
     /// A six-direction AD Hessian is formed only after local equilibrium.
@@ -662,6 +801,13 @@ fn incompressible_response_from(
     state: IncompressiblePlaneStressState,
     hessian: [[f64; 6]; 6],
 ) -> Result<IncompressiblePlaneStressResponse, MaterialError> {
+    condensed_response(state, hessian).map(|(response, _)| response)
+}
+
+fn condensed_response(
+    state: IncompressiblePlaneStressState,
+    hessian: [[f64; 6]; 6],
+) -> Result<(IncompressiblePlaneStressResponse, [[f64; 4]; 2]), MaterialError> {
     if hessian.iter().flatten().any(|v| !v.is_finite()) {
         return Err(state_error("nonfinite constrained-energy Hessian"));
     }
@@ -670,8 +816,12 @@ fn incompressible_response_from(
         [hessian[5][4], hessian[5][5]],
     ])?;
     let mut tangent = [[0.0; 4]; 4];
+    let mut shear_gradient = [[0.0; 4]; 2];
     for col in 0..4 {
         let extension = block.solve([hessian[4][col], hessian[5][col]])?;
+        for row in 0..2 {
+            shear_gradient[row][col] = -extension[row];
+        }
         for row in 0..4 {
             tangent[row][col] =
                 hessian[row][col] - hessian[row][4] * extension[0] - hessian[row][5] * extension[1];
@@ -680,14 +830,17 @@ fn incompressible_response_from(
     if tangent.iter().flatten().any(|v| !v.is_finite()) {
         return Err(state_error("unrepresentable condensed tangent"));
     }
-    Ok(IncompressiblePlaneStressResponse {
-        deformation_gradient: state.deformation_gradient,
-        energy_density_pa: state.energy_density_pa,
-        piola: state.piola,
-        full_piola: state.full_piola,
-        pressure_pa: state.pressure_pa,
-        tangent,
-        relative_transverse_residual: state.relative_transverse_residual,
-        iterations: state.iterations,
-    })
+    Ok((
+        IncompressiblePlaneStressResponse {
+            deformation_gradient: state.deformation_gradient,
+            energy_density_pa: state.energy_density_pa,
+            piola: state.piola,
+            full_piola: state.full_piola,
+            pressure_pa: state.pressure_pa,
+            tangent,
+            relative_transverse_residual: state.relative_transverse_residual,
+            iterations: state.iterations,
+        },
+        shear_gradient,
+    ))
 }

@@ -449,7 +449,9 @@ fn motion_affine_field(mesh: &Mesh2, gradient: [f64; 4], translation: [f64; 2]) 
 
 fn motion_product(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
     core::array::from_fn(|ij| {
-        (0..3).map(|k| a[3 * (ij / 3) + k] * b[3 * k + ij % 3]).sum()
+        (0..3)
+            .map(|k| a[3 * (ij / 3) + k] * b[3 * k + ij % 3])
+            .sum()
     })
 }
 
@@ -514,7 +516,11 @@ fn g1_held_plane_motion_has_physical_relaxed_thickness_rate() {
                     lateral * lateral * axial_rate + 2.0 * axial * lateral * lateral_rate,
                     2e-10,
                 );
-                close(field.reference_stress_power_density_w_m3, nominal * axial_rate, 2e-9);
+                close(
+                    field.reference_stress_power_density_w_m3,
+                    nominal * axial_rate,
+                    2e-9,
+                );
                 close(
                     field.reference_stress_power_density_w_m3,
                     field.jacobian * field.spatial_stress_power_density_w_m3,
@@ -556,14 +562,29 @@ fn g3_held_planar_rates_are_objective_under_moving_rigid_frames() {
         let displacement = |mesh: &Mesh2, a: &[f64; 9], translation| {
             motion_affine_field(mesh, [a[0] - 1.0, a[1], a[3], a[4] - 1.0], translation)
         };
-        for mesh in [Mesh2::triangles(1.0, 1.0, 1, 1), Mesh2::quads(1.0, 1.0, 1, 1)] {
+        for mesh in [
+            Mesh2::triangles(1.0, 1.0, 1, 1),
+            Mesh2::quads(1.0, 1.0, 1, 1),
+        ] {
             let p = problem(&mesh, &law);
-            for relaxed in [false, true] {
+            for form in 0..3 {
                 let observe = |u: &[f64], v: &[f64]| {
-                    if relaxed {
-                        p.plane_stress_held_material_motion(u, v, PlaneStressSettings::default(), cx)
-                    } else {
-                        p.plane_strain_held_material_motion(u, v, cx)
+                    match form {
+                        0 => p.plane_strain_held_material_motion(u, v, cx),
+                        1 => p.plane_stress_held_material_motion(
+                            u,
+                            v,
+                            PlaneStressSettings::default(),
+                            cx,
+                        ),
+                        _ => p
+                            .incompressible_plane_stress_held_material_motion(
+                                u,
+                                v,
+                                PlaneStressSettings::default(),
+                                cx,
+                            )
+                            .map(|points| points.into_iter().map(|point| point.motion).collect()),
                     }
                     .unwrap()
                 };
@@ -576,10 +597,8 @@ fn g3_held_planar_rates_are_objective_under_moving_rigid_frames() {
                     &motion_affine_field(&mesh, in_plane(&rotated_rate), [13.0, -17.0]),
                 );
                 for (before, after) in base.iter().zip(rotated) {
-                    let expected_d = motion_product(
-                        &motion_product(&q, &before.spatial_strain_rate_per_s),
-                        &qt,
-                    );
+                    let expected_d =
+                        motion_product(&motion_product(&q, &before.spatial_strain_rate_per_s), &qt);
                     for ij in 0..9 {
                         close(
                             after.green_lagrange_strain_rate_per_s[ij],
@@ -599,8 +618,11 @@ fn g3_held_planar_rates_are_objective_under_moving_rigid_frames() {
                     &displacement(&mesh, &rotated_f, [3.0, -7.0]),
                     &motion_affine_field(&mesh, in_plane(&rigid_rate), [13.0, -17.0]),
                 ) {
-                    for value in rigid.spatial_strain_rate_per_s
-                        .iter().chain(&rigid.green_lagrange_strain_rate_per_s) {
+                    for value in rigid
+                        .spatial_strain_rate_per_s
+                        .iter()
+                        .chain(&rigid.green_lagrange_strain_rate_per_s)
+                    {
                         close(*value, 0.0, 3e-10);
                     }
                     close(rigid.reference_stress_power_density_w_m3, 0.0, 3e-10);
@@ -624,13 +646,19 @@ fn g1_anisotropic_plane_motion_retains_relaxed_transverse_shear_rate() {
                 volumetric: Volumetric::Quadratic { kappa: 20.0 },
             },
             4.0,
-        ).unwrap();
+        )
+        .unwrap();
         let local = PlaneStressSettings::default();
-        for mesh in [Mesh2::triangles(1.0, 0.7, 1, 1), Mesh2::quads(1.0, 0.7, 1, 1)] {
+        for mesh in [
+            Mesh2::triangles(1.0, 0.7, 1, 1),
+            Mesh2::quads(1.0, 0.7, 1, 1),
+        ] {
             let p = problem(&mesh, &law);
             let u = motion_affine_field(&mesh, [0.14, 0.03, -0.01, 0.08], [0.0; 2]);
             let v = motion_affine_field(&mesh, [0.11, -0.02, 0.03, -0.04], [0.0; 2]);
-            let fields = p.plane_stress_held_material_motion(&u, &v, local, cx).unwrap();
+            let fields = p
+                .plane_stress_held_material_motion(&u, &v, local, cx)
+                .unwrap();
             let step = 2e-6;
             let plus: Vec<_> = u.iter().zip(&v).map(|(u, v)| u + step * v).collect();
             let minus: Vec<_> = u.iter().zip(&v).map(|(u, v)| u - step * v).collect();
@@ -638,13 +666,15 @@ fn g1_anisotropic_plane_motion_retains_relaxed_transverse_shear_rate() {
             let minus = p.plane_stress_states(&minus, local, cx).unwrap();
             assert!(fields.iter().any(|field| {
                 field.deformation_gradient_rate_per_s[2].abs()
-                    + field.deformation_gradient_rate_per_s[5].abs() > 1e-8
+                    + field.deformation_gradient_rate_per_s[5].abs()
+                    > 1e-8
             }));
             for ((field, plus), minus) in fields.iter().zip(plus).zip(minus) {
                 for ij in 0..9 {
                     close(
                         field.deformation_gradient_rate_per_s[ij],
-                        (plus.deformation_gradient[ij] - minus.deformation_gradient[ij]) / (2.0 * step),
+                        (plus.deformation_gradient[ij] - minus.deformation_gradient[ij])
+                            / (2.0 * step),
                         3e-6,
                     );
                 }
@@ -668,19 +698,251 @@ fn g0_held_plane_motion_preserves_tiny_rates_and_refuses_invalid_motion() {
         let tiny = 1e-30;
         let v = motion_affine_field(&mesh, [tiny, 0.0, 0.0, 0.0], [0.0; 2]);
         let local = PlaneStressSettings::default();
-        let fields = p.plane_stress_held_material_motion(&u, &v, local, cx).unwrap();
+        let fields = p
+            .plane_stress_held_material_motion(&u, &v, local, cx)
+            .unwrap();
         for field in fields {
             assert!((field.deformation_gradient_rate_per_s[0] / tiny - 1.0).abs() < 1e-13);
             assert!((field.deformation_gradient_rate_per_s[8] / tiny + 3.0 / 7.0).abs() < 1e-13);
         }
-        assert!(p.plane_stress_held_material_motion(&u, &v[..v.len() - 1], local, cx).is_err());
-        assert!(p.plane_strain_held_material_motion(&u, &[f64::NAN; 8], cx).is_err());
+        assert!(
+            p.plane_stress_held_material_motion(&u, &v[..v.len() - 1], local, cx)
+                .is_err()
+        );
+        assert!(
+            p.plane_strain_held_material_motion(&u, &[f64::NAN; 8], cx)
+                .is_err()
+        );
         let inverted = motion_affine_field(&mesh, [-2.0, 0.0, 0.0, 0.0], [0.0; 2]);
-        assert!(p.plane_stress_held_material_motion(&inverted, &v, local, cx).is_err());
-        assert!(p.plane_strain_held_material_motion(&inverted, &v, cx).is_err());
+        assert!(
+            p.plane_stress_held_material_motion(&inverted, &v, local, cx)
+                .is_err()
+        );
+        assert!(
+            p.plane_strain_held_material_motion(&inverted, &v, cx)
+                .is_err()
+        );
         gate.request();
         assert!(matches!(
             p.plane_stress_held_material_motion(&u, &v, local, cx),
+            Err(SolidError::Cancelled)
+        ));
+    });
+}
+
+#[test]
+fn g1_exact_volume_motion_matches_uniaxial_pressure_and_work_without_bulk_penalties() {
+    with_cx(|cx, _| {
+        let (mu, axial, axial_rate): (f64, f64, f64) = (2.0, 1.4, 0.23);
+        let lateral = 1.0 / axial.sqrt();
+        let lateral_rate = -0.5 * lateral * axial_rate / axial;
+        let nominal = mu * (axial - 1.0 / axial.powi(2));
+        let local = PlaneStressSettings::default();
+        for mesh in [
+            Mesh2::triangles(2.0, 1.0, 2, 2),
+            Mesh2::quads(2.0, 1.0, 2, 2),
+        ] {
+            let u = motion_affine_field(&mesh, [axial - 1.0, 0.0, 0.0, lateral - 1.0], [0.0; 2]);
+            let v = motion_affine_field(&mesh, [axial_rate, 0.0, 0.0, lateral_rate], [0.0; 2]);
+            let mut first = None;
+            for lambda in [0.0, 40.0, 1e300] {
+                let law = nh(mu, lambda);
+                let p = problem(&mesh, &law);
+                let fields = p
+                    .incompressible_plane_stress_held_material_motion(&u, &v, local, cx)
+                    .unwrap();
+                for result in &fields {
+                    let field = &result.motion;
+                    let stretches = [axial, lateral, lateral];
+                    let rates = [axial_rate, lateral_rate, lateral_rate];
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            close(
+                                field.deformation_gradient_rate_per_s[3 * i + j],
+                                if i == j { rates[i] } else { 0.0 },
+                                2e-12,
+                            );
+                            close(
+                                field.green_lagrange_strain_rate_per_s[3 * i + j],
+                                if i == j { stretches[i] * rates[i] } else { 0.0 },
+                                2e-12,
+                            );
+                            close(
+                                field.spatial_strain_rate_per_s[3 * i + j],
+                                if i == j { rates[i] / stretches[i] } else { 0.0 },
+                                2e-12,
+                            );
+                        }
+                    }
+                    close(field.jacobian, 1.0, 2e-14);
+                    close(field.jacobian_rate_per_s, 0.0, 2e-14);
+                    close(result.pressure_pa, mu * (lateral * lateral - 1.0), 2e-12);
+                    close(
+                        result.pressure_rate_pa_s,
+                        2.0 * mu * lateral * lateral_rate,
+                        2e-12,
+                    );
+                    close(field.first_piola_pa[0], nominal, 2e-12);
+                    for index in [2, 5, 8] {
+                        close(field.first_piola_pa[index], 0.0, 2e-12);
+                    }
+                    close(
+                        field.reference_stress_power_density_w_m3,
+                        nominal * axial_rate,
+                        2e-12,
+                    );
+                    close(
+                        field.reference_stress_power_density_w_m3,
+                        field.jacobian * field.spatial_stress_power_density_w_m3,
+                        2e-12,
+                    );
+                }
+                if let Some(first) = &first {
+                    assert_eq!(&fields, first, "bulk penalty entered exact-volume motion");
+                } else {
+                    first = Some(fields);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_exact_volume_anisotropic_motion_differentiates_shear_pressure_and_held_reference() {
+    use fs_material::hyper::reference::{ReferenceDeformation, ReferencedHyperelastic};
+
+    with_cx(|cx, _| {
+        let law = Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 1.0,
+                k1: 1.8,
+                k2: 1.1,
+                dispersion: 0.05,
+                fibres: vec![[0.8, 0.0, 0.6]],
+                invariants: FibreInvariants::Full,
+                volumetric: Volumetric::Quadratic { kappa: 1e300 },
+            },
+            4.0,
+        )
+        .unwrap();
+        let reference =
+            ReferenceDeformation::try_new([1.05, 0.04, 0.03, 0.0, 0.97, -0.02, 0.0, 0.0, 1.08])
+                .unwrap();
+        let referenced = ReferencedHyperelastic::new(&law, reference);
+        let local = PlaneStressSettings::default();
+        for mesh in [
+            Mesh2::triangles(1.0, 0.7, 1, 1),
+            Mesh2::mapped_quads(2, 1, &|x, y| [x + 0.15 * x * y + 0.1 * y, y + 0.1 * x]),
+        ] {
+            let u = motion_affine_field(&mesh, [0.14, 0.03, -0.01, 0.08], [0.0; 2]);
+            let v = motion_affine_field(&mesh, [0.11, -0.02, 0.03, -0.04], [0.0; 2]);
+            for shifted in [false, true] {
+                let mut p = problem(&mesh, &law);
+                if shifted {
+                    p.material = &referenced;
+                }
+                let fields = p
+                    .incompressible_plane_stress_held_material_motion(&u, &v, local, cx)
+                    .unwrap();
+                let step = 2e-6;
+                let plus: Vec<_> = u.iter().zip(&v).map(|(u, v)| u + step * v).collect();
+                let minus: Vec<_> = u.iter().zip(&v).map(|(u, v)| u - step * v).collect();
+                let plus = p
+                    .incompressible_plane_stress_states(&plus, local, cx)
+                    .unwrap();
+                let minus = p
+                    .incompressible_plane_stress_states(&minus, local, cx)
+                    .unwrap();
+                assert!(fields.iter().any(|result| {
+                    let rate = result.motion.deformation_gradient_rate_per_s;
+                    rate[2].abs() + rate[5].abs() > 1e-8
+                }));
+                for ((result, plus), minus) in fields.iter().zip(plus).zip(minus) {
+                    let field = &result.motion;
+                    for ij in 0..9 {
+                        close(
+                            field.deformation_gradient_rate_per_s[ij],
+                            (plus.deformation_gradient[ij] - minus.deformation_gradient[ij])
+                                / (2.0 * step),
+                            3e-6,
+                        );
+                    }
+                    close(
+                        result.pressure_rate_pa_s,
+                        (plus.pressure_pa - minus.pressure_pa) / (2.0 * step),
+                        3e-6,
+                    );
+                    close(
+                        field.jacobian,
+                        if shifted {
+                            reference.volume_ratio()
+                        } else {
+                            1.0
+                        },
+                        2e-13,
+                    );
+                    close(field.jacobian_rate_per_s, 0.0, 2e-13);
+                    close(
+                        field.reference_stress_power_density_w_m3,
+                        field.jacobian * field.spatial_stress_power_density_w_m3,
+                        2e-11,
+                    );
+                    // The exact constraint removes pressure work; this elastic
+                    // remainder's energy derivative is the full physical work.
+                    close(
+                        field.reference_stress_power_density_w_m3,
+                        (plus.energy_density_pa - minus.energy_density_pa) / (2.0 * step),
+                        3e-6,
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_exact_volume_motion_preserves_tiny_rates_and_original_refusals() {
+    with_cx(|cx, gate| {
+        let law = nh(2.0, 1e300);
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let p = problem(&mesh, &law);
+        let local = PlaneStressSettings::default();
+        let u = vec![0.0; 2 * mesh.nodes.len()];
+        let tiny = 1e-30;
+        let v = motion_affine_field(&mesh, [tiny, 0.0, 0.0, 0.0], [0.0; 2]);
+        for result in p
+            .incompressible_plane_stress_held_material_motion(&u, &v, local, cx)
+            .unwrap()
+        {
+            let field = result.motion;
+            assert!((field.deformation_gradient_rate_per_s[0] / tiny - 1.0).abs() < 1e-13);
+            assert!((field.deformation_gradient_rate_per_s[8] / tiny + 1.0).abs() < 1e-13);
+            assert!((result.pressure_rate_pa_s / tiny + 4.0).abs() < 1e-13);
+        }
+        assert!(
+            p.incompressible_plane_stress_held_material_motion(&u, &v[..7], local, cx)
+                .is_err()
+        );
+        assert!(
+            p.incompressible_plane_stress_held_material_motion(&u, &[f64::NAN; 8], local, cx)
+                .is_err()
+        );
+        let inverted = motion_affine_field(&mesh, [-2.0, 0.0, 0.0, 0.0], [0.0; 2]);
+        assert!(
+            p.incompressible_plane_stress_held_material_motion(&inverted, &v, local, cx)
+                .is_err()
+        );
+        let mut limited = nh(2.0, 40.0);
+        limited.stretch_limit = 2.0;
+        let stretch = motion_affine_field(&mesh, [1.0, 0.0, 0.0, 1.0], [0.0; 2]);
+        assert!(
+            problem(&mesh, &limited)
+                .incompressible_plane_stress_held_material_motion(&stretch, &v, local, cx)
+                .is_err()
+        );
+        gate.request();
+        assert!(matches!(
+            p.incompressible_plane_stress_held_material_motion(&u, &v, local, cx),
             Err(SolidError::Cancelled)
         ));
     });
