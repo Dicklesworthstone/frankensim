@@ -1,7 +1,8 @@
 //! Finite glass thickness with incoherent internal reflections.
 //!
 //! Each polarization sums its own geometric series before unpolarized powers
-//! are averaged. The two smooth, uncoated faces have the same exterior medium.
+//! are averaged. The two smooth, uncoated faces may have different lossless
+//! exterior media; each interface retains its own Fresnel power coefficients.
 //! This is the native real-index/Beer law, not coherent thin-film interference,
 //! a rough-surface model, or an inference of absorption from scattering loss.
 //! See SCHOTT TIE-35, section 1, for internal versus external transmittance;
@@ -18,7 +19,7 @@ use fs_math::det;
 pub struct SlabPowerBalance {
     /// Power returning to the incident exterior medium.
     pub reflectance: f64,
-    /// Power leaving the rear face into the identical exterior medium.
+    /// Power leaving the rear face into its declared exterior medium.
     pub transmittance: f64,
     /// Power absorbed inside the glass, excluding interface reflection.
     /// Evaluated directly to retain optically thin nonzero heating.
@@ -32,7 +33,7 @@ pub struct IncoherentSlabResponse {
     pub perpendicular: SlabPowerBalance,
     /// Electric field parallel to the incidence plane (p polarization).
     pub parallel: SlabPowerBalance,
-    /// Cosine of the refracted angle, or zero at total internal reflection.
+    /// Cosine inside the slab, or zero at front-face total internal reflection.
     pub transmitted_cosine: f64,
     /// Absorption optical depth of a single refracted traversal.
     /// Infinite when no propagating internal traversal exists.
@@ -70,13 +71,49 @@ impl DielectricGlass {
         incident_cosine: f64,
         exterior_index: f64,
     ) -> Result<IncoherentSlabResponse, DielectricError> {
+        self.incoherent_slab_response_between(
+            wavelength_nm,
+            thickness_m,
+            incident_cosine,
+            exterior_index,
+            exterior_index,
+        )
+    }
+
+    /// Evaluate an incoherent slab between two distinct lossless media.
+    ///
+    /// `incident_index` and `exit_index` are ordinary real phase indices at
+    /// the requested vacuum wavelength. The caller owns their source support.
+    /// `thickness_m` is positive normal thickness; the internal ray traverses
+    /// `thickness_m / transmitted_cosine` on every pass. Powers are fractions
+    /// of incident normal flux, without camera-radiance eta-squared factors.
+    ///
+    /// The front and rear Fresnel coefficients are summed separately for each
+    /// polarization. Rear-face total internal reflection prevents transmission
+    /// but still permits absorption during forward and returning traversals.
+    /// Front-face total reflection admits no internal power. Original bulk
+    /// wavelength support and both exterior indices are checked in either case.
+    /// Equal exterior indices preserve the original symmetric calculation.
+    ///
+    /// This is the same homogeneous, smooth, uncoated, incoherent real-index /
+    /// Beer-Lambert approximation as [`Self::incoherent_slab_response`]. It does
+    /// not model coherent or evanescent tunneling, strong complex-interface
+    /// absorption, scattering, lateral escape, or traversal delay.
+    pub fn incoherent_slab_response_between(
+        &self,
+        wavelength_nm: f64,
+        thickness_m: f64,
+        incident_cosine: f64,
+        incident_index: f64,
+        exit_index: f64,
+    ) -> Result<IncoherentSlabResponse, DielectricError> {
         validate_thickness(thickness_m)?;
-        if incident_cosine <= 0.0 {
+        if incident_cosine <= 0.0 || !super::admitted_dielectric_index(exit_index) {
             return Err(DielectricError::InvalidInterface);
         }
         let index = self.ior().eval(wavelength_nm)?;
         let alpha = self.absorption_ref().extinction_per_m(wavelength_nm)?;
-        let interface = fresnel_dielectric(incident_cosine, exterior_index, index)?;
+        let interface = fresnel_dielectric(incident_cosine, incident_index, index)?;
         if interface.total_internal_reflection {
             let reflected = SlabPowerBalance {
                 reflectance: 1.0,
@@ -97,17 +134,50 @@ impl DielectricGlass {
             // underflows/overflows. A genuinely opaque depth may be infinite.
             depth = det::exp(det::ln(alpha) + det::ln(thickness_m) - det::ln(cosine));
         }
-        let (reflection, transmission) = if exterior_index == index {
+        let (reflection, transmission) = if incident_index == index {
             // Preserve the original Fresnel null-interface fast path. At an
             // arbitrarily grazing matched ray, squared normal wave numbers
             // may underflow even though exact zero reflection is known.
             ([0.0; 2], [1.0; 2])
         } else {
-            dielectric_power_coefficients(incident_cosine, exterior_index, index, cosine)
+            dielectric_power_coefficients(incident_cosine, incident_index, index, cosine)
+        };
+        let powers = if incident_index == exit_index {
+            [0, 1].map(|pol| {
+                power_balance(reflection[pol] * reflection[pol], transmission[pol], depth)
+            })
+        } else {
+            let (rear_reflection, rear_transmission) = if exit_index == index {
+                ([0.0; 2], [1.0; 2])
+            } else {
+                // The original incident ray fixes the conserved tangential
+                // wave number. Reconstructing it from a rounded internal
+                // cosine can misclassify the rear critical ray.
+                let exit = fresnel_dielectric(incident_cosine, incident_index, exit_index)?;
+                if exit.total_internal_reflection {
+                    ([1.0; 2], [0.0; 2])
+                } else {
+                    dielectric_power_coefficients(
+                        cosine,
+                        index,
+                        exit_index,
+                        exit.transmitted_cosine,
+                    )
+                }
+            };
+            [0, 1].map(|pol| {
+                asymmetric_power_balance(
+                    reflection[pol] * reflection[pol],
+                    transmission[pol],
+                    rear_reflection[pol] * rear_reflection[pol],
+                    rear_transmission[pol],
+                    depth,
+                )
+            })
         };
         Ok(IncoherentSlabResponse {
-            perpendicular: power_balance(reflection[0] * reflection[0], transmission[0], depth),
-            parallel: power_balance(reflection[1] * reflection[1], transmission[1], depth),
+            perpendicular: powers[0],
+            parallel: powers[1],
             transmitted_cosine: cosine,
             optical_depth: depth,
         })
@@ -133,6 +203,35 @@ fn power_balance(r: f64, t: f64, depth: f64) -> SlabPowerBalance {
         transmittance,
         // Cancel (1+r*a) analytically from t*(1-a)*(1+r*a)/D.
         absorptance: t * (loss / (t + r * loss)),
+    }
+}
+
+fn asymmetric_power_balance(
+    front_r: f64,
+    front_t: f64,
+    rear_r: f64,
+    rear_t: f64,
+    depth: f64,
+) -> SlabPowerBalance {
+    if front_t == 0.0 || (rear_t == 0.0 && depth == 0.0) {
+        return SlabPowerBalance {
+            reflectance: 1.0,
+            transmittance: 0.0,
+            absorptance: 0.0,
+        };
+    }
+    let a = det::exp(-depth);
+    let loss = -det::expm1(-depth);
+    // D = 1 - R_front*R_rear*a². Direct interface power complements and
+    // expm1 retain weak escape/loss when either reflection rounds to one.
+    let denominator = front_t + front_r * rear_t + front_r * rear_r * -det::expm1(-2.0 * depth);
+    let entering_sum = front_t / denominator;
+    SlabPowerBalance {
+        reflectance: front_r + front_t * entering_sum * rear_r * a * a,
+        transmittance: entering_sum * rear_t * a,
+        // Positive dissipative work on forward and returning traversals;
+        // never infer weak heating by subtracting R+T from unit power.
+        absorptance: entering_sum * (loss * (1.0 + rear_r * a)),
     }
 }
 

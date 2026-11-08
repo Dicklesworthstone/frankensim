@@ -2163,11 +2163,16 @@ LTE transport, and the uniform-opacity compatibility path.
 
 `DielectricGlass::incoherent_slab_response` combines the original spectral
 index and absorption laws with normal thickness, refracted path length and
-every internal reflection between smooth parallel faces. The exterior medium
-must be the same on both sides. It sums s and p power independently before
-averaging unpolarized response. Reflection, transmission and true bulk
-absorption remain separate; direct absorption evaluation retains weak heating
-even when transmission rounds to its clear limit.
+every internal reflection between smooth parallel faces with identical exterior
+media. `incoherent_slab_response_between` additionally admits distinct lossless
+incident and exit indices, using the original incident ray to retain the
+conserved tangential wave number at the rear interface. Both sum s and p power
+independently before averaging. Front total reflection admits no internal heat;
+rear total reflection retains absorption during every forward and returning
+traversal. Reflection, transmission and true bulk absorption remain separate;
+direct Poynting transmissions and `expm1` retain weak escape and heating. Equal
+exterior indices preserve the symmetric calculation. Exterior indices are
+caller-supplied at the actual wavelength; original bulk support remains enforced.
 
 `BeerLambertAbsorption` can import spectral internal transmission at a known
 path length, or normal-incidence external slab transmission under that same
@@ -2179,9 +2184,10 @@ transmission is a measurement limit rather than an infinite inferred
 coefficient. Impossible above-clear values refuse. The calculation adds no
 measurement or uncertainty authority.
 
-Controls compare independent bounce sums, power closure, polarization,
-thickness scaling, weak/opaque limits and inverse measurements propagated
-through the original Beer law at new thicknesses and angles. This retains the
+Controls compare independent asymmetric interface bounce sums, power closure,
+polarization, reciprocal transmission, material-bound infrared opacity after a
+supported temperature refresh, thickness scaling, weak/opaque limits and inverse
+measurements propagated through the original Beer law at new thicknesses and angles. This retains the
 native real-index, weak-absorption interface approximation: no coherent
 thin-film interference, strongly absorbing complex-index faces, rough faces,
 scattering, coatings, lateral exit location or traversal delay. See

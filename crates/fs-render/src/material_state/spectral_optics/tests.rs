@@ -258,6 +258,67 @@ fn g1_ir_dielectric_keeps_phase_group_snell_and_original_absorption_feature() {
 }
 
 #[test]
+fn g1_material_ir_absorption_and_temperature_drive_asymmetric_slab_opacity() {
+    let card = card(1.0, None);
+    let cold = state(&card, 300.0);
+    let optical = resolve_spectral_tabulated_dielectric_state_point(
+        &card,
+        &cold.query(),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let binding = MaterialOpticalBinding::try_spectral_tabulated_dielectric(
+        &cold, &optical, MAX_GAP_NM, None, SURFACE,
+    )
+    .unwrap();
+    let hot = cold.at_query_point(&card, &point(600.0)).unwrap();
+    let (heated, _) = binding
+        .at_spectral_material_state(
+            &SpectralOpticalStatePoint::TabulatedDielectric(optical.clone()),
+            &card,
+            &hot,
+        )
+        .unwrap();
+    let mut peak_transmissions = Vec::new();
+    for (bound, delta) in [(binding, 0.0), (heated, 1.0)] {
+        let Material::Dielectric { glass, surface } = bound.material() else {
+            panic!("material-bound glass");
+        };
+        assert!(surface.is_delta());
+        let mut absorbed = Vec::new();
+        for (index, base_alpha) in [(4, 6.25), (5, 0.25)] {
+            let wavelength = optical.samples()[index].wavelength_m * 1.0e9;
+            let n = 1.75 - wavelength / 64_000.0 + delta * 0.0625;
+            let alpha = base_alpha + delta * 0.5;
+            let front_r = ((n - 1.0) / (n + 1.0)).powi(2);
+            let rear_r = ((n - 1.33) / (n + 1.33)).powi(2);
+            let a = (-alpha * 0.04_f64).exp();
+            let denominator = 1.0 - front_r * rear_r * a * a;
+            let expected_t = (1.0 - front_r) * (1.0 - rear_r) * a / denominator;
+            let expected_a = (1.0 - front_r) * (1.0 - a) * (1.0 + rear_r * a) / denominator;
+            let actual = glass
+                .incoherent_slab_response_between(wavelength, 0.04, 1.0, 1.0, 1.33)
+                .unwrap()
+                .unpolarized();
+            assert!((actual.transmittance - expected_t).abs() < 3.0e-13);
+            assert!((actual.absorptance - expected_a).abs() < 3.0e-13);
+            absorbed.push(actual.absorptance);
+            if index == 4 {
+                peak_transmissions.push(actual.transmittance);
+            }
+        }
+        assert!(absorbed[0] > 5.0 * absorbed[1]);
+        assert!(
+            glass
+                .incoherent_slab_response_between(550.0, 0.04, 1.0, 1.0, 1.33)
+                .is_err()
+        );
+    }
+    assert!(peak_transmissions[1] < peak_transmissions[0]);
+    assert_eq!(heated.accepted_state_identity(), hot.identity());
+}
+
+#[test]
 fn g0_binding_refuses_state_surface_interpolation_and_si_conversion_mismatches() {
     let card = card(1.0, None);
     let cold = state(&card, 300.0);

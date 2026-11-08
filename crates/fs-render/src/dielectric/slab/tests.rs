@@ -77,6 +77,166 @@ fn oblique_polarized_slab_matches_independent_bounce_sum() {
 }
 
 #[test]
+fn asymmetric_slab_matches_independent_polarized_internal_bounces() {
+    let alpha = 42.0;
+    let thickness = 0.018;
+    for (incident, exit, cosine) in [
+        (1.3_f64, 1.0_f64, 0.7_f64),
+        (1.0, 1.33, 0.3),
+        (1.3, 1.0, 0.4),
+    ] {
+        let transverse_squared = incident.powi(2) * (1.0 - cosine.powi(2));
+        let internal_cosine = (1.0 - transverse_squared / 1.5_f64.powi(2)).sqrt();
+        let exit_cosine_squared = 1.0 - transverse_squared / exit.powi(2);
+        let reflections = |ni: f64, nt: f64, ci: f64, ct: f64| {
+            [
+                ((ni * ci - nt * ct) / (ni * ci + nt * ct)).powi(2),
+                ((nt * ci - ni * ct) / (nt * ci + ni * ct)).powi(2),
+            ]
+        };
+        let front = reflections(incident, 1.5, cosine, internal_cosine);
+        let rear = if exit_cosine_squared <= 0.0 {
+            [1.0; 2]
+        } else {
+            reflections(1.5, exit, internal_cosine, exit_cosine_squared.sqrt())
+        };
+        let depth = alpha * thickness / internal_cosine;
+        let response = glass(alpha)
+            .incoherent_slab_response_between(600.0, thickness, cosine, incident, exit)
+            .unwrap();
+        close(response.optical_depth, depth, 4.0e-15);
+        for (pol, actual) in [response.perpendicular, response.parallel]
+            .into_iter()
+            .enumerate()
+        {
+            let a = (-depth).exp();
+            let mut entering = 1.0 - front[pol];
+            let mut expected = SlabPowerBalance {
+                reflectance: front[pol],
+                transmittance: 0.0,
+                absorptance: 0.0,
+            };
+            for pass in 0..200 {
+                expected.absorptance += entering * (1.0 - a);
+                let leaving = entering * a;
+                let r = if pass % 2 == 0 {
+                    expected.transmittance += leaving * (1.0 - rear[pol]);
+                    rear[pol]
+                } else {
+                    expected.reflectance += leaving * (1.0 - front[pol]);
+                    front[pol]
+                };
+                entering = leaving * r;
+            }
+            close(actual.reflectance, expected.reflectance, 1.0e-14);
+            close(actual.transmittance, expected.transmittance, 1.0e-14);
+            close(actual.absorptance, expected.absorptance, 1.0e-14);
+            close(
+                actual.reflectance + actual.transmittance + actual.absorptance,
+                1.0,
+                5.0e-15,
+            );
+        }
+    }
+}
+
+#[test]
+fn asymmetric_clear_thin_and_opaque_limits_keep_physical_power() {
+    // At normal incidence, n=1 -> n=1.5 -> n=2 gives Rf=1/25, Rb=1/49.
+    let front_r = 1.0 / 25.0;
+    let rear_r = 1.0 / 49.0;
+    let denominator = 1.0 - front_r * rear_r;
+    let clear = glass(0.0)
+        .incoherent_slab_response_between(550.0, 0.02, 1.0, 1.0, 2.0)
+        .unwrap()
+        .unpolarized();
+    close(
+        clear.reflectance,
+        (front_r + rear_r - 2.0 * front_r * rear_r) / denominator,
+        4.0e-15,
+    );
+    close(
+        clear.transmittance,
+        (1.0 - front_r) * (1.0 - rear_r) / denominator,
+        4.0e-15,
+    );
+    assert_eq!(clear.absorptance, 0.0);
+    let thin = glass(1.0e-20)
+        .incoherent_slab_response_between(550.0, 0.02, 1.0, 1.0, 2.0)
+        .unwrap()
+        .unpolarized();
+    close(
+        thin.absorptance,
+        (1.0 - front_r) * (1.0 + rear_r) / denominator * 2.0e-22,
+        4.0e-15,
+    );
+    let opaque = glass(1.0e5)
+        .incoherent_slab_response_between(550.0, 1.0, 1.0, 1.0, 2.0)
+        .unwrap()
+        .unpolarized();
+    close(opaque.reflectance, front_r, 4.0e-15);
+    close(opaque.absorptance, 1.0 - front_r, 4.0e-15);
+    assert_eq!(opaque.transmittance, 0.0);
+}
+
+#[test]
+fn rear_total_reflection_retains_double_pass_absorption_and_front_escape() {
+    // Matched front face: every entering ray traverses the slab twice before
+    // leaving through that face. The lower rear index admits no outgoing ray.
+    for alpha in [0.0, 1.0e-20, 12.0, 1.0e5] {
+        let response = glass(alpha)
+            .incoherent_slab_response_between(550.0, 0.025, 0.6, 1.5, 1.0)
+            .unwrap();
+        let power = response.unpolarized();
+        let round_trip_depth = 2.0 * alpha * 0.025 / 0.6;
+        assert_eq!(response.transmitted_cosine, 0.6);
+        assert_eq!(power.transmittance, 0.0);
+        close(power.reflectance, (-round_trip_depth).exp(), 5.0e-15);
+        close(power.absorptance, -(-round_trip_depth).exp_m1(), 5.0e-15);
+        close(power.reflectance + power.absorptance, 1.0, 5.0e-15);
+    }
+}
+
+#[test]
+fn asymmetric_transmission_is_reciprocal_at_the_same_tangential_wave_number() {
+    let incident = 1.0_f64;
+    let exit = 1.4_f64;
+    let cosine = 0.4_f64;
+    let reverse_cosine = (1.0 - (incident / exit).powi(2) * (1.0 - cosine.powi(2))).sqrt();
+    for alpha in [0.0, 1.0e-20, 21.0] {
+        let medium = glass(alpha);
+        let forward = medium
+            .incoherent_slab_response_between(550.0, 0.04, cosine, incident, exit)
+            .unwrap();
+        let reverse = medium
+            .incoherent_slab_response_between(550.0, 0.04, reverse_cosine, exit, incident)
+            .unwrap();
+        close(forward.optical_depth, reverse.optical_depth, 5.0e-15);
+        for (f, r) in [
+            (forward.perpendicular, reverse.perpendicular),
+            (forward.parallel, reverse.parallel),
+        ] {
+            close(f.transmittance, r.transmittance, 2.0e-14);
+            if alpha == 0.0 {
+                close(f.reflectance, r.reflectance, 2.0e-14);
+            } else {
+                assert!(f.absorptance > 0.0 && r.absorptance > 0.0);
+            }
+        }
+    }
+    // Identical exterior media keep the previous symmetric result exactly.
+    for exterior in [1.0, 1.33, 1.5, 2.0] {
+        for cosine in [1.0, 0.7, 0.2] {
+            let medium = glass(3.0);
+            assert_eq!(
+                medium.incoherent_slab_response_between(550.0, 0.04, cosine, exterior, exterior),
+                medium.incoherent_slab_response(550.0, 0.04, cosine, exterior),
+            );
+        }
+    }
+}
+
+#[test]
 fn thickness_and_angle_change_opacity_with_nonnegative_closed_power() {
     for alpha in [0.0, 1.0e-18, 0.02, 20.0, 1.0e5] {
         for cosine in [1.0, 0.8, 0.2, 1.0e-10] {
@@ -267,6 +427,17 @@ fn external_clear_loss_is_not_misinterpreted_as_bulk_absorption() {
 #[test]
 fn invalid_measurements_and_geometries_refuse_without_clipping() {
     let original = glass(1.0);
+    for exit in [0.0, 0.5, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            original.incoherent_slab_response_between(550.0, 0.01, 0.2, 2.0, exit),
+            Err(DielectricError::InvalidInterface),
+            "a totally reflecting front face cannot hide an invalid rear medium",
+        );
+    }
+    assert_eq!(
+        original.incoherent_slab_response_between(900.0, 0.01, 0.2, 2.0, 1.0),
+        Err(DielectricError::InvalidWavelength),
+    );
     for value in [0.0, -1.0, 1.01, f64::NAN, f64::INFINITY] {
         assert!(
             BeerLambertAbsorption::try_from_spectral_internal_transmittance_in_band(
