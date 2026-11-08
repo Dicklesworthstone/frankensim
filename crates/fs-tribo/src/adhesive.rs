@@ -22,6 +22,12 @@ use crate::{
 /// Circular junction shear with coupled translational and spinning slip.
 pub mod spinning;
 
+/// Circular bonded torsional compliance with an explicitly calibrated yield angle.
+pub mod torsion;
+
+// Shared exact scalar spring/slider integration for bonded rolling and twisting.
+pub(crate) mod moment;
+
 /// Geometry and repulsive load of one already-resolved adhesive contact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdhesiveContactState {

@@ -2669,3 +2669,23 @@ subdivision, sub-ULP history, and nonzero resistance at tensile JKR pull-off.
 The force-controlled pull-off stiffness is half its zero-load value. Arbitrary
 vector rolling, spin, sliding, changing normal area, detachment release, finite
 rotation, material calibration and heat allocation require their own owners.
+
+## Bonded adhesive torsion with calibrated yield
+
+`adhesive::torsion::AdhesiveTorsionContact` supplies circular full-stick
+torsional compliance `K_phi = (16/3) G_bar a^3`, with
+`1/G_bar = 1/G_a + 1/G_b`. Both original half-spaces contribute; the Mindlin
+translational compliance with Poisson factors is not the torsional compliance.
+The actual attached radius remains fixed. An explicitly supplied critical
+twist and small-angle ceiling select an elastic/perfectly plastic moment
+plateau. This is a lumped bonded-junction idealization, not local Coulomb
+partial slip, an inferred atomistic threshold or a mixed-mode peeling model.
+
+The private scalar increment kernel is shared with adhesive rolling, preserving
+its allocation-free, constant-work elastic return, compensated weak increments,
+mean resisting moment, recoverable storage and separate irreversible loss.
+Neither original law's parameter/history identity is interchangeable. G0/G1/G3
+tests check unequal half-space compliance, radius-cubed scaling, unloading,
+yield reversal, hysteresis, monotone subdivision, tiny increments and refusal.
+The normal source owns area/attachment applicability; changing area, normal
+axis, material state or temperature needs an explicit work/history transfer.

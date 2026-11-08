@@ -26,6 +26,8 @@ pub mod motion;
 pub mod rolling;
 /// Same-source thermal changes at an explicitly retained normal control.
 pub mod temperature;
+/// Source-bound torsional compliance and calibrated yield on a frozen JKR patch.
+pub mod torsion;
 mod work;
 
 use core::f64::consts::PI;

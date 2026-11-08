@@ -211,77 +211,36 @@ impl AdhesiveRollingContact {
                 field: "angle increment",
             });
         }
-        let angle = old.angle + Dd::from_f64(angle_increment_rad);
-        finite(angle.hi, "accumulated angle")?;
-        finite(angle.lo, "accumulated angle residual")?;
-        if angle_increment_rad != 0.0 && angle == old.angle {
-            return Err(AdhesiveRollingError::Unrepresentable {
-                field: "accumulated angle increment",
-            });
-        }
-        let increment = Dd::from_f64(angle_increment_rad) / Dd::from_f64(self.critical_angle);
-        finite(increment.hi, "normalized rolling increment")?;
-        finite(increment.lo, "normalized rolling increment residual")?;
-        if angle_increment_rad != 0.0 && increment == Dd::ZERO {
-            return Err(AdhesiveRollingError::Unrepresentable {
-                field: "rolling increment",
-            });
-        }
-        let trial = old.elastic_fraction + increment;
-        if increment != Dd::ZERO && trial == old.elastic_fraction {
-            return Err(AdhesiveRollingError::Unrepresentable {
-                field: "elastic history increment",
-            });
-        }
-        let mut fraction = trial;
-        if Dd::ONE.lt(trial) {
-            fraction = Dd::ONE;
-        }
-        if trial.lt(-Dd::ONE) {
-            fraction = -Dd::ONE;
-        }
-        let plastic = trial - fraction;
-        let change = fraction - old.elastic_fraction;
-        let energy = Dd::from_f64(self.yield_energy);
-        let storage_change = energy * change * (fraction + old.elastic_fraction);
-        let loss = energy * Dd::from_f64(2.0) * plastic.abs();
-        let work = storage_change + loss;
-        // Pure elasticity uses its analytic midpoint, including zero/tiny steps.
-        // On a yielding path, the nonnegative factored numerator avoids loss of
-        // the small plastic work after a nearly complete elastic reversal.
-        let mean_fraction = if plastic == Dd::ZERO {
-            (old.elastic_fraction + fraction) * Dd::from_f64(0.5)
-        } else {
-            (change * (fraction + old.elastic_fraction) * Dd::from_f64(0.5) + plastic.abs())
-                / increment
-        };
+        let increment = crate::adhesive::moment::advance(
+            old.elastic_fraction,
+            old.angle,
+            angle_increment_rad,
+            self.critical_angle,
+            self.critical_moment,
+            self.yield_energy,
+        )
+        .map_err(|field| AdhesiveRollingError::Unrepresentable { field })?;
         let state = AdhesiveRollingState {
             parameters: self.parameters,
-            elastic_fraction: fraction,
-            angle,
+            elastic_fraction: increment.fraction,
+            angle: increment.angle,
         };
         let step = AdhesiveRollingStep {
             state,
-            endpoint_moment_n_m: -self.critical_moment * fraction.to_f64(),
-            mean_moment_n_m: -self.critical_moment * mean_fraction.to_f64(),
-            storage_before_j: self.stored_energy_j(old)?,
-            storage_after_j: self.stored_energy_j(&state)?,
-            storage_change_j: storage_change.to_f64(),
-            irreversible_loss_j: loss.to_f64(),
-            applied_work_j: work.to_f64(),
+            endpoint_moment_n_m: increment.endpoint_moment,
+            mean_moment_n_m: increment.mean_moment,
+            storage_before_j: increment.storage_before,
+            storage_after_j: increment.storage_after,
+            storage_change_j: increment.storage_change,
+            irreversible_loss_j: increment.loss,
+            applied_work_j: increment.work,
             plastic_rolling_increment_m: self.parameters.critical_rolling_displacement_m
-                * plastic.to_f64(),
+                * increment.plastic_fraction.to_f64(),
         };
-        for (field, value) in [
-            ("endpoint moment", step.endpoint_moment_n_m),
-            ("mean moment", step.mean_moment_n_m),
-            ("storage change", step.storage_change_j),
-            ("rolling loss", step.irreversible_loss_j),
-            ("applied work", step.applied_work_j),
-            ("plastic increment", step.plastic_rolling_increment_m),
-        ] {
-            finite(value, field)?;
-        }
+        finite(
+            step.plastic_rolling_increment_m,
+            "plastic rolling increment",
+        )?;
         Ok(step)
     }
 }

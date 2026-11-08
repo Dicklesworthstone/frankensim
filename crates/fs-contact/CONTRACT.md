@@ -3939,3 +3939,23 @@ fixed-axis, fixed-normal-state law does not transport memory under finite
 rotations, evolve contact area, partition heat or model shear-induced peeling.
 Regression groups cover zero/tensile-load stiffness, threshold/reversal work,
 subdivision, source/history mismatch and atomic refusal.
+
+## Source-bound JKR bonded torsion
+
+`normal_patch::adhesive::torsion::SourceJkrTorsionContact` retains the original
+JKR attached response and both original bulk shear moduli. It supplies
+`K_phi = 16 G_bar a^3/3`, with `1/G_bar = 1/G_a + 1/G_b`, at zero, compressive
+or tensile normal resultant. An explicit critical twist and small-angle ceiling
+select the shared tribology owner's lumped elastic/plastic continuation.
+No tensile-load cutoff, Coulomb coefficient or universal yield angle is inferred.
+
+The independent authored ceiling on `G_III/W`, evaluated at critical stored
+twist using `G_III = 4 G_bar a phi_c^2/pi`, screens the frozen-area approximation.
+It is not a bound on area error or a mixed-mode Griffith solution, particularly
+near a normal fold. Normal JKR storage, reversible twist storage and irreversible
+twist loss remain distinct; the diagnostic release estimate adds no energy or
+heat channel. Complete source, normal state and controls bind history. Changed
+geometry/source/calibration and unsupported limits refuse without mutation.
+G0/G1/G3 tests independently add unequal bulk compliances, retain tensile-area
+resistance (one-quarter zero-load stiffness at force pull-off), reconstruct work,
+exercise reversal and reject foreign history and excessive mode-III release.
