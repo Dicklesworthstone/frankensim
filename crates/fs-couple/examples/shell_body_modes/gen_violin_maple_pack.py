@@ -11,7 +11,7 @@ omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); 
 constant_loss_reference_omega, so the shell reduction reads each loss factor at every mode's own frequency (fs_couple::shear_shell::constant_loss), and the
 packs of the wood-loss lane replace these numbers.
 
-usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein]
+usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein] [bridge=merhar2020]
 Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates,maple-sycamore-wavy-loss-alkadri2018}/properties.tsv and writes
 OUT_ROOT/violin-maple-sycamore-sonderegger2013-shell/{manifest.tsv,properties.tsv}.
 shear=ultrasonic writes the earlier pack (G_LR ultrasonic as well, the scalars of 4f9abefe1) under the name ...-shell-ultrasonicshear.
@@ -19,6 +19,10 @@ inplane=laemmlein (the audio-band pack, registered as violin-maple-sycamore-sond
 nu_LR as above; the pack is then named ...-shell-laemmlein.
 With shear=fpl (a declared SENSITIVITY, not the registered model) G_LR and G_LT are the Wood Handbook sugar maple ratios times the same E_L (glr_over_el 0.111, glt_over_el 0.063 of the committed pack
 maple-sugar-fpl-gtr282) instead of the ultrasonic values; G_RT stays ultrasonic (the Wood Handbook set has no G_RT ratio); the pack is then named ...-fplshear-shell.
+bridge=merhar2020 (with inplane=laemmlein only) writes the violin BRIDGE's pack: the audio-band pack with its density replaced by the measured density of a maple violin bridge
+(maple-bridge-aubert-merhar2020: Merhar and Humar 2020, Aubert bridge No. 1, from the bridge's own mass and volume) and every other row unchanged, so the stiffness and the loss
+stay the back maple's, a declared borrowing (orchestrator ruling, mail 14630); the nine viscosities hold no density, so they are the parent pack's byte for byte. The pack is
+then named ...-shell-laemmlein-bridge-merhar2020.
 """
 import math
 import os
@@ -28,11 +32,13 @@ REPO, OUT = sys.argv[1].rstrip("/"), sys.argv[2].rstrip("/")
 FPL_SHEAR = "shear=fpl" in sys.argv[3:]
 ULTRASONIC_SHEAR = "shear=ultrasonic" in sys.argv[3:]
 INPLANE_LAEMMLEIN = "inplane=laemmlein" in sys.argv[3:]
+BRIDGE_MERHAR = "bridge=merhar2020" in sys.argv[3:]
+assert not BRIDGE_MERHAR or (INPLANE_LAEMMLEIN and not FPL_SHEAR and not ULTRASONIC_SHEAR), "bridge=merhar2020 is built on the audio-band pack only (inplane=laemmlein)"
 SEED = REPO + "/data/matdb/seed-v1/"
 OMEGA_MIN, OMEGA_MAX = 2.0 * math.pi * 150.0, 2.0 * math.pi * 10000.0  # the narrower of the sources' bands: Laemmlein's sweep, 150-10000 Hz
 OMEGA_REF = 2.0 * math.pi * 200.0
 PACK = ("violin-maple-sycamore-sonderegger2013-shell" + ("-fplshear" if FPL_SHEAR else "") + ("-ultrasonicshear" if ULTRASONIC_SHEAR else "")
-        + ("-laemmlein" if INPLANE_LAEMMLEIN else ""))
+        + ("-laemmlein" if INPLANE_LAEMMLEIN else "") + ("-bridge-merhar2020" if BRIDGE_MERHAR else ""))
 
 
 def scalars(pack):
@@ -58,6 +64,15 @@ stiffness_text = ("E_L = the static bending modulus %.0f MPa; E_R = the mean of 
 if INPLANE_LAEMMLEIN:
     E_L, E_R, density = lp["young_modulus_longitudinal"] * 1e6, lp["young_modulus_radial"] * 1e6, lp["density"]
     stiffness_text = ("density %.1f kg/m3, E_L %.0f MPa and E_R %.0f MPa of Laemmlein's violin-back plates (maple-sycamore-lammlein2020-plates, audio band)" % (density, E_L / 1e6, E_R / 1e6))
+DENSITY_OBS = "sond-shell"
+if BRIDGE_MERHAR:
+    # The violin bridge's one measured property: its density, from the mass and volume of Aubert bridge No. 1 (Merhar and Humar 2020, p.164 and Table 2,
+    # unmodified). It replaces the back plates' 665.1 kg/m3 on the bridge only. The stiffness stays the back maple's, a declared borrowing: the paper's
+    # elastic set (Table 2) is literature ratios scaled to one clamped-bridge mode, a fit, and is not used.
+    mh = scalars("maple-bridge-aubert-merhar2020")
+    stiffness_text = ("E_L %.0f MPa and E_R %.0f MPa of Laemmlein's violin-back plates (maple-sycamore-lammlein2020-plates, audio band); the plates' density %.1f kg/m3 is NOT "
+                      "used: this bridge pack carries the measured density of a violin bridge (observation merhar-bridge)" % (E_L / 1e6, E_R / 1e6, density))
+    density, DENSITY_OBS = mh["row:density-bridge-unmodified"], "merhar-bridge"
 g_lr, g_lt, g_rt = so["shear_modulus_lr_ultrasonic"], so["shear_modulus_lt_ultrasonic"], so["shear_modulus_rt_ultrasonic"]  # MPa
 shear_text = "ULTRASONIC values (1 MHz transverse waves, 10 mm cubes)"
 if FPL_SHEAR:
@@ -130,6 +145,15 @@ OBS = [
      "with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the pack states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own "
      "frequency. They do not enter any frequency."),
 ]
+if BRIDGE_MERHAR:
+    OBS.append(("merhar-bridge", "Maple violin bridge No. 1 made by Aubert (one of three bridges: Nos. 1 and 2 by Aubert, No. 3 by Teller), as supplied, before the authors' thermal "
+                "modification; the maple species is not named",
+                "Merhar and Humar (2020) Drvna Industrija 71(2):163-169 as committed in the pack maple-bridge-aubert-merhar2020: density %.0f kg/m3 of the unmodified bridge, determined "
+                "from measurements of the mass and volume of the bridge (p.164; Table 2)" % density,
+                "ONE bridge, density only. The moisture content and the climate of the unmodified bridge's measurement are not printed (the modified pieces were stored a week at 23 C and "
+                "65 percent RH). The bridge's stiffness and loss are not measured and stay the violin-back plates' values of this pack, a DECLARED BORROWING: the paper's elastic set is "
+                "literature ratios (Kollmann 1975) adjusted so that the computed main mode of the clamped bridge matches its measured 4720 Hz, a fit, and its damping ratio 0.029 is the "
+                "clamped bridge's modal bandwidth, not a material loss; neither is used."))
 
 
 def fmt(v):
@@ -141,7 +165,7 @@ lines = ["frankensim.matdb-source.v1"]
 for o in OBS:
     lines.append("\t".join(("observation",) + o))
 for k, u in BASE:
-    for row in (("scalar", k, "sond-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
+    for row in (("scalar", k, DENSITY_OBS if k == "density" else "sond-shell", k, fmt(vals[k]), u, "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
         lines.append("\t".join(row))
 for k in VISC_ORDER:
     for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(visc[k]), "Pa*s", "constant"), ("uncertainty", k, "unstated", "-", "-", "-", "-"), ("validity", k, "T", "280", "320", "K"), ("validity", k, "omega", fmt(OMEGA_MIN), fmt(OMEGA_MAX), "rad/s")):
@@ -156,6 +180,11 @@ man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,
        "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013, maple-sycamore-lammlein2020-plates, maple-sycamore-loss-lammlein2020 and maple-sycamore-wavy-loss-alkadri2018 (whose own terms apply to the Laemmlein values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted; and to the Alkadri value: HAL author file under the HAL deposit authorisation only, no Creative Commons licence, publisher copyright on the article)",
        "citation\tSonderegger W., Martienssen A., Nitsche C., Ozyhar T., Kaliske M., Niemz P. (2013), Eur J Wood Prod 71:91-99, doi:10.1007/s00107-012-0641-8; Laemmlein S.L., Van Damme B., Mannes D., Schwarze F.W.M.R., Burgert I. (2020), Holzforschung 74(8):765-776, doi:10.1515/hf-2019-0182; Alkadri A., Carlier C., Wahyudi I., Gril J., Langbour P., Bremaud I. (2018), IAWA Journal 39(1):63-86, doi:10.1163/22941932-20170185, Table 1; derived by the pack author",
        "license\tPublished-Scientific-Facts-Attribution-Retained", "source\tprimary\tproperties.tsv\tmaterial-tsv-v1"]
+if BRIDGE_MERHAR:
+    man[2] += ("; and the bridge density of the committed pack maple-bridge-aubert-merhar2020 (Merhar and Humar 2020, Creative Commons Attribution 4.0 (CC BY) open-access "
+               "article)")
+    man[3] = man[3].replace("; derived by the pack author", "; Merhar M., Humar M. (2020), Drvna Industrija 71(2):163-169, doi:10.5552/drvind.2020.1966, p.164 and Table 2; "
+                            "derived by the pack author")
 open(OUT + "/" + PACK + "/manifest.tsv", "w", encoding="utf-8").write("\n".join(man) + "\n")
 print("wrote", OUT + "/" + PACK)
 for k in VISC_ORDER:
