@@ -31,7 +31,9 @@ use std::sync::Arc;
 pub struct WallCell {
     /// Zero is the lower wall; one is the upper wall.
     pub side: usize,
-    /// x in D2Q5; x + nx*y in D3Q7.
+    /// x in the original D2Q5 slab; x + nx*y in the original D3Q7 slab.
+    /// Native open carriers remove the selected normal coordinate and retain
+    /// x-fast surface order.
     pub link: usize,
 }
 

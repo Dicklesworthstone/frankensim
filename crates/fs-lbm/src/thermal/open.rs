@@ -14,9 +14,13 @@
 //! interval, as in the existing D3Q7 collision/history kernel.
 
 use super::advection::{D3Q7, FluxHistory};
+use super::boundary::conduction::{WallConduction, WallConductionError};
 use super::boundary::{
     FiniteThermalWallExchange, ThermalWall, ThermalWallError, ThermalWallExchange, WallReflection,
 };
+
+/// Implicit conduction between existing finite walls of the native open grid.
+pub mod conduction;
 
 /// Heat ownership on one native face, in XMin/XMax/YMin/YMax/ZMin/ZMax order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +49,8 @@ pub struct ThermalOpenLimits3 {
     /// Bounds all persistent thermal arrays, including retained source/flux
     /// scratch and both copies of every finite wall state. Native momentum
     /// storage and allocator metadata are outside this thermal-only budget.
+    /// Optional wall graphs have additional explicit per-pair limits through
+    /// `WallConductionControls`; their factors/workspace are not counted here.
     pub maximum_storage_bytes: usize,
     /// Admitted fluid temperatures, reservoir data and resolved wall traces.
     pub temperature_range: [f64; 2],
@@ -86,6 +92,7 @@ pub enum ThermalOpenError3 {
     Invalid(&'static str),
     Allocation,
     Wall(ThermalWallError),
+    Conduction(WallConductionError),
     Temperature {
         cell: usize,
         value: f64,
@@ -129,6 +136,7 @@ pub struct ThermalOpenField3 {
     trial_history: FluxHistory<3>,
     walls: [Vec<ThermalWall>; 6],
     trial_walls: [Vec<ThermalWall>; 6],
+    conduction: [Option<WallConduction>; 3],
     completed_steps: usize,
     last_balance: Option<ThermalOpenBalance3>,
 }
@@ -334,6 +342,7 @@ impl ThermalOpenField3 {
             trial_walls: core::array::from_fn(|_| Vec::new()),
             completed_steps,
             last_balance: None,
+            conduction: core::array::from_fn(|_| None),
         };
         field.solid.copy_from_slice(solid);
         field
@@ -472,6 +481,8 @@ impl ThermalOpenField3 {
             |cell| velocities[cell],
         );
         poll()?;
+        self.prepare_wall_conduction()?;
+        poll()?;
         let mut balance = self.stream(&mut poll)?;
         balance.source = source.total();
         self.check_candidate(&mut poll)?;
@@ -544,7 +555,17 @@ impl ThermalOpenField3 {
                                     + cell % strides[axis];
                                 let law = &mut self.trial_walls[face][plane];
                                 check_solid_temperature(face, *law, self.limits)?;
-                                let response = law.reflect_and_advance(outgoing, weight);
+                                let response = if let Some(conduction) = &self.conduction[axis] {
+                                    conduction.reflect(
+                                        usize::from(upper),
+                                        plane,
+                                        law,
+                                        outgoing,
+                                        weight,
+                                    )
+                                } else {
+                                    law.reflect_and_advance(outgoing, weight)
+                                };
                                 check_solid_temperature(face, *law, self.limits)?;
                                 check_wall_response(face, &response, self.limits)?;
                                 walls[face].add(outgoing, &response);
