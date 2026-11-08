@@ -5,9 +5,9 @@
 //! load-jump API; this lane refuses them instead of silently missing wraps.
 use super::*;
 use crate::loads3::transient::events::LoadJump3;
-use fs_scenario::frame::{Frame, FrameMotion};
+use fs_scenario::frame::{Frame, FrameId, FrameMotion, WORLD};
 use fs_scenario::payload::{OutsideDomainPolicy, SampleSource, TableInterpolation};
-use fs_scenario::signal::Interp;
+use fs_scenario::signal::{DEFAULT_MAXIMUM_CYCLES_PER_STEP, Interp, LinearChirp};
 
 mod recorded;
 use fs_qty::QtyAny;
@@ -20,13 +20,26 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), TransientHistoryError3> {
     cx.checkpoint().map_err(|_| TransientError3::Cancelled.into())
 }
 
+const MAXIMUM_FRAME_ROWS: usize = 256;
+
+struct ChirpResolution3<'a> {
+    source: &'a LinearChirp,
+    maximum_cycles_per_step: f64,
+}
+
 /// Finite authored event index, including vector/scalar knots and frame tilts.
 /// The borrowed history and its frame tree cannot change during an active run.
-/// Indexing does not certify resolution of a smooth signal between its knots.
+/// Native chirp laws are retained once for frequency-aware endpoint selection.
+/// Frame limits follow the actual vector payloads and their ancestor frames;
+/// unused frame motions retain their knots without throttling the source clock.
+/// A used tilt additionally bounds angular travel by 2*pi/16 radians per step.
+/// The source-resolution limit is not a solution-error or bandwidth certificate;
+/// other smooth signal families still need a caller-supplied time-step study.
 pub struct EventLoadHistory3<'a> {
     history: TetLoadHistory3<'a>,
     supports: SupportSchedule3<'a>,
     knots: Vec<f64>,
+    chirps: Vec<ChirpResolution3<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -152,17 +165,22 @@ impl<'a> EventLoadHistory3<'a> {
     ) -> Result<Self, TransientHistoryError3> {
         checkpoint(cx)?;
         if maximum_schedule_entries == 0 || maximum_schedule_entries > 1_048_576
-            || history.surfaces.len() > 1024 || history.frames.frames.len() > 256
+            || history.surfaces.len() > 1024 || history.frames.frames.len() > MAXIMUM_FRAME_ROWS
             || supports.len() > 1024 {
             return Err(invalid("event schedule exceeds its explicit setup envelope"));
         }
-        let mut index = Index { knots: Vec::new(), remaining: maximum_schedule_entries, cx };
+        let mut index = Index {
+            knots: Vec::new(), chirps: Vec::new(), remaining: maximum_schedule_entries, cx,
+            frames: &history.frames.frames, used_frames: [false; MAXIMUM_FRAME_ROWS],
+        };
         for row in history.surfaces {
             checkpoint(cx)?;
             match row {
                 SurfaceHistory3::Fixed(_) => {}
                 SurfaceHistory3::Traction { value, .. } => index.vector(value)?,
-                SurfaceHistory3::Pressure { value, .. } => index.signal(value)?,
+                SurfaceHistory3::Pressure { value, .. } => {
+                    index.signal(value, Some(DEFAULT_MAXIMUM_CYCLES_PER_STEP))?;
+                }
             }
         }
         match history.volume {
@@ -183,19 +201,39 @@ impl<'a> EventLoadHistory3<'a> {
                 }
             }
         }
-        for frame in &history.frames.frames {
+        for (row, frame) in history.frames.frames.iter().enumerate() {
             checkpoint(cx)?;
             if frame.name.len() > 4096 { return Err(invalid("event frame names exceed 4096 bytes")); }
-            if let FrameMotion::Tilt { angle: signal, .. }
-            | FrameMotion::Translating { displacement: signal, .. } = &frame.motion {
-                index.signal(signal)?;
+            let mut maximum_cycles = index.used_frames[row]
+                .then_some(DEFAULT_MAXIMUM_CYCLES_PER_STEP);
+            match &frame.motion {
+                FrameMotion::Tilt { angle, .. } => {
+                    if let (Some(cycles), TimeSignal::Chirp(chirp)) = (maximum_cycles, angle) {
+                        // |d angle/dt| <= |amplitude_rad| * 2*pi*f_max.
+                        // Round the allowance down so a large angle cannot
+                        // rotate through many turns within one resolved cycle.
+                        let amplitude = chirp.amplitude().value.abs();
+                        if amplitude > 1.0 {
+                            let scaled = (cycles / amplitude).next_down();
+                            if !scaled.is_finite() || scaled <= 0.0 {
+                                return Err(invalid("tilt resolution allowance is not representable"));
+                            }
+                            maximum_cycles = Some(scaled);
+                        }
+                    }
+                    index.signal(angle, maximum_cycles)?;
+                }
+                FrameMotion::Translating { displacement, .. } => {
+                    index.signal(displacement, maximum_cycles)?;
+                }
+                _ => {}
             }
         }
         checkpoint(cx)?;
         index.knots.sort_by(f64::total_cmp);
         index.knots.dedup_by(|a, b| *a == *b);
         checkpoint(cx)?;
-        Ok(Self { history, supports, knots: index.knots })
+        Ok(Self { history, supports, knots: index.knots, chirps: index.chirps })
     }
     pub fn knots_s(&self) -> &[f64] { &self.knots }
 
@@ -299,7 +337,7 @@ impl<'a> EventLoadHistory3<'a> {
         })
     }
 
-    fn endpoint(&self, start: f64, target: f64, maximum_step: f64) -> Result<f64, TransientHistoryError3> {
+    fn endpoint(&self, start: f64, target: f64, maximum_step: f64, cx: &Cx<'_>) -> Result<f64, TransientHistoryError3> {
         let span = target - start;
         if !target.is_finite() || !span.is_finite() || span <= 0.0
             || !maximum_step.is_finite() || maximum_step <= 0.0 {
@@ -309,6 +347,12 @@ impl<'a> EventLoadHistory3<'a> {
         if end - start > maximum_step { end = end.next_down(); }
         if let Some(&knot) = self.knots.get(self.knots.partition_point(|&t| t <= start)) {
             end = end.min(knot);
+        }
+        for chirp in &self.chirps {
+            checkpoint(cx)?;
+            end = chirp.source
+                .resolved_step_end(start, end, chirp.maximum_cycles_per_step)
+                .map_err(|error| LoadHistoryError3::Scenario(error.to_string()))?;
         }
         if end <= start || !end.is_finite() || start + (end - start) != end {
             return Err(invalid("event endpoint cannot be represented by a positive exact clock advance"));
@@ -413,14 +457,22 @@ impl<'a> EventLoadHistory3<'a> {
     }
 }
 
-struct Index<'a, 'cx> { knots: Vec<f64>, remaining: usize, cx: &'a Cx<'cx> }
-impl Index<'_, '_> {
+struct Index<'history, 'a, 'cx> {
+    knots: Vec<f64>,
+    chirps: Vec<ChirpResolution3<'history>>,
+    frames: &'history [Frame],
+    used_frames: [bool; MAXIMUM_FRAME_ROWS],
+    remaining: usize,
+    cx: &'a Cx<'cx>,
+}
+impl<'history> Index<'history, '_, '_> {
     fn charge(&mut self, count: usize) -> Result<(), TransientHistoryError3> {
         checkpoint(self.cx)?;
         self.remaining = self.remaining.checked_sub(count).ok_or_else(|| invalid("event schedule scalar-entry budget exhausted"))?;
         Ok(())
     }
-    fn signal(&mut self, signal: &TimeSignal) -> Result<(), TransientHistoryError3> {
+    fn signal(&mut self, signal: &'history TimeSignal, maximum_cycles_per_step: Option<f64>)
+        -> Result<(), TransientHistoryError3> {
         let (count, probe) = match signal {
             TimeSignal::Constant(_) => (1, 0.0),
             TimeSignal::Chirp(chirp) => (7, chirp.t_start_s()),
@@ -433,7 +485,17 @@ impl Index<'_, '_> {
         signal.eval(probe).map_err(|e| LoadHistoryError3::Scenario(e.to_string()))?;
         match signal {
             TimeSignal::Constant(_) => {}
-            TimeSignal::Chirp(chirp) => self.knots.extend([chirp.t_start_s(), chirp.t_end_s()]),
+            TimeSignal::Chirp(chirp) => {
+                self.knots.extend([chirp.t_start_s(), chirp.t_end_s()]);
+                if chirp.amplitude().value != 0.0
+                    && chirp.frequency_start_hz().max(chirp.frequency_end_hz()) > 0.0
+                    && let Some(maximum_cycles_per_step) = maximum_cycles_per_step
+                {
+                    self.chirps.try_reserve(1)
+                        .map_err(|_| invalid("event frequency index allocation refused"))?;
+                    self.chirps.push(ChirpResolution3 { source: chirp, maximum_cycles_per_step });
+                }
+            }
             TimeSignal::Ramp { t_start, t_end, .. } => self.knots.extend([*t_start, *t_end]),
             TimeSignal::Table { times, .. } => {
                 for (i, &time) in times.iter().enumerate() {
@@ -447,6 +509,7 @@ impl Index<'_, '_> {
     }
     fn vector(&mut self, vector: &VectorPayload) -> Result<(), TransientHistoryError3> {
         if vector.components() != 3 { return Err(invalid("event loads need three-component vectors")); }
+        self.reference_frame(vector.meta().frame())?;
         match vector.source() {
             SampleSource::Fixed(values) => self.charge(values.len())?,
             SampleSource::Distribution { .. } => return Err(invalid("event loads require explicit histories, not distributions")),
@@ -460,6 +523,32 @@ impl Index<'_, '_> {
                     self.knots.push(time.value);
                 }
             }
+        }
+        Ok(())
+    }
+
+    // Each successful path marks its complete ancestry once. The setup frame
+    // envelope bounds every lookup; no frame traversal or allocation remains
+    // in the stepping loop. A malformed referenced chain refuses before use.
+    fn reference_frame(&mut self, mut id: FrameId) -> Result<(), TransientHistoryError3> {
+        let mut visited = [false; MAXIMUM_FRAME_ROWS];
+        while id != WORLD {
+            checkpoint(self.cx)?;
+            let current = id;
+            let mut matches = self.frames.iter().enumerate()
+                .filter(|(_, frame)| frame.id == current);
+            let (row, frame) = matches.next()
+                .ok_or_else(|| invalid("event vector references a missing frame"))?;
+            if matches.next().is_some() {
+                return Err(invalid("event vector references an ambiguous frame"));
+            }
+            if visited[row] {
+                return Err(invalid("event vector frame ancestry contains a cycle"));
+            }
+            if self.used_frames[row] { return Ok(()); }
+            visited[row] = true;
+            self.used_frames[row] = true;
+            id = frame.parent;
         }
         Ok(())
     }
@@ -510,6 +599,8 @@ impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
     pub fn into_run(self) -> TetTransientRun3<'g, 'm, 'p, 's> { self.run }
 
     /// Advance ONE interval to the next authored knot, target or step cap.
+    /// Native tones/sweeps additionally limit phase advance to at most 1/16
+    /// cycle using the maximum source frequency over the actual interval.
     /// Call repeatedly to reach target. Left/right loads and frame tilts use the
     /// same exact endpoint. Finite jumps change acceleration without impulse;
     /// failure in either side/solve leaves the complete accepted run unchanged.
@@ -518,7 +609,7 @@ impl<'g, 'm, 'p, 's> EventTransientRun3<'_, '_, 'g, 'm, 'p, 's> {
         -> Result<ScheduledStep3, TransientHistoryError3> {
         checkpoint(cx)?;
         let start_time_s = self.run.state().time_s;
-        let end_time_s = self.schedule.endpoint(start_time_s, target_s, maximum_step_s)?;
+        let end_time_s = self.schedule.endpoint(start_time_s, target_s, maximum_step_s, cx)?;
         let geometry = self.run.geometry; let problem = self.run.problem;
         let left = self.schedule.left_at(geometry, problem,
             self.run.nodal_reference_density_kg_m3(), end_time_s,

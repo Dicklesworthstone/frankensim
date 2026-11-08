@@ -65,6 +65,213 @@ fn chirped_frame_and_pressure_sweep_knots_are_retained() {
         assert_eq!(schedule.knots_s(), &[0.1, 0.25, 0.75, 0.9]);
     });
 }
+
+#[test]
+fn g1_chirped_pressure_cannot_alias_whole_cycles_in_native_fixed_or_adaptive_steps() {
+    use fs_solid::loads3::history::dynamics::events::adaptive::TransientTimeControl3;
+
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6.0, 60.0, 0.25, [83; 32]).unwrap();
+        let p = problem(&material);
+        let geometry = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let frames = FrameTree::new();
+        let frequency = 4.0;
+        let omega = core::f64::consts::TAU * frequency;
+        let amplitude = 0.02;
+        let pressure = TimeSignal::Chirp(fs_scenario::LinearChirp::new(
+            0.0, 1.0, frequency, frequency, 0.0,
+            QtyAny::new(0.0, TRACTION_DIMS), QtyAny::new(amplitude, TRACTION_DIMS),
+        ).unwrap());
+        let surfaces = [SurfaceHistory3::Pressure { faces: &[0], value: &pressure }];
+        let history = TetLoadHistory3 {
+            surfaces: &surfaces, volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+            nodal_forces_n: &[], frames: &frames,
+        };
+        let schedule = EventLoadHistory3::new(history, 16, cx).unwrap();
+        // The unconstrained body's mass is rho*V = 6*(1/6) = 1 kg.
+        // Internal elastic forces cancel in its center-of-mass equation.
+        let face = geometry.faces()[0];
+        let acceleration = face.outward_normal.map(|n| -amplitude * face.area_m2 * n);
+        let control = TransientTimeControl3 {
+            maximum_step_s: 1.0, minimum_step_s: 1e-10, ..Default::default()
+        };
+        for adaptive in [false, true] {
+            let mut run = schedule.begin_transient(
+                &geometry, &p, None, 0.0, &ZERO, &ZERO, config(), cx,
+            ).unwrap();
+            // The original full and half steps at 0, .25, .5 all sampled
+            // cosine peaks, incorrectly treating two periods as a constant load.
+            while run.run().state().time_s < 0.5 {
+                let start = run.run().state().time_s;
+                let end = if adaptive {
+                    run.advance_adaptive_to(0.5, 1.0, control, cx).unwrap().second.end_time_s
+                } else {
+                    run.advance_to(0.5, 1.0, cx).unwrap().end_time_s
+                };
+                assert!((end - start) * frequency <= fs_scenario::DEFAULT_MAXIMUM_CYCLES_PER_STEP);
+                let motion = run.run().nodal_motion(cx).unwrap();
+                for axis in 0..3 {
+                    let q = motion[0].iter().map(|v| v[axis]).sum::<f64>() / 4.0;
+                    let v = motion[1].iter().map(|v| v[axis]).sum::<f64>() / 4.0;
+                    let expected_q = acceleration[axis] * (1.0 - (omega * end).cos()) / (omega * omega);
+                    let expected_v = acceleration[axis] * (omega * end).sin() / omega;
+                    // Sixteen steps/cycle bounds this fixture's coarse Newmark
+                    // phase error; adaptive error control may refine further.
+                    assert!((q - expected_q).abs() < 0.06 * acceleration[axis].abs() / (omega * omega) + 1e-10,
+                        "center displacement {q:e} != {expected_q:e} at {end:e}");
+                    assert!((v - expected_v).abs() < 0.02 * acceleration[axis].abs() / omega + 1e-10,
+                        "center velocity {v:e} != {expected_v:e} at {end:e}");
+                }
+            }
+            assert!(run.run().state().step >= 32);
+        }
+    });
+}
+
+#[test]
+fn g0_chirped_frame_frequency_limits_the_actual_event_step_and_refusal_is_atomic() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6.0, 60.0, 0.25, [83; 32]).unwrap();
+        let p = problem(&material);
+        let geometry = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let mut frames = FrameTree::new();
+        frames.add(Frame {
+            id: FrameId(1), parent: WORLD, name: "oscillating load frame".into(),
+            motion: FrameMotion::Tilt {
+                axis: [0.0, 0.0, 1.0], center: fs_ga::Vec3::new(0.0, 0.0, 0.0),
+                angle: TimeSignal::Chirp(fs_scenario::LinearChirp::new(
+                    0.0, 1.0, 32.0, 32.0, 0.0,
+                    QtyAny::dimensionless(0.0), QtyAny::dimensionless(0.1),
+                ).unwrap()),
+            },
+        });
+        let acceleration = payload(&[0.0, 1.0], &[[0.01, 0.0, 0.0]; 2],
+            TableInterpolation::Linear, OutsideDomainPolicy::Clamp, FrameId(1));
+        let history = TetLoadHistory3 {
+            surfaces: &[], volume: VolumeHistory3::Acceleration(&acceleration),
+            nodal_forces_n: &[], frames: &frames,
+        };
+        let schedule = EventLoadHistory3::new(history, 16, cx).unwrap();
+        let mut run = schedule.begin_transient(
+            &geometry, &p, None, 0.0, &ZERO, &ZERO, config(), cx,
+        ).unwrap();
+        let step = run.advance_to(0.5, 0.5, cx).unwrap();
+        assert!(step.end_time_s > 0.0 && step.end_time_s <= 1.0 / (16.0 * 32.0));
+        let saved = run.run().state().clone();
+        with_cx(true, |cancelled| {
+            assert!(run.advance_to(0.5, 0.5, cancelled).is_err());
+        });
+        assert_eq!(run.run().state(), &saved);
+    });
+}
+
+#[test]
+fn g1_unused_chirped_frames_keep_knots_without_throttling_active_loads() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6.0, 60.0, 0.25, [83; 32]).unwrap();
+        let p = problem(&material);
+        let geometry = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let mut frames = FrameTree::new();
+        frames.add(Frame {
+            id: FrameId(7), parent: WORLD, name: "unused fast tilt".into(),
+            motion: FrameMotion::Tilt {
+                axis: [0.0, 0.0, 1.0], center: fs_ga::Vec3::new(0.0, 0.0, 0.0),
+                angle: TimeSignal::Chirp(fs_scenario::LinearChirp::new(
+                    0.125, 0.75, 1e9, 1e9, 0.0,
+                    QtyAny::dimensionless(0.0), QtyAny::dimensionless(0.1),
+                ).unwrap()),
+            },
+        });
+        let acceleration = payload(&[0.0, 1.0], &[[0.01, 0.0, 0.0]; 2],
+            TableInterpolation::Linear, OutsideDomainPolicy::Clamp, WORLD);
+        for driven_pressure in [false, true] {
+            let pressure = if driven_pressure {
+                TimeSignal::Chirp(fs_scenario::LinearChirp::new(
+                    0.0, 1.0, 4.0, 4.0, 0.0,
+                    QtyAny::new(0.0, TRACTION_DIMS), QtyAny::new(0.001, TRACTION_DIMS),
+                ).unwrap())
+            } else {
+                TimeSignal::Constant(QtyAny::new(0.0, TRACTION_DIMS))
+            };
+            let surfaces = [SurfaceHistory3::Pressure { faces: &[0], value: &pressure }];
+            let history = TetLoadHistory3 {
+                surfaces: &surfaces, volume: VolumeHistory3::Acceleration(&acceleration),
+                nodal_forces_n: &[], frames: &frames,
+            };
+            let schedule = EventLoadHistory3::new(history, 32, cx).unwrap();
+            assert_eq!(schedule.knots_s(), &[0.0, 0.125, 0.75, 1.0]);
+            let mut run = schedule.begin_transient(
+                &geometry, &p, None, 0.0, &ZERO, &ZERO, config(), cx,
+            ).unwrap();
+            let step = run.advance_to(0.5, 0.5, cx).unwrap();
+            if driven_pressure {
+                // The directly used pressure still resolves 4 Hz, not the
+                // unrelated GHz frame and not just its own authored knots.
+                assert!(step.end_time_s > 1.0 / 128.0);
+                assert!(step.end_time_s <= 1.0 / 64.0);
+            } else {
+                assert_eq!(step.end_time_s, 0.125);
+                assert_eq!(run.advance_to(0.5, 0.5, cx).unwrap().end_time_s, 0.5);
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_used_ancestor_tilt_resolves_angular_travel_and_refuses_a_coarse_clock() {
+    with_cx(false, |cx| {
+        let material = TetElasticMaterial::try_new(6.0, 60.0, 0.25, [83; 32]).unwrap();
+        let p = problem(&material);
+        let geometry = TetLoadGeometry3::new(&NODES, &TETS, p.budget, 4, cx).unwrap();
+        let frequency = 2.0;
+        let amplitude = 100.0;
+        let angle = TimeSignal::Chirp(fs_scenario::LinearChirp::new(
+            0.0, 1.0, frequency, frequency, core::f64::consts::FRAC_PI_2,
+            QtyAny::dimensionless(0.0), QtyAny::dimensionless(amplitude),
+        ).unwrap());
+        let mut frames = FrameTree::new();
+        // The payload names a fixed child; its dynamic parent is deliberately
+        // stored later so frame ancestry must follow identities, not row order.
+        frames.add(Frame {
+            id: FrameId(2), parent: FrameId(1), name: "load coordinates".into(),
+            motion: FrameMotion::Fixed {
+                orientation: fs_ga::Quat::identity(), translation: fs_ga::Vec3::new(0.0, 0.0, 0.0),
+            },
+        });
+        frames.add(Frame {
+            id: FrameId(1), parent: WORLD, name: "large angular excursion".into(),
+            motion: FrameMotion::Tilt {
+                axis: [0.0, 0.0, 1.0], center: fs_ga::Vec3::new(0.0, 0.0, 0.0), angle: angle.clone(),
+            },
+        });
+        let acceleration = payload(&[0.0, 1.0], &[[0.01, 0.0, 0.0]; 2],
+            TableInterpolation::Linear, OutsideDomainPolicy::Clamp, FrameId(2));
+        let history = TetLoadHistory3 {
+            surfaces: &[], volume: VolumeHistory3::Acceleration(&acceleration),
+            nodal_forces_n: &[], frames: &frames,
+        };
+        let schedule = EventLoadHistory3::new(history, 16, cx).unwrap();
+        let mut run = schedule.begin_transient(
+            &geometry, &p, None, 0.0, &ZERO, &ZERO, config(), cx,
+        ).unwrap();
+        let step = run.advance_to(0.25, 0.25, cx).unwrap();
+        let allowance = fs_scenario::DEFAULT_MAXIMUM_CYCLES_PER_STEP;
+        assert!(step.end_time_s > 0.0 && step.end_time_s * frequency * amplitude <= allowance);
+        let travel = (angle.eval(step.end_time_s).unwrap().value - angle.eval(0.0).unwrap().value).abs();
+        assert!(travel <= core::f64::consts::TAU * allowance);
+
+        // A representable source-phase step alone is too coarse for this
+        // tilt's angular speed on a remote clock. Refuse without publishing.
+        let remote = 2.0_f64.powi(44);
+        let mut run = schedule.begin_transient(
+            &geometry, &p, None, remote, &ZERO, &ZERO, config(), cx,
+        ).unwrap();
+        let saved = run.run().state().clone();
+        assert!(run.advance_to(remote + 1.0, 1.0, cx).is_err());
+        assert_eq!(run.run().state(), &saved);
+    });
+}
+
 #[test]
 fn translating_frame_history_knots_are_retained_by_the_native_event_owner() {
     with_cx(false, |cx| {

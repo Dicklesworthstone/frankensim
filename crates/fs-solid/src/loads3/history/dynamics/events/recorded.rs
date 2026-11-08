@@ -46,7 +46,7 @@ impl EventLoadHistory3<'_> {
         let run = recorded.run();
         let start_time_s = run.state().time_s;
         let end_time_s = self
-            .endpoint(start_time_s, target_s, maximum_step_s)
+            .endpoint(start_time_s, target_s, maximum_step_s, cx)
             .map_err(adjoint_error)?;
         let left = self
             .left_at(

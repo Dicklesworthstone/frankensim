@@ -10,9 +10,10 @@ use fs_conduction::transient::backward_euler::{NonlinearStepConfig, StepConfig};
 use fs_conduction::{ConductionError, ConductionMesh, ConductivityModel, ConductivityTable, LinearConfig,
     ScalarField, ThermalBc, ThermalBoundaryBuilder, VOLUMETRIC_SOURCE_DIMS};
 use fs_exec::Cx;
+use fs_qty::QtyAny;
 use fs_rep_mesh::TetComplex;
 use fs_scenario::scenario::Environment;
-use fs_scenario::signal::{Interp, TimeSignal};
+use fs_scenario::signal::{DEFAULT_MAXIMUM_CYCLES_PER_STEP, Interp, LinearChirp, TimeSignal};
 use support::{with_cancelled_cx, with_cx};
 
 fn mesh() -> ConductionMesh {
@@ -127,6 +128,60 @@ fn g1_adaptation_does_not_drop_the_interval_ending_at_a_heater_switch() {
         assert!((work - 2.5).abs() < 1e-10); // 120 * (tet volume 1/6) * 0.125.
         run.advance_adaptive_step(cx, 0.25, 0.25, controls(), adaptive(1e-6)).unwrap();
         assert!(run.temperature().iter().all(|t| (t - 300.5).abs() < 1e-9));
+    });
+}
+
+#[test]
+fn g1_frequency_resolved_history_prevents_whole_cycle_heat_aliasing() {
+    let mesh = mesh();
+    let material = ConductivityModel::isotropic_declared(20.0).unwrap();
+    with_cx(|cx| {
+        let history = ThermalBoundaryHistory::new(cx, ThermalBoundaryBuilder::new(&mesh)
+            .adiabatic_remainder(), &Environment::earth_lab(), Vec::new(), 0.0).unwrap();
+        let signal = TimeSignal::Chirp(LinearChirp::new(0.0, 1.0, 8.0, 8.0, 0.0,
+            QtyAny::new(120.0, VOLUMETRIC_SOURCE_DIMS),
+            QtyAny::new(120.0, VOLUMETRIC_SOURCE_DIMS)).unwrap());
+        let make_run = |budget| ThermalHistoryRun::new(cx,
+            problem(&history, &material, HeatSourceHistory::Uniform(signal.clone())),
+            VolumetricHeatCapacity::declared(30.0).unwrap(), &[300.0; 4], budget).unwrap();
+
+        // Two complete source cycles are invisible to both the full interval
+        // and its midpoint: all three endpoint loads equal 240 W/m^3. The
+        // deliberately unaligned API therefore gives agreeing WRONG histories.
+        let mut coarse = make_run(1);
+        coarse.advance_to(cx, 0.25, controls()).unwrap();
+        let mut fine = make_run(2);
+        fine.advance_to(cx, 0.125, controls()).unwrap();
+        fine.advance_to(cx, 0.25, controls()).unwrap();
+        for (&a, &b) in coarse.temperature().iter().zip(fine.temperature()) {
+            assert!((a - b).abs() < 1e-9);
+            assert!((a - 302.0).abs() < 1e-9);
+        }
+
+        // Source-aware event selection resolves the same physical history
+        // before the local temperature-error comparison. A loose tolerance
+        // isolates that frequency guard from ordinary adaptive refinement.
+        let mut resolved = make_run(128);
+        let mut work = 0.0;
+        let mut pairs = 0;
+        while resolved.time_s() < 0.25 {
+            let step = resolved.advance_adaptive_step(
+                cx, 0.25, 0.25, controls(), adaptive(1.0)).unwrap();
+            assert!(8.0 * (step.end_time_s - step.start_time_s)
+                <= DEFAULT_MAXIMUM_CYCLES_PER_STEP);
+            assert_eq!(step.rejected_attempts, 0);
+            work += step.first_half.solution().source_w
+                * (step.midpoint_time_s - step.start_time_s)
+                + step.second_half.solution().source_w
+                * (step.end_time_s - step.midpoint_time_s);
+            pairs += 1;
+        }
+        assert!(pairs >= 32);
+        // Integral q dt = 120*0.25; the cosine contributes zero. The original
+        // tetrahedron has volume 1/6, so supplied heat is 5 J and delta T is 1 K.
+        assert!((work - 5.0).abs() < 1e-8);
+        assert!(resolved.temperature().iter().all(|&t| (t - 301.0).abs() < 1e-8));
+        assert_eq!(resolved.accepted_steps(), 2 * pairs);
     });
 }
 

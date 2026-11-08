@@ -1,13 +1,15 @@
 //! Local step-doubling estimates over event-resolved original Newmark steps.
 //! Publish the two-half-step trajectory, never Richardson-extrapolated motion.
-//! Agreement of finite samples can alias unresolved smooth forcing: the caller
-//! must still set a maximum step that resolves its bandwidth. No global error,
+//! Native chirps use the schedule's frequency limit before error estimation,
+//! so a full and two half steps cannot all skip whole source cycles. Other
+//! smooth histories still need a caller-resolved bandwidth. No global error,
 //! continuum accuracy, or certificate is inferred from this local estimate.
 use super::*;
 
 /// Componentwise SI absolute tolerances and a change-relative tolerance.
 /// The minimum applies to retried PAIR spans, not their individual half steps.
-/// A target/event may initially shorten a pair below that retry floor.
+/// A target, event or source-frequency limit may initially shorten a pair
+/// below that retry floor.
 #[derive(Debug, Clone, Copy)]
 pub struct TransientTimeControl3 {
     pub absolute_displacement_m: f64,
@@ -98,7 +100,7 @@ impl EventTransientRun3<'_, '_, '_, '_, '_, '_> {
         let mut cap = proposed_step_s.min(control.maximum_step_s).max(control.minimum_step_s);
         for attempt in 1..=control.maximum_attempts {
             checkpoint(cx)?;
-            let end = self.schedule.endpoint(start, target_s, cap)?;
+            let end = self.schedule.endpoint(start, target_s, cap, cx)?;
             let span = end - start;
             let middle = start + 0.5 * span;
             if middle <= start || middle >= end || !middle.is_finite() {

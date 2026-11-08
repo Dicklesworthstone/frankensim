@@ -230,6 +230,56 @@ fn varying_pressure_and_temperature_deliver_the_original_stage_stagnation_enthal
 }
 
 #[test]
+fn g1_oscillating_reservoirs_resolve_pressure_and_temperature_stage_clocks() {
+    let source = gas(0.0);
+    let mut driven = field(&source, closed());
+    let tone = |frequency, offset, amplitude, dims| {
+        TimeSignal::Chirp(fs_scenario::signal::LinearChirp::new(
+            0.0, 0.01, frequency, frequency, 0.0,
+            QtyAny::new(offset, dims), QtyAny::new(amplitude, dims),
+        ).unwrap())
+    };
+    let pressure = tone(1_000.0, 2.0, 0.1, Pressure::DIMS);
+    let temperature = tone(2_000.0, 1.0, 0.1, Temperature::DIMS);
+    let fixed_pressure = constant(2.0, Pressure::DIMS);
+    let fixed_temperature = constant(1.0, Temperature::DIMS);
+    let report = step_euler(
+        &mut driven,
+        &source,
+        [Some(history(&pressure, &fixed_temperature)),
+            Some(history(&fixed_pressure, &temperature))],
+        Time::new(0.002),
+        controls(),
+        || false,
+    ).unwrap();
+
+    // The requested interval contains whole periods of both sources. Native
+    // spatial CFL alone would accept it, aliasing both histories to their peaks.
+    // The faster temperature source on the OTHER end must also limit the step.
+    let dt = report.gas.elapsed.value();
+    assert!(dt > 0.0 && dt * 2_000.0 <= DEFAULT_MAXIMUM_CYCLES_PER_STEP);
+    close(dt, DEFAULT_MAXIMUM_CYCLES_PER_STEP / 2_000.0);
+    assert_eq!(report.gas.halvings, 0);
+    assert_eq!(driven.time().value(), dt);
+    for end in 0..2 {
+        assert_eq!(report.stages[0][end].unwrap().time_s, 0.0);
+        assert_eq!(report.stages[1][end].unwrap().time_s, dt);
+    }
+    let left = report.stages[1][0].unwrap();
+    let right = report.stages[1][1].unwrap();
+    close(left.absolute_pressure_pa,
+        2.0 + 0.1 * (core::f64::consts::TAU * 1_000.0 * dt).cos());
+    close(right.prescribed_temperature_k,
+        1.0 + 0.1 * (core::f64::consts::TAU * 2_000.0 * dt).cos());
+    assert!(left.absolute_pressure_pa < report.stages[0][0].unwrap().absolute_pressure_pa);
+    assert!(right.prescribed_temperature_k < report.stages[0][1].unwrap().prescribed_temperature_k);
+    close(report.gas.after.mass - report.gas.before.mass, report.gas.boundary_change.mass);
+    close(report.gas.after.energy - report.gas.before.energy, report.gas.boundary_change.energy);
+    close(report.gas.conservation_residual.energy, 0.0);
+    assert_eq!(driven.boundaries(), closed());
+}
+
+#[test]
 fn pressure_reversal_changes_the_entropy_donor_at_either_end() {
     let source = gas(0.0);
     let pressure = ramp(0.001, 0.7, 1.5, Pressure::DIMS);

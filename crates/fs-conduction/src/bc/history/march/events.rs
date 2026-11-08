@@ -26,7 +26,7 @@ use crate::transient::backward_euler::StepConfig;
 use fs_exec::Cx;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::bc::{BcValue, BoundaryCondition};
-use fs_scenario::signal::{Interp, TimeSignal};
+use fs_scenario::signal::{DEFAULT_MAXIMUM_CYCLES_PER_STEP, Interp, TimeSignal};
 
 /// One completed interval, which may stop before the requested target.
 #[derive(Debug, Clone)]
@@ -102,24 +102,24 @@ pub(super) fn next_endpoint<'s>(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_
     }
     for (at, (_, row)) in history.rows.iter().enumerate() {
         poll(cx, at)?;
-        if let Some(BcValue::Signal(signal)) = &row.row.value { limit(signal, start, &mut end); }
-        if let Some(signal) = &row.reference_temperature { limit(signal, start, &mut end); }
+        if let Some(BcValue::Signal(signal)) = &row.row.value { limit(signal, start, &mut end)?; }
+        if let Some(signal) = &row.reference_temperature { limit(signal, start, &mut end)?; }
     }
     match source {
         HeatSourceHistory::Fixed(_) => {}
         HeatSourceHistory::Uniform(signal) | HeatSourceHistory::Scaled { scale: signal, .. } => {
-            limit(signal, start, &mut end);
+            limit(signal, start, &mut end)?;
         }
     }
     for (at, signal) in extra.into_iter().enumerate() {
         poll(cx, at)?;
-        limit(signal, start, &mut end);
+        limit(signal, start, &mut end)?;
     }
     poll(cx, 0)?;
     Ok(end)
 }
 
-fn limit(signal: &TimeSignal, start: f64, end: &mut f64) {
+fn limit(signal: &TimeSignal, start: f64, end: &mut f64) -> Result<(), ConductionError> {
     let mut consider = |time: f64| { if time > start && time < *end { *end = time; } };
     match signal {
         TimeSignal::Constant(_) => {}
@@ -136,6 +136,13 @@ fn limit(signal: &TimeSignal, start: f64, end: &mut f64) {
             consider(a); consider(b);
         }
     }
+    if let TimeSignal::Chirp(chirp) = signal {
+        // Bound the actual solve interval before any coarse/fine endpoint
+        // samples can alias an oscillatory source to an apparent constant.
+        *end = chirp.resolved_step_end(start, *end, DEFAULT_MAXIMUM_CYCLES_PER_STEP)
+            .map_err(|error| invalid(&format!("event history frequency resolution: {error}")))?;
+    }
+    Ok(())
 }
 
 pub(super) fn value_before(signal: &TimeSignal, time_s: f64) -> Result<QtyAny, ConductionError> {
@@ -216,10 +223,19 @@ mod tests {
             1.0, 2.0, 1.0, 4.0, 0.3,
             QtyAny::new(300.0, TEMPERATURE_DIMS), QtyAny::new(10.0, TEMPERATURE_DIMS),
         ).unwrap());
-        for (start, expected) in [(0.0, 1.0), (1.0, 2.0), (2.0, 3.0)] {
+        for (start, expected, maximum_frequency, exact_join) in [
+            (0.0, 0.0625, 1.0, false), (0.99, 1.0, 1.0, true),
+            (1.995, 2.0, 4.0, true), (2.0, 2.015625, 4.0, false),
+        ] {
             let mut end = 3.0;
-            limit(&signal, start, &mut end);
-            assert_eq!(end, expected);
+            limit(&signal, start, &mut end).unwrap();
+            if exact_join {
+                assert_eq!(end, expected);
+            } else {
+                assert!(end <= expected);
+                assert!(expected - end <= 4.0 * f64::EPSILON * expected.abs().max(1.0));
+            }
+            assert!((end - start) * maximum_frequency <= DEFAULT_MAXIMUM_CYCLES_PER_STEP);
         }
         for knot in [1.0, 2.0] {
             assert_eq!(value_before(&signal, knot).unwrap(), signal.eval(knot).unwrap());
@@ -232,7 +248,7 @@ mod tests {
         let signal = TimeSignal::Table { times: vec![0.0, a, b], values: vec![0.0, 3.0, 7.0],
             dims: VOLUMETRIC_SOURCE_DIMS, interp: Interp::Hold };
         let mut end = 2.0;
-        limit(&signal, a, &mut end);
+        limit(&signal, a, &mut end).unwrap();
         assert_eq!(end, b);
         assert_eq!(value_before(&signal, a).unwrap().value, 0.0);
         assert_eq!(value_before(&signal, b).unwrap().value, 3.0);

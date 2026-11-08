@@ -2032,6 +2032,25 @@ resolved interfacial temperature, a cure law or a complete thermodynamic closure
 > first card-backed surface-radiation rung, and receipt-preserving PCB
 > homogenization handoff.
 
+## Frequency resolution on the native thermal history clock
+
+The shared event endpoint selector applies `LinearChirp::resolved_step_end`
+to authored boundary values, Robin reference temperatures, volumetric sources
+and additional supplied histories before selecting any solver stages. It uses
+the scenario default of at most 1/16 cycle per interval, including both tails
+of a sweep. Existing knots and exact held-value left limits remain intact.
+Fixed event steps and adaptive full/two-half comparisons therefore cannot all
+skip complete source cycles and mistake oscillating heat for a constant input.
+The native nonlinear solve, heat balance, local error controller, lifetime
+budget and cancellation continue to decide acceptance and atomic publication.
+
+Direct caller-prescribed endpoint APIs retain their existing semantics; this
+automatic guard belongs to event-aware history stepping. The phase allowance
+is not an antialias filter, a nonlinear bandwidth bound or a global time-error
+certificate. `thermal_history_adaptive` includes an independent adiabatic
+cosine-heating regression whose exact integrated heat differs from the
+deliberately aliased raw endpoint result.
+
 ## Purpose and layer
 
 `radiation::PointwiseAmbientRadiation` supplies spatially resolved ambient

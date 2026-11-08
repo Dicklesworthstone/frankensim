@@ -1543,6 +1543,19 @@ collision, force correction and reservoir transport. G0/G3 tests in
 density after steps, gauge/absolute equivalence, histories, profile precedence,
 transactional refusal and cancellation. No new dependency or solver is added.
 
+The feature-gated `scenario_pressure::compressible` adapter also resolves
+native chirp pressure and temperature histories before requesting an Euler
+reservoir interval. Both selected ends constrain the shared physical clock to
+the scenario default of at most 1/16 cycle per interval, while existing sweep
+joins and exact held-value left limits remain in force. Native CFL and retry
+logic may shorten that interval further; actual RK stage times still drive
+the original source sampling and reservoir flux. Source-resolution failures
+retain their original signal diagnostic and publish no fluid state. The same
+private advance owner serves the nonlinear duct adapter. This is authored
+source resolution, not a general nonlinear bandwidth or time-error bound.
+The native reservoir regression checks independent pressure/temperature
+cosines at actual stage times together with mass and energy conservation.
+
 ## Changing contact area with physical conduction and exposed cooling
 
 `FrictionHeatStep::evaluate_with_area` and its entropy variant stage mechanical

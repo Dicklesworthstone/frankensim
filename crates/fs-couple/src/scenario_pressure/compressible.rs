@@ -17,6 +17,7 @@ use fs_gas::dynamics::{
     Conserved, Error as GasError, Euler1d, FaceFlux, FrozenGas, PortStage, StepControl, StepReport,
 };
 use fs_qty::{Dims, Pressure, Temperature, Time};
+use fs_scenario::signal::DEFAULT_MAXIMUM_CYCLES_PER_STEP;
 use fs_scenario::{Interp, ScenarioError, TimeSignal};
 use std::cell::RefCell;
 
@@ -196,6 +197,17 @@ fn advance(
         for signal in [history.pressure, history.temperature] {
             if let Some(knot) = next_breakpoint(signal, time_s) {
                 duration = duration.min(knot - time_s);
+            }
+            if let TimeSignal::Chirp(chirp) = signal {
+                // The native solver may shorten this interval further for CFL
+                // or retry, but its RK stage samples must first resolve every
+                // selected pressure and temperature source's physical frequency.
+                let end = chirp.resolved_step_end(
+                    time_s,
+                    time_s + duration,
+                    DEFAULT_MAXIMUM_CYCLES_PER_STEP,
+                ).map_err(ReservoirHistoryError::Signal)?;
+                duration = duration.min(end - time_s);
             }
         }
     }
