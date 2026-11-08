@@ -1,5 +1,35 @@
 # fs-solid CONTRACT
 
+## Progressive finite ductile sheets
+
+`hyper2d::plastic::ductile::FiniteDuctileSheet` advances the original P1/Q1
+reference continuum beyond initiation using full three-dimensional progressive
+ductile history, solved transverse tractions and the nonsymmetric condensed
+tangent. The native sheet reference geometry, quadrature, force/tangent assembly
+and shared Newton/FGMRES increment owner are reused. No scalar damage potential
+or symmetric stiffness is substituted.
+
+Each immutable `SheetCrackBandGeometry` binds the selected in-plane reference
+normal, polygon and width (reference area divided by projected transverse span).
+The original element thickness supplies volume, never the in-plane band width.
+Every material length must match its retained geometry. This is an explicit
+projected-footprint regularization, without arbitrary-mesh crack-path or
+localization-objectivity claims.
+
+Original point histories, actual point temperatures and one physical duration
+remain frozen across solver iterations and retries. Accepted physical time
+advances once. Complete material storage, physical plastic loss, damage release,
+signed endpoint-work error and transverse residual work remain separate. Work
+gates bound absolute point defects before publishing the complete endpoint.
+Displacement control can traverse falling load branches; force-controlled
+instability can refuse without consuming history.
+
+Six G1/G3 cases in `finite_ductile_sheet` cover independent P1/Q1 rotated
+biaxial softening/thickness/work, damaged free-DOF equilibrium, full assembled
+tangent differences, unloading/replay, rate-dependent holds and geometric/
+work/time/cancellation refusals. Bending, wrinkling, evolving thermal
+coefficients, separation and contact are not supplied by this in-plane owner.
+
 ## Rate-dependent progressive finite solid damage
 
 The finite ductile tetrahedral static, backward-Euler and adaptive path owners

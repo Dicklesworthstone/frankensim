@@ -31,6 +31,8 @@ use crate::mesh2::{Mesh2, quad_points, shapes_at};
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
+/// Progressive finite ductile softening with the original sheet quadrature.
+pub mod ductile;
 /// Temperature-dependent forming, viscoplastic relaxation and creep using the
 /// same prepared sheet geometry and native equilibrium operator.
 pub mod thermal;
@@ -856,85 +858,28 @@ where
         need_tangent: bool,
         cx: &Cx<'_>,
     ) -> Result<(Assembled, f64), SmallStrainTetError> {
-        checkpoint(cx)?;
-        let dofs = 2 * self.mesh.nodes.len();
-        if u.len() != dofs || states.len() != self.states.len() || u.iter().any(|x| !x.is_finite())
-        {
-            return Err(invalid(
-                "sheet trial needs complete finite displacements and point history",
-            ));
+        if states.len() != self.states.len() {
+            return Err(invalid("sheet trial needs complete point history"));
         }
-        let mut force = vec![0.0; dofs];
-        let mut matrix = need_tangent.then(|| Coo::new(dofs, dofs));
         let mut potential = 0.0;
-        let mut force_cap = 0.0;
-        for (e, element) in self.elements.iter().enumerate() {
-            let orientation = element.minimum_corner_cross(Some(u));
-            if !orientation.is_finite() || orientation <= 0.0 {
-                return Err(invalid(format!(
-                    "sheet trial element {e} is inverted or folded"
-                )));
-            }
-            let mut local_force = [0.0; 8];
-            let mut local_tangent = [[0.0; 8]; 8];
-            for (q, point) in element.points.iter().enumerate() {
-                checkpoint(cx)?;
+        let (force, tangent, force_cap) = assemble_sheet(
+            self.mesh,
+            self.elements,
+            u,
+            prescribed,
+            need_tangent,
+            None,
+            cx,
+            |e, q| {
                 let response = (self.response)(e, q, u, states)?;
-                potential += point.volume_m3 * response.material.incremental_potential_j_m3;
-                for a in 0..element.arity {
-                    for i in 0..2 {
-                        let row = 2 * a + i;
-                        local_force[row] += point.volume_m3
-                            * (0..2)
-                                .map(|j| response.piola_pa[2 * i + j] * point.gradients[a][j])
-                                .sum::<f64>();
-                        if need_tangent {
-                            for b in 0..element.arity {
-                                for k in 0..2 {
-                                    let mut value = 0.0;
-                                    for j in 0..2 {
-                                        for l in 0..2 {
-                                            value += point.gradients[a][j]
-                                                * response.tangent_pa[2 * i + j][2 * k + l]
-                                                * point.gradients[b][l];
-                                        }
-                                    }
-                                    local_tangent[row][2 * b + k] += point.volume_m3 * value;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            for i in 0..2 * element.arity {
-                let row = 2 * element.nodes[i / 2] + i % 2;
-                force[row] += local_force[i];
-                if prescribed.is_none_or(|fixed| !fixed[row]) {
-                    force_cap += local_force[i].abs();
-                }
-                if let Some(matrix) = &mut matrix {
-                    for j in 0..2 * element.arity {
-                        let value = local_tangent[i][j];
-                        if value != 0.0 {
-                            matrix.push(row, 2 * element.nodes[j / 2] + j % 2, value);
-                        }
-                    }
-                }
-            }
+                potential += self.elements[e].points[q].volume_m3
+                    * response.material.incremental_potential_j_m3;
+                Ok((response.piola_pa, response.tangent_pa))
+            },
+        )?;
+        if !potential.is_finite() {
+            return Err(invalid("sheet incremental potential is not representable"));
         }
-        let tangent = matrix.map(|m| m.assemble());
-        if !potential.is_finite()
-            || !force_cap.is_finite()
-            || force.iter().any(|x| !x.is_finite())
-            || tangent
-                .as_ref()
-                .is_some_and(|m| (0..m.nrows()).any(|r| m.row(r).1.iter().any(|x| !x.is_finite())))
-        {
-            return Err(invalid(
-                "sheet assembled force, tangent or potential is not representable",
-            ));
-        }
-        checkpoint(cx)?;
         Ok((
             Assembled {
                 force,
@@ -944,6 +889,112 @@ where
             force_cap,
         ))
     }
+}
+
+// The original geometric assembly also admits nonpotential constitutive laws.
+// Potential accounting stays with the native material owner above; this seam
+// contracts physical Piola stresses and the complete, possibly nonsymmetric
+// tangent only. No dynamic dispatch, duplicate quadrature or symmetrization.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn assemble_sheet(
+    mesh: &Mesh2,
+    elements: &[Element],
+    u: &[f64],
+    prescribed: Option<&[bool]>,
+    need_tangent: bool,
+    inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+    cx: &Cx<'_>,
+    mut response: impl FnMut(usize, usize) -> Result<([f64; 4], [[f64; 4]; 4]), SmallStrainTetError>,
+) -> Result<(Vec<f64>, Option<Csr>, f64), SmallStrainTetError> {
+    checkpoint(cx)?;
+    let dofs = 2 * mesh.nodes.len();
+    if u.len() != dofs
+        || u.iter().any(|x| !x.is_finite())
+        || prescribed.is_some_and(|fixed| fixed.len() != dofs)
+    {
+        return Err(invalid(
+            "sheet trial needs complete finite displacement fields",
+        ));
+    }
+    let mut force = vec![0.0; dofs];
+    let mut matrix = need_tangent.then(|| Coo::new(dofs, dofs));
+    let mut force_cap = 0.0;
+    for (e, element) in elements.iter().enumerate() {
+        let orientation = element.minimum_corner_cross(Some(u));
+        if !orientation.is_finite() || orientation <= 0.0 {
+            return Err(invalid(format!(
+                "sheet trial element {e} is inverted or folded"
+            )));
+        }
+        let mut local_force = [0.0; 8];
+        let mut local_tangent = [[0.0; 8]; 8];
+        for (q, point) in element.points.iter().enumerate() {
+            checkpoint(cx)?;
+            let (piola, tangent) = response(e, q)?;
+            for a in 0..element.arity {
+                for i in 0..2 {
+                    let row = 2 * a + i;
+                    local_force[row] += point.volume_m3
+                        * (0..2)
+                            .map(|j| piola[2 * i + j] * point.gradients[a][j])
+                            .sum::<f64>();
+                    if need_tangent {
+                        for b in 0..element.arity {
+                            for k in 0..2 {
+                                let mut value = 0.0;
+                                for j in 0..2 {
+                                    for l in 0..2 {
+                                        value += point.gradients[a][j]
+                                            * tangent[2 * i + j][2 * k + l]
+                                            * point.gradients[b][l];
+                                    }
+                                }
+                                local_tangent[row][2 * b + k] += point.volume_m3 * value;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for i in 0..2 * element.arity {
+            let row = 2 * element.nodes[i / 2] + i % 2;
+            force[row] += local_force[i];
+            if prescribed.is_none_or(|fixed| !fixed[row]) {
+                force_cap += local_force[i].abs();
+            }
+            if let Some(matrix) = &mut matrix {
+                for j in 0..2 * element.arity {
+                    let value = local_tangent[i][j];
+                    if value != 0.0 {
+                        matrix.push(row, 2 * element.nodes[j / 2] + j % 2, value);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(inertia) = inertia {
+        inertia
+            .add_force(u, &mut force, cx)
+            .map_err(SmallStrainTetError::from)?;
+        if let Some(matrix) = &mut matrix {
+            inertia
+                .add_tangent(matrix, cx)
+                .map_err(SmallStrainTetError::from)?;
+        }
+    }
+    let tangent = matrix.map(|m| m.assemble());
+    if !force_cap.is_finite()
+        || force.iter().any(|x| !x.is_finite())
+        || tangent
+            .as_ref()
+            .is_some_and(|m| (0..m.nrows()).any(|r| m.row(r).1.iter().any(|x| !x.is_finite())))
+    {
+        return Err(invalid(
+            "sheet assembled force or tangent is not representable",
+        ));
+    }
+    checkpoint(cx)?;
+    Ok((force, tangent, force_cap))
 }
 
 impl<F> IncrementOperator for SheetOperator<'_, F>
