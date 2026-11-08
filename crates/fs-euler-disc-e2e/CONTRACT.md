@@ -1779,7 +1779,7 @@ same quiescent medium, with no extrapolation or mechanics feedback.
 Frame zero is explicitly at the closing boundary `start + 1/fs`. The receiver
 is sampled once at reception time `t` and held fixed during the source root:
 deterministic bisection solves `tau + |x_receiver(t)-X(tau)|/c = t`.
-The v3 physical observer retains one enclosing emission bracket per receiver.
+The physical observer retains one enclosing emission bracket per receiver.
 The same outward two-motion rate used by bandwidth admission predicts the next
 bracket; both endpoint signs must validate before it is used. Missed predictions,
 repeated times and backward queries fall back to the full finite source interval.
@@ -1787,14 +1787,27 @@ Checked endpoint values are reused, exact endpoint roots terminate immediately,
 and each solve makes at most the declared bisection cap plus four actual root-residual
 queries, including fallback probes. Every actual query checks cancellation, and
 failed roots leave the cursor unchanged. Narrower stopping brackets preserve the
-same source-time tolerance but need not preserve final sample bits, so the existing
-physical pressure identity domain advances to v3. No source history is extrapolated.
+same source-time tolerance but need not preserve final sample bits. No source
+history is extrapolated.
 The finite reception horizon is intersected with the actual wavefronts from
 both complete source-stencil endpoints by monotone root solves. Inward root
 brackets prevent a tolerated endpoint error from admitting missing source
 history; endpoint distance shortcuts are not used. All real-tesseral source
-coefficients use one complete 16-tap Lanczos-8 stencil at `tau`, and their
-direction is rotated by the emission pose before physical `1/r` spreading.
+coefficients use one complete normalized windowed-sinc stencil at `tau`, and
+their direction is rotated by the emission pose before physical `1/r` spreading.
+The caller selects radius 8, 16, 32, or 64 (16, 32, 64, or 128 real source
+frames) and an explicit `RetardedReconstructionWindow`: Lanczos or three-term
+Blackman. Radius `R` admits source times only in
+`[start + R/fs, start + (frame_count-R)/fs]`; source-length admission, continuous
+motion checks, and every receiver's wavefront horizon use that same radius.
+Even an exact integer query requires a complete stencil, then copies the
+original coefficient frame bit for bit. Fractional queries prepare one
+normalized weight vector for every SH channel, with reusable fixed scratch
+and symmetric outward trigonometric recurrence using `fs_math::det`. The
+trigonometric work is independent of radius; applying weights still costs
+`2R` multiply-adds per channel. This is a bounded work count, not a measured
+wall-clock speed claim. The v4 physical-pressure identity binds the selected
+window and radius as well as the changed reconstruction semantics.
 All observers share the intersection of their complete arrival-time horizons
 and are returned transactionally in caller order. The output sample clock is
 explicit and independent of the original source-stem clock. Admission requires
@@ -1806,10 +1819,20 @@ output Nyquist. The actual admitted whole-path receiver speed supplies
 Pressure remains the existing low-Mach far-field estimate sampled at the
 retarded event, without an additional Doppler amplitude factor. The receiver declaration
 also owns pose/directivity and geometric amplitude modulation; neither sampled
-BEM fit frequencies nor a modal list supplies spectral authority. Lanczos-8
+BEM fit frequencies nor a modal list supplies spectral authority. Finite sinc
 reconstruction is not an antialias filter for time compression. Pressure
 identities bind both clocks and both bandwidth declarations. Moving-receiver
 pressure metadata additionally binds the immutable trajectory identity.
+
+Lanczos has a narrower final transition; Blackman offers lower passband error
+when the caller has enough source guard band. Neither reconstructs arbitrary
+phase at exact source Nyquist, and increasing receiver rate cannot recover
+information absent from the source samples. The complete source-band
+declaration is not silently narrowed. Native kernel regressions compare both
+windows and all four radii against independent direct-sinc sums, sampled
+complex-tone responses across fractional phases and bands, and approaching,
+receding, and smoothly changing source clocks. These sampled response checks
+do not certify a continuous passband or the producer's spectral declaration.
 
 `RetardedPressureListeningArtifact::try_build` is the direct physical audition
 consumer: it accepts either original broadband source family and two
@@ -1822,7 +1845,10 @@ panning or inferred normalization. The artistic `spatial_audio` contract is
 unchanged, and the cinematic plate-plus-disc mix continues to use its coherent
 fixed microphone array.
 
-The cinematic moving-disc paths reserve the complete discrete source band,
+The cinematic structural and rigid-disc paths both select Lanczos-64 to reduce
+upper-band fractional-delay error while retaining its narrower transition.
+This requires eight times the source taps and a larger complete-history
+margin than Lanczos-8. They reserve the complete discrete source band,
 observe at 96 kHz, and use the original `fs-couple` pressure half-band
 decimator before joining the 48 kHz stationary-plate mix. Only complete
 master-clock cells with the full real FIR history are retained. The incomplete

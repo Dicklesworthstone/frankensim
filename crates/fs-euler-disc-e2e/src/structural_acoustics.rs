@@ -78,12 +78,15 @@ use crate::{
 
 mod prony;
 mod receiver;
+mod reconstruction;
 mod retarded_clock;
 pub use prony::{
     StructuralPronyAudioBudget, StructuralPronyAudioError, StructuralPronyAudioModel,
     StructuralPronyAudioRequest, StructuralPronyPressureFrame,
 };
 pub use receiver::{AcousticReceiverTrajectory, AcousticWorldReceiver};
+use reconstruction::PreparedWindowedSinc;
+pub use reconstruction::RetardedReconstructionWindow;
 #[cfg(test)]
 use retarded_clock::bisect_root_bracket;
 use retarded_clock::{RetardedClockError, RetardedEmissionCursor};
@@ -117,7 +120,7 @@ const RIGID_DISC_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
 const RIGID_DISC_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.rigid-disc-broadband-artifact.v1";
 const RETARDED_FAR_FIELD_SIGNAL_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v3";
+    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v4";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
 const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
@@ -566,7 +569,11 @@ pub struct RetardedFarFieldObserverControls {
     /// Maximum deterministic bisection iterations per root. A cursor query may
     /// additionally evaluate up to four endpoints, including checked fallback.
     pub maximum_root_iterations: u32,
-    /// Lanczos radius; version one requires exactly eight (16 taps).
+    /// Source reconstruction window; neither choice is a time-compression
+    /// antialias filter or an exact source-Nyquist reconstruction guarantee.
+    pub interpolation_window: RetardedReconstructionWindow,
+    /// Sinc-stencil radius: 8, 16, 32, or 64 source frames (twice as many taps).
+    /// Larger radii require more real source history and per-channel work.
     pub interpolation_radius_frames: u8,
     /// Maximum common output frames across all observers.
     pub maximum_output_frames: usize,
@@ -5486,10 +5493,10 @@ pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
 /// A moving receiver is sampled at reception time and held fixed during the
 /// emission solve; no Doppler pressure-amplitude multiplier is introduced.
 ///
-/// Version one is interior-only: every accepted emission query has a complete
-/// 16-tap Lanczos-8 stencil. Source interpolation stays on the original stem
-/// clock; observation uses the explicitly admitted output clock and bandwidth.
-/// Lanczos reconstruction is not an antialias filter for time compression.
+/// Evaluation is interior-only: every accepted emission query has a complete
+/// windowed-sinc stencil at the selected radius. Source interpolation stays on
+/// the original stem clock; observation uses the admitted output clock and band.
+/// Finite reconstruction is not an antialias filter for time compression.
 /// All observers are validated and synthesized into private candidates before
 /// any signal is returned.
 /// Consecutive queries retain one enclosing emission bracket per receiver;
@@ -5503,10 +5510,12 @@ pub fn synthesize_retarded_far_field_world_observers(
     controls: RetardedFarFieldObserverControls,
     cx: &Cx<'_>,
 ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
-    validate_retarded_observer_inputs(source, stem, basis, trajectory, observers, controls, cx)?;
+    let mut reconstruction = validate_retarded_observer_inputs(
+        source, stem, basis, trajectory, observers, controls, cx,
+    )?;
     let source_rate_hz = f64::from(stem.sample_rate_hz);
     let period = f64::from(controls.output_sample_rate_hz).recip();
-    let [first_emission_s, last_emission_s] = retarded_emission_window(stem);
+    let [first_emission_s, last_emission_s] = retarded_emission_window(stem, &reconstruction);
     let timeline = TimelineResampler::new(trajectory);
     let mut arrival_bounds = Vec::with_capacity(observers.len());
     for observer in observers {
@@ -5584,7 +5593,12 @@ pub fn synthesize_retarded_far_field_world_observers(
             // Continuous pose-speed admission already covers this root.
             // Interpolated momenta are not derivatives of the sampled pose.
             validate_retarded_radius(radius_m, minimum_far_field_m)?;
-            interpolate_stem_lanczos8(stem, emission_s, &mut coefficient_scratch)?;
+            interpolate_stem_windowed_sinc(
+                stem,
+                emission_s,
+                &mut reconstruction,
+                &mut coefficient_scratch,
+            )?;
             let direction_body = pose.orientation().rotate_world_to_body(direction_world);
             for (complex, real) in complex_scratch.iter_mut().zip(&coefficient_scratch) {
                 *complex = C64::from_re(*real);
@@ -5646,16 +5660,24 @@ fn validate_retarded_observer_inputs(
     observers: &[AcousticWorldReceiver<'_>],
     controls: RetardedFarFieldObserverControls,
     cx: &Cx<'_>,
-) -> Result<(), StructuralModalBasisError> {
+) -> Result<PreparedWindowedSinc, StructuralModalBasisError> {
     if observers.is_empty() || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "retarded receiver count must fit the explicit observer cap",
         });
     }
-    let maximum_receiver_mach = observers.iter()
+    let maximum_receiver_mach = observers
+        .iter()
         .map(|observer| observer.maximum_mach())
         .fold(0.0_f64, f64::max);
     validate_retarded_sampling(stem.sample_rate_hz, maximum_receiver_mach, controls)?;
+    let reconstruction = PreparedWindowedSinc::new(
+        controls.interpolation_radius_frames,
+        controls.interpolation_window,
+    )
+    .ok_or(StructuralModalBasisError::InvalidRequest {
+        what: "retarded reconstruction radius must be 8, 16, 32, or 64 source frames",
+    })?;
     drop(source.radiation.try_runtime()?);
     if source.identity == ContentHash([0; 32])
         || source.authority != BroadbandRadiationAuthority::EstimateOnly
@@ -5677,7 +5699,7 @@ fn validate_retarded_observer_inputs(
             != f64::from(source.sample_rate_hz).recip().to_bits()
         || stem.channels != source.radiation.channels
         || stem.coefficients.len() % stem.channels.len() != 0
-        || stem.frame_count() < 16
+        || stem.frame_count() < reconstruction.tap_count()
         || !stem.start_time_s.is_finite()
         || stem.coefficients.iter().any(|value| !value.0.is_finite())
     {
@@ -5688,11 +5710,10 @@ fn validate_retarded_observer_inputs(
     if !(controls.root_time_tolerance_s > 0.0 && controls.root_time_tolerance_s.is_finite())
         || controls.maximum_root_iterations == 0
         || controls.maximum_root_iterations > 256
-        || controls.interpolation_radius_frames != 8
         || controls.maximum_output_frames == 0
     {
         return Err(StructuralModalBasisError::InvalidRequest {
-            what: "retarded observer set or controls are outside the version-one domain",
+            what: "retarded observer set or controls are outside the admitted domain",
         });
     }
     for observer in observers {
@@ -5731,18 +5752,23 @@ fn validate_retarded_observer_inputs(
     validate_retarded_pose_motion(
         &timeline,
         trajectory,
-        retarded_emission_window(stem),
+        retarded_emission_window(stem, &reconstruction),
         source,
         controls.maximum_surface_mach,
         cx,
-    )
+    )?;
+    Ok(reconstruction)
 }
 
-fn retarded_emission_window(stem: &StructuralBroadbandSourceStem) -> [f64; 2] {
+fn retarded_emission_window(
+    stem: &StructuralBroadbandSourceStem,
+    reconstruction: &PreparedWindowedSinc,
+) -> [f64; 2] {
     let period_s = f64::from(stem.sample_rate_hz).recip();
+    let radius = reconstruction.radius() as f64;
     [
-        stem.start_time_s + 8.0 * period_s,
-        stem.start_time_s + (stem.frame_count() as f64 - 8.0) * period_s,
+        stem.start_time_s + radius * period_s,
+        stem.start_time_s + (stem.frame_count() as f64 - radius) * period_s,
     ]
 }
 
@@ -6088,9 +6114,10 @@ fn retarded_clock_error(
     }
 }
 
-fn interpolate_stem_lanczos8(
+fn interpolate_stem_windowed_sinc(
     stem: &StructuralBroadbandSourceStem,
     emission_s: f64,
+    reconstruction: &mut PreparedWindowedSinc,
     out: &mut [f64],
 ) -> Result<(), StructuralModalBasisError> {
     if out.len() != stem.channels.len() {
@@ -6099,41 +6126,52 @@ fn interpolate_stem_lanczos8(
         });
     }
     let u = (emission_s - stem.start_time_s) * f64::from(stem.sample_rate_hz) - 1.0;
-    let base = u.floor() as isize;
-    if base < 7 || base + 8 >= stem.frame_count() as isize {
+    let base = u.floor();
+    let radius = reconstruction.radius();
+    if !u.is_finite()
+        || stem.frame_count() < reconstruction.tap_count()
+        || base < (radius - 1) as f64
+        || base >= (stem.frame_count() - radius) as f64
+    {
         return Err(StructuralModalBasisError::ControlTimeline {
-            what: "retarded coefficient query lacks a complete Lanczos-8 stencil",
+            what: "retarded coefficient query lacks its complete reconstruction stencil",
         });
     }
-    out.fill(0.0);
-    for tap in -7_isize..=8 {
-        let index = usize::try_from(base + tap).expect("prevalidated nonnegative stem index");
-        let x = u - index as f64;
-        let weight = lanczos8(x);
+    let phase = u - base;
+    let base = base as usize;
+    if phase == 0.0 {
+        // Preserve original samples exactly, including signed zero, while
+        // retaining the same complete-history admission as fractional phases.
         for (sum, coefficient) in out
             .iter_mut()
-            .zip(stem.frame(index).expect("complete stem stencil").iter())
+            .zip(stem.frame(base).expect("complete stem stencil"))
         {
-            *sum = weight.mul_add(coefficient.0, *sum);
+            *sum = coefficient.0;
+        }
+    } else {
+        let weights =
+            reconstruction
+                .weights(phase)
+                .ok_or(StructuralModalBasisError::InvalidRequest {
+                    what: "retarded reconstruction weights became invalid",
+                })?;
+        out.fill(0.0);
+        for (tap, &weight) in weights.iter().enumerate() {
+            let index = base + 1 - radius + tap;
+            for (sum, coefficient) in out
+                .iter_mut()
+                .zip(stem.frame(index).expect("complete stem stencil"))
+            {
+                *sum = weight.mul_add(coefficient.0, *sum);
+            }
         }
     }
     if out.iter().any(|value| !value.is_finite()) {
         return Err(StructuralModalBasisError::InvalidRequest {
-            what: "retarded Lanczos interpolation became non-finite",
+            what: "retarded source reconstruction became non-finite",
         });
     }
     Ok(())
-}
-
-fn lanczos8(x: f64) -> f64 {
-    if x == 0.0 {
-        1.0
-    } else if x.abs() >= 8.0 {
-        0.0
-    } else {
-        let pix = core::f64::consts::PI * x;
-        (det::sin(pix) / pix) * (det::sin(pix / 8.0) / (pix / 8.0))
-    }
 }
 
 fn retarded_pressure_identity(
@@ -6166,6 +6204,7 @@ fn retarded_pressure_identity(
             stem.sample_rate_hz as usize,
             controls.output_sample_rate_hz as usize,
             controls.maximum_root_iterations as usize,
+            controls.interpolation_window as usize,
             controls.interpolation_radius_frames as usize,
             pressure_pa.len(),
         ],
@@ -7979,6 +8018,7 @@ mod tests {
             maximum_surface_mach: 0.0,
             root_time_tolerance_s: 1.0e-12,
             maximum_root_iterations: 64,
+            interpolation_window: RetardedReconstructionWindow::Lanczos,
             interpolation_radius_frames: 8,
             maximum_output_frames: 1_000_000,
         }
@@ -8233,10 +8273,88 @@ mod tests {
             structural_basis_identity: ContentHash([2; 32]),
         };
         let mut out = [0.0];
-        interpolate_stem_lanczos8(&stem, 17.0 / 16.0, &mut out).unwrap();
+        let mut reconstruction =
+            PreparedWindowedSinc::new(8, RetardedReconstructionWindow::Lanczos).unwrap();
+        interpolate_stem_windowed_sinc(&stem, 17.0 / 16.0, &mut reconstruction, &mut out).unwrap();
         assert!((out[0] - 17.0).abs() < 1.0e-13);
         let y00 = 0.5 / det::sqrt(core::f64::consts::PI);
         assert!(((out[0] * y00 / radius_m) * radius_m - out[0] * y00).abs() < 1.0e-13);
+    }
+
+    #[test]
+    fn retarded_reconstruction_retains_selected_history_and_original_channel_samples() {
+        let stem = StructuralBroadbandSourceStem {
+            start_time_s: 2.5,
+            sample_rate_hz: 1_024,
+            channels: vec![
+                RealTesseralChannel { l: 0, signed_m: 0 },
+                RealTesseralChannel { l: 1, signed_m: 0 },
+                RealTesseralChannel { l: 1, signed_m: 1 },
+            ],
+            coefficients: (0..256)
+                .flat_map(|_| [2.75, -5.5, -0.0].map(FarFieldSourceCoefficientPaM))
+                .collect(),
+            authority: BroadbandRadiationAuthority::EstimateOnly,
+            source_identity: ContentHash([1; 32]),
+            structural_basis_identity: ContentHash([2; 32]),
+        };
+        for window in [
+            RetardedReconstructionWindow::Lanczos,
+            RetardedReconstructionWindow::Blackman,
+        ] {
+            for radius in [8, 16, 32, 64] {
+                let mut reconstruction = PreparedWindowedSinc::new(radius, window).unwrap();
+                let interval = retarded_emission_window(&stem, &reconstruction);
+                assert_eq!(
+                    interval,
+                    [
+                        stem.start_time_s + f64::from(radius) / 1_024.0,
+                        stem.start_time_s + (256.0 - f64::from(radius)) / 1_024.0,
+                    ]
+                );
+                let mut out = [0.0; 3];
+                for time in interval {
+                    interpolate_stem_windowed_sinc(&stem, time, &mut reconstruction, &mut out)
+                        .unwrap();
+                    for (actual, expected) in out.into_iter().zip([2.75_f64, -5.5, -0.0]) {
+                        assert_eq!(actual.to_bits(), expected.to_bits());
+                    }
+                }
+                interpolate_stem_windowed_sinc(
+                    &stem,
+                    stem.start_time_s + 129.25 / 1_024.0,
+                    &mut reconstruction,
+                    &mut out,
+                )
+                .unwrap();
+                assert!((out[0] - 2.75).abs() < 2.0e-14);
+                assert!((out[1] + 5.5).abs() < 4.0e-14);
+                assert_eq!(out[2], 0.0);
+                for time in [
+                    interval[0] - 1.0 / 1_024.0,
+                    interval[1] + 1.0 / 1_024.0,
+                    f64::NAN,
+                ] {
+                    assert!(
+                        interpolate_stem_windowed_sinc(&stem, time, &mut reconstruction, &mut out)
+                            .is_err()
+                    );
+                }
+                let short = StructuralBroadbandSourceStem {
+                    coefficients: stem.coefficients[..(2 * usize::from(radius) - 1) * 3].to_vec(),
+                    ..stem.clone()
+                };
+                assert!(
+                    interpolate_stem_windowed_sinc(
+                        &short,
+                        interval[0],
+                        &mut reconstruction,
+                        &mut out,
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
 
     #[test]
@@ -8261,46 +8379,63 @@ mod tests {
             source_bandwidth_hz: 128.0,
             receiver_bandwidth_hz: 256.0,
             maximum_surface_mach: 0.1,
+            interpolation_radius_frames: 64,
             ..retarded_test_controls()
         };
         validate_retarded_sampling(stem.sample_rate_hz, 0.1, controls).unwrap();
-        let interval = retarded_emission_window(&stem);
-        let mut cursor = RetardedEmissionCursor::new(
-            interval,
-            maximum_retarded_source_time_rate(controls.maximum_surface_mach, 0.1),
-        );
-        for frame in 0..512 {
-            let reception = 0.5 + f64::from(frame) / 96_000.0;
-            let radius = |emission: f64| 100.0 - 34.0 * reception - 17.0 * emission;
-            let arrival = |emission: f64| emission + radius(emission) / 340.0;
-            let reference = bisect_retarded_emission_time(
-                reception,
-                interval[0],
-                interval[1],
-                controls.root_time_tolerance_s,
-                controls.maximum_root_iterations,
-                |time| Ok(arrival(time)),
-            )
-            .unwrap();
-            let bracket = cursor
-                .solve(
+        for window in [
+            RetardedReconstructionWindow::Lanczos,
+            RetardedReconstructionWindow::Blackman,
+        ] {
+            let mut reconstruction =
+                PreparedWindowedSinc::new(controls.interpolation_radius_frames, window).unwrap();
+            let interval = retarded_emission_window(&stem, &reconstruction);
+            let mut cursor = RetardedEmissionCursor::new(
+                interval,
+                maximum_retarded_source_time_rate(controls.maximum_surface_mach, 0.1),
+            );
+            for frame in 0..512 {
+                let reception = 0.5 + f64::from(frame) / 96_000.0;
+                let radius = |emission: f64| 100.0 - 34.0 * reception - 17.0 * emission;
+                let arrival = |emission: f64| emission + radius(emission) / 340.0;
+                let reference = bisect_retarded_emission_time(
                     reception,
+                    interval[0],
+                    interval[1],
                     controls.root_time_tolerance_s,
                     controls.maximum_root_iterations,
-                    |time| Ok::<_, StructuralModalBasisError>(arrival(time) - reception),
+                    |time| Ok(arrival(time)),
                 )
                 .unwrap();
-            let emission = 0.5 * (bracket[0] + bracket[1]);
-            let pressure = |time| {
-                let mut coefficients = [0.0];
-                interpolate_stem_lanczos8(&stem, time, &mut coefficients).unwrap();
-                let far =
-                    evaluate_real_tesseral(0, &[C64::from_re(coefficients[0])], [1.0, 0.0, 0.0])
-                        .unwrap();
-                far.re / radius(time)
-            };
-            assert!((emission - reference).abs() <= controls.root_time_tolerance_s);
-            assert!((pressure(emission) - pressure(reference)).abs() < 1.0e-10);
+                let bracket = cursor
+                    .solve(
+                        reception,
+                        controls.root_time_tolerance_s,
+                        controls.maximum_root_iterations,
+                        |time| Ok::<_, StructuralModalBasisError>(arrival(time) - reception),
+                    )
+                    .unwrap();
+                let emission = 0.5 * (bracket[0] + bracket[1]);
+                let mut pressure = |time| {
+                    let mut coefficients = [0.0];
+                    interpolate_stem_windowed_sinc(
+                        &stem,
+                        time,
+                        &mut reconstruction,
+                        &mut coefficients,
+                    )
+                    .unwrap();
+                    let far = evaluate_real_tesseral(
+                        0,
+                        &[C64::from_re(coefficients[0])],
+                        [1.0, 0.0, 0.0],
+                    )
+                    .unwrap();
+                    far.re / radius(time)
+                };
+                assert!((emission - reference).abs() <= controls.root_time_tolerance_s);
+                assert!((pressure(emission) - pressure(reference)).abs() < 1.0e-10);
+            }
         }
     }
 

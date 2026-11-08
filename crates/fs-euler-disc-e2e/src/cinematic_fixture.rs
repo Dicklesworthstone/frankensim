@@ -53,7 +53,8 @@ use crate::structural_acoustics::{
     BaffledPlateModalAudioModel,
     PhysicalModalInitialState, PhysicalPressureSignal, RectangularPlateModalBasis,
     RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
-    RetardedFarFieldObserverControls, RigidDiscBroadbandRadiationArtifact,
+    RetardedFarFieldObserverControls, RetardedReconstructionWindow,
+    RigidDiscBroadbandRadiationArtifact,
     StructuralBroadbandRadiationArtifact, StructuralBroadbandRadiationRequest,
     StructuralMeshControls, StructuralModalBasisError, StructuralModeRequest,
     StructuralRadiationModeCoverage, StructuralResidualFlexibilityControls, StructuralResidualFlexibilityEstimateBasis,
@@ -270,6 +271,10 @@ const CRITIQUE_PHYSICAL_FORCE_RECONSTRUCTION_PASSBAND_HZ: f64 = 18_000.0;
 // Observe first at 96 kHz, then use the existing pressure decimator before
 // combining with the stationary support-plate signal on the master clock.
 const CRITIQUE_RETARDED_SAMPLE_RATE_HZ: u32 = 2 * SOUND_MASTER_SAMPLE_RATE_HZ;
+// Keep Lanczos's narrower transition for the full source-band declaration.
+// A 128-tap source stencil reduces upper-band fractional-delay error; it needs
+// a 64-frame source-history margin and does not resolve exact source Nyquist.
+const CRITIQUE_RETARDED_INTERPOLATION_RADIUS_FRAMES: u8 = 64;
 /// Stable caller-ledgered root for animation frame render jobs.
 const CRITIQUE_RENDER_RUN: RunId = RunId(0x4555_4c45_5252_454e);
 /// Stable placement-only seed for the reusable parked render crew.
@@ -8870,7 +8875,8 @@ fn build_physical_audio(
                 maximum_surface_mach: 0.08,
                 root_time_tolerance_s: 1.0e-9,
                 maximum_root_iterations: 64,
-                interpolation_radius_frames: 8,
+                interpolation_window: RetardedReconstructionWindow::Lanczos,
+                interpolation_radius_frames: CRITIQUE_RETARDED_INTERPOLATION_RADIUS_FRAMES,
                 maximum_output_frames,
             },
             cx,
@@ -8911,7 +8917,8 @@ fn build_physical_audio(
                     maximum_surface_mach: 0.08,
                     root_time_tolerance_s: 1.0e-9,
                     maximum_root_iterations: 64,
-                    interpolation_radius_frames: 8,
+                    interpolation_window: RetardedReconstructionWindow::Lanczos,
+                    interpolation_radius_frames: CRITIQUE_RETARDED_INTERPOLATION_RADIUS_FRAMES,
                     maximum_output_frames,
                 },
                 cx,
