@@ -5,6 +5,8 @@ on:
     paths:
       - 'crates/fs-verify/**'
       - 'crates/fs-conduction/**'
+      - 'crates/fs-material/src/thermal.rs'
+      - 'crates/fs-material/src/thermal/**'
       - 'crates/fs-solver/**'
       - 'crates/fs-cli/src/network_command/transient/**'
       - 'crates/fs-cli/src/solve/transient/**'
@@ -78,6 +80,10 @@ jobs:
           PY
             cargo run --manifest-path tools/bootstrap/Cargo.toml
           fi
+      - name: Test exact source calorics and native lumped reservoir exchange
+        run: |
+          cargo test --release -p fs-material --lib thermal::transport:: -- --test-threads=1
+          cargo test --release -p fs-conduction --test lumped_caloric_exchange -- --test-threads=1
       - name: Test prescribed-temperature enthalpy physics and trajectories
         run: cargo test --release -p fs-conduction --test enthalpy_adjoint --test enthalpy_transport --test enthalpy_radiation --test heterogeneous_enthalpy --test thermal_history_enthalpy --test material_ambient_radiation --test material_enclosure_radiation -- --test-threads=1
       - name: Test native enthalpy storage, bath reactions and controls

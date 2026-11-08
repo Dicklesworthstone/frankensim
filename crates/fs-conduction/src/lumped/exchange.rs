@@ -4,6 +4,9 @@
 //! Biot gate remains mandatory. This entry requires radiation to be disabled;
 //! it adds no internal source or second heat-transfer model.
 
+/// Exact native Cp, Cv and measured-storage exchange with held cell boundaries.
+pub mod caloric;
+
 /// Direct isolated fixed-resistance exchange between two finite bodies.
 pub mod pair;
 
