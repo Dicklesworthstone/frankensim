@@ -269,6 +269,33 @@ the crash cascade with structurally exact energy accounting.
   and 32 explicit axial modes with indices at most 1024; it never drops
   a mode to satisfy a frequency cutoff. The caller owns the cutoff,
   resolved bandwidth, moving-end pullback, clock, and finite-strain domain.
+- `longitudinal::LongitudinalModalStorage` supplies the complete conservative
+  fixed-position modal storage for that SAME finite-axial-inertia strain law.
+  Its interleaved state retains all transverse modes plane-major, followed by
+  the authored axial indices. One or two physical bending rigidities select
+  transverse planes; their linear frequencies come from T, EI, length and
+  solid mass, while axial frequencies come from EA and the same mass. The
+  mass-normalized sine basis gives a reciprocal slope/force pullback. Nonzero
+  EI means pinned bending supports, not clamped endpoints. Exact cosine
+  products retain spatial sum/difference coupling without runtime quadrature;
+  no requested axial mode is removed to satisfy a time-step cutoff.
+  Original kinetic energy, tension/bending storage, geometric mean strain and
+  every retained nonuniform strain channel contribute to one Hamiltonian.
+  The source's one-state strain contractions are reused once per force call.
+  The analytic continuous Hessian differentiates both strain and its geometric
+  pullback, including reciprocal axial/transverse and cross-polarization
+  terms. The original exact two-point strain gradient and its analytic finite
+  endpoint Jacobian also survive the generic Storage interface; a midpoint
+  Hessian never replaces that endpoint derivative. Warm callbacks allocate
+  nothing and use bounded stack scratch, with O(planes * (transverse modes + 1) *
+  (axial_modes + 1)) work. Generic pHS assembly, harmonic balance, variational
+  and implicit mechanics can consume this complete source directly. Damping,
+  material memory, moving supports and generated-harmonic bandwidth remain
+  caller-owned; unretained axial channels are still statically equilibrated.
+  `tests/longitudinal_modal.rs` checks independent resolved spatial energy and
+  force quadrature, original KC condensation, complete tangent/endpoint
+  derivatives and work, a circular two-polarization orbit with axial DC, and
+  a sum-frequency axial resonance with three-rung temporal refinement.
 - `longitudinal::relaxation::StrainRelaxation` retains each original positive
   Maxwell arm's mean/cosine relaxed strains. Its trial calls the canonical
   `fs_material::visco::PronyRamp` for a piecewise-linear strain history,
