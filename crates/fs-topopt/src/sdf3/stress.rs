@@ -20,6 +20,10 @@
 //! relaxed AND physical stress at every retained sample of every declared case.
 //! It is an unweighted p-norm, not a normalized integral. Its sampling-dependent
 //! conservatism and finite-sample scope are part of the selected problem.
+//! Every physical load case first passes whole-cell material-strain admission,
+//! including cases excluded from a weighted aggregate. This checks the original
+//! isotropic tensor norm or source component limits; it does not constrain
+//! adjoint amplitudes or turn sampled strength into a continuum certificate.
 
 use super::*;
 use crate::SolveWork;
@@ -76,6 +80,10 @@ pub enum StressError3 {
     Invalid(&'static str),
     Evaluation(EvaluationStop),
     Physics(ElasticityError3),
+    /// The physical displacement leaves the original material's elastic strain
+    /// domain. This is distinct from a solver failure or an exhausted budget.
+    /// Standalone evaluation refuses; an optimizer may backtrack a trial.
+    MaterialDomain(&'static str),
     /// No partial point family or aggregate is returned on an allowance stop.
     PointBudget,
 }
@@ -89,6 +97,9 @@ impl From<ElasticityError3> for StressError3 {
         match e {
             ElasticityError3::Cancelled => Self::Evaluation(EvaluationStop::Cancelled),
             ElasticityError3::Invalid("bulk stress point allowance exhausted") => Self::PointBudget,
+            ElasticityError3::Invalid(reason @ ("bulk strain exceeds retained material domain"
+                | "projected bulk strain exceeds retained material domain"
+                | "affine bulk strain ball exceeds retained material domain")) => Self::MaterialDomain(reason),
             e => Self::Physics(e),
         }
     }
@@ -408,6 +419,13 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     control,
                     )?,
                 };
+                // Material validity belongs to the complete physical Q1 field,
+                // independently of the requested stress measure or load weight.
+                // Quadrature-only samples can miss a domain exit at a corner.
+                // The native owner also checks actual and assumed B-bar strain
+                // through the original strong/hanging constraint map.
+                control.checkpoint("sdf3-stress-material-domain")?;
+                self.operator.admit_material_domain(&u, || poll(control))?;
                 // b_g^T u is not external work or an actuator-energy law.
                 let compliance = finite(external.iter().zip(&u).map(|(f,u)| f*u).sum())?;
                 let data =
@@ -585,3 +603,4 @@ mod peak_tests;
 #[cfg(test)]
 #[path = "stress/motion_tests.rs"]
 mod motion_tests;
+

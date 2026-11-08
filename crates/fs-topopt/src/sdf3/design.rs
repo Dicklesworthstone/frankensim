@@ -482,6 +482,10 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
     /// Advance the existing AL state. Zero steps use cached derivatives without
     /// repeating physics or changing multipliers. Segments preserve spectral and
     /// dual state; rejected trials remain charged to both cumulative budgets.
+    /// A trial outside the retained elastic strain domain is unavailable to the
+    /// existing bounded line search, which may try a shorter step. Initialization
+    /// and restoration still refuse such fields. Reaching the material boundary
+    /// may stall this smooth optimizer; it is not a strain-constrained KKT claim.
     pub fn run(
         &mut self,
         additional_steps: usize,
@@ -500,7 +504,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                 self.state.try_run(
                     remaining.min(1),
                     &mut |rho| {
-                        sample(
+                        match sample(
                             study,
                             loads,
                             rho,
@@ -509,7 +513,14 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
                             motions,
                             &mut last,
                             &mut **ledger.borrow_mut(),
-                        )
+                        ) {
+                            // Reject only a physical material-domain exit. The
+                            // bounded line search can then shorten its density
+                            // step; cancellation, budgets and numerical failures
+                            // must still stop the session with their real cause.
+                            Err(StressError3::MaterialDomain(_)) => Ok(None),
+                            result => result,
+                        }
                     },
                     |_| {
                         if ledger
@@ -559,3 +570,4 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         }
     }
 }
+

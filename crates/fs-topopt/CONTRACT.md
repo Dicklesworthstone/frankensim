@@ -178,14 +178,30 @@ physical-inventory convention with its own retained cut-cell quadrature.
 
 ## Physical material validity on raw-SDF designs
 
-Physical 3-D equilibrium fields must satisfy each retained source material's
-absolute Mandel-strain ceiling on the native bulk quadrature, independently
-of whether the caller requests stress measurements or strength constraints.
-The common native admission path covers ordinary and robust independent-load
-compliance, displacement/reaction fitting and limits, and freshly resolved
-binary endpoints. Every returned experiment is admitted, including a case
-with zero objective weight. Source-free legacy elastic models receive no
-invented strain ceiling.
+Physical 3-D equilibrium fields must satisfy their original material strain
+domains throughout each native Q1 cell, independently of whether the caller
+requests stress measurements or strength constraints. Isotropic laws retain
+the supplied Frobenius tensor-norm limit, including symmetric shear; source
+tensors retain their absolute Mandel-component ceilings. The common native
+admission path covers ordinary and robust independent-load compliance,
+displacement/reaction fitting and limits, and freshly resolved binary endpoints.
+Every returned experiment is admitted, including a case with zero objective
+weight. Both actual displacement and assumed B-bar strains are checked.
+
+Standalone stress evaluations, including prescribed-motion and shared-primal
+variants, explicitly admit each whole physical field before allocating its
+stress samples or forming stress adjoints. A corner strain exit cannot hide
+between quadrature points or behind a small/zero objective weight. Material
+refusal returns no partial evaluation and restores incoming stiffness scales.
+
+The stress-constrained minimum-volume driver treats only a native material-domain
+refusal as an unavailable line-search trial. Its existing bounded backtracking
+can shorten the density step without changing any material limit. Rejected
+trials retain all spent solver work and cannot replace the accepted design or
+feasible archive. Initialization and restored endpoints still refuse invalid
+physical fields. Cancellation, budgets and other physics/numerical errors
+remain hard stops. A smooth run may stall at the material boundary; this is not
+a strain-constraint multiplier or a stationarity certificate for that boundary.
 
 The zero-offset spectral load-space evaluator also admits the COMPLETE
 coefficient unit ball before its spectrum. Direct binary endpoints and their
@@ -208,8 +224,9 @@ Adjoint vectors, virtual modes, residuals and DWR difference fields are
 algebraic quantities, not physical experiments, and do not inherit physical
 strain ceilings. The same native tensor and hanging-node/strong-clamp maps
 still govern their actions and pullbacks. These checks establish numerical
-validity at retained quadrature points, not continuum strain bounds,
-constitutive extrapolation, yielding or a nonlinear material model.
+validity of the complete discrete Q1 strain field, including the fictitious
+extension of a cut cell, where refusal may be conservative. They do not certify
+continuum error, constitutive extrapolation, yielding or a nonlinear material model.
 
 ## Physical mass on raw-SDF designs
 
