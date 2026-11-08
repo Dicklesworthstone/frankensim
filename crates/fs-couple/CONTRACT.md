@@ -1970,6 +1970,45 @@ focused regressions specify independent shrink/growth energy and entropy
 balances, callback-visible coverage and source-k rebinding, exact-target event
 order, and transactional late failure including a caught contact-update error.
 
+## Bandlimited fractional latency across pressure ensembles
+
+`PressureEnsemble::new_with_bandlimited_source_delays` aligns existing numerical
+receiver latencies that become fractional on a common output clock. For example,
+the impact observer's 80 source-sample derivative/interpolation latency becomes
+80/3 or 80/6 output samples when the original source runs at three or six times
+that clock. The caller declares a resolved physical pressure band at or below
+0.45 of the output rate; this declaration does not remove higher source content
+or prove convergence. Original decimators retain their antialiasing histories,
+source-group phase, mechanical clocks and event order.
+
+Fractional alignment pads each existing numerical latency to the next integral
+sample at or after their maximum, then retains a common 32-sample reconstruction
+delay. Physical source-to-receiver travel is excluded from that alignment and
+keeps its original phase. The original integer constructors and all-integral
+requests keep their original integer-delay path bit for bit, without added FIR
+latency. Existing whole-sample metadata is accompanied by explicit source and
+alignment fractions and the separate reconstruction delay. Both final numerical
+latency and complete per-part history remain within the 8192-sample limit.
+
+Physical impact propagation and ensemble alignment share one prepared
+`pcm_wav::delay::FractionalDelay` implementation using the existing Rayleigh
+kernel. Preparation is cold; callbacks allocate nothing in the alignment layer.
+The compensated multi-source sum still preserves weak signed pressures at
+destructive interference. Original finite horizons, unflushed tails and failed
+callback poisoning remain in force.
+
+Five new native regressions passed using analytic monopole receiver potentials
+through the original derivative, physical propagation, 3x/6x decimators and
+ensemble runtime. Relative waveform error stayed below 1.501e-4 through 0.45 of
+the output rate with the full 139-sample common numerical delay retained.
+They also cover an integral member sharing fractional reconstruction, callback
+partition equality, source sample accounting, a 2^-60 pressure between cancelling
+sources, integer-path parity, band refusal and complete-history limits. All 23
+original shared decimator/path/delay tests passed. This bounded native build
+retained the actual numerical/runtime owners and exercised original error
+variants, omitting unrelated voice facades and error payloads; it is not a full
+Cargo or mechanical integration gate.
+
 ## Bandlimited harmonic pressure from impacts
 
 The solver-neutral spherical-harmonic radiation bridge fits each channel

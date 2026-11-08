@@ -179,6 +179,9 @@ pub mod decimate;
 /// Output-clock adapters over the existing scheduled mechanics.
 pub mod observation;
 
+/// Fixed fractional delay shared by physical propagation and clock alignment.
+pub(crate) mod delay;
+
 #[cfg(test)]
 mod stereo_tests;
 
