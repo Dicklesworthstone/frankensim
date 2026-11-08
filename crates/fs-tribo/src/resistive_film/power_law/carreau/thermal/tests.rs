@@ -6,14 +6,14 @@ use fs_material::fluid_transport::rheology::{
 };
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
-const WIDTH: f64 = 0.01;
-const LENGTH: f64 = 0.02;
-const GAP: f64 = 2e-4;
+pub(super) const WIDTH: f64 = 0.01;
+pub(super) const LENGTH: f64 = 0.02;
+pub(super) const GAP: f64 = 2e-4;
 const MU: f64 = 0.1;
 const ACTIVATION: f64 = 12_000.0;
 const GAS_CONSTANT: f64 = 8.314_462_618_153_24;
 
-fn near(a: f64, b: f64, abs: f64, rel: f64) {
+pub(super) fn near(a: f64, b: f64, abs: f64, rel: f64) {
     assert!(a.is_finite() && b.is_finite());
     assert!(
         (a - b).abs() <= abs + rel * a.abs().max(b.abs()),
@@ -21,7 +21,7 @@ fn near(a: f64, b: f64, abs: f64, rel: f64) {
     );
 }
 
-fn controls() -> ThermalFilmControls {
+pub(super) fn controls() -> ThermalFilmControls {
     ThermalFilmControls {
         temperature_tolerance_k: 1e-10,
         absolute_energy_tolerance_j: 2e-11,
@@ -31,7 +31,7 @@ fn controls() -> ThermalFilmControls {
     }
 }
 
-fn insulated() -> ThermalFilmBoundary {
+pub(super) fn insulated() -> ThermalFilmBoundary {
     ThermalFilmBoundary {
         prescribed_power_w: 0.0,
         bath_conductance_w_k: 0.0,
@@ -39,7 +39,12 @@ fn insulated() -> ThermalFilmBoundary {
     }
 }
 
-fn film(temperature: f64, nonlinear: bool, rate_shift: bool, supply: f64) -> CarreauFilm {
+pub(super) fn film(
+    temperature: f64,
+    nonlinear: bool,
+    rate_shift: bool,
+    supply: f64,
+) -> CarreauFilm {
     let gap = GapPort {
         reference_m: GAP,
         closure: vec![1.0, 0.0, 0.0],
@@ -136,7 +141,7 @@ fn body(
     .unwrap()
 }
 
-fn viscosity(t: f64, rate: f64, nonlinear: bool, rate_shift: bool) -> f64 {
+pub(super) fn viscosity(t: f64, rate: f64, nonlinear: bool, rate_shift: bool) -> f64 {
     let shift = (ACTIVATION / GAS_CONSTANT * (1.0 / t - 1.0 / 300.0)).exp();
     if !nonlinear {
         return MU * shift;
@@ -170,7 +175,7 @@ fn heat_integral(knots: &[[f64; 2]], initial: f64, final_t: f64) -> f64 {
     sum
 }
 
-fn independent_root(mut low: f64, mut high: f64, residual: impl Fn(f64) -> f64) -> f64 {
+pub(super) fn independent_root(mut low: f64, mut high: f64, residual: impl Fn(f64) -> f64) -> f64 {
     assert!(residual(low) <= 0.0 && residual(high) >= 0.0);
     for _ in 0..80 {
         let mid = low + 0.5 * (high - low);

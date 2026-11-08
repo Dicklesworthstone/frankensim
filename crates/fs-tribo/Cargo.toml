@@ -13,6 +13,11 @@ fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-rand = { path = "../fs-rand" }
 
+[dev-dependencies]
+fs-matdb = { path = "../fs-matdb" }
+fs-evidence = { path = "../fs-evidence" }
+fs-qty = { path = "../fs-qty" }
+
 [features]
 # Benchmark tangential laws (M4.2-W4). Only dev-dependencies may enable it;
 # tests/benchmark_laws.rs asserts that no crate does so in [dependencies].

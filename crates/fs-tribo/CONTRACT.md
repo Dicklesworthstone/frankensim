@@ -2334,6 +2334,55 @@ Endpoint-only gap/pressure failures, unsupported initial squeeze, work limits,
 stiff cooling and late cancellation preserve exact retry. Existing full-film
 and cavitation regressions remain applicable to their mechanical/mass owners.
 
+## Open Carreau films with changing liquid mass and donor enthalpy
+
+`resistive_film::carreau::thermal::open::OpenThermalCarreauFilm` couples the
+existing moving full-film pressure/temperature solve to actual supply and return
+enthalpy. One original `ResolvedHeatCapacityCurve` supplies liquid density,
+Cp(T), support and source receipts. The entire chart must be liquid at the same
+positive density, consistent with incompressible Reynolds continuity. Retained
+mass is that density times the original resolved cell volumes; hydraulic
+passages retain no independent storage. The existing recirculating owner keeps
+its authored fixed thermal inventory and behavior.
+
+Every exterior channel has a held supply temperature in the original caloric
+support. The accepted native flow determines its actual donor: inflow carries
+reservoir enthalpy and outflow carries film-midpoint enthalpy. Reversal changes
+that donor without changing topology or fabricating return conditions. Original
+pressure, squeeze and sliding work already becomes native viscous heat; pressure
+flow work is not added again to sensible advection.
+
+Write `dh(a,b)=h(b)-h(a)`, `Tm=(T0+T1)/2`, `dm=m1-m0`, with positive
+incoming/outgoing transported masses and total viscous/prescribed/bath heat Q.
+The bounded shared root solves
+`R=m1*dh(T0,T1)-dm*dh(T0,Tm)-Q-sum_in(min*dh(Tm,Tin))=0`.
+For the reported mass residual `delta_m=dm+sum_out(mout)-sum_in(min)`,
+`R+delta_m*dh(T0,Tm)` is the full per-step energy residual. A retained initial
+reference temperature Tref provides a continuing storage/port ledger whose
+residual is `R+delta_m*dh(Tref,Tm)`. Both complete balances and the reduced root
+must pass the energy gate. All caloric work uses native original-law enthalpy
+differences, avoiding subtraction of a large arbitrary absolute datum. A mass
+defect is reported and gated; it never becomes physical heat.
+
+The returned proposal retains endpoint geometry, liquid mass, temperature,
+original source and clock together. Per-reservoir signed transferred mass,
+sensible energy and actual donor temperature let a surrounding reservoir owner
+propose its matching update. The retained reference survives subsequent steps.
+Original midpoint mechanics, physical endpoint admission, bounded thermal work,
+source limits and transactional output publication remain shared with the
+recirculating owner. Root iterations reuse bounded scratch; per-port receipts
+are allocated only for the accepted proposal.
+
+This model assumes one full-film liquid, uniform mixed temperature, constant
+density and the chart's fixed pressure/composition caloric convention. It does
+not supply spatial heat transport, cavitated-streamer heat, phase change,
+thermal expansion, compressibility or automatic finite-reservoir evolution.
+Focused regressions compare hot and reversed through-flow, squeeze expulsion
+and two-source refill with independent Arrhenius/Reynolds caloric balances;
+they also cover nonlinear flow across original Cp knots, large-datum invariance,
+continuing changing-mass storage, incompatible sources, invalid donor/gap/work
+proposals and late cancellation with exact retry.
+
 ## Original thermal Carreau Reynolds films
 
 `resistive_film::carreau::CarreauFilm` couples original
