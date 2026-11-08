@@ -4,6 +4,9 @@ use fs_ga::{Mat3, So3, So3Tangent, Vec3};
 use fs_time::lie::gyrostat::{HeldTorque, InertiaTensor3};
 use fs_time::lie::viscous::pair::ViscousPairStepper;
 
+type PreparePair =
+    fn([InertiaTensor3; 2], Mat3, f64) -> Result<ViscousPairStepper, fs_time::lie::LieStepError>;
+
 fn diagonal(x: f64, y: f64, z: f64) -> Mat3 {
     Mat3 {
         m: [x, 0.0, 0.0, 0.0, y, 0.0, 0.0, 0.0, z],
@@ -53,12 +56,8 @@ fn check_balances(step: &fs_time::lie::viscous::pair::ViscousPairStep, tolerance
 
 #[test]
 fn reciprocal_transverse_work_survives_dominant_common_spin_energy() {
-    let stepper = ViscousPairStepper::new(
-        [sphere(2.0); 2],
-        diagonal(2e40, 0.0, 0.0),
-        1e-40,
-    )
-    .unwrap();
+    let stepper =
+        ViscousPairStepper::new([sphere(2.0); 2], diagonal(2e40, 0.0, 0.0), 1e-40).unwrap();
     let initial = [Vec3::new(2.0, 0.0, 1e20), Vec3::new(0.0, 0.0, 1e20)];
     let step = stepper
         .step(
@@ -298,11 +297,20 @@ fn reference() -> Reference {
 
 #[test]
 fn full_tensors_and_both_moving_frames_refine_against_independent_euler_rk4() {
+    check_full_tensor_refinement(ViscousPairStepper::new);
+}
+
+#[test]
+fn exponential_full_tensors_refine_against_independent_euler_rk4() {
+    check_full_tensor_refinement(ViscousPairStepper::new_exponential);
+}
+
+fn check_full_tensor_refinement(prepare: PreparePair) {
     let inertias = matrices().map(|m| InertiaTensor3::new(m).unwrap());
     let reference = reference();
     let mut errors = Vec::new();
     for count in [8, 16, 32] {
-        let stepper = ViscousPairStepper::new(inertias, full_drag(), 0.8 / count as f64).unwrap();
+        let stepper = prepare(inertias, full_drag(), 0.8 / count as f64).unwrap();
         let mut rotations = initial_rotations();
         let mut momenta = [
             inertias[0].momentum(Vec3::new(0.6, -0.3, 0.7)).unwrap(),
@@ -366,6 +374,15 @@ fn full_tensors_and_both_moving_frames_refine_against_independent_euler_rk4() {
 
 #[test]
 fn independent_material_labels_and_common_world_rotation_preserve_pair_physics() {
+    check_frame_changes(ViscousPairStepper::new);
+}
+
+#[test]
+fn exponential_pair_respects_independent_material_and_world_frames() {
+    check_frame_changes(ViscousPairStepper::new_exponential);
+}
+
+fn check_frame_changes(prepare: PreparePair) {
     let principal = [Vec3::new(2.0, 3.0, 4.0), Vec3::new(1.5, 2.5, 3.5)];
     let principal_axes = [So3::identity(), rotation(Vec3::new(0.2, 0.1, -0.3))];
     let inertias = core::array::from_fn(|i| {
@@ -384,8 +401,8 @@ fn independent_material_labels_and_common_world_rotation_preserve_pair_physics()
         .matrix()
         .compose(full_drag())
         .compose(basis[0].matrix().transpose());
-    let original = ViscousPairStepper::new(inertias, full_drag(), 0.025).unwrap();
-    let changed = ViscousPairStepper::new(changed_inertias, changed_damping, 0.025).unwrap();
+    let original = prepare(inertias, full_drag(), 0.025).unwrap();
+    let changed = prepare(changed_inertias, changed_damping, 0.025).unwrap();
     let mut rotations = initial_rotations();
     let mut changed_rotations = core::array::from_fn(|i| {
         world

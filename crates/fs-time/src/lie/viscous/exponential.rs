@@ -18,14 +18,14 @@ pub(super) struct ExponentialRelaxation {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct Response {
-    decay_change: f64,
-    response: f64,
-    integrated_response: f64,
+pub(super) struct Response {
+    pub(super) decay_change: f64,
+    pub(super) response: f64,
+    pub(super) integrated_response: f64,
     // Two squares integrate each mode's heat, avoiding cancellation between
     // initial/forcing terms, including exact equilibrium and weak relaxation.
-    heat_mean: [f64; 2],
-    heat_deviation: [f64; 2],
+    pub(super) heat_mean: [f64; 2],
+    pub(super) heat_deviation: [f64; 2],
 }
 
 impl ExponentialRelaxation {
@@ -197,7 +197,7 @@ impl ExponentialRelaxation {
 }
 
 impl Response {
-    fn prepare(rate: f64, h: f64) -> Result<Self, LieStepError> {
+    pub(super) fn prepare(rate: f64, h: f64) -> Result<Self, LieStepError> {
         if rate == 0.0 {
             return Ok(Self {
                 response: h,

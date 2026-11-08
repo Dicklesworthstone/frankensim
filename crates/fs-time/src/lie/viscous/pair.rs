@@ -6,25 +6,31 @@
 //! r^T D r. External drives, internal transfer work, physical heat and native
 //! free-flow energy defects have separate accounts.
 //!
-//! Two midpoint torque half-stages surround the original compensated free
+//! The default midpoint torque half-stages surround the original compensated free
 //! motion of BOTH bodies. At each actual endpoint configuration the relative
 //! mobility K = I0^-1 + Q I1^-1 Q^T is factored by native Cholesky. A second
 //! 3-by-3 SPD solve determines the common impulse, including semidefinite D.
 //! There is no iteration, numerical Jacobian, per-step eigensolve or D inverse.
+//! The optional exponential preparation instead integrates each frozen-attitude
+//! torque stage exactly, without the midpoint relaxation-number restriction.
 
 use super::{
     Dd, HeldTorque, InertiaTensor3, LieStepError, Mat3, So3, Vec3, Vector, add, admit_damping,
-    apply, cholesky, compensated, components, dd, dot, drive_at, energy_change, held, invalid, rounded,
-    scalar, subtract, to_space, velocity,
+    apply, cholesky, compensated, components, dd, dot, drive_at, energy_change, held, invalid,
+    rounded, scalar, subtract, to_space, velocity,
 };
+
+#[path = "pair/exponential.rs"]
+mod exponential;
 
 /// Two fixed positive inertia tensors, a material damping tensor and interval.
 ///
-/// Preparation caches inertia-normalized principal mobility columns. Each
-/// step uses two native 3-by-3 Cholesky factorizations and one solve per torque
+/// Preparation caches inertia-normalized principal mobility columns. The
+/// default midpoint step uses two native 3-by-3 Cholesky factors and one solve per torque
 /// half-stage. Those four small factors use the native owner's bounded heap
 /// storage; no dense six-body-coordinate system or generic nonlinear solver
 /// is introduced.
+/// `new_exponential` selects the stiff-relaxation path described below.
 ///
 /// The coupler's orientation is attached to body 0. This is a smooth viscous
 /// rotational element, without a joint constraint, translational forces,
@@ -37,6 +43,8 @@ pub struct ViscousPairStepper {
     half_s: f64,
     reference_moment: f64,
     mobility_columns: [[Vector; 3]; 2],
+    exponential: bool,
+    cached_exponential: Option<exponential::PreparedExchange>,
 }
 
 /// One body's accepted motion and its separate source/transfer accounts.
@@ -71,7 +79,9 @@ pub struct ViscousPairBodyStep {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViscousPairStep {
     pub bodies: [ViscousPairBodyStep; 2],
-    /// Sum(s * r_mid^T D r_mid) over both torque half-stages [J].
+    /// Integrated relative-slip work over both torque half-stages [J].
+    /// Midpoint preparation uses s * r_mid^T D r_mid; exponential preparation
+    /// integrates the frozen-attitude linear relaxation analytically.
     /// Nonnegative mechanical dissipation, with no assigned heat destination.
     pub dissipated_energy_j: f64,
     /// Total spatial momentum change minus the two external drives [N m s].
@@ -128,7 +138,46 @@ impl ViscousPairStepper {
             half_s,
             reference_moment,
             mobility_columns,
+            exponential: false,
+            cached_exponential: None,
         })
+    }
+
+    /// Prepare exact frozen-attitude viscous exchange, including stiff drag.
+    ///
+    /// The full relative mobility and damping are reduced to three symmetric
+    /// relaxation modes at each actual endpoint attitude. One native Cholesky
+    /// factor and eigensolve replace the two midpoint factors; no D inverse,
+    /// six-coordinate approximation or clipping changes the physical law.
+    /// Spherical pairs cache this preparation once, so their viscous stages
+    /// allocate nothing and evaluate no eigenproblem or exponential function.
+    /// The surrounding native free rotations retain their usual arithmetic.
+    ///
+    /// Exponential response integrates reciprocal impulse, held-drive work,
+    /// signed transfer work and nonnegative slip heat. The existing compensated
+    /// free flows retain their separate numerical energy defects. Relaxation
+    /// has no midpoint sign reversal or relaxation-number cutoff, but the outer
+    /// split remains second order: refine the step for attitude, tumbling and
+    /// spatially held drive reorientation. Zero drag uses the original path.
+    pub fn new_exponential(
+        inertia: [InertiaTensor3; 2],
+        damping_first_body: Mat3,
+        duration_s: f64,
+    ) -> Result<Self, LieStepError> {
+        let mut stepper = Self::new(inertia, damping_first_body, duration_s)?;
+        stepper.exponential = true;
+        if damping_first_body.max_abs() != 0.0
+            && inertia.iter().all(|body| {
+                let moments = body.principal_moments();
+                moments.x == moments.y && moments.y == moments.z
+            })
+        {
+            stepper.cached_exponential = Some(exponential::PreparedExchange::prepare(
+                &stepper,
+                [So3::identity(); 2],
+            )?);
+        }
+        Ok(stepper)
     }
 
     pub const fn duration_s(&self) -> f64 {
@@ -145,8 +194,8 @@ impl ViscousPairStepper {
     /// Each drive may independently be held in its body's material frame or
     /// in space. Spatial drives are transformed at BOTH actual endpoint
     /// attitudes. Both momenta retain DD impulse tails through native free
-    /// drift. Source work and relative-slip heat use the accepted midpoint
-    /// rates, with local constitutive/work checks before publication.
+    /// drift. Source work and relative-slip heat use the actual midpoint or
+    /// exponential response, with local constitutive/work checks before return.
     ///
     /// The symmetric composition is second order for this smooth law. Every
     /// input is supplied by value; invalid data, unresolved mobility/decay or
@@ -250,6 +299,9 @@ impl ViscousPairStepper {
         momentum: [Vector; 2],
         drives: [HeldTorque; 2],
     ) -> Result<PairStage, LieStepError> {
+        if self.exponential && self.damping_first_body.max_abs() != 0.0 {
+            return self.exponential_stage(rotations, momentum, drives);
+        }
         let before = [
             velocity(self.inertia[0], momentum[0])?,
             velocity(self.inertia[1], momentum[1])?,
@@ -390,28 +442,7 @@ impl ViscousPairStepper {
     }
 
     fn coupling_impulse(&self, rotations: [So3; 2], g: Vector) -> Result<Vector, LieStepError> {
-        // Columns satisfy sum(c c^T) = I_ref K. Normalizing inertia BEFORE
-        // building mobility avoids an overflowing inverse for tiny inertias.
-        let mut columns = [[Dd::ZERO; 3]; 6];
-        columns[..3].copy_from_slice(&self.mobility_columns[0]);
-        for axis in 0..3 {
-            columns[3 + axis] = compensated::spatial_vector_to_body(
-                rotations[0],
-                to_space(rotations[1], self.mobility_columns[1][axis])?,
-            )?;
-        }
-        let mut mobility = [0.0; 9];
-        for i in 0..3 {
-            for j in 0..=i {
-                let mut entry = Dd::ZERO;
-                for column in columns {
-                    entry = entry + column[i] * column[j];
-                }
-                let entry = scalar(entry.to_f64(), "viscous pair relative mobility")?;
-                mobility[3 * i + j] = entry;
-                mobility[3 * j + i] = entry;
-            }
-        }
+        let mobility = self.relative_mobility(rotations)?;
         let factor = cholesky(&mobility, 3)
             .map_err(|_| invalid("resolved positive viscous pair mobility"))?;
         let lower: [Vector; 3] =
@@ -469,6 +500,32 @@ impl ViscousPairStepper {
             )?;
         }
         Ok(apply(self.damping_first_body, relative_midpoint)?.map(|v| dd(-self.half_s) * v))
+    }
+
+    fn relative_mobility(&self, rotations: [So3; 2]) -> Result<[f64; 9], LieStepError> {
+        // Columns satisfy sum(c c^T) = I_ref K. Normalizing inertia BEFORE
+        // building mobility avoids an overflowing inverse for tiny inertias.
+        let mut columns = [[Dd::ZERO; 3]; 6];
+        columns[..3].copy_from_slice(&self.mobility_columns[0]);
+        for axis in 0..3 {
+            columns[3 + axis] = compensated::spatial_vector_to_body(
+                rotations[0],
+                to_space(rotations[1], self.mobility_columns[1][axis])?,
+            )?;
+        }
+        let mut mobility = [0.0; 9];
+        for i in 0..3 {
+            for j in 0..=i {
+                let mut entry = Dd::ZERO;
+                for column in columns {
+                    entry = entry + column[i] * column[j];
+                }
+                let entry = scalar(entry.to_f64(), "viscous pair relative mobility")?;
+                mobility[3 * i + j] = entry;
+                mobility[3 * j + i] = entry;
+            }
+        }
+        Ok(mobility)
     }
 }
 

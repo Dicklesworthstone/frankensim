@@ -597,15 +597,27 @@ where claimed below.
   recoil/phase/work/heat and Euler/quaternion RK4 refinement, independent
   material/world covariance, zero-drag parity, common-spin/passivity and
   invalid or unresolved input.
-  The complete crate and first pair revision compiled with the pinned native
-  compiler and original cached dependencies. Five of six pair groups and all
-  five stationary-viscous regressions passed. The analytic driven group
-  exposed a component-relative constitutive refusal; the final check also
-  includes the local common-coupling vector scale for frame/solve arithmetic,
-  with the same numerical multiplier and no background-momentum or absolute
-  floor. Per-body work checks remain separate. Executor loss prevented
-  recompiling/rerunning this final correction, so final native acceptance and
-  a Cargo/DSR gate are not claimed.
+  The corrected local constitutive check includes the common-coupling vector
+  scale for frame/solve arithmetic, with no background-momentum or absolute
+  floor; per-body work checks remain separate. Its analytic driven regression
+  now passes in the focused native pair suite.
+  `ViscousPairStepper::new_exponential` adds exact frozen-attitude exchange
+  for stiff finite-body coupling, retaining the original midpoint constructor
+  and receipts. Inertia-normalized relative mobility reduces the complete
+  two-body law to three symmetric relaxation modes, without a damping inverse,
+  eigenvalue clipping or diagonal body approximation. Each actual endpoint
+  uses one native Cholesky factor and eigensolve. Spherical pairs cache this
+  preparation: their viscous stages allocate nothing and evaluate no eigensolve
+  or exponential function. Reciprocal impulses, both held-drive works and
+  signed transfer works use the integrated response. Independent positive-square
+  slip heat is weighted before squaring to retain finite extreme-scale work.
+  Native free rotations and numerical energy defects remain separate. The
+  outer composition is second order and still requires attitude/tumbling
+  refinement. Fifteen pair tests cover stiff analytic recoil/work/heat, full
+  tensors, independent Euler/quaternion convergence, coordinate covariance,
+  weak/zero drag and numerical scaling. Sixteen existing single-body damping
+  tests also pass through the focused actual-source native tests; this does
+  not establish a full workspace Cargo/DSR gate.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
