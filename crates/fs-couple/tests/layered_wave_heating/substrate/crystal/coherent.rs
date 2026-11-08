@@ -376,3 +376,6 @@ fn coherent_crystal_heat_preserves_geometry_source_budgets_and_atomic_cancellati
     ).unwrap();
     assert!(core::ptr::eq(check.illumination(), &illumination));
 }
+
+#[path = "coherent/partial.rs"]
+mod partial;

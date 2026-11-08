@@ -481,6 +481,33 @@ local-field volume/six-face integral, original depth refinement, authored-only
 darkness, native temperature evolution, work/storage limits and cancellation.
 Native Rust execution is required before claiming those regressions passed.
 
+`PreparedPartiallyCoherentCrystalHeating` extends that finite-footprint adapter
+to an original `AbsorbingCrystalPartiallyCoherentIllumination`. Each factor is
+a coherent angular field with all beam/eigenmode cross terms; independent
+factors add expected powers and may use different physical frequencies.
+Their peak field amplitudes already contain square-root statistical weights.
+No incoherence is imposed inside a factor, and no hidden spectral bandwidth,
+second weight or deterministic beat term is invented between factors.
+
+Both adapters share the same private native-cell geometry, material admission,
+six-face reduction and single heat-debit implementation. Work admission counts
+cells times the sum of each factor's squared transmitted-mode count; the EM
+owner separately bounds factor traversal, including empty factors. Storage
+includes the public owner and cell watts plus peak sequential EM-query or
+thermal-adapter scratch. Repeated accepted intervals reuse cached mean watts.
+
+The source, exact interface, thermal material cards, fixed query axes and cell
+IDs retain their original owners. Expected dielectric heat drives the native
+deterministic thermal candidate; for nonlinear laws this does not assert an
+ensemble-mean temperature. Face flux and numerical residual stay outside the
+heat additions. The held optical state, planar depth thermal resolution and
+atomic cancellation limitations of the coherent adapter remain unchanged.
+Regressions vary coherence from anti-phase to incoherent to in-phase at fixed
+beam power, compare analytic footprint visibility and native temperatures,
+combine distinct optical frequencies, preserve all six face energies, and
+exercise exact budgets, material refusal, darkness and cancellation.
+Native Rust execution is required before claiming those regressions passed.
+
 ## Full-coordinate material shells with two-sided open radiation
 
 `tensor_shell_radiation::open::OpenTensorShellRadiation` binds the original

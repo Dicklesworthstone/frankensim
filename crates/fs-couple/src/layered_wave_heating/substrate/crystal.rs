@@ -34,7 +34,7 @@ pub use illumination::PreparedCrystalIlluminationHeating;
 pub mod coherent;
 pub use coherent::{
     CoherentCrystalWaveEnergy, CoherentCrystalWavePower, CoherentCrystalWaveStep,
-    PreparedCoherentCrystalHeating,
+    PreparedCoherentCrystalHeating, PreparedPartiallyCoherentCrystalHeating,
 };
 
 /// Finite absorbing crystal films on the same thermal-cell owner.

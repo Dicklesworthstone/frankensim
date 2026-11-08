@@ -15,7 +15,7 @@ use super::{
     BoundLayeredThermalBody, CellId, DepositionSimulation, LayerConductionConfig,
     LayeredThermalSolveControls, LayeredThermalWorkspace, LayeredWaveHeatingError,
     SubstrateCellPower, SubstrateWaveHeatingLimits, admit_crystal_material, invalid, poll,
-    reserve,
+    reserve, ResolvedMaterialStatePoint,
 };
 use super::super::advance_cell_heat_to;
 use fs_em::plane_wave::uniaxial::oriented::absorbing::{
@@ -24,7 +24,8 @@ use fs_em::plane_wave::uniaxial::oriented::absorbing::{
 use fs_material::thermal::transport::stack::transient::implicit::LayeredThermalSolveReport;
 use fs_math::dd::Dd;
 
-/// Signed cycle-mean optical flow through the actual finite control volume.
+/// Signed mean optical flow through the actual finite control volume.
+/// Independent coherent factors contribute their expected powers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoherentCrystalWavePower {
     /// Outward watts at [x_min, x_max, y_min, y_max, z_min, z_max].
@@ -54,6 +55,10 @@ pub struct CoherentCrystalWaveStep<'t> {
     pub cell_energy_j: Vec<(CellId, f64)>,
 }
 
+/// Expected heat from independent coherent angular/spectral factors.
+pub mod partial;
+pub use partial::PreparedPartiallyCoherentCrystalHeating;
+
 /// Cached coherent cell watts from the original crystal, illumination and body.
 ///
 /// Preparation integrates all (2 * components)^2 transmitted-mode pairs in
@@ -63,11 +68,7 @@ pub struct CoherentCrystalWaveStep<'t> {
 pub struct PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 'a> {
     illumination: &'p AbsorbingCrystalCoherentIllumination<'f, 's, 'm>,
     thermal: &'b BoundLayeredThermalBody<'a>,
-    region: AbsorbingCrystalBox,
-    cells: Vec<SubstrateCellPower>,
-    power: CoherentCrystalWavePower,
-    mode_cell_pairs: usize,
-    workspace_bytes: usize,
+    prepared: PreparedCrystalBoxCells,
 }
 
 impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 'a> {
@@ -89,6 +90,125 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
         footprint_extent_m: [f64; 2],
         depth_start_m: f64,
         limits: SubstrateWaveHeatingLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, LayeredWaveHeatingError> {
+        let prepared = PreparedCrystalBoxCells::try_new(
+            thermal, illumination, footprint_origin_m, footprint_extent_m,
+            depth_start_m, limits, core::mem::size_of::<Self>(), cancelled,
+        )?;
+        Ok(Self { illumination, thermal, prepared })
+    }
+
+    pub const fn source(&self) -> &'p AbsorbingCrystalCoherentIllumination<'f, 's, 'm> {
+        self.illumination
+    }
+
+    pub const fn thermal_body(&self) -> &'b BoundLayeredThermalBody<'a> {
+        self.thermal
+    }
+
+    pub const fn region(&self) -> &AbsorbingCrystalBox {
+        &self.prepared.region
+    }
+
+    pub fn cells(&self) -> &[SubstrateCellPower] {
+        &self.prepared.cells
+    }
+
+    pub const fn power(&self) -> CoherentCrystalWavePower {
+        self.prepared.power
+    }
+
+    pub const fn preparation_mode_cell_pairs(&self) -> usize {
+        self.prepared.mode_cell_pairs
+    }
+
+    pub const fn workspace_bytes(&self) -> usize {
+        self.prepared.workspace_bytes
+    }
+
+    /// Add cached cell heat once on the original accepted thermal clock.
+    /// Face energies remain an optical account, separate from dielectric heat.
+    /// Failure/cancellation preserves the supplied initial state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_to<'t>(
+        &self,
+        initial: &DepositionSimulation<'t>,
+        target_s: f64,
+        conduction: LayerConductionConfig,
+        controls: LayeredThermalSolveControls,
+        workspace: &mut LayeredThermalWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CoherentCrystalWaveStep<'t>, LayeredWaveHeatingError> {
+        self.prepared.advance_to(
+            self.thermal, initial, target_s, conduction, controls, workspace, cancelled,
+        )
+    }
+}
+
+// This private seam only accepts original EM owners. Both public adapters use
+// the same native cell geometry, material admission and single thermal debit.
+trait CrystalBoxSource {
+    fn material(&self) -> &ResolvedMaterialStatePoint;
+    fn mode_pairs(&self) -> Result<usize, LayeredWaveHeatingError>;
+    fn integrated_power(
+        &self,
+        region: AbsorbingCrystalBox,
+        limits: AbsorbingCrystalBoxLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CrystalBoxQuery, LayeredWaveHeatingError>;
+}
+
+struct CrystalBoxQuery {
+    absorbed_w: f64,
+    outward_face_w: [f64; 6],
+    workspace_bytes: usize,
+}
+
+impl CrystalBoxSource for AbsorbingCrystalCoherentIllumination<'_, '_, '_> {
+    fn material(&self) -> &ResolvedMaterialStatePoint {
+        self.source().crystal_response().material()
+    }
+
+    fn mode_pairs(&self) -> Result<usize, LayeredWaveHeatingError> {
+        self.component_count().checked_mul(2)
+            .and_then(|n| n.checked_mul(n))
+            .ok_or(invalid("coherent crystal modal-pair work overflows"))
+    }
+
+    fn integrated_power(
+        &self,
+        region: AbsorbingCrystalBox,
+        limits: AbsorbingCrystalBoxLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CrystalBoxQuery, LayeredWaveHeatingError> {
+        let result = self.box_absorption(region, limits, cancelled)?;
+        Ok(CrystalBoxQuery {
+            absorbed_w: result.absorbed_power_w(),
+            outward_face_w: result.outward_face_power_w(),
+            workspace_bytes: result.workspace_bytes(),
+        })
+    }
+}
+
+struct PreparedCrystalBoxCells {
+    region: AbsorbingCrystalBox,
+    cells: Vec<SubstrateCellPower>,
+    power: CoherentCrystalWavePower,
+    mode_cell_pairs: usize,
+    workspace_bytes: usize,
+}
+
+impl PreparedCrystalBoxCells {
+    #[allow(clippy::too_many_arguments)]
+    fn try_new(
+        thermal: &BoundLayeredThermalBody<'_>,
+        source: &impl CrystalBoxSource,
+        footprint_origin_m: [f64; 2],
+        footprint_extent_m: [f64; 2],
+        depth_start_m: f64,
+        limits: SubstrateWaveHeatingLimits,
+        owner_header_bytes: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
         poll(&mut cancelled)?;
@@ -109,17 +229,13 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
             Dd::from_f64(footprint_extent_m[0]) * Dd::from_f64(footprint_extent_m[1]),
             Dd::from_f64(area),
         )?;
-        let mode_pairs = illumination
-            .component_count()
-            .checked_mul(2)
-            .and_then(|n| n.checked_mul(n))
-            .ok_or(invalid("coherent crystal modal-pair work overflows"))?;
+        let mode_pairs = source.mode_pairs()?;
         let mode_cell_pairs = mode_pairs
             .checked_mul(count)
             .ok_or(invalid("coherent crystal cell work overflows"))?;
         let retained_bytes = count
             .checked_mul(core::mem::size_of::<SubstrateCellPower>())
-            .and_then(|n| n.checked_add(core::mem::size_of::<Self>()))
+            .and_then(|n| n.checked_add(owner_header_bytes))
             .ok_or(invalid("coherent crystal storage overflows"))?;
         let interval_bytes = count
             .checked_mul(core::mem::size_of::<f64>() + core::mem::size_of::<(CellId, f64)>())
@@ -134,7 +250,7 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
         }
         admit_crystal_material(
             thermal,
-            illumination.source().crystal_response().material(),
+            source.material(),
             &mut cancelled,
         )?;
 
@@ -167,10 +283,10 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
                     Dd::from_f64(region.volume_m3()),
                     Dd::from_f64(area) * width / Dd::from_f64(n as f64),
                 )?;
-                let result = illumination.box_absorption(region, query_limits, &mut cancelled)?;
-                query_bytes = query_bytes.max(result.workspace_bytes());
-                let watts = result.absorbed_power_w();
-                let faces = result.outward_face_power_w();
+                let result = source.integrated_power(region, query_limits, &mut cancelled)?;
+                query_bytes = query_bytes.max(result.workspace_bytes);
+                let watts = result.absorbed_w;
+                let faces = result.outward_face_w;
                 if !watts.is_finite()
                     || watts < 0.0
                     || faces.iter().any(|value| !value.is_finite())
@@ -218,8 +334,6 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
         }
         poll(&mut cancelled)?;
         Ok(Self {
-            illumination,
-            thermal,
             region,
             cells,
             power,
@@ -228,40 +342,13 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
         })
     }
 
-    pub const fn source(&self) -> &'p AbsorbingCrystalCoherentIllumination<'f, 's, 'm> {
-        self.illumination
-    }
-
-    pub const fn thermal_body(&self) -> &'b BoundLayeredThermalBody<'a> {
-        self.thermal
-    }
-
-    pub const fn region(&self) -> &AbsorbingCrystalBox {
-        &self.region
-    }
-
-    pub fn cells(&self) -> &[SubstrateCellPower] {
-        &self.cells
-    }
-
-    pub const fn power(&self) -> CoherentCrystalWavePower {
-        self.power
-    }
-
-    pub const fn preparation_mode_cell_pairs(&self) -> usize {
-        self.mode_cell_pairs
-    }
-
-    pub const fn workspace_bytes(&self) -> usize {
-        self.workspace_bytes
-    }
-
     /// Add the cached cell heat once on the original accepted thermal clock.
     /// Six signed face energies describe the optical account; only dielectric
     /// heat enters the native solve. Failure/cancellation preserves initial.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance_to<'t>(
+    fn advance_to<'t>(
         &self,
+        thermal: &BoundLayeredThermalBody<'_>,
         initial: &DepositionSimulation<'t>,
         target_s: f64,
         conduction: LayerConductionConfig,
@@ -270,7 +357,7 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
         cancelled: impl FnMut() -> bool,
     ) -> Result<CoherentCrystalWaveStep<'t>, LayeredWaveHeatingError> {
         let result = advance_cell_heat_to(
-            self.thermal,
+            thermal,
             &self.cells,
             initial,
             target_s,
