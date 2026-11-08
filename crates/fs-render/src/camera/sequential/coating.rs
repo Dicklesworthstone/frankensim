@@ -138,6 +138,7 @@ impl LensCoating {
     pub(super) fn fresnel_polarized(
         &self,
         wavelength_nm: f64,
+        reverse: bool,
         cosine: f64,
         eta_i: f64,
         eta_t: f64,
@@ -147,7 +148,7 @@ impl LensCoating {
             &descriptors[..self.layers.len()],
             self.wavelength_bounds_nm,
         )
-        .and_then(|stack| stack.fresnel_polarized(wavelength_nm, false, cosine, eta_i, eta_t))
+        .and_then(|stack| stack.fresnel_polarized(wavelength_nm, reverse, cosine, eta_i, eta_t))
         .map_err(|_| CameraError::SequentialLensOutsideModel)
     }
 }

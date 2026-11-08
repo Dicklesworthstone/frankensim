@@ -4893,6 +4893,35 @@ Focused regressions cover nonvisible mixed-film transport against the original
 owner, near-infrared quarter-wave cancellation, replacement domains, and
 effective-only timing and continuity.
 
+`LensGhostPath` and `SequentialLens::trace_ghost_ray` trace a deterministic
+sensor-to-scene path with exactly two interface reflections: first at the
+larger surface index, then at the smaller one. Other encounters transmit.
+The shared traversal uses the original Snell/Fresnel/Mueller owners, reverses
+both adjacent media and authored film order on return legs, tests every
+revisited clear aperture, and retains the actual repeated Beer, geometric,
+phase-index and qualified group-index path lengths. Spheres, conics and even
+aspheres use the same intersection owners in both axial directions; polynomial
+uniqueness remains admitted by its global slope bound. A pair visits
+`N + 2*(first-second)` surfaces, at most 94 for 32 faces, with bounded work and
+no per-ray heap allocation. Exact zero-reflection support contributes zero
+sample mass; a weak channel retained by native Jones coherence is not erased.
+
+`with_two_reflection_ghosts(direct_probability)` explicitly samples the
+incoherent sum of the direct image and all `N*(N-1)/2` first-order ghost pairs.
+The supplied probability controls proposal variance; original optics fixes
+ghost strength. The first uniform lens coordinate is partitioned into path
+intervals and remapped within the chosen interval, retaining the original
+conditional pupil measure. Its inverse path probability enters the camera's
+geometric/measure weight exactly once, including clipped zero-contribution
+paths. The proposal enters camera continuity; `without_ghosts` restores the
+original direct-only proposal and identity. Higher-reflection paths and
+coherent interference between bulk paths are excluded. Timed paths retain
+actual repeated bulk transit; active films and encountered TIR reflections
+refuse timing because their coherent interface delay is not modeled.
+Regressions cover analytic slab Fresnel/three-pass Beer and group delay,
+signed Stokes transport through reversed spectral films, bidirectional conic
+and polynomial hits, proposal measure, and the explicit direct-plus-pair sum.
+
 `LensSurface::try_new_aspheric` retains the original vertex curvature, a
 dimensionless conic constant and seven SI even-polynomial coefficients A4
 through A16. Excluding A2 keeps the paraxial reference curvature unchanged.
@@ -4923,11 +4952,11 @@ medium stack before transport.
 Depth is axial distance from the sensor, and surface normal/albedo AOVs remain
 available. Motion stays unavailable until a lens-aware inverse mapping exists.
 
-The film convention is direct sensor irradiance divided by
+The film convention is sensor irradiance divided by
 `pi*rear_clear_radius^2/rear_vertex_z^2`; multiplying by that factor recovers
 irradiance from a radiometric scene. Exposure, ISO and QE remain explicit.
-This finite-thickness direct-image model omits reflected ghosts,
-diffraction and autofocus. Its unweighted ray and optical-centre
+The direct-only proposal remains the default. This finite-thickness model
+omits diffraction and autofocus. Its unweighted ray and optical-centre
 projection entry points refuse; a distorted lens has no single projective
 centre. Pose animation retains the authored prescription and fixed focus.
 The rear sampling aperture is not an entrance-pupil measurement, so no f-number

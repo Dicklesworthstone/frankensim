@@ -10166,6 +10166,10 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     if let Some(lens) = camera.sequential_lens() {
         hasher.update(b"native-sequential-spectral-lens.v2");
         update_continuity_f64(hasher, lens.reference_wavelength_nm());
+        if let Some(probability) = lens.ghost_direct_probability() {
+            hasher.update(b"native-sequential-two-reflection-ghosts.v1");
+            update_continuity_f64(hasher, probability);
+        }
         if let Some(glass) = lens.sensor_medium() {
             // Preserve the original vacuum prescription's identity while
             // retaining the full immersed sensor law, including absorption.

@@ -234,6 +234,60 @@ fn aperture_misses_and_unqualified_crossings_remain_distinct() {
 }
 
 #[test]
+fn reverse_conic_and_polynomial_intersections_recover_known_geometry() {
+    let vertex = 0.1;
+    let direction = unit([0.02, -0.03, 1.0]);
+    let reverse = direction.map(|component| -component);
+    for (curvature, conic, coefficients) in [
+        (20.0, -0.7, [0.0; 7]),
+        (0.0, -1.0, [0.0; 7]),
+        (-12.0, 0.3, coefficients()),
+        (20.0, -0.7, coefficients()),
+    ] {
+        let profile = AsphericSurface::try_new(curvature, conic, coefficients, 0.015).unwrap();
+        for (x, y) in [(0.0, 0.0), (0.007, -0.004), (-0.004, 0.009)] {
+            let expected = [
+                x,
+                y,
+                vertex + independent_sag(curvature, conic, coefficients, x, y),
+            ];
+            let from_sensor = core::array::from_fn(|j| expected[j] - 0.07 * direction[j]);
+            let from_scene = core::array::from_fn(|j| expected[j] - 0.13 * reverse[j]);
+            let (forward_hit, forward_distance) = profile
+                .intersect(vertex, from_sensor, direction)
+                .unwrap()
+                .unwrap();
+            let (backward_hit, backward_distance) = profile
+                .intersect(vertex, from_scene, reverse)
+                .unwrap()
+                .unwrap();
+            close(forward_distance, 0.07, 3e-15);
+            close(backward_distance, 0.13, 3e-15);
+            for coordinate in 0..3 {
+                close(forward_hit[coordinate], expected[coordinate], 3e-15);
+                close(backward_hit[coordinate], expected[coordinate], 3e-15);
+            }
+        }
+    }
+}
+
+#[test]
+fn reverse_aperture_miss_and_unproved_crossing_remain_distinct() {
+    let profile = AsphericSurface::try_new(20.0, -0.7, coefficients(), 0.015).unwrap();
+    assert!(
+        profile
+            .intersect(0.1, [0.05, 0.0, 0.2], [0.0, 0.0, -1.0])
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        profile
+            .intersect(0.1, [0.0, 0.0, 0.2], unit([1.0, 0.0, -0.1]))
+            .is_err()
+    );
+}
+
+#[test]
 fn conic_domain_and_unrepresentable_prescriptions_refuse() {
     assert!(AsphericSurface::try_new(100.0, 0.0, [0.0; 7], 0.01).is_none());
     assert!(AsphericSurface::try_new(20.0, f64::NAN, [0.0; 7], 0.01).is_none());

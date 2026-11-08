@@ -149,7 +149,7 @@ impl AsphericSurface {
         if !vertex.is_finite() || origin.iter().chain(&direction).any(|v| !v.is_finite()) {
             return Err(());
         }
-        if direction[2] <= 0.0 {
+        if direction[2] == 0.0 {
             return Ok(None);
         }
         if self.departures == [0.0; 7] {
@@ -157,16 +157,18 @@ impl AsphericSurface {
         }
         // Extend sag constantly beyond the clear disk only for bracketing.
         // This preserves its global Lipschitz bound. If F'=dz-grad(sag).dxy
-        // is positive everywhere, the extension has exactly one axial root;
+        // has a fixed nonzero sign everywhere, the extension has exactly one axial root;
         // a root outside the disk then proves an aperture miss.
         let transverse = det::hypot(direction[0], direction[1]).next_up();
-        if (direction[2] - self.slope_bound * transverse).next_down() <= 0.0 {
+        if (direction[2].abs() - self.slope_bound * transverse).next_down() <= 0.0 {
             return Err(());
         }
+        let reverse = direction[2] < 0.0;
         let z_lo = (vertex + self.bounds[0]).next_down();
         let z_hi = (vertex + self.bounds[1]).next_up();
-        let mut lo = ((z_lo - origin[2]) / direction[2]).next_down().max(0.0);
-        let mut hi = ((z_hi - origin[2]) / direction[2]).next_up();
+        let (entry, exit) = if reverse { (z_hi, z_lo) } else { (z_lo, z_hi) };
+        let mut lo = ((entry - origin[2]) / direction[2]).next_down().max(0.0);
+        let mut hi = ((exit - origin[2]) / direction[2]).next_up();
         if !lo.is_finite() || !hi.is_finite() {
             return Err(());
         }
@@ -190,11 +192,15 @@ impl AsphericSurface {
                 let (sag, g) = self.evaluate(x.mul_add(x, y * y).min(1.0));
                 (sag, g * x.mul_add(direction[0], y * direction[1]))
             };
-            let residual = (Dd::from_f64(origin[2]) - Dd::from_f64(vertex)
+            let mut residual = (Dd::from_f64(origin[2]) - Dd::from_f64(vertex)
                 + Dd::from_f64(direction[2]) * Dd::from_f64(t)
                 - Dd::from_f64(sag))
             .to_f64();
-            let derivative = direction[2] - slope;
+            let mut derivative = direction[2] - slope;
+            if reverse {
+                residual = -residual;
+                derivative = -derivative;
+            }
             if !residual.is_finite() || !derivative.is_finite() || derivative <= 0.0 {
                 return Err(());
             }

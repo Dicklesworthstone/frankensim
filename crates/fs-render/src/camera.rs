@@ -56,8 +56,8 @@ pub use diffraction::{DispersiveThinLens, ThinLensElement};
 mod sequential;
 #[cfg(feature = "tracer")]
 pub use sequential::{
-    LensCoating, LensCoatingLayer, LensSurface, SequentialCameraBeam, SequentialCameraRay,
-    SequentialLens, SequentialLensRay,
+    LensCoating, LensCoatingLayer, LensGhostPath, LensSurface, SequentialCameraBeam,
+    SequentialCameraRay, SequentialLens, SequentialLensRay,
 };
 
 const PI: f64 = core::f64::consts::PI;
@@ -505,6 +505,8 @@ pub struct LensSample {
 impl LensSample {
     /// Conventional midpoint of the lens-sample square. It maps to the centre
     /// of a clear circular pupil, but remains on the opening of an annulus.
+    /// An opt-in sequential ghost proposal remaps this coordinate before pupil
+    /// sampling, as documented by `SequentialLens::with_two_reflection_ghosts`.
     pub const CENTER: Self = Self { u: 0.5, v: 0.5 };
 
     /// Admit two finite coordinates in `[0,1)`.

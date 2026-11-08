@@ -4,8 +4,10 @@
 //! surface is a spherical cap, conic/even asphere or plane, with an explicit
 //! clear aperture and the material on its scene side. Exterior media may be
 //! authored explicitly; the original constructor retains index-one exteriors.
-//! Only the direct transmitted image is modeled: reflected
-//! ghosts, diffraction and automatic focusing are separate models.
+//! The direct transmitted image is the default. An explicit proposal also
+//! admits incoherent two-reflection ghost paths through these same surfaces.
+//! Higher-order ghosts, coherent bulk etalons, diffraction and automatic
+//! focusing remain separate models.
 //!
 //! We sample the actual rear cap, not a guessed exit-pupil bounding box. The
 //! projected-area to sensor-solid-angle Jacobian retains obliquity and clipping
@@ -16,7 +18,7 @@ use std::sync::Arc;
 
 use super::{Aperture, CameraError, CameraProjection, LensSample, PhysicalCamera};
 use crate::charts::Ray;
-use crate::dielectric::{DielectricCoating, DielectricGlass, DielectricSurface, refract};
+use crate::dielectric::{DielectricCoating, DielectricGlass, DielectricSurface, reflect, refract};
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::transport::{PolarizationFrame, physical_roundoff};
 use fs_exec::Cx;
@@ -28,6 +30,9 @@ const LIGHT_M_S: f64 = 299_792_458.0;
 mod asphere;
 mod coating;
 pub use coating::{LensCoating, LensCoatingLayer};
+mod ghost;
+pub use ghost::LensGhostPath;
+use ghost::{GhostSampling, PathSteps};
 
 /// A rotationally symmetric surface, ordered from sensor to scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -276,14 +281,15 @@ impl LensSurface {
     }
 }
 
-/// The direct transmitted ray, with power losses retained along its real path.
+/// One transmitted image path, with power losses retained along its real path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SequentialLensRay {
     pub ray: Ray,
-    /// Unpolarized direct-image transmission. Polarization generated at one
-    /// interface is retained through the others; Fresnel averages are not
-    /// independently multiplied. Reciprocity gives the same unpolarized
-    /// power transmission from scene to sensor. This excludes the endpoint
+    /// Unpolarized image-path transmission, including any prescribed ghost
+    /// reflections. Polarization generated at one interface is retained through
+    /// the others; Fresnel averages are not independently multiplied.
+    /// Reciprocity gives the same unpolarized power transmission from scene to
+    /// sensor. This excludes the endpoint
     /// radiance factor applied by the physical-camera generators.
     pub transmittance: f64,
     /// Sensor-to-front-surface geometric path in metres.
@@ -298,9 +304,10 @@ pub struct SequentialCameraRay {
     pub ray: Ray,
     /// Authored local phase index required at the native scene launch.
     pub scene_phase_index: f64,
-    /// Direct sensor irradiance divided by `pi*rear_radius²/rear_vertex_z²`.
+    /// Sampled sensor irradiance divided by `pi*rear_radius²/rear_vertex_z²`.
     /// Includes exact sensor/cap obliquity, Fresnel loss, bulk absorption and
-    /// the sensor-to-scene phase-index-squared radiance factor.
+    /// the sensor-to-scene phase-index-squared radiance factor, and the inverse
+    /// selected path probability when two-reflection ghosts are enabled.
     /// This explicit aperture-normalized convention matches the existing film's
     /// radiance scale; exposure duration, ISO and sensor quantum efficiency are
     /// not silently applied. Multiply by that solid-angle normalization to
@@ -349,15 +356,17 @@ impl SequentialCameraBeam {
     pub const fn scene_phase_index(&self) -> f64 {
         self.scene_phase_index
     }
-    /// Sensor-to-front-surface group transit along the actual refracted path.
+    /// Sensor-to-front-surface group transit along the actual lens path,
+    /// including repeated bulk segments of an admitted ghost.
     /// Only explicit timed generation evaluates group indices and returns
     /// `Some`; ordinary steady generation never requires their derivatives.
     pub const fn group_delay_s(&self) -> Option<Dd> {
         self.group_delay_s
     }
-    /// Sensor/cap obliquity and projected-area sampling only. The same aperture
-    /// normalization as [`SequentialCameraRay::weight`] is used, but all lens
-    /// and analyzer transmission is already in [`Self::power`].
+    /// Sensor/cap obliquity, projected-area sampling, and the inverse selected
+    /// path probability when first-order ghost sampling is enabled. The same
+    /// aperture normalization as [`SequentialCameraRay::weight`] is used;
+    /// optical reflection/transmission and analyzer response are in [`Self::power`].
     pub const fn geometry_weight(&self) -> f64 {
         self.geometry_weight
     }
@@ -379,6 +388,7 @@ struct TracedLensBeam {
 pub struct SequentialLens {
     surfaces: Arc<[LensSurface]>,
     spectral_coatings: Option<Arc<[Option<LensCoating>]>>,
+    ghost_sampling: Option<GhostSampling>,
     sensor_medium: Option<DielectricGlass>,
     reference_wavelength_nm: f64,
     // Immutable bulk-only support allows replacing a visible compact coating
@@ -455,6 +465,7 @@ impl SequentialLens {
         Ok(Self {
             surfaces: Arc::from(surfaces),
             spectral_coatings: None,
+            ghost_sampling: None,
             sensor_medium,
             reference_wavelength_nm,
             bulk_wavelength_bounds_nm,
@@ -516,6 +527,43 @@ impl SequentialLens {
             .as_ref()?
             .get(surface_index)?
             .as_ref()
+    }
+
+    /// Enable the incoherent sum of the direct image and every two-interface
+    /// reflection ghost pair in this prescription. The direct probability is
+    /// finite and strictly between zero and one; the remaining mass is uniform
+    /// over all N*(N-1)/2 pairs. It controls sampling variance. Native Fresnel,
+    /// coating and Beer laws determine each path's physical optical strength.
+    ///
+    /// Physical-camera generators partition and remap the first lens-sample
+    /// coordinate into path choice plus a conditionally uniform pupil sample.
+    /// Their measure weight includes the inverse path probability exactly once.
+    /// Misses keep zero sample mass. A path visits at most 3N-2 surfaces, with
+    /// no per-ray allocation or intensity cutoff. Higher-reflection paths and
+    /// coherent interference between bulk paths are outside this model.
+    pub fn with_two_reflection_ghosts(
+        mut self,
+        direct_probability: f64,
+    ) -> Result<Self, CameraError> {
+        self.ghost_sampling = Some(GhostSampling::try_new(
+            self.surfaces.len(),
+            direct_probability,
+        )?);
+        Ok(self)
+    }
+
+    /// Restore the original direct-only camera proposal.
+    #[must_use]
+    pub fn without_ghosts(mut self) -> Self {
+        self.ghost_sampling = None;
+        self
+    }
+
+    /// Direct-path probability of the explicit two-reflection proposal.
+    /// `None` retains the original direct-only model and sampling coordinates.
+    #[must_use]
+    pub fn ghost_direct_probability(&self) -> Option<f64> {
+        self.ghost_sampling.map(GhostSampling::direct_probability)
     }
 
     pub fn surfaces(&self) -> &[LensSurface] {
@@ -605,7 +653,49 @@ impl SequentialLens {
             }))
     }
 
+    /// Trace one deterministic two-reflection ghost without a sampling PDF.
+    /// Native spectral interface power and every actual bulk segment are
+    /// retained. This diagnostic does not depend on the camera proposal;
+    /// [`Self::trace_ray`] continues to return the direct transmitted path.
+    pub fn trace_ghost_ray(
+        &self,
+        cx: &Cx<'_>,
+        ray: Ray,
+        wavelength_nm: f64,
+        path: LensGhostPath,
+    ) -> Result<Option<SequentialLensRay>, CameraError> {
+        Ok(self
+            .trace_seeded_path(
+                cx,
+                ray,
+                wavelength_nm,
+                None,
+                Stokes::unpolarized(1.0),
+                false,
+                Some(path),
+            )?
+            .map(|beam| SequentialLensRay {
+                ray: beam.ray,
+                transmittance: beam.power.i,
+                distance_m: beam.distance_m,
+                optical_path_m: beam.optical_path_m,
+            }))
+    }
+
     fn trace_seeded_ray(
+        &self,
+        cx: &Cx<'_>,
+        ray: Ray,
+        wavelength_nm: f64,
+        reference_axis: Option<Vec3>,
+        power: Stokes,
+        timed: bool,
+    ) -> Result<Option<TracedLensBeam>, CameraError> {
+        self.trace_seeded_path(cx, ray, wavelength_nm, reference_axis, power, timed, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_seeded_path(
         &self,
         cx: &Cx<'_>,
         ray: Ray,
@@ -613,8 +703,12 @@ impl SequentialLens {
         reference_axis: Option<Vec3>,
         mut power: Stokes,
         timed: bool,
+        ghost: Option<LensGhostPath>,
     ) -> Result<Option<TracedLensBeam>, CameraError> {
         cx.checkpoint()?;
+        if ghost.is_some_and(|path| path.first_surface_index() >= self.surfaces.len()) {
+            return Err(CameraError::InvalidSequentialLens);
+        }
         let (lo, hi) = self.wavelength_bounds_nm;
         if !wavelength_nm.is_finite()
             || wavelength_nm <= 0.0
@@ -694,33 +788,50 @@ impl SequentialLens {
         let mut frame = PolarizationFrame::try_new(ray.dir, axis)
             .map_err(|_| CameraError::SequentialLensOutsideModel)?;
         let (mut distance_m, mut optical_path_m) = (0.0, 0.0);
-        for (i, surface) in self.surfaces().iter().enumerate() {
+        for step in PathSteps::new(self.surfaces.len(), ghost) {
             cx.checkpoint()?;
-            if ray.dir.z <= 0.0 {
+            if (!step.reverse && ray.dir.z <= 0.0) || (step.reverse && ray.dir.z >= 0.0) {
                 return Ok(None);
             }
+            let i = step.surface;
+            let surface = &self.surfaces[i];
             let Some((point, distance)) = surface.intersect(ray)? else {
                 return Ok(None);
             };
-            let normal = surface.normal(point)?;
+            let mut normal = surface.normal(point)?;
+            if step.reverse {
+                normal = normal.scale(-1.0);
+            }
+            let (incident, transmitted) = if step.reverse { (i + 1, i) } else { (i, i + 1) };
             let cosine = (-normal.dot(ray.dir)).clamp(0.0, 1.0);
             if cosine == 0.0 {
                 return Ok(None);
             }
             let response = match self.spectral_coating(i) {
-                Some(coating) => {
-                    coating.fresnel_polarized(wavelength_nm, cosine, indices[i], indices[i + 1])
-                }
+                Some(coating) => coating.fresnel_polarized(
+                    wavelength_nm,
+                    step.reverse,
+                    cosine,
+                    indices[incident],
+                    indices[transmitted],
+                ),
                 None => surface
                     .optical_surface
-                    .interface(wavelength_nm, false)
+                    .interface(wavelength_nm, step.reverse)
                     .and_then(|interface| {
-                        interface.fresnel_polarized(cosine, indices[i], indices[i + 1])
+                        interface.fresnel_polarized(cosine, indices[incident], indices[transmitted])
                     })
                     .map_err(|_| CameraError::SequentialLensOutsideModel),
             }?;
             if response.scalar.total_internal_reflection {
-                return Ok(None);
+                if !step.reflect {
+                    return Ok(None);
+                }
+                // Steady reflection retains the native evanescent s/p phase.
+                // Bulk transit alone cannot certify its dispersive delay.
+                if timed {
+                    return Err(CameraError::SequentialLensOutsideModel);
+                }
             }
             let cross = super::cross(ray.dir, normal);
             let s = if cross.x == 0.0 && cross.y == 0.0 && cross.z == 0.0 {
@@ -730,24 +841,41 @@ impl SequentialLens {
             };
             let incident_frame = PolarizationFrame::try_new(ray.dir, s)
                 .map_err(|_| CameraError::SequentialLensOutsideModel)?;
-            power = response
-                .transmission
-                .apply_diagonal_jones(frame.express_in(power, incident_frame));
-            let attenuation = det::exp(-extinction[i] * distance);
+            let input = frame.express_in(power, incident_frame);
+            let matrix = if step.reflect {
+                response.reflection
+            } else {
+                response.transmission
+            };
+            power = matrix.apply_diagonal_jones(input);
+            if step.reflect
+                && input.i > 0.0
+                && power.i == 0.0
+                && ghost::reflection_has_zero_support(matrix, input)
+            {
+                // A matched interface or extinguished polarization is a real
+                // zero-contribution branch, not Beer/throughput underflow.
+                return Ok(None);
+            }
+            let attenuation = det::exp(-extinction[incident] * distance);
             power = Stokes {
                 i: power.i * attenuation,
                 q: power.q * attenuation,
                 u: power.u * attenuation,
                 v: power.v * attenuation,
             };
-            let direction = refract(
-                ray.dir.scale(-1.0),
-                normal,
-                indices[i],
-                indices[i + 1],
-                response.scalar.transmitted_cosine,
-            )
-            .map_err(|_| CameraError::SequentialLensOutsideModel)?;
+            let direction = if step.reflect {
+                super::scaled_unit(reflect(ray.dir.scale(-1.0), normal))?
+            } else {
+                refract(
+                    ray.dir.scale(-1.0),
+                    normal,
+                    indices[incident],
+                    indices[transmitted],
+                    response.scalar.transmitted_cosine,
+                )
+                .map_err(|_| CameraError::SequentialLensOutsideModel)?
+            };
             frame = PolarizationFrame::try_new(direction, s)
                 .map_err(|_| CameraError::SequentialLensOutsideModel)?;
             ray = Ray {
@@ -755,9 +883,9 @@ impl SequentialLens {
                 dir: direction,
             };
             distance_m += distance;
-            optical_path_m += indices[i] * distance;
+            optical_path_m += indices[incident] * distance;
             if let Some(delay) = &mut group_delay_s {
-                *delay = *delay + segment_group_delay(group_indices[i], distance)?;
+                *delay = *delay + segment_group_delay(group_indices[incident], distance)?;
                 if !delay.hi.is_finite() || !delay.lo.is_finite() || delay.hi <= 0.0 {
                     return Err(CameraError::SequentialLensOutsideModel);
                 }
@@ -866,7 +994,8 @@ impl PhysicalCamera {
     /// rejection; the final scene exterior has no lens segment and is excluded.
     /// DD seconds retain each actual segment;
     /// phase optical path is never substituted for missing group information.
-    /// No interface residence time or coherent pulse reshaping is modeled.
+    /// No interface residence time or coherent pulse reshaping is modeled;
+    /// active films and encountered TIR ghost reflections refuse timing.
     pub fn generate_sequential_spectral_timed_beams_from_tangent_offsets<const N: usize>(
         &self,
         cx: &Cx<'_>,
@@ -1081,6 +1210,10 @@ impl PhysicalCamera {
             .sequential_lens
             .as_ref()
             .ok_or(CameraError::InvalidSequentialLens)?;
+        let (ghost, lens_sample, path_probability) = match lens.ghost_sampling {
+            Some(proposal) => proposal.sample(lens_sample)?,
+            None => (None, lens_sample, 1.0),
+        };
         let rear = &lens.surfaces()[0];
         let sensor = Point3::new(-x_tan * rear.vertex_z_m, -y_tan * rear.vertex_z_m, 0.0);
         let [x, y] = self.aperture.sample(lens_sample);
@@ -1095,6 +1228,10 @@ impl PhysicalCamera {
             * (rear.vertex_z_m / distance)
             * (rear.vertex_z_m / distance);
         if !geometry.is_finite() || geometry < 0.0 {
+            return Err(CameraError::SequentialLensOutsideModel);
+        }
+        let geometry = geometry / path_probability;
+        if !geometry.is_finite() {
             return Err(CameraError::SequentialLensOutsideModel);
         }
         let detector = detector.map(|(axis, rows)| {
@@ -1127,7 +1264,7 @@ impl PhysicalCamera {
             let (axis, power) = detector
                 .as_ref()
                 .map_or((None, Stokes::unpolarized(1.0)), |seeds| seeds[lane]);
-            if let Some(traced) = lens.trace_seeded_ray(
+            if let Some(traced) = lens.trace_seeded_path(
                 cx,
                 Ray {
                     origin: sensor,
@@ -1137,6 +1274,7 @@ impl PhysicalCamera {
                 axis,
                 power,
                 timed,
+                ghost,
             )? {
                 if geometry == 0.0 {
                     continue;

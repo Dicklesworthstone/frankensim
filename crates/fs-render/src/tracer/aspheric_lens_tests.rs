@@ -194,3 +194,31 @@ fn full_spectral_lens_continuity_binds_only_the_effective_ordered_films() {
         assert_eq!(expected, identity(&overridden));
     }
 }
+
+#[test]
+fn first_order_ghost_proposal_binds_progressive_camera_continuity() {
+    let direct = camera(0.0, [0.0; 7], false);
+    let with_ghosts = |probability| {
+        direct
+            .clone()
+            .with_sequential_lens(
+                direct
+                    .sequential_lens()
+                    .unwrap()
+                    .clone()
+                    .with_two_reflection_ghosts(probability)
+                    .unwrap(),
+            )
+            .unwrap()
+    };
+    let ghosts = with_ghosts(0.5);
+    assert_eq!(ghosts.focus_distance_m(), direct.focus_distance_m());
+    assert_ne!(identity(&ghosts), identity(&direct));
+    assert_eq!(identity(&ghosts), identity(&with_ghosts(0.5)));
+    assert_ne!(identity(&ghosts), identity(&with_ghosts(0.9)));
+    let restored = ghosts
+        .clone()
+        .with_sequential_lens(ghosts.sequential_lens().unwrap().clone().without_ghosts())
+        .unwrap();
+    assert_eq!(identity(&restored), identity(&direct));
+}
