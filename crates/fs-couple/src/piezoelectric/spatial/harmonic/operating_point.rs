@@ -18,7 +18,10 @@ use super::{
     HarmonicPiezoelectricResponse, ReactiveElectrodeLoad,
 };
 use fs_exec::Cx;
+use fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric;
 use fs_math::c64::C64;
+
+mod equilibrium;
 
 /// Solved, immutable DC equilibrium tied to the exact original model.
 /// Preparation retains relative potentials and boundary topology once, then
@@ -26,6 +29,8 @@ use fs_math::c64::C64;
 pub struct HarmonicOperatingPoint<'model, 'mesh> {
     model: &'model TetPiezoelectricModel<'mesh>,
     state: TetPiezoelectricSolution,
+    intrinsic_materials: Option<&'model [RelaxingTensorPiezoelectric]>,
+    bias_memory_energy_j: f64,
     relative_voltage_v: Vec<f64>,
     support_dofs: Vec<usize>,
     electrode_nodes: Vec<Vec<usize>>,
@@ -55,6 +60,8 @@ pub struct BiasedHarmonicResponse {
     pub harmonic: HarmonicPiezoelectricResponse,
     /// Steady body free energy [J], with no sinusoidal factor of one half.
     pub bias_stored_energy_j: f64,
+    /// Relaxed DC polarization memory already included in bias storage [J].
+    pub bias_memory_energy_j: f64,
     /// DC body free energy plus mean incremental body storage [J]. Does not
     /// include kinetic energy, external branch storage or caloric energy.
     pub average_total_stored_energy_j: f64,
@@ -119,6 +126,49 @@ impl<'mesh> TetPiezoelectricModel<'mesh> {
             cx,
         )
     }
+    /// Solve the relaxed DC equilibrium of the original Maxwell/Debye laws,
+    /// retaining those same immutable laws for every subsequent AC frequency.
+    /// Supply one uniform law or one per original tetrahedron, with the exact
+    /// source tensor/frame used by this model. Their source bands must admit
+    /// both zero frequency and every requested AC probe.
+    ///
+    /// DC uses epsilon_infinity plus the full directed Debye susceptibility;
+    /// Maxwell branch stresses have relaxed to zero. Actual DC polarization
+    /// storage is included once, without a sinusoidal averaging factor. This
+    /// creates no transient memory and does not authorize broadband transients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn harmonic_operating_point_with_relaxation<'model>(
+        &'model self,
+        intrinsic_materials: &'model [RelaxingTensorPiezoelectric],
+        prescribed_displacements_m: &[(usize, f64)],
+        electrodes: &[PiezoelectricElectrode<'_>],
+        nodal_forces_n: &[[f64; 3]],
+        nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<HarmonicOperatingPoint<'model, 'mesh>> {
+        let (state, full, memory_energy_j) = equilibrium::solve(
+            self,
+            intrinsic_materials,
+            prescribed_displacements_m,
+            electrodes,
+            nodal_forces_n,
+            nodal_free_charge_c,
+            controls,
+            cx,
+        )?;
+        let mut point = HarmonicOperatingPoint::from_static(
+            self,
+            state,
+            full,
+            prescribed_displacements_m,
+            electrodes,
+            cx,
+        )?;
+        point.intrinsic_materials = Some(intrinsic_materials);
+        point.bias_memory_energy_j = memory_energy_j;
+        Ok(point)
+    }
 }
 
 impl<'model, 'mesh> HarmonicOperatingPoint<'model, 'mesh> {
@@ -144,6 +194,8 @@ impl<'model, 'mesh> HarmonicOperatingPoint<'model, 'mesh> {
         Ok(Self {
             model,
             state,
+            intrinsic_materials: None,
+            bias_memory_energy_j: 0.0,
             relative_voltage_v: full[3 * model.nodes_m.len()..].to_vec(),
             support_dofs,
             electrode_nodes,
@@ -158,6 +210,16 @@ impl<'model, 'mesh> HarmonicOperatingPoint<'model, 'mesh> {
     /// Actual steady fields, forces, electrode charges and free-energy audit.
     pub const fn state(&self) -> &TetPiezoelectricSolution {
         &self.state
+    }
+
+    /// Original immutable intrinsic laws, retained without cloning or refitting.
+    pub const fn intrinsic_materials(&self) -> Option<&'model [RelaxingTensorPiezoelectric]> {
+        self.intrinsic_materials
+    }
+
+    /// Actual DC Debye memory energy, already included in state().stored_energy_j.
+    pub const fn bias_memory_energy_j(&self) -> f64 {
+        self.bias_memory_energy_j
     }
 
     /// Solve zero-mean perturbations about this prepared equilibrium. Mechanical
@@ -219,7 +281,7 @@ impl<'model, 'mesh> HarmonicOperatingPoint<'model, 'mesh> {
         let harmonic = self.model.solve_harmonic_internal(
             Some(self),
             omega_rad_s,
-            None,
+            self.intrinsic_materials,
             acoustic_ports,
             prescribed_displacements,
             electrodes,
@@ -397,6 +459,7 @@ impl<'model, 'mesh> HarmonicOperatingPoint<'model, 'mesh> {
         Ok(BiasedHarmonicResponse {
             harmonic,
             bias_stored_energy_j: self.state.stored_energy_j,
+            bias_memory_energy_j: self.bias_memory_energy_j,
             average_total_stored_energy_j,
             maximum_total_strain_norm,
             maximum_elastic_strain_norm,

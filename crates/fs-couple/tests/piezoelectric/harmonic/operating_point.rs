@@ -1,6 +1,9 @@
 //! G1/G3/G4: DC thermal bias and AC increments retain distinct physical roles.
 //! Uniform axial fields give exact capacitor, strain-envelope and acoustic
 //! power oracles without inferring a measured ceramic or a continuum accuracy.
+#[path = "operating_point/relaxation.rs"]
+mod relaxation;
+
 use super::*;
 use fs_couple::piezoelectric::spatial::harmonic::acoustic::{
     HarmonicAcousticPort, PlaneWavePortControls,

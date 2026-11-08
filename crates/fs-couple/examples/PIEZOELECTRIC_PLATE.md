@@ -395,6 +395,20 @@ not create geometric stress stiffening or nonlinear voltage tuning. The original
 `model.solve_harmonic(...)` remains the zero-bias entry point and refuses a
 thermally biased model unless its equilibrium has been prepared explicitly.
 
+For a ceramic with sourced Maxwell/Debye processes, use
+`model.harmonic_operating_point_with_relaxation(&laws, ...)`. The operating point
+borrows those original immutable laws and uses them for its AC solves. DC
+permittivity includes the relaxed Debye susceptibility; its actual polarization
+and static memory energy are retained. Maxwell stresses are fully relaxed.
+`point.bias_memory_energy_j()` is a subaccount already included in the DC body
+storage. A steady field contributes no ceramic dissipation. Subsequent AC heat
+and memory storage retain their original frequency-dependent branch response.
+
+Every intrinsic source must admit zero frequency and each requested AC probe.
+A finite upper frequency bound is supported; a law measured only on a band
+above zero does not establish its DC equilibrium. This preparation does not
+construct transient histories or grant unrestricted time-domain validity.
+
 ## Verification and boundaries
 
 Run the focused native spatial suite:

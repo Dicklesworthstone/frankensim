@@ -3213,9 +3213,20 @@ An ideal inductor requires an explicit persistent current and zero DC voltage;
 its flux is not silently reset. This API holds the caller's DC bias rather than
 solving an autonomous bias circuit. Thermal state and reference geometry remain
 fixed; geometric stress stiffening, nonlinear DC tuning and temperature
-modulation are outside the affine model. Intrinsic DC polarization is exposed
-by the material owner's `equilibrium_response`, which requires source support
-at zero frequency without granting unrestricted transient authority.
+modulation are outside the affine model.
+
+`harmonic_operating_point_with_relaxation` solves the actual relaxed DC
+operator with epsilon_infinity plus all directed Debye increments, while
+Maxwell branch stresses vanish. It borrows the original immutable intrinsic
+laws and reuses them for AC dispersion, memory and dissipation. Physical pole
+charge is independently integrated into native field/electrode recovery;
+static memory energy and polarization ramp work extend the same bias audit.
+The DC memory subaccount is already inside total bias storage and receives no
+sinusoidal factor. Zero-mean AC heat does not acquire a spurious DC loss.
+Both zero frequency and each AC probe must lie in the original source bands;
+a finite upper bound is admitted without authorizing unrestricted transients.
+No new material card, tensor identity, transient history or second physics
+trajectory is manufactured to represent this equilibrium.
 Focused analytic regressions cover hot open/short response, bias-plus-cycle
 limits, acoustic work, gauge-independent shunt work/storage and refusal.
 
