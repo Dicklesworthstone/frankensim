@@ -41,8 +41,8 @@ use fs_qty::{Dims, QtyAny};
 use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
 use fs_render::volumes::{
-    AbsorptionImageSettings, SpectralAbsorptionImageSettings, VolumeGrid,
-    render_absorption_transmittance,
+    AbsorptionImageSettings, IndexedSpectralAbsorptionImageSettings,
+    SpectralAbsorptionImageSettings, VolumeGrid, render_absorption_transmittance,
 };
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_sos::lyapunov_certifies_stability;
@@ -1094,6 +1094,71 @@ pub fn render_vessel_spectral_transmittance(
     .unwrap_or_default()
 }
 
+/// Render a captured mass frame with an explicit per-cell spectral material map.
+///
+/// `cell_materials` has the original mass field's x-fastest layout and length.
+/// Its u32 indices select material/state rows from `mass_absorption_m2_kg`;
+/// the table is material-major with `wavelengths_nm.len()` coefficients per row.
+/// Common positive, strictly increasing wavelengths are vacuum nanometres.
+/// The caller supplies the palette and map; no material is inferred from mass.
+///
+/// SI scaling and homogeneous out-of-plane extrusion follow
+/// [`render_vessel_transmittance`]. Each cell uses its own absorption spectrum
+/// before exact pixel-footprint filtering. Output is pixel-major, wavelengths
+/// fastest, with `resolution² * wavelengths_nm.len()` transmittances.
+///
+/// Admits at most 4,096 complete material rows and sixteen wavelengths, plus
+/// 1,048,576 pixels, original cells and cell visits, and 1,048,576 total
+/// cell/wavelength evaluations. The complete palette and all cell indices,
+/// including vacuum cells, are checked before transport output allocation.
+/// Invalid inputs or exhausted budgets return an empty vector.
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_indexed_spectral_transmittance(
+    mass_field: &[f64],
+    cell_materials: &[u32],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourIndexedSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        cell_materials,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_transmittance(
+        mass_field,
+        [nx, ny],
+        IndexedSpectralAbsorptionImageSettings {
+            spectral: SpectralAbsorptionImageSettings {
+                image: AbsorptionImageSettings {
+                    resolution: [resolution; 2],
+                    max_pixels: 1_048_576,
+                    max_grid_cells: 1_048_576,
+                    max_cell_visits: 1_048_576,
+                },
+                max_spectral_evaluations: 1_048_576,
+            },
+            max_materials: 4_096,
+        },
+    )
+    .unwrap_or_default()
+}
+
 /* ======================================================================= */
 /*  3 · FRAME  (fs-frame) — fnx-free LAYOUT; real fs-frame stages 3–5        */
 /* ======================================================================= */
@@ -1945,6 +2010,35 @@ mod wasm {
         )
     }
 
+    /// Spectral SI absorption using explicit original cell material indices.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_indexed_spectral_transmittance(
+        mass_field: &[f64],
+        cell_materials: &[u32],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+    ) -> Vec<f64> {
+        super::render_vessel_indexed_spectral_transmittance(
+            mass_field,
+            cell_materials,
+            nx,
+            ny,
+            resolution,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+        )
+    }
+
     #[wasm_bindgen]
     pub fn run_frame(seed: u32) -> Vec<f64> {
         super::run_frame(seed)
@@ -2164,6 +2258,136 @@ mod tests {
                 1000.0,
                 1e-3,
                 2e-3,
+            )
+            .is_empty()
+        );
+    }
+
+    /// G1/G3: explicit neighboring materials retain their spectra and coverage.
+    #[test]
+    fn browser_indexed_spectral_pour_matches_native_materials_and_pixel_layout() {
+        let mass = [1.0, 1.0];
+        let materials = [0, 1];
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [
+            core::f64::consts::LN_2,
+            0.0,
+            0.0,
+            2.0 * core::f64::consts::LN_2,
+        ];
+        let native = fs_vessel::pour::PourIndexedSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            cell_materials: &materials,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 1e-3,
+        }
+        .render_transmittance(
+            &mass,
+            [2, 1],
+            IndexedSpectralAbsorptionImageSettings {
+                spectral: SpectralAbsorptionImageSettings {
+                    image: AbsorptionImageSettings {
+                        resolution: [2, 2],
+                        max_pixels: 4,
+                        max_grid_cells: 2,
+                        max_cell_visits: 4,
+                    },
+                    max_spectral_evaluations: 8,
+                },
+                max_materials: 2,
+            },
+        )
+        .unwrap();
+        let browser = render_vessel_indexed_spectral_transmittance(
+            &mass,
+            &materials,
+            2,
+            1,
+            2,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            1e-3,
+            1e-3,
+        );
+        assert_eq!(browser, native);
+        assert_eq!(browser.len(), 8);
+        for (&actual, expected) in browser
+            .iter()
+            .zip([0.5, 1.0, 1.0, 0.25, 0.5, 1.0, 1.0, 0.25])
+        {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+        let coarse = render_vessel_indexed_spectral_transmittance(
+            &mass,
+            &materials,
+            2,
+            1,
+            1,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            1e-3,
+            1e-3,
+        );
+        assert_eq!(coarse.len(), 2);
+        for (&actual, expected) in coarse.iter().zip([0.75, 0.625]) {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+    }
+
+    /// G0: browser material maps and complete palette/work budgets are explicit.
+    #[test]
+    fn browser_indexed_spectral_pour_refuses_invalid_maps_and_excess_work() {
+        for materials in [&[0][..], &[u32::MAX, 0][..]] {
+            assert!(
+                render_vessel_indexed_spectral_transmittance(
+                    &[0.0, 1.0],
+                    materials,
+                    2,
+                    1,
+                    1,
+                    &[450.0, 650.0],
+                    &[0.4, 0.1, 0.2, 0.7],
+                    1000.0,
+                    1e-3,
+                    1e-3,
+                )
+                .is_empty()
+            );
+        }
+        let oversized_palette = vec![0.0; 4_097 * 2];
+        assert!(
+            render_vessel_indexed_spectral_transmittance(
+                &[1.0],
+                &[0],
+                1,
+                1,
+                1,
+                &[450.0, 650.0],
+                &oversized_palette,
+                1000.0,
+                1e-3,
+                1e-3,
+            )
+            .is_empty()
+        );
+        // Scalar pixel/cell limits admit this image; two wavelengths exceed
+        // the total 1,048,576 cell/wavelength evaluation cap.
+        assert!(
+            render_vessel_indexed_spectral_transmittance(
+                &[1.0],
+                &[0],
+                1,
+                1,
+                1024,
+                &[450.0, 650.0],
+                &[0.4, 0.1],
+                1000.0,
+                1e-3,
+                1e-3,
             )
             .is_empty()
         );

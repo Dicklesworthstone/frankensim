@@ -423,6 +423,30 @@ The shared renderer passed its 117-test targeted native suite; these four
 consumer tests received parser/API/physics review but remain unexecuted because
 the actual fs-vessel/fs-wasm dependency closure is unavailable here.
 
+### Indexed material spectra in native and browser pours
+
+`PourIndexedSpectralOpticalView` adds one borrowed `u32` material/state index per
+original mass cell and a material-major, wavelength-fastest mass-absorption
+palette on common supplied wavelengths. The native full-image and direct
+transmission methods, plus `PourOutcome::render_indexed_spectral_transmittance`,
+reuse the same SI geometry validation, original mass bytes and independently
+declared slab depth. Each cell uses its own coefficient before exact footprint
+filtering. The full spectral image also supports explicit-illumination visible
+observation through its original renderer API. No material identity, mixture
+law, spectral data or unresolved interface is inferred from density.
+
+`render_vessel_indexed_spectral_transmittance` and its wasm export expose this
+path directly to browser consumers with the same pixel-major, wavelength-fastest
+layout. Browser admission allows at most 4,096 material rows (65,536 coefficients
+at 16 wavelengths), 1,048,576 pixels/grid cells/cell visits, and 1,048,576 total
+cell-by-wavelength evaluations. The complete palette and map are validated,
+including unused rows and vacuum cells, before output allocation. Invalid input
+or exhausted budgets returns an empty vector. Four native/browser regression
+fixtures cover distinct material colors and footprint coverage, original-outcome
+forwarding, palette/index refusal, uniform parity and total work limits. They
+have pinned parser and independent API/physics review; native and WASM runtime
+execution remains unavailable in this environment.
+
 ## Cylindrical free-jet capillary screen
 
 `jet::FreeJetStudy<J>` composes an original `fs_lbm::jet::JetDispersion`
