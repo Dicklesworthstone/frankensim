@@ -28,6 +28,8 @@
 /// Analytic full-field frequency response and original-receiver resonance surveys.
 pub mod resonance;
 mod response;
+/// Original tensor-Prony shell materials coupled to the full interior field.
+pub mod shell;
 /// Full original structural and pressure fields on one exact held-input timeline.
 pub mod time;
 pub use response::StructuralInteriorEnergy;

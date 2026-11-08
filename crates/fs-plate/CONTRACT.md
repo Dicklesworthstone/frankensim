@@ -1,5 +1,32 @@
 # CONTRACT: fs-plate
 
+## Unfactored full tensor-material shell operators
+
+`TensorPronyShell::prepare_harmonic_operator` evaluates all original
+tensor-Prony/Kelvin sections at one admitted angular frequency and returns a
+`PreparedTensorPronyShellOperator` without factoring the bare structure.
+Coupled physical owners can retain the entire shell field through a bare-shell
+resonance. Original supported translational/rotary mass is borrowed unchanged;
+stiffness includes complete material storage and the original lossless drilling
+term; damping contains the complete material loss divided by angular frequency.
+No modal basis, material refit or load is introduced.
+
+The operator retains its source identity and exact frequency. Its
+`admit_displacement` requires every original finite free coordinate and then
+performs the original facet/layer full-cycle strain admission. A coupled owner
+must apply that admission before publishing a physical response and separately
+check its own residual and work balance. These frequency-specific matrices do
+not define a frozen causal time material or its frequency derivative.
+
+Preparation admits a conservative logical operator payload and the original
+spatial/material bounds before allocation. The existing bare and port-loaded
+harmonic paths share this assembly, preserve their dense-factor admission and
+discard temporary sparse duplicates before factoring. Their existing material
+frequency-derivative and field-recovery paths remain in force. Two additions to
+`tests/shell_prony_harmonic.rs` check original mass identity, analytical storage
+and loss across frequencies, prescribed full-field recovery, and original
+band/strain/dimension/budget/cancellation refusals.
+
 ## Physical viscosity on CST/DKT shells
 
 `shell::viscosity` supplies complete passive membrane, membrane/bending and

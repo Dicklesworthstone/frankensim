@@ -1,3 +1,46 @@
+## Full tensor-material shells coupled to interior acoustic fields
+
+`cavity_modal::interior::structure::shell::TensorShellInterior` couples an
+original `TensorPronyShell` to every original heterogeneous acoustic FE
+pressure-potential coordinate, including constant compression. The material
+owner evaluates its complete tensor-Prony/Kelvin storage and loss at the
+requested frequency without first factoring the bare shell. The existing
+interior owner then factors the full displacement/rotation/pressure pencil;
+neither a bare structural nor acoustic inverse is required.
+
+Explicit `ConformingShellFace` pairs bind unique original planar shell facets
+to coincident fluid boundary faces. The fluid volume owns the outward normal.
+Original supported P1 translation traces and their exact transpose exchange
+pressure work once; all original rotations retain inertia and mechanical
+coupling. No independent rotation velocity is invented at the zero-offset
+surface. Full high-order pressure integration and heterogeneous density and
+compressibility remain with the native FE owner. An empty interface is an
+explicit detached limit. Real nonnegative wall admittance is relative to the
+moving wall, as in that native owner.
+
+Both mechanical force/torque and prescribed inward flow use peak
+`exp(-i omega t)` phasors and may act coherently. Repeated load cases reuse one
+complete factor. A different frequency requires original material evaluation
+again; this frequency-bound API supplies no frozen time-domain material or
+frequency derivative. Every accepted response passes original full-cycle
+layer strain admission and separate structural, acoustic and enclosing power
+balances. Signed interface exchange is retained, while original material heat
+and resistive wall heat remain distinct. No fitted cavity spring, modal loss,
+or extra radiation debit is added.
+
+Original material and complete-coordinate factor bounds apply alongside
+explicit interface-face, trace-storage and trace-work caps. Cancellation and
+invalid geometry/material/load refusals publish no partial accepted field.
+The current adapter requires conforming planar faces and fixed small-signal
+geometry; nonconforming/curved traces, offset skins, tangential viscous fluid
+traction, exterior radiation and causal dispersive fluids require their own
+physical owners. Spatial FE convergence remains a caller obligation.
+
+`tests/tensor_shell_interior.rs` contains independent P1-times-P2 traction and
+full native material-response checks, analytical cavity-compression and
+detached limits, coherent dual-drive/signed-work checks with independent wall
+heat integration, and geometry/band/strain/budget/cancellation refusals.
+
 ## Equilibrium-relative pressure in coupled modal networks
 
 Held-force `CoupledModalSystem` frames observe vibration relative to the complete

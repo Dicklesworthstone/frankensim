@@ -496,6 +496,111 @@ fn vertex_strain_admission_catches_extrema_beyond_original_quadrature_points() {
 }
 
 #[test]
+fn unfactored_material_operator_keeps_original_physical_storage_loss_and_strain() {
+    with_cx(|cx, _| {
+        let source = source(proportional(0.02), CstDktMass::Consistent, cx);
+        // Original physical bending shape has exactly zero drilling strain.
+        let q = [
+            C64::ZERO,
+            C64::ZERO,
+            C64::new(2e-5, -3e-6),
+            C64::new(-1e-5, 2e-6),
+            C64::new(3e-5, 1e-6),
+            C64::ZERO,
+        ];
+        let reference = multiply(&source.model().k, &q);
+        let mass = multiply(&source.model().m, &q);
+        for omega in [0.3, 2.0, 12.0] {
+            let operator = source
+                .prepare_harmonic_operator(omega, controls(), cx)
+                .unwrap();
+            assert!(core::ptr::eq(operator.source(), &source));
+            assert!(core::ptr::eq(operator.mass(), &source.model().m));
+            assert_eq!(operator.omega_rad_s(), omega);
+            let (s, _) = scalar(omega);
+            let storage = multiply(operator.stiffness(), &q);
+            let loss = multiply(operator.damping(), &q);
+            for i in 0..q.len() {
+                near(storage[i], reference[i].scale(s.re), 2e-10);
+                near(loss[i], reference[i].scale(s.im / omega), 2e-10);
+            }
+            operator.admit_displacement(&q, cx).unwrap();
+            let force: Vec<_> = (0..q.len())
+                .map(|i| s.conj() * reference[i] - mass[i].scale(omega * omega))
+                .collect();
+            let response = source
+                .prepare_harmonic_response(omega, controls(), cx)
+                .unwrap()
+                .solve(&force, cx)
+                .unwrap();
+            for i in 0..q.len() {
+                near(response.displacement[i], q[i], 2e-8);
+            }
+            real_near(
+                response.average_viscous_power_w,
+                0.5 * omega * s.im * inner(&q, &reference),
+                2e-9,
+            );
+        }
+    });
+}
+
+#[test]
+fn unfactored_material_recovery_preserves_original_domains_and_refuses_partial_fields() {
+    with_cx(|cx, gate| {
+        let source = source(proportional(0.02), CstDktMass::Consistent, cx);
+        assert!(matches!(
+            source.prepare_harmonic_operator(101.0, controls(), cx),
+            Err(TensorShellHarmonicError::Material { .. })
+        ));
+        for omega in [0.0, f64::NAN] {
+            assert!(
+                source
+                    .prepare_harmonic_operator(omega, controls(), cx)
+                    .is_err()
+            );
+        }
+        for capped in [
+            HarmonicResponseControls {
+                maximum_coordinates: 5,
+                ..controls()
+            },
+            HarmonicResponseControls {
+                maximum_payload_bytes: 1,
+                ..controls()
+            },
+        ] {
+            assert!(source.prepare_harmonic_operator(2.0, capped, cx).is_err());
+        }
+        let operator = source
+            .prepare_harmonic_operator(2.0, controls(), cx)
+            .unwrap();
+        assert!(operator.admit_displacement(&[C64::ZERO; 5], cx).is_err());
+        assert!(
+            operator
+                .admit_displacement(&[C64::new(f64::NAN, 0.0); 6], cx)
+                .is_err()
+        );
+        let mut excessive = [C64::ZERO; 6];
+        excessive[2] = C64::from_re(1e6);
+        assert!(matches!(
+            operator.admit_displacement(&excessive, cx),
+            Err(TensorShellHarmonicError::Material { .. })
+        ));
+        gate.request();
+        assert!(matches!(
+            operator.admit_displacement(&[C64::ZERO; 6], cx),
+            Err(TensorShellHarmonicError::Plate(PlateError::Cancelled))
+        ));
+        assert!(
+            source
+                .prepare_harmonic_operator(2.0, controls(), cx)
+                .is_err()
+        );
+    });
+}
+
+#[test]
 fn original_source_bands_budgets_and_cancellation_refuse_without_partial_response() {
     with_cx(|cx, gate| {
         let source = source(proportional(0.02), CstDktMass::Consistent, cx);

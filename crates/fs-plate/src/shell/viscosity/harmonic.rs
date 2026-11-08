@@ -239,59 +239,39 @@ impl TensorPronyShell {
         )
     }
 
-    fn prepare(
+    /// Evaluate the original full material pencil without factoring the bare
+    /// shell. Coupled fluid/structure owners may therefore retain their own
+    /// coordinates through a bare structural resonance. The returned storage
+    /// and viscosity apply ONLY at this angular frequency; they do not define
+    /// a frozen causal time-domain material or a reduced modal approximation.
+    ///
+    /// This retains the original mass, drilling stiffness, tensor/layer
+    /// reductions and complete physical strain recovery. Logical payload is
+    /// bounded by 48*n*n + 32*(n+1) bytes plus the original material/facet and
+    /// resultant arrays. Native sparse/COO assembly keeps its source spatial
+    /// budget; borrowed source geometry and allocator metadata are separate.
+    pub fn prepare_harmonic_operator(
         &self,
         omega: f64,
         controls: HarmonicResponseControls,
-        boundary: Option<(&[f64], usize, &[C64], HarmonicPortControls)>,
         cx: &Cx<'_>,
-    ) -> Result<PreparedTensorPronyShell<'_>, TensorShellHarmonicError> {
-        checkpoint(cx)?;
-        if !omega.is_finite() || omega <= 0.0 {
-            return Err(invalid(
-                "tensor shell harmonic response requires finite positive frequency",
-            ));
-        }
+    ) -> Result<PreparedTensorPronyShellOperator<'_>, TensorShellHarmonicError> {
+        let section_bytes = self.harmonic_section_payload(omega, controls, cx)?;
         let n = self.model.free;
-        if n > controls.maximum_coordinates {
-            return Err(HarmonicResponseError::Budget {
-                quantity: "shell harmonic coordinates",
-                requested: n,
-                cap: controls.maximum_coordinates,
-            }
-            .into());
-        }
-        if !controls.maximum_relative_residual.is_finite()
-            || controls.maximum_relative_residual <= 0.0
-            || controls.maximum_relative_residual >= 1.0
-        {
-            return Err(invalid("shell harmonic residual budget must lie in (0,1)"));
-        }
-        let section_bytes = self
-            .sections
-            .iter()
-            .try_fold(0usize, |sum, section| {
-                PreparedSection::payload_bytes(section.layer_count())
-                    .and_then(|v| v.checked_add(2 * core::mem::size_of::<ShellViscosity>()))
-                    .and_then(|v| v.checked_add(core::mem::size_of::<PreparedFacet>()))
-                    .and_then(|v| sum.checked_add(v))
+        let bytes = n
+            .checked_mul(n)
+            .and_then(|v| v.checked_mul(48))
+            .and_then(|v| {
+                n.checked_add(1)
+                    .and_then(|r| r.checked_mul(32))
+                    .and_then(|r| v.checked_add(r))
             })
-            .ok_or_else(|| invalid("shell harmonic layer payload overflows"))?;
-        let source_bytes = n
-            .checked_mul(n)
-            .and_then(|v| v.checked_mul(24))
             .and_then(|v| v.checked_add(section_bytes))
-            .ok_or_else(|| invalid("shell harmonic source payload overflows"))?;
-        let total = n
-            .checked_mul(n)
-            .and_then(|v| v.checked_mul(144))
-            .and_then(|v| n.checked_mul(128).and_then(|w| v.checked_add(w)))
-            .and_then(|v| v.checked_add(source_bytes))
-            .ok_or_else(|| invalid("shell harmonic total payload overflows"))?;
-        if total > controls.maximum_payload_bytes {
+            .ok_or_else(|| invalid("shell harmonic operator payload overflows"))?;
+        if bytes > controls.maximum_payload_bytes {
             return Err(HarmonicResponseError::Budget {
-                quantity: "shell harmonic numerical payload bytes",
-                requested: total,
+                quantity: "shell harmonic operator payload bytes",
+                requested: bytes,
                 cap: controls.maximum_payload_bytes,
             }
             .into());
@@ -323,7 +303,6 @@ impl TensorPronyShell {
             materials.push(material);
             facets.push(PreparedFacet::new(self, element)?);
         }
-        let mass = dense(&self.model.m, n, cx)?;
         let physical_storage = assemble_constitutive_operator(
             &self.mesh,
             &storage_sections,
@@ -331,13 +310,101 @@ impl TensorPronyShell {
             self.budget,
             || cx.checkpoint().is_err(),
         )?;
-        let mut storage = dense(&physical_storage, n, cx)?;
-        add_sparse(&mut storage, &self.drilling, n, cx)?;
-        let loss =
+        let stiffness = add_operators(&physical_storage, &self.drilling, n, cx)?;
+        let damping =
             assemble_constitutive_operator(&self.mesh, &losses, &self.model, self.budget, || {
                 cx.checkpoint().is_err()
             })?;
-        let damping = dense(&loss, n, cx)?;
+        checkpoint(cx)?;
+        Ok(PreparedTensorPronyShellOperator {
+            source: self,
+            omega_rad_s: omega,
+            materials,
+            facets,
+            stiffness,
+            damping,
+        })
+    }
+
+    fn harmonic_section_payload(
+        &self,
+        omega: f64,
+        controls: HarmonicResponseControls,
+        cx: &Cx<'_>,
+    ) -> Result<usize, TensorShellHarmonicError> {
+        checkpoint(cx)?;
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(invalid(
+                "tensor shell harmonic response requires finite positive frequency",
+            ));
+        }
+        let n = self.model.free;
+        if n > controls.maximum_coordinates {
+            return Err(HarmonicResponseError::Budget {
+                quantity: "shell harmonic coordinates",
+                requested: n,
+                cap: controls.maximum_coordinates,
+            }
+            .into());
+        }
+        if !controls.maximum_relative_residual.is_finite()
+            || controls.maximum_relative_residual <= 0.0
+            || controls.maximum_relative_residual >= 1.0
+        {
+            return Err(invalid("shell harmonic residual budget must lie in (0,1)"));
+        }
+        self.sections
+            .iter()
+            .try_fold(0usize, |sum, section| {
+                PreparedSection::payload_bytes(section.layer_count())
+                    .and_then(|v| v.checked_add(2 * core::mem::size_of::<ShellViscosity>()))
+                    .and_then(|v| v.checked_add(core::mem::size_of::<PreparedFacet>()))
+                    .and_then(|v| sum.checked_add(v))
+            })
+            .ok_or_else(|| invalid("shell harmonic layer payload overflows"))
+    }
+
+    fn prepare(
+        &self,
+        omega: f64,
+        controls: HarmonicResponseControls,
+        boundary: Option<(&[f64], usize, &[C64], HarmonicPortControls)>,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedTensorPronyShell<'_>, TensorShellHarmonicError> {
+        let section_bytes = self.harmonic_section_payload(omega, controls, cx)?;
+        let n = self.model.free;
+        let source_bytes = n
+            .checked_mul(n)
+            .and_then(|v| v.checked_mul(24))
+            .and_then(|v| v.checked_add(section_bytes))
+            .ok_or_else(|| invalid("shell harmonic source payload overflows"))?;
+        let total = n
+            .checked_mul(n)
+            .and_then(|v| v.checked_mul(144))
+            .and_then(|v| n.checked_mul(128).and_then(|w| v.checked_add(w)))
+            .and_then(|v| v.checked_add(source_bytes))
+            .ok_or_else(|| invalid("shell harmonic total payload overflows"))?;
+        if total > controls.maximum_payload_bytes {
+            return Err(HarmonicResponseError::Budget {
+                quantity: "shell harmonic numerical payload bytes",
+                requested: total,
+                cap: controls.maximum_payload_bytes,
+            }
+            .into());
+        }
+        let PreparedTensorPronyShellOperator {
+            materials,
+            facets,
+            stiffness,
+            damping,
+            ..
+        } = self.prepare_harmonic_operator(omega, controls, cx)?;
+        let mass = dense(&self.model.m, n, cx)?;
+        let storage = dense(&stiffness, n, cx)?;
+        let viscosity = dense(&damping, n, cx)?;
+        // Do not retain sparse duplicates during the canonical dense factor.
+        drop(stiffness);
+        drop(damping);
         let solve_controls = HarmonicResponseControls {
             maximum_payload_bytes: controls.maximum_payload_bytes - source_bytes,
             ..controls
@@ -345,7 +412,7 @@ impl TensorPronyShell {
         let response = if let Some((b, ports, z, load_controls)) = boundary {
             PreparedHarmonicResponse::try_with_port_impedance(
                 &mass,
-                &damping,
+                &viscosity,
                 &storage,
                 n,
                 b,
@@ -359,7 +426,7 @@ impl TensorPronyShell {
         } else {
             PreparedHarmonicResponse::try_new(
                 &mass,
-                &damping,
+                &viscosity,
                 &storage,
                 n,
                 omega,
@@ -375,6 +442,51 @@ impl TensorPronyShell {
             facets,
             response,
         })
+    }
+}
+
+/// Full original material operators at one admitted angular frequency. No
+/// structural factorization, normalization, coordinate reduction or load is
+/// present. A companion owner must keep this source identity and frequency,
+/// and admit its solved displacement before publishing a physical response.
+pub struct PreparedTensorPronyShellOperator<'a> {
+    source: &'a TensorPronyShell,
+    omega_rad_s: f64,
+    materials: Vec<PreparedSection>,
+    facets: Vec<PreparedFacet>,
+    stiffness: Csr,
+    damping: Csr,
+}
+
+impl<'a> PreparedTensorPronyShellOperator<'a> {
+    pub const fn source(&self) -> &'a TensorPronyShell {
+        self.source
+    }
+    pub const fn omega_rad_s(&self) -> f64 {
+        self.omega_rad_s
+    }
+    /// Original supported translational/rotary mass, with no material refit.
+    pub fn mass(&self) -> &Csr {
+        &self.source.model.m
+    }
+    /// Full dispersive storage plus the original lossless drilling term.
+    pub const fn stiffness(&self) -> &Csr {
+        &self.stiffness
+    }
+    /// Full tensor-Prony/Kelvin loss divided by the admitted angular frequency.
+    pub const fn damping(&self) -> &Csr {
+        &self.damping
+    }
+
+    /// Admit a complete original free-coordinate phasor, including rotations,
+    /// against every layer's strain domain over the entire harmonic cycle.
+    /// This performs no solve and grants no residual or coupled-work claim.
+    pub fn admit_displacement(
+        &self,
+        displacement: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<(), TensorShellHarmonicError> {
+        admit_material_displacement(self.source, &self.materials, &self.facets, displacement, cx)
     }
 }
 
@@ -423,12 +535,7 @@ impl<'a> PreparedTensorPronyShell<'a> {
         displacement: &[C64],
         cx: &Cx<'_>,
     ) -> Result<(), TensorShellHarmonicError> {
-        for (element, (facet, material)) in self.facets.iter().zip(&self.materials).enumerate() {
-            checkpoint(cx)?;
-            let midpoint = facet.strains(displacement);
-            material.admit_facet(&self.source.sections[element], element, &midpoint, cx)?;
-        }
-        checkpoint(cx)
+        admit_material_displacement(self.source, &self.materials, &self.facets, displacement, cx)
     }
 
     /// Cache the exact material-frequency direction beside the same factor.
@@ -506,6 +613,31 @@ impl<'a> PreparedTensorPronyShell<'a> {
             stiffness_derivative,
         })
     }
+}
+
+fn admit_material_displacement(
+    source: &TensorPronyShell,
+    materials: &[PreparedSection],
+    facets: &[PreparedFacet],
+    displacement: &[C64],
+    cx: &Cx<'_>,
+) -> Result<(), TensorShellHarmonicError> {
+    checkpoint(cx)?;
+    if displacement.len() != source.model.free
+        || displacement
+            .iter()
+            .any(|q| !q.re.is_finite() || !q.im.is_finite())
+    {
+        return Err(invalid(
+            "shell material recovery requires complete finite original coordinates",
+        ));
+    }
+    for (element, (facet, material)) in facets.iter().zip(materials).enumerate() {
+        checkpoint(cx)?;
+        let midpoint = facet.strains(displacement);
+        material.admit_facet(&source.sections[element], element, &midpoint, cx)?;
+    }
+    checkpoint(cx)
 }
 
 /// One factor and its full material-frequency direction, reusable across loads.
