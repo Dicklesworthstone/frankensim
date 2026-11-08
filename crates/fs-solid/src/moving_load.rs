@@ -20,6 +20,9 @@ pub use driven::ShellSupportMotion;
 mod payload;
 pub use payload::ShellRigidPayload;
 
+#[path = "moving_load/body_acceleration.rs"]
+mod body_acceleration;
+
 #[path = "moving_load/impulse.rs"]
 mod impulse;
 pub use impulse::{MovingShellImpulse, ShellPointImpulse};
@@ -144,6 +147,7 @@ pub struct MovingShellModel {
     plate: ShellPlate,
     assembly: ShellAssembly,
     reference_density_kg_m3: Option<Vec<[f64; 3]>>,
+    body_acceleration_map: Vec<[f64; 3]>,
     free_index: Vec<Option<usize>>,
     max_load_points: usize,
     payloads: Vec<ShellRigidPayload>,
@@ -221,11 +225,13 @@ impl MovingShellModel {
         for (free, &full) in assembly.free_dofs.iter().enumerate() {
             free_index[full] = Some(free);
         }
+        let body_acceleration_map = Self::prepare_body_acceleration_map(&assembly, &mut cancelled)?;
         poll(&mut cancelled)?;
         Ok(Self {
             plate,
             assembly,
             reference_density_kg_m3,
+            body_acceleration_map,
             free_index,
             max_load_points,
             payloads: Vec::new(),
@@ -425,10 +431,12 @@ impl MovingShellModel {
             initial_loads,
             config,
             None,
+            None,
             cancelled,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_with_supports<'a>(
         &'a self,
         displacement: &[f64],
@@ -436,6 +444,7 @@ impl MovingShellModel {
         initial_loads: &[ShellPointWrench],
         config: ShellTimeConfig,
         supports: Option<ShellSupportMotion>,
+        body_acceleration_m_s2: Option<[f64; 3]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellMotion<'a>, MovingLoadError> {
         poll(&mut cancelled)?;
@@ -454,7 +463,12 @@ impl MovingShellModel {
                 "moving shell requires bounded average-acceleration Newmark",
             ));
         }
-        let load = self.project(initial_loads, &mut cancelled)?;
+        let load = match body_acceleration_m_s2 {
+            Some(acceleration) => {
+                self.project_with_body_acceleration(initial_loads, acceleration, &mut cancelled)
+            }
+            None => self.project(initial_loads, &mut cancelled),
+        }?;
         let a = &self.assembly;
         let n = a.mass.dimension();
         let rhs = self.acceleration_rhs(displacement, velocity, load.reduced, supports.as_ref())?;
@@ -682,7 +696,7 @@ impl MovingShellMotion<'_> {
         loads: &[ShellPointWrench],
         cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellStep, MovingLoadError> {
-        self.advance_with_supports(time_s, loads, None, cancelled)
+        self.advance_with_supports(time_s, loads, None, None, cancelled)
     }
 
     fn advance_with_supports(
@@ -690,6 +704,7 @@ impl MovingShellMotion<'_> {
         time_s: f64,
         loads: &[ShellPointWrench],
         acceleration: Option<[[f64; 3]; 3]>,
+        body_acceleration_m_s2: Option<[f64; 3]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellStep, MovingLoadError> {
         poll(&mut cancelled)?;
@@ -714,7 +729,13 @@ impl MovingShellMotion<'_> {
                 ));
             }
         };
-        let load = self.model.project(loads, &mut cancelled)?;
+        let load = match body_acceleration_m_s2 {
+            Some(acceleration) => {
+                self.model
+                    .project_with_body_acceleration(loads, acceleration, &mut cancelled)
+            }
+            None => self.model.project(loads, &mut cancelled),
+        }?;
         let effective_load = self
             .model
             .effective_load(load.reduced, next_supports.as_ref())?;

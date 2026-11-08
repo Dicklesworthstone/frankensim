@@ -9,6 +9,9 @@ mod driven;
 #[path = "moving_load/payload.rs"]
 mod payload;
 
+#[path = "moving_load/body_acceleration.rs"]
+mod body_acceleration;
+
 #[path = "moving_load/impulse.rs"]
 mod impulse;
 

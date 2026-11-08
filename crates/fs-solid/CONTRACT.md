@@ -3867,14 +3867,49 @@ momentum inventory. Payload assembly visits bounded 18-DOF point stencils
 once and adds no DOFs or per-step payload loops. Payload count and each endpoint
 load count are separately capped by the model's admitted point bound.
 
-Payload attachment and reference orientation remain fixed. Gravity and other
-external payload forces must be supplied explicitly through the force port.
+Payload attachment and reference orientation remain fixed. Uniform gravity can
+be supplied explicitly through the body-acceleration entries below; other
+external payload forces use the existing COM force port. Applying body gravity
+and the same payload weight through its point port would count that weight twice.
 This remains a small-rotation attached-inertia model, without sliding,
 collision, finite-rotation gyroscopic dynamics or finite support-carrier
 motion. Empty payload input preserves the original path exactly. Focused
 G0/G1/G3/G4 regressions in `tests/moving_load/payload.rs` assert independent COM
 energy and angular-momentum identities, native forced acceleration, driven
 support impulse/work, physical tensor admission, parity, and atomic retry.
+
+### Density-consistent prescribed body acceleration
+
+`project_with_body_acceleration`, `start_with_body_acceleration` and
+`advance_with_body_acceleration` superpose bounded point wrenches with an
+explicit uniform Cartesian acceleration in m/s². The original full augmented
+mass acts on a repeated translation field with zero director acceleration:
+`f_body = M_full * [g,0,g,0,...]`. Graded shell density, payload COM offset
+moments and restrained rows remain in the same physical load. No separate
+payload-weight loop, scalar density substitution or reduced-mass projection
+is used. Zero acceleration preserves the original point-load path exactly.
+
+Three rigid-translation mass columns are cached during model preparation and
+refreshed once after payload attachment. Endpoint evaluation is linear in
+full DOFs and consumes no point-load budget. The native initial-equilibrium,
+prepared Newmark, impulse, support-reaction and work owners consume the
+combined load without new factors or separate accounting. The driven variants
+accept body and support accelerations independently; full-mass condensation
+retains their physical difference and the original separate support work.
+
+Every new endpoint supplies its acceleration explicitly. A held endpoint load
+survives instantaneous impulses; the original `advance` methods supply no body
+acceleration at their newly supplied endpoint. Nonfinite or unrepresentable
+loads and cancellation leave accepted state, held load and reactions unchanged.
+These are prescribed uniform loads on the retained reference inventory in the
+existing small-rotation shell model, without self-gravity, spatially varying
+fields, accelerating-coordinate terms or configuration-dependent gravity.
+
+Six focused regressions in `tests/moving_load/body_acceleration.rs` cover
+independent density-weighted mass/centroid/potential moments, offset payloads,
+free fall, stationary reactions, falling driven pins, changing acceleration,
+held forces through impulses, point-port parity, zero-field bits and atomic
+refusal/retry for both native shell mass formulations.
 
 ### Localized instantaneous impulse ports
 

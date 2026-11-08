@@ -122,8 +122,9 @@ impl MovingShellModel {
     /// not acquire a fictitious Rayleigh drag. All native solves, prescribed
     /// pin terms, reactions, momentum and energy then use the augmented mass.
     ///
-    /// Payload locations cannot change after assembly. Apply any gravity or
-    /// other external payload force explicitly through its existing COM port.
+    /// Payload locations cannot change after assembly. Supply uniform gravity
+    /// explicitly with the body-acceleration entry points, which include shell
+    /// and payload weight once, or author external forces at the COM port.
     /// Numerically unresolved semidefinite inertia is refused, never repaired
     /// by clipping a negative pivot. No new finite-rotation claim is made.
     pub fn new_with_payloads(
@@ -225,6 +226,8 @@ impl MovingShellModel {
             .assembly
             .replace_mass_preserving_damping(mass, self.plate.budget.max_conditioning_dofs)
             .map_err(MovingLoadError::Spatial)?;
+        self.body_acceleration_map =
+            Self::prepare_body_acceleration_map(&self.assembly, &mut cancelled)?;
         self.payloads = payloads.to_vec();
         poll(&mut cancelled)?;
         Ok(self)

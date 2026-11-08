@@ -92,6 +92,7 @@ impl MovingShellModel {
             initial_loads,
             config,
             Some(supports),
+            None,
             cancelled,
         )
     }
@@ -214,6 +215,6 @@ impl MovingShellMotion<'_> {
         acceleration_m_s2: [[f64; 3]; 3],
         cancelled: impl FnMut() -> bool,
     ) -> Result<MovingShellStep, MovingLoadError> {
-        self.advance_with_supports(time_s, loads, Some(acceleration_m_s2), cancelled)
+        self.advance_with_supports(time_s, loads, Some(acceleration_m_s2), None, cancelled)
     }
 }
