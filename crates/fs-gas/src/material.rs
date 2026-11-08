@@ -21,6 +21,8 @@ pub mod nonideal_shock;
 pub mod phase_heat_exchanger;
 /// Adiabatic compressor/expander outlets with original mixture phase equilibrium.
 pub mod phase_machinery;
+/// Original equilibrium enthalpy and acoustics in bounded converging-nozzle flow.
+pub mod phase_nozzle;
 
 /// Shared material-card viscosity/conductivity in conservative gas transport.
 #[cfg(feature = "experimental-euler")]

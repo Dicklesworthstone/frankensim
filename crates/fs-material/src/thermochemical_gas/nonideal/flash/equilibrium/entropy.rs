@@ -19,6 +19,9 @@ use fs_thermochem::eos::peng_robinson::{
     stability::PengRobinsonStabilityOptionsV1,
 };
 
+/// Reusable original inlet references for pressure/entropy paths.
+pub mod prepared;
+
 /// Entropy and volume closure for reversible compression and expansion.
 pub mod volume;
 
@@ -149,7 +152,8 @@ impl PhaseEntropySolution {
     pub const fn internal_energy_change_j_kg(&self) -> Option<f64> {
         self.internal_energy_change_j_kg
     }
-    /// Actual PT selections, including reference and bracket endpoint work.
+    /// Actual PT selections in this query. One-shot increments include their
+    /// inlet reference; prepared paths report their preparation work separately.
     #[must_use]
     pub const fn pt_evaluations(&self) -> usize {
         self.pt_evaluations
