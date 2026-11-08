@@ -18,6 +18,9 @@ mod finite_layered;
 mod miscibility;
 #[path = "hydrostatic/equilibrium.rs"]
 mod equilibrium;
+#[cfg(feature = "hydrostatic-equilibrium")]
+#[path = "hydrostatic/floating_equilibrium.rs"]
+mod floating_equilibrium;
 use common::{close, density_card, point};
 use fs_ga::{Se3, So3, So3Tangent, Twist, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

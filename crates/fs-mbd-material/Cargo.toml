@@ -11,6 +11,8 @@ description = "Source-bound material and geometry compilation to the existing ri
 layer = "L3"
 
 [features]
+# Coupled floating draft/attitude through the native nonlinear solver.
+hydrostatic-equilibrium = ["dep:fs-solver"]
 # Joint material interface damping and finite-body thermal feedback.
 dissipative-coupling = ["dep:fs-solver"]
 # Keep electrical spatial solvers out of ordinary material-to-dynamics users.
