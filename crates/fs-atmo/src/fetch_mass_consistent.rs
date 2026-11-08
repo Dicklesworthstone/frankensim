@@ -9,6 +9,9 @@
 //! with impermeable wall condition $w(x, 0) = 0$.
 //!
 //! Claim class is explicitly `Estimated` / `Approximate` with ModelId `FetchAdjustedMassConsistent`.
+//!
+//! [`FetchAdjustedAnelastic`] additionally preserves mass continuity for an explicit
+//! height-dependent density profile; the original mode assumes constant density.
 
 use crate::{KAPPA, MAX_Z0_M, MIN_Z0_M, Refusal, refuse};
 use fs_math::det;
@@ -201,5 +204,202 @@ impl FetchAdjustedMassConsistent {
         let dw_dh = (u_star / KAPPA) * (1.0 / z0) * dz0_dx;
 
         du_dx + dw_dh
+    }
+}
+
+/// Authored density `rho(h) = rho_ref * exp(-inverse_scale_height * (h - h_ref))`.
+/// The finite height interval is inclusive; zero inverse scale height means exactly
+/// constant density. This kinematic profile supplies no gas equation of state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExponentialDensityProfile {
+    reference_density_kg_m3: f64,
+    reference_height_m: f64,
+    inverse_scale_height_per_m: f64,
+    height_bounds_m: [f64; 2],
+}
+
+impl ExponentialDensityProfile {
+    /// Admit a positive density, nonnegative inverse scale height and finite height
+    /// interval above ground, containing the reference height.
+    ///
+    /// # Errors
+    /// Refuses invalid inputs or a density that overflows or vanishes in the interval.
+    pub fn new(
+        reference_density_kg_m3: f64,
+        reference_height_m: f64,
+        inverse_scale_height_per_m: f64,
+        height_bounds_m: [f64; 2],
+    ) -> Result<Self, Refusal> {
+        if !reference_density_kg_m3.is_finite()
+            || reference_density_kg_m3 <= 0.0
+            || !reference_height_m.is_finite()
+            || !inverse_scale_height_per_m.is_finite()
+            || inverse_scale_height_per_m < 0.0
+            || !height_bounds_m.iter().all(|h| h.is_finite() && *h >= 0.0)
+            || height_bounds_m[1] <= height_bounds_m[0]
+            || reference_height_m < height_bounds_m[0]
+            || reference_height_m > height_bounds_m[1]
+        {
+            return Err(refuse(
+                "density-profile-invalid",
+                "density, inverse scale height or reference/domain heights are invalid".into(),
+                "supply positive density, nonnegative inverse scale height and ordered heights",
+            ));
+        }
+        let profile = Self {
+            reference_density_kg_m3,
+            reference_height_m,
+            inverse_scale_height_per_m,
+            height_bounds_m,
+        };
+        // Monotonicity makes the endpoints sufficient to admit the entire interval.
+        profile.density_kg_m3(height_bounds_m[0])?;
+        profile.density_kg_m3(height_bounds_m[1])?;
+        Ok(profile)
+    }
+
+    /// Physical density [kg/m³] at an admitted height above ground.
+    ///
+    /// # Errors
+    /// Refuses nonfinite/out-of-domain heights and nonrepresentable density.
+    pub fn density_kg_m3(&self, height_m: f64) -> Result<f64, Refusal> {
+        if !height_m.is_finite()
+            || height_m < self.height_bounds_m[0]
+            || height_m > self.height_bounds_m[1]
+        {
+            return Err(refuse(
+                "density-profile-domain",
+                "height lies outside the declared density interval".into(),
+                "query a finite height inside the source interval",
+            ));
+        }
+        let density = self.reference_density_kg_m3
+            * det::exp(-self.inverse_scale_height_per_m * (height_m - self.reference_height_m));
+        if !density.is_finite() || density <= 0.0 {
+            return Err(refuse(
+                "density-profile-range",
+                "density overflows or vanishes at the requested height".into(),
+                "reduce the source height interval or density contrast",
+            ));
+        }
+        Ok(density)
+    }
+}
+
+/// One consistent observation in the `[fetch, lateral, upward]` frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnelasticFetchSample {
+    /// Local physical density [kg/m³].
+    pub density_kg_m3: f64,
+    /// Velocity [m/s], with zero lateral component.
+    pub velocity_mps: [f64; 3],
+    /// Advective mass flux `rho * velocity` [kg/(m² s)].
+    pub mass_flux_kg_m2_s: [f64; 3],
+}
+
+/// Fetch log law with `div(rho * velocity) = 0` for the retained density profile.
+/// Above `b = d + z0(x)`, the vertical correction is
+/// `w = (u_star/kappa) * (z0'/z0) * integral_b^h(rho(s) ds) / rho(h)`.
+/// The original roughness clamps and zero-velocity cutoff are retained. Fetch
+/// endpoints and the cutoff are nonsmooth; continuity applies on each smooth piece.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FetchAdjustedAnelastic {
+    wind: FetchAdjustedMassConsistent,
+    density: ExponentialDensityProfile,
+    speed_scale_mps: f64,
+}
+
+impl FetchAdjustedAnelastic {
+    /// Freeze the wind and density sources, including all roughness cutoff heights.
+    ///
+    /// # Errors
+    /// Refuses invalid wind parameters, nonrepresentable speed scale or a density
+    /// domain that excludes any cutoff height along the clamped fetch profile.
+    pub fn new(
+        wind: FetchAdjustedMassConsistent,
+        density: ExponentialDensityProfile,
+    ) -> Result<Self, Refusal> {
+        let profile = wind.fetch_profile;
+        FetchRoughnessProfile::new(profile.z0_base_m, profile.dz0_dx, profile.max_fetch_m)?;
+        FetchAdjustedMassConsistent::new(
+            profile,
+            wind.displacement_height_m,
+            wind.reference_height_m,
+            wind.reference_speed_mps,
+        )?;
+        for x_m in [0.0, profile.max_fetch_m] {
+            density.density_kg_m3(wind.displacement_height_m + profile.z0_at(x_m))?;
+        }
+        let speed_scale_mps = wind.u_star() / KAPPA;
+        if !speed_scale_mps.is_finite() || speed_scale_mps <= 0.0 {
+            return Err(refuse(
+                "anelastic-flow-range",
+                "reference speed scale is not representable".into(),
+                "use a resolved reference height and speed",
+            ));
+        }
+        Ok(Self {
+            wind,
+            density,
+            speed_scale_mps,
+        })
+    }
+
+    /// Sample physical density, velocity and mass flux without allocation or quadrature.
+    /// Outside the fetch interval roughness is clamped and vertical velocity is zero.
+    /// At either fetch endpoint the interior derivative convention is retained.
+    ///
+    /// # Errors
+    /// Refuses nonfinite fetch, heights outside the density source, and overflow
+    /// in velocity, density-column correction or mass flux.
+    pub fn sample(&self, x_m: f64, height_m: f64) -> Result<AnelasticFetchSample, Refusal> {
+        if !x_m.is_finite() {
+            return Err(refuse(
+                "non-finite-input",
+                "fetch must be finite".into(),
+                "use finite fetch",
+            ));
+        }
+        let density_kg_m3 = self.density.density_kg_m3(height_m)?;
+        let profile = self.wind.fetch_profile;
+        let z0 = profile.z0_at(x_m);
+        let eff_h = height_m - self.wind.displacement_height_m;
+        let mut velocity_mps = [0.0; 3];
+        if eff_h > z0 {
+            velocity_mps[0] = self.speed_scale_mps * det::ln(eff_h / z0);
+            let gradient = if x_m >= 0.0 && x_m <= profile.max_fetch_m {
+                profile.dz0_dx
+            } else {
+                0.0
+            };
+            velocity_mps[2] = self.speed_scale_mps * (1.0 / z0) * gradient * (eff_h - z0);
+            if gradient != 0.0 && self.density.inverse_scale_height_per_m > 0.0 {
+                let exponent = self.density.inverse_scale_height_per_m * (eff_h - z0);
+                // expm1(x)/x resolves weak stratification, including x underflowing to zero.
+                let correction = if exponent == 0.0 {
+                    1.0
+                } else {
+                    det::expm1(exponent) / exponent
+                };
+                velocity_mps[2] *= correction;
+            }
+        }
+        let mass_flux_kg_m2_s = velocity_mps.map(|speed| density_kg_m3 * speed);
+        if velocity_mps
+            .iter()
+            .chain(mass_flux_kg_m2_s.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err(refuse(
+                "anelastic-flow-range",
+                "velocity, density-column correction or mass flux overflows".into(),
+                "reduce the height interval, density contrast or reference speed",
+            ));
+        }
+        Ok(AnelasticFetchSample {
+            density_kg_m3,
+            velocity_mps,
+            mass_flux_kg_m2_s,
+        })
     }
 }

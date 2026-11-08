@@ -427,3 +427,24 @@ This observation does not add energy outside the
 represented finite spectral band, provide a nonlinear time average, or include
 wall-blocking corrections, density fluctuations, pressure or a separate mean
 flow. The existing linear filters retain their original O(n) cost.
+
+## Density-stratified fetch mean wind
+
+`fetch_mass_consistent::FetchAdjustedAnelastic` binds the existing fetch log law
+to an immutable, caller-authored `ExponentialDensityProfile` on an explicit finite
+height interval. It returns local physical density, velocity and `rho * velocity`
+mass flux together. For inverse scale height `k >= 0`, its vertical correction
+uses `(exp(k * (h - d - z0)) - 1) / k`, evaluated through `expm1` with the exact
+constant-density limit. Thus `div(rho * velocity) = 0` on each smooth piece while
+`div(velocity) = k * w` generally differs from zero. Sampling allocates no storage
+and performs no quadrature; the reference speed scale is prepared once.
+
+The original constant-density API, zero-velocity roughness cutoff and fetch clamps
+remain unchanged. Cutoff and fetch endpoints are nonsmooth; endpoints retain the
+interior fetch derivative convention. Nonfinite sources, out-of-domain heights,
+unrepresentable density, velocity or mass flux refuse. This is an estimated
+kinematic mean-flow model, without inferred gas properties, pressure/temperature
+closure, turbulent density fluctuations or a momentum/energy solution. The
+existing fetch battery checks independent finite-difference mass continuity for
+both roughness-gradient signs, nonzero velocity divergence, constant/weak-density
+limits, impermeability, density-scale invariance and domain/overflow refusals.
