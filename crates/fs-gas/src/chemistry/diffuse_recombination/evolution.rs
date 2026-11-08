@@ -194,7 +194,15 @@ pub struct DiffuseRecombinationEvolutionBalance {
     /// Net radiative pair creation times N_A + outgoing - incoming photons.
     pub photon_residual: f64,
     /// Actual gas energy change + outgoing - incoming radiation - external work [J].
+    /// The boundary comparison includes `boundary_energy_roundoff_j`.
     pub energy_residual_j: f64,
+    /// Actual gas energy change - direct net radiation input - external work [J].
+    /// This independent storage/source check keeps the absolute chemistry tolerance.
+    pub gas_source_residual_j: f64,
+    /// Additional allowance [J] only for comparisons of rounded interface energies.
+    /// This is 128 epsilon times total incoming plus outgoing energy; it does not
+    /// increase the chemistry tolerance or certify a physical transport error.
+    pub boundary_energy_roundoff_j: f64,
     /// Complete accepted steps; two-half-step endpoints are retained.
     pub accepted_steps: usize,
     /// Rejected temporal or source/positivity trials.

@@ -578,11 +578,34 @@ impl<'a> Column<'a> {
                 residual_photons: photon_residual,
             });
         }
+        // The gas must match the directly accumulated radiation source even
+        // when a bright, almost transparent beam makes boundary subtraction
+        // unable to resolve its absorbed energy. Never relax this local account
+        // by the incident throughput.
+        let gas_source_residual = (gas - net_radiation - work).to_f64();
+        if !gas_source_residual.is_finite()
+            || gas_source_residual.abs() > self.controls.chemistry.energy_tolerance_j
+        {
+            return Err(Error::EnergyBalance {
+                residual_j: gas_source_residual,
+            });
+        }
+        // The transfer kernel exposes f64 directional rates. Their integrated
+        // subtraction has throughput-scale roundoff even though expm1 retains
+        // much smaller physical absorption. Mirror the photon audit allowance
+        // only for these two interface comparisons, and report it explicitly.
+        let boundary_energy_roundoff = 128.0
+            * f64::EPSILON
+            * (escaped_energy + incident_energy).to_f64();
+        let boundary_energy_allowance =
+            self.controls.chemistry.energy_tolerance_j + boundary_energy_roundoff;
+        if !boundary_energy_allowance.is_finite() {
+            return Err(Error::Arithmetic("boundary energy roundoff allowance"));
+        }
         let energy_residual = (gas + escaped_energy - incident_energy - work).to_f64();
         let radiation_residual = (net_radiation + escaped_energy - incident_energy).to_f64();
         for residual in [energy_residual, radiation_residual] {
-            if !residual.is_finite() || residual.abs() > self.controls.chemistry.energy_tolerance_j
-            {
+            if !residual.is_finite() || residual.abs() > boundary_energy_allowance {
                 return Err(Error::EnergyBalance {
                     residual_j: residual,
                 });
@@ -598,6 +621,8 @@ impl<'a> Column<'a> {
         self.balance.external_work_j = work.to_f64();
         self.balance.photon_residual = photon_residual;
         self.balance.energy_residual_j = energy_residual;
+        self.balance.gas_source_residual_j = gas_source_residual;
+        self.balance.boundary_energy_roundoff_j = boundary_energy_roundoff;
         poll(cancelled)?;
         Ok(DiffuseRecombinationEvolutionResult {
             cells: endpoints,

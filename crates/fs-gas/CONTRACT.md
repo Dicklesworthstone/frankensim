@@ -8393,6 +8393,17 @@ absorbed photons with their actual excess energy, not an arbitrary seed or the
 temperature stored on an absent electron pool. Empty columns preserve their
 complete transmitted exposure; zero duration preserves identity.
 
+The final gas-storage versus direct-radiation-source audit retains the absolute
+chemistry energy tolerance. Boundary-energy subtraction alone additionally
+allows `128*f64::EPSILON*(incoming_energy+outgoing_energy)`, reported as
+`boundary_energy_roundoff_j`, because the directional interface rates are f64:
+a nearly transparent bright beam may have equal rounded incoming/outgoing
+energies while `expm1` still resolves physical absorption. The separately
+reported `gas_source_residual_j` cannot use this throughput allowance to hide
+a gas-heating error. The allowance is an arithmetic admission tolerance, not
+a certified transport-error bound. A live thin-depth regression independently
+checks retained ionization/heating and this separation of the two audits.
+
 The existing temporal controller now includes incident absorption integrals
 alongside all population, temperature, diffuse and interface accounts. Source
 support, cancellation, field work, step and conservation failures publish no

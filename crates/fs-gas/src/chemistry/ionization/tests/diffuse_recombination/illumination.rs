@@ -157,7 +157,8 @@ fn audit_illuminated(result: &DiffuseRecombinationEvolutionResult) {
     assert!((radiation + b.escaped_energy_j - b.incident_energy_j).abs() <= 2.0 * tolerance);
     assert!((pairs * NA + b.escaped_photons - b.incident_photons).abs()
         <= NA * 1e-10 + 1e-13 * b.incident_photons);
-    assert!(b.energy_residual_j.abs() <= tolerance);
+    assert!(b.energy_residual_j.abs() <= tolerance + b.boundary_energy_roundoff_j);
+    assert!(b.gas_source_residual_j.abs() <= tolerance);
     assert!(b.maximum_normalized_local_error <= 1.0);
     for cell in result.cells() {
         let end = cell.state();
@@ -224,6 +225,44 @@ fn g3_live_illumination_and_recombination_share_one_energy_account() {
     assert_ne!(cell.state().amounts(), state.amounts());
     assert_ne!(cell.state().electron_temperature(), state.electron_temperature());
     audit_illuminated(&result);
+}
+
+
+#[test]
+fn g1_live_thin_beam_keeps_heat_below_boundary_subtraction_resolution() {
+    let duration = 0.1;
+    let flux = 1e13;
+    let (state, source) = parcel(0.0, 10000.0, 1.0, 1e16);
+    let area = Area::new(SIGMA * NA / 1e-20);
+    let controls = live_controls(duration);
+    let result = advance_diffuse_recombination_with_illumination(
+        &[DiffuseRecombinationEvolutionCell::new(&state, &source)],
+        area,
+        &[beam(20.0, flux, 1.0)],
+        Time::new(duration),
+        controls,
+        || false,
+    )
+    .unwrap();
+    // At this optical depth the unattenuated-beam solution is accurate to
+    // O(1e-20), well below f64 resolution. Use expm1 for the tiny population.
+    let ionized = -(-SIGMA * flux * duration).exp_m1();
+    let absorbed_energy = ionized * NA * 20.0 * EV;
+    let cell = &result.cells()[0];
+    let balance = result.balance();
+    close(cell.state().amounts()[1].value(), ionized, 4e-6);
+    close(cell.radiation().incident_absorbed_energy_j, absorbed_energy, 4e-6);
+    close(balance.net_radiation_energy_j, absorbed_energy, 4e-6);
+    assert!(balance.gas_energy_change_j > controls.chemistry.energy_tolerance_j);
+    assert!((balance.gas_energy_change_j - absorbed_energy).abs()
+        <= controls.chemistry.energy_tolerance_j);
+    assert_eq!(balance.incident_energy_j, balance.escaped_energy_j);
+    // This is the valid residual that formerly caused unconditional refusal.
+    assert!(balance.energy_residual_j.abs() > controls.chemistry.energy_tolerance_j);
+    assert!(balance.energy_residual_j.abs()
+        <= controls.chemistry.energy_tolerance_j + balance.boundary_energy_roundoff_j);
+    assert!(balance.gas_source_residual_j.abs() <= controls.chemistry.energy_tolerance_j);
+    assert_eq!(cell.state().amounts()[1], cell.state().amounts()[2]);
 }
 
 #[test]
