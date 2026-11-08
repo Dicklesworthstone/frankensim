@@ -458,7 +458,7 @@ fn g1_channel_sgs_flux_and_film_walls_reach_original_filter_transport_and_heat_b
                     assert!((exchange[side].mean_temperature - value).abs() < 2e-15);
                     continue;
                 }
-                ThermalWall::Adiabatic => unreachable!(),
+                ThermalWall::Adiabatic | ThermalWall::FiniteSolid(_) => unreachable!(),
             };
             assert!((measured[side] - expected).abs() < 2e-14);
         }

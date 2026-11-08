@@ -313,3 +313,105 @@ fn g0_trace_extrema_retain_nonfinite_refusals_after_later_finite_links() {
     near(report[1].min_temperature, 0.6, 2e-15);
     near(report[1].max_temperature, 0.6, 2e-15);
 }
+
+fn finite_wall_storage<const D: usize, const Q: usize>(
+    lattice: &AxisLattice<D, Q>,
+    shape: [usize; D],
+) {
+    use super::super::boundary::FiniteThermalWall;
+
+    let cells: usize = shape.iter().product();
+    let plane = cells / shape[D - 1];
+    // The prescribed tangential flow circulates heat on the original periodic
+    // axes. Its normal component is zero at the impermeable solid interface.
+    let mut velocity = [0.0; D];
+    velocity[0] = 0.035;
+    let mut populations = vec![lattice.equilibrium(0.25, velocity); cells];
+    let mut post = vec![0.0; Q * cells];
+    let mut history = FluxHistory::default();
+    let mut walls: [Vec<ThermalWall>; 2] = core::array::from_fn(|side| {
+        (0..plane).map(|link| {
+            let (temperature, capacity, heat) = if side == 0 {
+                (1.0 - 0.04 * link as f64, 2.0 + 0.25 * link as f64,
+                    0.002 * (1 + link % 2) as f64)
+            } else {
+                (0.4 + 0.03 * link as f64, 5.0 + 0.1 * link as f64,
+                    -0.0003 * (1 + link % 3) as f64)
+            };
+            ThermalWall::FiniteSolid(FiniteThermalWall {
+                temperature, heat_capacity: capacity,
+                resistance: 0.5 + 0.5 * side as f64 + 0.1 * link as f64,
+                heat_per_step: heat,
+            })
+        }).collect()
+    });
+    let solid_energy = |walls: &[Vec<ThermalWall>; 2]| -> f64 {
+        walls.iter().flatten().map(|wall| match wall {
+            ThermalWall::FiniteSolid(solid) => solid.heat_capacity * solid.temperature,
+            _ => unreachable!("this fixture owns finite solids"),
+        }).sum()
+    };
+    let capacity = (cells - 2 * plane) as f64 + walls.iter().flatten().map(|wall| {
+        match wall {
+            ThermalWall::FiniteSolid(solid) => solid.heat_capacity,
+            _ => unreachable!(),
+        }
+    }).sum::<f64>();
+    let initial = storage(&populations, plane) + solid_energy(&walls);
+    let mut deposited = 0.0;
+    for step in 0..2500 {
+        // Finish a finite, spatially heterogeneous heating/cooling pulse, then
+        // let the same retained wall cells equilibrate in the closed system.
+        if step == 24 {
+            for wall in walls.iter_mut().flatten() {
+                if let ThermalWall::FiniteSolid(solid) = wall { solid.heat_per_step = 0.0; }
+            }
+        }
+        let source: f64 = walls.iter().flatten().map(|wall| match wall {
+            ThermalWall::FiniteSolid(solid) => solid.heat_per_step,
+            _ => unreachable!(),
+        }).sum();
+        let before_fluid = storage(&populations, plane);
+        let before_solid = solid_energy(&walls);
+        lattice.collide(
+            &populations, &mut post, plane..cells - plane, 0.9, None,
+            &mut history, |_| velocity,
+        );
+        let report = lattice.stream_with_wall_state(
+            &mut populations, &post, shape, [ThermalWall::Adiabatic; 2], Some(&mut walls),
+        );
+        let fluid_heat = report[0].heat_in + report[1].heat_in;
+        let mut reported_source = 0.0;
+        for side in report {
+            let solid = side.solid.expect("mutable finite cells retain their heat account");
+            assert_eq!(solid.heat_in, side.heat_in);
+            near(solid.defect(), 0.0, 2e-12);
+            assert!(solid.maximum_link_defect < 2e-13);
+            reported_source += solid.source;
+        }
+        near(reported_source, source, 1e-16);
+        near(storage(&populations, plane) - before_fluid, fluid_heat, 2e-12);
+        near(solid_energy(&walls) - before_solid, source - fluid_heat, 2e-12);
+        deposited += source;
+    }
+    assert!(deposited > 0.0, "the finite wall source must actually run");
+    let expected_energy = initial + deposited;
+    near(storage(&populations, plane) + solid_energy(&walls), expected_energy, 2e-10);
+    // The equilibrium follows only original capacities and external source
+    // energy, independently of the boundary reflection formula.
+    let equilibrium = expected_energy / capacity;
+    for population in &populations[plane..cells - plane] {
+        near(population.iter().sum(), equilibrium, 5e-8);
+    }
+    for wall in walls.into_iter().flatten() {
+        if let ThermalWall::FiniteSolid(solid) = wall {
+            near(solid.temperature, equilibrium, 5e-8);
+        }
+    }
+}
+
+#[test]
+fn g1_finite_wall_sources_and_storage_close_on_both_native_scalar_lattices() {
+    finite_wall_storage(&D2Q5, [3, 6]);
+    finite_wall_storage(&D3Q7, [3, 2, 6]);
+}

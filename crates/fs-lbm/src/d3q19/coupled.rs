@@ -906,10 +906,16 @@ impl ThermalLbm3 {
     /// scalar coordinates. Uses the same stationary halfway-wall law as 2-D;
     /// spatial fields are replaced, and invalid declarations leave the
     /// previous laws and report intact.
+    /// Finite solids expand once into independent retained cells per link;
+    /// installing new laws replaces any previous finite wall storage.
     pub fn set_thermal_walls(&mut self, walls: [ThermalWall; 2]) -> Result<(), ThermalWallError> {
         for wall in walls { wall.validate()?; }
         self.wall_boundaries = Some(walls);
-        self.spatial_wall_boundaries = None;
+        // Finite solids own independent normal links, even when their initial
+        // data are uniform. No per-step wall allocation is needed.
+        self.spatial_wall_boundaries = walls.iter()
+            .any(|wall| matches!(wall, ThermalWall::FiniteSolid(_)))
+            .then(|| walls.map(|wall| vec![wall; self.grid.nx * self.grid.ny]));
         self.wall_exchange = None;
         Ok(())
     }
@@ -1156,14 +1162,13 @@ impl ThermalLbm3 {
                 |cell| grid.moments3(cell).1,
             );
         }
-        let walls = ThermalWallField::pair(
-            self.thermal_walls(), self.spatial_wall_boundaries.as_ref(),
-        );
-        self.wall_exchange = Some(advection::D3Q7.stream_with_walls(
+        let walls = self.thermal_walls();
+        self.wall_exchange = Some(advection::D3Q7.stream_with_wall_state(
             &mut self.gpop,
             post.as_flattened(),
             [nx, ny, nz],
-            Some(walls),
+            walls,
+            self.spatial_wall_boundaries.as_mut(),
         ));
         self.grid.post = post;
         let resolved = resolve.map(|resolve| resolve(self)).transpose()?;

@@ -198,11 +198,15 @@ impl ThermalLbm {
     /// the temperature coordinate. The laws persist through ordinary and
     /// checked source/transport steps, replacing any spatial wall field.
     /// Invalid declarations leave state intact.
-    /// These are stationary impermeable planar walls; they add no solid storage.
+    /// Walls remain stationary and impermeable. A finite-solid declaration is
+    /// expanded once into one retained cell per link; subsequent steps evolve
+    /// those cells independently. This replaces any previous wall storage.
     pub fn set_thermal_walls(&mut self, walls: [ThermalWall; 2]) -> Result<(), ThermalWallError> {
         for wall in walls { wall.validate()?; }
         self.wall_boundaries = Some(walls);
-        self.spatial_wall_boundaries = None;
+        self.spatial_wall_boundaries = walls.iter()
+            .any(|wall| matches!(wall, ThermalWall::FiniteSolid(_)))
+            .then(|| walls.map(|wall| vec![wall; self.grid.nx]));
         self.wall_exchange = None;
         Ok(())
     }
@@ -434,14 +438,13 @@ impl ThermalLbm {
                 |cell| grid.moments(cell).u,
             );
         }
-        let walls = ThermalWallField::pair(
-            self.thermal_walls(), self.spatial_wall_boundaries.as_ref(),
-        );
-        self.wall_exchange = Some(advection::D2Q5.stream_with_walls(
+        let walls = self.thermal_walls();
+        self.wall_exchange = Some(advection::D2Q5.stream_with_wall_state(
             &mut self.gpop,
             self.scratch.as_flattened(),
             [nx, ny],
-            Some(walls),
+            walls,
+            self.spatial_wall_boundaries.as_mut(),
         ));
         let resolved = resolve.map(|resolve| resolve(self)).transpose()?;
         if let Some(forces) = resolved.as_deref() {

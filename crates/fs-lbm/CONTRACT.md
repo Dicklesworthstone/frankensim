@@ -1,3 +1,36 @@
+## Finite solid cells on native thermal walls
+
+`ThermalWall::FiniteSolid` couples an explicitly sized solid cell to each
+normal D2Q5/D3Q7 slab link. Capacity, bulk temperature, through-wall/contact
+resistance and external heat per original lattice step are authored in the
+same scalar/energy coordinates as the fluid. A uniform declaration expands
+once into the existing per-link spatial state; live bulk temperatures are
+read through `thermal_wall_fields`. Ordinary steps allocate no wall scratch.
+
+The local backward-Euler solve closes both `C dT = Q - q` and
+`T_bulk - T_surface = R q` against the original reflected-pair heat. The
+fluid receives that heat once. `ThermalWallExchange::solid` retains independently
+measured solid storage, its external source, the actual fluid exchange and
+the largest per-link first-law defect. Checked source/material steps admit
+surface and solid-bulk temperatures and both summed and local balance before
+publishing; existing spatial snapshots roll wall state back with flow, scalar
+populations and advective history on any endpoint refusal. At extreme capacity
+ratios, an unrepresentable solid temperature increment can leave a first-law
+defect. Checked source/material steps refuse defects above the caller's balance
+tolerance; ordinary unchecked steps expose the defect in their wall report.
+
+Finite-wall kernel tests exercise the analytic interface/storage identities,
+heating/cooling, conductivity changes and tiny/large capacity limits.
+The shared scalar integration regression evolves both lattices under tangential
+advection and spatial heating/cooling, checking fluid/solid heat accounts each
+step and the independent capacity-weighted equilibrium after the source stops. Native
+`finite_thermal_walls` regressions cover both lattice stencils, capacity-weighted
+equilibrium, combined energy, one-time source deposition, independent wall
+cells and endpoint rollback; the source-history test also rejects after full
+candidate advancement. This is lumped first-order solid storage behind a
+stationary planar resistance: no lateral wall conduction, resolved solid
+diffusion, temperature-dependent solid law or coupled second-order time claim.
+
 
 
 ## Midpoint material tensor diffusion

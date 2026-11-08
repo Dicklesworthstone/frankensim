@@ -24,9 +24,12 @@ pub struct ThermalSourceLimits {
     /// temporarily holds a second complete solver state, plus transport scratch.
     pub max_cells: usize,
     /// Admitted temperature interval in the solver's temperature coordinates.
-    /// Checked on the input, both source kicks and the transported candidate.
+    /// Checked on the input, both source kicks and the transported candidate,
+    /// including finite solid-wall bulk temperatures and surface traces.
     pub temperature_range: [f64; 2],
     /// Absolute tolerance on the SUMMED temperature balance, in lattice units.
+    /// Also bounds each finite-wall plane and every finite solid link's
+    /// reciprocal storage/source balance before joint publication.
     pub balance_tolerance: f64,
 }
 
@@ -66,7 +69,7 @@ pub enum ThermalSourceError {
         /// Candidate temperature in lattice coordinates.
         value: f64,
     },
-    /// A resolved halfway wall trace leaves the admitted scalar interval.
+    /// A resolved wall trace or finite solid bulk leaves the scalar interval.
     WallTemperature {
         /// Bottom = 0, top = 1.
         wall: usize,
@@ -90,7 +93,7 @@ impl core::fmt::Display for ThermalSourceError {
             Self::Wall(error) => write!(f, "thermal source: {error}"),
             Self::Temperature { cell, value } => write!(f, "thermal source temperature {value} at cell {cell} is outside its admitted range"),
             Self::WallTemperature { wall, minimum, maximum } => write!(f,
-                "thermal source wall {wall} trace [{minimum}, {maximum}] is outside its admitted range"),
+                "thermal source wall {wall} trace/bulk [{minimum}, {maximum}] is outside its admitted range"),
             Self::Balance { defect } => write!(f, "thermal source balance defect {defect} exceeds tolerance"),
         }
     }
@@ -254,9 +257,13 @@ fn source_step_with_advance<
     for field in state.thermal_wall_fields() {
         field.validate(plane).map_err(ThermalSourceError::Wall)?;
         for wall in field.laws() {
-            if let ThermalWall::Temperature(temperature) = wall
-                && (temperature < limits.temperature_range[0] || temperature > limits.temperature_range[1])
-            {
+            let temperature = match wall {
+                ThermalWall::Temperature(value) => Some(value),
+                ThermalWall::FiniteSolid(solid) => Some(solid.temperature),
+                _ => None,
+            };
+            if temperature.is_some_and(|value|
+                value < limits.temperature_range[0] || value > limits.temperature_range[1]) {
                 return Err(invalid("prescribed wall temperature is outside the admitted interval").into());
             }
         }
@@ -293,6 +300,33 @@ fn source_step_with_advance<
             return Err(ThermalSourceError::WallTemperature {
                 wall, minimum: exchange.min_temperature, maximum: exchange.max_temperature,
             }.into());
+        }
+        if let Some(solid) = exchange.solid {
+            let defect = solid.defect();
+            if !defect.is_finite() || defect.abs() > limits.balance_tolerance {
+                return Err(ThermalSourceError::Balance { defect }.into());
+            }
+            if !solid.maximum_link_defect.is_finite()
+                || solid.maximum_link_defect > limits.balance_tolerance
+            {
+                return Err(ThermalSourceError::Balance { defect: solid.maximum_link_defect }.into());
+            }
+        }
+    }
+    // Finite walls live in the existing spatial state, so the same snapshot
+    // publishes or rolls back their bulk endpoints with the fluid. A valid
+    // surface mean cannot hide an invalid solid bulk behind a resistance.
+    for (wall, field) in candidate.thermal_wall_fields().into_iter().enumerate() {
+        for law in field.laws() {
+            if let ThermalWall::FiniteSolid(solid) = law
+                && (!solid.temperature.is_finite()
+                    || solid.temperature < limits.temperature_range[0]
+                    || solid.temperature > limits.temperature_range[1])
+            {
+                return Err(ThermalSourceError::WallTemperature {
+                    wall, minimum: solid.temperature, maximum: solid.temperature,
+                }.into());
+            }
         }
     }
     let [bottom_wall, top_wall] = wall_exchange.map(|exchange| exchange.heat_in);
@@ -511,7 +545,7 @@ mod history_tests {
             reference.advance(&forces).unwrap();
         }
         let before = actual.populations().to_vec();
-        let before_walls = actual.thermal_walls();
+        let before_walls = actual.thermal_wall_fields().map(|field| field.laws().collect::<Vec<_>>());
         let before_exchange = actual.wall_exchange();
         let mut heat = vec![0.0; cells];
         for cell in plane..cells - plane {
@@ -526,7 +560,7 @@ mod history_tests {
         );
         assert_eq!(rejected, Err(invalid("test endpoint rejection")));
         assert_eq!(actual.populations(), before.as_slice());
-        assert_eq!(actual.thermal_walls(), before_walls);
+        assert_eq!(actual.thermal_wall_fields().map(|field| field.laws().collect::<Vec<_>>()), before_walls);
         assert_eq!(actual.wall_exchange(), before_exchange);
         // The next accepted source steps must retain the same warmed
         // derivative as the ordinary solver, not restart it in each clone.
@@ -538,6 +572,10 @@ mod history_tests {
             ).unwrap();
             assert_eq!(actual.populations(), reference.populations());
             assert_eq!(actual.wall_exchange(), reference.wall_exchange());
+            assert_eq!(
+                actual.thermal_wall_fields().map(|field| field.laws().collect::<Vec<_>>()),
+                reference.thermal_wall_fields().map(|field| field.laws().collect::<Vec<_>>()),
+            );
         }
     }
 
@@ -561,6 +599,30 @@ mod history_tests {
         let walls = [
             ThermalWall::HeatFlux(0.0002),
             ThermalWall::Convective { transfer: 0.04, ambient: 0.0 },
+        ];
+        let mut two = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        let mut two_reference = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        two.set_thermal_walls(walls).unwrap();
+        two_reference.set_thermal_walls(walls).unwrap();
+        reject_then_advance::<_, 2, 5>(two, two_reference, [1e-5, -2e-6]);
+
+        let mut three = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        let mut three_reference = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        three.set_thermal_walls(walls).unwrap();
+        three_reference.set_thermal_walls(walls).unwrap();
+        reject_then_advance::<_, 3, 7>(three, three_reference, [1e-5, -2e-6, 3e-6]);
+    }
+
+    #[test]
+    fn g0_finite_solid_storage_rolls_back_with_thermal_history_and_flow() {
+        use super::super::boundary::FiniteThermalWall;
+        let walls = [
+            ThermalWall::FiniteSolid(FiniteThermalWall {
+                temperature: 0.9, heat_capacity: 1.0, resistance: 0.4, heat_per_step: 0.0002,
+            }),
+            ThermalWall::FiniteSolid(FiniteThermalWall {
+                temperature: 0.1, heat_capacity: 3.0, resistance: 0.0, heat_per_step: 0.0,
+            }),
         ];
         let mut two = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
         let mut two_reference = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);

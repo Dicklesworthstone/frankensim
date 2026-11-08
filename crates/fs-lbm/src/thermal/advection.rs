@@ -12,9 +12,9 @@
 //! temporal order of the complete partitioned buoyancy/source solver.
 
 use core::ops::Range;
-use super::boundary::{ThermalWallExchange, ThermalWallField};
+use super::boundary::{ThermalWall, ThermalWallExchange, WallReflection};
 #[cfg(test)]
-use super::boundary::ThermalWall;
+use super::boundary::ThermalWallField;
 
 /// One vector per cell; retained by transactional snapshots, never by a
 /// step-local relaxation field. Wall entries are unused.
@@ -198,6 +198,7 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
     /// measured independently of storage/source residuals. In-plane directions
     /// remain periodic; `None` retains the fully periodic path and zero reports.
     /// The original checked solver admits the laws and complete candidate.
+    #[cfg(test)]
     pub(crate) fn stream_with_walls(
         &self,
         populations: &mut [[f64; Q]],
@@ -205,28 +206,65 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
         shape: [usize; D],
         walls: Option<[ThermalWallField<'_>; 2]>,
     ) -> [ThermalWallExchange; 2] {
+        self.stream_reflected(populations, post, shape, walls.is_some(), |side, link, out, w| {
+            // This borrowed sampler is used by the stateless/periodic test
+            // seam. Stateful slab owners use stream_with_wall_state below.
+            walls.expect("boundary link")[side].at(link).reflect_and_advance(out, w)
+        })
+    }
+
+    /// Reflect and evolve the original per-link wall cells in place. Uniform
+    /// finite declarations are expanded ONCE when installed, not per step.
+    pub(crate) fn stream_with_wall_state(
+        &self,
+        populations: &mut [[f64; Q]],
+        post: &[f64],
+        shape: [usize; D],
+        uniform: [ThermalWall; 2],
+        mut spatial: Option<&mut [Vec<ThermalWall>; 2]>,
+    ) -> [ThermalWallExchange; 2] {
+        self.stream_reflected(populations, post, shape, true, |side, link, out, w| {
+            if let Some(walls) = spatial.as_deref_mut() {
+                walls[side][link].reflect_and_advance(out, w)
+            } else {
+                debug_assert!(!matches!(uniform[side], ThermalWall::FiniteSolid(_)));
+                let mut wall = uniform[side];
+                wall.reflect_and_advance(out, w)
+            }
+        })
+    }
+
+    fn stream_reflected(
+        &self,
+        populations: &mut [[f64; Q]],
+        post: &[f64],
+        shape: [usize; D],
+        has_walls: bool,
+        mut reflect: impl FnMut(usize, usize, f64, f64) -> WallReflection,
+    ) -> [ThermalWallExchange; 2] {
         let mut stride = [1; D];
         for axis in 1..D {
             stride[axis] = stride[axis - 1] * shape[axis - 1];
         }
         let cells = populations.len();
         let plane = stride[D - 1];
-        let active = if walls.is_some() {
+        let active = if has_walls {
             plane..cells - plane
         } else {
             0..cells
         };
         let mut exchange = [ThermalWallExchange::default(); 2];
-        if walls.is_some() {
+        if has_walls {
             for side in &mut exchange {
                 side.min_temperature = f64::INFINITY;
                 side.max_temperature = f64::NEG_INFINITY;
             }
         }
-        let mut correction = [[0.0; 2]; 2];
+        let mut correction = [[0.0; 5]; 2];
         let inverse_plane = 1.0 / plane as f64;
         // Fixed-order compensated reductions require no boundary arrays.
-        let mut record = |side: usize, incoming: f64, outgoing: f64, wall: f64| {
+        let mut record = |side: usize, reflected: &WallReflection, outgoing: f64| {
+            let (incoming, wall) = (reflected.incoming, reflected.temperature);
             let report = &mut exchange[side];
             if wall.is_finite() {
                 // Comparisons deliberately preserve a NaN recorded earlier.
@@ -244,6 +282,23 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
                 correction[side][column] = (next - *total) - increment;
                 *total = next;
             }
+            if let Some(link) = reflected.solid {
+                let solid = report.solid.get_or_insert_with(Default::default);
+                if !link.maximum_link_defect.is_finite() {
+                    solid.maximum_link_defect = f64::NAN;
+                } else if solid.maximum_link_defect.is_finite() {
+                    solid.maximum_link_defect = solid.maximum_link_defect.max(link.maximum_link_defect);
+                }
+                let values = [link.heat_in, link.stored_change, link.source];
+                let totals = [&mut solid.heat_in, &mut solid.stored_change, &mut solid.source];
+                for (column, (total, value)) in totals.into_iter().zip(values).enumerate() {
+                    let correction = &mut correction[side][column + 2];
+                    let increment = value - *correction;
+                    let next = *total + increment;
+                    *correction = (next - *total) - increment;
+                    *total = next;
+                }
+            }
         };
         for cell in active {
             let mut incoming = [0.0; Q];
@@ -251,22 +306,20 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
             for axis in 0..D {
                 let positive = self.positive[axis];
                 let negative = self.negative[axis];
-                if let Some([bottom, top]) = walls.filter(|_| axis == D - 1) {
+                if has_walls && axis == D - 1 {
                     incoming[positive] = if cell < 2 * plane {
                         let outgoing = post[Q * cell + negative];
-                        let (reflected, wall) = bottom.at(cell - plane)
-                            .reflect(outgoing, self.weights[positive]);
-                        record(0, reflected, outgoing, wall);
-                        reflected
+                        let reflected = reflect(0, cell - plane, outgoing, self.weights[positive]);
+                        record(0, &reflected, outgoing);
+                        reflected.incoming
                     } else {
                         post[Q * (cell - plane) + positive]
                     };
                     incoming[negative] = if cell >= cells - 2 * plane {
                         let outgoing = post[Q * cell + positive];
-                        let (reflected, wall) = top.at(cell - (cells - 2 * plane))
-                            .reflect(outgoing, self.weights[negative]);
-                        record(1, reflected, outgoing, wall);
-                        reflected
+                        let reflected = reflect(1, cell - (cells - 2 * plane), outgoing, self.weights[negative]);
+                        record(1, &reflected, outgoing);
+                        reflected.incoming
                     } else {
                         post[Q * (cell + plane) + negative]
                     };
