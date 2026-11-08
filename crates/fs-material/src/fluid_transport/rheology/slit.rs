@@ -791,11 +791,11 @@ impl LaminarCarreauSlit {
 // Nested Simpson refinement reuses every previous sample, with four scalars
 // per interval and no per-query allocation or constitutive resampling table.
 #[derive(Clone, Copy, Default)]
-struct Moments {
-    weight: f64,
-    mean: f64,
-    variance: f64,
-    pressure: f64,
+pub(super) struct Moments {
+    pub(super) weight: f64,
+    pub(super) mean: f64,
+    pub(super) variance: f64,
+    pub(super) pressure: f64,
 }
 
 impl Moments {
@@ -807,7 +807,7 @@ impl Moments {
             pressure: self.pressure * factor,
         }
     }
-    fn combine(self, other: Self) -> Self {
+    pub(super) fn combine(self, other: Self) -> Self {
         if self.weight == 0.0 {
             return other;
         }
@@ -846,7 +846,9 @@ impl Moments {
     }
 }
 
-fn integrate_moments(
+// The annular reduction uses these same positive inverse-tangent moments,
+// with normalized annular area in place of normalized slit height.
+pub(super) fn integrate_moments(
     sample: &mut impl FnMut(f64) -> Result<Moments, MaterialError>,
     lower: f64,
     upper: f64,
@@ -870,7 +872,7 @@ fn integrate_moments(
             .combine(added.scaled(4.0 * h / 3.0));
         if !simpson.valid() {
             return Err(state_error(
-                "Carreau slit quadrature moments are unrepresentable",
+                "Carreau flow quadrature moments are unrepresentable",
             ));
         }
         if let Some(old) = previous {
@@ -888,7 +890,7 @@ fn integrate_moments(
         trapezoid = trapezoid.scaled(0.5).combine(added.scaled(h));
     }
     Err(state_error(
-        "Carreau slit quadrature exhausted its refinement budget",
+        "Carreau flow quadrature exhausted its refinement budget",
     ))
 }
 

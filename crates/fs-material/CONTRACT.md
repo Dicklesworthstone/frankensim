@@ -18439,6 +18439,44 @@ independently prescribes shear stress, checks actual relaxation/rate and
 momentum/thermal populations, common `a=2` SI/lattice parity, and transactional
 calibration refusal.
 
+## Concentric annular Carreau transport
+
+`fluid_transport::rheology::annular::LaminarCarreauAnnulus` resolves one steady,
+fully developed axial profile between two concentric no-slip cylinders. Signed
+pressure drop and both axial wall velocities share the original thermal
+Carreau-Yasuda source and constitutive inverse. Cylindrical momentum fixes
+`tau(r)=C/r-delta_p*r/(2L)`; a bounded monotone stress solve enforces the relative
+wall speed. Both actual wall shear states must remain inside the original
+temperature/rate support. The inner wall is not replaced by an axis or a planar
+slit, and independently solved nonlinear pressure/sliding fields are not added.
+
+Logarithmic radius resolves the inner-cylinder shear. Gap and normalized annular
+area retain narrow-gap geometry without subtracting squared radii. Positive
+quadrature reuses the original scalar and central-variance integrators, splitting
+at stress zeros, extrema and original source transitions. Constant-viscosity
+limits use the analytic logarithmic Couette and annular Poiseuille response,
+including a cancellation-free small-gap mobility. All per-query scratch is
+bounded and allocation-free; checked profile and fractional-gap sampling poll
+between capped constitutive inverses and before publication.
+
+The accepted profile retains signed wall tractions and actual cylindrical
+forces, pressure work, requested wall work, positive integrated `tau*du/dr`
+heat, wall-speed residual and work defect. Mean-wall entrainment is separate
+from relative flow; curvature-driven Couette transport belongs to relative
+flow even at zero pressure. Common translation changes pressure/wall work by
+equal opposite amounts without changing heat or the reported work defect.
+Pressure mobility is a positive weighted central variance of normalized
+annular area; the same tangent supplies sliding resistance and reciprocal
+pressure/wall cross response. Numerical refinement changes remain estimates.
+
+Geometry and uniform temperature are frozen. The caller owns laminar/entrance
+admission, pressure limits and heat deposition; there is no rotation,
+eccentricity, cavitation, slip, material transport or transient claim. Tests
+recover analytical Newtonian profiles/forces/heat, compare nonlinear cylindrical
+momentum against an independent exact stress inverse, differentiate both ports,
+recover the planar narrow-gap limit, preserve thermal shifts and translation,
+and exercise curved-wall source refusal and cancellation with exact retry.
+
 ## Physical viscous stress and shear traction
 
 `fluid_transport::viscous` evaluates the three-dimensional isotropic law

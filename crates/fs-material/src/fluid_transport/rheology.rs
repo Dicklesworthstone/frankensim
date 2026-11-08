@@ -23,6 +23,8 @@ use crate::MaterialError;
 use crate::visco::temperature::{TemperatureShift, TemperatureShiftState};
 use fs_math::det;
 
+/// Fully developed concentric annuli with simultaneous pressure and axial wall motion.
+pub mod annular;
 pub mod pipe;
 /// Fully developed planar films with simultaneous pressure and wall shear.
 pub mod slit;
