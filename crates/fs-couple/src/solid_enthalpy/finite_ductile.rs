@@ -49,6 +49,9 @@ pub use super::finite_plastic::{
     ReferenceCaloricMaterial, ReferenceCaloricQuery,
 };
 
+/// Original finite ductile sheet histories coupled to their caloric cells.
+pub mod sheet;
+
 /// Explicit physical destinations for the native irreversible losses.
 /// Each fraction must lie in [0,1]. The complementary fraction is retained in
 /// the corresponding nonthermal inventory, with no implied later heat release.
@@ -98,8 +101,8 @@ pub struct DuctileCellHeat {
 
 /// The unchanged native mechanical account and explicit physical destinations.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FiniteDuctileThermalEnergy {
-    pub mechanical: FiniteDuctileTetEnergy,
+pub struct FiniteDuctileThermalEnergy<M = FiniteDuctileTetEnergy> {
+    pub mechanical: M,
     pub cells: Vec<DuctileCellHeat>,
     pub plastic_heat_j: f64,
     pub damage_heat_j: f64,

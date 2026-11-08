@@ -88,6 +88,7 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     #[cfg(feature = "experimental-solid-contact-heat")]
     Contact(fs_solid::hyper3::plastic::thermal::contact::FiniteThermoplasticPlaneContactError),
     DuctileSolid(fs_solid::hyper3::plastic::ductile::FiniteDuctileTetError),
+    DuctileSheet(fs_solid::hyper2d::plastic::ductile::FiniteDuctileSheetError),
     Sheet(FiniteThermoplasticSheetError),
     Porous(fs_solid::hyper3::plastic::porous::thermal::FiniteThermalPorousTetError),
     Thermal(DepositionError),

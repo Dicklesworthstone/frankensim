@@ -15,6 +15,8 @@ mod contact;
 mod creep;
 #[path = "finite_plastic_enthalpy/ductile.rs"]
 mod ductile;
+#[path = "finite_plastic_enthalpy/ductile_sheet.rs"]
+mod ductile_sheet;
 #[path = "finite_plastic_enthalpy/rate.rs"]
 mod rate;
 #[path = "finite_plastic_enthalpy/sheet.rs"]

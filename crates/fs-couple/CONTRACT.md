@@ -1,3 +1,45 @@
+## Reciprocal heat feedback for progressive finite ductile sheets
+
+`solid_enthalpy::finite_ductile::sheet::FiniteDuctileThermalSheet` binds each
+original P1/Q1 element to one exact source-backed caloric cell while retaining
+all native quadrature histories and volumes. Cell and material clocks, source
+identity, original volume/mass and temperature domains are checked. Prior
+plastic/damage loss cannot be adopted without its original caloric/nonthermal
+history. An optional moving sheet uses the same source reference densities and
+original consistent membrane mass.
+
+The existing bounded Picard/IQN-ILS feedback driver owns the thermal timeline,
+transport, events, observer replay and whole-window energy gates. Each proposal
+starts from the same accepted sheet, thermal state and observer; its actual
+duration drives rate flow and initiation, and its endpoint cell temperature is
+applied to every original point in that element. Only the complete converged
+mechanical/caloric/observer candidate escapes. Failed coupling trials do not
+accumulate extra plasticity, damage, heat or observer endpoints.
+
+Original point receipts and reference volumes integrate explicit fractions of
+native plastic dissipation and damage release. Complementary fractions remain
+in separate irreversible nonthermal inventories. These fractions apply to
+already-accounted physical losses, not total plastic work; energetic hardening
+is already retained mechanically. Signed material endpoint defects and numerical
+kinetic loss never become caloric heat. Source mass is conserved through damage
+and thickness changes.
+
+Temperature affects the supplied supported initiation locus. This adapter does
+not invent temperature laws for elastic moduli, yield/hardening, viscosity,
+expansion or post-initiation work. Thermal cells/conductances retain reference
+geometry; through-thickness thermal gradients, deformed Fourier transport,
+melting, contact and fragment evolution require their own models.
+
+Three focused source tests cover an independent biaxial heat/onset/thickness
+reference on P1 and Q1 with both Picard and IQN; warped per-point quadrature,
+different cell thicknesses/heat fractions, rate-dependent loading and held
+relaxation with retained motion/nonthermal inventory; and source, clock,
+prior-loss and failed-feedback rollback. Both new files passed pinned rustfmt
+parsing/formatting through stdout without filesystem writes. Bounded API/static
+review passed. Runtime and type-check execution remain unverified because the
+shared workspace exhausted storage and memory; no numerical test result is
+claimed.
+
 ## Complete transient Rayleigh fields in a molecularly relaxing gas
 
 `baffled_pressure::molecular_field::PreparedMolecularBaffledField` maps each

@@ -489,6 +489,11 @@ where
             .get(element)
             .map(|e| e.points.iter().map(|p| p.volume_m3).sum())
     }
+    /// Original point volume in native element/quadrature order. This is not
+    /// the current volume or an equal share inferred from an element mean.
+    pub fn quadrature_volume_m3(&self, element: usize, point: usize) -> Option<f64> {
+        self.elements.get(element)?.points.get(point).map(|p| p.volume_m3)
+    }
     pub fn quadrature_reference_volumes_m3(&self) -> impl Iterator<Item = f64> + '_ {
         self.elements
             .iter()
