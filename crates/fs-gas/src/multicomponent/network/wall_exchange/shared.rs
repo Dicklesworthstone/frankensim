@@ -34,6 +34,10 @@ impl<'law> NetworkWallOperator<'law> {
     /// conductance must be zero. Selected local contacts must be adiabatic and
     /// have no competing finite storage. Their original drag remains active.
     /// Sharing heat preserves every gas cell's mass and species separately.
+    /// Constant or lagged conductance retains independent original gas and wall
+    /// temperature intervals. An initially outside wall must still produce a
+    /// supported gas endpoint; implicit conductivity and integrated profiles
+    /// require the initial wall inside every active gas interval.
     ///
     /// Each source half solves all ports of a group simultaneously against
     /// one original wall h/u increment. Gas inversion and heat capacity use
@@ -83,7 +87,7 @@ impl<'law> NetworkWallOperator<'law> {
                 thermal: wall.storage.thermal,
             };
             contact.validate()?;
-            let temperature = if let Some(source) = &wall.storage.heat_storage {
+            if let Some(source) = &wall.storage.heat_storage {
                 contact = source.bind_contact(contact)?;
                 source.temperature_k(contact.thermal)?
             } else if let WallThermal::Lumped { temperature_k, .. } = contact.thermal {
@@ -108,13 +112,9 @@ impl<'law> NetworkWallOperator<'law> {
                     ));
                 }
             };
-            if conductance != 0.0
-                || wall.ports.is_empty()
-                || !(self.gas.domain().minimum_temperature..=self.gas.domain().maximum_temperature)
-                    .contains(&temperature)
-            {
+            if conductance != 0.0 || wall.ports.is_empty() {
                 return Err(WallExchangeError::Invalid(
-                    "shared wall films, ports or source interval",
+                    "shared wall films or ports",
                 ));
             }
             wall.storage.thermal = contact.thermal;

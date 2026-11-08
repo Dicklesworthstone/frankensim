@@ -34,7 +34,10 @@ impl<'law> RealGasWallOperator<'law> {
     /// energy increment. Every gas retains its current candidate density and
     /// original NASA/PR Delta u and Cv. Authored constant wall capacity or the
     /// original nonlinear/latent h/u law supplies wall storage exactly once.
-    /// Wall source temperature must lie in the declared gas caloric interval.
+    /// Gas and wall retain independent caloric intervals. Constant or lagged
+    /// conductance admits an initially hotter/colder wall when the coupled gas
+    /// endpoint is supported. Implicit conductivity and integrated profiles
+    /// require initial wall temperature inside every active gas interval.
     ///
     /// Bind before the first accepted wall interval. The outer flow owner
     /// publishes gas, wall, reports and clock only after all candidate cells
@@ -71,7 +74,7 @@ impl<'law> RealGasWallOperator<'law> {
                 thermal: wall.storage.thermal,
             };
             contact.validate()?;
-            let temperature = match &wall.storage.heat_storage {
+            match &wall.storage.heat_storage {
                 Some(source) => {
                     contact = source.bind_contact(contact)?;
                     source.temperature_k(contact.thermal)?
@@ -103,11 +106,6 @@ impl<'law> RealGasWallOperator<'law> {
             if conductance != 0.0 || wall.ports.is_empty() {
                 return Err(RealGasFlowError::Invalid(
                     "shared real-gas wall films belong to nonempty ports",
-                ));
-            }
-            if !self.gas.domain.admits_temperature(temperature) {
-                return Err(RealGasFlowError::Invalid(
-                    "shared wall outside original real-gas temperature interval",
                 ));
             }
             wall.storage.thermal = contact.thermal;

@@ -10,6 +10,7 @@ use std::cell::Cell;
 #[cfg(feature = "material")]
 mod conduction;
 pub(crate) mod links;
+mod supported;
 
 /// One compact volume's thermal boundary and optional original finite storage.
 /// Distinct contacts represent distinct physical wall masses. A shared wall
@@ -262,6 +263,24 @@ impl Group<'_> {
         work: &Work,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, WallExchangeError> {
+        self.bound_from(state, bound, 0.0, temperature, lower, control, work, cancelled)
+    }
+
+    // The caller supplies an original supported energy endpoint on the inside
+    // of this temperature inequality. Unlike the passive initial hull, a gas-
+    // supported wall interval need not contain zero wall-energy change.
+    #[allow(clippy::too_many_arguments)]
+    fn bound_from(
+        &self,
+        state: WallThermal,
+        bound: f64,
+        initial_inside: f64,
+        temperature: f64,
+        lower: bool,
+        control: WallControl,
+        work: &Work,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, WallExchangeError> {
         let inside = |t| {
             if lower {
                 t >= temperature
@@ -272,7 +291,7 @@ impl Group<'_> {
         if inside(self.after_state(state, bound, work)?.temperature) {
             return Ok(bound);
         }
-        let (mut outer, mut inner) = (bound, 0.0);
+        let (mut outer, mut inner) = (bound, initial_inside);
         for _ in 0..128 {
             poll(cancelled)?;
             let mid = 0.5 * outer + 0.5 * inner;
@@ -490,10 +509,42 @@ impl Group<'_> {
             )?;
         }
         let wall_initial = self.after(0.0, work)?.temperature;
-        let initial = self.evaluate(gas, 0.0, duration, control, work, cancelled)?;
+        let supported = self.supported_heat_interval(
+            gas, wall_initial, duration, control, work, cancelled,
+        )?;
         let mut iterations = 0;
         let mut accepted_change = 0.0;
-        if initial.0.abs() > control.tolerance(initial.2) {
+        let initial = if let Some([low, high]) = supported {
+            // A supported root may be exactly at a clipped source endpoint.
+            // The common solver takes strictly interior Newton proposals;
+            // retain exact endpoint acceptance and reuse the actual samples.
+            let lower = self.evaluate(gas, low, duration, control, work, cancelled)?;
+            let upper = self.evaluate(gas, high, duration, control, work, cancelled)?;
+            let solved = if lower.0.abs() <= control.tolerance(lower.2) {
+                (low, 0)
+            } else if upper.0.abs() <= control.tolerance(upper.2) {
+                (high, 0)
+            } else {
+                solve_scalar(
+                    low, high, 0.0_f64.clamp(low, high), control,
+                    |change, checkpoint| {
+                        if checkpoint() {
+                            return Err(WallExchangeError::Cancelled);
+                        }
+                        if change == low { Ok(lower) }
+                        else if change == high { Ok(upper) }
+                        else { self.evaluate(gas, change, duration, control, work, checkpoint) }
+                    },
+                    cancelled,
+                )?
+            };
+            accepted_change = solved.0;
+            iterations = solved.1;
+            self.evaluate(gas, accepted_change, duration, control, work, cancelled)?
+        } else {
+            self.evaluate(gas, 0.0, duration, control, work, cancelled)?
+        };
+        if supported.is_none() && initial.0.abs() > control.tolerance(initial.2) {
             let mut minimum = wall_initial;
             let mut maximum = wall_initial;
             for (i, (port, state)) in self.accepted.ports.iter().zip(&self.initial).enumerate() {

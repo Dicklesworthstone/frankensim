@@ -29,8 +29,10 @@ impl<'law> NetworkWallOperator<'law> {
     /// Each selected local contact must be adiabatic with no finite storage;
     /// its original drag remains active and thermalizes kinetic energy FIRST.
     /// Duplicate targets, overlapping thermal owners, and reservoir storage
-    /// refuse. Initial shared-wall temperatures must lie in the gas source's
-    /// declared interval. No temperature or source support is extrapolated.
+    /// refuse. Constant or lagged conductance admits independent wall/gas
+    /// temperature intervals when the coupled gas endpoint is supported.
+    /// Implicit conductivity and integrated profiles require the initial wall
+    /// temperature inside every active gas interval. No source is extrapolated.
     ///
     /// Every group closes its simultaneous backward-Euler endpoint equations,
     /// using one wall-energy increment unknown and the original gas solver.
@@ -84,14 +86,7 @@ impl<'law> NetworkWallOperator<'law> {
                 return Err(Error::Invalid("shared wall films belong to nonempty ports"));
             }
             wall.storage.thermal = contact.thermal;
-            let temperature = storage_temperature(&wall.storage)?;
-            if !(self.gas.domain().minimum_temperature..=self.gas.domain().maximum_temperature)
-                .contains(&temperature)
-            {
-                return Err(Error::Invalid(
-                    "shared wall outside original gas temperature interval",
-                ));
-            }
+            storage_temperature(&wall.storage)?;
             let n = wall.ports.len();
             let mut volumes = allocated(n, 0.0)?;
             for (i, port) in wall.ports.iter().enumerate() {

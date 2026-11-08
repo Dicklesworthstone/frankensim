@@ -46,7 +46,7 @@ fn temperature_spec() -> QuantitySpec {
 
 // Manufactured original card: k(T)=a+bT, Cv(T)=c+dT, one kilogram.
 // These are analytic test laws, not measured material property claims.
-fn temperature_source(
+pub(super) fn temperature_source(
     conductivity: [f64; 2],
     capacity: [f64; 2],
     span: [f64; 2],

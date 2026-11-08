@@ -22,6 +22,8 @@ const R: f64 = 8.314_462_618_153_24;
 mod shared_links;
 #[path = "thermal/material_conduction.rs"]
 mod material_conduction;
+#[path = "thermal/independent_domains.rs"]
+mod independent_domains;
 
 fn wall_controls() -> WallControl {
     WallControl {
