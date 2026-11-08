@@ -5,6 +5,8 @@
 mod mixed;
 #[path = "plastic_hill_thermal/voce.rs"]
 mod voce;
+#[path = "plastic_hill_thermal/rate.rs"]
+mod rate;
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

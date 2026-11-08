@@ -21908,3 +21908,37 @@ validation remains unrun.
 The original five-mode scalar return and exact tensor tangent include `eta/dt` only in the incremental radius. Original yield and energetic hardening coefficients remain unchanged. Accepted viscous histories may have positive static overstress; duration-free history admission checks their finite, isochoric, reachable small-strain state without a static-yield projection. Repeated proposals borrow the same accepted history and consume no additional interval. A further accepted hold interval can relax stress and advance plastic history.
 
 Physical dissipation is `Y*delta_alpha + (eta/dt)*delta_alpha^2`. Original elastic, isotropic and Prager storage and backward-Euler losses retain their existing owners. The endpoint-frozen thermal seam preserves old-coefficient history admission and original material axes; coefficient work and entropy belong to the thermal owner. Native tests specify independent anisotropic shear relaxation and endpoint slopes, J2 correspondence, rotated nonproportional tangents, plane-stress holds and stress-unit covariance. This bounded law does not supply sub-yield creep, a nonlinear rate exponent, dynamic backstress recovery, evolving texture, finite-strain forming or measured-alloy calibration.
+
+### Source-bound linear overstress for thermal Hill solids and sections
+
+`ThermalHillSource::with_linear_overstress` explicitly selects
+`hill_overstress_viscosity` in Pa s for Hill's work-conjugate alpha. It pins
+the original claim and admits every source-line crossing over the original
+fully solid caloric chart. The viscosity must remain positive and finite;
+hidden rate/frequency axes, partial temperature support, substitute fluid
+viscosity, and implicit J2 normalizations are refused. Dissipative viscosity
+may vary nonlinearly with temperature because it contributes no stored
+energy, entropy, or frozen-history heat capacity.
+
+Each `resolve_section_step` prepares the native oriented linear-overstress
+law once at its actual positive physical duration. The same old enthalpy,
+original material-frame history and interval feed the mechanical solve and
+the independently checked work account. Accepted viscous histories may
+remain outside the static yield surface; validation inspects their native
+strain/reachability without a second return or an artificial duration.
+Source refresh retains every selected Prager and Voce parameter regardless
+of builder order. The unselected rate-independent path remains unchanged.
+
+The endpoint heat is `(Y + eta*delta_alpha/dt)*delta_alpha`. Elastic,
+energetic isotropic/Prager/Voce storage, coefficient work, mechanical entropy,
+and backward-Euler numerical loss keep their original separate accounts.
+Existing thermal sections, shells and generic thermal-solid consumers use
+the native Hill state directly. This is small-strain associative threshold
+flow with fixed anisotropy and material axes; it is not sub-yield creep,
+finite-strain texture evolution, damage, or measured material qualification.
+
+`tests/plastic_hill_thermal/rate.rs` adds an independent exact shear
+loading/hold/reversal recurrence with varying temperature and duration, a
+rotated Voce/Prager thermal first-law check, actual section stress relaxation,
+and source-path/time/history refusals. These authored numerical fixtures do
+not establish empirical material accuracy.

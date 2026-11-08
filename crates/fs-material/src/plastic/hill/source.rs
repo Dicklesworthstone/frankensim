@@ -49,6 +49,9 @@ pub const HILL_VOCE_SATURATION_INCREMENT_PROPERTY: &str = "hill_voce_saturation_
 /// Saturation rate b per Hill work-conjugate alpha [dimensionless].
 /// A J2-equivalent-strain rate is not interchangeable for an anisotropic metric.
 pub const HILL_VOCE_SATURATION_RATE_PROPERTY: &str = "hill_voce_saturation_rate";
+/// Linear overstress viscosity eta [Pa s] for Hill work-conjugate alpha.
+/// This is not fluid shear viscosity or a J2 rate under a different metric.
+pub const HILL_OVERSTRESS_VISCOSITY_PROPERTY: &str = "hill_overstress_viscosity";
 /// Dimensionless coefficients in the exact order F, G, H, L, M, N.
 /// Normal stress differences use F/G/H; shear yz/zx/xy uses 2L/2M/2N.
 pub const HILL_COEFFICIENT_PROPERTIES: [&str; 6] = [

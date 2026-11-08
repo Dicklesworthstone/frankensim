@@ -307,6 +307,7 @@ impl<'a> ThermalHillSource<'a> {
             hardening_slope_pa_k: hardening_slope,
             kinematic_slope_pa_k: None,
             voce_slope_pa_k: None,
+            linear_overstress_selected: false,
         };
         // The native owner checks elasticity and the return-map denominator at
         // both affine extrema. Convex combinations keep the fixed Hill metric.
@@ -526,6 +527,99 @@ impl<'a> ThermalHillSource<'a> {
         // combined return moduli at both extrema, including exactly Q=0.
         self.resolve_temperature(knots[0].temperature_k)?;
         self.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
+        Ok(self)
+    }
+
+    /// Select linear associative Hill overstress before retaining histories.
+    /// eta(T) is the independently sourced Hill viscosity [Pa s] in
+    /// alpha_dot = max(q(sigma-X)-Y-R(alpha),0)/eta. Every point uses the
+    /// actual physical duration; viscosity never becomes hardening storage.
+    /// The complete original temperature path must stay positive and finite.
+    /// Unlike stored moduli, eta may have nonlinear temperature dependence:
+    /// it has no free-energy derivative or hidden heat-capacity contribution.
+    pub fn with_linear_overstress(
+        mut self,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ThermalHillError> {
+        let invalid = ThermalHillError::Invalid;
+        if self.linear_overstress_selected
+            || self
+                .requirements
+                .iter()
+                .any(|r| r.name() == HILL_OVERSTRESS_VISCOSITY_PROPERTY)
+        {
+            return Err(invalid(
+                "Hill overstress viscosity must be selected once as a distinct material role",
+            ));
+        }
+        let requirement = ScalarPropertyRequirement::try_new(
+            HILL_OVERSTRESS_VISCOSITY_PROPERTY,
+            Dims([-1, 1, -1, 0, 0, 0]),
+            ScalarAdmissibility::StrictlyPositive,
+        )?;
+        let selected = resolve_material_state_point(
+            self.card,
+            &self.context,
+            std::slice::from_ref(&requirement),
+            selection,
+        )?;
+        let property = &selected.properties()[0];
+        self.thermal_material_point().admit_static(property)?;
+        if !property.has_only_fixed_external_conditions(Some(&self.temperature_axis), false)
+            || property.angular_frequency_band_rad_s()?.is_some()
+        {
+            return Err(invalid(
+                "Hill viscosity requires the owned temperature and fixed external conditions, without a hidden rate or frequency axis",
+            ));
+        }
+        let pin = property.answer().receipt.selected;
+        let claim = self.card.claims().claim(pin).ok_or(invalid(
+            "selected Hill viscosity is absent from the original material card",
+        ))?;
+        let knots = self.caloric.curve().knots();
+        let lower = point_at(
+            &self.context,
+            &self.temperature_axis,
+            knots[0].temperature_k,
+        )?;
+        let upper = point_at(
+            &self.context,
+            &self.temperature_axis,
+            knots[knots.len() - 1].temperature_k,
+        )?;
+        let path = pinned_temperature_line(
+            self.card,
+            &claim.key,
+            &self.temperature_axis,
+            &lower,
+            &upper,
+            pin,
+        )?;
+        if path
+            .iter()
+            .any(|(_, value)| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(invalid(
+                "Hill viscosity must stay positive and finite on every source-line cell",
+            ));
+        }
+        let MaterialPropertySelection::PinnedByProperty(pins) = &mut self.selection else {
+            return Err(invalid("thermal Hill source lost its original claim pins"));
+        };
+        pins.push((HILL_OVERSTRESS_VISCOSITY_PROPERTY.to_owned(), pin));
+        self.requirements.push(requirement);
+        self.linear_overstress_selected = true;
+        let bundle = resolve_material_state_point(
+            self.card,
+            &self.context,
+            &self.requirements,
+            self.selection.clone(),
+        )?;
+        self.reference = self.apply_selected_hardening(ResolvedHill48::try_from_material(
+            bundle,
+            self.reference.local_law().elastic().strain_limit,
+            *self.reference.law().material_to_spatial(),
+        )?)?;
         Ok(self)
     }
 
