@@ -7,6 +7,9 @@
 //! Frozen advection additionally fixes viscosity; `LiquidFlowEnthalpyInput::feedback`
 //! re-solves momentum from the evolving local viscosity on each thermal substep.
 //! The borrowed sourced caloric curve remains authoritative H(T).
+//! Live feedback can attach the original limited axial enthalpy reconstruction
+//! through `MaterialFlowFeedback::with_reconstruction`; the selected plan follows
+//! actual source-dependent flow and is retained by both implicit entries.
 
 use core::fmt;
 use std::collections::BTreeMap;

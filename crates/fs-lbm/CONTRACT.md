@@ -33,6 +33,25 @@ the existing thermal integration case also exercises activated rates and rollbac
 
 `MaterialFlowAdvection::with_reconstruction` attaches the original thermal owner's shared `LimitedEnthalpyReconstruction` to solved material face fluxes. Selected contiguous axial cells reconstruct total specific enthalpy, including a declared passive equal-density latent inventory; paired face transfers, source-law inversion, accepted history and the combined conduction/advection timestep restriction remain with `fs-thermal`. Unselected cells and external streams retain donor enthalpy. Empty plans retain the donor-cell arithmetic. This is an explicit first-order-in-time stationary-control-volume model; it does not infer multidimensional junction slopes, phase mobility, density-change flow, pressure work or moving interfaces. The `advection()` accessor exposes the underlying graph and actual transport audit; implicit clients must attach the same `reconstruction()` plan to their own native implicit transport owner.
 
+`MaterialFlowFeedback::with_reconstruction` retains that same shared plan across
+live source viscosity, bounded Boussinesq buoyancy, mushy resistance and retained
+momentum updates, including both native implicit entries. Each actual source
+epoch rebuilds the original mass graph before binding the same reconstruction;
+no additional momentum solve or alternate caloric law is introduced. Required
+axial interior connections remain present at zero flow, allowing rest and flow
+reversal. They count against the original connection budget. Dormant transverse
+faces add no artificial junction, while nonzero crossflow remains visible and
+refuses an unsupported axial stencil. A missing neighbor at an exact-solid lock
+also refuses the candidate; external or cross-solid connectivity is not inferred.
+
+The stationary-skeleton liquid-carrier attachment reconstructs phase-carried
+liquid enthalpy, leaving solid latent inventory in original mixture storage.
+Its equal-density, pure-substance, source-support and physical Stokes-work gates
+still apply. The optional bulk entropy face limiter remains incompatible with
+liquid-only carriage. Reconstruction can be selected before the first advance;
+accepted feedback preserves it with the original material pins, physical history
+and transactional candidate. Empty selection preserves donor arithmetic and CFL.
+
 ## Hydrostatic rest under material density-dependent gravity
 
 `MaterialFreeSurfaceScaling::free_surface3_hydrostatic` initializes a planar

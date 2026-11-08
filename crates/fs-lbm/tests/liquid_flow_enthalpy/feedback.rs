@@ -7,6 +7,9 @@ use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
 #[path = "feedback/unsteady.rs"]
 mod unsteady;
 
+#[path = "feedback/reconstruction.rs"]
+mod reconstruction;
+
 fn feedback_card(scale: f64) -> MaterialCard {
     feedback_card_with_conductivity(
         scale,

@@ -47,8 +47,9 @@ pub struct FlowEnthalpyInput<'a> {
     pub inlet_specific_h_j_kg: [Option<f64>; 6],
     /// Bound on all voxels, including solids, checked before map allocation.
     pub max_cells: usize,
-    /// Bound on nonzero interior AND boundary connections. The thermal owner's
-    /// max_links must separately cover interior heat transfers plus other owners.
+    /// Bound on interior AND boundary connections. Live reconstruction also
+    /// retains zero-rate interior faces for its geometric stencil. The thermal
+    /// owner's max_links separately bounds nonzero heat transfers and other owners.
     pub max_connections: usize,
 }
 
@@ -329,6 +330,19 @@ fn mass_graph(
     domain: &VoxelDomain, field: &FlowField, density: f64, input: FlowEnthalpyInput<'_>,
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<(Vec<MassFlow>, Vec<MassBoundary>), DepositionError> {
+    mass_graph_with_zero_interior(domain, field, density, input, None, check)
+}
+
+// A reconstructed live graph must keep the same geometric stencil at rest or
+// during reversal. Zero-rate edges are actual adjacent MOBILE volumes required
+// by an authored axial stencil only; dormant transverse faces are not junctions.
+// external boundaries and faces incident to a static/phase-locked solid are
+// never invented. The original connection budget includes these stored edges.
+fn mass_graph_with_zero_interior(
+    domain: &VoxelDomain, field: &FlowField, density: f64, input: FlowEnthalpyInput<'_>,
+    reconstruction: Option<&LimitedEnthalpyReconstruction>,
+    check: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(Vec<MassFlow>, Vec<MassBoundary>), DepositionError> {
     if field.dims() != domain.dims() { return Err(invalid("flow field domain differs from thermal map")); }
     let mut flows = Vec::new();
     let mut boundaries = Vec::new();
@@ -353,12 +367,17 @@ fn mass_graph(
                 }
                 if f % 2 == 0 { continue; }
             }
-            if flux == 0.0 { continue; }
+            if flux == 0.0 && !reconstruction.zip(neighbor).is_some_and(|(plan, n)| {
+                input.cell_ids[c].zip(input.cell_ids[n])
+                    .is_some_and(|(a, b)| plan.requires_neighbor_connection(a, b))
+            }) { continue; }
             if flows.len().checked_add(boundaries.len()).is_none_or(|n| n >= input.max_connections) {
                 return Err(DepositionError::Budget("flow/enthalpy connections"));
             }
             let rate = density * flux;
-            if !rate.is_finite() || rate == 0.0 { return Err(DepositionError::Arithmetic); }
+            if !rate.is_finite() || (flux != 0.0 && rate == 0.0) {
+                return Err(DepositionError::Arithmetic);
+            }
             let (slot, _) = field.slot(domain, c, f);
             let id = u64::try_from(offsets[f / 2].checked_add(slot)
                 .ok_or(DepositionError::Arithmetic)?).map_err(|_| DepositionError::Arithmetic)?;

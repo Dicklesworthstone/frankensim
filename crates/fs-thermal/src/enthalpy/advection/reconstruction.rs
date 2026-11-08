@@ -192,6 +192,21 @@ impl LimitedEnthalpyReconstruction {
         self.stencils.is_empty()
     }
 
+    /// Whether an original axial stencil requires this undirected connection.
+    ///
+    /// A live flow owner can retain these genuine geometric connections at
+    /// zero mass rate, so stopping or reversing flow does not erase a required
+    /// neighbor. Unrelated dormant transverse faces need not become axial
+    /// junctions. This query supplies no flux and does not authorize a new
+    /// geometric connection; the native flow and admission still own those.
+    pub fn requires_neighbor_connection(&self, a: CellId, b: CellId) -> bool {
+        [(a, b), (b, a)].into_iter().any(|(centre, other)| {
+            self.stencils
+                .get(&centre)
+                .is_some_and(|stencil| other == stencil.previous || other == stencil.next)
+        })
+    }
+
     /// Limit each reconstructed bulk face by its original thermal entropy.
     ///
     /// The existing minmod trace is retained whenever its directed face

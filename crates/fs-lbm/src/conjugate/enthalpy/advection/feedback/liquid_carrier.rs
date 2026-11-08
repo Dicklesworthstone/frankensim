@@ -78,7 +78,9 @@ where
         )?;
         self.advected = Some(self.advected.take()
             .ok_or(invalid("unfinished material-flow source epoch"))?
-            .with_liquid_carrier(carrier)?);
+            .into_advection()
+            .with_liquid_carrier(carrier)?
+            .with_optional_reconstruction(None)?);
         self.liquid_carrier = Some(carrier);
         Ok(self)
     }

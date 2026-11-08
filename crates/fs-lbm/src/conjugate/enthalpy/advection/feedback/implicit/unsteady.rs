@@ -135,16 +135,16 @@ where
                     let epoch = proposal.applied.as_ref().expect("resolved native endpoint");
                     let active = proposal.momentum_domain(&epoch.samples, &mut || check())?;
                     let domain = active.as_ref().unwrap_or(proposal.domain);
-                    let (flows, boundaries) = mass_graph(
+                    let (flows, boundaries) = proposal.mass_graph(
                         domain,
                         &epoch.flow.field,
-                        proposal.density_kg_m3,
-                        proposal.input,
                         &mut || check(),
                     )?;
-                    let graph = Advected::new((), flows, proposal.input.max_connections)?
-                        .with_boundaries(boundaries, proposal.input.max_connections)?;
-                    let transport = graph.endpoint_transport(state, || check())?;
+                    let graph = proposal.bind_advection(
+                        Advected::new((), flows, proposal.input.max_connections)?
+                            .with_boundaries(boundaries, proposal.input.max_connections)?,
+                    )?;
+                    let transport = proposal.endpoint_transport(graph.advection(), state, || check())?;
                     let mut sources_w = transport.heat.bulk.sources_w;
                     let stream_w = sources_w.values().try_fold(0.0, |s, &p| finite(s + p))?;
                     let power = &proposal

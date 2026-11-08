@@ -9,8 +9,12 @@
 //! starting source epoch; reference mass and geometry remain fixed.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
-use fs_conduction::transient::deposition::advection::{Advected, AdvectionAudit};
+use fs_conduction::transient::deposition::advection::{
+    Advected, AdvectionAudit, ReconstructedAdvected,
+    reconstruction::LimitedEnthalpyReconstruction,
+};
 use fs_conduction::transient::deposition::advection::liquid::LiquidEnthalpyCarrier;
 use fs_conduction::transient::deposition::{
     CellId, DepositedCell, DepositionError, DepositionObserver, DepositionSimulation, Event,
@@ -21,7 +25,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::phase::mushy::{MushyPhaseLaw, PhaseMobility};
 
-use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph};
+use super::{FlowEnthalpyInput, admit_map, invalid, mass_graph_with_zero_interior};
 use crate::conjugate::{
     ChtError, FluidProperties, FvFlow, SimpleConfig, Turbulence, ViscousHeatControls, ViscousPower,
     VoxelDomain, creeping_flow_with_body_force_heat, creeping_flow_with_darcy_heat,
@@ -57,6 +61,7 @@ pub use viscous::ViscousHeatingAudit;
 mod phase_conduction;
 use phase_conduction::PhaseConduction;
 mod liquid_carrier;
+mod reconstruction;
 mod unsteady;
 use crate::conjugate::unsteady::MaterialMomentum;
 
@@ -195,6 +200,8 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
 /// and explicitly selects a first-order transient split instead. The shared
 /// `Advected` owner contributes its actual face mass rates,
 /// boundary h flux, internal transfers and combined conductive/advective CFL.
+/// `Self::with_reconstruction` retains the original bounded axial h traces
+/// across those momentum updates, including rest and flow reversal.
 /// Endpoint source checks run before publication. The applied field belongs to
 /// its explicit starting epoch; transient endpoint momentum has a separate
 /// receipt. Quasisteady mode requires rapid viscous equilibration relative to
@@ -235,7 +242,8 @@ pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     rheology: Option<RheologyBinding<'a, F>>,
     bound_time_s: f64,
     fluid_conduction: BTreeMap<(CellId, CellId), FluidConductionFace>,
-    advected: Option<Advected<O>>,
+    reconstruction: Option<Arc<LimitedEnthalpyReconstruction>>,
+    advected: Option<ReconstructedAdvected<O>>,
     applied: Option<MaterialFlowEpoch<F, T>>,
     endpoint: Vec<FlowMaterialSample<F, T>>,
     audit: AdvectionAudit,
@@ -291,7 +299,8 @@ where
             input,
             &mut || Ok(()),
         )?;
-        let advected = Advected::new(inner, Vec::new(), input.max_connections)?;
+        let advected = Advected::new(inner, Vec::new(), input.max_connections)?
+            .with_optional_reconstruction(None)?;
         Ok(Self {
             domain,
             input,
@@ -315,6 +324,7 @@ where
             rheology: None,
             bound_time_s: thermal.time_s(),
             fluid_conduction: BTreeMap::new(),
+            reconstruction: None,
             advected: Some(advected),
             applied: None,
             endpoint,
@@ -1080,15 +1090,14 @@ where
         let (epoch, reference) = self.solve_rheology_epoch(thermal, check)?;
         let active_domain = self.momentum_domain(&epoch.samples, check)?;
         let domain = active_domain.as_ref().unwrap_or(self.domain);
-        let (flows, boundaries) =
-            mass_graph(domain, &epoch.flow.field, self.density_kg_m3, self.input, check)?;
+        let (flows, boundaries) = self.mass_graph(domain, &epoch.flow.field, check)?;
         let old = self
             .advected
             .take()
             .ok_or(invalid("unfinished material-flow source epoch"))?;
         // Rebuilding the graph keeps the accepted wrapped physical history.
         // It does not call begin() again or reset another owner's work counter.
-        let mut advected = self.bind_liquid_carrier(
+        let mut advected = self.bind_advection(
             Advected::new(old.into_inner(), flows, self.input.max_connections)?
                 .with_boundaries(boundaries, self.input.max_connections)?,
         )?;

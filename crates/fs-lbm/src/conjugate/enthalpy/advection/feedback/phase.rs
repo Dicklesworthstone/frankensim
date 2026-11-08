@@ -228,7 +228,9 @@ where
             rheology: None,
             bound_time_s: thermal.time_s(),
             fluid_conduction: BTreeMap::new(),
-            advected: Some(Advected::new(inner, Vec::new(), input.max_connections)?),
+            reconstruction: None,
+            advected: Some(Advected::new(inner, Vec::new(), input.max_connections)?
+                .with_optional_reconstruction(None)?),
             applied: None,
             endpoint,
             audit: AdvectionAudit::default(),
