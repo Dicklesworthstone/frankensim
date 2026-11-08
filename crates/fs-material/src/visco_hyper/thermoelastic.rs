@@ -10,14 +10,19 @@
 //! change the natural map and, independently, positive relaxation times, but
 //! the latter do not enter reversible derivatives at fixed Cv. This snapshot
 //! does not evolve temperature/history, supply a complete caloric law, or
-//! convert reference work into heat. Exact incompressibility and remainder
-//! histories retain their separate pressure/constraint thermodynamic owners.
+//! convert reference work into heat. Exact-volume queries use a separate
+//! remainder history and retain the constrained pressure/thermal work.
 
-use super::{Hyperelastic, MAX_FINITE_STRAIN_BRANCHES, ViscoHyperelastic, ViscoState, parameters};
+use super::{
+    Hyperelastic, MAX_FINITE_STRAIN_BRANCHES, ViscoHyperelastic, ViscoRemainderState, ViscoState,
+    parameters,
+};
 use crate::MaterialError;
 use crate::hyper::cards::FiniteStrainPotential;
+use crate::hyper::incompressible_plane_stress::generic_state;
 use crate::hyper::mixed::VolumetricTreatment;
 use crate::hyper::plane_stress::{PlaneStressSettings, plane_stress_state_with_seed};
+use crate::hyper::thermoelastic::incompressible_plane_stress::IncompressibleThermoelasticPlaneStressState;
 use crate::hyper::thermoelastic::plane_stress::FiniteThermoelasticPlaneStressState;
 use crate::hyper::thermoelastic::{
     FiniteThermoelasticState, ReferencePotentialDerivatives, ThermalReferenceJet,
@@ -113,6 +118,53 @@ impl ViscoHyperelastic {
             full,
             VolumetricTreatment::OriginalMaterial,
             settings,
+        )
+    }
+
+    /// Physical exact-volume thermodynamics at fixed accepted viscous memory.
+    ///
+    /// The native ZERO-duration remainder supplies equilibrium matrix/fibre
+    /// storage and every frozen Maxwell branch. Thickness satisfies det(F)=
+    /// det(G(T)); both transverse shears relax while the accepted metrics
+    /// remain fixed in their original natural-coordinate frame. No positive-
+    /// duration value function is interpreted as Helmholtz energy.
+    ///
+    /// The original constrained owner supplies pressure-bearing stress,
+    /// S=Sr-p*d det(G)/dT, signed mechanical heat-capacity contribution, and
+    /// reversible rates under prescribed in-plane Fdot and Tdot. Pressure work
+    /// from changing natural volume is retained, not labeled relaxation heat.
+    /// Branch energies stay fixed; changing relaxation times alone cannot
+    /// change this instantaneous response or generate entropy production.
+    ///
+    /// The jet's G must equal the current law and accepted history binding.
+    /// Finite changes first use the native reference-change transaction.
+    /// Only an original remainder history is accepted; native mixed-split
+    /// restrictions still apply. No full-energy history is converted or reset.
+    /// The optional seed is [F02,F12]; otherwise accepted shears are reused.
+    /// The input history and its work/storage/loss ledger remain unchanged.
+    pub fn frozen_incompressible_thermoelastic_plane_stress_state(
+        &self,
+        accepted: &ViscoRemainderState,
+        in_plane: &[f64; 4],
+        temperature_k: f64,
+        reference_jet: ThermalReferenceJet,
+        initial_shear: Option<[f64; 2]>,
+        settings: PlaneStressSettings,
+    ) -> Result<IncompressibleThermoelasticPlaneStressState, MaterialError> {
+        self.validate_frozen_thermoelastic(temperature_k, &reference_jet)?;
+        let frozen = self.freeze_remainder(accepted, 0.0)?;
+        let seed = initial_shear.unwrap_or([
+            accepted.deformation_gradient[2],
+            accepted.deformation_gradient[5],
+        ]);
+        let (plane, remainder) = generic_state(&frozen, in_plane, Some(seed), settings)?;
+        let remainder = remainder
+            .ok_or_else(|| parameters("missing accepted zero-duration remainder tangent".into()))?;
+        IncompressibleThermoelasticPlaneStressState::from_frozen_remainder(
+            plane,
+            remainder,
+            temperature_k,
+            reference_jet,
         )
     }
 

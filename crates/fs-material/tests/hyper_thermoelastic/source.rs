@@ -725,3 +725,49 @@ fn exact_source_constant_limit_and_changing_bulk_modulus_keep_native_remainder_s
         near(value, 0.0, 3e-10, 0.0);
     }
 }
+
+#[test]
+fn exact_source_finite_increments_keep_changing_moduli_volume_and_constrained_entropy() {
+    use fs_material::hyper::plane_stress::PlaneStressSettings;
+    let source = bind(&card(SLOPES, false, 1.0), [290.0, 310.0]).unwrap();
+    let a = [1.22, 0.16, -0.05, 0.91];
+    let before = source
+        .incompressible_plane_stress_state(
+            &a,
+            exact_thermal_jet(0.0),
+            None,
+            PlaneStressSettings::default(),
+        )
+        .unwrap();
+    let after = source
+        .incompressible_plane_stress_state_at_temperature(
+            T + 4.0,
+            &a,
+            exact_thermal_jet(4.0),
+            None,
+            PlaneStressSettings::default(),
+        )
+        .unwrap();
+    let first = exact_thermal_oracle(0.0, a);
+    let second = exact_thermal_oracle(4.0, a);
+    near(
+        before.free_energy_increment_to(&after).unwrap(),
+        second.energy - first.energy,
+        3e-9,
+        3e-11,
+    );
+    near(
+        before.internal_energy_increment_to(&after).unwrap(),
+        second.internal_energy - first.internal_energy,
+        3e-9,
+        3e-11,
+    );
+    near(
+        after.internal_energy_increment_to(&before).unwrap(),
+        first.internal_energy - second.internal_energy,
+        3e-9,
+        3e-11,
+    );
+    assert_eq!(before.free_energy_increment_to(&before).unwrap(), 0.0);
+    assert_eq!(before.internal_energy_increment_to(&before).unwrap(), 0.0);
+}

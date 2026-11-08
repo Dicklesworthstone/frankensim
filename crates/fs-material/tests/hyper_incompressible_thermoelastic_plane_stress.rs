@@ -521,3 +521,53 @@ fn free_expansion_has_zero_elastic_rate_and_invalid_queries_leave_state_unchange
     }
     assert_eq!(center.response().deformation_gradient, before);
 }
+
+#[test]
+fn native_exact_thermal_increments_retain_changes_below_absolute_storage_resolution() {
+    let material = nh(1e250);
+    let constant =
+        ThermalReferenceJet::try_new(ReferenceDeformation::identity(), [0.0; 9], [0.0; 9]).unwrap();
+    let before = IncompressibleThermoelasticPlaneStressState::try_new(
+        &material,
+        &[2.0, 0.0, 0.0, 2.0],
+        300.0,
+        constant,
+        None,
+        settings(),
+    )
+    .unwrap();
+    let shear = 1e-8;
+    let after = IncompressibleThermoelasticPlaneStressState::try_new(
+        &material,
+        &[2.0, shear, 0.0, 2.0],
+        300.0,
+        constant,
+        None,
+        settings(),
+    )
+    .unwrap();
+    // The area and exact thickness are unchanged. The NH remainder has the
+    // independent increment mu*shear^2/2 despite a much larger prestress energy.
+    let expected = 3.0 * shear * shear;
+    assert_eq!(after.free_energy_j_m3() - before.free_energy_j_m3(), 0.0);
+    near(
+        before.free_energy_increment_to(&after).unwrap(),
+        expected,
+        1e-29,
+        1e-12,
+    );
+    near(
+        before.internal_energy_increment_to(&after).unwrap(),
+        expected,
+        1e-29,
+        1e-12,
+    );
+    near(
+        after.free_energy_increment_to(&before).unwrap(),
+        -expected,
+        1e-29,
+        1e-12,
+    );
+    assert_eq!(before.free_energy_increment_to(&before).unwrap(), 0.0);
+    assert_eq!(before.internal_energy_increment_to(&before).unwrap(), 0.0);
+}

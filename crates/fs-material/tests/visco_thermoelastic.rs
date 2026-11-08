@@ -1,11 +1,17 @@
 //! Reversible temperature derivatives retain the native finite-strain memory.
 
 use fs_material::hyper::cards::FiniteStrainPotential;
+use fs_material::hyper::incompressible_plane_stress::{
+    IncompressiblePlaneStressPotential, incompressible_plane_stress_with_kinematics,
+};
 use fs_material::hyper::plane_stress::PlaneStressSettings;
 use fs_material::hyper::reference::ReferenceDeformation;
+use fs_material::hyper::thermoelastic::incompressible_plane_stress::IncompressibleThermoelasticPlaneStressState;
 use fs_material::hyper::thermoelastic::{FiniteThermoelasticState, ThermalReferenceJet};
 use fs_material::hyper::{Hyperelastic, HyperelasticModel, OgdenTerm};
-use fs_material::visco_hyper::{BranchEnergy, FiniteStrainBranch, ViscoHyperelastic, ViscoState};
+use fs_material::visco_hyper::{
+    BranchEnergy, FiniteStrainBranch, ViscoHyperelastic, ViscoRemainderState, ViscoState,
+};
 
 const G: [f64; 9] = [1.09, 0.07, -0.025, 0.03, 0.97, 0.04, -0.015, 0.02, 1.04];
 const G1: [f64; 9] = [
@@ -520,4 +526,500 @@ fn plane_stress_thermal_reduction_retains_memory_and_differentiates_transverse_b
         );
     }
     assert_eq!(accepted, before);
+}
+
+fn remainder_law(ogden: bool) -> ViscoHyperelastic {
+    let mut material = law(ogden);
+    material.equilibrium = Hyperelastic::new(
+        HyperelasticModel::MooneyRivlin {
+            c10: 4.0,
+            c01: 0.0,
+            kappa: 40.0,
+        },
+        4.0,
+    )
+    .unwrap();
+    material
+}
+
+fn remainder_history(material: &ViscoHyperelastic) -> ViscoRemainderState {
+    let first = material
+        .step_incompressible_plane_stress_response(
+            &material.initial_remainder_state(),
+            &[1.25, 0.11, -0.02, 0.95],
+            0.07,
+            None,
+            PlaneStressSettings::default(),
+        )
+        .unwrap()
+        .material
+        .state;
+    material
+        .step_incompressible_plane_stress_response(
+            &first,
+            &[1.13, -0.08, 0.04, 1.08],
+            0.11,
+            None,
+            PlaneStressSettings::default(),
+        )
+        .unwrap()
+        .material
+        .state
+}
+
+struct ExactFrozenOracle {
+    deformation: [f64; 9],
+    elastic_deformation: [f64; 9],
+    piola: [f64; 9],
+    pressure: f64,
+    energy: f64,
+    entropy: f64,
+    internal_energy: f64,
+}
+
+// With c01=0 and NH branches, the exact-volume stored energy is a quadratic
+// form in F with M=8I+14Cv0^-1+5Cv1^-1. Its transverse minimum is analytic.
+// No native thermal derivative, spectral lift, pressure solve or AD is used.
+fn exact_frozen_oracle(
+    accepted: &ViscoRemainderState,
+    a: &[f64; 4],
+    delta: f64,
+) -> ExactFrozenOracle {
+    let g: [f64; 9] = core::array::from_fn(|i| G[i] + delta * G1[i] + 0.5 * delta * delta * G2[i]);
+    let gt: [f64; 9] = core::array::from_fn(|i| G1[i] + delta * G2[i]);
+    let j = determinant(&g);
+    let cg = cofactor(&g);
+    let h = core::array::from_fn(|ij| cg[3 * (ij % 3) + ij / 3] / j);
+    let ht = core::array::from_fn(|ij| h[3 * (ij % 3) + ij / 3]);
+    let mut metric = [8.0, 0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 8.0];
+    for (cv, mu) in accepted
+        .inverse_viscous_cauchy_green
+        .iter()
+        .zip([14.0, 5.0])
+    {
+        let full = [
+            cv[0], cv[3], cv[4], cv[3], cv[1], cv[5], cv[4], cv[5], cv[2],
+        ];
+        near(determinant(&full), 1.0, 3e-13, 0.0);
+        for i in 0..9 {
+            metric[i] += mu * full[i];
+        }
+    }
+    let q = multiply(&multiply(&h, &metric), &ht);
+    let direction = multiply(&h, &gt);
+    let direction_t = core::array::from_fn(|ij| direction[3 * (ij % 3) + ij / 3]);
+    let left = multiply(&direction, &q);
+    let right = multiply(&q, &direction_t);
+    let qt = core::array::from_fn(|i| -left[i] - right[i]);
+    let jt: f64 = cg.iter().zip(gt).map(|(c, rate)| c * rate).sum();
+    let d = a[0] * a[3] - a[1] * a[2];
+    let mut f = [a[0], a[1], 0.0, a[2], a[3], 0.0, 0.0, 0.0, j / d];
+    let mut ft = [0.0; 9];
+    ft[8] = jt / d;
+    for row in 0..2 {
+        let numerator = f[3 * row] * q[2] + f[3 * row + 1] * q[5];
+        let numerator_t = f[3 * row] * qt[2] + f[3 * row + 1] * qt[5];
+        f[3 * row + 2] = -numerator / q[8];
+        ft[3 * row + 2] = -(numerator_t + f[3 * row + 2] * qt[8]) / q[8];
+    }
+    let fq = multiply(&f, &q);
+    let fqt = multiply(&f, &qt);
+    let quadratic: f64 = f.iter().zip(fq).map(|(x, y)| x * y).sum();
+    let quadratic_t: f64 = (0..9).map(|i| 2.0 * ft[i] * fq[i] + f[i] * fqt[i]).sum();
+    let energy = 0.5 * j * (quadratic - 3.0 * 27.0);
+    let entropy = -0.5 * jt * (quadratic - 3.0 * 27.0) - 0.5 * j * quadratic_t;
+    let cof = cofactor(&f);
+    let normal = f[8] * f[8] * q[8];
+    let piola = core::array::from_fn(|i| j * fq[i] - normal * cof[i]);
+    ExactFrozenOracle {
+        deformation: f,
+        elastic_deformation: multiply(&f, &h),
+        piola,
+        pressure: normal - quadratic / 3.0,
+        energy,
+        entropy,
+        internal_energy: energy + (T + delta) * entropy,
+    }
+}
+
+fn four_point(values: [f64; 4], h: f64) -> f64 {
+    (values[0] - 8.0 * values[1] + 8.0 * values[2] - values[3]) / (12.0 * h)
+}
+
+#[test]
+fn exact_thermal_observer_uses_physical_aged_remainder_and_never_advances_memory() {
+    for ogden in [false, true] {
+        let material = remainder_law(ogden);
+        let accepted = remainder_history(&material);
+        let before = accepted.clone();
+        assert!(accepted.dissipated > 0.0);
+        let a = [1.18, 0.14, -0.03, 0.96];
+        let settings = PlaneStressSettings::default();
+        let state = material
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &accepted,
+                &a,
+                T,
+                jet(0.0),
+                None,
+                settings,
+            )
+            .unwrap();
+        let frozen = material.freeze_remainder(&accepted, 0.0).unwrap();
+        let native = incompressible_plane_stress_with_kinematics(
+            &frozen,
+            &a,
+            Some([
+                accepted.deformation_gradient[2],
+                accepted.deformation_gradient[5],
+            ]),
+            settings,
+        )
+        .unwrap();
+        assert_eq!(state.response().full_piola, native.response.full_piola);
+        assert_eq!(state.response().tangent, native.response.tangent);
+        assert_eq!(state.response().pressure_pa, native.response.pressure_pa);
+        near(
+            state.free_energy_j_m3(),
+            material
+                .remainder_free_energy(&accepted, &state.response().deformation_gradient)
+                .unwrap(),
+            3e-11,
+            3e-11,
+        );
+        let interval = material
+            .freeze_remainder(&accepted, 0.2)
+            .unwrap()
+            .incompressible_remainder_stress_and_potential(&state.response().deformation_gradient)
+            .unwrap()
+            .1;
+        assert!((interval - state.free_energy_j_m3()).abs() > 1e-6);
+        let reset = material
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &material.initial_remainder_state(),
+                &a,
+                T,
+                jet(0.0),
+                None,
+                settings,
+            )
+            .unwrap();
+        assert!((reset.free_energy_j_m3() - state.free_energy_j_m3()).abs() > 1e-4);
+        let mut shifted_times = material.clone();
+        shifted_times.branches[0].tau_s *= 1e-8;
+        shifted_times.branches[1].tau_s *= 1e8;
+        let slow = shifted_times
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &accepted,
+                &a,
+                T,
+                jet(0.0),
+                None,
+                settings,
+            )
+            .unwrap();
+        assert_eq!(slow.free_energy_j_m3(), state.free_energy_j_m3());
+        assert_eq!(slow.entropy_j_m3_k(), state.entropy_j_m3_k());
+        assert_eq!(
+            slow.mechanical_heat_capacity_j_m3_k(),
+            state.mechanical_heat_capacity_j_m3_k()
+        );
+        assert_eq!(
+            slow.rate([0.08, -0.03, 0.01, -0.05], 2.3).unwrap(),
+            state.rate([0.08, -0.03, 0.01, -0.05], 2.3).unwrap()
+        );
+        assert_eq!(accepted, before);
+    }
+}
+
+#[test]
+fn exact_thermal_memory_matches_independent_relaxed_potential_and_motion() {
+    let material = remainder_law(false);
+    let accepted = remainder_history(&material);
+    let a = [1.18, 0.14, -0.03, 0.96];
+    let state = material
+        .frozen_incompressible_thermoelastic_plane_stress_state(
+            &accepted,
+            &a,
+            T,
+            jet(0.0),
+            None,
+            PlaneStressSettings::default(),
+        )
+        .unwrap();
+    let oracle = exact_frozen_oracle(&accepted, &a, 0.0);
+    for (actual, expected) in [
+        (state.free_energy_j_m3(), oracle.energy),
+        (state.entropy_j_m3_k(), oracle.entropy),
+        (state.internal_energy_j_m3(), oracle.internal_energy),
+        (state.response().pressure_pa, oracle.pressure),
+    ] {
+        near(actual, expected, 3e-10, 3e-10);
+    }
+    for i in 0..9 {
+        near(
+            state.response().deformation_gradient[i],
+            oracle.deformation[i],
+            3e-11,
+            3e-11,
+        );
+        near(
+            state.response().full_piola[i],
+            oracle.piola[i],
+            3e-10,
+            3e-10,
+        );
+    }
+    let h = 0.02;
+    let thermal = [-2.0 * h, -h, h, 2.0 * h].map(|delta| exact_frozen_oracle(&accepted, &a, delta));
+    near(
+        state.mechanical_heat_capacity_j_m3_k(),
+        T * four_point(thermal.each_ref().map(|s| s.entropy), h),
+        3e-8,
+        3e-7,
+    );
+    let adot = [0.08, -0.03, 0.01, -0.05];
+    let tdot = 2.3;
+    let rate = state.rate(adot, tdot).unwrap();
+    let samples = [-2.0 * h, -h, h, 2.0 * h].map(|time| {
+        exact_frozen_oracle(
+            &accepted,
+            &core::array::from_fn(|i| a[i] + time * adot[i]),
+            tdot * time,
+        )
+    });
+    for i in 0..9 {
+        near(
+            rate.material().deformation_gradient_rate_per_s()[i],
+            four_point(samples.each_ref().map(|s| s.deformation[i]), h),
+            4e-8,
+            3e-7,
+        );
+        near(
+            rate.material().elastic_deformation_gradient_rate_per_s()[i],
+            four_point(samples.each_ref().map(|s| s.elastic_deformation[i]), h),
+            4e-8,
+            3e-7,
+        );
+        near(
+            rate.material().first_piola_rate_pa_s()[i],
+            four_point(samples.each_ref().map(|s| s.piola[i]), h),
+            3e-7,
+            3e-7,
+        );
+    }
+    for (actual, values) in [
+        (
+            rate.pressure_rate_pa_s(),
+            samples.each_ref().map(|s| s.pressure),
+        ),
+        (
+            rate.material().free_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.energy),
+        ),
+        (
+            rate.material().entropy_rate_w_m3_k(),
+            samples.each_ref().map(|s| s.entropy),
+        ),
+        (
+            rate.material().internal_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.internal_energy),
+        ),
+    ] {
+        near(actual, four_point(values, h), 3e-7, 3e-7);
+    }
+    for i in [2, 5, 8] {
+        near(rate.material().first_piola_rate_pa_s()[i], 0.0, 2e-10, 0.0);
+    }
+}
+
+#[test]
+fn exact_thermal_entropy_matches_retained_reference_work_without_relaxation_heat() {
+    let material = remainder_law(true);
+    let aged = remainder_history(&material);
+    let a = [1.18, 0.14, -0.03, 0.96];
+    let settings = PlaneStressSettings::default();
+    let accepted = material
+        .step_incompressible_plane_stress_response(&aged, &a, 0.0, None, settings)
+        .unwrap()
+        .material
+        .state;
+    let before = accepted.clone();
+    let center = material
+        .frozen_incompressible_thermoelastic_plane_stress_state(
+            &accepted,
+            &a,
+            T,
+            jet(0.0),
+            None,
+            settings,
+        )
+        .unwrap();
+    let h = 0.02;
+    let work = [-2.0 * h, -h, h, 2.0 * h].map(|delta| {
+        let target = material
+            .clone()
+            .with_reference_deformation(*jet(delta).reference());
+        let event = target
+            .change_incompressible_plane_stress_reference_from(&material, &accepted, None, settings)
+            .unwrap();
+        assert_eq!(
+            event.material.state.inverse_viscous_cauchy_green,
+            accepted.inverse_viscous_cauchy_green
+        );
+        assert_eq!(event.material.state.dissipated, accepted.dissipated);
+        assert_eq!(event.material.dissipated_pa, 0.0);
+        let endpoint = target
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &event.material.state,
+                &a,
+                T + delta,
+                jet(delta),
+                None,
+                settings,
+            )
+            .unwrap();
+        near(
+            endpoint.free_energy_j_m3(),
+            event.material.state.stored,
+            3e-10,
+            3e-10,
+        );
+        [
+            event.reference_work_pa + event.constraint_reference_work_pa,
+            event.constraint_reference_work_pa,
+            event.endpoint_work_defect_pa,
+        ]
+    });
+    near(
+        four_point(work.map(|w| w[0]), h),
+        -center.entropy_j_m3_k(),
+        3e-8,
+        3e-6,
+    );
+    near(
+        four_point(work.map(|w| w[1]), h),
+        center.response().pressure_pa * center.natural_volume_derivative_per_k(),
+        3e-8,
+        3e-6,
+    );
+    near(four_point(work.map(|w| w[2]), h), 0.0, 3e-8, 0.0);
+    assert_eq!(accepted, before);
+}
+
+#[test]
+fn exact_thermal_visco_native_limit_binding_refusals_and_increment_ownership() {
+    let mut material = remainder_law(false);
+    material.branches.clear();
+    let accepted = material.initial_remainder_state();
+    let a = [1.18, 0.14, -0.03, 0.96];
+    let settings = PlaneStressSettings::default();
+    let frozen = material
+        .frozen_incompressible_thermoelastic_plane_stress_state(
+            &accepted,
+            &a,
+            T,
+            jet(0.0),
+            None,
+            settings,
+        )
+        .unwrap();
+    let native = IncompressibleThermoelasticPlaneStressState::try_new(
+        &material.equilibrium,
+        &a,
+        T,
+        jet(0.0),
+        None,
+        settings,
+    )
+    .unwrap();
+    for (actual, expected) in [
+        (frozen.free_energy_j_m3(), native.free_energy_j_m3()),
+        (frozen.entropy_j_m3_k(), native.entropy_j_m3_k()),
+        (frozen.internal_energy_j_m3(), native.internal_energy_j_m3()),
+        (
+            frozen.mechanical_heat_capacity_j_m3_k(),
+            native.mechanical_heat_capacity_j_m3_k(),
+        ),
+        (frozen.response().pressure_pa, native.response().pressure_pa),
+    ] {
+        near(actual, expected, 3e-11, 3e-11);
+    }
+    assert_eq!(native.free_energy_increment_to(&native).unwrap(), 0.0);
+    assert!(frozen.free_energy_increment_to(&frozen).is_err());
+    assert!(frozen.internal_energy_increment_to(&frozen).is_err());
+    assert!(native.free_energy_increment_to(&frozen).is_err());
+    assert!(frozen.internal_energy_increment_to(&native).is_err());
+    let material = remainder_law(false);
+    let accepted = remainder_history(&material);
+    let saved = accepted.clone();
+    assert!(
+        material
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &accepted,
+                &a,
+                T,
+                jet(0.1),
+                None,
+                settings,
+            )
+            .is_err()
+    );
+    let foreign = material
+        .clone()
+        .with_reference_deformation(*jet(0.1).reference());
+    assert!(
+        foreign
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &accepted,
+                &a,
+                T,
+                jet(0.1),
+                None,
+                settings,
+            )
+            .is_err()
+    );
+    let mut invalid = accepted.clone();
+    invalid.inverse_viscous_cauchy_green[0] = [1.0, -1.0, -1.0, 0.0, 0.0, 0.0];
+    assert!(
+        material
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &invalid,
+                &a,
+                T,
+                jet(0.0),
+                None,
+                settings,
+            )
+            .is_err()
+    );
+    invalid = accepted.clone();
+    invalid.dissipated = -1.0;
+    assert!(
+        material
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &invalid,
+                &a,
+                T,
+                jet(0.0),
+                None,
+                settings,
+            )
+            .is_err()
+    );
+    let unsupported = law(false); // Original visco mixed schema refuses coupled NH.
+    assert!(
+        unsupported
+            .frozen_incompressible_thermoelastic_plane_stress_state(
+                &unsupported.initial_remainder_state(),
+                &a,
+                T,
+                jet(0.0),
+                None,
+                settings,
+            )
+            .is_err()
+    );
+    assert_eq!(accepted, saved);
 }

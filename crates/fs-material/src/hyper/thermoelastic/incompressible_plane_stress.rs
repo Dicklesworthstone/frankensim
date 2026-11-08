@@ -24,12 +24,13 @@ use super::{
 use crate::MaterialError;
 use crate::hyper::Hyperelastic;
 use crate::hyper::incompressible_plane_stress::{
-    IncompressiblePlaneStressKinematicResponse, IncompressiblePlaneStressResponse, PositiveShear,
-    generic_state, kinematic_response,
+    IncompressiblePlaneStressKinematicResponse, IncompressiblePlaneStressResponse,
+    IncompressiblePlaneStressState, PositiveShear, generic_state, kinematic_response,
 };
-use crate::hyper::mixed::cofactor;
+use crate::hyper::mixed::{RemainderResponse, cofactor};
 use crate::hyper::plane_stress::PlaneStressSettings;
 use crate::hyper::reference::ReferencedHyperelastic;
+use fs_math::dd::Dd;
 
 const IN_PLANE: [usize; 4] = [0, 1, 3, 4];
 const SHEAR: [usize; 2] = [2, 5];
@@ -53,6 +54,9 @@ fn cofactor_rate(f: &[f64; 9], rate: &[f64; 9]) -> [f64; 9] {
 /// entropy and stress are never exposed as the physical constrained response.
 #[derive(Clone, Debug)]
 pub struct IncompressibleThermoelasticPlaneStressState {
+    // Native/source elastic endpoints retain the bulk-free finite-increment
+    // owner. Frozen viscous storage needs its own Cv-aware increment path.
+    elastic_remainder: Option<Hyperelastic>,
     remainder: FiniteThermoelasticState,
     kinematics: IncompressiblePlaneStressKinematicResponse,
     natural_volume_derivative_per_k: f64,
@@ -149,6 +153,32 @@ impl IncompressibleThermoelasticPlaneStressState {
             partial,
         )?;
         let kinematics = kinematic_response(plane, accepted, in_plane)?;
+        let mut state = Self::from_prepared(remainder, kinematics)?;
+        state.elastic_remainder = Some(law);
+        Ok(state)
+    }
+
+    /// Internal seam for an original physical remainder at fixed accepted
+    /// memory. The caller must supply a ZERO-duration native preparation;
+    /// a dissipative incremental potential is not physical thermal storage.
+    pub(crate) fn from_frozen_remainder(
+        plane: IncompressiblePlaneStressState,
+        accepted: RemainderResponse,
+        temperature_k: f64,
+        reference_jet: ThermalReferenceJet,
+    ) -> Result<Self, MaterialError> {
+        let remainder = FiniteThermoelasticState::from_reference_potential(
+            &plane.deformation_gradient,
+            temperature_k,
+            reference_jet,
+            ReferencePotentialDerivatives {
+                free_energy_j_m3: accepted.potential_pa,
+                first_piola_pa: accepted.first_piola_pa,
+                isothermal_tangent_pa: accepted.tangent_pa,
+            },
+        )?;
+        let in_plane = IN_PLANE.map(|i| plane.deformation_gradient[i]);
+        let kinematics = kinematic_response(plane, accepted, &in_plane)?;
         Self::from_prepared(remainder, kinematics)
     }
 
@@ -218,6 +248,7 @@ impl IncompressibleThermoelasticPlaneStressState {
             return Err(unrepresentable());
         }
         Ok(Self {
+            elastic_remainder: None,
             remainder,
             kinematics,
             natural_volume_derivative_per_k,
@@ -257,6 +288,61 @@ impl IncompressibleThermoelasticPlaneStressState {
     }
     pub const fn internal_energy_j_m3(&self) -> f64 {
         self.internal_energy_j_m3
+    }
+    /// Direct change of physical constrained Helmholtz storage per ORIGINAL
+    /// volume. Both endpoints must retain native elastic remainder owners.
+    /// Source coefficients, compatible endpoint deformation and natural volume
+    /// may change; no bulk penalty is evaluated or subtracted.
+    ///
+    /// The caller owns the physical source/path relationship. This finite
+    /// difference of potentials is not classified as heat or mechanical work.
+    /// Frozen-viscoelastic endpoints refuse until their own stable Cv-aware
+    /// finite-increment owner is available.
+    pub fn free_energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        let (Some(before_law), Some(after_law)) =
+            (&self.elastic_remainder, &after.elastic_remainder)
+        else {
+            return Err(invalid(
+                "stable exact-volume thermal increments require native elastic endpoints; fixed-history viscoelastic increments are unsupported",
+            ));
+        };
+        let before_f = self.elastic_deformation_gradient();
+        let after_f = after.elastic_deformation_gradient();
+        let increment = self
+            .reference_jet()
+            .reference()
+            .original_density_increment_to(
+                after.reference_jet().reference(),
+                before_law.isochoric_energy(before_f),
+                after_law.isochoric_energy(after_f),
+                before_law.isochoric_energy_increment_to(before_f, after_law, after_f),
+            );
+        if increment.is_finite() {
+            Ok(increment)
+        } else {
+            Err(unrepresentable())
+        }
+    }
+    /// Mechanical Delta U=Delta Psi+Delta(T*S), with the CONSTRAINED entropy.
+    /// The symmetric product identity preserves small changes without
+    /// subtracting large rounded internal energies. Endpoint entropy retains
+    /// its original source-derived precision; no caloric capacity is inferred.
+    /// Native elastic endpoint admission matches `free_energy_increment_to`.
+    pub fn internal_energy_increment_to(&self, after: &Self) -> Result<f64, MaterialError> {
+        let before_t = Dd::from_f64(self.temperature_k());
+        let after_t = Dd::from_f64(after.temperature_k());
+        let before_s = Dd::from_f64(self.entropy_j_m3_k);
+        let after_s = Dd::from_f64(after.entropy_j_m3_k);
+        let half = Dd::from_f64(0.5);
+        let change = (Dd::from_f64(self.free_energy_increment_to(after)?)
+            + (half * before_t + half * after_t) * (after_s - before_s)
+            + (half * before_s + half * after_s) * (after_t - before_t))
+            .to_f64();
+        if change.is_finite() {
+            Ok(change)
+        } else {
+            Err(unrepresentable())
+        }
     }
     /// Mechanical -T*d²Psi_reduced/dT² [J/(m³ K)]. This may be negative;
     /// a separate caloric owner must admit the complete heat capacity.
