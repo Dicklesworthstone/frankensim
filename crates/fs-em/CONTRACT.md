@@ -7264,3 +7264,35 @@ refuse rather than treating one monochromatic sample as a constant law.
 the native interface solve, geometric invariance of bulk Debye dispersion,
 single counting of leakage, resonant/anomalous/evanescent limits, native
 six-component beam-field propagation and source/domain refusals.
+
+### Native AC circuits on physical solid-conductor electrodes
+
+`harmonic::terminals::SpatialHarmonicTerminalFrequency` prepares the complete
+complex impedance between original non-reference electrodes and their own
+conducting-component references. Each column comes from a native A-phi
+total-current trial; currents redistribute spatially and retain resolved
+skin/proximity response, source-bound conductivity and prescribed steady
+motion. Multi-electrode bodies retain a shared physical reference, and separate
+conductors retain their mutual magnetic response. Motion does not authorize
+symmetrizing the port matrix or clipping signed mechanical work.
+
+The original harmonic circuit descriptor closes RLC branches, transformers,
+sources and external mutual inductances on those ports. Its final replay uses
+independently recovered field currents, voltages, Ohmic heat and Lorentz work.
+Every occurrence of a physical electrode must map to the same native circuit
+node. Numerical reference resistors cancel before physical loss accounting;
+field-owned storage cannot also appear in external mutual-inductance links.
+The interface is bounded to at most 16 ports, and its additional numerical
+payload is admitted before allocation. One field trial per port prepares the
+frequency response. Cached cochains seed one original actual-amplitude solve
+per subsequent drive; all original residual and power checks still run.
+
+This owner solves homogeneous settled AC excitation through electrodes only.
+Independent impressed-field sources would require an affine terminal law and
+are not inferred. Material state, geometry and steady Eulerian motion remain
+fixed, and accepted transient histories are unchanged. The focused G1/G3/G4
+tests in `tests/spatial_induction/terminals/harmonic_circuit.rs` compare an
+independent diffusion/RLC reference, physical node/reference consistency,
+orientation and numerical-reference invariance, moving-field power splitting,
+and bounded cancellation/retry behavior. Synthetic fixtures are implementation
+evidence, not experimental device validation.

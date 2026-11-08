@@ -6,6 +6,8 @@ mod circuit;
 mod current;
 #[path = "terminals/harmonic.rs"]
 mod harmonic;
+#[path = "terminals/harmonic_circuit.rs"]
+mod harmonic_circuit;
 #[path = "terminals/thermal.rs"]
 mod thermal;
 #[cfg(feature = "magnetic-hysteresis")]

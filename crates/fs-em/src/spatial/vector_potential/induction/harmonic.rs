@@ -30,6 +30,8 @@ pub mod coherent_exposure;
 pub mod exposure;
 /// Consistent mean and twice-frequency mechanical loads on original bodies.
 pub mod loads;
+/// Physical solid-conductor electrode ports closed on native AC circuits.
+pub mod terminals;
 /// Closed source-bound winding terminals with current and voltage drive.
 pub mod winding;
 

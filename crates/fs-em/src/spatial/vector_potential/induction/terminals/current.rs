@@ -80,6 +80,16 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
     pub fn electrode_faces(&self) -> &[Vec<usize>] {
         &self.terminals.faces
     }
+    /// Original first electrode of each face-connected conducting component.
+    /// Entries use original electrode order, including each reference itself.
+    pub fn electrode_references(&self) -> &[usize] {
+        self.terminals.references()
+    }
+    pub(in crate::spatial::vector_potential::induction) fn harmonic_coordinate_count(
+        &self,
+    ) -> usize {
+        self.field.prepared.mass.nrows()
+    }
     pub fn field(&self, cancelled: &mut impl FnMut() -> bool) -> Result<SpatialInductionField> {
         self.field.field(cancelled)
     }
@@ -112,6 +122,30 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
         controls: super::super::harmonic::SpatialHarmonicInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<super::super::harmonic::SpatialHarmonicInductionResponse<'_, 'm, C>> {
+        self.solve_harmonic_current_seeded(
+            incoming_current_a,
+            impressed_current_a_m2,
+            velocity_m_s,
+            omega_rad_s,
+            controls,
+            None,
+            cancelled,
+        )
+    }
+
+    // Cached electrode unit fields are initial guesses only. All original
+    // field, charge, terminal and power checks still run at the actual drive.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::spatial::vector_potential::induction) fn solve_harmonic_current_seeded(
+        &self,
+        incoming_current_a: &[fs_math::c64::C64],
+        impressed_current_a_m2: &[[fs_math::c64::C64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        omega_rad_s: f64,
+        controls: super::super::harmonic::SpatialHarmonicInductionControls,
+        seed: Option<&[f64]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<super::super::harmonic::SpatialHarmonicInductionResponse<'_, 'm, C>> {
         poll(cancelled)?;
         if incoming_current_a.len() != self.terminals.faces.len() {
             return Err(invalid(
@@ -137,7 +171,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialCurrentInduction<'m, C> {
             velocity_m_s,
             omega_rad_s,
             controls,
-            None,
+            seed,
             Some([&real_drive, &imaginary_drive]),
             cancelled,
         )
