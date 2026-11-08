@@ -6,6 +6,8 @@
 //! the admitted temperature interval is checked before an interval is prepared.
 //! The two Arrhenius laws own their separate temperature dependences; the
 //! reference coefficients and elastic storage stay fixed over this interval.
+//! Explicit thermoelastic construction instead admits sourced affine E/nu through
+//! the original thermal potential, without changing either kinetic memory law.
 
 use std::sync::Arc;
 
@@ -81,6 +83,25 @@ impl<'a> RecoveringNortonSource<'a> {
     pub fn new(
         card: &'a MaterialCard,
         query: NortonSourceQuery<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, false, cancelled)
+    }
+
+    // Complete smooth elasticity and expansion admission belongs to the public
+    // thermal wrapper. This intermediate source refuses bare continuation.
+    pub(crate) fn prepare_thermoelastic(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        Self::prepare(card, query, true, cancelled)
+    }
+
+    fn prepare(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        thermal_elasticity: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, CreepSourceError> {
         poll(&mut cancelled)?;
@@ -104,17 +125,18 @@ impl<'a> RecoveringNortonSource<'a> {
                 })
                 .collect(),
         );
-        let creep = NortonCreepSource::new_with_strain_hardening(
-            card,
-            NortonSourceQuery {
-                lower: query.lower,
-                upper: query.upper,
-                temperature_axis: query.temperature_axis,
-                selection,
-                strain_limit: query.strain_limit,
-            },
-            &mut cancelled,
-        )?;
+        let creep_query = NortonSourceQuery {
+            lower: query.lower,
+            upper: query.upper,
+            temperature_axis: query.temperature_axis,
+            selection,
+            strain_limit: query.strain_limit,
+        };
+        let creep = if thermal_elasticity {
+            NortonCreepSource::prepare_thermoelastic(card, creep_query, true, &mut cancelled)?
+        } else {
+            NortonCreepSource::new_with_strain_hardening(card, creep_query, &mut cancelled)?
+        };
         for name in [
             CREEP_RECOVERY_REFERENCE_RATE_PROPERTY,
             CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY,
@@ -171,18 +193,26 @@ impl<'a> RecoveringNortonSource<'a> {
             activation_energy_j_mol: value(CREEP_RECOVERY_ACTIVATION_ENERGY_PROPERTY),
             reference_temperature_k: value(CREEP_RECOVERY_REFERENCE_TEMPERATURE_PROPERTY),
         };
-        for temperature_k in creep.parameters().temperature_range_k {
-            RecoveringNortonCreep::new(creep.prepared_law(temperature_k, 1.0)?, recovery)?;
-        }
-        poll(&mut cancelled)?;
-        Ok(Self {
+        let source = Self {
             binding: Arc::new(Binding {
                 card,
                 creep,
                 reference,
                 recovery,
             }),
-        })
+        };
+        for temperature_k in source.creep_source().parameters().temperature_range_k {
+            if thermal_elasticity {
+                source.resolve_temperature(temperature_k, 1.0, true)?;
+            } else {
+                RecoveringNortonCreep::new(
+                    source.creep_source().prepared_law(temperature_k, 1.0)?,
+                    recovery,
+                )?;
+            }
+        }
+        poll(&mut cancelled)?;
+        Ok(source)
     }
 
     /// Every original flow, resistance and elastic source receipt.
@@ -206,10 +236,24 @@ impl<'a> RecoveringNortonSource<'a> {
         temperature_k: f64,
         duration_s: f64,
     ) -> Result<ResolvedRecoveringNorton, CreepSourceError> {
-        let law = RecoveringNortonCreep::new(
-            self.binding.creep.prepared_law(temperature_k, duration_s)?,
-            self.binding.recovery,
-        )?;
+        self.resolve_temperature(temperature_k, duration_s, false)
+    }
+
+    fn resolve_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+        with_thermal_storage: bool,
+    ) -> Result<ResolvedRecoveringNorton, CreepSourceError> {
+        // Ordinary source calls retain their native-before-receipt validation.
+        let fixed_law = if with_thermal_storage {
+            None
+        } else {
+            Some(RecoveringNortonCreep::new(
+                self.binding.creep.prepared_law(temperature_k, duration_s)?,
+                self.binding.recovery,
+            )?)
+        };
         let point = self
             .reference()
             .query()
@@ -219,6 +263,17 @@ impl<'a> RecoveringNortonSource<'a> {
                 reason: error.to_string(),
             })?;
         let material = self.reference().at_query_point(self.binding.card, &point)?;
+        let law = match fixed_law {
+            Some(law) => law,
+            None => RecoveringNortonCreep::new(
+                self.binding.creep.prepared_thermoelastic_law(
+                    &material,
+                    temperature_k,
+                    duration_s,
+                )?,
+                self.binding.recovery,
+            )?,
+        };
         Ok(ResolvedRecoveringNorton {
             material: Arc::new(material),
             law,
@@ -306,5 +361,12 @@ impl<'a> CreepSourceFamily<'a> for RecoveringNortonSource<'a> {
         duration_s: f64,
     ) -> Result<Self::Material, CreepSourceError> {
         RecoveringNortonSource::at_temperature(self, temperature_k, duration_s)
+    }
+    fn at_thermoelastic_temperature(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Material, CreepSourceError> {
+        self.resolve_temperature(temperature_k, duration_s, true)
     }
 }

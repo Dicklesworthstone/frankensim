@@ -81,13 +81,11 @@ macro_rules! thermal_recovery {
                 axial_strain: f64,
                 state: &$state,
             ) -> Result<Voigt, CreepError> {
-                let free = self
-                    .tensor
-                    .free_strain_at_temperature(state.temperature_k)?;
-                let mechanical = self
-                    .mechanical
-                    .tensor_strain(axial_strain - free, &state.mechanical)?;
-                Ok(add_free(mechanical, free))
+                self.tensor.uniaxial_history_strain(
+                    axial_strain,
+                    &state.mechanical.tensor_history(),
+                    state.temperature_k,
+                )
             }
 
             pub fn response(

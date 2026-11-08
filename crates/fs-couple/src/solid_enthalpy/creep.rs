@@ -1,9 +1,11 @@
 //! Permanent creep and spatial heat on the original tetrahedral/enthalpy owners.
 //!
 //! Each reference tetrahedron binds one actual caloric cell and one original
-//! Norton or joint Norton/J2 source, optionally wrapped in sourced affine thermal
-//! expansion. E, nu, hardening modulus, reference density and geometry remain
-//! fixed. Local temperature changes Arrhenius kinetics, selected yield stress
+//! Norton or joint Norton/J2 source, including independently recovering primary
+//! resistance, optionally wrapped in sourced affine thermoelasticity. Explicit
+//! thermal constructors admit changing E/nu and account for their storage and
+//! entropy. Energetic hardening, reference density and geometry remain fixed.
+//! Local temperature changes Arrhenius creep/recovery, selected yield stress
 //! and sourced free strain. Conduction, reservoir exchange, thermal events and
 //! observer histories remain in the existing thermal owner.
 //!
@@ -12,8 +14,10 @@
 //! physical creep/plastic heat and signed reciprocal thermal exchange enter
 //! caloric storage; backward-Euler loss, hardening and T*entropy stay separate.
 //! All local heat, temperature and complete work gates precede publication.
-//! This is small-strain quasistatic secondary creep, not finite deformation,
-//! phase change, variable elastic/hardening coefficients or a life prediction.
+//! This is bounded small-strain quasistatic creep, including explicitly selected
+//! primary hardening/recovery and elastic softening. Finite deformation, phase
+//! change, changing energetic hardening and service-life qualification remain
+//! outside this owner.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;

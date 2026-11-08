@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use crate::creep::plastic::NortonJ2State;
 use crate::creep::plastic::source::NortonJ2Source;
+use crate::creep::recovery::plastic::source::RecoveringNortonJ2Source;
+use crate::creep::recovery::source::RecoveringNortonSource;
 use crate::creep::source::{
     CreepSourceError, CreepSourceFamily, NortonCreepSource, NortonSourceQuery,
 };
@@ -67,7 +69,10 @@ pub struct ThermalCreepState<S> {
 impl<S> ThermalCreepState<S> {
     /// Reconstruct a retained thermal history without advancing either owner.
     pub fn from_parts(mechanical: S, temperature_k: f64) -> Self {
-        Self { mechanical, temperature_k }
+        Self {
+            mechanical,
+            temperature_k,
+        }
     }
     pub const fn temperature_k(&self) -> f64 {
         self.temperature_k
@@ -227,6 +232,39 @@ impl<'a> ExpandingCreepSource<NortonJ2Source<'a>> {
     }
 }
 
+impl<'a> ExpandingCreepSource<RecoveringNortonSource<'a>> {
+    /// Affine sourced elasticity/expansion with independently recovering primary
+    /// resistance. Flow and recovery retain their separate Arrhenius parameters;
+    /// recovery never erases permanent creep or supplies stored energy or heat.
+    pub fn from_recovering_norton(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        expansion_reference: &ResolvedMaterialStatePoint,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        let mechanical =
+            RecoveringNortonSource::prepare_thermoelastic(card, query, &mut cancelled)?;
+        Self::new(card, mechanical, expansion_reference, cancelled)
+    }
+}
+
+impl<'a> ExpandingCreepSource<RecoveringNortonJ2Source<'a>> {
+    /// Simultaneous elastic/yield softening, permanent creep/plasticity and
+    /// resistance recovery with one thermal energy owner. Energetic hardening
+    /// must remain a constant directly sourced plastic-strain modulus.
+    pub fn from_recovering_norton_j2(
+        card: &'a MaterialCard,
+        query: NortonSourceQuery<'_>,
+        basis: HardeningPropertyBasis,
+        expansion_reference: &ResolvedMaterialStatePoint,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, CreepSourceError> {
+        let mechanical =
+            RecoveringNortonJ2Source::prepare_thermoelastic(card, query, basis, &mut cancelled)?;
+        Self::new(card, mechanical, expansion_reference, cancelled)
+    }
+}
+
 impl<'a, S: CreepSourceFamily<'a>> CreepSourceFamily<'a> for ExpandingCreepSource<S>
 where
     <S::Material as SmallStrainLaw>::State: CreepHistoryStrain,
@@ -335,7 +373,9 @@ where
         let poisson = thermal
             .elastic
             .property(POISSON_RATIO_PROPERTY)
-            .ok_or(CreepError::Invalid("original Poisson-ratio claim is missing"))?
+            .ok_or(CreepError::Invalid(
+                "original Poisson-ratio claim is missing",
+            ))?
             .value_si();
         let inelastic = state.inelastic_strain();
         let transverse_elastic = -poisson * (axial_strain - free - inelastic[0]);

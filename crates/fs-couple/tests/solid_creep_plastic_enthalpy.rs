@@ -107,6 +107,14 @@ impl Fixture {
         alpha: Option<f64>,
         recovery: Option<(StrainHardeningCreep, CreepRecoveryParameters)>,
     ) -> Self {
+        Self::with_recovery_softening(alpha, recovery, false)
+    }
+    fn with_recovery_softening(
+        alpha: Option<f64>,
+        recovery: Option<(StrainHardeningCreep, CreepRecoveryParameters)>,
+        softening: bool,
+    ) -> Self {
+        let heat_capacity = if softening { 500.0 } else { CP };
         let mut claims = ClaimSet::new();
         for (name, dims, value) in [
             (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, E),
@@ -130,10 +138,19 @@ impl Fixture {
                 HARDENING,
             ),
             ("density", Dims([-3, 1, 0, 0, 0, 0]), RHO),
-            ("specific_heat_capacity", CP_DIMS, CP),
+            ("specific_heat_capacity", CP_DIMS, heat_capacity),
         ] {
+            let slope = if softening {
+                match name {
+                    YOUNG_MODULUS_PROPERTY => -4e6,
+                    POISSON_RATIO_PROPERTY => 5e-4,
+                    _ => 0.0,
+                }
+            } else {
+                0.0
+            };
             claims
-                .insert_claim(claim(name, dims, value, value))
+                .insert_claim(claim(name, dims, value - 20.0 * slope, value + 80.0 * slope))
                 .unwrap();
         }
         claims
@@ -212,7 +229,7 @@ impl Fixture {
                 selection: SelectionPolicy::SingleClaimOnly,
             },
             SolidLiquidPhase::Solid,
-            -20.0 * CP,
+            -20.0 * heat_capacity,
             1e-5,
         )
         .unwrap();
@@ -893,9 +910,20 @@ fn restrained_heating_yields_and_creeps_then_relaxation_returns_heat_atomically(
     });
 }
 
-#[test]
-fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() {
+fn recovering_joint_reference(softening: bool) {
     let expansion = 1e-6;
+    let cp = if softening { 500.0 } else { CP };
+    let youngs_slope = if softening { -4e6 } else { 0.0 };
+    let poisson_slope = if softening { 5e-4 } else { 0.0 };
+    let youngs = |t: f64| E + youngs_slope * (t - 300.0);
+    let poisson = |t: f64| 0.2 + poisson_slope * (t - 300.0);
+    let bulk = |t: f64| youngs(t) / (3.0 * (1.0 - 2.0 * poisson(t)));
+    let shear = |t: f64| youngs(t) / (2.0 * (1.0 + poisson(t)));
+    // At a free-sided uniaxial endpoint, nu'(T) cancels from e:C'(T):e.
+    // This is entropy at fixed total strain/history, not along stress control.
+    let entropy = |t: f64, stress: f64| {
+        expansion * stress - 0.5 * youngs_slope * (stress / youngs(t)).powi(2)
+    };
     let primary = StrainHardeningCreep {
         reference_strain: 2e-4,
         exponent: 1.0,
@@ -906,29 +934,32 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
         activation_energy_j_mol: 15_000.0,
         reference_temperature_k: 300.0,
     };
-    let fixture = Fixture::with_recovery(Some(expansion), Some((primary, recovery)));
+    let fixture = Fixture::with_recovery_softening(
+        Some(expansion), Some((primary, recovery)), softening,
+    );
     with_gate(&CancelGate::new(), |cx| {
         let mut thermal = fixture.thermal();
-        let source = RecoveringNortonJ2Source::new(
-            &fixture.card,
-            NortonSourceQuery {
-                lower: &point(280.0),
-                upper: &point(380.0),
-                temperature_axis: "T",
-                selection: MaterialPropertySelection::SingleClaimOnly,
-                strain_limit: 0.05,
-            },
-            HardeningPropertyBasis::PlasticStrainModulus,
-            || false,
-        )
-        .unwrap();
-        let source = ExpandingCreepSource::new(
-            &fixture.card,
-            source,
-            &fixture.expansion_reference(),
-            || false,
-        )
-        .unwrap();
+        let (lower, upper) = (point(280.0), point(380.0));
+        let query = NortonSourceQuery {
+            lower: &lower,
+            upper: &upper,
+            temperature_axis: "T",
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            strain_limit: 0.05,
+        };
+        let source = if softening {
+            ExpandingCreepSource::from_recovering_norton_j2(
+                &fixture.card, query, HardeningPropertyBasis::PlasticStrainModulus,
+                &fixture.expansion_reference(), || false,
+            ).unwrap()
+        } else {
+            let mechanical = RecoveringNortonJ2Source::new(
+                &fixture.card, query, HardeningPropertyBasis::PlasticStrainModulus, || false,
+            ).unwrap();
+            ExpandingCreepSource::new(
+                &fixture.card, mechanical, &fixture.expansion_reference(), || false,
+            ).unwrap()
+        };
         let mut solid = CreepSolid::try_new(
             &thermal,
             &NODES,
@@ -955,7 +986,7 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
         let (mut creep, mut plastic, mut resistance) = (0.0, 0.0_f64, 0.0);
         for (step, (stress, dt, external_rise)) in [
             (2.3e6_f64, 0.5, 0.0),
-            (2.3e6, 0.5, 0.0),
+            (2.3e6, 0.5, if softening { 15.0 } else { 0.0 }),
             (0.0, 1.0, 0.0),
             (0.0, 1.0, 20.0),
             (2.4e6, 0.5, 0.0),
@@ -981,13 +1012,29 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
                 let dp = ((stress - yield_stress(t)) / HARDENING - plastic).max(0.0);
                 (dc, dp, (resistance + dc) / g)
             };
-            let reversible = -temperature * expansion * (stress - previous_stress);
+            // Change stiffness at the ORIGINAL elastic tensor, including its
+            // original Poisson contraction. No constitutive routine is used.
+            let old_axial = previous_stress / youngs(temperature);
+            let old_trace = (1.0 - 2.0 * poisson(temperature)) * old_axial;
+            let old_dev_norm = 2.0 / 3.0
+                * ((1.0 + poisson(temperature)) * old_axial).powi(2);
+            let coefficient_storage = |t: f64| {
+                0.5 * (bulk(t) - bulk(temperature)) * old_trace.powi(2)
+                    + (shear(t) - shear(temperature)) * old_dev_norm
+            };
+            let entropy_storage = |t: f64| {
+                t * entropy(t, stress) - temperature * entropy(temperature, previous_stress)
+            };
+            let reversible = |t: f64| {
+                stress * expansion * (t - temperature)
+                    - coefficient_storage(t) - entropy_storage(t)
+            };
             let residual = |t: f64| {
                 let (dc, dp, _) = increments(t);
-                RHO * CP * (t - temperature - external_rise)
+                RHO * cp * (t - temperature - external_rise)
                     - stress * dc
                     - yield_stress(t) * dp
-                    - reversible
+                    - reversible(t)
             };
             let (mut lo, mut hi) = (
                 temperature + external_rise - 2.0,
@@ -1004,7 +1051,8 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
             }
             let next_temperature = 0.5 * (lo + hi);
             let (dc, dp, next_resistance) = increments(next_temperature);
-            let external_j = RHO * V * CP * external_rise;
+            let reciprocal_heat = reversible(next_temperature);
+            let external_j = RHO * V * cp * external_rise;
             let observer = Heating {
                 watts: external_j / dt,
                 steps: 0,
@@ -1049,7 +1097,7 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
             close(solution.element_stress[0][0], stress, 2e-2);
             close(
                 solution.displacement_m[1][0],
-                L * (stress / E
+                L * (stress / youngs(next_temperature)
                     + creep
                     + dc
                     + plastic
@@ -1057,6 +1105,11 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
                     + expansion * (next_temperature - 300.0)),
                 4e-12,
             );
+            let transverse = -poisson(next_temperature) * stress / youngs(next_temperature)
+                - 0.5 * (creep + dc + plastic + dp)
+                + expansion * (next_temperature - 300.0);
+            close(solution.displacement_m[2][1], L * transverse, 4e-12);
+            close(solution.displacement_m[3][2], L * transverse, 4e-12);
             let report = candidate.report();
             let energy = report.element_energy[0];
             let physical = stress * dc + yield_stress(next_temperature) * dp;
@@ -1066,21 +1119,28 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
                 yield_stress(next_temperature) * dp * V,
                 1e-9,
             );
-            close(energy.reversible_heat_j_m3 * V, reversible * V, 1e-9);
+            close(energy.reversible_heat_j_m3 * V, reciprocal_heat * V, 1e-9);
             close(
                 energy.thermoelastic_storage_change_j_m3 * V,
-                expansion * (next_temperature * stress - temperature * previous_stress) * V,
+                entropy_storage(next_temperature) * V,
                 1e-9,
             );
             close(
                 energy.final_stored_j_m3 * V,
-                (0.5 * stress * stress / E + 0.5 * HARDENING * (plastic + dp).powi(2)) * V,
+                (0.5 * stress * stress / youngs(next_temperature)
+                    + 0.5 * HARDENING * (plastic + dp).powi(2)) * V,
                 1e-9,
             );
-            close(report.applied_heat_j, V * (physical + reversible), 1e-9);
+            close(
+                energy.initial_stored_j_m3 * V,
+                (0.5 * previous_stress * previous_stress / youngs(temperature)
+                    + 0.5 * HARDENING * plastic.powi(2)) * V,
+                1e-9,
+            );
+            close(report.applied_heat_j, V * (physical + reciprocal_heat), 1e-9);
             close(
                 report.thermal_audit.stored_energy_change_j,
-                external_j + V * (physical + reversible),
+                external_j + V * (physical + reciprocal_heat),
                 1e-9,
             );
             close(report.combined_residual_j, 0.0, config().energy_tolerance_j);
@@ -1128,4 +1188,14 @@ fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() 
             time += dt;
         }
     });
+}
+
+#[test]
+fn recovering_joint_solid_keeps_yield_history_through_heated_dwell_and_reload() {
+    recovering_joint_reference(false);
+}
+
+#[test]
+fn recovering_joint_solid_softens_under_load_and_closes_sourced_thermal_feedback() {
+    recovering_joint_reference(true);
 }
