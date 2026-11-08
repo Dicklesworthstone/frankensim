@@ -6697,3 +6697,32 @@ or cancellation publishes no gas candidate and permits a complete retry.
 `tests/molecular_heating.rs` includes independent nonlinear calorimetry, coherent
 versus independent frequency powers, a finite-body quadratic energy reference,
 source/volume and duplicate refusals, and cancellation/retry regressions.
+
+## Complete thermal assemblies for induction motors
+
+`circuit_enthalpy::motor::induction::heat::InductionHeatNetwork<A: HeatAssembly>`
+uses the original assembly's material/caloric cells and thermal transport
+providers in the same endpoint residual as the source-bound stator and rotor
+resistances. Contact resistance, layers, radiation and finite-coolant
+assemblies therefore reach the native flux/current/shaft evolution through
+the same temperature proposal, without a separate heat timeline.
+
+The bare-network and complete-assembly routes share the original seven-state
+induction driver and one prepared machine workspace per thermal interval.
+Stator copper, rotor copper and bearing heat retain their explicit receivers
+and enter once. Full assembly source payloads and typed errors are preserved.
+Graph resistor/electrical-contact work without a matching electrical owner
+refuses. The existing closed-radiation balance treats its net roundoff as
+internal transfer, retaining the original external-heat convention.
+Cancellation, source refusal and exhausted work budgets publish neither
+thermal nor machine history.
+
+The original `InductionThermalNetwork` remains available through defaulted
+sample/candidate source types. This composition does not add saturation,
+cage-bar skin effect, changed geometry or variable magnetic inductance; it
+retains the reduced machine's generally first-order electrothermal feedback.
+Three regressions in `tests/induction_motor_enthalpy/heat.rs` compare an
+independent two-coil/caloric/contact-resistance solution over two intervals,
+check equivalence with the bare network when no extra paths are attached,
+and exercise typed failure, cancellation, budgets and retry. Synthetic
+material curves qualify the discrete coupling rather than an empirical motor.

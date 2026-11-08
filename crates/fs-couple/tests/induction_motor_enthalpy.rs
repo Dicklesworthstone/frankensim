@@ -1,6 +1,8 @@
 //! Original induction flux states and two finite material winding temperatures.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "induction_motor_enthalpy/heat.rs"]
+mod heat;
 
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,

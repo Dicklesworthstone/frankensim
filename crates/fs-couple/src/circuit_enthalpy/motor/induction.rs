@@ -15,8 +15,12 @@
 //! refinement remain the caller's responsibility. This adds no skin effect,
 //! saturation, cage geometry, insulation failure or experimental validation.
 
+/// Complete source-owned contact, radiation, layer and coolant heat transfer.
+pub mod heat;
+
 use super::super::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients,
     DriverAccount, ThermalDriver, admit_driver_unknowns, cell_driver_candidate, finite,
     material::{
         ConductionLink, MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
@@ -115,8 +119,9 @@ pub struct InductionEnthalpySolve {
 }
 
 #[derive(Clone, Debug)]
-pub struct InductionThermalSample {
-    pub network: MaterialNetworkSample,
+pub struct InductionThermalSample<S = MaterialNetworkSample> {
+    /// Complete original transport results at the accepted thermal endpoint.
+    pub network: S,
     pub stator: Arc<ResolvedConductor>,
     pub rotor: Arc<ResolvedConductor>,
     /// Actual native stator and referred rotor coefficients after conversion.
@@ -125,19 +130,19 @@ pub struct InductionThermalSample {
     pub bearing_cell: CellId,
 }
 
-pub struct InductionEnthalpyCandidate<'t> {
+pub struct InductionEnthalpyCandidate<'t, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     motor: MaterialInductionMotor,
-    report: CircuitEnthalpyReport<InductionThermalSample, InductionStep>,
+    report: CircuitEnthalpyReport<InductionThermalSample<S>, InductionStep>,
 }
-impl<'t> InductionEnthalpyCandidate<'t> {
+impl<'t, S> InductionEnthalpyCandidate<'t, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn motor(&self) -> &MaterialInductionMotor {
         &self.motor
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<InductionThermalSample, InductionStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<InductionThermalSample<S>, InductionStep> {
         &self.report
     }
     /// Publish the original machine and caloric histories together. Every
@@ -147,7 +152,7 @@ impl<'t> InductionEnthalpyCandidate<'t> {
     ) -> (
         DepositionSimulation<'t>,
         MaterialInductionMotor,
-        CircuitEnthalpyReport<InductionThermalSample, InductionStep>,
+        CircuitEnthalpyReport<InductionThermalSample<S>, InductionStep>,
     ) {
         (self.thermal, self.motor, self.report)
     }
@@ -171,6 +176,10 @@ impl core::fmt::Display for InductionThermalError {
 }
 impl std::error::Error for InductionThermalError {}
 type Error = CircuitEnthalpyError<InductionThermalError>;
+
+fn induction_error<E: From<InductionThermalError>>(error: Error) -> CircuitEnthalpyError<E> {
+    error.map_source(E::from)
+}
 
 fn invalid(reason: &'static str) -> Error {
     CircuitEnthalpyError::Source(InductionThermalError::Invalid(reason))
@@ -337,7 +346,7 @@ impl InductionThermalNetwork<'_> {
         &self,
         thermal: &DepositionSimulation<'_>,
         state: [f64; 7],
-        mut parameters: InductionMotorParameters,
+        parameters: InductionMotorParameters,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialInductionMotor, Error> {
         let cancel = RefCell::new(cancelled);
@@ -347,17 +356,43 @@ impl InductionThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
-        let coefficients = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let windings = self.resolve_windings(thermal, &coefficients.source, None, &cancel)?;
-        let resistance = self.resistances(&windings)?;
+        self.bind_resolved(
+            thermal,
+            state,
+            parameters,
+            || {
+                let coefficients = prepared
+                    .resolve(thermal, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                self.resolve_windings(thermal, &coefficients.source, None, &cancel)
+            },
+            &cancel,
+        )
+    }
+
+    fn bind_resolved<E: From<InductionThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        state: [f64; 7],
+        mut parameters: InductionMotorParameters,
+        resolve: impl FnOnce() -> Result<[ResolvedConductor; 2], CircuitEnthalpyError<E>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<MaterialInductionMotor, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(induction_error::<E>)?;
+        self.admit(thermal).map_err(induction_error::<E>)?;
+        let windings = resolve()?;
+        let resistance = self.resistances(&windings).map_err(induction_error::<E>)?;
         parameters.stator_resistance_ohm = resistance[0];
         parameters.rotor_resistance_ohm = resistance[1];
-        let machine = InductionMotor::new(parameters).map_err(phs)?;
-        let operating_point = machine.operating_point(&state).map_err(phs)?;
+        let machine = InductionMotor::new(parameters)
+            .map_err(phs)
+            .map_err(induction_error::<E>)?;
+        let operating_point = machine
+            .operating_point(&state)
+            .map_err(phs)
+            .map_err(induction_error::<E>)?;
         finite(machine.system().hamiltonian(&state))?;
-        check(&cancel)?;
+        check(cancel).map_err(induction_error::<E>)?;
         Ok(MaterialInductionMotor {
             time_s: thermal.time_s(),
             state,
@@ -398,6 +433,52 @@ impl InductionThermalNetwork<'_> {
         check(&cancel)?;
         self.admit(thermal)?;
         admit_driver_unknowns(thermal, controls.thermal, initial_energy_increments_j)?;
+        let network = self.network();
+        let prepared = network
+            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .map_err(material)?;
+        self.step_resolved_candidate(
+            thermal,
+            target_s,
+            motor,
+            inputs,
+            controls,
+            initial_energy_increments_j,
+            |state, original| {
+                let coefficients = prepared
+                    .resolve(state, || (*cancel.borrow_mut())())
+                    .map_err(material)?;
+                let windings =
+                    self.resolve_windings(state, &coefficients.source, original, &cancel)?;
+                Ok((coefficients, windings))
+            },
+            &cancel,
+        )
+    }
+
+    // Transport composition changes only the source callback. Native magnetic,
+    // mechanical and copper/bearing histories still share this single driver.
+    #[allow(clippy::too_many_arguments)]
+    fn step_resolved_candidate<'t, S, E: From<InductionThermalError>>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        motor: &MaterialInductionMotor,
+        inputs: &[f64; 4],
+        controls: InductionEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+            Option<&[Arc<ResolvedConductor>; 2]>,
+        ) -> Result<
+            (CircuitThermalCoefficients<S>, [ResolvedConductor; 2]),
+            CircuitEnthalpyError<E>,
+        >,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<InductionEnthalpyCandidate<'t, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(induction_error::<E>)?;
+        self.admit(thermal).map_err(induction_error::<E>)?;
+        admit_driver_unknowns(thermal, controls.thermal, initial_energy_increments_j)?;
         let dt = finite(target_s - thermal.time_s())?;
         if dt <= 0.0
             || motor.time_s.to_bits() != thermal.time_s().to_bits()
@@ -406,19 +487,12 @@ impl InductionThermalNetwork<'_> {
             || motor.resistance_multipliers.map(f64::to_bits)
                 != self.multipliers().map(f64::to_bits)
         {
-            return Err(invalid(
+            return Err(induction_error(invalid(
                 "induction and heat require one positive interval and unchanged winding/receiver correspondence",
-            ));
+            )));
         }
-        let network = self.network();
-        let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let accepted = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let original = self.resolve_windings(thermal, &accepted.source, None, &cancel)?;
-        let resistance = self.resistances(&original)?;
+        let (_, original) = resolve(thermal, None)?;
+        let resistance = self.resistances(&original).map_err(induction_error::<E>)?;
         if original
             .iter()
             .zip(&motor.windings)
@@ -429,17 +503,19 @@ impl InductionThermalNetwork<'_> {
                     motor.parameters.rotor_resistance_ohm,
                 ]
         {
-            return Err(invalid(
+            return Err(induction_error(invalid(
                 "both induction conductor sources must match the accepted thermal state",
-            ));
+            )));
         }
         let machine = RefCell::new(
             InductionMotor::new(motor.parameters)
-                .map_err(phs)?
+                .map_err(phs)
+                .map_err(induction_error::<E>)?
                 .prepare_controlled(controls.machine, controls.backtracking_halvings, || {
                     (*cancel.borrow_mut())()
                 })
-                .map_err(native)?,
+                .map_err(native)
+                .map_err(induction_error::<E>)?,
         );
         let (thermal, motor, report) = cell_driver_candidate(
             thermal,
@@ -447,31 +523,29 @@ impl InductionThermalNetwork<'_> {
             controls.thermal,
             initial_energy_increments_j,
             |trial, _remaining| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(trial, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let windings = self.resolve_windings(
-                    trial,
-                    &coefficients.source,
-                    Some(&motor.windings),
-                    &cancel,
-                )?;
-                let resistance = self.resistances(&windings)?;
+                check(cancel).map_err(induction_error::<E>)?;
+                let (coefficients, windings) = resolve(trial, Some(&motor.windings))?;
+                let resistance = self.resistances(&windings).map_err(induction_error::<E>)?;
                 let windings = windings.map(Arc::new);
                 let mut native_machine = machine.borrow_mut();
                 native_machine
                     .set_winding_resistances(resistance)
-                    .map_err(phs)?;
+                    .map_err(phs)
+                    .map_err(induction_error::<E>)?;
                 let (mut state, mut ports) = ([0.0; 7], [0.0; 4]);
                 let step = native_machine
                     .step_controlled(&motor.state, inputs, dt, &mut state, &mut ports, || {
                         (*cancel.borrow_mut())()
                     })
-                    .map_err(native)?;
+                    .map_err(native)
+                    .map_err(induction_error::<E>)?;
                 let (heat_j, supplied_j) =
-                    physical_account(&step, controls.thermal.total_energy_tolerance_j)?;
-                let operating_point = native_machine.operating_point(&state).map_err(phs)?;
+                    physical_account(&step, controls.thermal.total_energy_tolerance_j)
+                        .map_err(induction_error::<E>)?;
+                let operating_point = native_machine
+                    .operating_point(&state)
+                    .map_err(phs)
+                    .map_err(induction_error::<E>)?;
                 let parameters = native_machine.parameters();
                 let next = MaterialInductionMotor {
                     time_s: target_s,
@@ -483,7 +557,7 @@ impl InductionThermalNetwork<'_> {
                     resistance_multipliers: motor.resistance_multipliers,
                     bearing_cell: motor.bearing_cell,
                 };
-                check(&cancel)?;
+                check(cancel).map_err(induction_error::<E>)?;
                 Ok(DrivenCoefficients {
                     circuit: InductionDriver {
                         motor: next,
@@ -505,7 +579,7 @@ impl InductionThermalNetwork<'_> {
                 })
             },
             |candidate, duration, checkpoint| {
-                receiver_powers(
+                receiver_powers::<InductionThermalError, 3>(
                     [
                         (
                             candidate.motor.winding_cells[0],
@@ -520,10 +594,11 @@ impl InductionThermalNetwork<'_> {
                     duration,
                     checkpoint,
                 )
+                .map_err(induction_error::<E>)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(induction_error::<E>)?;
         Ok(InductionEnthalpyCandidate {
             thermal,
             motor,
