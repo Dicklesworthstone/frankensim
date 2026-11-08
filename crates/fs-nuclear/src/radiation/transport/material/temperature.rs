@@ -7,6 +7,9 @@
 //! inferred from temperature or from a mass attenuation coefficient alone.
 //! Density and geometry remain the responsibility of the original specimen.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use super::*;
 
 /// One supplied complete photon mass kernel at a declared temperature.
@@ -25,12 +28,33 @@ pub struct PhotonMassTemperatureKnot {
 #[derive(Clone, Debug)]
 pub struct TemperaturePhotonMassMaterial(Arc<TemperatureData>);
 
+/// One original temperature law at a constant fraction of mixture MASS.
+#[derive(Clone, Debug)]
+pub struct TemperaturePhotonMassConstituent {
+    /// Fraction of total mixture mass, finite in [0, 1]; all fractions close one.
+    pub mass_fraction: f64,
+    /// Original immutable temperature law, source identities and kelvin support.
+    pub material: TemperaturePhotonMassMaterial,
+}
+
+/// Original temperature laws and the physical basis of their homogenization.
+#[derive(Clone, Debug)]
+pub struct TemperaturePhotonMassMixture {
+    /// Applicability of each complete constituent kernel IN the target mixture
+    /// throughout the common temperature domain, including local deposition
+    /// and a common within-group spectral weighting.
+    pub kernel_applicability: String,
+    /// Original authored order, constant mass fractions and immutable sources.
+    pub constituents: Vec<TemperaturePhotonMassConstituent>,
+}
+
 #[derive(Debug)]
 struct TemperatureData {
     data_id: String,
     knots: Vec<PhotonMassTemperatureKnot>,
     limits: PhotonSlabLimits,
     values: usize,
+    mixture: Option<TemperaturePhotonMassMixture>,
 }
 
 impl TemperaturePhotonMassMaterial {
@@ -84,7 +108,181 @@ impl TemperaturePhotonMassMaterial {
             knots,
             limits,
             values,
+            mixture: None,
         })))
+    }
+
+    /// Prepare a homogeneous, constant-composition mixture of temperature laws.
+    ///
+    /// Every complete constituent kernel is sampled at the SAME temperature.
+    /// The union of source knots on their common closed domain preserves every
+    /// piecewise-affine change of slope; mixing only the endpoints would erase
+    /// intermediate opacity structure. Preparation is done once, so subsequent
+    /// sampling has the same cost as a directly supplied temperature table.
+    /// All sources, including zero-weight ones, must share the photon kind and
+    /// exact energy grid and have a common domain of positive width.
+    ///
+    /// Fractions and physical applicability have the same meaning as
+    /// [`PhotonMassMaterial::from_mass_fractions`]. The caller must establish
+    /// complete heat/redistribution kernels applicable IN this target mixture
+    /// throughout the supported domain. Attenuation additivity alone does not
+    /// supply them. No extrapolation, changing phase/composition, density law
+    /// or measured-data qualification is inferred.
+    ///
+    /// Limits include original source table values, the conservatively counted
+    /// sampled constituent kernels retained at every mixed knot, and preparation
+    /// work. Shared source objects are never mutated or renormalized.
+    pub fn from_mass_fractions(
+        data_id: String,
+        material_id: u64,
+        constituents: Vec<TemperaturePhotonMassConstituent>,
+        kernel_applicability: String,
+        limits: PhotonSlabLimits,
+        mut checkpoint: impl FnMut() -> Result<(), RadiationError>,
+    ) -> Result<Self, RadiationError> {
+        checkpoint()?;
+        if data_id.trim().is_empty()
+            || kernel_applicability.trim().is_empty()
+            || constituents.is_empty()
+        {
+            return Err(RadiationError::InvalidInput(
+                "identified photon temperature mixture, mass fractions and kernel applicability required",
+            ));
+        }
+        let budget = || RadiationError::Budget("photon temperature mixture storage/work");
+        let first = &constituents[0].material;
+        let groups = first.group_edges_j().len() - 1;
+        let knot_values = groups
+            .checked_add(2)
+            .and_then(|width| groups.checked_mul(width))
+            .and_then(|n| n.checked_add(first.group_edges_j().len()))
+            .and_then(|n| n.checked_mul(constituents.len().checked_add(1)?))
+            .and_then(|n| n.checked_add(constituents.len()))
+            // Kelvin value and the original mass-mixture reduction allowance.
+            .and_then(|n| n.checked_add(3))
+            .filter(|_| groups <= limits.max_groups)
+            .ok_or_else(budget)?;
+        let mut source_values = 0_usize;
+        let mut source_knots = 0_usize;
+        let mut minimum = 0.0_f64;
+        let mut maximum = f64::MAX;
+        let mut fractions = Sum::default();
+        for constituent in &constituents {
+            checkpoint()?;
+            if !nonnegative(constituent.mass_fraction)
+                || constituent.mass_fraction > 1.0
+                || constituent.material.radiation() != first.radiation()
+                || constituent.material.group_edges_j() != first.group_edges_j()
+            {
+                return Err(RadiationError::InvalidInput(
+                    "photon temperature mixture needs fractions in [0,1] and one photon kind/group grid",
+                ));
+            }
+            fractions.add(constituent.mass_fraction)?;
+            source_values = source_values
+                .checked_add(constituent.material.value_count())
+                .and_then(|n| n.checked_add(1))
+                .filter(|&n| n <= limits.max_values && n <= limits.max_work)
+                .ok_or_else(budget)?;
+            source_knots = source_knots
+                .checked_add(constituent.material.knots().len())
+                .ok_or_else(budget)?;
+            let (lower, upper) = constituent.material.temperature_bounds_k();
+            minimum = minimum.max(lower);
+            maximum = maximum.min(upper);
+        }
+        fractions.add(-1.0)?;
+        if fractions.hi.abs() + fractions.lo.abs() > ROW_CLOSURE_TOLERANCE {
+            return Err(RadiationError::InvalidInput(
+                "photon constituent mass fractions must close one without normalization",
+            ));
+        }
+        if minimum >= maximum {
+            return Err(RadiationError::InvalidInput(
+                "photon temperature constituents need a common domain of positive width",
+            ));
+        }
+        // Merge already ordered sources in O(N log C), with a poll at each
+        // source knot. Charge the heap comparison bound and three kernel passes
+        // (sampling, mixing, closure admission) before coefficient allocation.
+        let merge_work = source_knots
+            .checked_mul(2 * constituents.len().ilog2() as usize + 3)
+            .and_then(|n| n.checked_add(source_values))
+            .ok_or_else(budget)?;
+        let admit_knots = |count: usize| {
+            let prepared = count.checked_mul(knot_values).ok_or_else(budget)?;
+            let values = source_values.checked_add(prepared).ok_or_else(budget)?;
+            let work = prepared
+                .checked_mul(3)
+                .and_then(|n| n.checked_add(merge_work))
+                .ok_or_else(budget)?;
+            if values > limits.max_values || work > limits.max_work {
+                return Err(budget());
+            }
+            Ok(values)
+        };
+        // The two required endpoints also cover the temporary merge heap.
+        admit_knots(2)?;
+        let mut pending = BinaryHeap::with_capacity(constituents.len());
+        for (source, constituent) in constituents.iter().enumerate() {
+            checkpoint()?;
+            let knots = constituent.material.knots();
+            let next = knots.partition_point(|knot| knot.temperature_k <= minimum);
+            if next < knots.len() && knots[next].temperature_k < maximum {
+                // Positive finite kelvin has the same order as its IEEE bits.
+                pending.push(Reverse((knots[next].temperature_k.to_bits(), source, next)));
+            }
+        }
+        let mut temperatures = vec![minimum];
+        while let Some(Reverse((bits, source, index))) = pending.pop() {
+            checkpoint()?;
+            let temperature = f64::from_bits(bits);
+            if temperatures.last().copied() != Some(temperature) {
+                admit_knots(temperatures.len().checked_add(2).ok_or_else(budget)?)?;
+                temperatures.push(temperature);
+            }
+            let knots = constituents[source].material.knots();
+            let next = index + 1;
+            if next < knots.len() && knots[next].temperature_k < maximum {
+                pending.push(Reverse((knots[next].temperature_k.to_bits(), source, next)));
+            }
+        }
+        drop(pending);
+        temperatures.push(maximum);
+        let values = admit_knots(temperatures.len())?;
+        let mut knots = Vec::with_capacity(temperatures.len());
+        for temperature_k in temperatures {
+            checkpoint()?;
+            let mut samples = Vec::with_capacity(constituents.len());
+            for constituent in &constituents {
+                samples.push(PhotonMassConstituent {
+                    mass_fraction: constituent.mass_fraction,
+                    material: constituent
+                        .material
+                        .sample(temperature_k, &mut checkpoint)?,
+                });
+            }
+            knots.push(PhotonMassTemperatureKnot {
+                temperature_k,
+                material: PhotonMassMaterial::from_mass_fractions(
+                    data_id.clone(),
+                    material_id,
+                    samples,
+                    kernel_applicability.clone(),
+                    limits,
+                    &mut checkpoint,
+                )?,
+            });
+        }
+        let mut result = Self::new(data_id, knots, limits, &mut checkpoint)?;
+        let data =
+            Arc::get_mut(&mut result.0).expect("newly admitted unshared temperature mixture");
+        data.values = values;
+        data.mixture = Some(TemperaturePhotonMassMixture {
+            kernel_applicability,
+            constituents,
+        });
+        Ok(result)
     }
 
     /// Authored identity of this interpolation model and its selected sources.
@@ -117,6 +315,12 @@ impl TemperaturePhotonMassMaterial {
     /// Retained scalar count used by aggregate consumer preparation budgets.
     pub fn value_count(&self) -> usize {
         self.0.values
+    }
+
+    /// Original temperature sources and constant composition, when prepared by
+    /// [`Self::from_mass_fractions`]. Directly supplied tables have no mixture.
+    pub fn mixture(&self) -> Option<&TemperaturePhotonMassMixture> {
+        self.0.mixture.as_ref()
     }
 
     /// Evaluate the original mass-kernel owner at one supported temperature.

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::radiation::transport::material::temperature::{
-    PhotonMassTemperatureKnot, TemperaturePhotonMassMaterial,
+    PhotonMassTemperatureKnot, TemperaturePhotonMassConstituent, TemperaturePhotonMassMaterial,
 };
 
 mod refinement;
@@ -143,6 +143,121 @@ fn g1_heated_shielding_converges_to_an_independent_nonlinear_solution() {
         .unwrap();
     assert!(300.0 + theta > fixed.temperature_k(CellId(11)).unwrap() + 0.2);
     assert!(exact_second < fixed.temperature_k(CellId(29)).unwrap());
+}
+
+#[test]
+fn g1_temperature_mixture_heats_through_distinct_constituent_opacity_breakpoints() {
+    let original = thermal(&LAW, 2.0, 0.0);
+    let source = |id, points: &[(f64, f64)]| {
+        TemperaturePhotonMassMaterial::new(
+            format!("manufactured constituent temperature law {id}"),
+            points
+                .iter()
+                .map(|&(temperature_k, coefficient)| PhotonMassTemperatureKnot {
+                    temperature_k,
+                    material: PhotonMassMaterial::new(
+                        format!("manufactured constituent {id} at {temperature_k} K"),
+                        id,
+                        DecayRadiation::Gamma,
+                        edges(),
+                        [coefficient, 2.0 * coefficient]
+                            .map(|value| PhotonMassCollision {
+                                total_m2_kg: value,
+                                heat_m2_kg: value,
+                                redistribution_m2_kg: vec![0.0, 0.0],
+                            })
+                            .to_vec(),
+                        PhotonSlabLimits::default(),
+                        || Ok(()),
+                    )
+                    .unwrap(),
+                })
+                .collect(),
+            PhotonSlabLimits::default(),
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let mixture = TemperaturePhotonMassMaterial::from_mass_fractions(
+        "manufactured shield mixture with two opacity peaks".into(),
+        1,
+        vec![
+            TemperaturePhotonMassConstituent {
+                mass_fraction: 0.5,
+                material: source(101, &[(300.0, 0.125), (302.0, 1.125), (306.0, 0.125)]),
+            },
+            TemperaturePhotonMassConstituent {
+                mass_fraction: 0.5,
+                material: source(102, &[(300.0, 0.375), (304.0, 0.875), (308.0, 0.375)]),
+            },
+        ],
+        "Manufactured independent absorption with local deposition in this mixture at all supported temperatures and common group weighting.".into(),
+        PhotonSlabLimits::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let mut materials = temperature_layers(false, 350.0);
+    materials[0].material = Arc::new(mixture);
+    let retained_values: usize = materials
+        .iter()
+        .map(|layer| layer.material.value_count())
+        .sum();
+    assert!(matches!(
+        feedback(
+            &original,
+            materials.clone(),
+            vec![steady()],
+            None,
+            PhotonFeedbackBudget {
+                max_material_values: retained_values - 1,
+                ..PhotonFeedbackBudget::default()
+            },
+        ),
+        Err(FissionThermalError::Radiation(RadiationError::Budget(_)))
+    ));
+    let owner = feedback(
+        &original,
+        materials,
+        vec![steady()],
+        None,
+        PhotonFeedbackBudget::default(),
+    )
+    .unwrap();
+    // The independently mixed optical depths at 300, 302, 304, 306 K are
+    // 0.5, 1.75, 1.5, 0.75. For each affine segment tau=a+b*theta,
+    // dtheta/dt=(P/C)*(1-exp(-tau)) has an exact exponential solution.
+    // Integrating that ODE to each breakpoint fixes the next segment's clock.
+    let time_to_302 = (1.75_f64.exp_m1() / 0.5_f64.exp_m1()).ln() / (2.0 * 0.625);
+    let time_302_to_304 = (1.5_f64.exp_m1() / 1.75_f64.exp_m1()).ln() / (2.0 * -0.125);
+    let remaining = 4.0 - time_to_302 - time_302_to_304;
+    assert!(remaining > 0.0);
+    let exact_first = 304.0
+        + ((-1.5_f64).exp() - (-1.5_f64).exp_m1() * (2.0 * -0.375 * remaining).exp()).ln() / -0.375;
+    assert!(exact_first > 305.0 && exact_first < 306.0);
+    let mut errors = Vec::new();
+    for dt in [0.125, 0.0625, 0.03125] {
+        let (heated, accepted, audit) = owner
+            .advance_to(&original, 4.0, controls(dt), || Ok(()))
+            .unwrap();
+        let first = heated.temperature_k(CellId(11)).unwrap();
+        let second = heated.temperature_k(CellId(29)).unwrap();
+        errors.push((first - exact_first).abs());
+        let first_heat = 4.0 * (first - 300.0);
+        let second_heat = (32.0 - first_heat) * -(-1.0_f64).exp_m1();
+        close(second, 300.0 + second_heat / 6.0);
+        close(accepted.audit().incident_j, 32.0);
+        close(accepted.audit().absorbed_j, first_heat + second_heat);
+        close(accepted.audit().escaped_j, 32.0 - first_heat - second_heat);
+        close(audit.external_heat_j, first_heat + second_heat);
+        assert!(accepted.prepared_temperatures_k().unwrap()[0].1 > 304.0);
+    }
+    assert!(errors[2] < 0.01, "{errors:?}");
+    for pair in errors.windows(2) {
+        assert!(
+            pair[0] / pair[1] > 1.8 && pair[0] / pair[1] < 2.2,
+            "{errors:?}"
+        );
+    }
 }
 
 #[test]

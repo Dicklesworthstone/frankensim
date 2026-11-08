@@ -3091,6 +3091,19 @@ radiation kind and exact energy grid. Exact knots retain their source objects;
 interior samples pass the original closure/downscatter admission without
 renormalization. The closed kelvin domain never extrapolates.
 
+`TemperaturePhotonMassMaterial::from_mass_fractions` prepares homogeneous
+mixtures at constant authored mass fractions. It retains the original
+temperature laws and their complete-kernel applicability in the target mixture.
+The union of constituent knots on the intersection of their closed domains
+preserves intermediate opacity peaks and changes of slope; mixing endpoints
+alone is insufficient. Every constituent, including zero-weight sources, must
+share the photon kind and exact energy grid. Prepared samples preserve local
+heat and outgoing energy separately. Attenuation additivity does not establish
+the required mixture-dependent deposition kernels. Retained source/sample
+values and preparation work are bounded; subsequent sampling needs no new
+constituent evaluations. Analytic transmission and native piecewise-opacity
+heating regressions exercise both interpolation and the existing thermal path.
+
 `ExternalPhotonHeating::from_temperature_slab` evaluates these kernels from
 the original native caloric temperatures. Stored mass and geometry still
 supply reference density and layer depth. Changed illuminated start states
