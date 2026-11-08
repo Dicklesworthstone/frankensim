@@ -34,6 +34,7 @@ mod remainder;
 mod tangent;
 use fs_math::det;
 use fs_phs::Storage;
+pub use parameters::hunt_crossley_loss_from_restitution;
 
 /// A distributed obstacle: collocation points with per-point gap,
 /// physical quadrature measure, and the shared power-law contact law. A point
@@ -158,6 +159,8 @@ impl Obstacle {
     /// Hunt–Crossley internal loss `χ ≥ 0` [s/m]. Zero is the elastic
     /// potential (restitution 1). Nonzero adds `χ K [p]_+^α ṗ` as a
     /// dissipative force, not a term in `H`.
+    /// To calibrate this coefficient from a normal rebound measurement, use
+    /// [`Self::with_restitution_loss`].
     ///
     /// # Errors
     /// [`DContactError::Parameter`] if `chi` is negative or non-finite.

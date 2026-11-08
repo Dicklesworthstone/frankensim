@@ -1,7 +1,119 @@
-//! Parameter derivatives of the original total unilateral resisting force.
+//! Restitution calibration and derivatives of the unilateral contact law.
 use super::{DContactError, Obstacle, det};
 
+/// Calibrate Hunt–Crossley `chi` [s/m] from normal restitution at an approach
+/// speed [m/s]. The returned coefficient remains fixed during subsequent impacts.
+///
+/// For an isolated, initially uncompressed normal impact with positive effective
+/// mass and stiffness, `F = K delta^alpha (1 + chi * delta_dot)` gives the exact
+/// relation `x - ln(1+x) = -e*x - ln(1-e*x)`, where `x = chi * approach_speed`
+/// and `e` is restitution. This solves its unique positive root; the mass,
+/// stiffness, and exponent cancel. It does not use a weak-damping approximation.
+///
+/// Restitution is matched at the supplied speed only. External loading, coupled
+/// modes and simultaneous contacts can change the rebound. This is parameter
+/// calibration, not an impact impulse or a replacement for the dissipative port.
+///
+/// `e = 1` returns exactly zero loss. Perfectly inelastic `e = 0` would require
+/// an infinite coefficient and is refused. Allocation-free, deterministic, and
+/// intended for setup rather than the timestep loop.
+///
+/// # Errors
+/// [`DContactError::Parameter`] for nonfinite values, `e` outside `(0, 1]`, a
+/// nonpositive speed, or a coefficient outside the representable positive range.
+pub fn hunt_crossley_loss_from_restitution(
+    restitution: f64,
+    approach_speed_m_s: f64,
+) -> Result<f64, DContactError> {
+    if !restitution.is_finite() || restitution <= 0.0 || restitution > 1.0 {
+        return Err(DContactError::Parameter {
+            what: "Hunt-Crossley restitution must be finite and in (0, 1]",
+        });
+    }
+    if !approach_speed_m_s.is_finite() || approach_speed_m_s <= 0.0 {
+        return Err(DContactError::Parameter {
+            what: "Hunt-Crossley reference approach speed must be finite and positive",
+        });
+    }
+    if restitution == 1.0 {
+        return Ok(0.0);
+    }
+
+    let (mut lo, mut hi) = (0.0, 1.0 / restitution);
+    if !hi.is_finite() {
+        return Err(DContactError::Parameter {
+            what: "Hunt-Crossley dimensionless loss is not representable",
+        });
+    }
+    // Dividing out the double root at zero keeps nearly elastic impacts from
+    // converging spuriously to chi=0. The residual is positive at zero and
+    // negative at the singular unloading limit x=1/e.
+    for _ in 0..128 {
+        let x = f64::midpoint(lo, hi);
+        if x == lo || x == hi {
+            break;
+        }
+        if restitution_residual(restitution, x) > 0.0 {
+            lo = x;
+        } else {
+            hi = x;
+        }
+    }
+    let chi = f64::midpoint(lo, hi) / approach_speed_m_s;
+    if !chi.is_finite() || chi <= 0.0 {
+        return Err(DContactError::Parameter {
+            what: "Hunt-Crossley calibrated chi is not representable",
+        });
+    }
+    Ok(chi)
+}
+
+fn restitution_residual(e: f64, x: f64) -> f64 {
+    if x <= 0.25 {
+        // F(x)/x^2 = sum_n [(-1)^n - e^(n+2)] x^n/(n+2).
+        // Factoring 1-e^2 preserves measured loss close to e=1. At x<=1/4,
+        // the omitted tail after n=32 is below 2e-21 in absolute magnitude.
+        let mut residual = 0.5 * (1.0 - e) * (1.0 + e);
+        let (mut x_power, mut e_power) = (1.0, e * e);
+        for n in 1..=32 {
+            x_power *= x;
+            e_power *= e;
+            let coefficient = if n % 2 == 0 {
+                1.0 - e_power
+            } else {
+                -1.0 - e_power
+            };
+            residual += coefficient * x_power / f64::from(n + 2);
+        }
+        residual
+    } else {
+        let unloading = 1.0 - e * x;
+        if unloading <= 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        (1.0 + e) * x + det::ln(unloading) - det::ln(1.0 + x)
+    }
+}
+
 impl Obstacle {
+    /// Set a fixed Hunt–Crossley loss coefficient from restitution measured at
+    /// the given normal approach speed. See [`hunt_crossley_loss_from_restitution`]
+    /// for the isolated-impact assumptions and speed dependence. The obstacle's
+    /// caller-supplied provenance is retained; this does not certify a source.
+    ///
+    /// # Errors
+    /// [`DContactError::Parameter`] for invalid or unrepresentable calibration.
+    pub fn with_restitution_loss(
+        self,
+        restitution: f64,
+        approach_speed_m_s: f64,
+    ) -> Result<Self, DContactError> {
+        self.with_internal_loss(hunt_crossley_loss_from_restitution(
+            restitution,
+            approach_speed_m_s,
+        )?)
+    }
+
     /// Contract a generalized force seed with derivatives of the TOTAL positive
     /// resisting force, including the original Hunt--Crossley loss increment.
     /// Output order is `[K, chi, gap_0, ..., gap_(n_points-1)]`. Exponent,

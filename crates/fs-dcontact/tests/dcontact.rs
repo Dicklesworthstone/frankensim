@@ -5,7 +5,10 @@
 //! velocity sweep, collocation refinement convergence, the jawari
 //! spectral-enrichment casebook, determinism, and typed refusals.
 
-use fs_dcontact::{ContactStorage, DContactError, Obstacle, polyline_heights, string_collocation};
+use fs_dcontact::{
+    ContactStorage, DContactError, Obstacle, hunt_crossley_loss_from_restitution, polyline_heights,
+    string_collocation,
+};
 use fs_phs::{PortHamiltonian, QuadraticStorage, Storage, step};
 
 /// G0: SI line measures, not probability weights, determine total reaction.
@@ -251,6 +254,82 @@ fn g1_hunt_crossley_restitution_matches_exact_relation() {
             errors[2] < errors[0],
             "the HC timestep axis must be live: {errors:?}"
         );
+    }
+}
+
+#[test]
+fn restitution_calibration_inverts_exact_impact_law_and_scales_with_speed() {
+    // Independently solve the forward relation with platform log1p, which
+    // retains the small difference in the weak-loss reference cases.
+    for x in [0.01_f64, 0.1, 0.5, 1.0, 5.0] {
+        let incoming_integral = x - x.ln_1p();
+        let (mut lo, mut hi) = (0.0, 1.0_f64.min(1.0 / x));
+        for _ in 0..80 {
+            let e = f64::midpoint(lo, hi);
+            if e == lo || e == hi {
+                break;
+            }
+            let outgoing_integral = -e * x - (-e * x).ln_1p();
+            if outgoing_integral < incoming_integral {
+                lo = e;
+            } else {
+                hi = e;
+            }
+        }
+        let e = f64::midpoint(lo, hi);
+        let chi = hunt_crossley_loss_from_restitution(e, 0.7).unwrap();
+        assert!((chi * 0.7 / x - 1.0).abs() < 1e-10, "x={x}, e={e}");
+        assert_eq!(
+            hunt_crossley_loss_from_restitution(e, 1.4).unwrap(),
+            chi * 0.5
+        );
+    }
+}
+
+#[test]
+fn restitution_calibration_preserves_near_elastic_loss_and_refuses_invalid_data() {
+    assert_eq!(hunt_crossley_loss_from_restitution(1.0, 0.4), Ok(0.0));
+    let e = 1.0 - 2.0_f64.powi(-40);
+    let chi = hunt_crossley_loss_from_restitution(e, 0.4).unwrap();
+    assert!((chi * 0.4 / (1.5 * (1.0 - e)) - 1.0).abs() < 2e-11);
+    for invalid in [0.0, -0.1, 1.1, f64::NAN, f64::INFINITY] {
+        assert!(hunt_crossley_loss_from_restitution(invalid, 0.4).is_err());
+    }
+    for invalid in [0.0, -0.1, f64::NAN, f64::INFINITY] {
+        assert!(hunt_crossley_loss_from_restitution(0.8, invalid).is_err());
+    }
+    let obstacle = Obstacle::new(
+        vec![1.0],
+        1,
+        1,
+        vec![0.0],
+        vec![1.0],
+        2e8,
+        1.5,
+        "measured normal rebound at 0.4 m/s".into(),
+    )
+    .unwrap()
+    .with_restitution_loss(e, 0.4)
+    .unwrap();
+    assert_eq!(obstacle.internal_loss(), chi);
+    assert_eq!(obstacle.provenance(), "measured normal rebound at 0.4 m/s");
+}
+
+#[test]
+fn calibrated_contact_rebounds_at_requested_restitution() {
+    // Different masses, stiffnesses and speeds share the isolated-impact law.
+    // Exercise the existing production implicit contact/loss integration seam.
+    for (mass, k, incoming) in [(0.05, 3.8e8, 0.2), (0.12, 8e7, 1.1)] {
+        let maximum = fs_math::det::pow(1.25 * mass * incoming * incoming / k, 0.4);
+        let dt = 2.943 * maximum / incoming / 256.0;
+        for requested in [0.5, 0.8, 0.95] {
+            let chi = hunt_crossley_loss_from_restitution(requested, incoming).unwrap();
+            let (_, actual) = isolated_impact(mass, k, chi, incoming, dt);
+            assert!(
+                (actual - requested).abs() < 1e-3,
+                "mass={mass}, K={k}, speed={incoming}: requested {requested}, got {actual}"
+            );
+        }
     }
 }
 

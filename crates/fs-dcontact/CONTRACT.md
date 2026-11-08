@@ -145,6 +145,27 @@ increment. Pointwise unloading remains non-attractive before mixed-sign
 collocation projection. G1 tests check both velocity signs at weak loss and
 simultaneous capped unloading/loading with cancelling generalized elastic forces.
 
+## Restitution-based loss calibration
+
+`hunt_crossley_loss_from_restitution(e, approach_speed_m_s)` and
+`Obstacle::with_restitution_loss` convert a measured normal restitution and
+positive reference speed into the existing fixed Hunt–Crossley `chi` [s/m].
+They invert the exact isolated-impact relation
+`x - ln(1+x) = -e*x - ln(1-e*x)`, `x = chi * approach_speed`, rather than a
+weak-loss approximation. Mass, positive stiffness and the power-law exponent
+cancel from this relation. The setup-time solve is allocation-free and uses a
+factored series near the elastic limit to retain weak loss. No calibration
+work is added to the force or timestep path.
+
+`e=1` gives zero loss; `e=0` requires infinite loss and refuses, as do invalid
+speeds and unrepresentable coefficients. The supplied restitution applies to
+an initially uncompressed, isolated normal impact at the reference speed;
+external loading, other speeds, coupled modes and simultaneous contacts need
+not reproduce it. This does not impose a restitution impulse or change the
+obstacle's caller-owned provenance. Tests compare the inverse with the exact
+forward relation and exercise the original implicit contact port at several
+restitutions, masses, stiffnesses and speeds.
+
 ## Contact parameter derivatives
 
 `Obstacle::resistance_parameter_vjp_into` differentiates the original total
