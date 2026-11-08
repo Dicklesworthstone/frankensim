@@ -70,6 +70,8 @@ pub mod spectral;
 /// Stokes/Mueller polarization transport primitives.
 pub mod polarization;
 #[cfg(feature = "tracer")]
+pub mod rough_diffuse;
+#[cfg(feature = "tracer")]
 pub mod thermal_surface;
 #[cfg(feature = "tracer")]
 pub mod tracer;
