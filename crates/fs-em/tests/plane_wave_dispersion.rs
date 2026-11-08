@@ -271,3 +271,51 @@ fn g0_refuses_invalid_frequencies_singular_poles_and_mismatched_sources() {
     assert!(DielectricResponse::LorentzWithOhmic { dielectric: &polarization, conductor: &other }
         .bulk_dispersion(0.5 * OMEGA0).is_err());
 }
+
+#[test]
+fn g1_high_frequency_loss_derivatives_keep_resolved_absorption_tails() {
+    let material = source(0.03 * OMEGA0);
+    let relaxation = debye(material.clone(), 1.0, 1.0);
+    let conductor = ResolvedConductorState::try_from_material_with_basis(
+        material, ElectricalPropertyBasis::Conductivity,
+    ).unwrap();
+    let inverse_speed = (2.0 * E * M).sqrt();
+    for ratio in [1e6_f64, 1e8, 1e12, 1e50] {
+        let omega = ratio * OMEGA0;
+        let jet = DielectricResponse::Ohmic(&conductor).bulk_dispersion(omega).unwrap();
+        // Independent closed form from k² = mu*(epsilon_inf*omega²-i*sigma*omega).
+        // Writing sqrt(1-i*t) = u+i*v gives an imaginary first derivative
+        // proportional to t³, even when sqrt(1+t²) rounds to exactly one.
+        let t = SIGMA / (2.0 * E * omega);
+        let radius = (1.0 + t * t).sqrt();
+        let u = ((radius + 1.0) * 0.5).sqrt();
+        let first = -inverse_speed * t.powi(3) / (8.0 * u.powi(3) * radius);
+        let second = (inverse_speed / omega) * t.powi(3) * (radius + 2.0)
+            / (8.0 * u * radius.powi(3));
+        near(jet.wavenumber_derivative_s_m().im, first, 5e-14 * first.abs());
+        near(jet.wavenumber_second_derivative_s2_m().im, second, 5e-14 * second.abs());
+        let propagated = jet.propagation(0.1).unwrap();
+        near(propagated.log_amplitude_derivative_s, 0.1 * first, 5e-15 * first.abs());
+        near(propagated.log_amplitude_second_derivative_s2, 0.1 * second, 5e-15 * second.abs());
+
+        // Independently expand sqrt(epsilon/epsilon_inf) through omega^-3.
+        // With a=(sigma+Delta/tau)/epsilon_inf, b=Delta/(epsilon_inf*tau²),
+        // c=Delta/(epsilon_inf*tau³), Q=c+a*b/2+a³/8, Im(k')~-S*Q/omega³
+        // and Im(k'')~3*S*Q/omega⁴. Here Delta/epsilon_inf=2, tau*OMEGA0=1:
+        // Q/OMEGA0³ = 5 (Debye) and 67/8 (Debye with this source's leakage).
+        for (response, coefficient) in [
+            (DielectricResponse::Debye(&relaxation), 5.0),
+            (DielectricResponse::DebyeWithOhmic {
+                dielectric: &relaxation, conductor: &conductor,
+            }, 67.0 / 8.0),
+        ] {
+            let jet = response.bulk_dispersion(omega).unwrap();
+            let first = -inverse_speed * (coefficient / ratio) / ratio / ratio;
+            let second = -3.0 * first / omega;
+            // The omitted relative tail is O(ratio^-2); compare each small
+            // imaginary component, not a norm dominated by phase slowness.
+            near(jet.wavenumber_derivative_s_m().im, first, 1e-10 * first.abs());
+            near(jet.wavenumber_second_derivative_s2_m().im, second, 1e-10 * second.abs());
+        }
+    }
+}

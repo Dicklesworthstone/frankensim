@@ -70,7 +70,7 @@ impl<'a> DielectricResponse<'a> {
         let omega = positive(omega_rad_s)?;
         let epsilon = self.permittivity(omega)?;
         let permeability = linear_magnetic_permeability(self.material())?;
-        let epsilon_derivatives = derivatives(self, omega)?;
+        let (epsilon_derivatives, loss_moments) = derivatives(self, omega)?;
         // Use the SAME binary-scaled outgoing bulk root as native absorbing
         // incidence. This preserves real-negative/evanescent branch selection
         // and avoids forming omega² or the dimensional epsilon*mu product.
@@ -86,10 +86,37 @@ impl<'a> DielectricResponse<'a> {
         // k = omega sqrt(mu epsilon). Store omega*epsilon' and
         // omega²*epsilon'' until the last dimensional divisions. The exact
         // constant-law limit gives second == 0 without subtracting k/omega².
-        let first = slowness * (C64::ONE + slope.scale(0.5));
+        let mut first = slowness * (C64::ONE + slope.scale(0.5));
         let second_scaled =
             slowness * (slope + curvature.scale(0.5) - slope * slope.scale(0.25));
-        let second = C64::new(second_scaled.re / omega, second_scaled.im / omega);
+        let mut second = C64::new(second_scaled.re / omega, second_scaled.im / omega);
+        if epsilon.re > 0.0 && epsilon.im < 0.0 && slowness.re > 0.0 && slowness.im < 0.0 {
+            // Weak absorption makes Im(h) + Im(omega*h') cancel to much
+            // smaller order than either term. Differentiate 2*Re(h)*Im(h)
+            // = mu*Im(epsilon), using original per-law loss moments:
+            // m1 = Im(epsilon + omega*epsilon'),
+            // m2 = Im(2*omega*epsilon' + omega²*epsilon'').
+            // Ohmic m1/m2 are exactly zero; Debye tails remain explicit.
+            // A positive real epsilon keeps Re(h) the dominant root part.
+            let lambda = (slowness * slope.scale(0.5)).re / slowness.re;
+            let eta = (slowness
+                * (curvature.scale(0.5) - slope * slope.scale(0.25))).re
+                / slowness.re;
+            let [loss_first, loss_second] = loss_moments.map(|value| value / epsilon.im);
+            let attenuation_first = slowness.im * (loss_first - lambda);
+            let attenuation_second = (slowness.im
+                * (loss_second - 2.0 * lambda * loss_first + 2.0 * lambda * lambda - eta))
+                / omega;
+            // An extreme weak pole can have finite complex derivatives while
+            // normalization by its tiny loss overflows. In that case retain
+            // the already evaluated general jet, including evanescent limits.
+            if [lambda, eta, loss_first, loss_second, attenuation_first, attenuation_second]
+                .into_iter().all(f64::is_finite)
+            {
+                first.im = attenuation_first;
+                second.im = attenuation_second;
+            }
+        }
         if ![slope, curvature, first, second].into_iter().all(finite) {
             return Err(invalid("bulk dispersion derivatives are unrepresentable"));
         }
@@ -198,31 +225,40 @@ fn invalid(message: &'static str) -> ReflectionError {
 struct DerivativeSum {
     real: [Dd; 2],
     imaginary: [Dd; 2],
+    loss_moments: [Dd; 2],
 }
 impl DerivativeSum {
-    fn add(&mut self, values: [C64; 2]) -> Result<()> {
+    fn add(&mut self, values: [C64; 2], loss_moments: [f64; 2]) -> Result<()> {
         for (index, value) in values.into_iter().enumerate() {
-            if !finite(value) {
+            if !finite(value) || !loss_moments[index].is_finite() {
                 return Err(invalid("material dispersion derivative is unrepresentable"));
             }
             self.real[index] = self.real[index] + Dd::from_f64(value.re);
             self.imaginary[index] = self.imaginary[index] + Dd::from_f64(value.im);
+            self.loss_moments[index] =
+                self.loss_moments[index] + Dd::from_f64(loss_moments[index]);
         }
         Ok(())
     }
-    fn finish(self) -> Result<[C64; 2]> {
+    fn finish(self) -> Result<([C64; 2], [f64; 2])> {
         let values = core::array::from_fn(|index| {
             C64::new(self.real[index].to_f64(), self.imaginary[index].to_f64())
         });
-        if values.into_iter().all(finite) {
-            Ok(values)
+        let loss_moments = self.loss_moments.map(Dd::to_f64);
+        if values.into_iter().all(finite)
+            && loss_moments.into_iter().all(f64::is_finite)
+        {
+            Ok((values, loss_moments))
         } else {
             Err(invalid("material dispersion derivative sum is unrepresentable"))
         }
     }
 }
 
-fn derivatives(source: DielectricResponse<'_>, omega: f64) -> Result<[C64; 2]> {
+fn derivatives(
+    source: DielectricResponse<'_>,
+    omega: f64,
+) -> Result<([C64; 2], [f64; 2])> {
     let mut sum = DerivativeSum::default();
     let (debye, lorentz, conductivity) = match source {
         DielectricResponse::Lossless(_) => (None, None, 0.0),
@@ -251,7 +287,12 @@ fn derivatives(source: DielectricResponse<'_>, omega: f64) -> Result<[C64; 2]> {
                  C64::new(1.0 / denominator, inverse / denominator))
             };
             let first = -(h.scale(pole.permittivity_increment_f_m) * q);
-            sum.add([first, (first * q).scale(-2.0)])?;
+            let loss = h.im * pole.permittivity_increment_f_m;
+            let loss_first = (2.0 * loss) * h.re;
+            sum.add(
+                [first, (first * q).scale(-2.0)],
+                [loss_first, loss_first * (4.0 * h.re - 3.0)],
+            )?;
         }
     }
     if let Some(model) = lorentz {
@@ -270,12 +311,23 @@ fn derivatives(source: DielectricResponse<'_>, omega: f64) -> Result<[C64; 2]> {
             let p = C64::new(-2.0 * x * x, (damping / scale) * x) / denominator;
             let r = C64::from_re(2.0 * x * x) / denominator;
             let first = -(susceptibility * p);
-            sum.add([first, (first * p).scale(-2.0) + susceptibility * r])?;
+            let second = (first * p).scale(-2.0) + susceptibility * r;
+            // Im(chi + omega*chi') = 2*Im(chi)*Re((omega0²+omega²)/D).
+            // Keep the original real-zero at resonance instead of subtracting
+            // two almost equal loss contributions.
+            let natural_scaled = natural / scale;
+            let loss_factor = (C64::from_re(natural_scaled * natural_scaled + x * x)
+                / denominator).re;
+            sum.add(
+                [first, second],
+                [susceptibility.im * (2.0 * loss_factor), 2.0 * first.im + second.im],
+            )?;
         }
     }
     if conductivity != 0.0 {
         let loss = positive(conductivity / omega)?;
-        sum.add([C64::new(0.0, loss), C64::new(0.0, -2.0 * loss)])?;
+        // The loss of omega*epsilon is constant for the original Ohmic law.
+        sum.add([C64::new(0.0, loss), C64::new(0.0, -2.0 * loss)], [0.0; 2])?;
     }
     sum.finish()
 }
