@@ -1,14 +1,14 @@
 //! Endpoint material changes in one permanent mechanical coordinate basis.
 //!
 //! With h=dt/2, the endpoint-average momentum equation solves
-//! (M+h C+h²K1) v_mid = M v0 + h [f_mid-(K0+K1)q0/2]. Both material
+//! (M+h C+h²K1) v_mid = M v0 + h [f_mid-(K0+K1)q0/2], with Maxwell
+//! ramp tangents on the left and original-history forces on the right. Both material
 //! operators act on the SAME physical coordinates, reference inertia and
 //! algebraic drilling constraint. No remap or temperature-rate lift enters.
 
 use super::{
     EnrichedMitcShell, MitcTransientReport, MitcTransientState, MitcTransientStep,
-    PreparedMitcMidpoint, action, check, finite, invalid, product, product_retained,
-    row_check,
+    PreparedMitcMidpoint, action, check, finite, invalid, product, product_retained, row_check,
 };
 use crate::PlateError;
 use fs_math::dd::Dd;
@@ -18,7 +18,8 @@ impl PreparedMitcMidpoint {
     /// Advance with the original accepted stiffness and this factor's endpoint
     /// stiffness. Both owners must share the exact reference coordinate basis,
     /// physical mass and numerical drilling constraint. This is a finite
-    /// endpoint-average force scheme; material/thermal histories and their
+    /// endpoint-average elastic force scheme with exact Maxwell histories
+    /// along its affine displacement path. Thermal history and whole-trajectory
     /// timestep refinement remain the caller's responsibility.
     ///
     /// The report exposes `q0^T(K1-K0)q1/2` separately from mechanical load
@@ -50,6 +51,7 @@ impl PreparedMitcMidpoint {
         }
         before.admit_state(initial)?;
         after.admit_state(initial)?;
+        after.admit_relaxation(before, initial)?;
         let n = after.dimension();
         if load_before.len() != n
             || load_after.len() != n
@@ -92,6 +94,13 @@ impl PreparedMitcMidpoint {
                 .map_or(k0q0[i], |next| 0.5 * k0q0[i] + 0.5 * next[i]);
             rhs[i] = finite(rhs[i] + h * (force[i] - stiffness_force))?;
         }
+        after.relaxation_resistance(
+            initial,
+            &self.relaxation_ramps,
+            h,
+            &mut rhs,
+            &mut cancelled,
+        )?;
         let midpoint_velocity = self
             .factor
             .solve_reduced(&self.effective, &rhs, &mut cancelled)?;
@@ -102,7 +111,7 @@ impl PreparedMitcMidpoint {
             q[i] = finite(initial.coordinates[i] + self.dt_s * midpoint_velocity[i])?;
             v[i] = finite(2.0 * midpoint_velocity[i] - initial.velocity[i])?;
         }
-        let state = after.state_reduced(target, q, v, &mut cancelled)?;
+        let mut state = after.state_reduced(target, q, v, &mut cancelled)?;
         let displacement: Vec<_> = state
             .coordinates
             .iter()
@@ -131,12 +140,41 @@ impl PreparedMitcMidpoint {
         let load_work_j = load_work.to_f64();
         let kinetic_change = after.kinetic_increment(initial, &state, &mut cancelled)?;
         let kinetic_energy_change_j = finite(kinetic_change.to_f64())?;
-        let (dissipated_energy_j, facet_dissipated_energy_j) =
+        let (viscous_dissipated_energy_j, facet_viscous_dissipated_energy_j) =
             after.material_dissipation(&midpoint_velocity, self.dt_s, &mut cancelled)?;
-        // This is ΔKE+Δ(qKq/2)+heat-W_parameter-W_load, evaluated without an
+        let (
+            history,
+            relaxation_energy_change_j,
+            relaxation_dissipated_energy_j,
+            facet_relaxation_dissipated_energy_j,
+        ) = after.advance_relaxation(
+            initial,
+            &midpoint_velocity,
+            self.dt_s,
+            &self.relaxation_ramps,
+            &mut cancelled,
+        )?;
+        state.relaxation = history;
+        let dissipated_energy_j =
+            finite(viscous_dissipated_energy_j + relaxation_dissipated_energy_j)?;
+        let mut facet_dissipated_energy_j = facet_viscous_dissipated_energy_j.clone();
+        if facet_dissipated_energy_j.is_empty() {
+            facet_dissipated_energy_j.clone_from(&facet_relaxation_dissipated_energy_j);
+        } else {
+            for (total, loss) in facet_dissipated_energy_j
+                .iter_mut()
+                .zip(&facet_relaxation_dissipated_energy_j)
+            {
+                *total = finite(*total + loss)?;
+            }
+        }
+        // This is ΔKE+Δ(qKq/2)+ΔMaxwell+heat-W_parameter-W_load, without an
         // avoidable cancellation of the same parameter work twice.
         let energy_residual_j = finite(
-            (kinetic_change + stiffness_work + Dd::from_f64(dissipated_energy_j)
+            (kinetic_change
+                + stiffness_work
+                + Dd::from_f64(relaxation_energy_change_j)
+                + Dd::from_f64(dissipated_energy_j)
                 - load_work)
                 .to_f64(),
         )?;
@@ -149,9 +187,14 @@ impl PreparedMitcMidpoint {
                 quadratic_energy_change_j,
                 stiffness_parameter_work_j,
                 dissipated_energy_j,
+                viscous_dissipated_energy_j,
+                relaxation_dissipated_energy_j,
+                relaxation_energy_change_j,
                 energy_residual_j,
             },
             facet_dissipated_energy_j,
+            facet_viscous_dissipated_energy_j,
+            facet_relaxation_dissipated_energy_j,
         })
     }
 }

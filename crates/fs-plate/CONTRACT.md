@@ -1463,8 +1463,10 @@ The current model must retain mesh, directors, constraints and reference mass
 moments. Rebinding is immutable and does not move the physical history.
 
 `PreparedMitcMidpoint::advance_from` uses BOTH endpoint operators in the
-momentum equation. With `h=dt/2`, its factor is `M+h C+h²K1`, and its right-hand side
-is `M v0+h[f_mean-(K0+K1)q0/2]`. The native first-law account separates
+momentum equation. With `h=dt/2`, its memory-free factor is `M+h C+h²K1`, and its
+right-hand side is `M v0+h[f_mean-(K0+K1)q0/2]`. Exact Maxwell average-force
+tangents and original-history forces extend these same operators below.
+The native first-law account separates
 `q0^T(K1-K0)q1/2` from load work and quadratic storage. This diagnostic parameter
 work is not itself a material heat source; the coupled thermodynamic owner must
 use its original free energy and entropy. The constant-operator entry shares
@@ -1484,7 +1486,8 @@ lossless path exactly.
 
 Physical heat is independently evaluated from the original constitutive Gram
 factors and midpoint strain rates on each facet's positive quadrature. The
-native first law is `delta(kinetic+quadratic storage)+heat-W_parameter-W_load`;
+native first law is
+`delta(kinetic+quadratic+Maxwell storage)+heat-W_parameter-W_load`;
 its signed defect is never relabeled as heat. `facet_dissipated_energy_j` names
 the original thermal destinations but does not perform a thermal credit.
 These per-facet amounts sum to the report's material heat and must not be
@@ -1495,10 +1498,39 @@ between-step rebind preserves accepted displacement, velocity and reference
 inertia without creating energy or resetting a history. Resolving a physical
 decay still requires timestep convergence; midpoint is not L-stable.
 
+`with_relaxation` adds explicit per-facet `ShearShellRelaxationBranch` spectra
+above the EQUILIBRIUM sections. The same full A/B/D/shear work and original
+positive quadrature retain all nodal/director couplings. Each facet branch
+stores twenty local elastic coordinates: eighteen global nodal coordinates
+and two residual director coordinates. No global-DOF-by-spectrum history,
+modal truncation, drilling loss or static director substitution is introduced.
+Source branch count, assembly work and retained branch/ramp/history payload
+are bounded before allocation.
+
+For each exact affine numerical displacement increment, the original
+`PronyRamp` supplies the branch endpoint, average force and integrated heat.
+Writing its average history as `a*r0+c*delta_q`, the existing prepared factor
+adds `2*h²*c*K_branch`; its right-hand side adds `-h*a*K_branch*r0`.
+The factor and prepared ramps are reused for every equal-step interval.
+Material storage changes use the accepted history difference; heat is evaluated
+independently in the original passive strain channels. The native report and
+facet destinations expose Kelvin and Maxwell heat separately as well as their
+sum, with Maxwell storage included in the mechanical first law. Small accepted
+coordinate/velocity rounding defects remain numerical residuals.
+
+`with_relaxation_history` requires explicit initial elastic branch coordinates;
+zero means relaxed history even at a nonzero mechanical shape. Accepted states
+retain the exact source owner. Both interval endpoints and prepared ramps must
+share that owner, while elastic material refresh preserves it in the original
+fixed basis. Changing a spectrum cannot silently transfer or reset its stored
+energy. Failed and cancelled proposals leave the original mechanical and
+material histories intact. The branch path is integrated exactly, while the
+coupled motion still requires timestep convergence.
+
 The scope is temperature/parameter-dependent LINEAR elasticity in a fixed
-reference geometry with constant physical mass and optional frozen linear
-viscosity. No hereditary loss, nonlinear prestress, remesh, adjoint or
-experimental accuracy follows.
+reference geometry with constant physical mass, optional frozen linear
+viscosity and explicit frozen Maxwell spectra. Nonlinear prestress, remesh,
+adjoint and experimental accuracy remain outside this lane.
 `tests/thermal_shell_inertia.rs`
 checks analytic bubble/cross inertia, independent dynamic internal motion,
 static-limit recovery, repeated midpoint conservation and atomic refusals.
@@ -1509,7 +1541,11 @@ and cancellation. Compiler checks do not establish numerical execution.
 `tests/thermal_shell_viscosity.rs` adds full-operator parity with the existing
 modal projection, independent damped-director convergence over three time
 steps, nonproportional heat/work closure, rigid-motion and gauge-loss exclusion,
-material refresh, exact zero-loss parity and transactional refusals.
+material refresh, exact zero-loss parity and transactional refusals. It also
+checks two-branch Maxwell motion, history, storage and independently integrated
+Kelvin/Maxwell heat against a continuous ODE reference over three time steps;
+spatial A/B/D/shear memory, nonzero prehistory, null rigid motion, source identity,
+budget bounds and cancellation exercise the same native sparse owner.
 
 ## Equilibrium of tied shell assemblies before modal reduction
 

@@ -17,8 +17,9 @@
 //! reference mass is assembled directly from the original director velocity
 //! field; numerical drilling inertia in a regularized modal pencil is excluded.
 //! Optional physical Kelvin--Voigt resultants damp the complete original
-//! strain-rate field, including independent director motion. This lane does
-//! not claim finite rotation, prestressed tangents, hereditary material memory,
+//! strain-rate field, including independent director motion.
+//! Optional Maxwell excess resultants retain their original material histories.
+//! This lane does not claim finite rotation, prestressed tangents,
 //! moving geometry, or temperature-dependent reference inertia.
 //! Director-axis drilling has no physical inertia. Its algebraic constraint
 //! must hold for initial coordinates and rates; unsupported director-axis
@@ -37,8 +38,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod material;
+mod relaxation;
 mod step;
 mod viscosity;
+pub use relaxation::MitcRelaxationBudget;
 
 /// An immutable full enriched pencil sharing the original nodal shell model.
 #[derive(Clone, Debug)]
@@ -53,6 +56,7 @@ pub struct EnrichedMitcShell {
     mass: Arc<Csr>,
     gauges: Arc<Vec<AlgebraicGauge>>,
     viscosity: Option<Arc<viscosity::EnrichedViscosity>>,
+    relaxation: Option<Arc<relaxation::EnrichedRelaxation>>,
 }
 
 #[derive(Debug)]
@@ -75,6 +79,7 @@ pub struct MitcTransientState {
     bubble_coordinates: Vec<[f64; 2]>,
     bubble_velocity: Vec<[f64; 2]>,
     kinetic_energy_j: f64,
+    relaxation: Option<relaxation::History>,
 }
 
 impl MitcTransientState {
@@ -110,6 +115,20 @@ impl MitcTransientState {
     pub const fn kinetic_energy_j(&self) -> f64 {
         self.kinetic_energy_j
     }
+
+    /// Physical Maxwell storage in the accepted original facet histories [J].
+    pub fn relaxation_energy_j(&self) -> f64 {
+        self.relaxation
+            .as_ref()
+            .map_or(0.0, |history| history.stored_energy_j)
+    }
+
+    /// Elastic branch coordinates in the original facet-major/source order.
+    pub fn relaxation_history(&self) -> Option<&[[f64; 20]]> {
+        self.relaxation
+            .as_ref()
+            .map(|history| history.coordinates.as_slice())
+    }
 }
 
 /// Physical response and conjugate generalized forces at the actual retained
@@ -139,6 +158,7 @@ pub struct PreparedMitcMidpoint {
     dt_s: f64,
     effective: Csr,
     factor: StaticFactor,
+    relaxation_ramps: Vec<fs_material::visco::PronyRamp>,
 }
 
 /// The linear mechanical first-law identity, including explicit thermal loads.
@@ -154,10 +174,16 @@ pub struct MitcTransientReport {
     /// Polarized work from changing the physical stiffness at fixed reference
     /// coordinates: q0^T (K1-K0) q1 / 2 [J]. It is not a caloric heat source.
     pub stiffness_parameter_work_j: f64,
-    /// Nonnegative material heat dt times the original midpoint strain-rate
-    /// power [J]. Numerical drilling work and integration defects are excluded.
+    /// Independently integrated Kelvin–Voigt and Maxwell material heat [J].
+    /// Numerical drilling work and integration defects are excluded.
     pub dissipated_energy_j: f64,
-    /// Kinetic plus quadratic storage change plus material heat, minus
+    /// Instantaneous viscosity's physical midpoint-path heat [J].
+    pub viscous_dissipated_energy_j: f64,
+    /// Exact Maxwell heat along the affine numerical displacement path [J].
+    pub relaxation_dissipated_energy_j: f64,
+    /// Physical storage change in the accepted Maxwell histories [J].
+    pub relaxation_energy_change_j: f64,
+    /// Kinetic, quadratic and Maxwell storage change plus material heat, minus
     /// stiffness-parameter work and total load work [J].
     pub energy_residual_j: f64,
 }
@@ -169,10 +195,14 @@ pub struct MitcTransientStep {
     /// Mechanical midpoint balance on this interval.
     pub report: MitcTransientReport,
     /// Physical material heat [J] in original facet order, for a caller's
-    /// explicit thermal transfer. Empty when no viscosity is attached. These
+    /// explicit thermal transfer. Empty when no material loss is attached. These
     /// values are already included in report.dissipated_energy_j; do not debit
     /// them again from mechanics or automatically add other loss channels.
     pub facet_dissipated_energy_j: Vec<f64>,
+    /// Kelvin–Voigt heat by facet, included in the combined material heat.
+    pub facet_viscous_dissipated_energy_j: Vec<f64>,
+    /// Maxwell heat by facet, included in the combined material heat.
+    pub facet_relaxation_dissipated_energy_j: Vec<f64>,
 }
 
 impl EnrichedMitcShell {
@@ -256,6 +286,7 @@ impl EnrichedMitcShell {
             mass,
             gauges,
             viscosity: None,
+            relaxation: None,
         })
     }
 
@@ -292,7 +323,10 @@ impl EnrichedMitcShell {
         after: &MitcTransientState,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, PlateError> {
-        finite(self.kinetic_increment(before, after, &mut cancelled)?.to_f64())
+        finite(
+            self.kinetic_increment(before, after, &mut cancelled)?
+                .to_f64(),
+        )
     }
 
     fn kinetic_increment(
@@ -477,7 +511,8 @@ impl EnrichedMitcShell {
         })
     }
 
-    /// Factor M + (dt/2) C + (dt/2)^2 K once, sharing the static owner's equilibrated
+    /// Factor M + (dt/2) C + (dt/2)^2 K plus exact Maxwell ramp tangents once,
+    /// sharing the static owner's equilibrated
     /// sparse LDLT, compensated refinement and true-residual gate. Factorization
     /// and individual sparse kernels remain indivisible cancellation regions.
     pub fn prepare_midpoint(
@@ -508,6 +543,7 @@ impl EnrichedMitcShell {
                 }
             }
         }
+        let relaxation_ramps = self.relaxation_tangent(dt_s, &mut coo, &mut cancelled)?;
         check(&mut cancelled)?;
         let effective = coo.assemble();
         let factor = StaticFactor::try_new(&effective, &mut cancelled)?;
@@ -517,6 +553,7 @@ impl EnrichedMitcShell {
             dt_s,
             effective,
             factor,
+            relaxation_ramps,
         })
     }
 
@@ -620,6 +657,7 @@ impl EnrichedMitcShell {
             bubble_coordinates,
             bubble_velocity,
             kinetic_energy_j,
+            relaxation: None,
         })
     }
 }

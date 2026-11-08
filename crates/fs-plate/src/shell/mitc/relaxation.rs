@@ -76,6 +76,14 @@ impl ShearShellRelaxationBranch {
         self.relaxation_time_s
     }
 
+    pub(super) const fn excess(&self) -> &ShearShellViscosity {
+        &self.excess
+    }
+
+    pub(super) const fn factor(&self) -> &ShearDissipation {
+        &self.factor
+    }
+
     pub fn is_zero(&self) -> bool {
         self.excess.is_zero()
     }

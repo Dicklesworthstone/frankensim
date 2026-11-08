@@ -4,7 +4,8 @@
 use fs_material::sheet::SheetMatrix;
 use fs_plate::PlateError;
 use fs_plate::shell::ShellMesh;
-use fs_plate::shell::mitc::thermal::transient::EnrichedMitcShell;
+use fs_plate::shell::mitc::relaxation::ShearShellRelaxationBranch;
+use fs_plate::shell::mitc::thermal::transient::{EnrichedMitcShell, MitcRelaxationBudget};
 use fs_plate::shell::mitc::viscosity::{ShearShellViscosity, project_viscosity};
 use fs_plate::shell::mitc::{
     ConstraintFrame, MitcBudget, MitcShellModel, NodalDirectors, ShearShellSection,
@@ -110,6 +111,315 @@ fn coupled_loss() -> ShearShellViscosity {
         [0.8, 0.1, 0.6],
     )
     .unwrap()
+}
+
+fn memory(law: ShearShellViscosity, tau: f64) -> ShearShellRelaxationBranch {
+    let (a, b, d, s) = law.coupled_matrices();
+    ShearShellRelaxationBranch::new_coupled(a, b, d, [s[0][0], s[0][1], s[1][1]], tau).unwrap()
+}
+
+fn memory_budget(branches: usize) -> MitcRelaxationBudget {
+    MitcRelaxationBudget {
+        max_element_branches: branches,
+        max_assembly_terms: branches * WORK,
+        max_payload_bytes: branches * 5000,
+    }
+}
+
+// G1 independent continuous Maxwell/Kelvin oscillator, including both heat
+// channels as differential states. No production Prony coefficients are used.
+fn memory_reference(omega: f64, mass: f64, beta: f64, tau: [f64; 2], duration: f64) -> [f64; 6] {
+    let alpha = [0.4, 0.7];
+    let stiffness = mass * omega * omega;
+    let derivative = |x: [f64; 6]| {
+        [
+            x[1],
+            -omega * omega * (x[0] + beta * x[1] + alpha[0] * x[2] + alpha[1] * x[3]),
+            x[1] - x[2] / tau[0],
+            x[1] - x[3] / tau[1],
+            stiffness * (alpha[0] * x[2] * x[2] / tau[0] + alpha[1] * x[3] * x[3] / tau[1]),
+            beta * stiffness * x[1] * x[1],
+        ]
+    };
+    let dt = duration / 20000.0;
+    let mut x = [0.0, 0.2, 0.0, 0.0, 0.0, 0.0];
+    for _ in 0..20000 {
+        let a = derivative(x);
+        let b = derivative(core::array::from_fn(|i| x[i] + 0.5 * dt * a[i]));
+        let c = derivative(core::array::from_fn(|i| x[i] + 0.5 * dt * b[i]));
+        let d = derivative(core::array::from_fn(|i| x[i] + dt * c[i]));
+        x = core::array::from_fn(|i| x[i] + dt * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]) / 6.0);
+    }
+    x
+}
+
+#[test]
+fn g1_original_director_maxwell_memory_matches_continuous_motion_and_separate_heat() {
+    let original = EnrichedMitcShell::try_new(model(true, 1.0), || false).unwrap();
+    let n = original.model().pencil().free;
+    let mass = 0.5 * I2 * 81.0 / 280.0;
+    let a = entry(original.stiffness(), n, n);
+    let b = entry(original.stiffness(), n, n + 1);
+    let d = entry(original.stiffness(), n + 1, n + 1);
+    let lambda = 0.5 * (a + d) + (0.5 * (a - d)).hypot(b);
+    let vector = if b.abs() > 1e-14 {
+        let length = b.hypot(lambda - a);
+        [b / length, (lambda - a) / length]
+    } else if a >= d {
+        [1.0, 0.0]
+    } else {
+        [0.0, 1.0]
+    };
+    let omega = (lambda / mass).sqrt();
+    let (beta, tau, duration) = (0.25 / omega, [0.3 / omega, 1.7 / omega], 3.0 / omega);
+    let shell = original
+        .with_viscosity(&[proportional(beta)], WORK, || false)
+        .unwrap()
+        .with_relaxation(
+            &[vec![
+                memory(proportional(0.4), tau[0]),
+                memory(proportional(0.7), tau[1]),
+            ]],
+            memory_budget(2),
+            || false,
+        )
+        .unwrap();
+    let reference = memory_reference(omega, mass, beta, tau, duration);
+    let mut errors = Vec::new();
+    for steps in [40, 80, 160] {
+        let solver = shell
+            .prepare_midpoint(duration / f64::from(steps), || false)
+            .unwrap();
+        let initial = shell
+            .state(
+                0.0,
+                &[0.0; 18],
+                &[0.0; 18],
+                &[[0.0; 2]],
+                &[vector.map(|x| 0.2 * x)],
+                || false,
+            )
+            .unwrap();
+        let mut state = shell
+            .with_relaxation_history(&initial, &[[0.0; 20]; 2], || false)
+            .unwrap();
+        let energy = state.kinetic_energy_j();
+        let mut heat = [0.0; 2];
+        let force = vec![0.0; shell.dimension()];
+        for _ in 0..steps {
+            let next = solver.advance(&state, &force, &force, || false).unwrap();
+            assert!(next.report.relaxation_dissipated_energy_j >= 0.0);
+            assert!(next.report.viscous_dissipated_energy_j >= 0.0);
+            near(next.report.energy_residual_j, 0.0, 0.0, 3e-11 * energy);
+            heat[0] += next.report.relaxation_dissipated_energy_j;
+            heat[1] += next.report.viscous_dissipated_energy_j;
+            state = next.state;
+        }
+        let amplitude = |q: &[f64; 2]| q[0] * vector[0] + q[1] * vector[1];
+        let q = amplitude(&state.bubble_coordinates()[0]);
+        let v = amplitude(&state.bubble_velocity()[0]);
+        let history = state.relaxation_history().unwrap();
+        let actual = [
+            q,
+            v,
+            amplitude(&[history[0][18], history[0][19]]),
+            amplitude(&[history[1][18], history[1][19]]),
+            heat[0],
+            heat[1],
+        ];
+        let scale = [
+            omega / 0.2,
+            5.0,
+            omega / 0.2,
+            omega / 0.2,
+            1.0 / energy,
+            1.0 / energy,
+        ];
+        errors.push(
+            actual
+                .iter()
+                .zip(reference)
+                .zip(scale)
+                .map(|((a, b), scale)| (a - b).abs() * scale)
+                .fold(0.0_f64, f64::max),
+        );
+        near(
+            state.kinetic_energy_j()
+                + 0.5 * lambda * q * q
+                + state.relaxation_energy_j()
+                + heat[0]
+                + heat[1],
+            energy,
+            2e-10,
+            1e-18,
+        );
+        assert!(heat[0] > 0.0 && heat[1] > 0.0);
+    }
+    assert!(
+        errors[0] / errors[1] > 3.8 && errors[1] / errors[2] > 3.8,
+        "{errors:?}"
+    );
+    assert!(errors[2] < 3e-4, "{errors:?}");
+}
+
+#[test]
+fn g3_coupled_spatial_memory_retains_null_motion_and_transactional_histories() {
+    let original = EnrichedMitcShell::try_new(model(false, 1.0), || false).unwrap();
+    let shell = original
+        .with_viscosity(&[coupled_loss()], WORK, || false)
+        .unwrap()
+        .with_relaxation(
+            &[vec![
+                memory(coupled_loss(), 1e-4),
+                memory(proportional(0.3), 0.002),
+            ]],
+            memory_budget(2),
+            || false,
+        )
+        .unwrap();
+    let solver = shell.prepare_midpoint(1e-4, || false).unwrap();
+    let mut velocity = [0.0; 18];
+    velocity[6] = 0.4;
+    velocity[13] = -0.2;
+    let initial = shell
+        .state(
+            0.0,
+            &[0.0; 18],
+            &velocity,
+            &[[0.0; 2]],
+            &[[0.3, -0.2]],
+            || false,
+        )
+        .unwrap();
+    let mut history = [[0.0; 20]; 2];
+    history[0][6] = 0.005;
+    history[1][18] = 0.015;
+    history[1][19] = -0.02;
+    let initial = shell
+        .with_relaxation_history(&initial, &history, || false)
+        .unwrap();
+    let energy = initial.kinetic_energy_j() + initial.relaxation_energy_j();
+    let force = vec![0.0; shell.dimension()];
+    let mut polls = 0;
+    let next = solver
+        .advance(&initial, &force, &force, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    assert!(next.report.relaxation_dissipated_energy_j > 0.0);
+    assert!(next.report.viscous_dissipated_energy_j > 0.0);
+    near(next.report.energy_residual_j, 0.0, 0.0, 1e-9 * energy);
+    near(
+        next.facet_dissipated_energy_j[0],
+        next.facet_viscous_dissipated_energy_j[0] + next.facet_relaxation_dissipated_energy_j[0],
+        1e-14,
+        0.0,
+    );
+    let mut calls = 0;
+    assert!(matches!(
+        solver.advance(&initial, &force, &force, || {
+            calls += 1;
+            calls >= polls - 1
+        }),
+        Err(PlateError::Cancelled)
+    ));
+    assert_eq!(initial.relaxation_history().unwrap(), &history);
+    assert_eq!(initial.time_s(), 0.0);
+    let mut translation = [0.0; 18];
+    for node in 0..3 {
+        translation[6 * node] = 0.4;
+        translation[6 * node + 1] = -0.3;
+    }
+    let rigid = shell
+        .state(
+            0.0,
+            &[0.0; 18],
+            &translation,
+            &[[0.0; 2]],
+            &[[0.0; 2]],
+            || false,
+        )
+        .unwrap();
+    let rigid = shell
+        .with_relaxation_history(&rigid, &[[0.0; 20]; 2], || false)
+        .unwrap();
+    let moved = solver.advance(&rigid, &force, &force, || false).unwrap();
+    assert!(moved.report.dissipated_energy_j < 1e-25);
+    assert!(moved.state.relaxation_energy_j() < 1e-25);
+    for (&a, &b) in moved.state.nodal_velocity_6n().iter().zip(&translation) {
+        near(a, b, 1e-10, 1e-11);
+    }
+}
+
+#[test]
+fn g0_memory_initialization_bounds_and_material_refresh_are_explicit() {
+    let original = EnrichedMitcShell::try_new(model(true, 1.0), || false).unwrap();
+    let spectrum = [vec![memory(proportional(0.4), 0.01)]];
+    for budget in [
+        MitcRelaxationBudget {
+            max_element_branches: 0,
+            ..memory_budget(1)
+        },
+        MitcRelaxationBudget {
+            max_assembly_terms: WORK - 1,
+            ..memory_budget(1)
+        },
+        MitcRelaxationBudget {
+            max_payload_bytes: 0,
+            ..memory_budget(1)
+        },
+    ] {
+        assert!(
+            original
+                .with_relaxation(&spectrum, budget, || false)
+                .is_err()
+        );
+    }
+    let shell = original
+        .with_relaxation(&spectrum, memory_budget(1), || false)
+        .unwrap();
+    let initial = shell
+        .state(
+            0.0,
+            &[0.0; 18],
+            &[0.0; 18],
+            &[[0.01, -0.02]],
+            &[[0.1, 0.2]],
+            || false,
+        )
+        .unwrap();
+    let force = vec![0.0; shell.dimension()];
+    assert!(
+        shell
+            .prepare_midpoint(1e-4, || false)
+            .unwrap()
+            .advance(&initial, &force, &force, || false)
+            .is_err()
+    );
+    assert!(
+        shell
+            .with_relaxation_history(&initial, &[], || false)
+            .is_err()
+    );
+    let initial = shell
+        .with_relaxation_history(&initial, &[[0.0; 20]], || false)
+        .unwrap();
+    let refreshed = shell
+        .with_material_model(model(true, 1.3), || false)
+        .unwrap();
+    let solver = refreshed.prepare_midpoint(1e-4, || false).unwrap();
+    assert!(
+        solver
+            .advance_from(&original, &initial, &force, &force, || false)
+            .is_err()
+    );
+    let next = solver
+        .advance_from(&shell, &initial, &force, &force, || false)
+        .unwrap();
+    assert!(next.report.relaxation_dissipated_energy_j > 0.0);
+    assert!(next.report.energy_residual_j.abs() < 1e-10);
+    assert_eq!(initial.relaxation_history().unwrap(), &[[0.0; 20]]);
 }
 
 #[test]

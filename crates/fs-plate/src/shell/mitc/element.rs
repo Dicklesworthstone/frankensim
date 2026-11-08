@@ -299,6 +299,57 @@ impl PreparedStrainField {
         self.bubble_stiffness
     }
 
+    /// Original positive quadrature integrates Maxwell heat independently of
+    /// accepted storage changes and momentum work. Local histories retain all
+    /// eighteen global nodal coordinates and both residual director coordinates.
+    pub(super) fn relaxation_interval(
+        &self,
+        initial: &[f64; 20],
+        increment: &[f64; 20],
+        endpoint: &[f64; 20],
+        law: &super::viscosity::ShearDissipation,
+        ramp: &fs_material::visco::PronyRamp,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(f64, f64, f64), PlateError> {
+        let expand = |q: &[f64; 20]| {
+            let nodal = core::array::from_fn(|i| q[i]);
+            let mut expanded = self.expand(&nodal);
+            expanded[18] += q[18];
+            expanded[19] += q[19];
+            expanded
+        };
+        let change = core::array::from_fn(|i| endpoint[i] - initial[i]);
+        let (q, du, dq, next) = (
+            expand(initial),
+            expand(increment),
+            expand(&change),
+            expand(endpoint),
+        );
+        let (mut stored_change, mut stored, mut heat) = (0.0, 0.0, 0.0);
+        for (lambda, weight) in stiffness_rule() {
+            if cancelled() {
+                return Err(PlateError::Cancelled);
+            }
+            let channels = |values: &[f64; 20]| {
+                let (membrane, bending, shear) = self.eval(values, lambda[1], lambda[2]);
+                law.channels(membrane, bending, shear)
+            };
+            let (a, b, c, d) = (channels(&q), channels(&du), channels(&dq), channels(&next));
+            let volume = self.g.area_m2 * weight;
+            for i in 0..12 {
+                heat += volume * ramp.apply(a[i], b[i]).2;
+                stored_change += volume * c[i] * (a[i] + 0.5 * c[i]);
+                stored += 0.5 * volume * d[i] * d[i];
+            }
+        }
+        if !stored_change.is_finite() || !stored.is_finite() || !heat.is_finite() {
+            return Err(PlateError::BadSection {
+                what: "enriched shell relaxation energy is unrepresentable",
+            });
+        }
+        Ok((stored_change, stored, heat))
+    }
+
     /// Exactly the native condensed physical nodal stiffness arithmetic. This
     /// permits the retained owner to isolate its ORIGINAL numerical gauge once.
     pub(super) fn condensed_stiffness(
