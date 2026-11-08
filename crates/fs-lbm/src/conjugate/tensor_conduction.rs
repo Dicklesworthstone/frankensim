@@ -31,6 +31,12 @@ pub use nonlinear::{
     advance_nonlinear_tensor_conduction, advance_nonlinear_tensor_conduction_sdirk2,
     solve_nonlinear_tensor_conduction,
 };
+#[cfg(feature = "enthalpy-coupling")]
+pub use nonlinear::{
+    TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step, TensorCaloricStep,
+    TensorCaloricStorage, advance_caloric_tensor_conduction,
+    advance_caloric_tensor_conduction_sdirk2,
+};
 pub use sdirk::{
     TENSOR_SDIRK2_GAMMA, TensorConductionSdirk2Step, advance_tensor_conduction_sdirk2,
 };
@@ -170,11 +176,64 @@ fn operator(
         .ok_or_else(|| invalid("cell geometry or tensor half-cell coefficients are unrepresentable"))
 }
 
-#[allow(clippy::too_many_lines)]
+fn validate_sensible_storage(
+    domain: &VoxelDomain,
+    step: Option<&PseudoStep<'_>>,
+    gate: &CancelGate,
+) -> Result<(), ChtError> {
+    if let Some(step) = step {
+        let cells = domain.cell_count();
+        if step.coefficient_w_k.len() != cells
+            || step.previous.len() != cells
+            || !step.junction_coefficient_w_k.is_empty()
+        {
+            return Err(invalid(
+                "storage needs one original temperature/coefficient per cell and no junctions",
+            ));
+        }
+        for c in 0..cells {
+            if c.is_multiple_of(4096) {
+                poll(gate)?;
+            }
+            finite_positive("thermal.storage.coefficient_w_k", step.coefficient_w_k[c])?;
+        }
+    }
+    Ok(())
+}
+
 fn prepare(
-    domain: &VoxelDomain, solids: &[SolidMaterial], setup: &ThermalSetup,
-    tensors: &[ConductivityTensor], config: &EnergyConfig,
-    step: Option<&PseudoStep<'_>>, gate: &CancelGate,
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    tensors: &[ConductivityTensor],
+    config: &EnergyConfig,
+    step: Option<&PseudoStep<'_>>,
+    gate: &CancelGate,
+) -> Result<Prepared, ChtError> {
+    validate_sensible_storage(domain, step, gate)?;
+    prepare_geometry(
+        domain,
+        solids,
+        setup,
+        tensors,
+        config,
+        step.map(|s| s.previous),
+        gate,
+    )
+}
+
+/// Geometry admission only needs the original positive temperature reference
+/// and knowledge that physical storage anchors every cell. Its energy
+/// coordinate and storage tangent stay with the selected transient owner.
+#[allow(clippy::too_many_lines)]
+fn prepare_geometry(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    tensors: &[ConductivityTensor],
+    config: &EnergyConfig,
+    storage_reference_k: Option<&[f64]>,
+    gate: &CancelGate,
 ) -> Result<Prepared, ChtError> {
     poll(gate)?;
     let cells = domain.cell_count();
@@ -225,16 +284,17 @@ fn prepare(
                 return Err(invalid("open-flow boundaries require the advective energy owner")),
         }
     }
-    if let Some(step) = step {
-        if step.coefficient_w_k.len() != cells || step.previous.len() != cells
-            || !step.junction_coefficient_w_k.is_empty()
-        {
-            return Err(invalid("storage needs one original temperature/coefficient per cell and no junctions"));
+    if let Some(previous) = storage_reference_k {
+        if previous.len() != cells {
+            return Err(invalid(
+                "storage needs one original temperature reference per cell",
+            ));
         }
-        for c in 0..cells {
-            if c.is_multiple_of(4096) { poll(gate)?; }
-            finite_positive("thermal.storage.coefficient_w_k", step.coefficient_w_k[c])?;
-            finite_positive("thermal.storage.previous_k", step.previous[c])?;
+        for (c, &temperature) in previous.iter().enumerate() {
+            if c.is_multiple_of(4096) {
+                poll(gate)?;
+            }
+            finite_positive("thermal.storage.previous_k", temperature)?;
         }
         anchored = true;
     }
@@ -245,7 +305,7 @@ fn prepare(
             _ => None,
         }))
         .or_else(|| setup.cell_sinks.first().map(|s| s.temperature_k))
-        .or_else(|| step.and_then(|s| s.previous.first().copied()))
+        .or_else(|| storage_reference_k.and_then(|s| s.first().copied()))
         .unwrap_or(0.0);
     let mut sinks = vec![Sink::default(); cells];
     for (index, sink) in setup.cell_sinks.iter().enumerate() {
@@ -509,10 +569,58 @@ fn recover(
 /// a different temperature from a frozen surrogate.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn audit_endpoint(
-    domain: &VoxelDomain, setup: &ThermalSetup, data: &Prepared,
-    step: Option<&PseudoStep<'_>>, carried_power_w: Option<&[f64]>,
-    temperature: Vec<f64>, face_temperature_k: Vec<[f64; 6]>,
-    outward_heat_w: Vec<[f64; 6]>, arithmetic: Vec<[f64; 6]>, gate: &CancelGate,
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    data: &Prepared,
+    step: Option<&PseudoStep<'_>>,
+    carried_power_w: Option<&[f64]>,
+    temperature: Vec<f64>,
+    face_temperature_k: Vec<[f64; 6]>,
+    outward_heat_w: Vec<[f64; 6]>,
+    arithmetic: Vec<[f64; 6]>,
+    gate: &CancelGate,
+) -> Result<TensorConductionSolution, ChtError> {
+    audit_endpoint_with_storage(
+        domain,
+        setup,
+        data,
+        |cell, temperature| {
+            Ok(step.map_or(StorageRate::default(), |step| StorageRate {
+                power_w: step.coefficient_w_k[cell] * (temperature - step.previous[cell]),
+                arithmetic_w: step.coefficient_w_k[cell]
+                    * (temperature.abs() + step.previous[cell].abs()),
+            }))
+        },
+        carried_power_w,
+        temperature,
+        face_temperature_k,
+        outward_heat_w,
+        arithmetic,
+        gate,
+    )
+}
+
+/// Actual physical storage rate and its arithmetic scale, independent of the
+/// coordinate used by the nonlinear solve. Enthalpy supplies centered energy
+/// change here, never an apparent heat capacity or a datum-sized allowance.
+#[derive(Clone, Copy, Default)]
+struct StorageRate {
+    power_w: f64,
+    arithmetic_w: f64,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn audit_endpoint_with_storage(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    data: &Prepared,
+    storage: impl Fn(usize, f64) -> Result<StorageRate, ChtError>,
+    carried_power_w: Option<&[f64]>,
+    temperature: Vec<f64>,
+    face_temperature_k: Vec<[f64; 6]>,
+    outward_heat_w: Vec<[f64; 6]>,
+    arithmetic: Vec<[f64; 6]>,
+    gate: &CancelGate,
 ) -> Result<TensorConductionSolution, ChtError> {
     let cells = domain.cell_count();
     let mut maximum = 0.0_f64;
@@ -537,13 +645,15 @@ fn audit_endpoint(
         } else {
             source += power;
             scale += power.abs();
-            if let Some(step) = step {
-                let g = step.coefficient_w_k[c];
-                let storage = g * (t - step.previous[c]);
-                residual += storage;
-                throughput += storage.abs();
-                rounding += g * (t.abs() + step.previous[c].abs());
+            let stored = storage(c, t)?;
+            finite("thermal.tensor_conduction.storage_power_w", stored.power_w)?;
+            finite("thermal.tensor_conduction.storage_arithmetic_w", stored.arithmetic_w)?;
+            if stored.arithmetic_w < 0.0 {
+                return Err(invalid("physical storage arithmetic scale must be nonnegative"));
             }
+            residual += stored.power_w;
+            throughput += stored.power_w.abs();
+            rounding += stored.arithmetic_w;
             if let Some(carry) = carried_power_w {
                 residual -= carry[c];
                 throughput += carry[c].abs();

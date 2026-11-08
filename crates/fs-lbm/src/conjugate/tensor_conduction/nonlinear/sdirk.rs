@@ -100,25 +100,7 @@ pub fn advance_nonlinear_tensor_conduction_sdirk2(
         stage_interval_s,
         gate,
     )?;
-    let remaining = |limit: usize, used: usize| {
-        limit
-            .checked_sub(used)
-            .ok_or_else(|| invalid("first nonlinear SDIRK2 stage exceeded its shared work budget"))
-    };
-    let second_config = TensorNonlinearConfig {
-        linear: EnergyConfig {
-            max_iterations: remaining(
-                config.linear.max_iterations,
-                first.solution.solution.report.iterations,
-            )?,
-            ..config.linear
-        },
-        max_newton_iterations: remaining(
-            config.max_newton_iterations,
-            first.solution.newton_iterations,
-        )?,
-        max_backtracks: remaining(config.max_backtracks, first.solution.backtracks)?,
-    };
+    let second_config = remaining_controls(config, &first.solution)?;
     let storage_step = PseudoStep {
         coefficient_w_k: &coefficient_w_k,
         previous: previous_temperature_k,
@@ -162,5 +144,28 @@ pub fn advance_nonlinear_tensor_conduction_sdirk2(
         stage_time_s,
         stages: [first.solution, second],
         record,
+    })
+}
+
+/// All nonlinear work budgets belong to the whole physical interval.
+pub(super) fn remaining_controls(
+    config: &TensorNonlinearConfig,
+    first: &TensorNonlinearSolution,
+) -> Result<TensorNonlinearConfig, ChtError> {
+    let remaining = |limit: usize, used: usize| {
+        limit
+            .checked_sub(used)
+            .ok_or_else(|| invalid("first nonlinear SDIRK2 stage exceeded its shared work budget"))
+    };
+    Ok(TensorNonlinearConfig {
+        linear: EnergyConfig {
+            max_iterations: remaining(
+                config.linear.max_iterations,
+                first.solution.report.iterations,
+            )?,
+            ..config.linear
+        },
+        max_newton_iterations: remaining(config.max_newton_iterations, first.newton_iterations)?,
+        max_backtracks: remaining(config.max_backtracks, first.backtracks)?,
     })
 }

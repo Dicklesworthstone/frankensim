@@ -169,17 +169,40 @@ pub(super) fn stage_carry(
     gate: &CancelGate,
 ) -> Result<(Vec<f64>, Vec<f64>), ChtError> {
     let cells = domain.cell_count();
-    // The first stage has admitted all field sizes, capacities and old
-    // temperatures. Retain just two additional cell fields for stage 2.
     let mut coefficient_w_k = storage(cells)?;
+    for (cell, &capacity) in heat_capacity_j_k.iter().enumerate() {
+        if cell.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        let coefficient = capacity / stage_interval_s;
+        finite_positive("tensor.sdirk2.storage_w_k", coefficient)?;
+        coefficient_w_k.push(coefficient);
+    }
+    let carried_power_w = stage_carry_with_storage(
+        domain,
+        setup,
+        first,
+        |cell| coefficient_w_k[cell] * (first.temperature[cell] - previous_temperature_k[cell]),
+        gate,
+    )?;
+    Ok((coefficient_w_k, carried_power_w))
+}
+
+/// Carry actual first-stage heat. A prescribed cell's total rate comes from
+/// its original storage coordinate, including latent energy at constant T.
+pub(super) fn stage_carry_with_storage(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    first: &TensorConductionSolution,
+    prescribed_storage_rate_w: impl Fn(usize) -> f64,
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ChtError> {
+    let cells = domain.cell_count();
     let mut carried_power_w = storage(cells)?;
     for cell in 0..cells {
         if cell.is_multiple_of(4096) {
             poll(gate)?;
         }
-        let coefficient = heat_capacity_j_k[cell] / stage_interval_s;
-        finite_positive("tensor.sdirk2.storage_w_k", coefficient)?;
-        coefficient_w_k.push(coefficient);
         let power = setup.power_w.get(cell).copied().unwrap_or(0.0);
         let rate = first.outward_heat_w[cell]
             .iter()
@@ -200,8 +223,7 @@ pub(super) fn stage_carry(
         if index.is_multiple_of(4096) {
             poll(gate)?;
         }
-        carried_power_w[cell] =
-            coefficient_w_k[cell] * (first.temperature[cell] - previous_temperature_k[cell]);
+        carried_power_w[cell] = prescribed_storage_rate_w(cell);
     }
     let carry_weight = (1.0 - TENSOR_SDIRK2_GAMMA) / TENSOR_SDIRK2_GAMMA;
     for (cell, carried) in carried_power_w.iter_mut().enumerate() {
@@ -211,7 +233,7 @@ pub(super) fn stage_carry(
         *carried *= carry_weight;
         finite("tensor.sdirk2.carried_power_w", *carried)?;
     }
-    Ok((coefficient_w_k, carried_power_w))
+    Ok(carried_power_w)
 }
 
 /// Integrate physical heat from both accepted stages without counting carried
@@ -230,6 +252,34 @@ pub(super) fn interval_record(
     iterations: usize,
     gate: &CancelGate,
 ) -> Result<TransientRecord, ChtError> {
+    interval_record_with_storage(
+        domain,
+        second_setup,
+        first_record,
+        second,
+        |cell| heat_capacity_j_k[cell] * (second.temperature[cell] - previous_temperature_k[cell]),
+        carried_power_w,
+        end_time_s,
+        stage_interval_s,
+        iterations,
+        gate,
+    )
+}
+
+/// Same interval ledger for sensible or original caloric storage.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn interval_record_with_storage(
+    domain: &VoxelDomain,
+    second_setup: &ThermalSetup,
+    first_record: &TransientRecord,
+    second: &TensorConductionSolution,
+    stored_by_cell_j: impl Fn(usize) -> f64,
+    carried_power_w: &[f64],
+    end_time_s: f64,
+    stage_interval_s: f64,
+    iterations: usize,
+    gate: &CancelGate,
+) -> Result<TransientRecord, ChtError> {
     let solids_present = (0..domain.cell_count()).any(|cell| !domain.is_fluid(cell));
     // Reuse the physical ledger owner to account for actual stage-2 face
     // heat, sinks and constrained storage. This is an internal accounting
@@ -240,7 +290,7 @@ pub(super) fn interval_record(
         &second.temperature,
         second.report.balance,
         iterations,
-        |cell| heat_capacity_j_k[cell] * (second.temperature[cell] - previous_temperature_k[cell]),
+        stored_by_cell_j,
         (end_time_s, stage_interval_s, solids_present),
         0.0,
         0.0,

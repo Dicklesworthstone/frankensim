@@ -207,6 +207,12 @@ pub use tensor_conduction::{
     advance_nonlinear_tensor_conduction_sdirk2, advance_tensor_conduction,
     advance_tensor_conduction_sdirk2, solve_nonlinear_tensor_conduction, solve_tensor_conduction,
 };
+#[cfg(feature = "enthalpy-coupling")]
+pub use tensor_conduction::{
+    TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step, TensorCaloricStep,
+    TensorCaloricStorage, advance_caloric_tensor_conduction,
+    advance_caloric_tensor_conduction_sdirk2,
+};
 pub use transient::{TransientConfig, TransientRecord, TransientSolution, march_energy};
 pub use unsteady::{
     Boussinesq, ConjugateMarch, FlowStepRecord, MaterialEndpointConfig, MaterialEndpointMarch,

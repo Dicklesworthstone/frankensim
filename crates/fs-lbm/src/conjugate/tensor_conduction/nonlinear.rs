@@ -1,23 +1,35 @@
 //! Original-law nonlinear conduction on the native full-tensor face topology.
 //!
-//! Cells and traces remain physical Kelvin temperatures. Exact conductivity
-//! interval averages drive the physical heat, while original endpoint tensors
-//! give the Newton derivative. Cell increments are statically condensed;
-//! only face increments enter the native sparse solve.
+//! Traces remain physical Kelvin temperatures. Cell unknowns are temperature
+//! or the original caloric energy coordinate. Exact conductivity interval
+//! averages drive physical heat; endpoint tensors and the original dT/de
+//! give the Newton derivative. Cells are statically condensed, leaving only
+//! face increments in the native sparse solve.
 
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
 
 use super::{
     ChtError, ConductivityTensor, EnergyConfig, Prepared, PseudoStep, SolidMaterial,
-    TensorConductionSolution, ThermalFace, ThermalSetup, VoxelDomain, audit_endpoint,
-    bicgstab_ilu0, finite, finite_positive, invalid, poll, prepare, residual_norms, scale_rows,
+    TensorConductionSolution, ThermalFace, ThermalSetup, VoxelDomain, audit_endpoint_with_storage,
+    bicgstab_ilu0, finite, finite_positive, invalid, poll, prepare_geometry, residual_norms,
+    scale_rows, validate_sensible_storage,
 };
 
+#[cfg(feature = "enthalpy-coupling")]
+mod caloric;
+mod coordinate;
 mod local;
 mod material;
 mod sdirk;
 mod transient;
+#[cfg(feature = "enthalpy-coupling")]
+pub use caloric::{
+    TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step, TensorCaloricStep,
+    TensorCaloricStorage, advance_caloric_tensor_conduction,
+    advance_caloric_tensor_conduction_sdirk2,
+};
+use coordinate::{CellCoordinate, KelvinCoordinate};
 use local::{KirchhoffCell, KirchhoffRecovery};
 pub use material::{RotatedSolidConductivity, TensorConductivityLaw};
 pub use sdirk::{TensorNonlinearSdirk2Step, advance_nonlinear_tensor_conduction_sdirk2};
@@ -126,12 +138,34 @@ pub fn solve_nonlinear_tensor_conduction(
     )
 }
 
+#[derive(Clone, Copy)]
+struct CoordinateValue {
+    value: f64,
+    temperature_slope: f64,
+}
+
 struct Endpoint {
     solution: TensorConductionSolution,
+    // None for Kelvin, avoiding duplicate cell storage in all existing paths.
+    coordinates: Option<Vec<CoordinateValue>>,
     trace: Vec<f64>,
     cell_residual: Vec<f64>,
     trace_residual: Vec<f64>,
     merit: f64,
+}
+
+impl Endpoint {
+    fn value(&self, cell: usize) -> f64 {
+        self.coordinates
+            .as_ref()
+            .map_or(self.solution.temperature[cell], |values| values[cell].value)
+    }
+
+    fn temperature_slope(&self, cell: usize) -> f64 {
+        self.coordinates
+            .as_ref()
+            .map_or(1.0, |values| values[cell].temperature_slope)
+    }
 }
 
 struct Direction {
@@ -155,14 +189,44 @@ fn solve_inner(
     gate: &CancelGate,
 ) -> Result<TensorNonlinearSolution, ChtError> {
     poll(gate)?;
+    validate_sensible_storage(domain, step, gate)?;
+    solve_coordinate(
+        domain,
+        solids,
+        setup,
+        laws,
+        initial_temperature_k,
+        config,
+        &KelvinCoordinate { step },
+        carried_power_w,
+        gate,
+    )
+    .map(|(solution, _)| solution)
+}
+
+/// Shared original-law solve: Kelvin and caloric coordinates use exactly the
+/// same face topology, heat residuals, sparse solve and work budgets.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn solve_coordinate<C: CellCoordinate>(
+    domain: &VoxelDomain,
+    solids: &[SolidMaterial],
+    setup: &ThermalSetup,
+    laws: &[&dyn TensorConductivityLaw],
+    initial_values: &[f64],
+    config: &TensorNonlinearConfig,
+    coordinate: &C,
+    carried_power_w: Option<&[f64]>,
+    gate: &CancelGate,
+) -> Result<(TensorNonlinearSolution, Option<Vec<CoordinateValue>>), ChtError> {
+    poll(gate)?;
     let cells = domain.cell_count();
-    if laws.len() != cells || initial_temperature_k.len() != cells {
+    if laws.len() != cells || initial_values.len() != cells {
         return Err(invalid(
             "nonlinear tensor conduction needs one original law and seed per cell",
         ));
     }
     if let Some(carry) = carried_power_w {
-        if step.is_none() || carry.len() != cells {
+        if coordinate.reference_temperatures().is_none() || carry.len() != cells {
             return Err(invalid(
                 "stage heat carry needs original storage and one value per cell",
             ));
@@ -174,12 +238,12 @@ fn solve_inner(
             finite("thermal.tensor_conduction.carried_power_w", value)?;
         }
     }
-    let mut temperature = initial_temperature_k.to_vec();
-    for (cell, &t) in temperature.iter().enumerate() {
+    let mut values = initial_values.to_vec();
+    for (cell, value) in values.iter_mut().enumerate() {
         if cell.is_multiple_of(4096) {
             poll(gate)?;
         }
-        finite_positive("thermal.tensor_conduction.initial_temperature_k", t)?;
+        *value = coordinate.normalize(cell, *value)?;
     }
     // Bounds/duplicates are still admitted by the shared geometry owner.
     // This pre-assignment merely selects the correct original-law query.
@@ -188,32 +252,60 @@ fn solve_inner(
             return Err(invalid("fixed-temperature cell is outside the domain"));
         }
         finite_positive("thermal.fixed_temperature", t)?;
-        temperature[cell] = t;
+        values[cell] = coordinate.prescribed_value(cell, t)?;
     }
+    let temperature: std::borrow::Cow<'_, [f64]> = if C::IS_TEMPERATURE {
+        std::borrow::Cow::Borrowed(&values)
+    } else {
+        std::borrow::Cow::Owned(
+            values
+                .iter()
+                .enumerate()
+                .map(|(cell, &value)| {
+                    if cell.is_multiple_of(256) {
+                        poll(gate)?;
+                    }
+                    coordinate
+                        .temperature_and_slope(cell, value)
+                        .map(|state| state[0])
+                })
+                .collect::<Result<Vec<_>, ChtError>>()?,
+        )
+    };
     let mut point = Vec::<ConductivityTensor>::with_capacity(cells);
     let mut geometry = Vec::with_capacity(cells);
     for cell in 0..cells {
         if cell.is_multiple_of(512) {
             poll(gate)?;
         }
+        finite_positive("thermal.tensor_conduction.initial_temperature_k", temperature[cell])?;
         point.push(laws[cell].conductivity_at_temperature(temperature[cell])?);
         geometry.push(
             KirchhoffCell::new(domain.widths(cell))
                 .ok_or_else(|| invalid("nonlinear tensor cell geometry is unrepresentable"))?,
         );
     }
-    let data = prepare(domain, solids, setup, &point, &config.linear, step, gate)?;
+    let data = prepare_geometry(
+        domain,
+        solids,
+        setup,
+        &point,
+        &config.linear,
+        coordinate.reference_temperatures(),
+        gate,
+    )?;
     drop(point);
     let trace = initial_trace(domain, &data, &temperature, gate)?;
+    drop(temperature);
     let mut endpoint = evaluate(
         domain,
         setup,
         laws,
         &geometry,
         &data,
-        step,
+        coordinate,
         carried_power_w,
-        temperature,
+        values,
         trace,
         gate,
     )?;
@@ -226,12 +318,12 @@ fn solve_inner(
             endpoint.solution.report.nonzeros = nonzeros;
             endpoint.solution.report.iterations = iterations;
             endpoint.solution.report.relative_residual = last_linear_residual;
-            return Ok(TensorNonlinearSolution {
+            return Ok((TensorNonlinearSolution {
                 solution: endpoint.solution,
                 newton_iterations: corrections,
                 backtracks,
                 max_equation_defect_w: endpoint.merit,
-            });
+            }, endpoint.coordinates));
         }
         if corrections == config.max_newton_iterations {
             return Err(not_converged(
@@ -252,7 +344,7 @@ fn solve_inner(
             laws,
             &geometry,
             &data,
-            step,
+            coordinate,
             &endpoint,
             &config.linear,
             remaining,
@@ -265,13 +357,13 @@ fn solve_inner(
         let mut fraction = 1.0_f64;
         loop {
             poll(gate)?;
-            let temperature = endpoint
-                .solution
-                .temperature
-                .iter()
-                .enumerate()
-                .map(|(c, &t)| {
-                    data.fixed[c].unwrap_or_else(|| fraction.mul_add(direction.cell[c], t))
+            let values = (0..cells)
+                .map(|cell| {
+                    if data.fixed[cell].is_some() {
+                        endpoint.value(cell)
+                    } else {
+                        fraction.mul_add(direction.cell[cell], endpoint.value(cell))
+                    }
                 })
                 .collect();
             let trace = endpoint
@@ -288,9 +380,9 @@ fn solve_inner(
                 laws,
                 &geometry,
                 &data,
-                step,
+                coordinate,
                 carried_power_w,
-                temperature,
+                values,
                 trace,
                 gate,
             ) {
@@ -377,19 +469,45 @@ fn initial_trace(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn evaluate(
+fn evaluate<C: CellCoordinate>(
     domain: &VoxelDomain,
     setup: &ThermalSetup,
     laws: &[&dyn TensorConductivityLaw],
     geometry: &[KirchhoffCell],
     data: &Prepared,
-    step: Option<&PseudoStep<'_>>,
+    coordinate: &C,
     carried_power_w: Option<&[f64]>,
-    temperature: Vec<f64>,
+    values: Vec<f64>,
     trace: Vec<f64>,
     gate: &CancelGate,
 ) -> Result<Endpoint, ChtError> {
     let cells = domain.cell_count();
+    let (temperature, coordinates) = if C::IS_TEMPERATURE {
+        (values, None)
+    } else {
+        let mut temperature = Vec::with_capacity(cells);
+        let mut coordinates = Vec::with_capacity(cells);
+        for (cell, value) in values.into_iter().enumerate() {
+            if cell.is_multiple_of(512) {
+                poll(gate)?;
+            }
+            let value = coordinate.normalize(cell, value)?;
+            let [t, slope] = coordinate.temperature_and_slope(cell, value)?;
+            finite_positive("thermal.tensor_conduction.temperature_k", t)?;
+            finite("thermal.tensor_conduction.temperature_slope", slope)?;
+            if slope < 0.0 {
+                return Err(invalid(
+                    "the original caloric temperature slope must be nonnegative",
+                ));
+            }
+            temperature.push(t);
+            coordinates.push(CoordinateValue {
+                value,
+                temperature_slope: slope,
+            });
+        }
+        (temperature, Some(coordinates))
+    };
     for (id, &t) in trace.iter().enumerate() {
         if id.is_multiple_of(4096) {
             poll(gate)?;
@@ -422,9 +540,8 @@ fn evaluate(
                 - sink.relative_load
                 - setup.power_w.get(c).copied().unwrap_or(0.0)
                 - carried_power_w.map_or(0.0, |carry| carry[c]);
-            if let Some(step) = step {
-                cell_residual[c] += step.coefficient_w_k[c] * (t - step.previous[c]);
-            }
+            let value = coordinates.as_ref().map_or(t, |values| values[c].value);
+            cell_residual[c] += coordinate.storage_rate(c, value)?.power_w;
         }
         for (f, &q) in actual.outward_w.iter().enumerate() {
             let id = data.face_ids[c][f];
@@ -466,11 +583,12 @@ fn evaluate(
         }
         merit = merit.max(value.abs());
     }
-    let solution = audit_endpoint(
+    let solution = audit_endpoint_with_storage(
         domain,
         setup,
         data,
-        step,
+        |cell, temperature| coordinate.storage_rate(cell,
+            coordinates.as_ref().map_or(temperature, |values| values[cell].value)),
         carried_power_w,
         temperature,
         faces,
@@ -480,6 +598,7 @@ fn evaluate(
     )?;
     Ok(Endpoint {
         solution,
+        coordinates,
         trace,
         cell_residual,
         trace_residual,
@@ -488,13 +607,13 @@ fn evaluate(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn linearize(
+fn linearize<C: CellCoordinate>(
     domain: &VoxelDomain,
     setup: &ThermalSetup,
     laws: &[&dyn TensorConductivityLaw],
     geometry: &[KirchhoffCell],
     data: &Prepared,
-    step: Option<&PseudoStep<'_>>,
+    coordinate: &C,
     endpoint: &Endpoint,
     config: &EnergyConfig,
     remaining_iterations: usize,
@@ -524,8 +643,14 @@ fn linearize(
             recovery.push(None);
             (tangent.face.map(|row| row.map(|value| -value)), [0.0; 6])
         } else {
-            let added =
-                data.sinks[c].conductance + step.map_or(0.0, |storage| storage.coefficient_w_k[c]);
+            let slope = endpoint.temperature_slope(c);
+            let added = data.sinks[c].conductance * slope + coordinate.storage_tangent(c);
+            let tangent = if C::IS_TEMPERATURE {
+                tangent
+            } else {
+                tangent.with_cell_temperature_slope(slope)
+                    .ok_or_else(|| invalid("original caloric tensor tangent is unrepresentable"))?
+            };
             let condensed = tangent
                 .condense(added, endpoint.cell_residual[c])
                 .ok_or_else(|| invalid("nonlinear cell condensation is unrepresentable"))?;
