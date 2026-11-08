@@ -3,11 +3,14 @@
   B  gen_violin_shell_assembly.py instrument=cello on that specimen gives shell-assembly-h12.5.tsv;
   B24 the same three scripts with bar_slide_mm=12.27 and rib_layers=24 give shell-assembly-h12.5-bar-r24.tsv, the table of
      the live cello pages;
+  N24 the measured-outline body: cello_specimen.py with outline=, fholes= and fhstop=photo, then cello_bridge_19g.py, give the specimen's
+     PROVENANCE.tsv (kept as PROVENANCE-outline-r24.tsv; any architecture), and gen_violin_shell_assembly.py with rib_layers=24 gives
+     shell-assembly-h12.5-outline-r24.tsv (x86-64 Linux);
   E  cello_shell_card.py with the directory's assemble-shell output leaves cello-shell-D3.material-strings unchanged
      (its body and cavity records are the table's);
   A  gen_violin_shell_assembly.py with no cello option still gives il Cannone's shell-assembly-h6.tsv.
 The two tables reproduce only on the architecture that made them: with the same numpy 2.5.4 and triangle 20250106 the
-triangulation differs between x86-64 Linux and arm64 macOS. The cello tables were made on x86-64 Linux, so B and B24 run there;
+triangulation differs between x86-64 Linux and arm64 macOS. The cello tables were made on x86-64 Linux, so B, B24 and N24's table run there;
 il Cannone's h6 table was made on arm64 macOS, so A runs there; elsewhere each is reported as skipped. C and E run anywhere.
 assemble-shell needs the material_strings binary; its output for the D assembly is kept as assemble-shell-D.txt and is
 used here only as E's input.
@@ -65,6 +68,15 @@ if LINUX_X86:
     same("B24 table", WORK / "shell-assembly-h12.5-bar-r24.tsv", DATA / "shell-assembly-h12.5-bar-r24.tsv")
 else:
     print("SKIP B24 table: made on x86-64 Linux, this is %s %s" % MACHINE)
+# N24: the measured-outline body (the outline of the LOC photographs, the f-hole trace placed at the photographs' notch height, bar slid to equidistant ends, 24 rib layers)
+run(HERE / "cello_specimen.py", CANNONE, WORK / "outline-specimen-raw", "fholes=" + str(DATA / "fholes-trace-image0021.tsv"), "outline=" + str(DATA / "outline-measured-loc-photographs.tsv"), "fhstop=photo")
+run(HERE / "cello_bridge_19g.py", WORK / "outline-specimen-raw", WORK / "outline-specimen")
+same("N24 provenance", WORK / "outline-specimen" / "PROVENANCE.tsv", DATA / "PROVENANCE-outline-r24.tsv")
+if LINUX_X86:
+    run(HERE / "gen_violin_shell_assembly.py", WORK / "outline-specimen", WORK / "shell-assembly-h12.5-outline-r24.tsv", *LIVE_FLAGS)
+    same("N24 table", WORK / "shell-assembly-h12.5-outline-r24.tsv", DATA / "shell-assembly-h12.5-outline-r24.tsv")
+else:
+    print("SKIP N24 table: made on x86-64 Linux, this is %s %s" % MACHINE)
 # E: the D3 card's table-derived records
 run(HERE / "cello_shell_card.py", DATA / "cello-shell-D3.material-strings", DATA / "assemble-shell-D.txt", WORK / "cello-shell-D3.material-strings")
 same("E card", WORK / "cello-shell-D3.material-strings", DATA / "cello-shell-D3.material-strings")

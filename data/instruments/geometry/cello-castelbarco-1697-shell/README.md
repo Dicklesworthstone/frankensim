@@ -16,6 +16,12 @@ scan. The il Cannone violin specimen tables
   are the 4/4 column of Hans Johannsson's cello table.
 - The bridge has the typical cello bridge mass of 19 g (Zhang, Woodhouse and
   Stoppani 2016).
+- The measured-outline body below takes the plan outlines of the back and of
+  the top from the same record's photographs (back, front and strung front, images
+  0001, 0002 and 0019 of resource music.musihas-200154818), scaled by the printed
+  bouts, and places the f-holes by their traced shape (image 0021) at the notch
+  height the photographs show. The default body keeps the stretched il Cannone
+  outline.
 
 `PROVENANCE.tsv` gives the source of every mapped value and names each
 ASSUMPTION. `specimen.tsv` gives the identity and the source ids of
@@ -38,6 +44,21 @@ ASSUMPTION. `specimen.tsv` gives the identity and the source ids of
   instead of the mapping's 71.2 and 95.7. Alan Goldblatt's cello specification
   sheet prints 80 to 85 mm, and a maker's forum post (Cliff Green) gives 80.
   Both are makers' figures, not measurements of this cello.
+- **`outline-measured-loc-photographs.tsv`**: the plan outlines of the back and of the top measured on the
+  photographs (z above the bottom of the back, left and right x at 1 mm rows; the front to z 730 where the
+  fingerboard hides the plate edge, the back to z 748 where the neck heel hides it). Derived numbers only; no
+  image is kept. Scale: the mean of the three printed bouts (346 / 234 / 440 mm), to which the measured widths agree within 0.2 percent on the back photograph and 0.9 percent on the front.
+- **`shell-assembly-h12.5-outline-r24.tsv`**: the table of the measured-outline body, from the same scripts with
+  `outline=outline-measured-loc-photographs.tsv fholes=fholes-trace-image0021.tsv fhstop=photo` and
+  `rib_layers=24` (38 components, 17733 nodes, 30711 triangles, 87 ties). The outline, the ring, the arching, the
+  thickness zones, the bar, the post and the bridge all go through one map of five landmarks (bottom edge, lower
+  ledge, waist, upper ledge, top edge) between the il Cannone back and the measured back. What a printed or
+  photographed distance fixes is placed, not mapped: the traced f-holes (the notch line 19.0 mm above the front's
+  lower ledge, which is 405.0 mm below the top edge: the printed stop of 419 / 420 mm disagrees with the
+  photographs by about 14 mm and is not used), the bridge plane on the notch line, and the bass bar, slid until its
+  ends are equidistant from the top plate's ends (83.4 mm, inside Goldblatt's 80 to 85 mm).
+- **`PROVENANCE-outline-r24.tsv`**: the provenance of that body's specimen, with the landmark map and its check
+  rows. The specimen tables themselves are not kept: check N24 makes them again.
 - **`cello-{C,G,D,A}.assembly`**: the `assemble-shell` options, one bridge per
   string. Their comments name the table by its earlier file name,
   `cello-h12.5-s8-v5.tsv`.
@@ -76,6 +97,13 @@ $py $s/cello_bridge_19g.py "$w/raw" "$w/specimen"
 $py $s/gen_violin_shell_assembly.py "$w/specimen" "$w/table.tsv" 12.5 neck=ellipse foot_band_mm=8 \
   fanfix=move crossing_snap_mm=2.5 bridge_dp_mm=0.5 rib_layers=24 instrument=cello
 ```
+
+Check N24 reproduces `PROVENANCE-outline-r24.tsv` on any architecture and the table
+`shell-assembly-h12.5-outline-r24.tsv` on Linux x86-64 (md5 acec5e667a6035f18b6f3f544bd662b5). On the body alone
+(`shell_body_modes`, 256 modes, 15 to 5000 Hz, the registered spruce and maple packs) this body's lowest
+open-sound-hole mode is at 82.87 Hz where the live pages' body has 82.12 Hz, its in-vacuo modes 1 to 100 lie
+1.3 percent lower (median), and its highest purely bridge mode below 1 kHz is at 785 Hz (779 Hz): a body with
+no strings, so these are checks against measured cellos, not matches.
 
 ## Render the D3
 

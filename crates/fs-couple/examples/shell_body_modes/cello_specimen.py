@@ -5,6 +5,17 @@ recording or mode frequency. cello_bridge_19g.py then sets the bridge to its pub
 data/instruments/geometry/cello-castelbarco-1697-shell (check_cello_shell.py reproduces it byte for byte).
 
 usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [instrument=viola] [fholes=RASTER_RUNS.tsv] [bar_slide_mm=MM]   (OUT_DIR must not exist)
+       python3 -I cello_specimen.py CANNONE_DIR OUT_DIR fholes=RASTER_RUNS.tsv outline=MEASURED_OUTLINE.tsv fhstop=print|photo
+
+outline=MEASURED_OUTLINE.tsv (optional, needs fholes= and fhstop=, refuses bar_slide_mm=; without it every output byte is as before): the plan outlines are the
+Castelbarco's own, measured on the LOC photographs (outline-measured-loc-photographs.tsv: z above the bottom of the back, left / right x of the back and of the
+top, derived numbers only). Every borrowed il Cannone field (rib ring, arching, thickness zones, bar, post, bridge) goes through ONE plan map instead of the
+uniform stretch: a piecewise-linear z map through five landmarks (bottom edge, lower ledge, waist, upper ledge, top edge = the printed back length) found by one
+rule on the Cannone back and on the measured back, and an x map by the per-row ratio of the measured to the Cannone half-width about least-squares centre lines.
+What a printed or photographed distance fixes is placed, not warped: the f-hole trace (rigid, moved in z only by fhstop=), the bridge plane (the notch line),
+the bar (its length 580, and its slide: rigid in z until its ends sit equidistant from the top plate's own ends, the rule of the posted pages' bar_slide_mm=12.27,
+so bar_slide_mm= is refused with outline=). fhstop=print places the trace as stamped (bass notch 419 mm below the top edge); fhstop=photo places the notch line
+at the height above the front's measured lower ledge that LOC photograph 0002 shows (the printed stop and the photographs differ by about 14 mm; the rows state both).
 
 bar_slide_mm=MM (optional, cello only; without it every output byte is as before): after the bar is placed, slide it MM mm toward the neck
 along z as one piece (length, height profile, width and tilt kept), then re-set its x so that its x at the bridge plane is unchanged, and
@@ -67,11 +78,15 @@ import numpy as np
 
 SRC = sys.argv[1].rstrip("/") + "/"
 OUT = sys.argv[2].rstrip("/") + "/"
-TRACE, VIOLA, BAR_SLIDE = None, False, None
+TRACE, VIOLA, BAR_SLIDE, OUTLINE, FHSTOP = None, False, None, None, None
 for arg in sys.argv[3:]:
     key, eq, value = arg.partition("=")
     if key == "fholes" and eq and value and TRACE is None:
         TRACE = value
+    elif key == "outline" and eq and value and OUTLINE is None:
+        OUTLINE = value
+    elif key == "fhstop" and value in ("print", "photo") and FHSTOP is None:
+        FHSTOP = value
     elif key == "bar_slide_mm" and eq and value and BAR_SLIDE is None:
         try:
             BAR_SLIDE = float(value)
@@ -82,11 +97,19 @@ for arg in sys.argv[3:]:
     elif arg == "instrument=viola" and not VIOLA:
         VIOLA = True
     else:
-        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM and instrument=viola" % arg)
+        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM, one outline=MEASURED_OUTLINE.tsv, one fhstop=print|photo and instrument=viola" % arg)
 if TRACE and VIOLA:
     raise SystemExit("refusing: the fholes trace is the Castelbarco cello's (image 0021); the viola places its holes from image 0015")
 if BAR_SLIDE is not None and VIOLA:
     raise SystemExit("refusing: bar_slide_mm= is the cello's (Goldblatt's cello specification sheet); the viola keeps its mapped bar")
+if OUTLINE and (VIOLA or not TRACE):
+    raise SystemExit("refusing: outline= is the Castelbarco cello's measured outline (LOC photographs) and goes with its f-hole trace: give fholes= and not instrument=viola")
+if OUTLINE and FHSTOP is None:
+    raise SystemExit("refusing: outline= needs fhstop=print (notch line at the printed stop below the top edge) or fhstop=photo (notch line at the photographs' height above the lower ledge)")
+if FHSTOP and not OUTLINE:
+    raise SystemExit("refusing: fhstop= is an outline= option")
+if OUTLINE and BAR_SLIDE is not None:
+    raise SystemExit("refusing: outline= places the bar's slide itself (equidistant ends from the top plate's ends); bar_slide_mm= would stack a second slide")
 if os.path.exists(OUT):
     raise SystemExit("refusing: %s exists" % OUT)
 os.makedirs(OUT)
@@ -149,9 +172,10 @@ SZ = L_BACK / L_CAN
 ST_Z = np.array([zb[kL], zb[kC], zb[kU]])
 ST_S = np.array([B_LO / wb[kL], B_C / wb[kC], B_UP / wb[kU]])
 LOC_TXT = dict(length="%g" % L_BACK, bouts="%g, %g, %g" % (B_LO, B_C, B_UP))  # as printed: 749 and 440, 234, 346 for the cello
-prov("plan_length_scale", "%.6f" % SZ, "LOC / CAN", "z' = %.4f z: LOC length of back %s mm over the Cannone body length %.1f mm (top outline rows at least 10 mm wide, i.e. without the back's button)" % (SZ, LOC_TXT["length"], L_CAN))
-prov("plan_width_scale", "lower %.4f at z %.2f, C %.4f at z %.2f, upper %.4f at z %.2f (Cannone z)" % (ST_S[0], ST_Z[0], ST_S[1], ST_Z[1], ST_S[2], ST_Z[2]), "LOC / CAN",
-     "x' = s(z) x, s piecewise linear in the Cannone z through the three bout stations of the Cannone back (widths %.1f, %.1f, %.1f mm -> LOC %s), constant beyond; ASSUMPTION: the %s outline is the Cannone outline so stretched (no %s outline curve is published in reach)" % (wb[kL], wb[kC], wb[kU], LOC_TXT["bouts"], NAME, NAME))
+if not OUTLINE:
+    prov("plan_length_scale", "%.6f" % SZ, "LOC / CAN", "z' = %.4f z: LOC length of back %s mm over the Cannone body length %.1f mm (top outline rows at least 10 mm wide, i.e. without the back's button)" % (SZ, LOC_TXT["length"], L_CAN))
+    prov("plan_width_scale", "lower %.4f at z %.2f, C %.4f at z %.2f, upper %.4f at z %.2f (Cannone z)" % (ST_S[0], ST_Z[0], ST_S[1], ST_Z[1], ST_S[2], ST_Z[2]), "LOC / CAN",
+         "x' = s(z) x, s piecewise linear in the Cannone z through the three bout stations of the Cannone back (widths %.1f, %.1f, %.1f mm -> LOC %s), constant beyond; ASSUMPTION: the %s outline is the Cannone outline so stretched (no %s outline curve is published in reach)" % (wb[kL], wb[kC], wb[kU], LOC_TXT["bouts"], NAME, NAME))
 
 
 def sx(zc):  # Cannone z -> width scale
@@ -166,6 +190,139 @@ def fwd(x, z):  # Cannone plan -> cello plan
 def inv(xp, zp):  # cello plan -> Cannone plan
     z = np.asarray(zp, float) / SZ
     return np.asarray(xp, float) / sx(z), z
+
+
+def ZF(zc):  # the plan map's z part alone: Cannone z -> cello plan z (SZ z without outline=)
+    return SZ * zc
+
+
+# ------------------------------------------------------------------ outline=: the MEASURED Castelbarco outline, and ONE landmark map for every borrowed violin field
+# The measured outline is data/instruments/geometry/cello-castelbarco-1697-shell/outline-measured-loc-photographs.tsv (derived numbers only: z above the bottom of the
+# back, left / right x per plate, from the LOC photographs p1 (back) and p2 (front) with the scale of the printed bouts 346 / 234 / 440 mm). With it the plan map is
+# ONE piecewise-linear z map through five landmarks (bottom, lower ledge, waist, upper ledge, top: the same five found on the il Cannone back and on the measured back)
+# and, for x, the per-row ratio of the measured to the Cannone half-width about each outline's own centre line (3-row mean). Outline, ribs, arching, thickness
+# zones, bar, post and bridge all go through this one map (no blend); the f-holes, the bridge plane and the bar length are re-placed from printed distances below.
+if OUTLINE:
+    def _smooth(a, k):  # moving mean over k rows (odd), edge-padded
+        a = np.asarray(a, float)
+        if k <= 1:
+            return a
+        return np.convolve(np.pad(a, k // 2, mode="edge"), np.ones(k) / k, mode="valid")
+
+    def _landmarks(z, hw, k):
+        """(lower ledge, waist, upper ledge) z of one half-width profile: waist = minimum in 35-65 % of the span; a ledge = the fastest narrowing going up
+        (smallest d hw / dz of the k-row mean) between 30 % of the span and the waist (lower), the waist and 80 % of the span (upper)."""
+        hs = _smooth(hw, k)
+        span = z[-1] - z[0]
+        d = np.gradient(hs, z)
+        iw = int(np.argmin(np.where((z > z[0] + 0.35 * span) & (z < z[0] + 0.65 * span), hs, np.inf)))
+        sl = (z > z[0] + 0.30 * span) & (z < z[iw])
+        su = (z > z[iw]) & (z < z[0] + 0.80 * span)
+        return float(z[sl][np.argmin(d[sl])]), float(z[iw]), float(z[su][np.argmin(d[su])])
+
+    def _waist_band(z, hw, k):
+        """(first, last) z of the contiguous band within 0.5 mm of the half-width minimum: the minimum is soft, and the waist landmark is the row of the minimum itself.
+        The smoothed profile is rounded to 1e-6 mm first: a row exactly 0.5 mm above the minimum is a tie that the last bit of the arithmetic decides, and the last bit differs between architectures."""
+        hs = np.round(_smooth(hw, k), 6)
+        span = z[-1] - z[0]
+        iw = int(np.argmin(np.where((z > z[0] + 0.35 * span) & (z < z[0] + 0.65 * span), hs, np.inf)))
+        lo_i, hi_i = iw, iw
+        while lo_i > 0 and hs[lo_i - 1] <= hs[iw] + 0.5:
+            lo_i -= 1
+        while hi_i < len(z) - 1 and hs[hi_i + 1] <= hs[iw] + 0.5:
+            hi_i += 1
+        return float(z[lo_i]), float(z[hi_i])
+
+    _ol = open(OUTLINE, encoding="utf-8").read().splitlines()
+    if _ol[0] != "frankensim.measured-outline-rows.v1" or _ol[1].split("\t") != ["z_mm_above_bottom", "back_x_left_mm", "back_x_right_mm", "front_x_left_mm", "front_x_right_mm"]:
+        raise SystemExit("refusing: %s is not the measured-outline table" % OUTLINE)
+    _M = np.array([[float(v) if v != "" else np.nan for v in l.split("\t")] for l in _ol[2:] if l.strip()])
+
+    def _meas(c0):  # (z, left, right) of the rows where the plate was measured
+        ok = ~np.isnan(_M[:, c0]) & ~np.isnan(_M[:, c0 + 1])
+        return _M[ok, 0], _M[ok, c0], _M[ok, c0 + 1]
+
+    MB_Z, MB_L, MB_R = _meas(1)  # back (photograph p1)
+    MT_Z, MT_L, MT_R = _meas(3)  # top / front (photograph p2)
+    # frame: bottom edge of the plate at the old frame's, the top edge at the old frame's too (so the length is still the printed 749 and Z_TOP the trace's 191.47)
+    L_TOP_C = float(top_ol[wt >= 10, 0].max()) + 0.5  # Cannone z of the top edge (half a 1 mm row beyond the last row at least 10 mm wide)
+    Z_TOP_OLD = SZ * L_TOP_C
+    Z_BOT_EDGE = Z_TOP_OLD - L_BACK
+    # landmarks: the Cannone back rows between the plate's bottom and top edges (the button is above), the measured back rows
+    _kb = (back_ol[:, 0] < L_TOP_C) & ((back_ol[:, 2] - back_ol[:, 1]) >= 10.0)
+    cz, chw = back_ol[_kb, 0], 0.5 * (back_ol[_kb, 2] - back_ol[_kb, 1])
+    C_LM = _landmarks(cz, chw, 3)
+    M_LM = _landmarks(MB_Z, 0.5 * (MB_R - MB_L), 5)
+    MF_LM = _landmarks(MT_Z, 0.5 * (MT_R - MT_L), 5)  # the front's own landmarks: the f-holes are cut in the top, so the notch height reads against the FRONT's lower ledge
+    _spread = lambda z_, hw_, ks_=(3, 5, 7, 9): (np.array([_landmarks(z_, hw_, k_) for k_ in ks_]).min(0), np.array([_landmarks(z_, hw_, k_) for k_ in ks_]).max(0))
+    SP_B, SP_F, SP_C = _spread(MB_Z, 0.5 * (MB_R - MB_L)), _spread(MT_Z, 0.5 * (MT_R - MT_L)), _spread(cz, chw, (1, 3, 5, 7))
+    WB_B, WB_F, WB_C = _waist_band(MB_Z, 0.5 * (MB_R - MB_L), 5), _waist_band(MT_Z, 0.5 * (MT_R - MT_L), 5), _waist_band(cz, chw, 3)
+    LM_C = np.array([L_TOP_C - L_CAN, *C_LM, L_TOP_C])
+    LM_M = Z_BOT_EDGE + np.array([0.0, *M_LM, L_BACK])
+    _s0, _s1 = (LM_M[1] - LM_M[0]) / (LM_C[1] - LM_C[0]), (LM_M[4] - LM_M[3]) / (LM_C[4] - LM_C[3])
+    ZC_N = np.r_[LM_C[0] - 100.0, LM_C, LM_C[-1] + 100.0]
+    ZM_N = np.r_[LM_M[0] - 100.0 * _s0, LM_M, LM_M[-1] + 100.0 * _s1]
+
+    def ZF(zc):  # noqa: F811 - Cannone z -> cello plan z
+        return np.interp(zc, ZC_N, ZM_N)
+
+    def ZINV(zp):  # cello plan z -> Cannone z
+        return np.interp(zp, ZM_N, ZC_N)
+
+    def _ratio_rows(zc_rows, hwc_rows, mz, ml, mr):
+        """Per-row ratio (measured / Cannone half-width) at the Cannone rows, held at the ends of the measured coverage, clipped to 0.4-3, 3-row mean."""
+        zp = ZF(zc_rows) - Z_BOT_EDGE
+        inside = (zp >= mz[0]) & (zp <= mz[-1]) & (hwc_rows >= 5.0)
+        raw = np.interp(zp, mz, 0.5 * (mr - ml)) / np.maximum(hwc_rows, 5.0)
+        w = np.interp(zc_rows, zc_rows[inside], raw[inside])
+        return _smooth(np.clip(w, 0.4, 3.0), 3)
+
+    # map A (every borrowed field): the BACK outline's rows; the plates' own outlines below use their own measured rows
+    _zb, _lb, _rb = back_ol[:, 0], back_ol[:, 1], back_ol[:, 2]
+    W_A = _ratio_rows(_zb, 0.5 * (_rb - _lb), MB_Z, MB_L, MB_R)
+
+    def _centre_line(z, mid):  # least-squares line through the row midpoints: a corner's left and right edges are not at one z, so the midpoint of a corner row is not the centre
+        b_, a_ = np.polyfit(z, mid, 1)
+        return lambda zz: a_ + b_ * np.asarray(zz, float)
+
+    CC_LIN = _centre_line(cz, 0.5 * (back_ol[_kb, 1] + back_ol[_kb, 2]))  # the il Cannone back's centre line (rows between its plate edges, at least 10 mm wide)
+    CM_B = _centre_line(MB_Z, 0.5 * (MB_L + MB_R))  # the measured centre lines (about 0 by the photographs' own fit)
+    CM_T = _centre_line(MT_Z, 0.5 * (MT_L + MT_R))
+
+    def _cm_A(zp):
+        return CM_B(zp - Z_BOT_EDGE)
+
+    def fwd(x, z):  # noqa: F811 - Cannone plan -> cello plan (one map for every borrowed field)
+        x, z = np.asarray(x, float), np.asarray(z, float)
+        zp = ZF(z)
+        return _cm_A(zp) + np.interp(z, _zb, W_A) * (x - CC_LIN(z)), zp
+
+    def inv(xp, zp):  # noqa: F811 - cello plan -> Cannone plan
+        zp = np.asarray(zp, float)
+        z = ZINV(zp)
+        return CC_LIN(z) + (np.asarray(xp, float) - _cm_A(zp)) / np.interp(z, _zb, W_A), z
+
+    _xt, _zt = fwd(np.array([-30.0, 0.0, 25.0]), np.array([-200.0, -60.0, 40.0]))
+    _xi, _zi = inv(_xt, _zt)
+    assert abs(_xi - np.array([-30.0, 0.0, 25.0])).max() < 1e-9 and abs(_zi - np.array([-200.0, -60.0, 40.0])).max() < 1e-9, "fwd / inv are not inverse"
+    # how well the map reproduces the measured back outline (the check that the fields and the outline are one geometry), z 40-700 above the bottom edge
+    _zq = np.arange(40.0, 700.0, 1.0)
+    _zcq = ZINV(Z_BOT_EDGE + _zq)
+    _hwq = np.interp(_zcq, _zb, W_A) * np.interp(_zcq, _zb, 0.5 * (_rb - _lb))
+    _hwm = np.interp(_zq, MB_Z, 0.5 * (MB_R - MB_L))
+    MAP_ERR = (float(np.sqrt(np.mean((_hwq - _hwm) ** 2))), float(np.abs(_hwq - _hwm).max()), float(_zq[np.argmax(np.abs(_hwq - _hwm))]))
+    prov("plan_map_landmarks", "z above the bottom edge: measured back lower ledge %.1f, waist %.1f, upper ledge %.1f, top %.1f; Cannone back (own z) %.2f, %.2f, %.2f, top edge %.2f; segment scales %s; front lower ledge %.1f, waist %.1f, upper ledge %.1f; spread over the 3-9 row means (il Cannone 1-7): back %s to %s, front %s to %s, il Cannone %s to %s; the waist minimum is soft: the band within 0.5 mm of it spans z %.1f-%.1f on the back, %.1f-%.1f on the front, %.1f-%.1f on the il Cannone back (the landmark is the minimum row itself)" % (
+        M_LM[0], M_LM[1], M_LM[2], L_BACK, C_LM[0], C_LM[1], C_LM[2], L_TOP_C, " / ".join("%.3f" % ((LM_M[i + 1] - LM_M[i]) / (LM_C[i + 1] - LM_C[i])) for i in range(4)), MF_LM[0], MF_LM[1], MF_LM[2],
+        "/".join("%.0f" % v for v in SP_B[0]), "/".join("%.0f" % v for v in SP_B[1]), "/".join("%.0f" % v for v in SP_F[0]), "/".join("%.0f" % v for v in SP_F[1]), "/".join("%.0f" % v for v in SP_C[0]), "/".join("%.0f" % v for v in SP_C[1]), *WB_B, *WB_F, *WB_C), "LOC photographs / CAN",
+         "ONE plan map for every borrowed il Cannone field (outline rows of the rib ring, arching, thickness zones, bar, post, bridge): z' = piecewise linear through five landmarks (bottom edge, lower ledge, waist, upper ledge, top edge = the printed back length %g mm; ledge = the fastest narrowing of the half-width going up, waist = its minimum, found on the 3-row mean of the Cannone back rows and the 5-row mean of the measured back rows, same rule), linear beyond with the end segments' slopes; x' = measured centre line + (measured / Cannone half-width, 3-row mean, held beyond the measured rows, clipped 0.4-3) x (x - the Cannone back's centre line); the centre lines are least-squares lines through the row midpoints (a corner row's midpoint is not a centre: its left and right edges are at different z). No blend with the old uniform stretch. ASSUMPTION: the il Cannone violin's fields are this cello's fields up to this map (arching and thickness maps: the Cannone's, as before)" % L_BACK)
+    _ktp = (top_ol[:, 2] - top_ol[:, 1]) >= 10.0
+    _ztc = top_ol[_ktp, 0]
+    _zpt = ZF(_ztc) - Z_BOT_EDGE
+    _etp = np.interp(_ztc, _zb, W_A) * 0.5 * (top_ol[_ktp, 2] - top_ol[_ktp, 1]) - np.interp(_zpt, MT_Z, 0.5 * (MT_R - MT_L))
+    _bt = (_zpt >= 40) & (_zpt <= 700)
+    prov("plan_map_check_top", "map half-width (the back's ratio, as the top's fields use it) against the measured FRONT, z 40-700: rms %.2f mm, max %.2f mm at z %.0f" % (
+        float(np.sqrt(np.mean(_etp[_bt] ** 2))), float(np.abs(_etp[_bt]).max()), float(_zpt[_bt][np.argmax(np.abs(_etp[_bt]))])), "check", "computed; not fitted. The top outline itself is the measured front's rows, so this is the size of the mismatch between the top's borrowed fields and its outline")
+    prov("plan_map_check", "map half-width against the measured back, z 40-700: rms %.2f mm, max %.2f mm at z %.0f" % MAP_ERR, "check", "computed; not fitted. The plates' outlines themselves are the measured rows (below), so this is the size of the mismatch between the fields' geometry and the outline")
 
 
 # ------------------------------------------------------------------ Cannone plate fields (the generator's own processing: 3 mm blocks, fill, smooth 2 / 3)
@@ -260,15 +417,47 @@ def map_outline(a):
     return np.c_[z2, xl, xr]
 
 
-top_rows, back_rows = map_outline(top_ol), map_outline(back_ol)
+def map_outline_measured(a, mz, ml, mr, plate):
+    """The plate's outline rows at the Cannone rows' mapped z: the MEASURED rows where the photograph has them, the Cannone rows through the plate's
+    own held half-width ratio where it has not (the top above the fingerboard's cut, z 730). The back stops where its measured rows stop."""
+    ac = a[(a[:, 2] - a[:, 1]) >= 10.0]  # as map_outline: the generator leaves out rows narrower than 10 mm (decided in Cannone units)
+    zp = ZF(ac[:, 0])
+    zm_ = zp - Z_BOT_EDGE
+    Wt = _ratio_rows(ac[:, 0], 0.5 * (ac[:, 2] - ac[:, 1]), mz, ml, mr)
+    cc = CC_LIN(ac[:, 0])
+    cm = (CM_B if plate == "back" else CM_T)(zm_)
+    inside = (zm_ >= mz[0]) & (zm_ <= mz[-1])
+    xl = np.where(inside, np.interp(zm_, mz, ml), cm + Wt * (ac[:, 1] - cc))
+    xr = np.where(inside, np.interp(zm_, mz, mr), cm + Wt * (ac[:, 2] - cc))
+    keep = inside if plate == "back" else np.ones(len(ac), bool)
+    return np.c_[zp[keep], xl[keep], xr[keep]]
+
+
+if OUTLINE:
+    top_rows = map_outline_measured(top_ol, MT_Z, MT_L, MT_R, "top")
+    back_rows = map_outline_measured(back_ol, MB_Z, MB_L, MB_R, "back")
+else:
+    top_rows, back_rows = map_outline(top_ol), map_outline(back_ol)
 for name, rows in (("top", top_rows), ("back", back_rows)):
     write(name + "-plate-outline.tsv", "frankensim.specimen-outline-rows.v1", ["z_mm", "x_left_mm", "x_right_mm"], rows, ["%.3f"] * 3)
 cpoly_t = np.vstack([np.c_[top_rows[:, 2], top_rows[:, 0]], np.c_[top_rows[::-1, 1], top_rows[::-1, 0]]])
 cpoly_b = np.vstack([np.c_[back_rows[:, 2], back_rows[:, 0]], np.c_[back_rows[::-1, 1], back_rows[::-1, 0]]])
 wcb = back_rows[:, 2] - back_rows[:, 1]
 Z_SPLIT = -87.0 * SZ if VIOLA else -183  # lower / upper bout split: the Cannone's z -87 mapped (the cello's -183 is that, rounded)
-prov("outline_check", "back length %.1f, bouts lower %.1f / C %.1f / upper %.1f mm" % (back_rows[:, 0].max() - back_rows[:, 0].min() + SZ, wcb[back_rows[:, 0] < Z_SPLIT].max(),
-     wcb[(back_rows[:, 0] > ST_Z[0] * SZ) & (back_rows[:, 0] < ST_Z[2] * SZ)].min(), wcb[back_rows[:, 0] > Z_SPLIT].max()), "check", "the mapped back outline against LOC %s / %g / %g / %g (length includes the button rows that are at least 10 mm wide in Cannone units)" % (LOC_TXT["length"], B_LO, B_C, B_UP))
+if OUTLINE:
+    _wt = top_rows[:, 2] - top_rows[:, 1]
+    _zw_ = Z_BOT_EDGE + M_LM[1]
+    _sel_c = (back_rows[:, 0] > Z_BOT_EDGE + M_LM[0]) & (back_rows[:, 0] < Z_BOT_EDGE + M_LM[2])
+    prov("outline_measured", "top %d rows (measured z %.1f-%.1f above the bottom edge, then the Cannone top rows through the held ratio to the top edge), back %d rows (measured z %.1f-%.1f, none beyond); frame: bottom edge z %.2f, top edge z %.2f (printed back length %g)" % (
+        len(top_rows), MT_Z[0], MT_Z[-1], len(back_rows), MB_Z[0], MB_Z[-1], Z_BOT_EDGE, Z_TOP_OLD, L_BACK), "LOC photographs",
+         "the outline rows are the measured ones (LOC item ihas.200154818 photographs p1 back and p2 front, 3.7056 px/mm from the printed bouts 346 / 234 / 440 mm, each edge by threshold, centre line fitted; derived numbers in outline-measured-loc-photographs.tsv): the plate's own rows at the Cannone rows' mapped z, 1 mm table interpolated; the photograph's front stops at z 730 where the fingerboard hides the plate edge, the back at z 748 where the neck heel hides it (the back therefore loses the button rows that the stretched il Cannone back carried: rows at least 10 mm wide up to z 770 above its bottom). ASSUMPTIONS: the photographs are plan views at one scale (the three bout scales differ by 0.7 %); the printed length 749 puts the top edge")
+    prov("outline_check", "back widths: lower bout %.1f / C %.1f / upper bout %.1f mm; top: lower %.1f / C %.1f / upper %.1f mm" % (
+        wcb[back_rows[:, 0] < _zw_].max(), wcb[_sel_c].min(), wcb[back_rows[:, 0] > _zw_].max(),
+        _wt[top_rows[:, 0] < _zw_].max(), _wt[(top_rows[:, 0] > Z_BOT_EDGE + M_LM[0]) & (top_rows[:, 0] < Z_BOT_EDGE + M_LM[2])].min(), _wt[top_rows[:, 0] > _zw_].max()), "check",
+         "against LOC printed 440 / 234 / 346 mm (the photographs' scale is their mean, so the three agree to the 0.7 % spread, not exactly)")
+else:
+    prov("outline_check", "back length %.1f, bouts lower %.1f / C %.1f / upper %.1f mm" % (back_rows[:, 0].max() - back_rows[:, 0].min() + SZ, wcb[back_rows[:, 0] < Z_SPLIT].max(),
+         wcb[(back_rows[:, 0] > ST_Z[0] * SZ) & (back_rows[:, 0] < ST_Z[2] * SZ)].min(), wcb[back_rows[:, 0] > Z_SPLIT].max()), "check", "the mapped back outline against LOC %s / %g / %g / %g (length includes the button rows that are at least 10 mm wide in Cannone units)" % (LOC_TXT["length"], B_LO, B_C, B_UP))
 
 
 def dist_to_poly(poly, pts):
@@ -296,6 +485,7 @@ LO_INNER, LO_OUTER = 220.0, 258.2  # LOCM between the lower eyes' inner edges, a
 LO_DIA = {1: 19.7, 2: 19.2}  # LOCM lower eye diameters (check only)
 STOP_P = {1: 419.0, 2: 420.0}  # LOCM stop: top edge to the f-hole notches, bass / treble
 NOTCH_GAP_P = 162.0  # LOCM between the notches (check only)
+FH_PHOTO_ABOVE_LEDGE, FH_PHOTO_STOP = 19.0, 403.6  # outline= only: LOC photograph p2 (3.7056 px/mm from the printed bouts 346 / 234 / 440): notch nicks (inner stem edges) at rows 1589 / 1588, lower ledge row 1659, top edge row 93: mm above the lower ledge, mm below the top edge
 LO_EDGE_P = {1: 32.8, 2: 34.0}  # LOCM lower eye to the outside of the instrument, bass / treble (check only)
 LOCM_REF = "LOC item ihas.200154818 image 0021 (Montgomery 2005, Castelbarco cello, caliper mm)"
 LOCM_TXT = dict(tape=" (103.0 by tape)", stop="'bass ff hole higher than treble'", lo_dia="%.1f / %.1f")
@@ -314,6 +504,8 @@ _, _, fh = nt("top-plate-fholes.tsv")
 _, _, bsec_c = nt("bridge-sections.tsv")
 Z_NOTCH_C = float(np.average(bsec_c[:, 3], weights=bsec_c[:, 1]))  # ASSUMPTION: the Cannone's notch line is its bridge plane
 Z_TOP = SZ * (float(top_ol[:, 0].max()) + 0.5)  # ASSUMPTION: the top's edge on the centre line is half a 1 mm row beyond its last row
+if OUTLINE and abs(Z_TOP - Z_TOP_OLD) > 1e-6:
+    raise SystemExit("refusing: the frame's top edge %.4f differs from the uniform stretch's %.4f" % (Z_TOP_OLD, Z_TOP))
 
 
 def eye_circle(r, zlo, zhi):
@@ -407,6 +599,16 @@ if TRACE:
     fh_rows = [(int(f[0]), float(f[1]), float(f[2]), float(f[3])) for f in (l.split("\t") for l in tl[2:] if l.strip())]
     if sorted({r[0] for r in fh_rows}) != [1, 2]:
         raise SystemExit("refusing: %s must hold hole 1 (bass) and hole 2 (treble)" % TRACE)
+    FH_DZ = 0.0  # z shift of the whole trace (rigid: the drawing's own distances are not touched); only with outline=
+    if OUTLINE:
+        # the trace's notches as traced and placed (bass notch at the printed 419 below the top edge, z 191.47 - 419 = -227.53; treble -224.83)
+        _n_raw = 0.5 * (-227.53 + -224.83)
+        if FHSTOP == "print":
+            FH_DZ = 0.0  # the trace as stamped: the bass notch at the printed stop below the top edge
+        else:
+            # the photographs: the notch line is FH_PHOTO_ABOVE_LEDGE above the lower ledge (LOC photograph p2: nicks at rows 1589 / 1588, ledge row 1659, 3.7056 px/mm)
+            FH_DZ = (Z_BOT_EDGE + MF_LM[0] + FH_PHOTO_ABOVE_LEDGE) - _n_raw
+        fh_rows = [(h_, z_ + FH_DZ, xa_, xb_) for h_, z_, xa_, xb_ in fh_rows]
 write("top-plate-fholes.tsv", "frankensim.specimen-raster-runs.v1", ["hole", "z_mm", "x_start_mm", "x_end_mm"], fh_rows, ["%d", "%.2f", "%.2f", "%.2f"])
 fhr = np.array(fh_rows)
 for h in (1, 2):
@@ -462,6 +664,10 @@ if TRACE:
         raise SystemExit("refusing: the trace was placed with the top edge at z 191.47, this specimen has %.3f" % Z_TOP)
     T_EYE = {(1, "up"): (-58.13, -174.46, 6.61), (2, "up"): (57.54, -173.40, 6.01), (1, "lo"): (-119.70, -270.05, 9.60), (2, "lo"): (119.58, -266.07, 9.21)}
     T_NOTCH = {1: (-79.87, -227.53), 2: (80.54, -224.83)}
+    if OUTLINE:  # the whole trace moved rigidly by FH_DZ
+        T_EYE = {k_: (v_[0], v_[1] + FH_DZ, v_[2]) for k_, v_ in T_EYE.items()}
+        T_NOTCH = {k_: (v_[0], v_[1] + FH_DZ) for k_, v_ in T_NOTCH.items()}
+        BR_PLANE = 0.5 * (T_NOTCH[1][1] + T_NOTCH[2][1])  # the bridge stands on the notch line: the mean of the two traced notches' z
     lo_t = {h: float(dist_to_poly(cpoly_t, np.array([T_EYE[(h, "lo")][:2]]))[0]) - T_EYE[(h, "lo")][2] for h in (1, 2)}
     fh_new = [
         ("f_hole_length", "%.1f / %.1f mm (bass / treble), end to end" % (FH_LEN_P[1], FH_LEN_P[2]), "LOCM",
@@ -494,6 +700,20 @@ if TRACE:
             SZ * Z_NOTCH_C, Z_TOP - SZ * Z_NOTCH_C, SZ * Z_NOTCH_C - T_NOTCH[1][1], SZ * Z_NOTCH_C - T_NOTCH[2][1]), "check",
          "KNOWN MISSES, kept as measured (the trace is placed as stamped; nothing is moved after measuring): T9 the treble stop is 3.70 mm short of the printed 420 (tolerance 1.0): the drawing's treble notch lies 2.70 mm above its bass notch and all three chords tilt treble side up (-0.53, -0.96, -0.96 deg); T3 the treble eyes are 0.93 / 1.10 mm narrower than printed (tolerance 0.5): the lit wall band inside their rims is wood by the half-intensity rule. In tolerance: the bass eyes (-0.28, -0.15) and both lengths (+0.28, -0.26)"),
     ]
+    if OUTLINE:  # the stop and the check state the placement on the measured outline
+        _stop_b, _stop_t = Z_TOP - T_NOTCH[1][1], Z_TOP - T_NOTCH[2][1]
+        _led = Z_BOT_EDGE + MF_LM[0]
+        _what = ("fhstop=print: the trace as stamped, the bass notch at the printed stop below the top edge" if FHSTOP == "print" else
+                 "fhstop=photo: the trace moved up %.2f mm so that the mean notch height is %.1f mm above the front's measured lower ledge (z %.2f), the height read on LOC photograph p2" % (FH_DZ, FH_PHOTO_ABOVE_LEDGE, _led))
+        for i_, row_ in enumerate(fh_new):
+            if row_[0] == "f_hole_stop":
+                fh_new[i_] = ("f_hole_stop", "%.0f / %.0f mm from the top edge to the notches (bass / treble)" % (STOP_P[1], STOP_P[2]), "LOCM",
+                              "%s ('bass ff hole higher than treble'); USED on the measured outline as: %s; placed notches at z %.2f / %.2f = %.2f / %.2f mm below the top edge (z %.2f), %.2f / %.2f mm above the lower ledge. DISAGREEMENT, kept: LOC photograph p2 (3.7056 px/mm from the printed bouts) reads the notch nicks at %.1f mm below the top edge (printed %.0f / %.0f) and %.1f mm above the lower ledge; the printed stop and the photographs differ by about %.0f mm" % (
+                                  LOCM_REF, _what, T_NOTCH[1][1], T_NOTCH[2][1], _stop_b, _stop_t, Z_TOP, T_NOTCH[1][1] - _led, T_NOTCH[2][1] - _led, FH_PHOTO_STOP, STOP_P[1], STOP_P[2], FH_PHOTO_ABOVE_LEDGE, 0.5 * (STOP_P[1] + STOP_P[2]) - FH_PHOTO_STOP))
+            elif row_[0] == "f_hole_check":
+                fh_new[i_] = ("f_hole_check", "scored against predictions stamped before measuring, as traced at the stamped placement (the over-the-arch values depend on the arch under the holes, which the move of the trace changes by up to 13.6 mm in z): eye widths over the arch upper 13.22 / 12.07 (LOCM 13.5 / 13.0), lower 19.55 / 18.10 (19.7 / 19.2) mm; lengths eye to eye over the arch 130.78 / 128.24 (130.5 / 128.5); notch gap 160.44 (162.0). On the measured outline: stop %.2f / %.2f mm (printed %.0f / %.0f, photograph %.1f), notch line %.2f mm above the lower ledge (photograph %.1f), lower eye to the top outline %.2f / %.2f mm (LOCM %.1f / %.1f); bridge plane z %.2f = the mean notch z, %.2f mm below the top edge" % (
+                    _stop_b, _stop_t, STOP_P[1], STOP_P[2], FH_PHOTO_STOP, BR_PLANE - _led, FH_PHOTO_ABOVE_LEDGE, lo_t[1], lo_t[2], LO_EDGE_P[1], LO_EDGE_P[2], BR_PLANE, Z_TOP - BR_PLANE), "check",
+                    "KNOWN MISSES of the trace, kept as measured: T9 the treble notch lies 2.70 mm above the bass notch on the drawing (all three chords tilt treble side up, -0.53, -0.96, -0.96 deg; the photograph reads 0.3 mm); T3 the treble eyes are 0.93 / 1.10 mm narrower than printed. Nothing is moved after measuring")
     at = [i for i, p in enumerate(PROV) if p[0].startswith("f_hole")]
     if at != list(range(at[0], at[0] + len(fh_new))):
         raise SystemExit("refusing: the f_hole rows are not the %d contiguous rows the trace replaces" % len(fh_new))
@@ -737,7 +957,10 @@ xb2, zb2 = fwd(bs[:, 2], bs[:, 0])
 zmid = 0.5 * (zb2.min() + zb2.max())
 klen = 1.0 if BAR_L is None else BAR_L / (zb2.max() - zb2.min())  # None: no printed length, the plan length scale alone
 zb3 = zmid + (zb2 - zmid) * klen
-xb3 = sx(zb3 / SZ) * (bs[:, 2])  # centre line follows the plan map at the stretched z
+if OUTLINE:
+    xb3 = fwd(bs[:, 2], ZINV(zb3))[0]  # centre line follows the one plan map at the stretched z (the bar is then slid rigidly in z below, as on the posted pages)
+else:
+    xb3 = sx(zb3 / SZ) * (bs[:, 2])  # centre line follows the plan map at the stretched z
 # keep the bar under the bass foot where the Cannone has it: at the bridge plane, the bar's x relative to the feet is the
 # Cannone's relative x scaled by the bridge's own x scale (the bridge is scaled about its feet's middle)
 _, _, sil0 = nt("bridge-silhouette.tsv")
@@ -749,9 +972,20 @@ kxb0 = BR_FEET / (bot0[:, 2].max() - bot0[:, 1].min())
 zbr_c = float(np.average(bsec0[:, 3], weights=bsec0[:, 1]))
 bar_x_at_bridge_c = float(np.interp(zbr_c, bs[:, 0], bs[:, 2]))
 bar_x_target = (bar_x_at_bridge_c - xfeet0) * kxb0
-BAR_SHIFT = bar_x_target - float(np.interp(SZ * zbr_c, zb3, xb3))
+BAR_SHIFT = bar_x_target - float(np.interp(BR_PLANE if OUTLINE else SZ * zbr_c, zb3, xb3))
 xb3 = xb3 + BAR_SHIFT
-if BAR_SLIDE is not None:  # bar_slide_mm=: rigid slide toward the neck, x re-set so that the bar's x at the bridge plane stays
+if OUTLINE:
+    # the rule of the posted pages (bar_slide_mm=12.27; Goldblatt prints the bar's ends 80-85 mm from the plate's ends, Green 80): the bar slides rigidly in z until its ends sit equidistant
+    # from the TOP plate's own two ends (its first and last outline rows); its length, height profile, width and tilt stay; x is re-set so that its x at the bridge plane (the notch line) stays too
+    _bar_lo0, _bar_hi0 = float(zb3.min()), float(zb3.max())
+    OUTLINE_SLIDE = 0.5 * ((float(top_rows[:, 0].min()) + float(top_rows[:, 0].max())) - (_bar_lo0 + _bar_hi0))
+    zb3 = zb3 + OUTLINE_SLIDE
+    xb3 = xb3 + (bar_x_target - float(np.interp(BR_PLANE, zb3, xb3)))
+    prov("bass_bar_slide", "bar slid %.2f mm along z (toward the %s), rigid; x at the bridge plane unchanged; ends %.2f / %.2f mm from the top plate's ends (the mapped bar sat %.2f / %.2f mm)" % (
+        OUTLINE_SLIDE, "neck" if OUTLINE_SLIDE > 0 else "tail", zb3.min() - float(top_rows[:, 0].min()), float(top_rows[:, 0].max()) - zb3.max(),
+        _bar_lo0 - float(top_rows[:, 0].min()), float(top_rows[:, 0].max()) - _bar_hi0), "makers' tables",
+         "the rule of the posted pages, re-applied on the measured outline: Goldblatt prints the bar's ends 80-85 mm from the plate's ends, Green 80; the ends are measured from the top plate's own first and last outline rows, so equidistant ends are (top length - %.0f) / 2 from each. Makers' tables, borrowed and named, not measurements of this cello" % (zb3.max() - zb3.min()))
+elif BAR_SLIDE is not None:  # bar_slide_mm=: rigid slide toward the neck, x re-set so that the bar's x at the bridge plane stays
     zb3 = zb3 + BAR_SLIDE
     xb3 = xb3 + (bar_x_target - float(np.interp(SZ * zbr_c, zb3, xb3)))
     prov("bass_bar_slide", "bar slid %.2f mm toward the neck along z, rigid; x at the bridge plane unchanged" % BAR_SLIDE, "makers' tables",
@@ -784,7 +1018,7 @@ feet_c = bottom[:, 2].max() - bottom[:, 1].min()
 kx_b = BR_FEET / feet_c
 ky_b = BR_H / (ybot - ytop + 0.25)
 zc_c = float(np.average(bsec[:, 3], weights=bsec[:, 1]))
-ZC2 = float(SZ * zc_c)
+ZC2 = BR_PLANE if OUTLINE else float(SZ * zc_c)
 foot_secs = bsec[(bsec[:, 0] > -25.5) & (bsec[:, 0] < -21.5)]
 t_foot_c = float(np.mean(foot_secs[:, 7] - foot_secs[:, 6]))
 area_c = float(np.sum(sil[:, 2] - sil[:, 1]) * 0.25)
@@ -882,6 +1116,25 @@ POST_ROW = (("johannsson-viola-medium", "soundpost thickness 6.5 mm (hansjohanns
 write("dimensions.tsv", "frankensim.specimen-dimensions.v1", ["part", "feature", "quantity", "value_si", "unit", "sigma_si", "route", "source_id", "note"],
       [("soundpost", "section", "equivalent-diameter-mean", "%.6f" % (POST_D / 1000), "m", "unstated", "published-maker-table") + POST_ROW],
       ["%s"] * 9)
+if OUTLINE:
+    def _rep(item, old, new):
+        i_ = [p[0] for p in PROV].index(item)
+        assert old in PROV[i_][3], (item, old)
+        PROV[i_] = (PROV[i_][0], PROV[i_][1], PROV[i_][2], PROV[i_][3].replace(old, new))
+
+    _rep("bridge", "position = the Cannone bridge plane through the length scale", "position = the notch line of the placed f-hole trace (mean of the two notches' z, %.2f), NOT the plan map" % ZC2)
+    _rep("soundpost", "through the plan map", "through the one landmark plan map (the warped il Cannone centroid; it does not follow the bridge plane's move to the notch line)")
+    _rep("bass_bar", "about its mapped middle)", "about its mapped middle, then slid rigidly in z to equidistant ends: row bass_bar_slide)")
+    _rep("bass_bar", "the plan width scale at each z", "the one landmark plan map's x at each z")
+    _keep_bar = h3 > 2.0
+    _bar_lo, _bar_hi = float(zb3[_keep_bar].min()), float(zb3[_keep_bar].max())
+    _zw_c = float(ZF(C_LM[1]))
+    _post_old = (SZ * PZ, SZ * zbr_c)  # the old uniform map's post and bridge plane z
+    prov("placement_check", "bridge plane z %.2f (%.2f mm below the top edge z %.2f, %.2f mm above the front's lower ledge z %.2f); bass bar z %.2f to %.2f (%.2f mm from the top plate's bottom end, %.2f mm from its top end; length %.1f mm); soundpost z %.2f (%.2f mm %s the bridge plane; the old uniform map had %.2f mm); the warped il Cannone bridge plane would have been z %.2f (%.2f mm from the notch line)" % (
+        ZC2, Z_TOP - ZC2, Z_TOP, ZC2 - (Z_BOT_EDGE + MF_LM[0]), Z_BOT_EDGE + MF_LM[0], _bar_lo, _bar_hi, _bar_lo - float(top_rows[:, 0].min()), float(top_rows[:, 0].max()) - _bar_hi, _bar_hi - _bar_lo, P2z, abs(P2z - ZC2),
+        "below" if P2z < ZC2 else "above", abs(_post_old[0] - _post_old[1]), float(ZF(zbr_c)), float(ZF(zbr_c)) - ZC2), "check",
+         "expected against placed, computed; not fitted. Items placed from a printed or photographed distance (f-hole trace, bridge plane = the notch line, bar length 580 and its place relative to the bridge) are listed beside the one-map warped value, so none moves by accident")
+    prov("ring_overhang_check", "stretched ring on the measured outlines: mean %.2f mm, min %.2f mm; after pulling in: min %.2f mm; %d of %d angles moved, by up to %.2f mm" % (oh0.mean(), oh0.min(), oh1.min(), int((moved > 1e-9).sum()), len(moved), moved.max()), "check", "the rib_ring_overhang row above, repeated here so the byte check can compare it with the uniform stretch's (mean 5.27, min -3.57 mm, 48 of 180 angles moved by up to 24.55 mm)")
 with open(OUT + "PROVENANCE.tsv", "x", encoding="utf-8") as f:
     f.write("item\tvalue\tsource\tnote\n")
     for r in PROV:
