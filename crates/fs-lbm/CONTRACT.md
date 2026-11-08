@@ -578,3 +578,40 @@ With `enthalpy-coupling`, `advance_caloric_tensor_conduction` and `advance_calor
 `TensorCaloricLaw` extends the canonical `ThermalLaw` with original bounded energy support, an analytic temperature derivative, a fused constitutive query, and reference-cell admission. Direct implementations retain the equilibrium phase curve, restricted pure-solid view, and original heat-storage assembly; amount-bound storage enforces its original mass normalization. Every prescribed-temperature cell requires an explicit original specific energy at each stage, validated against its authored temperature, so an isothermal phase fraction is never selected by a temperature inverse. Prescribed boundary-face temperatures do not require a cell-energy prescription.
 
 Both stages reevaluate original caloric and tensor laws, share nonlinear/Krylov/backtracking budgets, and reuse the independently audited interval heat ledger with actual representable stored-energy changes and prescribed-cell reservoir corrections. Conductivity remains the independently supplied tensor law `K(T)`; independent phase-fraction dependence, moving geometry, expansion work, and advection are outside these entries. Backward Euler is first order. SDIRK2 is second order on smooth caloric/forcing segments with fixed constraints; unresolved sharp phase transitions or forcing changes require time refinement or interval splitting. Either stage's refusal or cancellation returns no partial interval.
+
+## Lagrangian momentum and heat in conservative NSF3
+
+`NsfGrid3::with_lagrangian_thermal_sgs` binds the original joint Favre--Germano
+pathline histories to native D3Q27 mass/momentum and conservative total energy.
+Periodic fluid boxes and resolved channels with two periodic axes are admitted;
+actual translating-wall velocities and original thermal-wall derivative policies
+feed the same filters. Independent momentum and temperature memories, optional
+bounded invariant momentum times, coefficient bounds and molecular-ratio
+admissions are explicit. Times are lattice timesteps from the native grid clock.
+Source-owned viscosity, heat capacity, conductivity and bulk relaxation retain
+their original state and domain. Only deviatoric collision receives modeled
+viscosity; shared interior heat faces receive rho*(cp/R)*alpha_t. Mechanical
+transfer stays in the original total-energy stress work, without an additional
+heating source. Molecular half-cell conduction remains the wall heat law.
+
+Every endpoint corrector/probe starts from the same accepted signed histories.
+The final source/force/temperature state retains a borrowing joint history token
+through all later native work, energy and cancellation admissions; one infallible
+commit accompanies physical publication. Failed/retried steps cannot age memory.
+Same-time wall/force changes re-emit the accepted contractions with zero elapsed
+transport, without publishing a new model sample. Regular timesteps reuse the
+264 nominal bytes/cell filter/history payload and do not copy history or repeat
+the final fit. Thermal-wall preview intervals allocate an independent workspace
+within their cell and original per-workspace bounds, copying only accepted
+histories/scales/policy. A rejected multi-step prefix cannot modify its parent.
+
+G1/G3/G4 regressions cover the one-update endpoint against the original shared
+model, conservative closed-box energy, final-checkpoint rollback/replay,
+moving-channel same-time refresh, independent multi-step thermal trials,
+workspace/geometry/usage and representable-clock refusals. Core regressions
+cover zero-time refresh and history-copy independence from rejected scratch.
+The pathline/source update remains first order even though native energy uses
+its original endpoint trapezoid. No open boundary, interior-solid filter,
+backscatter-energy model, complete compressible LES closure, turbulent-wall
+function, shock qualification or DNS claim is added. Native integration tests
+are authored but require execution in a complete build environment.

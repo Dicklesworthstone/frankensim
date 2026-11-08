@@ -56,6 +56,64 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g3_native_refresh_preserves_history_and_public_time_admission() {
+    let shape = [5, 6, 7];
+    let (rho, velocity, scalar) = field(shape, 0.05, 2.0);
+    let mut owner = LagrangianDynamicScalar::new(shape, [1.0; 3], usize::MAX).unwrap();
+    owner.prepare(momentum_config(), scalar_config(), 0.0,
+        &rho, &velocity, &scalar, || false).unwrap().commit();
+    let momentum_history = owner.flow.history.clone();
+    let scalar_history = owner.scalar.history.clone();
+    let scales = (owner.flow.history_log_scale, owner.scalar.history_log_scale);
+    let zero_velocity = vec![[0.0; 3]; rho.len()];
+    let zero_scalar = vec![0.0; rho.len()];
+    let refreshed = owner.prepare_or_refresh(
+        momentum_config(), scalar_config(), 0.0, &rho, &zero_velocity, None,
+        &zero_scalar, None, || false,
+    ).unwrap();
+    assert!(refreshed.viscosities().iter().all(|&value| value == 0.0));
+    assert!(refreshed.diffusivities().iter().all(|&value| value == 0.0));
+    drop(refreshed);
+    assert_eq!(owner.flow.history, momentum_history);
+    assert_eq!(owner.scalar.history, scalar_history);
+    assert_eq!((owner.flow.history_log_scale, owner.scalar.history_log_scale), scales);
+    assert_eq!(owner.accepted_time(), Some(0.0));
+    assert!(owner.prepare(momentum_config(), scalar_config(), 0.0,
+        &rho, &velocity, &scalar, || false).is_err());
+}
+
+#[test]
+fn g3_native_history_fork_excludes_rejected_scratch_and_evolves_independently() {
+    let shape = [5, 6, 7];
+    let (rho, velocity, scalar) = field(shape, 0.05, 2.0);
+    let mut owner = LagrangianDynamicScalar::new(shape, [0.7, 1.1, 0.9], usize::MAX)
+        .unwrap().with_adaptive_momentum_memory(AdaptiveLagrangianMemory {
+            coefficient: 0.15, minimum_time: 0.05,
+        }).unwrap();
+    owner.prepare(momentum_config(), scalar_config(), 0.0,
+        &rho, &velocity, &scalar, || false).unwrap().commit();
+    let (_, other_velocity, other_scalar) = field(shape, 0.1, 0.5);
+    drop(owner.prepare(momentum_config(), scalar_config(), 0.2,
+        &rho, &other_velocity, &other_scalar, || false).unwrap());
+    assert!(owner.fork_for_trial(owner.workspace_bytes() - 1).is_err());
+    let mut fork = owner.fork_for_trial(owner.workspace_bytes()).unwrap();
+    assert_eq!(fork.flow.history, owner.flow.history);
+    assert_eq!(fork.scalar.history, owner.scalar.history);
+    assert_eq!(fork.flow.flow.spacing, [0.7, 1.1, 0.9]);
+    let original = owner.prepare(momentum_config(), scalar_config(), 0.4,
+        &rho, &velocity, &scalar, || false).unwrap();
+    let copied = fork.prepare(momentum_config(), scalar_config(), 0.4,
+        &rho, &velocity, &scalar, || false).unwrap();
+    assert_eq!(original.viscosities(), copied.viscosities());
+    assert_eq!(original.diffusivities(), copied.diffusivities());
+    assert_eq!(original.momentum_memory_time_range(), copied.momentum_memory_time_range());
+    copied.commit();
+    drop(original);
+    assert_eq!(owner.accepted_time(), Some(0.0));
+    assert_eq!(fork.accepted_time(), Some(0.4));
+}
+
+#[test]
 fn g0_initial_joint_fit_matches_original_local_box_momentum_and_scalar() {
     let shape = [5, 6, 7];
     let spacing = [0.7, 1.1, 0.9];

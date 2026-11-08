@@ -15,6 +15,10 @@ use crate::sgs3::dynamic::scalar::{DynamicScalarConfig, PeriodicDynamicScalar};
 use crate::sgs3::dynamic::{DynamicSgsConfig, DynamicSgsError, PeriodicDynamicSgs};
 use std::sync::{Arc, Mutex};
 
+mod lagrangian;
+pub use lagrangian::NsfLagrangianThermalSgsConfig;
+use crate::sgs3::dynamic::lagrangian::scalar::LagrangianDynamicScalar;
+
 /// Independently fitted momentum and temperature diffusivity. Coefficient and
 /// molecular-ratio bounds are admissions, not coefficient clamps.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,18 +70,23 @@ enum DynamicState {
         normal_axis: usize,
         workspace: Arc<Mutex<ChannelWorkspace>>,
     },
+    Lagrangian {
+        config: NsfLagrangianThermalSgsConfig,
+        normal_axis: Option<usize>,
+        workspace: Arc<Mutex<LagrangianDynamicScalar>>,
+    },
 }
 
 #[derive(Clone)]
 pub(in crate::nsf3) struct DynamicTransport {
     // Each variant pairs its own controls and filter geometry. One lock around
     // the serial fit preserves Sync for the original parallel cell/face loops.
-    // The buffers are overwritten scratch, not accepted coefficients or a
-    // temporal model history. An exclusive native trial shares only this
-    // already-budgeted scratch; each fit prepares its own fields before use.
-    // Accepted coefficients stay on each grid's separate sgs_transport vector.
+    // Instantaneous variants share only overwritten filter scratch. The
+    // Lagrangian variant also owns accepted history and must fork that state
+    // for a reversible native interval. Each grid retains its own coefficients.
     state: DynamicState,
     bytes: usize,
+    sample_time: f64,
 }
 
 impl DynamicTransport {
@@ -87,8 +96,8 @@ impl DynamicTransport {
     /// and installs the actual wall velocities/scalar policies. The exclusive
     /// trial retains its own accepted `sgs_transport` and FV history, so sharing
     /// only this already-admitted scratch needs no second filter allocation.
-    /// Neither closure owns Lagrangian or time-averaged model memory; a future
-    /// history-bearing closure must supply its own transaction here.
+    /// Lagrangian history instead receives an independent bounded workspace;
+    /// only its accepted banks and scales are copied, never rejected scratch.
     pub(in crate::nsf3) fn shared_for_trial(&self) -> Result<Self, NsfError> {
         match &self.state {
             DynamicState::Periodic { workspace, .. } if workspace.is_poisoned() => {
@@ -96,6 +105,21 @@ impl DynamicTransport {
             }
             DynamicState::Channel { workspace, .. } if workspace.is_poisoned() => {
                 return Err(NsfError::Input("channel NSF workspace lock poisoned"));
+            }
+            DynamicState::Lagrangian { config, normal_axis, workspace } => {
+                let fork = workspace.lock()
+                    .map_err(|_| NsfError::Input("Lagrangian NSF workspace lock poisoned"))?
+                    .fork_for_trial(self.bytes)
+                    .map_err(NsfError::DynamicSgs)?;
+                return Ok(Self {
+                    state: DynamicState::Lagrangian {
+                        config: *config,
+                        normal_axis: *normal_axis,
+                        workspace: Arc::new(Mutex::new(fork)),
+                    },
+                    bytes: self.bytes,
+                    sample_time: self.sample_time,
+                });
             }
             _ => {}
         }
@@ -173,6 +197,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 workspace: Arc::new(Mutex::new(Workspace { momentum, heat })),
             },
             bytes,
+            sample_time: self.steps as f64,
         });
         self.refresh_dynamic_transport()?;
         Ok(self)
@@ -262,6 +287,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 workspace: Arc::new(Mutex::new(ChannelWorkspace { momentum, heat })),
             },
             bytes,
+            sample_time: self.steps as f64,
         });
         self.refresh_dynamic_transport()?;
         Ok(self)
@@ -299,7 +325,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn dynamic_thermal_sgs_config(&self) -> Option<NsfDynamicThermalSgsConfig> {
         match &self.dynamic_sgs.as_ref()?.state {
             DynamicState::Periodic { config, .. } => Some(*config),
-            DynamicState::Channel { .. } => None,
+            DynamicState::Channel { .. } | DynamicState::Lagrangian { .. } => None,
         }
     }
 
@@ -307,7 +333,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn channel_dynamic_thermal_sgs_config(&self) -> Option<NsfChannelDynamicThermalSgsConfig> {
         match &self.dynamic_sgs.as_ref()?.state {
             DynamicState::Channel { config, .. } => Some(*config),
-            DynamicState::Periodic { .. } => None,
+            DynamicState::Periodic { .. } | DynamicState::Lagrangian { .. } => None,
         }
     }
 
@@ -381,6 +407,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     material,
                     momentum.viscosities(),
                     heat.diffusivities(),
+                    config.momentum.maximum_eddy_to_molecular,
+                )
+            }
+            DynamicState::Lagrangian { config, normal_axis, workspace } => {
+                let mut workspace = workspace.lock()
+                    .map_err(|_| NsfError::Input("Lagrangian NSF workspace lock poisoned"))?;
+                let trial = self.prepare_lagrangian_trial(
+                    &mut workspace, *config, *normal_axis, dynamic.sample_time,
+                    rho, velocity, theta, || false,
+                )?;
+                self.dynamic_transport_field(
+                    rho, theta, material, trial.viscosities(), trial.diffusivities(),
                     config.momentum.maximum_eddy_to_molecular,
                 )
             }
@@ -528,6 +566,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let maximum = match &dynamic.state {
             DynamicState::Periodic { config, .. } => config.heat.maximum_diffusivity_to_molecular,
             DynamicState::Channel { config, .. } => config.heat.maximum_diffusivity_to_molecular,
+            DynamicState::Lagrangian { config, .. } => config.heat.maximum_diffusivity_to_molecular,
         };
         if !ratio.is_finite() || ratio > maximum {
             Err(NsfError::SgsHeatRatio {

@@ -343,6 +343,24 @@ impl LagrangianDynamicSgs {
         density: &[f64],
         velocity: &[[f64; 3]],
         walls: Option<[[f64; 3]; 2]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(LagrangianSgsTrial<'_>, InputScales), DynamicSgsError> {
+        self.prepare_scaled_at(config, time, density, velocity, walls, false, cancelled)
+    }
+
+    // Native owners may refresh a constitutive field after a same-time wall
+    // or force change. With zero elapsed time the accepted contractions do
+    // not advect or age; only their emission uses the current physical state.
+    // Public trajectory preparation continues to require increasing times.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_scaled_at(
+        &mut self,
+        config: LagrangianSgsConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        walls: Option<[[f64; 3]; 2]>,
+        allow_refresh: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(LagrangianSgsTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -352,7 +370,9 @@ impl LagrangianDynamicSgs {
         }
         if !time.is_finite()
             || time < 0.0
-            || self.accepted_time.is_some_and(|previous| time <= previous)
+            || self.accepted_time.is_some_and(|previous| {
+                time < previous || (!allow_refresh && time == previous)
+            })
         {
             return Err(DynamicSgsError::Invalid(
                 "finite increasing Lagrangian sample times required",
@@ -371,7 +391,8 @@ impl LagrangianDynamicSgs {
         let (scales, _) =
             self.flow
                 .prepare_contractions(density, velocity, walls, &mut cancelled)?;
-        let current_log = (scales.velocity > 0.0)
+        let current_log = (scales.velocity > 0.0
+            && (self.accepted_time.is_none() || elapsed > 0.0))
             .then(|| 2.0 * det::ln(scales.density) + 4.0 * det::ln(scales.velocity));
         let update = HistoryUpdate::new(
             &self.flow,
@@ -504,6 +525,10 @@ impl HistoryUpdate {
         memory_time: f64,
         maximum_departure_cells: f64,
     ) -> Result<Self, DynamicSgsError> {
+        // A same-time constitutive refresh has no current-source weight.
+        // Ignore that source's scale instead of risking loss of accepted
+        // history against an arbitrarily larger, but unused, current source.
+        let current_log = if initialized && elapsed == 0.0 { None } else { current_log };
         let common_log = match (previous_log, current_log) {
             (Some(a), Some(b)) => a.max(b),
             (Some(a), None) | (None, Some(a)) => a,
@@ -516,7 +541,7 @@ impl HistoryUpdate {
         // Subtracting fresh from one loses representable old history when
         // elapsed/T exceeds about 37. Evaluate the exponential independently.
         let old_weight = det::exp(-relaxation);
-        if initialized && fresh == 0.0 {
+        if initialized && elapsed > 0.0 && fresh == 0.0 {
             return Err(DynamicSgsError::Invalid(
                 "unrepresentable Lagrangian relaxation interval",
             ));

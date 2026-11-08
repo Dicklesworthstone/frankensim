@@ -16,7 +16,8 @@ use crate::sgs3::{SgsConfig, SgsError, SgsModel, eddy_viscosity};
 
 mod dynamic;
 pub(super) use dynamic::DynamicTransport;
-pub use dynamic::{NsfChannelDynamicThermalSgsConfig, NsfDynamicThermalSgsConfig};
+pub use dynamic::{NsfChannelDynamicThermalSgsConfig, NsfDynamicThermalSgsConfig,
+    NsfLagrangianThermalSgsConfig};
 
 /// Every modeling choice is explicit; there is no turbulence default.
 #[derive(Clone, Copy, Debug, PartialEq)]

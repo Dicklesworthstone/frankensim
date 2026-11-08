@@ -96,10 +96,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     ///
     /// Periodic/channel dynamic filters share only their already-budgeted,
     /// mutex-protected scratch with this exclusive trial. Every fit prepares
-    /// the current candidate fields before consuming that scratch; neither
-    /// closure has temporal model history. Accepted transport coefficients,
-    /// controls and physical reports remain separately retained on each grid.
-    /// No second filter allocation or solver is introduced. A dropped/refused
+    /// the current candidate fields before consuming that scratch. Lagrangian
+    /// filters instead copy accepted momentum/heat history into an independent
+    /// workspace, bounded by the copied cell count and the original per-owner
+    /// workspace admission; they add 264 nominal bytes per candidate cell.
+    /// Candidate native steps advance only that candidate's history. Accepted
+    /// transport coefficients, controls and reports remain separate. No second
+    /// fluid solver is introduced. A dropped/refused
     /// trial may leave scratch overwritten, as an ordinary failed native step
     /// can, but cannot publish any candidate physical/dynamic coefficient.
     /// The original wall update refits momentum/heat for the proposed boundary;

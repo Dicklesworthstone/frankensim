@@ -272,6 +272,53 @@ impl LagrangianDynamicScalar {
         self.flow.accepted_time()
     }
 
+    /// Copy accepted history for an exclusive native fluid trial. Scratch is
+    /// freshly allocated within the supplied budget; stale/rejected candidate
+    /// fields are deliberately not copied. Future preparations overwrite all
+    /// scratch before consuming it. The two trajectories never share history.
+    pub(crate) fn fork_for_trial(
+        &self,
+        maximum_bytes: usize,
+    ) -> Result<Self, DynamicSgsError> {
+        let mut fork = Self::new_geometry(
+            self.shape(),
+            self.flow.flow.spacing,
+            self.flow.flow.geometry,
+            maximum_bytes,
+        )?;
+        fork.flow.history.copy_from_slice(&self.flow.history);
+        fork.flow.accepted_time = self.flow.accepted_time;
+        fork.flow.history_log_scale = self.flow.history_log_scale;
+        fork.flow.adaptive_memory = self.flow.adaptive_memory;
+        fork.flow.accepted_memory_time_range = self.flow.accepted_memory_time_range;
+        fork.scalar.history.copy_from_slice(&self.scalar.history);
+        fork.scalar.history_log_scale = self.scalar.history_log_scale;
+        Ok(fork)
+    }
+
+    /// Native same-epoch refresh or an increasing-time candidate. Refreshes
+    /// retain the accepted physical contractions with zero transport/aging;
+    /// dropping the returned token also preserves their exact representation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_or_refresh(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        config: LagrangianScalarConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: Option<[[f64; 3]; 2]>,
+        scalar: &[f64],
+        scalar_walls: Option<[ScalarWall; 2]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LagrangianScalarTrial<'_>, DynamicSgsError> {
+        self.prepare_scaled_at(
+            momentum, config, time, density, velocity, wall_velocity, scalar,
+            scalar_walls, true, cancelled,
+        )
+        .map(|(trial, _)| trial)
+    }
+
     /// Prepare both fits from the same physical fields at one increasing time.
     /// The first sample uses each original local-box fit. Subsequent samples
     /// transport and relax each signed contraction pair independently.
@@ -352,6 +399,26 @@ impl LagrangianDynamicScalar {
         wall_velocity: Option<[[f64; 3]; 2]>,
         scalar: &[f64],
         scalar_walls: Option<[ScalarWall; 2]>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(LagrangianScalarTrial<'_>, InputScales), DynamicSgsError> {
+        self.prepare_scaled_at(
+            momentum, config, time, density, velocity, wall_velocity, scalar,
+            scalar_walls, false, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_scaled_at(
+        &mut self,
+        momentum: LagrangianSgsConfig,
+        config: LagrangianScalarConfig,
+        time: f64,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        wall_velocity: Option<[[f64; 3]; 2]>,
+        scalar: &[f64],
+        scalar_walls: Option<[ScalarWall; 2]>,
+        allow_refresh: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(LagrangianScalarTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
@@ -386,12 +453,13 @@ impl LagrangianDynamicScalar {
                 .normalize_with_walls(scalar, scalar_walls, &mut cancelled)?;
         let previous = self.flow.accepted_time();
         let elapsed = previous.map_or(0.0, |t| time - t);
-        let (momentum, scales) = self.flow.prepare_scaled_with_walls(
+        let (momentum, scales) = self.flow.prepare_scaled_at(
             momentum,
             time,
             density,
             velocity,
             wall_velocity,
+            allow_refresh,
             &mut cancelled,
         )?;
         let flow = &momentum.owner.flow;

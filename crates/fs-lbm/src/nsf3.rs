@@ -89,6 +89,7 @@ mod sgs;
 mod vorticity;
 pub use sgs::{
     NsfChannelDynamicThermalSgsConfig, NsfDynamicThermalSgsConfig, NsfSgsConfig, NsfSgsTransport,
+    NsfLagrangianThermalSgsConfig,
 };
 mod open;
 pub use open::{MAX_NSF_RESERVOIR_APERTURES, NsfOpenState, NsfReservoirAperture,
@@ -1645,6 +1646,26 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         cancelled: &mut impl FnMut() -> bool,
         wall_exchange: Option<thermal_wall_trial::ThermalWallStepRecord<'_>>,
     ) -> Result<EnergyLedger, NsfError> {
+        if let Some(dynamic) = &mut self.dynamic_sgs {
+            dynamic.begin_native_step(self.steps)?;
+        }
+        let result = self.step_with_wall_exchange_inner(
+            next_body_acceleration, cancelled, wall_exchange,
+        );
+        if let Some(dynamic) = &mut self.dynamic_sgs {
+            // Failed candidates retain the old physical clock. Setters and
+            // retries therefore cannot inherit a rejected endpoint epoch.
+            dynamic.finish_native_step(self.steps);
+        }
+        result
+    }
+
+    fn step_with_wall_exchange_inner(
+        &mut self,
+        next_body_acceleration: Option<Vec<body_force::BodyAcceleration>>,
+        cancelled: &mut impl FnMut() -> bool,
+        wall_exchange: Option<thermal_wall_trial::ThermalWallStepRecord<'_>>,
+    ) -> Result<EnergyLedger, NsfError> {
         body_force::checkpoint(cancelled)?;
         if wall_exchange.as_ref().is_some_and(|record| record.previous_flux.len() != self.thermal_walls.len()) {
             return Err(NsfError::Input("thermal wall exchange history does not match its faces"));
@@ -1960,8 +1981,18 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         )?;
         // The next collision must use the actual accepted force-corrected
         // velocity and source state, after the final temperature corrector.
-        let transport_new =
-            self.sgs_field(&rho1, &u1, &th1, &material_new, endpoint_faces.as_ref())?;
+        // Keep the final history token through every remaining work/energy
+        // admission and cancellation point. Its Arc lives independently of
+        // self, so physical publication can follow without a second fit or
+        // copying any history arrays. Earlier corrector/probe fits were dropped.
+        let retained_dynamic = self.dynamic_sgs.clone();
+        let mut lagrangian_workspace = retained_dynamic.as_ref()
+            .map(|dynamic| dynamic.lagrangian_workspace())
+            .transpose()?.flatten();
+        let (transport_new, pending_sgs_history) = self.prepare_endpoint_sgs(
+            lagrangian_workspace.as_deref_mut(), &rho1, &u1, &th1,
+            &material_new, endpoint_faces.as_ref(), &mut *cancelled,
+        )?;
         body_force::checkpoint(cancelled)?;
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
@@ -2142,6 +2173,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             None => None,
         };
         body_force::checkpoint(cancelled)?;
+        if let Some(history) = pending_sgs_history {
+            history.commit();
+        }
         if let (Some(record), Some(exchange)) = (wall_exchange, local_exchange) {
             *record.exchanges = exchange;
             *record.next_flux = wall_heat_flux;
