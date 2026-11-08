@@ -21,7 +21,14 @@ diagnoses, never timeout mysteries).
   `apply_transpose` (defaulting to `apply` — correct ONLY for
   symmetric operators). `CsrOp::symmetric/general` adapts assembled
   matrices (general materializes the transpose once,
-  deterministically).
+  deterministically). Object-safe `apply_controlled` and
+  `apply_transpose_controlled` accept a borrowed cancellation predicate. Their
+  defaults check around the existing action; `CsrOp` polls during sparse work
+  through the checked fs-sparse kernel and publishes output atomically.
+  `OperatorApplyError` distinguishes cancellation, shape overflow/mismatch and
+  temporary-allocation refusal. Callers must discard output on any refusal from
+  an arbitrary operator; only adapters documenting staging promise unchanged
+  output. Ordinary `apply` remains allocation-free for CSR.
   **NO-CLAIM: the crate does not verify operator symmetry.** There is
   no symmetry probe anywhere in fs-solver, so nothing detects a client
   `LinearOp` that inherits the default `apply_transpose` on a
@@ -66,8 +73,8 @@ diagnoses, never timeout mysteries).
 - `FgmresState::run_cancellable` and
   `NewtonKrylovState::run_cancellable` — Cx-aware entry points returning
   `CancellableSolveReport<R>`. `SolverRunProgress` distinguishes completed
-  work from a cancellation pause, numerical callback panic, or changed
-  dimension. The ordinary numerical report describes only the last
+  work from a cancellation pause, numerical callback panic, changed
+  dimension, or typed `OperatorFailed` refusal. The ordinary numerical report describes only the last
   committed checkpoint; callers must inspect progress before treating it as
   the outcome of new work. `SolverCallbackCounts` reports every numerical
   callback actually invoked, including discarded work. These per-invocation
@@ -304,7 +311,12 @@ predicate or numerical callback is invoked during that solve. Predicates
 must be bounded and nonpanicking; their failures are not numerical callback
 faults and are not caught.
 
-Individual callbacks and vector reductions are not preemptible. The
+FGMRES passes its latched predicate into `LinearOp::apply_controlled`.
+`CsrOp` polls within sparse rows, including very wide rows; allocation and the
+final transactional output copy remain non-preemptible. An operator's typed
+shape/allocation refusal discards the unfinished cycle and remains visible as
+`OperatorFailed`, rather than being mislabeled as cancellation or convergence.
+Other individual callbacks and vector reductions are not preemptible. The
 constructor's initial residual evaluation remains outside the Cx entry
 point. Callback panic containment requires `panic=unwind`, does not suppress
 the caller's panic hook, and does not undo external side effects. These

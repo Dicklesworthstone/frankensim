@@ -334,8 +334,12 @@ impl EnthalpyBackwardEuler<'_, '_> {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn solve_with_temperature_contacts(
-        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
-        contacts: &TemperatureContacts<'_, '_>, old_h: &[f64], dt_s: f64,
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &TemperatureContacts<'_, '_>,
+        old_h: &[f64],
+        dt_s: f64,
         config: ContactEnthalpyNewtonConfig,
         pointwise_radiation: Option<PointwiseBoundary<'_>>,
         source_j: Option<&[fs_math::dd::Dd]>,
@@ -421,6 +425,9 @@ impl EnthalpyBackwardEuler<'_, '_> {
             SolverRunProgress::CallbackPanicked(callback) => {
                 return Err(EnthalpyError::SolverCallbackPanicked(callback));
             }
+            SolverRunProgress::OperatorFailed(error) => {
+                return Err(EnthalpyError::SolverOperatorFailed(error));
+            }
             SolverRunProgress::DimensionMismatch { expected, actual } => {
                 return Err(EnthalpyError::Newton(NewtonError::Dimension {
                     problem: actual,
@@ -447,4 +454,3 @@ impl EnthalpyBackwardEuler<'_, '_> {
         Ok((newton.x, run.report, physical.contacts))
     }
 }
-

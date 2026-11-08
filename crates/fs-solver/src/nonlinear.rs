@@ -5,12 +5,12 @@
 //! Callers provide independent linear-system verification before selecting a
 //! named Krylov method.
 
-use crate::{LinearOp, SolveReport, StallDiagnosis, dot, norm2};
+use crate::{LinearOp, OperatorApplyError, SolveReport, StallDiagnosis, dot, norm2};
 use fs_exec::Cx;
 use fs_sparse::precond::Precond;
 use std::cell::{Cell, RefCell};
 use std::fmt;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
 /// Numerical callback whose unwind interrupted a cancellable solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +35,9 @@ pub enum SolverRunProgress {
     Paused,
     /// A numerical callback unwound; the unfinished work was discarded.
     CallbackPanicked(SolverCallback),
+    /// A controlled operator refused its shape or temporary allocation.
+    /// This is distinct from cancellation and from a numerical breakdown.
+    OperatorFailed(OperatorApplyError),
     /// The supplied operator/problem no longer matches the retained state.
     DimensionMismatch {
         /// Dimension retained in the checkpoint.
@@ -75,6 +78,7 @@ struct RunControl<'a> {
     cancelled: Option<RefCell<&'a mut dyn FnMut() -> bool>>,
     progress: Cell<SolverRunProgress>,
     callbacks: Cell<SolverCallbackCounts>,
+    polling: Cell<bool>,
 }
 
 impl<'a> RunControl<'a> {
@@ -83,6 +87,7 @@ impl<'a> RunControl<'a> {
             cancelled: cancelled.map(RefCell::new),
             progress: Cell::new(SolverRunProgress::Complete),
             callbacks: Cell::new(SolverCallbackCounts::default()),
+            polling: Cell::new(false),
         }
     }
 
@@ -93,7 +98,14 @@ impl<'a> RunControl<'a> {
         if self
             .cancelled
             .as_ref()
-            .is_some_and(|cancelled| cancelled.borrow_mut()())
+            .is_some_and(|cancelled| {
+                // A predicate panic must retain its caller-owned unwind even
+                // when the poll occurs inside a controlled operator callback.
+                self.polling.set(true);
+                let requested = cancelled.borrow_mut()();
+                self.polling.set(false);
+                requested
+            })
         {
             self.progress.set(SolverRunProgress::Paused);
             return false;
@@ -117,7 +129,10 @@ impl<'a> RunControl<'a> {
         // entry points contain numerical callback unwinds and never publish their
         // partially written vectors. They cannot undo external side effects.
         if self.cancelled.is_some() {
-            if catch_unwind(AssertUnwindSafe(callback)).is_err() {
+            if let Err(payload) = catch_unwind(AssertUnwindSafe(callback)) {
+                if self.polling.get() {
+                    resume_unwind(payload);
+                }
                 self.progress.set(SolverRunProgress::CallbackPanicked(role));
                 return false;
             }
@@ -125,6 +140,27 @@ impl<'a> RunControl<'a> {
             callback();
         }
         self.poll()
+    }
+
+    fn invoke_operator<A: LinearOp>(
+        &self,
+        role: SolverCallback,
+        operator: &A,
+        x: &[f64],
+        output: &mut [f64],
+    ) -> bool {
+        if self.cancelled.is_none() {
+            return self.invoke(role, || operator.apply(x, output));
+        }
+        self.invoke(role, || {
+            let result = operator.apply_controlled(x, output, &mut || !self.poll());
+            if let Err(error) = result {
+                self.progress.set(match error {
+                    OperatorApplyError::Interrupted => SolverRunProgress::Paused,
+                    other => SolverRunProgress::OperatorFailed(other),
+                });
+            }
+        })
     }
 
     fn finish<R>(&self, report: R) -> CancellableSolveReport<R> {
@@ -641,9 +677,11 @@ impl FgmresState {
     /// history. Earlier completed cycles remain committed. Resume with a fresh
     /// context and the same pure inputs restarts only the unfinished cycle.
     ///
-    /// Callbacks and individual vector reductions are not preemptible. Spent
-    /// callbacks are reported separately, including work that must be repeated
-    /// on resume. Panics are contained only when built with unwind support.
+    /// Operators receive the cooperative [`LinearOp::apply_controlled`] hook;
+    /// [`crate::CsrOp`] checks within sparse rows. Other callbacks and vector
+    /// reductions remain non-preemptible unless their implementation cooperates.
+    /// Shape/allocation refusals are reported as [`SolverRunProgress::OperatorFailed`].
+    /// Spent callbacks include discarded work. Panics require unwind support.
     pub fn run_cancellable<A: LinearOp, P: FlexiblePreconditioner>(
         &mut self,
         operator: &A,
@@ -739,7 +777,7 @@ impl FgmresState {
         let mut applied = vec![0.0; n];
         for _ in 0..max_cycles {
             applied.fill(f64::NAN);
-            if !control.invoke(operator_role, || operator.apply(&self.x, &mut applied)) {
+            if !control.invoke_operator(operator_role, operator, &self.x, &mut applied) {
                 break;
             }
             let mut residual: Vec<f64> = rhs
@@ -781,7 +819,7 @@ impl FgmresState {
                     break;
                 }
                 let mut w = vec![f64::NAN; n];
-                if !control.invoke(operator_role, || operator.apply(&z, &mut w)) {
+                if !control.invoke_operator(operator_role, operator, &z, &mut w) {
                     break;
                 }
                 for (row, vector) in basis.iter().enumerate() {
@@ -862,7 +900,7 @@ impl FgmresState {
                 }
             }
             applied.fill(f64::NAN);
-            if !control.invoke(operator_role, || operator.apply(&self.x, &mut applied)) {
+            if !control.invoke_operator(operator_role, operator, &self.x, &mut applied) {
                 break;
             }
             let true_residual: Vec<f64> = rhs

@@ -8,7 +8,9 @@
 //!   (the fs-time `AdaptiveState` pattern, tested the same way).
 //! - CANCELLABLE: iteration granularity — every state is complete
 //!   between iterations. FGMRES and Newton additionally accept a Cx,
-//!   poll numerical callbacks, and discard interrupted staged work.
+//!   poll numerical callbacks, and discard interrupted staged work. FGMRES
+//!   also forwards cancellation into cooperative operators; CsrOp polls
+//!   within sparse rows while preserving all-or-nothing output.
 //! - DETERMINISTIC: all inner products go through the fixed-shape
 //!   chunked reduction (fs-tilelang's combiner — shape depends on
 //!   length only, never on threads or tiers).
@@ -55,7 +57,7 @@ pub use nonlinear::{
     SourceCompatibility, SymmetryEvidence, TrustRegionConfig, VerifiedLinearSystem,
     admit_linear_solver, verify_linear_system,
 };
-pub use op::{CsrOp, LinearOp};
+pub use op::{CsrOp, LinearOp, OperatorApplyError};
 pub use pmg::{MaskedTensorOp, PMultigrid};
 pub use stokes::{StokesBlockDiag, StokesOp, StokesSystem};
 

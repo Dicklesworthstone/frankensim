@@ -190,12 +190,11 @@ pub enum EnthalpyError {
     NotConverged(NewtonReport),
     /// Independent physical nodal residual exceeds its unchanged local gate.
     /// This is not a Newton stall or a whole-domain energy defect.
-    EndpointResidual {
-        residual_j: f64,
-        tolerance_j: f64,
-    },
+    EndpointResidual { residual_j: f64, tolerance_j: f64 },
     /// A nonlinear callback unwound; the incomplete Newton attempt was discarded.
     SolverCallbackPanicked(SolverCallback),
+    /// A controlled linear action refused its shape or temporary allocation.
+    SolverOperatorFailed(fs_solver::OperatorApplyError),
     /// Independently integrated input did not balance the published storage.
     EnergyBalance {
         /// Actual storage minus net external input, joules.
@@ -256,6 +255,9 @@ impl fmt::Display for EnthalpyError {
                 formatter,
                 "physical enthalpy endpoint residual {residual_j} J exceeds {tolerance_j} J"
             ),
+            Self::SolverOperatorFailed(error) => {
+                write!(formatter, "enthalpy operator refused; step discarded: {error}")
+            }
             Self::SolverCallbackPanicked(callback) => {
                 write!(
                     formatter,
@@ -889,8 +891,10 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn solve_newton_from<'s>(
-        &'s self, config: EnthalpyStepConfig,
-        source_j: Option<&'s [fs_math::dd::Dd]>, initial_guess: Option<&[f64]>,
+        &'s self,
+        config: EnthalpyStepConfig,
+        source_j: Option<&'s [fs_math::dd::Dd]>,
+        initial_guess: Option<&[f64]>,
     ) -> Result<(Vec<f64>, NewtonReport), EnthalpyError> {
         // Resolve history and the initial tangent before shared Newton admits it.
         // A chart/domain refusal here retains its original typed error.
@@ -919,6 +923,9 @@ impl StepContext<'_, '_, '_, '_> {
                 }
                 SolverRunProgress::CallbackPanicked(callback) => {
                     return Err(EnthalpyError::SolverCallbackPanicked(callback));
+                }
+                SolverRunProgress::OperatorFailed(error) => {
+                    return Err(EnthalpyError::SolverOperatorFailed(error));
                 }
                 SolverRunProgress::DimensionMismatch { expected, actual } => {
                     return Err(EnthalpyError::Newton(NewtonError::Dimension {
@@ -1655,4 +1662,3 @@ fn poll(cx: &Cx<'_>, at: usize) -> Result<(), EnthalpyError> {
         })
     })
 }
-

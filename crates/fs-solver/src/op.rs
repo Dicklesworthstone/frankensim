@@ -2,10 +2,74 @@
 //! APPLIES, never entries — assembled matrices enter only through the
 //! [`CsrOp`] adapter (and the p-MG coarse level).
 
-use fs_sparse::{Csr, ops};
+use fs_sparse::{Csr, SparseApplyError, ops};
+use std::fmt;
 
 pub mod multilevel;
 pub mod two_level;
+
+/// A controlled operator action refused before the solver commits its work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorApplyError {
+    /// The cooperative cancellation predicate requested a pause.
+    Interrupted,
+    /// The operator's dense shape cannot be represented by `usize`.
+    DimensionOverflow,
+    /// An input or output buffer does not match the operator's shape.
+    DimensionMismatch {
+        /// `"input"` or `"output"`.
+        buffer: &'static str,
+        /// Required scalar length.
+        expected: usize,
+        /// Supplied scalar length.
+        actual: usize,
+    },
+    /// The operator could not reserve its temporary output.
+    Allocation,
+}
+
+impl fmt::Display for OperatorApplyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Interrupted => f.write_str("operator apply interrupted"),
+            Self::DimensionOverflow => f.write_str("operator apply dimensions overflow usize"),
+            Self::DimensionMismatch {
+                buffer,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "operator apply {buffer} length: expected {expected}, got {actual}"
+                )
+            }
+            Self::Allocation => {
+                f.write_str("operator apply could not reserve its temporary output")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OperatorApplyError {}
+
+impl From<SparseApplyError<()>> for OperatorApplyError {
+    fn from(error: SparseApplyError<()>) -> Self {
+        match error {
+            SparseApplyError::Interrupted(()) => Self::Interrupted,
+            SparseApplyError::DimensionOverflow => Self::DimensionOverflow,
+            SparseApplyError::DimensionMismatch {
+                buffer,
+                expected,
+                actual,
+            } => Self::DimensionMismatch {
+                buffer,
+                expected,
+                actual,
+            },
+            SparseApplyError::Allocation => Self::Allocation,
+        }
+    }
+}
 
 /// A linear operator with its transpose — the adjoint hook is part of
 /// the trait, not an afterthought, so every solver built on it is
@@ -15,6 +79,31 @@ pub trait LinearOp {
     fn n(&self) -> usize;
     /// y = A·x.
     fn apply(&self, x: &[f64], y: &mut [f64]);
+    /// Cooperative action for cancellable solvers. `true` requests a pause.
+    ///
+    /// The default checks before and after the existing action. Override to
+    /// poll during long kernels. The caller must discard `y` on refusal:
+    /// arbitrary operators need not make their partial output transactional.
+    /// [`CsrOp`] does stage its output and checks within sparse rows.
+    ///
+    /// # Errors
+    /// Returns interruption or a structured operator refusal. The predicate
+    /// must be bounded and must not panic.
+    fn apply_controlled(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), OperatorApplyError> {
+        if cancelled() {
+            return Err(OperatorApplyError::Interrupted);
+        }
+        self.apply(x, y);
+        if cancelled() {
+            return Err(OperatorApplyError::Interrupted);
+        }
+        Ok(())
+    }
     /// y = Aᵀ·x. The default forwards to `apply` — CORRECT ONLY for
     /// symmetric operators; nonsymmetric implementations MUST override.
     ///
@@ -32,6 +121,28 @@ pub trait LinearOp {
     /// explicit ⟨Av, w⟩ = ⟨v, Aᵀw⟩ probe before relying on it.
     fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
         self.apply(x, y);
+    }
+
+    /// Cooperative transpose action, with the contract of
+    /// [`Self::apply_controlled`]. The default preserves an implementation's
+    /// existing transpose action; it does not assume symmetry.
+    ///
+    /// # Errors
+    /// Returns interruption or a structured operator refusal.
+    fn apply_transpose_controlled(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), OperatorApplyError> {
+        if cancelled() {
+            return Err(OperatorApplyError::Interrupted);
+        }
+        self.apply_transpose(x, y);
+        if cancelled() {
+            return Err(OperatorApplyError::Interrupted);
+        }
+        Ok(())
     }
 }
 
@@ -78,5 +189,29 @@ impl LinearOp for CsrOp {
             Some(at) => at.spmv(x, y),
             None => self.a.spmv(x, y),
         }
+    }
+
+    fn apply_controlled(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), OperatorApplyError> {
+        self.a
+            .spmv_with_checkpoint(x, y, || if cancelled() { Err(()) } else { Ok(()) })
+            .map_err(OperatorApplyError::from)
+    }
+
+    fn apply_transpose_controlled(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<(), OperatorApplyError> {
+        self.at
+            .as_ref()
+            .unwrap_or(&self.a)
+            .spmv_with_checkpoint(x, y, || if cancelled() { Err(()) } else { Ok(()) })
+            .map_err(OperatorApplyError::from)
     }
 }

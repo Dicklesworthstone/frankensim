@@ -687,7 +687,6 @@ impl EnthalpyStepLinearization<'_> {
 }
 
 impl EnthalpyTangent<'_, '_> {
-
     fn action(
         &self,
         cx: &Cx<'_>,
@@ -829,6 +828,9 @@ impl EnthalpyTangent<'_, '_> {
                     }
                     SolverRunProgress::CallbackPanicked(callback) => {
                         return Err(EnthalpyError::SolverCallbackPanicked(callback).into());
+                    }
+                    SolverRunProgress::OperatorFailed(error) => {
+                        return Err(EnthalpyError::SolverOperatorFailed(error).into());
                     }
                     SolverRunProgress::DimensionMismatch { .. } => {
                         return Err(EnthalpyAdjointError::InvalidInput(
@@ -1138,4 +1140,3 @@ fn finite(value: f64) -> Result<f64, EnthalpyAdjointError> {
         Err(EnthalpyAdjointError::NonFiniteArithmetic)
     }
 }
-
