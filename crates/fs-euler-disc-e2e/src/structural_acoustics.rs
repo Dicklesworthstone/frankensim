@@ -79,12 +79,14 @@ use crate::{
 mod prony;
 mod receiver;
 mod retarded_clock;
-pub use receiver::{AcousticReceiverTrajectory, AcousticWorldReceiver};
-use retarded_clock::{RetardedClockError, bisect_root_bracket};
 pub use prony::{
     StructuralPronyAudioBudget, StructuralPronyAudioError, StructuralPronyAudioModel,
     StructuralPronyAudioRequest, StructuralPronyPressureFrame,
 };
+pub use receiver::{AcousticReceiverTrajectory, AcousticWorldReceiver};
+#[cfg(test)]
+use retarded_clock::bisect_root_bracket;
+use retarded_clock::{RetardedClockError, RetardedEmissionCursor};
 
 /// Schema version of the integrated structural modal artifact.
 pub const STRUCTURAL_MODAL_BASIS_SCHEMA_VERSION: u32 = 1;
@@ -115,7 +117,7 @@ const RIGID_DISC_BROADBAND_SOURCE_IDENTITY_DOMAIN: &str =
 const RIGID_DISC_BROADBAND_ARTIFACT_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.rigid-disc-broadband-artifact.v1";
 const RETARDED_FAR_FIELD_SIGNAL_IDENTITY_DOMAIN: &str =
-    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v2";
+    "org.frankensim.fs-euler-disc-e2e.retarded-far-field-signal.v3";
 const MODAL_ACOUSTIC_RADIATION_IDENTITY_DOMAIN: &str =
     "org.frankensim.fs-euler-disc-e2e.modal-acoustic-radiation.v1";
 const MODAL_ACOUSTIC_DIRECTIVITY_IDENTITY_DOMAIN: &str =
@@ -561,7 +563,8 @@ pub struct RetardedFarFieldObserverControls {
     pub maximum_surface_mach: f64,
     /// Absolute source-emission and receiver-window bisection tolerance [s].
     pub root_time_tolerance_s: f64,
-    /// Maximum deterministic bisection iterations.
+    /// Maximum deterministic bisection iterations per root. A cursor query may
+    /// additionally evaluate up to four endpoints, including checked fallback.
     pub maximum_root_iterations: u32,
     /// Lanczos radius; version one requires exactly eight (16 taps).
     pub interpolation_radius_frames: u8,
@@ -5489,6 +5492,8 @@ pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
 /// Lanczos reconstruction is not an antialias filter for time compression.
 /// All observers are validated and synthesized into private candidates before
 /// any signal is returned.
+/// Consecutive queries retain one enclosing emission bracket per receiver;
+/// verified Doppler-rate predictions narrow the next bounded root solve.
 pub fn synthesize_retarded_far_field_world_observers(
     source: &StructuralBroadbandRadiationArtifact,
     stem: &StructuralBroadbandSourceStem,
@@ -5534,7 +5539,13 @@ pub fn synthesize_retarded_far_field_world_observers(
             requested: capacity,
         }
     })?;
-    for _ in observers {
+    let mut emission_cursors = Vec::new();
+    emission_cursors
+        .try_reserve_exact(observers.len())
+        .map_err(|_| StructuralModalBasisError::PressureCapacity {
+            requested: observers.len(),
+        })?;
+    for observer in observers {
         let mut observer_pressure = Vec::new();
         observer_pressure
             .try_reserve_exact(frame_count)
@@ -5542,6 +5553,13 @@ pub fn synthesize_retarded_far_field_world_observers(
                 requested: capacity,
             })?;
         pressure.push(observer_pressure);
+        emission_cursors.push(RetardedEmissionCursor::new(
+            [first_emission_s, last_emission_s],
+            maximum_retarded_source_time_rate(
+                controls.maximum_surface_mach,
+                observer.maximum_mach(),
+            ),
+        ));
     }
     let mut coefficient_scratch = vec![0.0; stem.channels.len()];
     let mut complex_scratch = vec![C64::ZERO; stem.channels.len()];
@@ -5558,10 +5576,10 @@ pub fn synthesize_retarded_far_field_world_observers(
                 &timeline,
                 reception_position,
                 arrival_s,
-                first_emission_s,
-                last_emission_s,
+                &mut emission_cursors[observer_index],
                 source.sound_speed_m_s,
                 controls,
+                cx,
             )?;
             // Continuous pose-speed admission already covers this root.
             // Interpolated momenta are not derivatives of the sampled pose.
@@ -5821,27 +5839,20 @@ fn validate_retarded_sampling(
         || controls.source_bandwidth_hz > 0.5 * f64::from(source_rate_hz)
         || !controls.receiver_bandwidth_hz.is_finite()
         || controls.receiver_bandwidth_hz < 0.0
-        || controls.receiver_bandwidth_hz
-            >= 0.5 * f64::from(controls.output_sample_rate_hz)
+        || controls.receiver_bandwidth_hz >= 0.5 * f64::from(controls.output_sample_rate_hz)
     {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "retarded source and receiver bandwidths must fit their explicit sample clocks",
         });
     }
-    // Round outward; exact stationary/DC cases retain their original bandwidth.
-    let source_compressed_hz = if controls.maximum_surface_mach == 0.0
-        || controls.source_bandwidth_hz == 0.0
-    {
+    // The same outward clock-rate bound controls bandwidth and the next
+    // emission bracket; neither consumer invents a separate motion estimate.
+    let maximum_rate =
+        maximum_retarded_source_time_rate(controls.maximum_surface_mach, maximum_receiver_mach);
+    let required_hz = if maximum_rate == 1.0 || controls.source_bandwidth_hz == 0.0 {
         controls.source_bandwidth_hz
     } else {
-        (controls.source_bandwidth_hz
-            / (1.0 - controls.maximum_surface_mach).next_down())
-        .next_up()
-    };
-    let required_hz = if maximum_receiver_mach == 0.0 || source_compressed_hz == 0.0 {
-        source_compressed_hz
-    } else {
-        (source_compressed_hz * (1.0 + maximum_receiver_mach).next_up()).next_up()
+        (controls.source_bandwidth_hz * maximum_rate).next_up()
     };
     if controls.receiver_bandwidth_hz < required_hz {
         return Err(StructuralModalBasisError::InvalidRequest {
@@ -5849,6 +5860,19 @@ fn validate_retarded_sampling(
         });
     }
     Ok(())
+}
+
+fn maximum_retarded_source_time_rate(source_mach: f64, receiver_mach: f64) -> f64 {
+    let source_rate = if source_mach == 0.0 {
+        1.0
+    } else {
+        (1.0 / (1.0 - source_mach).next_down()).next_up()
+    };
+    if receiver_mach == 0.0 {
+        source_rate
+    } else {
+        (source_rate * (1.0 + receiver_mach).next_up()).next_up()
+    }
 }
 
 // Output cells use the same physical epoch as the stem, but have their OWN
@@ -5999,19 +6023,25 @@ fn retarded_emission(
     timeline: &TimelineResampler<'_>,
     observer: AcousticWorldObserver,
     arrival_s: f64,
-    low: f64,
-    high: f64,
+    cursor: &mut RetardedEmissionCursor,
     sound_speed_m_s: f64,
     controls: RetardedFarFieldObserverControls,
+    cx: &Cx<'_>,
 ) -> Result<(f64, Pose, Vec3, f64), StructuralModalBasisError> {
-    let emission_s = bisect_retarded_emission_time(
-        arrival_s,
-        low,
-        high,
-        controls.root_time_tolerance_s,
-        controls.maximum_root_iterations,
-        |time_s| arrival_time(timeline, observer, time_s, sound_speed_m_s),
-    )?;
+    let [low, high] = cursor
+        .solve(
+            arrival_s,
+            controls.root_time_tolerance_s,
+            controls.maximum_root_iterations,
+            |time_s| {
+                cx.checkpoint()
+                    .map_err(|_| StructuralModalBasisError::Cancelled)?;
+                arrival_time(timeline, observer, time_s, sound_speed_m_s)
+                    .map(|arrival| arrival - arrival_s)
+            },
+        )
+        .map_err(retarded_clock_error)?;
+    let emission_s = if low == high { low } else { 0.5 * (low + high) };
     let pose = timeline.pose(emission_s)?;
     let (offset, radius_m) = observer_vector(observer, pose.position_world());
     if !(radius_m > 0.0 && radius_m.is_finite()) {
@@ -6022,6 +6052,7 @@ fn retarded_emission(
     Ok((emission_s, pose, offset.scale(radius_m.recip()), radius_m))
 }
 
+#[cfg(test)]
 fn bisect_retarded_emission_time(
     arrival_s: f64,
     low: f64,
@@ -8206,6 +8237,71 @@ mod tests {
         assert!((out[0] - 17.0).abs() < 1.0e-13);
         let y00 = 0.5 / det::sqrt(core::f64::consts::PI);
         assert!(((out[0] * y00 / radius_m) * radius_m - out[0] * y00).abs() < 1.0e-13);
+    }
+
+    #[test]
+    fn retarded_cursor_preserves_actual_stem_interpolation_and_far_field_pressure() {
+        let stem = StructuralBroadbandSourceStem {
+            start_time_s: 0.0,
+            sample_rate_hz: 8_192,
+            channels: vec![RealTesseralChannel { l: 0, signed_m: 0 }],
+            coefficients: (0..4_096)
+                .map(|frame| {
+                    FarFieldSourceCoefficientPaM(
+                        (core::f64::consts::TAU * 128.0 * f64::from(frame + 1) / 8_192.0).sin(),
+                    )
+                })
+                .collect(),
+            authority: BroadbandRadiationAuthority::EstimateOnly,
+            source_identity: ContentHash([1; 32]),
+            structural_basis_identity: ContentHash([2; 32]),
+        };
+        let controls = RetardedFarFieldObserverControls {
+            output_sample_rate_hz: 96_000,
+            source_bandwidth_hz: 128.0,
+            receiver_bandwidth_hz: 256.0,
+            maximum_surface_mach: 0.1,
+            ..retarded_test_controls()
+        };
+        validate_retarded_sampling(stem.sample_rate_hz, 0.1, controls).unwrap();
+        let interval = retarded_emission_window(&stem);
+        let mut cursor = RetardedEmissionCursor::new(
+            interval,
+            maximum_retarded_source_time_rate(controls.maximum_surface_mach, 0.1),
+        );
+        for frame in 0..512 {
+            let reception = 0.5 + f64::from(frame) / 96_000.0;
+            let radius = |emission: f64| 100.0 - 34.0 * reception - 17.0 * emission;
+            let arrival = |emission: f64| emission + radius(emission) / 340.0;
+            let reference = bisect_retarded_emission_time(
+                reception,
+                interval[0],
+                interval[1],
+                controls.root_time_tolerance_s,
+                controls.maximum_root_iterations,
+                |time| Ok(arrival(time)),
+            )
+            .unwrap();
+            let bracket = cursor
+                .solve(
+                    reception,
+                    controls.root_time_tolerance_s,
+                    controls.maximum_root_iterations,
+                    |time| Ok::<_, StructuralModalBasisError>(arrival(time) - reception),
+                )
+                .unwrap();
+            let emission = 0.5 * (bracket[0] + bracket[1]);
+            let pressure = |time| {
+                let mut coefficients = [0.0];
+                interpolate_stem_lanczos8(&stem, time, &mut coefficients).unwrap();
+                let far =
+                    evaluate_real_tesseral(0, &[C64::from_re(coefficients[0])], [1.0, 0.0, 0.0])
+                        .unwrap();
+                far.re / radius(time)
+            };
+            assert!((emission - reference).abs() <= controls.root_time_tolerance_s);
+            assert!((pressure(emission) - pressure(reference)).abs() < 1.0e-10);
+        }
     }
 
     #[test]

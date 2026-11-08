@@ -1779,6 +1779,16 @@ same quiescent medium, with no extrapolation or mechanics feedback.
 Frame zero is explicitly at the closing boundary `start + 1/fs`. The receiver
 is sampled once at reception time `t` and held fixed during the source root:
 deterministic bisection solves `tau + |x_receiver(t)-X(tau)|/c = t`.
+The v3 physical observer retains one enclosing emission bracket per receiver.
+The same outward two-motion rate used by bandwidth admission predicts the next
+bracket; both endpoint signs must validate before it is used. Missed predictions,
+repeated times and backward queries fall back to the full finite source interval.
+Checked endpoint values are reused, exact endpoint roots terminate immediately,
+and each solve makes at most the declared bisection cap plus four actual root-residual
+queries, including fallback probes. Every actual query checks cancellation, and
+failed roots leave the cursor unchanged. Narrower stopping brackets preserve the
+same source-time tolerance but need not preserve final sample bits, so the existing
+physical pressure identity domain advances to v3. No source history is extrapolated.
 The finite reception horizon is intersected with the actual wavefronts from
 both complete source-stencil endpoints by monotone root solves. Inward root
 brackets prevent a tolerated endpoint error from admitting missing source
