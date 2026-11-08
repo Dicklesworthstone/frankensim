@@ -42,6 +42,59 @@ pub enum TemperatureContactCoordinates {
     TwoSided([String; 2]),
 }
 
+impl TemperatureContactCoordinates {
+    pub(crate) fn axes(&self) -> &[String] {
+        match self {
+            Self::Mean(axis) => std::slice::from_ref(axis),
+            Self::TwoSided(axes) => axes.as_slice(),
+        }
+    }
+
+    pub(crate) fn admit_reference(
+        &self, name: &str, point: &QueryPoint,
+    ) -> Result<(), ConductionError> {
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature, ValueForm::Static,
+        ));
+        let axes = self.axes();
+        for (i, axis) in axes.iter().enumerate() {
+            if axis.trim().is_empty() || axes[..i].contains(axis) {
+                return Err(invalid(name, "contact temperature coordinates must be nonblank and distinct"));
+            }
+            let descriptor_ok = match point.axis_quantities().get(axis) {
+                Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
+                None => axis == "T",
+            };
+            if !descriptor_ok || !point.axes().get(axis)
+                .is_some_and(|t| t.is_finite() && *t > 0.0)
+            {
+                return Err(invalid(name, "each contact temperature coordinate needs a positive absolute-temperature value"));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn query_point_at(
+        &self, name: &str, reference: &QueryPoint, temperatures_k: [f64; 2],
+    ) -> Result<QueryPoint, ConductionError> {
+        let [a, b] = [positive(temperatures_k[0])?, positive(temperatures_k[1])?];
+        let mut point = reference.clone();
+        match self {
+            Self::Mean(axis) => {
+                point = point.with(axis, positive(0.5 * a + 0.5 * b)?)
+                    .map_err(|error| invalid(name, format!("temperature query refused: {error}")))?;
+            }
+            Self::TwoSided(axes) => {
+                for (axis, temperature) in axes.iter().zip([a, b]) {
+                    point = point.with(axis, temperature)
+                        .map_err(|error| invalid(name, format!("temperature query refused: {error}")))?;
+                }
+            }
+        }
+        Ok(point)
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ContactSurface {
     Matching(InterfaceSurface),
@@ -201,28 +254,7 @@ impl<'a> TemperatureContact<'a> {
     fn admit_reference(
         name: &str, point: &QueryPoint, coordinates: &TemperatureContactCoordinates,
     ) -> Result<(), ConductionError> {
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature, ValueForm::Static,
-        ));
-        let axes = match &coordinates {
-            TemperatureContactCoordinates::Mean(axis) => std::slice::from_ref(axis),
-            TemperatureContactCoordinates::TwoSided(axes) => axes.as_slice(),
-        };
-        for (i, axis) in axes.iter().enumerate() {
-            if axis.trim().is_empty() || axes[..i].contains(axis) {
-                return Err(invalid(&name, "contact temperature coordinates must be nonblank and distinct"));
-            }
-            let descriptor_ok = match point.axis_quantities().get(axis) {
-                Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
-                None => axis == "T",
-            };
-            if !descriptor_ok || !point.axes().get(axis)
-                .is_some_and(|t| t.is_finite() && *t > 0.0)
-            {
-                return Err(invalid(&name, "each contact temperature coordinate needs a positive absolute-temperature value"));
-            }
-        }
-        Ok(())
+        coordinates.admit_reference(name, point)
     }
 
     /// Stable interface name, retaining the ordered card's surface convention.
@@ -247,21 +279,7 @@ impl<'a> TemperatureContact<'a> {
         if self.material_states.is_some() {
             return Err(invalid(self.name(), "material contact requires original enthalpy states, not temperature alone"));
         }
-        let [a, b] = [positive(temperatures_k[0])?, positive(temperatures_k[1])?];
-        let mut point = self.source_context(side_a)?.0.clone();
-        match &self.coordinates {
-            TemperatureContactCoordinates::Mean(axis) => {
-                point = point.with(axis, positive(0.5 * a + 0.5 * b)?)
-                    .map_err(|error| invalid(self.name(), format!("temperature query refused: {error}")))?;
-            }
-            TemperatureContactCoordinates::TwoSided(axes) => {
-                for (axis, temperature) in axes.iter().zip([a, b]) {
-                    point = point.with(axis, temperature)
-                        .map_err(|error| invalid(self.name(), format!("temperature query refused: {error}")))?;
-                }
-            }
-        }
-        Ok(point)
+        self.coordinates.query_point_at(self.name(), self.source_context(side_a)?.0, temperatures_k)
     }
 
     fn at_traces_with_query_refusal(

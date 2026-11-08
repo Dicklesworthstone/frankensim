@@ -21,6 +21,11 @@ mod nonlinear;
 pub use nonlinear::{
     NonlinearLayerTemperatures, NonlinearLayeredWallSolution, NonlinearWallOptions,
 };
+mod contact;
+pub use contact::{
+    LayeredContactState, LayeredTemperatureContact, TemperatureContactWallOptions,
+    TemperatureContactWallSolution,
+};
 mod generation;
 pub use generation::{
     GeneratedLayerTemperatureJet, GeneratedLayerTemperatureProfile, GeneratedLayerTemperatures,

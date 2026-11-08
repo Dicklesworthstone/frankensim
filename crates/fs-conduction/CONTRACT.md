@@ -1868,6 +1868,28 @@ bracket without evaluating an out-of-domain constitutive value. Caller-declared 
 temperature and constitutive-flux limits gate the returned candidate. Cancellation
 is checked between layers and every 128 source segments. Effective resistance and
 transmittance belong to this boundary pair; they are not tangent conductances.
+
+`LayeredWall::solve_temperature_dependent_with_contacts` composes that same
+bulk solve with indexed `LayeredTemperatureContact` source bindings. The shared
+contact-coordinate owner preserves explicit mean or ordered left/right source
+temperatures; pressure and other supplied context remain fixed. Each selected
+interface claim stays pinned. A bounded Picard loop reuses the working stack,
+changes only contact coefficients, and relaxes only source temperature
+coordinates. Acceptance queries the original laws at the unchanged returned
+interface temperatures and checks physical contact flux against the common
+stack flux using the original flux tolerances. Reports retain applied and fresh
+source answers, both interface temperatures, physical residuals and all counted
+wall/shooting responses. Unlisted contacts and surface films stay unchanged.
+Equal reservoir temperatures resolve the actual equilibrium resistance before
+the bulk solve, so zero heat cannot mask a wrong local resistance or receipt.
+Focused G1/G3/G4 tests in `tests/layered_nonlinear/contact.rs` cover nonlinear bulk
+plus varying and fixed contacts, equilibrium, ordered-source heat reversal,
+source support, bounded failure and cancellation. No extrapolation, claim
+switching, uniqueness, arbitrary-feedback convergence, continuous multiaxis
+source-path support or propagated uncertainty is inferred. This entry point is
+planar and source-free; generated/radial/transient contact feedback remains with
+the corresponding owners.
+
 `LayeredWall::solve_temperature_dependent_with_generation` combines the same
 source-segment integral/inverse with `dq/dx=s` for finite, signed, uniform
 per-layer production/removal. The Kirchhoff potential is quadratic, while
