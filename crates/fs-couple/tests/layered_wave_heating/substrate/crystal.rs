@@ -17,6 +17,8 @@ use fs_material::state_point::{SpectralComplexIndexKnot, SpectralComplexIndexSta
 const C0: f64 = 299_792_458.0;
 const WAVELENGTH_M: f64 = 550e-9;
 
+mod slab;
+
 fn crystal_card(name: &str, loss: [f64; 2]) -> MaterialCard {
     let base = card(name, 2.0, 0.0);
     let mut claims = base.claims().clone();

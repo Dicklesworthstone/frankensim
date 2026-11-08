@@ -120,7 +120,8 @@ pub struct SubstrateWaveHeatingLimits {
 }
 
 /// One original physical control volume and its positive, integrated heat.
-/// The depth interval is measured into the exit from the final optical face.
+/// Depth follows the source owner: from the final optical face for an exit
+/// substrate, or from the entrance face for a finite crystal film.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SubstrateCellPower {
     pub cell_id: CellId,
@@ -129,8 +130,9 @@ pub struct SubstrateCellPower {
 }
 
 /// Normal power through the two boundaries of the REPRESENTED thermal body.
-/// Absorption before and after that body, and absorption in the original
-/// finite films, are excluded. Residual includes floating-point evaluation;
+/// Absorption outside that body's depth interval is excluded. The substrate
+/// owner excludes the preceding films; a crystal-film owner includes only its
+/// represented film cells. Residual includes floating-point evaluation;
 /// it is reported, never redistributed into cell heat.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SubstrateWavePower {

@@ -1,8 +1,9 @@
 //! Polarization-dependent crystal absorption on the native thermal timeline.
 //!
 //! The thermal body is a finite planar control column inside the original
-//! homogeneous uniaxial half-space, not a crystal film with a second optical
-//! interface. Its actual area and depth cells receive analytic integrals of
+//! homogeneous uniaxial crystal. The base adapter uses a half-space; the slab
+//! adapter retains both optical faces of a finite absorbing film.
+//! Actual area and depth cells receive analytic integrals of
 //! the original coherent ordinary/extraordinary field's dielectric loss.
 //! Interference is retained before heating; summing independent mode powers
 //! or sampling heat only at cell centres would describe a different source.
@@ -29,12 +30,19 @@ use fs_math::dd::Dd;
 pub mod illumination;
 pub use illumination::PreparedCrystalIlluminationHeating;
 
+/// Finite absorbing crystal films on the same thermal-cell owner.
+pub mod slab;
+pub use slab::PreparedCrystalSlabHeating;
+
 // Only native electromagnetic owners implement this internal source seam.
 // Geometry, material admission, cell integration and thermal accounting stay
 // identical for a coherent field and an explicitly uncorrelated illumination.
 trait CrystalHeatingSource {
     fn material(&self) -> &ResolvedMaterialStatePoint;
     fn factor_count(&self) -> usize;
+    fn mode_pair_count(&self) -> Option<usize> {
+        self.factor_count().checked_mul(4)
+    }
     fn absorbed_w(
         &self,
         area: f64,
@@ -198,10 +206,12 @@ fn prepare_column<'b, 'a>(
             "crystal heat requires finite nonnegative depth and admitted planar thermal cells",
         ));
     }
+    let mode_pairs = source
+        .mode_pair_count()
+        .ok_or(invalid("crystal mode-pair work overflows"))?;
     let mode_cell_pairs = count
         .checked_add(2)
-        .and_then(|n| n.checked_mul(4))
-        .and_then(|n| n.checked_mul(source.factor_count()))
+        .and_then(|n| n.checked_mul(mode_pairs))
         .ok_or(invalid("crystal cell-mode work overflows"))?;
     let per_cell = core::mem::size_of::<SubstrateCellPower>()
         + core::mem::size_of::<CellId>()

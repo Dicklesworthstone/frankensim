@@ -97,6 +97,23 @@ fn original_weak_loss_remains_positive_below_port_subtraction_resolution() {
 }
 
 #[test]
+fn lossless_dominant_polarization_does_not_erase_finite_orthogonal_heat() {
+    let mut d = input([C64::new(1.5, -0.1), C64::from_re(1.9)]);
+    d.axis = [1.0, 0.0, 0.0];
+    d.incidence = Incidence::Cosine(1.0);
+    d.electric = [C64::ZERO, C64::ONE];
+    let reference = solve(d, 1.0, MU, 0.8).unwrap();
+    let expected = integrated_heat(&reference, 1.0, 0.0, 0.8).unwrap();
+    // Ex is lossless and 300 orders larger than absorbing Ey. Linear field
+    // scaling and compensating area leave the deposited watts unchanged.
+    d.electric = [C64::from_re(1e150), C64::from_re(1e-150)];
+    let mixed = solve(d, 1.0, MU, 0.8).unwrap();
+    let actual = integrated_heat(&mixed, 1e300, 0.0, 0.8).unwrap();
+    assert!(actual > 0.0);
+    relative(actual, expected, 3e-13);
+}
+
+#[test]
 fn counterpropagating_node_retains_cubic_thin_volume_heat() {
     // Prescribed field fixture for the integral itself: the two waves cancel
     // exactly at z=1/2 and |E|²=4 sin²(z-1/2). The dielectric coefficient is
