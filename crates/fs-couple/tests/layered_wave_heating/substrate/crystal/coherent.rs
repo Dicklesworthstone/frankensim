@@ -379,3 +379,6 @@ fn coherent_crystal_heat_preserves_geometry_source_budgets_and_atomic_cancellati
 
 #[path = "coherent/partial.rs"]
 mod partial;
+
+#[path = "coherent/slab.rs"]
+mod slab;

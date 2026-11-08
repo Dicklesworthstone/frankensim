@@ -564,6 +564,32 @@ combine distinct optical frequencies, preserve all six face energies, and
 exercise exact budgets, material refusal, darkness and cancellation.
 Native Rust execution is required before claiming those regressions passed.
 
+### Finite-film angular interference on native thermal cells
+
+`PreparedCoherentCrystalSlabHeating` and
+`PreparedPartiallyCoherentCrystalSlabHeating` bind original finite-film
+illumination to the shared physical-box thermal-cell cache. All four internal
+waves of every beam retain the original entrance/exit faces, material tensor,
+optic axis and source phase. Every cell box must lie within the original film,
+including empty illumination. Footprint area, depth subdivisions, material card
+and fixed query axes must match the native thermal body.
+
+Work is cells times `(4 * components)^2`, summed across independent groups.
+Positive volume-integrated dielectric heat is cached in original cell order;
+all six signed face powers remain a separate optical account. Accepted native
+intervals reuse these watts and add them once alongside authored heat. Storage
+includes retained cells and peak optical-query or interval scratch.
+Refusal/cancellation preserves the initial thermal state.
+
+Independent groups add expected heat without invented coherence or a second
+statistical weight. For nonlinear thermal bodies this is not an ensemble-mean
+temperature prediction. Optics/statistics stay held; lateral thermal resolution,
+carrier transients and thermo-optic feedback are not inferred. Focused
+regressions combine actual film standing-wave quadrature with analytic angular
+fringes/covariance visibility and native temperature/energy checks, plus exact
+exit-face cells, dark out-of-film refusal, material, budget and atomic
+cancellation checks. Native Rust execution remains unverified for these controls.
+
 ## Full-coordinate material shells with two-sided open radiation
 
 `tensor_shell_radiation::open::OpenTensorShellRadiation` binds the original

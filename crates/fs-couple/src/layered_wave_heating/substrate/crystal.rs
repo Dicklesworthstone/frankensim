@@ -35,6 +35,7 @@ pub mod coherent;
 pub use coherent::{
     CoherentCrystalWaveEnergy, CoherentCrystalWavePower, CoherentCrystalWaveStep,
     PreparedCoherentCrystalHeating, PreparedPartiallyCoherentCrystalHeating,
+    PreparedCoherentCrystalSlabHeating, PreparedPartiallyCoherentCrystalSlabHeating,
 };
 
 /// Finite absorbing crystal films on the same thermal-cell owner.

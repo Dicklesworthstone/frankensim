@@ -9,7 +9,8 @@
 //! conduction through depth. It does not resolve lateral temperature gradients,
 //! lateral thermal conduction, patch-edge scattering, thermo-optic feedback or
 //! carrier transients. The rectangular support selects a control volume inside
-//! the original homogeneous half-space; it adds no optical boundary.
+//! the original homogeneous crystal; it adds no optical boundary. Finite-film
+//! consumers retain both original optical faces and admit only boxes inside them.
 
 use super::{
     BoundLayeredThermalBody, CellId, DepositionSimulation, LayerConductionConfig,
@@ -58,6 +59,10 @@ pub struct CoherentCrystalWaveStep<'t> {
 /// Expected heat from independent coherent angular/spectral factors.
 pub mod partial;
 pub use partial::PreparedPartiallyCoherentCrystalHeating;
+
+/// Angular interference and independent coherent groups in finite films.
+pub mod slab;
+pub use slab::{PreparedCoherentCrystalSlabHeating, PreparedPartiallyCoherentCrystalSlabHeating};
 
 /// Cached coherent cell watts from the original crystal, illumination and body.
 ///
@@ -146,7 +151,7 @@ impl<'p, 'f, 's, 'm, 'b, 'a> PreparedCoherentCrystalHeating<'p, 'f, 's, 'm, 'b, 
     }
 }
 
-// This private seam only accepts original EM owners. Both public adapters use
+// This private seam only accepts original EM owners. Every public adapter uses
 // the same native cell geometry, material admission and single thermal debit.
 trait CrystalBoxSource {
     fn material(&self) -> &ResolvedMaterialStatePoint;
