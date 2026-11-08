@@ -5550,3 +5550,45 @@ flow, common-port gravity, discarded manifold kinetic flux, shared-work and
 source/geometry/control/cancellation refusals. Product and tests were parsed
 with the pinned formatter; native Cargo compilation/test execution was not
 available in this resource-exhausted session.
+
+### Source-bound fan operating points on heated parallel gas branches
+
+The `steady_gas::pressure::parallel::fan` owner now connects the existing native
+fan bank to the original parallel gas pressure/thermal solve. Each trial imposes
+one positive static-pressure difference on the same branch ports, resolves the
+original thermochemical fields and flow split, and binds the reference bank with
+`FrozenFlowMedium::bind_fan_bank` to the **exact resolved network inlet**. Actual
+inlet volume flow selects the fan point; neither mixed-outlet volume nor mass
+divided by reference density is substituted. Original fan curve provenance,
+arrangement, speed, stall support, pressure tolerance, density/Reynolds similarity
+and pressure-fraction admission survive. The accepted native network is returned
+directly, retaining its source enthalpy mix, gravity and omitted-mechanical-work
+accounting. This remains the common-pressure, low-Mach, constant-area-per-branch
+model with ideal imposed-static-pressure manifolds, not a manifold momentum or
+hydraulic junction-loss closure.
+
+The caller supplies a finite positive pressure sign bracket, explicit residual
+tolerances and bounded complete network evaluations. Native flow evaluations and
+thermal substeps share one outer allowance across every pressure trial and
+branch; original aggregate controls are admitted before remaining work is clipped.
+An unsupported or failed trial stops without extrapolation, partial publication
+or a second accepted-state solve. Heating and buoyancy can make the response
+nonmonotone: the result certifies neither uniqueness/stability nor propagation of
+the retained fan-curve uncertainty.
+
+A static pressure curve does not provide shaft efficiency or a fan heat model.
+The caller must author an independently applicable minimum **bank static
+efficiency** in (0,1], valid at every evaluated flow/speed/medium, and a maximum
+neglected shaft-power allowance. At actual inlet volume Q the declared upper
+power is Q times nominal static rise times (1 + retained relative pressure
+tolerance), divided by this minimum efficiency. This conditional allowance is
+reported separately from branch/manifold hydraulic, kinetic and potential
+omission bounds; it is never deposited as heat or subtracted again. The source
+inlet thermodynamic state stays frozen across the admitted omitted fan heating
+and compression. Zero static supply, an absent/invalid efficiency bound or an
+exceeded shaft-power allowance refuses; motor electrical losses are not inferred.
+
+Focused regressions cover an independent fan/Poiseuille intersection under
+density and speed changes, heated branch redistribution with nonlinear original
+enthalpy, actual inlet-volume selection, native source/stall refusals, and shared
+work, cancellation and separate omitted-fan-power admission.

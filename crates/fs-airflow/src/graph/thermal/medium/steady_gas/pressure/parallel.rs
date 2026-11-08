@@ -6,6 +6,9 @@
 //! rates; neither temperature nor volume flow is averaged to conserve energy.
 //! This is not a general pressure graph or a manifold momentum/junction model.
 
+/// Native density-aware fan selection of this same thermal flow split.
+pub mod fan;
+
 use std::collections::BTreeSet;
 
 use fs_exec::Cx;
@@ -50,6 +53,24 @@ pub struct ParallelGasBudget {
     /// They are not a hydraulic junction-loss coefficient or pressure closure.
     pub maximum_neglected_kinetic_power_w: f64,
     pub maximum_neglected_potential_power_w: f64,
+}
+
+impl ParallelGasBudget {
+    // Shared admission precedes any outer fan work clipping.
+    fn admit(self) -> Result<(), ParallelGasError> {
+        let nonnegative = |x: f64| x.is_finite() && x >= 0.0;
+        if !(2..=128 * MAX_PARALLEL_GAS_BRANCHES).contains(&self.maximum_flow_evaluations)
+            || self.maximum_substeps == 0
+            || !nonnegative(self.maximum_neglected_hydraulic_power_w)
+            || !nonnegative(self.maximum_neglected_kinetic_power_w)
+            || !nonnegative(self.maximum_neglected_potential_power_w)
+        {
+            return Err(invalid(
+                "positive shared work and finite omission allowances required",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A refusal publishes no branch collection and never mutates a problem.
@@ -151,18 +172,9 @@ pub fn solve_parallel_pressure_driven_material_gas(
     budget: ParallelGasBudget,
 ) -> Result<ParallelGasSolution, ParallelGasError> {
     checkpoint(cx)?;
-    let nonnegative = |x: f64| x.is_finite() && x >= 0.0;
-    if branches.is_empty()
-        || branches.len() > MAX_PARALLEL_GAS_BRANCHES
-        || !(2..=128 * MAX_PARALLEL_GAS_BRANCHES).contains(&budget.maximum_flow_evaluations)
-        || budget.maximum_substeps == 0
-        || !nonnegative(budget.maximum_neglected_hydraulic_power_w)
-        || !nonnegative(budget.maximum_neglected_kinetic_power_w)
-        || !nonnegative(budget.maximum_neglected_potential_power_w)
-    {
-        return Err(invalid(
-            "bounded nonempty branches, positive shared work and finite omission allowances required",
-        ));
+    budget.admit()?;
+    if branches.is_empty() || branches.len() > MAX_PARALLEL_GAS_BRANCHES {
+        return Err(invalid("bounded nonempty parallel branches required"));
     }
     let first = branches[0].problem;
     let mut names = BTreeSet::new();
