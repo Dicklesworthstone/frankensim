@@ -6068,6 +6068,46 @@ physical receiver peaks and phases, and source-tangent/resource-refusal behavior
 Those FE regressions are authored but unexecuted while the complete `fs-couple`
 dependency build is unavailable. MR56's broader qualification remains open.
 
+`StructuralInterior::prepare_resonance_modes` now prepares the same complete
+original M/C/K arrays through `fs-modal::quadratic_modes::PreparedQuadraticModes`.
+Repeated `refine` calls recover seeded local free modes without a bare-fluid
+inverse, pressure-mode truncation, proportional-damping approximation or new
+eigensolver. Exact binary equilibration and the full mass factor are reused.
+Every structural displacement and pressure-potential coordinate survives,
+including constant fluid potential; original-row residuals and mass
+normalization are checked by the shared physical quadratic-mode owner.
+
+The free-mode convention is `exp(s t)`: original velocity is `s*u` and physical
+pressure is `s*psi`, retaining the real decay term. Returned pressure, fluid
+force `B^T*p`, displaced flow `B*v`, oscillation frequency `abs(Im(s))` and signed
+amplitude decay `-Re(s)` describe this coupled mode. Original structural and
+fluid storage use Hermitian modal-envelope factor 1/2, not harmonic-cycle
+factor 1/4. Structural loss uses only the symmetric part of the original
+velocity operator; wall loss and signed interface work are independently
+evaluated. The reported decay residual is `2*Re(s)*H + D_structure + D_wall`.
+Interface and gyroscopic skew work create no heat. No linewidth is converted
+to decay, and growth is never clipped to stability.
+
+Shared `PoleOptions` additionally reserve `128*n+256` numerical payload bytes
+and work score `128*n*n+256*n` for original seed, field and physical observation
+recovery. The limits cover preparation and each refinement independently,
+excluding the borrowed original model, caller arrays, earlier results and
+allocator metadata. Cancellation or refusal publishes no partial mode and
+leaves preparation reusable. Exact stiffness symmetry and original physical
+storage checks remain in force. These are local numerical free modes of the
+frozen spatial model, not a complete spectrum, continuum enclosure, nonlinear
+resonance prediction or arbitrary frequency-dependent wall realization;
+repeated or defective roots retain the native solver's refusal.
+
+`structure/poles_tests.rs` specifies independent damped/overdamped scalar roots,
+growth sign, a two-coordinate gyroscopic frequency split without dissipation,
+exact affine-cavity compression loading, the same free trajectory under the
+existing time propagator, complete source-row and separate envelope-work
+identities, spatial wall losses, and budget/seed/cancellation/replay behavior.
+These full-FE tests are authored but unexecuted in this lane while the complete
+`fs-couple` dependency closure is unavailable. Their definitions alone do not
+qualify MR56 or establish performance.
+
 ### Adaptive physical time for retained porous gas/wall compression
 
 `ThermalPorousGasSystem::advance_adaptive` resolves a complete physical stroke

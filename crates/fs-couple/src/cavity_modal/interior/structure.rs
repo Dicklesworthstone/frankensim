@@ -25,6 +25,8 @@
 //! realization of frequency-dependent wall data. Full spatial coordinates still
 //! require mesh/order convergence; dense harmonic preparation is explicitly bounded.
 
+/// Free complex modes of the complete original structural/acoustic pencil.
+pub mod poles;
 /// Analytic full-field frequency response and original-receiver resonance surveys.
 pub mod resonance;
 mod response;
