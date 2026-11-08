@@ -319,14 +319,12 @@ impl DonnanOsmoticPair {
             water - mobility * equilibrium.solvent_driving_pressure_pa([pressure_drop, 0.0])?,
             "nonfinite Donnan water residual",
         )?;
+        let mechanical_stiffness = self.compartments[0].pressure.tangent_pa_per_m3(volumes[0])?
+            + self.compartments[1].pressure.tangent_pa_per_m3(volumes[1])?;
         let derivative = equilibrium
             .osmotic_pressure_drop_slope_pa_per_m3
             .and_then(|slope| {
-                let value = 1.0
-                    + mobility
-                        * (self.compartments[0].pressure.elastance_pa_per_m3
-                            + self.compartments[1].pressure.elastance_pa_per_m3
-                            + slope);
+                let value = 1.0 + mobility * (mechanical_stiffness + slope);
                 positive(value).then_some(value)
             });
         Ok(Trial {
@@ -533,19 +531,9 @@ impl DonnanOsmoticPair {
                 });
             }
         }
-        let pressure_before = self.compartments[0].pressure.pressure_difference_pa(
-            self.compartments[0].solution().solvent_volume_m3(),
-            self.compartments[1].pressure,
-            self.compartments[1].solution().solvent_volume_m3(),
-        )?;
-        let pressure_after = self.compartments[0].pressure.pressure_difference_pa(
-            trial.volumes[0],
-            self.compartments[1].pressure,
-            trial.volumes[1],
-        )?;
-        let pressure_work = finite(
-            (0.5 * pressure_before + 0.5 * pressure_after) * trial.water,
-            "Donnan mechanical work is not representable",
+        let pressure_work = super::mechanics::pressure_work_into_solution_j(
+            &self.compartments,
+            trial.volumes,
         )?;
         let report = DonnanStepReport {
             interval_s: [self.time_s, end],

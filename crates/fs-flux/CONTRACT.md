@@ -4604,13 +4604,13 @@ reservoir data and refusal of a meniscus for a miscible solution.
 `MembraneTransport` links. Solvent volume and every independent solute amount
 are extensive state; concentrations and osmotic pressure are recalculated at
 each trial. Species share one explicit ordering, temperature and incompressible
-solvent molar volume. Mechanical pressure has an independent linear volume
-response, admitting prescribed pressure, hydrostatic columns and compliant
-chambers without counting osmotic pressure twice.
+solvent molar volume. Mechanical pressure has an independent volume response,
+admitting prescribed pressure, hydrostatic columns, linear compliance and the
+original nonlinear convex bulk materials without counting osmotic pressure twice.
 
 Ideal and nonideal networks, finite concentration films and fast-ion Donnan
 swelling cancel a common pressure reference BEFORE adding the individual
-chamber responses. The same pressure difference supplies mechanical work.
+chamber responses. Mechanical work uses the exact primitive of those same laws.
 Consequently an arbitrary common gauge cannot erase a physically resolved
 restoring force. Metamorphic regressions repeat actual compliant osmotic
 motion under large common pressure offsets and require identical accepted
@@ -4663,6 +4663,46 @@ crossflow fields, nonisothermal heat/entropy balance, mechanical inertia, ionic
 reaction chemistry or experimentally validated membrane selectivity. Ordinary
 nonselective fluid links use zero reflection; gas solution-diffusion retains
 its separate existing physical law and permeability units.
+
+### Original nonlinear material resistance to swelling
+
+`OsmoticPressureVolume::from_bulk_material` retains an original
+`DiscreteBulkPoint` from `fs-material`, with its quadratic, log-squared or
+Simo--Taylor volumetric energy, original prestress, held natural reference and
+explicit convex volume domain. Given reference solvent volume Vw, retained
+non-solvent volume Vs and the original total volume ratio J0, the mapping is
+V0=(Vw+Vs)/J0 and J(V)=J0+(V-Vw)/V0. Background pressure is separate from the
+original elastic pressure. The aqueous owner still supplies osmotic pressure
+exactly once.
+
+Pressure, positive endpoint tangent and finite storage changes use the SAME
+original material law. The tangent includes both reference-volume chain rules;
+it is not the finite-interval secant compliance used by the material's discrete
+gradient solver. Evaluations are direct and allocation-free on success, with
+no nested pressure inversion. Every trial retains the original material's
+domain refusal instead of extrapolating a spring or clipping solvent volume.
+
+All consumers of the common compartment law inherit this response: ideal and
+nonideal water networks, retained solid/solution inventories, concentration
+films, coupled solution-potential accounting and finite Donnan swelling.
+Donnan Newton predictors use the actual trial stiffness. Donnan and transient
+film reports integrate exact material storage plus background-pressure work;
+a pressure trapezoid would be inaccurate for nonlinear chambers. The coupled
+nonideal owner uses that same primitive in its total-potential acceptance gate.
+Common pressure references cancel before work accounting, with actual solvent
+balance checked separately.
+
+Regressions compare all three original bulk laws against independent pressure,
+tangent and energy formulas, including dry volume, original prestrain and held
+natural reference. Finite Donnan and retaining-network trajectories distinguish
+the nonlinear response from its initial tangent spring; finite films check
+exact nonlinear storage work. A nonideal coupled network checks independent
+mixing-plus-material storage and identical dynamics under a large common
+pressure gauge. Domain refusal preserves inventories and clock.
+These tests were added but could not be executed in the resource-exhausted
+implementation environment. This homogeneous volumetric restraint supplies
+no shell/shear geometry, poroelastic transport, evolving reference, polymer
+mixing or experimentally calibrated biological-membrane claim.
 
 ## Material-driven spherical cavitation
 
@@ -5802,7 +5842,7 @@ reflection factors or an infinite salt bath. Compartment solution getters hold
 mobile ions only; the Donnan report holds full osmotic pressure including traps.
 
 One step uses backward Euler. Analytical nonnegative ionic stiffness augments
-the mechanical elastance in a safeguarded Newton solve; the ideal equilibrated
+the actual mechanical tangent at each trial in a safeguarded Newton solve; the ideal equilibrated
 free energy makes the scalar residual monotone. Bounded bracketing handles
 volume applicability and stiff roots, and a narrow sign-changing bracket may
 control transfer-position error while retaining the actual balance residual.
@@ -5816,7 +5856,8 @@ This is the ideal fast-ion limit, not transient ionic permeability,
 Nernst--Planck transport, double-layer storage, imposed voltage/current or a
 nonideal electrolyte closure. Incompatible nonideal inventories are refused.
 Root tolerances do not control first-order temporal error. Mechanical work is
-an exact integral for the declared linear chamber laws, not a thermal closure.
+the exact original pressure primitive for linear or nonlinear chamber laws,
+not a thermal closure.
 
 The `donnan_swelling` example follows finite charged-bath swelling against
 compliance, compares an independent monovalent algebraic equilibrium, and

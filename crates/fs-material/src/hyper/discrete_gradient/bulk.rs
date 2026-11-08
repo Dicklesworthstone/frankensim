@@ -321,6 +321,33 @@ impl DiscreteBulkPoint {
         self.endpoint_pressure(self.accepted_volume_ratio)
     }
 
+    /// Original endpoint derivative `dU'(Je)/dJ_total` [Pa].
+    ///
+    /// This is the tangent of the physical endpoint pressure, not the
+    /// derivative of the finite-interval secant used by [`Self::response`].
+    /// It remains positive on the same admitted convex branch. A held natural
+    /// volume contributes the chain-rule factor `1/det(G)`.
+    pub fn endpoint_tangent_pa(&self) -> Result<f64, MaterialError> {
+        let j = self.accepted_volume_ratio / self.reference_volume_ratio;
+        let curvature = match self.volume {
+            Volumetric::Quadratic { .. } => self.volume.kappa(),
+            Volumetric::LogSquared { .. } => {
+                (self.volume.kappa() / j) * ((1.0 - det::ln(j)) / j)
+            }
+            Volumetric::SimoTaylor { .. } => {
+                0.5 * self.volume.kappa() + (0.5 * self.volume.kappa() / j) / j
+            }
+        };
+        let tangent = curvature / self.reference_volume_ratio;
+        if tangent.is_finite() && tangent > 0.0 {
+            Ok(tangent)
+        } else {
+            Err(state_error(
+                "positive endpoint bulk tangent is unrepresentable",
+            ))
+        }
+    }
+
     /// Reuse the admitted original law, held reference and controls at a new
     /// TOTAL-volume endpoint.
     /// This creates a candidate; the accepted point is never modified.

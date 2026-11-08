@@ -64,6 +64,7 @@ pub mod transient;
 /// Finite water exchange with conservative, fast-ion Donnan equilibrium.
 pub mod donnan;
 
+mod mechanics;
 mod solubility;
 
 #[cfg(test)]
@@ -91,6 +92,8 @@ pub enum OsmoticNetworkError {
     Invalid(&'static str),
     /// The original solution or membrane law refused the state.
     Material(OsmosisError),
+    /// The original nonlinear mechanical material refused its volume branch.
+    Mechanical(fs_material::MaterialError),
     /// The original finite solid/dissolved partition refused the state.
     Solubility(FiniteSolubilityError),
     /// Source-owned solution thermodynamics or original MS friction refused.
@@ -165,11 +168,14 @@ impl From<KineticSolubilityError> for OsmoticNetworkError {
     }
 }
 
-/// Mechanical pressure `p_ref + elastance * (V - V_ref)`.
+/// Mechanical resistance to solvent-volume change, independent of osmosis.
 ///
+/// [`Self::new`] supplies `p_ref + elastance * (V - V_ref)`.
 /// A zero elastance is a prescribed pressure. An open vertical reservoir of
 /// constant cross-section A has elastance rho*g/A; an elastic chamber can
-/// provide its tangent pressure/volume response. This pressure excludes
+/// provide its tangent pressure/volume response. [`Self::from_bulk_material`]
+/// instead retains an original nonlinear convex material bulk energy, its
+/// pressure and its actual volume-dependent tangent. This pressure excludes
 /// osmotic pressure, which the membrane law accounts for exactly once.
 /// Pressures may use any COMMON reference; this law does not admit cavitation.
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +183,7 @@ pub struct OsmoticPressureVolume {
     reference_volume_m3: f64,
     reference_pressure_pa: f64,
     elastance_pa_per_m3: f64,
+    bulk: Option<mechanics::BulkPressure>,
 }
 
 impl OsmoticPressureVolume {
@@ -198,14 +205,14 @@ impl OsmoticPressureVolume {
             reference_volume_m3,
             reference_pressure_pa,
             elastance_pa_per_m3,
+            bulk: None,
         })
     }
 
     /// Mechanical pressure at the supplied solvent volume [Pa].
     pub fn pressure_pa(self, volume_m3: f64) -> Result<f64, OsmoticNetworkError> {
-        let pressure = self.reference_pressure_pa
-            + self.elastance_pa_per_m3 * (volume_m3 - self.reference_volume_m3);
-        if !positive(volume_m3) || !pressure.is_finite() {
+        let pressure = self.reference_pressure_pa + self.response_pressure_pa(volume_m3)?;
+        if !pressure.is_finite() {
             return Err(OsmoticNetworkError::Invalid(
                 "nonfinite pressure/volume response",
             ));
@@ -213,7 +220,7 @@ impl OsmoticPressureVolume {
         Ok(pressure)
     }
 
-    /// Difference of the SAME linear pressure laws, cancelling common pressure
+    /// Difference of the SAME pressure laws, cancelling common pressure
     /// references before arithmetic can hide a small elastic response.
     pub fn pressure_difference_pa(
         self,
@@ -221,12 +228,14 @@ impl OsmoticPressureVolume {
         other: Self,
         other_volume_m3: f64,
     ) -> Result<f64, OsmoticNetworkError> {
-        self.pressure_pa(volume_m3)?;
-        other.pressure_pa(other_volume_m3)?;
-        let difference = (self.reference_pressure_pa - other.reference_pressure_pa)
-            + self.elastance_pa_per_m3 * (volume_m3 - self.reference_volume_m3)
-            - other.elastance_pa_per_m3 * (other_volume_m3 - other.reference_volume_m3);
-        if !difference.is_finite() {
+        let left = self.response_pressure_pa(volume_m3)?;
+        let right = other.response_pressure_pa(other_volume_m3)?;
+        let difference =
+            (self.reference_pressure_pa - other.reference_pressure_pa) + left - right;
+        if !difference.is_finite()
+            || !(self.reference_pressure_pa + left).is_finite()
+            || !(other.reference_pressure_pa + right).is_finite()
+        {
             return Err(OsmoticNetworkError::Invalid(
                 "pressure difference is not representable",
             ));
@@ -234,7 +243,7 @@ impl OsmoticPressureVolume {
         Ok(difference)
     }
 
-    /// Exact linear-pressure primitive change, with a COMMON linear pressure
+    /// Exact pressure primitive change, with a COMMON linear pressure
     /// reference removed. This is a closed-volume accounting primitive; the
     /// actual solvent-volume residual must be checked independently. It supplies
     /// no caloric energy. Prescribed loads contribute their pressure work here.
@@ -247,10 +256,19 @@ impl OsmoticPressureVolume {
         self.pressure_pa(before_volume_m3)?;
         self.pressure_pa(after_volume_m3)?;
         let delta = after_volume_m3 - before_volume_m3;
-        let change = delta
-            * ((self.reference_pressure_pa - common_pressure_pa)
-                + self.elastance_pa_per_m3
-                    * ((before_volume_m3 - self.reference_volume_m3) + 0.5 * delta));
+        let change = match self.bulk {
+            Some(bulk) => {
+                (self.reference_pressure_pa - common_pressure_pa) * delta
+                    + bulk.energy_change_j(
+                        before_volume_m3 - self.reference_volume_m3,
+                        after_volume_m3 - self.reference_volume_m3,
+                    )?
+            }
+            None => delta
+                * ((self.reference_pressure_pa - common_pressure_pa)
+                    + self.elastance_pa_per_m3
+                        * ((before_volume_m3 - self.reference_volume_m3) + 0.5 * delta)),
+        };
         if !common_pressure_pa.is_finite() || !change.is_finite() {
             return Err(OsmoticNetworkError::Invalid(
                 "mechanical potential difference is not representable",

@@ -447,3 +447,28 @@ fn g0_invalid_domains_exhausted_scalar_work_and_insufficient_work_allowances_ref
     invalid.stretch_limit = f64::NAN;
     assert!(DiscreteBulkPoint::try_new(&invalid, 1.0, controls).is_err());
 }
+
+#[test]
+fn endpoint_bulk_tangent_matches_original_pressure_and_small_interval_limit() {
+    let kappa = 7.5e5;
+    for volume in [
+        Volumetric::Quadratic { kappa },
+        Volumetric::LogSquared { kappa },
+        Volumetric::SimoTaylor { kappa },
+    ] {
+        let material = law(volume);
+        for j in [0.31, 0.83, 1.0, 1.97, 2.55] {
+            let point = DiscreteBulkPoint::try_new(&material, j, settings(kappa)).unwrap();
+            let h = 1e-5 * j;
+            let oracle = (endpoint_pressure(volume, j + h) - endpoint_pressure(volume, j - h))
+                / (2.0 * h);
+            let tangent = point.endpoint_tangent_pa().unwrap();
+            close(tangent, oracle, 2e-9 * oracle.abs());
+            // At equal endpoints, the interval derivative is HALF the
+            // physical endpoint derivative. Confusing the two slows or
+            // destabilizes a coupled water/elasticity Newton iteration.
+            let held = point.response(point.endpoint_pressure_pa()).unwrap();
+            close(held.compliance_per_pa * tangent, 2.0, 5e-14);
+        }
+    }
+}

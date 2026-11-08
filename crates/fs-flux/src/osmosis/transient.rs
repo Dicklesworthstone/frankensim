@@ -1218,16 +1218,7 @@ impl TransientOsmoticPair {
         self.candidate_bulks[1]
             .solution
             .replace_inventories(vr, &self.workspace.trial_amounts[(self.rows - 1) * count..])?;
-        let pressure_before = self.bulks[0].pressure.pressure_difference_pa(
-            self.bulks[0].solution().solvent_volume_m3(),
-            self.bulks[1].pressure,
-            self.bulks[1].solution().solvent_volume_m3(),
-        )?;
-        let pressure_after =
-            self.bulks[0]
-                .pressure
-                .pressure_difference_pa(vl, self.bulks[1].pressure, vr)?;
-        let work = finite((0.5 * pressure_before + 0.5 * pressure_after) * trial.water)?;
+        let work = super::mechanics::pressure_work_into_solution_j(&self.bulks, [vl, vr])?;
         let film_water: f64 = self
             .films
             .iter()
