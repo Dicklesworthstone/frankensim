@@ -4,8 +4,15 @@
 //! original source-compiled k(T,f) supplies both sensible and latent tangents;
 //! no apparent heat capacity or phase mixing rule is introduced here.
 //! The native conduction observer and implicit/adaptive chain own all fluxes,
-//! Newton steps, events, entropy and energy acceptance. Cellwise k and fixed
-//! reference geometry are finite-volume approximations requiring refinement.
+//! Newton steps, events, entropy and energy acceptance. Default fixed geometry
+//! and cellwise k are finite-volume approximations requiring refinement. The
+//! opt-in density_geometry observer closes current volume for free liquid spheres.
+
+/// Quasistatic liquid density and current radial geometry on native heat substeps.
+pub mod density_geometry;
+pub use density_geometry::{
+    SphericalLiquidCellGeometry, SphericalLiquidDensityObserver, SphericalLiquidGeometry,
+};
 
 use super::transient::{LayeredThermalIds, MAX_LAYERED_THERMAL_CELLS};
 use super::{LayerStackGeometry, MAX_CONDUCTION_LAYERS};
@@ -46,8 +53,10 @@ struct Cell {
 /// Equal-volume phase control volumes with original source laws shared by layer.
 /// Physical faces are represented; explicit solid radial constructors retain a
 /// zero-area regular centre with no inner bath. Planar lateral surfaces and
-/// cylinder endcaps are insulated. Pressure/composition and geometry stay fixed. This
-/// is reference-mass transport, not expansion work, advection or phase kinetics.
+/// cylinder endcaps are insulated. Original geometry and inventories stay fixed;
+/// the default observer uses these reference metrics. Free liquid spherical
+/// transport can opt into current density geometry through its bound observer.
+/// Neither mode infers pressure work, momentum, mixing or phase kinetics.
 #[derive(Clone, Debug)]
 pub struct PreparedPhaseLayeredThermalBody<'a> {
     layers: Vec<PhaseLayerSource<'a>>,
