@@ -15,6 +15,7 @@ use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
+use fs_material::fluid_transport::viscous::{DeformationRate, NewtonianViscosity};
 use fs_material::liquid::{ResolvedLiquidState, resolve_liquid_state};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::{MaterialError, fluid_transport::FluidTransportState};
@@ -290,7 +291,7 @@ fn mixed_strain_populations2(
 }
 
 #[test]
-fn planar_material_rheology_respects_independent_trace_relaxation() {
+fn planar_material_rheology_embeds_physical_strain_with_independent_trace_relaxation() {
     use fs_lbm::core2::CollisionModel2;
     use fs_material::fluid_transport::rheology::CarreauYasuda;
 
@@ -300,8 +301,16 @@ fn planar_material_rheology_respects_independent_trace_relaxation() {
         [[0.012, 0.008], [0.008, -0.004]],
         [[0.004, -0.006], [-0.006, -0.004]],
     ] {
-        let expected_rate =
-            (2.0_f64 * strain.iter().flatten().map(|d| d * d).sum::<f64>()).sqrt() / DT;
+        let expected_rate = DeformationRate::from_tensor([
+            strain[0][0] / DT,
+            strain[1][1] / DT,
+            0.0,
+            strain[0][1] / DT,
+            0.0,
+            0.0,
+        ])
+        .unwrap()
+        .shear_rate_per_s();
         let expected_viscosity = curve.viscosity_pa_s(expected_rate).unwrap();
         let expected_tau = 0.5 + 3.0 * (expected_viscosity / 1000.0) * DT / (DX * DX);
         for (collision, bulk_tau) in [
@@ -327,9 +336,133 @@ fn planar_material_rheology_respects_independent_trace_relaxation() {
                     let applied = result.applied.iter().find(|sample| sample.cell == 6).unwrap();
                     near(applied.material.point().shear_rate_per_s, expected_rate, 2e-11);
                     near(applied.transport.dynamic_viscosity_pa_s(), expected_viscosity, 2e-11);
+                    near(applied.momentum_relaxation, expected_tau, 2e-11);
                     assert!(applied.material.relaxation_defect() < 3e-12);
                     assert_eq!(slab.lattice.grid.collision, collision);
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn planar_source_shear_and_tied_bulk_heat_match_the_physical_tensor() {
+    let source = card(0.2);
+    let reference = resolve_liquid_state(
+        &source,
+        &query(305.0, 0.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    // Equal planar expansion is not spherical in 3-D: D_zz remains zero.
+    // Mixed signs/shear also check the independent stress-power contraction.
+    for strain in [
+        [[0.01, 0.0], [0.0, 0.01]],
+        [[0.012, 0.008], [0.008, -0.004]],
+    ] {
+        let deformation = DeformationRate::from_tensor([
+            strain[0][0] / DT,
+            strain[1][1] / DT,
+            0.0,
+            strain[0][1] / DT,
+            0.0,
+            0.0,
+        ])
+        .unwrap();
+        let expected_rate = deformation.shear_rate_per_s();
+        let viscosity = 1.0 + 0.2 * expected_rate;
+        let tau = 0.5 + 3.0 * (viscosity / 1000.0) * DT / (DX * DX);
+        // BGK retains zeta=2mu/3, so the sum is exactly the legacy 2mu D:D.
+        let expected_power = NewtonianViscosity::new(viscosity, 2.0 * viscosity / 3.0)
+            .unwrap()
+            .evaluate(deformation)
+            .unwrap()
+            .dissipation_w_m3();
+        let full_rate_squared = 2.0
+            * strain
+                .iter()
+                .flatten()
+                .map(|d| (d / DT).powi(2))
+                .sum::<f64>();
+        near(expected_power, viscosity * full_rate_squared, 2e-14);
+        assert!(expected_rate * expected_rate < full_rate_squared);
+
+        for force in [[0.0; 2], [0.003, -0.002]] {
+            let mut hot = slab2();
+            let mut manual = slab2();
+            for state in [&mut hot, &mut manual] {
+                state.lattice.grid.f[6] = mixed_strain_populations2(strain, tau, tau, force);
+                state.lattice.grid.fext[6] = force;
+                state.lattice.grid.tau[6] = 1.6;
+            }
+            let mut authored = [0.0; 16];
+            authored[8] = 17.0;
+            let mut total = authored;
+            total[6] = expected_power;
+            let gate = CancelGate::new();
+            let heated = hot
+                .step_with_material_rheology_and_viscous_heating(
+                    &authored,
+                    &[[0.0; 2]; 16],
+                    DX,
+                    limits(),
+                    controls(),
+                    &gate,
+                    |point, _| resolve(&source, &reference, point),
+                )
+                .unwrap();
+            let direct = manual
+                .step_with_material_rheology(
+                    &total,
+                    &[[0.0; 2]; 16],
+                    DX,
+                    limits(),
+                    controls(),
+                    &gate,
+                    |point, _| resolve(&source, &reference, point),
+                )
+                .unwrap();
+            let applied = heated
+                .transport
+                .applied
+                .iter()
+                .find(|s| s.cell == 6)
+                .unwrap();
+            near(
+                applied.material.point().shear_rate_per_s,
+                expected_rate,
+                2e-11,
+            );
+            near(applied.transport.dynamic_viscosity_pa_s(), viscosity, 2e-11);
+            near(applied.momentum_relaxation, tau, 2e-11);
+            assert_eq!(
+                applied.material.source().material().card_identity(),
+                source.content_hash()
+            );
+            assert_eq!(
+                applied.material.source().material().query(),
+                query(
+                    applied.temperature_k,
+                    applied.material.point().shear_rate_per_s
+                )
+            );
+            near(heated.viscous.power_w_m3[6], expected_power, 2e-10);
+            near(
+                heated.viscous.viscous_heat_j,
+                expected_power * DX.powi(3) * DT,
+                2e-18,
+            );
+            near(heated.viscous.source_partition_defect_j, 0.0, 2e-18);
+            near(heated.transport.heat.source_j, direct.heat.source_j, 2e-18);
+            assert_eq!(hot.lattice.grid.f, manual.lattice.grid.f);
+            for (a, b) in hot
+                .lattice
+                .gpop
+                .iter()
+                .flatten()
+                .zip(manual.lattice.gpop.iter().flatten())
+            {
+                near(*a, *b, 2e-15);
             }
         }
     }

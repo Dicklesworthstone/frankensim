@@ -5,10 +5,11 @@
 //! with `gamma_dot = numerator / (tau dt)`; the background tau is only an
 //! initial iterate. This avoids interpreting a state with the wrong viscosity
 //! after step-local transport restores the background relaxation field.
-//! In 3-D this numerator contains only deviatoric strain. Dilation is kept
-//! separately for viscous heating, using the independently authored bulk
-//! relaxation or the collision model's existing bulk/shear tie. Volume change
-//! cannot thin or thicken a shear-calibrated material.
+//! The material shear query uses the three-dimensional deviatoric invariant,
+//! with `D_zz = 0` for planar flow. Planar equal biaxial expansion still has a
+//! three-dimensional deviator; isotropic three-dimensional dilation does not.
+//! Dilation is also retained separately for viscous heating, using the
+//! independently authored bulk relaxation or the collision's bulk/shear tie.
 //!
 //! This is an explicit generalized-Newtonian, fixed-storage coupling.
 //! Local constitutive convergence is not implicit time integration, viscoelastic
@@ -38,8 +39,8 @@ pub struct RheologyPoint {
     pub cell: usize,
     /// Absolute temperature [K] at the sampled time level.
     pub temperature_k: f64,
-    /// `sqrt(2 dev(D):dev(D))` [1/s] in 3-D, where `D = sym(grad u)`.
-    /// The existing 2-D incompressible adapter retains `sqrt(2 D:D)`.
+    /// `sqrt(2 dev_3(D):dev_3(D))` [1/s], where `D = sym(grad u)`.
+    /// Planar flow embeds its original tensor with `D_zz = D_xz = D_yz = 0`.
     pub shear_rate_per_s: f64,
 }
 
@@ -113,9 +114,10 @@ pub(crate) fn solve_local<F, E>(
     solve_local_with_fixed_strain(numerator, 0.0, timestep_s, initial_tau, solve, check, evaluate)
 }
 
-/// Preserve the existing 2-D full-strain constitutive convention when its
-/// trace has independent relaxation. Three-dimensional material shear laws
-/// call this with zero fixed strain: volume change never enters their query.
+/// Combine orthogonal contributions to the physical shear invariant. For
+/// planar flow with independent trace relaxation, the fixed part is
+/// `|div(u)|/sqrt(3)`: the plane's trace is not isotropic in three dimensions.
+/// Three-dimensional material laws have no fixed contribution to shear.
 #[allow(clippy::too_many_arguments)]
 fn solve_local_with_fixed_strain<F, E>(
     numerator: f64,
@@ -140,7 +142,7 @@ fn solve_local_with_fixed_strain<F, E>(
         let rate = if fixed_rate == 0.0 {
             shear / timestep_s
         } else {
-            // Preserve the 2-D scaled norm without squared-component loss.
+            // Preserve the orthogonal scaled norm without squared-component loss.
             let scale = shear.max(fixed_rate);
             let a = shear / scale;
             let b = fixed_rate / scale;
@@ -229,14 +231,14 @@ pub struct RheologyMaterial<F> {
     transport: FluidTransportState,
     iterations: usize,
     relaxation_defect: f64,
-    // sqrt(2/dimension)|div u| in 1/s, separate from the 3-D source query.
+    // sqrt(2/3)|div u| in 1/s, also for planar flow embedded with D_zz=0.
     // Retain it without subtracting squared invariants or resampling stress.
     dilation_rate_per_s: Option<DilationRate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DilationRate {
-    /// The 3-D collision family retains zeta = 2 mu / 3.
+    /// The ordinary collision family retains zeta = 2 mu / 3.
     Tied(f64),
     /// Physical bulk heat requires an explicitly sourced zeta.
     Independent(f64),
@@ -274,7 +276,7 @@ impl StressSlab<2, 5> for ThermalLbm {
     fn strain_components(&self, cell: usize) -> [f64; 2] {
         let m = self.grid.moments(cell);
         let force = std::array::from_fn(|d| self.grid.g[d].mul_add(m.rho, self.grid.fext[cell][d]));
-        crate::rheology::strain_components2(
+        crate::core2::material_strain_components2(
             &self.grid.f[cell], m.rho, m.u, force,
             self.grid.collision.central_moment_bulk_tau(),
         )
@@ -348,7 +350,11 @@ fn sample_with_strain<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q:
         &mut |cell, temperature_k, retained| {
             let root = solve_local_with_fixed_strain(
                 components[cell][0],
-                if D == 2 { components[cell][1] } else { 0.0 },
+                if D == 2 && independent_bulk {
+                    components[cell][1] * core::f64::consts::FRAC_1_SQRT_2
+                } else {
+                    0.0
+                },
                 units.timestep_s,
                 state.momentum_relaxation()[cell],
                 solve,
@@ -398,14 +404,12 @@ fn sample_with_strain<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q:
                 },
                 iterations: root.iterations,
                 relaxation_defect: root.relaxation_defect,
-                dilation_rate_per_s: (D == 3 || independent_bulk).then(|| {
-                    if independent_bulk {
-                        DilationRate::Independent(components[cell][1] / units.timestep_s)
-                    } else {
-                        DilationRate::Tied(
-                            (components[cell][1] / root.relaxation_time) / units.timestep_s,
-                        )
-                    }
+                dilation_rate_per_s: Some(if independent_bulk {
+                    DilationRate::Independent(components[cell][1] / units.timestep_s)
+                } else {
+                    DilationRate::Tied(
+                        (components[cell][1] / root.relaxation_time) / units.timestep_s,
+                    )
                 }),
             })
         },

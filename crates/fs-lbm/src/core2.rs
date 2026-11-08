@@ -3026,3 +3026,43 @@ pub(crate) fn force_corrected_stress(
         syy + u[1] * force[1],
     ]
 }
+
+/// Physical material strain for planar flow, embedded with `D_zz = 0`.
+/// The material owner defines shear as `sqrt(2 dev_3(D):dev_3(D))`; removing
+/// the two-dimensional trace instead would discard real planar extension.
+///
+/// For tied relaxation, return its tau-weighted shear and dilation invariants.
+/// For independent trace relaxation, the first entry is the numerator of the
+/// in-plane trace-free rate and the second is `sqrt(2/3)|div(u)|`, already
+/// divided by bulk tau. The material root then combines the first / shear tau
+/// with the second / sqrt(2), since
+/// `2 dev_3(D):dev_3(D) = 4(D_dev2,xx^2 + D_xy^2) + div(u)^2/3`.
+/// This leaves native two-dimensional collision/rheology conventions intact.
+pub(crate) fn material_strain_components2(
+    f: &[f64; Q],
+    rho: f64,
+    u: [f64; 2],
+    force: [f64; 2],
+    central_bulk_tau: Option<f64>,
+) -> [f64; 2] {
+    let [sxx, sxy, syy] = force_corrected_stress(f, rho, u, force);
+    let mean = 0.5 * sxx + 0.5 * syy;
+    let (xx, yy) = if central_bulk_tau.is_some() {
+        let difference = 0.5 * sxx - 0.5 * syy;
+        (difference, -difference)
+    } else {
+        (sxx, syy)
+    };
+    // Pi = -2 rho cs² tau D. Reuse the physical material tensor invariant,
+    // retaining tensor shear (D_xy, not the engineering rate 2 D_xy).
+    let shear = crate::kinematics::deviatoric_rate3([
+        -1.5 * (xx / rho),
+        -1.5 * (yy / rho),
+        0.0,
+        -1.5 * (sxy / rho),
+        0.0,
+        0.0,
+    ]);
+    let dilation = (mean / rho).abs() * 6.0_f64.sqrt() / central_bulk_tau.unwrap_or(1.0);
+    [shear, dilation]
+}

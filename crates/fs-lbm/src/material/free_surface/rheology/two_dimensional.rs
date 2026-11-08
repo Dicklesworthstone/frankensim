@@ -5,6 +5,8 @@
 //! the native conservative candidate; collision, streaming and VOF conversion
 //! remain owned by FreeSurface. Receipt epochs describe collision input, not
 //! the subsequently streamed or converted cells.
+//! Material shear uses the original physical three-dimensional invariant with
+//! `D_zz = 0`, including the deviatoric part of planar biaxial extension.
 
 use fs_exec::CancelGate;
 use fs_material::state_point::ResolvedMaterialStatePoint;
@@ -14,7 +16,7 @@ use super::{
     RheologySolve, capillary_scaling, plan_free_surface_from_material, plan_momentum_scaling,
     solve_local,
 };
-use crate::core2::{Cell, CollisionModel2, Grid, force_corrected_shear_rate};
+use crate::core2::{Cell, CollisionModel2, Grid, material_strain_components2};
 use crate::freesurface::{ConversionMomentumReport2, FreeSurface, FreeSurfaceMomentumError2};
 use crate::material::free_surface::MaterialFreeSurfaceScaling;
 use crate::rheology::{TAU_CAP, TAU_FLOOR};
@@ -161,8 +163,9 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
                 return Err(Error::Invalid("invalid incoming dense relaxation time"));
             }
             let force = std::array::from_fn(|d| grid.g[d].mul_add(moments.rho, grid.fext[cell][d]));
-            let numerator =
-                force_corrected_shear_rate(&grid.f[cell], moments.rho, moments.u, force, 1.0);
+            let [numerator, _] = material_strain_components2(
+                &grid.f[cell], moments.rho, moments.u, force, None,
+            );
             let root = solve_local(
                 numerator,
                 self.scaling.timestep_s(),

@@ -748,8 +748,9 @@ pub fn update_tau_field(
     Ok(update_tau_prepared(grid, |i| laws.prepared(i)))
 }
 
-/// Collision-consistent 2-D strain components shared by native and
-/// source-backed rheology. The first value is the shear-dependent numerator;
+/// Collision-consistent full 2-D strain for the native lattice-unit laws.
+/// Physical material adapters use the three-dimensional planar embedding in
+/// `core2::material_strain_components2`. The first value is the shear-dependent numerator;
 /// the second is the independently relaxed dilation. Callers resolve and
 /// validate `central_bulk_tau` once per sweep when the collision is fixed.
 pub(crate) fn strain_components2(

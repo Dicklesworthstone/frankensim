@@ -307,6 +307,25 @@ coefficient, molecular-ratio and departure bounds. It does not supply
 unresolved non-Newtonian stress correlations, an adaptive memory timescale,
 a thermal energy equation or turbulent-DNS validation.
 
+## Physical strain in planar material rheology
+
+Source-backed D2Q9 thermal and free-surface rheology use the same physical
+`sqrt(2 dev_3(D):dev_3(D))` invariant as `fs-material`, embedding the original
+planar tensor with `D_zz = D_xz = D_yz = 0`. Equal in-plane expansion therefore
+retains its actual three-dimensional deviator. Guo half-source correction and
+independent central-moment trace relaxation precede this embedding; the latter's
+planar trace contributes `div(u)^2/3` to the squared material shear rate.
+
+Thermal power separately retains `2 mu dev_3(D):dev_3(D) + zeta div(u)^2`.
+Ordinary tied collision keeps its existing implicit `zeta = 2 mu / 3`, so its
+total planar loss remains `2 mu D:D`; the material query no longer counts that
+bulk term as shear. Independent planar bulk relaxation still requires a physical
+bulk-heating owner and is refused by the shear-only heating entry. Native
+lattice-unit rheology retains its explicitly documented full two-dimensional
+strain convention. Manufactured original-population tests cover both source
+owners, force correction, trace relaxation, actual viscosity, and heat partition
+against the material tensor and independently prescribed thermal source.
+
 ## Density-aware coarse/fine interpolation
 
 `RefinedChannel` interpolates spatial and temporal ghost data in the physical

@@ -1,11 +1,13 @@
 //! Generalized-Newtonian stress power on the existing thermal/flow step.
 //!
 //! The same initial material evaluation supplies collision viscosity and
-//! nonnegative stress power. In 3-D, the source's shear-rate query excludes
-//! dilation, while heat retains `2 mu D_dev:D_dev + zeta (div u)^2`.
+//! nonnegative stress power. The source's shear-rate query uses the physical
+//! three-dimensional deviator, with `D_zz = 0` for planar flow, while heat
+//! retains `2 mu D_dev:D_dev + zeta (div u)^2`.
 //! The ordinary collision family ties `zeta = 2 mu / 3`; independent bulk
 //! relaxation requires the explicitly sourced physical bulk entry point.
-//! The 2-D incompressible law retains `2 mu D:D = mu gamma_dot^2`.
+//! Thus tied planar collision retains total `2 mu D:D`, without confusing
+//! its bulk contribution with the shear rate used to query the material.
 //! No numerical kinetic-energy residual, pressure work, turbulence closure or
 //! elastic energy is relabelled as thermal power.
 
@@ -37,7 +39,7 @@ fn physical_bulk_tau(mapping: &MaterialSlab<ThermalLbm3>, bulk_viscosity_pa_s: f
 /// Explicit source partition for an accepted physical viscous-heating step.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscousHeating {
-    /// Constitutive stress power [W/m3], with zero wall entries. The 3-D APIs
+    /// Constitutive stress power [W/m3], with zero wall entries. Both dimensions
     /// separate deviatoric shear and volumetric power without counting
     /// dilation twice. The ordinary collision's bulk/shear tie is retained;
     /// an independent bulk coefficient requires its explicit physical source.
@@ -263,8 +265,8 @@ impl MaterialSlab<ThermalLbm> {
     /// Advance with material viscosity AND its physical viscous heat.
     ///
     /// `power_w_m3` supplies external heat only: this method adds the molecular
-    /// `mu * gamma_dot^2` loss once, using the exact initial viscosity/shear
-    /// samples that drive momentum. The original two source half-kicks advance
+    /// shear and tied bulk losses once (`2 mu D:D` in total), using the exact
+    /// initial viscosity/shear samples that drive momentum. The original two source half-kicks advance
     /// sensible heat, and endpoint material queries see the resulting actual
     /// temperature. Repeated calls close explicit temperature/viscosity feedback.
     /// Source, conversion, temperature, heat-balance, endpoint and cancellation

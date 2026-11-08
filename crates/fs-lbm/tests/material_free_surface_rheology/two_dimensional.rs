@@ -7,7 +7,32 @@ use fs_lbm::material::free_surface::rheology::{
     FreeSurfaceRheologyError, MaterialFreeSurfaceRheology2,
 };
 use fs_lbm::rheology::{Rheology, update_tau};
-use fs_lbm::{Cell, E, Grid};
+use fs_lbm::{Cell, Grid};
+use fs_material::fluid_transport::viscous::DeformationRate;
+
+// Independent quadrature: the native D2Q9 directions are crate-private.
+const E: [(i32, i32); 9] = [
+    (0, 0),
+    (1, 0),
+    (0, 1),
+    (-1, 0),
+    (0, -1),
+    (1, 1),
+    (-1, 1),
+    (-1, -1),
+    (1, -1),
+];
+const W: [f64; 9] = [
+    4.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 36.0,
+    1.0 / 36.0,
+    1.0 / 36.0,
+    1.0 / 36.0,
+];
 
 fn patch_shear(grid: &mut Grid, cell: usize, epsilon: f64) {
     // Diagonal +/- populations preserve density and momentum and give
@@ -135,6 +160,69 @@ fn g1_source_curve_matches_an_independent_quadratic_root_and_changes_collision()
     assert!(sample.collision_tau > 0.8);
     assert_ne!(liquid.grid.f, frozen.grid.f);
     near(liquid.ledger_mass(), initial_mass, 1e-11);
+}
+
+#[test]
+fn planar_extension_queries_the_physical_material_tensor_in_the_guo_frame() {
+    let source = card(0.01, 100.0, 0.001);
+    let binding = law(&source);
+    for strain in [[[0.5, 0.0], [0.0, 0.5]], [[0.5, 0.3], [0.3, -0.2]]] {
+        let expected_rate =
+            DeformationRate::from_tensor([strain[0][0], strain[1][1], 0.0, strain[0][1], 0.0, 0.0])
+                .unwrap()
+                .shear_rate_per_s();
+        let viscosity = 0.1 + 0.01 * expected_rate;
+        let tau = 0.5 + 3.0 * viscosity * DT / (1000.0 * DX * DX);
+        for force in [[0.0; 2], [0.0003, -0.0002]] {
+            let mut rheology =
+                MaterialFreeSurfaceRheology2::try_new(&binding, [5, 4], DX, DT, 0.05, solve())
+                    .unwrap();
+            let mut grid = Grid::uniform(5, 4, 1.6);
+            let cell = grid.idx(2, 2);
+            let u = [0.01, -0.015];
+            let equilibrium = fs_lbm::equilibrium(1.0, u[0], u[1]);
+            // Prescribe original physical moments with the Hermite projection,
+            // including both Guo half-force terms; rho=1, D_lattice=D_SI*dt.
+            grid.f[cell] = std::array::from_fn(|q| {
+                let e = [f64::from(E[q].0), f64::from(E[q].1)];
+                let momentum = -0.5 * (e[0] * force[0] + e[1] * force[1]);
+                let mut contraction = 0.0;
+                for a in 0..2 {
+                    for b in 0..2 {
+                        let stress = -2.0 * tau * strain[a][b] * DT / 3.0
+                            - 0.5 * (u[a] * force[b] + force[a] * u[b]);
+                        contraction +=
+                            (e[a] * e[b] - if a == b { 1.0 / 3.0 } else { 0.0 }) * stress;
+                    }
+                }
+                equilibrium[q] + W[q] * (3.0 * momentum + 4.5 * contraction)
+            });
+            grid.fext[cell] = force;
+            let mut liquid = FreeSurface::new(
+                grid,
+                rheology.scaling().surface_tension_lattice(),
+                ContactModel::Neutral,
+            );
+            rheology
+                .step(&mut liquid, &CancelGate::new_clock_free())
+                .unwrap();
+            let sample = rheology.rheology_at([2, 2]).unwrap();
+            near(sample.shear_rate_per_s, expected_rate, 2e-10);
+            near(sample.collision_tau, tau, 2e-11);
+            let material = rheology.material_at([2, 2]).unwrap();
+            near(
+                material.property("dynamic_viscosity").unwrap().value_si(),
+                viscosity,
+                2e-11,
+            );
+            assert_eq!(material.card_identity(), source.content_hash());
+            assert!(
+                material
+                    .query_point()
+                    .contains(&("rate".into(), sample.shear_rate_per_s))
+            );
+        }
+    }
 }
 
 #[test]
