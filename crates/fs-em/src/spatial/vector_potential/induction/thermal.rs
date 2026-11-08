@@ -8,6 +8,9 @@
 //! its material entropy/internal-energy law. This entry point alone does not
 //! choose a thermal temperature, deposit heat or infer a heat-capacity law.
 
+/// Settled AC responses on source-refreshed native operators.
+pub mod harmonic;
+
 use super::super::super::{SpatialMagneticMaterial, invalid, poll};
 use super::{
     MagneticOwner, Prepared, Result, SpatialInduction, SpatialInductionCandidate,

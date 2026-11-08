@@ -7116,3 +7116,39 @@ Focused regressions cover unlike specimens exchanging water at zero net vapor
 change, canonical source/participant ordering, loading-dependent Cartesian
 SDIRK storage, one-specimen equivalence, original first-order transport parity,
 and aggregate work/source refusal followed by reuse.
+
+## Settled three-dimensional AC induction heating with thermal feedback
+
+`circuit_enthalpy::spatial_induction::harmonic::heat_assembly_candidate` refreshes
+original scalar or oriented conductivity and re-solves stationary 3D A-phi at
+every caloric Newton proposal and final acceptance. It reuses the native
+source-temperature material trial, harmonic field solve and finite-cell
+enthalpy residual. Actual cellwise cycle-mean Joule heat enters the assigned
+caloric receivers exactly once, with the complete `HeatAssembly` evaluated at
+that same proposed temperature. Contacts, layers, radiation and finite coolant
+retain their source payloads and typed errors; closed-radiation net remains an
+internal transfer. Unowned graph electrical work refuses.
+
+Mapped permeability sources must be temperature independent, including when
+sampled endpoint values happen to coincide. Original material domains, source
+identity and whole-volume caloric correspondence are checked. The accepted
+report retains original material snapshots, thermal-provider samples, cell
+heat destinations, native field diagnostics and both steady AC and thermal
+balances. Existing circuit-trial budgets count actual field evaluations;
+cancellation, source refusal or failed nonlinear acceptance publishes no
+thermal endpoint and leaves the template's transient cochain/clock unchanged.
+
+This is a held-excitation, settled-carrier/slow-thermal approximation with
+backward-Euler thermal rates. The caller must justify the time-scale separation;
+no automatic settling or error certificate is supplied. Startup, envelope
+magnetic-energy changes, finite-window phase/beat heat, motion, saturation and
+hysteresis require their separate owners. Mean power is integrated over the
+thermal interval without an additional peak-phasor factor of one half.
+
+Three G1/G3/G4 regression definitions in
+`tests/spatial_induction_enthalpy/harmonic.rs` compare independent AC diffusion
+and caloric balances over consecutive intervals, distinguish conductivity
+feedback from frozen-field heat, exercise temperature-dependent contact and
+closed radiation transport, and cover source/fixed-permeability refusal,
+transactional failure, budgets, cancellation and retry. Synthetic references
+qualify the discrete model; they do not establish experimental device accuracy.

@@ -11,6 +11,8 @@
 
 /// Physical electrode circuits, retained magnetic diffusion and finite heat.
 pub mod circuit;
+/// Settled AC induction heating with source-temperature conductivity feedback.
+pub mod harmonic;
 /// Vector magnetic memory, local pinning heat and finite enthalpy.
 #[cfg(feature = "magnetic-hysteresis")]
 pub mod hysteretic;

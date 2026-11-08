@@ -16,6 +16,9 @@ mod orthotropic;
 #[path = "spatial_induction_enthalpy/circuit.rs"]
 mod circuit;
 
+#[path = "spatial_induction_enthalpy/harmonic.rs"]
+mod harmonic;
+
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve,
     material::MaterialCell,

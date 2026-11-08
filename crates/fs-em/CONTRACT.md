@@ -7321,3 +7321,20 @@ Focused existing optical/material regressions compare original Maxwell and
 permittivity frequency differences, closed Cauchy/linear-index references,
 constant and varying power absorption, infrared Sellmeier GVD including its
 sign change, water phase/group curvature, source identity and domain refusals.
+
+### Settled AC views of original material-temperature trials
+
+`SpatialInductionMaterialTrial::into_harmonic` exposes the same admitted
+source-temperature operators through a dedicated `SpatialHarmonicMaterialTrial`.
+Geometry, fixed trace, gauge, conducting support and source selections remain
+native, and the original sparse harmonic solver retains its charge, Ampere,
+skin/motion and real/reactive-power gates. The view shares the already prepared
+operators; it does not assemble a second material matrix or expose a transient
+state update. Original magnetic cochains, impressed-current history and clock
+remain unchanged.
+
+This view does not supply magnetic parameter-work or thermal accounting. A
+consumer must declare its settled-carrier approximation or provide a separate
+transient/thermodynamic account. The source-temperature AC heating consumer in
+`fs-couple` checks fixed permeability and independently authored caloric/heat
+transport before using these responses in its thermal residual.
