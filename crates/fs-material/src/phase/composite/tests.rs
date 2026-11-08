@@ -154,6 +154,17 @@ fn latent_storage_and_density_use_fixed_constituent_masses() {
     close(half.specific_volume_m3_kg, volume, 1e-19);
     close(half.bulk_density_kg_m3, 1.0 / volume, 1e-10);
     close(
+        ThermalLaw::bulk_density_kg_m3(&law, 150_000.0)
+            .unwrap()
+            .unwrap(),
+        1.0 / volume,
+        1e-10,
+    );
+    assert_eq!(
+        ThermalLaw::bulk_density_kg_m3(&law, -1.0),
+        Err(DepositionError::MaterialDomain),
+    );
+    close(
         half.pcm_volume_fraction,
         0.25 * pcm_specific_volume / volume,
         1e-15,
@@ -182,6 +193,114 @@ fn latent_storage_and_density_use_fixed_constituent_masses() {
             .unwrap(),
         50_000.0 / 400.0,
         1e-12,
+    );
+}
+
+/// G1: the native geometry consumer must refresh thickness across melting,
+/// with constituent mass and latent storage retained by the original owner.
+#[test]
+fn density_drives_pcm_layer_resistance_without_changing_mass() {
+    use fs_thermal::enthalpy::conduction::{
+        ConductionObserver, ConductiveReservoir, ConductivityLaw, PlanarDensityLayer,
+    };
+    use fs_thermal::enthalpy::{
+        Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionSimulation,
+        Event, MaterialId, Reservoir, StepConfig, TimedEvent,
+    };
+    struct UnitConductivity;
+    impl ConductivityLaw for UnitConductivity {
+        fn conductivity_w_m_k(&self, _: f64) -> Result<f64, DepositionError> {
+            Ok(1.0)
+        }
+    }
+    let matrix = matrix(0.0);
+    let pcm = pcm(0.0);
+    let law = PcmComposite::try_new(&matrix, &pcm, 0.25, 0.0).unwrap();
+    let initial_h = 150_000.0;
+    let volume = |h: f64| {
+        0.75 / 8000.0 + 0.25 / 1000.0 + (h - 125_000.0) * (1.0 / 800.0 - 1.0 / 1000.0) / 200_000.0
+    };
+    let config = StepConfig {
+        max_dt_s: 0.01,
+        energy_tolerance_j: 1e-8,
+    };
+    let initial = DepositionSimulation::new(
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(DepositedCell {
+                id: CellId(0),
+                segment_id: 0,
+                body_id: 0,
+                material_id: MaterialId(0),
+                mass_kg: 1.0,
+                specific_h_j_kg: initial_h,
+                geometry: CellGeometry {
+                    start_m: [0.0; 3],
+                    end_m: [1.0, 0.0, 0.0],
+                    volume_m3: volume(initial_h),
+                    surface_area_m2: 2.0,
+                },
+                boundary: Boundary {
+                    ambient_k: 400.0,
+                    htc_w_m2_k: 0.0,
+                    source_w: 0.0,
+                    reservoir: Some(Reservoir {
+                        area_m2: 1.0,
+                        conductance_w_k: 0.0,
+                        temperature_k: 500.0,
+                    }),
+                },
+            }),
+        }],
+        &[(MaterialId(0), &law)],
+        DepositionBudget {
+            max_cells: 1,
+            max_links: 1,
+            max_events: 1,
+            max_substeps: 10,
+        },
+    )
+    .unwrap()
+    .advance_to(0.0, config, || Ok(()))
+    .unwrap()
+    .0;
+    let observer = ConductionObserver::new(
+        &initial,
+        &[(MaterialId(0), &UnitConductivity)],
+        &[],
+        &[ConductiveReservoir {
+            cell_id: CellId(0),
+            half_distance_m: 0.5 * volume(initial_h),
+            surface_resistance_m2_k_w: 0.0,
+        }],
+        || Ok(()),
+    )
+    .unwrap()
+    .with_material_density_layers(
+        &initial,
+        &[PlanarDensityLayer {
+            cell_id: CellId(0),
+            footprint_area_m2: 1.0,
+        }],
+        || Ok(()),
+    )
+    .unwrap();
+    let (heated, observer, audit) = initial
+        .advance_observed(&observer, 0.02, config, || Ok(()))
+        .unwrap();
+    let first_h = initial_h + 0.01 * 200.0 / volume(initial_h);
+    let expected_h = first_h + 0.01 * 200.0 / volume(first_h);
+    let cell = &heated.cells()[&CellId(0)];
+    close(cell.specific_h_j_kg, expected_h, 1e-8);
+    close(heated.temperature_k(CellId(0)).unwrap(), 400.0, 1e-12);
+    assert_eq!(cell.mass_kg, 1.0);
+    assert_eq!(cell.geometry, initial.cells()[&CellId(0)].geometry);
+    close(audit.external_heat_j, expected_h - initial_h, 1e-8);
+    close(audit.residual_j, 0.0, 1e-8);
+    close(
+        observer.last_planar_half_distance_m(CellId(0)).unwrap(),
+        0.5 * volume(first_h),
+        1e-16,
     );
 }
 

@@ -68,6 +68,48 @@ fn pressure_enthalpy_inverse_uses_nasa_curvature_and_returns_one_coherent_medium
     assert!((h300 + cp300 * (t - 300.0) - expected_h).abs() > 100.0);
 }
 
+/// G0/G3: the shared thermal interface must retain the isobaric mixture EOS,
+/// including composition and the inverse caloric bracket, without freezing rho.
+#[test]
+fn thermal_density_retains_pressure_composition_and_caloric_state() {
+    let source = model(vec![0.75, 0.25], 0.001);
+    for fractions in [[0.75, 0.25], [0.25, 0.75], [1.0, 0.0], [0.0, 1.0]] {
+        let molar_mass = fractions[0] * 0.028 + fractions[1] * 0.004;
+        for pressure in [100_000.0, 140_000.0] {
+            let law = GasEnthalpyLaw::from_mole(
+                &source,
+                mole(fractions.to_vec()),
+                point(300.0, pressure),
+                controls(),
+            )
+            .unwrap();
+            for temperature in [280.0, 300.0, 337.0, 360.0] {
+                let h = law.enthalpy_at_temperature(temperature).unwrap();
+                let rho = law.bulk_density_kg_m3(h).unwrap().unwrap();
+                let expected =
+                    pressure * molar_mass / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature);
+                assert!((rho / expected - 1.0).abs() < 1e-11);
+                assert_eq!(
+                    rho,
+                    law.resolve_enthalpy(h, || false)
+                        .unwrap()
+                        .state()
+                        .state()
+                        .density
+                );
+            }
+            let cold = law.enthalpy_at_temperature(280.0).unwrap();
+            let hot = law.enthalpy_at_temperature(360.0).unwrap();
+            for invalid in [cold - 1.0, hot + 1.0, f64::NAN, f64::INFINITY] {
+                assert_eq!(
+                    law.bulk_density_kg_m3(invalid),
+                    Err(DepositionError::MaterialDomain)
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn relative_caloric_sample_integrates_mixture_cp_and_preserves_its_bracket() {
     let source = model(vec![0.75, 0.25], 0.001);

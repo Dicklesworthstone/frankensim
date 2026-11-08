@@ -41,6 +41,42 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_thermal_density_retains_the_original_expanding_crystal_branch() {
+    let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+        ContentHash([61; 32]),
+        SolidLiquidPhase::Solid,
+        vec![
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 0.0,
+                temperature_k: 300.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 1000.0,
+            },
+            EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: 200_000.0,
+                temperature_k: 500.0,
+                liquid_mass_fraction: 0.0,
+                bulk_density_kg_m3: 800.0,
+            },
+        ],
+    )
+    .unwrap();
+    let branch = CrystallizationCaloricBranch::new(&curve).unwrap();
+    for (h, fraction) in [(0.0, 0.0), (50_000.0, 0.25), (200_000.0, 1.0)] {
+        let specific_volume = (1.0 - fraction) / 1000.0 + fraction / 800.0;
+        close(
+            ThermalLaw::bulk_density_kg_m3(&branch, h).unwrap().unwrap(),
+            1.0 / specific_volume,
+            1e-10,
+        );
+    }
+    assert_eq!(
+        ThermalLaw::bulk_density_kg_m3(&branch, -1.0),
+        Err(DepositionError::MaterialDomain),
+    );
+}
+
+#[test]
 fn g0_curved_phase_gap_checks_its_interior_minimum_between_source_boundaries() {
     let source_branch = |phase, datum, temperatures: &[f64], varying_capacity| {
         let knots: Vec<_> = temperatures

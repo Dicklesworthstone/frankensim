@@ -185,6 +185,10 @@ impl CrystallizationCaloric for CrystallizationCaloricBranch<'_> {
 }
 
 impl ThermalLaw for CrystallizationCaloricBranch<'_> {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        ThermalLaw::bulk_density_kg_m3(self.curve, h)
+    }
+
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity().as_bytes())
     }

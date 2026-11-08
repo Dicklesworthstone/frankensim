@@ -137,6 +137,13 @@ impl FreezingWaterThermalLaw {
 }
 
 impl ThermalLaw for FreezingWaterThermalLaw {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.chart
+            .state_at_specific_enthalpy(h, || false)
+            .map(|solution| Some(solution.state().bulk_density_kg_m3()))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
         self.chart
             .state_at_specific_enthalpy(specific_h_j_kg, || false)

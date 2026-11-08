@@ -459,6 +459,23 @@ impl GasEnthalpyLaw {
 }
 
 impl ThermalLaw for GasEnthalpyLaw {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        let t = self.temperature_k(h)?;
+        let (_, pressure) =
+            coordinates(&self.context).map_err(|_| DepositionError::MaterialDomain)?;
+        // Retain the original mixture's molecular mass and EOS. A density
+        // query needs no viscosity/conductivity resolution or transport receipt.
+        let properties = self
+            .model
+            .thermodynamics()
+            .evaluate_properties(Temperature::new(t), pressure)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        let eos = fs_thermochem::IdealGasEosV1::new(properties.molar_mass())
+            .and_then(|eos| eos.evaluate_pt(Temperature::new(t), pressure))
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        Ok(Some(eos.mass_density().value()))
+    }
+
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
         temperature(&self.model, &self.context, h, self.controls, &mut || false)
             .map(|solution| solution.temperature_k).map_err(|_| DepositionError::MaterialDomain)

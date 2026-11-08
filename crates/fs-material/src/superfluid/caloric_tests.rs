@@ -222,6 +222,12 @@ fn native_thermal_interface_owns_the_same_enthalpy_entropy_and_slope() {
     assert_eq!(thermal.storage_basis(), ThermalStorageBasis::Enthalpy);
     assert_eq!(thermal.caloric_identity(), Some(*law.identity().as_bytes()));
     close(thermal.temperature_k(355.0).unwrap(), 1.5, 2e-14);
+    // G1: integrating beta=-0.01/K gives rho=145 exp(0.01*(T-1)).
+    close(
+        thermal.bulk_density_kg_m3(355.0).unwrap().unwrap(),
+        145.0 * 0.005_f64.exp(),
+        2e-14,
+    );
     assert_eq!(
         thermal.maximum_temperature_slope(),
         law.maximum_temperature_slope()
@@ -236,6 +242,10 @@ fn native_thermal_interface_owns_the_same_enthalpy_entropy_and_slope() {
     );
     assert_eq!(
         thermal.temperature_k(881.0),
+        Err(DepositionError::MaterialDomain)
+    );
+    assert_eq!(
+        thermal.bulk_density_kg_m3(881.0),
         Err(DepositionError::MaterialDomain)
     );
     assert_eq!(

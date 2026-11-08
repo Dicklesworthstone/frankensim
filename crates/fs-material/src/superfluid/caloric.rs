@@ -553,6 +553,12 @@ impl IsobaricSuperfluidLaw {
 }
 
 impl ThermalLaw for IsobaricSuperfluidLaw {
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.state_at_specific_enthalpy(h)
+            .map(|state| Some(state.two_fluid().density_kg_m3()))
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
+
     fn storage_basis(&self) -> ThermalStorageBasis {
         ThermalStorageBasis::Enthalpy
     }

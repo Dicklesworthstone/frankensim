@@ -197,6 +197,9 @@ fn thermal_preparation_retains_both_source_bounds_and_admits_a_zero_slope_latent
     assert_eq!(plateau.liquid_heat_capacity_bound(), None);
     assert_eq!(plateau.maximum_temperature_slope(), 0.0);
     let [lower_h, upper_h] = plateau.chart().enthalpy_bounds_j_kg();
+    let ice_density = at_h(&plateau, lower_h).bulk_density_kg_m3();
+    let liquid_density = at_h(&plateau, upper_h).bulk_density_kg_m3();
+    assert!(ice_density < liquid_density);
     for fraction in [0.0, 0.25, 0.75, 1.0] {
         let h = match fraction {
             0.0 => lower_h,
@@ -206,6 +209,13 @@ fn thermal_preparation_retains_both_source_bounds_and_admits_a_zero_slope_latent
         assert_eq!(
             ThermalLaw::temperature_k(&plateau, h).unwrap(),
             melting_temperature
+        );
+        near(
+            ThermalLaw::bulk_density_kg_m3(&plateau, h)
+                .unwrap()
+                .unwrap(),
+            1.0 / ((1.0 - fraction) / ice_density + fraction / liquid_density),
+            2e-10,
         );
     }
     near(
@@ -219,6 +229,10 @@ fn thermal_preparation_retains_both_source_bounds_and_admits_a_zero_slope_latent
         ThermalLaw::temperature_k(&plateau, lower_h.next_down()),
         Err(DepositionError::MaterialDomain)
     ));
+    assert_eq!(
+        ThermalLaw::bulk_density_kg_m3(&plateau, lower_h.next_down()),
+        Err(DepositionError::MaterialDomain),
+    );
 }
 
 #[test]
