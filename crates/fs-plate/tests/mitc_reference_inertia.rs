@@ -484,3 +484,224 @@ fn unrealizable_inventory_wrong_extent_and_cancellation_refuse() {
         Err(PlateError::Cancelled)
     ));
 }
+
+#[test]
+fn body_acceleration_retains_graded_weight_signed_layer_torque_and_world_frame() {
+    for mass in [ShellMass::Consistent, ShellMass::Lumped] {
+        for sign in [-1.0, 1.0] {
+            for turned in [false, true] {
+                let (mut mesh, _) = triangle();
+                let mut normals = vec![[0.0, 0.0, 1.0]; 3];
+                let shift = [0.7, -0.2, 0.4];
+                let mut acceleration = [1.25, -3.0, -9.81];
+                // Independent P1 area integrals: integral I0=11/6,
+                // integral x*I0=7/12, integral y*I0=3/4 and
+                // integral I1=(.01-.06+.21)/6 about the declared surface.
+                let inventory = 11.0 / 6.0;
+                let mut first = [7.0 / 12.0, 0.75, sign * (0.01 - 0.06 + 0.21) / 6.0];
+                if turned {
+                    for point in &mut mesh.nodes {
+                        let rotated = rotate(*point);
+                        *point = core::array::from_fn(|a| rotated[a] + shift[a]);
+                    }
+                    for normal in &mut normals {
+                        *normal = rotate(*normal);
+                    }
+                    acceleration = rotate(acceleration);
+                    let rotated = rotate(first);
+                    first = core::array::from_fn(|a| rotated[a] + inventory * shift[a]);
+                }
+                let directors = NodalDirectors::new(&mesh, normals, 0.5).unwrap();
+                let moments = [core::array::from_fn(|i| {
+                    let i0 = [1.0, 3.0, 7.0][i];
+                    let z = sign * [0.01, -0.02, 0.03][i];
+                    ShearShellInertia::new(i0, i0 * z, i0 * (0.0004 + z * z)).unwrap()
+                })];
+                let assembled = model(&mesh, &directors, &[section(1.0)], &moments, &[], mass);
+                let load = assembled
+                    .body_acceleration_load(acceleration, || false)
+                    .unwrap();
+                let mut force = [0.0; 3];
+                let mut moment = [0.0; 3];
+                for (node, &position) in mesh.nodes.iter().enumerate() {
+                    let f = core::array::from_fn(|a| load[6 * node + a]);
+                    let orbital = cross(position, f);
+                    for a in 0..3 {
+                        force[a] += f[a];
+                        moment[a] += orbital[a] + load[6 * node + 3 + a];
+                    }
+                }
+                let expected_moment = cross(first, acceleration);
+                for a in 0..3 {
+                    close(force[a], inventory * acceleration[a], 20.0);
+                    close(moment[a], expected_moment[a], 20.0);
+                }
+                let rigid: Vec<_> = (0..18)
+                    .map(|i| if i % 6 < 3 { acceleration[i % 6] } else { 0.0 })
+                    .collect();
+                let mut direct = vec![0.0; 18];
+                assembled.pencil().m.spmv(&rigid, &mut direct);
+                // The numerical relative-spin gauge vanishes on translation.
+                for (&a, b) in load.iter().zip(direct) {
+                    close(a, b, 20.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn body_load_keeps_fixed_columns_and_native_oblique_support_work_and_static_solve() {
+    let (mesh, directors) = triangle();
+    let moments = scaled_moments([1.0, 2.0, 5.0]);
+    let constraints = [
+        ShellConstraint {
+            node: 0,
+            mask: [true; 6],
+            frame: ConstraintFrame::Global,
+        },
+        ShellConstraint {
+            node: 1,
+            mask: [true; 6],
+            frame: ConstraintFrame::Global,
+        },
+        ShellConstraint {
+            node: 2,
+            mask: [true, false, false, false, false, false],
+            frame: ConstraintFrame::Local([
+                [0.36, -0.48, 0.8],
+                [0.8, 0.6, 0.0],
+                [-0.48, 0.64, 0.6],
+            ]),
+        },
+    ];
+    let acceleration = [1.7, -2.2, -9.81];
+    for mass in [ShellMass::Consistent, ShellMass::Lumped] {
+        let free = model(&mesh, &directors, &[section(1.0)], &moments, &[], mass);
+        let supported = model(
+            &mesh,
+            &directors,
+            &[section(1.0)],
+            &moments,
+            &constraints,
+            mass,
+        );
+        let world = supported
+            .body_acceleration_load(acceleration, || false)
+            .unwrap();
+        assert_eq!(
+            world,
+            free.body_acceleration_load(acceleration, || false).unwrap()
+        );
+        let projected = supported
+            .project_body_acceleration(acceleration, || false)
+            .unwrap();
+        assert_eq!(projected, supported.project_load(&world).unwrap());
+        assert!(world[..12].iter().any(|f| f.abs() > 0.1));
+        let u: Vec<_> = (0..supported.pencil().free)
+            .map(|i| 0.01 * (i as f64 - 0.7))
+            .collect();
+        let expanded = supported.expand(&u).unwrap();
+        let world_work: f64 = world.iter().zip(expanded).map(|(f, u)| f * u).sum();
+        let free_work: f64 = projected.iter().zip(&u).map(|(f, u)| f * u).sum();
+        close(world_work, free_work, 1.0);
+        if mass == ShellMass::Consistent {
+            let rigid: Vec<_> = (0..18)
+                .map(|i| if i % 6 < 3 { acceleration[i % 6] } else { 0.0 })
+                .collect();
+            let truncated = supported.project_load(&rigid).unwrap();
+            let mut wrong = vec![0.0; truncated.len()];
+            supported.pencil().m.spmv(&truncated, &mut wrong);
+            assert!(
+                wrong
+                    .iter()
+                    .zip(&projected)
+                    .any(|(a, b)| (a - b).abs() > 0.01)
+            );
+        }
+        let displacement = fs_plate::shell::mitc::solve_static(&supported, &world).unwrap();
+        let reduced = supported.project_load(&displacement).unwrap();
+        let mut reaction = vec![0.0; reduced.len()];
+        supported.pencil().k.spmv(&reduced, &mut reaction);
+        for (internal, &applied) in reaction.iter().zip(&projected) {
+            assert!((internal - applied).abs() <= 1e-9 * applied.abs().max(1.0));
+        }
+    }
+}
+
+#[test]
+fn uniform_body_load_preserves_original_paths_and_refusal_leaves_inventory_reusable() {
+    let (mesh, directors) = triangle();
+    let sections = [section(1.0)];
+    let moments = [[ShearShellInertia::from_section(&sections[0]); 3]];
+    for mass in [ShellMass::Consistent, ShellMass::Lumped] {
+        let original = assemble_mitc3p(
+            &mesh,
+            &directors,
+            &sections,
+            &[],
+            mass,
+            budget(&mesh),
+            1e-3,
+            || false,
+        )
+        .unwrap();
+        let explicit = model(&mesh, &directors, &sections, &moments, &[], mass);
+        let g = [1.0, -2.0, -9.81];
+        let expected = original.body_acceleration_load(g, || false).unwrap();
+        assert_eq!(
+            expected,
+            explicit.body_acceleration_load(g, || false).unwrap()
+        );
+        assert_eq!(
+            original.body_acceleration_load([0.0; 3], || false).unwrap(),
+            vec![0.0; 18]
+        );
+        for g in [[f64::NAN, 0.0, 0.0], [0.0, f64::INFINITY, 0.0]] {
+            assert!(original.body_acceleration_load(g, || false).is_err());
+        }
+        // Polls cover entry, completed physical load and both ends of the
+        // native support projection. Every refusal leaves the immutable cache.
+        for stop in [1, 3, 5, 6] {
+            let mut polls = 0;
+            assert!(matches!(
+                original.project_body_acceleration(g, || {
+                    polls += 1;
+                    polls == stop
+                }),
+                Err(PlateError::Cancelled)
+            ));
+            assert_eq!(
+                original.body_acceleration_load(g, || false).unwrap(),
+                expected
+            );
+        }
+        same_bits(
+            &original.pencil().m,
+            &explicit.pencil().m,
+            original.pencil().free,
+        );
+    }
+    let heavy = model(
+        &mesh,
+        &directors,
+        &sections,
+        &scaled_moments([10.0, 20.0, 50.0]),
+        &[],
+        ShellMass::Consistent,
+    );
+    let before = heavy
+        .body_acceleration_load([0.0, 0.0, -9.81], || false)
+        .unwrap();
+    assert!(
+        heavy
+            .body_acceleration_load([0.0, 0.0, f64::MAX], || false)
+            .is_err()
+    );
+    assert_eq!(
+        heavy
+            .body_acceleration_load([0.0, 0.0, -9.81], || false)
+            .unwrap(),
+        before
+    );
+}

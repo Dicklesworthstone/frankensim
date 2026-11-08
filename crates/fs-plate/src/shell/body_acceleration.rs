@@ -1,6 +1,6 @@
 //! Uniform reference-frame acceleration through the original full shell mass.
 //!
-//! Preparation accompanies native panel and bonded-beam assembly. Each of the
+//! Preparation accompanies native panel, bonded-beam and MITC assembly. Each of the
 //! three cached columns is the full mass acting on a unit rigid translation,
 //! before support restriction. Constrained columns therefore still contribute
 //! to free loads, and constrained rows retain their applied force and moment.
@@ -14,8 +14,8 @@ use crate::PlateError;
 
 /// Immutable response of one assembled reference inventory to uniform acceleration.
 ///
-/// Returned with its matching native pencil by the graded reinforced-shell
-/// assembly entries. The private coefficients include every original coordinate;
+/// Returned with the graded reinforced-shell pencil or retained by the native
+/// MITC shell. The private coefficients include every original coordinate;
 /// no reduced-mass reconstruction or density resampling occurs during evaluation.
 #[derive(Debug, Clone)]
 pub struct ShellBodyAcceleration {
@@ -37,11 +37,31 @@ impl ShellBodyAcceleration {
     /// Nonfinite acceleration or unrepresentable force/moment. No partial load
     /// vector is returned, and the prepared inventory remains reusable.
     pub fn full_load(&self, acceleration_m_s2: [f64; 3]) -> Result<Vec<f64>, PlateError> {
+        self.full_load_with_cancellation(acceleration_m_s2, || false)
+    }
+
+    /// The same complete load, with cancellation before allocation, every
+    /// bounded group of coordinates, and before publication.
+    ///
+    /// # Errors
+    /// Cancellation or the same physical/numerical refusals as [`Self::full_load`].
+    /// Neither a partial vector nor a changed inventory is published.
+    pub fn full_load_with_cancellation(
+        &self,
+        acceleration_m_s2: [f64; 3],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, PlateError> {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
         if acceleration_m_s2.iter().any(|x| !x.is_finite()) {
             return Err(bad("shell body acceleration must be finite in m/s^2"));
         }
         let mut load = Vec::with_capacity(self.response.len());
-        for row in &self.response {
+        for (index, row) in self.response.iter().enumerate() {
+            if index % 256 == 0 && cancelled() {
+                return Err(PlateError::Cancelled);
+            }
             let value = row
                 .iter()
                 .zip(acceleration_m_s2)
@@ -51,6 +71,9 @@ impl ShellBodyAcceleration {
                 return Err(bad("shell body acceleration load overflow"));
             }
             load.push(value);
+        }
+        if cancelled() {
+            return Err(PlateError::Cancelled);
         }
         Ok(load)
     }

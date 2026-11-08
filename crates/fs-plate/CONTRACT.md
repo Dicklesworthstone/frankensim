@@ -2118,6 +2118,35 @@ equilibrium and release, frozen-history tangent finite differences, and refused
 or cancelled attempts with unchanged accepted histories.
 
 
+## Body acceleration through original MITC reference inertia
+
+`MitcShellModel::body_acceleration_load` returns full physical reference-node
+forces and axial moments from explicit uniform global acceleration.
+`project_body_acceleration` then applies the original work-conjugate oblique
+support map. Both preserve constrained-column contributions; reduced mass
+times free translation cannot reconstruct this body load.
+
+Three response coefficients per original coordinate are collected during the
+same physical element assembly, before support restriction. The original
+constant or P1 I0/I1/I2 field, signed layer-centroid torque, director interpolation,
+elastic bubble condensation and selected mass image remain intact. The separate
+relative-drilling gauge annihilates rigid translation and supplies no physical
+body force. Existing K/M accumulation is unchanged. No second inertia quadrature
+or unrestricted sparse pencil is built.
+
+Evaluation is linear in node count, with bounded cancellation checks and no
+partial result on nonfinite acceleration, arithmetic refusal or cancellation.
+The cache is immutable; load refusal cannot alter accepted inventory. This is
+fixed-reference dead acceleration, not moving supports, current-density
+resampling, centrifugal force or finite-rotation follower gravity. Independent
+transient director coordinates use their retained enriched physical mass owner.
+
+Three focused additions to `tests/mitc_reference_inertia.rs` define independent
+graded weight/centroid torque, signed layer and frame behavior, full-mass action,
+fixed-column and oblique-support work, the native static solve, uniform path
+equivalence and cancellable refusal/reuse. Pinned Rustfmt parsing completed;
+native runtime execution remains unperformed in the full shared filesystem.
+
 ## Native shell reference inertia independent of stiffness
 
 `shell::inertia::prepare_reference_mass` exposes the original local P1

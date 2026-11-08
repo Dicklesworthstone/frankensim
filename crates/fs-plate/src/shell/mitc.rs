@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 mod element;
 mod inertia;
 pub use inertia::{ShearShellInertia, assemble_mitc3p_with_reference_inertia};
+mod body_acceleration;
+use super::body_acceleration::ShellBodyAcceleration;
 mod static_solver;
 pub use static_solver::PreparedMitcStatic;
 /// Reusable observation of the original condensed MITC strain field.
@@ -502,6 +504,7 @@ pub struct MitcShellModel {
     directors: NodalDirectors,
     sections: Vec<ShearShellSection>,
     reference_inertia: Option<Vec<[ShearShellInertia; 3]>>,
+    body_acceleration: ShellBodyAcceleration,
 }
 impl MitcShellModel {
     /// Immutable geometry, directors and equilibrium sections that assembled
@@ -536,6 +539,19 @@ impl MitcShellModel {
     /// Pull back a physical global force/moment vector by the same frame map
     /// used in assembly, preserving `f_global · u_global = f_free · u_free`.
     pub fn project_load(&self, full: &[f64]) -> Result<Vec<f64>, PlateError> {
+        self.project_load_cancellable(full, || false)
+    }
+
+    // The same work-conjugate projection serves the cached body load. Retain
+    // bounded polling through support rotation rather than duplicating its map.
+    fn project_load_cancellable(
+        &self,
+        full: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, PlateError> {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
         if full.len() != 6 * self.frames.len() || full.iter().any(|x| !x.is_finite()) {
             return Err(PlateError::BadConstraint {
                 what: "one finite physical force/moment per shell DOF required",
@@ -543,13 +559,24 @@ impl MitcShellModel {
         }
         let mut out = vec![0.0; self.pencil.free];
         for (node, r) in self.frames.iter().enumerate() {
+            if node % 64 == 0 && cancelled() {
+                return Err(PlateError::Cancelled);
+            }
             for block in [0, 3] {
                 for a in 0..3 {
                     if let Some(i) = self.pencil.dof_map[6 * node + block + a] {
                         out[i] = (0..3).map(|k| r[a][k] * full[6 * node + block + k]).sum();
+                        if !out[i].is_finite() {
+                            return Err(PlateError::BadConstraint {
+                                what: "projected shell force/moment overflow",
+                            });
+                        }
                     }
                 }
             }
+        }
+        if cancelled() {
+            return Err(PlateError::Cancelled);
         }
         Ok(out)
     }
@@ -1574,6 +1601,8 @@ fn assemble_mitc3p_impl(
     }
     let mut k = Coo::new(free, free);
     let mut m = Coo::new(free, free);
+    let mut body_acceleration = ShellBodyAcceleration::empty();
+    body_acceleration.initialize(full);
     let mut drill = vec![BTreeMap::<usize, f64>::new(); mesh.nodes.len()];
     let mut node_area = vec![0.0; mesh.nodes.len()];
     let mut drill_scale = vec![0.0; mesh.nodes.len()];
@@ -1600,6 +1629,21 @@ fn assemble_mitc3p_impl(
             )?
         };
         let facet_inertia = inertia::FacetInertia::new(&sections[e], corners);
+        // Physical world-coordinate mass BEFORE oblique support restriction.
+        // Its signed I1 terms supply actual first-moment body torques. The
+        // separate relative-drilling gauge annihilates rigid translation and
+        // contributes no physical acceleration force.
+        for i in 0..18 {
+            for j in i..18 {
+                if (i % 6 < 3 || j % 6 < 3) && me[i][j] != 0.0 {
+                    body_acceleration.accumulate_symmetric(
+                        6 * tri[i / 6] + i % 6,
+                        6 * tri[j / 6] + j % 6,
+                        me[i][j],
+                    )?;
+                }
+            }
+        }
         for i in 0..18 {
             let ni = tri[i / 6];
             let bi = i % 6;
@@ -1726,6 +1770,7 @@ fn assemble_mitc3p_impl(
         directors: directors.clone(),
         sections: sections.to_vec(),
         reference_inertia: reference_inertia.map(<[_]>::to_vec),
+        body_acceleration,
     })
 }
 
