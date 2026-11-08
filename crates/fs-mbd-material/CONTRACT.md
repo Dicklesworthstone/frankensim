@@ -2085,4 +2085,18 @@ added mass, waves and sloshing remain outside this quasistatic analysis.
 waterplane/metacentric formulas, an unstable tall body, neutral submergence,
 the finite-tank heave factor `A_tank/(A_tank-A_waterplane)`, and continuous
 stratification. It also checks frame covariance, cancellation, source reuse
-and perturbation resolution.
+and perturbation resolution. The executable example resolves two disjoint
+solid regions plus a shared liquid, computes their inclined floating pose
+and stiffness, then advances the original energy-gated native motion:
+
+```sh
+cargo run -p fs-mbd-material --features hydrostatic-equilibrium --example floating_equilibrium
+# Change the physical material densities (left solid, right solid, liquid):
+cargo run -p fs-mbd-material --features hydrostatic-equilibrium --example floating_equilibrium -- 600 400 1000
+```
+
+Its independent regression checks both material assignments against the
+inclination equation `5*tan(theta)+4*tan(theta)^3=1.2` (with reversed sign for
+the reversed mass offset), and the free-heave pitch stiffness from the exact
+integrated box energy. Off-diagonal heave/tilt terms therefore participate in
+the comparison, rather than testing only an upright homogeneous block.

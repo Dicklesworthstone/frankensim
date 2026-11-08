@@ -54,3 +54,8 @@ required-features = ["electrothermal-coupling"]
 [[example]]
 name = "thermal_vibration"
 required-features = ["thermoelastic-coupling"]
+
+[[example]]
+name = "floating_equilibrium"
+path = "examples/floating_equilibrium/main.rs"
+required-features = ["hydrostatic-equilibrium"]
