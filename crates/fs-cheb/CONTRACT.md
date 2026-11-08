@@ -426,3 +426,33 @@ does not panic through the budgeted API. The classic `differentiate` keeps its
 existing panic contract. The callback entry point does not itself admit a
 coefficient budget. G0/G1/G4 tests in `checked_derivative.rs` cover the exact
 cubic chain rule, wide-domain scaling, overflow refusal and cancellation.
+
+
+## Free-surface Nusselt-film spectral stability
+
+`orr_sommerfeld::film::PreparedFilmSpectrum` solves temporal stability of the
+Newtonian Nusselt profile with one no-slip wall and a deformable, shear-free
+surface. It retains surface displacement, the kinematic condition, tangential
+stress, normal viscous stress, normal gravity and surface tension. Length and
+velocity scales are thickness and mean speed; eigenvalue real parts are growth
+on the corresponding advective clock. Positive finite kh is required.
+
+The wall-factored Chebyshev coefficient basis uses the original `Cheb1`
+differentiation/evaluation owners. Surface displacement is eliminated by its
+tangential-stress relation. Row/column-equilibrated shift-invert uses the existing
+complex LU/QR; no replacement eigen kernel, fitted dispersion, artificial
+damping or long-wave expansion is introduced. Prepared derivative grids are
+reused across material, wavenumber and path queries.
+
+The caller supplies two orders, requested modes, QR/SVD sweep caps and residual/
+resolution tolerances. Degree is bounded by 64. Both orders' rightmost mode sets
+must match, and native SVD right vectors check the original pencil's
+componentwise backward residual. Failure/cancellation returns no partial
+spectrum. Order differences are reported numerical indicators, not certified
+enclosures or bounds over unsampled wavenumbers.
+
+Focused regressions cover the mean-speed Yih threshold, Nusselt long-wave phase
+speed, free-surface viscous half-integer modes, finite-Re/finite-kh references
+from an independent generalized-QZ calculation, and resolution/cancellation
+refusal. The model assumes a locally parallel planar Newtonian film without
+gas dynamics, side walls, contact lines, nonlinear waves or evolving rheology.

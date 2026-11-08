@@ -11,6 +11,10 @@
 
 use fs_lbm::film::{FilmError, FilmMaterial, LongWaveLimits, NusseltFilm};
 
+/// Finite-wavelength free-surface spectra using the native Chebyshev owner.
+pub mod spectral;
+pub use spectral::{LaminarFilmSpectralStudy, LaminarSpectralError, LaminarSpectralReport};
+
 mod transit_band;
 pub use transit_band::{LaminarFilmTransitBandStudy, LaminarTransitBandReport};
 
@@ -173,6 +177,9 @@ pub struct LaminarGrowthReport {
 /// A physical film study that cannot report a growth value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaminarFilmError {
+    /// The native free-surface eigensolve was refused. The spectral study's
+    /// direct evaluate method retains the full residual/resolution diagnosis.
+    Spectral { section: usize, mode: usize },
     /// At least one section is needed.
     EmptyPath,
     /// At least one physical wavenumber is needed.
@@ -226,6 +233,12 @@ pub enum LaminarFilmError {
 impl core::fmt::Display for LaminarFilmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Spectral { section, mode } => {
+                write!(
+                    f,
+                    "free-surface spectrum refused at film section {section}, wavenumber {mode}"
+                )
+            }
             Self::EmptyPath => write!(f, "a laminar film study needs a path section"),
             Self::EmptyModes => write!(f, "a laminar film study needs a physical wavenumber"),
             Self::InvalidWidthScale => write!(f, "film width scale must be finite and positive"),

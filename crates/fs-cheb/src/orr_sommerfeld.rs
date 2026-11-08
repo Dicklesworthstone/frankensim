@@ -18,6 +18,9 @@
 //! query): [`growth_rates`] returns the k rightmost eigenvalues, sorted
 //! by descending real part with deterministic tie-breaks.
 
+/// Finite-wavelength, free-surface Nusselt-film temporal stability.
+pub mod film;
+
 use crate::{diff_matrix, lobatto_points};
 use fs_la::eigen_complex::{EigFailure, eig, lu_complex};
 use fs_math::c64::C64;

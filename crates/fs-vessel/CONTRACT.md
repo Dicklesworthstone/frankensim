@@ -533,3 +533,32 @@ profiles and a work budget that refuses the equivalent explicit run.
 Capillary/advection stability and maximum-step accuracy requirements still
 apply. A slender-domain stop is not a prediction of resolved pinch-off or
 post-breakup droplets.
+
+
+## Finite-wavelength free-surface film stability
+
+`LaminarFilmSpectralStudy` composes the native Nusselt base with
+`fs_cheb::orr_sommerfeld::film::PreparedFilmSpectrum`. Actual section widths,
+volume flow, material properties and effective acceleration determine h, mean
+speed, Re, kh, gravity and capillarity. Rates return in 1/s and rad/s on the
+same h/mean-speed clock. The caller's h/width budget explicitly admits the
+laterally wide approximation.
+
+One prepared pair of spectral grids serves the entire path/wavenumber query.
+The report identifies the worst sampled mode, physical operating range, native
+residual and dimensional order difference. Finite kh does not invoke the
+Benney long-wave approximation. Native numerical or physical refusal publishes
+no partial report, and the controlled entry point observes cancellation.
+
+The study implements the existing `LaminarGrowthObjective` for physical risk
+and racing. Direct evaluation retains full native refusal details; the common
+objective error preserves the failed section and wavenumber. Resolution
+differences are numerical indicators, not certified error bounds. A negative
+sampled result does not establish global stability, nonlinear laminarity or
+stability of unexamined wavelengths. This local temporal study does not extend
+the separate weak-growth finite-path transport approximation.
+
+SI regressions cover finite-wavelength decay, physical clock/dimensional
+scaling, the shared growth-objective seam and geometry/wavelength/cancellation
+refusal. No material coefficients or physical kernel are replaced in the
+vessel adapter.
