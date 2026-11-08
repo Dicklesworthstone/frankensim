@@ -2,15 +2,16 @@
 //! buckling pencils and eigenvalue derivatives — because the
 //! steel-minimizing frame that ignores buckling IS A PAPERCLIP.
 //!
-//! The pencil `(K + λ K_G(σ₀)) φ = 0` is solved MATRIX-FREE with
-//! fs-la's LOBPCG (the named consumer) on the Cholesky-reduced
-//! symmetric operator Ã = L⁻¹(−K_G)L⁻ᵀ (K = LLᵀ): the largest Ritz
-//! value θ gives the critical load λ = 1/θ. The dense factorization is
-//! fixture-gated (the cond-probe discipline); production-scale shifted
-//! iterations are a recorded no-claim. Independently scaled matrices preserve
-//! physical load factors; transformed and original-pencil residuals gate every
-//! result. Small pencils that cannot fit a LOBPCG block use fs-la's native dense
-//! symmetric eigensolver within an explicit 64-DOF bound.
+//! The pencil `(K + λ K_G(σ₀)) φ = 0` uses a symmetric elastic-factor
+//! reduction. Small pencils retain the dense Cholesky/LOBPCG route; above
+//! 4096 free DOFs, bounded native sparse LDLᵀ whitening delegates to the
+//! generic fs-spectral service. Largest algebraic inverse-load roots select
+//! the lowest positive critical loads. Independently scaled matrices preserve
+//! physical units; transformed and original-pencil residuals qualify the
+//! actual rounded load returned to the caller. Small pencils that cannot
+//! fit a LOBPCG block use fs-la's native dense symmetric eigensolver within
+//! an explicit 64-DOF bound. Sparse fill/work limits remain explicit and
+//! numerical convergence does not certify spectrum completeness.
 //!
 //! Eigenvalue derivatives ship with the pencil: the DIRECT derivative
 //! `dλ/ds = φᵀ(∂K/∂s)φ / (φᵀ(−K_G)φ)` at frozen prebuckling stress,
@@ -22,7 +23,8 @@
 //! battery). [`sensitivity`] supplies the complete element-modulus derivative:
 //! direct elastic and geometric terms plus one reference-equilibrium adjoint
 //! per mode, with the original Standard/B-bar strain operator and supports.
-//! It conservatively refuses unresolved eigenvalue clusters.
+//! Individual derivatives refuse unresolved clusters; the complete-packet
+//! aggregate uses one equilibrium adjoint and admits repeated interior modes.
 
 use crate::SolidError;
 use crate::linear::{Formulation, LinearProblem};
@@ -35,6 +37,8 @@ use fs_sparse::{Coo, Csr};
 pub mod sensitivity;
 /// Proportional buckling of source-bound three-dimensional prestress assemblies.
 pub mod solid3;
+/// Buckling with bounded sparse factorization and the generic spectral service.
+pub mod sparse;
 
 /// Buckling analysis output.
 #[derive(Debug, Clone)]
@@ -212,9 +216,12 @@ fn reference_strain(conn: &[usize], grads: &[[f64; 2]], u: &[[f64; 2]]) -> [f64;
 /// No absolute cutoff on the inverse load can erase a small reference load.
 ///
 /// If the requested block cannot fit LOBPCG's search space, pencils with at
-/// most 64 free DOFs use the native dense symmetric eigensolver. The Cholesky
-/// reduction is bounded to 4096 free DOFs. This is not a scalable sparse
-/// buckling algorithm, a nonlinear stability limit or a convergence certificate.
+/// most 64 free DOFs use the native dense symmetric eigensolver. Up to 4096
+/// free DOFs retain the Cholesky route. Larger pencils use bounded sparse
+/// positive-factor whitening with default [`sparse::SparseBucklingLimits`].
+/// The explicit sparse entry accepts caller-selected resource allowances.
+/// Neither route certifies missed-mode exclusion, nonlinear collapse or mesh
+/// convergence; exhausted fill and work allowances remain explicit refusals.
 ///
 /// # Errors
 /// Invalid, nonfinite, nonsymmetric or oversized pencils and invalid DOF maps
@@ -237,8 +244,9 @@ pub fn buckling_loads(
 /// planar, three-dimensional, or other displacement DOFs without padding.
 ///
 /// The callback returns true to cancel. Cancellation publishes no partial modes.
-/// The dense factor and eigensolver workspace retain `buckling_loads`' caps;
-/// this does not introduce a second numerical solver or a continuum certificate.
+/// Small pencils retain the dense factor/workspace caps; larger pencils use
+/// [`sparse::SparseBucklingLimits`] and the generic spectral service. Both
+/// qualify the original physical equation and preserve cancellation semantics.
 #[allow(clippy::too_many_lines)]
 pub fn buckling_loads_cancellable(
     k: &Csr,
@@ -251,6 +259,17 @@ pub fn buckling_loads_cancellable(
     check_cancelled(cancelled)?;
     let invalid = |what: &str| SolidError::InvalidInput { what: what.into() };
     let n = k.nrows();
+    if n > 4096 {
+        return sparse::buckling_loads_cancellable(
+            k,
+            kg,
+            dof_map,
+            nev,
+            steps,
+            &sparse::SparseBucklingLimits::default(),
+            cancelled,
+        );
+    }
     if n == 0 || n > 4096 || k.ncols() != n || kg.nrows() != n || kg.ncols() != n {
         return Err(invalid(
             "buckling requires matching nonempty square pencils with at most 4096 DOFs",
@@ -378,15 +397,7 @@ pub fn buckling_loads_cancellable(
         if pair.value <= 0.0 {
             continue;
         }
-        let mut load = (k_scale / g_scale) / pair.value;
-        if !load.is_finite() || load <= 0.0 {
-            load = (k_scale / pair.value) / g_scale;
-        }
-        if !load.is_finite() || load <= 0.0 {
-            return Err(invalid(
-                "critical buckling load factor is not representable",
-            ));
-        }
+        let (load, (ks, gs)) = restored_load(k_scale, g_scale, pair.value)?;
         let mut phi = pair.vector.clone();
         bwd(&mut phi);
         // Remove arbitrary amplitude before evaluating work and residuals.
@@ -399,13 +410,8 @@ pub fn buckling_loads_cancellable(
         }
         scaled_k.spmv(&phi, &mut k_phi);
         scaled_g.spmv(&phi, &mut g_phi);
-        // ||theta Khat phi + Ghat phi|| / (|theta| ||Khat phi|| + ||Ghat phi||),
-        // dividing out the larger scalar before arithmetic, without dimensional floors.
-        let (ks, gs) = if pair.value <= 1.0 {
-            (pair.value, 1.0)
-        } else {
-            (1.0, 1.0 / pair.value)
-        };
+        // Verify the actual rounded physical load against the original pencil.
+        // A precise transformed root cannot justify a coarsely restored load.
         let (mut residual, mut knorm, mut gnorm) = (0.0_f64, 0.0_f64, 0.0_f64);
         for i in 0..n {
             residual = residual.hypot(ks.mul_add(k_phi[i], gs * g_phi[i]));
@@ -456,6 +462,104 @@ fn check_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), SolidError> {
         Err(SolidError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+/// Restore a physical load and coefficients for its actual rounded pencil.
+///
+/// Splitting binary exponents prevents a subnormal or overflowing intermediate
+/// k_scale/g_scale from corrupting an otherwise representable load. The final
+/// load is rounded once into its physical exponent range. Crucially, the
+/// residual coefficients are then reconstructed from that returned value, not
+/// from the unrounded transformed Ritz root.
+///
+/// The returned coefficients are proportional to (k_scale, load*g_scale), with
+/// a common power of two removed. Their relative rounding must be at most
+/// 1e-12, leaving headroom for the physical 1e-8 residual gate. A coarse
+/// subnormal load may still be returned here: that residual gate decides
+/// whether its actual physical equation is accurate enough to publish.
+#[allow(clippy::too_many_lines)]
+fn restored_load(k_scale: f64, g_scale: f64, theta: f64) -> Result<(f64, (f64, f64)), SolidError> {
+    let invalid = |what: &str| SolidError::InvalidInput { what: what.into() };
+    if [k_scale, g_scale, theta]
+        .iter()
+        .any(|x| !x.is_finite() || *x <= 0.0)
+    {
+        return Err(invalid(
+            "buckling load restoration requires finite positive scales and root",
+        ));
+    }
+
+    // Exact positive x = mantissa * 2^exponent, 1 <= mantissa < 2.
+    // Lifting a subnormal by 2^54 is exact and makes its exponent explicit.
+    fn parts(x: f64) -> (f64, i32) {
+        let (lifted, correction) = if x < f64::MIN_POSITIVE {
+            (x * f64::from_bits(1077_u64 << 52), -54)
+        } else {
+            (x, 0)
+        };
+        let bits = lifted.to_bits();
+        let exponent = ((bits >> 52) & 0x7ff) as i32 - 1023 + correction;
+        let mantissa = f64::from_bits((bits & 0x000f_ffff_ffff_ffff) | (1023_u64 << 52));
+        (mantissa, exponent)
+    }
+
+    // A subnormal has only the final multiplication's rounding, not a series
+    // of halvings or an already-underflowed power-of-two intermediate.
+    fn scale(mantissa: f64, exponent: i32) -> f64 {
+        let (mantissa, own) = parts(mantissa);
+        let exponent = exponent + own;
+        if exponent > 1023 {
+            f64::INFINITY
+        } else if exponent < -1075 {
+            0.0
+        } else if exponent >= -1022 {
+            mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+        } else if exponent == -1075 {
+            (mantissa * 0.5) * f64::from_bits(1)
+        } else {
+            mantissa * f64::from_bits(1_u64 << (exponent + 1074))
+        }
+    }
+
+    fn coefficient(mantissa: f64, exponent: i32) -> Option<f64> {
+        let value = scale(mantissa, exponent);
+        if !value.is_finite() || value <= 0.0 {
+            return None;
+        }
+        // Compare in the normalized range, even when value is subnormal.
+        // Positive rounding can only retain or raise the leading exponent by
+        // one here; reconstructing the mantissa never forms an extreme ratio.
+        let (rounded, rounded_exponent) = parts(value);
+        let delta = rounded_exponent - exponent;
+        if !(0..=1).contains(&delta) {
+            return None;
+        }
+        let recovered = rounded * f64::from_bits(((delta + 1023) as u64) << 52);
+        ((recovered - mantissa).abs() <= 1e-12 * mantissa).then_some(value)
+    }
+
+    let (km, ke) = parts(k_scale);
+    let (gm, ge) = parts(g_scale);
+    let (tm, te) = parts(theta);
+    let load = scale(km / gm / tm, ke - ge - te);
+    if !load.is_finite() || load <= 0.0 {
+        return Err(invalid(
+            "critical buckling load factor is not representable",
+        ));
+    }
+
+    let (lm, le) = parts(load);
+    let (right_mantissa, right_adjustment) = parts(lm * gm);
+    let right_exponent = le + ge + right_adjustment;
+    let common = ke.max(right_exponent);
+    let ks = coefficient(km, ke - common);
+    let gs = coefficient(right_mantissa, right_exponent - common);
+    match (ks, gs) {
+        (Some(ks), Some(gs)) => Ok((load, (ks, gs))),
+        _ => Err(invalid(
+            "returned buckling load has no faithfully representable residual coefficients",
+        )),
     }
 }
 

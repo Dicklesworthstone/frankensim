@@ -2852,6 +2852,7 @@ dependencies = [
  "fs-scenario",
  "fs-solver",
  "fs-sparse",
+ "fs-spectral",
  "fs-thermal",
  "fs-thermochem",
  "fs-time",

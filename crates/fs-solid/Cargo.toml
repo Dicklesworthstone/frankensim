@@ -41,6 +41,7 @@ fs-query = { path = "../fs-query" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-spectral = { path = "../fs-spectral" }
 fs-time = { path = "../fs-time" }
 
 [dev-dependencies]

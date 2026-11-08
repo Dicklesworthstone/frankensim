@@ -6746,12 +6746,12 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
   shipped envelope is the capacity band + self-consistency).
 - fs-scenario dimensioned-value resolution (units plumbing stays with
   the scenario consumer; kind/physics validation ships here).
-- Production-scale pencil solves (shift-invert/sparse factorizations
-  beyond the fixture-gated dense reduction), LOBPCG preconditioning hooks,
-  and higher-dimensional/nonlinear buckling sensitivities. Fixed-load P1/Q1
-  element-modulus total gradients are supplied by `stability::sensitivity`,
-  including its complete-packet `aggregate` owner. The dedicated `fs-topopt`
-  sizing consumer uses these native equilibrium derivatives.
+- Arbitrary-scale sparse-fill guarantees, spectrum-completeness certification,
+  LOBPCG preconditioning hooks, and higher-dimensional/nonlinear buckling
+  sensitivities. Bounded sparse positive-factor pencils are supplied by
+  `stability::sparse`. Fixed-load P1/Q1 element-modulus total gradients are
+  supplied by `stability::sensitivity`, including its complete-packet
+  `aggregate` owner, and consumed by the dedicated `fs-topopt` sizing study.
 - Plate/shell buckling references (needs bending elements — the
   shells bead); the 2D canonical here is the strut.
 - Kirchhoff--Love/bending-continuum claims,
@@ -13250,3 +13250,43 @@ reuses the complete original geometry/budget/cancellation admission and returns
 eight reference-volume weights per element in native state order. It evaluates
 no constitutive stress, tangent or state update. Caloric owners can therefore
 bind warped-cell point masses without taking a fictitious material interval.
+
+## Sparse buckling above the dense fixture bound
+
+`stability::sparse` solves `(K + lambda G) phi = 0` using native bounded
+sparse LDLᵀ, positive-factor whitening and
+`fs-spectral::service::EigenService`. Existing
+`buckling_loads[_cancellable]` dispatches above 4096 free coordinates;
+smaller pencils retain the legacy path. The explicit sparse entry also
+admits smaller cases fitting its native search block.
+
+`SparseBucklingLimits` bounds input dimensions/entries, symbolic fill/work,
+numeric factor payload/work/front size, per-application operator work and
+total operator applications. The caller separately supplies the outer
+iteration allowance. No global dense K, G or inverse is assembled. Dense
+fronts remain smaller than n and below the configured limit. Native
+cooperative sparse products and positive-factor triangular actions poll
+cancellation through preparation, iteration and final publication.
+
+The complete factor must have positive finite scalar pivots. Singular,
+indefinite or unresolved bases refuse without regularization; 2×2 pivots
+are disabled. G may be indefinite, tensile or zero. Largest algebraic
+inverse-load roots select compressive modes. Independent matrix scaling
+preserves units/reference-load multipliers. Whitened and original-pencil
+relative residuals must pass 1e-8, and modes have unit negative-geometric work.
+
+Both dense and sparse routes restore physical loads through binary
+mantissa/exponent arithmetic. Original-pencil residuals use the actual
+rounded load published to the caller, including its subnormal precision.
+An accurately solved transformed root cannot excuse an inaccurate returned
+physical factor. Exactly representable subnormal factors remain admissible;
+unrepresentable residual coefficients or failed physical residuals refuse.
+
+Resource/convergence exhaustion returns an error, never partial modes.
+These remain numerical Ritz estimates: fill can exceed the budget, and
+missed-mode exclusion, continuum convergence, nonlinear collapse and
+postcritical stability are not certified. G1/G3 verification covers 5003
+diagonal DOFs, small noncommuting signed pencils, small P1/Q1/B-bar continuum
+comparisons, scale restoration, resource/cancellation refusals and exact
+versus coarse subnormal factors. This is not a 100k-continuum performance
+claim.
