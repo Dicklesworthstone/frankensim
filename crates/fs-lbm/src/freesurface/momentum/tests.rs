@@ -354,6 +354,88 @@ fn g0_bulk_relaxation_refuses_before_native_momentum_and_pressure_steps() {
 }
 
 #[test]
+fn g0_local_trace_fields_refuse_before_native_momentum_and_pressure_steps() {
+    use crate::core2::CollisionModel2;
+    let gate = CancelGate::new_clock_free();
+    let initial = surface(&[([3, 3], 1.0, [0.01, 0.0])], [0.0; 2]);
+    let dry = initial.grid.idx(0, 0);
+    assert_eq!(initial.grid.flags[dry], Cell::Gas);
+    for collision in [
+        CollisionModel2::CentralMoment,
+        CollisionModel2::CentralMomentBulk { bulk_tau: 1.3 },
+    ] {
+        for bad in [None, Some(0.5), Some(f64::NAN), Some(f64::INFINITY)] {
+            for entry in 0..4 {
+                let mut sim = initial.clone();
+                sim.grid.collision = collision;
+                let mut field = vec![0.9; sim.grid.f.len()];
+                if let Some(value) = bad {
+                    field[dry] = value;
+                } else {
+                    field.pop();
+                }
+                let field_bits: Vec<_> = field.iter().map(|tau| tau.to_bits()).collect();
+                sim.grid.central_moment_bulk_tau = Some(field);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match entry {
+                        0 => sim.step_with_momentum(&gate),
+                        1 => sim.step_with_angular_momentum(&gate),
+                        _ => {
+                            let result = if entry == 2 {
+                                sim.step_with_gas_pressure_and_momentum(&gate, 0.1, |_| {
+                                    panic!("invalid trace field reached pressure sampling")
+                                })
+                            } else {
+                                sim.step_with_gas_link_pressure_and_momentum(&gate, 0.1, |_| {
+                                    panic!("invalid trace field reached pressure sampling")
+                                })
+                            };
+                            result.map_err(|error| match error {
+                                FreeSurfacePressureMomentumError2::Momentum(error) => error,
+                                other => panic!("unexpected pressure refusal: {other:?}"),
+                            })
+                        }
+                    }));
+                assert!(matches!(
+                    result.expect("bad trace fields must refuse without panicking"),
+                    Err(FreeSurfaceMomentumError2::Invalid(_)),
+                ));
+                assert_eq!(sim.grid.f, initial.grid.f);
+                assert_eq!(sim.grid.flags, initial.grid.flags);
+                assert_eq!(sim.grid.tau, initial.grid.tau);
+                assert_eq!(sim.grid.fext, initial.grid.fext);
+                assert_eq!(sim.grid.collision, collision);
+                assert_eq!(sim.mass, initial.mass);
+                assert_eq!(sim.fill_raw, initial.fill_raw);
+                assert_eq!(sim.fill_smooth, initial.fill_smooth);
+                assert_eq!(sim.scratch, initial.scratch);
+                assert_eq!(sim.carry.to_bits(), initial.carry.to_bits());
+                assert_eq!(sim.conversions.to_fluid, initial.conversions.to_fluid);
+                assert_eq!(sim.conversions.to_gas, initial.conversions.to_gas);
+                assert_eq!(
+                    sim.conversions.gas_to_interface,
+                    initial.conversions.gas_to_interface
+                );
+                assert_eq!(
+                    sim.conversions.fluid_to_interface,
+                    initial.conversions.fluid_to_interface
+                );
+                assert_eq!(
+                    sim.grid
+                        .central_moment_bulk_tau
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|tau| tau.to_bits())
+                        .collect::<Vec<_>>(),
+                    field_bits,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_newly_wet_cells_require_valid_material_state_before_publication() {
     let gate = CancelGate::new_clock_free();
     for bad_force in [true, false] {

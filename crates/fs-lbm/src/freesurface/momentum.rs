@@ -286,6 +286,16 @@ impl FreeSurface {
                 ));
             }
         }
+        let bulk_field = self
+            .grid
+            .central_moment_bulk_tau
+            .as_deref()
+            .filter(|_| self.grid.collision.central_moment_bulk_tau().is_some());
+        if bulk_field.is_some_and(|field| field.len() != n) {
+            return Err(invalid(
+                "central-moment trace field must cover the complete grid",
+            ));
+        }
         let wall = self
             .planar_contact
             .map(|c| c.wall)
@@ -298,6 +308,11 @@ impl FreeSurface {
         for i in 0..n {
             if i % 256 == 0 {
                 poll(gate)?;
+            }
+            if bulk_field.is_some_and(|field| !field[i].is_finite() || field[i] <= 0.5) {
+                return Err(invalid(
+                    "central-moment trace relaxation must be finite and greater than 0.5",
+                ));
             }
             // Dry neighbours may become wet during the conversion cascade.
             // Their held material force and relaxation must be usable before

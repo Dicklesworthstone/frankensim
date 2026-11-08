@@ -14,16 +14,19 @@ use fs_material::state_point::ResolvedMaterialStatePoint;
 use super::{
     CellMaterial, Error, IsothermalRheologyLaw, IsothermalRheologySample, LocalRheologyError,
     RheologySolve, capillary_scaling, plan_free_surface_from_material, plan_momentum_scaling,
-    solve_local,
 };
 use crate::core2::{Cell, CollisionModel2, Grid, material_strain_components2};
 use crate::freesurface::{ConversionMomentumReport2, FreeSurface, FreeSurfaceMomentumError2};
 use crate::material::free_surface::MaterialFreeSurfaceScaling;
+use crate::material::transport::rheology::solve_local_with_fixed_strain;
 use crate::rheology::{TAU_CAP, TAU_FLOOR};
 
 /// Reusable source/collision epochs for an existing dense native liquid.
 ///
-/// This is fixed-temperature, shear-only generalized-Newtonian BGK flow.
+/// This is fixed-temperature generalized-Newtonian BGK or central-moment flow.
+/// Central collision retains its authored scalar or per-cell trace relaxation;
+/// the physical shear query includes the resulting planar trace contribution
+/// `|div u|/sqrt(3)`. This does not infer a physical bulk-viscosity source.
 /// Pressure-dependent sources and other collision models refuse. No material
 /// fit, viscosity clipping, heat evolution or second integration path is added.
 /// The caller retains the actual FreeSurface, including its geometry/contact
@@ -137,11 +140,37 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
             ]
             .iter()
             .any(|&len| len != n)
-            || grid.collision != CollisionModel2::Bgk
+            || !matches!(
+                grid.collision,
+                CollisionModel2::Bgk
+                    | CollisionModel2::CentralMoment
+                    | CollisionModel2::CentralMomentBulk { .. }
+            )
             || liquid.sigma.to_bits() != self.scaling.surface_tension_lattice().to_bits()
         {
             return Err(Error::Invalid(
-                "dense source rheology requires matching BGK geometry, storage and capillarity",
+                "dense source rheology requires matching BGK/central geometry, storage and capillarity",
+            ));
+        }
+        let central_bulk_tau = match grid.collision {
+            CollisionModel2::CentralMoment => Some(1.0),
+            CollisionModel2::CentralMomentBulk { bulk_tau } => {
+                if !bulk_tau.is_finite() || bulk_tau <= 0.5 {
+                    return Err(Error::Invalid(
+                        "invalid incoming dense trace relaxation time",
+                    ));
+                }
+                Some(bulk_tau)
+            }
+            _ => None,
+        };
+        let bulk_field = grid
+            .central_moment_bulk_tau
+            .as_deref()
+            .filter(|_| central_bulk_tau.is_some());
+        if bulk_field.is_some_and(|field| field.len() != n) {
+            return Err(Error::Invalid(
+                "dense trace field must cover the complete grid",
             ));
         }
         if self.scratch.len() < n {
@@ -154,6 +183,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
             if cell % 256 == 0 {
                 poll(gate)?;
             }
+            if bulk_field.is_some_and(|field| !field[cell].is_finite() || field[cell] <= 0.5) {
+                return Err(Error::Invalid(
+                    "invalid incoming dense trace relaxation time",
+                ));
+            }
             self.scratch[cell] = None;
             if !matches!(grid.flags[cell], Cell::Fluid | Cell::Interface) {
                 continue;
@@ -163,11 +197,20 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
                 return Err(Error::Invalid("invalid incoming dense relaxation time"));
             }
             let force = std::array::from_fn(|d| grid.g[d].mul_add(moments.rho, grid.fext[cell][d]));
-            let [numerator, _] = material_strain_components2(
-                &grid.f[cell], moments.rho, moments.u, force, None,
+            let [numerator, dilation] = material_strain_components2(
+                &grid.f[cell],
+                moments.rho,
+                moments.u,
+                force,
+                grid.central_moment_bulk_tau_at(cell),
             );
-            let root = solve_local(
+            let root = solve_local_with_fixed_strain(
                 numerator,
+                if central_bulk_tau.is_some() {
+                    dilation * core::f64::consts::FRAC_1_SQRT_2
+                } else {
+                    0.0
+                },
                 self.scaling.timestep_s(),
                 grid.tau[cell],
                 self.solve,
