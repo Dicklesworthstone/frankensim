@@ -25,26 +25,43 @@ fn instantaneous_reference(
     selected: &[usize],
     phase: f64,
 ) -> (Vec<[f64; 3]>, [f64; 6], f64) {
-    let problem = response.problem();
+    instantaneous_superposition_reference(&[(response, phase)], selected)
+}
+
+fn instantaneous_superposition_reference(
+    responses: &[(&SpatialHarmonicInductionResponse<'_, '_>, f64)],
+    selected: &[usize],
+) -> (Vec<[f64; 3]>, [f64; 6], f64) {
+    let problem = responses[0].0.problem();
     let mut nodal = vec![[0.0; 3]; problem.mesh().vertex_count];
     let mut wrench = [0.0; 6];
     let mut power = 0.0;
-    let (sine, cosine) = det::sin_cos(phase);
-    let at_phase = |z: C64| z.re * cosine + z.im * sine;
     // Independent four-point degree-two tetrahedral quadrature. Reconstruct
     // real J(t), B(t) BEFORE the cross product; do not use Fourier force formulas
     // or the production load integrator's mass weights.
     let high = (5.0 + 3.0 * 5.0_f64.sqrt()) / 20.0;
     let low = (5.0 - 5.0_f64.sqrt()) / 20.0;
     for &cell in selected {
-        let record = response.cells().iter().find(|c| c.cell == cell).unwrap();
+        let record = responses[0].0.cells().iter().find(|c| c.cell == cell).unwrap();
         let tet = problem.mesh().tets[cell].map(|v| v as usize);
-        let b = response.flux_density_t()[cell].map(at_phase);
+        let mut b = [0.0; 3];
+        let mut current = [[0.0; 3]; 4];
+        for &(response, phase) in responses {
+            let (sine, cosine) = det::sin_cos(phase);
+            let at_phase = |z: C64| z.re * cosine + z.im * sine;
+            let record = response.cells().iter().find(|c| c.cell == cell).unwrap();
+            for axis in 0..3 {
+                b[axis] += at_phase(response.flux_density_t()[cell][axis]);
+                for vertex in 0..4 {
+                    current[vertex][axis] += at_phase(record.current_density_a_m2[vertex][axis]);
+                }
+            }
+        }
         for point in 0..4 {
             let shape: [f64; 4] = std::array::from_fn(|i| if i == point { high } else { low });
             let j = std::array::from_fn(|axis| {
                 (0..4)
-                    .map(|i| shape[i] * at_phase(record.current_density_a_m2[i][axis]))
+                    .map(|i| shape[i] * current[i][axis])
                     .sum()
             });
             let position = std::array::from_fn(|axis| {
@@ -329,5 +346,260 @@ fn harmonic_loads_preserve_squared_source_phase_body_frames_and_atomic_selection
         ));
     }
     assert_eq!(response.potential_wb(), before);
+    assert_eq!(state.time_s(), 0.0);
+}
+
+#[test]
+fn cross_carrier_sum_and_beat_forces_reconstruct_original_fields() {
+    let (problem, sources) = cube(1, None);
+    let initial = problem
+        .solve(
+            &[[0.0; 3]; 6],
+            &trace(&problem, [0.0; 3], false),
+            static_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let state =
+        SpatialInduction::new(&initial, sources, preparation(), 2e-9, &mut || false).unwrap();
+    let velocity: Vec<_> = problem
+        .positions_m()
+        .iter()
+        .map(|p| p.map(|x| 0.35 * x))
+        .collect();
+    let virtual_velocity: Vec<_> = problem
+        .positions_m()
+        .iter()
+        .copied()
+        .map(virtual_velocity)
+        .collect();
+    let first = state
+        .solve_harmonic(
+            &[[C64::new(3.2, -2.4); 3]; 6],
+            &velocity,
+            3.0,
+            harmonic_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    // A true third harmonic, an inharmonic beat, and a coherent equal-frequency
+    // source all use the same original spatial operator and retain their phase.
+    for omega in [9.0, 3.125, 3.0] {
+        let second = state
+            .solve_harmonic(
+                &[[C64::new(-1.8, 0.7); 3]; 6],
+                &velocity,
+                omega,
+                harmonic_controls(),
+                &mut || false,
+            )
+            .unwrap();
+        for selected in [&[0, 1, 2, 3, 4, 5][..], &[5, 0, 3][..]] {
+            let a = first
+                .lorentz_loads(selected, LOAD_LIMITS, &mut || false)
+                .unwrap();
+            let b = second
+                .lorentz_loads(selected, LOAD_LIMITS, &mut || false)
+                .unwrap();
+            let mixed = first
+                .cross_lorentz_loads(&second, selected, LOAD_LIMITS, &mut || false)
+                .unwrap();
+            near(mixed.difference_omega_rad_s(), (omega - 3.0).abs(), 1e-15);
+            near(mixed.sum_omega_rad_s(), omega + 3.0, 1e-15);
+            let swapped = second
+                .cross_lorentz_loads(&first, selected, LOAD_LIMITS, &mut || false)
+                .unwrap();
+            let cross_coefficients = [
+                mixed.difference_real(),
+                mixed.difference_imaginary(),
+                mixed.sum_real(),
+                mixed.sum_imaginary(),
+            ];
+            for (left, right) in cross_coefficients.into_iter().zip([
+                swapped.difference_real(),
+                swapped.difference_imaginary(),
+                swapped.sum_real(),
+                swapped.sum_imaginary(),
+            ]) {
+                assert_eq!(left.nodal_forces_n(), right.nodal_forces_n());
+            }
+            assert!(
+                cross_coefficients
+                    .iter()
+                    .flat_map(|c| c.nodal_forces_n())
+                    .flatten()
+                    .any(|value| value.abs() > 1e-5)
+            );
+            if omega == 3.0 {
+                assert!(
+                    mixed
+                        .difference_imaginary()
+                        .nodal_forces_n()
+                        .iter()
+                        .flatten()
+                        .all(|value| *value == 0.0)
+                );
+            }
+            let coefficients = [
+                a.mean(),
+                a.second_harmonic_real(),
+                a.second_harmonic_imaginary(),
+                b.mean(),
+                b.second_harmonic_real(),
+                b.second_harmonic_imaginary(),
+                mixed.difference_real(),
+                mixed.difference_imaginary(),
+                mixed.sum_real(),
+                mixed.sum_imaginary(),
+            ];
+            let wrenches =
+                coefficients.map(|c| c.wrench(&Se3::identity(), [0.0; 3]).unwrap().to_array());
+            let powers = coefficients.map(|c| c.power_w(&virtual_velocity, &mut || false).unwrap());
+            for time in [0.0, 0.137, 0.91, 3.7, 13.0] {
+                let phase_a = 3.0 * time;
+                let phase_b = omega * time;
+                let (nodal, wrench, power) = instantaneous_superposition_reference(
+                    &[(&first, phase_a), (&second, phase_b)],
+                    selected,
+                );
+                let weights = [
+                    1.0,
+                    det::cos(2.0 * phase_a),
+                    det::sin(2.0 * phase_a),
+                    1.0,
+                    det::cos(2.0 * phase_b),
+                    det::sin(2.0 * phase_b),
+                    det::cos(mixed.difference_omega_rad_s() * time),
+                    det::sin(mixed.difference_omega_rad_s() * time),
+                    det::cos(mixed.sum_omega_rad_s() * time),
+                    det::sin(mixed.sum_omega_rad_s() * time),
+                ];
+                for (node, expected) in nodal.iter().enumerate() {
+                    for axis in 0..3 {
+                        let actual = coefficients
+                            .iter()
+                            .zip(weights)
+                            .map(|(c, w)| w * c.nodal_forces_n()[node][axis])
+                            .sum();
+                        near(actual, expected[axis], 3e-9);
+                    }
+                }
+                for axis in 0..6 {
+                    near(
+                        wrenches.iter().zip(weights).map(|(c, w)| w * c[axis]).sum(),
+                        wrench[axis],
+                        3e-9,
+                    );
+                }
+                near(
+                    powers.iter().zip(weights).map(|(p, w)| p * w).sum(),
+                    power,
+                    3e-9,
+                );
+            }
+        }
+    }
+    assert_eq!(state.time_s(), 0.0);
+}
+
+#[test]
+fn cross_carrier_loads_refuse_incompatible_sources_motion_and_partial_work() {
+    let (problem, sources) = cube(1, None);
+    let initial = problem
+        .solve(
+            &[[0.0; 3]; 6],
+            &trace(&problem, [0.0; 3], false),
+            static_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let other_state = SpatialInduction::new(
+        &initial,
+        sources.clone(),
+        preparation(),
+        2e-9,
+        &mut || false,
+    )
+    .unwrap();
+    let state =
+        SpatialInduction::new(&initial, sources, preparation(), 2e-9, &mut || false).unwrap();
+    let stationary = [[0.0; 3]; 8];
+    let moving: Vec<_> = problem
+        .positions_m()
+        .iter()
+        .map(|p| p.map(|x| 0.35 * x))
+        .collect();
+    let source = [[C64::new(4.0, 0.0); 3]; 6];
+    let first = state
+        .solve_harmonic(
+            &source,
+            &stationary,
+            3.0,
+            harmonic_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let second = state
+        .solve_harmonic(
+            &source,
+            &stationary,
+            9.0,
+            harmonic_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    let changed_motion = state
+        .solve_harmonic(&source, &moving, 9.0, harmonic_controls(), &mut || false)
+        .unwrap();
+    let changed_source = other_state
+        .solve_harmonic(
+            &source,
+            &stationary,
+            9.0,
+            harmonic_controls(),
+            &mut || false,
+        )
+        .unwrap();
+    for incompatible in [&changed_motion, &changed_source] {
+        assert!(matches!(
+            first.cross_lorentz_loads(incompatible, &[0], LOAD_LIMITS, &mut || false),
+            Err(SpatialLorentzLoadError::Invalid(_))
+        ));
+    }
+    for selection in [&[][..], &[0, 0][..], &[usize::MAX][..]] {
+        assert!(matches!(
+            first.cross_lorentz_loads(&second, selection, LOAD_LIMITS, &mut || false),
+            Err(SpatialLorentzLoadError::Invalid(_))
+        ));
+    }
+    let selected = [5, 0, 3];
+    for limits in [
+        SpatialLorentzLoadLimits {
+            max_vertices: 7,
+            ..LOAD_LIMITS
+        },
+        SpatialLorentzLoadLimits {
+            max_cells: 2,
+            ..LOAD_LIMITS
+        },
+    ] {
+        assert!(
+            first
+                .cross_lorentz_loads(&second, &selected, limits, &mut || false)
+                .is_err()
+        );
+    }
+    let before = first.potential_wb().to_vec();
+    for stop in [0, 5, 14, 30, 50] {
+        let mut polls = 0;
+        assert!(matches!(
+            first.cross_lorentz_loads(&second, &selected, LOAD_LIMITS, &mut || {
+                polls += 1;
+                polls > stop
+            }),
+            Err(SpatialLorentzLoadError::Cancelled)
+        ));
+    }
+    assert_eq!(first.potential_wb(), before);
     assert_eq!(state.time_s(), 0.0);
 }

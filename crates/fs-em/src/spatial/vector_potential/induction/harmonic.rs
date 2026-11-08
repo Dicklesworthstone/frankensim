@@ -116,6 +116,9 @@ pub struct SpatialHarmonicInductionResponse<
 > {
     source: &'s SpatialInduction<'m, C>,
     omega_rad_s: f64,
+    // Retain the actual fixed operator's motion for coherent cross-frequency
+    // superposition. Sharing a mesh alone does not imply the same induction law.
+    velocity_m_s: Vec<[f64; 3]>,
     // Original reduced A/q coordinates, real block followed by imaginary.
     // Retained for exact linear superposition followed by original residual
     // and physical recovery checks; never a detached field authority.
@@ -642,6 +645,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         Ok(SpatialHarmonicInductionResponse {
             source: self,
             omega_rad_s: omega,
+            velocity_m_s: velocity_m_s.to_vec(),
             solution: x,
             potential_wb: a_re
                 .into_iter()
@@ -761,6 +765,11 @@ fn admit<C: SpatialConductorMaterial>(
             mesh.tets
                 .len()
                 .checked_mul(512)
+                .and_then(|r| v.checked_add(r))
+        })
+        .and_then(|v| {
+            mesh.vertex_count
+                .checked_mul(3)
                 .and_then(|r| v.checked_add(r))
         });
     if memory.is_none_or(|v| v > c.maximum_krylov_scalars)

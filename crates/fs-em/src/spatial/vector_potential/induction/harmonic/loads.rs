@@ -22,6 +22,9 @@ use super::super::mechanical::{
 use super::{SpatialHarmonicInductionResponse, cross};
 use fs_material::conductor::spatial::SpatialConductorMaterial;
 
+mod cross;
+pub use cross::SpatialHarmonicLorentzCrossLoads;
+
 /// Mechanical Fourier coefficients in the original field coordinates.
 ///
 /// Every coefficient uses original mesh vertex order and the existing load

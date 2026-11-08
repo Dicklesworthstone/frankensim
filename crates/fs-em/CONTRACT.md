@@ -7018,6 +7018,25 @@ with degree-two tetrahedral quadrature and check nodal force, torque, nonrigid
 virtual work, zero-mean oscillation, quadratic amplitude and doubled phase,
 receiving frames, canonical selections and cancellation.
 
+`SpatialHarmonicInductionResponse::cross_lorentz_loads` supplies the missing
+interaction of two coherent carriers from the same original induction source
+and prescribed steady motion. Each carrier keeps its own resolved current,
+skin response and magnetic phase. The additional peak force coefficients are
+`(J_a cross B_b + J_b cross B_a)/2` at the sum frequency and
+`(J_a cross conj(B_b) + conj(J_b) cross B_a)/2` at the nonnegative difference
+frequency (a is the higher carrier). Equal frequencies retain their additional
+DC force; no incoherent averaging or beat-frequency cutoff is applied. Add
+these terms once per unordered pair alongside the existing self-carrier loads.
+The four consistent P1 load fields preserve torque and nonrigid virtual work
+without another electromagnetic solve or time-domain sampling. Source and
+motion mismatches refuse; the accepted response retains its admitted steady
+velocity, included in the original field-storage budget. Storage and work stay
+linear in mesh vertices and selected-cell data apart from canonical selection
+sorting and conductor lookup. Independent real-field superposition followed by
+degree-two tetrahedral quadrature checks true harmonics, close inharmonic beats,
+equal-frequency coherence, phase signs, force, torque and work (G1/G3), plus
+incompatible-source, selection, resource and cancellation refusals (G0/G4).
+
 ### Source-bound 3D harmonic winding terminals and original circuits
 
 `spatial::vector_potential::induction::harmonic::winding` binds the original
