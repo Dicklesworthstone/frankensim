@@ -18,6 +18,9 @@ use section::Section;
 pub mod inertia;
 pub use inertia::{CstDktMass, ReferenceDensityMoments};
 use inertia::ReferenceInertia;
+/// Full-coordinate loads from uniform reference-frame body acceleration.
+pub mod body_acceleration;
+use body_acceleration::ShellBodyAcceleration;
 /// Physical membrane/bending loss on the original CST/DKT strain field.
 pub mod viscosity;
 /// Passive hereditary membrane/bending branches on the same physical strains.
@@ -340,6 +343,20 @@ fn assemble_with_reference_inertia<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass,
     nodal_thickness: Option<&[f64]>, reference_inertia: Option<ReferenceInertia<'_>>)
     -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia_and_body_acceleration(mesh, sections, uniform,
+        boundary_nodes, support, drilling_alpha, inertia, nodal_thickness,
+        reference_inertia, None)
+}
+
+// Optional full-load response shares these exact element masses and frame maps.
+// Original callers retain their arithmetic and allocate no response cache.
+#[allow(clippy::too_many_arguments)]
+fn assemble_with_reference_inertia_and_body_acceleration<S: Section>(
+    mesh: &ShellMesh, sections: &[S], uniform: bool, boundary_nodes: &[usize],
+    support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass,
+    nodal_thickness: Option<&[f64]>, reference_inertia: Option<ReferenceInertia<'_>>,
+    mut body_acceleration: Option<&mut ShellBodyAcceleration>,
+) -> Result<ShellModel, PlateError> {
     mesh.validate()?;
     if let Some(h) = nodal_thickness {
         if h.len() != mesh.nodes.len() || h.iter().any(|v| !v.is_finite() || *v <= 0.0) {
@@ -367,6 +384,9 @@ fn assemble_with_reference_inertia<S: Section>(mesh: &ShellMesh, sections: &[S],
     let mut free = 0;
     let dof_map: Vec<_> = constrained.iter().map(|fixed| if *fixed { None } else { let i=free; free+=1; Some(i) }).collect();
     if free == 0 { return Err(PlateError::BadSection { what: "shell has no free coordinates" }); }
+    if let Some(response) = body_acceleration.as_deref_mut() {
+        response.initialize(ndof);
+    }
     let mut k = Coo::new(free,free);
     let mut mass = if inertia == CstDktMass::Lumped { vec![0.0;free] } else { Vec::new() };
     let mut consistent = Coo::new(free,free);
@@ -384,17 +404,23 @@ fn assemble_with_reference_inertia<S: Section>(mesh: &ShellMesh, sections: &[S],
         } else { None };
         // Transform translations and physical axial rotations with the same R.
         for i in 0..18 {
-            let Some(ri) = dof_map[6*tri[i/6]+i%6] else { continue; };
+            let full_i = 6*tri[i/6]+i%6;
+            let ri = dof_map[full_i];
+            if ri.is_none() && body_acceleration.is_none() { continue; }
             for j in 0..18 {
-                let Some(cj) = dof_map[6*tri[j/6]+j%6] else { continue; };
+                let full_j = 6*tri[j/6]+j%6;
+                let cj = dof_map[full_j];
+                if cj.is_none() && body_acceleration.is_none() { continue; }
                 let bi=6*(i/6)+3*((i%6)/3);
                 let bj=6*(j/6)+3*((j%6)/3);
-                let mut value=0.0;
-                for p in 0..3 { for q in 0..3 {
-                    value += g.frame[p][i%3]*local[(bi+p)*18+bj+q]*g.frame[q][j%3];
-                }}
-                if !value.is_finite() { return Err(PlateError::BadSection { what: "shell stiffness overflow" }); }
-                k.push(ri,cj,value);
+                if let (Some(ri), Some(cj)) = (ri, cj) {
+                    let mut value=0.0;
+                    for p in 0..3 { for q in 0..3 {
+                        value += g.frame[p][i%3]*local[(bi+p)*18+bj+q]*g.frame[q][j%3];
+                    }}
+                    if !value.is_finite() { return Err(PlateError::BadSection { what: "shell stiffness overflow" }); }
+                    k.push(ri,cj,value);
+                }
                 if let Some(me) = &local_mass { if i <= j {
                     let mut value = 0.0;
                     for p in 0..3 { for q in 0..3 {
@@ -404,8 +430,13 @@ fn assemble_with_reference_inertia<S: Section>(mesh: &ShellMesh, sections: &[S],
                         return Err(PlateError::BadSection { what: "shell inertia rotation overflow" });
                     }
                     if value != 0.0 {
-                        consistent.push(ri,cj,value);
-                        if i != j { consistent.push(cj,ri,value); }
+                        if let (Some(ri), Some(cj)) = (ri, cj) {
+                            consistent.push(ri,cj,value);
+                            if i != j { consistent.push(cj,ri,value); }
+                        }
+                        if let Some(response) = body_acceleration.as_deref_mut() {
+                            response.accumulate_symmetric(full_i, full_j, value)?;
+                        }
                     }
                 }}
             }
@@ -416,6 +447,11 @@ fn assemble_with_reference_inertia<S: Section>(mesh: &ShellMesh, sections: &[S],
             let jr=m*section.thickness*section.thickness/12.0;
             for &node in tri { for c in 0..6 {
                 if let Some(i)=dof_map[6*node+c] { mass[i]+=if c<3 {m} else {jr}; }
+                if c < 3 {
+                    if let Some(response) = body_acceleration.as_deref_mut() {
+                        response.accumulate_symmetric(6*node+c, 6*node+c, m)?;
+                    }
+                }
             }}
         }
     }

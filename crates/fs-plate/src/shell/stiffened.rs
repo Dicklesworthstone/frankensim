@@ -20,6 +20,7 @@ pub mod timoshenko;
 
 use super::{ShellMesh, ShellModel, ShellSupport, ShellSection};
 use super::section::Section;
+use super::body_acceleration::ShellBodyAcceleration;
 #[cfg(test)]
 use super::assemble_shell_sections;
 use crate::{PlateError, PlateSection};
@@ -142,7 +143,7 @@ pub fn assemble_stiffened_shell_with_reference_density(
     mass: BeamMass,
 ) -> Result<ShellModel, PlateError> {
     assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass,
-        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)))
+        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)), None)
 }
 
 /// Independent membrane/bending sections with the same graded panel and beam
@@ -163,8 +164,66 @@ pub fn assemble_stiffened_shell_materials_with_reference_density(
     mass: BeamMass,
 ) -> Result<ShellModel, PlateError> {
     assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass,
-        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)))
+        Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)), None)
 }
+
+/// Assemble the graded pencil and its complete uniform-acceleration response.
+///
+/// The returned cache is formed from those SAME transformed panel/beam masses
+/// before support restriction. It retains supported-column contributions and
+/// reference-node moments from eccentric reinforcement. Use
+/// [`ShellBodyAcceleration::full_load`] to prescribe gravity or another explicit
+/// global acceleration; neither density nor support motion infers that load.
+/// Preparation adds three scalars per full coordinate, with no second mass
+/// integration. Both density fields are admitted before cache allocation.
+///
+/// This is a reference-frame dead load under the existing small-motion beam
+/// and moderate-rotation shell scope, not finite-rotation follower gravity.
+/// The ordinary pencil and frozen legacy entries retain their original bits.
+///
+/// # Errors
+/// Any original graded-assembly refusal or unrepresentable full load response.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_with_reference_density_and_body_acceleration(
+    mesh: &ShellMesh,
+    sections: &[PlateSection],
+    reference_corner_density_kg_m3: &[[f64; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_density_kg_m3: &[[f64; 2]],
+    mass: BeamMass,
+) -> Result<(ShellModel, ShellBodyAcceleration), PlateError> {
+    let mut response = ShellBodyAcceleration::empty();
+    let model = assemble_sections_with_reference_density(mesh, sections, boundary, support,
+        beams, mass, Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)),
+        Some(&mut response))?;
+    Ok((model, response))
+}
+
+/// Independent-section form of the same graded pencil and full acceleration load.
+///
+/// The independently declared membrane/bending laws and original beam inertia
+/// choice are retained. All physical semantics and refusals are those of
+/// [`assemble_stiffened_shell_with_reference_density_and_body_acceleration`].
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_stiffened_shell_materials_with_reference_density_and_body_acceleration(
+    mesh: &ShellMesh,
+    sections: &[ShellSection],
+    reference_corner_density_kg_m3: &[[f64; 3]],
+    boundary: &[usize],
+    support: ShellSupport,
+    beams: &[ShellBeam],
+    reference_beam_density_kg_m3: &[[f64; 2]],
+    mass: BeamMass,
+) -> Result<(ShellModel, ShellBodyAcceleration), PlateError> {
+    let mut response = ShellBodyAcceleration::empty();
+    let model = assemble_sections_with_reference_density(mesh, sections, boundary, support,
+        beams, mass, Some((reference_corner_density_kg_m3, reference_beam_density_kg_m3)),
+        Some(&mut response))?;
+    Ok((model, response))
+}
+
 pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam])
     -> Result<ShellModel, PlateError> {
@@ -173,11 +232,12 @@ pub(super) fn assemble_sections<S: Section>(mesh: &ShellMesh, sections: &[S],
 fn assemble_sections_with_mass<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass)
     -> Result<ShellModel, PlateError> {
-    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass, None)
+    assemble_sections_with_reference_density(mesh, sections, boundary, support, beams, mass, None, None)
 }
 fn assemble_sections_with_reference_density<S: Section>(mesh: &ShellMesh, sections: &[S],
     boundary: &[usize], support: ShellSupport, beams: &[ShellBeam], mass: BeamMass,
-    reference_density: Option<(&[[f64; 3]], &[[f64; 2]])>)
+    reference_density: Option<(&[[f64; 3]], &[[f64; 2]])>,
+    mut body_acceleration: Option<&mut ShellBodyAcceleration>)
     -> Result<ShellModel, PlateError> {
     if let Some((panels, reinforcement)) = reference_density {
         crate::reference_density::validate(mesh.tris.len(), panels)?;
@@ -189,9 +249,10 @@ fn assemble_sections_with_reference_density<S: Section>(mesh: &ShellMesh, sectio
         }
     }
     let mut model = match reference_density {
-        Some((panels, _)) => super::assemble_with_reference_inertia(
+        Some((panels, _)) => super::assemble_with_reference_inertia_and_body_acceleration(
             mesh, sections, false, boundary, support, super::DRILLING_ALPHA,
-            super::CstDktMass::Consistent, None, Some(super::ReferenceInertia::Density(panels)))?,
+            super::CstDktMass::Consistent, None, Some(super::ReferenceInertia::Density(panels)),
+            body_acceleration.as_deref_mut())?,
         None => super::assemble(mesh, sections, false, boundary, support)?,
     };
     if beams.is_empty() { return Ok(model); }
@@ -205,6 +266,14 @@ fn assemble_sections_with_reference_density<S: Section>(mesh: &ShellMesh, sectio
                 mesh, beam, mass, Some(reinforcement[index]))?,
             None => element_with_mass(mesh, beam, mass)?,
         };
+        if let Some(response) = body_acceleration.as_deref_mut() {
+            for i in 0..12 { for j in i..12 {
+                if me[12*i+j] != 0.0 {
+                    response.accumulate_symmetric(6*beam.nodes[i/6]+i%6,
+                        6*beam.nodes[j/6]+j%6, me[12*i+j])?;
+                }
+            }}
+        }
         for i in 0..12 {
             let Some(row) = model.dof_map[6*beam.nodes[i/6]+i%6] else { continue; };
             for j in 0..12 {

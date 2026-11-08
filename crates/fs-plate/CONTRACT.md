@@ -849,6 +849,38 @@ and complete-field admission. Changed Rust was parsed with pinned Rustfmt
 and independent moment arithmetic was checked; native execution of these
 new regressions remains unperformed.
 
+### Density-consistent body acceleration on reinforced shells
+
+The graded reinforced-shell `*_and_body_acceleration` assembly entries return
+the original supported pencil together with an immutable `ShellBodyAcceleration`.
+During that same assembly, each transformed symmetric panel and beam mass entry
+contributes to three full-coordinate rigid-translation responses. No second
+mass integration or full unrestricted sparse matrix is needed. The response
+retains constrained columns and rows, including reference-node moments from
+the existing eccentric beam congruence; reducing mass before applying uniform
+acceleration would lose part of a consistent body load.
+
+`full_load` takes explicit global acceleration [m/s²] and returns three forces
+[N] and three axial moments [N m] per original node, ready for the native dead-load
+and support-restriction paths. Repeated evaluation uses three stored coefficients
+per coordinate and linear work. Nonfinite acceleration or overflowing
+force/moment refuses without publishing a partial vector or changing the cache.
+Both density fields and native shell geometry/section/support admission precede
+response allocation.
+All original assembly entries allocate no cache and retain their original pencil
+arithmetic; the new entries also retain that same supported K and M.
+
+The response is a reference-frame dead acceleration load under the existing
+small-motion reinforcement and moderate-rotation shell model. Gravity remains
+explicit. It does not rotate offsets or directors with deformed geometry, update
+inventory, model centrifugal acceleration or infer moving supports.
+Five focused regressions check independent graded weight/centroid torque,
+full-mass action and eccentric moments, constrained-column retention, frame
+covariance, density relocation/scaling, native material/empty-beam paths and
+atomic evaluation refusals. Pinned Rustfmt parsed the product and test source;
+native test execution remains unperformed because the shared filesystem lacks
+space for the original dependency graph.
+
 ### Layered CST/DKT reference density and first mass moment
 
 `ReferenceDensityMoments` and the `*_with_reference_density_moments` assembly
