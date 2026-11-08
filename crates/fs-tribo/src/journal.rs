@@ -20,6 +20,7 @@ use fs_math::det;
 
 /// Explicit curved-wall slip and separate liquid/interface dissipation.
 pub mod slip;
+pub mod yield_stress;
 
 /// Explicit storage and evaluation bound on a source viscosity line.
 pub const MAX_JOURNAL_VISCOSITY_KNOTS: usize = 256;
