@@ -1163,9 +1163,16 @@ bells were measured in vacuum). `--shell-radiation baffled-rayleigh`, on crash a
   tau = 4a/(3 pi c): 2 sigma = 2 |H|^2 R. It is an approximation, named on the page: edge diffraction
   and the curvature's effect on radiation are not resolved. The receipt prints each mode's eta beside
   the value without the dipole factor;
-- only each mode's own resistance is kept; the receipt prints the dropped cross resistance to the other
-  loaded modes of its sector (sum_n |R_mn| / R_mm at the mode's frequency). Modes above the limit, up to
-  the output Nyquist, take none, so their decay times are upper bounds;
+- two loaded modes of one sector also couple through their cross resistance R_mn (MB 14957, a
+  correction). Their overlap is |2 sigma_mn| / |omega_m - omega_n|, 2 sigma_mn = 2 |H|^2 R_mn at either
+  mode's frequency (the larger). The pairs above the declared 0.05 join into clusters, and each
+  cluster takes its full block 2 |H|^2 R at its mean frequency, refused unless symmetric and positive
+  semidefinite to 1e-9 (sin(kr)/r is a positive definite kernel). It enters through the block's
+  eigenvectors. Every other mode keeps its own resistance only. The receipt prints each mode's largest
+  overlap and cluster, one line per cluster with its eigen-T60s beside each mode's own, and the cross
+  resistance each mode still drops (sum_n |R_mn| / R_mm over the modes outside its cluster, at its
+  frequency). Modes above the limit, up to the output Nyquist, take none, so their decay times are
+  upper bounds;
 - the loss is the low-rank explicit form of the heads' measured shape damping, positive semidefinite,
   counted in the shell's energy budget and its clock admission; the exported stepper refuses it.
 

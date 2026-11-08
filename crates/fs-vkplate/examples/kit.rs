@@ -35,7 +35,8 @@
 //! correction), adds the radiation loss of the played shell's own rest modes
 //! (`kit::attach_shell_radiation`): each mode up to the grid's resolution limit takes the baffled
 //! Rayleigh resistance of its shape on the projected plane, from both faces, times the microphone's
-//! own first-order dipole factor; the modes above take none. Without a printed shell loss it is
+//! own first-order dipole factor, and the modes of one sector whose overlap exceeds 0.05 share their
+//! full resistance block (MB 14957); the modes above take none. Without a printed shell loss it is
 //! refused (declared T60 points already lump radiation), and on the drums (their heads have their
 //! own route), the hi-hats (two shells in contact) and `--preset-heads`.
 //!

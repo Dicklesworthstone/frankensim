@@ -1,6 +1,6 @@
 //! A free shell's radiation loss on its own rest modes (`Body::attach_shell_radiation`, MB 14574 (d)).
 use super::*;
-use crate::shell_radiation::{RayleighGrid, rest_modes};
+use crate::shell_radiation::{CLUSTER_OVERLAP, RayleighGrid, gated_block, radiation_load, rest_modes};
 use std::f64::consts::PI;
 
 fn flat(name: &str, radius: f64, grid: f64, thickness: f64, young: f64, density: f64) -> Body {
@@ -150,14 +150,16 @@ fn the_rayleigh_convolution_is_the_double_sum_and_a_uniform_disc_is_the_baffled_
 /// A light disc (300 kg/m^3, an assumption, so that radiation dominates within milliseconds) started
 /// in its most damped loaded mode: the mode's coordinate falls at the attached sigma = R_rad / 2, the
 /// energy never rises and the shell's discrete energy plus the radiated work stays the start energy.
+/// The cluster overlap is +inf, so every mode keeps only its own resistance and stays an exact mode.
 #[test]
 fn a_rest_mode_decays_at_its_radiation_rate_and_the_energy_closes() {
     let (r, h) = (0.15, 0.01);
     let mut body = flat("light disc", r, h, 1.0e-3, 7.0e10, 300.0);
     let omega_max = rest_modes(&mut body.clone(), 0.0).unwrap().omega_max;
-    let lines = body.attach_shell_radiation(&standard_gas(), r, 4000.0, 8000.0).unwrap();
+    let lines = body.attach_shell_radiation(&standard_gas(), r, 4000.0, 8000.0, f64::INFINITY).unwrap();
     assert!(lines[0].starts_with("shell radiation (MB 14574 (d), a correction)") && lines[0].contains("upper bounds"), "{lines:?}");
-    assert!(lines[1].starts_with("shell radiation modes") && lines[2].starts_with("shell radiation by octave"), "{lines:?}");
+    assert!(lines[1].starts_with("shell radiation modes") && lines[1].contains("no pair overlaps above inf")
+        && lines[2].starts_with("shell radiation by octave"), "{lines:?}");
     let damping = body.shape_damping.as_ref().unwrap();
     assert_eq!(lines.len(), 3 + damping.two_sigma.len(), "one line per loaded mode");
     let largest = damping.two_sigma.iter().cloned().fold(0.0_f64, f64::max);
@@ -225,6 +227,158 @@ fn the_card_crash_takes_the_load_through_the_kit_and_a_struck_render_stays_finit
     assert!(body.shape_damping_dissipated_j() > 0.0);
 }
 
+/// The light disc's loaded modes (`a_rest_mode_decays_at_its_radiation_rate_and_the_energy_closes`)
+/// with the gas and dipole time the attach uses.
+fn light_disc_load_inputs() -> (Body, Vec<(f64, Vec<f64>, usize)>, f64, f64, f64) {
+    let (r, h) = (0.15, 0.01);
+    let mut body = flat("light disc", r, h, 1.0e-3, 7.0e10, 300.0);
+    let gas = standard_gas();
+    let modes = rest_modes(&mut body, 2.0 * PI * 8000.0).unwrap().modes.into_iter().filter(|m| m.0 <= 2.0 * PI * 4000.0).collect();
+    let tau = 4.0 * r / (3.0 * PI * gas.sound_speed);
+    (body, modes, gas.density, gas.sound_speed, tau)
+}
+
+/// MB 14957: with the cluster overlap above every pair's, no cluster forms and the load is, bit for bit,
+/// each mode's own resistance alone, 2 |H|^2 R_mm, recomputed here from the convolution, on the mode's
+/// own shape. Just below the largest overlap, that pair joins, and with it only its mirror image when it
+/// lies in parity sector 1 or 2 (the reflection x <-> y maps those sectors onto each other, so the image
+/// has the same frequencies and overlap; c44b found it). Each joined pair's block at its mean frequency,
+/// recomputed here, has its two kept rates as its trace and is rebuilt by its two kept shapes, which are
+/// M-orthonormal to each other and to every other kept shape; every other mode keeps its own loss, bit
+/// for bit.
+#[test]
+fn the_cluster_load_is_the_diagonal_above_every_overlap_and_joins_the_largest_pair_below_it() {
+    let (body, modes, rho, c, tau) = light_disc_load_inputs();
+    let h = body.h;
+    let loaded: Vec<&(f64, Vec<f64>, usize)> = modes.iter().collect();
+    let grid = RayleighGrid::new(&body.xy, h).unwrap();
+    let dipole = |omega: f64| {
+        let wt = omega * tau;
+        wt * wt / (1.0 + wt * wt)
+    };
+    let alone = radiation_load(&loaded, &grid, h, rho, c, tau, f64::INFINITY).unwrap();
+    let (top, a, b) = alone.largest.unwrap();
+    assert!(top.is_finite() && top > 0.0 && loaded[a].2 == loaded[b].2, "largest overlap {top} between modes {a} and {b}");
+    assert_eq!(alone.clipped, 0);
+    let above = radiation_load(&loaded, &grid, h, rho, c, tau, top * (1.0 + 1e-9)).unwrap();
+    for load in [&alone, &above] {
+        assert!(load.clusters.is_empty() && load.cluster.iter().all(Option::is_none) && load.zeroed == 0);
+        assert_eq!(load.shapes.len(), loaded.len());
+        for (i, mode) in loaded.iter().enumerate() {
+            let u = grid.convolve(&mode.1, mode.0 / c);
+            let own = mode.0 * rho / (2.0 * PI) * h.powi(4) * dot(&mode.1, &u);
+            assert_eq!(load.rates[i].to_bits(), (2.0 * dipole(mode.0) * own).to_bits(), "mode {i}");
+            assert!(load.shapes[i][..] == mode.1[..], "mode {i} keeps its own shape");
+        }
+    }
+    let below = radiation_load(&loaded, &grid, h, rho, c, tau, top * (1.0 - 1e-9)).unwrap();
+    let mirrored = matches!(loaded[a].2, 1 | 2);
+    assert_eq!(below.clusters.len(), if mirrored { 2 } else { 1 }, "largest pair in parity sector {}", loaded[a].2);
+    let g = below.cluster[a].unwrap();
+    assert_eq!(below.clusters[g].members, vec![a, b]);
+    assert_eq!(below.clusters[g].overlap, top);
+    assert_eq!(below.shapes.len(), loaded.len());
+    for k in &below.clusters {
+        assert_eq!(k.members.len(), 2);
+        let (p, q) = (k.members[0], k.members[1]);
+        assert!(loaded[p].2 == loaded[q].2 && (k.overlap / top - 1.0).abs() < 1e-9, "cluster {:?}: overlap {} against {top}", k.members, k.overlap);
+        if (p, q) != (a, b) {
+            assert!(loaded[p].2 + loaded[a].2 == 3, "the image lies in the other odd sector");
+            for (x, y) in [(p, a), (q, b)] {
+                assert!((loaded[x].0 / loaded[y].0 - 1.0).abs() < 1e-9, "image mode {x} at {} against {y} at {}", loaded[x].0, loaded[y].0);
+            }
+        }
+        let omega = 0.5 * (loaded[p].0 + loaded[q].0);
+        let scale = 2.0 * dipole(omega) * omega * rho / (2.0 * PI) * h.powi(4);
+        let (up, uq) = (grid.convolve(&loaded[p].1, omega / c), grid.convolve(&loaded[q].1, omega / c));
+        let (bpp, bqq, bpq) = (scale * dot(&loaded[p].1, &up), scale * dot(&loaded[q].1, &uq), scale * dot(&loaded[p].1, &uq));
+        let sum = k.two_sigma[0] + k.two_sigma[1];
+        assert!((sum / (bpp + bqq) - 1.0).abs() < 1e-12, "cluster {:?}: trace {sum:e} vs {:e}", k.members, bpp + bqq);
+        let project = |phi: &[f64], shape: &[f64]| -> f64 { phi.iter().zip(&body.mass).zip(shape).map(|((x, m), y)| x * m * y).sum() };
+        for (i, j, want) in [(p, p, bpp), (q, q, bqq), (p, q, bpq)] {
+            let rebuilt: f64 = k.shapes.iter().zip(&k.two_sigma).map(|(s, r)| r * project(&loaded[i].1[..], &s[..]) * project(&loaded[j].1[..], &s[..])).sum();
+            assert!((rebuilt - want).abs() <= 1e-10 * (bpp + bqq), "cluster {:?}, entry ({i}, {j}): rebuilt {rebuilt:e} vs {want:e}", k.members);
+        }
+        for (s, shape) in k.shapes.iter().enumerate() {
+            for (t, other) in below.shapes.iter().enumerate() {
+                let gram = project(&shape[..], &other[..]);
+                let same = other[..] == shape[..];
+                assert!((gram - if same { 1.0 } else { 0.0 }).abs() < 1e-12, "cluster {:?} shape {s} against kept shape {t}: {gram:e}", k.members);
+            }
+        }
+    }
+    let mut want = Vec::new();
+    for i in 0..loaded.len() {
+        match below.cluster[i] {
+            None => want.push(alone.rates[i].to_bits()),
+            Some(g) if below.clusters[g].members[0] == i => want.extend(below.clusters[g].two_sigma.iter().map(|r| r.to_bits())),
+            Some(_) => {}
+        }
+    }
+    let kept: Vec<u64> = below.rates.iter().map(|r| r.to_bits()).collect();
+    assert_eq!(kept, want, "every mode outside the clusters keeps its own loss; each cluster's rates stand at its first mode");
+}
+
+/// MB 14957, a two-mode degenerate case against its analytic split. Two "modes" at one frequency, the
+/// unit motions of two nodes d = 2h apart, of masses m_a and m_b, each mass-normalised: their block is
+/// 2 |H|^2 (omega rho0 / 2 pi) h^4 [[k/m_a, s/sqrt(m_a m_b)], [s/sqrt(m_a m_b), k/m_b]], s = sin(kd)/d,
+/// so the pair decays at its two eigenvalues (B_aa + B_bb)/2 -+ sqrt(((B_aa - B_bb)/2)^2 + B_ab^2), on
+/// eigenvectors that rebuild the block. Their gap is zero, so they join at every finite threshold; at
+/// +inf each keeps B_aa or B_bb alone.
+#[test]
+fn two_degenerate_modes_split_into_their_analytic_pair() {
+    let h: f64 = 0.01;
+    let xy = [[0.0, 0.0], [h, 0.0], [2.0 * h, 0.0]];
+    let mass: [f64; 3] = [2.0e-3, 3.0e-3, 5.0e-3];
+    let grid = RayleighGrid::new(&xy, h).unwrap();
+    let (rho, c, tau, omega): (f64, f64, f64, f64) = (1.2, 343.0, 4.0 * 0.15 / (3.0 * PI * 343.0), 2.0 * PI * 3000.0);
+    let a = (omega, vec![1.0 / mass[0].sqrt(), 0.0, 0.0], 0);
+    let b = (omega, vec![0.0, 0.0, 1.0 / mass[2].sqrt()], 0);
+    let modes = [&a, &b];
+    let (k, d) = (omega / c, 2.0 * h);
+    let wt = omega * tau;
+    let scale = 2.0 * wt * wt / (1.0 + wt * wt) * omega * rho / (2.0 * PI) * h.powi(4);
+    let (baa, bbb, bab) = (scale * k / mass[0], scale * k / mass[2], scale * (k * d).sin() / d / (mass[0] * mass[2]).sqrt());
+    let mean = 0.5 * (baa + bbb);
+    let half = (0.25 * (baa - bbb).powi(2) + bab * bab).sqrt();
+    let near = |x: f64, y: f64| (x - y).abs() <= 1e-12 * y.abs();
+    for threshold in [CLUSTER_OVERLAP, 1e300] {
+        let load = radiation_load(&modes, &grid, h, rho, c, tau, threshold).unwrap();
+        assert_eq!(load.largest, Some((f64::INFINITY, 0, 1)));
+        assert_eq!(load.clusters.len(), 1);
+        let pair = &load.clusters[0];
+        assert!(near(pair.two_sigma[0], mean - half) && near(pair.two_sigma[1], mean + half), "{:?} vs {} and {}", pair.two_sigma, mean - half, mean + half);
+        assert_eq!(load.rates, pair.two_sigma);
+        for (p, q, want) in [(0, 0, baa), (1, 1, bbb), (0, 1, bab)] {
+            let rebuilt: f64 = load.shapes.iter().zip(&load.rates).map(|(s, r)| {
+                let (x, y) = (dot(&modes[p].1, &s.iter().zip(&mass).map(|(v, m)| v * m).collect::<Vec<_>>()),
+                              dot(&modes[q].1, &s.iter().zip(&mass).map(|(v, m)| v * m).collect::<Vec<_>>()));
+                r * x * y
+            }).sum();
+            assert!(near(rebuilt, want), "block entry ({p}, {q}): rebuilt {rebuilt:e} vs {want:e}");
+        }
+    }
+    let alone = radiation_load(&modes, &grid, h, rho, c, tau, f64::INFINITY).unwrap();
+    assert!(alone.clusters.is_empty());
+    assert!(near(alone.rates[0], baa) && near(alone.rates[1], bbb), "{:?} vs {baa} and {bbb}", alone.rates);
+}
+
+/// A cluster's block must be symmetric and positive semidefinite to 1e-9: a negative eigenvalue, one
+/// of -2.5e-9 of the largest, an asymmetric pair, a zero block and a wrong size refuse; one of -2.5e-13
+/// of the largest is rounding and is set to zero.
+#[test]
+fn a_cluster_block_refuses_unless_symmetric_and_positive_semidefinite() {
+    assert!(gated_block(vec![1.0, 2.0, 2.0, 1.0], 2).is_err(), "eigenvalues -1 and 3");
+    assert!(gated_block(vec![1.0, 1.0, 1.0, 1.0 - 1e-8], 2).is_err(), "eigenvalue -5e-9 against 2");
+    assert!(gated_block(vec![1.0, 0.5, 0.5 + 1e-6, 1.0], 2).is_err(), "asymmetric by 1e-6");
+    assert!(gated_block(vec![0.0; 4], 2).is_err());
+    assert!(gated_block(vec![1.0; 3], 2).is_err());
+    let (lam, vectors, asymmetry, smallest, zeroed) = gated_block(vec![1.0, 1.0, 1.0, 1.0 - 1e-12], 2).unwrap();
+    assert!(lam[0] == 0.0 && zeroed == 1 && smallest < 0.0 && smallest > -1e-12, "{lam:?} {smallest:e} {zeroed}");
+    assert!((lam[1] - 2.0).abs() < 1e-11 && asymmetry == 0.0, "{lam:?}");
+    assert!((vectors[1].abs() - 0.5f64.sqrt()).abs() < 1e-11 && (vectors[3].abs() - 0.5f64.sqrt()).abs() < 1e-11, "{vectors:?}");
+}
+
 #[test]
 fn shell_radiation_refuses_heads_bad_arguments_no_mode_and_a_second_attach() {
     let gas = standard_gas();
@@ -233,25 +387,29 @@ fn shell_radiation_refuses_heads_bad_arguments_no_mode_and_a_second_attach() {
         young: 4e9, poisson: 0.38, density: 1390.0, tension: 2000.0, bending: true, nonlinear: Nonlinear::None,
         t60: [(100.0, 1.0), (1000.0, 1.0)], support: None, muffle: None,
     }).unwrap();
-    assert!(head.attach_shell_radiation(&gas, 0.15, 1000.0, 2000.0).is_err());
+    assert!(head.attach_shell_radiation(&gas, 0.15, 1000.0, 2000.0, CLUSTER_OVERLAP).is_err());
     let mut disc = flat("disc", 0.15, 0.015, 1.0e-3, 7.0e10, 2700.0);
     for (loaded, listed, a) in [(0.0, 100.0, 0.15), (-1.0, 100.0, 0.15), (200.0, 100.0, 0.15), (f64::NAN, 100.0, 0.15),
         (100.0, f64::INFINITY, 0.15), (100.0, 200.0, 0.0), (100.0, 200.0, f64::NAN)] {
-        assert!(disc.attach_shell_radiation(&gas, a, loaded, listed).is_err(), "{loaded} {listed} {a}");
+        assert!(disc.attach_shell_radiation(&gas, a, loaded, listed, CLUSTER_OVERLAP).is_err(), "{loaded} {listed} {a}");
         assert!(disc.shape_damping.is_none());
     }
-    assert!(disc.attach_shell_radiation(&gas, 0.15, 1.0, 100.0).is_err(), "no elastic mode at or below 1 Hz");
+    for overlap in [0.0, -0.05, f64::NAN, f64::NEG_INFINITY] {
+        assert!(disc.attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0, overlap).is_err(), "cluster overlap {overlap}");
+        assert!(disc.shape_damping.is_none());
+    }
+    assert!(disc.attach_shell_radiation(&gas, 0.15, 1.0, 100.0, CLUSTER_OVERLAP).is_err(), "no elastic mode at or below 1 Hz");
     assert!(disc.shape_damping.is_none());
-    disc.attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0).unwrap();
-    assert!(disc.attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0).is_err());
-    assert!(Body::point("stick", 0.01).attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0).is_err());
+    disc.attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0, CLUSTER_OVERLAP).unwrap();
+    assert!(disc.attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0, CLUSTER_OVERLAP).is_err());
+    assert!(Body::point("stick", 0.01).attach_shell_radiation(&gas, 0.15, 2000.0, 4000.0, CLUSTER_OVERLAP).is_err());
 }
 
 #[test]
 #[should_panic(expected = "shell radiation")]
 fn exported_stepper_refuses_shell_radiation() {
     let mut disc = flat("disc", 0.15, 0.015, 1.0e-3, 7.0e10, 2700.0);
-    disc.attach_shell_radiation(&standard_gas(), 0.15, 2000.0, 4000.0).unwrap();
+    disc.attach_shell_radiation(&standard_gas(), 0.15, 2000.0, 4000.0, CLUSTER_OVERLAP).unwrap();
     let mut instrument = Instrument::new(96_000.0);
     instrument.add(disc);
     let _ = instrument.image();

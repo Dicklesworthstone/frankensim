@@ -1132,7 +1132,8 @@ fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, ma
 /// own rest modes (`Body::attach_shell_radiation`): loaded up to the grid's resolution limit, six nodes
 /// per bending wavelength of a flat plate of the rim's thickness in `c.elastic`, listed up to the
 /// output Nyquist; the dipole radius is the microphone's own (`Mic::unbaffled`, the cymbal's radius),
-/// the gas the instrument's. The clock picked at build is kept and re-admitted with the load at the
+/// the gas the instrument's; the modes of one sector whose overlap exceeds the declared 0.05
+/// (`shell_radiation::CLUSTER_OVERLAP`, MB 14957) share their full resistance block. The clock picked at build is kept and re-admitted with the load at the
 /// same margin, 0.6. Returns the receipt lines.
 pub fn attach_shell_radiation(p: &mut Piece, c: &CymbalSpec) -> Result<Vec<String>, String> {
     let (e, nu, rho) = c.elastic;
@@ -1144,7 +1145,7 @@ pub fn attach_shell_radiation(p: &mut Piece, c: &CymbalSpec) -> Result<Vec<Strin
     let gas = p.instrument.gas.clone();
     let body = p.instrument.bodies.iter_mut().find(|b| b.name == c.name)
         .ok_or_else(|| format!("shell radiation: no body named {:?}", c.name))?;
-    let mut lines = body.attach_shell_radiation(&gas, c.radius, loaded_hz, listed_hz)?;
+    let mut lines = body.attach_shell_radiation(&gas, c.radius, loaded_hz, listed_hz, crate::shell_radiation::CLUSTER_OVERLAP)?;
     let (lam, who) = p.instrument.admission_rate2();
     let k = 1.0 / p.instrument.rate;
     let ratio = k * k * lam / 4.0;
