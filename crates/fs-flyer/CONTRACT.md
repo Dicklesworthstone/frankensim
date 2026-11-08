@@ -2668,3 +2668,33 @@ against direct native and frozen-field runs, reproducibility, and late
 reference/material/cancellation rollback. Exact-file formatting and source
 checks passed; native compilation and execution remain pending in the
 constrained environment.
+
+### Affine Mann forcing in native connected wake advection
+
+`MannWakeWind::{shed_near_with_sampling,shed_hybrid_with_sampling}` accept
+an explicit `MannWakeSampling::Affine` anchor and spatial velocity/gradient
+error budgets. Existing `shed_near` and `shed_hybrid` retain exact sampling.
+The affine snapshot is prepared from the current conditioned OU frame on the
+first query at each actual stage, reused across that stage's native vertices,
+and discarded whenever the bridge time changes. Adaptive revisits rebuild
+from the same original conditional history, so vertex order and rejected
+trials do not select different atmospheric realizations. The anchor is fixed
+for the complete interval; wall mode requires it on the shared native image
+plane. The optional log-law mean is still evaluated exactly at each point.
+
+Reports expose affine preparation counts and the largest admitted spatial
+truncation estimates. For Q native queries at F visited stages, affine
+atmospheric observation work is O(F * modes + Q), with fixed-size additional
+storage; this is an operation-count statement, not a measured speedup. The
+sampling policy is an explicit step input and must be repeated on replay.
+All original circulation/topology/core, integration, work limits and
+cancellation rules remain authoritative. A spatial-budget or preparation
+refusal withholds the complete near/far wake and atmospheric endpoint; only
+infallible publication follows native acceptance. The spatial estimates do
+not certify native trajectory error or a new turbulence closure.
+
+Three native regression groups are authored for uncached-reference
+equivalence through adaptive rejections, wall/hybrid replay with exact mean,
+and late spatial-budget/final-cancellation rollback. Source/parser checks
+were completed; native integration compilation and execution remain
+unverified in the disk-constrained implementation workspace.

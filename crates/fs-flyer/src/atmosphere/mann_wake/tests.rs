@@ -5,6 +5,9 @@ use fs_vpm::farfield3d::WakeCoreEvolutionMode;
 use fs_vpm::filament3d::WakeRateCertificate;
 use fs_vpm::images3d::ImagePlane;
 
+#[path = "tests/affine.rs"]
+mod affine;
+
 const MODES: usize = 8;
 const BYTES: usize = 4 * 88 * MODES;
 const DT: f64 = 0.05;

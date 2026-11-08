@@ -32,6 +32,9 @@ use fs_rand::StreamKey;
 pub mod filter;
 use filter::MannBoxFilter;
 
+/// Fixed-anchor affine observations with explicit spatial truncation bounds.
+pub mod affine;
+
 /// Exact OU evolution on a separately declared fixed physical time step.
 pub mod fixed_step;
 
@@ -463,6 +466,25 @@ impl HomogeneousMannField {
     /// This operation draws no randomness and allocates no storage.
     pub fn sample(&self, point_m: [f64; 3]) -> Result<FlowSample, Refusal> {
         self.sample_with_gains(point_m, None)
+    }
+
+    /// Prepare one affine observation of this accepted realization. For a
+    /// wall observation the anchor must lie on the plane; each subsequent
+    /// point is admitted against caller-supplied spatial error budgets.
+    pub fn affine_observation(
+        &self,
+        anchor_m: [f64; 3],
+        wall: Option<MannPlaneWall>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<affine::MannAffineField, Refusal> {
+        affine::prepare_modes(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            anchor_m,
+            wall,
+            cancelled,
+        )
     }
 
     /// Velocity and analytic gradient above an explicit slip plane. The

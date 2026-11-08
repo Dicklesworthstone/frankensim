@@ -16,6 +16,7 @@
 
 use std::cell::RefCell;
 
+use fs_atmo::mann_field::affine::{MannAffineAccuracy, MannAffineError, MannAffineField};
 use fs_atmo::mann_field::fixed_step::{
     FixedStepMannCheckpoint, FixedStepMannField, MAX_MANN_OU_BRIDGE_DEPTH, MannOuBridge,
     MannOuBridgeFrame,
@@ -47,8 +48,23 @@ pub struct MannWakeBudget {
     /// Includes bridge/endpoint preparation and every conditional path visit,
     /// including revisited stage times after rejected wake trials.
     pub maximum_normal_draws: usize,
-    /// Counts all native incident-field queries, each costing O(mode_count).
+    /// Counts all native incident-field queries. Exact queries cost O(modes);
+    /// affine queries cost O(1), with O(modes) preparation per observed stage.
     pub maximum_field_samples: usize,
+}
+
+/// Explicit spatial observation for one attempted physical wake interval.
+/// The anchor remains fixed across vertices, adaptive trials and stage order.
+/// Repeat the same policy when replaying the native wake/wind checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MannWakeSampling {
+    Exact,
+    Affine {
+        /// In the common Mann/VPM frame; must lie on the declared wall, if any.
+        anchor_m: [f64; 3],
+        /// Bounds the represented spatial field, not wake trajectory error.
+        accuracy: MannAffineAccuracy,
+    },
 }
 
 /// Original integrator and spatial-approximation choice, with no hidden default.
@@ -80,6 +96,12 @@ pub struct MannWakeStepReport {
     /// Conditional frame updates; consecutive vertices at one stage share it.
     pub stage_frames: usize,
     pub maximum_bridge_depth_used: usize,
+    /// Once per visited OU stage in affine mode, including revisited stages.
+    /// All vertices at the same stage reuse this fixed-size observation.
+    pub affine_frames: usize,
+    /// Largest admitted analytical spatial truncation estimates. These use
+    /// ordinary f64 arithmetic, not interval-certified error bounds.
+    pub maximum_affine_error: MannAffineError,
     pub start_time_s: f64,
     pub end_time_s: f64,
 }
@@ -267,11 +289,39 @@ impl MannWakeWind {
         budget: MannWakeBudget,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MannWakeStepReport, Refusal> {
+        self.shed_near_with_sampling(
+            near,
+            gamma,
+            config,
+            boundary,
+            integration,
+            MannWakeSampling::Exact,
+            budget,
+            cancelled,
+        )
+    }
+
+    /// Native near-wake advection with an explicitly budgeted affine option.
+    /// Every new OU stage rebuilds the affine value, gradient and error bounds;
+    /// a spatial-budget refusal rolls back the complete native transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_near_with_sampling(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: WakeBoundary<'_>,
+        integration: MannWakeIntegration,
+        sampling: MannWakeSampling,
+        budget: MannWakeBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MannWakeStepReport, Refusal> {
         self.advance_interval(
             near.ticks,
             near.cert.shed_hz,
             config,
             boundary,
+            sampling,
             budget,
             cancelled,
             |variation, cancelled| match integration {
@@ -308,11 +358,40 @@ impl MannWakeWind {
         budget: MannWakeBudget,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MannWakeStepReport, Refusal> {
+        self.shed_hybrid_with_sampling(
+            near,
+            far,
+            gamma,
+            config,
+            boundary,
+            integration,
+            MannWakeSampling::Exact,
+            budget,
+            cancelled,
+        )
+    }
+
+    /// The same authored affine field drives both native near/far partitions.
+    /// No partition-specific fit or independent turbulent sample is generated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_hybrid_with_sampling(
+        &mut self,
+        near: &mut FilamentWake,
+        far: &mut FarField,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        boundary: WakeBoundary<'_>,
+        integration: MannWakeIntegration,
+        sampling: MannWakeSampling,
+        budget: MannWakeBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MannWakeStepReport, Refusal> {
         self.advance_interval(
             near.ticks,
             near.cert.shed_hz,
             config,
             boundary,
+            sampling,
             budget,
             cancelled,
             |variation, cancelled| match integration {
@@ -342,6 +421,7 @@ impl MannWakeWind {
         shed_hz: f64,
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
+        sampling: MannWakeSampling,
         budget: MannWakeBudget,
         mut cancelled: impl FnMut() -> bool,
         advance: impl FnOnce(
@@ -350,6 +430,20 @@ impl MannWakeWind {
         ) -> Result<MannWakeAdvection, Refusal>,
     ) -> Result<MannWakeStepReport, Refusal> {
         poll(&mut cancelled)?;
+        if let MannWakeSampling::Affine { anchor_m, accuracy } = sampling {
+            accuracy.admit().map_err(atmosphere)?;
+            if !anchor_m.iter().all(|x| x.is_finite())
+                || self
+                    .config
+                    .wall
+                    .is_some_and(|wall| anchor_m[2] != wall.height_m())
+            {
+                return Err(error(
+                    "mann-affine-anchor",
+                    "affine wake anchor must be finite and lie on the declared wall",
+                ));
+            }
+        }
         if wake_tick != self.next_wake_tick || self.dt_s() != 1.0 / shed_hz {
             return Err(error(
                 "mann-wake-clock",
@@ -411,11 +505,15 @@ impl MannWakeWind {
             bridge,
             frame,
             config: self.config,
+            sampling,
+            affine: None,
             budget,
             normal_draws: endpoint_draws,
             field_samples: 0,
             stage_frames: 0,
             maximum_depth: 0,
+            affine_frames: 0,
+            maximum_affine_error: MannAffineError::default(),
         };
         let cancelled = RefCell::new(cancelled);
         let advection = advance(
@@ -432,6 +530,8 @@ impl MannWakeWind {
             field_samples: stage.field_samples,
             stage_frames: stage.stage_frames,
             maximum_bridge_depth_used: stage.maximum_depth,
+            affine_frames: stage.affine_frames,
+            maximum_affine_error: stage.maximum_affine_error,
             start_time_s: stage.bridge.start_time_s(),
             end_time_s: stage.bridge.end_time_s(),
         };
@@ -447,11 +547,15 @@ struct StageWind {
     bridge: MannOuBridge,
     frame: MannOuBridgeFrame,
     config: MannWakeConfig,
+    sampling: MannWakeSampling,
+    affine: Option<MannAffineField>,
     budget: MannWakeBudget,
     normal_draws: usize,
     field_samples: usize,
     stage_frames: usize,
     maximum_depth: usize,
+    affine_frames: usize,
+    maximum_affine_error: MannAffineError,
 }
 
 impl StageWind {
@@ -507,12 +611,42 @@ impl StageWind {
             self.normal_draws += report.normal_draws;
             self.stage_frames += 1;
             self.maximum_depth = self.maximum_depth.max(report.tree_depth);
+            // A returning adaptive stage rebuilds from its original bridge
+            // realization; an affine field from another time is never reused.
+            self.affine = None;
         }
-        let sample = match self.config.wall {
-            Some(wall) => self.frame.sample_wall_blocked(point, wall),
-            None => self.frame.sample(point),
-        }
-        .map_err(atmosphere)?;
+        let sample = match self.sampling {
+            MannWakeSampling::Exact => match self.config.wall {
+                Some(wall) => self.frame.sample_wall_blocked(point, wall),
+                None => self.frame.sample(point),
+            }
+            .map_err(atmosphere)?,
+            MannWakeSampling::Affine { anchor_m, accuracy } => {
+                if self.affine.is_none() {
+                    self.affine = Some(
+                        self.frame
+                            .affine_observation(anchor_m, self.config.wall, &mut cancelled)
+                            .map_err(atmosphere)?,
+                    );
+                    self.affine_frames += 1;
+                }
+                let sample = self
+                    .affine
+                    .as_ref()
+                    .expect("prepared current stage")
+                    .sample(point, accuracy)
+                    .map_err(atmosphere)?;
+                self.maximum_affine_error.velocity_mps = self
+                    .maximum_affine_error
+                    .velocity_mps
+                    .max(sample.error.velocity_mps);
+                self.maximum_affine_error.gradient_per_s = self
+                    .maximum_affine_error
+                    .gradient_per_s
+                    .max(sample.error.gradient_per_s);
+                sample.flow
+            }
+        };
         add_mean(sample, point, self.config)
     }
 }

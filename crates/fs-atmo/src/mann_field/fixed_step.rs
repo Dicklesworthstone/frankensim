@@ -295,6 +295,24 @@ impl FixedStepMannField {
     pub fn sample(&self, point_m: [f64; 3]) -> Result<FlowSample, Refusal> {
         self.sample_with_gains(point_m, None)
     }
+
+    /// Snapshot one fixed-anchor affine field with realization-specific
+    /// spatial truncation bounds. Rebuild after advancing this temporal owner.
+    pub fn affine_observation(
+        &self,
+        anchor_m: [f64; 3],
+        wall: Option<MannPlaneWall>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<affine::MannAffineField, Refusal> {
+        affine::prepare_modes(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            anchor_m,
+            wall,
+            cancelled,
+        )
+    }
     /// Read the accepted quadratures through the same harmonic slip-plane
     /// observation as the original clock owner; no additional state or draws.
     pub fn sample_wall_blocked(

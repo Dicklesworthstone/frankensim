@@ -493,3 +493,34 @@ the represented outer slip-plane field; it adds no unresolved spectral energy,
 no-slip viscous layer, wall-generated turbulence, density fluctuations, pressure
 or separate mean flow. Positive semidefiniteness holds in exact arithmetic;
 roundoff eigenvalues are not clipped.
+
+## Budgeted affine observations of represented Mann turbulence
+
+`mann_field::affine::MannAffineField` is an immutable affine snapshot of one
+accepted realization at one authored anchor. `HomogeneousMannField`,
+`FixedStepMannField` and `MannOuBridgeFrame` expose `affine_observation`;
+preparation uses the original value/analytic gradient, actual retained
+quadratures and O(modes) work, without allocations or random draws. Each
+subsequent sample costs O(1) and returns explicit Euclidean velocity and
+Frobenius gradient truncation estimates. Homogeneous modes contribute
+`A |k|^2`, where `A = sqrt(|a|^2 + |b|^2)`. A wall correction contributes
+`R q^2` to velocity curvature and `sqrt(2) R q^2` to gradient curvature, with
+`R = hypot(a_z,b_z)` and `q = |k_horizontal|`; horizontal phase and vertical
+exponential derivatives are both included. Taylor remainder estimates are
+`H_v r^2/2` and `H_g r`. These are analytical bounds evaluated in ordinary
+floating-point arithmetic, not interval certificates or bounds on roundoff,
+unresolved spectrum, time integration or trajectory error.
+
+A wall snapshot requires its anchor exactly on the declared plane; the affine
+field then retains no penetration there and the source's zero divergence up
+to roundoff. Queries below the plane, invalid budgets, excessive spatial
+remainder, or nonrepresentable nonzero bounds refuse. No automatic
+reanchoring, query-order-dependent patches or silent exact fallback occurs.
+Snapshots must be rebuilt after source time/amplitudes change; original exact
+observations remain unchanged.
+
+Five focused regression groups cover exact-anchor equivalence, realization
+error estimates, wall-envelope derivatives and slip, reordered bridge stages,
+representability, cancellation and zero fields. The actual atmospheric crate
+and its unit-test modules passed a pinned compiler metadata check using real
+dependencies; these new tests were not linked or executed.

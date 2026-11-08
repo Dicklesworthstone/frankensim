@@ -499,6 +499,24 @@ impl MannOuBridgeFrame {
     pub fn sample(&self, point_m: [f64; 3]) -> Result<FlowSample, Refusal> {
         self.sample_with_gains(point_m, None)
     }
+
+    /// Prepare from this exact conditioned stage, without another random
+    /// draw. A different bridge observation needs a new affine snapshot.
+    pub fn affine_observation(
+        &self,
+        anchor_m: [f64; 3],
+        wall: Option<MannPlaneWall>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<affine::MannAffineField, Refusal> {
+        affine::prepare_modes(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            anchor_m,
+            wall,
+            cancelled,
+        )
+    }
     pub fn sample_filtered(
         &self,
         point_m: [f64; 3],
