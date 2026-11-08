@@ -4260,3 +4260,53 @@ own motion and heat transactions. Four G0/G1/G3/G4 regressions specify an
 independent uncondensed seven-unknown equilibrium, held-stage relaxation and
 cyclic reversal, spin-length congruence, and atomic normal/opening/domain/
 owner/cancellation refusals.
+
+## Simultaneous normal, vector-shear and torsional adhesion
+
+`mixed_mode::combined` equilibrates one original circular full-stick JKR area
+under normal approach, two shear displacements and twist. Its potential adds
+the original translation and torsional elastic terms to the original normal
+and surface terms. All four work-conjugate efforts and the full reciprocal
+4-by-4 relaxed tangent follow from that same radius-stationary potential.
+Vanishing twist and vanishing shear retain the existing source responses and
+their tangent blocks exactly.
+
+The existing ideally brittle, mode-independent Griffith choice and decoupled
+isotropic-halfspace, circular/perimeter-averaged assumptions remain explicit.
+The original normal geometry/material checks still apply. Combined nominal
+screens use the triangle bounds `|u|/a + |phi|` and
+`8*Gstar*|u|/(pi*a) + 2*Gbar*|phi|` against the original displacement and
+mean-shear/yield envelopes. These are not singular-edge slip certificates.
+No partial-slip law, material default, fitted toughness, irreversible loss or
+post-instability continuation is inferred.
+
+The bounded, allocation-free radius solve keeps all original dimensional
+coefficients in compensated arithmetic before normalization. It solves a
+positive stationary minimum and a positive root offset without inverting a
+vanishing radial tangent. Coefficient-side opening admission distinguishes a
+closed crack even when rounded radius subtraction has the opposite sign.
+Ambiguous fold or opening signs refuse; a generic marginal response additionally
+requires zero original dimensional stationarity and curvature. Original
+surface, normal, shear and torsional storage and finite radial residual remain
+separate diagnostics.
+
+`combined::path` supplies a symmetric discrete gradient of the same complete
+potential and an analytic 4-by-4 endpoint derivative. Factored polynomial
+differences and the radial-stationarity secant preserve small work without
+quadrature or subtraction of endpoint energies. Sealed prepared endpoints need
+zero original queries at coincidence; uncached paths require at most five.
+Shared coordinate-box admission checks both approach extremes at maximum shear
+and twist, encloses radius growth during reversal, then applies the original
+normal and joint nominal envelopes. Folds, opening edges and singular secants
+refuse. The motion owner supplies its actual quadratic trajectory extrema to
+this same admission.
+
+Five source regressions specify simultaneous-force/potential agreement, exact
+pure-mode reductions, all sixteen relaxed derivatives and frame covariance,
+combined applicability limits, and closed-opening refusal. A kernel regression
+retains coefficient perturbations below binary64 resolution on both sides of a
+fold and rejects a rounded-opening counterexample. Six path regressions cover
+independent point-force work, subdivision/reversal, all sixteen endpoint
+derivatives, one-ULP work and sealed caches, reversal-driven area expansion,
+pure-mode limits and an unsafe interior opening edge. Rust test execution
+remains unverified in the resource-constrained shared environment.

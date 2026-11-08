@@ -18,6 +18,9 @@
 //! dependent fold; subsequent sliding, nucleation or dynamic separation needs
 //! the caller's physical owner, not an invented zero-area equilibrium or heat.
 
+/// Simultaneous normal, vector-shear and twist equilibrium on one original area.
+pub mod combined;
+
 /// Finite tangential apparatus stiffness and competing sourced slip/peel limits.
 pub mod loading;
 
