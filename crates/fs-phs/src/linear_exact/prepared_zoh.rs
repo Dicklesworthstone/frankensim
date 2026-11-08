@@ -121,6 +121,28 @@ impl<'a> PreparedExactZoh<'a> {
     /// Prepared held-input duration [s]. It never changes during a warm step.
     pub fn duration(&self) -> f64 { self.duration }
 
+    /// Original cached coefficients of one actual interval-mean output:
+    /// `y_bar = state_row * initial + input_row * held_input`.
+    /// Rows retain the original coordinate/port ordering. At zero duration
+    /// the input row is empty and the state row is the instantaneous output.
+    /// This immutable view performs no propagation, allocation or fitting;
+    /// coupled pressure/flow consumers can factor selected response columns
+    /// once and must check their accepted trajectory against their constraints.
+    pub fn average_output_map(&self, output_port: usize) -> Result<(&[f64], &[f64]), PhsError> {
+        let (n, m) = (self.system().n, self.system().m);
+        if output_port >= m {
+            return Err(PhsError::BadPortPairing);
+        }
+        Ok((
+            &self.mean_state[output_port * n..(output_port + 1) * n],
+            if self.duration == 0.0 {
+                &[]
+            } else {
+                &self.mean_input[output_port * m..(output_port + 1) * m]
+            },
+        ))
+    }
+
     /// Internal transfer view, consumed only after a successful native step.
     pub(crate) fn port_integrals(&self) -> &[Sum] { &self.scratch.port_integrals }
 

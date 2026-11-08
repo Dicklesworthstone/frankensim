@@ -1,6 +1,11 @@
 //! One native coupled trajectory and original per-pipe source heat.
 use super::*;
+mod flow_control;
 mod harmonic;
+pub use flow_control::{
+    LaminarNetworkFlowControlStep, LaminarNetworkFlowPort, LaminarNetworkFlowTolerance,
+    PreparedLaminarNetworkFlowControl,
+};
 use fs_phs::PreparedStepError;
 use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, PreparedExactZoh, PreparedSourceLoss,
@@ -145,6 +150,21 @@ impl<M: FluidTransport> PreparedLaminarNetwork<'_, M> {
         &mut self,
         cx: &Cx<'_>,
         state: &mut LaminarNetworkState,
+        pressures: &[Pressure],
+        heads: Option<&[Pressure]>,
+    ) -> Result<LaminarNetworkStep, LaminarPipeError> {
+        let report = self.preview(cx, state, pressures, heads)?;
+        self.publish(state, report);
+        Ok(report)
+    }
+
+    // The complete original trajectory and every physical audit are shared
+    // by pressure-driven and mean-flow-driven advancement. Additional flow
+    // constraints must pass before either accepted history or reports publish.
+    fn preview(
+        &mut self,
+        cx: &Cx<'_>,
+        state: &LaminarNetworkState,
         pressures: &[Pressure],
         heads: Option<&[Pressure]>,
     ) -> Result<LaminarNetworkStep, LaminarPipeError> {
@@ -335,13 +355,17 @@ impl<M: FluidTransport> PreparedLaminarNetwork<'_, M> {
             ));
         }
         checkpoint(cx)?;
+        Ok(report)
+    }
+
+    fn publish(&mut self, state: &mut LaminarNetworkState, report: LaminarNetworkStep) {
+        let boundary = self.network.topology.pressure_nodes.len();
         state.coordinates.copy_from_slice(&self.pending);
-        state.accepted_time_s = next_time;
+        state.accepted_time_s += report.duration_s;
         core::mem::swap(&mut self.records, &mut self.pending_records);
         self.boundary_flows
             .copy_from_slice(&self.output[..boundary]);
         self.last = Some(report);
-        Ok(report)
     }
 
     fn audit_flows(

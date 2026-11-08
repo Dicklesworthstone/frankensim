@@ -23,7 +23,10 @@
 mod continuity;
 mod prepared;
 mod tones;
-pub use prepared::PreparedLaminarNetwork;
+pub use prepared::{
+    LaminarNetworkFlowControlStep, LaminarNetworkFlowPort, LaminarNetworkFlowTolerance,
+    PreparedLaminarNetwork, PreparedLaminarNetworkFlowControl,
+};
 pub use tones::PreparedLaminarNetworkTones;
 
 use std::sync::Arc;

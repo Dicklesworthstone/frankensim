@@ -425,6 +425,31 @@ viscosity/history continuation and refusal atomicity. The source-level
 continuity tests cover topology, kinetic orthonormality, closed cycles,
 dead ends, disconnected gauges and unequal inertias.
 
+### Prescribed delivered flow through original network ports
+
+`LaminarNetwork::prepare_flow_control` solves held pressure increments at selected
+original reservoirs or directed branch-head sources for requested interval-mean
+flows. Delivered volume equals that mean times the prepared duration; the
+instantaneous flow remains the full original inertial/memory trajectory. The
+coupled mobility comes from the cached native mean-output map, including every
+initial profile coordinate. Cold preparation checks independence and scaled
+positive response and factors once with native Cholesky. Warm calls reuse all
+buffers, perform no new factorization or trajectory probes, and refine against
+the complete original response rather than a fitted or symmetrized replacement.
+
+The original component gauges are retained even when a reference reservoir is
+controlled. Accepted pressure increments and gauged port pressures are reported
+separately so a small physical drive is not rounded away beside a huge common
+absolute pressure. Actual integrated port flows must satisfy the caller's
+absolute/relative tolerance. The same complete trajectory, per-branch heat,
+source work, continuity and whole-interval Reynolds checks gate acceptance;
+state, clock, required pressures, flows and reports publish together. Dependent
+controls, unresolved response, unsupported regime and cancellation refuse
+without changing accepted results. This is a held-pressure volume-delivery
+inverse of the existing incompressible developed-Newtonian network, with its
+original rigid-wall, frequency-band and dense-size limits; it does not impose
+instantaneous flow or introduce pump/compliance/cavitation physics.
+
 ## Unsteady laminar branches between common reservoirs
 
 `graph::inertial::laminar::parallel::LaminarParallel` connects original

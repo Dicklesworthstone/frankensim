@@ -2252,6 +2252,12 @@ selected input is ignored while predicting its response. Maps come directly
 from the existing cached output integrals, not unit-state probes or new
 exponentials. Warm queries require O(n+m) contractions and no owner allocation.
 
+`average_output_map(output_port)` exposes immutable original state/input rows
+of the same cached mean-output map for coupled multiport consumers. It performs
+no propagation, allocation or fitting. Consumers admit their selected response
+rank and verify constraints on the accepted original trajectory. The zero-time
+input row is empty; the state row remains the instantaneous physical output.
+
 At zero duration, the relation is the original instantaneous output with zero
 mobility. A disconnected port may also have zero mobility; consumers requiring
 positive impedance must admit it themselves. Existing complete-state, exact

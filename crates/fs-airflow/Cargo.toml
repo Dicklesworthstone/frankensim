@@ -12,7 +12,7 @@ layer = "L3"
 
 [features]
 default = []
-compartment-fire = ["dep:fs-gas", "dep:fs-la", "dep:fs-thermochem"]
+compartment-fire = ["dep:fs-gas", "dep:fs-thermochem"]
 transient-transport = []
 
 [dependencies]
@@ -25,7 +25,8 @@ fs-convection = { path = "../fs-convection" }
 fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
 fs-gas = { path = "../fs-gas", features = ["experimental-euler"], optional = true }
-fs-la = { path = "../fs-la", optional = true }
+# Prepared laminar flow ports reuse the native dense positive factorization.
+fs-la = { path = "../fs-la" }
 # Native convection/heat composition always uses the original finite cells and
 # observers, independently of the optional transport and compartment-fire drivers.
 fs-thermal = { path = "../fs-thermal" }
