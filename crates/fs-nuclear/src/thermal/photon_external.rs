@@ -25,7 +25,7 @@ use fs_math::dd::Dd;
 mod affine;
 use affine::{affine_energy, interpolate};
 
-mod feedback;
+pub(super) mod feedback;
 pub use feedback::{PhotonFeedbackBudget, PhotonFeedbackWork, TemperaturePhotonSlabLayer};
 use feedback::{PhotonFeedbackCandidate, PhotonTemperatureFeedback};
 

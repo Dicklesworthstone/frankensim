@@ -65,6 +65,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         }
         let bindings = bind_receivers(thermal, receivers, response.receiver_ids(), &mut || Ok(()))?;
         self.spectral_radiation = None;
+        self.photon_feedback = None;
         self.radiation = Some(Arc::new(BoundRadiation {
             response,
             receivers: bindings,

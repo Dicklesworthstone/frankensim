@@ -40,6 +40,7 @@ pub use spectral::{DecayRadiationEmitter, DecayRadiationHeatSource};
 mod photon;
 pub use photon::{PhotonSlabGeometry, PhotonSlabLayer};
 mod photon_external;
+use photon_external::feedback::PhotonTemperatureFeedback;
 pub use photon_external::{
     ExternalPhotonHeating, ExternalPhotonHeatingAudit, PhotonFeedbackBudget, PhotonFeedbackWork,
     PhotonHeatingBudget, PhotonIllumination, PhotonPowerKnot, PhotonPowerSchedule,
@@ -500,6 +501,8 @@ struct PendingStep<S: NuclearHeatSource> {
     states: Vec<(CellId, S, S::Step)>,
     account: Account,
     audit: FissionHeatingAudit,
+    // Response and preparation cache are one unpublished thermal candidate.
+    photon_transport: Option<(Arc<BoundSpectralRadiation<S>>, PhotonTemperatureFeedback)>,
 }
 
 /// Transactional source owner for [`DepositionSimulation::advance_observed`].
@@ -515,6 +518,7 @@ pub struct NuclearHeating<S: NuclearHeatSource> {
     sources: BTreeMap<CellId, BoundSource<S>>,
     radiation: Option<Arc<BoundRadiation>>,
     spectral_radiation: Option<Arc<BoundSpectralRadiation<S>>>,
+    photon_feedback: Option<PhotonTemperatureFeedback>,
     budget: S::Budget,
     pending: Option<PendingStep<S>>,
     account: Account,
@@ -567,6 +571,7 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
             sources: bound,
             radiation: None,
             spectral_radiation: None,
+            photon_feedback: None,
             budget,
             pending: None,
             account: Account::default(),
@@ -689,6 +694,9 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         if let Some(radiation) = &self.spectral_radiation {
             radiation.validate(thermal, checkpoint)?;
         }
+        if let Some(feedback) = &self.photon_feedback {
+            feedback.validate_temperature_support(thermal, checkpoint)?;
+        }
         Ok(())
     }
 }
@@ -702,6 +710,9 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         }
         self.account = Account::default();
         self.audit = FissionHeatingAudit::default();
+        if let Some(feedback) = &mut self.photon_feedback {
+            feedback.begin();
+        }
         Ok(())
     }
 
@@ -827,7 +838,33 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
                 checkpoint,
             )?;
         }
-        if let Some(radiation) = &self.spectral_radiation {
+        // Only actual grouped emission needs a refreshed opacity response.
+        // Nuclear trials, local heat and evaluated spectra above stay with
+        // their original owners. No cache or response is accepted here.
+        let illuminated = emitted_groups
+            .iter()
+            .any(|(_, groups)| groups.iter().any(|&energy| energy > 0.0));
+        let photon_transport = if illuminated {
+            if let (Some(feedback), Some(radiation)) =
+                (&self.photon_feedback, &self.spectral_radiation)
+            {
+                feedback.candidate(thermal, checkpoint)?.map(|candidate| {
+                    (
+                        Arc::new(radiation.with_response(candidate.response)),
+                        candidate.feedback,
+                    )
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(radiation) = photon_transport
+            .as_ref()
+            .map(|(radiation, _)| radiation)
+            .or(self.spectral_radiation.as_ref())
+        {
             radiation.deposit(
                 &emitted_groups,
                 S::energy_tolerance_j(self.budget),
@@ -859,6 +896,7 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             states,
             account,
             audit,
+            photon_transport,
         });
         Ok(watts)
     }
@@ -899,6 +937,10 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
         self.time_s = pending.end_s;
         self.account = pending.account;
         self.audit = pending.audit;
+        if let Some((radiation, feedback)) = pending.photon_transport {
+            self.spectral_radiation = Some(radiation);
+            self.photon_feedback = Some(feedback);
+        }
         Ok(())
     }
 }

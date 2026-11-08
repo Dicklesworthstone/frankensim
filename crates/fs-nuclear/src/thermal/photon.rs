@@ -4,7 +4,8 @@
 //! as homogeneous layers of a common cross-sectional area. Original volume and
 //! mass determine thickness and reference density; no thermal emissivity,
 //! equilibrium density or replacement material law supplies photon physics.
-//! Photon mass kernels are constant over their declared material applicability.
+//! Fixed kernels or explicitly supplied temperature laws retain their declared
+//! material applicability and the existing nuclear/thermal transaction.
 
 use std::collections::BTreeSet;
 
@@ -15,8 +16,8 @@ use crate::radiation::transport::refinement::{
     PhotonSlabRefinement, RefinedPhotonSlabResponse, refine_slab_response,
 };
 use crate::radiation::transport::{
-    PhotonOrdinate, PhotonSlabCell, PhotonSlabLimits, PhotonSlabResponse, admit_slab_dimensions,
-    prepare_slab_response,
+    PhotonOrdinate, PhotonSlabCell, PhotonSlabLimits, PhotonSlabResponse, PhotonSlabSource,
+    PhotonSourceGeometry, admit_slab_dimensions, prepare_slab_response,
 };
 
 /// One original cell in geometric order along the planar stack's normal.
@@ -105,6 +106,69 @@ impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
         Ok((coupled, prepared))
     }
 
+    /// Couple internally emitted nuclear photons to original material temperatures.
+    ///
+    /// Each evaluated emitter remains uniform and isotropic in its original
+    /// slab cell. The original decay/activation/burnup owner supplies integrated
+    /// group energy; only the slab's complete heat/scattering kernels refresh at
+    /// each illuminated native interval's start temperature. Original reference
+    /// masses, geometry, calorics and local nuclear deposition stay unchanged.
+    ///
+    /// The same feedback model as [`ExternalPhotonHeating::from_temperature_slab`]
+    /// supports optional spatial refinement and prepared temperature mixtures.
+    /// Changed responses and preparation budgets publish only with an accepted
+    /// nuclear/thermal endpoint. All endpoints, including dark/final ones,
+    /// remain inside every supplied temperature domain. Replacing this binding
+    /// through a fixed radiation/slab constructor disables temperature feedback.
+    ///
+    /// This retains steady planar transport and first-order, start-temperature
+    /// coupling: refine the native thermal timestep for opacity feedback. It
+    /// does not infer density/composition changes or photon flight-time storage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_temperature_photon_slab(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        data_id: String,
+        geometry: PhotonSlabGeometry,
+        layers: Vec<TemperaturePhotonSlabLayer>,
+        emitters: Vec<DecayRadiationEmitter>,
+        ordinates: Vec<PhotonOrdinate>,
+        limits: PhotonSlabLimits,
+        refinement: Option<PhotonSlabRefinement>,
+        feedback_budget: PhotonFeedbackBudget,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, PhotonSlabResponse), FissionThermalError> {
+        let source_ids = self.photon_emitter_ids(thermal, &emitters, &mut checkpoint)?;
+        let (feedback, prepared, receivers) = PhotonTemperatureFeedback::prepare(
+            thermal,
+            data_id,
+            geometry,
+            layers,
+            source_ids
+                .into_iter()
+                .map(|cell_id| PhotonSlabSource {
+                    source_id: cell_id,
+                    geometry: PhotonSourceGeometry::UniformLayer { cell_id },
+                })
+                .collect(),
+            ordinates,
+            limits,
+            refinement,
+            feedback_budget,
+            &mut checkpoint,
+        )?;
+        let mut coupled = self.with_grouped_decay_radiation(
+            thermal,
+            Arc::clone(&prepared.response),
+            emitters,
+            receivers,
+            &mut checkpoint,
+        )?;
+        coupled.photon_feedback = Some(feedback);
+        checkpoint()?;
+        Ok((coupled, prepared))
+    }
+
     /// Resolve the flat-source spatial approximation before binding radioactive
     /// heating to the same original material cells as [`Self::with_photon_slab`].
     ///
@@ -172,6 +236,18 @@ impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
         limits: PhotonSlabLimits,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
     ) -> Result<PhotonSlabInput, FissionThermalError> {
+        let source_ids = self.photon_emitter_ids(thermal, emitters, checkpoint)?;
+        photon_material_input(
+            thermal, geometry, layers, source_ids, true, ordinates, limits, checkpoint,
+        )
+    }
+
+    fn photon_emitter_ids(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        emitters: &[DecayRadiationEmitter],
+        checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Vec<u64>, FissionThermalError> {
         checkpoint()?;
         self.validate(thermal, self.time_s, &mut || Ok(()))?;
         if self.pending.is_some() {
@@ -189,9 +265,25 @@ impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
                 "photon emitters must cover the nonempty original source cohort exactly",
             ));
         }
-        photon_material_input(
-            thermal, geometry, layers, source_ids, true, ordinates, limits, checkpoint,
-        )
+        Ok(source_ids)
+    }
+}
+
+impl<S: NuclearHeatSource> NuclearHeating<S> {
+    /// Original geometric-order temperatures used by the last accepted photon
+    /// response. Available only for the temperature-dependent slab binding.
+    pub fn prepared_photon_temperatures_k(&self) -> Option<&[(CellId, f64)]> {
+        self.photon_feedback
+            .as_ref()
+            .map(PhotonTemperatureFeedback::prepared_temperatures_k)
+    }
+
+    /// Photon preparation work at construction or in the last accepted advance.
+    /// Failed candidates leave both this account and the accepted response intact.
+    pub fn photon_feedback_work(&self) -> Option<PhotonFeedbackWork> {
+        self.photon_feedback
+            .as_ref()
+            .map(PhotonTemperatureFeedback::work)
     }
 }
 

@@ -3125,6 +3125,25 @@ agreement do not certify temporal error. This extension does not infer
 temperature-dependent density, phase mixtures, expansion, photon flight time,
 electron transport or measured material qualification.
 
+## Temperature feedback for internally emitted nuclear photons
+
+`NuclearHeating::with_temperature_photon_slab` applies the same prepared
+temperature-dependent material kernels and feedback cache to evaluated internal
+photon emission. Original decay/activation/burnup histories supply integrated
+group energy; local nuclear deposition and ungrouped outward energy keep their
+existing owners. Every emitter remains uniform and isotropic in its original
+slab layer. Changed illuminated start temperatures refresh the transport
+response; unchanged temperatures and dark intervals reuse it.
+
+The response, preparation account and temperature cache remain pending until
+the original nuclear/thermal transaction accepts its endpoint. A domain,
+thermal, transport or cancellation failure preserves accepted inventories,
+response and cache together. All endpoints retain the original temperature
+support and material/mass/geometry bindings. Fixed-response rebinding disables
+temperature feedback. Native timestep refinement remains necessary for this
+first-order coupling; the original spatial/angular transport limitations and
+the exclusion of inferred density/composition changes remain unchanged.
+
 ## Temporal convergence of external photon absorption
 
 `ExternalPhotonHeating::advance_refined` compares complete native trajectories

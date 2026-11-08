@@ -145,6 +145,7 @@ impl<S: DecayRadiationHeatSource> NuclearHeating<S> {
             })?;
         checkpoint()?;
         self.radiation = None;
+        self.photon_feedback = None;
         self.spectral_radiation = Some(Arc::new(BoundSpectralRadiation {
             response,
             projections,
@@ -164,6 +165,17 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
 }
 
 impl<S: NuclearHeatSource> BoundSpectralRadiation<S> {
+    // The shared temperature model retains identical photon/source/receiver
+    // grids. Replacing only its response shares all original decay projections
+    // and keeps the native receiver correspondence unchanged.
+    pub(super) fn with_response(&self, response: Arc<GroupedRadiationResponse>) -> Self {
+        Self {
+            response,
+            projections: self.projections.clone(),
+            receivers: self.receivers.clone(),
+        }
+    }
+
     pub(super) fn validate(
         &self,
         thermal: &DepositionSimulation<'_>,

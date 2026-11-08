@@ -16,6 +16,8 @@ use fs_la::decay::DecayLimits;
 const EV_J: f64 = 1.602_176_634e-19;
 const INITIAL: f64 = 1e14;
 
+mod temperature;
+
 fn edges() -> Vec<f64> {
     vec![0.0, 1.5e6 * EV_J, 3e6 * EV_J]
 }

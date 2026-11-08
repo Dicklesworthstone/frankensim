@@ -1,4 +1,4 @@
-//! Native temperature feedback for the existing prescribed photon source.
+//! Shared native temperature feedback for prescribed and nuclear photon sources.
 //!
 //! Every source interval uses its original start-state caloric temperatures.
 //! Mass, volume and layer geometry remain fixed; only explicitly supplied mass
@@ -65,7 +65,7 @@ struct FeedbackModel {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct PhotonTemperatureFeedback {
+pub(in crate::thermal) struct PhotonTemperatureFeedback {
     model: Arc<FeedbackModel>,
     temperatures_k: Arc<[(CellId, f64)]>,
     work: PhotonFeedbackWork,
@@ -75,9 +75,9 @@ pub(super) struct PhotonTemperatureFeedback {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct PhotonFeedbackCandidate {
-    pub(super) response: Arc<GroupedRadiationResponse>,
-    pub(super) feedback: PhotonTemperatureFeedback,
+pub(in crate::thermal) struct PhotonFeedbackCandidate {
+    pub(in crate::thermal) response: Arc<GroupedRadiationResponse>,
+    pub(in crate::thermal) feedback: PhotonTemperatureFeedback,
 }
 
 impl ExternalPhotonHeating {
@@ -114,17 +114,6 @@ impl ExternalPhotonHeating {
             .first()
             .map_or(0, |layer| layer.material.group_edges_j().len() - 1);
         admit_slab_dimensions(layers.len(), groups, sources.len(), ordinates.len(), limits)?;
-        if feedback_budget.max_transport_preparations == 0 {
-            return Err(RadiationError::Budget("photon feedback preparation count").into());
-        }
-        let mut values = 0_usize;
-        for layer in &layers {
-            checkpoint()?;
-            values = values
-                .checked_add(layer.material.value_count())
-                .filter(|&n| n <= feedback_budget.max_material_values)
-                .ok_or(RadiationError::Budget("photon feedback material storage"))?;
-        }
         let (geometries, powers) = split_sources(sources, budget, &mut checkpoint)?;
         admit_spectra(
             &powers,
@@ -132,21 +121,16 @@ impl ExternalPhotonHeating {
             layers[0].material.group_edges_j(),
             &mut checkpoint,
         )?;
-        let model = Arc::new(FeedbackModel {
+        let (feedback, prepared, receivers) = PhotonTemperatureFeedback::prepare(
+            thermal,
             data_id,
             geometry,
-            layers: layers.into(),
-            sources: geometries.into(),
-            ordinates: ordinates.into(),
+            layers,
+            geometries,
+            ordinates,
             limits,
             refinement,
-            budget: feedback_budget,
-        });
-        let temperatures = model.temperatures(thermal, &mut checkpoint)?;
-        let (prepared, receivers) = model.prepare(
-            thermal,
-            &temperatures,
-            feedback_budget.max_transport_work,
+            feedback_budget,
             &mut checkpoint,
         )?;
         let mut heating = Self::new(
@@ -157,15 +141,7 @@ impl ExternalPhotonHeating {
             budget,
             &mut checkpoint,
         )?;
-        heating.feedback = Some(PhotonTemperatureFeedback {
-            model,
-            temperatures_k: temperatures.into(),
-            work: PhotonFeedbackWork {
-                preparations: 1,
-                transport_work: prepared.work,
-            },
-            trial_work_limit: None,
-        });
+        heating.feedback = Some(feedback);
         checkpoint()?;
         Ok(heating)
     }
@@ -277,17 +253,85 @@ impl FeedbackModel {
 }
 
 impl PhotonTemperatureFeedback {
+    /// Prepare one original slab model, independent of its source-energy owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::thermal) fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        data_id: String,
+        geometry: PhotonSlabGeometry,
+        layers: Vec<TemperaturePhotonSlabLayer>,
+        sources: Vec<PhotonSlabSource>,
+        ordinates: Vec<PhotonOrdinate>,
+        limits: PhotonSlabLimits,
+        refinement: Option<PhotonSlabRefinement>,
+        budget: PhotonFeedbackBudget,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, PhotonSlabResponse, Vec<RadiationReceiver>), FissionThermalError> {
+        checkpoint()?;
+        let groups = layers
+            .first()
+            .map_or(0, |layer| layer.material.group_edges_j().len() - 1);
+        admit_slab_dimensions(layers.len(), groups, sources.len(), ordinates.len(), limits)?;
+        if budget.max_transport_preparations == 0 {
+            return Err(RadiationError::Budget("photon feedback preparation count").into());
+        }
+        let mut values = 0_usize;
+        for layer in &layers {
+            checkpoint()?;
+            values = values
+                .checked_add(layer.material.value_count())
+                .filter(|&n| n <= budget.max_material_values)
+                .ok_or(RadiationError::Budget("photon feedback material storage"))?;
+        }
+        let model = Arc::new(FeedbackModel {
+            data_id,
+            geometry,
+            layers: layers.into(),
+            sources: sources.into(),
+            ordinates: ordinates.into(),
+            limits,
+            refinement,
+            budget,
+        });
+        let temperatures = model.temperatures(thermal, &mut checkpoint)?;
+        let (prepared, receivers) = model.prepare(
+            thermal,
+            &temperatures,
+            budget.max_transport_work,
+            &mut checkpoint,
+        )?;
+        let feedback = Self {
+            model,
+            temperatures_k: temperatures.into(),
+            work: PhotonFeedbackWork {
+                preparations: 1,
+                transport_work: prepared.work,
+            },
+            trial_work_limit: None,
+        };
+        checkpoint()?;
+        Ok((feedback, prepared, receivers))
+    }
+
+    pub(in crate::thermal) fn prepared_temperatures_k(&self) -> &[(CellId, f64)] {
+        &self.temperatures_k
+    }
+
+    pub(in crate::thermal) fn work(&self) -> PhotonFeedbackWork {
+        self.work
+    }
+
     pub(super) fn limit_trial_work(&mut self, limit: Option<PhotonFeedbackWork>) {
         self.trial_work_limit = limit;
     }
 
-    pub(super) fn begin(&mut self) {
+    pub(in crate::thermal) fn begin(&mut self) {
         self.work = PhotonFeedbackWork::default();
     }
 
     // Support is checked at every native endpoint/event, even when that instant
     // is the final requested state and there will be no later source query.
-    pub(super) fn validate_temperature_support(
+    pub(in crate::thermal) fn validate_temperature_support(
         &self,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -299,7 +343,7 @@ impl PhotonTemperatureFeedback {
         Ok(())
     }
 
-    pub(super) fn candidate(
+    pub(in crate::thermal) fn candidate(
         &self,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
