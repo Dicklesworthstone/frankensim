@@ -1,9 +1,12 @@
 //! Independent PR energy balances through the original wave/wall owners.
 
 use super::*;
-use fs_gas::dynamics::nonideal::{RealGasWallContact, RealGasWallOperator};
+use fs_gas::dynamics::nonideal::{
+    RealGasWallContact, RealGasWallOperator, SharedWall, SharedWallControl, SharedWallGas,
+    SharedWallPort,
+};
 use fs_gas::multicomponent::wall_exchange::{
-    MaterialWallCaloric, WallContact, WallControl, WallDrag, WallThermal,
+    MaterialWallCaloric, SharedWallStorage, WallContact, WallControl, WallDrag, WallThermal,
 };
 use fs_thermal::enthalpy::{
     Boundary as ThermalBoundary, CellGeometry, CellId, DepositedCell, DepositionError, MaterialId,
@@ -271,6 +274,88 @@ fn specific_wall_energy(walls: &RealGasWallOperator<'_>, cell: usize) -> f64 {
     specific_energy_j_kg
 }
 
+fn shared_wall(input: RealGasWallContact<'static>, conductances: &[f64]) -> SharedWall<'static> {
+    SharedWall {
+        storage: SharedWallStorage {
+            thermal: input.contact.thermal,
+            heat_storage: input.heat_storage,
+        },
+        ports: conductances.iter().enumerate().map(|(cell, &conductance_w_per_k)| SharedWallPort {
+            gas: SharedWallGas::Branch { branch: 0, cell }, conductance_w_per_k,
+        }).collect(),
+    }
+}
+
+#[test]
+fn shared_nonlinear_wall_uses_each_current_real_gas_density_and_only_one_heat_inventory() {
+    let gas = gas();
+    let initial = [(12.0, 30.0, 350.0), (20.0, -10.0, 650.0), (30.0, 15.0, 800.0)]
+        .into_iter().map(|(rho, velocity, t)| state(&gas, rho, velocity, t)).collect::<Vec<_>>();
+    let mesh = Mesh1d::new(vec![0.0, 0.2, 0.5, 1.0], vec![0.07; 4],
+        vec![0.014, 0.021, 0.035]).unwrap();
+    let mut wave = RealGasEuler1d::new_on_mesh(gas.clone(), mesh.clone(), initial.clone(),
+        RealGasBoundaries::Periodic, || false).unwrap();
+    let mut flow = RealGasEuler1d::new_on_mesh(gas, mesh, initial,
+        RealGasBoundaries::Periodic, || false).unwrap();
+    let conductances = [1e8, 2e8, 7e7];
+    let wall_initial = 500.0;
+    let mut walls = RealGasWallOperator::new(&flow,
+        vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
+        .with_shared_walls(vec![shared_wall(finite_wall(wall_initial, 0.0), &conductances)],
+            SharedWallControl::default(), || false).unwrap();
+    let requested = Time::new(1e-6);
+    let transport = wave.step(requested, controls(), || false).unwrap();
+    let heat_controls = WallControl { relative_energy_tolerance: 0.0, ..wall_controls() };
+    let report = flow.step_with_walls(requested, controls(), &mut walls,
+        heat_controls, || false).unwrap();
+    assert_eq!(report.elapsed, requested);
+    assert_eq!(report.elapsed, transport.elapsed);
+    assert_eq!(report.boundary_change, transport.boundary_change);
+    // Independent nested scalar balance using the closed PR expression above.
+    // The wave's actual candidate densities, momenta and original cell volumes
+    // enter the heat solve; no reference-density or frozen-Cv approximation does.
+    let gas_endpoint = |wall_t: f64, i: usize| {
+        let rho = wave.states()[i].density;
+        let t0 = wave.primitives()[i].temperature;
+        let mass = rho * wave.mesh().volumes()[i];
+        root(t0.min(wall_t), t0.max(wall_t), |t| {
+            mass * (internal_energy(rho, t) - internal_energy(rho, t0))
+                - report.elapsed.value() * conductances[i] * (wall_t - t)
+        })
+    };
+    let gas_heat = |wall_t: f64| (0..3).map(|i| {
+        report.elapsed.value() * conductances[i] * (wall_t - gas_endpoint(wall_t, i))
+    }).sum::<f64>();
+    let lower = wave.primitives().iter().fold(wall_initial, |t, p| t.min(p.temperature));
+    let upper = wave.primitives().iter().fold(wall_initial, |t, p| t.max(p.temperature));
+    let wall_change = |t: f64| 0.75 * 0.5 * (t - wall_initial) * (t + wall_initial);
+    let expected_wall = root(lower, upper, |t| wall_change(t) + gas_heat(t));
+    let duplicated_wall = root(lower, upper, |t| 3.0 * wall_change(t) + gas_heat(t));
+    assert!((expected_wall - duplicated_wall).abs() > 1.0,
+        "fixture must distinguish one finite wall from three copies");
+    let shared = walls.shared_wall(0).unwrap();
+    let source = shared.storage.heat_storage.as_ref().unwrap();
+    near(source.temperature_k(shared.storage.thermal).unwrap(), expected_wall, 5e-8);
+    let mut heating = false;
+    let mut cooling = false;
+    for i in 0..3 {
+        assert_eq!(flow.states()[i].density, wave.states()[i].density);
+        assert_eq!(flow.states()[i].momentum, wave.states()[i].momentum);
+        near(flow.primitives()[i].temperature, gas_endpoint(expected_wall, i), 5e-8);
+        heating |= flow.primitives()[i].temperature > wave.primitives()[i].temperature;
+        cooling |= flow.primitives()[i].temperature < wave.primitives()[i].temperature;
+    }
+    assert!(heating && cooling);
+    near(report.wall_heat, gas_heat(expected_wall), 5e-5);
+    near(walls.last_report().unwrap().wall_storage_change_j, wall_change(expected_wall), 5e-5);
+    let shared_report = walls.last_shared_wall_report().unwrap();
+    assert!(shared_report.source_evaluations > 0);
+    assert!(shared_report.contact_solves >= 3);
+    assert_eq!(shared_report.elapsed, report.elapsed);
+    near(shared_report.energy_residual_j, 0.0, 3e-5);
+    check_wall_balance(&flow, &walls, report);
+}
+
 #[test]
 fn finite_source_cp_retains_nonlinear_enthalpy_and_cancels_formation_datums() {
     for (initial, wall_initial) in [(360.0, 800.0), (800.0, 360.0)] {
@@ -362,6 +447,118 @@ impl ThermalLaw for LatentEnthalpy {
     fn maximum_temperature_slope(&self) -> f64 {
         1.0 / 500.0
     }
+}
+
+#[test]
+fn shared_latent_wall_keeps_one_phase_inventory_while_every_dense_gas_cell_heats() {
+    let mut flow = uniform(gas(), 530.0, 0.0);
+    let source = MaterialWallCaloric::from_thermal_law(
+        LatentEnthalpy, wall_cell(100_000.0), [0.0, 200_000.0],
+    ).unwrap();
+    let input = RealGasWallContact {
+        contact: source.initial_contact(0.0, WallDrag::None).unwrap(),
+        heat_storage: Some(source),
+    };
+    let conductance = 1e7;
+    let mut walls = RealGasWallOperator::new(&flow,
+        vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
+        .with_shared_walls(vec![shared_wall(input, &[conductance; 3])],
+            SharedWallControl::default(), || false).unwrap();
+    let heat_controls = WallControl { relative_energy_tolerance: 0.0, ..wall_controls() };
+    let report = flow.step_with_walls(Time::new(1e-5), controls(), &mut walls,
+        heat_controls, || false).unwrap();
+    let mass = 20.0 * flow.mesh().volumes()[0];
+    let expected = root(530.0, 550.0, |t| {
+        mass * (internal_energy(20.0, t) - internal_energy(20.0, 530.0))
+            - conductance * report.elapsed.value() * (550.0 - t)
+    });
+    let heat = 3.0 * mass * (internal_energy(20.0, expected) - internal_energy(20.0, 530.0));
+    let shared = walls.shared_wall(0).unwrap();
+    let source = shared.storage.heat_storage.as_ref().unwrap();
+    assert_eq!(source.temperature_k(shared.storage.thermal).unwrap(), 550.0);
+    let WallThermal::Caloric { specific_energy_j_kg, .. } = shared.storage.thermal else {
+        panic!("one original latent inventory required");
+    };
+    near(specific_energy_j_kg, 100_000.0 - heat / 0.75, 2e-5);
+    assert!(specific_energy_j_kg > 50_000.0 && specific_energy_j_kg < 100_000.0);
+    for primitive in flow.primitives() {
+        near(primitive.temperature, expected, 3e-8);
+    }
+    near(report.wall_heat, heat, 2e-5);
+    check_wall_balance(&flow, &walls, report);
+}
+
+#[test]
+fn shared_wall_binding_work_and_late_cancellation_preserve_every_accepted_owner() {
+    let input = || shared_wall(contact(WallThermal::Lumped {
+        temperature_k: 700.0, heat_capacity_j_per_k: 400.0, conductance_w_per_k: 0.0,
+    }), &[1e7; 3]);
+    let make = || {
+        let flow = uniform(gas(), 400.0, 0.0);
+        let walls = RealGasWallOperator::new(&flow,
+            vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
+            .with_shared_walls(vec![input()], SharedWallControl::default(), || false).unwrap();
+        (flow, walls)
+    };
+    let mut no_retry = controls();
+    no_retry.maximum_halvings = 0;
+    let heat_controls = WallControl { relative_energy_tolerance: 0.0, ..wall_controls() };
+    let (mut good, mut good_walls) = make();
+    let (mut refused, mut refused_walls) = make();
+    for (flow, walls) in [(&mut good, &mut good_walls), (&mut refused, &mut refused_walls)] {
+        let report = flow.step_with_walls(Time::new(1e-6), no_retry, walls,
+            heat_controls, || false).unwrap();
+        let WallThermal::Lumped { temperature_k, .. } = walls.shared_wall(0).unwrap().storage.thermal else {
+            panic!("one authored finite wall expected");
+        };
+        near(walls.last_report().unwrap().wall_storage_change_j, 400.0 * (temperature_k - 700.0), 1e-8);
+        check_wall_balance(flow, walls, report);
+    }
+    let snapshot = (
+        refused.states().to_vec(), refused.primitives().to_vec(), refused.time(),
+        refused_walls.contacts().to_vec(), refused_walls.shared_wall(0).unwrap().clone(),
+        refused_walls.last_report(), refused_walls.last_shared_wall_report(),
+    );
+    let mut polls = 0;
+    good.step_with_walls(Time::new(1e-6), no_retry, &mut good_walls, heat_controls, || {
+        polls += 1; false
+    }).unwrap();
+    let mut seen = 0;
+    assert_eq!(refused.step_with_walls(Time::new(1e-6), no_retry, &mut refused_walls,
+        heat_controls, || { seen += 1; seen == polls }), Err(RealGasFlowError::Cancelled));
+    assert_eq!((
+        refused.states().to_vec(), refused.primitives().to_vec(), refused.time(),
+        refused_walls.contacts().to_vec(), refused_walls.shared_wall(0).unwrap().clone(),
+        refused_walls.last_report(), refused_walls.last_shared_wall_report(),
+    ), snapshot);
+
+    let mut limited = RealGasWallOperator::new(&refused,
+        vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
+        .with_shared_walls(vec![input()], SharedWallControl { maximum_source_evaluations: 1 },
+            || false).unwrap();
+    let initial_wall = limited.shared_wall(0).unwrap().clone();
+    assert!(matches!(refused.step_with_walls(Time::new(1e-6), no_retry, &mut limited,
+        heat_controls, || false), Err(RealGasFlowError::StepRetries { .. })));
+    assert_eq!(refused.states(), snapshot.0);
+    assert_eq!(refused.primitives(), snapshot.1);
+    assert_eq!(refused.time(), snapshot.2);
+    assert_eq!(limited.shared_wall(0).unwrap(), &initial_wall);
+    assert_eq!(limited.last_report(), None);
+    assert_eq!(limited.last_shared_wall_report(), None);
+
+    for location in [SharedWallGas::Plenum(0), SharedWallGas::Branch { branch: 1, cell: 0 },
+        SharedWallGas::Branch { branch: 0, cell: 3 }, SharedWallGas::Branch { branch: 0, cell: 1 }]
+    {
+        let mut invalid = input();
+        invalid.ports[0].gas = location;
+        let owner = RealGasWallOperator::new(&refused,
+            vec![contact(WallThermal::Adiabatic); 3], || false).unwrap();
+        assert!(owner.with_shared_walls(vec![invalid], SharedWallControl::default(), || false).is_err());
+    }
+    let owner = RealGasWallOperator::new(&refused, vec![contact(WallThermal::Reservoir {
+        temperature_k: 700.0, conductance_w_per_k: 1.0,
+    }); 3], || false).unwrap();
+    assert!(owner.with_shared_walls(vec![input()], SharedWallControl::default(), || false).is_err());
 }
 
 #[test]

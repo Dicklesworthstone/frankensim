@@ -9,6 +9,9 @@ use crate::multicomponent::wall_exchange::{
 };
 use fs_qty::Time;
 
+mod shared;
+pub use shared::{SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport};
+
 /// One cell's contact and optional original finite-wall caloric law.
 ///
 /// Without a source, `Lumped` retains its explicitly authored constant capacity.
@@ -48,7 +51,8 @@ pub struct RealGasWallReport {
 /// contact storage. The original model, energy gauge and physical mesh are bound
 /// once. Gas states, finite walls, reports and flow clock publish together.
 /// Each contact owns an independent finite amount; a wall shared across cells
-/// is not inferred by reusing its immutable constitutive source.
+/// is bound explicitly with [`Self::with_shared_walls`]. Reusing a constitutive
+/// source alone does not share its finite heat inventory.
 ///
 /// Local heat is backward Euler after the accepted wave interval: the overall
 /// transport/source splitting is first order. Conductance and radial drag are
@@ -59,6 +63,7 @@ pub struct RealGasWallOperator<'law> {
     contacts: Vec<WallContact>,
     candidate_contacts: Vec<WallContact>,
     heat_storage: Vec<Option<MaterialWallCaloric<'law>>>,
+    shared: Option<shared::SharedWalls<'law>>,
     last_report: Option<RealGasWallReport>,
 }
 
@@ -106,6 +111,7 @@ impl<'law> RealGasWallOperator<'law> {
             contacts,
             candidate_contacts,
             heat_storage,
+            shared: None,
             last_report: None,
         })
     }
@@ -192,12 +198,18 @@ impl<'law> RealGasWallOperator<'law> {
             self.candidate_contacts[i] = update.contact;
             *state = candidate;
         }
+        if let Some(shared) = &mut self.shared {
+            total.add(shared.prepare(&self.gas, states, primitives, duration, controls, cancelled)?)?;
+        }
         poll(cancelled)?;
         Ok(total.report(duration))
     }
 
     pub(super) fn commit(&mut self, report: RealGasWallReport) {
         core::mem::swap(&mut self.contacts, &mut self.candidate_contacts);
+        if let Some(shared) = &mut self.shared {
+            shared.commit();
+        }
         self.last_report = Some(report);
     }
 }

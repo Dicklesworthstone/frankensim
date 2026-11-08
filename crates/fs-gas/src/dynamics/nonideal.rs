@@ -18,7 +18,10 @@
 mod evolve;
 pub use evolve::{RealGasBoundaries, RealGasBoundary, RealGasEuler1d};
 mod thermal;
-pub use thermal::{RealGasWallContact, RealGasWallOperator, RealGasWallReport};
+pub use thermal::{
+    RealGasWallContact, RealGasWallOperator, RealGasWallReport, SharedWall, SharedWallControl,
+    SharedWallGas, SharedWallPort, SharedWallReport,
+};
 mod wall;
 pub use wall::RealGasWallControl;
 
