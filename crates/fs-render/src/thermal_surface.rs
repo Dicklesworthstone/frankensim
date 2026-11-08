@@ -72,6 +72,13 @@ pub use crystal_emission::{
     CrystalEmissionError, PreparedUniaxialSlabEmission, UniaxialSlabThermalEmission,
 };
 
+#[cfg(feature = "crystal-emission")]
+mod crystal_stack_emission;
+#[cfg(feature = "crystal-emission")]
+pub use crystal_stack_emission::{
+    CrystalStackEmissionError, PreparedUniaxialStackEmission, UniaxialStackThermalEmission,
+};
+
 mod coating_exchange;
 pub use coating_exchange::{
     CoatingExchangeBudget, CoatingExchangeError, CoatingExchangeQuadrature, CoatingExchangeRates,

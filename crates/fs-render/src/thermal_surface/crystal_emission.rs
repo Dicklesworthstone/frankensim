@@ -21,6 +21,7 @@ use fs_em::plane_wave::{
         absorbing::slab::PreparedAbsorbingSlabPolarization, slab::OrientedUniaxialSlab,
     },
 };
+use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_math::{c64::C64, det};
 use fs_qty::{
     QuantitySpec,
@@ -53,23 +54,10 @@ impl<'f, 's, 'm> UniaxialSlabThermalEmission<'f, 's, 'm> {
         source: &'f OrientedUniaxialSlab<'s, 'm>,
         temperature_axis: &str,
     ) -> Result<Self> {
-        let point = source
-            .entrance_interface()
-            .crystal_response()
-            .material()
-            .query();
-        let absolute = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::AbsoluteTemperature,
-            ValueForm::Static,
-        ));
-        if point.axis_quantities().get(temperature_axis) != Some(&absolute) {
-            return Err(CrystalEmissionError::TemperatureAxis);
-        }
-        let temperature_k = point
-            .axes()
-            .get(temperature_axis)
-            .copied()
-            .ok_or(CrystalEmissionError::TemperatureAxis)?;
+        let temperature_k = material_temperature(
+            source.entrance_interface().crystal_response().material(),
+            temperature_axis,
+        )?;
         Self::try_isothermal(source, temperature_k)
     }
 
@@ -80,9 +68,7 @@ impl<'f, 's, 'm> UniaxialSlabThermalEmission<'f, 's, 'm> {
         source: &'f OrientedUniaxialSlab<'s, 'm>,
         temperature_k: f64,
     ) -> Result<Self> {
-        if !temperature_k.is_finite() || temperature_k <= 0.0 {
-            return Err(ThermalSurfaceError::Temperature.into());
-        }
+        admit_temperature(temperature_k)?;
         Ok(Self {
             source,
             temperature_k,
@@ -128,15 +114,10 @@ impl<'f, 's, 'm> UniaxialSlabThermalEmission<'f, 's, 'm> {
             outgoing_cosine,
             [-plane[0], -plane[1]],
         )?;
-        let index = polarization.incident_phase_index();
-        let mu = polarization.incident_permeability_h_m();
-        if !index.is_finite()
-            || !mu.is_finite()
-            || (index - 1.0).abs() > VACUUM_RELATIVE_TOLERANCE
-            || (mu / VACUUM_MU_H_M - 1.0).abs() > VACUUM_RELATIVE_TOLERANCE
-        {
-            return Err(CrystalEmissionError::ObservationMedium);
-        }
+        admit_vacuum(
+            polarization.incident_phase_index(),
+            polarization.incident_permeability_h_m(),
+        )?;
         Ok(PreparedUniaxialSlabEmission {
             polarization,
             temperature_k: self.temperature_k,
@@ -207,12 +188,7 @@ impl<'f, 's, 'm> PreparedUniaxialSlabEmission<'f, 's, 'm> {
     /// from rounded I and Q. It is authoritative for subsequent analyzers;
     /// do not reconstruct a weak radiance by subtracting Stokes components.
     pub fn analyzer_radiance_w_m2_sr_nm(&self, analyzer: [C64; 2]) -> Result<f64> {
-        let [s, p] = unit_analyzer(analyzer)?;
-        let [ux, uy] = self.plane;
-        let electric = [
-            (s.scale(-uy) + p.scale(self.cosine * ux)).conj(),
-            (s.scale(ux) + p.scale(self.cosine * uy)).conj(),
-        ];
+        let electric = reciprocal_analyzer_electric(self.cosine, self.plane, analyzer)?;
         let field = self.polarization.prepare_field(electric)?;
         let power = field
             .slab_absorption(1.0, 0.0, self.source().thickness_m())?
@@ -304,7 +280,59 @@ impl core::fmt::Display for CrystalEmissionError {
 
 impl core::error::Error for CrystalEmissionError {}
 
-fn unit_plane(axis: [f64; 2]) -> Result<[f64; 2]> {
+pub(super) fn material_temperature(
+    material: &ResolvedMaterialStatePoint,
+    temperature_axis: &str,
+) -> Result<f64> {
+    let point = material.query();
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    if point.axis_quantities().get(temperature_axis) != Some(&absolute) {
+        return Err(CrystalEmissionError::TemperatureAxis);
+    }
+    let temperature = point
+        .axes()
+        .get(temperature_axis)
+        .copied()
+        .ok_or(CrystalEmissionError::TemperatureAxis)?;
+    admit_temperature(temperature)?;
+    Ok(temperature)
+}
+
+pub(super) fn admit_temperature(temperature_k: f64) -> Result<()> {
+    if !temperature_k.is_finite() || temperature_k <= 0.0 {
+        return Err(ThermalSurfaceError::Temperature.into());
+    }
+    Ok(())
+}
+
+pub(super) fn admit_vacuum(index: f64, mu: f64) -> Result<()> {
+    if !index.is_finite()
+        || !mu.is_finite()
+        || (index - 1.0).abs() > VACUUM_RELATIVE_TOLERANCE
+        || (mu / VACUUM_MU_H_M - 1.0).abs() > VACUUM_RELATIVE_TOLERANCE
+    {
+        return Err(CrystalEmissionError::ObservationMedium);
+    }
+    Ok(())
+}
+
+pub(super) fn reciprocal_analyzer_electric(
+    cosine: f64,
+    plane: [f64; 2],
+    analyzer: [C64; 2],
+) -> Result<[C64; 2]> {
+    let [s, p] = unit_analyzer(analyzer)?;
+    let [ux, uy] = plane;
+    Ok([
+        (s.scale(-uy) + p.scale(cosine * ux)).conj(),
+        (s.scale(ux) + p.scale(cosine * uy)).conj(),
+    ])
+}
+
+pub(super) fn unit_plane(axis: [f64; 2]) -> Result<[f64; 2]> {
     let scale = axis[0].abs().max(axis[1].abs());
     if axis.iter().any(|x| !x.is_finite()) || scale == 0.0 {
         return Err(CrystalEmissionError::EmissionDirection);
@@ -334,4 +362,4 @@ fn unit_analyzer(analyzer: [C64; 2]) -> Result<[C64; 2]> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

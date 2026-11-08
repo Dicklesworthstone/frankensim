@@ -93,14 +93,14 @@ fn resolved(properties: Vec<(PropertyKey, f64)>, temperature_k: f64) -> Resolved
     .unwrap()
 }
 
-struct Fixture {
-    ordinary: SpectralComplexIndexStatePoint,
-    extraordinary: SpectralComplexIndexStatePoint,
-    exterior: ResolvedMaterialStatePoint,
+pub(in crate::thermal_surface) struct Fixture {
+    pub(in crate::thermal_surface) ordinary: SpectralComplexIndexStatePoint,
+    pub(in crate::thermal_surface) extraordinary: SpectralComplexIndexStatePoint,
+    pub(in crate::thermal_surface) exterior: ResolvedMaterialStatePoint,
 }
 
 impl Fixture {
-    fn new(
+    pub(in crate::thermal_surface) fn new(
         indices: [[f64; 2]; 2],
         temperature_k: f64,
         exterior_index: f64,
@@ -153,7 +153,10 @@ impl Fixture {
         }
     }
 
-    fn interface(&self, axis: [f64; 3]) -> OrientedUniaxialInterface<'_> {
+    pub(in crate::thermal_surface) fn interface(
+        &self,
+        axis: [f64; 3],
+    ) -> OrientedUniaxialInterface<'_> {
         OrientedUniaxialInterface::try_new(
             DielectricResponse::Lossless(&self.exterior),
             UniaxialOpticalResponse::try_new(&self.ordinary, &self.extraordinary, 6.1e-6).unwrap(),
@@ -163,14 +166,14 @@ impl Fixture {
     }
 }
 
-fn close(actual: f64, expected: f64) {
+pub(in crate::thermal_surface) fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() <= 3.0e-10 * expected.abs().max(f64::MIN_POSITIVE),
         "actual={actual:e}, expected={expected:e}"
     );
 }
 
-fn planck_si(temperature_k: f64, wavelength_nm: f64) -> f64 {
+pub(in crate::thermal_surface) fn planck_si(temperature_k: f64, wavelength_nm: f64) -> f64 {
     let wavelength = wavelength_nm * 1.0e-9;
     let h = 6.626_070_15e-34;
     let k = 1.380_649e-23;
