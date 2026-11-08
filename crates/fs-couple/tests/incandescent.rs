@@ -3,6 +3,8 @@
 
 #[path = "incandescent/history.rs"]
 mod history;
+#[path = "incandescent/phase_transport.rs"]
+mod phase_transport;
 
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
@@ -56,6 +58,14 @@ fn source_fixture(
     basis: ElectricalPropertyBasis,
     phase_dependent: bool,
 ) -> (MaterialOhmicNode, EquilibriumEnthalpyPhaseCurve) {
+    thermal_source_fixture(basis, phase_dependent, 1e6)
+}
+
+fn thermal_source_fixture(
+    basis: ElectricalPropertyBasis,
+    phase_dependent: bool,
+    liquid_conductivity: f64,
+) -> (MaterialOhmicNode, EquilibriumEnthalpyPhaseCurve) {
     // q(T)=T/300 or q(f)=1+2f in the selected independent electrical basis.
     let key = PropertyKey::new("authored-filament-source", basis.dimensions());
     let mut claims = ClaimSet::new();
@@ -99,15 +109,47 @@ fn source_fixture(
         ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS, 10.0),
         ("density", Density::DIMS, 1000.0),
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 1e6),
+        (
+            fs_conduction::radiation::SURFACE_EMISSIVITY_PROPERTY,
+            Dims::NONE,
+            0.8,
+        ),
     ] {
+        let phase_curve = phase_dependent
+            && (name == fs_conduction::radiation::SURFACE_EMISSIVITY_PROPERTY
+                || (name == "thermal_conductivity" && liquid_conductivity != value));
+        let value = if phase_curve {
+            PropertyValue::Curve {
+                abscissa: "f".into(),
+                abscissa_dims: Dims::NONE,
+                knots: vec![
+                    (0.0, value),
+                    (
+                        1.0,
+                        if name == "thermal_conductivity" {
+                            liquid_conductivity
+                        } else {
+                            0.2
+                        },
+                    ),
+                ],
+                dims,
+            }
+        } else {
+            PropertyValue::Scalar { value, dims }
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
+                value,
                 validity: ValidityDomain::unconstrained()
                     .with("T", 300.0, 900.0)
                     .with_quantity("pressure", pressure_quantity(), 1e5, 2e5),
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                interpolation: if phase_curve {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
                 provenance: Provenance {

@@ -3,12 +3,14 @@
 //! `TimeSignal` owns the SI schedule and right-continuous hold convention.
 //! Each incoming interval retains its held drive through its endpoint; a jump
 //! changes the next interval's drive without resetting the body's enthalpy.
-//! The explicit maximum step controls temporal resolution independently of
-//! native source-feedback admission and energy-residual tolerances.
+//! The explicit maximum step and optional native step-doubling estimate control
+//! temporal resolution independently of source-feedback admission and energy
+//! residual tolerances. Accepted states always come from the original solver.
 
 use super::{IncandescentError, IncandescentStep, PreparedIncandescentSource};
 use fs_conduction::ConductionError;
-use fs_conduction::lumped::{LumpedThermalEnvironment, MAX_LUMPED_ENTHALPY_STEPS};
+use fs_conduction::lumped::MAX_LUMPED_ENTHALPY_STEPS;
+use fs_conduction::lumped::endpoint::LumpedEndpointEnvironment;
 use fs_material::conductor::{OhmicDrive, graph::MaterialOhmicNode};
 use fs_material::phase::UniformEnthalpyStepInput;
 use fs_qty::Dims;
@@ -45,15 +47,16 @@ impl<'a> IncandescentDriveHistory<'a> {
     }
 }
 
-/// Physical clock and bounded thermal work; no error controller is implied.
+/// Physical clock and bounded thermal work, shared by both history modes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IncandescentHistoryControls {
     /// Absolute start in the original signal's seconds-based clock.
     pub start_s: f64,
     /// Positive maximum physical substep [s], also clipped at every drive knot.
     pub maximum_step_s: f64,
-    /// Bounds native solves and retained rows. A held table may contain at
-    /// most this many entries plus one, including entries outside the horizon.
+    /// Bounds ALL native solves, including discarded coarse or rejected trials
+    /// in adaptive mode, and retained rows. A held table may contain at most
+    /// this many entries plus one, including entries outside the horizon.
     pub maximum_steps: usize,
 }
 
@@ -65,6 +68,28 @@ pub struct TimedIncandescentStep {
     pub start_s: f64,
     pub end_s: f64,
     pub step: IncandescentStep,
+}
+
+/// Local time-error target in the original primary enthalpy coordinate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IncandescentHistoryAccuracy {
+    /// Absolute specific-enthalpy difference between a full native step and
+    /// two half steps [J/kg]. This detects phase evolution at fixed temperature
+    /// and is independent of the chosen enthalpy datum. It must exceed eight
+    /// times the combined native enthalpy tolerance and state roundoff scale.
+    pub maximum_local_enthalpy_error_j_kg: f64,
+}
+
+/// Accepted native half steps and the work used to resolve their time history.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveIncandescentHistory {
+    pub steps: Vec<TimedIncandescentStep>,
+    /// Includes discarded coarse steps and all three solves of rejected trials.
+    pub native_solves: usize,
+    pub rejected_intervals: usize,
+    /// Largest accepted full-versus-two-half-step enthalpy estimate [J/kg].
+    /// This is a local estimate, not a bound on accumulated trajectory error.
+    pub maximum_accepted_error_j_kg: f64,
 }
 
 #[derive(Debug)]
@@ -124,12 +149,73 @@ impl From<ScenarioError> for IncandescentHistoryError {
 /// maximum step for their own temperature/light-history accuracy requirements.
 pub fn advance_history(
     source: &MaterialOhmicNode,
-    environment: &LumpedThermalEnvironment,
+    environment: &impl LumpedEndpointEnvironment,
     input: UniformEnthalpyStepInput<'_>,
     drive_history: IncandescentDriveHistory<'_>,
     controls: IncandescentHistoryControls,
-    mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
+    checkpoint: impl FnMut() -> Result<(), ConductionError>,
 ) -> Result<Vec<TimedIncandescentStep>, IncandescentHistoryError> {
+    Ok(advance_history_impl(
+        source,
+        environment,
+        input,
+        drive_history,
+        controls,
+        None,
+        checkpoint,
+    )?
+    .steps)
+}
+
+/// Resolve held-drive transients using the original implicit step's time error.
+///
+/// Each trial compares one full backward-Euler step with two half steps from
+/// the same accepted state. For this first-order method the local fine-state
+/// error estimate is `abs(h_fine - h_coarse) / (2^1 - 1)`. If clock rounding
+/// makes the two durations `a, b` unequal, the leading-order fine-state estimate
+/// is multiplied by `(a*a + b*b) / (2*a*b)`, evaluated without squaring times.
+/// A midpoint must be strictly inside the represented interval. Accepted trials
+/// retain BOTH native half-step reports; no extrapolated state or synthetic
+/// source/boundary energy is published. Rejected trials halve the interval;
+/// an estimate below one quarter of the target permits doubling the next one.
+/// The physical maximum, native feedback bound and exact drive knots still
+/// clip every trial. Native source refusals remain errors, not retry signals.
+///
+/// The absolute J/kg target remains meaningful through melting and freezing.
+/// It must exceed the algebraic/roundoff scale; it is never inflated to make a
+/// trial pass. Step doubling supplies a LOCAL estimate, not a rigorous global
+/// temperature, phase, or emitted-light error bound, especially at caloric
+/// corners. The clock, source and atomic-publication contracts of
+/// [`advance_history`] also apply. `maximum_steps` counts every native solve.
+pub fn advance_history_adaptive(
+    source: &MaterialOhmicNode,
+    environment: &impl LumpedEndpointEnvironment,
+    input: UniformEnthalpyStepInput<'_>,
+    drive_history: IncandescentDriveHistory<'_>,
+    controls: IncandescentHistoryControls,
+    accuracy: IncandescentHistoryAccuracy,
+    checkpoint: impl FnMut() -> Result<(), ConductionError>,
+) -> Result<AdaptiveIncandescentHistory, IncandescentHistoryError> {
+    advance_history_impl(
+        source,
+        environment,
+        input,
+        drive_history,
+        controls,
+        Some(accuracy),
+        checkpoint,
+    )
+}
+
+fn advance_history_impl(
+    source: &MaterialOhmicNode,
+    environment: &impl LumpedEndpointEnvironment,
+    input: UniformEnthalpyStepInput<'_>,
+    drive_history: IncandescentDriveHistory<'_>,
+    controls: IncandescentHistoryControls,
+    accuracy: Option<IncandescentHistoryAccuracy>,
+    mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
+) -> Result<AdaptiveIncandescentHistory, IncandescentHistoryError> {
     use IncandescentHistoryError::Invalid;
     checkpoint()?;
     if !controls.start_s.is_finite()
@@ -143,6 +229,16 @@ pub fn advance_history(
     {
         return Err(Invalid(
             "finite clock, positive horizon/step and bounded nonzero step budget required",
+        ));
+    }
+    if let Some(accuracy) = accuracy
+        && (!accuracy.maximum_local_enthalpy_error_j_kg.is_finite()
+            || accuracy.maximum_local_enthalpy_error_j_kg <= 0.0
+            || accuracy.maximum_local_enthalpy_error_j_kg
+                <= 8.0 * environment.enthalpy_tolerance_j_kg())
+    {
+        return Err(Invalid(
+            "local time-error target must be finite, positive and above eight native enthalpy tolerances",
         ));
     }
     let end = controls.start_s + input.duration_s;
@@ -188,10 +284,15 @@ pub fn advance_history(
     let mut next_event = times.partition_point(|&time| time <= controls.start_s);
     let mut time = controls.start_s;
     let mut current = input;
-    let mut samples = Vec::new();
+    let mut report = AdaptiveIncandescentHistory {
+        steps: Vec::new(),
+        native_solves: 0,
+        rejected_intervals: 0,
+        maximum_accepted_error_j_kg: 0.0,
+    };
     while time < end {
         checkpoint()?;
-        if samples.len() == controls.maximum_steps {
+        if report.native_solves == controls.maximum_steps {
             return Err(Invalid(
                 "incandescent history exhausted its native step budget",
             ));
@@ -208,15 +309,17 @@ pub fn advance_history(
         let limit = prepared
             .maximum_step_s(environment, proposal, &mut checkpoint)?
             .min(controls.maximum_step_s);
+        let mut next_duration = limit;
         while time < span_end {
             checkpoint()?;
-            if samples.len() == controls.maximum_steps {
+            let required_solves = if accuracy.is_some() { 3 } else { 1 };
+            if controls.maximum_steps - report.native_solves < required_solves {
                 return Err(Invalid(
                     "incandescent history exhausted its native step budget",
                 ));
             }
             let remaining = span_end - time;
-            let maximum_duration = limit.min(remaining);
+            let maximum_duration = next_duration.min(remaining);
             let mut next = if maximum_duration == remaining {
                 span_end
             } else {
@@ -228,29 +331,120 @@ pub fn advance_history(
                 next = next.next_down();
             }
             let duration = next - time;
-            let heat = prescribed_power * duration;
-            if !next.is_finite()
-                || !duration.is_finite()
-                || duration <= 0.0
-                || !heat.is_finite()
-                || (prescribed_power != 0.0 && heat == 0.0)
-            {
+            if !next.is_finite() || !duration.is_finite() || duration <= 0.0 {
                 return Err(Invalid(
-                    "native substep or prescribed heat cannot be represented on this clock",
+                    "native substep cannot be represented on this clock",
                 ));
             }
-            samples
-                .try_reserve(1)
+            report
+                .steps
+                .try_reserve(if accuracy.is_some() { 2 } else { 1 })
                 .map_err(|_| Invalid("history output allocation failed"))?;
-            current.duration_s = duration;
-            current.internal_heat_j = heat;
-            let step = prepared.advance(environment, current, &mut checkpoint)?;
-            current.initial = step.thermal.state;
-            samples.push(TimedIncandescentStep {
-                start_s: time,
-                end_s: next,
-                step,
-            });
+            if let Some(accuracy) = accuracy {
+                let middle = time + 0.5 * duration;
+                let first_duration = middle - time;
+                let second_duration = next - middle;
+                if middle <= time || middle >= next {
+                    return Err(Invalid(
+                        "adaptive midpoint cannot be represented inside this clock interval",
+                    ));
+                }
+                let split_correction = 0.5 * (first_duration / second_duration)
+                    + 0.5 * (second_duration / first_duration);
+                if !split_correction.is_finite() || split_correction <= 0.0 {
+                    return Err(Invalid("adaptive half-interval ratio is not representable"));
+                }
+                let split_correction = split_correction.max(1.0);
+                let coarse = native_interval(
+                    &prepared,
+                    environment,
+                    current,
+                    duration,
+                    prescribed_power,
+                    &mut checkpoint,
+                )?;
+                let first = native_interval(
+                    &prepared,
+                    environment,
+                    current,
+                    first_duration,
+                    prescribed_power,
+                    &mut checkpoint,
+                )?;
+                let mut half_input = current;
+                half_input.initial = first.thermal.state;
+                let second = native_interval(
+                    &prepared,
+                    environment,
+                    half_input,
+                    second_duration,
+                    prescribed_power,
+                    &mut checkpoint,
+                )?;
+                report.native_solves += 3;
+                let coarse_h = coarse.thermal.state.specific_enthalpy_j_kg();
+                let fine_h = second.thermal.state.specific_enthalpy_j_kg();
+                let state_scale = current
+                    .initial
+                    .specific_enthalpy_j_kg()
+                    .abs()
+                    .max(coarse_h.abs())
+                    .max(fine_h.abs());
+                let noise =
+                    8.0 * (environment.enthalpy_tolerance_j_kg() + f64::EPSILON * state_scale);
+                let tolerance = accuracy.maximum_local_enthalpy_error_j_kg;
+                if tolerance <= noise {
+                    return Err(Invalid(
+                        "local time-error target is below combined native enthalpy and roundoff scales",
+                    ));
+                }
+                let error = (fine_h - coarse_h).abs() * split_correction;
+                if !error.is_finite() {
+                    return Err(Invalid("local enthalpy time-error estimate is not finite"));
+                }
+                if error > tolerance {
+                    report.rejected_intervals += 1;
+                    next_duration = 0.5 * duration;
+                    continue;
+                }
+                report.maximum_accepted_error_j_kg = report.maximum_accepted_error_j_kg.max(error);
+                current.initial = second.thermal.state;
+                report.steps.push(TimedIncandescentStep {
+                    start_s: time,
+                    end_s: middle,
+                    step: first,
+                });
+                report.steps.push(TimedIncandescentStep {
+                    start_s: middle,
+                    end_s: next,
+                    step: second,
+                });
+                next_duration = if error <= 0.25 * tolerance {
+                    if duration >= 0.5 * limit {
+                        limit
+                    } else {
+                        2.0 * duration
+                    }
+                } else {
+                    duration
+                };
+            } else {
+                let step = native_interval(
+                    &prepared,
+                    environment,
+                    current,
+                    duration,
+                    prescribed_power,
+                    &mut checkpoint,
+                )?;
+                report.native_solves += 1;
+                current.initial = step.thermal.state;
+                report.steps.push(TimedIncandescentStep {
+                    start_s: time,
+                    end_s: next,
+                    step,
+                });
+            }
             time = next;
         }
         if time < end {
@@ -259,5 +453,28 @@ pub fn advance_history(
         }
     }
     checkpoint()?;
-    Ok(samples)
+    Ok(report)
+}
+
+fn native_interval(
+    prepared: &PreparedIncandescentSource<'_>,
+    environment: &impl LumpedEndpointEnvironment,
+    mut input: UniformEnthalpyStepInput<'_>,
+    duration: f64,
+    prescribed_power: f64,
+    checkpoint: &mut impl FnMut() -> Result<(), ConductionError>,
+) -> Result<IncandescentStep, IncandescentHistoryError> {
+    let heat = prescribed_power * duration;
+    if !duration.is_finite()
+        || duration <= 0.0
+        || !heat.is_finite()
+        || (prescribed_power != 0.0 && heat == 0.0)
+    {
+        return Err(IncandescentHistoryError::Invalid(
+            "native interval or prescribed heat is not representable",
+        ));
+    }
+    input.duration_s = duration;
+    input.internal_heat_j = heat;
+    Ok(prepared.advance(environment, input, checkpoint)?)
 }

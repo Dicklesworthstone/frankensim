@@ -10,8 +10,11 @@ pub mod history;
 
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
-use fs_conduction::lumped::LumpedThermalEnvironment;
-use fs_conduction::lumped::endpoint::{DrivenLumpedEnthalpyStep, LumpedEnthalpyEndpoint};
+use fs_conduction::lumped::endpoint::{
+    DrivenLumpedEnthalpyStep, LumpedEndpointEnvironment, LumpedEnthalpyEndpoint,
+};
+use fs_conduction::lumped::{LumpedEnthalpyBody, LumpedEnthalpyTransport};
+use fs_conduction::radiation::MaterialRadiationNodeState;
 use fs_material::conductor::graph::MaterialOhmicNode;
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_material::phase::{
@@ -60,6 +63,11 @@ pub struct IncandescentStep {
     pub thermal: DrivenLumpedEnthalpyStep,
     /// The SAME final temperature and phase used by the implicit heat source.
     pub electrical: IncandescentElectricalState,
+    /// Actual accepted material/emissivity receipt for a phase transport body.
+    /// Rendering can bind this state through `MaterialThermalBinding` without
+    /// selecting another material or subtracting another radiative heat loss.
+    /// Temperature-table/declared transport has no fresh material query here.
+    pub thermal_surface: Option<MaterialRadiationNodeState>,
 }
 
 /// Original thermal and electrical refusals stay distinguishable.
@@ -163,12 +171,13 @@ impl<'a> PreparedIncandescentSource<'a> {
     /// and check temporal convergence independently of energy closure.
     pub fn maximum_step_s(
         &self,
-        environment: &LumpedThermalEnvironment,
+        environment: &impl LumpedEndpointEnvironment,
         input: UniformEnthalpyStepInput<'_>,
         mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
     ) -> Result<f64, IncandescentError> {
         checkpoint()?;
-        let (endpoint, feedback) = self.prepare(environment, input)?;
+        let endpoint = environment.prepare_endpoint(input)?;
+        let feedback = self.feedback_for_body(endpoint.body())?;
         Ok(endpoint.maximum_step_s_for_internal_power(feedback, checkpoint)?)
     }
 
@@ -185,20 +194,31 @@ impl<'a> PreparedIncandescentSource<'a> {
     /// partial state and never alters the caller's accepted state.
     pub fn advance(
         &self,
-        environment: &LumpedThermalEnvironment,
+        environment: &impl LumpedEndpointEnvironment,
         input: UniformEnthalpyStepInput<'_>,
         mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
     ) -> Result<IncandescentStep, IncandescentError> {
         checkpoint()?;
-        let (endpoint, feedback) = self.prepare(environment, input)?;
+        let endpoint = environment.prepare_endpoint(input)?;
+        self.advance_prepared_endpoint(&endpoint, checkpoint)
+    }
+
+    /// Drive an already admitted native endpoint, including material phase
+    /// conductivity and emissivity. Radiation stays a boundary heat term and
+    /// uses the same final enthalpy as electrical work and thermal storage.
+    pub fn advance_prepared_endpoint(
+        &self,
+        endpoint: &LumpedEnthalpyEndpoint<'_>,
+        mut checkpoint: impl FnMut() -> Result<(), ConductionError>,
+    ) -> Result<IncandescentStep, IncandescentError> {
+        checkpoint()?;
+        let feedback = self.feedback_for_body(endpoint.body())?;
+        let curve = endpoint.body().phase_curve();
         let mut source_error = None;
         let result = endpoint.solve_with_internal_power(
             feedback,
-            |enthalpy, temperature| match self.trial_electrical_state(
-                input.curve,
-                enthalpy,
-                temperature,
-            ) {
+            |enthalpy, temperature| match self.trial_electrical_state(curve, enthalpy, temperature)
+            {
                 Ok(sample) => Ok(sample.joule_power_w),
                 Err(error) => {
                     let what = error.to_string();
@@ -220,44 +240,57 @@ impl<'a> PreparedIncandescentSource<'a> {
             thermal.state.temperature_k(),
             thermal.state.liquid_mass_fraction(),
         )?;
-        if electrical.joule_power_w * input.duration_s != thermal.additional_internal_heat_j {
+        if electrical.joule_power_w * endpoint.duration_s() != thermal.additional_internal_heat_j {
             return Err(IncandescentError::Invalid(
                 "accepted electrical work must equal the native thermal deposition",
             ));
         }
+        let thermal_surface = match endpoint.body().transport() {
+            LumpedEnthalpyTransport::MaterialPhase(transport) => {
+                let (_, sample) = transport
+                    .radiation()
+                    .evaluate(thermal.state.specific_enthalpy_j_kg())?;
+                if sample.phase != thermal.state {
+                    return Err(IncandescentError::Invalid(
+                        "accepted emissivity and stored enthalpy must describe the same physical state",
+                    ));
+                }
+                Some(sample)
+            }
+            LumpedEnthalpyTransport::Temperature(_) => None,
+        };
         checkpoint()?;
         Ok(IncandescentStep {
             thermal,
             electrical,
+            thermal_surface,
         })
     }
 
-    fn prepare<'body>(
-        &self,
-        environment: &LumpedThermalEnvironment,
-        input: UniformEnthalpyStepInput<'body>,
-    ) -> Result<(LumpedEnthalpyEndpoint<'body>, f64), IncandescentError> {
+    fn feedback_for_body(&self, body: &LumpedEnthalpyBody<'_>) -> Result<f64, IncandescentError> {
+        let caloric = body.phase_curve();
         if let PreparedFeedback::SpecificEnthalpy { curve, .. } = &self.feedback
-            && *curve != input.curve.identity()
+            && *curve != caloric.identity()
         {
             return Err(IncandescentError::Invalid(
                 "prepared electrical feedback belongs to a different caloric chart",
             ));
         }
         let volume = self.source.length_m() * self.source.area_m2();
+        let thermal_volume = body.characteristic_length_m() * body.surface_area_m2();
         if !volume.is_finite()
             || volume <= 0.0
-            || !input.volume_m3.is_finite()
-            || input.volume_m3 <= 0.0
-            || (volume / input.volume_m3 - 1.0).abs() > 64.0 * f64::EPSILON
-            || input.initial.material_card_identity()
+            || !thermal_volume.is_finite()
+            || thermal_volume <= 0.0
+            || (volume / thermal_volume - 1.0).abs() > 64.0 * f64::EPSILON
+            || caloric.material_card_identity()
                 != self.source.source().original().material().card_identity()
         {
             return Err(IncandescentError::Invalid(
                 "electrical geometry must span the whole body on the same original material card",
             ));
         }
-        let knots = input.curve.knots();
+        let knots = caloric.knots();
         let [low, high] = self.source.temperature_range_k();
         if knots[0].temperature_k < low || knots[knots.len() - 1].temperature_k > high {
             return Err(IncandescentError::Invalid(
@@ -269,7 +302,7 @@ impl<'a> PreparedIncandescentSource<'a> {
         // A card may contain measurements at many pressures or compositions.
         // Sharing its hash alone does not bind those physical conditions.
         // Authored charts carry no receipts and retain their declared authority.
-        for receipt in input.curve.source_receipts() {
+        for receipt in caloric.source_receipts() {
             for (axis, value) in &receipt.query_point {
                 if receipt.axis_quantities.get(axis) != material.axis_quantities().get(axis)
                     || (axis != self.source.temperature_axis()
@@ -284,10 +317,31 @@ impl<'a> PreparedIncandescentSource<'a> {
         }
         let varying_phase =
             knots[0].liquid_mass_fraction != knots[knots.len() - 1].liquid_mass_fraction;
-        for receipt in environment.transport.conductivity_receipts() {
+        let (receipts, evolving_phase) = match body.transport() {
+            LumpedEnthalpyTransport::Temperature(transport) => {
+                (transport.conductivity_receipts(), false)
+            }
+            LumpedEnthalpyTransport::MaterialPhase(transport) => {
+                if transport.conductivity().temperature_axis() != self.source.temperature_axis()
+                    || transport.conductivity().liquid_fraction_axis() != phase_axis
+                {
+                    return Err(IncandescentError::Invalid(
+                        "electrical and thermal phase sources need the same declared temperature and liquid-fraction coordinates",
+                    ));
+                }
+                // Phase preparation already admits equal conductivity/emissivity
+                // context across all paths. Its original receipt retains that
+                // context without revisiting every path knot on every time step.
+                (
+                    std::slice::from_ref(transport.radiation().reference_emissivity().receipt()),
+                    true,
+                )
+            }
+        };
+        for receipt in receipts {
             for (axis, value) in &receipt.query_point {
                 let fixed_coordinate_matches = if Some(axis.as_str()) == phase_axis {
-                    !varying_phase && *value == knots[0].liquid_mass_fraction
+                    evolving_phase || (!varying_phase && *value == knots[0].liquid_mass_fraction)
                 } else {
                     axis == self.source.temperature_axis()
                         || material.state_coordinate(axis) == Some(*value)
@@ -301,7 +355,6 @@ impl<'a> PreparedIncandescentSource<'a> {
                 }
             }
         }
-        let endpoint = environment.prepare_endpoint(input)?;
         // The material thermal owner bounds its ORIGINAL Cp law, including
         // nonlinear sensible storage; latent plateaus contribute zero dT/dh.
         let feedback = match self.feedback {
@@ -312,19 +365,19 @@ impl<'a> PreparedIncandescentSource<'a> {
                 if slope == 0.0 {
                     0.0
                 } else {
-                    (slope / input.mass_kg).next_up()
+                    (slope / body.mass_kg()).next_up()
                 }
             }
             PreparedFeedback::Temperature(slope) => {
-                let temperature_slope = input.curve.maximum_temperature_slope();
+                let temperature_slope = caloric.maximum_temperature_slope();
                 if slope == 0.0 || temperature_slope == 0.0 {
                     0.0
                 } else {
-                    let direct = slope * (temperature_slope / input.mass_kg);
+                    let direct = slope * (temperature_slope / body.mass_kg());
                     let feedback = if direct.is_finite() && direct > 0.0 {
                         direct
                     } else {
-                        (slope / input.mass_kg) * temperature_slope
+                        (slope / body.mass_kg()) * temperature_slope
                     };
                     feedback.next_up()
                 }
@@ -335,7 +388,7 @@ impl<'a> PreparedIncandescentSource<'a> {
                 "positive electrothermal feedback is unrepresentable",
             ));
         }
-        Ok((endpoint, feedback))
+        Ok(feedback)
     }
 
     fn trial_electrical_state(

@@ -1,3 +1,29 @@
+## Phase-consistent incandescent cooling and adaptive histories
+
+`PreparedIncandescentSource` now accepts the original phase thermal environment
+or an already admitted native endpoint. Electrical work, stored enthalpy and
+phase-dependent radiative cooling use the same accepted state and fixed geometry.
+The accepted `thermal_surface` retains the native material/emissivity sample for
+the renderer's existing gray-diffuse binding; observing light adds no cooling
+debit. Source coordinates and fixed conditions must match across these owners.
+
+`incandescent::history::advance_history_adaptive` compares one original implicit
+step with two actual half steps. It measures absolute local error in J/kg, so
+melting at constant temperature remains observable. Accepted output retains both
+native half steps and only their actual heat/work accounts; no extrapolated
+state is substituted. A correction handles unequal half durations on rounded
+absolute clocks. Every original drive knot, feedback limit and maximum duration
+remains authoritative. All native solves, including rejected/coarse trials, count
+against the explicit work budget, and failure publishes no partial history.
+
+The error target must exceed native algebraic tolerance and state roundoff.
+Step doubling estimates local temporal error; it does not certify accumulated
+temperature, phase or light error. Existing fixed-step histories remain available.
+Focused integration regressions cover latent electrical/radiative feedback,
+accepted emissivity, full-chart Biot/source-context refusal, cooling refinement,
+enthalpy-datum shifts and bounded work. They are source/formatter checked but
+unexecuted here because the required constellation dependencies are absent.
+
 ## Full tensor-material shells coupled to interior acoustic fields
 
 `cavity_modal::interior::structure::shell::TensorShellInterior` couples an

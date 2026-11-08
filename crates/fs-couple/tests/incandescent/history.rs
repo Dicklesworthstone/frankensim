@@ -3,10 +3,11 @@
 use super::{environment, fixture, input, source_fixture};
 use fs_conduction::ConductionError;
 use fs_couple::incandescent::history::{
-    IncandescentDriveHistory, IncandescentHistoryControls, IncandescentHistoryError,
-    advance_history,
+    IncandescentDriveHistory, IncandescentHistoryAccuracy, IncandescentHistoryControls,
+    IncandescentHistoryError, advance_history, advance_history_adaptive,
 };
 use fs_material::conductor::ElectricalPropertyBasis;
+use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::{Interp, TimeSignal};
 
@@ -259,4 +260,273 @@ fn g0_history_refusals_and_cancellation_leave_the_accepted_input_unchanged() {
         ),
         Err(IncandescentHistoryError::Invalid(_))
     ));
+}
+
+#[test]
+fn g1_adaptive_history_refines_real_time_error_and_preserves_native_work_at_a_jump() {
+    let (node, curve) = fixture(ElectricalPropertyBasis::Resistivity);
+    let drive = TimeSignal::Table {
+        times: vec![0.0, 10.0],
+        values: vec![2.0, 0.0],
+        dims: CURRENT,
+        interp: Interp::Hold,
+    };
+    let bath = environment();
+    let original = input(&curve, 0.0, 20.0);
+    let run = |tolerance| {
+        advance_history_adaptive(
+            &node,
+            &bath,
+            original,
+            IncandescentDriveHistory::Current(&drive),
+            controls(20.0, 6000),
+            IncandescentHistoryAccuracy {
+                maximum_local_enthalpy_error_j_kg: tolerance,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let loose = run(10.0);
+    let fine = run(0.01);
+    // C=1 J/K, I=2 A, R=T/300 ohm until 10 s; afterwards stored heat is held.
+    let exact = 300.0 * fs_math::det::exp(10.0 / 75.0);
+    let loose_error = loose
+        .steps
+        .last()
+        .unwrap()
+        .step
+        .thermal
+        .state
+        .temperature_k()
+        - exact;
+    let fine_error = fine
+        .steps
+        .last()
+        .unwrap()
+        .step
+        .thermal
+        .state
+        .temperature_k()
+        - exact;
+    assert!(fine_error > 0.0 && fine_error < loose_error && fine_error < 0.1);
+    assert!(fine.native_solves > loose.native_solves);
+    assert!(fine.rejected_intervals > 0);
+    assert!(fine.maximum_accepted_error_j_kg <= 0.01);
+    assert_eq!(
+        fine.native_solves,
+        3 * (fine.steps.len() / 2 + fine.rejected_intervals)
+    );
+    assert!(fine.native_solves <= 6000);
+    assert_eq!(fine.steps.first().unwrap().start_s, 0.0);
+    assert_eq!(fine.steps.last().unwrap().end_s, 20.0);
+    assert!(
+        fine.steps
+            .windows(2)
+            .all(|rows| rows[0].end_s == rows[1].start_s)
+    );
+    let incoming = fine.steps.iter().find(|row| row.end_s == 10.0).unwrap();
+    assert_eq!(incoming.step.electrical.current_a, 2.0);
+    assert!(
+        fine.steps
+            .iter()
+            .filter(|row| row.start_s >= 10.0)
+            .all(|row| row.step.electrical.joule_power_w == 0.0)
+    );
+    let heat: f64 = fine
+        .steps
+        .iter()
+        .map(|row| {
+            row.step.thermal.additional_internal_heat_j
+                + row.step.thermal.endpoint.convection_heat_j
+                + row.step.thermal.endpoint.radiation_heat_j
+        })
+        .sum();
+    let stored = original.mass_kg
+        * fine
+            .steps
+            .last()
+            .unwrap()
+            .step
+            .thermal
+            .state
+            .specific_enthalpy_j_kg();
+    let native_budget = bath
+        .maximum_thermal_residual_j
+        .min(original.mass_kg * bath.enthalpy_tolerance_j_kg);
+    assert!((stored - heat).abs() <= fine.steps.len() as f64 * native_budget + 1e-10);
+
+    // An odd number of clock ulps gives unequal represented half intervals.
+    // Their native heat still sums to the prescribed 6 J; the coarse trial's
+    // duplicate proposal must not enter the published energy account.
+    let zero = TimeSignal::Constant(QtyAny::new(0.0, CURRENT));
+    let mut prescribed = input(&curve, 0.0, 6.0);
+    prescribed.internal_heat_j = 6.0;
+    let rounded = advance_history_adaptive(
+        &node,
+        &bath,
+        prescribed,
+        IncandescentDriveHistory::Current(&zero),
+        IncandescentHistoryControls {
+            start_s: 1e16,
+            ..controls(6.0, 3)
+        },
+        IncandescentHistoryAccuracy {
+            maximum_local_enthalpy_error_j_kg: 0.01,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(rounded.native_solves, 3);
+    assert_eq!(rounded.steps.len(), 2);
+    assert_ne!(
+        rounded.steps[0].end_s - rounded.steps[0].start_s,
+        rounded.steps[1].end_s - rounded.steps[1].start_s
+    );
+    let deposited: f64 = rounded
+        .steps
+        .iter()
+        .map(|row| row.step.thermal.endpoint.stored_energy_change_j)
+        .sum();
+    assert!((deposited - 6.0).abs() < 1e-9);
+}
+
+#[test]
+fn g1_adaptive_error_resolves_latent_phase_without_using_the_enthalpy_datum() {
+    let (node, curve) = source_fixture(ElectricalPropertyBasis::Resistivity, true);
+    let drive = TimeSignal::Constant(QtyAny::new(2.0, CURRENT));
+    let offset = 1e6;
+    let shifted = EquilibriumEnthalpyPhaseCurve::try_new(
+        curve.material_card_identity(),
+        curve
+            .knots()
+            .iter()
+            .map(|knot| {
+                let mut shifted = *knot;
+                shifted.specific_enthalpy_j_kg += offset;
+                shifted
+            })
+            .collect(),
+    )
+    .unwrap();
+    let run = |chart: &EquilibriumEnthalpyPhaseCurve, initial_h| {
+        advance_history_adaptive(
+            &node,
+            &environment(),
+            input(chart, initial_h, 1.0),
+            IncandescentDriveHistory::Current(&drive),
+            controls(1.0, 1000),
+            IncandescentHistoryAccuracy {
+                maximum_local_enthalpy_error_j_kg: 0.01,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let history = run(&curve, 4000.0);
+    let translated = run(&shifted, 4000.0 + offset);
+    assert!(history.rejected_intervals > 0 && history.steps.len() > 2);
+    assert!(
+        history
+            .steps
+            .iter()
+            .all(|row| row.step.thermal.state.temperature_k() == 600.0)
+    );
+    assert!(history.maximum_accepted_error_j_kg <= 0.01);
+    let state = history.steps.last().unwrap().step.thermal.state;
+    // Within the plateau, dh/dt = 40 + .04(h-3000), with h(0)=4000.
+    let exact = 2000.0 + 2000.0 * fs_math::det::exp(0.04);
+    assert!((state.specific_enthalpy_j_kg() - exact).abs() < 0.1);
+    assert!(state.liquid_mass_fraction() > 0.5);
+    assert_eq!(translated.native_solves, history.native_solves);
+    let translated_state = translated.steps.last().unwrap().step.thermal.state;
+    assert!(
+        (translated_state.specific_enthalpy_j_kg() - offset - state.specific_enthalpy_j_kg()).abs()
+            < 1e-7
+    );
+    assert!((translated_state.liquid_mass_fraction() - state.liquid_mass_fraction()).abs() < 1e-9);
+}
+
+#[test]
+fn g0_adaptive_trials_charge_all_work_and_refuse_unresolved_accuracy_atomically() {
+    let (node, curve) = fixture(ElectricalPropertyBasis::Resistivity);
+    let drive = TimeSignal::Constant(QtyAny::new(2.0, CURRENT));
+    let original = input(&curve, 0.0, 10.0);
+    let accuracy = IncandescentHistoryAccuracy {
+        maximum_local_enthalpy_error_j_kg: 0.01,
+    };
+    // Two solves cannot complete one trial. Three solves complete a rejected
+    // trial but cannot publish its discarded coarse or half-step proposals.
+    for budget in [2, 3] {
+        assert!(matches!(
+            advance_history_adaptive(
+                &node,
+                &environment(),
+                original,
+                IncandescentDriveHistory::Current(&drive),
+                controls(10.0, budget),
+                accuracy,
+                || Ok(()),
+            ),
+            Err(IncandescentHistoryError::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        advance_history_adaptive(
+            &node,
+            &environment(),
+            original,
+            IncandescentDriveHistory::Current(&drive),
+            controls(10.0, 1000),
+            IncandescentHistoryAccuracy {
+                maximum_local_enthalpy_error_j_kg: 1e-12
+            },
+            || Ok(()),
+        ),
+        Err(IncandescentHistoryError::Invalid(_))
+    ));
+    let mut clock_input = original;
+    clock_input.duration_s = 2.0;
+    assert!(matches!(
+        advance_history_adaptive(
+            &node,
+            &environment(),
+            clock_input,
+            IncandescentDriveHistory::Current(&drive),
+            IncandescentHistoryControls {
+                start_s: 1e16,
+                ..controls(2.0, 100)
+            },
+            accuracy,
+            || Ok(()),
+        ),
+        Err(IncandescentHistoryError::Invalid(_))
+    ));
+    let mut calls = 0;
+    let cancelled = advance_history_adaptive(
+        &node,
+        &environment(),
+        original,
+        IncandescentDriveHistory::Current(&drive),
+        controls(10.0, 1000),
+        accuracy,
+        || {
+            calls += 1;
+            if calls == 200 {
+                Err(ConductionError::Cancelled {
+                    stage: "adaptive-history-test",
+                    at: calls,
+                })
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(matches!(
+        cancelled,
+        Err(IncandescentHistoryError::Native(_))
+    ));
+    assert_eq!(calls, 200);
+    assert_eq!(original.initial.specific_enthalpy_j_kg(), 0.0);
+    assert_eq!(original.initial.temperature_k(), 300.0);
 }
