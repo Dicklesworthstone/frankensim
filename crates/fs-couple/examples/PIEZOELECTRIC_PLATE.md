@@ -1,10 +1,11 @@
-# Spatial piezoelectric plate, reactive shunts and frequency response
+# Spatial piezoelectric plate, reactive shunts and acoustic sensing
 
 Run the finite-plate example with the repository's pinned toolchain:
 
 ```bash
 cargo run -p fs-couple --example piezoelectric_plate
 cargo run -p fs-couple --example piezoelectric_plate -- --harmonic
+cargo run -p fs-couple --example piezoelectric_plate -- --acoustic
 ```
 
 The first command computes static actuation, the matching isolated-electrode
@@ -13,6 +14,8 @@ The harmonic mode reports a small frequency sweep with open, resistive and
 resistor–inductor loads. Voltage, current and deformation come from the coupled
 field solution. The table also reports mean conductor heat and the residual
 of the independently reconstructed power balance.
+The acoustic mode advances the same plate and retained R/L/C histories under
+an incident guide wave, including the fluid's reaction on the moving plate.
 
 ## Material and geometry
 
@@ -72,6 +75,7 @@ Each accepted interval checks
 change(body kinetic + elastic + electric energy)
   + change(external capacitor + winding energy)
   + conductor Joule heat
+  + signed acoustic outward work, when a guide is attached
   = mechanical work + external electrical source work.
 ```
 
@@ -86,6 +90,59 @@ materials and passive electrical networks* (1991),
 [DOI 10.1016/0022-460X(91)90762-9](https://doi.org/10.1016/0022-460X(91)90762-9).
 An inductor adds an electrical resonance; it does not improve vibration at
 every frequency. Tuning must be assessed against the coupled response.
+
+## Acoustic sensing with retained R/L/C storage
+
+Run `cargo run -p fs-couple --example piezoelectric_plate -- --acoustic`.
+This mode uses the same nominal PZT-5A tensor, mesh and six supports as the
+other modes. The pressure load is integrated over the actual top-face P1
+triangles; no fitted sensor gain or independently imposed mechanical force
+replaces the reciprocal pressure/volume-flow map.
+
+The declared circuit has the existing 1 kΩ conductor, ideal 1.256637 mH winding,
+and a separate 1 nF capacitor derived from an authored permittivity and gap
+geometry. The winding retains flux linkage and the capacitor retains charge.
+Only the named external conductor produces heat; the ceramic and fluid remain
+lossless in this demonstration. These are source-retaining authored circuit
+models, not measured component specifications.
+
+The fluid is explicitly authored with density 1000 kg/m³ and sound speed
+1480 m/s. It occupies a lossless semi-infinite 10 × 10 mm rigid uniform guide.
+The first transverse cutoff of that declared guide is 74 kHz; the incident
+tone is 5 kHz with 1000 Pa peak pressure. This is not a measured water model,
+free-field radiation, a finite cavity or a broadband transient prediction.
+
+The initial displacement, velocity, electrode charge, winding flux and
+capacitor charge come from the coupled periodic harmonic solution. Preparation
+uses the implicit-midpoint frequency map `ωd = 2 tan(ω dt/2)/dt` and the
+corresponding midpoint pressure scaling. This initializes the time-discrete
+single-tone history without introducing a zero-start broadband excitation.
+The declared interface bandwidth is 10 kHz; timestep size is not used as a
+spectral certificate. There are 64 steps per cycle and two cycles; refine the
+mesh and time sampling before drawing a design conclusion.
+
+Eight CSV rows report time, electrode voltage, mean thickness motion, external
+reactive energy, cumulative conductor heat, incoming/outgoing wave energies,
+signed net outward work and the cumulative balance. Expected checks are:
+
+- Voltage and motion oscillate; external reactive storage remains nonnegative.
+- Heat and the separate incoming/outgoing wave energies accumulate positively.
+- At 0.4 ms the prescribed incoming wave has supplied **1.351351351 × 10⁻⁸ J**
+  to the guide section, from `duration × peak_pressure² × area / (2 ρ c)`.
+  Most can be reflected; this is not the energy absorbed by the ceramic.
+- Over a complete periodic cycle, net acoustic work is inward and pays the
+  conductor heat. During a partial cycle either sign is possible as stored
+  energy is exchanged with the guide.
+- `balance_j` is `body energy + external reactive energy + cumulative heat
+  + cumulative signed outward work − initial total energy`. It should remain
+  small; it is printed without rescaling or zeroing. Each native step must
+  satisfy the declared 10⁻¹⁸ J balance tolerance before publication.
+
+The entry point is
+`ReactivePiezoelectricTransient::step_with_acoustic_ports_candidate`.
+It accepts optional moving-support velocities, retains original guide wave
+reports, and publishes all body and electrical histories together. Empty port
+lists preserve the existing non-acoustic behavior.
 
 ## Harmonic sensing, actuation and electrical loading
 
@@ -290,7 +347,7 @@ outside this path. The existing longitudinal `PiezoelectricCircuit` remains
 the separate reduced rod adapter for the native general circuit graph.
 
 These models do not supply ferroelectric hysteresis, saturation,
-depoling, breakdown, fringing, acoustic radiation or dissipative piezoelectric
+depoling, breakdown, fringing, free-field acoustic radiation or dissipative piezoelectric
 cross coupling. Intrinsic relaxation is available in harmonic and transient paths.
 The harmonic result is a periodic particular solution; it does not establish
 startup decay or uniqueness of an unexcited lossless mode. The plate mesh and

@@ -2,6 +2,7 @@
 //!
 //! Run: cargo run -p fs-couple --example piezoelectric_plate
 //! Frequency response: append `-- --harmonic` for open/resistive/RL shunts.
+//! Acoustic RLC sensing: append `-- --acoustic` for a periodic guide-driven run.
 //! Data and approximation boundaries: examples/PIEZOELECTRIC_PLATE.md.
 
 use fs_blake3::ContentHash;
@@ -10,9 +11,13 @@ use fs_couple::piezoelectric::spatial::{
     harmonic::{
         HarmonicElectrode, HarmonicElectrodeCondition, HarmonicElectrodeLoad,
         HarmonicPiezoelectricControls,
+        acoustic::{HarmonicAcousticPort, PlaneWavePortControls},
     },
     transient::TetPiezoelectricTransient,
-    transient::load::reactive::ReactiveElectrodeLoad,
+    transient::acoustic::TransientAcousticPort,
+    transient::load::reactive::{
+        ReactiveElectrodeLoad, ReactiveElectrodeState, ReactivePiezoelectricTransient,
+    },
     transient::load::{ElectrodeDrive, ResistiveElectrodeLoad},
 };
 use fs_evidence::ValidityDomain;
@@ -23,12 +28,15 @@ use fs_matdb::{
 };
 use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, resolve_uniform_conductor};
 use fs_material::field_storage::{
-    MAGNETIC_PERMEABILITY_DIMS, MAGNETIC_PERMEABILITY_PROPERTY, ResolvedInductor,
+    ELECTRIC_PERMITTIVITY_DIMS, ELECTRIC_PERMITTIVITY_PROPERTY,
+    MAGNETIC_PERMEABILITY_DIMS, MAGNETIC_PERMEABILITY_PROPERTY, ResolvedCapacitor, ResolvedInductor,
 };
+use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_material::piezoelectric::tensor::{TensorPiezoelectric, waves::PiezoelectricWaveCondition};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_math::c64::C64;
 use fs_solid::linear3::TetAssemblyBudget;
+use std::sync::Arc;
 
 const SOURCE: &str =
     "https://info.piezo.com/hubfs/Data-Sheets/piezo-material-properties-data-sheet-20201112.pdf";
@@ -195,6 +203,28 @@ fn declared_winding() -> Result<ResolvedInductor, Box<dyn std::error::Error>> {
     )?)
 }
 
+fn declared_capacitor() -> Result<ResolvedCapacitor, Box<dyn std::error::Error>> {
+    // Separate authored dielectric: epsilon=1e-8 F/m, A=100 mm^2, gap=1 mm.
+    // Its 1 nF is additional external storage, not the ceramic capacitance.
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(ELECTRIC_PERMITTIVITY_PROPERTY, ELECTRIC_PERMITTIVITY_DIMS),
+        value: PropertyValue::Scalar { value: 1e-8, dims: ELECTRIC_PERMITTIVITY_DIMS },
+        validity: ValidityDomain::unconstrained(), uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+        provenance: Provenance {
+            source: "authored ideal fixed dielectric capacitor for the piezoelectric plate example".into(),
+            license: "CC0-1.0".into(), artifact: None,
+        },
+    })?;
+    let card = MaterialCard::assemble(MaterialStateId {
+        chemistry: "authored ideal dielectric".into(), phase: "solid".into(),
+        process: "uniform fixed field; no leakage or dielectric loss".into(), revision: 0,
+    }, claims, vec![])?;
+    Ok(ResolvedCapacitor::resolve(&card, &QueryPoint::new(),
+        MaterialPropertySelection::SingleClaimOnly, 1e-4, 1e-3)?)
+}
+
 /// A balanced mechanical drive powers the actual electrical load. Each row is
 /// an independent steady periodic solve of the same finite plate, not a sweep
 /// of transient samples or a fitted terminal resonance.
@@ -301,6 +331,112 @@ fn harmonic_response(
                 response.power_balance_residual_w
             );
         }
+    }
+    Ok(())
+}
+
+/// A single in-band acoustic tone drives the complete retained R/L/C system.
+/// Initialize its periodic history rather than launching an undeclared broadband
+/// mechanical startup. Midpoint's frequency map makes this initialization agree
+/// with the actual time-discrete equations; it is not a fitted forcing gain.
+#[allow(clippy::too_many_arguments)]
+fn acoustic_response(
+    model: &TetPiezoelectricModel<'_>, supports: &[(usize, f64)],
+    bottom: &[usize], top: &[usize], tets: &[[usize; 4]],
+    zeros: &[[f64; 3]], zero_charge: &[f64],
+    controls: TetPiezoelectricControls, cx: &Cx<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut faces = std::collections::BTreeSet::new();
+    for tet in tets {
+        for omit in 0..4 {
+            let face: Vec<_> = (0..4).filter(|&i| i != omit).map(|i| tet[i]).collect();
+            if face.iter().all(|i| top.contains(i)) {
+                let mut face = [face[0], face[1], face[2]];
+                face.sort_unstable();
+                faces.insert(face);
+            }
+        }
+    }
+    let port = model.plane_wave_acoustic_port(&faces.into_iter().collect::<Vec<_>>(), 1e-4,
+        PlaneWavePortControls {
+            maximum_surface_dofs: 3 * top.len(), coplanarity_tolerance: 1e-10,
+            maximum_wavenumber_rad_m: 0.8 * core::f64::consts::PI / 0.01,
+            maximum_relative_amplitude: 1e-3,
+        }, cx)?;
+    // Declared constant fluid coefficients; not an empirically validated water model.
+    let medium = FluidAcousticState::try_new(1000.0, 1480.0)?;
+    let resistor = declared_load()?;
+    let winding = Arc::new(declared_winding()?);
+    let capacitor = Arc::new(declared_capacitor()?);
+    let loads = vec![
+        ReactiveElectrodeLoad::SeriesRl { electrodes: [1, 0], inductor: winding.clone(),
+            conductor: Some(resistor.conductor.clone()) },
+        ReactiveElectrodeLoad::Capacitor { electrodes: [1, 0], capacitor: capacitor.clone() },
+    ];
+    let frequency_hz = 5000.0;
+    let dt = 1.0 / (64.0 * frequency_hz);
+    let omega = core::f64::consts::TAU * frequency_hz;
+    let half_phase = 0.5 * omega * dt;
+    let discrete_omega = 2.0 * half_phase.tan() / dt;
+    let peak_pressure = 1000.0;
+    let controls = TetPiezoelectricControls { energy_tolerance_j: 1e-18,
+        charge_tolerance_c: 1e-18, ..controls };
+    let prescribed: Vec<_> = supports.iter().map(|&(i, v)| (i, C64::from_re(v))).collect();
+    let helectrodes = [
+        HarmonicElectrode { nodes: bottom, condition: HarmonicElectrodeCondition::Voltage(C64::ZERO) },
+        HarmonicElectrode { nodes: top, condition: HarmonicElectrodeCondition::Current(C64::ZERO) },
+    ];
+    let hloads: Vec<_> = loads.iter().cloned().map(HarmonicElectrodeLoad::Reactive).collect();
+    let steady = model.solve_harmonic_with_acoustic_ports(discrete_omega,
+        &[HarmonicAcousticPort { port: &port, medium: &medium,
+            incident_pressure_pa: C64::from_re(peak_pressure / half_phase.cos()) }],
+        None, &prescribed, &helectrodes, &hloads,
+        &vec![[C64::ZERO; 3]; zeros.len()], &vec![C64::ZERO; zeros.len()],
+        HarmonicPiezoelectricControls { field: controls, power_tolerance_w: 1e-12,
+            maximum_real_coordinates: 8 * zeros.len() }, cx)?;
+    let displacement: Vec<_> = steady.displacement_m.iter().map(|u| u.map(|v| v.re)).collect();
+    let velocity: Vec<_> = steady.velocity_m_s.iter().map(|u| u.map(|v| v.re)).collect();
+    let body = TetPiezoelectricTransient::new(model, supports, &[
+        PiezoelectricElectrode { nodes: bottom, condition: ElectrodeCondition::Voltage(0.0) },
+        PiezoelectricElectrode { nodes: top, condition: ElectrodeCondition::Charge(steady.electrodes[1].charge_c.re) },
+    ], &displacement, &velocity, zero_charge, controls, cx)?;
+    let flux = winding.inductance_h() * steady.loads[0].current_a.re;
+    let charge = capacitor.capacitance_f() * steady.loads[1].voltage_v.re;
+    let initial_energy = body.state().total_energy_j()
+        + winding.stored_energy_j(flux)? + capacitor.stored_energy_j(charge)?;
+    let mut coupled = ReactivePiezoelectricTransient::new(body, loads,
+        vec![ReactiveElectrodeState::FluxLinkage(flux), ReactiveElectrodeState::Charge(charge)],
+        vec![], controls, cx)?;
+    println!("Nominal PZT-5A acoustic sensor: 5 kHz, 1000 Pa peak, periodic initial history, 64 steps/cycle.");
+    println!("Source: {SOURCE}");
+    println!("Authored lossless fluid rho=1000 kg/m^3, c=1480 m/s; 10 mm square uniform guide, first transverse cutoff=74 kHz.");
+    println!("External R={:.6e} ohm, L={:.6e} H, C={:.6e} F; no external electrical or nodal-force supply.",
+        resistor.conductor.resistance_ohm(), winding.inductance_h(), capacitor.capacitance_f());
+    println!("time_s,voltage_v,mean_thickness_motion_m,external_reactive_energy_j,conductor_heat_j,incident_energy_j,outgoing_energy_j,net_outward_work_j,balance_j");
+    let (mut heat, mut incident, mut outgoing, mut outward) = (0.0, 0.0, 0.0, 0.0);
+    for i in 0..128 {
+        let pressure = peak_pressure * (omega * (f64::from(i) + 0.5) * dt).cos();
+        let candidate = coupled.step_with_acoustic_ports_candidate(dt,
+            &[TransientAcousticPort { port: &port, medium: &medium,
+                midpoint_incident_pressure_pa: pressure,
+                maximum_angular_frequency_rad_s: 2.0 * omega }], None,
+            &[ElectrodeDrive::Voltage(0.0), ElectrodeDrive::Current(0.0)],
+            zeros, zero_charge, controls, cx)?;
+        let step = candidate.step();
+        let wave = &step.acoustic_ports[0];
+        heat += step.joule_heat_j;
+        incident += wave.incident_energy_j;
+        outgoing += wave.outgoing_energy_j;
+        outward += wave.net_outward_work_j;
+        if (i + 1) % 16 == 0 {
+            let state = candidate.model().body().state();
+            let mean = |face: &[usize]| face.iter().map(|&n| state.displacement_m()[n][2]).sum::<f64>() / face.len() as f64;
+            let balance = state.total_energy_j() + step.reactive_energy_j[1] + heat + outward - initial_energy;
+            println!("{:.6e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.3e}",
+                state.time_s(), state.electrodes()[1].voltage_v, mean(top) - mean(bottom),
+                step.reactive_energy_j[1], heat, incident, outgoing, outward, balance);
+        }
+        coupled = candidate.into_parts().0;
     }
     Ok(())
 }
@@ -441,10 +577,11 @@ fn transient_response(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let harmonic = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => false,
-        [mode] if mode == "--harmonic" => true,
-        _ => return Err("usage: piezoelectric_plate [--harmonic]".into()),
+    let mode = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => "default",
+        [mode] if mode == "--harmonic" => "harmonic",
+        [mode] if mode == "--acoustic" => "acoustic",
+        _ => return Err("usage: piezoelectric_plate [--harmonic|--acoustic]".into()),
     };
     let material = nominal_material()?;
     let sources = [material];
@@ -498,8 +635,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:59,kernel_id:59,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
         let model=TetPiezoelectricModel::assemble(&nodes,&tets,&sources,FRAME,TetAssemblyBudget::standard(),&cx)?;
-        if harmonic {
+        if mode == "harmonic" {
             return harmonic_response(&model,&supports,&bottom,&top,nodes.len(),controls,&cx);
+        }
+        if mode == "acoustic" {
+            return acoustic_response(&model,&supports,&bottom,&top,&tets,&zero_forces,&zero_charge,controls,&cx);
         }
         let driven=model.solve(&supports,&[
             PiezoelectricElectrode {nodes:&bottom,condition:ElectrodeCondition::Voltage(0.0)},
