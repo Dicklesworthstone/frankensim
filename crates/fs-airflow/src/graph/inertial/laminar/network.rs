@@ -8,7 +8,7 @@
 //! With x_mean = U*y and U^T U = I, the native energy is H=||x||^2/2,
 //! R_network = T^T R_pipes T and G_network = T^T G_pipes. Reservoir pressures
 //! and explicit branch pressure heads have their ORIGINAL flow-conjugate ports.
-//! The same native exact held-input owner advances this coupled system.
+//! Native exact held-input and continuous-tone owners advance this coupled system.
 //! Incidence interconnection: van der Schaft and Maschke (2013),
 //! <https://epubs.siam.org/doi/10.1137/110840091>.
 //!
@@ -22,7 +22,9 @@
 
 mod continuity;
 mod prepared;
+mod tones;
 pub use prepared::PreparedLaminarNetwork;
+pub use tones::PreparedLaminarNetworkTones;
 
 use std::sync::Arc;
 

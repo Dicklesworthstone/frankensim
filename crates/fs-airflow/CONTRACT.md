@@ -4514,6 +4514,41 @@ compare pulsatile startup with independent radial Stokes modes, recover the
 held-pressure DC path, preserve flow/displacement/work/heat under interval
 subdivision, and retain accepted flow and forcing phases on refusal.
 
+`LaminarNetwork::prepare_tones` extends this same continuous forcing to the
+complete constrained network. Every original reservoir and directed branch
+pressure-head port supplies the full prepared frequency list in port-major
+order. Each connected component's pressure gauge is removed separately for
+each quadrature before matrix products. All original radial-memory arms remain;
+internal junction continuity is built into the original coordinates.
+
+The native trajectory independently integrates every original branch's positive
+viscous source squares and every physical port's signed pressure work, including
+cross-frequency effects. Reservoir work and branch-head work remain separately
+available, with positive work entering the fluid. Individual reservoir-port
+work uses the component's reference gauge; the total reservoir work is gauge
+invariant. The adapter audits branch heat against native total heat, source work
+against native supplied work, and endpoint and integrated reservoir/junction
+continuity. It publishes history, clock, source phases and all accepted reports
+atomically. Failed admission or cancellation preserves them for retry.
+
+Preparation accounts for complete channel construction and all reusable buffers
+within the caller's explicit dense byte/work/dimension budget. Warm advancement
+allocates nothing and performs no new exponential or factorization. Passive
+contraction bounds the entire interval's Reynolds support; a separately retained
+DC equilibrium sharpens the bound. The oscillatory forcing-norm envelope is
+conservative and can refuse long intervals or strongly cancelling waveforms.
+The caller may request a shorter interval; the owner never changes the clock or
+silently removes modes. Developed, fixed-density Newtonian branch assumptions,
+zero-storage junctions and original wall-spectrum validity limits still apply.
+These ports prescribe pressure, not a pump curve or an automatic flow controller.
+
+Focused regressions compare a one-branch network with the original continuous
+pipe, compare a fork's full trajectory and every heat/work channel with an
+independent RK4 integration, preserve history and all accounts under subdivision,
+recover held-pressure DC behavior, preserve independent component gauges, and
+retain accepted reports/history/phases when an interior pressure peak or bad
+input is refused.
+
 ## Material-backed finite rectangular cooling-channel sections
 
 `graph::thermal::medium::convection::duct` evaluates the original rectangular

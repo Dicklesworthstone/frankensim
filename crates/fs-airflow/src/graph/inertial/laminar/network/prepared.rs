@@ -70,10 +70,7 @@ impl<M: FluidTransport> LaminarNetwork<M> {
             records: vec![LaminarNetworkBranchStep::default(); self.branches.len()],
             pending_records: vec![LaminarNetworkBranchStep::default(); self.branches.len()],
             boundary_flows: vec![0.0; self.topology.pressure_nodes.len()],
-            node_flow: vec![0.0; self.topology.node_count],
-            node_scale: vec![0.0; self.topology.node_count],
-            component_flow: vec![0.0; self.topology.pressure_nodes.len()],
-            component_scale: vec![0.0; self.topology.pressure_nodes.len()],
+            flow_audit: NetworkFlowAudit::new(self),
             last: None,
         })
     }
@@ -95,10 +92,7 @@ pub struct PreparedLaminarNetwork<'a, M> {
     records: Vec<LaminarNetworkBranchStep>,
     pending_records: Vec<LaminarNetworkBranchStep>,
     boundary_flows: Vec<f64>,
-    node_flow: Vec<f64>,
-    node_scale: Vec<f64>,
-    component_flow: Vec<f64>,
-    component_scale: Vec<f64>,
+    flow_audit: NetworkFlowAudit,
     last: Option<LaminarNetworkStep>,
 }
 
@@ -355,24 +349,60 @@ impl<M: FluidTransport> PreparedLaminarNetwork<'_, M> {
         average: bool,
         coordinate_bound: f64,
     ) -> Result<(f64, f64), LaminarPipeError> {
+        self.flow_audit.audit(
+            self.network,
+            &self.pending_records,
+            &self.output,
+            average,
+            coordinate_bound,
+        )
+    }
+}
+
+/// The same original topology audit serves held and continuous trajectories.
+pub(super) struct NetworkFlowAudit {
+    node_flow: Vec<f64>,
+    node_scale: Vec<f64>,
+    component_flow: Vec<f64>,
+    component_scale: Vec<f64>,
+}
+
+impl NetworkFlowAudit {
+    pub(super) fn new<M: FluidTransport>(network: &LaminarNetwork<M>) -> Self {
+        Self {
+            node_flow: vec![0.0; network.topology.node_count],
+            node_scale: vec![0.0; network.topology.node_count],
+            component_flow: vec![0.0; network.topology.pressure_nodes.len()],
+            component_scale: vec![0.0; network.topology.pressure_nodes.len()],
+        }
+    }
+
+    pub(super) fn audit<M: FluidTransport>(
+        &mut self,
+        network: &LaminarNetwork<M>,
+        records: &[LaminarNetworkBranchStep],
+        output: &[f64],
+        average: bool,
+        coordinate_bound: f64,
+    ) -> Result<(f64, f64), LaminarPipeError> {
         self.node_flow.fill(0.0);
         self.node_scale.fill(0.0);
         self.component_flow.fill(0.0);
         self.component_scale.fill(0.0);
-        for (edge, report) in self.pending_records.iter().enumerate() {
+        for (edge, report) in records.iter().enumerate() {
             let flow = if average {
                 report.average_volume_flow_m3_s
             } else {
                 report.final_volume_flow_m3_s
             };
-            let scale = flow.abs() + self.network.flow_norms[edge] * coordinate_bound;
-            let [from, to] = self.network.topology.branch_nodes[edge];
+            let scale = flow.abs() + network.flow_norms[edge] * coordinate_bound;
+            let [from, to] = network.topology.branch_nodes[edge];
             self.node_flow[from] += flow;
             self.node_flow[to] -= flow;
             self.node_scale[from] += scale;
             self.node_scale[to] += scale;
         }
-        let tolerance = ROUNDOFF * self.pending.len() as f64;
+        let tolerance = ROUNDOFF * network.system.state_dim() as f64;
         let mut internal = 0.0_f64;
         for node in 0..self.node_flow.len() {
             let value = self.node_flow[node];
@@ -382,15 +412,15 @@ impl<M: FluidTransport> PreparedLaminarNetwork<'_, M> {
                     "network continuity account is unrepresentable",
                 ));
             }
-            if let Some(port) = self.network.basis.boundary_slot[node] {
-                let output = if average { self.output[port] } else { value };
-                if (output - value).abs() > tolerance * scale {
+            if let Some(port) = network.basis.boundary_slot[node] {
+                let boundary_output = if average { output[port] } else { value };
+                if (boundary_output - value).abs() > tolerance * scale {
                     return Err(LaminarPipeError::Invalid(
                         "native reservoir flow disagrees with original branches",
                     ));
                 }
-                let root = self.network.basis.pressure_reference[port];
-                self.component_flow[root] += output;
+                let root = network.basis.pressure_reference[port];
+                self.component_flow[root] += boundary_output;
                 self.component_scale[root] += scale;
             } else {
                 internal = internal.max(value.abs());
@@ -414,7 +444,7 @@ impl<M: FluidTransport> PreparedLaminarNetwork<'_, M> {
     }
 }
 
-fn prepared_error(error: PreparedStepError) -> LaminarPipeError {
+pub(super) fn prepared_error(error: PreparedStepError) -> LaminarPipeError {
     match error {
         PreparedStepError::Solver(error) => LaminarPipeError::Native(error),
         PreparedStepError::Cancelled => {
