@@ -1,13 +1,16 @@
 //! G1/G3/G4: actual finite liquid inventories exchange momentum and mixing heat.
 //! Constitutive data are synthetic; conservation references are independent.
 
-use fs_couple::liquid_transfer::{LiquidMassTransfer, transfer_interface_mass};
+use fs_couple::liquid_transfer::{
+    LiquidMassTransfer, transfer_interface_mass, transfer_interface_mass_streams,
+};
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::freesurface3::ContactModel3;
 use fs_lbm::material::free_surface::enthalpy::{
-    FreeSurfaceEnthalpyControls, FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls,
-    FreeSurfaceMassInflow, FreeSurfaceMassOutflow, MaterialFreeSurfaceEnthalpy3,
+    FreeSurfaceEnthalpyControls, FreeSurfaceEnthalpyError, FreeSurfaceMassExchange,
+    FreeSurfaceMassExchangeControls, FreeSurfaceMassInflow, FreeSurfaceMassOutflow,
+    MaterialFreeSurfaceEnthalpy3,
 };
 use fs_lbm::material::free_surface::{
     MaterialFreeSurfaceDomain3, MaterialFreeSurfaceInitialCell3, plan_free_surface_from_material,
@@ -637,6 +640,175 @@ fn g4_prepared_native_transfers_discard_cleanly_and_publish_the_immediate_outcom
         unchanged(donor, &immediate_donor);
         unchanged(receiver, &immediate_receiver);
     });
+}
+
+#[test]
+fn g4_rounded_world_centers_cannot_hide_distinct_transfer_points() {
+    with_pair(0.0, [0.0; 3], 0.3, 0.1, |donor, receiver, gate| {
+        let before_donor = donor.clone();
+        let before_receiver = receiver.clone();
+        let origin = [2.0_f64.powi(52); 3];
+        let coincident = LiquidMassTransfer {
+            donor_origin_m: origin,
+            receiver_origin_m: origin,
+            ..transfer(1e-7)
+        };
+        for packet in [
+            LiquidMassTransfer {
+                donor: [3, 4, 3],
+                ..coincident
+            },
+            LiquidMassTransfer {
+                donor_axes_to_world: UnitQuaternion::new(0.0, 0.0, 0.0, 1.0).unwrap(),
+                ..coincident
+            },
+        ] {
+            let offset = |coordinates: [usize; 3], axes| {
+                world_vector(axes, coordinates.map(|c| (c as f64 + 0.5) * DX))
+            };
+            let a = offset(packet.donor, packet.donor_axes_to_world);
+            let b = offset(packet.receiver, packet.receiver_axes_to_world);
+            // Both absolute points round to exactly the same f64 vector.
+            assert_eq!(
+                core::array::from_fn::<_, 3, _>(|d| origin[d] + a[d]),
+                core::array::from_fn::<_, 3, _>(|d| origin[d] + b[d]),
+            );
+            // The original donor is admissible, but transporting its momentum
+            // across this finite separation would require a missing torque.
+            donor
+                .project_interface_mass_exchange(packet.donor, -packet.mass_kg)
+                .unwrap();
+            let [x, y, z] = packet.donor;
+            let velocity = donor
+                .flow()
+                .sample_at_si(x, y, z)
+                .unwrap()
+                .unwrap()
+                .velocity_m_s;
+            let angular_jump = cross(
+                core::array::from_fn(|d| b[d] - a[d]),
+                world_vector(
+                    packet.donor_axes_to_world,
+                    velocity.map(|v| packet.mass_kg * v),
+                ),
+            );
+            assert!(angular_jump.iter().map(|l| l.abs()).sum::<f64>() > 1e-12);
+            assert!(matches!(
+                transfer_interface_mass(donor, receiver, packet, controls(), gate),
+                Err(FreeSurfaceEnthalpyError::Invalid(reason)) if reason.contains("coincident")
+            ));
+            unchanged(donor, &before_donor);
+            unchanged(receiver, &before_receiver);
+        }
+    });
+}
+
+#[test]
+fn g4_stream_batch_rejects_late_geometric_alias_without_publishing() {
+    with_pair(0.0, [0.0; 3], 0.3, 0.1, |donor, receiver, gate| {
+        let before_donor = donor.clone();
+        let before_receiver = receiver.clone();
+        let mut second = donor.clone();
+        let origin = [2.0_f64.powi(52); 3];
+        let aligned = LiquidMassTransfer {
+            donor_origin_m: origin,
+            receiver_origin_m: origin,
+            ..transfer(1e-7)
+        };
+        let displaced = LiquidMassTransfer {
+            donor_axes_to_world: UnitQuaternion::new(0.0, 0.0, 0.0, 1.0).unwrap(),
+            ..aligned
+        };
+        assert!(matches!(
+            transfer_interface_mass_streams(
+                &mut [&mut *donor, &mut second],
+                receiver,
+                &[aligned, displaced],
+                2,
+                controls(),
+                gate,
+            ),
+            Err(FreeSurfaceEnthalpyError::Invalid(reason)) if reason.contains("centers")
+        ));
+        unchanged(donor, &before_donor);
+        unchanged(&second, &before_donor);
+        unchanged(receiver, &before_receiver);
+    });
+}
+
+#[test]
+fn g3_coincident_transfer_is_invariant_under_large_common_translation() {
+    for axes in [
+        UnitQuaternion::IDENTITY,
+        UnitQuaternion::new(0.61, 0.23, -0.4, 0.7).unwrap(),
+    ] {
+        with_oriented_pair(
+            0.0,
+            [0.0; 3],
+            0.3,
+            0.1,
+            [axes; 2],
+            |donor, receiver, gate| {
+                let mut reference_donor = donor.clone();
+                let mut reference_receiver = receiver.clone();
+                let mut batch_donor = donor.clone();
+                let mut batch_receiver = receiver.clone();
+                let packet = LiquidMassTransfer {
+                    donor_axes_to_world: axes,
+                    receiver_axes_to_world: axes,
+                    ..transfer(1e-7)
+                };
+                let reference = transfer_interface_mass(
+                    &mut reference_donor,
+                    &mut reference_receiver,
+                    packet,
+                    controls(),
+                    gate,
+                )
+                .unwrap();
+                let origin = [2.0_f64.powi(52); 3];
+                let translated_packet = LiquidMassTransfer {
+                    donor_origin_m: origin,
+                    receiver_origin_m: origin,
+                    ..packet
+                };
+                let translated =
+                    transfer_interface_mass(donor, receiver, translated_packet, controls(), gate)
+                        .unwrap();
+                assert_eq!(translated.point_m, origin);
+                assert_eq!(translated.donor, reference.donor);
+                assert_eq!(translated.receiver, reference.receiver);
+                assert_eq!(
+                    translated.momentum_defect_kg_m_s,
+                    reference.momentum_defect_kg_m_s
+                );
+                assert_eq!(
+                    translated.enthalpy_kinetic_defect_j,
+                    reference.enthalpy_kinetic_defect_j
+                );
+                unchanged(donor, &reference_donor);
+                unchanged(receiver, &reference_receiver);
+
+                let batch = transfer_interface_mass_streams(
+                    &mut [&mut batch_donor],
+                    &mut batch_receiver,
+                    &[translated_packet],
+                    1,
+                    controls(),
+                    gate,
+                )
+                .unwrap();
+                assert_eq!(batch.point_m, origin);
+                assert_eq!(
+                    batch.donors.as_slice(),
+                    core::slice::from_ref(&translated.donor)
+                );
+                assert_eq!(batch.receiver, translated.receiver);
+                unchanged(&batch_donor, donor);
+                unchanged(&batch_receiver, receiver);
+            },
+        );
+    }
 }
 
 #[path = "liquid_transfer/density.rs"]

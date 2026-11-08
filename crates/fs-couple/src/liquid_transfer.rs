@@ -10,6 +10,9 @@
 //! Each grid has an explicit origin and orientation in one inertial frame;
 //! their mapped cell centers must coincide. Thus the stream has one application
 //! point, with no missing connector torque or gravitational transport work.
+//! Coincidence uses compensated origin differences and rotated local offsets,
+//! with roundoff bounded by the local geometry, never absolute world position.
+//! A large common translation therefore cannot hide a real separation.
 //! Owners retain the same original caloric object, complete material claims
 //! and external context. Their temperature references, physical densities and
 //! lattice scalings may differ. The accepted receiver still has to satisfy its
@@ -30,6 +33,7 @@ use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassInflow, FreeSurfaceMassInflowReport, FreeSurfaceMassOutflow,
     FreeSurfaceMassOutflowReport, MaterialFreeSurfaceEnthalpy3,
 };
+use fs_math::dd::Dd;
 use fs_mbd::{UnitQuaternion, Vec3};
 
 /// One finite packet moved from donor to receiver, without advancing time.
@@ -168,24 +172,24 @@ pub fn transfer_interface_mass(
             "native liquid packet masses disagree beyond the declared budget",
         ));
     }
-    let point_m = center(
+    let donor_center = center(
         donor,
         transfer.donor,
         transfer.donor_origin_m,
         transfer.donor_axes_to_world,
     )?;
-    if point_m
-        != center(
-            receiver,
-            transfer.receiver,
-            transfer.receiver_origin_m,
-            transfer.receiver_axes_to_world,
-        )?
-    {
+    let receiver_center = center(
+        receiver,
+        transfer.receiver,
+        transfer.receiver_origin_m,
+        transfer.receiver_axes_to_world,
+    )?;
+    if !donor_center.coincides(&receiver_center) {
         return Err(Error::Invalid(
             "liquid transfer requires coincident mapped cell centers in one Cartesian frame",
         ));
     }
+    let point_m = donor_center.point_m;
     let [x, y, z] = transfer.donor;
     let velocity_m_s = donor
         .flow()
@@ -346,12 +350,13 @@ pub fn transfer_interface_mass_streams<'s, 'm>(
             "liquid stream batch needs a finite accepted clock",
         ));
     }
-    let point_m = center(
+    let receiver_center = center(
         receiver,
         receiver_pose.receiver,
         receiver_pose.receiver_origin_m,
         receiver_pose.receiver_axes_to_world,
     )?;
+    let point_m = receiver_center.point_m;
     let receiver_density = receiver.flow().scaling().material().density_kg_m3();
     let mut outgoing = Vec::new();
     let mut incoming = Vec::new();
@@ -380,13 +385,13 @@ pub fn transfer_interface_mass_streams<'s, 'm>(
                 "liquid streams changed original source, clock or common receiver",
             ));
         }
-        if center(
+        let donor_center = center(
             donor,
             transfer.donor,
             transfer.donor_origin_m,
             transfer.donor_axes_to_world,
-        )? != point_m
-        {
+        )?;
+        if !donor_center.coincides(&receiver_center) {
             return Err(Error::Invalid(
                 "liquid stream centers must coincide with the receiver in one world frame",
             ));
@@ -542,26 +547,71 @@ fn reference_volumes(
     })
 }
 
+struct MappedCenter {
+    origin_m: [f64; 3],
+    offset_m: [f64; 3],
+    point_m: [f64; 3],
+    roundoff_m: f64,
+}
+
+impl MappedCenter {
+    fn coincides(&self, other: &Self) -> bool {
+        let tolerance_m = self.roundoff_m + other.roundoff_m;
+        (0..3).all(|d| {
+            // Subtract origins BEFORE adding the small grid-local offsets.
+            // Equal rounded world points alone can hide entire cell spacings
+            // and silently lose the transported parcel's angular momentum.
+            let separation = (Dd::from_f64(self.origin_m[d]) - Dd::from_f64(other.origin_m[d]))
+                + (Dd::from_f64(self.offset_m[d]) - Dd::from_f64(other.offset_m[d]));
+            separation.to_f64().abs() <= tolerance_m
+        })
+    }
+}
+
 fn center(
     liquid: &MaterialFreeSurfaceEnthalpy3<'_, '_>,
     coordinates: [usize; 3],
     origin_m: [f64; 3],
     axes_to_world: UnitQuaternion,
-) -> Result<[f64; 3], Error> {
+) -> Result<MappedCenter, Error> {
     let dx = liquid.flow().scaling().cell_size_m();
-    let point = if axes_to_world == UnitQuaternion::IDENTITY {
+    let local = core::array::from_fn(|d| (coordinates[d] as f64 + 0.5) * dx);
+    let offset_m = if axes_to_world == UnitQuaternion::IDENTITY {
+        local
+    } else {
+        vector(axes_to_world.rotate_body_to_world(vec3(local)))
+    };
+    // Preserve the existing rounded world-space receipt. It is deliberately
+    // separate from the relative geometry used to authorize the transfer.
+    let point_m = if axes_to_world == UnitQuaternion::IDENTITY {
         core::array::from_fn(|d| (coordinates[d] as f64 + 0.5).mul_add(dx, origin_m[d]))
     } else {
-        let local = core::array::from_fn(|d| (coordinates[d] as f64 + 0.5) * dx);
-        let world = vector(axes_to_world.rotate_body_to_world(vec3(local)));
-        core::array::from_fn(|d| world[d] + origin_m[d])
+        core::array::from_fn(|d| offset_m[d] + origin_m[d])
     };
-    if origin_m.iter().chain(&point).any(|x| !x.is_finite()) {
+    // A conservative allowance for coordinate scaling and the two quaternion
+    // products: 64 binary64 epsilons times the grid-local L1 extent per owner.
+    // The absolute world origin must NEVER enlarge this geometric allowance.
+    let roundoff_m = local
+        .into_iter()
+        .map(|x| x.abs() * (64.0 * f64::EPSILON))
+        .sum::<f64>();
+    if origin_m
+        .iter()
+        .chain(&offset_m)
+        .chain(&point_m)
+        .any(|x| !x.is_finite())
+        || !roundoff_m.is_finite()
+    {
         return Err(Error::Invalid(
             "liquid transfer Cartesian origin or center is unrepresentable",
         ));
     }
-    Ok(point)
+    Ok(MappedCenter {
+        origin_m,
+        offset_m,
+        point_m,
+        roundoff_m,
+    })
 }
 
 fn vec3(value: [f64; 3]) -> Vec3 {
