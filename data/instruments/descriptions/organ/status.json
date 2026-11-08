@@ -13,7 +13,8 @@
     "A forced Bickley jet, spreading by Fletcher 1976's organ-flue Pitot law. That's a trial here: it was measured on an E4 pipe with flues of 0.25 to 1.0 mm, so this flue is in range, but it isn't this pipe",
     "A labium offset of 0.666 mm (2.66 flue heights). It isn't a measurement of this pipe: it carries Fletcher's voicing b0 of about -0.4, printed for Fletcher's perspex E4 pipe, through Fletcher's jet width at this cut-up",
     "A limit on how far the jet can swing: Fletcher 1976's envelope, with no coefficient to set. The way it's applied in time is this model's: the gain changes only when the jet changes sign",
-    "The first mode: it speaks 492.8 Hz from about 0.14 s on"
+    "The first mode: it speaks 492.8 Hz from about 0.14 s on",
+    "Room air on the way to the microphone: the receiver hears the pipe through the exterior air's viscous and thermal absorption on every path from the open end and the mouth (`observer_gas stokes-kirchhoff`, on the flue route since da45542bd), as the flute and whistle pages do. It changes the sound on its way, not the pipe: the held note moves by less than 0.01 c, and on the comparison with the different pipe's recording (for scale, not as a grade) the same measures as before sit inside the spread between that pipe's takes"
   ],
   "physics_missing": [
     "A recording of this pipe: the clip is a 16 ft Principal at St. Jakobus, Ilmenau, key B5, sounding 482.85 Hz. Different pipe, so it's family likeness only with no count, and nothing about it went into the card. The 35.2 c between them isn't a fault",
