@@ -1364,6 +1364,50 @@ Independent JavaScript angular and full finite-radius flux checks agreed to
 1.33e-15 relative error for the documented three-source fixture; those checks
 validate the reference equations, not Rust compilation.
 
+## Directional interference and outgoing wave momentum
+
+`PreparedCompactRadiatedPower::with_momentum` retains that original free-space
+owner and prepares `PreparedCompactRadiatedMomentum`. For its normalized
+amplitude A(n), it evaluates both P = <|A|^2> and the vector first moment
+M = <n |A|^2>. The outgoing wave momentum flux is M/c in newtons, using the
+same original material sound speed. M/P, when P is nonzero, is the
+power-weighted mean direction; the exact model obeys |M| <= P.
+
+A colocated volume/force source has M = (2/3) Re(a f*) in the original
+sqrt(watt) normalization. Its relative Q/F phase can reverse directional
+emission while leaving total sphere power unchanged. Separated-source
+monopole, mixed Q/F and force/force interference uses the original lower
+angular moments plus the rank-three moment, from the Legendre integral
+[DLMF 10.54.2](https://dlmf.nist.gov/10.54.E2) and spherical-Bessel series
+[DLMF 10.53.1](https://dlmf.nist.gov/10.53.E1). A small-argument series retains
+j3 without upward-recurrence cancellation; j2/x is retained directly at large
+separation. The original coalesced DD baseline and separate small remainders
+remain intact, including directional residuals below order-one f64 power ulps.
+This does not certify relative accuracy at every interference null.
+
+Preparation adds two DD coefficients per distinct-position pair under the
+original source/pair limits. Repeated coherent application forms power and
+M in one traversal, allocating nothing and evaluating no transcendental
+functions. Explicit independent sources and low-rank coherence factors retain
+each source's Q/F phase; independent factors add both power and momentum.
+Factor units and peak-phasor averaging remain those of the original power
+owner. Cancellation publishes no partial result.
+
+This is an outgoing-wave observation of prescribed Q/F sources in a
+homogeneous stationary lossless free space. It is not an applied mechanical
+recoil force or a coupled source/mean-flow momentum balance. Ideal-wall
+owners explicitly refuse: dividing full-image scalar power by image-group
+order does not give the vector momentum in the physical wall domain.
+Molecular-model refusal remains inherited from the original power adapter.
+
+Seven G1/G3/G4 regressions in `tests/compact_momentum.rs` cover analytic
+cardioid phase steering, independent angular quadrature of separated mixed
+and force-only sources, opposite monopole phase steering, weak cancellation,
+the power/momentum bound, coordinate and material covariance, independent
+and coherently mixed source factors, budgets, ideal-wall refusal and
+cancellation. Native execution is required before claiming these Rust
+regressions have passed.
+
 ## Mixed deterministic, real and proper acoustic source ensembles
 
 `observation::PreparedHarmonicEnsemble` combines an optional deterministic

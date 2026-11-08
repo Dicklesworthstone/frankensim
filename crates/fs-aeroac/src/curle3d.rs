@@ -38,7 +38,8 @@ pub use array::{
     PreparedCompactSourceObserver, PreparedHalfSpaceObserver,
 };
 pub use power::{
-    CompactRadiatedPower, PreparedCompactRadiatedPower, PreparedConvectedMonopolePower, RadiatedPowerBudget,
+    CompactRadiatedMomentum, CompactRadiatedPower, PreparedCompactRadiatedMomentum,
+    PreparedCompactRadiatedPower, PreparedConvectedMonopolePower, RadiatedPowerBudget,
     RadiatedPowerModeBudget,
 };
 pub use statistics::{CoherenceBudget, CompactFieldStatistics};

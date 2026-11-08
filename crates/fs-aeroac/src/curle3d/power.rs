@@ -26,6 +26,10 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::special::{SphericalBesselMoments, spherical_bessel_moments};
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod momentum;
+pub use momentum::{
+    COMPACT_MOMENTUM_SCOPE, CompactRadiatedMomentum, PreparedCompactRadiatedMomentum,
+};
 mod multipole;
 mod convected;
 pub use convected::{
