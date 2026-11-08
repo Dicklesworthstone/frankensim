@@ -3102,6 +3102,13 @@ cell powers through `volumes::heating::OpticalHeating` into the existing
 cell-index bindings permit aggregation into a resolved thermal control volume;
 missing, duplicate, inactive or nonconservative assignments refuse.
 
+Directed beam power uses compensated cumulative optical depth, including
+absorption and scattering, before applying attenuation to the segment's
+original incident power. Refining a layer into cells whose individual survival
+factors round to one therefore retains the resolved total loss. Per-cell heat
+and scattered watts still use their separate positive `expm1` partitions;
+small transmission fractions are scaled without discarding representable watts.
+
 The native `advance_observed` owns caloric storage (including latent heat),
 conduction, sources, event alignment and transactional publication. Absorbed
 power is counted once in its external-heat audit. The optical observer retains
@@ -10006,7 +10013,9 @@ The exact solution is `P_out=P*exp(-alpha*L)/(1+beta*(P/A)*L_eff)`, with
 [Sheik-Bahae et al. (1990), equations (23)–(25)](https://doi.org/10.1109/3.53394).
 Positive power partitions avoid subtracting nearly equal beam powers; a rare
 logarithmic fallback retains finite watts when optical fractions underflow or
-intermediate products overflow. Beta zero uses the original Beer-law arithmetic.
+intermediate products overflow. Runs of beta-zero cells share the compensated
+Beer-law depth accumulator; a nonlinear cell starts the next linear run at its
+transmitted power, preserving the exact linear limit under cell refinement.
 Only crossed cells are visited after preparation; output allocation and traversal
 are explicitly bounded, cancellation is polled through the original DDA, and a
 late failure publishes no partial report.

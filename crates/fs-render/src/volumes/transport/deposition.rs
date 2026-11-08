@@ -173,6 +173,41 @@ pub(crate) fn absorb_beam(power: f64, density: f64, length: f64, coefficient: f6
     (absorbed, transmitted)
 }
 
+/// Retain attenuation across cells even when each cell's transmission rounds
+/// to one. The correction also keeps small depths after strongly absorbing
+/// layers; power is always scaled from the beginning of this linear segment.
+#[derive(Clone, Copy, Default)]
+struct BeamOpticalDepth {
+    sum: f64,
+    correction: f64,
+}
+
+impl BeamOpticalDepth {
+    fn transmit(&mut self, incident_power_w: f64, cell_depth: f64) -> f64 {
+        let next = self.sum + cell_depth;
+        if next.is_finite() {
+            self.correction += if self.sum >= cell_depth {
+                (self.sum - next) + cell_depth
+            } else {
+                (cell_depth - next) + self.sum
+            };
+            self.sum = next;
+        } else {
+            self.sum = f64::INFINITY;
+            self.correction = 0.0;
+        }
+        let depth = self.sum + self.correction;
+        let transmission = det::exp(-depth);
+        if transmission >= f64::MIN_POSITIVE {
+            incident_power_w * transmission
+        } else {
+            // Scale before rounding a tiny fraction to zero: substantial
+            // incident power can still leave representable transmitted watts.
+            det::exp(det::ln(incident_power_w) - depth)
+        }
+    }
+}
+
 pub(super) fn deposit<const N: usize>(
     cx: &Cx<'_>,
     medium: &AbsorbingGrid<'_>,
@@ -288,6 +323,7 @@ pub(super) fn deposit_prepared<const N: usize>(
     };
     let mut absorbed_correction = [0.0; N];
     let mut scattered_correction = [0.0; N];
+    let mut optical_depth = [BeamOpticalDepth::default(); N];
     while let Some(cell) = cells.next_with_checkpoint(check)? {
         let rho = medium.grid.data[cell.cell];
         if rho == 0.0 || cell.length_m == 0.0 {
@@ -311,14 +347,8 @@ pub(super) fn deposit_prepared<const N: usize>(
                 removed_power(power, opacity, rho, cell.length_m, absorption[lane], total);
             deposit.scattered_power_w[lane] =
                 removed_power(power, opacity, rho, cell.length_m, scatter[lane], total);
-            let transmittance = det::exp(-tau);
-            // A tiny transmission fraction can still carry representable
-            // watts when the incoming beam is large.
-            result.transmitted_power_w[lane] = if transmittance >= f64::MIN_POSITIVE {
-                power * transmittance
-            } else {
-                det::exp(det::ln(power) - tau)
-            };
+            result.transmitted_power_w[lane] =
+                optical_depth[lane].transmit(incident_power_w[lane], tau);
         }
         if deposit.absorbed_power_w.iter().all(|p| *p == 0.0)
             && deposit.scattered_power_w.iter().all(|p| *p == 0.0)

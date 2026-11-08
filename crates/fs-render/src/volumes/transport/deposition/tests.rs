@@ -62,6 +62,146 @@ fn balance<const N: usize>(report: &BeamPowerDeposition<N>) {
 }
 
 #[test]
+fn g3_sub_ulp_cell_absorption_retains_grid_refinement_and_the_nonlinear_linear_limit() {
+    with_cx(|cx, _| {
+        use super::nonlinear::{TwoPhotonAbsorbingGrid, TwoPhotonAbsorption};
+
+        const CELLS: usize = 4096;
+        let depth = 2.0_f64.powi(-44);
+        // Each refined cell has tau = 2^-56, so exp(-tau) rounds to one.
+        assert_eq!((-depth / CELLS as f64).exp(), 1.0);
+        let coefficient = super::super::MassAbsorptionSpectrum::constant(depth).unwrap();
+        let coarse_density = [1.0];
+        let fine_density = [1.0; CELLS];
+        let coarse = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &coarse_density, [0.0; 3], [1.0; 3]),
+            coefficient,
+            None,
+            budget(8192),
+        )
+        .unwrap();
+        let fine = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new(
+                [1, 1, CELLS],
+                &fine_density,
+                [0.0; 3],
+                [1.0, 1.0, 1.0 / CELLS as f64],
+            ),
+            coefficient,
+            None,
+            budget(8192),
+        )
+        .unwrap();
+        let origin = Point3::new(0.5, 0.5, 0.0);
+        let direction = Vec3::new(0.0, 0.0, 1.0);
+        let a = coarse
+            .deposit_beam_power(cx, origin, direction, 1.0, &[550.0], &[1.0], 1)
+            .unwrap();
+        let b = fine
+            .deposit_beam_power(cx, origin, direction, 1.0, &[550.0], &[1.0], CELLS)
+            .unwrap();
+        assert_eq!(b.cells.len(), CELLS);
+        assert!(b.transmitted_power_w[0] < 1.0);
+        assert_eq!(b.transmitted_power_w, a.transmitted_power_w);
+        assert_eq!(
+            b.transmitted_power_w,
+            fine.transmittance(cx, origin, direction, 1.0, &[550.0])
+                .unwrap()
+        );
+        close(b.absorbed_power_w[0], -(-depth).exp_m1());
+        close(b.absorbed_power_w[0], a.absorbed_power_w[0]);
+        assert!((b.transmitted_power_w[0] + b.absorbed_power_w[0] - 1.0).abs() <= f64::EPSILON);
+
+        let law =
+            TwoPhotonAbsorption::try_new(0.0, (380.0, 780.0), f64::MAX, ContentHash([97; 32]))
+                .unwrap();
+        let linear_limit = TwoPhotonAbsorbingGrid::try_new(cx, &fine, law)
+            .unwrap()
+            .deposit_beam_power(cx, origin, direction, 1.0, 550.0, 1.0, 1.0, CELLS)
+            .unwrap();
+        assert_eq!(linear_limit.cells, b.cells);
+        assert_eq!(linear_limit.transmitted_power_w, b.transmitted_power_w);
+        assert_eq!(linear_limit.absorbed_power_w, b.absorbed_power_w);
+        balance(&b);
+    });
+}
+
+#[test]
+fn g1_sub_ulp_cell_extinction_preserves_absorbed_and_scattered_power_separately() {
+    with_cx(|cx, _| {
+        const CELLS: usize = 4096;
+        let density = [1.0; CELLS];
+        let depth = 2.0_f64.powi(-44);
+        let absorption = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new(
+                [1, 1, CELLS],
+                &density,
+                [0.0; 3],
+                [1.0, 1.0, 1.0 / CELLS as f64],
+            ),
+            super::super::MassAbsorptionSpectrum::table(&[
+                (380.0, 0.0),
+                (580.0, 0.25 * depth),
+                (780.0, depth),
+            ])
+            .unwrap(),
+            None,
+            budget(8192),
+        )
+        .unwrap();
+        let medium = ScatteringGrid::try_new(
+            cx,
+            absorption,
+            MassScatteringSpectrum::table(&[(380.0, depth), (580.0, 0.75 * depth), (780.0, 0.0)])
+                .unwrap(),
+            PhaseFunction::Isotropic,
+        )
+        .unwrap();
+        let incident = [1.0, 3.0, 8.0];
+        let report = medium
+            .deposit_beam_power(
+                cx,
+                Point3::new(0.5, 0.5, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                1.0,
+                &[380.0, 580.0, 780.0],
+                &incident,
+                CELLS,
+            )
+            .unwrap();
+        let opacity = -(-depth).exp_m1();
+        for lane in 0..3 {
+            let fraction = [0.0, 0.25, 1.0][lane];
+            close(
+                report.absorbed_power_w[lane],
+                incident[lane] * fraction * opacity,
+            );
+            close(
+                report.scattered_power_w[lane],
+                incident[lane] * (1.0 - fraction) * opacity,
+            );
+            assert!(report.transmitted_power_w[lane] < incident[lane]);
+            assert!(
+                (report.transmitted_power_w[lane] - incident[lane] * (-depth).exp()).abs()
+                    <= 4.0 * f64::EPSILON * incident[lane]
+            );
+            assert!(
+                (report.transmitted_power_w[lane]
+                    + report.absorbed_power_w[lane]
+                    + report.scattered_power_w[lane]
+                    - incident[lane])
+                    .abs()
+                    <= 4.0 * f64::EPSILON * incident[lane]
+            );
+        }
+        balance(&report);
+    });
+}
+
+#[test]
 fn g1_heterogeneous_cells_deposit_the_local_spectral_beer_lambert_loss() {
     with_cx(|cx, _| {
         let densities = [1.0, 3.0, 0.0, 2.0];

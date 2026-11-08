@@ -16,9 +16,9 @@
 //! nonlinear. Linear transport APIs and their superposition remain unchanged.
 
 use super::{
-    AbsorbingGrid, BeamPowerDeposition, CellBeamPower, CellRay, ContentHash, Cx, Point3, Vec3,
-    VolumeTransportError, absorb_beam, add_compensated, checkpoint, det, positive_product,
-    validate_ray,
+    AbsorbingGrid, BeamOpticalDepth, BeamPowerDeposition, CellBeamPower, CellRay, ContentHash, Cx,
+    Point3, Vec3, VolumeTransportError, absorb_beam, add_compensated, checkpoint, det,
+    positive_product, removed_power, validate_ray,
 };
 use crate::volumes::transport::CellPalette;
 use fs_blake3::DomainHasher;
@@ -254,6 +254,8 @@ impl<'m, 'g> TwoPhotonAbsorbingGrid<'m, 'g> {
             return Ok(result);
         };
         let mut correction = 0.0;
+        let mut linear_depth = BeamOpticalDepth::default();
+        let mut linear_incident_power_w = incident_power_w;
         let mut last_linear = None;
         let mut kappa = 0.0;
         while let Some(cell) = cells.next(cx)? {
@@ -281,8 +283,26 @@ impl<'m, 'g> TwoPhotonAbsorbingGrid<'m, 'g> {
                     .at(wavelength_nm)?;
                 last_linear = Some(linear);
             }
-            let (absorbed, transmitted) =
-                absorb_two_photon(power, beam_area_m2, rho, cell.length_m, kappa, law.beta_m_w);
+            let (absorbed, transmitted) = if law.beta_m_w == 0.0 {
+                if kappa == 0.0 {
+                    continue;
+                }
+                let tau = positive_product(rho, kappa, cell.length_m);
+                let absorbed =
+                    removed_power(power, -det::expm1(-tau), rho, cell.length_m, kappa, kappa);
+                (
+                    absorbed,
+                    linear_depth.transmit(linear_incident_power_w, tau),
+                )
+            } else {
+                let partition =
+                    absorb_two_photon(power, beam_area_m2, rho, cell.length_m, kappa, law.beta_m_w);
+                // Nonlinear attenuation depends on the entering irradiance.
+                // Start any following linear run at this exact output power.
+                linear_depth = BeamOpticalDepth::default();
+                linear_incident_power_w = partition.1;
+                partition
+            };
             if !absorbed.is_finite() || !transmitted.is_finite() {
                 return Err(VolumeTransportError::Unrepresentable.into());
             }
