@@ -4223,3 +4223,40 @@ never alter the caller's accepted state. Physical regressions cover tensor
 softening/cooling without plastic healing, independent potential and subsequent
 shear-work accounting, maintained-force stiffening without fictitious indentation,
 held-spring work, and refusal of opening with retained shear energy.
+
+### Retained translation/twist loading apparatus for plastic shear layers
+
+`normal_patch::PlasticLayerShearDrive` adds a physical three-coordinate loading
+spring to the original finite-gap plastic/layer contact owner. Translation and
+infinitesimal twist use conjugate coordinates
+`q=[u_x,u_y,l*theta]`, `w=[F_x,F_y,M/l]`; a full reciprocal positive-definite
+stiffness retains translation/twist coupling. The authored spin length is a
+coordinate scale, not a material fit. Its stiffness must transform by congruence
+when that scale changes.
+
+The spring is integrated by its exact quadratic-potential midpoint relation.
+Elimination adds `2*A*K^-1*A^T` to the original simultaneous contact response
+and adds the retained spring extension to released motion. The matrix is
+prepared once using the existing factorization and bounded contact owner.
+There is no outer nonlinear solver, diagonalized recoil or second material
+return map. All layer trials borrow the same original history and physical
+interval; accepted spring, normal and elastic/plastic/Maxwell/Kelvin histories
+form one complete candidate. Normal approach/load/spring substeps retain every
+shear/apparatus coordinate and the original opening-energy refusal.
+
+Receipts distinguish actual stage work, polarized loading-spring potential
+change, original layer storage and physical losses, and signed work transferred
+to the caller's original body response. That last account is
+`sum(F*(C_body*F-du_body_free))`; it is neither heat nor invented body storage.
+A stationary stage can release spring energy into actual plastic/viscoelastic
+flow. Native normal plastic work remains separate. Complete physical work and
+spring force balance must close before publication.
+
+The fixed tangent registration, supplied body-response validity and explicit
+accumulated small-rotation bound remain binding. This adds neither a moving
+material grid, apparatus inertia, ideal force control, temperature prediction
+nor calibrated friction. The body and thermal owners must jointly accept their
+own motion and heat transactions. Four G0/G1/G3/G4 regressions specify an
+independent uncondensed seven-unknown equilibrium, held-stage relaxation and
+cyclic reversal, spin-length congruence, and atomic normal/opening/domain/
+owner/cancellation refusals.

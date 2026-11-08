@@ -1042,3 +1042,6 @@ fn coefficient_refresh_refuses_incompatible_memory_and_opening_without_partial_a
         assert_eq!(before, saved);
     });
 }
+
+#[path = "finite_gap_plastic_layer/drive.rs"]
+mod drive;

@@ -11,6 +11,9 @@
 //! with recoverable shear storage refuses: no spring energy, Maxwell memory, or
 //! permanent slip is silently discarded or relabelled as heat.
 
+mod drive;
+pub use drive::*;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;
@@ -375,6 +378,27 @@ impl FiniteGapPlasticLayerContact {
         controls: TangentialSolveConfig,
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticLayerShearAdvance, FiniteGapPlasticLayerError> {
+        self.advance_shear_with_response(
+            before,
+            released_increment_m,
+            duration_s,
+            controls,
+            &self.owner.response,
+            cx,
+        )
+    }
+
+    // A physical apparatus may contribute an exactly eliminated linear response.
+    // It cannot replace the original layer owner, histories, pressure, or work audit.
+    fn advance_shear_with_response(
+        &self,
+        before: &FiniteGapPlasticLayerState,
+        released_increment_m: &[[f64; 2]],
+        duration_s: f64,
+        controls: TangentialSolveConfig,
+        response: &PreparedTangentialContacts,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticLayerShearAdvance, FiniteGapPlasticLayerError> {
         checkpoint(cx)?;
         self.admit(before)?;
         if released_increment_m.len() != self.owner.sites.len() {
@@ -415,10 +439,7 @@ impl FiniteGapPlasticLayerContact {
                 },
             });
         }
-        let result = self
-            .owner
-            .response
-            .advance(&inputs, || cx.checkpoint().is_err())?;
+        let result = response.advance(&inputs, || cx.checkpoint().is_err())?;
         let mut shear = Vec::with_capacity(self.owner.sites.len());
         let mut contacts = Vec::with_capacity(self.owner.sites.len());
         let mut dissipation = Vec::with_capacity(self.owner.sites.len());
