@@ -89,8 +89,9 @@ pub enum DampingModel {
 /// Reference inertia for the plate's P1 translational and rotational fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellMassFormulation {
-    /// Split each triangle's mass and rotary inventory equally at its vertices.
-    /// This is the original [`ShellPlate::assemble`] behavior.
+    /// Positive row sums of the reference mass. Uniform density splits each
+    /// triangle's inventory equally, preserving [`ShellPlate::assemble`].
+    /// Graded density retains total mass and its first moments.
     Lumped,
     /// Integrate products of P1 shape functions exactly, retaining cross-node
     /// inertia for nonuniform velocity fields. Both formulations keep the
@@ -337,21 +338,69 @@ impl ShellPlate {
         &self,
         mass_formulation: ShellMassFormulation,
     ) -> Result<ShellAssembly, ShellError> {
+        self.assemble_reference_mass(mass_formulation, None)
+    }
+
+    /// Assemble positive P1 volumetric density [kg/m³] at the three original
+    /// corners of each triangle, in connectivity order. Shared corners may
+    /// differ between triangles, retaining material interfaces without averaging.
+    /// This field replaces the scalar material density only for inertia.
+    ///
+    /// The existing exact P1 mass owner integrates density together with both
+    /// velocity shapes; lumping takes its row sums. Reference geometry and
+    /// thickness define the original inventory, retained in support reduction
+    /// and Rayleigh damping. Current temperature or deformation must not be
+    /// resampled into this closed-body inventory. The original isotropic rotary
+    /// surrogate remains; this is not a through-thickness laminate model.
+    ///
+    /// # Errors
+    /// Incomplete coverage, nonpositive/nonfinite corner values or
+    /// unrepresentable mass moments refuse before publishing any assembly.
+    pub fn assemble_with_reference_density(
+        &self,
+        reference_density_kg_m3: &[[f64; 3]],
+        mass_formulation: ShellMassFormulation,
+    ) -> Result<ShellAssembly, ShellError> {
+        self.assemble_reference_mass(mass_formulation, Some(reference_density_kg_m3))
+    }
+
+    fn assemble_reference_mass(
+        &self,
+        mass_formulation: ShellMassFormulation,
+        reference_density_kg_m3: Option<&[[f64; 3]]>,
+    ) -> Result<ShellAssembly, ShellError> {
         self.validate()?;
+        if let Some(density) = reference_density_kg_m3 {
+            if density.len() != self.triangles.len()
+                || density.iter().flatten().any(|rho| !rho.is_finite() || *rho <= 0.0)
+            {
+                return Err(ShellError::InvalidInput {
+                    what: "one positive finite reference density per original triangle corner required".into(),
+                });
+            }
+        }
         let dofs = self.nodes.len() * 6;
         let entries = dofs * dofs;
         let mut mass = vec![0.0; entries];
         let mut stiffness = vec![0.0; entries];
         let reference_normal = triangle_geometry(self, self.triangles[0])?.2;
 
-        for &triangle in &self.triangles {
+        for (element, &triangle) in self.triangles.iter().enumerate() {
             let (area, edges, normal) = triangle_geometry(self, triangle)?;
             if dot(normal, reference_normal) < 1.0 - 1e-10 {
                 return Err(ShellError::UnsupportedGeometry {
                     what: "curved, folded, or inconsistently oriented multi-patch triangles require the fs-iga shell frontend".into(),
                 });
             }
-            self.assemble_triangle_mass(triangle, area, mass_formulation, &mut mass);
+            let density = reference_density_kg_m3.map_or(
+                [self.material.density_kg_m3; 3],
+                |field| field[element],
+            );
+            if density[0] == density[1] && density[0] == density[2] {
+                self.assemble_triangle_mass(triangle, area, density[0], mass_formulation, &mut mass)?;
+            } else {
+                self.assemble_triangle_graded_mass(triangle, area, density, mass_formulation, &mut mass)?;
+            }
             self.assemble_triangle(triangle, area, edges, normal, &mut stiffness);
         }
 
@@ -605,13 +654,25 @@ impl ShellPlate {
         &self,
         triangle: [usize; 3],
         area: f64,
+        density: f64,
         formulation: ShellMassFormulation,
         mass: &mut [f64],
-    ) {
-        let density = self.material.density_kg_m3;
+    ) -> Result<(), ShellError> {
         let thickness = self.thickness_m;
         let translational_mass = density * thickness * area / 3.0;
         let rotary_mass = density * thickness.powi(3) * area / 36.0;
+        let minimum_weight = match formulation {
+            ShellMassFormulation::Lumped => 1.0,
+            ShellMassFormulation::ConsistentReference => 0.25,
+        };
+        if [translational_mass, rotary_mass]
+            .into_iter()
+            .any(|m| !m.is_finite() || m * minimum_weight <= 0.0)
+        {
+            return Err(ShellError::InvalidInput {
+                what: "shell reference mass moments must be finite and positive".into(),
+            });
+        }
         let n = self.nodes.len() * 6;
         for row in triangle {
             for column in triangle {
@@ -639,6 +700,53 @@ impl ShellPlate {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn assemble_triangle_graded_mass(
+        &self,
+        triangle: [usize; 3],
+        area: f64,
+        density: [f64; 3],
+        formulation: ShellMassFormulation,
+        mass: &mut [f64],
+    ) -> Result<(), ShellError> {
+        use crate::membrane::inertia::{p1_reference_consistent_mass, p1_reference_row_masses};
+
+        let bad = || ShellError::InvalidInput {
+            what: "graded shell reference mass moments must be finite and positive".into(),
+        };
+        let areal_density = density.map(|rho| rho * self.thickness_m);
+        let translation = match formulation {
+            ShellMassFormulation::Lumped => {
+                let rows = p1_reference_row_masses(area, areal_density).map_err(|_| bad())?;
+                core::array::from_fn(|i| {
+                    core::array::from_fn(|j| if i == j { rows[i] } else { 0.0 })
+                })
+            }
+            ShellMassFormulation::ConsistentReference => {
+                p1_reference_consistent_mass(area, areal_density).map_err(|_| bad())?
+            }
+        };
+        let rotary_factor = self.thickness_m * self.thickness_m / 12.0;
+        let n = self.nodes.len() * 6;
+        for (i, row) in triangle.into_iter().enumerate() {
+            for (j, column) in triangle.into_iter().enumerate() {
+                let linear = translation[i][j];
+                if linear == 0.0 {
+                    continue;
+                }
+                let rotary = linear * rotary_factor;
+                if !rotary.is_finite() || rotary <= 0.0 {
+                    return Err(bad());
+                }
+                for component in 0..6 {
+                    let inventory = if component < 3 { linear } else { rotary };
+                    add(mass, n, dof(row, component), dof(column, component), inventory);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn assemble_triangle(

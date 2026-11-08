@@ -94,6 +94,64 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 #[test]
+fn graded_density_changes_native_impulse_response_at_fixed_total_mass() {
+    let mut p = plate();
+    p.nodes.truncate(3);
+    p.triangles.truncate(1);
+    let impulse_ns = 0.01;
+    for formulation in [ShellMassFormulation::Lumped, ShellMassFormulation::ConsistentReference] {
+        let mut speeds = Vec::new();
+        for (rho, inverse_mass) in [([1.0, 2.0, 3.0], [240.0 / 7.0, 7180.0 / 63.0]),
+                                   ([3.0, 2.0, 1.0], [80.0 / 3.0, 4780.0 / 63.0])] {
+            let model = MovingShellModel::new_with_reference_density(
+                p.clone(), vec![rho], formulation, 1, || false,
+            ).unwrap();
+            assert_eq!(model.reference_density_kg_m3(), Some([rho].as_slice()));
+            // Both triangular inventories weigh 0.1 kg. For the first density
+            // the exact P1 translational matrix is
+            // [[16,9,10],[9,20,11],[10,11,24]] / 1200 kg, determinant
+            // numerator 3780. Swapping rho_0/rho_2 swaps the first/last rows
+            // and columns, giving the two independent inverse-mass values.
+            let translation: Vec<_> = (0..18).map(|i| if i % 6 == 2 { 1.0 } else { 0.0 }).collect();
+            near(2.0 * model.assembly().full_mass.quadratic_energy(&translation), 0.1, 2e-16);
+            let zero = vec![0.0; 18];
+            let mut motion = model.start(&zero, &zero, &[], config(), || false).unwrap();
+            let report = motion.apply_impulses(&[ShellPointImpulse {
+                point: ShellLoadPoint { triangle: 0, barycentric: [1.0, 0.0, 0.0], offset_m: [0.0; 3] },
+                linear_impulse_ns: [0.0, 0.0, impulse_ns],
+                angular_impulse_nms: [0.0; 3],
+            }], || false).unwrap();
+            let index = usize::from(formulation == ShellMassFormulation::ConsistentReference);
+            let expected = impulse_ns * inverse_mass[index];
+            near(motion.state().velocity[2], expected, 2e-14);
+            near(report.momentum_change.linear[2], impulse_ns, 2e-16);
+            near(report.kinetic_energy_change_j, 0.5 * impulse_ns * expected, 2e-16);
+            near(report.energy_residual_j, 0.0, 2e-16);
+            let energy = motion.state().total_energy_j;
+            motion.advance(config().dt_s, &[], || false).unwrap();
+            near(motion.state().total_energy_j, energy, 2e-14 * energy);
+            assert_eq!(model.reference_density_kg_m3(), Some([rho].as_slice()));
+            speeds.push(expected);
+        }
+        assert!(speeds[1] < speeds[0], "concentrating density at the impact corner lowers its response");
+    }
+}
+
+#[test]
+fn reference_density_motion_admission_is_cancellable_and_checks_coverage() {
+    for density in [vec![], vec![[1.0; 3]], vec![[1.0, -1.0, 1.0]; 2]] {
+        assert!(MovingShellModel::new_with_reference_density(
+            plate(), density, ShellMassFormulation::ConsistentReference, 1, || false,
+        ).is_err());
+    }
+    assert!(matches!(MovingShellModel::new_with_reference_density(
+        plate(), vec![[1.0; 3]; 2], ShellMassFormulation::ConsistentReference, 1, || true,
+    ), Err(MovingLoadError::Cancelled)));
+    let model = MovingShellModel::new(plate(), 1, || false).unwrap();
+    assert!(model.reference_density_kg_m3().is_none());
+}
+
+#[test]
 fn distributed_wrenches_keep_force_couple_and_reference_lever_arms() {
     let model = MovingShellModel::new(plate(), 4, || false).unwrap();
     let mut second = wrench(point(1, [0.2, 0.3, 0.5]));

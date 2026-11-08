@@ -143,6 +143,7 @@ impl From<ShellTimeError> for MovingLoadError {
 pub struct MovingShellModel {
     plate: ShellPlate,
     assembly: ShellAssembly,
+    reference_density_kg_m3: Option<Vec<[f64; 3]>>,
     free_index: Vec<Option<usize>>,
     max_load_points: usize,
     payloads: Vec<ShellRigidPayload>,
@@ -173,15 +174,49 @@ impl MovingShellModel {
         plate: ShellPlate,
         mass_formulation: ShellMassFormulation,
         max_load_points: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MovingLoadError> {
+        Self::new_reference_mass(plate, mass_formulation, None, max_load_points, cancelled)
+    }
+
+    /// Retain positive P1 reference density [kg/m³] at every original triangle
+    /// corner. The owned field replaces scalar plate density for the selected
+    /// native mass, including rotary inertia, support reactions and damping.
+    /// Every force, event impulse, contact compliance and Newmark step then
+    /// consumes that same immutable reference inventory, without reassembly or
+    /// resampling at current conditions. No material-source calibration or
+    /// finite-rotation claim is added.
+    pub fn new_with_reference_density(
+        plate: ShellPlate,
+        reference_density_kg_m3: Vec<[f64; 3]>,
+        mass_formulation: ShellMassFormulation,
+        max_load_points: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MovingLoadError> {
+        Self::new_reference_mass(
+            plate,
+            mass_formulation,
+            Some(reference_density_kg_m3),
+            max_load_points,
+            cancelled,
+        )
+    }
+
+    fn new_reference_mass(
+        plate: ShellPlate,
+        mass_formulation: ShellMassFormulation,
+        reference_density_kg_m3: Option<Vec<[f64; 3]>>,
+        max_load_points: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MovingLoadError> {
         poll(&mut cancelled)?;
         if max_load_points == 0 || max_load_points > 4096 {
             return Err(invalid("moving shell load bound must be in 1..=4096"));
         }
-        let assembly = plate
-            .assemble_with_mass_formulation(mass_formulation)
-            .map_err(MovingLoadError::Spatial)?;
+        let assembly = match reference_density_kg_m3.as_deref() {
+            Some(density) => plate.assemble_with_reference_density(density, mass_formulation),
+            None => plate.assemble_with_mass_formulation(mass_formulation),
+        }.map_err(MovingLoadError::Spatial)?;
         let mut free_index = vec![None; assembly.full_mass.dimension()];
         for (free, &full) in assembly.free_dofs.iter().enumerate() {
             free_index[full] = Some(free);
@@ -190,6 +225,7 @@ impl MovingShellModel {
         Ok(Self {
             plate,
             assembly,
+            reference_density_kg_m3,
             free_index,
             max_load_points,
             payloads: Vec::new(),
@@ -199,6 +235,11 @@ impl MovingShellModel {
     /// Validated, immutable original spatial model.
     pub fn plate(&self) -> &ShellPlate {
         &self.plate
+    }
+    /// Original corner reference density, or `None` for scalar material density.
+    /// These values describe the original inventory, not a current-density query.
+    pub fn reference_density_kg_m3(&self) -> Option<&[[f64; 3]]> {
+        self.reference_density_kg_m3.as_deref()
     }
     /// Native full/reduced operators, including any attached payload inertia,
     /// and the original fixed support membership.
