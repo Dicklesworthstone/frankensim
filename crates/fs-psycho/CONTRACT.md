@@ -80,8 +80,8 @@ test).
 - `signal::pareto_metrics` — the batch set for Pareto/listening
   consumers (stationary sones + phon, N5/Nmax, sharpness, mean
   DW-block roughness with block count, log-attack-time, ECMA T-TNR
-  and T-PR on the largest power-of-two prefix with that prefix
-  length disclosed) from one 48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
+  and T-PR on the complete native-length recording, with the original
+  sample count disclosed) from one 48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
   bitwise the standalone call's value (pinned by test); any
   component's typed refusal propagates — no partial results.
 - `tonality::{tone_to_noise_ecma, prominence_ratio_ecma}` — ECMA-74
@@ -90,8 +90,13 @@ test).
   statement-for-statement from the Apache-2.0 MoSQITo reference
   (Bray smoothed-spectrum screening, 1/24-octave criteria, annex
   D.8/D.10 critical bands, D.7.1 hearing threshold). Detection band
-  (89.1, 11200) Hz; power-of-two block (the reference was re-run at
-  the fixture lengths). Disclosed deviations in the module doc, all
+  (89.1, 11200) Hz; exact native-length block, including odd and
+  non-power-of-two counts through `fs-fft::GeneralFft`. Bluestein's internal
+  convolution padding does not change the record, sample clock or frequency
+  spacing. Power-of-two records retain the original Stockham route and
+  reference pins. Focused G1/G3 tests exercise 48000/48001-sample records,
+  tones arriving after the former truncated prefix, and bitwise replay.
+  Disclosed deviations in the module doc, all
   on paths the reference cannot execute deterministically or
   correctly: uninitialized smoothed-spectrum head/tail
   (deterministic completion), zero-magnitude floor at the
@@ -215,7 +220,7 @@ test).
     one band -> one merged tone, pinned); far-pair fixture exercises
     the far-apart branch's ACCEPT path (bin-exact tones; a weak
     non-prominent tone with total exactly 0). Tonality refusals
-    (non-power-of-two, short, NaN, bad rate, unresolvable detection
+    (short, NaN, bad rate, unresolvable detection
     band, too-coarse resolution for 1/24-octave smoothing incl. the
     review's panic configuration) typed and executed.
 13. Fluctuation strength: the 1-vacil reference stimulus reads
@@ -294,7 +299,7 @@ temporal-asymmetry behavior; phon conversion + signal refusals;
 the reference binary consumed to mint every signal-path pin; batch
 aggregation-exactness (bitwise) + refusal propagation; tonality
 exactness on five fixtures (incl. both multi-tone branches) + typed
-tonality refusals.
+tonality refusals; native-length tail-tone coverage and bitwise replay.
 
 `examples/psycho_descriptors.rs` (4 unit tests + IRP M7.5-W1 Python
 bridge `test_psycho_bridge.py`): bitwise equality between parsed

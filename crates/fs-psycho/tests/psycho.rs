@@ -930,19 +930,19 @@ fn pareto_batch_is_aggregation_exact() {
             .expect("lat")
             .to_bits()
     );
-    // Tonality on the largest power-of-two prefix (72000 -> 65536),
-    // bitwise vs the standalone calls on that exact prefix.
-    assert_eq!(m.tonality_block, 65_536);
+    // Tonality on the complete native 72000-sample record,
+    // bitwise vs the standalone calls on that same recording.
+    assert_eq!(m.tonality_block, pcm.len());
     assert_eq!(
         m.tnr_total_db.to_bits(),
-        fs_psycho::tonality::tone_to_noise_ecma(&pcm[..65_536], sigfix::SR)
+        fs_psycho::tonality::tone_to_noise_ecma(&pcm, sigfix::SR)
             .expect("tnr")
             .total_db
             .to_bits()
     );
     assert_eq!(
         m.pr_total_db.to_bits(),
-        fs_psycho::tonality::prominence_ratio_ecma(&pcm[..65_536], sigfix::SR)
+        fs_psycho::tonality::prominence_ratio_ecma(&pcm, sigfix::SR)
             .expect("pr")
             .total_db
             .to_bits()
@@ -1077,16 +1077,46 @@ fn tonality_matches_reference() {
     println!("{{\"suite\":\"fs-psycho\",\"case\":\"tonality\",\"verdict\":\"pass\"}}");
 }
 
+/// G1/G3: native-length spectra retain late tones and replay bitwise.
+#[test]
+fn tonality_native_lengths_keep_late_tones_and_the_original_clock() {
+    use fs_psycho::tonality::{prominence_ratio_ecma, tone_to_noise_ecma};
+    for n in [48_000, 48_001] {
+        let mut pcm = sigfix::lcg_noise(n, 12_345);
+        for (j, value) in pcm.iter_mut().enumerate() {
+            *value *= 0.0001;
+            // A tone appearing after the old 32768-sample prefix was
+            // completely invisible to the batch analysis. This windowed
+            // tone is a deterministic spectrum test, not a stationarity claim.
+            if j >= 32_768 {
+                let phase = core::f64::consts::TAU * 1_000.0 * j as f64 / sigfix::SR;
+                *value += 0.02 * fs_math::det::sin(phase);
+            }
+        }
+        for metric in [tone_to_noise_ecma, prominence_ratio_ecma] {
+            let full = metric(&pcm, sigfix::SR).expect("native-length spectrum");
+            assert!(
+                full.tones
+                    .iter()
+                    .any(|tone| tone.prominent && (tone.frequency_hz - 1_000.0).abs() < 2.0),
+                "late tone lost for N={n}: {:?}",
+                full.tones
+            );
+            let prefix = metric(&pcm[..32_768], sigfix::SR).expect("noise prefix");
+            assert!(prefix.tones.iter().all(|tone| !tone.prominent));
+            let replay = metric(&pcm, sigfix::SR).expect("deterministic replay");
+            assert_eq!(full.total_db.to_bits(), replay.total_db.to_bits());
+        }
+    }
+}
+
 /// Tonality refusals, typed by name.
 #[test]
 fn tonality_refusals_are_typed() {
     use fs_psycho::tonality::tone_to_noise_ecma;
     let good = sigfix::tonal_a();
-    // Non-power-of-two length.
-    assert!(matches!(
-        tone_to_noise_ecma(&good[..60_000], sigfix::SR),
-        Err(PsychoError::Shape { .. })
-    ));
+    // Non-power-of-two records keep their original samples and clock.
+    assert!(tone_to_noise_ecma(&good[..60_000], sigfix::SR).is_ok());
     // Too short.
     assert!(matches!(
         tone_to_noise_ecma(&good[..2048], sigfix::SR),

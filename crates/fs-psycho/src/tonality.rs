@@ -7,9 +7,9 @@
 //! per ECMA TR/108 over the prominent tones).
 //!
 //! Scope facts, stated:
-//! - Single stationary block, Pa input, power-of-two length (fs-fft;
-//!   the reference FFTs the whole signal at its native length — the
-//!   reference was re-run at the fixture lengths to mint every pin).
+//! - Single stationary block, Pa input, at its exact native length.
+//!   The existing general FFT preserves odd and non-power-of-two records
+//!   without truncation, resampling or padding the physical frequency grid.
 //! - The spectrum front end is the reference's `comp_spectrum`:
 //!   sum-normalized Hann window, one-sided spectrum scaled by the
 //!   empirical 1.42, frequency axis labeled `(k+1) fs/n` (the
@@ -31,7 +31,7 @@
 //! THE VALUES ARE NEVER A SUBSTITUTE FOR HUMAN LISTENING (crate law).
 
 use crate::PsychoError;
-use fs_fft::{C64, Fft};
+use fs_fft::{C64, GeneralFft, GeneralFftBudget, GeneralFftError};
 use fs_math::det;
 
 /// One detected tonal component.
@@ -101,23 +101,35 @@ fn argmin_abs(xs: &[f64], target: f64) -> usize {
 
 /// The reference's `comp_spectrum` (db=True): sum-normalized Hann,
 /// one-sided x1.42, axis (k+1)fs/n, dB re 2e-5.
-fn spectrum_db(pcm_pa: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
+fn spectrum_db(pcm_pa: &[f64], sample_rate: f64) -> Result<(Vec<f64>, Vec<f64>), PsychoError> {
     let n = pcm_pa.len();
+    // This API already owns the complete record. Size arithmetic is checked
+    // before allocation, and the general plan reuses Stockham directly for
+    // power-of-two lengths while retaining the original N for every other N.
+    let fft = GeneralFft::new(
+        n,
+        GeneralFftBudget {
+            max_samples: n,
+            max_workspace_bytes: GeneralFft::required_workspace_bytes(n).map_err(fft_error)?,
+        },
+    )
+    .map_err(fft_error)?;
     let mut win = vec![0.0f64; n];
     let mut wsum = 0.0;
     for (i, w) in win.iter_mut().enumerate() {
         *w = 0.5 - 0.5 * det::cos(2.0 * core::f64::consts::PI * usize_f64(i) / usize_f64(n - 1));
         wsum += *w;
     }
-    let fft = Fft::new(n);
-    let mut scratch = vec![C64::new(0.0, 0.0); n];
+    let mut scratch = vec![C64::new(0.0, 0.0); fft.scratch_len()];
     let mut buf: Vec<C64> = pcm_pa
         .iter()
         .zip(&win)
         .map(|(x, w)| C64::new(x * w / wsum, 0.0))
         .collect();
-    fft.forward(&mut buf, &mut scratch);
-    let half = n / 2;
+    fft.forward(&mut buf, &mut scratch).map_err(fft_error)?;
+    // Even N omits its Nyquist bin, as in the reference. Odd N has no
+    // Nyquist bin: its last positive-frequency coefficient belongs here.
+    let half = n.div_ceil(2);
     let db: Vec<f64> = buf[..half]
         .iter()
         .map(|c| {
@@ -134,7 +146,18 @@ fn spectrum_db(pcm_pa: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     let freq: Vec<f64> = (0..half)
         .map(|k| usize_f64(k + 1) * sample_rate / usize_f64(n))
         .collect();
-    (db, freq)
+    Ok((db, freq))
+}
+
+fn fft_error(error: GeneralFftError) -> PsychoError {
+    match error {
+        GeneralFftError::NonFinite { .. } => PsychoError::NonFinite {
+            what: "tonality Fourier coefficient",
+        },
+        _ => PsychoError::Shape {
+            what: "tonality transform size or workspace is not representable",
+        },
+    }
 }
 
 /// The reference's `_getFrequencies(90, 11200, 24, G=10, fr=1000)`
@@ -454,9 +477,9 @@ fn screening_for_tones(freqs: &[f64], spec_db: &[f64]) -> Result<Vec<usize>, Psy
 /// Validate + build the masked detection-band view.
 fn detection_band(pcm_pa: &[f64], sample_rate: f64) -> Result<(Vec<f64>, Vec<f64>), PsychoError> {
     let n = pcm_pa.len();
-    if !n.is_power_of_two() || n < 4096 {
+    if n < 4096 {
         return Err(PsychoError::Shape {
-            what: "tonality needs a power-of-two block of at least 4096 samples",
+            what: "tonality needs a block of at least 4096 samples",
         });
     }
     if !sample_rate.is_finite() || sample_rate <= 0.0 {
@@ -467,7 +490,7 @@ fn detection_band(pcm_pa: &[f64], sample_rate: f64) -> Result<(Vec<f64>, Vec<f64
     if pcm_pa.iter().any(|v| !v.is_finite()) {
         return Err(PsychoError::NonFinite { what: "pcm sample" });
     }
-    let (db, freq) = spectrum_db(pcm_pa, sample_rate);
+    let (db, freq) = spectrum_db(pcm_pa, sample_rate)?;
     let lo = freq.partition_point(|&f| f <= F_LOW);
     let hi = freq.partition_point(|&f| f < F_HIGH);
     if hi.saturating_sub(lo) < 64 {
@@ -515,7 +538,7 @@ impl ToneAccum {
 /// tones per ECMA TR/108.
 ///
 /// # Errors
-/// [`PsychoError::Shape`] on a non-power-of-two or too-short block;
+/// [`PsychoError::Shape`] on a too-short or unrepresentable block;
 /// [`PsychoError::NonFinite`] on bad samples/rate;
 /// [`PsychoError::DegenerateSignal`] when the detection band is
 /// unresolvable at this rate/length.
