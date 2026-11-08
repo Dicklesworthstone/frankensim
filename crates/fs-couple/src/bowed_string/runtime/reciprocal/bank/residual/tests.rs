@@ -37,6 +37,104 @@ fn static_green_is_the_complete_modal_sum() {
     assert!(exact-sum > 0.0 && exact-sum <= 1e-6*exact, "{exact:e} vs {sum:e}");
 }
 
+// Independent sine eigenfunction sum, using std trigonometry and summing the
+// smallest terms first. Starting above the retained modes checks their omitted tail
+// without subtracting the retained compliance from the production Green function.
+fn modal_compliance_reference(card: &BowedStringCard, x: f64, y: f64, first: usize) -> f64 {
+    (first..=40_000).rev().map(|n| {
+        let order = n as f64*core::f64::consts::PI;
+        let wave = order/card.length_m;
+        2.0*(order*x).sin()*(order*y).sin()
+            /(card.length_m*(card.tension_n*wave.powi(2)+card.bending_stiffness_n_m2*wave.powi(4)))
+    }).sum()
+}
+
+#[test]
+fn bending_dominated_green_matches_modes_and_is_continuous_at_the_series_switch() {
+    let mut beam = card(1e-3, 8);
+    beam.length_m = 0.5;
+    for (x, y) in [(0.1, 0.1), (0.1, BRIDGE), (0.5, 0.52), (0.8, 0.8), (0.93, 0.07)] {
+        let mut below_switch = 0.0;
+        for q in [1e-20, 1e-12, 1e-8, 1e-3*(1.0-1e-8), 1e-3*(1.0+1e-8)] {
+            beam.tension_n = q*beam.bending_stiffness_n_m2/beam.length_m.powi(2);
+            let actual = static_green_m_n(&beam, x, y);
+            let reference = modal_compliance_reference(&beam, x, y, 1);
+            assert!(actual > 0.0 && (actual-reference).abs() <= 5e-11*reference,
+                "q {q:e}, ({x}, {y}): Green {actual:e}, independent modes {reference:e}");
+            assert_eq!(actual.to_bits(), static_green_m_n(&beam, y, x).to_bits());
+            if q < 1e-3 { below_switch = actual; }
+            else {
+                assert!((actual-below_switch).abs() <= 5e-11*below_switch,
+                    "({x}, {y}): switch jump from {below_switch:e} to {actual:e}");
+            }
+        }
+    }
+}
+
+#[test]
+fn bending_dominated_green_has_the_pinned_beam_limit_even_near_the_ends() {
+    let mut beam = card(1e-3, 8);
+    beam.length_m = 0.5;
+    beam.tension_n = 1e-18;
+    let (l, ei) = (beam.length_m, beam.bending_stiffness_n_m2);
+    for (x, y) in [(1e-10_f64, 1e-10), (1e-10, 0.8), (0.1, 0.1), (0.8, 0.8),
+        (1.0-1e-10, 1.0-1e-10)] {
+        let (a, b) = (x.min(y)*l, x.max(y)*l);
+        // The piecewise cubic solution of EI*w''''=delta, w=w''=0 at
+        // both ends: a*(L-b)*(L^2-a^2-(L-b)^2)/(6*EI*L).
+        let reference = a*(l-b)*(2.0*b*(l-b)+(b-a)*(b+a))/(6.0*ei*l);
+        let actual = static_green_m_n(&beam, x, y);
+        assert!(actual > 0.0 && (actual-reference).abs() <= 2e-14*reference,
+            "({x}, {y}): Green {actual:e}, pinned beam {reference:e}");
+    }
+}
+
+#[test]
+fn bending_dominated_polarized_bridge_is_passive_and_rotation_invariant() {
+    let mut beam = card(1e-3, 4);
+    beam.length_m = 0.5;
+    beam.tension_n = 1e-18;
+    let (bridge_station, point_station) = (0.8, 0.3);
+    let condensed = condense(residual_compliance_m_n(&beam, bridge_station, bridge_station).unwrap(),
+        BRIDGE_N_M, 3.0).unwrap();
+    assert!(condensed.stiffness_n_m > 0.0 && condensed.stiffness_n_m < BRIDGE_N_M);
+    assert!(condensed.damping_n_s_m > 0.0 && condensed.damping_n_s_m < 3.0);
+    let tail = |x, y| modal_compliance_reference(&beam, x, y, beam.mode_count+1);
+    let (bb, sb, ss) = (tail(bridge_station, bridge_station), tail(point_station, bridge_station),
+        tail(point_station, point_station));
+    let reference_k = BRIDGE_N_M/(1.0+BRIDGE_N_M*bb);
+    let reference_axis = [0.6, 0.8];
+    let reference_cross = reference_axis.map(|axis| reference_k*axis*sb);
+    let reference_compliance = [ss-reference_k*(0.6*sb).powi(2), -reference_k*0.6*0.8*sb*sb,
+        -reference_k*0.6*0.8*sb*sb, ss-reference_k*(0.8*sb).powi(2)];
+    let mut baseline: Option<(Vec<f64>, Vec<f64>)> = None;
+    for angle in [0.0_f64, 0.51, 1.7] {
+        let (s, c) = angle.sin_cos();
+        let rotate = |v: [f64; 2]| [c*v[0]-s*v[1], s*v[0]+c*v[1]];
+        let bridge = ResidualBridge { card: &beam, station_fraction: bridge_station,
+            axis: rotate(reference_axis), condensed };
+        let points = [[1.0, 0.0], [0.0, 1.0]].map(|direction| ResidualStop {
+            string: 0, station_fraction: point_station, direction: rotate(direction) });
+        let (cross, g) = stop_residual(&[bridge], &points).unwrap();
+        for (actual, reference) in cross.iter().zip(reference_cross) {
+            assert!((actual-reference).abs() <= 2e-9*reference.abs());
+        }
+        for (actual, reference) in g.iter().zip(reference_compliance) {
+            assert!((actual-reference).abs() <= 2e-9*ss);
+        }
+        assert_eq!(g[1].to_bits(), g[2].to_bits());
+        assert!(g[0] > 0.0 && g[3] > 0.0 && g[0]*g[3]-g[1]*g[2] > 0.0);
+        if let Some((base_cross, base_g)) = &baseline {
+            for (actual, original) in cross.iter().zip(base_cross) {
+                assert!((actual-original).abs() <= 2e-14*reference_cross[1].abs());
+            }
+            for (actual, original) in g.iter().zip(base_g) {
+                assert!((actual-original).abs() <= 2e-14*ss);
+            }
+        } else { baseline = Some((cross, g)); }
+    }
+}
+
 #[test]
 fn residual_is_positive_symmetric_and_refuses_supports_off_the_span() {
     let a = card(1.6e-5, 25);

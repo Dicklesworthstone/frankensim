@@ -32,10 +32,39 @@ pub(super) mod coupled_bridge;
 #[must_use]
 pub fn static_green_m_n(card: &BowedStringCard, x: f64, y: f64) -> f64 {
     let (l, t) = (card.length_m, card.tension_n);
-    let (a, b) = (x.min(y)*l, x.max(y)*l);
+    let (lo, hi) = (x.min(y), x.max(y));
+    let (a, b) = (lo*l, hi*l);
     let string = a*(l-b)/l;
     if !(card.bending_stiffness_n_m2 > 0.0) { return string/t; }
     let k = det::sqrt(t/card.bending_stiffness_n_m2);
+    let q = (k*l)*(k*l);
+    if q <= 1e-3 {
+        // The two terms below coalesce as tension vanishes. With u=lo,
+        // v=1-hi and sinhc(z)=sinh(z)/z, instead evaluate
+        // L^3/EI * u*v * [sinhc(sqrt(q))-sinhc(u*sqrt(q))*sinhc(v*sqrt(q))]
+        //                / [q*sinhc(sqrt(q))].
+        // Its numerator divided by q is
+        // c1 + q*c2 + q^2*c3 + q^3*c4 + O(q^4).
+        // Positive coefficients obey c_n/c1 <= 1/(2n-2)!.
+        // At q <= 1e-3, the relative truncation bound is below 2.49e-17.
+        // Positive factorizations also avoid cancellation near either end:
+        // (hi-lo)*(1+u+v) = 1-(u+v)^2.
+        let (u, v) = (lo, 1.0-hi);
+        let (u2, v2, uv) = (u*u, v*v, u*v);
+        let s2 = (u+v)*(u+v);
+        let gap = (hi-lo)*(1.0+u+v);
+        let c1 = (gap+2.0*uv)/6.0;
+        let c2 = gap*(1.0+s2)/120.0 + uv*(u2+v2)/30.0 + uv*uv/45.0;
+        let c3 = gap*(1.0+s2+s2*s2)/5040.0 + uv*(u2*u2+v2*v2)/840.0
+            + uv*uv*(u2+v2)/630.0 + uv*uv*uv/252.0;
+        let c4 = gap*(1.0+s2)*(1.0+s2*s2)/362880.0
+            + uv*(u2*u2*u2+v2*v2*v2)/45360.0
+            + uv*uv*(u2*u2+v2*v2)/22680.0
+            + uv*uv*uv*(u2+v2)/6480.0 + uv*uv*uv*uv/8100.0;
+        let numerator = c1+q*(c2+q*(c3+q*c4));
+        let denominator = 1.0+q*(1.0/6.0+q*(1.0/120.0+q*(1.0/5040.0+q/362880.0)));
+        return l*l*l/card.bending_stiffness_n_m2*uv*numerator/denominator;
+    }
     // sinh(k a) sinh(k (L - b)) / (k sinh(k L)), with every exponential at most one.
     let bending = det::exp(k*(a-b))*det::expm1(-2.0*k*a)*det::expm1(-2.0*k*(l-b))
         / (-2.0*det::expm1(-2.0*k*l)) / k;
