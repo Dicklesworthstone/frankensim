@@ -14,6 +14,8 @@ use super::{
 use crate::AeroacError;
 use crate::curle3d::moving::{CompactSourceStrength, MovingCompactObserver};
 
+mod energy;
+pub use energy::MovingSourceArrayEnergy;
 mod multipole;
 pub use multipole::{MovingMultipoleHistory, MovingMultipoleSource};
 

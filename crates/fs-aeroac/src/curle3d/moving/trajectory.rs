@@ -31,8 +31,8 @@ pub mod receiver;
 pub mod reflection;
 
 pub use array::{
-    MovingMultipoleHistory, MovingMultipoleSource, MovingSourceArrayBudget, MovingSourceArrayField,
-    PreparedMovingSourceArray,
+    MovingMultipoleHistory, MovingMultipoleSource, MovingSourceArrayBudget, MovingSourceArrayEnergy,
+    MovingSourceArrayField, PreparedMovingSourceArray,
 };
 pub use path::PreparedKinematicTrajectory;
 pub use receiver::{

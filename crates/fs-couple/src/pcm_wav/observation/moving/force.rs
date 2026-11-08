@@ -285,6 +285,27 @@ impl<'a, M: ForceMotion> MovingForceRenderer<'a, M> {
     pub const fn microphone(&self) -> FirstOrder {
         self.microphone
     }
+
+    /// Background fluid velocity in the original laboratory frame [m/s].
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        self.original.mean_flow_velocity_m_s()
+    }
+
+    /// Energy and laboratory transport after coherent source/image summation.
+    /// The original fluid/frame supplies rho, c and U; microphone pickup and
+    /// microphone translation are not acoustic fields or fluid advection.
+    pub fn energy_transport(
+        &self,
+        field: &CompactFieldSample,
+    ) -> Result<fs_aeroac::curle3d::energy::AcousticEnergyTransport, RenderError> {
+        fs_aeroac::curle3d::energy::instantaneous(
+            self.medium,
+            self.mean_flow_velocity_m_s(),
+            field.pressure_pa,
+            field.particle_velocity_m_s,
+        )
+        .map_err(acoustic)
+    }
     /// Original physical source count.
     pub fn source_count(&self) -> usize {
         self.original.source_count()

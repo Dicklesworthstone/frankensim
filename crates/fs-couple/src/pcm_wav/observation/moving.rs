@@ -339,6 +339,13 @@ impl<'a, M: CompactMotion> MovingCompactRenderer<'a, M> {
     pub const fn observer(&self) -> &M::Observer {
         &self.observer
     }
+
+    /// Uniform fluid velocity from the original admitted motion frame [m/s].
+    /// All sources share that receiver/frame; source and microphone velocities
+    /// remain independent kinematics and never replace the background flow.
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        self.tracks[0].source.motion.mean_flow_velocity_m_s()
+    }
     /// Microphone position in the fluid rest frame at one admitted time.
     /// For uniform flow, the common receiver retains its fixed laboratory
     /// position separately; an unrepresentable frame transform may refuse.

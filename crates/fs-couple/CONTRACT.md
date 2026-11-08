@@ -2840,6 +2840,25 @@ prior renderer tests passed focused native builds of the actual source
 modules and original math/material/interval owners. The previous WAV-end-to-end
 test and full Cargo/DSR workspace gates were not executed in that focused lane.
 
+## Energy transport of original acoustic field observations
+
+Moving monopole, force and quadrupole field renderers expose
+`energy_transport(&field)` through the shared acoustic energy reduction. The
+original admitted material and motion frame supply rho, c and laboratory mean
+fluid velocity U. Source motion and microphone motion never substitute for U.
+The input is one coherent physical p/u sample from that renderer, before
+microphone projection or audio filtering; the query advances no history or
+sample cursor and allocates no memory.
+
+The quadratic perturbation energy is `E=(p^2/(rho*c^2)+rho*|u|^2)/2` and its
+laboratory transport is `p*u+U*E`. Existing field samples retain their signed
+pressure-work flux `p*u`, layout and callback behavior. The energy includes
+all retained perturbation velocity, including a convected vortical wake; it
+does not represent a change in background-flow energy or a radiated-power
+qualification. This balance assumes the original homogeneous lossless fluid
+and uniform background flow. Quadratic products can have twice the field
+bandwidth, which matters when sampling their spectra or time averages.
+
 ## Moving stress fields and directional PCM
 
 `quadrupole::moving::field::MovingQuadrupoleFieldRenderer` binds the original

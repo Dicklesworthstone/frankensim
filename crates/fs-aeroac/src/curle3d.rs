@@ -16,6 +16,8 @@
 
 /// Prepared harmonic arrays of physical volume sources and force dipoles.
 pub mod array;
+/// Quadratic perturbation energy and transport of original coherent fields.
+pub mod energy;
 /// Retarded pressure from prescribed moving compact volume and force sources.
 pub mod moving;
 /// Analytic whole-sphere power of coherent compact-source arrays.

@@ -169,6 +169,27 @@ impl<'a, M: CompactMotion> MovingMonopoleRenderer<'a, M> {
     pub const fn microphone(&self) -> FirstOrder {
         self.microphone
     }
+
+    /// Background fluid velocity in the original laboratory frame [m/s].
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        self.original.mean_flow_velocity_m_s()
+    }
+
+    /// Energy and laboratory transport of one coherent field from this renderer.
+    /// Uses the original fluid and mean flow with physical p/u, before microphone
+    /// projection or audio filtering. This observation advances no sample clock.
+    pub fn energy_transport(
+        &self,
+        field: &CompactFieldSample,
+    ) -> Result<fs_aeroac::curle3d::energy::AcousticEnergyTransport, RenderError> {
+        fs_aeroac::curle3d::energy::instantaneous(
+            self.medium,
+            self.mean_flow_velocity_m_s(),
+            field.pressure_pa,
+            field.particle_velocity_m_s,
+        )
+        .map_err(acoustic)
+    }
     /// Physical source count; reflected images do not become new sources.
     pub fn source_count(&self) -> usize {
         self.original.source_count()

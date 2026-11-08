@@ -415,31 +415,15 @@ impl PreparedConvectedMonopoleObserver {
 
     fn finish(&self, sum: StatisticsSum) -> Result<ConvectedMonopoleStatistics, AeroacError> {
         let field = sum.finish(self.scope())?;
-        let mut energy = Dd::from_f64(
-            (0.5 * field.mean_square_pressure_pa2) / self.acoustic.adiabatic_bulk_modulus_pa(),
-        );
-        for axis in 0..3 {
-            energy = energy
-                + Dd::from_f64(0.5 * self.acoustic.density_kg_m3())
-                    * Dd::from_f64(field.velocity_covariance_m2_s2[axis][axis].re);
-        }
-        let mean_perturbation_energy_density_j_m3 = energy.to_f64();
-        let mean_perturbation_energy_flux_w_m2 = core::array::from_fn(|axis| {
-            (Dd::from_f64(field.active_intensity_w_m2[axis])
-                + Dd::from_f64(self.flow_velocity_m_s[axis]) * energy)
-                .to_f64()
-        });
-        if !mean_perturbation_energy_density_j_m3.is_finite()
-            || mean_perturbation_energy_flux_w_m2
-                .iter()
-                .any(|v| !v.is_finite())
-        {
-            return Err(nonfinite("convected perturbation energy or transport"));
-        }
+        let energy = crate::curle3d::energy::time_averaged(
+            self.acoustic,
+            self.flow_velocity_m_s,
+            &field,
+        )?;
         Ok(ConvectedMonopoleStatistics {
             field,
-            mean_perturbation_energy_density_j_m3,
-            mean_perturbation_energy_flux_w_m2,
+            mean_perturbation_energy_density_j_m3: energy.energy_density_j_m3,
+            mean_perturbation_energy_flux_w_m2: energy.energy_flux_w_m2,
         })
     }
 }

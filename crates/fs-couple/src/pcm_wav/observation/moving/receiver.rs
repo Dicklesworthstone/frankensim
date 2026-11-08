@@ -19,6 +19,12 @@ impl sealed::Sealed for &PreparedMovingReceiverSource<'_> {}
 impl<'path> CompactMotion for &PreparedMovingReceiverSource<'path> {
     type Observer = &'path PreparedKinematicTrajectory;
 
+    fn mean_flow_velocity_m_s(self) -> [f64; 3] {
+        self.source()
+            .flow_frame()
+            .map_or([0.0; 3], |frame| frame.velocity_m_s())
+    }
+
     fn admit_observer(self, observer: &Self::Observer) -> Result<(), RenderError> {
         // Equal endpoints are not sufficient: they could have different interior
         // trajectories, accepted clocks, interpolation or preparation policies.

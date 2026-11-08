@@ -27,6 +27,13 @@ pub trait CompactMotion: sealed::Sealed + Copy {
     /// The original receiver owner: a fixed microphone or a borrowed path.
     /// Every source in one render must admit this SAME receiver.
     type Observer: Copy;
+    /// Original uniform fluid velocity relative to the laboratory [m/s].
+    /// Source and microphone translation do not constitute a background flow.
+    /// Untransformed owners describe a quiescent medium; flow-aware owners
+    /// retain this value from their original shared frame.
+    fn mean_flow_velocity_m_s(self) -> [f64; 3] {
+        [0.0; 3]
+    }
     /// Verify the original microphone, material state and geometric limits.
     fn admit_observer(self, observer: &Self::Observer) -> Result<(), RenderError>;
     /// Sample the original receiver position at its physical arrival time.

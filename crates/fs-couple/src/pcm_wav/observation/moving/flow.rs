@@ -17,6 +17,10 @@ impl sealed::Sealed for UniformFlowCompactObserver {}
 impl CompactMotion for UniformFlowCompactObserver {
     type Observer = UniformFlowReceiver;
 
+    fn mean_flow_velocity_m_s(self) -> [f64; 3] {
+        self.velocity_m_s()
+    }
+
     fn admit_observer(self, observer: &Self::Observer) -> Result<(), RenderError> {
         if self.receiver() != *observer {
             return Err(sizing(

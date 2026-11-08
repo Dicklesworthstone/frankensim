@@ -308,6 +308,27 @@ impl<'a, M: QuadrupoleMotion + ForceMotion> MovingQuadrupoleFieldRenderer<'a, M>
     pub const fn microphone(&self) -> FirstOrder {
         self.microphone
     }
+
+    /// Background fluid velocity from the original shared laboratory frame.
+    pub fn mean_flow_velocity_m_s(&self) -> [f64; 3] {
+        self.sources[0].motion.mean_flow_velocity_m_s()
+    }
+
+    /// Energy and laboratory transport of one coherent stress-field sample.
+    /// Retains the original material/frame and uses physical p/u independently
+    /// of microphone projection. This observation changes no history or cursor.
+    pub fn energy_transport(
+        &self,
+        field: &QuadrupoleFieldSample,
+    ) -> Result<fs_aeroac::curle3d::energy::AcousticEnergyTransport, RenderError> {
+        fs_aeroac::curle3d::energy::instantaneous(
+            self.medium,
+            self.mean_flow_velocity_m_s(),
+            field.pressure_pa,
+            field.particle_velocity_m_s,
+        )
+        .map_err(RenderError::Acoustic)
+    }
     pub fn source_count(&self) -> usize {
         self.sources.len()
     }

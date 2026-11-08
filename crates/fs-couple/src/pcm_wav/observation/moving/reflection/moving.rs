@@ -19,6 +19,12 @@ impl sealed::Sealed for &PreparedReflectedMovingReceiverSource<'_> {}
 impl<'path> CompactMotion for &PreparedReflectedMovingReceiverSource<'path> {
     type Observer = &'path MovingReflectionObserver<'path>;
 
+    fn mean_flow_velocity_m_s(self) -> [f64; 3] {
+        self.source()
+            .flow_frame()
+            .map_or([0.0; 3], |frame| frame.velocity_m_s())
+    }
+
     fn admit_observer(self, observer: &Self::Observer) -> Result<(), RenderError> {
         if !core::ptr::eq(self.reflection_observer(), *observer) {
             return Err(sizing(
