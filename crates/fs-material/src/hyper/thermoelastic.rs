@@ -25,6 +25,8 @@ use super::{Hyperelastic, det3};
 use crate::MaterialError;
 use fs_math::dd::Dd;
 
+/// Exact elastic-volume plane stress with moving natural volume and thermal work.
+pub mod incompressible_plane_stress;
 /// Finite-compliance transverse relaxation of the same thermal potential.
 pub mod plane_stress;
 /// Original elastic-source derivatives for the admitted Neo-Hookean model.
@@ -54,6 +56,20 @@ fn trace(a: &[f64; 9]) -> f64 {
 }
 fn dot(a: &[f64; 9], b: &[f64; 9]) -> f64 {
     a.iter().zip(b).fold(0.0, |sum, (x, y)| x.mul_add(*y, sum))
+}
+
+fn elastic_deformation_rate(
+    elastic_deformation: &[f64; 9],
+    reference_jet: &ThermalReferenceJet,
+    deformation_rate: &[f64; 9],
+    temperature_rate_k_s: f64,
+) -> [f64; 9] {
+    let h = reference_jet.reference.elastic_deformation(&IDENTITY);
+    let thermal_direction = product(elastic_deformation, &reference_jet.first_derivative_per_k);
+    let numerator = core::array::from_fn(|i| {
+        (-temperature_rate_k_s).mul_add(thermal_direction[i], deformation_rate[i])
+    });
+    product(&numerator, &h)
 }
 
 // Partial derivatives at fixed Fe, supplied only by the admitted source owner.
@@ -521,16 +537,12 @@ impl FiniteThermoelasticState {
         {
             return Err(invalid("finite deformation and temperature rates required"));
         }
-        let h = self.reference_jet.reference.elastic_deformation(&IDENTITY);
-        let thermal_direction = product(
+        let elastic_deformation_gradient_rate_per_s = elastic_deformation_rate(
             &self.elastic_deformation_gradient,
-            &self.reference_jet.first_derivative_per_k,
+            &self.reference_jet,
+            &deformation_gradient_rate_per_s,
+            temperature_rate_k_s,
         );
-        let elastic_numerator = core::array::from_fn(|i| {
-            (-temperature_rate_k_s)
-                .mul_add(thermal_direction[i], deformation_gradient_rate_per_s[i])
-        });
-        let elastic_deformation_gradient_rate_per_s = product(&elastic_numerator, &h);
         let first_piola_rate_pa_s = core::array::from_fn(|i| {
             self.stress_temperature_derivative_pa_k[i].mul_add(
                 temperature_rate_k_s,

@@ -410,7 +410,7 @@ fn constrained_hessian(
     (hessian, thickness_gradient)
 }
 
-fn kinematic_response(
+pub(crate) fn kinematic_response(
     state: IncompressiblePlaneStressState,
     remainder: RemainderResponse,
     in_plane: &[f64; 4],
@@ -447,7 +447,7 @@ fn kinematic_response(
     })
 }
 
-fn generic_state<L: IncompressiblePlaneStressPotential + ?Sized>(
+pub(crate) fn generic_state<L: IncompressiblePlaneStressPotential + ?Sized>(
     material: &L,
     in_plane: &[f64; 4],
     initial_shear: Option<[f64; 2]>,
@@ -477,7 +477,7 @@ fn generic_state<L: IncompressiblePlaneStressPotential + ?Sized>(
 
 // Scalar-normalized Cholesky of the two eliminated shear coordinates.
 // An unstable block refuses; no regularization or stiffness floor is used.
-struct PositiveShear {
+pub(crate) struct PositiveShear {
     lower: [[f64; 2]; 2],
     scale: f64,
 }
@@ -492,7 +492,7 @@ struct ShearEvaluation {
 }
 
 impl PositiveShear {
-    fn new(a: [[f64; 2]; 2]) -> Result<Self, MaterialError> {
+    pub(crate) fn new(a: [[f64; 2]; 2]) -> Result<Self, MaterialError> {
         let scale = a.iter().flatten().map(|v| v.abs()).fold(0.0, f64::max);
         if !(scale.is_finite() && scale > 0.0)
             || a.iter().flatten().any(|v| !v.is_finite())
@@ -518,7 +518,7 @@ impl PositiveShear {
         })
     }
 
-    fn solve(&self, rhs: [f64; 2]) -> Result<[f64; 2], MaterialError> {
+    pub(crate) fn solve(&self, rhs: [f64; 2]) -> Result<[f64; 2], MaterialError> {
         let l = &self.lower;
         let y0 = (rhs[0] / self.scale) / l[0][0];
         let y1 = (rhs[1] / self.scale - l[1][0] * y0) / l[1][1];
