@@ -74,12 +74,38 @@ struct AxialOracle {
 }
 
 fn axial_oracle(axis: usize, strain: f64) -> AxialOracle {
+    axial_oracle_with_saturation(axis, strain, 0.0, 1.0)
+}
+
+fn axial_oracle_with_saturation(
+    axis: usize,
+    strain: f64,
+    saturation: f64,
+    rate: f64,
+) -> AxialOracle {
     // q² = sigma^T Q sigma. For one nonzero normal stress, its flow normal
     // remains fixed: n_j = sign(sigma) Q_ja / sqrt(Q_aa). Hence the exact
     // free-sided return has denominator E Q_aa + H, not the J2 denominator.
     let q = [[G + H, -H, -G], [-H, F + H, -F], [-G, -F, F + G]];
     let a = q[axis][axis].sqrt();
-    let alpha = (a * E * strain.abs() - YIELD).max(0.0) / (E * a * a + HARDENING);
+    let mut alpha = (a * E * strain.abs() - YIELD).max(0.0) / (E * a * a + HARDENING);
+    if saturation > 0.0 && alpha > 0.0 {
+        // Independent uniaxial equilibrium: bisect the scalar compliance/yield
+        // equation, without using the production five-mode constitutive return.
+        let mut lower = 0.0;
+        let mut upper = alpha;
+        for _ in 0..80 {
+            let candidate = 0.5 * (lower + upper);
+            let radius =
+                YIELD + HARDENING * candidate - saturation * (-rate * candidate).exp_m1();
+            if a * E * strain.abs() - E * a * a * candidate > radius {
+                lower = candidate;
+            } else {
+                upper = candidate;
+            }
+        }
+        alpha = 0.5 * (lower + upper);
+    }
     let mut plastic = [0.0; 6];
     for j in 0..3 {
         plastic[j] = strain.signum() * alpha * q[j][axis] / a;
@@ -174,7 +200,10 @@ fn plane_stress_reduction_preserves_distinct_directional_yield_thresholds() {
 
 #[test]
 fn p1_q1_forming_and_unloading_retain_anisotropic_width_and_thickness() {
-    let law = metal();
+    check_plane_forming_and_unloading(&metal(), axial_oracle);
+}
+
+fn check_plane_forming_and_unloading(law: &Hill48, oracle: impl Fn(usize, f64) -> AxialOracle) {
     for mesh in [
         Mesh2::quads(1.0, 1.0, 2, 2),
         Mesh2::triangles(1.0, 1.0, 2, 2),
@@ -182,8 +211,8 @@ fn p1_q1_forming_and_unloading_retain_anisotropic_width_and_thickness() {
         for axis in 0..2 {
             for sign in [-1.0, 1.0] {
                 let supports = plane_supports(&mesh, axis, Some(sign * 0.006));
-                let loaded = with_cx(|cx| plane_problem(&mesh, &law, &supports).solve(cx)).unwrap();
-                let exact = axial_oracle(axis, sign * 0.006);
+                let loaded = with_cx(|cx| plane_problem(&mesh, law, &supports).solve(cx)).unwrap();
+                let exact = oracle(axis, sign * 0.006);
                 assert!(exact.alpha > 0.0);
                 for (state, stress) in loaded
                     .quadrature_states
@@ -210,7 +239,7 @@ fn p1_q1_forming_and_unloading_retain_anisotropic_width_and_thickness() {
                 // plastic contractions (or expansions under compression).
                 let released = plane_supports(&mesh, axis, None);
                 let unloaded = with_cx(|cx| {
-                    plane_problem(&mesh, &law, &released).solve_from(
+                    plane_problem(&mesh, law, &released).solve_from(
                         loaded.displacement_m.as_flattened(),
                         &loaded.quadrature_states,
                         cx,
@@ -249,7 +278,10 @@ fn p1_q1_forming_and_unloading_retain_anisotropic_width_and_thickness() {
 
 #[test]
 fn native_tetrahedron_uses_the_same_directional_flow_and_permanent_set() {
-    let law = metal();
+    check_tetrahedral_forming_and_unloading(&metal(), axial_oracle);
+}
+
+fn check_tetrahedral_forming_and_unloading(law: &Hill48, oracle: impl Fn(usize, f64) -> AxialOracle) {
     let nodes = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     let tets = [[0, 1, 2, 3]];
     // Suppress rigid motion/shear; the three diagonal stretches remain available.
@@ -272,7 +304,7 @@ fn native_tetrahedron_uses_the_same_directional_flow_and_permanent_set() {
             let problem = SmallStrainTetProblem {
                 nodes_m: &nodes,
                 tetrahedra: &tets,
-                laws: SmallStrainLawField::Uniform(&law),
+                laws: SmallStrainLawField::Uniform(law),
                 prescribed_m: &supports,
                 nodal_forces_n: &[],
                 load_path: &[1.0],
@@ -280,7 +312,7 @@ fn native_tetrahedron_uses_the_same_directional_flow_and_permanent_set() {
                 settings: IncrementSettings::default(),
             };
             let loaded = with_cx(|cx| problem.solve(cx)).unwrap();
-            let exact = axial_oracle(axis, strain);
+            let exact = oracle(axis, strain);
             near(loaded.element_states[0].alpha, exact.alpha, 2e-10);
             for j in 0..6 {
                 near(loaded.element_strain[0][j], exact.strain[j], 2e-10);
@@ -327,10 +359,29 @@ fn native_tetrahedron_uses_the_same_directional_flow_and_permanent_set() {
 }
 
 #[test]
+fn saturated_anisotropic_solids_keep_native_flow_springback_and_reactions() {
+    let (saturation, rate) = (2.0, 500.0);
+    let law = metal()
+        .with_voce_isotropic_hardening(saturation, rate)
+        .unwrap();
+    let oracle = |axis, strain| {
+        let exact = axial_oracle_with_saturation(axis, strain, saturation, rate);
+        assert!(exact.alpha < axial_oracle(axis, strain).alpha);
+        exact
+    };
+    check_plane_forming_and_unloading(&law, oracle);
+    check_tetrahedral_forming_and_unloading(&law, oracle);
+}
+
+#[test]
 fn condensed_hill_tangent_differentiates_native_skew_q1_forces() {
-    let law = metal();
+    check_condensed_hill_tangent(&metal());
+    check_condensed_hill_tangent(&metal().with_voce_isotropic_hardening(2.0, 500.0).unwrap());
+}
+
+fn check_condensed_hill_tangent(law: &Hill48) {
     let mesh = Mesh2::mapped_quads(2, 1, &|s, t| [2.0 * s + 0.3 * t, t + 0.2 * s]);
-    let problem = plane_problem(&mesh, &law, &[]);
+    let problem = plane_problem(&mesh, law, &[]);
     let states: Vec<_> = (0..8)
         .map(|_| ReducedState {
             strain: [0.0; 6],

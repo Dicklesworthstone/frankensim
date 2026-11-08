@@ -18,6 +18,8 @@ use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voig
 use fs_evidence::{Ambition, ModelCard};
 use fs_math::det;
 
+pub(super) mod hardening;
+
 /// Source-bound, fixed-condition Voce parameters and retained material receipts.
 pub mod source;
 
@@ -81,16 +83,13 @@ impl VoceJ2 {
     }
 
     pub(super) fn saturation_strength(&self, alpha: f64) -> f64 {
-        self.saturation_pa * -det::expm1(-self.rate_per_strain * alpha)
+        hardening::strength(self.saturation_pa, self.rate_per_strain, alpha)
     }
 
     /// Stable incremental hardening slope, including the zero-increment limit.
     /// Shared by the rate-independent and combined overstress returns.
     pub(super) fn saturation_secant_pa(&self, alpha: f64, delta: f64) -> f64 {
-        let x = self.rate_per_strain * delta;
-        let ratio = if x == 0.0 { 1.0 } else { -det::expm1(-x) / x };
-        self.saturation_pa * self.rate_per_strain
-            * det::exp(-self.rate_per_strain * alpha) * ratio
+        hardening::secant(self.saturation_pa, self.rate_per_strain, alpha, delta)
     }
 
     /// Isotropic hardening force H alpha + Q (1-exp(-b alpha)) [Pa].
@@ -108,7 +107,7 @@ impl VoceJ2 {
             return self.backbone.hardening;
         }
         self.backbone.hardening
-            + self.saturation_pa * self.rate_per_strain * det::exp(-self.rate_per_strain * alpha)
+            + hardening::slope(self.saturation_pa, self.rate_per_strain, alpha)
     }
 
     /// Native effective-stress yield residual at the actual retained history.
@@ -261,43 +260,14 @@ impl VoceJ2 {
     }
 
     fn saturation_storage_scaled(&self, alpha: f64, saturation_pa: f64) -> f64 {
-        let x = self.rate_per_strain * alpha;
-        if x < 0.1 {
-            let ratio = -1.0 / 362880.0 + x / 3628800.0;
-            let ratio = 1.0 / 40320.0 + x * ratio;
-            let ratio = -1.0 / 5040.0 + x * ratio;
-            let ratio = 1.0 / 720.0 + x * ratio;
-            let ratio = -1.0 / 120.0 + x * ratio;
-            let ratio = 1.0 / 24.0 + x * ratio;
-            let ratio = -1.0 / 6.0 + x * ratio;
-            let ratio = 0.5 + x * ratio;
-            (saturation_pa * self.rate_per_strain) * alpha * (alpha * ratio)
-        } else {
-            saturation_pa * (alpha * (1.0 + det::expm1(-x) / x))
-        }
+        hardening::storage(saturation_pa, self.rate_per_strain, alpha)
     }
 
     // R(alpha_1) delta_alpha - Integral_alpha_0^alpha_1 R(p) dp >= 0.
     // Evaluating this convex remainder directly avoids subtracting two almost
     // equal hardening work/storage terms on small increments.
     pub(super) fn saturation_numerical_loss(&self, alpha: f64, delta: f64) -> f64 {
-        if delta == 0.0 {
-            return 0.0;
-        }
-        let x = self.rate_per_strain * delta;
-        let ratio = if x < 0.1 {
-            let ratio = -1.0 / 45360.0 + x / 403200.0;
-            let ratio = 1.0 / 5760.0 + x * ratio;
-            let ratio = -1.0 / 840.0 + x * ratio;
-            let ratio = 1.0 / 144.0 + x * ratio;
-            let ratio = -1.0 / 30.0 + x * ratio;
-            let ratio = 1.0 / 8.0 + x * ratio;
-            let ratio = -1.0 / 3.0 + x * ratio;
-            x * (0.5 + x * ratio)
-        } else {
-            -det::expm1(-x) / x - det::exp(-x)
-        };
-        (self.saturation_pa * det::exp(-self.rate_per_strain * alpha)) * delta * ratio
+        hardening::numerical_loss(self.saturation_pa, self.rate_per_strain, alpha, delta)
     }
 
     /// Original native radial-return work account with the independent Voce

@@ -3,7 +3,8 @@
 //! In the fixed material axes,
 //! `q² = F(syy-szz)² + G(szz-sxx)² + H(sxx-syy)²`
 //! `     + 2L syz² + 2M szx² + 2N sxy²`.
-//! The yield radius is `yield_stress + hardening * alpha`. Here `alpha` is
+//! The yield radius is `yield_stress + hardening * alpha`, with an optional
+//! energetic Voce increment `Q*(1-exp(-b*alpha))`. Here `alpha` is
 //! the accumulated work-conjugate multiplier: `(sigma-X):d(eps_p) = q d(alpha)`
 //! with backstress X=0 unless linear kinematic hardening is explicitly selected.
 //! It is NOT generally the von Mises equivalent plastic strain. Individual
@@ -21,10 +22,13 @@
 //! or finite-strain forming. It supplies neither fracture nor forming limits.
 //!
 //! Optional energetic linear kinematic hardening translates this same surface
-//! by `X = C * eps_p`: yielding uses `q(sigma-X) = yield_stress + H*alpha`.
+//! by `X = C * eps_p`: yielding uses `q(sigma-X) = yield_stress + R(alpha)`.
 //! C multiplies TENSOR plastic strain, not engineering shear or a uniaxial
 //! tangent modulus. Its recoverable storage is `C eps_p:eps_p / 2`.
 //! Existing constructors select C=0; opt in before retaining any history.
+//! Saturation uses the same scalar return and the endpoint hardening slope in
+//! its exact tangent. Its recoverable storage is the integral of the Voce
+//! increment; neither that storage nor integration loss becomes plastic heat.
 //!
 //! References: Hill (1948), doi:10.1098/rspa.1948.0045; Sandia LAME,
 //! <https://www.sandia.gov/files/sierra/SM_LAME_5_28/main/models/hill.html>.
@@ -40,6 +44,7 @@ pub mod source;
 pub mod thermal;
 
 use super::energy::{EnergyTolerances, IncrementEnergy, StoredEnergy};
+use super::voce::hardening;
 use crate::elastic::{IsotropicElastic, bulk_shear_stiffness};
 use crate::tensor::{contract, frobenius_norm, mandel_stiffness_to_voigt, trace};
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
@@ -120,6 +125,8 @@ pub struct Hill48 {
     yield_stress: f64,
     hardening: f64,
     kinematic: f64,
+    saturation_pa: f64,
+    saturation_rate_per_strain: f64,
     coefficients: Hill48Coefficients,
     bulk: f64,
     twice_shear: f64,
@@ -140,7 +147,7 @@ pub struct HillResponse {
     pub state: HillState,
     /// Increment of the Hill work-conjugate accumulated strain.
     pub plastic_increment: f64,
-    /// Signed endpoint `q(sigma-X) - yield_stress - hardening*alpha`, in Pa.
+    /// Signed endpoint `q(sigma-X) - yield_stress - R(alpha)`, in Pa.
     pub yield_residual_pa: f64,
 }
 
@@ -171,6 +178,7 @@ struct PlasticTangent {
     denominators: [f64; 5],
     normalized: [f64; 5],
     ratios: [f64; 5],
+    derivative_ratios: [f64; 5],
 }
 
 /// Parameter, history, numerical or explicit work-account refusal.
@@ -418,6 +426,8 @@ impl Hill48 {
             yield_stress: yield_stress_pa,
             hardening: hardening_modulus_pa,
             kinematic: 0.0,
+            saturation_pa: 0.0,
+            saturation_rate_per_strain: 1.0,
             coefficients,
             bulk,
             twice_shear,
@@ -431,8 +441,9 @@ impl Hill48 {
     /// Select energetic linear Prager hardening before retaining any history.
     /// The backstress is `X=C*eps_p` in tensor coordinates and its storage is
     /// `C*eps_p:eps_p/2`. C is finite and nonnegative [Pa]; it is NOT the J2
-    /// uniaxial hardening slope (that convention uses C=2*H_k/3). No saturation,
-    /// dynamic recovery, pre-existing backstress or history rebinding is supplied.
+    /// uniaxial hardening slope (that convention uses C=2*H_k/3). No kinematic
+    /// saturation, dynamic recovery, pre-existing backstress or history rebinding
+    /// is supplied.
     /// The original anisotropic metric and scalar return solver are retained.
     pub fn with_linear_kinematic_hardening(mut self, modulus_pa: f64) -> Result<Self, HillError> {
         if !modulus_pa.is_finite() || modulus_pa < 0.0 {
@@ -457,15 +468,59 @@ impl Hill48 {
                 "kinematic return moduli are not representable",
             ));
         }
-        let scale = returns.iter().copied().fold(0.0_f64, f64::max);
+        let scale = returns.iter().copied().fold(0.0_f64, f64::max)
+            + self.saturation_pa * self.saturation_rate_per_strain;
         let ratios = returns.map(|value| value / scale);
-        if ratios.iter().any(|value| !positive(*value)) {
+        if !positive(scale) || ratios.iter().any(|value| !positive(*value)) {
             return Err(HillError::Parameters(
                 "kinematic return modulus ratios are not representable",
             ));
         }
         self.kinematic = modulus_pa;
         self.return_twice_shear = effective;
+        self.return_scale = scale;
+        self.return_ratios = ratios;
+        Ok(self)
+    }
+
+    /// Select energetic Voce isotropic hardening before retaining any history.
+    /// Q >= 0 [Pa] adds `Q*(1-exp(-b*alpha))` to the existing yield radius;
+    /// b > 0 is per Hill work-conjugate strain, not generally J2 equivalent
+    /// strain. Linear isotropic and Prager terms remain independently active.
+    /// Q=0 preserves the original return, tangent and energy arithmetic.
+    /// Explicit coefficients do not establish a measured-metal calibration.
+    pub fn with_voce_isotropic_hardening(
+        mut self,
+        saturation_pa: f64,
+        rate_per_strain: f64,
+    ) -> Result<Self, HillError> {
+        let slope = saturation_pa * rate_per_strain;
+        if !saturation_pa.is_finite()
+            || saturation_pa < 0.0
+            || !positive(rate_per_strain)
+            || !slope.is_finite()
+            || (saturation_pa > 0.0 && slope == 0.0)
+            || !(self.yield_stress + saturation_pa).is_finite()
+        {
+            return Err(HillError::Parameters(
+                "Voce Q must be nonnegative and b positive with representable strength and slope",
+            ));
+        }
+        let returns = self
+            .modes
+            .eigenvalues
+            .map(|value| self.hardening + self.return_twice_shear * value);
+        // Include the maximum saturation slope in the prepared scale. Both
+        // the initial and endpoint normalized return derivatives stay <= 1.
+        let scale = returns.iter().copied().fold(0.0_f64, f64::max) + slope;
+        let ratios = returns.map(|value| value / scale);
+        if !positive(scale) || ratios.iter().any(|value| !positive(*value)) {
+            return Err(HillError::Parameters(
+                "Voce return modulus ratios are not representable",
+            ));
+        }
+        self.saturation_pa = saturation_pa;
+        self.saturation_rate_per_strain = rate_per_strain;
         self.return_scale = scale;
         self.return_ratios = ratios;
         Ok(self)
@@ -479,13 +534,40 @@ impl Hill48 {
     pub const fn yield_stress_pa(&self) -> f64 {
         self.yield_stress
     }
-    /// Energetic hardening modulus against the Hill work-conjugate accumulation.
+    /// Linear energetic modulus against the Hill work-conjugate accumulation.
     pub const fn hardening_modulus_pa(&self) -> f64 {
         self.hardening
     }
     /// C [Pa] in `X=C*eps_p`; zero retains the original isotropic-hardening law.
     pub const fn kinematic_modulus_pa(&self) -> f64 {
         self.kinematic
+    }
+    /// Additional isotropic saturation strength Q [Pa]; zero disables Voce.
+    pub const fn voce_saturation_pa(&self) -> f64 {
+        self.saturation_pa
+    }
+    /// Approach rate b per Hill work-conjugate strain; unused when Q=0.
+    pub const fn voce_rate_per_strain(&self) -> f64 {
+        self.saturation_rate_per_strain
+    }
+    /// Energetic isotropic force H*alpha + Q*(1-exp(-b*alpha)) [Pa].
+    pub fn isotropic_hardening_pa(&self, alpha: f64) -> f64 {
+        let linear = self.hardening * alpha;
+        if self.saturation_pa == 0.0 {
+            linear
+        } else {
+            linear + hardening::strength(self.saturation_pa, self.saturation_rate_per_strain, alpha)
+        }
+    }
+    /// Endpoint isotropic slope H + Q*b*exp(-b*alpha) [Pa].
+    /// The independent kinematic modulus does not expand the yield radius.
+    pub fn isotropic_hardening_derivative_pa(&self, alpha: f64) -> f64 {
+        if self.saturation_pa == 0.0 {
+            self.hardening
+        } else {
+            self.hardening
+                + hardening::slope(self.saturation_pa, self.saturation_rate_per_strain, alpha)
+        }
     }
     /// Original dimensionless quadratic coefficients in the material axes.
     pub const fn coefficients(&self) -> &Hill48Coefficients {
@@ -528,7 +610,7 @@ impl Hill48 {
     }
 
     fn radius(&self, alpha: f64) -> Result<f64, HillError> {
-        let radius = self.yield_stress + self.hardening * alpha;
+        let radius = self.yield_stress + self.isotropic_hardening_pa(alpha);
         if !positive(radius) {
             return Err(HillError::Numerical("yield radius is not representable"));
         }
@@ -667,7 +749,9 @@ impl Hill48 {
             });
         }
 
-        // In mode i, xi_i = y*xi_trial_i / (y0 + (H+(2mu+C)*lambda_i)*dl).
+        // In mode i, xi_i = y*xi_trial_i / (y + (2mu+C)*lambda_i*dl),
+        // where y=y0+H*dl+Delta_R_Voce. Its denominator has derivative
+        // H+(2mu+C)*lambda_i+R'_Voce(alpha+dl), always strictly positive.
         // Thus sum_i [sqrt(lambda_i)*xi_trial_i/denominator_i]^2 = 1.
         // Normalize stresses and moduli independently before solving for
         // z = return_scale*dl/q_trial. This retains stress-unit covariance.
@@ -678,6 +762,8 @@ impl Hill48 {
                 "yield-to-trial ratio is not representable",
             ));
         }
+        // return_scale bounds every denominator derivative from above;
+        // the minimum linear modal ratio bounds it from below, also for Voce.
         let mut lower = (q_trial - y0) / q_trial;
         let minimum = self
             .return_ratios
@@ -693,11 +779,32 @@ impl Hill48 {
         let mut z = lower;
         let mut normalized = [0.0; 5];
         let mut denominators = [0.0; 5];
+        let mut derivative_ratios = self.return_ratios;
+        let (remaining, initial_slope) = if self.saturation_pa == 0.0 {
+            (0.0, 0.0)
+        } else {
+            let decay = det::exp(-self.saturation_rate_per_strain * state.alpha);
+            (
+                self.saturation_pa * decay,
+                (self.saturation_pa * self.saturation_rate_per_strain) * decay / self.return_scale,
+            )
+        };
+        let mut saturation_increment_ratio = 0.0;
         let mut solved = false;
         let mut residual = f64::INFINITY;
         for _ in 0..MAX_RETURN_ITERATIONS {
+            if self.saturation_pa > 0.0 {
+                let increment = (q_trial / self.return_scale) * z;
+                saturation_increment_ratio =
+                    hardening::strength(remaining, self.saturation_rate_per_strain, increment)
+                        / q_trial;
+                let slope_ratio = initial_slope
+                    * det::exp(-self.saturation_rate_per_strain * increment);
+                derivative_ratios = self.return_ratios.map(|ratio| ratio + slope_ratio);
+            }
             for i in 0..5 {
-                denominators[i] = radius_ratio + self.return_ratios[i] * z;
+                denominators[i] = radius_ratio + self.return_ratios[i] * z
+                    + saturation_increment_ratio;
                 normalized[i] = unit[i] / denominators[i];
             }
             let value = norm(&normalized);
@@ -719,7 +826,7 @@ impl Hill48 {
             let derivative = -value
                 * (0..5)
                     .map(|i| {
-                        (normalized[i] / value).powi(2) * (self.return_ratios[i] / denominators[i])
+                        (normalized[i] / value).powi(2) * (derivative_ratios[i] / denominators[i])
                     })
                     .sum::<f64>();
             let newton = z - residual / derivative;
@@ -742,7 +849,8 @@ impl Hill48 {
                 "plastic increment or accumulation is not representable",
             ));
         }
-        let yield_ratio = radius_ratio + (self.hardening / self.return_scale) * z;
+        let yield_ratio = radius_ratio + (self.hardening / self.return_scale) * z
+            + saturation_increment_ratio;
         let ratios: [f64; 5] = core::array::from_fn(|i| yield_ratio / denominators[i]);
         let returned: [f64; 5] = core::array::from_fn(|i| trial[i] * ratios[i]);
         let offset = self.modes.tensor(&core::array::from_fn(|i| {
@@ -775,10 +883,23 @@ impl Hill48 {
             plastic_increment: increment,
             yield_residual_pa: yield_residual,
             tangent: Some(PlasticTangent {
-                radius_ratio,
+                // Differentiation uses y-dl*y', not the old yield radius or
+                // a secant slope. The concave Voce increment adds a positive
+                // remainder; its shared series avoids cancellation near yield.
+                radius_ratio: radius_ratio
+                    + if self.saturation_pa == 0.0 {
+                        0.0
+                    } else {
+                        hardening::slope_remainder(
+                            remaining,
+                            self.saturation_rate_per_strain,
+                            increment,
+                        ) / q_trial
+                    },
                 denominators,
                 normalized,
                 ratios,
+                derivative_ratios,
             }),
         })
     }
@@ -792,13 +913,14 @@ impl Hill48 {
             denominators,
             normalized,
             ratios,
+            derivative_ratios,
         } = data;
 
         // Analytic rank-one correction in the prepared orthonormal modes.
         // Dividing by return_scale/q_trial before forming products avoids
         // squared stress moduli and preserves the symmetric Mandel tangent.
         let b = (0..5)
-            .map(|i| normalized[i].powi(2) * self.return_ratios[i] / denominators[i])
+            .map(|i| normalized[i].powi(2) * derivative_ratios[i] / denominators[i])
             .sum::<f64>();
         if !positive(b) {
             return Err(HillError::Numerical(
@@ -873,10 +995,18 @@ impl Hill48 {
     ) -> Result<StoredEnergy, HillError> {
         let elastic = self.admit(strain, state)?;
         let modes = self.modes.coordinates(&elastic);
+        let mut isotropic_storage = 0.5 * self.hardening * state.alpha * state.alpha;
+        if self.saturation_pa > 0.0 {
+            isotropic_storage += hardening::storage(
+                self.saturation_pa,
+                self.saturation_rate_per_strain,
+                state.alpha,
+            );
+        }
         let value = StoredEnergy {
             elastic_j_m3: 0.5 * self.bulk * trace(&elastic).powi(2)
                 + 0.5 * self.twice_shear * modes.iter().map(|v| v * v).sum::<f64>(),
-            hardening_j_m3: 0.5 * self.hardening * state.alpha * state.alpha,
+            hardening_j_m3: isotropic_storage,
             kinematic_hardening_j_m3: if self.kinematic == 0.0 {
                 0.0
             } else {
@@ -969,6 +1099,14 @@ impl Hill48 {
                 + kinematic_loss,
             residual_j_m3: 0.0,
         };
+        if self.saturation_pa > 0.0 {
+            energy.numerical_dissipation_j_m3 += hardening::numerical_loss(
+                self.saturation_pa,
+                self.saturation_rate_per_strain,
+                old_state.alpha,
+                da,
+            );
+        }
         energy.residual_j_m3 = energy.mechanical_work_j_m3
             - energy.stored_change_j_m3()
             - energy.physical_dissipation_j_m3
@@ -1022,7 +1160,12 @@ impl SmallStrainLaw for Hill48 {
             vec![
                 "small strain and rotation; fixed material axes".into(),
                 "associative orthotropic pressure-independent yielding".into(),
-                "isotropic elasticity and explicitly selected energetic linear isotropic/Prager hardening".into(),
+                if self.saturation_pa == 0.0 {
+                    "isotropic elasticity and explicitly selected energetic linear isotropic/Prager hardening"
+                } else {
+                    "isotropic elasticity and explicitly selected energetic linear/Voce isotropic and Prager hardening"
+                }
+                .into(),
             ],
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
@@ -1030,8 +1173,12 @@ impl SmallStrainLaw for Hill48 {
                 self.elastic.strain_limit.min(0.05),
             ),
             vec![
-                "no evolving texture, nonlinear cyclic hardening, rate or thermal dependence"
-                    .into(),
+                if self.saturation_pa == 0.0 {
+                    "no evolving texture, nonlinear cyclic hardening, rate or thermal dependence"
+                } else {
+                    "no evolving texture, nonlinear backstress recovery, rate or thermal dependence"
+                }
+                .into(),
                 "no calibrated material accuracy, damage, necking or finite-strain forming".into(),
             ],
             0.05,
