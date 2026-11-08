@@ -11,6 +11,14 @@
 mod driven;
 pub use driven::{LumpedCaloricDrivenExchange, solve_lumped_caloric_driven_exchange};
 
+/// Isolated reciprocal contact between two original native caloric cells.
+#[path = "caloric/pair.rs"]
+pub mod pair;
+pub use pair::{
+    LumpedCaloricPairExchange, LumpedCaloricPairExchangeConfig,
+    solve_lumped_caloric_pair_exchange,
+};
+
 use crate::ConductionError;
 use crate::lumped::{BiotGate, lumped_error};
 use fs_exec::Cx;
@@ -335,6 +343,7 @@ struct PreparedCaloricBoundary {
     boundary: BoundaryConductances,
     initial_temperature_k: f64,
     caloric_identity: [u8; 32],
+    minimum_conductivity_w_m_k: f64,
     maximum_biot: f64,
     total_conductance_w_k: f64,
 }
@@ -384,6 +393,7 @@ fn prepare_caloric_exchange(
         boundary,
         initial_temperature_k: initial_state.temperature_k,
         caloric_identity,
+        minimum_conductivity_w_m_k: minimum_k,
         maximum_biot,
         total_conductance_w_k: conductance,
     })

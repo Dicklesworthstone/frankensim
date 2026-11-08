@@ -8,6 +8,9 @@ mod support;
 #[path = "lumped_caloric_exchange/forced.rs"]
 mod forced;
 
+#[path = "lumped_caloric_exchange/pair.rs"]
+mod pair;
+
 use fs_conduction::ConductionError;
 use fs_conduction::lumped::{
     BiotGate,
