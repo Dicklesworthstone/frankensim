@@ -2446,3 +2446,25 @@ check payload/work/point caps, source-domain and cancellation refusals, and the
 absence of material heat from pure drilling motion. Source review and exact
 GitHub blob readback completed. Native compilation, formatting and execution
 remain unverified while the workspace is unavailable.
+
+### Graded inventory in loaded reinforced-shell vibration pencils
+
+`shell::preload::{equilibrate_stiffened_shell_with_reference_density,
+equilibrate_shell_materials_with_reference_density}` carry the original graded
+panel/beam mass through the same nonlinear dead-load and tether equilibrium.
+The corresponding shared stiffened assembly owns all density integration and
+eccentric inertia. Continuation replaces only stiffness by the accepted native
+tangent; the original mass matrix is retained exactly for downstream modes.
+Independent membrane/bending sections and both beam inertia choices remain
+explicit. Dead forces are caller-owned; density changes do not silently add
+weight or alter those supplied forces.
+
+Every entry shares the original supported-geometry/work checks, nonlinear
+solver callback, complete physical residual, deformation limits and tangent
+stability acceptance. Invalid density coverage/values refuse before the solver
+callback. The native moderate-rotation/reference-frame assumptions remain;
+no evolving inventory, deformed inertia or additional solver is inferred.
+Focused regressions retain graded mass under nonzero preload, distinguish
+kinetic changes from fixed dead-load equilibrium, check mass-scaled loaded
+Rayleigh quotients with tethers and independent sections, and reject invalid
+inventory or an unsupported solver convergence claim.

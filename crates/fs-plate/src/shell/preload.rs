@@ -28,6 +28,10 @@ use std::sync::Arc;
 pub mod tethers;
 /// Full-coordinate equilibrium of shells joined by the original mortar ties.
 pub mod assembly;
+/// Graded original panel and reinforcement inventory in loaded vibration pencils.
+pub mod density;
+pub use density::{equilibrate_shell_materials_with_reference_density,
+    equilibrate_stiffened_shell_with_reference_density};
 mod beams;
 use beams::{BeamStretch, MAX_BONDED_BEAMS};
 use tethers::{PreparedTether, ShellTether, TetherResponse};
@@ -466,13 +470,28 @@ fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
     options:PreloadOptions,
     solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize)->Result<(Vec<f64>,usize),String>)
     ->Result<PreloadedShell,String> {
+    equilibrate_sections_with_assembly(mesh, sections, boundary, support, beams, loads, tethers,
+        options, solve, || super::stiffened::assemble_sections(mesh, sections, boundary, support, beams))
+}
+
+// All source choices share the same admission, equilibrium, full-coordinate
+// tether/stability checks and final mass retention. Assembly is deferred until
+// the original problem/work checks pass; callers cannot substitute an unrelated
+// prebuilt pencil with matching dimensions.
+#[allow(clippy::too_many_arguments)]
+fn equilibrate_sections_with_assembly<S: Section>(
+    mesh: &ShellMesh, sections: &[S], boundary: &[usize], support: ShellSupport,
+    beams: &[ShellBeam], loads: &[f64], tethers: &[ShellTether], options: PreloadOptions,
+    solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize) -> Result<(Vec<f64>, usize), String>,
+    assemble: impl FnOnce() -> Result<ShellModel, crate::PlateError>,
+) -> Result<PreloadedShell, String> {
     if mesh.nodes.len()>10_000 || mesh.tris.len()>40_000 || loads.len()!=6*mesh.nodes.len()
         || tethers.len()>4096 || beams.len()>MAX_BONDED_BEAMS
         || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty() {
         return Err("invalid supported-shell preload, load cardinality or explicit budget".into());
     }
     validate_options(options)?;
-    let model=super::stiffened::assemble_sections(mesh,sections,boundary,support,beams).map_err(|e|e.to_string())?;
+    let model=assemble().map_err(|e|e.to_string())?;
     let base=positive_factor(&model.k)?;
     let length=(0..3).map(|c| {
         let lo=mesh.nodes.iter().map(|p|p[c]).fold(f64::INFINITY,f64::min);
