@@ -16,6 +16,8 @@ use fs_feec::acoustics::thermoviscous::{
 };
 use std::sync::Arc;
 
+mod bandlimited;
+
 fn profiles<'a, 'c>(
     interior: &'a ThermoviscousInterior<'c>,
 ) -> (

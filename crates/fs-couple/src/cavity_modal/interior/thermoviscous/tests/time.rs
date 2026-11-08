@@ -1,5 +1,6 @@
 use super::*;
 mod volume_dg;
+mod bandlimited;
 use super::super::dg::{ThermoviscousDg, ThermoviscousDgLimits};
 use crate::dg_port::DgPortLoad;
 use fs_duct::dg::{DgBoundary, DgDuct, DgMesh, PortId, MAX_DG_PROPAGATOR_DOFS};

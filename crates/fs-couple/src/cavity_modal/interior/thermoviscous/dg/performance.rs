@@ -5,6 +5,8 @@
 //! walls and moving structure continue through the same reciprocal DG step.
 //! The shared pressure, decimation, ensemble and PCM owners consume this stream;
 //! observation never substitutes an independent sound source or wall-loss law.
+//! An explicit bandlimited constructor admits an independent output clock while
+//! the complete source and every physical control retain their original dt.
 
 use super::{
     PreparedThermoviscousTime, PreparedThermoviscousVolumeTime, ThermoviscousDg,
@@ -15,9 +17,14 @@ use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
+use crate::pcm_wav::observation::resample::{BandlimitedObservationPolicy, BandlimitedResampler};
 use crate::render::RenderError;
 use fs_exec::CancelGate;
 use std::sync::Arc;
+
+#[path = "performance/bandlimited.rs"]
+mod bandlimited;
+use bandlimited::BandlimitedDgObservation;
 
 /// One original physical interval's complete external drives.
 #[derive(Clone, Debug, PartialEq)]
@@ -75,8 +82,9 @@ impl ThermoviscousDgControlValues for ThermoviscousDgVolumeControl {
 /// Explicit finite playback storage and callback bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThermoviscousDgPerformanceConfig {
-    /// Must match the original physical interval exactly: dt = 1 / rate.
-    /// Use the shared pressure decimator for a lower PCM rate.
+    /// Output sample rate. The original `new`/`new_at_port` constructors require
+    /// dt = 1/rate exactly. The explicit `new_bandlimited` constructors preserve
+    /// the physical dt and observe its interval means on this independent rate.
     pub sample_rate_hz: u32,
     /// Largest callback, in 1..=65_536 samples.
     pub maximum_block: usize,
@@ -103,6 +111,8 @@ pub struct ThermoviscousDgPerformance<
     receiver: Option<BaffledPressure>,
     observer_gas: Option<GasPropagationReport>,
     terminal_flows: Vec<f64>,
+    bandlimited: Option<BandlimitedDgObservation>,
+    output_samples: u64,
     gate: Arc<CancelGate>,
     rendered: u64,
     poisoned: bool,
@@ -153,13 +163,88 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
         config: ThermoviscousDgPerformanceConfig,
         gate: Arc<CancelGate>,
     ) -> Result<Self, RenderError> {
+        Self::build(system, port, controls, observation, config, gate, None)
+    }
+
+    /// Observe the primary original duct on an independent finite output clock.
+    ///
+    /// Controls still contain one entry per ORIGINAL physical interval. Their
+    /// count must exactly cover `output_samples / config.sample_rate_hz`, using
+    /// the shared resampler's index-based coverage and same-clock roundoff rule.
+    /// No physical control is interpolated, discarded or replayed. The complete
+    /// pressure, velocity, temperature, molecular and structural state continues
+    /// through the same reciprocal field/DG solver, including volume sources.
+    ///
+    /// The selected pressure and all original terminal flows share one causal
+    /// filter BEFORE the Rayleigh receiver. Zero prehistory and declared FIR
+    /// latency remain in the output. There is no padded source tail, interval-
+    /// mean deconvolution or claim to repair aliasing at the original time step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bandlimited(
+        system: ThermoviscousDg<'a, 'c, P>,
+        controls: Vec<C>,
+        observation: ApertureObservation,
+        config: ThermoviscousDgPerformanceConfig,
+        output_samples: u64,
+        policy: BandlimitedObservationPolicy,
+        gate: Arc<CancelGate>,
+    ) -> Result<Self, RenderError> {
+        let port = system.port();
+        Self::new_bandlimited_at_port(
+            system,
+            port,
+            controls,
+            observation,
+            config,
+            output_samples,
+            policy,
+            gate,
+        )
+    }
+
+    /// The same independent observation clock at a named original FE-to-duct
+    /// connection. Every other connected duct still participates in the same
+    /// reciprocal step; the selected port is never replaced by a compact source.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_bandlimited_at_port(
+        system: ThermoviscousDg<'a, 'c, P>,
+        port: usize,
+        controls: Vec<C>,
+        observation: ApertureObservation,
+        config: ThermoviscousDgPerformanceConfig,
+        output_samples: u64,
+        policy: BandlimitedObservationPolicy,
+        gate: Arc<CancelGate>,
+    ) -> Result<Self, RenderError> {
+        Self::build(
+            system,
+            port,
+            controls,
+            observation,
+            config,
+            gate,
+            Some((output_samples, policy)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        system: ThermoviscousDg<'a, 'c, P>,
+        port: usize,
+        controls: Vec<C>,
+        observation: ApertureObservation,
+        config: ThermoviscousDgPerformanceConfig,
+        gate: Arc<CancelGate>,
+        independent_clock: Option<(u64, BandlimitedObservationPolicy)>,
+    ) -> Result<Self, RenderError> {
         if gate.is_requested() {
             return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
         }
         if system.accepted_steps() != 0
             || config.sample_rate_hz == 0
-            || system.prepared().binding().duration_s.to_bits()
-                != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
+            || (independent_clock.is_none()
+                && system.prepared().binding().duration_s.to_bits()
+                    != (1.0 / f64::from(config.sample_rate_hz)).to_bits())
             || !(1..=65_536).contains(&config.maximum_block)
             || controls.is_empty()
             || controls.len() as u64 > system.limits().maximum_steps
@@ -178,7 +263,9 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
             .and_then(|per_step| per_step.checked_mul(controls.len()))
             .ok_or_else(|| sizing("resolved field control storage overflow"))?;
         if values > config.maximum_control_values {
-            return Err(sizing("resolved field controls exceed their declared storage bound"));
+            return Err(sizing(
+                "resolved field controls exceed their declared storage bound",
+            ));
         }
         for control in &controls {
             if gate.is_requested() {
@@ -188,7 +275,10 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
                 || control.wall_forces_n_per_sqrt_kg().len() != forces
                 || control.force_drive_n().len() != binding.body_force_count
                 || control.heat_drive_w().len() != binding.heat_count
-                || system.coupled_ports().iter().any(|&port| control.traction_pa()[port] != 0.0)
+                || system
+                    .coupled_ports()
+                    .iter()
+                    .any(|&port| control.traction_pa()[port] != 0.0)
                 || control
                     .traction_pa()
                     .iter()
@@ -202,14 +292,18 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
                 ));
             }
         }
-        let load = system.load_at_port(port)
-            .ok_or_else(|| sizing("resolved field observation requires an attached FE pressure port"))?;
+        let load = system.load_at_port(port).ok_or_else(|| {
+            sizing("resolved field observation requires an attached FE pressure port")
+        })?;
         let receiver = match observation {
             ApertureObservation::Inlet => None,
             ApertureObservation::TubeBaffled(location) => Some(
-                load
-                    .baffled_receiver(config.sample_rate_hz, location)
-                    .map_err(RenderError::Voice)?,
+                if independent_clock.is_some() {
+                    load.baffled_receiver_projected(config.sample_rate_hz, location)
+                } else {
+                    load.baffled_receiver(config.sample_rate_hz, location)
+                }
+                .map_err(RenderError::Voice)?,
             ),
             _ => {
                 return Err(sizing(
@@ -222,6 +316,21 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
         } else {
             Vec::new()
         };
+        let bandlimited = independent_clock
+            .map(|(samples, policy)| {
+                BandlimitedDgObservation::new(
+                    binding.duration_s,
+                    config.sample_rate_hz,
+                    samples,
+                    controls.len(),
+                    terminal_flows.len(),
+                    policy,
+                    &gate,
+                )
+            })
+            .transpose()?;
+        let output_samples =
+            independent_clock.map_or(controls.len() as u64, |(samples, _)| samples);
         if gate.is_requested() {
             return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
         }
@@ -234,6 +343,8 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
             receiver,
             observer_gas: None,
             terminal_flows,
+            bandlimited,
+            output_samples,
             gate,
             rendered: 0,
             poisoned: false,
@@ -246,22 +357,35 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
     /// and causal delay on each original path before summing pressure.
     pub fn with_observer_gas(mut self, propagation: &GasPropagation) -> Result<Self, RenderError> {
         if self.poisoned || self.system.accepted_steps() != 0 || self.observer_gas.is_some() {
-            return Err(sizing("resolved field gas observation requires one cold attachment"));
+            return Err(sizing(
+                "resolved field gas observation requires one cold attachment",
+            ));
         }
         let ApertureObservation::TubeBaffled(location) = self.observation else {
-            return Err(sizing("resolved field gas propagation requires an exterior microphone"));
+            return Err(sizing(
+                "resolved field gas propagation requires an exterior microphone",
+            ));
         };
-        let (receiver, report) = self
+        let load = self
             .system
             .load_at_port(self.observation_port)
-            .ok_or_else(|| sizing("resolved field microphone lost its attached pressure port"))?
-            .baffled_receiver_with_gas(
+            .ok_or_else(|| sizing("resolved field microphone lost its attached pressure port"))?;
+        let (receiver, report) = if self.bandlimited.is_some() {
+            load.baffled_receiver_projected_with_gas(
                 self.config.sample_rate_hz,
                 location,
                 propagation,
                 &self.gate,
             )
-            .map_err(RenderError::Voice)?;
+        } else {
+            load.baffled_receiver_with_gas(
+                self.config.sample_rate_hz,
+                location,
+                propagation,
+                &self.gate,
+            )
+        }
+        .map_err(RenderError::Voice)?;
         if self.gate.is_requested() {
             return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
         }
@@ -308,15 +432,47 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
         self.observer_gas.as_ref()
     }
 
+    /// Actual source-bound filter, including its declared band and causal delay.
+    /// The original exact-clock constructors have no additional filter.
+    pub fn bandlimited_observation(&self) -> Option<&BandlimitedResampler> {
+        self.bandlimited
+            .as_ref()
+            .map(BandlimitedDgObservation::resampler)
+    }
+
     pub fn cancellation_gate(&self) -> &CancelGate {
         &self.gate
     }
 
     pub fn remaining_samples(&self) -> u64 {
-        self.controls.len() as u64 - self.rendered
+        self.output_samples - self.rendered
     }
 
     fn advance(&mut self) -> Result<f64, RenderError> {
+        let pressure = if self.bandlimited.is_some() {
+            self.advance_bandlimited()?
+        } else {
+            self.advance_source()?
+        };
+        let pressure = if let Some(receiver) = &mut self.receiver {
+            receiver
+                .step_trace(&self.terminal_flows)
+                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?
+        } else {
+            pressure
+        };
+        if !pressure.is_finite() {
+            return Err(sizing(
+                "resolved field observer produced nonfinite physical pressure",
+            ));
+        }
+        self.rendered += 1;
+        Ok(pressure)
+    }
+
+    /// The same physical step for both observers. Controls are addressed by
+    /// accepted source interval, never by the independent output cursor.
+    fn advance_source(&mut self) -> Result<f64, RenderError> {
         let control = self
             .controls
             .get(self.system.accepted_steps() as usize)
@@ -331,40 +487,66 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
                 control.heat_drive_w(),
                 &self.gate,
             )
-            .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
+            .map_err(|error| {
+                RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()))
+            })?;
         let pressure = if self.observation_port == primary_port {
             frame.mean_pressure_pa
         } else {
-            frame.additional_ducts.iter().find(|duct| duct.port == self.observation_port)
+            frame
+                .additional_ducts
+                .iter()
+                .find(|duct| duct.port == self.observation_port)
                 .ok_or_else(|| sizing("resolved field frame omitted its observed duct"))?
                 .mean_pressure_pa
         };
-        let pressure = if let Some(receiver) = &mut self.receiver {
-            let terminals = self.system.load_at_port(self.observation_port)
+        if self.receiver.is_some() {
+            let terminals = self
+                .system
+                .load_at_port(self.observation_port)
                 .ok_or_else(|| sizing("resolved field microphone lost its attached pressure port"))?
                 .last_terminal_frames();
             if terminals.is_empty() || terminals.len() != self.terminal_flows.len() {
-                return Err(sizing("resolved field microphone requires every original terminal flow"));
+                return Err(sizing(
+                    "resolved field microphone requires every original terminal flow",
+                ));
             }
             for (flow, terminal) in self.terminal_flows.iter_mut().zip(terminals) {
                 *flow = terminal.outward_flow_m3_s;
             }
-            receiver
-                .step_trace(&self.terminal_flows)
-                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?
-        } else {
-            pressure
-        };
-        if !pressure.is_finite() {
-            return Err(sizing("resolved field observer produced nonfinite physical pressure"));
         }
-        self.rendered += 1;
         Ok(pressure)
+    }
+
+    fn advance_bandlimited(&mut self) -> Result<f64, RenderError> {
+        if self.gate.is_requested() {
+            return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
+        }
+        let required = self
+            .bandlimited
+            .as_ref()
+            .expect("bound field observation")
+            .required_source_intervals()?;
+        while (self.system.accepted_steps() as usize) < required {
+            let pressure = self.advance_source()?;
+            self.bandlimited
+                .as_mut()
+                .expect("bound field observation")
+                .push_source(pressure, &self.terminal_flows)?;
+        }
+        // The common caller advances the output cursor only after the original
+        // receiver succeeds. A refusal preserves the accepted physical prefix
+        // and poisons continuation, as on the original exact-clock path.
+        self.bandlimited
+            .as_mut()
+            .expect("bound field observation")
+            .render_next(&mut self.terminal_flows)
     }
 }
 
 impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues> PressureRenderer
-    for ThermoviscousDgPerformance<'a, 'c, P, C> {
+    for ThermoviscousDgPerformance<'a, 'c, P, C>
+{
     fn samples_rendered(&self) -> u64 {
         self.rendered
     }
@@ -376,7 +558,9 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues> Pres
     fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
         self.validate_sample_count(0)?;
         if rate != self.config.sample_rate_hz {
-            return Err(sizing("resolved field pressure uses its original physical clock"));
+            return Err(sizing(
+                "resolved field pressure uses its admitted observation clock",
+            ));
         }
         Ok(())
     }
@@ -386,7 +570,9 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues> Pres
             return Err(RenderError::Poisoned);
         }
         if samples > self.remaining_samples() {
-            return Err(sizing("resolved field pressure exceeds its finite physical history"));
+            return Err(sizing(
+                "resolved field pressure exceeds its finite physical history",
+            ));
         }
         Ok(())
     }
@@ -397,7 +583,9 @@ impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues> Pres
             return Err(RenderError::EmptyBlock);
         }
         if output.len() > self.config.maximum_block {
-            return Err(sizing("resolved field callback exceeds its declared capacity"));
+            return Err(sizing(
+                "resolved field callback exceeds its declared capacity",
+            ));
         }
         for slot in output {
             match self.advance() {
