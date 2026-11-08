@@ -352,28 +352,42 @@ pub fn refine_harmonic_frequency_channels(
             if trial_frequency == current.frequency {
                 return Err(current.not_converged(evaluations));
             }
-            let plan = HarmonicFitPlan::new(
+            // Conditioning and frequency information can disappear at a full
+            // trial step even when the accepted iterate is well resolved.
+            // Charge that QR attempt and let a shorter step recover.
+            evaluations += 1;
+            let trial = HarmonicFitPlan::new(
                 sample_count,
                 timestep_s,
                 trial_frequency,
                 harmonics,
                 plan_budget,
-            )?;
-            evaluations += 1;
-            let trial = evaluate(
-                channels,
-                &ratios,
-                physical_scale,
-                plan,
-                duration,
-                &mut scratch,
-                &mut derivative,
-            )?;
-            if trial.normalized_residual_squared < current.normalized_residual_squared {
-                current = trial;
-                break;
+            )
+            .map_err(HarmonicFrequencyError::from)
+            .and_then(|plan| {
+                evaluate(
+                    channels,
+                    &ratios,
+                    physical_scale,
+                    plan,
+                    duration,
+                    &mut scratch,
+                    &mut derivative,
+                )
+            });
+            match trial {
+                Ok(candidate)
+                    if candidate.normalized_residual_squared
+                        < current.normalized_residual_squared =>
+                {
+                    current = candidate;
+                    break;
+                }
+                Ok(_)
+                | Err(HarmonicFrequencyError::Fit(HarmonicFitError::IllConditioned { .. }))
+                | Err(HarmonicFrequencyError::Unidentifiable) => step *= 0.5,
+                Err(error) => return Err(error),
             }
-            step *= 0.5;
         }
     }
 }

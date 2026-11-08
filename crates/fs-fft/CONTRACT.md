@@ -401,10 +401,13 @@ linear and nonlinear parameters described by
 [O'Leary and Rust](https://www.cs.umd.edu/users/oleary/software/varpro.pdf).
 
 The explicit budget bounds all candidate QR evaluations and conservative peak
-numeric storage, including refinement scratch. Nyquist admission covers the
-entire search interval. Normalized fitting and search arithmetic preserve
-physical unit scaling. Missing fundamentals can be inferred from the declared
-upper harmonic pattern; no synthetic fundamental amplitude is introduced.
+numeric storage, including refinement scratch. Ill-conditioned or unresolved
+trial candidates consume an evaluation and backtrack to a shorter step; an
+inadmissible seed refuses immediately. Exhaustion reports the last accepted
+iterate. Nyquist admission covers the entire search interval. Normalized fitting
+and search arithmetic preserve physical unit scaling. Missing fundamentals can
+be inferred from the declared upper harmonic pattern; no synthetic fundamental
+amplitude is introduced.
 An active bound, unidentifiable frequency, exhausted work, or floating-point
 stagnation produces a typed refusal rather than a nominally converged spectrum.
 

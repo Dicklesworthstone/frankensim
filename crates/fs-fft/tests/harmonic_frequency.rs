@@ -157,6 +157,79 @@ fn exact_seed_can_finish_with_one_evaluation_but_a_coarse_seed_cannot() {
 }
 
 #[test]
+fn a_short_record_recovers_after_a_trial_loses_harmonic_resolution() {
+    let dt = 1.0 / 3100.0;
+    let phasors = [C64::new(0.85, -1.4), C64::new(-0.475, 1.54)];
+    let samples = signal(32, dt, 46.0, &phasors, 1.5);
+    let mut b = budget(64.0);
+    b.frequency_bounds_hz = [5.0, 105.0];
+    b.absolute_tolerance_hz = 1e-8;
+    b.fit.min_reciprocal_condition = 0.02;
+
+    // The 10 ms record resolves both the supplied seed and the true 46 Hz
+    // harmonic model. Its first full step overshoots to 39 Hz, where those
+    // columns fail the caller's conditioning floor. A half-step remains
+    // resolved and recovers the physical spectrum without relaxing that floor.
+    assert!(matches!(
+        HarmonicFitPlan::new(samples.len(), dt, 39.0, &[1, 2], b.fit),
+        Err(HarmonicFitError::IllConditioned { .. })
+    ));
+    let result = refine_harmonic_frequency(&samples, dt, 64.0, &[1, 2], b).unwrap();
+    close(result.fundamental_hz, 46.0, 1e-8);
+    close(result.fit.dc, 1.5, 1e-8);
+    for (actual, expected) in result.fit.phasors.iter().zip(phasors) {
+        close(actual.re, expected.re, 1e-8);
+        close(actual.im, expected.im, 1e-8);
+    }
+    assert!(result.fit.residual_rms < 1e-10);
+    assert!(result.last_correction_hz.abs() <= b.absolute_tolerance_hz);
+    assert!(result.evaluations <= 8);
+}
+
+#[test]
+fn unresolved_trials_consume_work_but_do_not_replace_the_last_accepted_fit() {
+    let dt = 1.0 / 3100.0;
+    let samples = signal(
+        32,
+        dt,
+        46.0,
+        &[C64::new(0.85, -1.4), C64::new(-0.475, 1.54)],
+        1.5,
+    );
+    let mut b = budget(64.0);
+    b.frequency_bounds_hz = [5.0, 105.0];
+    b.fit.min_reciprocal_condition = 0.02;
+    for (max_evaluations, accepted_hz) in [(2, 64.0), (3, 51.5)] {
+        b.max_evaluations = max_evaluations;
+        let fixed = HarmonicFitPlan::new(samples.len(), dt, accepted_hz, &[1, 2], b.fit)
+            .unwrap()
+            .fit(&samples)
+            .unwrap();
+        let error = refine_harmonic_frequency(&samples, dt, 64.0, &[1, 2], b).unwrap_err();
+        let HarmonicFrequencyError::NotConverged {
+            fundamental_hz,
+            residual_rms,
+            evaluations,
+            ..
+        } = error
+        else {
+            panic!("expected bounded backtracking, got {error:?}");
+        };
+        close(fundamental_hz, accepted_hz, 1e-12);
+        close(residual_rms, fixed.residual_rms, 1e-14);
+        assert_eq!(evaluations, max_evaluations);
+    }
+    // A seed that itself fails admission still refuses immediately; there is
+    // no accepted physical estimate from which to backtrack.
+    assert!(matches!(
+        refine_harmonic_frequency(&samples, dt, 39.0, &[1, 2], b),
+        Err(HarmonicFrequencyError::Fit(
+            HarmonicFitError::IllConditioned { .. }
+        ))
+    ));
+}
+
+#[test]
 fn an_active_bound_or_unrepresentable_correction_never_fakes_convergence() {
     let f0 = 173.41;
     let dt = 1.0 / 8000.0;
