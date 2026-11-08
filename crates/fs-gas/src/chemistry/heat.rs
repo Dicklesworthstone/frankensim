@@ -57,8 +57,7 @@ impl HeatExchange<'_> {
         match self {
             Self::Bath(bath) => bath.increment_density(step, temperature, volume),
             #[cfg(feature = "material")]
-            Self::Body(body) => Ok((step * body.conductance().value() / volume)
-                * (body.sample(heat.value() * volume)?.temperature_k - temperature)),
+            Self::Body(body) => body.increment_density(step, temperature, heat, volume),
         }
     }
 
@@ -262,6 +261,10 @@ impl<'a> HeatStage<'a> {
             Some(HeatExchange::Bath(bath)) if bath.effective_radiating_area.value() != 0.0 => {
                 bath.radiation_capacity_density(diagonal_step, volume)
             }
+            #[cfg(feature = "material")]
+            Some(HeatExchange::Body(body)) if body.effective_radiating_area().value() != 0.0 => {
+                body.radiation_capacity_density(diagonal_step, volume)
+            }
             _ => 0.0,
         };
         if !heat.value().is_finite()
@@ -284,9 +287,26 @@ impl<'a> HeatStage<'a> {
         })
     }
 
-    pub fn heat(self, temperature: f64) -> Result<(Sum, f64), IsochoricKineticsError> {
+    #[cfg_attr(not(feature = "material"), allow(unused_variables))]
+    pub fn heat(
+        self,
+        temperature: f64,
+        controls: IsochoricKineticsSolve,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Sum, f64), IsochoricKineticsError> {
         #[cfg(feature = "material")]
         if let Some(HeatExchange::Body(body)) = self.exchange {
+            if self.radiation_capacity_density_j_m3_k4 != 0.0 {
+                return body.radiative_stage_heat(
+                    self.fixed,
+                    self.volume,
+                    self.capacity_density_j_m3_k,
+                    self.radiation_capacity_density_j_m3_k4,
+                    temperature,
+                    controls,
+                    cancelled,
+                );
+            }
             return body.stage_heat(
                 self.fixed,
                 self.volume,
@@ -316,13 +336,27 @@ impl<'a> HeatStage<'a> {
         Ok((heat, feedback))
     }
 
+    #[cfg_attr(not(feature = "material"), allow(unused_variables))]
     pub fn temperature_interval(
         self,
         lower: f64,
         upper: f64,
+        controls: IsochoricKineticsSolve,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(f64, f64), IsochoricKineticsError> {
         #[cfg(feature = "material")]
         if let Some(HeatExchange::Body(body)) = self.exchange {
+            if self.radiation_capacity_density_j_m3_k4 != 0.0 {
+                return body.radiative_stage_temperature_interval(
+                    self.fixed,
+                    self.volume,
+                    self.capacity_density_j_m3_k,
+                    self.radiation_capacity_density_j_m3_k4,
+                    [lower, upper],
+                    controls,
+                    cancelled,
+                );
+            }
             return body.stage_temperature_interval(
                 self.fixed,
                 self.volume,

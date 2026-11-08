@@ -153,7 +153,8 @@ fn gray_stage_retains_kelvin_separation_original_linear_arithmetic_and_admission
         0.0,
     )
     .unwrap();
-    let (heat, tangent) = stage.heat(temperature).unwrap();
+    let controls = thermal_controls(IsochoricKineticsMethod::Sdirk2);
+    let (heat, tangent) = stage.heat(temperature, controls, &mut || false).unwrap();
     let expected_tangent = 0.5 * 4.0 * SIGMA * reservoir.powi(3);
     let expected_heat = expected_tangent * (reservoir - temperature);
     assert!((heat.value() / expected_heat - 1.0).abs() < 8e-15);
@@ -164,7 +165,8 @@ fn gray_stage_retains_kelvin_separation_original_linear_arithmetic_and_admission
             .increment_density(0.125, temperature, 0.25)
             .unwrap()
     );
-    let (equilibrium_heat, equilibrium_tangent) = stage.heat(reservoir).unwrap();
+    let (equilibrium_heat, equilibrium_tangent) =
+        stage.heat(reservoir, controls, &mut || false).unwrap();
     assert_eq!(equilibrium_heat.value(), 0.0);
     assert!(equilibrium_tangent > 0.0);
 

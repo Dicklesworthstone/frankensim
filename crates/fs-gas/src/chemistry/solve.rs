@@ -1673,7 +1673,8 @@ fn resolve_energy(
                     cancelled: &mut _| {
         statistics.temperature_evaluations += 1;
         let mut state = evaluate_state(mechanism, Temperature::new(temperature), work, cancelled)?;
-        (state.heat_density_j_m3, state.heat_feedback_density_j_m3_k) = heat.heat(temperature)?;
+        (state.heat_density_j_m3, state.heat_feedback_density_j_m3_k) =
+            heat.heat(temperature, controls, cancelled)?;
         let mut residual = chemical;
         residual.add(-caloric.target_increment_density);
         // Keep the compensation term separate from the leading cumulative
@@ -1716,6 +1717,8 @@ fn resolve_energy(
     let (mut lo, mut hi) = heat.temperature_interval(
         controls.minimum_temperature_k,
         controls.maximum_temperature_k,
+        controls,
+        cancelled,
     )?;
     let mut t = hint.clamp(lo, hi);
     let first = evaluate(t, work, statistics, &mut *cancelled)?;

@@ -5552,16 +5552,37 @@ gas reactors expose `advance_with_finite_body`; the returned gas and original-
 source body endpoints publish together. Source, cancellation, work and energy
 refusals publish neither endpoint.
 
-The existing backward-Euler/SDIRK2 chemical stages eliminate the finite body
-on its original caloric intervals. Retained affine Cp(T) uses a scaled quadratic
-solve of h(T)+beta*T; authored affine T(h) and latent intervals retain their
-linear elimination. Binary segment lookup and analytic elimination introduce
-no second time integrator or nested iterative temperature root. The constrained
+Without radiation, the existing backward-Euler/SDIRK2 chemical stages eliminate
+the finite body on its original caloric intervals. Retained affine Cp(T) uses a
+scaled quadratic solve of h(T)+beta*T; authored affine T(h) and latent intervals
+retain their linear elimination. This original analytic path is unchanged
+when radiation is disabled. The constrained
 gas Jacobian uses the original derivative at the accepted body temperature,
 including source Cp variation within compact two-knot charts. Latent plateaus
 retain their actual enthalpy and phase fraction; the adaptive comparison
 includes both body temperature and liquid
 fraction. Caloric bracketing respects both original source domains.
+
+`FiniteHeatBody::with_gray_radiation(area, effective_emissivity)` adds the same
+explicit gray geometry/emissivity convention as the held bath, retaining
+epsilon*A alongside the original body state. The evolving body exchanges
+G*(Tb-Tg)+sigma*epsilon*A*(Tb^4-Tg^4) with the reacting gas. Its temperature
+responds to the transferred heat, including finite sensible storage and sharp
+latent storage. Fixed radiation geometry survives continued body states and
+prescribed conductance histories; density changes do not silently rescale area.
+
+The same chemical stage retains cumulative gas heat q and body
+h=h0-V*q/m. Binary lookup locates the original caloric segment. A bounded,
+cancellable safeguarded Newton solve uses heat relative to the fixed stage
+history, evaluating the original h(q) source and complete gray flux together.
+Sharp latent segments retain direct elimination. The exact eliminated gas
+feedback is `(a+4*b*Tg^3)/(1+(V/m)*(a+4*b*Tb^3)*dTb/dh)`, with
+`a=dt*G/V` and `b=dt*sigma*epsilon*A/V`. Original affine Cp(T) and one-sided
+source derivatives remain authoritative; no apparent latent heat capacity is
+introduced. Monotone endpoint solves constrain the outer gas-temperature
+bracket to the original body domain. All new roots use the caller's existing
+energy tolerance and maximum caloric iterations, and perform no allocation.
+This adds no separate heat timestep or duplicated radiation-energy ledger.
 
 Gas heat and body heat cancel once. The original material isobaric heat owner
 reports density-derived volume, pressure work, enthalpy and internal-energy
@@ -5571,8 +5592,8 @@ energy remain in their respective original potentials. Entropy admission uses
 the actual gas change plus the original body integral of dh/T. Unresolved
 enthalpy-datum heat increments refuse rather than disappear.
 
-This is a homogeneous finite-body model with constant conductance, held
-pressures and no gas/body mass exchange. The caller must justify negligible
+This is a homogeneous finite-body model with declared conductance, optional
+gray exchange, held pressures and no gas/body mass exchange. The caller must justify negligible
 internal body gradients and the pressure applicability of the original chart.
 It does not resolve wall geometry, contact mechanics, moving interfaces or
 spatial flame transport. Source traversal is bounded to 4096 original knots.
@@ -5594,8 +5615,21 @@ a full workspace verdict or measured-material validation.
 The `source_cp_body` regressions additionally cover increasing/decreasing Cp,
 original-interval heat closure and finite-difference feedback, shifted enthalpy
 datums, and independent two-body evolution through both reactor constraints and
-time methods. These new regressions are source/syntax checked but unexecuted;
-the current shared host stopped dependency compilation before this target.
+time methods. The focused original-source material-feature heat build now
+passes all 21 tests, including these Cp regressions and the four finite-gray
+cases. A separate default-feature heat build passes all 10 tests. The material
+build retains original phase caloric/entropy and chemistry code while omitting
+unrelated adapters. Full material/workspace Cargo execution remains blocked by
+the missing sibling asupersync checkout.
+
+Additional finite-gray regressions compare source-Cp stage heat and analytic
+feedback against independent polynomial/finite-difference calculations, and
+compare reacting/frozen two-body evolution against independent scalar ODEs.
+They include sensible-to-latent heating and freezing, both gas constraints and
+time methods, pressure work, original body entropy, source endpoint brackets,
+zero-radiation parity, explicit root work limits, cancellation and replay.
+These numerical fixtures do not validate a measured surface emissivity or
+justify the homogeneous-body approximation for an arbitrary specimen.
 
 ### Finite support inertia in the original network wall transaction
 

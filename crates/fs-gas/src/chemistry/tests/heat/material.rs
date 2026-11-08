@@ -5,6 +5,9 @@ use fs_material::phase::{
     EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
 };
 
+#[path = "material/radiation.rs"]
+mod radiation;
+
 fn curve(datum: f64, latent: bool) -> EquilibriumEnthalpyPhaseCurve {
     // Authored G1 calorimeter, not a measured material or source-validation deck.
     let identity = source("manufactured-calorimeter", 1.0, 4.0, 0.0, 0.0).regions()[0]
@@ -323,7 +326,9 @@ fn sensible_to_latent_crossing_follows_heat_before_melting() {
 #[test]
 fn finite_body_refusals_cancel_replay_and_insulated_parity() {
     let chart = curve(0.0, true);
-    let original = body(&chart, 25_000.0, 40.0);
+    let original = body(&chart, 25_000.0, 40.0)
+        .with_gray_radiation(fs_qty::Area::new(0.2), 0.8)
+        .unwrap();
     let controls = thermal_controls(IsochoricKineticsMethod::Sdirk2);
     let feed = [Amount::new(1.0), Amount::new(0.0)];
     let mut reactor =
@@ -401,7 +406,9 @@ fn finite_body_refusals_cancel_replay_and_insulated_parity() {
         || false,
     )
     .unwrap();
-    let edge = body(&chart, 100_000.0, 40.0);
+    let edge = body(&chart, 100_000.0, 40.0)
+        .with_gray_radiation(fs_qty::Area::new(0.2), 0.8)
+        .unwrap();
     assert!(
         limited
             .advance_with_finite_body(
@@ -463,7 +470,9 @@ fn finite_body_constrained_jacobian_retains_both_caloric_feedbacks() {
         ],
     );
     for pressure in [false, true] {
-        for chart_kind in 0..3 {
+        for case in 0..6 {
+            let chart_kind = case % 3;
+            let radiating = case >= 3;
             let chart = if chart_kind == 2 {
                 source_cp_curve(0.0, [10.0, 110.0])
             } else {
@@ -472,8 +481,10 @@ fn finite_body_constrained_jacobian_retains_both_caloric_feedbacks() {
             let original = body(
                 &chart,
                 if chart_kind == 1 { 25_000.0 } else { 3000.0 },
-                1000.0,
-            );
+                if radiating { 30.0 } else { 1000.0 },
+            )
+            .with_gray_radiation(fs_qty::Area::new(if radiating { 1.6 } else { 0.0 }), 0.8)
+            .unwrap();
             let mut reactor = solve::Reactor::new(
                 mechanism.clone(),
                 thermal_controls(IsochoricKineticsMethod::Sdirk2),
@@ -504,7 +515,7 @@ fn finite_body_constrained_jacobian_retains_both_caloric_feedbacks() {
             let numeric = (plus[0] - minus[0]) / 2e-6;
             assert!(
                 (numeric - derivative[0]).abs() < 2e-7 * numeric.abs().max(1.0),
-                "p={pressure}, chart={chart_kind}: {numeric} != {}",
+                "p={pressure}, chart={chart_kind}, radiating={radiating}: {numeric} != {}",
                 derivative[0]
             );
         }
@@ -549,7 +560,10 @@ fn g1_g3_source_cp_body_stages_close_original_heat_and_tangent() {
                     }
                 }
                 let expected = 0.5 * (lo + hi);
-                let (heat, feedback) = stage.heat(gas_temperature).unwrap();
+                let controls = thermal_controls(IsochoricKineticsMethod::Sdirk2);
+                let (heat, feedback) = stage
+                    .heat(gas_temperature, controls, &mut || false)
+                    .unwrap();
                 let body_h = original.state().specific_enthalpy_j_kg()
                     - heat.value() * volume / original.mass().value();
                 let actual = chart.temperature_at_specific_enthalpy(body_h).unwrap();
@@ -560,12 +574,20 @@ fn g1_g3_source_cp_body_stages_close_original_heat_and_tangent() {
                 let expected_feedback = capacity * actual_capacity / (actual_capacity + beta);
                 assert!((feedback - expected_feedback).abs() < 1e-10);
                 let epsilon = 0.001;
-                let plus = stage.heat(gas_temperature + epsilon).unwrap().0.value();
-                let minus = stage.heat(gas_temperature - epsilon).unwrap().0.value();
+                let plus = stage
+                    .heat(gas_temperature + epsilon, controls, &mut || false)
+                    .unwrap()
+                    .0
+                    .value();
+                let minus = stage
+                    .heat(gas_temperature - epsilon, controls, &mut || false)
+                    .unwrap()
+                    .0
+                    .value();
                 let difference = -(plus - minus) / (2.0 * epsilon);
                 assert!((feedback - difference).abs() < 2e-7 * feedback.max(1.0));
                 assert_eq!(original.state().specific_enthalpy_j_kg(), datum + h0);
-                assert!(stage.heat(-1000.0).is_err());
+                assert!(stage.heat(-1000.0, controls, &mut || false).is_err());
             }
         }
     }

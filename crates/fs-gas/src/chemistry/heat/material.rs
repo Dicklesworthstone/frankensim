@@ -13,6 +13,8 @@ use fs_material::phase::{
     isobaric::IsobaricHeatStep,
 };
 
+mod radiation;
+
 /// Fixed-mass body with its exact original caloric source and current state.
 ///
 /// The caller supplies the pressure at which the chart applies and a total
@@ -26,6 +28,7 @@ pub struct FiniteHeatBody<'m> {
     mass: Mass,
     pressure: Pressure,
     conductance: ThermalConductance,
+    effective_radiating_area: Area,
 }
 
 impl<'m> FiniteHeatBody<'m> {
@@ -59,6 +62,7 @@ impl<'m> FiniteHeatBody<'m> {
             mass,
             pressure,
             conductance,
+            effective_radiating_area: Area::new(0.0),
         })
     }
 
@@ -76,6 +80,32 @@ impl<'m> FiniteHeatBody<'m> {
     }
     pub const fn conductance(self) -> ThermalConductance {
         self.conductance
+    }
+
+    /// Caller-declared `epsilon * A` [m²]; zero disables gray radiation.
+    pub const fn effective_radiating_area(self) -> Area {
+        self.effective_radiating_area
+    }
+
+    /// Add or replace gray radiation between this finite body and the gas.
+    ///
+    /// Area and effective emissivity obey the same admission and gray geometry
+    /// convention as [`HeatBath::with_gray_radiation`]. The original body
+    /// enthalpy, phase, mass, pressure and source are unchanged. Geometry stays
+    /// fixed during each advance; neither gas expansion nor material density
+    /// changes silently rescale the declared area.
+    pub fn with_gray_radiation(
+        mut self,
+        area: Area,
+        effective_emissivity: f64,
+    ) -> Result<Self, IsochoricKineticsError> {
+        self.effective_radiating_area = HeatBath::new(
+            self.conductance,
+            Temperature::new(self.state.temperature_k()),
+        )?
+        .with_gray_radiation(area, effective_emissivity)?
+        .effective_radiating_area();
+        Ok(self)
     }
 
     /// Change the declared total conductance without changing physical storage.
@@ -110,6 +140,36 @@ impl<'m> FiniteHeatBody<'m> {
         Ok(self
             .curve
             .values_at_specific_enthalpy(self.state.specific_enthalpy_j_kg() + increment)?)
+    }
+
+    pub(super) fn radiation_capacity_density(self, step: f64, volume: f64) -> f64 {
+        (step * (STEFAN_BOLTZMANN * self.effective_radiating_area.value())) / volume
+    }
+
+    pub(super) fn increment_density(
+        self,
+        step: f64,
+        temperature: f64,
+        heat: Sum,
+        volume: f64,
+    ) -> Result<f64, IsochoricKineticsError> {
+        let body_temperature = self.sample(heat.value() * volume)?.temperature_k;
+        let linear = (step * self.conductance.value() / volume) * (body_temperature - temperature);
+        if self.effective_radiating_area.value() == 0.0 {
+            return Ok(linear);
+        }
+        let (radiation, _) = radiation_heat(
+            self.radiation_capacity_density(step, volume),
+            body_temperature,
+            temperature,
+        )?;
+        let increment = linear + radiation;
+        if !increment.is_finite() {
+            return Err(IsochoricKineticsError::Invalid(
+                "unrepresentable radiative finite-body heat increment",
+            ));
+        }
+        Ok(increment)
     }
 
     fn heat_report(self, gas_heat_j: f64) -> Result<IsobaricHeatStep, IsochoricKineticsError> {
