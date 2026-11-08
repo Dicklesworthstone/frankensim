@@ -323,8 +323,8 @@ fn flanged_mouth_fir_reproduces_the_coupled_mouth_flow_between_dft_bins() {
 
 #[test]
 fn flanged_admission_ceiling_tracks_the_mouth_radius_and_one_static_pressure() {
-    // Planted negative: the exterior ka ceiling (FLANGED_MAX_KA = 24 at Nyquist) belongs to the MOUTH radius.
-    // The admitted clock must scale as 1/R and sit at 24 c / (pi R); a code path that read the 12 mm inlet radius
+    // Planted negative: the exterior ka ceiling (FLANGED_MAX_KA at Nyquist) belongs to the MOUTH radius.
+    // The admitted clock must scale as 1/R and sit at FLANGED_MAX_KA c / (pi R); a code path that read the 12 mm inlet radius
     // instead would admit clocks five times too high and fail both checks.
     let gas = air_at(293.15);
     let admitted = |mouth: f64, rate: u32| {
@@ -343,7 +343,7 @@ fn flanged_admission_ceiling_tracks_the_mouth_radius_and_one_static_pressure() {
     };
     let (small, large) = (boundary(0.05), boundary(0.06));
     for (mouth, found) in [(0.05, small), (0.06, large)] {
-        let predicted = 24.0 * gas.sound_speed / (core::f64::consts::PI * mouth);
+        let predicted = fs_duct::FLANGED_MAX_KA * gas.sound_speed / (core::f64::consts::PI * mouth);
         assert!((f64::from(found) - predicted).abs() <= 1.0, "R {mouth}: {found} vs {predicted}");
     }
     assert!((f64::from(small) / f64::from(large) - 1.2).abs() < 1e-3, "{small} / {large}");

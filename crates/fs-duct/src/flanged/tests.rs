@@ -313,7 +313,8 @@ fn two_medium_flange_matches_pressure_velocity_continuity() {
 /// measured point at or below the cap holds the 1e-12 gate, that the cap itself is measured, and
 /// that the first point above the cap still holds the gate, so the cap is never the edge itself.
 /// Measured natively (qtest f67a93ae9): 3.5e-14 at 20, 6.5e-14 at 24, 6.0e-14 at 26, 2.9e-13 at
-/// 28, 2.0e-11 at 30. Moving the cap past 28 fails the last assertion. Receipts:
+/// 28, 2.0e-11 at 30. The cap is 28 (MB 13958; it was 24): the last measured point that holds the gate, with the first
+/// measured point above it (30) already past it, so moving the cap past 28 fails the last assertion. Receipts:
 /// `IRPDUCT_FLANGED_ABOVE_CAP`.
 #[test]
 fn flanged_design_is_measured_across_and_beyond_the_cap() {
@@ -370,12 +371,41 @@ fn flanged_design_is_measured_across_and_beyond_the_cap() {
             );
         }
     }
-    assert!(at_cap.expect("the cap is one of the measured points") < 1.0e-12);
+    let at_cap = at_cap.expect("the cap is one of the measured points");
+    assert!(at_cap < 5.0e-13, "the gate must hold at the cap with a margin of two: {at_cap:e}");
     let (ka_above, rel_above) = first_above.expect("a measured point lies above the cap");
     assert!(
-        rel_above < 1.0e-12,
-        "the cap must sit inside the plateau: ka={ka_above} just above it already loses the gate ({rel_above:e})"
+        rel_above >= 1.0e-12,
+        "the first measured point above the cap (ka={ka_above}) still holds the gate ({rel_above:e}): the cap can be raised again"
     );
+}
+
+/// D2 (MB 13958): the cap was raised from 24 to 28 on the FULL matrix, not only `Z_00`. The production node design is compared, at the
+/// production mode count, with a design of twice the nodes on every rule (`REAL`, `NEAR_PANELS`, `PANEL`, `TAIL_AVG`, `TAIL_OSC`): the largest
+/// entry difference over the largest entry of the refined matrix must hold the module's 1e-12 gate at ka 24, 26 and the cap. Receipts:
+/// `IRPDUCT_FLANGED_MATRIX_CAP`.
+#[test]
+fn flanged_full_matrix_is_measured_against_a_refined_node_design_through_the_cap() {
+    let refined = Rules::design(2 * REAL_NODES, 2 * NEAR_PANELS, 2 * PANEL_NODES, 2 * TAIL_AVG_NODES, 2 * TAIL_OSC_NODES)
+        .expect("refined design");
+    let production = RULES.as_ref().expect("production design");
+    assert!(production.real.len() < refined.real.len() && production.near_panels < refined.near_panels);
+    let mut at_cap = None;
+    for ka in [20.0, 22.0, 24.0, 26.0, FLANGED_MAX_KA] {
+        let fine = radiation_matrix_with(&refined, ka, FLANGED_MODES).expect("refined matrix");
+        let coarse = radiation_matrix_with(production, ka, FLANGED_MODES).expect("production matrix");
+        assert_eq!(coarse.len(), FLANGED_MODES * (FLANGED_MODES + 1) / 2);
+        let scale = fine.iter().map(|z| z.abs()).fold(0.0_f64, f64::max);
+        let (worst, at) = fine.iter().zip(&coarse).enumerate()
+            .map(|(i, (a, b))| ((*a - *b).abs(), i)).fold((0.0_f64, 0), |m, x| if x.0 > m.0 { x } else { m });
+        let rel = worst / scale;
+        eprintln!("IRPDUCT_FLANGED_MATRIX_CAP ka={ka} entries={} max_entry_diff_over_max_entry={rel:e} at_packed_entry={at} max_entry={scale:e}", fine.len());
+        assert!(rel.is_finite() && rel < 1.0e-12, "full matrix loses the 1e-12 gate against the refined design at ka={ka}: {rel:e}");
+        if ka == FLANGED_MAX_KA {
+            at_cap = Some(rel);
+        }
+    }
+    assert!(at_cap.expect("the cap is one of the measured points") < 1.0e-12);
 }
 
 /// The band the lift admitted, `ka` from 20 to the cap, held to the module's own gates on a dense
@@ -388,9 +418,10 @@ fn flanged_lifted_band_holds_the_gates_across_a_cutoff() {
     let gas = air();
     let z0 = gas.density * gas.sound_speed / (PI * RADIUS * RADIUS);
     let alpha7 = RULES.as_ref().expect("rules").roots[6].0;
+    let alpha8 = RULES.as_ref().expect("rules").roots[7].0;
     assert!(
-        (20.0..FLANGED_MAX_KA).contains(&alpha7),
-        "the cutoff this test straddles must lie inside the lifted band: {alpha7}"
+        (20.0..FLANGED_MAX_KA).contains(&alpha7) && (20.0..FLANGED_MAX_KA).contains(&alpha8),
+        "the cutoffs this test straddles must lie inside the lifted band: {alpha7} {alpha8}"
     );
     let steps = ((FLANGED_MAX_KA - 20.0) / 0.05).round() as usize;
     let mut grid: Vec<f64> = (0..=steps).map(|i| 20.0 + 0.05 * i as f64).collect();
@@ -400,6 +431,11 @@ fn flanged_lifted_band_holds_the_gates_across_a_cutoff() {
         alpha7,
         alpha7 * (1.0 + 1.0e-9),
         alpha7 * (1.0 + 1.0e-6),
+        alpha8 * (1.0 - 1.0e-6),
+        alpha8 * (1.0 - 1.0e-9),
+        alpha8,
+        alpha8 * (1.0 + 1.0e-9),
+        alpha8 * (1.0 + 1.0e-6),
     ]);
     grid.retain(|&ka| ka < FLANGED_MAX_KA);
     let (mut worst_piston, mut worst_piston_ka, mut worst_r, mut worst_r_ka) =
@@ -431,7 +467,7 @@ fn flanged_lifted_band_holds_the_gates_across_a_cutoff() {
     );
     eprintln!(
         "{{\"suite\":\"fs-duct\",\"case\":\"flanged_lifted_band_holds_the_gates_across_a_cutoff\",\
-         \"inputs\":\"{} points, ka 20..{FLANGED_MAX_KA} step 0.05 plus alpha_7={alpha7:.6} +-1e-6,1e-9,0\",\
+         \"inputs\":\"{} points, ka 20..{FLANGED_MAX_KA} step 0.05 plus alpha_7={alpha7:.6} and alpha_8={alpha8:.6} +-1e-6,1e-9,0\",\
          \"observed\":{{\"worst_piston_rel\":{worst_piston:e},\"at_ka\":{worst_piston_ka},\
          \"max_abs_r\":{worst_r:.12},\"at_ka_r\":{worst_r_ka}}},\"verdict\":\"pass\"}}",
         grid.len()

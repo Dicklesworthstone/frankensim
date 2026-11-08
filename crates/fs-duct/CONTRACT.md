@@ -1624,9 +1624,10 @@ divergence-theorem closure/orientation pin on the lathe).
   Sheng 1989).
   - The previous fit-below / piston-above switch jumped by ~0.19 z0 at
     `ka = 1`, which no causal characteristic line can realize.
-  - Refused above `FLANGED_MAX_KA = 24`. This is the fixed-node
+  - Refused above `FLANGED_MAX_KA = 28`. This is the fixed-node
     quadrature's design limit, not a validity edge of the model (the
-    multimodal load is exact for every `ka`). It was 20 until
+    multimodal load is exact for every `ka`). It was 24 until MB 13958 (a 59.5 mm
+    saxophone bell reaches `ka` 26.2 at the 24 kHz Nyquist of a 48 kHz clip), and 20 before that, until
     `flanged_design_is_measured_across_and_beyond_the_cap` measured the
     design: the quadrature `Z_00` against the closed-form piston is 3.5e-14
     at `ka = 20`, at most 6.5e-14 through 26, 2.9e-13 at 28, and loses the
@@ -1636,6 +1637,13 @@ divergence-theorem closure/orientation pin on the lathe).
     at cutoff drops out of the Schur complement (`ζ = ∞`, the continuous
     limit), so the new cutoff inside the band (`α_7 = 22.76`) is handled the
     way `α_1` to `α_6` were. Values at `ka <= 20` are bit-identical to before.
+    The raise to 28 is measured on the FULL 16-mode matrix: against a design of
+    twice the nodes on every rule, the largest entry difference over the largest entry is
+    1.3e-14 at `ka = 24`, 6.7e-14 at 26 and 7.6e-14 at 28 (gate 1e-12; receipts
+    `IRPDUCT_FLANGED_MATRIX_CAP`). 28 is the last measured point that holds the Z_00 gate (30 has lost
+    it). The cutoffs `α_7 = 22.76` and `α_8 = 25.90` both lie inside the admitted band and are
+    straddled by `flanged_lifted_band_holds_the_gates_across_a_cutoff`. The equivalent-load
+    builder (`modal::equivalent`) keeps its own band, `ka` 24, the one its claims were measured to.
   - The plane-mode TMM above a bore's first cross-mode cutoff stays the
     disclosed 1-D boundary.
   - A full exterior BEM of an unflanged pipe is still the recorded successor.
@@ -2787,7 +2795,7 @@ The target is `Re Z_eq` (the even part fixes the causal kernel, so causality is
 exact; the reactance follows by Kramers-Kronig and is checked against `Z_eq`).
 The resistance omitted above the evaluation would leak into the reactance as an
 error growing with frequency, so `Z_eq` is evaluated up to the flanged radiation
-limit (`ka = 24`) and the builder REFUSES a step whose Nyquist frequency stops
+band (`ka = 24`, its own measured band, not the flanged cap) and the builder REFUSES a step whose Nyquist frequency stops
 that short of 0.9 of it, and a claimed band above a third of the evaluation.
 Measured on a cylinder with a Bessel bell to 40 mm (claim 4 kHz, bins 10 Hz): a
 12.5 us step matches `Z_eq` at off-grid midpoints to 3.5e-5 `Z_inf`; the 25 us step

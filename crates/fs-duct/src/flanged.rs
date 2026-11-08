@@ -60,9 +60,15 @@ pub const FLANGED_MAX_MODES: usize = 24;
 /// `flanged_design_is_measured_across_and_beyond_the_cap`, the quadrature
 /// `Z_00` against the closed-form piston is 3.5e-14 at `ka = 20`, at most
 /// 6.5e-14 through 26, then 2.9e-13 at 28, 2.0e-11 at 30 (past the 1e-12
-/// gate), 3.6e-8 at 34 and 1.5e-5 at 38. The cap sits well inside the
-/// plateau, not on its edge; above it the load refuses by name.
-pub const FLANGED_MAX_KA: f64 = 24.0;
+/// gate), 3.6e-8 at 34 and 1.5e-5 at 38. Raised from 24 to 28 (MB 13958, the 59.5 mm
+/// bell of a saxophone reaches `ka` 26.2 at the 24 kHz Nyquist of a 48 kHz clip) on the
+/// full 16-mode matrix: `flanged_full_matrix_is_measured_against_a_refined_node_design_through_the_cap`
+/// compares it with a design of twice the nodes on every rule, largest entry difference over the
+/// largest entry 1.3e-14 at `ka = 24`, 6.7e-14 at 26 and 7.6e-14 at 28 (gate 1e-12).
+/// 28 is the last measured point that holds the gate (30 has lost it), so the cap sits on the
+/// edge of the plateau side with a margin of about a factor of three, not well inside it;
+/// above it the load refuses by name.
+pub const FLANGED_MAX_KA: f64 = 28.0;
 
 /// Reactive split, above `α_23 ≈ 72.9` with room for the rotated tail.
 const TAIL_X: f64 = 86.0;
@@ -80,6 +86,8 @@ const ROOT_GUARD: f64 = 1.0e-5;
 
 struct Rules {
     real: Vec<(f64, f64)>,
+    /// Panels of the reactive near part.
+    near_panels: usize,
     panel: Vec<(f64, f64)>,
     avg: Vec<(f64, f64)>,
     osc: Vec<(f64, f64)>,
@@ -87,14 +95,24 @@ struct Rules {
     roots: Vec<(f64, f64)>,
 }
 
+impl Rules {
+    /// The rules of one node design: `real` nodes on the propagating part, `near_panels` panels of `panel` nodes on the
+    /// reactive near part, `avg` and `osc` nodes on the two tail parts. Production is the constants above; the full-matrix
+    /// measurement behind the cap builds a refined one.
+    fn design(real: usize, near_panels: usize, panel: usize, avg: usize, osc: usize) -> Result<Self, DuctError> {
+        Ok(Self {
+            real: gauss_legendre(real),
+            near_panels,
+            panel: gauss_legendre(panel),
+            avg: gauss_legendre(avg),
+            osc: gauss_legendre(osc),
+            roots: j1_roots_with_j0(FLANGED_MAX_MODES - 1)?,
+        })
+    }
+}
+
 static RULES: LazyLock<Result<Rules, DuctError>> = LazyLock::new(|| {
-    Ok(Rules {
-        real: gauss_legendre(REAL_NODES),
-        panel: gauss_legendre(PANEL_NODES),
-        avg: gauss_legendre(TAIL_AVG_NODES),
-        osc: gauss_legendre(TAIL_OSC_NODES),
-        roots: j1_roots_with_j0(FLANGED_MAX_MODES - 1)?,
-    })
+    Rules::design(REAL_NODES, NEAR_PANELS, PANEL_NODES, TAIL_AVG_NODES, TAIL_OSC_NODES)
 });
 
 /// Order-zero Bessel `J0` for the root table: the shared double-double
@@ -217,7 +235,11 @@ fn accumulate(acc: &mut [f64], d: &[f64], weight: f64) {
 /// `Z_00`. Production replaces `Z_00` by the closed form. This is the seam
 /// the closed-form cross-check certifies.
 pub(crate) fn radiation_matrix(ka: f64, modes: usize) -> Result<Vec<C64>, DuctError> {
-    let rules = RULES.as_ref().map_err(Clone::clone)?;
+    radiation_matrix_with(RULES.as_ref().map_err(Clone::clone)?, ka, modes)
+}
+
+/// [`radiation_matrix`] on any node design: the seam on which the production design is measured against a refined one.
+fn radiation_matrix_with(rules: &Rules, ka: f64, modes: usize) -> Result<Vec<C64>, DuctError> {
     let roots = &rules.roots[..modes - 1];
     let pairs = modes * (modes + 1) / 2;
     let mut re = vec![0.0_f64; pairs];
@@ -232,8 +254,8 @@ pub(crate) fn radiation_matrix(ka: f64, modes: usize) -> Result<Vec<C64>, DuctEr
     }
     // Reactive near part: s in (0, s_c), x = sqrt(K² + s²) in (K, TAIL_X).
     let s_c = det::sqrt((TAIL_X - ka) * (TAIL_X + ka));
-    let width = s_c / NEAR_PANELS as f64;
-    for panel in 0..NEAR_PANELS {
+    let width = s_c / rules.near_panels as f64;
+    for panel in 0..rules.near_panels {
         let base = panel as f64 * width;
         for &(t, w) in &rules.panel {
             let s = t.mul_add(width, base);

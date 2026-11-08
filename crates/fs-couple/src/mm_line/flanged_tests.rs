@@ -104,7 +104,8 @@ fn flanged_line_preflights_exterior_band_and_pressure() {
     let different_pressure = air(293.15, 90_000.0);
     let duct = Duct {
         segments: vec![Segment::Cylinder {
-            radius: 0.06,
+            // 70 mm: ka at the 24 kHz Nyquist of 48 kHz is 30.8, above the flanged cap (28); the 60 mm this test used reaches 26.4, which the cap of 24 refused and 28 admits.
+            radius: 0.07,
             length: 0.1,
         }],
     };

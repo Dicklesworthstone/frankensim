@@ -22,6 +22,10 @@
 //! that resistance alone, so it is causal by construction.
 use super::*;
 
+/// The largest `ka` the equivalent-load kernel is evaluated to: the band of its recorded measurements (24), not the flanged load's admitted
+/// cap (raised to 28, MB 13958), so the kernels, their claims and the bits of every bore that uses this builder stay as measured.
+const EVALUATED_MAX_KA: f64 = 24.0;
+
 /// Plane-mode equivalent of the complete flanged mouth at one frequency.
 ///
 /// `state` is the bore gas, `exterior` the room; they must share a static
@@ -198,7 +202,7 @@ pub fn plane_mouth_kernel(
         return Err(DuctError::Singular);
     }
     // Evaluate to the flanged radiation limit or just below Nyquist, whichever is lower.
-    let radiation_limit_hz = crate::flanged::FLANGED_MAX_KA * exterior.sound_speed
+    let radiation_limit_hz = EVALUATED_MAX_KA * exterior.sound_speed
         / (core::f64::consts::TAU * mouth_radius_m);
     let evaluated_hz = (0.999 * radiation_limit_hz).min(0.98 * 0.5 / spec.step_s);
     let top = (evaluated_hz / bin_hz).floor() as usize;
