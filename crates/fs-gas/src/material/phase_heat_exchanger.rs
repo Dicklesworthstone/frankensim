@@ -4,6 +4,9 @@
 //! original PH increment owner resolves both outlets, including phase changes;
 //! neither averaged heat capacity nor an additional latent-energy term is used.
 
+/// Original-source parallel and counterflow plug-flow heat exchange.
+pub mod spatial;
+
 use crate::chemistry::ThermalConductance;
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
 use fs_material::thermochemical_gas::nonideal::flash::{

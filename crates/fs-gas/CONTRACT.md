@@ -5442,6 +5442,69 @@ references, a liquid-to-coexistence transition, the analytic dilute constant-Cp
 limit, unequal and reversed streams, independent large reference-datum shifts,
 exact rest, shared work boundaries, domain refusal and cancellation/replay.
 
+## Spatial parallel and counterflow mixture heat exchangers
+
+With `material`, `material::phase_heat_exchanger::spatial` resolves the
+one-dimensional steady plug-flow energy balance for parallel or counterflow
+streams. Each stream retains its own mixture, fixed pressure, positive mass
+flow and original phase policy. Two immutable prepared PH paths select the
+inlets once. All local states use native source-integrated increments from
+those same inlets, including NASA calorics, EOS departures and phase conversion.
+
+For signed total heat duty `Q` into the left stream and cumulative heat fraction
+`u`, the left increment is `u Q / mdot_left`. The right increment is
+`-u Q / mdot_right` in parallel flow and `-(1-u) Q / mdot_right` in counterflow.
+The continuum relation is `UA = Q integral[du / (T_right(u) - T_left(u))]`.
+Thus each species feed remains separate and both stream energy balances close
+without chaining approximate outlet states, fitting a heat capacity, adding a
+latent source, or counting pressure-flow work twice. Counterflow outlet
+temperatures may cross; passivity concerns the co-located temperature gap.
+
+The bounded scalar root uses the power residual `Q - UA / I`, with sign
+normalization and `I` the positive reciprocal-gap integral. Adaptive nested
+Simpson panels cache original endpoint and midpoint states. Native PH work is
+linear in sampled nodes per duty query. Breadth-first subdivision avoids
+exhausting one near-pinch interval before the complete partition can exclude an
+excessive trial duty. Monotone source-temperature bounds require each accepted
+panel's entire gap to be positive under the native monotone caloric inversion
+assumption. A partition-wide lower bound on required conductance can reject an
+upper duty without fully resolving its near-pinch profile. Witnessed
+nonpositive gaps also reduce only the upper bracket. Original source/domain
+failures and unresolved panel bounds remain explicit refusals.
+
+The raw coarse/fine quadrature difference is an estimate, without a smooth-order
+Richardson divisor that could hide phase-boundary kinks. Caller conductance
+tolerances are further limited by the reserved power budget. Acceptance requires
+the scalar residual plus its conditional quadrature power uncertainty to fit
+the physical allowance. This is not a certified quadrature bound and excludes
+native PH inversion uncertainty and model/source-data error. Original PH
+tolerances remain explicit. Actual source enthalpy flows and combined source
+entropy are checked by the same final balance owner as the mixed-chamber API.
+
+The returned source-bearing profile distinguishes cumulative heat fraction from
+cumulative conductance fraction. The latter equals axial fraction only for
+uniform conductance per unit length. Its normalization uses the same
+compensated reduction as the accepted total integral. Both physical ends,
+original phase states, source increments, total PT/EOS work, quadrature estimates
+and minimum sampled gap are retained without another accepted-state flash.
+
+A single whole-call PT budget includes both preparations and every duty/root
+sample. Separate duty, panel and refinement-depth limits bound the remaining
+work and storage. Strict monotone gap bounds can require increasing panel counts
+at high NTU; an insufficient declared budget refuses rather than silently
+skipping pinch checks. Zero UA or equal inlet temperatures gives exact zero
+duty after the two inlet preparations, with no new endpoint PT calls.
+Cancellation or any numerical/source refusal publishes no partial profile.
+
+The model includes no pressure drop, axial conduction, wall heat capacity,
+external heat, shaft work, species exchange, reaction kinetics or change in
+kinetic/potential energy. It retains the original finite phase-screen evidence,
+without a global phase-stability claim. Focused tests cover independently
+calculated PR parallel/counterflow references, a liquid-to-coexistence transition,
+the dilute-gas effectiveness-NTU formulas, high-NTU counterflow outlet crossing
+and near-pinch upper bounds, source-reference shifts, reversed flow duty, exact
+rest, shared work limits, spatial refinement, source refusal and cancellation.
+
 ## Adiabatic equilibrium mixture compressors and expanders
 
 With `material`, `material::phase_machinery::adiabatic_mixture_machine`
