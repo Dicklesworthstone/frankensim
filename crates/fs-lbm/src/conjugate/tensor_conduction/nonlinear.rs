@@ -25,7 +25,10 @@ mod sdirk;
 mod transient;
 #[cfg(feature = "enthalpy-coupling")]
 pub use caloric::{
+    TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
+    TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,
     TensorCaloricEndpoint, TensorCaloricLaw, TensorCaloricSdirk2Step, TensorCaloricStep,
+    advance_caloric_tensor_conduction_adaptive,
     TensorCaloricStorage, advance_caloric_tensor_conduction,
     advance_caloric_tensor_conduction_sdirk2,
 };

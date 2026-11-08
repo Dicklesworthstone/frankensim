@@ -14,8 +14,14 @@ use crate::conjugate::{
     ChtError, SolidMaterial, ThermalSetup, VoxelDomain, finite, finite_positive, poll,
 };
 
+mod adaptive;
 mod material;
 mod storage;
+pub use adaptive::{
+    TensorCaloricAdaptiveConfig, TensorCaloricAdaptiveError, TensorCaloricAdaptiveReport,
+    TensorCaloricAdaptiveSolution, TensorCaloricForcing, TensorCaloricForcingSample,
+    advance_caloric_tensor_conduction_adaptive,
+};
 use storage::{CaloricStage, PreparedCaloric};
 
 /// The original caloric law plus its own bounded, analytic temperature tangent.
