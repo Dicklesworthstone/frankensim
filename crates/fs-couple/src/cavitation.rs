@@ -20,6 +20,10 @@
 #[cfg(feature = "cavitation")]
 pub mod bubble;
 
+/// Interacting radial sources and their individually retarded acoustic paths.
+#[cfg(feature = "cavitation")]
+pub mod cluster;
+
 /// Resonant coherent propagation from the native compressible bubble model.
 #[cfg(feature = "cavitation")]
 pub mod bubbly;

@@ -155,6 +155,34 @@ pub struct BubbleClusterStep {
     pub maximum_normalized_local_error: f64,
 }
 
+/// Fully solved joint interval awaiting acceptance by an attached consumer.
+///
+/// Borrowing the original owner prevents another advance while this candidate
+/// is inspected. Dropping it leaves every radius, velocity and clock unchanged;
+/// committing moves only the already admitted endpoint, without reintegration.
+#[must_use = "a cluster proposal changes no accepted state until commit"]
+pub struct BubbleClusterProposal<'a> {
+    owner: &'a mut BubbleCluster,
+    step: BubbleClusterStep,
+}
+
+impl BubbleClusterProposal<'_> {
+    /// The complete native source, work and energy result before publication.
+    pub const fn step(&self) -> &BubbleClusterStep {
+        &self.step
+    }
+
+    /// Accept all member states and their common clock together. This performs
+    /// no allocation, callback, numerical solve or fallible physical operation.
+    pub fn commit(self) -> BubbleClusterStep {
+        for (state, current) in self.owner.states.iter_mut().zip(&self.step.observation.bubbles) {
+            *state = current.state;
+        }
+        self.owner.time_s = self.step.observation.time_s;
+        self.step
+    }
+}
+
 /// Fixed original members and an atomically published joint physical state.
 #[derive(Debug)]
 pub struct BubbleCluster {
@@ -347,6 +375,26 @@ impl BubbleCluster {
         Pressure: Fn(f64) -> f64,
         Cancel: FnMut() -> bool,
     {
+        Ok(self
+            .propose_controlled(end_time_s, numerics, pressure, cancelled)?
+            .commit())
+    }
+
+    /// Solve the original joint trajectory without publishing its endpoint.
+    /// An acoustic or other attached consumer can inspect the native result,
+    /// admit its own physical domain, poll cancellation and then commit both.
+    /// This shares the exact advance kernel and never clones the cluster.
+    pub fn propose_controlled<Pressure, Cancel>(
+        &mut self,
+        end_time_s: f64,
+        numerics: &BubbleClusterNumerics,
+        pressure: &Pressure,
+        cancelled: &mut Cancel,
+    ) -> Result<BubbleClusterProposal<'_>, BubbleClusterError>
+    where
+        Pressure: Fn(f64) -> f64,
+        Cancel: FnMut() -> bool,
+    {
         poll(cancelled)?;
         numerics.radial.validate()?;
         if !positive(numerics.absolute_energy_tolerance_j) {
@@ -417,11 +465,7 @@ impl BubbleCluster {
             });
         }
         poll(cancelled)?;
-        for (state, current) in self.states.iter_mut().zip(&observation.bubbles) {
-            *state = current.state;
-        }
-        self.time_s = result.time_s;
-        Ok(BubbleClusterStep {
+        let step = BubbleClusterStep {
             observation,
             pressure_work_j,
             viscous_loss_j,
@@ -430,6 +474,10 @@ impl BubbleCluster {
             rejected_steps: result.rejected_steps,
             rhs_evaluations: result.rhs_evaluations,
             maximum_normalized_local_error: result.maximum_normalized_local_error,
+        };
+        Ok(BubbleClusterProposal {
+            owner: self,
+            step,
         })
     }
 

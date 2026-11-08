@@ -6781,3 +6781,43 @@ independent two-coil/caloric/contact-resistance solution over two intervals,
 check equivalence with the bare network when no extra paths are attached,
 and exercise typed failure, cancellation, budgets and retry. Synthetic
 material curves qualify the discrete coupling rather than an empirical motor.
+
+
+## Material-bound interacting cavitation sources
+
+With the existing cavitation feature, `cavitation::cluster::MaterialBubbleCluster`
+retains the original liquid source and native `fs_flux::cavitation::BubbleCluster`.
+Binding requires the complete same material snapshot, including viscosity and
+surface tension. Each compact source uses that member's jointly solved volume
+rate and acceleration, its restrained center, and the common accepted physical
+clock. It never substitutes isolated-bubble accelerations or a summed source at
+an arbitrary common distance.
+
+The native cluster proposal solves the original joint DP54/work/energy kernel
+without publishing its endpoint. Dropping a proposal changes no member state.
+The material adapter admits every acoustic endpoint and checks cancellation
+before committing all radii, velocities and the shared clock. No second solver,
+cluster clone, extra integration or acoustic radiation damping is introduced.
+
+Prepared monopoles retain separate distances and travel times in the original
+liquid. Their endpoints generally have different arrival times. Coherent
+pressure on one receiver clock uses the exported per-member histories and
+stationary motions with the existing `MovingCompactRenderer`, which evaluates
+each history at its own retarded time before summing signed pressures.
+Source history resolution, nonlinear source bandwidth and interpolation
+convergence remain explicit producer responsibilities. The cavitation example
+includes this complete two-member source-to-receiver path.
+
+Applicability remains restrained, separated spherical bubbles, frozen material,
+incompressible long-wave mutual interaction and one-way linear compact
+propagation. It does not supply finite-delay cloud dynamics, translational
+forces, thermal phase change, shocks, nonspherical collapse or erosion.
+The acoustic source relation is Brennen, Cavitation and Bubble Dynamics,
+[chapter 3, section 3.8, equation 3.10](https://media.library.caltech.edu/CaltechBOOK:1995.001/chap3.htm).
+
+Six regression tests cover the joint source and material identity, native
+proposal rollback, independent per-path pressure and delay, late acoustic and
+cancellation rollback with exact retry, mismatched observers, and receiver
+history refinement against separately integrated retarded states. Execution
+is pending: the implementation session's executor became unavailable before
+compilation or test completion. These cases are not claimed as passing evidence.

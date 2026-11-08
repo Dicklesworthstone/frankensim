@@ -36,7 +36,8 @@ mod stepper;
 
 pub use cluster::{
     BubbleCluster, BubbleClusterError, BubbleClusterLimits, BubbleClusterNumerics,
-    BubbleClusterObservation, BubbleClusterStep, ClusterBubble, MAX_INTERACTING_BUBBLES,
+    BubbleClusterObservation, BubbleClusterProposal, BubbleClusterStep, ClusterBubble,
+    MAX_INTERACTING_BUBBLES,
 };
 pub use keller_miksis::{BubblePressureSample, KellerMiksisBubble, KellerMiksisLimits};
 pub use population::{
