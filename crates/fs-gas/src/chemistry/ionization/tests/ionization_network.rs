@@ -17,6 +17,7 @@ use fs_thermochem::kinetics::atomic_ionization::{AtomicIonizationV1, AtomicStati
 use fs_thermochem::{ChargeVector, ElementId, ElementalMatrix, ReactionId};
 
 mod thermal;
+mod transport;
 
 const CV: f64 = 1.5 * R;
 const ALPHA_MASS: f64 = 6.644_657_335_7e-27;

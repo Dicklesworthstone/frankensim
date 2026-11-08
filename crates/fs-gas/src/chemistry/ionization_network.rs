@@ -42,6 +42,7 @@ use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicR
 
 mod solve;
 use solve::{Point, Problem};
+pub mod transport;
 
 /// The existing atomic source, work, state and energy refusal vocabulary.
 pub type IonizationNetworkError = CollisionalRadiativeError;
@@ -106,6 +107,9 @@ pub struct IonizationNetworkBalance {
     pub absorbed_radiation_energy_j: f64,
     /// Energy carried away by spontaneous recombination photons [J].
     pub emitted_radiation_energy_j: f64,
+    /// Direct signed photon energy deposited in gas [J]. Diffuse owners cancel
+    /// internal recycling before this accumulation, independently of gross flux.
+    pub net_radiation_energy_j: f64,
     /// Original level storage change reconstructed from actual populations [J].
     pub chemical_storage_change_j: f64,
     /// Actual shared electron sensible-energy change [J].

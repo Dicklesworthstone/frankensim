@@ -1,5 +1,7 @@
 use super::*;
+use crate::chemistry::collisional_radiative::solve::DiffuseIncrement;
 use crate::chemistry::collisional_radiative::thermal::PreparedThermal;
+use fs_math::dd::Dd;
 use fs_math::det::expm1;
 use fs_qty::Amount;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -36,6 +38,7 @@ pub(super) struct Point {
     pub events: Vec<Events>,
     te: f64,
     th: f64,
+    net_radiation: Dd,
     // Total, neutral and Coulomb electron-to-heavy transfers [J].
     exchange: [Sum; 3],
 }
@@ -46,6 +49,7 @@ impl Point {
             events: vec![Events::default(); channels],
             te: 0.0,
             th: 0.0,
+            net_radiation: Dd::ZERO,
             exchange: [Sum::default(); 3],
         }
     }
@@ -54,7 +58,19 @@ impl Point {
         self.events.copy_from_slice(&source.events);
         self.te = source.te;
         self.th = source.th;
+        self.net_radiation = source.net_radiation;
         self.exchange = source.exchange;
+    }
+    pub fn electron_temperature(&self) -> f64 {
+        self.te
+    }
+    pub fn heavy_temperature(&self) -> f64 {
+        self.th
+    }
+    /// Signed radiation energy, retained before gross emission and absorption
+    /// can erase a small physical escape or interspecies exchange.
+    pub fn net_radiation_energy_j(&self) -> f64 {
+        self.net_radiation.to_f64()
     }
 }
 
@@ -250,12 +266,23 @@ impl<'a> Problem<'a> {
         self.edges.iter().map(|edge| edge.source)
     }
 
+    /// Lower stage, upper stage and shared electrons in canonical edge order.
+    pub fn active_amounts(&self, channel: usize, point: &Point) -> [f64; 3] {
+        let edge = &self.edges[channel];
+        [
+            point.amounts[edge.lower],
+            point.amounts[edge.upper],
+            point.amounts[self.electron.expect("admitted structural electron")],
+        ]
+    }
+
     pub fn initial_point(&self) -> Point {
         Point {
             amounts: self.initial.amounts().iter().map(|n| n.value()).collect(),
             events: vec![Events::default(); self.edges.len()],
             te: self.initial.electron_temperature().value(),
             th: self.initial.heavy_temperature().value(),
+            net_radiation: Dd::ZERO,
             exchange: [Sum::default(); 3],
         }
     }
@@ -282,14 +309,39 @@ impl<'a> Problem<'a> {
         balance: &mut IonizationNetworkBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), IonizationNetworkError> {
+        self.compose_impl(point, dt, true, balance, cancelled)
+    }
+
+    /// Impact, three-body capture and thermal exchange only. A common radiation
+    /// owner supplies both photon processes through simultaneous edge moments.
+    pub fn collisional_compose(
+        &self,
+        point: &mut Point,
+        dt: f64,
+        balance: &mut IonizationNetworkBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), IonizationNetworkError> {
+        self.compose_impl(point, dt, false, balance, cancelled)
+    }
+
+    fn compose_impl(
+        &self,
+        point: &mut Point,
+        dt: f64,
+        radiation: bool,
+        balance: &mut IonizationNetworkBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), IonizationNetworkError> {
+        poll(cancelled)?;
         self.thermal_step(point, 0.5 * dt, balance, cancelled)?;
-        let last = self.edges.len() - 1;
-        for index in 0..last {
-            self.midpoint(index, point, 0.5 * dt, balance, cancelled)?;
-        }
-        self.midpoint(last, point, dt, balance, cancelled)?;
-        for index in (0..last).rev() {
-            self.midpoint(index, point, 0.5 * dt, balance, cancelled)?;
+        if let Some(last) = self.edges.len().checked_sub(1) {
+            for index in 0..last {
+                self.midpoint(index, point, 0.5 * dt, radiation, balance, cancelled)?;
+            }
+            self.midpoint(last, point, dt, radiation, balance, cancelled)?;
+            for index in (0..last).rev() {
+                self.midpoint(index, point, 0.5 * dt, radiation, balance, cancelled)?;
+            }
         }
         self.thermal_step(point, 0.5 * dt, balance, cancelled)?;
         Ok(())
@@ -384,6 +436,7 @@ impl<'a> Problem<'a> {
         index: usize,
         point: &mut Point,
         dt: f64,
+        radiation: bool,
         balance: &mut IonizationNetworkBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), IonizationNetworkError> {
@@ -397,17 +450,25 @@ impl<'a> Problem<'a> {
             te: point.te,
             th: point.th,
         };
-        if pair.lower == 0.0 && pair.upper == 0.0 {
+        if (pair.lower == 0.0 && pair.upper == 0.0)
+            || (pair.electron == 0.0 && (!radiation || edge.photon.rate_per_neutral_per_s == 0.0))
+        {
             return Ok(());
         }
-        let rates = self.rates(edge, pair, balance, cancelled)?;
+        let rates = self.rates(edge, pair, radiation, balance, cancelled)?;
         let middle = self.frozen(edge, pair, rates, 0.5 * dt)?.0;
-        let middle_rates = self.rates(edge, middle, balance, cancelled)?;
-        let (next, increments) = self.frozen(edge, pair, middle_rates, dt)?;
+        let middle_rates = self.rates(edge, middle, radiation, balance, cancelled)?;
+        let (next, increments, net_radiation) = self.frozen(edge, pair, middle_rates, dt)?;
         point.amounts[edge.lower] = next.lower;
         point.amounts[edge.upper] = next.upper;
         point.amounts[electron] = next.electron;
         point.te = next.te;
+        point.net_radiation = point.net_radiation + Dd::from_f64(net_radiation);
+        if !point.net_radiation.to_f64().is_finite() {
+            return Err(IonizationNetworkError::Arithmetic(
+                "network net radiation energy",
+            ));
+        }
         for (sum, increment) in point.events[index].0.iter_mut().zip(increments) {
             sum.add(increment);
             if !sum.value.is_finite() {
@@ -421,6 +482,7 @@ impl<'a> Problem<'a> {
         &self,
         edge: &Edge<'_>,
         pair: Pair,
+        radiation: bool,
         balance: &mut IonizationNetworkBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Rates, IonizationNetworkError> {
@@ -430,7 +492,7 @@ impl<'a> Problem<'a> {
         }
         balance.rate_evaluations += 1;
         let photon = edge.photon;
-        let te = if pair.electron == 0.0 && photon.rate_per_neutral_per_s > 0.0 {
+        let te = if radiation && pair.electron == 0.0 && photon.rate_per_neutral_per_s > 0.0 {
             (NA / CV) * (photon.electron_heating_per_neutral_w / photon.rate_per_neutral_per_s)
         } else {
             pair.te
@@ -458,23 +520,31 @@ impl<'a> Problem<'a> {
                 }
                 error => IonizationNetworkError::Atomic(error),
             })?;
-        let radiative = edge
-            .source
-            .evaluate(
-                Temperature::new(te),
-                self.controls.local.quadrature,
-                &mut *cancelled,
+        let (capture, captured_energy) = if radiation {
+            let radiative = edge
+                .source
+                .evaluate(
+                    Temperature::new(te),
+                    self.controls.local.quadrature,
+                    &mut *cancelled,
+                )
+                .map_err(|error| match error {
+                    RadiativeRecombinationErrorV1::Cancelled => IonizationNetworkError::Cancelled,
+                    error => IonizationNetworkError::Recombination(error),
+                })?;
+            balance.maximum_relative_quadrature_error = balance
+                .maximum_relative_quadrature_error
+                .max(radiative.relative_quadrature_error_estimate);
+            balance.maximum_relative_tail_bound = balance
+                .maximum_relative_tail_bound
+                .max(radiative.relative_tail_bound);
+            (
+                NA * radiative.coefficient_m3_s * (pair.upper.max(pair.electron) / volume),
+                NA * radiative.mean_captured_energy_j().unwrap_or(0.0),
             )
-            .map_err(|error| match error {
-                RadiativeRecombinationErrorV1::Cancelled => IonizationNetworkError::Cancelled,
-                error => IonizationNetworkError::Recombination(error),
-            })?;
-        balance.maximum_relative_quadrature_error = balance
-            .maximum_relative_quadrature_error
-            .max(radiative.relative_quadrature_error_estimate);
-        balance.maximum_relative_tail_bound = balance
-            .maximum_relative_tail_bound
-            .max(radiative.relative_tail_bound);
+        } else {
+            (0.0, 0.0)
+        };
         let minor = pair.upper.min(pair.electron);
         let three_body = if pair.upper <= pair.electron {
             -atom.concentration_derivatives_per_s[1]
@@ -483,12 +553,16 @@ impl<'a> Problem<'a> {
         } else {
             0.0
         };
-        let capture = NA * radiative.coefficient_m3_s * (pair.upper.max(pair.electron) / volume);
         let rates = Rates {
-            birth: photon.rate_per_neutral_per_s + atom.concentration_derivatives_per_s[0],
+            birth: if radiation {
+                photon.rate_per_neutral_per_s
+            } else {
+                0.0
+            } + atom.concentration_derivatives_per_s[0],
             death: three_body + capture,
             capture,
-            captured_energy: NA * radiative.mean_captured_energy_j().unwrap_or(0.0),
+            captured_energy,
+            radiation,
         };
         if [
             rates.birth,
@@ -512,13 +586,13 @@ impl<'a> Problem<'a> {
         pair: Pair,
         rates: Rates,
         dt: f64,
-    ) -> Result<(Pair, [f64; 6]), IonizationNetworkError> {
+    ) -> Result<(Pair, [f64; 6], f64), IonizationNetworkError> {
         let lambda = rates.birth + rates.death;
         if !nonnegative(lambda) {
             return Err(IonizationNetworkError::Arithmetic("network turnover rate"));
         }
         if lambda == 0.0 || dt == 0.0 {
-            return Ok((pair, [0.0; 6]));
+            return Ok((pair, [0.0; 6], 0.0));
         }
         let minor = pair.upper.min(pair.electron);
         let total = pair.lower + minor;
@@ -549,14 +623,35 @@ impl<'a> Problem<'a> {
             next_minor = total - lower;
         }
         let extent = (birth * pair.lower - death * minor) * depleted;
-        let photo = edge.photon.rate_per_neutral_per_s * lower_time;
+        let photo = if rates.radiation {
+            edge.photon.rate_per_neutral_per_s * lower_time
+        } else {
+            0.0
+        };
         let capture = rates.capture * minor_time;
         let collisional = (extent - photo) + capture;
-        let absorbed = NA * edge.photon.absorbed_power_per_neutral_w * lower_time;
+        let absorbed = if rates.radiation {
+            NA * edge.photon.absorbed_power_per_neutral_w * lower_time
+        } else {
+            0.0
+        };
         let captured = rates.captured_energy * capture;
-        let sensible = NA * edge.photon.electron_heating_per_neutral_w * lower_time
+        let heating = if rates.radiation {
+            NA * edge.photon.electron_heating_per_neutral_w * lower_time
+        } else {
+            0.0
+        };
+        let sensible = heating
             - edge.source.source().channel().ionization_energy_j_mol() * collisional
             - captured;
+        let mut net_radiation = Sum::default();
+        for value in [
+            absorbed,
+            -edge.source.source().channel().ionization_energy_j_mol() * capture,
+            -captured,
+        ] {
+            net_radiation.add(value);
+        }
         let electron = next_minor + (pair.electron - pair.upper).max(0.0);
         let upper = next_minor + (pair.upper - pair.electron).max(0.0);
         if [
@@ -567,6 +662,7 @@ impl<'a> Problem<'a> {
             || !sensible.is_finite()
             || !extent.is_finite()
             || !collisional.is_finite()
+            || !net_radiation.value.is_finite()
             || (electron == 0.0 && (pair.electron != 0.0 || sensible != 0.0))
         {
             return Err(IonizationNetworkError::OutsideDomain);
@@ -593,6 +689,7 @@ impl<'a> Problem<'a> {
                 th: pair.th,
             },
             [extent, photo, collisional, capture, absorbed, captured],
+            net_radiation.value,
         ))
     }
 
@@ -606,6 +703,141 @@ impl<'a> Problem<'a> {
         } else {
             Ok(())
         }
+    }
+
+    /// Apply a common field's integrated moments to every edge simultaneously.
+    /// Shared intermediate stages and electrons are debited once after all edge
+    /// deltas are assembled. Gross emission/reabsorption only audit consistency;
+    /// the supplied direct signed moments determine gas energy and populations.
+    /// An invalid trial leaves the point unchanged and never clips populations.
+    pub fn apply_diffuse(
+        &self,
+        point: &mut Point,
+        increments: &[DiffuseIncrement],
+    ) -> Result<(), IonizationNetworkError> {
+        if increments.len() != self.edges.len()
+            || point.events.len() != self.edges.len()
+            || point.amounts.len() != self.initial.amounts().len()
+            || self.edges.len() > MAX_EQUILIBRIUM_SPECIES_V1
+        {
+            return Err(IonizationNetworkError::Invalid(
+                "network radiation moment extent",
+            ));
+        }
+        if self.edges.is_empty() {
+            return Ok(());
+        }
+        let electron = self.electron.expect("admitted structural electron");
+        let controls = self.controls.local;
+        let mut changes = [Dd::ZERO; MAX_EQUILIBRIUM_SPECIES_V1];
+        let mut next_events = [Events::default(); MAX_EQUILIBRIUM_SPECIES_V1];
+        let mut sensible = Dd::ZERO;
+        let mut radiation = Dd::ZERO;
+        for (index, (edge, increment)) in self.edges.iter().zip(increments).enumerate() {
+            let DiffuseIncrement {
+                net_extent_mol: extent,
+                net_electron_energy_j: heat,
+                net_gas_energy_j: energy,
+                absorbed_mol: photo,
+                captured_mol: capture,
+                absorbed_energy_j: absorbed,
+                captured_energy_j: kinetic,
+            } = *increment;
+            if [extent, heat, energy].iter().any(|v| !v.is_finite())
+                || [photo, capture, absorbed, kinetic]
+                    .iter()
+                    .any(|v| !nonnegative(*v))
+            {
+                return Err(IonizationNetworkError::Arithmetic(
+                    "network diffuse radiation increment",
+                ));
+            }
+            let chi = edge.source.source().channel().ionization_energy_j_mol();
+            let chemical = chi * extent;
+            let emitted = chi * capture + kinetic;
+            let event_allowance = controls.absolute_amount_tolerance_mol
+                + 64.0 * f64::EPSILON * photo.max(capture).max(extent.abs());
+            let gross_allowance = controls.energy_tolerance_j
+                + 64.0 * f64::EPSILON * absorbed.max(emitted).max(energy.abs());
+            let net_allowance = controls.energy_tolerance_j
+                + 64.0 * f64::EPSILON * heat.abs().max(chemical.abs()).max(energy.abs());
+            let direct = Dd::from_f64(heat) + Dd::from_f64(chemical) - Dd::from_f64(energy);
+            let gross = Dd::from_f64(absorbed) - Dd::from_f64(emitted) - Dd::from_f64(energy);
+            if !nonnegative(emitted)
+                || !chemical.is_finite()
+                || !direct.to_f64().is_finite()
+                || !gross.to_f64().is_finite()
+                || [event_allowance, gross_allowance, net_allowance]
+                    .iter()
+                    .any(|v| !nonnegative(*v))
+                || ((photo - capture) - extent).abs() > event_allowance
+                || gross.to_f64().abs() > gross_allowance
+                || direct.to_f64().abs() > net_allowance
+            {
+                return Err(IonizationNetworkError::Invalid(
+                    "network diffuse photon/event/energy disagreement",
+                ));
+            }
+            changes[edge.lower] = changes[edge.lower] - Dd::from_f64(extent);
+            changes[edge.upper] = changes[edge.upper] + Dd::from_f64(extent);
+            changes[electron] = changes[electron] + Dd::from_f64(extent);
+            sensible = sensible + Dd::from_f64(heat);
+            radiation = radiation + Dd::from_f64(energy);
+            next_events[index] = point.events[index];
+            for (slot, (sum, value)) in next_events[index]
+                .0
+                .iter_mut()
+                .zip([extent, photo, 0.0, capture, absorbed, kinetic])
+                .enumerate()
+            {
+                sum.add(value);
+                if !sum.value.is_finite() || (slot != 0 && slot != 2 && sum.value < 0.0) {
+                    return Err(IonizationNetworkError::Arithmetic(
+                        "cumulative network diffuse events",
+                    ));
+                }
+            }
+        }
+        let mut amounts = [0.0; MAX_EQUILIBRIUM_SPECIES_V1];
+        for (index, &before) in point.amounts.iter().enumerate() {
+            amounts[index] = (Dd::from_f64(before) + changes[index]).to_f64();
+            if !nonnegative(amounts[index]) {
+                return Err(IonizationNetworkError::OutsideDomain);
+            }
+        }
+        let heat = sensible.to_f64();
+        let next_radiation = point.net_radiation + radiation;
+        if !heat.is_finite() || !next_radiation.to_f64().is_finite() {
+            return Err(IonizationNetworkError::Arithmetic(
+                "network diffuse energy accumulation",
+            ));
+        }
+        let before = point.amounts[electron];
+        let after = amounts[electron];
+        if after == 0.0 && (before != 0.0 || heat != 0.0) {
+            return Err(IonizationNetworkError::OutsideDomain);
+        }
+        let te = if after == 0.0 {
+            point.te
+        } else if before == 0.0 {
+            heat / (CV * after)
+        } else {
+            let change = (heat - CV * point.te * changes[electron].to_f64()) / (CV * after);
+            if change.is_finite() && change.abs() < 0.5 * point.te {
+                point.te + change
+            } else {
+                (CV * before * point.te + heat) / (CV * after)
+            }
+        };
+        self.admit_temperature(te)?;
+        let species = point.amounts.len();
+        point.amounts.copy_from_slice(&amounts[..species]);
+        point
+            .events
+            .copy_from_slice(&next_events[..self.edges.len()]);
+        point.te = te;
+        point.net_radiation = next_radiation;
+        Ok(())
     }
 
     pub fn error(
@@ -622,6 +854,17 @@ impl<'a> Problem<'a> {
             (coarse.th - fine.th).abs()
                 / (controls.temperature_tolerance_k
                     + controls.relative_tolerance * coarse.th.max(fine.th)),
+        );
+        error = error.max(
+            (coarse.net_radiation - fine.net_radiation).to_f64().abs()
+                / (controls.energy_tolerance_j
+                    + controls.relative_tolerance
+                        * start
+                            .net_radiation
+                            .to_f64()
+                            .abs()
+                            .max(coarse.net_radiation.to_f64().abs())
+                            .max(fine.net_radiation.to_f64().abs())),
         );
         // Exchange accuracy follows actual sensible pool scales, never large
         // formation offsets or a cumulative transfer that can change sign.
@@ -762,13 +1005,13 @@ impl<'a> Problem<'a> {
             .map(|power| power * duration);
         let [exchange, neutral_exchange, coulomb_exchange] = point.exchange.map(|s| s.value);
         let [photo, capture, absorbed, emitted] = totals.map(|sum| sum.value);
+        let net_radiation = point.net_radiation.to_f64();
         let mut residual = Sum::default();
         for value in [
             sensible,
             chemical.value,
             heavy,
-            emitted,
-            -absorbed,
+            -net_radiation,
             -electron_work,
             -heavy_work,
         ] {
@@ -779,8 +1022,7 @@ impl<'a> Problem<'a> {
         for value in [
             sensible,
             chemical.value,
-            emitted,
-            -absorbed,
+            -net_radiation,
             -electron_work,
             exchange,
         ] {
@@ -794,10 +1036,26 @@ impl<'a> Problem<'a> {
             || !residual.value.is_finite()
             || !heavy_residual.is_finite()
             || !electron_residual.value.is_finite()
+            || !net_radiation.is_finite()
         {
             return Err(IonizationNetworkError::Arithmetic(
                 "network photon/gas energy",
             ));
+        }
+        // Gross totals may carry enormous internal recycling. Audit them only
+        // at their representable precision; endpoint energy below is checked
+        // against the direct signed source with the original strict tolerance.
+        let gross_residual =
+            (Dd::from_f64(absorbed) - Dd::from_f64(emitted) - point.net_radiation).to_f64();
+        let gross_allowance = self.controls.local.energy_tolerance_j
+            + 128.0 * f64::EPSILON * absorbed.max(emitted).max(net_radiation.abs());
+        if !gross_residual.is_finite()
+            || !nonnegative(gross_allowance)
+            || gross_residual.abs() > gross_allowance
+        {
+            return Err(IonizationNetworkError::EnergyBalance {
+                residual_j: gross_residual,
+            });
         }
         if residual.value.abs() > self.controls.local.energy_tolerance_j {
             return Err(IonizationNetworkError::EnergyBalance {
@@ -840,6 +1098,7 @@ impl<'a> Problem<'a> {
         balance.emitted_photons = NA * capture;
         balance.absorbed_radiation_energy_j = absorbed;
         balance.emitted_radiation_energy_j = emitted;
+        balance.net_radiation_energy_j = net_radiation;
         balance.chemical_storage_change_j = chemical.value;
         balance.electron_sensible_energy_change_j = sensible;
         balance.heavy_sensible_energy_change_j = heavy;
@@ -870,6 +1129,7 @@ struct Rates {
     death: f64,
     capture: f64,
     captured_energy: f64,
+    radiation: bool,
 }
 
 fn photo_error(error: PhotoionizationErrorV1) -> IonizationNetworkError {

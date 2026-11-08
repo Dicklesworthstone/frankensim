@@ -8375,6 +8375,40 @@ manufactured numerical tests do not validate those extreme parameters as a
 physical plasma or bound the quasi-static approximation.
 
 
+## Competing atomic absorbers in one gas mixture
+
+`chemistry::ionization_network::transport::evaluate_network_radiation_transport`
+transports prescribed discrete boundary beams through ordered, uniformly mixed
+cells containing multiple original atomic charge-state ladders. Every cell uses
+one shared species vector and electron pool. At each energy the normal channel
+optical depths add; exact uniform-slab attenuation consumes one shared photon
+supply, and each channel receives its opacity fraction of the absorbed photons.
+This is the species-partition rule in Pawlik and Schaye, arXiv:1008.1071,
+Section 4.1. Co-located species are not ordered as separate shielding layers.
+Positive/negative direction cosines select the entry boundary; projected face
+flux and oblique optical path are both represented. The small absorbed fraction
+uses `expm1`, independently of transmitted flux rounding.
+
+Original source identity, bank, charge ladder and supported photon energies are
+admitted for all channels, including initially absent but reachable stages.
+Cross sections and canonical channel indices prepare once, and radiation stages
+reuse fixed buffers. Explicit cell/channel/beam products bound allocation;
+source preparation, characteristic sweeps and radiation evaluations have work
+limits and cancellation checks. Result rates retain the original state and
+canonical sources, per-channel ionization and excess-energy deposition, and
+per-beam local and whole-column photon accounts. No population or temperature
+change is implied by the frozen query. Empty and transparent cells transmit.
+
+The internal network radiation adapter applies simultaneous edge increments
+through their original stoichiometry and a single shared-electron caloric update.
+It rejects combined stage depletion without clipping, and retains a compensated
+signed radiation-energy source independently of gross emission/absorption.
+Actual chemical/sensible storage still has the original absolute energy audit;
+the separate gross-traffic comparison allows only its floating-point roundoff.
+Geometry is fixed, propagation is quasi-static, and the caller owns discrete
+spectral/angular resolution. This entry does not supply excited-state channels,
+scattering, secondary nonthermal electrons, diffuse emission or light-travel time.
+
 ## External illumination during diffuse ionization evolution
 
 `chemistry::diffuse_recombination::evolution::advance_diffuse_recombination_with_illumination`
