@@ -2335,6 +2335,7 @@ dependencies = [
 name = "fs-orbit"
 version = "0.0.1"
 dependencies = [
+ "fs-fft",
  "fs-la",
  "fs-math",
  "fs-nlmodal",

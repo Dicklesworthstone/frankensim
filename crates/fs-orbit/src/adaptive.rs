@@ -1,7 +1,7 @@
 //! Bounded, measured refinement of retained harmonic order.
 
 use super::{
-    AftSum, AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing,
+    AftWorkspace, HbAnchor, HbBudget, HbOrbit, HbScales, OrbitError, OrbitProblem, Packing,
     TAU, solve_hb, solve_hb_scaled_seeded, solve_hb_seeded,
 };
 use fs_math::{c64::C64, det};
@@ -297,15 +297,12 @@ fn projected_residual<P: OrbitProblem>(
     tolerances: &[f64],
 ) -> SampledResidual {
     let retained = orbit.coeffs[0].len() - 1;
+    super::transform::reconstruct(
+        &aft.basis, aft.transform.as_mut(), aft.samples, pack.d, retained,
+        |k, n| orbit.coeffs[k][n],
+        |j, k, ac| aft.xs[j * pack.d + k] = orbit.coeffs[k][0].re + ac,
+    );
     for j in 0..aft.samples {
-        for k in 0..pack.d {
-            let mut ac = AftSum::new(0.0);
-            for (n, phase) in (1..=retained).zip(aft.basis.cycle(j).skip(1)) {
-                let c = orbit.coeffs[k][n];
-                ac.add(2.0 * (c.re * phase.re - c.im * phase.im));
-            }
-            aft.xs[j * pack.d + k] = orbit.coeffs[k][0].re + ac.total();
-        }
         aft.island.fill(0.0);
         problem.island(
             TAU / orbit.omega * j as f64 / aft.samples as f64,
@@ -329,17 +326,13 @@ fn projected_residual<P: OrbitProblem>(
     // original island samples. All source calls are complete, so the state
     // buffer can be reused without allocating another sample array. Cancel
     // static terms before adding AC so a large preload cannot erase it.
-    for j in 0..aft.samples {
-        for k in 0..pack.d {
-            let mut ac = AftSum::new(0.0);
-            for (n, phase) in (1..=retained).zip(aft.basis.cycle(j).skip(1)) {
-                let z = linear[n * pack.d + k];
-                ac.add(2.0 * (z.re * phase.re - z.im * phase.im));
-            }
-            aft.xs[j * pack.d + k] = (linear[k].re - aft.gs[j * pack.d + k]) + ac.total();
-        }
-    }
+    super::transform::reconstruct(
+        &aft.basis, aft.transform.as_mut(), aft.samples, pack.d, retained,
+        |k, n| linear[n * pack.d + k],
+        |j, k, ac| aft.xs[j * pack.d + k] = (linear[k].re - aft.gs[j * pack.d + k]) + ac,
+    );
     aft.center_island(pack.d);
+    aft.project_island(pack);
     let mut residual = vec![0.0; pack.coeff_len()];
     for n in 0..=pack.n_harm {
         for k in 0..pack.d {
@@ -364,17 +357,12 @@ fn projected_residual<P: OrbitProblem>(
     let mut total_ratios = vec![0.0; pack.d];
     let mut omitted_ratios = vec![0.0; pack.d];
     let sample_scale = 1.0 / det::sqrt(aft.samples as f64);
-    for j in 0..aft.samples {
-        for k in 0..pack.d {
-            let mut retained_ac = AftSum::new(0.0);
-            for (n, phase) in (1..=retained).zip(aft.basis.cycle(j).skip(1)) {
-                retained_ac.add(
-                    2.0 * (residual[pack.re_index(n, k)] * phase.re
-                        - residual[pack.im_index(n, k)] * phase.im),
-                );
-            }
+    super::transform::reconstruct(
+        &aft.basis, aft.transform.as_mut(), aft.samples, pack.d, retained,
+        |k, n| C64::new(residual[pack.re_index(n, k)], residual[pack.im_index(n, k)]),
+        |j, k, retained_ac| {
             let defect = aft.xs[j * pack.d + k];
-            let omitted = (defect - residual[pack.re_index(0, k)]) - retained_ac.total();
+            let omitted = (defect - residual[pack.re_index(0, k)]) - retained_ac;
             for (ratios, value) in [(&mut total_ratios, defect), (&mut omitted_ratios, omitted)] {
                 let normalized = value / tolerances[k] * sample_scale;
                 ratios[k] = if normalized.is_finite() {
@@ -383,8 +371,8 @@ fn projected_residual<P: OrbitProblem>(
                     f64::INFINITY
                 };
             }
-        }
-    }
+        },
+    );
     SampledResidual {
         coefficients: residual,
         total_ratios,

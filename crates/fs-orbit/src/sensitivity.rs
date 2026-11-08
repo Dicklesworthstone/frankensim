@@ -555,8 +555,10 @@ fn admit<P: OrbitProblem>(
     // Includes both AFT grids/bases, tangent caches, all retained raw/scaled
     // matrices, LU copies/trailing scratch, condition estimation and one result.
     // GEMM's current fixed panels occupy (128+512)*256 f64 values.
-    let payload =
-        8 * (8 * n * n + 16 * n + 16 * d * d * (2 * h + 1) + 8 * (3 * m + 1) * (d + 1) + 163_840);
+    let transform_payload = crate::transform::payload(m as usize, h as usize, d as usize)? as u128
+        + crate::transform::payload((2 * m + 1) as usize, h as usize, d as usize)? as u128;
+    let payload = transform_payload
+        + 8 * (8 * n * n + 16 * n + 16 * d * d * (2 * h + 1) + 8 * (3 * m + 1) * (d + 1) + 163_840);
     let work = 16 * n * n * n + 128 * n * n + 128 * (3 * m + 1) * (d * d + d) * (2 * h + 1);
     for (quantity, requested, cap) in [
         (
@@ -620,6 +622,7 @@ fn project_direction(
         aft.gs[sample * pack.d..(sample + 1) * pack.d].copy_from_slice(&aft.island);
     }
     aft.center_island(pack.d);
+    aft.project_island(pack);
     let mut column = vec![0.0; pack.coeff_len()];
     for n in 0..=pack.n_harm {
         poll(cancelled)?;
@@ -666,3 +669,4 @@ fn linear_residual(matrix: &[f64], solution: &[f64], rhs: &[f64], correction: &m
     }
     maximum
 }
+

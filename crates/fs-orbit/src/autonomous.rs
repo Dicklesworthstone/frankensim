@@ -149,7 +149,20 @@ impl Chart {
         let finest = (samples + 1) * (1_u128 << MAX_AFT_REFINEMENTS) - 1;
         let count = b.steps as u128 + 2;
         let size = nz as u128;
-        let bytes = 8 * (3 * size * size + 64 * size
+        // Both the current and finer AFT grids may coexist. Admit their
+        // exact-length plans/scratch and retained projections before callbacks;
+        // twice the maximum payload conservatively covers every ladder pair.
+        // The base even grid may use an FFT while later odd grids stay direct.
+        let mut fft_samples = samples as usize;
+        let mut fft_peak = 0;
+        for refinement in 0..=MAX_AFT_REFINEMENTS {
+            fft_peak = fft_peak.max(super::transform::payload(fft_samples, b.harmonics, d)?);
+            if refinement < MAX_AFT_REFINEMENTS {
+                fft_samples = 2 * fft_samples + 1;
+            }
+        }
+        let fft_bytes = 2 * fft_peak as u128;
+        let bytes = fft_bytes + 8 * (3 * size * size + 64 * size
             + 4 * finest * (d + 1) as u128
             + count * (2 * d as u128 * (b.harmonics + 1) as u128
                 + 3 * d as u128 + b.max_newton as u128 + 32));

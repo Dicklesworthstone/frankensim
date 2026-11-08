@@ -11,6 +11,7 @@ description = "Periodic-orbit service (fs-orbit): harmonic balance with alternat
 layer = "L2"
 
 [dependencies]
+fs-fft = { path = "../fs-fft" }
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
 

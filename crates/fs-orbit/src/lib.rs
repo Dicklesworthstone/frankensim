@@ -66,6 +66,7 @@ pub use forced::{ContinuationScales, ScaledContinuationPoint, continue_branch_sc
 
 mod basis;
 mod tangent;
+mod transform;
 use basis::PhaseBasis;
 
 /// Consistent discrete shooting tangents, physical scaling and Floquet maps.
@@ -513,6 +514,7 @@ struct AftWorkspace {
     samples: usize,
     refinement: usize,
     basis: PhaseBasis,
+    transform: Option<transform::Transform>,
     xs: Vec<f64>,
     gs: Vec<f64>,
     island: Vec<f64>,
@@ -543,10 +545,16 @@ impl AftWorkspace {
                 what: "AFT state size overflows",
             })?;
         let basis = PhaseBasis::new(samples)?;
+        let transform = if transform::enabled(samples, pack.n_harm) {
+            Some(transform::Transform::new(samples, pack.n_harm, pack.d)?)
+        } else {
+            None
+        };
         Ok(Self {
             samples,
             refinement,
             basis,
+            transform,
             xs: vec![0.0; state_len],
             gs: vec![0.0; state_len],
             island: vec![0.0; pack.d],
@@ -570,6 +578,9 @@ impl AftWorkspace {
     /// deviations in place. This preserves a constant source exactly without
     /// relying on floating-point trigonometric tables summing to zero.
     fn center_island(&mut self, d: usize) {
+        if let Some(transform) = self.transform.as_mut() {
+            transform.projected = false;
+        }
         for sample in 1..self.samples {
             for k in 0..d {
                 self.gs[sample * d + k] =
@@ -578,10 +589,19 @@ impl AftWorkspace {
         }
     }
 
+    fn project_island(&mut self, pack: &Packing) {
+        if let Some(transform) = self.transform.as_mut() {
+            transform.project(&self.gs, pack.d, pack.n_harm);
+        }
+    }
+
     /// Fourier projection of the centered samples, shared by the solved and
     /// independently assessed harmonic bands. DC restores the reference once;
     /// AC projects only deviations. No additional sample buffer is needed.
     fn island_coefficient(&self, pack: &Packing, n: usize, k: usize) -> C64 {
+        if let Some(transform) = self.transform.as_ref().filter(|t| t.projected) {
+            return transform.coefficients[n * pack.d + k];
+        }
         let mut re = AftSum::new(if n == 0 { self.gs[k] } else { 0.0 });
         let mut im = AftSum::new(0.0);
         for (sample, phase) in (1..self.samples).zip(self.basis.cycle(n).skip(1)) {
@@ -611,17 +631,11 @@ fn hb_residual<P: OrbitProblem>(
     let n_harm = pack.n_harm;
     let omega = pack.omega_slot.map_or(omega_fixed, |s| u[s]);
     let m = aft.samples;
-    for j in 0..m {
-        for k in 0..d {
-            let mut ac = AftSum::new(0.0);
-            for (n, phase) in (1..=n_harm).zip(aft.basis.cycle(j).skip(1)) {
-                ac.add(
-                    2.0 * (u[pack.re_index(n, k)] * phase.re - u[pack.im_index(n, k)] * phase.im),
-                );
-            }
-            aft.xs[j * d + k] = u[pack.re_index(0, k)] + ac.total();
-        }
-    }
+    transform::reconstruct(
+        &aft.basis, aft.transform.as_mut(), m, d, n_harm,
+        |k, n| C64::new(u[pack.re_index(n, k)], u[pack.im_index(n, k)]),
+        |j, k, ac| aft.xs[j * d + k] = u[pack.re_index(0, k)] + ac,
+    );
     let period = if omega > 0.0 { TAU / omega } else { f64::NAN };
     aft.island.fill(0.0);
     for j in 0..m {
@@ -630,6 +644,7 @@ fn hb_residual<P: OrbitProblem>(
         aft.gs[j * d..(j + 1) * d].copy_from_slice(&aft.island);
     }
     aft.center_island(d);
+    aft.project_island(pack);
     // P(0) is shared by all state rows. Rebuild once per residual because
     // continuation is allowed to change the problem's physical parameter.
     let p0 = problem.port(C64::new(0.0, 0.0));

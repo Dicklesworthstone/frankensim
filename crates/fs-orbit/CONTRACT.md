@@ -207,10 +207,63 @@ Phase storage is 16*M bytes and preparation uses at most floor(M/2)
 deterministic sin/cos calls, independent of harmonic order N. Previously the
 residual and analytic tangent together held 16*M*(3*N+1) bytes of phase tables.
 Continuation payload admission counts the new shared allocation, including
-coexisting coarse/fine grids. Projection and tangent summation work otherwise
+coexisting coarse/fine grids. Direct projection and tangent summation work
 retain the counts above, along with measured discrete basis means and the
 constant-preserving projection. These are algorithmic/storage counts, not
 whole-solver throughput or cross-ISA bit-equality claims.
+
+High-order residual reconstruction/projection and adaptive full-equation
+assessment additionally share one prepared `fs-fft::GeneralFft` per AFT grid.
+Power-of-two grids select this route from order 32; odd verification grids
+select it from order 256 because Bluestein needs a larger convolution. The
+actual quadrature length, time samples, retained order and independent finer
+grid are unchanged. Per-channel transforms reuse one data/scratch allocation;
+with default FFT features there are no new per-residual allocations or source
+evaluations. Small orders
+retain compensated direct sums. Exact tangent projection continues to use the
+original compensated owner; it is checked against independent high-order
+convolution with FFT residuals active, to floating-point accuracy.
+
+Reconstruction uses an unnormalized forward transform of conjugated Fourier
+bins, avoiding an intermediate multiplication by sample count. DC is added
+after AC reconstruction. Projection transforms only the already normalized
+deviations from the first source sample; its DC sum remains compensated and a
+constant source retains exactly zero AC. Adaptive checks cancel original static
+terms before adding AC and still measure the full sampled equation and its
+omitted part. A refused transform falls back to the original compensated sum
+on those same samples; it cannot hide source nonfiniteness or change equations.
+
+The additional payload is the FFT owner's admitted preparation/plan/scratch
+bound plus `16*(M+d*(N+1))` bytes for its data and retained coefficients. The
+root grid remains available for direct checks and tangents. Continuation
+admits twice the largest FFT payload over its entire coarse/fine ladder BEFORE
+source callbacks; checking only the finest odd grid would miss an active base
+power-of-two plan. Forced-sensitivity preparation separately admits the sum of
+its actual two FFT grids and reuses their projection for source directions.
+This is a measured speed/memory tradeoff, not a claim that
+FFT buffers are smaller than the root-only representation.
+
+Bounded native measurements on the same x86_64 host with the pinned
+2026-07-06 toolchain and optimized actual numerical owners supported the
+separate route thresholds. At M/N=256/32, reconstruction was 19.35→6.26 us
+and projection 18.87→6.79 us; at 2048/256, 1528→74.1 us and 1338→77.4 us.
+At 4097/256 the odd-grid gains were smaller (2856→1916 us and 2656→1786 us).
+The 1025/64 projection instead slowed from 177→442 us, so that route stays
+direct. Maximum compared waveform/coefficient differences were 5.33e-15 and
+3.34e-16. These are transform-kernel comparisons on a shared host, not full
+Newton throughput, a quiet-machine benchmark, or cross-ISA bit equality.
+
+The transform regression cases check every retained complex coefficient on
+even/odd grids, exact-zero AC under a large constant preload, nonlinear
+convolution and its tangent, refinement to an initially omitted 65th harmonic,
+pre-callback continuation memory admission, and finite physical coefficients
+when an FFT intermediate overflows. Fifteen orbit unit tests, 51 existing
+harmonic/backbone/continuation tests and seven forced-sensitivity integration
+tests passed in native builds of
+the complete orbit crate with the actual math/SIMD/FFT and linear-algebra
+numerical owners. Seven original exact-length FFT tests also passed. Unrelated
+executor/orchestration services were excluded from dependency builds; this is
+not a full Cargo/workspace gate.
 
 Physical row/column conditioning, phase masks, the analytic backbone-amplitude
 row, and the full product rule for equilibrium deflation remain in the same
@@ -832,3 +885,4 @@ material derivatives with separately solved parameter perturbations, and checks
 3/7/11/15-harmonic convergence against independently integrated continuous-time
 variational RK4. It also covers complete phased frequency-port/clock derivatives,
 physical unit changes, repeated-factor source-call counts and named refusals.
+
