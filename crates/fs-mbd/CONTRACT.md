@@ -51,6 +51,20 @@ entry includes an independent continuous rotated symmetric-top reference for
 all three explicit paths, with spatial momentum and kinetic-energy checks.
 Native group admission and representability limits apply to the shared drift.
 
+The native midpoint, Cayley, kick-drift and Verlet translation stages retain
+the product tail of `mass * gravity` until it has combined with the applied
+world force. That compensated resultant drives the momentum impulse and COM
+drift, including separately evaluated endpoint forces. Nearly balanced loads
+therefore retain their physical residual acceleration. The instantaneous
+`prepare_point_motion` query retains the corresponding `force / mass` division
+remainder until adding gravity; it does not require a representable weight
+when the acceleration is representable. These fixed-size operations allocate
+nothing and leave the independent force/gravity work audit intact. The
+integer-oracle regression in `tests/momentum_reductions.rs` checks all native
+translation lanes, signed axes, binary unit rescaling, varying endpoint loads
+and derivative consistency. Representability limits of the returned `f64`
+state remain; compensated arithmetic does not project momentum or energy.
+
 ## Fourth-order free rigid-body motion
 
 `RigidBodyIntegrator::step_free_fourth_order` composes the shared compensated

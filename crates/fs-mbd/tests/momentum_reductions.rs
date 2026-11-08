@@ -61,6 +61,106 @@ fn properties() -> MassProperties {
     MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap()
 }
 
+#[test]
+fn gravity_and_applied_force_keep_their_actual_residual_momentum() {
+    // Exact integer oracle: (n+1)*(n-1) - n*n = -1, across binary unit scales.
+    let n = 1_i128 << 27;
+    let mass = (n + 1) as f64;
+    let property =
+        MassProperties::new(mass, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).unwrap();
+    let initial = state(Vec3::ZERO, Vec3::ZERO);
+    for g_scale in [2.0_f64.powi(-24), 1.0, 2.0_f64.powi(20)] {
+        for axis in [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ] {
+            let gravity = Gravity::new(axis.scale((n - 1) as f64 * g_scale)).unwrap();
+            let engine = RigidBodyIntegrator::new(gravity);
+            let wrench = Wrench {
+                force_world: axis.scale(-(n * n) as f64 * g_scale),
+                torque_body: Vec3::ZERO,
+            };
+            let dt = 2.0;
+            let expected_momentum = axis.scale(-g_scale * dt);
+            let expected_position = axis.scale(-g_scale * dt * dt / (2.0 * mass));
+            for receipt in [
+                engine.step(initial, property, wrench, dt).unwrap(),
+                engine.step_cayley(initial, property, wrench, dt).unwrap(),
+                engine.step_symplectic(initial, property, wrench, dt).unwrap(),
+                engine
+                    .begin_verlet(initial, property, wrench, dt)
+                    .unwrap()
+                    .finish(wrench)
+                    .unwrap(),
+            ] {
+                assert_eq!(receipt.state_after.linear_momentum_world(), expected_momentum);
+                assert_eq!(receipt.state_after.pose().position_world(), expected_position);
+                let energy = g_scale * g_scale * dt * dt / (2.0 * mass);
+                assert!(
+                    (receipt.work.kinetic_energy_change_j - energy).abs()
+                        <= 4.0 * f64::EPSILON * energy
+                );
+                assert!(receipt.work.work_energy_residual_j.abs() <= 16.0 * f64::EPSILON * energy);
+            }
+            let kicked = engine
+                .step_kick_drift(initial, property, wrench, dt)
+                .unwrap();
+            assert_eq!(kicked.state_after.linear_momentum_world(), expected_momentum);
+            assert_eq!(
+                kicked.state_after.pose().position_world(),
+                expected_position.scale(2.0)
+            );
+            let motion = engine
+                .prepare_point_motion(initial, property, wrench)
+                .unwrap()
+                .point_motion(Vec3::ZERO)
+                .unwrap();
+            assert_eq!(
+                motion.center_of_mass_acceleration_world,
+                axis.scale(-g_scale / mass)
+            );
+
+            // Different endpoint forces must retain their own gravitational
+            // residuals; a held-load shortcut cannot replace their trapezoid.
+            let last = Wrench {
+                force_world: axis.scale((-(n * n) + 4) as f64 * g_scale),
+                torque_body: Vec3::ZERO,
+            };
+            let varied = engine
+                .begin_verlet(initial, property, wrench, dt)
+                .unwrap()
+                .finish(last)
+                .unwrap();
+            assert_eq!(
+                varied.state_after.linear_momentum_world(),
+                axis.scale(g_scale * dt)
+            );
+            assert_eq!(varied.state_after.pose().position_world(), expected_position);
+        }
+    }
+}
+
+#[test]
+fn instantaneous_acceleration_does_not_require_a_representable_weight() {
+    let property =
+        MassProperties::new(1e308, Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0)).unwrap();
+    let engine = RigidBodyIntegrator::new(Gravity::new(Vec3::new(2.0, 0.0, 0.0)).unwrap());
+    let motion = engine
+        .prepare_point_motion(
+            state(Vec3::ZERO, Vec3::ZERO),
+            property,
+            Wrench {
+                force_world: Vec3::new(1e308, 0.0, 0.0),
+                torque_body: Vec3::ZERO,
+            },
+        )
+        .unwrap()
+        .point_motion(Vec3::ZERO)
+        .unwrap();
+    assert_eq!(motion.center_of_mass_acceleration_world, Vec3::new(3.0, 0.0, 0.0));
+}
+
 fn state(position: Vec3, momentum: Vec3) -> RigidBodyState {
     RigidBodyState::new(
         Pose::new(position, UnitQuaternion::IDENTITY).unwrap(),

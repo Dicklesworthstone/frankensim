@@ -27,10 +27,10 @@ pub struct VerletStage {
     // phases and matched momentum transport. The endpoint kick must precede
     // rounding; transporting a discarded kick tail afterward is insufficient.
     angular_momentum_drifted: [Dd; 3],
-    force_before_world: Vec3,
+    force_before_world: [Dd; 3],
     applied_force_before_world: Vec3,
     torque_work_before: super::MomentumWork,
-    weight_world: Vec3,
+    weight_world: [Dd; 3],
     duration_seconds: f64,
 }
 
@@ -87,8 +87,8 @@ impl RigidBodyIntegrator {
         properties.validate()?;
         wrench_before.validate()?;
         let diagnostics_before = self.diagnostics(state, properties)?;
-        let weight_world = self.gravity.acceleration_world().scale(properties.mass);
-        let force_before_world = wrench_before.force_world.add(weight_world);
+        let weight_world = weight(self.gravity.acceleration_world(), properties.mass);
+        let force_before_world = resultant_force(wrench_before.force_world, weight_world);
         let linear_momentum_mid = add_half_impulse(
             lifted(state.linear_momentum_world),
             force_before_world,
@@ -97,7 +97,7 @@ impl RigidBodyIntegrator {
         let linear_mid = rounded(linear_momentum_mid, "verlet.linear_momentum_mid")?;
         let angular_kicked = add_half_impulse(
             lifted(state.angular_momentum_body),
-            wrench_before.torque_body,
+            lifted(wrench_before.torque_body),
             duration_seconds,
         );
         let torque_work_before = super::work::angular_torque_work(
@@ -158,7 +158,7 @@ impl VerletStage {
     /// Invalid arithmetic/state/force returns no completed receipt.
     pub fn finish(self, wrench_after: Wrench) -> Result<StepReceipt, DynamicsError> {
         wrench_after.validate()?;
-        let force_after_world = wrench_after.force_world.add(self.weight_world);
+        let force_after_world = resultant_force(wrench_after.force_world, self.weight_world);
         let held = if force_after_world == self.force_before_world {
             let full = add_impulse(
                 lifted(self.state_before.linear_momentum_world),
@@ -186,7 +186,7 @@ impl VerletStage {
         )?;
         let angular_after = add_half_impulse(
             self.angular_momentum_drifted,
-            wrench_after.torque_body,
+            lifted(wrench_after.torque_body),
             self.duration_seconds,
         );
         let angular_momentum_after = rounded(angular_after, "verlet.angular_momentum_after")?;
@@ -233,12 +233,22 @@ pub(super) fn lifted(value: Vec3) -> [Dd; 3] {
     components(value).map(Dd::from_f64)
 }
 
-pub(super) fn add_impulse(momentum: [Dd; 3], force: Vec3, duration: f64) -> [Dd; 3] {
-    let force = components(force);
-    core::array::from_fn(|d| momentum[d] + Dd::from_f64(force[d]) * Dd::from_f64(duration))
+pub(super) fn weight(acceleration: Vec3, mass: f64) -> [Dd; 3] {
+    lifted(acceleration).map(|g| g * Dd::from_f64(mass))
 }
 
-pub(super) fn add_half_impulse(momentum: [Dd; 3], force: Vec3, duration: f64) -> [Dd; 3] {
+// Preserve gravity's product tail until applied and gravitational loads have
+// canceled. Rounding m*g first can erase the entire physical residual force.
+pub(super) fn resultant_force(applied: Vec3, weight: [Dd; 3]) -> [Dd; 3] {
+    let applied = lifted(applied);
+    core::array::from_fn(|d| applied[d] + weight[d])
+}
+
+pub(super) fn add_impulse(momentum: [Dd; 3], force: [Dd; 3], duration: f64) -> [Dd; 3] {
+    core::array::from_fn(|d| momentum[d] + force[d] * Dd::from_f64(duration))
+}
+
+pub(super) fn add_half_impulse(momentum: [Dd; 3], force: [Dd; 3], duration: f64) -> [Dd; 3] {
     let half = 0.5 * duration;
     let result = add_impulse(momentum, force, half);
     let remainder = (-2.0_f64).mul_add(half, duration);
@@ -248,10 +258,7 @@ pub(super) fn add_half_impulse(momentum: [Dd; 3], force: Vec3, duration: f64) ->
     // An odd subnormal duration loses half a minimum subnormal in `half`.
     // Contract that residual with the force before halving it, without ever
     // forming a possibly overflowing full force*duration product.
-    let force = components(force);
-    core::array::from_fn(|d| {
-        result[d] + (Dd::from_f64(force[d]) * Dd::from_f64(remainder)) * Dd::from_f64(0.5)
-    })
+    core::array::from_fn(|d| result[d] + (force[d] * Dd::from_f64(remainder)) * Dd::from_f64(0.5))
 }
 
 pub(super) fn drift_position(

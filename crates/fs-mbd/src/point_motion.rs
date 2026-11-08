@@ -8,6 +8,7 @@ use crate::{
     DynamicsError, MassProperties, PointKinematics, Pose, RigidBodyIntegrator, RigidBodyState,
     Vec3, Wrench,
 };
+use fs_math::dd::Dd;
 
 mod relative;
 
@@ -87,10 +88,23 @@ impl RigidBodyIntegrator {
         if !angular_acceleration_world.is_finite() {
             return Err(DynamicsError::NonFinite("angular_acceleration_world"));
         }
-        let center_of_mass_acceleration_world = wrench
-            .force_world
-            .scale(properties.mass().recip())
-            .add(self.gravity().acceleration_world());
+        let force = [
+            wrench.force_world.x,
+            wrench.force_world.y,
+            wrench.force_world.z,
+        ];
+        let gravity = crate::verlet::lifted(self.gravity().acceleration_world());
+        // Keep F/m's division remainder until gravity has been added. This is
+        // the derivative of the steppers' compensated F + m*g resultant, while
+        // avoiding an overflowing m*g when the acceleration itself is finite.
+        let center_of_mass_acceleration_world = crate::verlet::rounded(
+            core::array::from_fn(|i| {
+                let quotient = force[i] / properties.mass();
+                let remainder = (-quotient).mul_add(properties.mass(), force[i]);
+                Dd::from_pair(quotient, remainder / properties.mass()) + gravity[i]
+            }),
+            "center_of_mass_acceleration_world",
+        )?;
         if !center_of_mass_acceleration_world.is_finite() {
             return Err(DynamicsError::NonFinite(
                 "center_of_mass_acceleration_world",

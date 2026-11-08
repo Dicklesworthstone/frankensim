@@ -1924,9 +1924,10 @@ impl RigidBodyIntegrator {
         properties.validate()?;
         wrench.validate()?;
         let diagnostics_before = self.diagnostics(state, properties)?;
-        let total_force_world = wrench
-            .force_world
-            .add(self.gravity.acceleration_world().scale(properties.mass));
+        let total_force_world = verlet::resultant_force(
+            wrench.force_world,
+            verlet::weight(self.gravity.acceleration_world(), properties.mass),
+        );
         let linear_momentum_mid = verlet::add_half_impulse(
             verlet::lifted(state.linear_momentum_world),
             total_force_world,
@@ -2085,9 +2086,10 @@ impl RigidBodyIntegrator {
         properties.validate()?;
         wrench.validate()?;
         let diagnostics_before = self.diagnostics(state, properties)?;
-        let total_force_world = wrench
-            .force_world
-            .add(self.gravity.acceleration_world().scale(properties.mass));
+        let total_force_world = verlet::resultant_force(
+            wrench.force_world,
+            verlet::weight(self.gravity.acceleration_world(), properties.mass),
+        );
         let linear_kicked = verlet::add_impulse(
             verlet::lifted(state.linear_momentum_world),
             total_force_world,
@@ -2106,7 +2108,7 @@ impl RigidBodyIntegrator {
 
         let angular_momentum_kicked = verlet::add_impulse(
             verlet::lifted(state.angular_momentum_body),
-            wrench.torque_body,
+            verlet::lifted(wrench.torque_body),
             duration_seconds,
         );
         let (orientation_after, angular_drifted) = free_rotation_step_compensated(
@@ -2277,10 +2279,10 @@ fn implicit_rotation_step(
         }
         let before = verlet::lifted(before);
         let after = verlet::rounded(
-            verlet::add_impulse(before, torque, h),
+            verlet::add_impulse(before, verlet::lifted(torque), h),
             "rotational.angular_momentum_after",
         )?;
-        let mid = verlet::add_half_impulse(before, torque, h);
+        let mid = verlet::add_half_impulse(before, verlet::lifted(torque), h);
         // This admitted branch has zero gyroscopic transport. The common
         // free owner evaluates its same midpoint exponential while retaining
         // the impulse and inertia-quotient tails through the attitude phase.
