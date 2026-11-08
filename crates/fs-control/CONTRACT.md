@@ -77,8 +77,19 @@ candidate refusal and an after-stamp cancellation leave accepted PI/plant state
 and duties unchanged; the successful retry matches a fresh native solve exactly.
 
 This slice does not implement gain synthesis, automatic MTPA or field weakening,
-speed control, observers, multirate clocks, delay/quantization/fault models, PWM
+observers, multirate clocks, delay/quantization/fault models, PWM
 events, switching losses or protection hardware. Current-reference limiting does
 not guarantee that a transient physical current remains inside that bound. It
 does not claim closed-loop stability, HIL timing, experimental motor validation
 or completion of the broader control-runtime/E4 beads. No feature flags apply.
+
+
+## Relative-shaft speed, power limits and thermal derating
+
+`speed::SpeedController` regulates rotor-minus-stator speed into signed electromagnetic torque. Authored positive/negative torque caps and separate sampled motoring/regeneration power caps use torque times relative speed in all four quadrants. Exactly zero relative speed retains finite starting torque without a denominator floor. Demand predicts the fixed-period PI contribution; finish tracks the ORIGINAL machine allocator's achievable torque using `gamma=Ts/(Taw+Ts)`. Torque and power endpoints are checked independently with 32 machine-epsilon relative slack on each endpoint's own magnitude; zero capabilities remain exact. Both outer and inner PI proposals are accepted only with their successful native plant interval.
+
+`thermal::ThermalDeratingPolicy` applies authored full-output/trip/reset temperatures to 1..=64 original measured components. The minimum linear component factor scales all four directional capabilities without averaging temperatures. Any trip latches zero requested torque until an explicit reset with every channel at or below its reset temperature. The policy has fixed bounded sample work, allocates nothing, preserves the original cap asymmetry and proposes its latch state transactionally. It changes command capability, never physical energy, current, motion or cooling.
+
+Pure tests independently cover signed quadrants/common rotation, analytic PI/tracking, exact disabled capabilities, thermal bands, latch/reset/cancellation and the thermal-to-speed composition. The native battery-synchronous fixture connects the original torque allocator and FOC controller, checking load recovery, regenerative chemical recharge, independently reconstructed energy, both shaft impulses and refused/cancelled interval retry.
+
+These are sampled command limits. They do not guarantee transient current, battery power or between-sample thermal bounds. Zero torque demand is not electrical isolation, commanded braking or hardware protection. Allocator anti-windup does not certify voltage feasibility; gain synthesis, automatic MTPA/field weakening, scheduling and closed-loop stability remain separate capabilities.
