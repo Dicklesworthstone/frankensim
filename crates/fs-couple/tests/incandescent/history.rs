@@ -124,7 +124,7 @@ fn g1_native_feedback_admission_and_temporal_resolution_are_both_active() {
     assert!((bounded.last().unwrap().step.thermal.state.temperature_k() - 720.0).abs() < 1e-7);
     // Independent continuous-time solution for the manufactured C=1, P=T/75
     // law. A smaller declared step reduces the native first-order time error.
-    let exact = 300.0 * fs_math::exp(10.0 / 75.0);
+    let exact = 300.0 * fs_math::det::exp(10.0 / 75.0);
     let coarse = run(10.0, 1.0);
     let fine = run(10.0, 0.5);
     let coarse_error = coarse.last().unwrap().step.thermal.state.temperature_k() - exact;
