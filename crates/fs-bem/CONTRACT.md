@@ -1,5 +1,41 @@
 # fs-bem CONTRACT
 
+## Physical sources inside a transmitting fluid inclusion
+
+`helmholtz::transmission::FluidInterface::radiate_internal_field` binds
+coherent finite volume, force and stress sources strictly inside the original
+closed fluid interface. The original interior density and sound speed set the
+source fields; the exterior state sets outgoing propagation at the same
+angular frequency. Plane waves, exterior sources and unresolved source/face
+separations refuse through explicit source and native geometric admission.
+
+The existing direct transmission matrix and factor are reused. Interior
+source pressure and density-weighted normal derivative enter the original
+Green identities. The owner solves the material-contrast correction directly,
+including the density jump in its normal derivative drive, preserving weak
+interior reflection without subtracting large total and source fields.
+Pressure and normal velocity are continuous physical interface traces. Signed
+surface work measures outgoing radiation, not an absorption deficit for a
+source-free cavity.
+
+Both interior and exterior receivers retain pressure and all Cartesian Euler
+velocity components through the native adaptive triangle derivative owner.
+Direct source fields are added only in their original interior fluid; exactly
+matched media recover analytic fields in both regions and zero reflection.
+The separate reflected-field query retains weak environmental reaction.
+Native boundary/far-field representations retain their panel discretization
+error, including in the matched case. Quadrature estimates cover boundary
+integration only, and the explicit backward-error ceiling covers the native
+linear solve only. Neither is a source or continuum accuracy certificate.
+
+The source, surface, dense/vector and receiver limits remain native, with
+bounded cancellation throughout. Scope is stationary prescribed compact
+sources and inviscid nondispersive fluids; finite source size, source feedback,
+viscosity and moving/deforming interfaces require their physical owners.
+Five groups in `tests/fluid_transmission_internal.rs` check exact transparency,
+independent spherical pressure/velocity and power refinement, weak contrast,
+coherent mixed multipoles, and source/receiver-domain/cancellation refusals.
+
 ## Exterior observation FIRs and CQ (IRP M2.5-W6)
 
 `observation_transfers::BemObservation` binds the existing dense Burton–Miller

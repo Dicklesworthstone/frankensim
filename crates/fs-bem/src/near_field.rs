@@ -115,6 +115,15 @@ impl<'a> Geometry<'a> {
             surface,points,minimum_clearance_m,MAX_PANELS,None,true)?;
         Ok(Self {surface,points:points.to_vec(),clearances})
     }
+    /// The same interior winding/clearance admission with bounded cancellation.
+    pub(crate) fn new_interior_cancellable(
+        surface: &'a SpherePanels, points: &[Point], minimum_clearance_m: f64,
+        gate: &fs_exec::CancelGate,
+    ) -> Result<Self,HelmholtzError> {
+        let clearances=admit_region_points_controlled(
+            surface,points,minimum_clearance_m,MAX_PANELS,Some(gate),true)?;
+        Ok(Self {surface,points:points.to_vec(),clearances})
+    }
     /// Explicit matrix-free surface range, with the same exterior winding,
     /// exact triangle clearance and receiver cardinality admission. Integration
     /// still has its original kernel-evaluation/depth budget; this is not a

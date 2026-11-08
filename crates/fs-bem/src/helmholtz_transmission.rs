@@ -41,6 +41,10 @@ pub mod multiple;
 #[path = "helmholtz_transmission/nested.rs"]
 pub mod nested;
 
+/// Finite volume, force and stress sources inside the original fluid inclusion.
+#[path = "helmholtz_transmission/internal.rs"]
+pub mod internal;
+
 /// A transmission solve has two pressure-scaled unknowns per panel.
 pub const MAX_TRANSMISSION_PANELS: usize = MAX_DENSE_PANELS / 2;
 
