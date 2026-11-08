@@ -9999,6 +9999,37 @@ was compiled against the real fs-math/fs-rand libraries and executed:
 141 tests passed, zero failed. This lean configuration does not execute the
 material-state, native tracer camera or browser consumer feature tests.
 
+### Illuminated native and browser pour frames
+
+`PourSpectralOpticalView` and `PourIndexedSpectralOpticalView` now expose
+`render_radiance` and `render_xyz`, with matching `PourOutcome` entry points.
+They borrow the captured original mass buffer and use its explicit SI density,
+spacing and extruded slab depth. Supplied illumination is uniform or indexed
+by original XY column, independently of output image resolution. The shared
+column kernel applies source radiance and absorption before footprint filtering.
+
+Browser functions `render_vessel_spectral_radiance`,
+`render_vessel_spectral_xyz`, `render_vessel_indexed_spectral_radiance` and
+`render_vessel_indexed_spectral_xyz` expose the same physical calculation.
+The explicit `background_per_column` flag selects one wavelength spectrum or
+`nx*ny*wavelengths` source values; shape never silently changes meaning.
+Radiance remains W/(m² sr nm). XYZ requires explicit nanometre integration
+weights and retains the shared approximate visible observer and normalization.
+No illuminant, exposure, RGB transform, scattering or hidden liquid spectrum is
+introduced. XYZ is flattened without copying its final allocation.
+
+The browser admits at most 1,048,576 pixels, original cells, cell visits and
+spectral evaluations, and at most 4,096 indexed material rows. Any invalid
+input or exceeded limit returns the existing empty-vector refusal, with no
+partial image. Native callers receive the original typed optical errors.
+
+Six consumer regressions cover source/opacity covariance, uniform and indexed
+paths, output-resolution independence, explicit XYZ widths/layout, native/browser
+parity and invalid inputs/work limits. These received pinned Rust parser and
+source/API review only; the full fs-vessel/fs-wasm dependency configurations
+were not compiled or executed here. The 141 passing lean renderer tests cover
+the shared transport kernel, not these consumer feature configurations.
+
 ### Correlated spectral camera illumination
 
 `render_absorbing_camera_with_background` and

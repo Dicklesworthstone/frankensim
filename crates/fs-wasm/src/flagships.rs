@@ -42,8 +42,8 @@ use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
 use fs_render::volumes::{
     AbsorptionImageSettings, AbsorptionMixtureSettings, IndexedSpectralAbsorptionImageSettings,
-    SpectralAbsorptionImageSettings, VolumeGrid, prepare_density_absorption_mixtures,
-    render_absorption_transmittance,
+    SpectralAbsorptionImageSettings, SpectralIllumination, VolumeGrid,
+    prepare_density_absorption_mixtures, render_absorption_transmittance,
 };
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_sos::lyapunov_certifies_stability;
@@ -1196,6 +1196,238 @@ pub fn render_vessel_indexed_spectral_transmittance(
     .unwrap_or_default()
 }
 
+/// Transmit supplied spectral illumination through a captured mass frame.
+///
+/// `background_w_m2_sr_nm` supplies radiance at the original wavelengths. With
+/// `background_per_column == false`, it has one value per wavelength, uniform
+/// across the frame. With `true`, it has `nx * ny * wavelengths_nm.len()` values,
+/// indexed by `(y * nx + x) * wavelengths_nm.len() + band`. These are original
+/// mass columns, independently of output resolution. Each source is constant
+/// over its original column and lies behind the full extruded slab.
+///
+/// Each column's background is attenuated before pixel-footprint filtering;
+/// downsampling retains the correlation between illumination and absorption.
+/// Output is pixel-major, wavelength-fastest radiance in W/(m² sr nm).
+/// Geometry and the absorption-only approximation follow
+/// [`render_vessel_spectral_transmittance`]. No illuminant or exposure is inferred.
+///
+/// Limits are 1,048,576 pixels, original cells, cell visits and total spectral
+/// evaluations. Invalid sources, field data, physical parameters or exhausted
+/// limits return an empty vector, with no partial image.
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_spectral_radiance(
+    mass_field: &[f64],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+    background_w_m2_sr_nm: &[f64],
+    background_per_column: bool,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_radiance(
+        mass_field,
+        [nx, ny],
+        vessel_illumination_settings(resolution),
+        vessel_illumination(background_w_m2_sr_nm, background_per_column),
+    )
+    .unwrap_or_default()
+}
+
+/// Observe an illuminated captured frame as approximate visible XYZ triples.
+///
+/// Illumination layout and SI geometry match [`render_vessel_spectral_radiance`].
+/// Each finite nonnegative `quadrature_weights_nm` value supplies the wavelength
+/// integration width for its corresponding radiance-per-nanometre sample.
+/// The shared analytic CIE observer admits only 380--780 nm and uses relative
+/// `1 / integral(y_bar)` normalization. No spectral interpolation, illuminant,
+/// exposure, tone mapping or RGB transform is inferred.
+///
+/// Output is `[X, Y, Z]` for each x-fastest pixel, with `resolution² * 3` values.
+/// Direct projection allocates only the final XYZ image, retaining source and
+/// absorption correlation at the original column resolution. It uses the same
+/// work limits and empty-vector refusal as [`render_vessel_spectral_radiance`].
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_spectral_xyz(
+    mass_field: &[f64],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+    background_w_m2_sr_nm: &[f64],
+    background_per_column: bool,
+    quadrature_weights_nm: &[f64],
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_xyz(
+        mass_field,
+        [nx, ny],
+        vessel_illumination_settings(resolution),
+        vessel_illumination(background_w_m2_sr_nm, background_per_column),
+        quadrature_weights_nm,
+    )
+    .map(Vec::into_flattened)
+    .unwrap_or_default()
+}
+
+/// Transmit illumination through an explicit per-cell spectral material map.
+///
+/// Material-map and palette layouts match
+/// [`render_vessel_indexed_spectral_transmittance`]; illumination layout and
+/// radiance units match [`render_vessel_spectral_radiance`]. Materials are
+/// evaluated before the illuminated columns are averaged. The original mass,
+/// material map, palette and illumination remain borrowed.
+///
+/// Admits at most 4,096 material rows and the same complete-image limits as
+/// [`render_vessel_spectral_radiance`]. Invalid input returns an empty vector.
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_indexed_spectral_radiance(
+    mass_field: &[f64],
+    cell_materials: &[u32],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+    background_w_m2_sr_nm: &[f64],
+    background_per_column: bool,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourIndexedSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        cell_materials,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_radiance(
+        mass_field,
+        [nx, ny],
+        IndexedSpectralAbsorptionImageSettings {
+            spectral: vessel_illumination_settings(resolution),
+            max_materials: 4_096,
+        },
+        vessel_illumination(background_w_m2_sr_nm, background_per_column),
+    )
+    .unwrap_or_default()
+}
+
+/// Observe an illuminated material-indexed captured frame as visible XYZ.
+///
+/// The observer, explicit quadrature, flat XYZ output and absence of exposure
+/// or display transforms match [`render_vessel_spectral_xyz`]. Material and
+/// illumination layouts match [`render_vessel_indexed_spectral_radiance`].
+/// Direct projection avoids intermediate spectral and opacity images.
+/// Invalid input or exhausted work limits returns an empty vector.
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_indexed_spectral_xyz(
+    mass_field: &[f64],
+    cell_materials: &[u32],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+    background_w_m2_sr_nm: &[f64],
+    background_per_column: bool,
+    quadrature_weights_nm: &[f64],
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourIndexedSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        cell_materials,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_xyz(
+        mass_field,
+        [nx, ny],
+        IndexedSpectralAbsorptionImageSettings {
+            spectral: vessel_illumination_settings(resolution),
+            max_materials: 4_096,
+        },
+        vessel_illumination(background_w_m2_sr_nm, background_per_column),
+        quadrature_weights_nm,
+    )
+    .map(Vec::into_flattened)
+    .unwrap_or_default()
+}
+
+fn vessel_illumination_settings(resolution: usize) -> SpectralAbsorptionImageSettings {
+    SpectralAbsorptionImageSettings {
+        image: AbsorptionImageSettings {
+            resolution: [resolution; 2],
+            max_pixels: 1_048_576,
+            max_grid_cells: 1_048_576,
+            max_cell_visits: 1_048_576,
+        },
+        max_spectral_evaluations: 1_048_576,
+    }
+}
+
+fn vessel_illumination(background: &[f64], per_column: bool) -> SpectralIllumination<'_> {
+    if per_column {
+        SpectralIllumination::Columns(background)
+    } else {
+        SpectralIllumination::Uniform(background)
+    }
+}
+
 /* ======================================================================= */
 /*  3 · FRAME  (fs-frame) — fnx-free LAYOUT; real fs-frame stages 3–5        */
 /* ======================================================================= */
@@ -2090,6 +2322,138 @@ mod wasm {
         )
     }
 
+    /// Physical radiance through captured mass, with explicit illumination layout.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_spectral_radiance(
+        mass_field: &[f64],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+        background_w_m2_sr_nm: &[f64],
+        background_per_column: bool,
+    ) -> Vec<f64> {
+        super::render_vessel_spectral_radiance(
+            mass_field,
+            nx,
+            ny,
+            resolution,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+            background_w_m2_sr_nm,
+            background_per_column,
+        )
+    }
+
+    /// Approximate visible XYZ with explicit source radiance and quadrature.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_spectral_xyz(
+        mass_field: &[f64],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+        background_w_m2_sr_nm: &[f64],
+        background_per_column: bool,
+        quadrature_weights_nm: &[f64],
+    ) -> Vec<f64> {
+        super::render_vessel_spectral_xyz(
+            mass_field,
+            nx,
+            ny,
+            resolution,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+            background_w_m2_sr_nm,
+            background_per_column,
+            quadrature_weights_nm,
+        )
+    }
+
+    /// Physical radiance through captured mass and an explicit material map.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_indexed_spectral_radiance(
+        mass_field: &[f64],
+        cell_materials: &[u32],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+        background_w_m2_sr_nm: &[f64],
+        background_per_column: bool,
+    ) -> Vec<f64> {
+        super::render_vessel_indexed_spectral_radiance(
+            mass_field,
+            cell_materials,
+            nx,
+            ny,
+            resolution,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+            background_w_m2_sr_nm,
+            background_per_column,
+        )
+    }
+
+    /// Approximate visible XYZ through captured mass and an explicit material map.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_indexed_spectral_xyz(
+        mass_field: &[f64],
+        cell_materials: &[u32],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+        background_w_m2_sr_nm: &[f64],
+        background_per_column: bool,
+        quadrature_weights_nm: &[f64],
+    ) -> Vec<f64> {
+        super::render_vessel_indexed_spectral_xyz(
+            mass_field,
+            cell_materials,
+            nx,
+            ny,
+            resolution,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+            background_w_m2_sr_nm,
+            background_per_column,
+            quadrature_weights_nm,
+        )
+    }
+
     #[wasm_bindgen]
     pub fn run_frame(seed: u32) -> Vec<f64> {
         super::run_frame(seed)
@@ -2519,6 +2883,299 @@ mod tests {
                 1000.0,
                 1e-3,
                 1e-3,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn browser_illuminated_pour_retains_original_column_correlation_and_layout() {
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [core::f64::consts::LN_2, 2.0 * core::f64::consts::LN_2];
+        let background = [2.0, 4.0, 10.0, 20.0];
+        let render = |resolution, source: &[f64], per_column| {
+            render_vessel_spectral_radiance(
+                &[0.0, 1.0],
+                2,
+                1,
+                resolution,
+                &wavelengths,
+                &coefficients,
+                1000.0,
+                1e-3,
+                1e-3,
+                source,
+                per_column,
+            )
+        };
+        let coarse = render(1, &background, true);
+        assert_eq!(coarse.len(), 2);
+        for (&actual, expected) in coarse.iter().zip([3.5, 4.5]) {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+        let uniform = render(1, &[6.0, 12.0], false);
+        for (&actual, expected) in uniform.iter().zip([4.5, 7.5]) {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+        // The source remains two original columns while output has four pixels.
+        let fine = render(2, &background, true);
+        assert_eq!(fine.len(), 8);
+        for (&actual, expected) in fine.iter().zip([2.0, 4.0, 5.0, 5.0, 2.0, 4.0, 5.0, 5.0]) {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+        let palette = [0.0, 0.0, coefficients[0], coefficients[1]];
+        let indexed = render_vessel_indexed_spectral_radiance(
+            &[1.0, 1.0],
+            &[0, 1],
+            2,
+            1,
+            2,
+            &wavelengths,
+            &palette,
+            1000.0,
+            1e-3,
+            1e-3,
+            &background,
+            true,
+        );
+        assert_eq!(indexed.len(), fine.len());
+        for (&actual, expected) in indexed.iter().zip(fine) {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+    }
+
+    #[test]
+    fn browser_illuminated_pour_xyz_matches_native_observation_and_flat_layout() {
+        use fs_render::spectral::{cie_x, cie_y, cie_z, y_integral};
+
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [core::f64::consts::LN_2, 2.0 * core::f64::consts::LN_2];
+        let background = [2.0, 4.0, 10.0, 20.0];
+        let weights = [20.0, 40.0];
+        let optics = fs_vessel::pour::PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 1e-3,
+        };
+        let native = optics
+            .render_xyz(
+                &[0.0, 1.0],
+                [2, 1],
+                SpectralAbsorptionImageSettings {
+                    image: AbsorptionImageSettings {
+                        resolution: [2, 2],
+                        max_pixels: 4,
+                        max_grid_cells: 2,
+                        max_cell_visits: 4,
+                    },
+                    max_spectral_evaluations: 8,
+                },
+                SpectralIllumination::Columns(&background),
+                &weights,
+            )
+            .unwrap();
+        let browser = render_vessel_spectral_xyz(
+            &[0.0, 1.0],
+            2,
+            1,
+            2,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            1e-3,
+            1e-3,
+            &background,
+            true,
+            &weights,
+        );
+        assert_eq!(browser, native.into_flattened());
+        assert_eq!(browser.len(), 12);
+        for (pixel, radiance) in
+            browser
+                .chunks_exact(3)
+                .zip([[2.0, 4.0], [5.0, 5.0], [2.0, 4.0], [5.0, 5.0]])
+        {
+            for (channel, cmf) in [cie_x, cie_y, cie_z].into_iter().enumerate() {
+                let expected = (cmf(450.0) * weights[0] * radiance[0]
+                    + cmf(650.0) * weights[1] * radiance[1])
+                    / y_integral();
+                assert!((pixel[channel] - expected).abs() < 8e-15);
+            }
+        }
+        let palette = [0.0, 0.0, coefficients[0], coefficients[1]];
+        let indexed = render_vessel_indexed_spectral_xyz(
+            &[1.0, 1.0],
+            &[0, 1],
+            2,
+            1,
+            2,
+            &wavelengths,
+            &palette,
+            1000.0,
+            1e-3,
+            1e-3,
+            &background,
+            true,
+            &weights,
+        );
+        assert_eq!(indexed.len(), browser.len());
+        for (&actual, expected) in indexed.iter().zip(browser) {
+            assert!((actual - expected).abs() < 8e-15);
+        }
+    }
+
+    #[test]
+    fn browser_illuminated_pour_refuses_invalid_sources_observers_and_work() {
+        let mass = [0.0, 1.0];
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [0.4, 0.1];
+        for (source, per_column) in [
+            (&[1.0][..], false),
+            (&[1.0, 2.0][..], true),
+            (&[1.0, 2.0, -1.0, 4.0][..], true),
+            (&[1.0, 2.0, f64::NAN, 4.0][..], true),
+        ] {
+            assert!(
+                render_vessel_spectral_radiance(
+                    &mass,
+                    2,
+                    1,
+                    1,
+                    &wavelengths,
+                    &coefficients,
+                    1000.0,
+                    1e-3,
+                    1e-3,
+                    source,
+                    per_column,
+                )
+                .is_empty()
+            );
+            assert!(
+                render_vessel_spectral_xyz(
+                    &mass,
+                    2,
+                    1,
+                    1,
+                    &wavelengths,
+                    &coefficients,
+                    1000.0,
+                    1e-3,
+                    1e-3,
+                    source,
+                    per_column,
+                    &[20.0, 40.0],
+                )
+                .is_empty()
+            );
+        }
+        for weights in [&[1.0][..], &[1.0, -1.0][..], &[1.0, f64::INFINITY][..]] {
+            assert!(
+                render_vessel_spectral_xyz(
+                    &mass,
+                    2,
+                    1,
+                    1,
+                    &wavelengths,
+                    &coefficients,
+                    1000.0,
+                    1e-3,
+                    1e-3,
+                    &[1.0, 2.0],
+                    false,
+                    weights,
+                )
+                .is_empty()
+            );
+        }
+        for materials in [&[0][..], &[u32::MAX, 0][..]] {
+            assert!(
+                render_vessel_indexed_spectral_radiance(
+                    &mass,
+                    materials,
+                    2,
+                    1,
+                    1,
+                    &wavelengths,
+                    &coefficients,
+                    1000.0,
+                    1e-3,
+                    1e-3,
+                    &[1.0, 2.0],
+                    false,
+                )
+                .is_empty()
+            );
+            assert!(
+                render_vessel_indexed_spectral_xyz(
+                    &mass,
+                    materials,
+                    2,
+                    1,
+                    1,
+                    &wavelengths,
+                    &coefficients,
+                    1000.0,
+                    1e-3,
+                    1e-3,
+                    &[1.0, 2.0],
+                    false,
+                    &[20.0, 40.0],
+                )
+                .is_empty()
+            );
+        }
+        // Each image would need 2,097,152 spectral evaluations: refuse before allocation.
+        assert!(
+            render_vessel_spectral_radiance(
+                &[1.0],
+                1,
+                1,
+                1024,
+                &wavelengths,
+                &coefficients,
+                1000.0,
+                1e-3,
+                1e-3,
+                &[1.0, 2.0],
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            render_vessel_indexed_spectral_xyz(
+                &[1.0],
+                &[0],
+                1,
+                1,
+                1024,
+                &wavelengths,
+                &coefficients,
+                1000.0,
+                1e-3,
+                1e-3,
+                &[1.0, 2.0],
+                false,
+                &[20.0, 40.0],
+            )
+            .is_empty()
+        );
+        assert!(
+            render_vessel_spectral_xyz(
+                &[1.0],
+                1,
+                1,
+                1,
+                &[900.0, 1000.0],
+                &coefficients,
+                1000.0,
+                1e-3,
+                1e-3,
+                &[1.0, 2.0],
+                false,
+                &[20.0, 40.0],
             )
             .is_empty()
         );

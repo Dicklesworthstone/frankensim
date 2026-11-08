@@ -19,10 +19,12 @@ use fs_lbm::{Cell, Grid};
 use fs_render::volumes::{
     AbsorptionImageSettings, DensityAbsorption, DensityAbsorptionSpectrum, DvrError,
     IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
-    SpectralAbsorptionImageSettings, SpectralOpacityImage, VolumeGrid,
+    SpectralAbsorptionImageSettings, SpectralIllumination, SpectralOpacityImage, VolumeGrid,
     render_absorption_transmittance, render_density_spectral_box,
-    render_density_spectral_indexed_box, render_density_spectral_indexed_transmittance_box,
-    render_density_spectral_transmittance_box, render_density_transmittance_box,
+    render_density_spectral_indexed_box, render_density_spectral_indexed_radiance_box,
+    render_density_spectral_indexed_transmittance_box, render_density_spectral_indexed_xyz_box,
+    render_density_spectral_radiance_box, render_density_spectral_transmittance_box,
+    render_density_spectral_xyz_box, render_density_transmittance_box,
 };
 
 /// The pour fixture: a tank with an interior weir (the lip) the fluid
@@ -320,6 +322,63 @@ impl<'a> PourSpectralOpticalView<'a> {
             .map_err(PourOpticalError::Transport)
     }
 
+    /// Render transmitted spectral radiance from an explicitly supplied source.
+    ///
+    /// Illumination is either one spectrum for the whole frame or one spectrum
+    /// per original mass column, in x-fastest, wavelength-fastest order. Each
+    /// column attenuates its own background before exact pixel-footprint
+    /// filtering, preserving correlations between the liquid and illumination.
+    /// Output is pixel-major spectral radiance in W/(m² sr nm).
+    /// No opacity/depth image or converted simulation field is allocated.
+    pub fn render_radiance(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: SpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        let grid = pour_optical_grid(
+            mass_field,
+            dimensions,
+            self.lattice_spacing_m,
+            self.slab_depth_m,
+        )?;
+        render_density_spectral_radiance_box(&grid, settings, self.absorption(), illumination)
+            .map_err(PourOpticalError::Transport)
+    }
+
+    /// Observe transmitted light with the shared approximate visible XYZ model.
+    ///
+    /// Source values are spectral radiance per nanometre, and the explicitly
+    /// supplied quadrature weights are in nanometres. The analytic CIE fits
+    /// admit 380--780 nm and use the renderer's relative Y normalization.
+    /// No illuminant, exposure, spectral interpolation or display transform is
+    /// inferred. Per-column source/absorption correlation is retained before
+    /// pixel filtering. Only the final XYZ image is allocated.
+    pub fn render_xyz(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: SpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+        quadrature_weights_nm: &[f64],
+    ) -> Result<Vec<[f64; 3]>, PourOpticalError> {
+        let grid = pour_optical_grid(
+            mass_field,
+            dimensions,
+            self.lattice_spacing_m,
+            self.slab_depth_m,
+        )?;
+        render_density_spectral_xyz_box(
+            &grid,
+            settings,
+            self.absorption(),
+            illumination,
+            quadrature_weights_nm,
+        )
+        .map_err(PourOpticalError::Transport)
+    }
+
     fn absorption(self) -> DensityAbsorptionSpectrum<'a> {
         DensityAbsorptionSpectrum {
             wavelengths_nm: self.wavelengths_nm,
@@ -371,6 +430,64 @@ impl<'a> PourIndexedSpectralOpticalView<'a> {
         )?;
         render_density_spectral_indexed_transmittance_box(&grid, settings, self.absorption())
             .map_err(PourOpticalError::Transport)
+    }
+
+    /// Render source radiance through each original cell's supplied material.
+    ///
+    /// The borrowed illumination is uniform or indexed by original mass column,
+    /// with wavelengths fastest. Source radiance and material-dependent
+    /// attenuation are combined before exact finite-pixel averaging. This
+    /// retains radiance in W/(m² sr nm) and the original wavelength order.
+    pub fn render_radiance(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: IndexedSpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        let grid = pour_optical_grid(
+            mass_field,
+            dimensions,
+            self.lattice_spacing_m,
+            self.slab_depth_m,
+        )?;
+        render_density_spectral_indexed_radiance_box(
+            &grid,
+            settings,
+            self.absorption(),
+            illumination,
+        )
+        .map_err(PourOpticalError::Transport)
+    }
+
+    /// Observe material-dependent transmitted light as approximate visible XYZ.
+    ///
+    /// Illumination, quadrature, observer support and normalization match
+    /// [`PourSpectralOpticalView::render_xyz`]. The supplied material palette,
+    /// original mass and original-column illumination remain borrowed. Direct
+    /// projection avoids an intermediate spectral radiance or opacity image.
+    pub fn render_xyz(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: IndexedSpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+        quadrature_weights_nm: &[f64],
+    ) -> Result<Vec<[f64; 3]>, PourOpticalError> {
+        let grid = pour_optical_grid(
+            mass_field,
+            dimensions,
+            self.lattice_spacing_m,
+            self.slab_depth_m,
+        )?;
+        render_density_spectral_indexed_xyz_box(
+            &grid,
+            settings,
+            self.absorption(),
+            illumination,
+            quadrature_weights_nm,
+        )
+        .map_err(PourOpticalError::Transport)
     }
 
     fn absorption(self) -> IndexedDensityAbsorptionSpectrum<'a> {
@@ -446,6 +563,64 @@ impl PourOutcome {
         settings: IndexedSpectralAbsorptionImageSettings,
     ) -> Result<Vec<f64>, PourOpticalError> {
         view.render_transmittance(&self.mass_field, dimensions, settings)
+    }
+
+    /// Transmit explicit uniform or original-column illumination through this mass field.
+    pub fn render_spectral_radiance(
+        &self,
+        dimensions: [usize; 2],
+        view: PourSpectralOpticalView<'_>,
+        settings: SpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        view.render_radiance(&self.mass_field, dimensions, settings, illumination)
+    }
+
+    /// Project this illuminated accepted field to the shared approximate visible observer.
+    pub fn render_spectral_xyz(
+        &self,
+        dimensions: [usize; 2],
+        view: PourSpectralOpticalView<'_>,
+        settings: SpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+        quadrature_weights_nm: &[f64],
+    ) -> Result<Vec<[f64; 3]>, PourOpticalError> {
+        view.render_xyz(
+            &self.mass_field,
+            dimensions,
+            settings,
+            illumination,
+            quadrature_weights_nm,
+        )
+    }
+
+    /// Transmit explicit illumination through the accepted field's supplied material map.
+    pub fn render_indexed_spectral_radiance(
+        &self,
+        dimensions: [usize; 2],
+        view: PourIndexedSpectralOpticalView<'_>,
+        settings: IndexedSpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        view.render_radiance(&self.mass_field, dimensions, settings, illumination)
+    }
+
+    /// Observe material-dependent transmitted illumination without a converted field.
+    pub fn render_indexed_spectral_xyz(
+        &self,
+        dimensions: [usize; 2],
+        view: PourIndexedSpectralOpticalView<'_>,
+        settings: IndexedSpectralAbsorptionImageSettings,
+        illumination: SpectralIllumination<'_>,
+        quadrature_weights_nm: &[f64],
+    ) -> Result<Vec<[f64; 3]>, PourOpticalError> {
+        view.render_xyz(
+            &self.mass_field,
+            dimensions,
+            settings,
+            illumination,
+            quadrature_weights_nm,
+        )
     }
 }
 
@@ -1489,5 +1664,273 @@ mod physical_opacity_tests {
             .render_transmittance(&mass, [2, 1], limits),
             Err(PourOpticalError::InvalidGeometry),
         ));
+    }
+
+    #[test]
+    fn illuminated_pour_preserves_original_column_source_absorption_correlation() {
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [core::f64::consts::LN_2, 2.0 * core::f64::consts::LN_2];
+        let source = [2.0, 4.0, 10.0, 20.0];
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 1e-3,
+        };
+        let limits = SpectralAbsorptionImageSettings {
+            image: AbsorptionImageSettings {
+                resolution: [1, 1],
+                max_pixels: 1,
+                max_grid_cells: 2,
+                max_cell_visits: 2,
+            },
+            max_spectral_evaluations: 4,
+        };
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: vec![0.0, 1.0],
+        };
+        let correlated = outcome
+            .render_spectral_radiance(
+                [2, 1],
+                optics,
+                limits,
+                SpectralIllumination::Columns(&source),
+            )
+            .unwrap();
+        // The clear column sees [2,4]; the absorbing column sees [10,20].
+        // Average T*B is [3.5,4.5], whereas average(T)*average(B) is [4.5,7.5].
+        for (&actual, expected) in correlated.iter().zip([3.5, 4.5]) {
+            close(actual, expected);
+        }
+        let uniform = optics
+            .render_radiance(
+                &outcome.mass_field,
+                [2, 1],
+                limits,
+                SpectralIllumination::Uniform(&[6.0, 12.0]),
+            )
+            .unwrap();
+        for (&actual, expected) in uniform.iter().zip([4.5, 7.5]) {
+            close(actual, expected);
+        }
+        let palette = [0.0, 0.0, coefficients[0], coefficients[1]];
+        let indexed = PourIndexedSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &palette,
+            cell_materials: &[0, 1],
+            density_unit_kg_m3: optics.density_unit_kg_m3,
+            lattice_spacing_m: optics.lattice_spacing_m,
+            slab_depth_m: optics.slab_depth_m,
+        };
+        let indexed_outcome = PourOutcome {
+            mass_field: vec![1.0, 1.0],
+            ..outcome
+        };
+        let material_radiance = indexed_outcome
+            .render_indexed_spectral_radiance(
+                [2, 1],
+                indexed,
+                IndexedSpectralAbsorptionImageSettings {
+                    spectral: limits,
+                    max_materials: 2,
+                },
+                SpectralIllumination::Columns(&source),
+            )
+            .unwrap();
+        for (&actual, expected) in material_radiance.iter().zip([3.5, 4.5]) {
+            close(actual, expected);
+        }
+    }
+
+    #[test]
+    fn illuminated_pour_xyz_uses_explicit_spectral_widths_and_original_materials() {
+        use fs_render::spectral::{cie_x, cie_y, cie_z, y_integral};
+
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [core::f64::consts::LN_2, 2.0 * core::f64::consts::LN_2];
+        let source = [2.0, 4.0, 10.0, 20.0];
+        let weights = [20.0, 40.0];
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 1e-3,
+        };
+        let limits = SpectralAbsorptionImageSettings {
+            image: AbsorptionImageSettings {
+                resolution: [1, 1],
+                max_pixels: 1,
+                max_grid_cells: 2,
+                max_cell_visits: 2,
+            },
+            max_spectral_evaluations: 4,
+        };
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: vec![0.0, 1.0],
+        };
+        let image = outcome
+            .render_spectral_xyz(
+                [2, 1],
+                optics,
+                limits,
+                SpectralIllumination::Columns(&source),
+                &weights,
+            )
+            .unwrap();
+        assert_eq!(image.len(), 1);
+        for (channel, cmf) in [cie_x, cie_y, cie_z].into_iter().enumerate() {
+            let expected = (cmf(450.0) * 20.0 * 3.5 + cmf(650.0) * 40.0 * 4.5) / y_integral();
+            close(image[0][channel], expected);
+        }
+        let doubled = optics
+            .render_xyz(
+                &outcome.mass_field,
+                [2, 1],
+                limits,
+                SpectralIllumination::Columns(&source),
+                &[40.0, 80.0],
+            )
+            .unwrap();
+        for channel in 0..3 {
+            close(doubled[0][channel], 2.0 * image[0][channel]);
+        }
+        let palette = [0.0, 0.0, coefficients[0], coefficients[1]];
+        let indexed = PourIndexedSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &palette,
+            cell_materials: &[0, 1],
+            density_unit_kg_m3: optics.density_unit_kg_m3,
+            lattice_spacing_m: optics.lattice_spacing_m,
+            slab_depth_m: optics.slab_depth_m,
+        };
+        let indexed_outcome = PourOutcome {
+            mass_field: vec![1.0, 1.0],
+            ..outcome
+        };
+        let indexed_image = indexed_outcome
+            .render_indexed_spectral_xyz(
+                [2, 1],
+                indexed,
+                IndexedSpectralAbsorptionImageSettings {
+                    spectral: limits,
+                    max_materials: 2,
+                },
+                SpectralIllumination::Columns(&source),
+                &weights,
+            )
+            .unwrap();
+        for channel in 0..3 {
+            close(indexed_image[0][channel], image[0][channel]);
+        }
+    }
+
+    #[test]
+    fn illuminated_pour_refuses_invalid_sources_observers_and_work() {
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &[450.0, 650.0],
+            mass_absorption_m2_kg: &[0.4, 0.1],
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 1e-3,
+        };
+        let limits = SpectralAbsorptionImageSettings {
+            image: AbsorptionImageSettings {
+                resolution: [1, 1],
+                max_pixels: 1,
+                max_grid_cells: 2,
+                max_cell_visits: 2,
+            },
+            max_spectral_evaluations: 4,
+        };
+        for source in [
+            SpectralIllumination::Uniform(&[1.0]),
+            SpectralIllumination::Columns(&[1.0, 2.0]),
+            SpectralIllumination::Columns(&[1.0, 2.0, -1.0, 4.0]),
+            SpectralIllumination::Columns(&[1.0, 2.0, f64::NAN, 4.0]),
+        ] {
+            assert!(
+                optics
+                    .render_radiance(&[0.0, 1.0], [2, 1], limits, source)
+                    .is_err()
+            );
+            assert!(
+                optics
+                    .render_xyz(&[0.0, 1.0], [2, 1], limits, source, &[20.0, 40.0])
+                    .is_err()
+            );
+        }
+        for weights in [&[1.0][..], &[1.0, -1.0][..], &[1.0, f64::INFINITY][..]] {
+            assert!(
+                optics
+                    .render_xyz(
+                        &[0.0, 1.0],
+                        [2, 1],
+                        limits,
+                        SpectralIllumination::Uniform(&[1.0, 2.0]),
+                        weights,
+                    )
+                    .is_err()
+            );
+        }
+        let insufficient = SpectralAbsorptionImageSettings {
+            max_spectral_evaluations: 3,
+            ..limits
+        };
+        assert!(
+            optics
+                .render_radiance(
+                    &[0.0, 1.0],
+                    [2, 1],
+                    insufficient,
+                    SpectralIllumination::Uniform(&[1.0, 2.0]),
+                )
+                .is_err()
+        );
+        assert!(
+            optics
+                .render_xyz(
+                    &[0.0, 1.0],
+                    [2, 1],
+                    insufficient,
+                    SpectralIllumination::Uniform(&[1.0, 2.0]),
+                    &[20.0, 40.0],
+                )
+                .is_err()
+        );
+        let infrared = PourSpectralOpticalView {
+            wavelengths_nm: &[900.0, 1000.0],
+            ..optics
+        };
+        assert!(
+            infrared
+                .render_radiance(
+                    &[0.0, 1.0],
+                    [2, 1],
+                    limits,
+                    SpectralIllumination::Uniform(&[1.0, 2.0]),
+                )
+                .is_ok()
+        );
+        assert!(
+            infrared
+                .render_xyz(
+                    &[0.0, 1.0],
+                    [2, 1],
+                    limits,
+                    SpectralIllumination::Uniform(&[1.0, 2.0]),
+                    &[20.0, 40.0],
+                )
+                .is_err()
+        );
     }
 }
