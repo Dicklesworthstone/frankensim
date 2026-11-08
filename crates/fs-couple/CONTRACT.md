@@ -1,3 +1,40 @@
+## Simultaneous original shell, interior pressure and exterior radiation
+
+`TensorShellInterior::prepare_with_exterior` couples the original material
+shell, complete interior pressure-potential FE coordinates and closed exterior
+BEM through one loaded native harmonic factor. It retains all free shell
+translations and rotations and the existing opposite-transpose interior work
+pair. The exterior resisting impedance enters through `[I_shell; 0_pressure]`:
+`M_s u_ddot + C_s u_dot + K_s u - B^T p + Z_ext u_dot = F`.
+There is no dry-shell or cavity-field inverse, fitted radiation spring or
+additional acoustic mode reduction. Repeated coherent force and inward-flow
+cases reuse this complete factor and the same exterior source columns.
+
+Both sides use peak `exp(-i omega t)` phasors at the original material operator's
+frequency. The exterior must retain the exact same original shell object.
+Cavity-outward normals must agree with the original closed source facet
+orientation; paired caller vertex permutations cannot change this physical
+side check. Interior and exterior media may differ. Every closed exterior panel
+remains, including supported scattering faces. An empty interior interface map
+provides the explicit detached-cavity limit.
+
+`PreparedTensorShellRadiation::prepare_acoustics` prepares the existing native
+exterior impedance and fields without independently factoring shell motion.
+Original material strain, complete-coordinate storage/work, physical-port PSD,
+exterior topology/band and cancellation admission remain authoritative. The
+additional real force map has an explicit `8*n*q` byte limit. Pressure and all
+particle-velocity components are observed from the jointly loaded velocity and
+the unchanged native BEM columns.
+
+Applied structural input, acoustic source input, signed interior exchange,
+material heat, wall heat and exterior work remain separate. Structural and
+enclosing balances debit exterior-port work exactly once; independently
+integrated outgoing flux must agree with that same source-bound field before a
+response is returned. This is fixed-geometry harmonic coupling across the
+original zero-offset closed midsurface. Apertures, open screens, finite-thickness
+acoustic skins, causal material-memory evolution and a continuum accuracy
+certificate are outside this interface's scope.
+
 ## Spatial series filaments on native material and heat networks
 
 `incandescent::filament::PreparedSeriesFilament` assembles one original

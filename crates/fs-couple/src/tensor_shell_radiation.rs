@@ -77,6 +77,29 @@ pub struct TensorShellRadiationFrequencyControls {
     pub power_relative_tolerance: f64,
 }
 
+/// Native acoustic columns and coherent observation without a mechanical factor.
+/// Use this when the original shell participates in a larger coupled system.
+#[derive(Clone, Copy, Debug)]
+pub struct TensorShellRadiationAcousticControls {
+    /// Same native BEM numerical bound as the complete frequency preparation.
+    /// Mechanical/port payload and the borrowed static geometry are separate.
+    pub maximum_boundary_payload_bytes: usize,
+    /// One coherent field and its streaming outgoing-flux scratch.
+    pub field: CoherentPortFieldLimits,
+    /// Work for one independently integrated coherent outgoing-flux assessment.
+    pub maximum_radiated_power_work: u64,
+}
+
+impl From<TensorShellRadiationFrequencyControls> for TensorShellRadiationAcousticControls {
+    fn from(controls: TensorShellRadiationFrequencyControls) -> Self {
+        Self {
+            maximum_boundary_payload_bytes: controls.maximum_boundary_payload_bytes,
+            field: controls.field,
+            maximum_radiated_power_work: controls.maximum_radiated_power_work,
+        }
+    }
+}
+
 /// Native refusals retain their numerical or material source.
 #[derive(Debug)]
 pub enum TensorShellRadiationError {
@@ -298,34 +321,24 @@ impl<'geometry, 'shell> PreparedTensorShellRadiation<'geometry, 'shell> {
         Ok(geometry)
     }
 
-    /// Solve every original unit-velocity acoustic column with one native BEM
-    /// factor, then load the full tensor shell through its existing factor owner.
-    /// The real generalized force map is identity in the ORIGINAL free coordinate
-    /// chart. Panel areas already occur in BEM impedance; none are applied twice.
-    /// Dark and rotational columns remain; full self/mutual/reactive entries are
-    /// neither clipped nor symmetrized. No unloaded mechanical solve is required.
-    ///
-    /// # Errors
-    /// Out-of-band request, per-frequency budgets, native acoustic/material/
-    /// passivity/factor refusal, allocation failure or cancellation.
-    pub fn prepare_frequency(
-        &self, omega_rad_s: f64, controls: TensorShellRadiationFrequencyControls, cx: &Cx<'_>,
-    ) -> Result<PreparedTensorShellRadiationFrequency<'_, 'geometry, 'shell>, TensorShellRadiationError> {
+    /// Prepare the SAME full original-coordinate acoustic impedance and source
+    /// columns without factoring a mechanical subproblem. A larger coupled
+    /// owner can retain interior pressure coordinates and add this load before
+    /// its sole mechanical/acoustic factorization. The native bound fields are
+    /// the observation source; impedance and radiated fields are not refitted.
+    /// Panel areas already occur in Z. Dependent, dark and rotational columns
+    /// remain, with every self, mutual and reactive entry under exp(-i omega t).
+    pub fn prepare_acoustics(
+        &self, omega_rad_s: f64, controls: TensorShellRadiationAcousticControls, cx: &Cx<'_>,
+    ) -> Result<VelocityPortSolution<'_, 'geometry>, TensorShellRadiationError> {
         checkpoint(cx)?;
         if !omega_rad_s.is_finite() || omega_rad_s <= 0.0 || omega_rad_s > self.highest_omega_rad_s {
             return Err(TensorShellRadiationError::Invalid("frequency lies outside the admitted exterior band"));
-        }
-        if !controls.power_relative_tolerance.is_finite()
-            || controls.power_relative_tolerance <= 0.0 || controls.power_relative_tolerance >= 1.0
-        {
-            return Err(TensorShellRadiationError::Invalid("finite power tolerance in (0,1) required"));
         }
         let q = self.source.velocity_rows.len();
         let (n, p, ports) = (self.boundary.unknowns() as u128,
             self.source.surface.areas().len() as u128, q as u128);
         let angular = 64_u128 * (1_u128 << (2*self.budget.angular_refinement));
-        admit("original harmonic coordinates", ports, controls.mechanical.maximum_coordinates as u128)?;
-        admit("original harmonic ports", ports, controls.ports.maximum_ports as u128)?;
         let boundary_bytes = 64*n*n + 128*ports*(n+p) + 32*ports*ports
             + 64*angular*n + 256*n + 65536;
         admit("original BEM frequency payload", boundary_bytes,
@@ -341,6 +354,27 @@ impl<'geometry, 'shell> PreparedTensorShellRadiation<'geometry, 'shell> {
         let wavenumber = omega_rad_s/self.source.medium.sound_speed;
         let radiation = self.boundary.solve_velocity_ports(wavenumber, self.source.medium,
             &rows, || cx.checkpoint().is_err())?;
+        checkpoint(cx)?;
+        Ok(radiation)
+    }
+
+    /// Load the complete tensor shell with the original acoustic columns.
+    /// No bare-shell inverse is required. Material strain, physical-port PSD
+    /// admission and full loaded factorization retain their native owners.
+    pub fn prepare_frequency(
+        &self, omega_rad_s: f64, controls: TensorShellRadiationFrequencyControls, cx: &Cx<'_>,
+    ) -> Result<PreparedTensorShellRadiationFrequency<'_, 'geometry, 'shell>, TensorShellRadiationError> {
+        checkpoint(cx)?;
+        if !controls.power_relative_tolerance.is_finite()
+            || controls.power_relative_tolerance <= 0.0 || controls.power_relative_tolerance >= 1.0
+        {
+            return Err(TensorShellRadiationError::Invalid("finite power tolerance in (0,1) required"));
+        }
+        let q = self.source.velocity_rows.len();
+        admit("original harmonic coordinates", q as u128, controls.mechanical.maximum_coordinates as u128)?;
+        admit("original harmonic ports", q as u128, controls.ports.maximum_ports as u128)?;
+        let radiation = self.prepare_acoustics(omega_rad_s, controls.into(), cx)?;
+        let wavenumber = omega_rad_s/self.source.medium.sound_speed;
         let shell: &'shell TensorPronyShell = self.source.shell;
         let mechanical = shell.prepare_harmonic_response_with_port_impedance(
             omega_rad_s, &self.source.identity_ports, q, radiation.impedance(),

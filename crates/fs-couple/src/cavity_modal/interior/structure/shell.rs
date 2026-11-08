@@ -13,6 +13,9 @@
 //! admission precedes publication. The frequency-bound owner deliberately
 //! exposes no time realization or frozen-coefficient frequency derivative.
 
+/// Simultaneous original interior pressure and closed exterior radiation loading.
+pub mod exterior;
+
 use super::{
     PreparedStructuralInterior, StructuralInterior, StructuralInteriorError,
     StructuralInteriorResponse, StructuralMatrices, admit, poll,
@@ -25,7 +28,7 @@ use fs_modal::harmonic::HarmonicResponseControls;
 use fs_plate::shell::viscosity::harmonic::{
     PreparedTensorPronyShellOperator, TensorPronyShell, TensorShellHarmonicError,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Corresponding original vertices on one planar fluid face and shell facet.
 /// The order of either side may be reversed together. Winding never sets the
@@ -62,6 +65,7 @@ pub enum TensorShellInteriorError {
     Invalid(&'static str),
     Interior(StructuralInteriorError),
     Shell(TensorShellHarmonicError),
+    Exterior(crate::tensor_shell_radiation::TensorShellRadiationError),
     Budget {
         quantity: &'static str,
         required: u128,
@@ -90,6 +94,11 @@ impl From<TensorShellHarmonicError> for TensorShellInteriorError {
         Self::Shell(value)
     }
 }
+impl From<crate::tensor_shell_radiation::TensorShellRadiationError> for TensorShellInteriorError {
+    fn from(value: crate::tensor_shell_radiation::TensorShellRadiationError) -> Self {
+        Self::Exterior(value)
+    }
+}
 
 /// One original material frequency and its complete coupled spatial pencil.
 /// Repeated force/flow cases share a prepared factor. Preparing a different
@@ -98,6 +107,9 @@ pub struct TensorShellInterior<'shell, 'a, 'f, 'c> {
     material: PreparedTensorPronyShellOperator<'shell>,
     model: StructuralInterior<'a, 'f, 'c>,
     tolerance: f64,
+    // Paired caller winding never sets this sign. It compares the original
+    // source facet orientation with the owning fluid volume's outward normal.
+    exterior_side_consistent: bool,
 }
 
 impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
@@ -169,12 +181,12 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
             512 * (t + 1) * (1 + u128::from(levels)) + 2048 * i + 128 * n,
             controls.maximum_trace_work as u128,
         )?;
-        let mut original_facets = BTreeSet::new();
+        let mut original_facets = BTreeMap::new();
         for &facet in &shell.mesh().tris {
             poll(cx)?;
             let mut key = facet;
             key.sort_unstable();
-            if !original_facets.insert(key) {
+            if original_facets.insert(key, facet).is_some() {
                 return Err(TensorShellInteriorError::Invalid(
                     "shell contains duplicate original facets",
                 ));
@@ -183,12 +195,13 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
         let mut selected_shell = BTreeSet::new();
         let mut selected_fluid = BTreeSet::new();
         let mut traces = vec![Vec::new(); q];
+        let mut exterior_side_consistent = true;
         for face in interfaces {
             poll(cx)?;
             let (mut shell_key, mut fluid_key) = (face.shell, face.fluid);
             shell_key.sort_unstable();
             fluid_key.sort_unstable();
-            if !original_facets.contains(&shell_key)
+            if !original_facets.contains_key(&shell_key)
                 || !selected_shell.insert(shell_key)
                 || !selected_fluid.insert(fluid_key)
             {
@@ -200,6 +213,16 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
                 .geometry()
                 .boundary_geometry(face.fluid)
                 .map_err(StructuralInteriorError::from)?;
+            let original = original_facets[&shell_key].map(|node| shell.mesh().nodes[node]);
+            let a: [f64; 3] = core::array::from_fn(|d| original[1][d] - original[0][d]);
+            let b: [f64; 3] = core::array::from_fn(|d| original[2][d] - original[0][d]);
+            let cross = [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ];
+            let outward: f64 = cross.iter().zip(normal).map(|(a, b)| a * b).sum();
+            exterior_side_consistent &= outward.is_finite() && outward > 0.0;
             for local in 0..3 {
                 let node = face.shell[local];
                 if points[local] != shell.mesh().nodes[node] {
@@ -236,6 +259,7 @@ impl<'shell, 'a, 'f, 'c> TensorShellInterior<'shell, 'a, 'f, 'c> {
             material,
             model,
             tolerance: controls.power_relative_tolerance,
+            exterior_side_consistent,
         })
     }
 
@@ -318,7 +342,21 @@ impl PreparedTensorShellInterior<'_, '_, '_, '_, '_> {
         poll(cx)?;
         let field = self.coupled.solve(structural_force, inward_flow_load, cx)?;
         self.owner
-            .material
+            .admit_response(field, structural_force, inward_flow_load, cx)
+    }
+}
+
+impl TensorShellInterior<'_, '_, '_, '_> {
+    // Both the interior-only and exterior-loaded paths recover the SAME source
+    // strains and check complete structural/acoustic power before publication.
+    fn admit_response(
+        &self,
+        field: StructuralInteriorResponse,
+        structural_force: &[C64],
+        inward_flow_load: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<TensorShellInteriorResponse, TensorShellInteriorError> {
+        self.material
             .admit_displacement(&field.structural_displacement, cx)?;
         let mut scale = Dd::from_f64(0.0);
         for ((force, reaction), velocity) in structural_force
@@ -336,27 +374,37 @@ impl PreparedTensorShellInterior<'_, '_, '_, '_, '_> {
         scale = scale
             + Dd::from_f64(field.average_structural_dissipation_w.abs())
             + Dd::from_f64(field.average_wall_dissipation_w.abs());
+        let mut port_power = 0.0;
+        if let Some(port) = &field.structural_port_load {
+            port_power = port.average_absorbed_power_w;
+            for (effort, flow) in port.effort.iter().zip(&port.flow) {
+                poll(cx)?;
+                scale = scale + Dd::from_f64(0.5 * effort.abs() * flow.abs());
+            }
+            scale = scale + Dd::from_f64(port_power.abs());
+        }
         let scale = scale.to_f64();
         let structural = relative(field.structural_power_balance_residual_w().abs(), scale);
         let acoustic = relative(field.acoustic_power_balance_residual_w().abs(), scale);
         let enclosing = field.average_structural_input_power_w
             + field.average_acoustic_input_power_w
             - field.average_structural_dissipation_w
-            - field.average_wall_dissipation_w;
+            - field.average_wall_dissipation_w
+            - port_power;
         let total = relative(enclosing.abs(), scale)
             .max(relative(field.power_balance_residual_w.abs(), scale));
         let maximum = structural.max(acoustic).max(total);
-        if maximum > self.owner.tolerance {
+        if maximum > self.tolerance {
             return Err(TensorShellInteriorError::PowerBalance {
                 structure: structural,
                 acoustic,
                 total,
-                tolerance: self.owner.tolerance,
+                tolerance: self.tolerance,
             });
         }
         poll(cx)?;
         Ok(TensorShellInteriorResponse {
-            angular_frequency_rad_s: self.owner.material.omega_rad_s(),
+            angular_frequency_rad_s: self.material.omega_rad_s(),
             field,
             apparent_power_scale_w: scale,
             relative_power_balance: maximum,

@@ -43,7 +43,8 @@ use fs_feec::acoustics::helmholtz::heterogeneous::{
 };
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
-    HarmonicResponse, HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
+    HarmonicPortResponse, HarmonicResponse, HarmonicResponseControls, HarmonicResponseError,
+    PreparedHarmonicResponse,
 };
 use fs_solid::linear3::TetElasticAssembly;
 use fs_sparse::Csr;
@@ -461,17 +462,26 @@ pub struct StructuralInteriorResponse {
     pub average_structural_dissipation_w: f64,
     /// Independently integrated relative-wall admittance work.
     pub average_wall_dissipation_w: f64,
-    /// Whole-system input minus dissipation, from the canonical harmonic owner.
+    /// Additional structural load, when a source-bound exterior is attached.
+    /// Flow is work-conjugate to opposing effort; it is separate from interior
+    /// pressure work and intrinsic material/wall heat. Unloaded solves use None.
+    pub structural_port_load: Option<HarmonicPortResponse>,
+    /// Whole-system input minus dissipation and additional structural-port work.
     pub power_balance_residual_w: f64,
     pub relative_residual: f64,
 }
 
 impl StructuralInteriorResponse {
-    /// Original structural source and acoustic exchange minus structural heat.
+    /// Structural source plus interior exchange, less material heat and any
+    /// additional exterior/load work. Radiation is not debited as material heat.
     #[must_use]
     pub fn structural_power_balance_residual_w(&self) -> f64 {
         self.average_structural_input_power_w + self.average_fluid_to_structure_power_w
             - self.average_structural_dissipation_w
+            - self
+                .structural_port_load
+                .as_ref()
+                .map_or(0.0, |port| port.average_absorbed_power_w)
     }
 
     /// Original flow-source work minus the same exchange and relative-wall heat.
@@ -586,6 +596,7 @@ impl PreparedStructuralInterior<'_, '_, '_, '_> {
             average_fluid_to_structure_power_w: exchange,
             average_structural_dissipation_w: structural_loss,
             average_wall_dissipation_w: wall_loss,
+            structural_port_load: response.port_load,
             power_balance_residual_w: response.power_balance_residual_w,
             relative_residual: response.relative_residual,
         })
