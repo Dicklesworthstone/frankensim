@@ -30,6 +30,14 @@ ASSUMPTION. `specimen.tsv` gives the identity and the source ids of
   - written by `cello_specimen.py`, then `cello_bridge_19g.py`.
 - **`shell-assembly-h12.5.tsv`**: the 12.5 mm shell table (39 components, 92
   ties), written by `gen_violin_shell_assembly.py ... instrument=cello`.
+- **`shell-assembly-h12.5-bar-r24.tsv`**: the table the live cello pages are
+  rendered on. It comes from the same scripts with two changes:
+  `bar_slide_mm=12.27` and `rib_layers=24` in place of 6. With
+  `bar_slide_mm=12.27`, `cello_specimen.py` slides the bass bar 12.27 mm toward
+  the neck as one piece, so its ends sit 83.5 and 83.4 mm from the top's ends
+  instead of the mapping's 71.2 and 95.7. Alan Goldblatt's cello specification
+  sheet prints 80 to 85 mm, and a maker's forum post (Cliff Green) gives 80.
+  Both are makers' figures, not measurements of this cello.
 - **`cello-{C,G,D,A}.assembly`**: the `assemble-shell` options, one bridge per
   string. Their comments name the table by its earlier file name,
   `cello-h12.5-s8-v5.tsv`.
@@ -49,6 +57,19 @@ uv run --python 3.12 --with triangle --with numpy python3 -I \
 Check B (this table) runs only on Linux x86-64, and check A (il Cannone's h6
 table) only on macOS arm64: with the same numpy and triangle versions, the
 triangulation differs by architecture.
+
+Check B24 reproduces the table of the live pages, also only on Linux x86-64
+(md5 b59a6549f59166e59b1ac8b2b0bb3970). Its three steps:
+
+```bash
+s=crates/fs-couple/examples/shell_body_modes
+w=$(mktemp -d)
+py="uv run --python 3.12 --with numpy==2.5.4 --with triangle==20250106 python3 -I"
+$py $s/cello_specimen.py data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026 "$w/raw" bar_slide_mm=12.27
+$py $s/cello_bridge_19g.py "$w/raw" "$w/specimen"
+$py $s/gen_violin_shell_assembly.py "$w/specimen" "$w/table.tsv" 12.5 neck=ellipse foot_band_mm=8 \
+  fanfix=move crossing_snap_mm=2.5 bridge_dp_mm=0.5 rib_layers=24 instrument=cello
+```
 
 ## Render the D3
 

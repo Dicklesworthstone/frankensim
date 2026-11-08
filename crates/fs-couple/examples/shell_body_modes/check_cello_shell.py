@@ -1,11 +1,13 @@
 """Reproduce the cello shell data of data/instruments/geometry/cello-castelbarco-1697-shell byte for byte from origin's tables:
   C  cello_specimen.py on the il Cannone tables, then cello_bridge_19g.py, give every specimen table of the directory;
   B  gen_violin_shell_assembly.py instrument=cello on that specimen gives shell-assembly-h12.5.tsv;
+  B24 the same three scripts with bar_slide_mm=12.27 and rib_layers=24 give shell-assembly-h12.5-bar-r24.tsv, the table of
+     the live cello pages;
   E  cello_shell_card.py with the directory's assemble-shell output leaves cello-shell-D3.material-strings unchanged
      (its body and cavity records are the table's);
   A  gen_violin_shell_assembly.py with no cello option still gives il Cannone's shell-assembly-h6.tsv.
 The two tables reproduce only on the architecture that made them: with the same numpy 2.5.4 and triangle 20250106 the
-triangulation differs between x86-64 Linux and arm64 macOS. The cello table was made on x86-64 Linux, so B runs there;
+triangulation differs between x86-64 Linux and arm64 macOS. The cello tables were made on x86-64 Linux, so B and B24 run there;
 il Cannone's h6 table was made on arm64 macOS, so A runs there; elsewhere each is reported as skipped. C and E run anywhere.
 assemble-shell needs the material_strings binary; its output for the D assembly is kept as assemble-shell-D.txt and is
 used here only as E's input.
@@ -20,6 +22,7 @@ ROOT = HERE.parents[3]
 CANNONE = ROOT / "data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026"
 DATA = ROOT / "data/instruments/geometry/cello-castelbarco-1697-shell"
 CELLO_FLAGS = ["12.5", "neck=ellipse", "foot_band_mm=8", "fanfix=move", "crossing_snap_mm=2.5", "bridge_dp_mm=0.5", "rib_layers=6", "instrument=cello"]
+LIVE_FLAGS = [f if f != "rib_layers=6" else "rib_layers=24" for f in CELLO_FLAGS]
 WORK = Path(sys.argv[1])
 if WORK.exists():
     raise SystemExit("refusing: %s exists" % WORK)
@@ -54,6 +57,14 @@ if LINUX_X86:
     same("B table", WORK / "shell-assembly-h12.5.tsv", DATA / "shell-assembly-h12.5.tsv")
 else:
     print("SKIP B table: made on x86-64 Linux, this is %s %s" % MACHINE)
+# B24: the live pages' table (bar slid 12.27 mm toward the neck, 24 rib layers; made on x86-64 Linux)
+if LINUX_X86:
+    run(HERE / "cello_specimen.py", CANNONE, WORK / "bar-specimen-raw", "bar_slide_mm=12.27")
+    run(HERE / "cello_bridge_19g.py", WORK / "bar-specimen-raw", WORK / "bar-specimen")
+    run(HERE / "gen_violin_shell_assembly.py", WORK / "bar-specimen", WORK / "shell-assembly-h12.5-bar-r24.tsv", *LIVE_FLAGS)
+    same("B24 table", WORK / "shell-assembly-h12.5-bar-r24.tsv", DATA / "shell-assembly-h12.5-bar-r24.tsv")
+else:
+    print("SKIP B24 table: made on x86-64 Linux, this is %s %s" % MACHINE)
 # E: the D3 card's table-derived records
 run(HERE / "cello_shell_card.py", DATA / "cello-shell-D3.material-strings", DATA / "assemble-shell-D.txt", WORK / "cello-shell-D3.material-strings")
 same("E card", WORK / "cello-shell-D3.material-strings", DATA / "cello-shell-D3.material-strings")

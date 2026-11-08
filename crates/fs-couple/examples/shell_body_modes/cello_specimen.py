@@ -4,7 +4,12 @@ written with its source or labelled ASSUMPTION in PROVENANCE.tsv beside the tabl
 recording or mode frequency. cello_bridge_19g.py then sets the bridge to its published mass; the two together write
 data/instruments/geometry/cello-castelbarco-1697-shell (check_cello_shell.py reproduces it byte for byte).
 
-usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [instrument=viola] [fholes=RASTER_RUNS.tsv]   (OUT_DIR must not exist)
+usage: python3 -I cello_specimen.py CANNONE_DIR OUT_DIR [instrument=viola] [fholes=RASTER_RUNS.tsv] [bar_slide_mm=MM]   (OUT_DIR must not exist)
+
+bar_slide_mm=MM (optional, cello only; without it every output byte is as before): after the bar is placed, slide it MM mm toward the neck
+along z as one piece (length, height profile, width and tilt kept), then re-set its x so that its x at the bridge plane is unchanged, and
+add the bass_bar_slide row to PROVENANCE.tsv. The live cello pages carry bar_slide_mm=12.27: the mapped bar's ends sit 71.2 / 95.7 mm from
+the top's ends, and Goldblatt's cello specification sheet prints 80 to 85 mm (Green 80), so 12.27 puts them at 83.5 / 83.4 mm.
 
 fholes=RASTER_RUNS.tsv (optional): the two hole rasters traced from the LOCM drawing itself (frankensim.specimen-raster-runs.v1,
 already in this specimen's plan mm), used in place of the scaled Cannone holes; the top's island follows them, and the
@@ -62,17 +67,26 @@ import numpy as np
 
 SRC = sys.argv[1].rstrip("/") + "/"
 OUT = sys.argv[2].rstrip("/") + "/"
-TRACE, VIOLA = None, False
+TRACE, VIOLA, BAR_SLIDE = None, False, None
 for arg in sys.argv[3:]:
     key, eq, value = arg.partition("=")
     if key == "fholes" and eq and value and TRACE is None:
         TRACE = value
+    elif key == "bar_slide_mm" and eq and value and BAR_SLIDE is None:
+        try:
+            BAR_SLIDE = float(value)
+        except ValueError:
+            raise SystemExit("refusing: bar_slide_mm=%r is not a number" % value)
+        if not (0.0 < BAR_SLIDE < 50.0):
+            raise SystemExit("refusing: bar_slide_mm=%r: the slide is toward the neck, more than 0 and less than 50 mm" % value)
     elif arg == "instrument=viola" and not VIOLA:
         VIOLA = True
     else:
-        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv and instrument=viola" % arg)
+        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM and instrument=viola" % arg)
 if TRACE and VIOLA:
     raise SystemExit("refusing: the fholes trace is the Castelbarco cello's (image 0021); the viola places its holes from image 0015")
+if BAR_SLIDE is not None and VIOLA:
+    raise SystemExit("refusing: bar_slide_mm= is the cello's (Goldblatt's cello specification sheet); the viola keeps its mapped bar")
 if os.path.exists(OUT):
     raise SystemExit("refusing: %s exists" % OUT)
 os.makedirs(OUT)
@@ -737,6 +751,11 @@ bar_x_at_bridge_c = float(np.interp(zbr_c, bs[:, 0], bs[:, 2]))
 bar_x_target = (bar_x_at_bridge_c - xfeet0) * kxb0
 BAR_SHIFT = bar_x_target - float(np.interp(SZ * zbr_c, zb3, xb3))
 xb3 = xb3 + BAR_SHIFT
+if BAR_SLIDE is not None:  # bar_slide_mm=: rigid slide toward the neck, x re-set so that the bar's x at the bridge plane stays
+    zb3 = zb3 + BAR_SLIDE
+    xb3 = xb3 + (bar_x_target - float(np.interp(SZ * zbr_c, zb3, xb3)))
+    prov("bass_bar_slide", "bar slid %.2f mm toward the neck along z, rigid; x at the bridge plane unchanged" % BAR_SLIDE, "makers' tables",
+         "Goldblatt prints the bar's ends 80-85 mm from the plate's ends, Green 80; the mapped bar sat 71.2 / 95.7 mm. Makers' tables, borrowed and named, not measurements of this cello")
 h3 = hb_c * kh
 rows = [(z, BAR_W * h, x, 0.0, x - 0.5 * BAR_W, x + 0.5 * BAR_W, 0.0, h) for z, h, x in zip(zb3, h3, xb3)]
 write("bass-bar-sections.tsv", "frankensim.specimen-sections.v1", ["z_mm", "area_mm2", "centroid_x_mm", "centroid_y_mm", "x_min_mm", "x_max_mm", "y_min_mm", "y_max_mm"], rows, ["%.3f"] * 8)
