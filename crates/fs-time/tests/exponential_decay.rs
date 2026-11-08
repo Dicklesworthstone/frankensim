@@ -412,3 +412,216 @@ fn diffusion_admission_rejects_nonreciprocal_or_invalid_models() {
     isolated.step(&mut state, &|_, out| out[0] = 3.0);
     assert_eq!(state, [3.5]);
 }
+
+#[test]
+fn unequal_reservoirs_match_the_analytic_heat_and_power_balance() {
+    // C=(2,8) J/K, G=3 W/K and P=(7,-2) W. The mean heats at
+    // (P0+P1)/(C0+C1)=0.5 K/s; the difference obeys d'=-1.875*d+3.75.
+    let capacities = [2.0, 8.0];
+    let conductances = [0.0, 3.0, 3.0, 0.0];
+    let method = ExpEuler::try_new_capacity_diffusion(&conductances, &capacities, 0.2).unwrap();
+    let initial = [350.0, 290.0];
+    let mut state = initial;
+    // Workspaces remain interchangeable with ordinary same-dimension steppers.
+    let ordinary = ExpEuler::try_new(&[-1.0, 0.0, 0.0, -2.0], 2, 0.2).unwrap();
+    let mut workspace = ordinary.workspace();
+    let power = |physical: &[f64], out: &mut [f64]| {
+        assert!(physical.iter().all(|value| (280.0..360.0).contains(value)));
+        out.copy_from_slice(&[7.0, -2.0]);
+    };
+    for step in 1..=20 {
+        method
+            .step_checked(&mut state, &power, &mut workspace)
+            .unwrap();
+        let time = 0.2 * f64::from(step);
+        let mean = 302.0 + 0.5 * time;
+        let difference = 2.0 + 58.0 * (-1.875 * time).exp();
+        relative(state[0], mean + 0.8 * difference, 8e-14);
+        relative(state[1], mean - 0.2 * difference, 8e-14);
+        relative(2.0 * state[0] + 8.0 * state[1], 3020.0 + 5.0 * time, 8e-14);
+    }
+    let whole = ExpEuler::try_new_capacity_diffusion(&conductances, &capacities, 4.0).unwrap();
+    let mut direct = initial;
+    whole.step(&mut direct, &power);
+    for (a, b) in direct.into_iter().zip(state) {
+        relative(a, b, 8e-14);
+    }
+}
+
+#[test]
+fn capacity_diffusion_retains_separate_weighted_equilibria() {
+    let capacities = [1.0, 3.0, 8.0, 2.0, 5.0, 11.0];
+    let n = capacities.len();
+    let mut conductances = vec![0.0; n * n];
+    for (i, j, value) in [(0, 2, 1.0), (1, 3, 2.0), (3, 5, 4.0)] {
+        conductances[i * n + j] = value;
+        conductances[j * n + i] = value;
+    }
+    let method = ExpEuler::try_new_capacity_diffusion(&conductances, &capacities, 1e16).unwrap();
+    let mut state = [10.0, 20.0, 30.0, 40.0, 7.0, 60.0];
+    method.step(&mut state, &zero);
+    for (value, expected) in
+        state
+            .into_iter()
+            .zip([250.0 / 9.0, 50.0, 250.0 / 9.0, 50.0, 7.0, 50.0])
+    {
+        relative(value, expected, 8e-14);
+    }
+    relative(state[0] + 8.0 * state[2], 250.0, 8e-14);
+    relative(
+        3.0 * state[1] + 2.0 * state[3] + 11.0 * state[5],
+        800.0,
+        8e-14,
+    );
+
+    // The isolated cell's source is an extensive power, not a temperature rate.
+    let isolated = ExpEuler::try_new_capacity_diffusion(&[0.0], &[5.0], 0.5).unwrap();
+    let mut one = [7.0];
+    isolated.step(&mut one, &|_, out| out[0] = 3.0);
+    relative(one[0], 7.3, 8e-15);
+
+    // h*P alone underflows, but the transformed impulse and physical state do not.
+    let tiny = ExpEuler::try_new_capacity_diffusion(&[0.0], &[1e-200], 1e-200).unwrap();
+    let mut one = [0.0];
+    tiny.step(&mut one, &|_, out| out[0] = 1e-200);
+    relative(one[0], 1e-200, 8e-15);
+}
+
+#[test]
+fn weighted_totals_retain_product_tails_and_balanced_physical_power() {
+    let epsilon = 2.0_f64.powi(-27);
+    let capacities = [1.0 + epsilon, 1.0];
+    let method =
+        ExpEuler::try_new_capacity_diffusion(&[0.0, 1.0, 1.0, 0.0], &capacities, 1e16).unwrap();
+    // The rounded product C0*u0 is 1.0, but its exact value is 1-2^-54.
+    // Retaining the FMA residual is necessary to keep this real stored amount.
+    let mut state = [1.0 - epsilon, -1.0];
+    assert_eq!(capacities[0] * state[0], 1.0);
+    method.step(&mut state, &zero);
+    let expected = -(epsilon * epsilon) / (capacities[0] + capacities[1]);
+    for value in state {
+        relative(value, expected, 8e-14);
+    }
+
+    let large = (1_u64 << 53) as f64;
+    let tiny = 1.0 / large;
+    let capacities = [1.0, 2.0, 3.0, 5.0, 7.0, 11.0];
+    let mut conductances = vec![(1_u64 << 60) as f64; 36];
+    for i in 0..6 {
+        conductances[6 * i + i] = 0.0;
+    }
+    let method = ExpEuler::try_new_capacity_diffusion(&conductances, &capacities, large).unwrap();
+    let mut workspace = method.workspace();
+    for net in [0.0, tiny, -tiny] {
+        let power = [large, 1.0, tiny, -large, -1.0, -tiny + net];
+        let mut state = [0.0; 6];
+        method
+            .step_checked(
+                &mut state,
+                &|_, out| out.copy_from_slice(&power),
+                &mut workspace,
+            )
+            .unwrap();
+        let amount: f64 = capacities.iter().zip(state).map(|(c, u)| c * u).sum();
+        assert!(
+            (amount - large * net).abs() < 2e-13,
+            "amount={amount:e}, net={net:e}"
+        );
+    }
+}
+
+#[test]
+fn capacity_units_and_unit_storage_leave_physical_trajectories_unchanged() {
+    let conductances = path_rates(3, 2.0);
+    let ordinary = ExpEuler::try_new_diffusion(&conductances, 3, 0.4).unwrap();
+    let unit = ExpEuler::try_new_capacity_diffusion(&conductances, &[1.0; 3], 0.4).unwrap();
+    let mut a = [2.0, 4.0, 7.0];
+    let mut b = a;
+    let forcing = |_: &[f64], out: &mut [f64]| out.copy_from_slice(&[0.7, -0.2, 0.1]);
+    ordinary.step(&mut a, &forcing);
+    unit.step(&mut b, &forcing);
+    assert_eq!(a, b);
+
+    for scale in [1e-120, 1.0, 1e120] {
+        let method = ExpEuler::try_new_capacity_diffusion(
+            &[0.0, 3.0 * scale, 3.0 * scale, 0.0],
+            &[2.0 * scale, 8.0 * scale],
+            0.2,
+        )
+        .unwrap();
+        let mut state = [350.0, 290.0];
+        method.step(&mut state, &|_, out| {
+            out.copy_from_slice(&[7.0 * scale, -2.0 * scale])
+        });
+        let mean = 302.1;
+        let difference = 2.0 + 58.0 * (-0.375_f64).exp();
+        relative(state[0], mean + 0.8 * difference, 5e-14);
+        relative(state[1], mean - 0.2 * difference, 5e-14);
+    }
+}
+
+#[test]
+fn capacity_diffusion_refuses_invalid_or_unrepresentable_physics_atomically() {
+    let conductances = [0.0, 3.0, 3.0, 0.0];
+    for capacities in [
+        [0.0, 1.0],
+        [-1.0, 1.0],
+        [f64::NAN, 1.0],
+        [f64::INFINITY, 1.0],
+        [f64::MAX, f64::MAX],
+    ] {
+        assert!(ExpEuler::try_new_capacity_diffusion(&conductances, &capacities, 0.2).is_err());
+    }
+    assert!(ExpEuler::try_new_capacity_diffusion(&[], &[], 0.2).is_err());
+    assert!(ExpEuler::try_new_capacity_diffusion(&[0.0], &[2.0, 8.0], 0.2).is_err());
+    assert!(ExpEuler::try_new_capacity_diffusion(&conductances, &[2.0, 8.0], 0.0).is_err());
+    for conductances in [
+        [1.0, 3.0, 3.0, 0.0],
+        [0.0, -3.0, -3.0, 0.0],
+        [0.0, 3.0, 4.0, 0.0],
+        [0.0, f64::INFINITY, f64::INFINITY, 0.0],
+    ] {
+        assert!(ExpEuler::try_new_capacity_diffusion(&conductances, &[2.0, 8.0], 0.2).is_err());
+    }
+    assert!(
+        ExpEuler::try_new_capacity_diffusion(&[0.0, 1e-100, 1e-100, 0.0], &[1e300, 1e300], 0.2,)
+            .is_err()
+    );
+
+    let method = ExpEuler::try_new_capacity_diffusion(&conductances, &[0.25, 1.0], 0.01).unwrap();
+    let mut workspace = method.workspace();
+    let mut state = [2.0, 3.0];
+    let before = state;
+    assert_eq!(
+        method.step_checked(
+            &mut state,
+            &|_, out| out.copy_from_slice(&[f64::MAX, 0.0]),
+            &mut workspace,
+        ),
+        Err(ExpEulerError::Arithmetic)
+    );
+    assert_eq!(state, before);
+    method
+        .step_checked(&mut state, &zero, &mut workspace)
+        .unwrap();
+    relative(0.25 * state[0] + state[1], 3.5, 8e-14);
+
+    let method = ExpEuler::try_new_capacity_diffusion(&conductances, &[2.0, 8.0], 0.2).unwrap();
+    let mut overflowing = [f64::MAX, 1.0];
+    assert_eq!(
+        method.step_checked(&mut overflowing, &zero, &mut method.workspace(),),
+        Err(ExpEulerError::Arithmetic)
+    );
+    assert_eq!(overflowing, [f64::MAX, 1.0]);
+
+    // The product itself is normal, but its exact low bit is below 2^-1074.
+    // Losing that residual must not silently change a conserved amount.
+    let tiny_capacity = (4.0 * f64::MIN_POSITIVE) * (1.0 + f64::EPSILON);
+    let method = ExpEuler::try_new_capacity_diffusion(&[0.0], &[tiny_capacity], 1.0).unwrap();
+    let mut unresolved = [1.0 + f64::EPSILON];
+    assert_eq!(
+        method.step_checked(&mut unresolved, &zero, &mut method.workspace(),),
+        Err(ExpEulerError::Arithmetic)
+    );
+    assert_eq!(unresolved, [1.0 + f64::EPSILON]);
+}

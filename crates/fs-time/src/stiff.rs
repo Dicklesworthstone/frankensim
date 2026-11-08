@@ -10,7 +10,7 @@ use fs_ivl::expansion::fast_expansion_sum_zeroelim;
 use fs_la::eigen::{MAX_EIGEN_WORK_ELEMENTS, admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::{Lu, lu};
 use fs_math::det;
-use fs_math::eft::two_sum;
+use fs_math::eft::{two_prod, two_sum};
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport};
 use std::fmt;
 
@@ -552,7 +552,7 @@ fn solve_report_bits_equal(left: &SolveReport, right: &SolveReport) -> bool {
 pub struct ExpEuler {
     n: usize,
     h: f64,
-    /// Eigenvectors (columns) of A.
+    /// Eigenvectors of A, or of the capacity-similar symmetric generator.
     vecs: Vec<f64>,
     /// e^{hλ}, or e^{hλ/4} when direct retention is subnormal/zero.
     exp_h: Vec<f64>,
@@ -564,6 +564,13 @@ pub struct ExpEuler {
     constant_modes: Vec<ConstantDiffusionMode>,
     /// Component nodes in the same order as `constant_modes`.
     component_nodes: Vec<usize>,
+    /// Physical storage and the similarity transform, only for capacity diffusion.
+    capacity: Option<CapacityWeights>,
+}
+
+struct CapacityWeights {
+    values: Vec<f64>,
+    roots: Vec<f64>,
 }
 
 struct ConstantDiffusionMode {
@@ -675,7 +682,7 @@ impl ExpEuler {
             return Err(ExpEulerError::InvalidInput("require a finite matrix"));
         }
         if !require_decay && n > 0 && exact_diffusion_generator(a, n) {
-            return Self::prepare_diffusion(a, n, h);
+            return Self::prepare_diffusion(a, n, h, None);
         }
         let maximum = a
             .iter()
@@ -785,6 +792,7 @@ impl ExpEuler {
             hphi1,
             constant_modes: Vec::new(),
             component_nodes: Vec::new(),
+            capacity: None,
         })
     }
 
@@ -800,7 +808,7 @@ impl ExpEuler {
     /// Each connected component retains its constant mode analytically. Only
     /// its orthogonal contrasts enter the eigensolver, so eigenvalue roundoff
     /// cannot turn conserved material into growth or decay at long times.
-    /// Compensated component sums also retain balanced sources and sinks.
+    /// Exact expansion sums also retain balanced sources and sinks.
     /// The existing workspace and allocation-free step path are reused.
     /// Constant additive forcing is exact up to eigensolve and roundoff error;
     /// nonlinear forcing remains first order. This bounded dense owner adds
@@ -824,12 +832,82 @@ impl ExpEuler {
                 "exchange-rate diagonal must be zero",
             ));
         }
-        Self::prepare_diffusion(rates, n, h)
+        Self::prepare_diffusion(rates, n, h, None)
     }
 
-    // The diagonal is ignored here: the public rate-table constructor checks
+    /// Prepare finite-volume or lumped diffusion with distinct storage capacities.
+    ///
+    /// The physical equation is
+    /// `C_i * u_i' = sum_j G_ij * (u_j - u_i) + P_i(u)`.
+    /// Supply one finite positive, time-independent capacity per state and a
+    /// row-major n-by-n conductance table, n = capacities.len(). Its diagonal
+    /// must be zero and off-diagonal values finite, nonnegative and exactly
+    /// reciprocal. Missing edges are insulating. For heat, C is J/K, G is W/K,
+    /// u is K, h is seconds, and the step callback supplies P in W.
+    ///
+    /// Unlike the ordinary constructors' intensive N, this constructor's
+    /// callback supplies EXTENSIVE sources P before division by capacity. It
+    /// still reads the original physical u. Capacity and conductance may include
+    /// volume, geometry or interface resistance; the caller owns that model.
+    ///
+    /// The similarity transform y = sqrt(C) u makes the generator symmetric.
+    /// Each connected component retains its sqrt(C) null vector analytically,
+    /// so its capacity-weighted total changes only by h times the summed source,
+    /// up to endpoint roundoff. Only decaying contrasts enter the eigensolver.
+    /// State totals include the residual of each rounded C_i*u_i product;
+    /// balanced physical sources are summed before any capacity conversion.
+    /// Checked stepping reuses storage and allocates nothing.
+    ///
+    /// This is a bounded dense, fixed-capacity model. It does not infer
+    /// temperature-dependent storage, enthalpy, positivity certificates or a
+    /// general nonsymmetric operator. Constant P is integrated exactly up to
+    /// spectral and floating-point errors; nonlinear P remains first order.
+    ///
+    /// # Errors
+    /// Refuses invalid capacities/conductances, shapes, duration or work budget,
+    /// unresolved decay spectra, and unrepresentable capacity sums or transforms.
+    pub fn try_new_capacity_diffusion(
+        conductances: &[f64],
+        capacities: &[f64],
+        h: f64,
+    ) -> Result<Self, ExpEulerError> {
+        let n = capacities.len();
+        let square = admit_jacobi_eigh(n)
+            .map_err(|_| ExpEulerError::InvalidInput("dense eigensolve exceeds its work cap"))?
+            .matrix_entries();
+        if conductances.len() != square {
+            return Err(ExpEulerError::Dimension {
+                expected: square,
+                actual: conductances.len(),
+            });
+        }
+        if capacities
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(ExpEulerError::InvalidInput(
+                "capacities must be finite and positive",
+            ));
+        }
+        if (0..n).any(|i| conductances[i * n + i] != 0.0) {
+            return Err(ExpEulerError::InvalidInput(
+                "conductance diagonal must be zero",
+            ));
+        }
+        if capacities.iter().all(|value| *value == 1.0) {
+            return Self::try_new_diffusion(conductances, n, h);
+        }
+        Self::prepare_diffusion(conductances, n, h, Some(capacities))
+    }
+
+    // The diagonal is ignored here: the public rate-table constructors check
     // zero entries, while the matrix constructor proves exact row closure.
-    fn prepare_diffusion(rates: &[f64], n: usize, h: f64) -> Result<Self, ExpEulerError> {
+    fn prepare_diffusion(
+        rates: &[f64],
+        n: usize,
+        h: f64,
+        capacities: Option<&[f64]>,
+    ) -> Result<Self, ExpEulerError> {
         if n == 0 || !h.is_finite() || h <= 0.0 {
             return Err(ExpEulerError::InvalidInput(
                 "require positive dimension and finite step",
@@ -843,7 +921,7 @@ impl ExpEuler {
         if square
             .checked_mul(6)
             .and_then(|value| {
-                n.checked_mul(12)
+                n.checked_mul(if capacities.is_some() { 20 } else { 12 })
                     .and_then(|linear| value.checked_add(linear))
             })
             .is_none_or(|value| value > MAX_EIGEN_WORK_ELEMENTS)
@@ -874,6 +952,15 @@ impl ExpEuler {
             hphi1: vec![h; n],
             constant_modes: Vec::new(),
             component_nodes: Vec::with_capacity(n),
+            capacity: capacities.map(|values| CapacityWeights {
+                values: values.to_vec(),
+                roots: values.iter().map(|&value| det::sqrt(value)).collect(),
+            }),
+        };
+        let mut capacity_scratch = if capacities.is_some() {
+            vec![0.0; n]
+        } else {
+            Vec::new()
         };
         let mut visited = vec![false; n];
         let mut column = 0;
@@ -899,8 +986,16 @@ impl ExpEuler {
             result.component_nodes[start..end].sort_unstable();
             let nodes = &result.component_nodes[start..end];
             let count = nodes.len();
-            let root_count = det::sqrt(count as f64);
+            let root_count = match &result.capacity {
+                Some(capacity) => det::sqrt(component_sum(
+                    &capacity.values,
+                    nodes,
+                    &mut capacity_scratch,
+                )?),
+                None => det::sqrt(count as f64),
+            };
             let normalization = 1.0 / root_count;
+            let constant_column = column;
             result.constant_modes.push(ConstantDiffusionMode {
                 column,
                 start,
@@ -908,10 +1003,103 @@ impl ExpEuler {
                 normalization,
             });
             for &node in nodes {
-                result.vecs[node * n + column] = normalization;
+                result.vecs[node * n + column] = match &result.capacity {
+                    Some(capacity) => normalization * capacity.roots[node],
+                    None => normalization,
+                };
             }
             column += 1;
             if count == 1 {
+                continue;
+            }
+            if let Some(capacity) = &result.capacity {
+                // B = C^(-1/2) L C^(-1/2), with known B sqrt(C) = 0.
+                // H maps e0 to minus that normalized null vector w. The
+                // contrast block is B_ij - b_i B_0j - b_j B_i0 + b_i b_j B_00,
+                // b_i = w_i/(1+w_0). No rounded zero eigenvalue is propagated.
+                let root = nodes[0];
+                let denominator = 1.0 + result.vecs[root * n + constant_column];
+                let reflection: Vec<_> = nodes
+                    .iter()
+                    .map(|&node| result.vecs[node * n + constant_column] / denominator)
+                    .collect();
+                let mut diagonal = Vec::with_capacity(count);
+                let mut root_edges = Vec::with_capacity(count);
+                for &node in nodes {
+                    let mut degree = Compensated::zero();
+                    for &other in nodes {
+                        if other == node {
+                            continue;
+                        }
+                        let conductance = rates[node * n + other];
+                        let rate = conductance / capacity.values[node];
+                        if !rate.is_finite() || (conductance != 0.0 && rate == 0.0) {
+                            return Err(ExpEulerError::Spectrum(
+                                "capacity exchange rate is unrepresentable",
+                            ));
+                        }
+                        degree = degree.accumulate(rate);
+                    }
+                    let entry = -degree.value();
+                    if !entry.is_finite() {
+                        return Err(ExpEulerError::Spectrum(
+                            "capacity exchange row is unrepresentable",
+                        ));
+                    }
+                    diagonal.push(entry);
+                    root_edges.push(if node == root {
+                        0.0
+                    } else {
+                        capacity_exchange_entry(
+                            rates[node * n + root],
+                            capacity.roots[node],
+                            capacity.roots[root],
+                        )?
+                    });
+                }
+                let dimension = count - 1;
+                let mut contrast = vec![0.0; dimension * dimension];
+                for i in 1..count {
+                    for j in i..count {
+                        let entry = if i == j {
+                            diagonal[i]
+                        } else {
+                            capacity_exchange_entry(
+                                rates[nodes[i] * n + nodes[j]],
+                                capacity.roots[nodes[i]],
+                                capacity.roots[nodes[j]],
+                            )?
+                        };
+                        let value = (reflection[i] * reflection[j]).mul_add(
+                            diagonal[0],
+                            (-reflection[i]).mul_add(
+                                root_edges[j],
+                                (-reflection[j]).mul_add(root_edges[i], entry),
+                            ),
+                        );
+                        contrast[(i - 1) * dimension + j - 1] = value;
+                        contrast[(j - 1) * dimension + i - 1] = value;
+                    }
+                }
+                let reduced = Self::try_new_symmetric(&contrast, dimension, h, true)?;
+                for mode in 0..dimension {
+                    let sum = (1..count).fold(Compensated::zero(), |sum, row| {
+                        sum.accumulate(
+                            result.vecs[nodes[row] * n + constant_column]
+                                * reduced.vecs[(row - 1) * dimension + mode],
+                        )
+                    });
+                    let first = -sum.value();
+                    result.vecs[root * n + column] = first;
+                    for row in 1..count {
+                        result.vecs[nodes[row] * n + column] = reflection[row]
+                            .mul_add(first, reduced.vecs[(row - 1) * dimension + mode]);
+                    }
+                    result.exp_h[column] = reduced.exp_h[mode];
+                    result.split_exp[column] = reduced.split_exp[mode];
+                    result.hphi1[column] = reduced.hphi1[mode];
+                    column += 1;
+                }
                 continue;
             }
             let mut diagonal = Vec::with_capacity(count);
@@ -977,12 +1165,15 @@ impl ExpEuler {
         ExpEulerWorkspace {
             source: vec![0.0; self.n],
             modal: vec![0.0; self.n],
-            next: vec![0.0; self.n],
+            // Weighted totals need both components of each exact product.
+            next: vec![0.0; 2 * self.n],
         }
     }
 
     /// One exponential-Euler step, allocating temporary workspace. The callback
-    /// must write every source entry, including explicit zeros.
+    /// must write every source entry, including explicit zeros. It reads the
+    /// original physical state. Ordinary constructors expect intensive N in
+    /// u/time; `try_new_capacity_diffusion` expects extensive P in C*u/time.
     ///
     /// # Panics
     /// Panics on a refusal from [`Self::step_checked`], before publishing state.
@@ -991,9 +1182,11 @@ impl ExpEuler {
             .expect("valid exponential-Euler state and source");
     }
 
-    /// Advance with reusable storage. The callback reads the original state
-    /// and must write every source entry. No allocation occurs in this method;
-    /// callback side effects and allocation remain the caller's responsibility.
+    /// Advance with reusable storage. The callback reads the original physical
+    /// state and must write every source entry. Ordinary constructors expect
+    /// intensive N in u/time; `try_new_capacity_diffusion` expects extensive P
+    /// in C*u/time, BEFORE division by storage capacity. No allocation occurs
+    /// in this method; callback effects and allocation remain caller-owned.
     ///
     /// # Errors
     /// Invalid shapes, nonfinite/unwritten values and arithmetic overflow
@@ -1025,6 +1218,9 @@ impl ExpEuler {
             if !value.is_finite() {
                 return Err(ExpEulerError::NonFiniteSource { index });
             }
+        }
+        if let Some(capacity) = &self.capacity {
+            return self.step_capacity_checked(u, capacity, workspace);
         }
         // Transform to eigenbasis: û = Vᵀu, n̂ = VᵀN.
         let mut constants = self.constant_modes.iter().peekable();
@@ -1076,17 +1272,143 @@ impl ExpEuler {
             }
             workspace.next[j] = acc;
         }
-        u.copy_from_slice(&workspace.next);
+        u.copy_from_slice(&workspace.next[..n]);
+        Ok(())
+    }
+
+    fn step_capacity_checked(
+        &self,
+        u: &mut [f64],
+        capacity: &CapacityWeights,
+        workspace: &mut ExpEulerWorkspace,
+    ) -> Result<(), ExpEulerError> {
+        let n = self.n;
+        // Physical totals precede every similarity conversion. In particular,
+        // division of opposing powers by different capacities must not create
+        // a spurious component source on a long stiff interval.
+        for mode in &self.constant_modes {
+            let nodes = &self.component_nodes[mode.start..mode.end];
+            let amount = capacity_component_sum(u, &capacity.values, nodes, &mut workspace.next)?;
+            let power = component_sum(&workspace.source, nodes, &mut workspace.next)?;
+            // Convert totals before multiplying by h: h*P can underflow in
+            // energy units even when its transformed impulse is representable.
+            let state = amount * mode.normalization;
+            let source = power * mode.normalization;
+            if !state.is_finite()
+                || !source.is_finite()
+                || (amount != 0.0 && state == 0.0)
+                || (power != 0.0 && source == 0.0)
+            {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            let endpoint = self.h.mul_add(source, state);
+            if !endpoint.is_finite() || (state == 0.0 && source != 0.0 && endpoint == 0.0) {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            workspace.modal[mode.column] = endpoint;
+        }
+        // Reuse endpoint scratch for y=sqrt(C)u once all exact totals exist.
+        // Source storage may now hold P/sqrt(C); the callback already saw u.
+        for j in 0..n {
+            let state = capacity.roots[j] * u[j];
+            let source = workspace.source[j] / capacity.roots[j];
+            if !state.is_finite()
+                || !source.is_finite()
+                || (u[j] != 0.0 && state == 0.0)
+                || (workspace.source[j] != 0.0 && source == 0.0)
+            {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            workspace.next[j] = state;
+            workspace.source[j] = source;
+        }
+        let mut constants = self.constant_modes.iter().peekable();
+        for i in 0..n {
+            if constants.peek().is_some_and(|mode| mode.column == i) {
+                let _ = constants.next();
+                continue;
+            }
+            let (mut state, mut source) = (0.0, 0.0);
+            for j in 0..n {
+                state = self.vecs[j * n + i].mul_add(workspace.next[j], state);
+                source = self.vecs[j * n + i].mul_add(workspace.source[j], source);
+            }
+            if !state.is_finite() || !source.is_finite() {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            workspace.modal[i] = if self.split_exp[i] {
+                let factor = self.exp_h[i];
+                let tail = ((state * factor) * factor) * factor;
+                factor.mul_add(tail, self.hphi1[i] * source)
+            } else {
+                self.exp_h[i].mul_add(state, self.hphi1[i] * source)
+            };
+            if !workspace.modal[i].is_finite() {
+                return Err(ExpEulerError::Arithmetic);
+            }
+        }
+        // The only publication follows complete reconstruction in physical u.
+        for j in 0..n {
+            let mut state = 0.0;
+            for (i, &value) in workspace.modal.iter().enumerate() {
+                state = self.vecs[j * n + i].mul_add(value, state);
+            }
+            let physical = state / capacity.roots[j];
+            if !physical.is_finite() || (state != 0.0 && physical == 0.0) {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            workspace.next[j] = physical;
+        }
+        u.copy_from_slice(&workspace.next[..n]);
         Ok(())
     }
 }
 
-// Grow a nonoverlapping expansion in existing endpoint scratch, with the
-// shared error-free TwoSum primitive. Each input adds at most one component;
-// writes never overtake unread components, so nodes.len() slots suffice.
-// Exact balance becomes the empty expansion before any binary64 estimate.
-// Refuse overflow of an intermediate expansion instead of publishing a false
-// conserved amount. The caller owns finite inputs and scratch of length >= n.
+fn capacity_exchange_entry(conductance: f64, left: f64, right: f64) -> Result<f64, ExpEulerError> {
+    if conductance == 0.0 {
+        return Ok(0.0);
+    }
+    // Try both factorizations instead of overflowing sqrt(C_i)*sqrt(C_j)
+    // or losing a recoverable ratio at the first division.
+    for (first, second) in [(left, right), (right, left)] {
+        let intermediate = conductance / first;
+        let value = intermediate / second;
+        if intermediate.is_finite() && intermediate != 0.0 && value.is_finite() && value != 0.0 {
+            return Ok(value);
+        }
+    }
+    Err(ExpEulerError::Spectrum(
+        "capacity similarity entry is unrepresentable",
+    ))
+}
+
+// Add one component with the shared error-free TwoSum primitive. Writes
+// never overtake unread components. Each input needs at most one extra slot;
+// exact cancellation becomes an empty expansion before binary64 estimation.
+fn add_component(
+    mut carry: f64,
+    scratch: &mut [f64],
+    length: usize,
+) -> Result<usize, ExpEulerError> {
+    let mut output = 0;
+    for input in 0..length {
+        let (sum, error) = two_sum(carry, scratch[input]);
+        if !sum.is_finite() || !error.is_finite() {
+            return Err(ExpEulerError::Arithmetic);
+        }
+        if error != 0.0 {
+            scratch[output] = error;
+            output += 1;
+        }
+        carry = sum;
+    }
+    if carry != 0.0 {
+        scratch[output] = carry;
+        output += 1;
+    }
+    Ok(output)
+}
+
 fn component_sum(
     values: &[f64],
     nodes: &[usize],
@@ -1094,26 +1416,54 @@ fn component_sum(
 ) -> Result<f64, ExpEulerError> {
     let mut length = 0;
     for &node in nodes {
-        let mut carry = values[node];
-        let mut output = 0;
-        for input in 0..length {
-            let (sum, error) = two_sum(carry, scratch[input]);
-            if !sum.is_finite() || !error.is_finite() {
-                return Err(ExpEulerError::Arithmetic);
-            }
-            if error != 0.0 {
-                scratch[output] = error;
-                output += 1;
-            }
-            carry = sum;
-        }
-        if carry != 0.0 {
-            scratch[output] = carry;
-            output += 1;
-        }
-        length = output;
+        length = add_component(values[node], scratch, length)?;
     }
-    let sum = fs_ivl::expansion::estimate(&scratch[..length]);
+    finite_component_sum(&scratch[..length])
+}
+
+fn capacity_component_sum(
+    values: &[f64],
+    capacities: &[f64],
+    nodes: &[usize],
+    scratch: &mut [f64],
+) -> Result<f64, ExpEulerError> {
+    let mut length = 0;
+    for &node in nodes {
+        // Keeping just the rounded product loses real stored amounts even
+        // when the final component total is small and fully representable.
+        let (product, tail) = two_prod(capacities[node], values[node]);
+        if !product.is_finite()
+            || !tail.is_finite()
+            || (values[node] != 0.0
+                && (product == 0.0
+                    || least_bit_exponent(capacities[node]) + least_bit_exponent(values[node])
+                        < -1074))
+        {
+            return Err(ExpEulerError::Arithmetic);
+        }
+        length = add_component(tail, scratch, length)?;
+        length = add_component(product, scratch, length)?;
+    }
+    finite_component_sum(&scratch[..length])
+}
+
+// A finite expansion cannot retain bits below the smallest subnormal.
+// Inspect exact binary operands rather than accepting a rounded-away FMA
+// product residual as zero. Call only for finite nonzero values.
+fn least_bit_exponent(value: f64) -> i32 {
+    let bits = value.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let significand = (bits & 0x000f_ffff_ffff_ffff) | if exponent == 0 { 0 } else { 1_u64 << 52 };
+    let shift = if exponent == 0 {
+        -1074
+    } else {
+        exponent - 1075
+    };
+    shift + significand.trailing_zeros() as i32
+}
+
+fn finite_component_sum(expansion: &[f64]) -> Result<f64, ExpEulerError> {
+    let sum = fs_ivl::expansion::estimate(expansion);
     if !sum.is_finite() {
         return Err(ExpEulerError::Arithmetic);
     }

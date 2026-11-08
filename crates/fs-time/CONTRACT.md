@@ -943,6 +943,26 @@ where claimed below.
   or extra cancellation guarantee is claimed. `tests/exponential_decay.rs`
   adds insulated long-window equilibrium, disconnected conservation, driven
   analytical exchange, balanced and net sources, and small-rate regressions.
+- `stiff::ExpEuler::try_new_capacity_diffusion(conductances, capacities, h)`
+  extends the same original owner to `C_i u_i' = sum_j G_ij(u_j-u_i) + P_i(u)`.
+  Positive, fixed capacities represent physical storage; finite nonnegative
+  reciprocal conductances represent exchange. The callback reads physical u
+  and supplies extensive P (for heat: C in J/K, G in W/K, P in W), before any
+  division by capacity. Ordinary constructors continue to expect intensive N.
+  The physical similarity `B=C^(-1/2) L C^(-1/2)` and a Householder contrast
+  basis preserve each component's known sqrt(C) null vector without clipping
+  eigenvalues or symmetrizing an arbitrary nonsymmetric operator. Long-window
+  equilibrium is the capacity-weighted mean; disconnected and isolated
+  components retain separate balances. Weighted state totals fold both FMA
+  product components; physical powers are summed before conversion. A reusable
+  2n endpoint buffer serves exact totals, transformed states and final physical
+  reconstruction, with no per-step allocation. Invalid or unrepresentable
+  storage, exchange, transforms and spectra refuse without publishing a state.
+  The same dense work bound and constant/nonlinear source accuracy limits
+  apply; capacities are fixed, and no enthalpy, variable-storage, positivity or
+  sparse-scaling claim is added. Focused G1/G3/G4 tests use an independent forced
+  two-reservoir solution, weighted component conservation, a nonzero product
+  residual, exact physical source balance, unit rescaling and atomic refusals.
 - `adaptive::{AdaptiveState, PiController, rk45_adaptive}` —
   Dormand–Prince 5(4), max-norm error against atol + rtol·|u|, PI
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
