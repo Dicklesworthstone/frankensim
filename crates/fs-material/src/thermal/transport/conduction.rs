@@ -41,6 +41,7 @@ use super::{
 };
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerConductionResponse, LayerGeometry,
+    ResolvedConductionLayer,
 };
 use fs_blake3::ContentHash;
 use fs_matdb::PropertyLineSlice;
@@ -54,6 +55,7 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 
 #[derive(Clone, Copy, Debug)]
 enum OriginalConduction<'a, 'm> {
+    EquilibriumPhase(&'a ResolvedConductionLayer<'m>),
     Isobaric(&'a IsobaricConductionLaw<'m>),
     ExpandingIsobaric(&'a IsobaricExpansionConductionLaw<'m>),
     Isochoric(&'a IsochoricConductionLaw<'m>),
@@ -76,6 +78,20 @@ pub struct CaloricConductionLayer<'a, 'm> {
 }
 
 impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
+    /// Retain an original solid or liquid enthalpy chart and its selected k(T).
+    ///
+    /// Its prepared pure-phase/source interval and original exact Cp tangents
+    /// remain authoritative. The existing integrated films, gray gaps and
+    /// contacts can then share that SAME caloric object with native conduction,
+    /// including density-driven planar thickness at conserved mass. This does
+    /// not continue a homogeneous layer across a melting or freezing interval.
+    pub fn from_equilibrium_phase(law: &'a ResolvedConductionLayer<'m>) -> Self {
+        Self {
+            original: OriginalConduction::EquilibriumPhase(law),
+            conductivity: law.conductivity_curve().clone(),
+        }
+    }
+
     /// Retain source-exact Cp storage at its original fixed pressure/composition.
     pub fn from_isobaric(law: &'a IsobaricConductionLaw<'m>) -> Result<Self, DepositionError> {
         Ok(Self {
@@ -134,6 +150,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     #[must_use]
     pub fn caloric_law(&self) -> &'m dyn ThermalLaw {
         match self.original {
+            OriginalConduction::EquilibriumPhase(law) => law.caloric_curve(),
             OriginalConduction::Isobaric(law) => law.caloric(),
             OriginalConduction::ExpandingIsobaric(law) => law.caloric(),
             OriginalConduction::Isochoric(law) => law.caloric(),
@@ -151,6 +168,9 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     #[must_use]
     pub fn supports_material_card(&self, card: ContentHash) -> bool {
         match self.original {
+            OriginalConduction::EquilibriumPhase(law) => {
+                law.caloric_curve().material_card_identity() == card
+            }
             OriginalConduction::Isobaric(law) => law.caloric().material_card_identity() == card,
             OriginalConduction::ExpandingIsobaric(law) => {
                 law.caloric().caloric().material_card_identity() == card
@@ -176,6 +196,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     #[must_use]
     pub fn source_line(&self) -> &PropertyLineSlice {
         match self.original {
+            OriginalConduction::EquilibriumPhase(law) => law.source_line().as_ref(),
             OriginalConduction::Isobaric(law) => law.source_line(),
             OriginalConduction::ExpandingIsobaric(law) => law.source_line(),
             OriginalConduction::Isochoric(law) => law.source_line(),
@@ -188,6 +209,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
     #[must_use]
     pub fn energy_bounds_j_kg(&self) -> [f64; 2] {
         match self.original {
+            OriginalConduction::EquilibriumPhase(law) => law.enthalpy_range_j_kg(),
             OriginalConduction::Isobaric(law) => law.enthalpy_bounds_j_kg(),
             OriginalConduction::ExpandingIsobaric(law) => law.enthalpy_bounds_j_kg(),
             OriginalConduction::Isochoric(law) => law.enthalpy_bounds_j_kg(),
@@ -202,6 +224,7 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
         energy: f64,
     ) -> Result<ImplicitConductionState, DepositionError> {
         match self.original {
+            OriginalConduction::EquilibriumPhase(law) => law.conduction_state_at_enthalpy(energy),
             OriginalConduction::Isobaric(law) => law.state_at_specific_enthalpy(energy),
             OriginalConduction::ExpandingIsobaric(law) => law.state_at_specific_enthalpy(energy),
             OriginalConduction::Isochoric(law) => law.state_at_specific_internal_energy(energy),

@@ -78,6 +78,10 @@ impl CaloricConductionLayer<'_, '_> {
     /// If the stored coordinate itself cannot resolve all the heat, the residual
     /// reports the difference. The final coordinate must pass its ORIGINAL
     /// caloric inverse; unsupported paths and unrepresentable arithmetic refuse.
+    ///
+    /// Equilibrium-phase layers retain their original phase exchange API.
+    /// Its response does not yet supply this result's stable exposure-mean
+    /// derivative, so this convenience method refuses that layer type.
     pub fn linear_heat_exchange(
         &self,
         initial_specific_energy_j_kg: f64,
@@ -96,6 +100,11 @@ impl CaloricConductionLayer<'_, '_> {
         let caloric = self.caloric_law();
         let initial_temperature = caloric.temperature_k(initial_specific_energy_j_kg)?;
         let (exchange, temperatures) = match self.original {
+            OriginalConduction::EquilibriumPhase(_) => {
+                return Err(DepositionError::InvalidInput(
+                    "fixed-bath caloric response is unsupported for equilibrium-phase storage",
+                ));
+            }
             OriginalConduction::Isobaric(law) => solve(
                 &law.caloric().source_line().knots,
                 1.0, initial_temperature, reservoir_temperature_k, exposure_j_kg_k,

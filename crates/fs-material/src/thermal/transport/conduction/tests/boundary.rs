@@ -2,12 +2,17 @@
 
 use super::super::boundary::IntegratedCaloricBoundary;
 use super::*;
+use crate::phase::{
+    EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, HeatCapacityKnot, SolidLiquidPhase,
+};
+use crate::thermal::conduction::phase::PreparedPhaseConductivity;
+use crate::thermal::source::ThermalMaterialPoint;
 use fs_thermal::enthalpy::conduction::implicit::boundary::{
     ImplicitBoundaryGeometry, ImplicitBoundaryLaw,
 };
 use fs_thermal::enthalpy::{
     Reservoir,
-    conduction::{ConductiveAmbient, ConductiveReservoir},
+    conduction::{ConductiveAmbient, ConductiveReservoir, PlanarDensityLayer},
 };
 
 const CELL: CellId = CellId(0);
@@ -414,4 +419,210 @@ fn g4_external_bath_is_not_a_material_sample_and_failed_source_steps_preserve_hi
         .unwrap();
     assert!(retry.temperature_k(CELL).unwrap() > 690.0);
     assert!(retry.temperature_k(CELL).unwrap() < 700.0);
+}
+
+fn phase_point(source: &Fixture) -> ThermalMaterialPoint<'_> {
+    ThermalMaterialPoint {
+        material: &source.card,
+        context: &source.lower,
+        temperature_axis: "T",
+        liquid_fraction_axis: None,
+    }
+}
+
+fn exact_phase_curve(source: &Fixture, phase: SolidLiquidPhase) -> EquilibriumEnthalpyPhaseCurve {
+    EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+        source.card.content_hash(),
+        phase,
+        0.0,
+        &[300.0, 500.0, 700.0].map(|t| HeatCapacityKnot {
+            temperature_k: t,
+            specific_heat_capacity_j_kg_k: 400.0 + t,
+            bulk_density_kg_m3: 1600.0 - 2.0 * t,
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_equilibrium_layers_keep_exact_cp_source_bounds_and_inward_phase_tangents() {
+    let source = Fixture::new(false);
+    for phase in [SolidLiquidPhase::Solid, SolidLiquidPhase::Liquid] {
+        let curve = exact_phase_curve(&source, phase);
+        let resolved = ResolvedConductionLayer::new(
+            &curve, phase_point(&source), &source.conductivity, SELECTION,
+            phase, [350.0, 500.0], || Ok(()),
+        ).unwrap();
+        let layer = CaloricConductionLayer::from_equilibrium_phase(&resolved);
+        assert!(core::ptr::eq(layer.caloric_law(), &curve as &dyn ThermalLaw));
+        assert!(core::ptr::eq(layer.source_line(), resolved.source_line().as_ref()));
+        assert!(layer.supports_material_card(source.card.content_hash()));
+        assert_eq!(layer.caloric_law().storage_basis(), ThermalStorageBasis::Enthalpy);
+        assert_eq!(layer.energy_bounds_j_kg(), [energy(1, 350.0), energy(1, 500.0)]);
+        assert_eq!(layer.conductivity_curve(), resolved.conductivity_curve());
+        assert!(matches!(
+            layer.linear_heat_exchange(energy(1, 400.0), 450.0, 10.0),
+            Err(DepositionError::InvalidInput(
+                "fixed-bath caloric response is unsupported for equilibrium-phase storage"
+            ))
+        ));
+        let end = layer.state_at_specific_energy(energy(1, 500.0)).unwrap();
+        assert_eq!(end.temperature_k, 500.0);
+        near(end.temperature_slope_kg_k_j, 1.0 / 900.0, 1e-16);
+        near(end.conductivity_slope_kg_w_m_k_j, 0.02 / 900.0, 1e-18);
+        assert!(layer.state_at_specific_energy(energy(1, 350.0) - 1.0).is_err());
+        assert!(layer.state_at_specific_energy(energy(1, 500.0) + 1.0).is_err());
+    }
+
+    let curve = EquilibriumEnthalpyPhaseCurve::try_new(
+        source.card.content_hash(),
+        [(0.0, 300.0, 0.0, 1000.0), (160_000.0, 500.0, 0.0, 600.0),
+         (210_000.0, 500.0, 1.0, 600.0), (410_000.0, 700.0, 1.0, 200.0)]
+            .map(|(h, t, f, rho)| EnthalpyPhaseKnot {
+                specific_enthalpy_j_kg: h, temperature_k: t,
+                liquid_mass_fraction: f, bulk_density_kg_m3: rho,
+            }).to_vec(),
+    ).unwrap();
+    // The original solidus has a zero RIGHT derivative into its latent plateau.
+    // The selected all-solid layer must retain its positive inward derivative.
+    assert_eq!(curve.temperature_derivative_at_specific_enthalpy(160_000.0).unwrap(), 0.0);
+    assert_eq!(curve.temperature_at_specific_enthalpy(185_000.0).unwrap(), 500.0);
+    for (phase, temperatures, bounds, end_slope) in [
+        (SolidLiquidPhase::Solid, [350.0, 500.0], [40_000.0, 160_000.0], 1.0 / 800.0),
+        (SolidLiquidPhase::Liquid, [500.0, 650.0], [210_000.0, 360_000.0], 1.0 / 1000.0),
+    ] {
+        let resolved = ResolvedConductionLayer::new(
+            &curve, phase_point(&source), &source.conductivity, SELECTION,
+            phase, temperatures, || Ok(()),
+        ).unwrap();
+        let layer = CaloricConductionLayer::from_equilibrium_phase(&resolved);
+        assert_eq!(layer.energy_bounds_j_kg(), bounds);
+        near(layer.state_at_specific_energy(bounds[1]).unwrap().temperature_slope_kg_k_j,
+            end_slope, 1e-16);
+        assert!(layer.state_at_specific_energy(185_000.0).is_err());
+    }
+    assert!(ResolvedConductionLayer::new(
+        &curve, phase_point(&source), &source.conductivity, SELECTION,
+        SolidLiquidPhase::SolidLiquid, [350.0, 650.0], || Ok(()),
+    ).is_err());
+    assert!(ResolvedConductionLayer::new(
+        &curve, phase_point(&source), &source.conductivity, SELECTION,
+        SolidLiquidPhase::Solid, [450.0, 550.0], || Ok(()),
+    ).is_err());
+}
+
+#[test]
+fn g1_original_phase_calorics_expand_and_contract_through_integrated_film_heat() {
+    let source = Fixture::new(false);
+    for (phase, initial, bath, temperatures) in [
+        (SolidLiquidPhase::Solid, 400.0, 460.0, [350.0, 500.0]),
+        (SolidLiquidPhase::Liquid, 620.0, 560.0, [500.0, 680.0]),
+    ] {
+        let curve = exact_phase_curve(&source, phase);
+        let resolved = ResolvedConductionLayer::new(
+            &curve, phase_point(&source), &source.conductivity, SELECTION,
+            phase, temperatures, || Ok(()),
+        ).unwrap();
+        let layer = CaloricConductionLayer::from_equilibrium_phase(&resolved);
+        let point_law = PreparedPhaseConductivity::new(
+            &curve, phase_point(&source), &source.conductivity, SELECTION,
+            layer.energy_bounds_j_kg(), || Ok(()),
+        ).unwrap();
+        let density = |t: f64| 1600.0 - 2.0 * t;
+        let distance = |t: f64| MASS / (2.0 * AREA * density(t));
+        let geometry = ImplicitBoundaryGeometry {
+            area_m2: AREA,
+            half_distance_m: distance(initial),
+            surface_resistance_m2_k_w: 0.02,
+        };
+        let film = IntegratedCaloricBoundary::new(&layer, geometry, layer_controls()).unwrap();
+        // Independent exact Kirchhoff/film root for k(T)=0.02*T, with the
+        // original affine rho(T) and the same conserved mass/fixed footprint.
+        let power = |t: f64, moving: bool| {
+            let d = if moving { distance(t) } else { distance(initial) };
+            let p = geometry.surface_resistance_m2_k_w * 0.02 / (2.0 * d);
+            let rhs = bath + p * t * t;
+            let face = 2.0 * rhs / (1.0 + (1.0 + 4.0 * p * rhs).sqrt());
+            AREA / geometry.surface_resistance_m2_k_w * (face - bath)
+        };
+        let t = initial + 12.0 * (bath - initial).signum();
+        let h = energy(1, t);
+        let state = film.state_at_specific_enthalpy_with_geometry_tangent(
+            h, bath,
+            ImplicitBoundaryGeometry { half_distance_m: distance(t), ..geometry },
+            2.0 / (density(t) * (400.0 + t)), &mut || Ok(()),
+        ).unwrap().unwrap();
+        near(state.conductance_w_k * (t - bath), power(t, true), 2e-9);
+        near(
+            state.power_enthalpy_derivative_w_kg_j,
+            (power(temperature(1, h + 0.25), true)
+                - power(temperature(1, h - 0.25), true)) / 0.5,
+            2e-8,
+        );
+
+        let volume = MASS / density(initial);
+        let original = DepositionSimulation::new(
+            vec![TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: CELL, material_id: MATERIAL, body_id: 1, segment_id: 1,
+                    mass_kg: MASS, specific_h_j_kg: energy(1, initial),
+                    geometry: CellGeometry {
+                        start_m: [0.0; 3], end_m: [volume / AREA, 0.0, 0.0],
+                        volume_m3: volume, surface_area_m2: 2.0 * AREA,
+                    },
+                    boundary: Boundary {
+                        ambient_k: 300.0, htc_w_m2_k: 0.0, source_w: 0.0,
+                        reservoir: Some(Reservoir {
+                            area_m2: AREA, conductance_w_k: 0.0, temperature_k: bath,
+                        }),
+                    },
+                }),
+            }],
+            &[(MATERIAL, &curve)],
+            DepositionBudget { max_cells: 1, max_links: 0, max_events: 1, max_substeps: 8 },
+        ).unwrap().advance_to(
+            0.0, StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-8 }, || Ok(()),
+        ).unwrap().0;
+        let observer = ConductionObserver::new(
+            &original, &[(MATERIAL, &point_law)], &[],
+            &[ConductiveReservoir {
+                cell_id: CELL, half_distance_m: geometry.half_distance_m,
+                surface_resistance_m2_k_w: geometry.surface_resistance_m2_k_w,
+            }], || Ok(()),
+        ).unwrap().with_material_density_layers(
+            &original, &[PlanarDensityLayer { cell_id: CELL, footprint_area_m2: AREA }],
+            || Ok(()),
+        ).unwrap();
+        let chain = ImplicitConductionChain::new(
+            &original, &observer, &[(MATERIAL, &point_law)], || Ok(()),
+        ).unwrap().with_boundary_laws(
+            &original, &[(CELL, &film)], &[], || Ok(()),
+        ).unwrap();
+        let dt = 200.0;
+        let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+        let (next, report) = chain.advance_to(
+            &original, dt, controls(dt), &mut workspace, || Ok(()),
+        ).unwrap();
+
+        let residual = |t: f64, moving: bool| {
+            MASS * (energy(1, t) - energy(1, initial)) + dt * power(t, moving)
+        };
+        let (mut lo, mut hi) = (initial.min(bath), initial.max(bath));
+        assert!(residual(lo, true) < 0.0 && residual(hi, true) > 0.0);
+        for _ in 0..70 {
+            let t = 0.5 * (lo + hi);
+            if residual(t, true) > 0.0 { hi = t; } else { lo = t; }
+        }
+        let final_t = next.temperature_k(CELL).unwrap();
+        near(final_t, 0.5 * (lo + hi), 2e-8);
+        near(report.energy.external_heat_j, -dt * power(final_t, true), 1e-6);
+        near(report.energy.stored_energy_change_j,
+            MASS * (energy(1, final_t) - energy(1, initial)), 1e-6);
+        near(report.energy.residual_j, 0.0, 1e-6);
+        assert!(residual(final_t, false).abs() > 1.0);
+        assert_eq!(next.mass_kg(), MASS);
+        assert_eq!(next.cells()[&CELL].geometry, original.cells()[&CELL].geometry);
+        assert_eq!(original.cells()[&CELL].specific_h_j_kg, energy(1, initial));
+    }
 }
