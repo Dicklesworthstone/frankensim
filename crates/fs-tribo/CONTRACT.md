@@ -2280,41 +2280,59 @@ caloric integral. Density, mass, heat capacity, supply-loop losses and material
 provenance are not inferred from viscosity or film volume. This is not an open
 film with silently omitted advected enthalpy.
 
-The owner binds fixed graph coordinates. Tangential wall velocities, pressure
-supplies, prescribed heat and linear bath conductance/temperature are held over
-each interval; any velocity changing a cell or passage gap refuses. At every
-thermal trial the original Carreau slits are prepared at the mean endpoint
-temperature and the complete existing pressure/sliding graph is solved again.
-The original caloric change satisfies
-`E(T1)-E(T0) = dt*(D((T0+T1)/2) + Q - H*((T0+T1)/2-Tbath))`.
+The fixed-coordinate advance admits held tangential wall motion and refuses
+gap-changing velocity. `advance_moving_into` and its checked variant instead
+advance the original affine configuration as `q_next=q0+dt*v`. Cell and channel
+gaps are admitted at both endpoints and the rounded midpoint. Original source
+pressure, wall-rate and work admission is checked at the physical starting and
+final configurations. Squeeze, tangential walls and held reservoir pressures
+share the existing Reynolds graph at `q_mid=q0+dt*v/2`.
+
+At every thermal trial the original Carreau slits are prepared at the mean
+endpoint temperature and that complete pressure/squeeze/sliding graph is
+solved again. The original caloric change satisfies
+`E(T1)-E(T0) = dt*(D(q_mid,(T0+T1)/2) + Q - H*((T0+T1)/2-Tbath))`.
 Only actual profile dissipation enters stored heat. Mechanical/supply work,
 prescribed and bath heat, caloric residual and native constitutive/continuity
 work residual remain distinct. Reported force, pressure and channel responses
-are the accepted midpoint mechanics; the returned film is prepared and checked
-against the held loading at its endpoint temperature.
+are the accepted midpoint mechanics; the returned owner retains endpoint
+configuration and endpoint material temperature together.
+
+Resolved volume-cell storage is separate from the zero-storage hydraulic
+passages. The affine cell-volume increment uses the same original area/closure
+rows as the normal pressure work. Signed midpoint reservoir outflow closes a
+reported volume-continuity residual with that increment. Liquid expelled from
+the resolved film remains in the returning thermal inventory; neither its
+caloric table nor its declared mass is rescaled by the changing gap. Normal
+squeeze work and tangential work are already in the native pressure/sliding
+power balance and are not deposited a second time.
 
 A bounded local bracket/secant solve starts from the accepted temperature,
-obeys an explicit temperature-excursion cap and the shared original caloric and
-material support, and reserves work for endpoint admission. The endpoint
-net-power sign guard refuses detected equilibrium overshoots, including stiff
-midpoint cooling. It does not isolate every interior equilibrium of a
-nonmonotone pressure/sliding load, establish unconditional root uniqueness or
-diagnose physical thermal runaway. Unresolved intervals require caller step
-refinement. One candidate film is allocated per interval; root iterations reuse
-its original ordered passage and coefficient arrays with bounded stack scratch.
-All sources, outputs and the accepted thermal clock publish together after the
-final cancellation check. Failed work, support or energy admission changes none
-of the accepted state or caller output slices.
+obeys an explicit temperature-excursion cap and shared original caloric and
+material support, and reserves work for endpoint admission. The net-power sign
+guard evaluates both thermal endpoints at the SAME midpoint geometry. It
+refuses detected frozen-load equilibrium overshoots, including stiff midpoint
+cooling, while the separate physical endpoint check admits the evolving gap.
+It does not isolate every interior equilibrium of a nonmonotone load, establish
+unconditional uniqueness, certify source support throughout an arbitrary
+nonlinear trajectory, or diagnose physical thermal runaway. Unresolved
+intervals require caller refinement. One candidate film is allocated per
+interval; root iterations reuse original ordered passage/coefficient arrays
+and bounded stack scratch. Configuration, sources, outputs and thermal clock
+publish together after the final cancellation check. Failed geometry, work,
+source or energy admission preserves accepted state and caller output slices.
 
-This rung supplies midpoint temperature feedback at fixed geometry and fixed
-thermal inventory. Spatial temperature profiles, open-stream enthalpy,
-cavitation/latent heat, thermal expansion, moving-gap integration and cooling
-coefficient calibration remain outside its scope. Focused tests compare the
-linear cooling balance, nonlinear Carreau heating across caloric knots and both
-thermal shift conventions, independent pressure-fed viscous work, and temporal
-second-order refinement. Source/geometry/work limits, stiff cooling refusal and
-late cancellation retain exact retry. Existing full-film and cavitation
-regressions remain applicable to their unchanged mechanical/mass owners.
+This rung supplies midpoint geometry and temperature feedback with a fixed
+recirculating thermal inventory. Spatial temperature profiles, open-stream
+enthalpy, cavitation/latent heat, thermal expansion, fluid inertia and cooling
+coefficient calibration remain outside its scope. Focused tests cover linear
+cooling, nonlinear heating across caloric knots and both source shift modes,
+pressure-fed viscous work, thermally coupled moving-gap squeeze/sliding,
+geometric volume and normal-work closure, and second-order nonautonomous
+thermal refinement against an independent Arrhenius/Reynolds reference.
+Endpoint-only gap/pressure failures, unsupported initial squeeze, work limits,
+stiff cooling and late cancellation preserve exact retry. Existing full-film
+and cavitation regressions remain applicable to their mechanical/mass owners.
 
 ## Original thermal Carreau Reynolds films
 

@@ -7,16 +7,25 @@
 //! isolated film. Open supplies, local advected enthalpy, transverse thermal
 //! gradients, thermal expansion and phase changes require another owner.
 //!
-//! Geometry is held fixed and gap-changing velocities refuse. Tangential wall
-//! velocities, reservoir pressures, prescribed heat and bath data are held over
-//! the interval. The original caloric integral obeys
-//! `E(T1)-E(T0) = dt * [D((T0+T1)/2) + Q - H*((T0+T1)/2-Tbath)]`.
+//! The fixed-geometry advance admits tangential motion. The moving advance
+//! also evolves the original affine gaps with held generalized velocity,
+//! `q(t)=q0+t*v`. Squeeze and sliding share the original pressure graph at
+//! `q_mid=q0+dt*v/2`, with source admission at both physical endpoints.
+//! Film-cell volume change and signed reservoir outflow close a separate
+//! continuity audit. Liquid displaced from the film stays in the declared
+//! returning thermal inventory; its caloric table is never rescaled by gap.
+//!
+//! Held reservoir pressures, prescribed heat and bath data give
+//! `E(T1)-E(T0) = dt * [D(q_mid,(T0+T1)/2) + Q - H*((T0+T1)/2-Tbath)]`.
 //! Every D evaluation re-prepares the original material laws and solves their
-//! complete pressure/sliding graph. This is an implicit midpoint temperature
-//! quadrature, not an exact time history or an unconditional uniqueness claim.
-//! A local bounded scalar solve refuses unsupported or unresolved intervals.
-//! An endpoint net-power sign guard rejects detected equilibrium overshoots;
-//! it does not isolate every interior equilibrium of a nonmonotone load. The
+//! complete pressure/squeeze/sliding graph. This is implicit midpoint geometry
+//! and temperature quadrature, not an exact trajectory or an unconditional
+//! uniqueness claim. A bounded scalar solve refuses unresolved intervals.
+//! The net-power sign guard uses the SAME midpoint geometry at both thermal
+//! endpoints, rejecting detected frozen-load equilibrium overshoots without
+//! confusing time-varying squeeze power with a stationary thermal equilibrium.
+//! It does not isolate every interior equilibrium of a nonmonotone load or
+//! certify source support throughout an arbitrary nonlinear trajectory. The
 //! caller owns temporal refinement and the uniform-temperature admission.
 
 use fs_material::thermal::transport::storage::TabulatedHeatStorage;
@@ -97,8 +106,8 @@ impl ThermalFilmBoundary {
 /// Accepted original film and the caloric state of its returning inventory.
 ///
 /// The exact declared caloric table is borrowed, never refit or extended. The
-/// initial passage temperatures must agree exactly. The fixed graph geometry
-/// and thermal inventory are distinct declarations: this type does not infer
+/// initial passage temperatures must agree exactly. The original affine graph
+/// and fixed thermal inventory are distinct declarations: this type does not infer
 /// mass, density, heat capacity, supply-loop losses or source-card provenance.
 #[derive(Clone, Debug)]
 pub struct ThermalCarreauFilm<'a> {
@@ -117,6 +126,17 @@ pub struct ThermalFilmReport {
     pub final_temperature_k: f64,
     pub midpoint_temperature_k: f64,
     pub duration_s: f64,
+    /// Resolved volume cells, excluding the zero-storage hydraulic passages.
+    pub initial_film_cell_volume_m3: f64,
+    pub final_film_cell_volume_m3: f64,
+    /// Affine volume increment from the original cell-area/closure rows.
+    /// Evaluated from rates, avoiding subtraction of nearly equal volumes.
+    pub film_cell_volume_change_m3: f64,
+    /// Signed midpoint outflow from the film into its returning inventory.
+    pub reservoir_outflow_volume_m3: f64,
+    /// Cell volume change plus reservoir outflow; a numerical mass-balance
+    /// defect, not an extra fluid inventory or heat source.
+    pub volume_balance_residual_m3: f64,
     pub stored_energy_change_j: f64,
     pub dissipated_heat_j: f64,
     /// Signed imposed heat into the fixed thermal inventory [J].
@@ -134,7 +154,7 @@ pub struct ThermalFilmReport {
     pub combined_energy_residual_j: f64,
     pub thermal_residual_allowance_j: f64,
     pub temperature_bracket_width_k: f64,
-    /// Original complete mechanical report at the midpoint temperature.
+    /// Original complete mechanical report at midpoint temperature and geometry.
     pub midpoint_mechanics: CarreauFilmReport,
     /// Includes the final original-law endpoint mechanical support check.
     pub evaluations: usize,
@@ -233,11 +253,84 @@ impl<'a> ThermalCarreauFilm<'a> {
         )
     }
 
+    /// Advance configuration and temperature together under held generalized
+    /// velocity: `q_next=q+duration*velocity`. Original cell/channel affine gaps
+    /// are admitted at the midpoint and both endpoints. Native midpoint normal
+    /// pressure work and tangential work feed the SAME viscous heat calculation.
+    ///
+    /// The caloric inventory remains the supplied whole recirculating body.
+    /// Fluid squeezed out of the resolved film stays in that body at its uniform
+    /// temperature. No open-supply enthalpy, local heat partition, density change,
+    /// inertia, cavitation or new thermal storage is inferred.
+    ///
+    /// Returned forces/pressures are midpoint values. The next owner retains
+    /// endpoint configuration and source temperature, ready for continuation.
+    /// Time/geometry quadrature needs refinement for the actual gap evolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_moving_into(
+        &self,
+        velocity: &[f64],
+        duration_s: f64,
+        boundary: ThermalFilmBoundary,
+        controls: ThermalFilmControls,
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [CarreauFilmChannelReport],
+    ) -> Result<ThermalFilmStep<'a>, FilmError> {
+        self.advance_moving_with_check_into(
+            velocity,
+            duration_s,
+            boundary,
+            controls,
+            force,
+            pressure,
+            channels,
+            || Ok(()),
+        )
+    }
+
+    /// Checked moving-gap advance. Initial and final physical source admission
+    /// count against the SAME pressure-solve budget as the thermal root. Refusal
+    /// preserves the accepted configuration, temperature, clock and all outputs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_moving_with_check_into(
+        &self,
+        velocity: &[f64],
+        duration_s: f64,
+        boundary: ThermalFilmBoundary,
+        controls: ThermalFilmControls,
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [CarreauFilmChannelReport],
+        check: impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<ThermalFilmStep<'a>, FilmError> {
+        self.advance_kernel::<true>(
+            velocity, duration_s, boundary, controls, force, pressure, channels, check,
+        )
+    }
+
     /// Refusal/cancellation leaves self and every caller output unchanged.
     /// One candidate film is allocated per interval; thermal root iterations
     /// re-use its prepared passage/coefficient arrays and bounded stack scratch.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_with_check_into(
+        &self,
+        velocity: &[f64],
+        duration_s: f64,
+        boundary: ThermalFilmBoundary,
+        controls: ThermalFilmControls,
+        force: &mut [f64],
+        pressure: &mut [f64],
+        channels: &mut [CarreauFilmChannelReport],
+        check: impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<ThermalFilmStep<'a>, FilmError> {
+        self.advance_kernel::<false>(
+            velocity, duration_s, boundary, controls, force, pressure, channels, check,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_kernel<const MOVING: bool>(
         &self,
         velocity: &[f64],
         duration_s: f64,
@@ -264,32 +357,63 @@ impl<'a> ThermalCarreauFilm<'a> {
         {
             return fail("invalid Carreau thermal interval, velocity or output shape");
         }
-        // The graph is fixed over this thermal interval. An instantaneous
-        // squeeze rate cannot be presented as a finite constant-volume step.
-        if geometry
+        let moving_gaps = geometry
             .cells
             .iter()
             .any(|cell| dot(&cell.gap.closure, velocity) != 0.0)
             || geometry
                 .channels
                 .iter()
-                .any(|edge| dot(&edge.gap.closure, velocity) != 0.0)
-        {
+                .any(|edge| dot(&edge.gap.closure, velocity) != 0.0);
+        if !MOVING && moving_gaps {
             return fail("Carreau thermal fixed geometry refuses gap-changing velocity");
+        }
+        let mut midpoint_q = [0.0; MAX_PORTS];
+        let mut final_q = [0.0; MAX_PORTS];
+        for (index, (&position, &rate)) in self.configuration.iter().zip(velocity).enumerate() {
+            midpoint_q[index] = if MOVING {
+                finite((0.5 * duration_s).mul_add(rate, position))?
+            } else {
+                position
+            };
+            final_q[index] = if MOVING {
+                finite(duration_s.mul_add(rate, position))?
+            } else {
+                position
+            };
+            if MOVING && rate != 0.0 && final_q[index] == position {
+                return fail("Carreau moving thermal configuration increment is unrepresentable");
+            }
+        }
+        let midpoint_q = &midpoint_q[..geometry.port_count()];
+        let final_q = &final_q[..geometry.port_count()];
+        // For affine gaps, endpoint admission retains the entire geometric
+        // domain; admit the rounded midpoint independently as well.
+        geometry.validate_configuration(midpoint_q)?;
+        geometry.validate_configuration(final_q)?;
+        let final_checks = if moving_gaps { 2 } else { 1 };
+        if controls.maximum_evaluations <= final_checks + usize::from(moving_gaps) {
+            return fail("Carreau thermal pressure-solve budget exhausted");
         }
         let mut candidate = self.film.clone();
         let mut scratch = Scratch::new();
         let mut evaluations = 0;
+        if moving_gaps {
+            // A mid-gap trial cannot conceal an unsupported starting pressure,
+            // rate or wall state. This scratch is replaced by accepted midpoint
+            // mechanics before publication.
+            scratch.evaluate(&self.film, &self.configuration, velocity, &mut check)?;
+            evaluations += 1;
+        }
         let mut solve = |endpoint: f64, candidate: &mut CarreauFilm, scratch: &mut Scratch| {
-            if evaluations + 1 >= controls.maximum_evaluations {
+            if evaluations + final_checks >= controls.maximum_evaluations {
                 return fail("Carreau thermal pressure-solve budget exhausted");
             }
             evaluations += 1;
             check()?;
             let midpoint = self.temperature_k + 0.5 * (endpoint - self.temperature_k);
             prepare_temperature(candidate, midpoint, &mut check)?;
-            let mechanics =
-                scratch.evaluate(candidate, &self.configuration, velocity, &mut check)?;
+            let mechanics = scratch.evaluate(candidate, midpoint_q, velocity, &mut check)?;
             let stored = self
                 .storage
                 .energy_change_j(self.temperature_k, endpoint)
@@ -416,18 +540,25 @@ impl<'a> ThermalCarreauFilm<'a> {
         }
         prepare_temperature(&mut candidate, accepted.temperature, &mut check)?;
         let mut endpoint_scratch = Scratch::new();
-        let endpoint =
-            endpoint_scratch.evaluate(&candidate, &self.configuration, velocity, &mut check)?;
+        let endpoint = endpoint_scratch.evaluate(&candidate, midpoint_q, velocity, &mut check)?;
         evaluations += 1;
+        if moving_gaps {
+            // Admit the endpoint geometry with its endpoint material. Keep the
+            // midpoint-geometry thermal endpoint above for the frozen-load
+            // equilibrium guard; nonautonomous squeeze power may itself turn.
+            endpoint_scratch.evaluate(&candidate, final_q, velocity, &mut check)?;
+            evaluations += 1;
+        }
         let endpoint_net = finite(
             endpoint.film.dissipated_power_w
                 + boundary.prescribed_power_w
                 + bath_power(boundary, accepted.temperature)?,
         )?;
         let endpoint_heat = product(duration_s, endpoint_net)?;
-        // A reversed endpoint power detects a crossed stationary temperature,
-        // including the oscillatory stiff-cooling branch. This endpoint guard
-        // does not isolate every interior root of a nonmonotone combined load.
+        // A reversed thermal-endpoint power at the SAME midpoint geometry
+        // detects a crossed stationary temperature of this frozen-load solve,
+        // including stiff cooling. Physical geometry changes may move that
+        // equilibrium; their endpoint source check is separate above.
         if initial.residual < 0.0 && endpoint_heat < -accepted.allowance
             || initial.residual > 0.0 && endpoint_heat > accepted.allowance
         {
@@ -436,12 +567,61 @@ impl<'a> ThermalCarreauFilm<'a> {
         let mechanical_work_j = product(duration_s, accepted.mechanics.mechanical_power_w)?;
         let reservoir_work_j = product(duration_s, accepted.mechanics.reservoir_power_w)?;
         let mechanical_work_residual_j = product(duration_s, accepted.mechanics.work_defect_w)?;
+        let mut initial_volume = 0.0;
+        let mut final_volume = 0.0;
+        let mut volume_rate = 0.0;
+        for (index, cell) in geometry.cells.iter().enumerate() {
+            if index.is_multiple_of(32) {
+                check()?;
+            }
+            initial_volume = finite(
+                initial_volume
+                    + product(
+                        cell.area_m2,
+                        cell.gap.reference_m - dot(&cell.gap.closure, &self.configuration),
+                    )?,
+            )?;
+            final_volume = finite(
+                final_volume
+                    + product(
+                        cell.area_m2,
+                        cell.gap.reference_m - dot(&cell.gap.closure, final_q),
+                    )?,
+            )?;
+            volume_rate =
+                finite(volume_rate - product(cell.area_m2, dot(&cell.gap.closure, velocity))?)?;
+        }
+        let volume_change = if MOVING {
+            product(duration_s, volume_rate)?
+        } else {
+            0.0
+        };
+        let mut outflow = 0.0;
+        let mut compensation = 0.0;
+        for (index, (edge, channel)) in geometry.channels.iter().zip(&scratch.channels).enumerate()
+        {
+            if index.is_multiple_of(32) {
+                check()?;
+            }
+            if edge.to.is_none() {
+                let corrected = channel.volume_flow_m3_s - compensation;
+                let next = finite(outflow + corrected)?;
+                compensation = (next - outflow) - corrected;
+                outflow = next;
+            }
+        }
+        let displaced_volume = product(duration_s, outflow)?;
         let report = ThermalFilmReport {
             initial_temperature_k: self.temperature_k,
             final_temperature_k: accepted.temperature,
             midpoint_temperature_k: self.temperature_k
                 + 0.5 * (accepted.temperature - self.temperature_k),
             duration_s,
+            initial_film_cell_volume_m3: initial_volume,
+            final_film_cell_volume_m3: final_volume,
+            film_cell_volume_change_m3: volume_change,
+            reservoir_outflow_volume_m3: displaced_volume,
+            volume_balance_residual_m3: finite(volume_change + displaced_volume)?,
             stored_energy_change_j: accepted.stored,
             dissipated_heat_j: accepted.heat,
             prescribed_heat_j: accepted.imposed,
@@ -459,7 +639,7 @@ impl<'a> ThermalCarreauFilm<'a> {
         let next = Self {
             film: candidate,
             storage: self.storage,
-            configuration: self.configuration.clone(),
+            configuration: final_q.to_vec(),
             temperature_k: accepted.temperature,
             time_s: final_time,
             temperature_span_k: self.temperature_span_k,

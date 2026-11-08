@@ -603,3 +603,385 @@ fn g4_late_cancellation_preserves_mechanics_caloric_clock_and_exact_retry() {
         clean.report.dissipated_heat_j.to_bits()
     );
 }
+
+#[test]
+fn g1_moving_newtonian_squeeze_couples_midgap_pressure_heat_and_volume() {
+    let capacity = 2e-5;
+    let area = 1e-4;
+    let velocity = [2e-4, 0.0, 0.0];
+    let duration = 0.4;
+    let storage = TabulatedHeatStorage::try_new(&[[280.0, capacity], [360.0, capacity]]).unwrap();
+    let old = body(&storage, 300.0, false, false, 0.0);
+    let midpoint_gap = GAP - 0.5 * duration * velocity[0];
+    let outgoing = 0.5 * area * velocity[0];
+    let conductance = |temperature| {
+        WIDTH * midpoint_gap.powi(3) / (12.0 * viscosity(temperature, 0.0, false, false) * LENGTH)
+    };
+    let expected = independent_root(300.0, 330.0, |temperature| {
+        capacity * (temperature - 300.0)
+            - duration * 2.0 * outgoing * outgoing / conductance(0.5 * (300.0 + temperature))
+    });
+    let mut force = [0.0; 3];
+    let mut pressure = [0.0];
+    let mut channels = [CarreauFilmChannelReport::default(); 2];
+    let step = old
+        .advance_moving_into(
+            &velocity,
+            duration,
+            insulated(),
+            controls(),
+            &mut force,
+            &mut pressure,
+            &mut channels,
+        )
+        .unwrap();
+    let midpoint_pressure = outgoing / conductance(0.5 * (300.0 + expected));
+    near(step.next.temperature_k(), expected, 2e-7, 1e-12);
+    near(pressure[0], midpoint_pressure, 1e-6, 1e-10);
+    near(force[0], area * midpoint_pressure, 1e-10, 1e-10);
+    for channel in channels {
+        near(channel.volume_flow_m3_s, outgoing, 1e-22, 1e-11);
+    }
+    near(
+        step.report.dissipated_heat_j,
+        duration * 2.0 * outgoing * midpoint_pressure,
+        2e-12,
+        1e-9,
+    );
+    near(
+        step.report.mechanical_work_j,
+        duration * force[0] * velocity[0],
+        1e-16,
+        1e-11,
+    );
+    near(
+        step.report.stored_energy_change_j,
+        step.report.mechanical_work_j,
+        step.report.thermal_residual_allowance_j,
+        1e-9,
+    );
+    near(step.report.reservoir_work_j, 0.0, 1e-20, 0.0);
+    near(
+        step.report.initial_film_cell_volume_m3,
+        area * GAP,
+        1e-23,
+        1e-13,
+    );
+    near(
+        step.report.final_film_cell_volume_m3,
+        area * (GAP - duration * velocity[0]),
+        1e-23,
+        1e-13,
+    );
+    near(
+        step.report.film_cell_volume_change_m3,
+        -area * duration * velocity[0],
+        1e-23,
+        1e-13,
+    );
+    near(
+        step.report.reservoir_outflow_volume_m3,
+        area * duration * velocity[0],
+        1e-23,
+        1e-11,
+    );
+    near(step.report.volume_balance_residual_m3, 0.0, 1e-21, 0.0);
+    assert_eq!(
+        step.next.configuration(),
+        &[duration * velocity[0], 0.0, 0.0]
+    );
+    assert_eq!(old.configuration(), &[0.0; 3]);
+    assert_eq!(old.temperature_k(), 300.0);
+    assert_eq!(step.next.time_s(), 4.0 + duration);
+    assert!(std::ptr::eq(step.next.storage(), &storage));
+    // The accepted owner is prepared at endpoint temperature and can continue
+    // at the actual narrower endpoint, not at the midpoint pressure state.
+    step.next
+        .film()
+        .evaluate_into(
+            step.next.configuration(),
+            &velocity,
+            &mut force,
+            &mut pressure,
+            &mut channels,
+        )
+        .unwrap();
+    let final_gap = GAP - duration * velocity[0];
+    let final_conductance =
+        WIDTH * final_gap.powi(3) / (12.0 * viscosity(expected, 0.0, false, false) * LENGTH);
+    near(pressure[0], outgoing / final_conductance, 2e-6, 1e-10);
+}
+
+#[test]
+fn g2_nonlinear_squeeze_sliding_heat_retains_original_thermal_laws_and_normal_work() {
+    let capacity = 0.02;
+    let storage = TabulatedHeatStorage::try_new(&[[280.0, capacity], [360.0, capacity]]).unwrap();
+    let velocity = [2e-5, -0.25, 0.25];
+    let duration = 2.0;
+    let mut temperatures = [0.0; 2];
+    for (index, rate_shift) in [false, true].into_iter().enumerate() {
+        let old = body(&storage, 300.0, true, rate_shift, 0.0);
+        let mut force = [0.0; 3];
+        let mut pressure = [0.0];
+        let mut channels = [CarreauFilmChannelReport::default(); 2];
+        let step = old
+            .advance_moving_into(
+                &velocity,
+                duration,
+                insulated(),
+                controls(),
+                &mut force,
+                &mut pressure,
+                &mut channels,
+            )
+            .unwrap();
+        assert!(step.next.temperature_k() > 300.0);
+        assert!(pressure[0] > 0.0 && force[0] > 0.0);
+        near(
+            channels[0].volume_flow_m3_s + channels[1].volume_flow_m3_s,
+            1e-4 * velocity[0],
+            1e-21,
+            1e-9,
+        );
+        near(
+            step.report.mechanical_work_j,
+            duration * dot(&force, &velocity),
+            1e-14,
+            1e-10,
+        );
+        near(
+            step.report.dissipated_heat_j,
+            duration * channels.iter().map(|c| c.dissipated_power_w).sum::<f64>(),
+            1e-14,
+            1e-10,
+        );
+        near(
+            step.report.stored_energy_change_j,
+            step.report.dissipated_heat_j,
+            step.report.thermal_residual_allowance_j,
+            1e-9,
+        );
+        near(step.report.combined_energy_residual_j, 0.0, 1e-9, 0.0);
+        near(step.report.volume_balance_residual_m3, 0.0, 1e-20, 0.0);
+        for (position, rate) in step.next.configuration().iter().zip(velocity) {
+            near(*position, duration * rate, 1e-20, 1e-14);
+        }
+        for (source, original) in step
+            .next
+            .film()
+            .passages()
+            .iter()
+            .zip(old.film().passages())
+        {
+            assert_eq!(source.law(), original.law());
+            assert_eq!(source.temperature_k(), step.next.temperature_k());
+        }
+        temperatures[index] = step.next.temperature_k();
+    }
+    assert!((temperatures[0] - temperatures[1]).abs() > 1e-4);
+}
+
+#[test]
+fn g3_moving_squeeze_has_second_order_geometry_and_thermal_refinement() {
+    let capacity = 2e-5;
+    let area = 1e-4;
+    let rate = 2e-4;
+    let duration = 0.4;
+    let storage = TabulatedHeatStorage::try_new(&[[280.0, capacity], [360.0, capacity]]).unwrap();
+    // Independent Newtonian Reynolds reduction with the original Arrhenius
+    // viscosity: D=6*mu(T)*L*(A*v)^2/(width*h(t)^3). Time, geometry and
+    // temperature evolve together in this separate fourth-order reference.
+    let derivative = |time: f64, temperature: f64| {
+        let gap = GAP - rate * time;
+        6.0 * viscosity(temperature, 0.0, false, false) * LENGTH * (area * rate).powi(2)
+            / (WIDTH * gap.powi(3) * capacity)
+    };
+    let mut reference = 300.0;
+    let dt = duration / 4096.0;
+    for index in 0..4096 {
+        let time = f64::from(index) * dt;
+        let a = derivative(time, reference);
+        let b = derivative(time + 0.5 * dt, reference + 0.5 * dt * a);
+        let c = derivative(time + 0.5 * dt, reference + 0.5 * dt * b);
+        let d = derivative(time + dt, reference + dt * c);
+        reference += dt * (a + 2.0 * b + 2.0 * c + d) / 6.0;
+    }
+    let integrate = |steps| {
+        let mut state = body(&storage, 300.0, false, false, 0.0);
+        let mut force = [0.0; 3];
+        let mut pressure = [0.0];
+        let mut channels = [CarreauFilmChannelReport::default(); 2];
+        let mut heat = 0.0;
+        let mut displacement = 0.0;
+        for _ in 0..steps {
+            let step = state
+                .advance_moving_into(
+                    &[rate, 0.0, 0.0],
+                    duration / f64::from(steps),
+                    insulated(),
+                    controls(),
+                    &mut force,
+                    &mut pressure,
+                    &mut channels,
+                )
+                .unwrap();
+            heat += step.report.dissipated_heat_j;
+            displacement += step.report.reservoir_outflow_volume_m3;
+            state = step.next;
+        }
+        near(
+            capacity * (state.temperature_k() - 300.0),
+            heat,
+            1e-10,
+            1e-9,
+        );
+        near(displacement, area * rate * duration, 1e-22, 1e-10);
+        near(state.configuration()[0], rate * duration, 1e-20, 1e-13);
+        (state.temperature_k() - reference).abs()
+    };
+    let errors = [integrate(1), integrate(2), integrate(4)];
+    assert!(
+        errors[2] > 1e-6
+            && errors[0] / errors[1] > 3.0
+            && errors[1] / errors[2] > 3.6
+            && errors[1] / errors[2] < 4.5,
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn g4_moving_thermal_endpoint_admission_budget_and_cancellation_are_atomic() {
+    let storage = TabulatedHeatStorage::try_new(&[[280.0, 0.08], [360.0, 0.08]]).unwrap();
+    let old = body(&storage, 300.0, false, false, 0.0);
+    let sentinel = CarreauFilmChannelReport {
+        volume_flow_m3_s: 23.0,
+        ..Default::default()
+    };
+    let mut force = [17.0; 3];
+    let mut pressure = [19.0];
+    let mut channels = [sentinel; 2];
+    for (duration, numerical) in [
+        (1.0, controls()),  // midpoint valid; endpoint closes the volume cell
+        (0.98, controls()), // endpoint gap valid; endpoint pressure exceeds support
+        (
+            0.1,
+            ThermalFilmControls {
+                maximum_evaluations: 4,
+                ..controls()
+            },
+        ),
+    ] {
+        assert!(
+            old.advance_moving_into(
+                &[2e-4, 0.0, 0.0],
+                duration,
+                insulated(),
+                numerical,
+                &mut force,
+                &mut pressure,
+                &mut channels,
+            )
+            .is_err()
+        );
+        assert_eq!(force, [17.0; 3]);
+        assert_eq!(pressure, [19.0]);
+        assert_eq!(channels, [sentinel; 2]);
+        assert_eq!(old.configuration(), &[0.0; 3]);
+        assert_eq!(old.temperature_k(), 300.0);
+        assert_eq!(old.time_s(), 4.0);
+    }
+    // A wide mid-gap cannot hide an unsupported starting squeeze state.
+    let narrow = ThermalCarreauFilm::new(
+        film(300.0, false, false, 0.0),
+        &storage,
+        &[GAP - 5e-6, 0.0, 0.0],
+        4.0,
+    )
+    .unwrap();
+    assert!(
+        narrow
+            .advance_moving_into(
+                &[-2e-4, 0.0, 0.0],
+                0.4,
+                insulated(),
+                controls(),
+                &mut force,
+                &mut pressure,
+                &mut channels,
+            )
+            .is_err()
+    );
+    assert_eq!(force, [17.0; 3]);
+    assert_eq!(pressure, [19.0]);
+    assert_eq!(channels, [sentinel; 2]);
+
+    let velocity = [2e-5, -0.25, 0.25];
+    let mut calls = 0;
+    let clean = old
+        .advance_moving_with_check_into(
+            &velocity,
+            0.2,
+            insulated(),
+            controls(),
+            &mut force,
+            &mut pressure,
+            &mut channels,
+            || {
+                calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+    let expected = (force, pressure, channels);
+    force = [17.0; 3];
+    pressure = [19.0];
+    channels = [sentinel; 2];
+    let mut at = 0;
+    let error = old
+        .advance_moving_with_check_into(
+            &velocity,
+            0.2,
+            insulated(),
+            controls(),
+            &mut force,
+            &mut pressure,
+            &mut channels,
+            || {
+                at += 1;
+                if at == calls {
+                    Err(FilmError("moving thermal final cancellation"))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error, FilmError("moving thermal final cancellation"));
+    assert_eq!(
+        (force, pressure, channels),
+        ([17.0; 3], [19.0], [sentinel; 2])
+    );
+    assert_eq!(old.configuration(), &[0.0; 3]);
+    assert_eq!(old.time_s(), 4.0);
+    let retry = old
+        .advance_moving_into(
+            &velocity,
+            0.2,
+            insulated(),
+            controls(),
+            &mut force,
+            &mut pressure,
+            &mut channels,
+        )
+        .unwrap();
+    assert_eq!((force, pressure, channels), expected);
+    assert_eq!(retry.next.configuration(), clean.next.configuration());
+    assert_eq!(
+        retry.next.temperature_k().to_bits(),
+        clean.next.temperature_k().to_bits()
+    );
+    assert_eq!(
+        retry.report.dissipated_heat_j.to_bits(),
+        clean.report.dissipated_heat_j.to_bits()
+    );
+}
