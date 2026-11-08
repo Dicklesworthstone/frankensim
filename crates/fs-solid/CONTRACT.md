@@ -1,5 +1,19 @@
 # fs-solid CONTRACT
 
+## Finite ductile failure to native deformable fragments
+
+`hyper3::plastic::ductile::fracture` releases explicitly selected conforming P1 seams only after both incident original material points have exact finite-support completion, zero retained compressive storage, compatible original reference-band direction, and traction-free current facets. Current Cauchy traction and area-scaled first-Piola traction are admitted independently. A rounded exponential damage value cannot authorize a cut.
+
+The zero-duration transfer duplicates original nodal stars. Element/local-corner order, deformation, multiplicative plastic history, original material owner, characteristic length, physical stress, and cumulative plastic, damage, and numerical-work accounts are copied unchanged. The cut creates no additional fracture-energy credit, impulse, or material return. Boundary conditions and loads must use the receiving node numbering.
+
+Both cellwise density and the complete P1 nodal-density field retain their original consistent mass. Exact copied motion is checked by element-order mass, current first moment, linear momentum, angular momentum, and kinetic inventories; native CSR kinetic roundoff has a separate energy gate. Graded density is not replaced by cell means or a lumped/rigid-fragment mass. Released faces retain their current release normals and element/corner identities through later explicit cuts.
+
+`FiniteDuctileFractureMotion` continues the original finite backward-Euler solve and checks paired openings and oriented current normals at each accepted endpoint. Contact-free continuation refuses closing endpoints and departure from the admitted normal cone. These are endpoint guards, not a swept-path or general collision proof. There is no automatic crack discovery, arbitrary sliding/rotating-fragment contact, erosion, general remeshing, or calibrated alloy failure claim.
+
+Damage-increment continuation remains necessary to resolve the softening work: a permitted virgin-to-terminal jump can exhaust the attenuation capacity while its endpoint work and defect are both zero. Endpoint-defect control alone cannot detect that unresolved path. The transfer neither manufactures missing physical work nor reclassifies the attenuation diagnostic as heat or fracture loss.
+
+Three focused G0/G3 tests in `tests/finite_ductile_fracture.rs` construct a stress-free rigid rotation followed by a resolved progressive loading path, then check both density modes, exact history/state transfer, native fragment motion, and invalid-release/closure/cancellation refusals. Source and test files were parsed by pinned rustfmt; Cargo typechecking and execution remain unverified because the workspace is full and the real dependency build hit the memory limit.
+
 ## Progressive ductile rigid-plane tooling
 
 Static and moving `FiniteDuctileTetSolid` / `FiniteDuctileTetMotion` endpoints

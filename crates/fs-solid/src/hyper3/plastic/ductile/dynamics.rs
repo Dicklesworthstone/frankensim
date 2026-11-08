@@ -33,11 +33,11 @@ pub struct FiniteDuctileTetMotion<'g, 'm, L>
 where
     L: DifferentiableDuctileInitiationLaw + Clone + Debug + PartialEq,
 {
-    solid: FiniteDuctileTetSolid<'g, 'm, L>,
-    velocity_mps: Vec<[f64; 3]>,
-    reference_density_kg_m3: Arc<[f64]>,
-    reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
-    mass: Arc<P1ReferenceMass>,
+    pub(super) solid: FiniteDuctileTetSolid<'g, 'm, L>,
+    pub(super) velocity_mps: Vec<[f64; 3]>,
+    pub(super) reference_density_kg_m3: Arc<[f64]>,
+    pub(super) reference_nodal_density_kg_m3: Option<Arc<[f64]>>,
+    pub(super) mass: Arc<P1ReferenceMass>,
 }
 
 /// One complete accepted interval with unchanged material and kinetic accounts.

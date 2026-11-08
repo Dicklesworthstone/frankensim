@@ -13,8 +13,9 @@
 //! signed endpoint work-integration defect. The work budget bounds the SUM of
 //! absolute element defects, so opposing errors cannot conceal underresolution.
 //! Drive unstable softening by prescribed displacement or use smaller physical
-//! intervals; this owner does not supply arclength, crack insertion, contact,
-//! remeshing, thermal feedback or fragment transfer. P1 volumetric locking and
+//! intervals; explicit finite-support fracture transfer and matched-trace contact
+//! are separate child owners. This owner does not supply arclength, arbitrary
+//! remeshing or thermal feedback. P1 volumetric locking and
 //! the parent's displacement-only applicability limits remain in force.
 
 use core::cell::RefCell;
@@ -45,6 +46,8 @@ use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 pub mod contact;
 /// Consistent reference inertia on the same nonpotential finite ductile solve.
 pub mod dynamics;
+/// Native complete-failure separation with original histories and consistent mass.
+pub mod fracture;
 /// Bounded physical-interval continuation through native finite softening.
 pub mod path;
 
