@@ -18,6 +18,7 @@ const C0: f64 = 299_792_458.0;
 const WAVELENGTH_M: f64 = 550e-9;
 
 mod slab;
+mod stack;
 
 fn crystal_card(name: &str, loss: [f64; 2]) -> MaterialCard {
     let base = card(name, 2.0, 0.0);

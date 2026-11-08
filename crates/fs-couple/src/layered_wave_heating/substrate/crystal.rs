@@ -41,6 +41,10 @@ pub use coherent::{
 pub mod slab;
 pub use slab::{PreparedCrystalSlabHeating, PreparedCrystalSlabIlluminationHeating};
 
+/// Independently oriented absorbing layers on their original thermal cells.
+pub mod stack;
+pub use stack::PreparedCrystalStackHeating;
+
 // Only native electromagnetic owners implement this internal source seam.
 // Geometry, material admission, cell integration and thermal accounting stay
 // identical for a coherent field and an explicitly uncorrelated illumination.
@@ -315,9 +319,24 @@ fn admit_crystal_material(
     original: &ResolvedMaterialStatePoint,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), LayeredWaveHeatingError> {
+    admit_crystal_materials(thermal, |_| Ok(original), cancelled)
+}
+
+fn admit_crystal_materials<'m>(
+    thermal: &BoundLayeredThermalBody<'_>,
+    mut original: impl FnMut(usize) -> Result<&'m ResolvedMaterialStatePoint, LayeredWaveHeatingError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), LayeredWaveHeatingError> {
     let body = thermal.prepared_body();
-    for (layer, storage) in body.conduction().layers().iter().zip(body.storages()) {
+    for (index, (layer, storage)) in body
+        .conduction()
+        .layers()
+        .iter()
+        .zip(body.storages())
+        .enumerate()
+    {
         poll(cancelled)?;
+        let original = original(index)?;
         if original.card_identity() != layer.material_card_identity() {
             return Err(invalid(
                 "crystal conductivity must retain the original optical material card",
