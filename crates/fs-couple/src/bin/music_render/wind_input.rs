@@ -8,6 +8,8 @@ mod gas_sources;
 mod gas_fixture;
 #[path = "wind_input/finite_gas_heat.rs"]
 mod finite_gas_heat;
+#[path = "wind_input/observation_filter.rs"]
+mod observation_filter;
 use std::io::{Read, Write};
 use std::path::Path;
 use fs_blake3::ContentHash;
@@ -443,11 +445,14 @@ pub(super) fn resolved_provenance(
     let load = system.load();
     let duct = load.duct();
     let (point, mut observer) = match renderer.observation() {
+        ApertureObservation::Inlet if renderer.bandlimited_observation().is_some() => ("mean-inlet",
+            ",\"observation_scope\":\"causal filtered reconstruction of internal interval-mean DG pressure; not an exterior microphone\"".into()),
         ApertureObservation::Inlet => ("mean-inlet",
             ",\"observation_scope\":\"internal interval-mean DG pressure; not an exterior microphone\"".into()),
         ApertureObservation::TubeBaffled(receiver) => ("baffled-outlet",
             super::duct_metadata::dg_baffled_projected_observation_provenance(load, receiver,
-                renderer.baffled_receiver().expect("admitted resolved microphone"), info.sample_rate_hz)),
+                renderer.baffled_receiver().expect("admitted resolved microphone"), info.sample_rate_hz,
+                renderer.bandlimited_observation().is_some())),
         _ => unreachable!("resolved input admits only its actual DG pressure observers"),
     };
     let gas = super::duct_metadata::gas_state(system.reference_gas());
@@ -626,10 +631,12 @@ pub(super) fn resolved_provenance(
         format!(",\"upstream_acoustic_load\":{{\"operator_identity\":\"{}\",\"total_dofs\":{},\"length_m\":{:e},\"inlet_area_m2\":{:e},\"inlet_gas\":{gas},\"scope\":\"original finite material DG duct and terminal histories; acoustic coupling without mean mass or enthalpy advection; pressure observer remains on the downstream duct\"{wall}{radiation}}}",
             duct.operator_identity().to_hex(), duct.total_dofs(), duct.total_length(), duct.inlet_area_m2())
     });
-    let timing = format!(",\"time_projection\":{{\"physical_interval_s\":{:e},\"declared_physical_intervals\":{},\"declared_physical_duration_s\":{:e},\"observation_rate_hz\":{},\"declared_observation_samples\":{},\"declared_observation_duration_s\":{:e},\"method\":\"conservative overlap of original interval means; direct same-clock path\",\"boundary_control\":\"declared hold or linear ramp sampled at each physical interval start; event error at most one physical interval\",\"bandlimited_antialias_filter\":false,\"scope\":\"box-average temporal projection requires clock refinement; physical prefix may lead observation by less than one physical interval; shared PCM decimation may truncate an incomplete output interval\"}}",
+    let timing = if let Some(filter) = renderer.bandlimited_observation() {
+        observation_filter::provenance(filter, info.physical_intervals, info.samples)
+    } else { format!(",\"time_projection\":{{\"physical_interval_s\":{:e},\"declared_physical_intervals\":{},\"declared_physical_duration_s\":{:e},\"observation_rate_hz\":{},\"declared_observation_samples\":{},\"declared_observation_duration_s\":{:e},\"method\":\"conservative overlap of original interval means; direct same-clock path\",\"boundary_control\":\"declared hold or linear ramp sampled at each physical interval start; event error at most one physical interval\",\"bandlimited_antialias_filter\":false,\"scope\":\"box-average temporal projection requires clock refinement; physical prefix may lead observation by less than one physical interval; shared PCM decimation may truncate an incomplete output interval\"}}",
         load.propagator().dt(), info.physical_intervals,
         load.propagator().dt() * info.physical_intervals as f64,
-        info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz));
+        info.sample_rate_hz, info.samples, info.samples as f64 / f64::from(info.sample_rate_hz)) };
     format!("\"resolved_input\":{{\"schema\":\"frankensim-resolved-dg-performance-v1\",\"blake3\":\"{}\",\"source_owner\":\"original-NsfGrid3-D3Q27\",\"dimensions\":[{},{},{}],\"solid_cells\":{},\"initial_state_cells\":{},\"boundary_segments\":{},\"boundary_ramps\":{},\"dx_m\":{:e},\"nsf_dt_s\":{:e},\"substeps\":{},\"source_gas\":{gas},\"bulk_to_shear_ratio\":{:e},\"bulk_ratio_source\":{},\"coupled_area_m2\":{:e},\"maximum_root_evaluations\":{},\"maximum_cell_steps\":{},\"pressure_absolute_tolerance_pa\":{:e},\"pressure_relative_tolerance\":{:e},\"projection_absolute_tolerance_j\":{:e},\"projection_relative_tolerance\":{:e},\"duct_operator_identity\":\"{}\",\"duct_total_dofs\":{},\"pressure_point\":\"{point}\",\"observer_gas\":{propagation},\"model_scope\":\"original resolved fixed-composition fluid and live material DG bore; uniform acoustic interface projection with separate mass/energy flux; stationary voxel walls and two-cell fluid collars; source, geometry, boundary and coupling convergence remain required; no measured flute/reed qualification\"{sgs}{characteristic_thermal}{aperture}{reservoir}{boundary}{upstream}{timing}{observer}{radiation}{solid_wall}{gas_sources}{reservoir_observation}{reservoir_feedback}{finite_reservoir}}}",
         info.input_hash.to_hex(), info.dimensions[0], info.dimensions[1], info.dimensions[2],
         info.solid_cells, info.initial_state_cells, info.boundary_segments, info.boundary_ramps, law.dx_m, law.dt_s,

@@ -34,6 +34,29 @@ unexecuted because the constrained real-source build stopped in asupersync
 before reaching the affected crates; numerical oracle checks are not a Rust
 test pass.
 
+## Bandlimited observation of resolved physical sources
+
+`NsfDgPerformance` and `NsfThermoviscousDgPerformance` opt into the shared causal
+fractional-rate observer with `with_bandlimited_observation(policy)`, attached
+after all reservoir surfaces and material-gas receivers. The original inlet
+pressure, terminal flows and every selected reservoir tile form one channel
+bank before Rayleigh differentiation, propagation and superposition. Distinct
+source identities, signs and physical gains remain separate. The filter's
+actual band, work/storage dimensions and common numerical latency are exposed
+by `bandlimited_observation()`; zero prehistory and that delay remain audible.
+No future source intervals, physical tail or delay removal are introduced.
+
+Every output still advances the original physical trajectory through exactly
+`source_intervals_for` coverage, including the final partial interval. Controls,
+mechanics, energy accounts and callback-independent source order are unchanged.
+Legacy constructors retain their original exact or conservative-overlap path.
+Cold transfer into a complete acoustic field moves the original unadvanced
+filter only with identical physical dt, output window and channel basis; later
+surface/gas attachments refuse. Cancellation and each owner's existing accepted
+physical-prefix/poison semantics remain in force. This finite observation FIR
+does not undo aliasing already present in the source or qualify source dynamics,
+spatial radiation resolution or empirical instrument fidelity.
+
 ## Modal convergence with conservative and cancelling fields
 
 The modal vibroacoustic convergence APIs now require both the original active

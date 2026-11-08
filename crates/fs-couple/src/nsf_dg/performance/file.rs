@@ -17,6 +17,7 @@ use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallL
 use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgRadiationSolve, NsfDgReservoirRadiation, NsfFiniteReservoirLimits, same_clock};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
+use crate::pcm_wav::observation::resample::BandlimitedObservationPolicy;
 use crate::render::RenderError;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_exec::CancelGate;
@@ -39,6 +40,7 @@ use std::str::{FromStr, Lines, SplitAsciiWhitespace};
 use std::sync::Arc;
 
 mod geometry;
+mod observation_filter;
 
 pub const RESOLVED_DG_PERFORMANCE_SCHEMA: &str = "frankensim-resolved-dg-performance-v1";
 pub const MAX_RESOLVED_PERFORMANCE_BYTES: usize = 1024 * 1024;
@@ -206,6 +208,7 @@ impl ResolvedDgFilePerformance {
         if !(1..=MAX_RESOLVED_SAMPLES).contains(&samples) || full_scale_pa <= 0.0 {
             return Err(bad(rows.line, "finite source window or physical PCM scale is out of bounds"));
         }
+        let observation_filter = observation_filter::read(&mut rows)?;
 
         let mut row = rows.row("gas")?;
         let (gas, model, named, mut gas_records) = match row.fields.clone().next() {
@@ -810,6 +813,12 @@ impl ResolvedDgFilePerformance {
         }
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation).map_err(ResolvedDgInputError::Render)?;
+        }
+        // The one shared filter sees the final pressure/terminal/tile channel
+        // layout. Physical drives and the original interval count stay intact.
+        if let Some(policy) = observation_filter {
+            renderer = renderer.with_bandlimited_observation(policy)
+                .map_err(ResolvedDgInputError::Render)?;
         }
         poll(&gate)?;
         Ok(Self {

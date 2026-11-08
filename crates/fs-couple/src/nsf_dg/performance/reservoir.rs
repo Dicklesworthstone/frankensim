@@ -331,6 +331,9 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     pub fn with_reservoir_observation_at(
         mut self, aperture: usize, input: ReservoirObservation,
     ) -> Result<Self, RenderError> {
+        if self.bandlimited.is_some() {
+            return Err(sizing("attach reservoir surfaces before the bandlimited filter"));
+        }
         if self.poisoned
             || self.system.accepted_steps() != 0
             || self.reservoirs.iter().any(|observer| observer.aperture == aperture)

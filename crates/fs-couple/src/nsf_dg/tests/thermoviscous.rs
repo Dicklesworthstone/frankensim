@@ -98,6 +98,8 @@ macro_rules! snapshot {
     }};
 }
 
+mod bandlimited;
+
 #[test]
 fn external_flow_port_keeps_the_complete_schur_response_and_dropped_trials() {
     let gate = CancelGate::new_clock_free();

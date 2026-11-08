@@ -571,13 +571,45 @@ decimation then use their existing owners. Callback boundaries do not affect
 the partitions. Matching clocks retain the original one-frame path, including
 its arithmetic; derived-clock roundoff is admitted without retiming geometry.
 
-This is a piecewise-constant temporal projection with a box-average frequency
+This default is a piecewise-constant temporal projection with a box-average frequency
 response, **not a band-limited antialias filter**. Refine both clocks against the
 intended bandwidth, and use the existing decimator for the final output where
 appropriate. Receiver bandwidth must fit physical and observation Nyquist as
 well as original wall/radiation bands. Physical state can lead the observation
 window by less than one original interval. The source duration, physical prefix,
 receiver delay basis and this approximation are explicit in native provenance.
+
+#### Optional filtering before changing the observation clock
+
+Add the following optional record immediately after `output`:
+
+```text
+observation_filter bandlimited PASSBAND_HZ STOPBAND_HZ PHASES MAX_PREPARATION_TERMS MAX_HISTORY_VALUES MAX_OUTPUT_TERMS
+```
+
+For example, `observation_filter bandlimited 6000 8000 1024 2000000 65536 65536`
+requests a 6 kHz passband and an 8 kHz stopband; both the original physical
+sample rate and output rate must admit that band. The shared
+`BandlimitedObservationPolicy` also bounds phase-table preparation, retained
+history values and work per complete multichannel output. Unresolved bands,
+insufficient budgets and invalid records refuse; they never select the
+unfiltered path. Omitting the record preserves the existing overlap method.
+
+This path reconstructs the original interval means with a finite
+Blackman-Harris windowed-sinc filter and an interpolated phase table. Inlet
+pressure, every observed DG terminal flow and every selected reservoir/tile
+flow share the same clock and filter before the Rayleigh receivers run. It
+retains the original interval averaging rather than deconvolving it, and it
+does not recover frequencies already aliased at the physical source clock.
+The filter has explicit causal latency, zero initial history and no tail flush
+beyond the declared output window. Its finite support, phase resolution,
+pass/stop bands and delay are recorded in `time_projection` provenance.
+
+The direct Rust API is `with_bandlimited_observation(policy)` on either
+`NsfDgPerformance` or `NsfThermoviscousDgPerformance`, after binding its exterior
+observers and before playback. The embedded resolved-source record also
+survives the thermoviscous field handoff. Physical states, accepted source
+intervals, material evolution and authored control timing are unchanged.
 
 `DgPortLoad::new_with_computed_baffled_branches_at_dt` also retains this exact
 physical interval in the DG propagator and terminal realization. Its computed
@@ -676,6 +708,7 @@ Records have no ignored suffixes, blank rows or inline comments.
 frankensim-resolved-dg-performance-v1
 clock OBSERVATION_RATE_HZ NSF_SUBSTEPS_PER_DG_INTERVAL
 output OUTPUT_SAMPLES FULL_SCALE_PA
+[optional observation_filter bandlimited PASSBAND_HZ STOPBAND_HZ PHASES MAX_PREPARATION_TERMS MAX_HISTORY_VALUES MAX_OUTPUT_TERMS]
 gas dry-air TEMPERATURE_K PRESSURE_PA
 grid NX NY NZ DX_M PERIODIC_X PERIODIC_Y PERIODIC_Z
 fluid_limits MAX_CELLS TMIN_K TMAX_K MAX_MACH MAX_TEMPERATURE_RATIO TRANSPORT_POINTS WORKERS

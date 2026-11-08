@@ -227,7 +227,7 @@ pub(super) fn dg_baffled_observation_provenance(
     receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
     microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
 ) -> String {
-    dg_baffled_observation_on_clock(load, receiver, microphone, None)
+    dg_baffled_observation_on_clock(load, receiver, microphone, None, false)
 }
 
 pub(super) fn dg_baffled_projected_observation_provenance(
@@ -235,8 +235,9 @@ pub(super) fn dg_baffled_projected_observation_provenance(
     receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
     microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
     observation_rate_hz: u32,
+    bandlimited: bool,
 ) -> String {
-    dg_baffled_observation_on_clock(load, receiver, microphone, Some(observation_rate_hz))
+    dg_baffled_observation_on_clock(load, receiver, microphone, Some(observation_rate_hz), bandlimited)
 }
 
 fn dg_baffled_observation_on_clock(
@@ -244,10 +245,14 @@ fn dg_baffled_observation_on_clock(
     receiver: fs_couple::pcm_wav::baffled::CircularOutletReceiver,
     microphone: &fs_couple::pcm_wav::baffled::BaffledPressure,
     observation_rate_hz: Option<u32>,
+    bandlimited: bool,
 ) -> String {
     let source = load.radiation_record().expect("admitted bound DG radiation source");
     let exterior = gas_state(source.gas_record().state());
-    let (clock, reconstruction, flow_scope) = if observation_rate_hz.is_some() {
+    let (clock, reconstruction, flow_scope) = if bandlimited {
+        ("observation", "causal fractional-rate filtering followed by bandlimited Rayleigh differentiation",
+            "original interval-mean terminal flows filtered together before the declared observation clock; observation latency is reported in time_projection")
+    } else if observation_rate_hz.is_some() {
         ("observation", "overlap-projected-terminal-flow-bandlimited-differentiating-Rayleigh",
             "interval-mean DG terminal flows projected onto the declared observation clock")
     } else {

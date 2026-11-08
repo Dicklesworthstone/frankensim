@@ -11,6 +11,7 @@ use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
+use crate::pcm_wav::observation::resample::{BandlimitedObservationPolicy, BandlimitedResampler};
 use crate::render::RenderError;
 use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
@@ -23,6 +24,8 @@ pub(super) mod clock;
 use clock::IntervalClock;
 pub(super) mod reservoir;
 pub use reservoir::ReservoirObservation;
+pub(super) mod bandlimited;
+use bandlimited::BandlimitedObservation;
 
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
 
@@ -69,6 +72,7 @@ pub(in crate::nsf_dg) struct NsfDgColdObservers {
     pub reservoirs: Vec<reservoir::ReservoirPressure>,
     pub terminal_flows: Vec<f64>,
     pub projected_observer: bool,
+    pub bandlimited: Option<BandlimitedObservation>,
 }
 
 pub struct NsfDgPerformance<L: Lattice3<27>> {
@@ -84,6 +88,7 @@ pub struct NsfDgPerformance<L: Lattice3<27>> {
     gate: Arc<CancelGate>,
     last: Option<NsfDgFrame>,
     clock: Option<IntervalClock>,
+    bandlimited: Option<BandlimitedObservation>,
     projected_observer: bool,
     output_samples: u64,
     output_cursor: u64,
@@ -247,7 +252,45 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             system, boundary, observation, receiver,
             observer_gas: None, reservoirs: Vec::new(), terminal_flows, sample_rate_hz, maximum_block, gate,
             last: None, clock, projected_observer, output_samples, output_cursor: 0, poisoned: false,
+            bandlimited: None,
         })
+    }
+
+    /// Observe every original pressure/flow channel through one causal
+    /// bandlimited fractional-rate filter before the Rayleigh receivers.
+    /// Attach this last, after reservoir and gas observers. Its explicit delay
+    /// and zero prehistory change observation only: original controls, accepted
+    /// physical intervals and the requested output count remain unchanged.
+    /// The finite window has no automatic tail flush or future source padding.
+    /// Legacy constructors keep their original exact/box-projected semantics.
+    pub fn with_bandlimited_observation(mut self, policy: BandlimitedObservationPolicy)
+        -> Result<Self, RenderError>
+    {
+        if self.gate.is_requested() {
+            return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
+        }
+        if self.poisoned || self.output_cursor != 0 || self.system.accepted_steps() != 0
+            || self.last.is_some() || self.bandlimited.is_some()
+        {
+            return Err(sizing("bandlimited observation requires one cold attachment after all physical observers"));
+        }
+        let bandlimited = BandlimitedObservation::new(
+            self.system.load().propagator().dt(), self.sample_rate_hz, self.output_samples,
+            self.terminal_flows.len(), self.reservoirs.iter().map(|observer| observer.flows.len()), policy,
+            &mut || self.gate.is_requested(),
+        ).map_err(|error| if self.gate.is_requested() {
+            RenderError::Voice(AcousticRealizeError::Cancelled)
+        } else { error })?;
+        if self.gate.is_requested() {
+            return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
+        }
+        self.bandlimited = Some(bandlimited);
+        Ok(self)
+    }
+
+    /// Actual shared filter, including declared band and causal latency.
+    pub fn bandlimited_observation(&self) -> Option<&BandlimitedResampler> {
+        self.bandlimited.as_ref().map(BandlimitedObservation::resampler)
     }
     /// Bind the shared physical atmosphere law to every original outlet-to-microphone
     /// path before playback. The exterior gas comes from the actual DG radiation
@@ -259,6 +302,9 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     /// surface pressure is summed. The retained cancellation gate also owns this
     /// bounded cold preparation; failed preparation publishes no receiver.
     pub fn with_observer_gas(mut self, propagation: &GasPropagation) -> Result<Self, RenderError> {
+        if self.bandlimited.is_some() {
+            return Err(sizing("attach material gas observation before the bandlimited filter"));
+        }
         if self.poisoned || self.system.accepted_steps() != 0 || self.observer_gas.is_some() {
             return Err(sizing("resolved material gas observation requires one cold attachment"));
         }
@@ -307,6 +353,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 receiver: self.receiver, observer_gas: self.observer_gas,
                 reservoirs: self.reservoirs, terminal_flows: self.terminal_flows,
                 projected_observer: self.projected_observer,
+                bandlimited: self.bandlimited,
             } })
     }
 
@@ -341,6 +388,7 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
     }
 
     fn advance(&mut self) -> Result<f64, RenderError> {
+        if self.bandlimited.is_some() { return self.advance_bandlimited(); }
         if let Some(clock) = self.clock { return self.advance_projected(clock); }
         self.advance_source()?;
         // Preserve the strict path's accepted-prefix semantics even if the
@@ -390,6 +438,47 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             }
             cursor = next;
         }
+        self.output_cursor += 1;
+        self.observe(pressure)
+    }
+
+    fn advance_bandlimited(&mut self) -> Result<f64, RenderError> {
+        if self.gate.is_requested() {
+            return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
+        }
+        let required = self.bandlimited.as_ref().expect("bound source filter")
+            .required_source_intervals()?;
+        while (self.system.accepted_steps() as usize) < required {
+            self.advance_source()?;
+            let frame = self.last.as_ref().expect("accepted original resolved interval");
+            for reservoir in &mut self.reservoirs {
+                reservoir.flows.fill(0.0);
+                reservoir.accumulate(&frame.reservoir_flows, 1.0)?;
+            }
+            if self.receiver.is_some() {
+                if frame.terminals.len() != self.terminal_flows.len() || frame.terminals.is_empty() {
+                    return Err(sizing("bandlimited DG microphone requires every original terminal flow"));
+                }
+                for (flow, terminal) in self.terminal_flows.iter_mut().zip(&frame.terminals) {
+                    *flow = terminal.outward_flow_m3_s;
+                }
+            }
+            self.bandlimited.as_mut().expect("bound source filter").push_source(
+                frame.inlet_pressure_pa, &self.terminal_flows,
+                self.reservoirs.iter().map(|observer| observer.flows.as_slice()),
+            )?;
+        }
+        let values = self.bandlimited.as_mut().expect("bound source filter").render_next()?;
+        let pressure = values[0];
+        let mut next = 1 + self.terminal_flows.len();
+        self.terminal_flows.copy_from_slice(&values[1..next]);
+        for reservoir in &mut self.reservoirs {
+            let end = next + reservoir.flows.len();
+            reservoir.flows.copy_from_slice(&values[next..end]);
+            next = end;
+        }
+        // As on the original projected path, a subsequent receiver failure
+        // retains this accepted observation interval and poisons continuation.
         self.output_cursor += 1;
         self.observe(pressure)
     }

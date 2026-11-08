@@ -4,6 +4,8 @@ use crate::nsf_dg::{NsfDgDrive, NsfFiniteReservoirInventory, NsfFiniteReservoirS
 use fs_lbm::nsf3::NsfGasMedium;
 use fs_material::gas_species::input::ThermochemicalPhase;
 
+mod bandlimited;
+
 #[path = "../../../../render/schedule/reed/field_input/tests/support.rs"]
 mod support;
 

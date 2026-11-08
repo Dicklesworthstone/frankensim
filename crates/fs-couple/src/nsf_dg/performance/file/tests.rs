@@ -23,6 +23,7 @@ mod flue_geometry;
 mod geometry;
 mod aperture;
 mod sgs;
+mod bandlimited;
 
 #[path = "../../../render/schedule/reed/field_input/tests/support.rs"]
 mod support;

@@ -2,6 +2,7 @@
 use super::performance::NsfDgPerformance;
 use super::*;
 mod pressure;
+mod bandlimited;
 mod patch;
 mod upstream;
 mod thermoviscous;

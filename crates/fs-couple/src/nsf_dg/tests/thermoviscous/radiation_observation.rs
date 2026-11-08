@@ -6,6 +6,8 @@ use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits};
 use crate::render::RenderError;
 
+mod bandlimited;
+
 /// 0.05 m is the nearest height the shared Rayleigh receiver admits
 /// (`BaffledPressure::from_loaded`). It is also at least one output sample of
 /// travel from every tile at the 8 kHz clock floor: 0.05 m * 8000 / c = 1.15
