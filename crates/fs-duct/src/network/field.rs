@@ -43,9 +43,12 @@ pub enum NetworkFieldSection {
     /// distinct inlet/outlet states at the same axial coordinate.
     Outlet { segment: usize },
     /// A point within a cylindrical segment, including either endpoint.
-    /// Cones/profiles retain their native endpoint observation until their
-    /// own spatial propagator exports a resolved interior basis.
     Cylinder { segment: usize, offset_m: f64 },
+    /// A point within an authored cone, including either endpoint. Lossy
+    /// cones retain their original spherical-wave subdivision and each
+    /// slice's original midpoint material: a probe does not refine the solve.
+    /// Smooth Profile segments still expose their native endpoints only.
+    Cone { segment: usize, offset_m: f64 },
 }
 
 /// Stable physical edge identity and unambiguous section.
@@ -457,6 +460,85 @@ impl PreparedNetworkFields {
                             )
                         }
                     }
+                    NetworkFieldSection::Cone { segment, offset_m } => {
+                        let Segment::Cone {
+                            inlet_radius,
+                            outlet_radius,
+                            length,
+                        } = edge.duct.segments[segment]
+                        else {
+                            unreachable!("cone probe admitted")
+                        };
+                        let before = boundaries[segment];
+                        let after = boundaries[segment + 1];
+                        if offset_m == 0.0 {
+                            (prefix[before], suffix[before])
+                        } else if offset_m == length {
+                            (prefix[after], suffix[after])
+                        } else {
+                            // Both native gas and material chain owners use
+                            // uniform axial spherical slices. Retain the actual
+                            // count, including explicit material refinement.
+                            let count = after - before;
+                            let dx = length / count as f64;
+                            // Locate against physical boundaries rather than
+                            // rounding x/dx to the wrong side of a loss slice.
+                            let (mut lo, mut hi) = (0, count);
+                            while lo + 1 < hi {
+                                let mid = lo + (hi - lo) / 2;
+                                if length * (mid as f64 / count as f64) <= offset_m {
+                                    lo = mid;
+                                } else {
+                                    hi = mid;
+                                }
+                            }
+                            let slice = lo;
+                            let x0 = length * (slice as f64 / count as f64);
+                            let x1 = length * ((slice + 1) as f64 / count as f64);
+                            // Native boundaries use exact cached cuts and
+                            // never introduce a zero-length local wave.
+                            if offset_m == x0 {
+                                (prefix[before + slice], suffix[before + slice])
+                            } else if offset_m == x1 {
+                                (prefix[before + slice + 1], suffix[before + slice + 1])
+                            } else {
+                                let ra = inlet_radius
+                                    + (outlet_radius - inlet_radius)
+                                        * (slice as f64 / count as f64);
+                                let rb = inlet_radius
+                                    + (outlet_radius - inlet_radius)
+                                        * ((slice + 1) as f64 / count as f64);
+                                // Split the ORIGINAL block. Resampling loss at
+                                // new midpoints changes its operator and makes
+                                // fields inconsistent with the loaded solve.
+                                let local = (offset_m - x0) / (x1 - x0);
+                                let radius = ra + (rb - ra) * local;
+                                let wave = wave_at(edge, f64::midpoint(ra, rb))?;
+                                let a = TwoPort::from_wave(
+                                    &Segment::Cone {
+                                        inlet_radius: ra,
+                                        outlet_radius: radius,
+                                        length: dx * local,
+                                    },
+                                    &wave,
+                                    reference,
+                                )?;
+                                let b = TwoPort::from_wave(
+                                    &Segment::Cone {
+                                        inlet_radius: radius,
+                                        outlet_radius: rb,
+                                        length: dx * (1.0 - local),
+                                    },
+                                    &wave,
+                                    reference,
+                                )?;
+                                (
+                                    prefix[before + slice].star(a, MAX_NETWORK_CONDITION)?.0,
+                                    b.star(suffix[before + slice + 1], MAX_NETWORK_CONDITION)?.0,
+                                )
+                            }
+                        }
+                    }
                 };
                 let weights = section_weights(left, right)?;
                 for column in 0..count {
@@ -685,6 +767,27 @@ fn resolve_location(
             if !offset_m.is_finite() || offset_m < 0.0 || offset_m > length {
                 return Err(bad("cylindrical field probe lies outside its segment"));
             }
+            (segment, offset_m, radius)
+        }
+        NetworkFieldSection::Cone { segment, offset_m } => {
+            let Some(&Segment::Cone {
+                inlet_radius,
+                outlet_radius,
+                length,
+            }) = edge.duct.segments.get(segment)
+            else {
+                return Err(bad("conical field probe requires an authored cone"));
+            };
+            if !offset_m.is_finite() || offset_m < 0.0 || offset_m > length {
+                return Err(bad("conical field probe lies outside its segment"));
+            }
+            let radius = if offset_m == 0.0 {
+                inlet_radius
+            } else if offset_m == length {
+                outlet_radius
+            } else {
+                inlet_radius + (outlet_radius - inlet_radius) * (offset_m / length)
+            };
             (segment, offset_m, radius)
         }
     };

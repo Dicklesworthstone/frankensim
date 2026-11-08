@@ -3506,10 +3506,13 @@ It does not require an open-circuit network impedance to exist. The same
 prepared result exposes its exterior `PreparedNetworkSources` work owner.
 
 Probes select original segment inlet/outlet planes or arbitrary stations
-inside an authored cylinder. Compact zero-length holes retain two distinct
-states at one axial coordinate. Cone/profile endpoints use their original
-propagation blocks and resolution; interior cone/profile stations are not
-inferred. Radius-step sides retain their own areas. Returned volume flow is
+inside an authored cylinder or cone. Conical stations split only the containing
+original spherical-wave block, retaining its original midpoint constitutive
+coefficients and gas or explicit material slice resolution. Adding probes does
+not refine propagation or resample loss. Native slice boundaries and segment
+endpoints reuse their exact cached cuts. Compact zero-length holes retain two
+distinct states at one axial coordinate; smooth profiles expose their original
+endpoints only. Radius-step sides retain their own areas. Returned volume flow is
 positive along the edge's from-to orientation, while particle velocity is
 the section mean U/A, not a radial viscothermal velocity profile.
 
@@ -3550,6 +3553,9 @@ waves with complex viscothermal impedance, the loaded exact half-wave case,
 complementary standing-wave pressure/flow nodes, finite-window real-signal
 integration with four proper latent phases, opaque two-sided boundary layers,
 compact-hole flow removal, graph/source reindexing, budgets and cancellation.
+Conical regressions cover independent spherical-wave interference and pressure
+nulls, widening/shrinking lossy tapers, explicit material slice counts, the
+uniform-cylinder limit, adjacent slice-boundary probes and geometry refusals.
 They are synthetic numerical/model checks, not experimental duct validation.
 
 ### Native broadband interior-field interference

@@ -70,6 +70,440 @@ fn analytic(k: C64, z: C64, length: f64, x: f64, forward: C64, backward: C64) ->
     [a + b, (a - b) / z]
 }
 
+fn cone_net(r0: f64, r1: f64, length: f64) -> DuctNetwork {
+    let mut net = cylinder_net(length);
+    net.edges[0].duct.segments[0] = Segment::Cone {
+        inlet_radius: r0,
+        outlet_radius: r1,
+        length,
+    };
+    net
+}
+
+fn cone_points(length: f64, fractions: &[f64]) -> Vec<NetworkFieldProbe> {
+    cone_points_at(fractions.iter().map(|fraction| length * fraction))
+}
+
+fn cone_points_at(offsets: impl IntoIterator<Item = f64>) -> Vec<NetworkFieldProbe> {
+    offsets
+        .into_iter()
+        .map(|offset_m| NetworkFieldProbe {
+            edge_id: "tube".into(),
+            section: NetworkFieldSection::Cone {
+                segment: 0,
+                offset_m,
+            },
+        })
+        .collect()
+}
+
+fn assert_conical_field(
+    sample: &NetworkFieldSample,
+    expected: [C64; 2],
+    area: f64,
+    specific_impedance: f64,
+) {
+    let [p, u] = expected;
+    // Scale with BOTH physical fields, so a pressure or velocity null is
+    // checked against the nonzero wave field rather than a large floor.
+    let pressure_scale = p.abs().max(u.abs() * specific_impedance / area);
+    let flow_scale = pressure_scale * area / specific_impedance;
+    for (actual, expected, scale) in [
+        (sample.pressure_pa, p, pressure_scale),
+        (sample.volume_flow_m3_s, u, flow_scale),
+        (
+            sample.particle_velocity_m_s,
+            u.scale(1.0 / area),
+            flow_scale / area,
+        ),
+    ] {
+        assert!(
+            (actual - expected).abs() <= 4e-11 * scale,
+            "{actual:?} != {expected:?}; scale {scale:e}"
+        );
+    }
+    let power = 0.5 * (p * u.conj()).re;
+    assert!((sample.mean_power_w - power).abs() <= 4e-11 * pressure_scale * flow_scale);
+}
+
+// Independent solution of (r p)'' + k² (r p) = 0 and
+// U = A p'/(i k Z_specific). The curvature term is essential:
+// pressure and flow nodes do not have the cylinder's phase relationship.
+fn cone_analytic(
+    k: C64,
+    z: C64,
+    radii: [f64; 2],
+    length: f64,
+    x: f64,
+    a: C64,
+    b: C64,
+) -> [C64; 2] {
+    let [r0, r1] = radii;
+    let radius = r0 + (r1 - r0) * (x / length);
+    let forward = a * phase(k, x).scale(r0 / radius);
+    let backward = b * phase(k, length - x).scale(r1 / radius);
+    let p = forward + backward;
+    let curvature = C64::new(0.0, (r1 - r0) / length / radius) / k;
+    let u = (forward - backward + p * curvature)
+        .scale(core::f64::consts::PI * radius * radius)
+        / z;
+    [p, u]
+}
+
+#[test]
+fn conical_interference_recovers_spherical_fields_and_pressure_nulls() {
+    let gas = gas();
+    let length = 0.37;
+    let omega = 2971.0;
+    let k = C64::from_re(omega / gas.sound_speed);
+    let z = C64::from_re(gas.density * gas.sound_speed);
+    let node = length * 0.41;
+    let a = C64::new(1.4, -0.3);
+    for radii in [[0.006, 0.015], [0.015, 0.006]] {
+        let b = -a * phase(k, 2.0 * node - length).scale(radii[0] / radii[1]);
+        let field = |x| cone_analytic(k, z, radii, length, x, a, b);
+        let sources = [
+            pressure_source("right", field(length)[0]),
+            pressure_source("left", field(0.0)[0]),
+        ];
+        let net = cone_net(radii[0], radii[1], length);
+        let points = cone_points(length, &[0.0, 0.13, 0.41, 0.63, 0.91, 1.0]);
+        let owner = PreparedNetworkFields::new(
+            &net,
+            &gas,
+            &request(omega, LossModel::Lossless, &sources, &[], &points),
+            || false,
+        )
+        .unwrap();
+        let actual = owner
+            .sample(owner.port_response().default_excitations(), || false)
+            .unwrap();
+        for (sample, location) in actual.iter().zip(owner.locations()) {
+            assert_conical_field(
+                sample,
+                field(location.axial_position_m),
+                location.area_m2,
+                z.abs(),
+            );
+            assert!(sample.mean_power_w.abs() < 2e-15);
+        }
+        assert!(actual[2].pressure_pa.abs() < 2e-13);
+        assert!(actual[2].volume_flow_m3_s.abs() > 1e-7);
+        // Endpoints retain exactly the original native cut and area arithmetic.
+        let endpoints = [
+            NetworkFieldProbe {
+                edge_id: "tube".into(),
+                section: NetworkFieldSection::Inlet { segment: 0 },
+            },
+            NetworkFieldProbe {
+                edge_id: "tube".into(),
+                section: NetworkFieldSection::Outlet { segment: 0 },
+            },
+        ];
+        let endpoint_owner = PreparedNetworkFields::new(
+            &net,
+            &gas,
+            &request(omega, LossModel::Lossless, &sources, &[], &endpoints),
+            || false,
+        )
+        .unwrap();
+        let endpoint_values = endpoint_owner
+            .sample(endpoint_owner.port_response().default_excitations(), || false)
+            .unwrap();
+        assert_eq!([actual[0], actual[5]].as_slice(), endpoint_values.as_slice());
+    }
+}
+
+// Back-propagate a finite state with the direct spherical ODE solution.
+// Production reconstruction instead uses decaying scattering from both ends.
+fn cone_backwards(
+    wave: &crate::SegmentWave,
+    radii: [f64; 2],
+    length: f64,
+    x: f64,
+    end: [C64; 2],
+) -> [C64; 2] {
+    let [r0, r1] = radii;
+    let area = core::f64::consts::PI * r1 * r1;
+    let curvature = C64::new(0.0, (r1 - r0) / length / r1) / wave.wavenumber;
+    let difference = end[1] * wave.specific_impedance.scale(1.0 / area) - end[0] * curvature;
+    let forward = (end[0] + difference).scale(0.5);
+    let backward = (end[0] - difference).scale(0.5);
+    let a = forward * phase(wave.wavenumber, -length).scale(r1 / r0);
+    cone_analytic(
+        wave.wavenumber,
+        wave.specific_impedance,
+        radii,
+        length,
+        x,
+        a,
+        backward,
+    )
+}
+
+#[test]
+fn lossy_conical_interference_keeps_original_midpoint_slices() {
+    let gas = gas();
+    let (length, omega) = (0.18, 1700.0);
+    for radii in [[0.001, 0.004], [0.004, 0.001]] {
+        let count = crate::cone_loss_slices(radii[0], radii[1]).unwrap();
+        let dx = length / count as f64;
+        let radius = |i| radii[0] + (radii[1] - radii[0]) * (i as f64 / count as f64);
+        let waves: Vec<_> = (0..count)
+            .map(|i| {
+                crate::segment_wave(
+                    &gas,
+                    f64::midpoint(radius(i), radius(i + 1)),
+                    omega,
+                    LossModel::Bessel,
+                )
+                .unwrap()
+            })
+            .collect();
+        let mut states = vec![[C64::ZERO; 2]; count + 1];
+        states[count] = [C64::new(0.8, -0.2), C64::new(4e-9, 3e-9)];
+        for i in (0..count).rev() {
+            states[i] = cone_backwards(
+                &waves[i],
+                [radius(i), radius(i + 1)],
+                dx,
+                0.0,
+                states[i + 1],
+            );
+        }
+        let mut offsets = Vec::new();
+        let mut expected = Vec::new();
+        for i in 0..count {
+            let x0 = length * (i as f64 / count as f64);
+            let x1 = length * ((i + 1) as f64 / count as f64);
+            let mut local_points = vec![x0, x0 + 0.37 * (x1 - x0), x1.next_down()];
+            if i > 0 {
+                local_points.push(x0.next_up());
+            }
+            for x in local_points {
+                offsets.push(x);
+                expected.push(cone_backwards(
+                    &waves[i],
+                    [radius(i), radius(i + 1)],
+                    dx,
+                    dx * ((x - x0) / (x1 - x0)),
+                    states[i + 1],
+                ));
+            }
+        }
+        offsets.push(length);
+        expected.push(states[count]);
+        let points = cone_points_at(offsets);
+        let sources = [
+            pressure_source("left", states[0][0]),
+            pressure_source("right", states[count][0]),
+        ];
+        let net = cone_net(radii[0], radii[1], length);
+        let owner = PreparedNetworkFields::new(
+            &net,
+            &gas,
+            &request(omega, LossModel::Bessel, &sources, &[], &points),
+            || false,
+        )
+        .unwrap();
+        let actual = owner
+            .sample(owner.port_response().default_excitations(), || false)
+            .unwrap();
+        for ((sample, location), field) in actual.iter().zip(owner.locations()).zip(expected) {
+            assert_conical_field(
+                sample,
+                field,
+                location.area_m2,
+                gas.density * gas.sound_speed,
+            );
+        }
+    }
+}
+
+#[test]
+fn material_conical_fields_retain_explicit_loss_slice_resolution() {
+    use fs_material::fluid_acoustics::FluidAcousticState;
+    use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
+    use fs_material::fluid_transport::FluidTransportState;
+
+    let material = ThermoviscousFluidState::try_new(
+        FluidAcousticState::try_new(950.0, 1300.0).unwrap(),
+        FluidTransportState::try_new(950.0, 4200.0, 0.6, 0.2).unwrap(),
+        4100.0,
+    )
+    .unwrap();
+    let (length, omega) = (0.19, 1700.0);
+    for radii in [[0.001, 0.004], [0.004, 0.001]] {
+        for count in [1, 4, 11] {
+            let dx = length / count as f64;
+            let radius = |i| radii[0] + (radii[1] - radii[0]) * (i as f64 / count as f64);
+            let waves: Vec<_> = (0..count)
+                .map(|i| {
+                    crate::fluid::segment_wave_with_loss(
+                        &material,
+                        f64::midpoint(radius(i), radius(i + 1)),
+                        omega,
+                        LossModel::Bessel,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let mut states = vec![[C64::ZERO; 2]; count + 1];
+            states[count] = [C64::new(0.8, -0.2), C64::new(4e-12, 3e-12)];
+            for i in (0..count).rev() {
+                states[i] = cone_backwards(
+                    &waves[i],
+                    [radius(i), radius(i + 1)],
+                    dx,
+                    0.0,
+                    states[i + 1],
+                );
+            }
+            let fractions: Vec<_> = (0..count)
+                .flat_map(|i| [i as f64 / count as f64, (i as f64 + 0.37) / count as f64])
+                .chain(core::iter::once(1.0))
+                .collect();
+            let points = cone_points(length, &fractions);
+            let sources = [
+                pressure_source("left", states[0][0]),
+                pressure_source("right", states[count][0]),
+            ];
+            let net = cone_net(radii[0], radii[1], length);
+            let owner = PreparedNetworkFields::from_material_with_loss(
+                &net,
+                &material,
+                crate::ConeSlices::Fixed(count),
+                &request(omega, LossModel::Bessel, &sources, &[], &points),
+                || false,
+            )
+            .unwrap();
+            let actual = owner
+                .sample(owner.port_response().default_excitations(), || false)
+                .unwrap();
+            for i in 0..count {
+                for (j, local) in [(2 * i, 0.0), (2 * i + 1, 0.37)] {
+                    let field = cone_backwards(
+                        &waves[i],
+                        [radius(i), radius(i + 1)],
+                        dx,
+                        local * dx,
+                        states[i + 1],
+                    );
+                    let location = &owner.locations()[j];
+                    assert_eq!(location.density_kg_m3, 950.0);
+                    assert_eq!(location.sound_speed_m_s, 1300.0);
+                    assert_conical_field(&actual[j], field, location.area_m2, 950.0 * 1300.0);
+                }
+            }
+            assert_conical_field(
+                actual.last().unwrap(),
+                states[count],
+                owner.locations().last().unwrap().area_m2,
+                950.0 * 1300.0,
+            );
+            assert!(actual[0].mean_power_w > actual.last().unwrap().mean_power_w);
+        }
+    }
+}
+
+#[test]
+fn conical_uniform_limit_matches_original_cylinder_at_slice_neighbors() {
+    let gas = gas();
+    let length = 0.37_f64;
+    let cut = length * 0.5;
+    let offsets = [
+        0.0,
+        length * f64::EPSILON,
+        0.13 * length,
+        cut.next_down(),
+        cut,
+        cut.next_up(),
+        0.81 * length,
+        length.next_down(),
+        length,
+    ];
+    let conical_points = cone_points_at(offsets);
+    let cylindrical_points: Vec<_> = offsets
+        .into_iter()
+        .map(|offset_m| NetworkFieldProbe {
+            edge_id: "tube".into(),
+            section: NetworkFieldSection::Cylinder {
+                segment: 0,
+                offset_m,
+            },
+        })
+        .collect();
+    let sources = [
+        pressure_source("left", C64::new(1.1, -0.2)),
+        pressure_source("right", C64::new(-0.3, 0.7)),
+    ];
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        let conical = PreparedNetworkFields::new(
+            &cone_net(0.008, 0.008, length),
+            &gas,
+            &request(1700.0, loss, &sources, &[], &conical_points),
+            || false,
+        )
+        .unwrap();
+        let cylindrical = PreparedNetworkFields::new(
+            &cylinder_net(length),
+            &gas,
+            &request(1700.0, loss, &sources, &[], &cylindrical_points),
+            || false,
+        )
+        .unwrap();
+        // Each source column and their coherent sum must agree; one drive
+        // alone can hide a source-dependent reconstruction error.
+        for excitation in [
+            [C64::ONE, C64::ZERO],
+            [C64::ZERO, C64::ONE],
+            [C64::new(1.1, -0.2), C64::new(-0.3, 0.7)],
+        ] {
+            let actual = conical.sample(&excitation, || false).unwrap();
+            let expected = cylindrical.sample(&excitation, || false).unwrap();
+            for ((sample, other), location) in actual.iter().zip(expected).zip(conical.locations()) {
+                assert_conical_field(
+                    sample,
+                    [other.pressure_pa, other.volume_flow_m3_s],
+                    location.area_m2,
+                    gas.density * gas.sound_speed,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn conical_fields_refuse_offsets_and_mismatched_authored_geometry() {
+    let gas = gas();
+    let length = 0.37_f64;
+    let net = cone_net(0.006, 0.015, length);
+    let sources = [
+        pressure_source("left", C64::ONE),
+        pressure_source("right", C64::ZERO),
+    ];
+    for offset in [-f64::EPSILON, length.next_up(), f64::NAN, f64::INFINITY] {
+        let points = cone_points_at([offset]);
+        let query = request(1700.0, LossModel::Bessel, &sources, &[], &points);
+        assert!(PreparedNetworkFields::new(&net, &gas, &query, || false).is_err());
+    }
+    let points = cone_points_at([length * 0.5]);
+    let query = request(1700.0, LossModel::Lossless, &sources, &[], &points);
+    assert!(PreparedNetworkFields::new(&cylinder_net(length), &gas, &query, || false).is_err());
+    let points = [NetworkFieldProbe {
+        edge_id: "tube".into(),
+        section: NetworkFieldSection::Cone {
+            segment: 1,
+            offset_m: 0.0,
+        },
+    }];
+    let query = request(1700.0, LossModel::Lossless, &sources, &[], &points);
+    assert!(PreparedNetworkFields::new(&net, &gas, &query, || false).is_err());
+    let points = probes(length, &[0.5]);
+    let query = request(1700.0, LossModel::Lossless, &sources, &[], &points);
+    assert!(PreparedNetworkFields::new(&net, &gas, &query, || false).is_err());
+}
+
 // G1: prescribed endpoint pressures are manufactured from independently
 // evaluated counterpropagating waves, including lossy complex impedance.
 #[test]
