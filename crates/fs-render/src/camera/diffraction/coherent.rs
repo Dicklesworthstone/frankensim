@@ -33,6 +33,7 @@ mod exposure;
 mod interferometer;
 mod pixel;
 mod polarization;
+pub use interferometer::CoherentInterferometerPixelPower;
 pub use interferometer::{CoherentDiffractionInterferometer, CoherentInterferometerSample};
 pub use polarization::{
     PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,

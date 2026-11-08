@@ -4255,6 +4255,28 @@ leaves the preparation reusable. Focused regressions cover path-length
 fringes, output closure, weak dark ports, partial coherence, complex defocus
 with sensor chirp, and passivity/sensor/work/cancellation admission.
 
+### Finite relay pixels of the two-arm receiver
+
+`PreparedCoherentDiffraction::integrate_interferometer_pixel` collects both
+ports over one rectangular relay-offset footprint, translated about each
+receiver coordinate. Both relays use the same tangent-area measure and unit
+magnification; full translated corners retain the original paraxial admission.
+The original positive spatial rule integrates six DD moments: both arm powers,
+both port powers and complex mutual coherence. Fields interfere before these
+moments, and independent covariance banks add afterward. Collected values are
+watts, not point densities; the integrated complex coherence determines the
+visibility of an achromatic phase scan across the complete detector.
+
+Resolution includes the original pupil intensity bandwidth plus the relative
+sensor-chirp gradient in each axis. This prevents a large arm separation or
+sensor distance from hiding unresolved spatial fringes. Active-arm pupil work
+and all quadrature samples are admitted before field evaluation. Repeated
+queries allocate nothing, preserve weak dark-port signals and leave preparation
+reusable after refusal/cancellation. Refinement assesses quadrature convergence,
+not an optical error certificate. Independent square-pupil/Simpson references,
+spatial contrast loss, partition/factor additivity, work refusal and finite
+large-power cases supplement the original point-interferometer regressions.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored

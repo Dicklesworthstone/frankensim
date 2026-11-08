@@ -14,6 +14,9 @@ use super::{
 };
 use fs_math::{c64::C64, det};
 
+mod pixel;
+pub use pixel::CoherentInterferometerPixelPower;
+
 /// Passive sampling of two positions on one physical sensor plane.
 ///
 /// The arm powers are fractions of the original clear-pupil source power.
@@ -65,6 +68,69 @@ impl CoherentDiffractionInterferometer {
             relative_phase_rad,
         })
     }
+
+    pub(super) const fn coordinates(self) -> [[f64; 2]; 2] {
+        self.coordinates
+    }
+
+    pub(super) const fn sensor_distance_m(self) -> f64 {
+        self.sensor_distance_m
+    }
+
+    pub(super) const fn optical_path_difference_m(self) -> f64 {
+        self.optical_path_difference_m
+    }
+
+    pub(super) const fn relative_phase_rad(self) -> f64 {
+        self.relative_phase_rad
+    }
+
+    pub(super) fn arm_amplitudes(self) -> [Dd; 2] {
+        self.arm_power_fractions
+            .map(|power| Dd::from_f64(power).sqrt())
+    }
+
+    pub(super) fn pupil_evaluations(
+        self,
+        waves: usize,
+        maximum: usize,
+    ) -> Result<usize, CoherentDiffractionError> {
+        let active = self
+            .arm_power_fractions
+            .iter()
+            .filter(|&&p| p != 0.0)
+            .count();
+        let evaluations = waves
+            .checked_mul(active)
+            .ok_or(CoherentDiffractionError::Limit {
+                quantity: "interferometer pupil evaluations",
+                requested: usize::MAX,
+                maximum,
+            })?;
+        admit_count("interferometer pupil evaluations", evaluations, maximum)?;
+        Ok(evaluations)
+    }
+
+    // Monochromatic pupil fields omit the common sensor chirp. Restore its
+    // relative value at the two actual positions before recombination.
+    pub(super) fn relative_rotation(
+        self,
+        wavelength_nm: f64,
+        medium_wavelength_nm: f64,
+        coordinates: [[f64; 2]; 2],
+    ) -> Result<[Dd; 2], CoherentDiffractionError> {
+        let radii = coordinates.map(|at| {
+            Dd::from_f64(at[0]) * Dd::from_f64(at[0]) + Dd::from_f64(at[1]) * Dd::from_f64(at[1])
+        });
+        rotation([
+            length_phase(
+                Dd::from_f64(self.sensor_distance_m) * (radii[1] - radii[0]) * Dd::from_f64(0.5),
+                medium_wavelength_nm,
+            )?,
+            length_phase(Dd::from_f64(self.optical_path_difference_m), wavelength_nm)?,
+            Dd::from_f64(self.relative_phase_rad),
+        ])
+    }
 }
 
 /// Ensemble powers per tangent-coordinate area at a two-arm receiver.
@@ -107,63 +173,55 @@ impl PreparedCoherentDiffraction<'_, '_> {
     ) -> Result<CoherentInterferometerSample, CoherentDiffractionError> {
         poll(&mut cancelled)?;
         admit_sensor(self.camera, receiver.sensor_distance_m)?;
-        let active = receiver
-            .arm_power_fractions
-            .iter()
-            .filter(|&&p| p != 0.0)
-            .count();
-        let evaluations =
-            self.waves
-                .checked_mul(active)
-                .ok_or(CoherentDiffractionError::Limit {
-                    quantity: "interferometer pupil evaluations",
-                    requested: usize::MAX,
-                    maximum: maximum_pupil_evaluations,
-                })?;
-        admit_count(
-            "interferometer pupil evaluations",
-            evaluations,
-            maximum_pupil_evaluations,
-        )?;
-        let amplitudes = receiver.arm_power_fractions.map(|p| Dd::from_f64(p).sqrt());
+        let evaluations = receiver.pupil_evaluations(self.waves, maximum_pupil_evaluations)?;
+        let amplitudes = receiver.arm_amplitudes();
         // Query the original medium wavelength, not a group-delay index.
         let medium_wavelength_nm = self.camera.pupil_wavelength_nm(self.wavelength_nm)?;
-        let radii = receiver.coordinates.map(|at| {
-            Dd::from_f64(at[0]) * Dd::from_f64(at[0]) + Dd::from_f64(at[1]) * Dd::from_f64(at[1])
-        });
-        // Keep independently authored phases separate until each has been
-        // reduced; a large OPD must not erase a small physical phase offset.
-        let phases = [
-            length_phase(
-                Dd::from_f64(receiver.sensor_distance_m)
-                    * (radii[1] - radii[0])
-                    * Dd::from_f64(0.5),
-                medium_wavelength_nm,
-            )?,
-            length_phase(
-                Dd::from_f64(receiver.optical_path_difference_m),
-                self.wavelength_nm,
-            )?,
-            Dd::from_f64(receiver.relative_phase_rad),
-        ];
-        let mut rotation = [Dd::ONE, Dd::ZERO];
-        for phase in phases {
-            rounded(phase)?;
-            let (sine, cosine) = det::sin_cos_dd(phase);
-            rotation = mul(rotation, [cosine, sine]);
-        }
+        let rotation = receiver.relative_rotation(
+            self.wavelength_nm,
+            medium_wavelength_nm,
+            receiver.coordinates,
+        )?;
+        let moments = self.interferometer_moments(
+            receiver.coordinates,
+            amplitudes,
+            rotation,
+            &mut cancelled,
+        )?;
+        let visibility = visibility([moments[0], moments[1]], [moments[4], moments[5]])?;
+        let result = CoherentInterferometerSample {
+            arm_power_density_w: [rounded(moments[0])?, rounded(moments[1])?],
+            output_power_density_w: [rounded(moments[2])?, rounded(moments[3])?],
+            mutual_coherence_density_w: C64::new(rounded(moments[4])?, rounded(moments[5])?),
+            fringe_visibility: visibility,
+            pupil_evaluations: evaluations,
+        };
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    // Preserve these six DD moments through finite detector integration.
+    // Rounding a point sample's powers first would lose weak output signals.
+    fn interferometer_moments(
+        &self,
+        coordinates: [[f64; 2]; 2],
+        amplitudes: [Dd; 2],
+        rotation: [Dd; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[Dd; 6], CoherentDiffractionError> {
         let mut arms = [Dd::ZERO; 2];
         let mut outputs = [Dd::ZERO; 2];
         let mut mutual = [Dd::ZERO; 2];
+        let combiner_amplitude = Dd::from_f64(0.5).sqrt();
         for bank in core::iter::once(self.illumination.mean)
             .chain(self.illumination.factors.iter().map(|factor| factor.waves))
         {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let mut fields = [[Dd::ZERO; 2]; 2];
             for arm in 0..2 {
-                if receiver.arm_power_fractions[arm] != 0.0 {
+                if amplitudes[arm] != Dd::ZERO {
                     fields[arm] = self
-                        .field(bank, receiver.coordinates[arm], &mut cancelled)?
+                        .field(bank, coordinates[arm], cancelled)?
                         .map(|value| value * amplitudes[arm]);
                 }
             }
@@ -176,31 +234,15 @@ impl PreparedCoherentDiffraction<'_, '_> {
                 mutual[axis] = mutual[axis] + cross[axis];
             }
             for (port, sign) in [Dd::ONE, -Dd::ONE].into_iter().enumerate() {
-                let field = std::array::from_fn(|axis| fields[0][axis] + sign * fields[1][axis]);
-                outputs[port] = outputs[port] + square(field)? * Dd::from_f64(0.5);
+                let field = std::array::from_fn(|axis| {
+                    (fields[0][axis] + sign * fields[1][axis]) * combiner_amplitude
+                });
+                outputs[port] = outputs[port] + square(field)?;
             }
         }
-        let total = arms[0] + arms[1];
-        let visibility = if total == Dd::ZERO {
-            0.0
-        } else {
-            // Normalize before squaring to avoid overflow in bright fields.
-            let re = mutual[0] / total;
-            let im = mutual[1] / total;
-            rounded((re * re + im * im).sqrt() * Dd::from_f64(2.0))?
-        };
-        if visibility > 1.0 + 16.0 * f64::EPSILON {
-            return Err(CoherentDiffractionError::Unrepresentable);
-        }
-        let result = CoherentInterferometerSample {
-            arm_power_density_w: [rounded(arms[0])?, rounded(arms[1])?],
-            output_power_density_w: [rounded(outputs[0])?, rounded(outputs[1])?],
-            mutual_coherence_density_w: C64::new(rounded(mutual[0])?, rounded(mutual[1])?),
-            fringe_visibility: visibility.min(1.0),
-            pupil_evaluations: evaluations,
-        };
-        poll(&mut cancelled)?;
-        Ok(result)
+        Ok([
+            arms[0], arms[1], outputs[0], outputs[1], mutual[0], mutual[1],
+        ])
     }
 }
 
@@ -210,7 +252,10 @@ impl PreparedCoherentDiffraction<'_, '_> {
 // The exact integer metre-to-nanometre factor preserves the authored units;
 // reducing both retained components before division also keeps large paths
 // from accumulating the wavelength-division or 2*pi approximation errors.
-fn length_phase(length_m: Dd, wavelength_nm: f64) -> Result<Dd, CoherentDiffractionError> {
+pub(super) fn length_phase(
+    length_m: Dd,
+    wavelength_nm: f64,
+) -> Result<Dd, CoherentDiffractionError> {
     let length_nm = length_m * Dd::from_f64(1e9);
     rounded(length_nm)?;
     let remainder_nm = Dd::from_pair(length_nm.hi % wavelength_nm, length_nm.lo % wavelength_nm);
@@ -220,6 +265,40 @@ fn length_phase(length_m: Dd, wavelength_nm: f64) -> Result<Dd, CoherentDiffract
     Ok(phase)
 }
 
-fn mul(a: [Dd; 2], b: [Dd; 2]) -> [Dd; 2] {
+pub(super) fn mul(a: [Dd; 2], b: [Dd; 2]) -> [Dd; 2] {
     [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
+}
+
+fn rotation(phases: impl IntoIterator<Item = Dd>) -> Result<[Dd; 2], CoherentDiffractionError> {
+    let mut rotation = [Dd::ONE, Dd::ZERO];
+    // Independently authored phases remain separate until each reduction, so
+    // a large optical path cannot swallow a tiny interface phase.
+    for phase in phases {
+        rounded(phase)?;
+        let (sine, cosine) = det::sin_cos_dd(phase);
+        rotation = mul(rotation, [cosine, sine]);
+    }
+    Ok(rotation)
+}
+
+pub(super) fn visibility(arms: [Dd; 2], mutual: [Dd; 2]) -> Result<f64, CoherentDiffractionError> {
+    let scale = if arms[0].lt(arms[1]) {
+        arms[1]
+    } else {
+        arms[0]
+    };
+    let visibility = if scale == Dd::ZERO {
+        0.0
+    } else {
+        // Every returned arm and port can be finite even when the sum of
+        // the two arm powers exceeds binary64. Normalize before adding too.
+        let total = arms[0] / scale + arms[1] / scale;
+        let re = (mutual[0] / scale) / total;
+        let im = (mutual[1] / scale) / total;
+        rounded((re * re + im * im).sqrt() * Dd::from_f64(2.0))?
+    };
+    if visibility > 1.0 + 16.0 * f64::EPSILON {
+        return Err(CoherentDiffractionError::Unrepresentable);
+    }
+    Ok(visibility.min(1.0))
 }

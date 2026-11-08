@@ -1617,3 +1617,6 @@ fn g0_g4_pixel_admission_work_preflight_and_cancelled_reuse() {
 
 #[path = "coherent_diffraction/pupil.rs"]
 mod pupil;
+
+#[path = "coherent_diffraction/interferometer_pixel.rs"]
+mod interferometer_pixel;
