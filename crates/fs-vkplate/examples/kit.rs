@@ -31,6 +31,13 @@
 //! hi-hats, `cusn8` rows on the crash and ride. `--shell-loss cusn8` is CuSn8's printed
 //! thermoelastic damping alone; `cusn8-eta` adds the cast bells' borrowed anelastic factor;
 //! `cusn8-low` is a band end (Kemper's lower conductivity) and never posts.
+//! `--shell-radiation baffled-rayleigh`, on crash and ride with `--shell-loss` only (MB 14574 (d), a
+//! correction), adds the radiation loss of the played shell's own rest modes
+//! (`kit::attach_shell_radiation`): each mode up to the grid's resolution limit takes the baffled
+//! Rayleigh resistance of its shape on the projected plane, from both faces, times the microphone's
+//! own first-order dipole factor; the modes above take none. Without a printed shell loss it is
+//! refused (declared T60 points already lump radiation), and on the drums (their heads have their
+//! own route), the hi-hats (two shells in contact) and `--preset-heads`.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -62,6 +69,10 @@ const HEAD_MODE_DAMPING_FLAG: &str = "--head-mode-damping";
 /// `--shell-loss cusn8|cusn8-eta|cusn8-low` on the crash and ride.
 const SHELL_LOSS_FLAG: &str = "--shell-loss";
 const SHELL_LOSS_ROWS: &str = "b20|b20-low|b20-high|cusn8|cusn8-eta|cusn8-low";
+/// Opt-in (MB 14574 (d), a correction), crash and ride with `--shell-loss` only:
+/// `--shell-radiation baffled-rayleigh`, the played shell's radiation loss on its own rest modes.
+const SHELL_RADIATION_FLAG: &str = "--shell-radiation";
+const SHELL_RADIATION_ROWS: &str = "baffled-rayleigh";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -127,6 +138,13 @@ fn main() {
             std::process::exit(2)
         })
     });
+    let shell_radiation = all.iter().position(|a| a == SHELL_RADIATION_FLAG).map(|i| match all.get(i + 1).map(String::as_str) {
+        Some(SHELL_RADIATION_ROWS) => (),
+        _ => {
+            eprintln!("usage: {SHELL_RADIATION_FLAG} {SHELL_RADIATION_ROWS}");
+            std::process::exit(2)
+        }
+    });
     let wall_loss = all.iter().any(|a| a == CAVITY_WALL_LOSS_FLAG);
     if wall_loss && cavity_modes.is_none() {
         eprintln!("refused: {CAVITY_WALL_LOSS_FLAG} is the loss of the air modes; give {CAVITY_MODES_FLAG} F_MAX_HZ too");
@@ -145,18 +163,18 @@ fn main() {
                 std::process::exit(1)
             })
     });
-    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG || all[i - 1] == SHELL_LOSS_FLAG))
+    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG || all[i - 1] == SHELL_LOSS_FLAG || all[i - 1] == SHELL_RADIATION_FLAG))
         || mic_index.is_some_and(|j| i > j && i <= j + 4);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && *a != SHELL_LOSS_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && *a != SHELL_LOSS_FLAG && *a != SHELL_RADIATION_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss {SHELL_LOSS_ROWS}]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006] [--shell-loss {SHELL_LOSS_ROWS} [--shell-radiation {SHELL_RADIATION_ROWS}]]");
         std::process::exit(2);
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
@@ -165,6 +183,10 @@ fn main() {
     }
     if shell_loss.is_some() && (!matches!(a[1].as_str(), "crash" | "ride" | "hihat-closed" | "hihat-open") || preset_heads) {
         eprintln!("refused: {SHELL_LOSS_FLAG} replaces a cymbal shell's declared T60 pair, offered on crash, ride and the hi-hats without {} only", drum_cards::PRESET_HEADS_FLAG);
+        std::process::exit(1)
+    }
+    if shell_radiation.is_some() && (shell_loss.is_none() || !matches!(a[1].as_str(), "crash" | "ride")) {
+        eprintln!("refused: {SHELL_RADIATION_FLAG} adds the radiation a printed shell loss lacks, offered on crash and ride with {SHELL_LOSS_FLAG} only (declared T60 points already lump radiation; the drums' heads have their own route; the hi-hats are two shells in contact)");
         std::process::exit(1)
     }
     let speed = a.get(3).map(|s| s.parse::<f64>().expect("speed")).filter(|v| *v > 0.0);
@@ -241,6 +263,19 @@ fn main() {
             "ride" => p.notes.extend(ride_line),
             _ => p.notes.extend(hat_lines),
         }
+    }
+    // --shell-radiation: the played shell, rebuilt as the match built it (card route, FS_KIT_GRID applied)
+    let mut radiating: Option<&'static str> = None;
+    if shell_radiation.is_some() {
+        let spec = cy(if played == "crash" { drum_cards::crash(false) } else { drum_cards::ride(false) });
+        match kit::attach_shell_radiation(&mut p, &spec) {
+            Ok(lines) => p.notes.extend(lines),
+            Err(e) => {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            }
+        }
+        radiating = Some(spec.name);
     }
     if let Some((alpha, axis)) = mic_pattern {
         for mic in 0..p.instrument.mics.len() {
@@ -376,6 +411,9 @@ fn main() {
                     port.radiated_j(), port.radiation_energy_j());
             }
         }
+    }
+    if let Some(body) = radiating.and_then(|name| p.instrument.bodies.iter().find(|b| b.name == name)) {
+        eprintln!("shell radiation removed {:.4e} J", body.shape_damping_dissipated_j());
     }
     eprintln!("{dur} s rendered in {wall:.1} s ({:.1}x real time); peak {peak:.3} Pa", wall / dur);
     assert!(peak.is_finite(), "non-finite output");

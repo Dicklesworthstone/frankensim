@@ -18,6 +18,9 @@ layer = "L4"
 
 [dependencies]
 fs-contact = { path = "../fs-contact" }
+# Dense symmetric eigensolver: a shell's rest modes for its radiation loss (MB 14574 (d)) and the
+# offline cymbal clamp-share example (.372).
+fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
@@ -29,8 +32,6 @@ fs-tribo = { path = "../fs-tribo" }
 [dev-dependencies]
 fs-blake3 = { path = "../fs-blake3" }
 fs-evidence = { path = "../fs-evidence" }
-# Dense symmetric eigensolver for the offline cymbal clamp-share example (.372).
-fs-la = { path = "../fs-la" }
 
 [profile.release]
 opt-level = 3

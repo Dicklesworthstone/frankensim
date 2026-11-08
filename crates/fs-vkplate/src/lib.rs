@@ -84,6 +84,9 @@ pub mod shaft;
 /// anelastic loss factor in place of a preset's two declared T60 points.
 pub mod shell_loss;
 
+/// A free shell's radiation loss on its own rest modes (opt-in, MB 14574 (d)): `Body::attach_shell_radiation`.
+mod shell_radiation;
+
 mod contact_island;
 mod contact_response;
 pub use contact_island::{Controls as ContactSolveControls, RefusalSite as ContactRefusalSite, SolveError as ContactSolveError, SolveReport as ContactSolveReport};
@@ -143,6 +146,9 @@ mod flux_tests;
 
 #[cfg(test)]
 mod shape_damping_tests;
+
+#[cfg(test)]
+mod shell_radiation_tests;
 
 /// Four quarter-cell quadrature points, each with three tensor-root rows.
 /// Shared with consumers of `BodyImage::viscous_root`.
@@ -730,7 +736,9 @@ struct ModalLoss {
 /// applied explicitly to the backward velocity like `ModalLoss`. It is kept
 /// low-rank, one vector per shape, not an n x n matrix. The sampled shapes are
 /// not exact grid modes, so C also reaches their neighbours through the overlap;
-/// it is positive semidefinite either way, so it only removes energy.
+/// it is positive semidefinite either way, so it only removes energy. A free
+/// shell's radiation loss (`Body::attach_shell_radiation`) fills the same form
+/// with the shell's own rest modes, which are exact grid modes.
 #[derive(Clone)]
 struct ShapeDamping {
     /// M phi_j for each shape, with phi_j' M phi_j = 1.
@@ -4725,7 +4733,8 @@ impl Instrument {
     /// contacts are also refused: the
     /// exported stepper does not implement their simultaneous solve. These
     /// checks include contacts a scheduled strike may activate later. A head's
-    /// measured shape damping (`Body::attach_shape_damping`) is refused too.
+    /// measured shape damping (`Body::attach_shape_damping`) and a shell's radiation loss
+    /// (`Body::attach_shell_radiation`), which shares its form, are refused too.
     pub fn image(&mut self) -> InstrumentImage {
         assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
         assert!(self.mics.iter().all(|m| m.pressure_fraction == 1.0),
@@ -4737,7 +4746,7 @@ impl Instrument {
         assert!(self.mindlin_contacts.is_empty(),
             "the exported stepper does not implement retained Mindlin contact memory; use Instrument::try_step");
         assert!(self.bodies.iter().all(|b| b.shape_damping.is_none()),
-            "the exported stepper does not implement measured shape damping; use Instrument::step");
+            "the exported stepper does not implement measured shape damping or shell radiation; use Instrument::step");
         assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
             !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
             "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");

@@ -1128,6 +1128,36 @@ fn build_cymbal(c: &CymbalSpec, hits: &[(f64, f64, f64, f64)], gas: GasState, ma
     Ok(Piece { instrument: ins, oversample: os, settle: 0.0, notes })
 }
 
+/// Opt-in (MB 14574 (d), a correction): the cymbal `c`'s shell in `p` takes the radiation loss of its
+/// own rest modes (`Body::attach_shell_radiation`): loaded up to the grid's resolution limit, six nodes
+/// per bending wavelength of a flat plate of the rim's thickness in `c.elastic`, listed up to the
+/// output Nyquist; the dipole radius is the microphone's own (`Mic::unbaffled`, the cymbal's radius),
+/// the gas the instrument's. The clock picked at build is kept and re-admitted with the load at the
+/// same margin, 0.6. Returns the receipt lines.
+pub fn attach_shell_radiation(p: &mut Piece, c: &CymbalSpec) -> Result<Vec<String>, String> {
+    let (e, nu, rho) = c.elastic;
+    let t = edge_thickness(c);
+    let d = e * t.powi(3) / (12.0 * (1.0 - nu * nu));
+    let kb = 2.0 * PI / (crate::radiation::NODES_PER_WAVELENGTH * c.grid);
+    let listed_hz = OUT_RATE / 2.0;
+    let loaded_hz = (kb * kb * (d / (rho * t)).sqrt() / (2.0 * PI)).min(listed_hz);
+    let gas = p.instrument.gas.clone();
+    let body = p.instrument.bodies.iter_mut().find(|b| b.name == c.name)
+        .ok_or_else(|| format!("shell radiation: no body named {:?}", c.name))?;
+    let mut lines = body.attach_shell_radiation(&gas, c.radius, loaded_hz, listed_hz)?;
+    let (lam, who) = p.instrument.admission_rate2();
+    let k = 1.0 / p.instrument.rate;
+    let ratio = k * k * lam / 4.0;
+    if !(ratio <= 0.6) {
+        return Err(format!("shell radiation: the {:.0} kHz clock no longer admits {who} with the load (ratio {ratio:.4} > 0.6)", p.instrument.rate / 1000.0));
+    }
+    lines.insert(1, format!(
+        "shell radiation limits: loaded up to {loaded_hz:.0} Hz, six nodes per bending wavelength on the {:.1} mm grid for a flat plate {:.3} mm thick (the rim) in E {:.0} GPa, nu {nu}, rho {rho:.0} kg/m^3; listed up to the output Nyquist; the {:.0} kHz clock re-admitted with the load at ratio {ratio:.4} <= 0.6",
+        c.grid * 1e3, t * 1e3, e / 1e9, p.instrument.rate / 1000.0
+    ));
+    Ok(lines)
+}
+
 pub fn hihat_spec() -> (CymbalSpec, CymbalSpec) {
     let top = CymbalSpec { name: "hi-hat top 14", radius: 0.1778, bow_thickness: 0.85e-3, bell_thickness: 1.4e-3, bell_radius: 0.055, bow_rise: 0.015, bell_rise: 0.01, grid: 5.5e-3, t60: [(500.0, 8.0), (10000.0, 1.5)], provenance: None, elastic: BRONZE };
     let bottom = CymbalSpec { name: "hi-hat bottom 14", bow_thickness: 1.1e-3, ..top };

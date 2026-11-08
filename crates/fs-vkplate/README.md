@@ -1149,6 +1149,29 @@ relative to the mass.
   alloy's loss.
 - `cusn8-low`: Kemper's 62 W/(m K), the band's long end. It never posts.
 
+Neither part of a printed shell loss contains the power the shell radiates as sound (van Houten's
+bells were measured in vacuum). `--shell-radiation baffled-rayleigh`, on crash and ride with
+`--shell-loss` only (MB 14574 (d), a correction), adds it on the shell's own modes
+(`kit::attach_shell_radiation`, `Body::attach_shell_radiation`, `src/shell_radiation.rs`):
+- the modes are those of K about rest, `Body::rest_stiffness_apply` (bending, felt and the curvature
+  Hessian), solved densely in the grid's four parity sectors; K's asymmetry and the cross-sector
+  coupling are measured on every entry and gated at 1e-12;
+- each mode up to six nodes per bending wavelength at the rim's thickness (about 4.8 kHz on the crash's
+  6 mm grid) takes the one-face baffled Rayleigh resistance of its own shape on the projected plane,
+  R = (omega rho0 / 2 pi) sum_ij phi_i phi_j sin(k r_ij)/r_ij h^4 with the microphone's h^2 weights,
+  from both faces, times the microphone's own dipole factor (omega tau)^2/(1 + (omega tau)^2),
+  tau = 4a/(3 pi c): 2 sigma = 2 |H|^2 R. It is an approximation, named on the page: edge diffraction
+  and the curvature's effect on radiation are not resolved. The receipt prints each mode's eta beside
+  the value without the dipole factor;
+- only each mode's own resistance is kept; the receipt prints the dropped cross resistance to the other
+  loaded modes of its sector (sum_n |R_mn| / R_mm at the mode's frequency). Modes above the limit, up to
+  the output Nyquist, take none, so their decay times are upper bounds;
+- the loss is the low-rank explicit form of the heads' measured shape damping, positive semidefinite,
+  counted in the shell's energy budget and its clock admission; the exported stepper refuses it.
+
+It is refused without a printed shell loss (declared T60 points already lump radiation), on the drums
+(their heads have their own route), on the hi-hats (two shells in contact) and on `--preset-heads`.
+
 `--preset-heads` (anywhere on the command line) renders the recording-fitted presets instead, and
 adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to the
 drums' notes.
