@@ -22,6 +22,9 @@
 
 mod radius;
 
+/// Work-consistent normal/twist exchange along an admitted attached path.
+pub mod path;
+
 use super::{JkrMixedModeError, SourceJkrMixedMode, finite, positive};
 use crate::normal_patch::adhesive::JkrError;
 use core::f64::consts::PI;

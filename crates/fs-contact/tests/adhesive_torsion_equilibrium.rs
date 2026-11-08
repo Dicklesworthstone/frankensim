@@ -3,9 +3,11 @@
 mod common;
 
 use core::f64::consts::PI;
+use fs_contact::normal_patch::adhesive::mixed_mode::torsion::path::JkrTorsionalPathError;
 use fs_contact::normal_patch::adhesive::mixed_mode::torsion::*;
 use fs_contact::normal_patch::adhesive::mixed_mode::{JkrMixedModeEnvelope, SourceJkrMixedMode};
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};
+use fs_exec::CancelGate;
 use fs_tribo::InputAuthority;
 
 fn source() -> SourceJkrMixedMode {
@@ -316,5 +318,324 @@ fn original_envelopes_and_normal_spinodal_remain_effective() {
             zero.torsional_moment_n_m,
             2e-12,
         );
+    }
+}
+
+fn work_close(a: f64, b: f64, scale: f64, tolerance: f64) {
+    assert!(
+        (a - b).abs() <= tolerance * scale,
+        "{a:e} != {b:e}, scale {scale:e}"
+    );
+}
+
+#[test]
+fn g1_torsional_discrete_gradient_preserves_original_work_and_reversal() {
+    let source = source();
+    let gate = CancelGate::new();
+    let (_, delta, phi) = oracle(&source);
+    for (from, to) in [
+        ([0.8 * delta, 0.3 * phi], [1.15 * delta, 0.9 * phi]),
+        ([delta, -0.6 * phi], [delta, 0.8 * phi]),
+        (
+            [
+                0.4 * source.normal_source().minimum_attached_indentation_m(),
+                0.0,
+            ],
+            [delta, 0.0],
+        ),
+    ] {
+        let path = source.torsional_discrete_path(from, to, &gate).unwrap();
+        let reverse = source.torsional_discrete_path(to, from, &gate).unwrap();
+        let scale = [path.before, path.contact]
+            .into_iter()
+            .map(|s| s.normal_elastic_energy_j + s.torsional_elastic_energy_j - s.surface_energy_j)
+            .sum::<f64>();
+        work_close(
+            path.reversible_work_j,
+            path.contact.reversible_energy_j - path.before.reversible_energy_j,
+            scale,
+            3e-14,
+        );
+        work_close(path.work_residual_j, 0.0, scale, 3e-14);
+        work_close(
+            reverse.reversible_work_j,
+            -path.reversible_work_j,
+            scale,
+            2e-15,
+        );
+        assert_eq!(path.mean_effort, reverse.mean_effort);
+        assert!(path.evaluations <= 5);
+        assert_eq!(path.contact.model_identity(), source.identity());
+        assert_eq!(
+            path.contact.normal_state_identity(),
+            source.normal_source().normal_state().identity()
+        );
+        let increment = [to[0] - from[0], to[1] - from[1]];
+        let mut integral = 0.0;
+        for i in 0..=256 {
+            let t = i as f64 / 256.0;
+            let response = source
+                .evaluate_torsion_displacement_controlled(
+                    from[0] + t * increment[0],
+                    from[1] + t * increment[1],
+                )
+                .unwrap();
+            assert!(response.contact_radius_m >= path.minimum_contact_radius_m);
+            assert!(response.contact_radius_m <= path.maximum_contact_radius_m);
+            let weight = if i == 0 || i == 256 {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            integral += weight
+                * (response.normal_force_n * increment[0]
+                    + response.torsional_moment_n_m * increment[1]);
+        }
+        work_close(
+            path.reversible_work_j,
+            integral / (3.0 * 256.0),
+            scale,
+            2e-10,
+        );
+        let mut previous = from;
+        let mut subdivided = 0.0;
+        for t in [0.07, 0.24, 0.63, 1.0] {
+            let next = [from[0] + t * increment[0], from[1] + t * increment[1]];
+            subdivided += source
+                .torsional_discrete_path(previous, next, &gate)
+                .unwrap()
+                .reversible_work_j;
+            previous = next;
+        }
+        work_close(subdivided, path.reversible_work_j, scale, 3e-14);
+        if from[1] == 0.0 && to[1] == 0.0 {
+            assert_eq!(path.mean_effort[1], 0.0);
+            work_close(
+                path.reversible_work_j,
+                source
+                    .normal_source()
+                    .reversible_work_between(from[0], to[0])
+                    .unwrap(),
+                scale,
+                3e-14,
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_torsional_path_tangent_matches_endpoint_differences_and_coincidence() {
+    let source = source();
+    let gate = CancelGate::new();
+    let (_, delta, phi) = oracle(&source);
+    let from = [0.7 * delta, 0.3 * phi];
+    let to = [1.1 * delta, 0.8 * phi];
+    let path = source.torsional_discrete_path(from, to, &gate).unwrap();
+    for (j, step) in [delta * 1e-5, phi * 1e-5].into_iter().enumerate() {
+        let mut plus = to;
+        let mut minus = to;
+        plus[j] += step;
+        minus[j] -= step;
+        let p = source.torsional_discrete_path(from, plus, &gate).unwrap();
+        let m = source.torsional_discrete_path(from, minus, &gate).unwrap();
+        for i in 0..2 {
+            close(
+                (p.mean_effort[i] - m.mean_effort[i]) / (2.0 * step),
+                path.end_tangent[i][j],
+                3e-7,
+            );
+        }
+    }
+    let same = source.torsional_discrete_path(to, to, &gate).unwrap();
+    let original = source
+        .evaluate_torsion_displacement_controlled(to[0], to[1])
+        .unwrap();
+    assert_eq!(
+        same.mean_effort,
+        [original.normal_force_n, original.torsional_moment_n_m]
+    );
+    assert_eq!(
+        same.end_tangent,
+        original
+            .coupled_stiffness
+            .unwrap()
+            .map(|row| row.map(|x| 0.5 * x))
+    );
+    assert_eq!(same.reversible_work_j, 0.0);
+    assert_eq!(same.evaluations, 1);
+}
+
+#[test]
+fn g0_torsional_path_retains_one_ulp_work_and_original_prepared_source() {
+    let source = source();
+    let gate = CancelGate::new();
+    let (_, delta, phi) = oracle(&source);
+    let q = [delta, phi];
+    let prepared = source.prepare_torsional_discrete_path(q, &gate).unwrap();
+    assert!(core::ptr::eq(prepared.source(), &source));
+    let original = source
+        .evaluate_torsion_displacement_controlled(delta, phi)
+        .unwrap();
+    for i in 0..2 {
+        for upper in [false, true] {
+            let mut next = q;
+            next[i] = if upper {
+                next[i].next_up()
+            } else {
+                next[i].next_down()
+            };
+            let trial = prepared.trial(next, &gate).unwrap();
+            let effort = [original.normal_force_n, original.torsional_moment_n_m][i];
+            let expected = effort * (next[i] - q[i]);
+            close(trial.path().reversible_work_j, expected, 3e-12);
+            assert_ne!(trial.path().reversible_work_j, 0.0);
+            assert!(trial.path().reversible_work_j.abs() < 1e-12 * original.surface_energy_j.abs());
+            assert!(trial.path().evaluations <= 4);
+            assert_eq!(trial.endpoint().coordinates(), next);
+            assert_eq!(prepared.coordinates(), q);
+        }
+    }
+    let no_motion = prepared.trial(q, &gate).unwrap();
+    assert_eq!(no_motion.path().evaluations, 0);
+    assert_eq!(no_motion.endpoint(), prepared);
+    assert!(prepared.trial([delta, f64::NAN], &gate).is_err());
+    assert_eq!(prepared.coordinates(), q);
+    gate.request();
+    assert_eq!(
+        prepared.trial(q, &gate),
+        Err(JkrTorsionalPathError::Cancelled)
+    );
+    assert_eq!(prepared.coordinates(), q);
+}
+
+#[test]
+fn g3_torsional_path_bounds_include_radius_growth_during_twist_reversal() {
+    let source = source();
+    let gate = CancelGate::new();
+    let (_, delta, phi) = oracle(&source);
+    let path = source
+        .torsional_discrete_path([delta, phi], [delta, -phi], &gate)
+        .unwrap();
+    let untwisted = source
+        .evaluate_torsion_displacement_controlled(delta, 0.0)
+        .unwrap();
+    assert!(untwisted.contact_radius_m > path.before.contact_radius_m);
+    assert!(path.maximum_contact_radius_m >= untwisted.contact_radius_m);
+    assert_eq!(path.mean_effort[1], 0.0);
+    assert_eq!(path.reversible_work_j, 0.0);
+    assert_eq!(
+        path.before.reversible_energy_j,
+        path.contact.reversible_energy_j
+    );
+}
+
+#[test]
+fn g0_torsional_paths_refuse_folds_opening_edges_and_unsafe_interior() {
+    let source = source();
+    let gate = CancelGate::new();
+    let (_, delta, _) = oracle(&source);
+    for approach in [
+        delta,
+        0.6 * source.normal_source().minimum_attached_indentation_m(),
+    ] {
+        let limit = source
+            .torsional_displacement_limit(approach)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            source.torsional_discrete_path(
+                [approach, 0.0],
+                [approach, limit.twist_angle_rad],
+                &gate
+            ),
+            Err(JkrTorsionalPathError::UnresolvedSecant)
+        );
+    }
+    // Both endpoints attach, but the linear path exceeds the convex opening-
+    // edge boundary phi_limit ~ delta^(-1/4). Endpoint-only admission is wrong.
+    let low = 0.25 * delta;
+    let start_twist = 0.99
+        * source
+            .torsional_displacement_limit(low)
+            .unwrap()
+            .unwrap()
+            .twist_angle_rad;
+    let end_twist = 0.99
+        * source
+            .torsional_displacement_limit(delta)
+            .unwrap()
+            .unwrap()
+            .twist_angle_rad;
+    source
+        .evaluate_torsion_displacement_controlled(low, start_twist)
+        .unwrap();
+    source
+        .evaluate_torsion_displacement_controlled(delta, end_twist)
+        .unwrap();
+    assert!(
+        source
+            .evaluate_torsion_displacement_controlled(
+                low.midpoint(delta),
+                start_twist.midpoint(end_twist)
+            )
+            .is_err()
+    );
+    assert_eq!(
+        source.torsional_discrete_path([low, start_twist], [delta, end_twist], &gate),
+        Err(JkrTorsionalPathError::UnresolvedEnvelope)
+    );
+}
+
+#[test]
+fn g1_original_torsional_path_drives_a_reversible_rotor_without_energy_drift() {
+    let source = source();
+    let gate = CancelGate::new();
+    let (_, delta, phi) = oracle(&source);
+    let point = source
+        .evaluate_torsion_displacement_controlled(delta, 0.0)
+        .unwrap();
+    let inertia = 1e-8;
+    let frequency = (point.coupled_stiffness.unwrap()[1][1] / inertia).sqrt();
+    let dt = 0.15 / frequency;
+    let mut angle = 0.3 * phi;
+    let mut speed = 0.6 * phi * frequency;
+    let initial_contact = source
+        .evaluate_torsion_displacement_controlled(delta, angle)
+        .unwrap();
+    let initial_energy = initial_contact.reversible_energy_j + 0.5 * inertia * speed * speed;
+    let scale = initial_contact.normal_elastic_energy_j
+        + initial_contact.torsional_elastic_energy_j
+        - initial_contact.surface_energy_j
+        + 0.5 * inertia * speed * speed;
+    let mut prepared = source
+        .prepare_torsional_discrete_path([delta, angle], &gate)
+        .unwrap();
+    for _ in 0..80 {
+        let mut endpoint = angle + dt * speed;
+        let mut converged = false;
+        for _ in 0..12 {
+            let trial = prepared.trial([delta, endpoint], &gate).unwrap();
+            let path = trial.path();
+            let residual =
+                2.0 * inertia * ((endpoint - angle) / dt - speed) / dt + path.mean_effort[1];
+            let derivative = 2.0 * inertia / (dt * dt) + path.end_tangent[1][1];
+            let correction = residual / derivative;
+            if correction.abs() <= 2e-14 * phi {
+                let next_speed = 2.0 * (endpoint - angle) / dt - speed;
+                let energy =
+                    path.contact.reversible_energy_j + 0.5 * inertia * next_speed * next_speed;
+                work_close(energy, initial_energy, scale, 3e-12);
+                let (accepted, _) = trial.into_parts();
+                prepared = accepted;
+                angle = endpoint;
+                speed = next_speed;
+                converged = true;
+                break;
+            }
+            endpoint -= correction;
+        }
+        assert!(converged);
     }
 }

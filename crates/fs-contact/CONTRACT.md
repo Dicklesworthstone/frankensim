@@ -4011,3 +4011,35 @@ Focused regressions exercise unequal-modulus intensity oracles, pure-normal
 reduction, area shrinkage, coupled energy derivatives, reciprocal tangent,
 twist work including normal/surface relaxation, both physical boundaries,
 near-zero conditioning and original applicability refusals.
+
+### Work-consistent relaxed-area torsional paths
+
+`SourceJkrMixedMode::torsional_discrete_path` supplies normal force and torsional
+moment together on the original radius-relaxed I/III potential. Symmetric
+polynomial differences and the secant of radius stationarity retain reversible
+work without subtracting endpoint energies or integrating with quadrature. The
+analytic endpoint tangent differentiates the original implicit equilibrium;
+coincidence returns the original efforts and half its condensed stiffness.
+Finite equilibrium residuals remain visible in the work residual.
+
+Admission encloses the entire straight normal/twist path using both extreme
+approaches at maximum absolute twist, plus the maximum-radius corner at minimum
+absolute twist. This catches opening-edge excursions between attached endpoints
+and includes area growth during twist reversal. Every original source and
+small-scale applicability screen remains active. A conservative box that cannot
+establish attachment refuses and may require caller subdivision; a curved
+inertial trajectory with overshoot requires separate admission. Neither a fold
+nor the closed-crack opening edge is crossed. These are floating-point screens,
+not certified error enclosures, a partial-slip law or a detachment continuation.
+
+`prepare_torsional_discrete_path` retains an immutable source-bound endpoint for
+repeated Newton proposals. Only accepted trials yield successor endpoints;
+public diagnostic responses cannot replace material or contact state. An
+uncached path uses at most five source queries, a prepared changed trial at
+most four, and coincidence none; all are allocation-free and poll cancellation
+before source queries. G0/G1/G3/G4 regressions in
+`tests/adhesive_torsion_equilibrium.rs` cover independent normal/torque work,
+reversal/subdivision, endpoint derivatives, one-ulp increments, original source
+identity, path-boundary refusals, cancellation and a reversible rotor consuming
+the public path/tangent API. No new material calibration, irreversible loss or
+heat partition is introduced.
