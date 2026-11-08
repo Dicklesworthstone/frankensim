@@ -18,7 +18,9 @@
 //! (2.19), <https://web.stanford.edu/group/ctr/ResBriefs/1991/19_SQUIRES.pdf>,
 //! with the parent first-order pathline averaging (Meneveau, Lund & Cabot,
 //! 1996, doi:10.1017/S0022112096007379). It is a declared discretization with
-//! authored memory times, not the papers' adaptive/calibrated timescale.
+//! authored scalar memory times. Momentum can independently opt into the
+//! bounded invariant law through with_adaptive_momentum_memory; no scalar
+//! timescale or calibration is inferred from that momentum policy.
 //! Periodic Cartesian domains and resolved plane channels are admitted.
 //! Channel walls use the original scalar derivative policy at both filter
 //! scales, and the parent's positive, wall-bounded history interpolation.
@@ -105,6 +107,10 @@ impl LagrangianScalarTrial<'_> {
         self.momentum.report()
     }
 
+    pub const fn momentum_memory_time_range(&self) -> [f64; 2] {
+        self.momentum.memory_time_range()
+    }
+
     pub const fn scalar_report(&self) -> DynamicScalarReport {
         self.report
     }
@@ -145,6 +151,24 @@ impl LagrangianScalarTrial<'_> {
 }
 
 impl LagrangianDynamicScalar {
+    /// Configure only momentum memory before this joint trajectory starts.
+    /// Scalar relaxation remains controlled by its own authored memory time.
+    pub fn with_adaptive_momentum_memory(
+        mut self,
+        config: super::AdaptiveLagrangianMemory,
+    ) -> Result<Self, DynamicSgsError> {
+        self.flow = self.flow.with_adaptive_memory(config)?;
+        Ok(self)
+    }
+
+    pub const fn adaptive_momentum_memory(&self) -> Option<super::AdaptiveLagrangianMemory> {
+        self.flow.adaptive_memory()
+    }
+
+    pub const fn accepted_momentum_memory_time_range(&self) -> Option<[f64; 2]> {
+        self.flow.accepted_memory_time_range()
+    }
+
     pub fn required_bytes(cells: usize) -> Result<usize, DynamicSgsError> {
         let history =
             cells

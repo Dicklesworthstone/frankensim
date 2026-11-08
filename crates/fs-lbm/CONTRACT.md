@@ -304,8 +304,8 @@ with the independently composed native operators, serial/pooled results,
 source/force refusal and retry, and thermal Carreau--Yasuda moving channels
 in all three orientations. This retains the exploratory closure's topology,
 coefficient, molecular-ratio and departure bounds. It does not supply
-unresolved non-Newtonian stress correlations, an adaptive memory timescale,
-a thermal energy equation or turbulent-DNS validation.
+unresolved non-Newtonian stress correlations, a thermal energy equation or
+turbulent-DNS validation. Locally adaptive memory is an explicit option below.
 
 ## Physical strain in planar material rheology
 
@@ -400,3 +400,41 @@ correctly sampled smooth forcing with fixed constraints; forcing jumps must
 bound intervals. The L-stable tableau does not establish unconditional
 nonlinear convergence, arbitrary-step positivity or a discrete maximum
 principle for general rotated anisotropy.
+
+## Locally adaptive Lagrangian momentum memory
+
+`sgs3::dynamic::lagrangian::AdaptiveLagrangianMemory` is an explicit opt-in
+configuration for the existing signed Germano history. Before its first
+accepted fit, `LagrangianDynamicSgs::with_adaptive_memory` and the native
+`LagrangianSgsWorkspace3` can author a positive dimensionless coefficient
+and a minimum time. The step configuration's original `memory_time` is the
+upper bound. Existing owners without this selection retain their fixed-time
+arithmetic. Scalar and component owners expose the same momentum selection;
+their independently authored heat and species memory times remain unchanged.
+
+The local law is `T = theta Delta (I_LM I_MM / rho^4)^(-1/8)`, based on
+Meneveau, Lund and Cabot (1996), DOI `10.1017/S0022112096007379`.
+It uses the advected accepted history and the original grid-filter width.
+The density normalization removes the squared-density units of these Favre
+contractions; this variable-density extension is not a calibrated claim.
+Both time bounds and theta remain explicit. Zero, undetermined or nonpositive
+signed numerator history selects the upper bound without discarding its sign.
+This bounded policy differs from the paper's positivity mechanism.
+
+The first fit remains the original local spatial average. Each later local
+time is frozen during the existing first-order pathline/source relaxation.
+Logarithmic invariant arithmetic avoids products, fourth powers and premature
+underflow; old-history decay enters the shared scale before exponentiation.
+No per-cell arrays are added. Accepted minimum/maximum times publish only
+when the original turbulence trial commits, including native collision and
+material-rheology consumers. Cancelled, dropped or refused trials preserve
+accepted histories and times. Native-grid times remain in lattice timesteps.
+
+Six new regressions verify unit similarity, advected-history relaxation,
+time bounds, signed and extreme-scale histories, all channel orientations,
+transactional retries and independent thermal/species memories. The exact
+production SGS module graph passes all 80 tests with the pinned compiler and
+actual native math dependencies. The full fs-lbm grid/material adapters were
+source-reviewed but not compiled in the constrained environment. This adds no
+adaptive scalar memory, backscatter-energy equation, calibrated theta, DNS
+qualification or higher-order pathline integration.

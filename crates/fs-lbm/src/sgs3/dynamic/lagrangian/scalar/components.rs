@@ -71,6 +71,10 @@ impl LagrangianComponentsTrial<'_> {
         self.joint.momentum_report()
     }
 
+    pub const fn momentum_memory_time_range(&self) -> [f64; 2] {
+        self.joint.momentum_memory_time_range()
+    }
+
     pub const fn scalar_report(&self) -> DynamicScalarReport {
         self.joint.scalar_report()
     }
@@ -126,6 +130,24 @@ impl LagrangianComponentsTrial<'_> {
 }
 
 impl LagrangianDynamicComponents {
+    /// Select adaptive momentum memory before the first joint fit. Heat and
+    /// component relaxation keep their independently authored memory times.
+    pub fn with_adaptive_momentum_memory(
+        mut self,
+        config: super::super::AdaptiveLagrangianMemory,
+    ) -> Result<Self, DynamicSgsError> {
+        self.flow = self.flow.with_adaptive_momentum_memory(config)?;
+        Ok(self)
+    }
+
+    pub const fn adaptive_momentum_memory(&self) -> Option<super::super::AdaptiveLagrangianMemory> {
+        self.flow.adaptive_momentum_memory()
+    }
+
+    pub const fn accepted_momentum_memory_time_range(&self) -> Option<[f64; 2]> {
+        self.flow.accepted_momentum_memory_time_range()
+    }
+
     pub fn required_bytes(cells: usize) -> Result<usize, DynamicSgsError> {
         let history =
             cells

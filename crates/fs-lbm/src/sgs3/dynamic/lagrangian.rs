@@ -11,9 +11,11 @@
 //! viscosity while their signed history is retained.
 //!
 //! This follows the pathline-averaging construction of Meneveau, Lund & Cabot
-//! (1996), doi:10.1017/S0022112096007379. Here the positive memory time is
-//! caller-declared: the paper's adaptive timescale and calibration are NOT
-//! implemented. Periodic history starts from the local 27-cell average.
+//! (1996), doi:10.1017/S0022112096007379. The default positive memory time is
+//! caller-declared. [`AdaptiveLagrangianMemory`] optionally derives a bounded
+//! local timescale from the advected accepted stress contractions, with an
+//! explicit density normalization for the Favre extension. It supplies no
+//! empirical calibration. Periodic history starts from the local 27-cell average.
 //! A resolved plane channel instead uses the existing tangential test filter
 //! and a local nine-cell initial average, not homogeneous-plane averaging.
 //! Its actual no-slip wall velocities enter the original Favre contractions.
@@ -33,6 +35,11 @@
 
 use super::*;
 
+#[path = "lagrangian/memory.rs"]
+mod memory;
+pub use memory::AdaptiveLagrangianMemory;
+use memory::AdaptiveUpdate;
+
 /// Joint momentum/scalar pathline histories with independent scalar transport.
 #[path = "lagrangian/scalar.rs"]
 pub mod scalar;
@@ -42,6 +49,7 @@ pub mod scalar;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LagrangianSgsConfig {
     /// Positive relaxation time T in the same units as the sample time.
+    /// With an explicitly adaptive owner this is the upper bound on local T.
     pub memory_time: f64,
     /// Maximum backtracked distance per axis in cells, in (0, 1].
     /// This bounds the first-order trajectory approximation; it is not a CFL
@@ -92,6 +100,8 @@ pub struct LagrangianDynamicSgs {
     // A shared logarithmic scale avoids overflowing those fourth powers and
     // keeps histories comparable when current density/velocity scales change.
     history_log_scale: Option<f64>,
+    adaptive_memory: Option<AdaptiveLagrangianMemory>,
+    accepted_memory_time_range: Option<[f64; 2]>,
 }
 
 /// A fully admitted candidate. Its viscosities are valid until it is dropped
@@ -102,6 +112,7 @@ pub struct LagrangianSgsTrial<'a> {
     time: f64,
     log_scale: Option<f64>,
     report: DynamicSgsReport,
+    memory_time_range: [f64; 2],
 }
 
 impl LagrangianSgsTrial<'_> {
@@ -125,11 +136,18 @@ impl LagrangianSgsTrial<'_> {
         self.report
     }
 
+    /// Minimum/maximum relaxation time used by this admitted candidate.
+    /// The initial local-box sample reports the authored upper time bound.
+    pub const fn memory_time_range(&self) -> [f64; 2] {
+        self.memory_time_range
+    }
+
     /// Infallible, allocation-free publication of the successfully used fit.
     pub fn commit(self) {
         core::mem::swap(&mut self.owner.history, &mut self.owner.candidate);
         self.owner.accepted_time = Some(self.time);
         self.owner.history_log_scale = self.log_scale;
+        self.owner.accepted_memory_time_range = Some(self.memory_time_range);
     }
 }
 
@@ -196,6 +214,8 @@ impl LagrangianDynamicSgs {
             candidate: allocated(cells, [0.0; 2])?,
             accepted_time: None,
             history_log_scale: None,
+            adaptive_memory: None,
+            accepted_memory_time_range: None,
         };
         let required = result.workspace_bytes();
         if required > maximum_bytes {
@@ -233,6 +253,32 @@ impl LagrangianDynamicSgs {
     /// Time of the last committed fit, not the consuming solver's endpoint.
     pub const fn accepted_time(&self) -> Option<f64> {
         self.accepted_time
+    }
+
+    /// Select a bounded invariant timescale before this trajectory starts.
+    /// Momentum history remains signed; heat/component memories are separate.
+    /// No field arrays or additional numerical workspace are allocated.
+    pub fn with_adaptive_memory(
+        mut self,
+        config: AdaptiveLagrangianMemory,
+    ) -> Result<Self, DynamicSgsError> {
+        config.validate()?;
+        if self.accepted_time.is_some() {
+            return Err(DynamicSgsError::Invalid(
+                "select adaptive Lagrangian memory before the first accepted fit",
+            ));
+        }
+        self.adaptive_memory = Some(config);
+        Ok(self)
+    }
+
+    pub const fn adaptive_memory(&self) -> Option<AdaptiveLagrangianMemory> {
+        self.adaptive_memory
+    }
+
+    /// Timescale range of the last committed fit, never a rejected trial.
+    pub const fn accepted_memory_time_range(&self) -> Option<[f64; 2]> {
+        self.accepted_memory_time_range
     }
 
     /// Fit from current same-time physical fields. The first sample starts the
@@ -301,6 +347,9 @@ impl LagrangianDynamicSgs {
     ) -> Result<(LagrangianSgsTrial<'_>, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
         config.validate()?;
+        if let Some(memory) = self.adaptive_memory {
+            memory.validate_upper_bound(config.memory_time)?;
+        }
         if !time.is_finite()
             || time < 0.0
             || self.accepted_time.is_some_and(|previous| time <= previous)
@@ -330,17 +379,47 @@ impl LagrangianDynamicSgs {
             self.history_log_scale,
             current_log,
             elapsed,
-            config.memory_time,
+            // The adaptive path computes its own per-cell weights. Admit its
+            // fastest possible relaxation here: an enormous upper time bound
+            // must not reject a representable local adaptive update.
+            self.adaptive_memory.map_or(config.memory_time, |memory| memory.minimum_time),
             config.maximum_departure_cells,
         )?;
+        let adaptive = self.adaptive_memory.map(|memory| {
+            AdaptiveUpdate::new(
+                memory,
+                config.memory_time,
+                self.flow.filter_width,
+                self.history_log_scale,
+                current_log,
+                &update,
+            )
+        });
         let mut report = DynamicSgsReport {
             minimum_raw_coefficient_squared: f64::INFINITY,
             ..DynamicSgsReport::default()
         };
         let mut amplitude: f64 = 0.0;
+        let mut memory_time_range = [f64::INFINITY, 0.0_f64];
         for cell in 0..self.history.len() {
             poll(&mut cancelled, cell)?;
-            let pair = update.pair(cell, velocity[cell], &self.history, &self.flow.contraction)?;
+            let (pair, memory_time) = if let Some(adaptive) = &adaptive {
+                adaptive.pair(
+                    &update,
+                    cell,
+                    velocity[cell],
+                    density[cell],
+                    &self.history,
+                    &self.flow.contraction,
+                )?
+            } else {
+                (
+                    update.pair(cell, velocity[cell], &self.history, &self.flow.contraction)?,
+                    config.memory_time,
+                )
+            };
+            memory_time_range[0] = memory_time_range[0].min(memory_time);
+            memory_time_range[1] = memory_time_range[1].max(memory_time);
             let raw = if pair[1] == 0.0 {
                 report.undetermined_cells += 1;
                 0.0
@@ -382,6 +461,8 @@ impl LagrangianDynamicSgs {
                 report.maximum_coefficient_squared.max(coefficient);
             report.maximum_eddy_viscosity = report.maximum_eddy_viscosity.max(viscosity);
         }
+        let common_log = adaptive.as_ref().map_or(update.common_log, |a| a.common_log());
+        let update = HistoryUpdate { common_log, ..update };
         let log_scale = update.normalize(&mut self.candidate, amplitude, &mut cancelled)?;
         poll(&mut cancelled, 0)?;
         Ok((
@@ -390,6 +471,7 @@ impl LagrangianDynamicSgs {
                 time,
                 log_scale,
                 report,
+                memory_time_range,
             },
             scales,
         ))
@@ -479,18 +561,7 @@ impl HistoryUpdate {
             }
             pair
         } else {
-            let departure =
-                core::array::from_fn(|axis| velocity[axis] * (self.elapsed / self.spacing[axis]));
-            if departure
-                .iter()
-                .any(|d: &f64| !d.is_finite() || d.abs() > self.maximum_departure_cells)
-            {
-                return Err(DynamicSgsError::Cell {
-                    cell,
-                    reason: "Lagrangian departure exceeds declared cell limit",
-                });
-            }
-            let advected = sample_history(self.geometry, self.shape, cell, departure, history)?;
+            let advected = self.advected(cell, velocity, history)?;
             let current = contraction[cell];
             if (self.old_weight > 0.0 && self.old_scale == 0.0 && advected[1] != 0.0)
                 || (self.fresh > 0.0 && self.new_scale == 0.0 && current[1] != 0.0)
@@ -515,6 +586,26 @@ impl HistoryUpdate {
             });
         }
         Ok(pair)
+    }
+
+    fn advected(
+        &self,
+        cell: usize,
+        velocity: [f64; 3],
+        history: &[[f64; 2]],
+    ) -> Result<[f64; 2], DynamicSgsError> {
+        let departure =
+            core::array::from_fn(|axis| velocity[axis] * (self.elapsed / self.spacing[axis]));
+        if departure
+            .iter()
+            .any(|d: &f64| !d.is_finite() || d.abs() > self.maximum_departure_cells)
+        {
+            return Err(DynamicSgsError::Cell {
+                cell,
+                reason: "Lagrangian departure exceeds declared cell limit",
+            });
+        }
+        sample_history(self.geometry, self.shape, cell, departure, history)
     }
 
     fn normalize(

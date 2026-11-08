@@ -73,6 +73,23 @@ pub struct LagrangianSgsWorkspace3<C> {
 
 impl<C> LagrangianSgsWorkspace3<C> {
     pub fn collisions(&self) -> &[C] { self.local.collisions() }
+    /// Select adaptive momentum memory before the first accepted native fit.
+    /// Both time bounds use lattice timesteps; the step config supplies the
+    /// upper bound. Existing collision/history arrays are retained.
+    pub fn with_adaptive_memory(
+        mut self,
+        config: dynamic::lagrangian::AdaptiveLagrangianMemory,
+    ) -> Result<Self, dynamic::DynamicSgsError> {
+        self.filter = self.filter.with_adaptive_memory(config)?;
+        Ok(self)
+    }
+    pub fn adaptive_memory(&self) -> Option<dynamic::lagrangian::AdaptiveLagrangianMemory> {
+        self.filter.adaptive_memory()
+    }
+    /// Actual minimum/maximum times of the last accepted fit.
+    pub fn accepted_memory_time_range(&self) -> Option<[f64; 2]> {
+        self.filter.accepted_memory_time_range()
+    }
     /// Fixed halfway-wall normal, or `None` for a fully periodic trajectory.
     pub fn normal_axis(&self) -> Option<usize> {
         self.filter.normal_axis()
