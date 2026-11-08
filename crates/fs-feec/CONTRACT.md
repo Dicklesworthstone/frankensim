@@ -2782,3 +2782,30 @@ energy balance, signed coordinate changes, and admission/cancellation. Source
 and reciprocal-physics review plus pinned formatting and whitespace checks
 passed. Native Rust execution remains unverified because the shared dependency
 build exhausted the bounded validation environment.
+
+## Original structural relaxation in resolved moving walls
+
+`with_moving_wall_relaxation_channels` attaches every original signed coupling
+row c [1/s] and relaxation time tau [s] in the same mass-normalized wall basis.
+The structural modes contain RELAXED stiffness. Each retained energy coordinate
+x [sqrt(J)] obeys x_dot = c dot v - x/tau, applies resisting force c*x, stores
+x*x/2, and dissipates x*x/tau. No channel, off-diagonal term, or supplied history
+is fitted, discarded, or converted into frequency-local diagonal damping.
+Separate instantaneous structural damping may coexist without counting these
+same material losses twice. One complete memory owner is admitted, with explicit
+channel, projection-work, and backing-storage limits.
+
+Harmonic preparation caches the full complex matrix c*c^T/(1/tau+i*omega)
+once per frequency. The original solve and unscaled residual use that same cache;
+reported fluid traction still excludes structural forces. MovingWallField reports
+the complex material coordinates, mean stored energy |x|^2/4 and mean heat
+|x|^2/(2*tau); ThermoviscousPower includes structural_relaxation_w once.
+
+Causal preparation appends every original x to the same full mixed-field state
+and original inverse-mass congruence. Explicit initial preload and dark-channel
+history survive; zero_state declares relaxed rest. The existing exact held-input
+trajectory integrates structural_relaxation_heat_j, including mechanical,
+heat-source, volume-source and two-fluid interface paths. Complete state/port
+admission refuses oversized models instead of truncating source material history.
+The source owner remains responsible for its original validity band and for
+excluding these branches from its instantaneous loss model.

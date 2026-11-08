@@ -8,7 +8,8 @@
 //! original entry before the admitted fs-phs exact held-input owner is called.
 //!
 //! Fluid viscosity (shear plus bulk), fluid conduction, molecular heat exchange
-//! finite-wall conduction and original structural damping are integrated
+//! finite-wall conduction, original structural damping and passive structural
+//! relaxation heat are integrated
 //! along that SAME trajectory.
 //! Pressure, structural-force, body-force and volumetric-heat work use their actual
 //! interval-integrated dual flows on that same trajectory.
@@ -19,6 +20,11 @@
 //! and isothermal thermal boundaries constrain only the translational field.
 //! Finite solid slabs may retain their actual P1 normal heat fields, sharing
 //! the original P2 fluid interface; resolution is explicit, with no fitted poles.
+//! Every attached material channel retains its original energy coordinate x:
+//! x_dot=c.dot(v)-x/tau, resisting force c*x, storage x*x/2 and heat x*x/tau.
+//! Its relaxed structural stiffness remains in the original wall model. Supplied
+//! initial histories are preserved, including preload with zero wall velocity;
+//! neither a frequency-local resistance nor an endpoint heat estimate replaces them.
 //! Geometry and equilibrium remain fixed; no mean flow, ALE,
 //! phase change, nonlinear mechanics or acoustic-resolution claim is inferred.
 
@@ -47,7 +53,7 @@ pub use interface::{
     PreparedConformingThermoviscousTimePair, PreparedThermoviscousTimePair,
     ThermoviscousTimePairStep,
 };
-const HEAT_CHANNELS: usize = 5;
+const HEAT_CHANNELS: usize = 6;
 
 /// Original-owner refusals; no state is published on failure or cancellation.
 #[derive(Debug)]
@@ -92,7 +98,8 @@ fn invalid(what: &'static str) -> ThermoviscousTimeError {
 /// Explicit small-domain cold preparation and physical accounting admission.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoviscousTimeLimits {
-    /// Complete mixed, molecular and finite-wall fields plus every structural displacement.
+    /// Complete mixed, molecular and finite-wall fields, every structural
+    /// displacement and every original material relaxation coordinate.
     /// Exceeding the cap is a refusal; no original field is truncated.
     pub max_states: usize,
     /// Existing pHS flow-integral byte/work limits. Coordinate maps additionally
@@ -138,6 +145,14 @@ pub struct ThermoviscousTimeState {
     pub wall_displacement_m_sqrt_kg: Vec<f64>,
     /// Original mass-normalized structural velocities [m sqrt(kg)/s].
     pub wall_velocity_m_sqrt_kg_per_s: Vec<f64>,
+    /// Original signed material-history energy coordinates [sqrt(J)], in
+    /// attached channel order. For source coupling row c and internal strain z,
+    /// x=c.dot(q)-z; this field is x, NOT z. Its storage is x*x/2.
+    /// An explicitly relaxed history has x=0. An initially unrelaxed history
+    /// with z=0 has x=c.dot(q). Caller-supplied preload is retained exactly;
+    /// it is not inferred from displacement or reset between time steps.
+    /// Every attached channel is required, including dark/zero coupling rows.
+    pub wall_relaxation_coordinates_sqrt_j: Vec<f64>,
 }
 
 /// Same-window energy/work [J]. No loss or balance residual is clipped.
@@ -169,6 +184,9 @@ pub struct ThermoviscousTimeWork {
     /// Original finite-solid Fourier conduction, along the same trajectory.
     /// Includes declared in-plane conduction on the spatial wall path.
     pub solid_conductive_heat_j: f64,
+    /// Original structural material relaxation, sum integral(x*x/tau dt) [J].
+    /// Distinct from instantaneous wall damping and molecular heat exchange.
+    pub structural_relaxation_heat_j: f64,
 }
 impl ThermoviscousTimeWork {
     pub fn dissipated_j(self) -> f64 {
@@ -177,6 +195,7 @@ impl ThermoviscousTimeWork {
             + self.structural_damping_heat_j
             + self.molecular_relaxation_heat_j
             + self.solid_conductive_heat_j
+            + self.structural_relaxation_heat_j
     }
     pub fn supplied_j(self) -> f64 {
         self.pressure_work_j
@@ -362,12 +381,24 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         let (conductive_wall_fields, base) =
             wall::WallFields::new(model, duration_s, wall_resolution, tangential, caloric_end, cancelled)?;
         let walls = model.pressure_start - 3 * model.velocity_count;
-        let n = base + walls;
+        let relaxation_rows = model.moving_wall_relaxation_channels_per_s().unwrap_or(&[]);
+        let relaxation_times = model.moving_wall_relaxation_times_s().unwrap_or(&[]);
+        let memory_start = base
+            .checked_add(walls)
+            .ok_or_else(|| invalid("complete transient state extent overflow"))?;
+        let n = memory_start
+            .checked_add(relaxation_rows.len())
+            .ok_or_else(|| invalid("complete transient material-memory extent overflow"))?;
         let mechanical_ports = model.loads.len() + walls;
         let heat_start = mechanical_ports.checked_add(force_sources.len())
             .ok_or_else(|| invalid("complete transient source count overflow"))?;
         let ports = heat_start.checked_add(heat_sources.len())
             .ok_or_else(|| invalid("complete transient source count overflow"))?;
+        let augmented = n
+            .checked_add(ports)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| invalid("complete transient propagation extent overflow"))?;
         if !duration_s.is_finite()
             || duration_s <= 0.0
             || !limits.maximum_relative_energy_residual.is_finite()
@@ -375,7 +406,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             || limits.maximum_relative_energy_residual > 1e-6
             || n > limits.max_states
             || ports > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
-            || 2 * (n + ports + 1) > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+            || augmented > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
         {
             return Err(invalid(
                 "complete transient state/port capacity, positive clock and bounded energy tolerance required",
@@ -529,6 +560,35 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             }
             input[row * ports + model.loads.len() + i] = 1.0 / scale[row];
         }
+        // Original energy coordinates need no fitted pole, inverse mass or
+        // normalization. The same signed coefficient appears on both sides
+        // of each skew pair, preserving material/wall work exactly.
+        for (channel, (coupling_row, &tau)) in
+            relaxation_rows.iter().zip(relaxation_times).enumerate()
+        {
+            poll(cancelled)?;
+            let memory = memory_start + channel;
+            let rate = 1.0 / tau;
+            if !rate.is_finite() || rate <= 0.0 {
+                return Err(invalid(
+                    "representable original material relaxation rate required",
+                ));
+            }
+            inverse[memory * n + memory] = 1.0;
+            q[memory * n + memory] = 1.0;
+            heat[5][memory * n + memory] = rate;
+            for (mode, &coefficient) in coupling_row.iter().enumerate() {
+                let row = 3 * model.velocity_count + mode;
+                let coupling = coefficient / scale[row];
+                if !coupling.is_finite() || (coefficient != 0.0 && coupling == 0.0) {
+                    return Err(invalid(
+                        "representable original material/wall coupling required",
+                    ));
+                }
+                physical_j[row * n + memory] = -coupling;
+                physical_j[memory * n + row] = coupling;
+            }
+        }
         let j = congruence(&physical_j, &inverse, n, cancelled)?;
         let total: Vec<_> = (0..n * n)
             .map(|i| heat.iter().map(|channel| channel[i]).sum())
@@ -629,7 +689,9 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         self.conductive_wall_fields.maximum_frequency_hz
     }
 
-    /// Explicit all-rest initial condition, including structural coordinates.
+    /// Explicit all-rest initial condition, including structural coordinates
+    /// and relaxed material histories. A displaced/preloaded source must
+    /// supply its original history explicitly in the returned state's fields.
     /// The structural source's separate time state is not silently advanced.
     pub fn zero_state(&self) -> ThermoviscousTimeState {
         self.decode(&vec![0.0; self.system.state_dim()])
@@ -776,18 +838,22 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
     fn encode(&self, state: &ThermoviscousTimeState) -> Result<Vec<f64>, ThermoviscousTimeError> {
         let model = self.model;
         let walls = self.wall_scale.len();
+        let memory_start = self.scale.len() + walls;
         if state.pressure_pa.len() != model.temperature_start - model.pressure_start
             || state.velocity_m_s.len() != model.space.ndof
             || state.temperature_k.len() != model.space.ndof
             || state.molecular_temperature_k.len() != self.reservoir_offsets.len()
             || state.wall_displacement_m_sqrt_kg.len() != walls
             || state.wall_velocity_m_sqrt_kg_per_s.len() != walls
+            || state.wall_relaxation_coordinates_sqrt_j.len()
+                != self.system.state_dim() - memory_start
             || state
                 .pressure_pa
                 .iter()
                 .chain(&state.temperature_k)
                 .chain(&state.wall_displacement_m_sqrt_kg)
                 .chain(&state.wall_velocity_m_sqrt_kg_per_s)
+                .chain(&state.wall_relaxation_coordinates_sqrt_j)
                 .chain(state.velocity_m_s.iter().flatten())
                 .chain(state.molecular_temperature_k.iter().flatten())
                 .chain(state.conductive_wall_temperature_k.iter().flatten())
@@ -839,6 +905,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             x[3 * model.velocity_count + i] = state.wall_velocity_m_sqrt_kg_per_s[i];
             x[self.scale.len() + i] = state.wall_displacement_m_sqrt_kg[i] * self.wall_scale[i];
         }
+        x[memory_start..].copy_from_slice(&state.wall_relaxation_coordinates_sqrt_j);
         for (field, offset) in state
             .molecular_temperature_k
             .iter()
@@ -922,6 +989,8 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 .map(|(i, s)| state[self.scale.len() + i] / s)
                 .collect(),
             wall_velocity_m_sqrt_kg_per_s: wall_velocity,
+            wall_relaxation_coordinates_sqrt_j: state[self.scale.len() + self.wall_scale.len()..]
+                .to_vec(),
         }
     }
 
@@ -983,6 +1052,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             structural_damping_heat_j: candidate.integrals[2],
             molecular_relaxation_heat_j: candidate.integrals[3],
             solid_conductive_heat_j: candidate.integrals[4],
+            structural_relaxation_heat_j: candidate.integrals[5],
         };
         admit_work(work, &candidate.integrals, self.maximum_relative_energy_residual)?;
         let means: Vec<_> = candidate.integrals[HEAT_CHANNELS..]

@@ -51,6 +51,7 @@ pub mod wall;
 use wall::PreparedWallTraces;
 /// Reciprocal full-vector moving solid boundaries in the original mixed solve.
 pub mod moving_wall;
+use moving_wall::relaxation::PreparedWallRelaxation;
 use moving_wall::{MovingWall, MovingWallField};
 /// Distributed heat-release excitation on the original resolved temperature basis.
 pub mod heat_source;
@@ -327,6 +328,7 @@ pub struct ThermoviscousFe<'c> {
     pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
     moving_wall: Option<MovingWall>,
     moving_wall_damping: Option<moving_wall::MovingWallDamping>,
+    moving_wall_relaxation: Option<moving_wall::relaxation::MovingWallRelaxation>,
 }
 
 /// One reusable factorization at a single frequency and caloric state.
@@ -338,6 +340,7 @@ pub struct PreparedThermoviscous<'a, 'c> {
     rows: Vec<f64>,
     columns: Vec<f64>,
     wall_admittances: Vec<C64>,
+    wall_relaxation: PreparedWallRelaxation,
 }
 
 /// Original mixed operator with positive-real-reference loads, retaining its
@@ -374,6 +377,8 @@ pub struct ThermoviscousPower {
     /// Original structural damping, including attached cross-mode channels;
     /// excludes the resolved fluid losses.
     pub structural_damping_w: f64,
+    /// Original structural memory heat, separate from instantaneous damping.
+    pub structural_relaxation_w: f64,
 }
 impl ThermoviscousPower {
     /// Sum of fluid-volume and solid-wall dissipation.
@@ -385,6 +390,7 @@ impl ThermoviscousPower {
             + self.solid_conductive_w
             + self.caloric_w
             + self.structural_damping_w
+            + self.structural_relaxation_w
     }
     /// Input minus fluid-volume and solid-wall dissipation [W].
     #[must_use]
@@ -831,6 +837,7 @@ impl<'c> ThermoviscousFe<'c> {
             physical_modes: Vec::new(),
             moving_wall: None,
             moving_wall_damping: None,
+            moving_wall_relaxation: None,
         };
         model.assemble(cancelled)?;
         for mode in &boundary.ports {
@@ -1112,9 +1119,19 @@ impl<'c> ThermoviscousFe<'c> {
         cp: C64,
         reference: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(LuComplex, Vec<f64>, Vec<f64>, Vec<C64>), ThermoviscousError> {
+    ) -> Result<
+        (
+            LuComplex,
+            Vec<f64>,
+            Vec<f64>,
+            Vec<C64>,
+            PreparedWallRelaxation,
+        ),
+        ThermoviscousError,
+    > {
         poll(cancelled)?;
         let omega = self.validate_frequency_cp(frequency_hz, cp)?;
+        let wall_relaxation = self.prepare_wall_relaxation(omega, cancelled)?;
         let wall_admittances =
             self.conductive
                 .admittances(self.fe.medium(), frequency_hz, cancelled)?;
@@ -1133,7 +1150,7 @@ impl<'c> ThermoviscousFe<'c> {
             poll(cancelled)?;
             for col in 0..n {
                 let i = row * n + col;
-                a[i] = self.operator_entry(row, col, omega, cp);
+                a[i] = self.operator_entry(row, col, omega, cp, &wall_relaxation);
             }
             for entry in self.conductive.row(row) {
                 let coefficient =
@@ -1194,30 +1211,37 @@ impl<'c> ThermoviscousFe<'c> {
         }
         let factor = lu_complex_with_cancel(&a, n, &mut *cancelled)?;
         poll(cancelled)?;
-        Ok((factor, rows, columns, wall_admittances))
+        Ok((factor, rows, columns, wall_admittances, wall_relaxation))
     }
 
-    fn operator_entry(&self, row: usize, col: usize, omega: f64, cp: C64) -> C64 {
+    fn operator_entry(
+        &self,
+        row: usize,
+        col: usize,
+        omega: f64,
+        cp: C64,
+        memory: &PreparedWallRelaxation,
+    ) -> C64 {
         let fluid = self.fluid_operator_entry(row, col, omega, cp);
         let wall_start = 3 * self.velocity_count;
-        if row == col && row >= wall_start && row < self.pressure_start {
+        if (wall_start..self.pressure_start).contains(&row)
+            && (wall_start..self.pressure_start).contains(&col)
+        {
             let structure = &self
                 .moving_wall
                 .as_ref()
                 .expect("moving coordinate")
                 .structure;
-            let mode = row - wall_start;
-            fluid
-                + moving_wall::modal_impedance(
-                    &structure.modes()[mode],
-                    self.wall_damping_entry(mode, mode),
-                    omega,
-                )
-        } else if self.moving_wall_damping.is_some()
-            && (wall_start..self.pressure_start).contains(&row)
-            && (wall_start..self.pressure_start).contains(&col)
-        {
-            fluid + C64::from_re(self.wall_damping_entry(row - wall_start, col - wall_start))
+            let (i, j) = (row - wall_start, col - wall_start);
+            let instantaneous = if i == j {
+                moving_wall::modal_impedance(&structure.modes()[i], self.wall_damping_entry(i, i), omega)
+            } else {
+                C64::from_re(self.wall_damping_entry(i, j))
+            };
+            let relaxation = if memory.impedance.is_empty() { C64::ZERO } else {
+                memory.impedance[i * structure.modes().len() + j]
+            };
+            fluid + instantaneous + relaxation
         } else {
             fluid
         }
@@ -1247,6 +1271,7 @@ impl<'c> ThermoviscousFe<'c> {
         omega: f64,
         cp: C64,
         wall_admittances: &[C64],
+        wall_relaxation: &PreparedWallRelaxation,
         reference: Option<&[f64]>,
         rhs: &[C64],
         cancelled: &mut impl FnMut() -> bool,
@@ -1293,7 +1318,7 @@ impl<'c> ThermoviscousFe<'c> {
                 let mut im = Dd::from_f64(rhs[i].im);
                 let mut scale = rhs[i].abs();
                 for (j, &v) in x.iter().enumerate() {
-                    let a = self.operator_entry(i, j, omega, cp);
+                    let a = self.operator_entry(i, j, omega, cp, wall_relaxation);
                     if a.re == 0.0 && a.im == 0.0 {
                         continue;
                     }
@@ -1377,7 +1402,7 @@ impl<'c> ThermoviscousFe<'c> {
         cp: C64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedThermoviscous<'a, 'c>, ThermoviscousError> {
-        let (factor, rows, columns, wall_admittances) =
+        let (factor, rows, columns, wall_admittances, wall_relaxation) =
             self.factor(frequency_hz, cp, None, cancelled)?;
         Ok(PreparedThermoviscous {
             model: self,
@@ -1387,6 +1412,7 @@ impl<'c> ThermoviscousFe<'c> {
             rows,
             columns,
             wall_admittances,
+            wall_relaxation,
         })
     }
 
@@ -1436,7 +1462,7 @@ impl<'c> ThermoviscousFe<'c> {
         reference: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedThermoviscousScattering<'a, 'c>, ThermoviscousError> {
-        let (factor, rows, columns, wall_admittances) =
+        let (factor, rows, columns, wall_admittances, wall_relaxation) =
             self.factor(frequency_hz, cp, Some(reference), cancelled)?;
         poll(cancelled)?;
         Ok(PreparedThermoviscousScattering {
@@ -1448,6 +1474,7 @@ impl<'c> ThermoviscousFe<'c> {
                 rows,
                 columns,
                 wall_admittances,
+                wall_relaxation,
             },
             reference: reference.to_vec(),
             roots: reference.iter().map(|&r| det::sqrt(r)).collect(),
@@ -1484,6 +1511,7 @@ impl PreparedThermoviscous<'_, '_> {
             std::f64::consts::TAU * self.frequency_hz,
             self.cp,
             &self.wall_admittances,
+            &self.wall_relaxation,
             None,
             &rhs,
             cancelled,
@@ -1563,6 +1591,7 @@ impl PreparedThermoviscous<'_, '_> {
             )?,
             caloric_w: 0.0,
             structural_damping_w: moving_wall.damping_w,
+            structural_relaxation_w: moving_wall.relaxation_w,
         };
         power.input_w += moving_wall.external_input_w;
         let quad = duffy_quadrature(model.volume_quadrature_order());
@@ -1681,6 +1710,7 @@ impl PreparedThermoviscousScattering<'_, '_> {
             std::f64::consts::TAU * prepared.frequency_hz,
             prepared.cp,
             &prepared.wall_admittances,
+            &prepared.wall_relaxation,
             Some(&self.reference),
             &rhs,
             cancelled,

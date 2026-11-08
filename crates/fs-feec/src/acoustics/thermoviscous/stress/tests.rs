@@ -146,6 +146,7 @@ fn g1_original_hierarchical_coefficients_and_instantaneous_heating_are_retained(
         temperature_k: vec![0.0; 10],
         molecular_temperature_k: vec![],
         conductive_wall_temperature_k: vec![],
+        wall_relaxation_coordinates_sqrt_j: vec![],
         wall_displacement_m_sqrt_kg: vec![],
         wall_velocity_m_sqrt_kg_per_s: vec![],
     };

@@ -260,6 +260,7 @@ fn original_harmonic_fields_match_primal_identification_with_sources_and_constra
                                 j,
                                 std::f64::consts::TAU * source.frequency_hz,
                                 source.cp,
+                                &source.wall_relaxation,
                             );
                     }
                 }

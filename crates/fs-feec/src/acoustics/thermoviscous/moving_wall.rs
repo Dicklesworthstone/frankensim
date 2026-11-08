@@ -21,6 +21,9 @@
 use super::*;
 use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeModel};
 
+/// Original passive material histories in harmonic and causal wall motion.
+pub mod relaxation;
+
 /// Hard cap on retained structural coordinates in this local dense owner.
 pub const MAX_MOVING_WALL_MODES: usize = 64;
 
@@ -70,6 +73,12 @@ pub struct MovingWallField {
     pub external_input_w: f64,
     /// Structural damping [W], already included in structural_damping_w.
     pub damping_w: f64,
+    /// Original material energy-coordinate peak phasors [sqrt(J)].
+    pub relaxation_coordinates_sqrt_j: Vec<C64>,
+    /// Cycle-mean stored structural-memory energy [J].
+    pub relaxation_mean_energy_j: f64,
+    /// Structural-memory heat [W], included in structural_relaxation_w.
+    pub relaxation_w: f64,
     /// Solid-to-fluid traction work [W]. This is an INTERNAL exchange diagnostic,
     /// not an additional loss. Positive means the moving solid supplies fluid work.
     pub power_into_fluid_w: f64,
@@ -512,6 +521,7 @@ impl PreparedThermoviscous<'_, '_> {
             std::f64::consts::TAU * self.frequency_hz,
             self.cp,
             &self.wall_admittances,
+            &self.wall_relaxation,
             None,
             &rhs,
             cancelled,
@@ -580,10 +590,13 @@ impl PreparedThermoviscous<'_, '_> {
                 result.damping_w += 0.5 * C64::new(re.to_f64(), im.to_f64()).norm_sq();
             }
         }
+        self.wall_relaxation_field(&mut result, cancelled)?;
         if result.fluid_force_n_per_sqrt_kg.iter().any(|z| !finite(*z))
             || [
                 result.external_input_w,
                 result.damping_w,
+                result.relaxation_w,
+                result.relaxation_mean_energy_j,
                 result.power_into_fluid_w,
             ]
             .iter()

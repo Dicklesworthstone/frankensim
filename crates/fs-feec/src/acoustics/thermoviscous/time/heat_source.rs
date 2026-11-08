@@ -229,6 +229,7 @@ impl<'c> PreparedThermoviscousHeatTime<'_, 'c> {
             structural_damping_heat_j: candidate.integrals[2],
             molecular_relaxation_heat_j: candidate.integrals[3],
             solid_conductive_heat_j: candidate.integrals[4],
+            structural_relaxation_heat_j: candidate.integrals[5],
         };
         admit_work(
             work,

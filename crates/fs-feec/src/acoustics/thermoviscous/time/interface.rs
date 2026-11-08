@@ -506,6 +506,7 @@ impl<'p, 'a, 'c> PreparedThermoviscousTimePair<'p, 'a, 'c> {
                 structural_damping_heat_j: heat[2],
                 molecular_relaxation_heat_j: heat[3],
                 solid_conductive_heat_j: heat[4],
+                structural_relaxation_heat_j: heat[5],
             };
             admit_work(work, heat, self.maximum_relative_energy_residual)?;
             let state = source.decode(&candidate.state[start..end]);

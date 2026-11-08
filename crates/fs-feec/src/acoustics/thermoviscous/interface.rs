@@ -333,6 +333,7 @@ fn solve_region(
         std::f64::consts::TAU * source.frequency_hz,
         source.cp,
         &source.wall_admittances,
+        &source.wall_relaxation,
         None,
         rhs,
         cancelled,

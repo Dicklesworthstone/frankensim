@@ -2,6 +2,7 @@ use super::*;
 use crate::acoustics::thermoviscous::moving_wall::{MovingWall, modal_impedance};
 use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
 
+mod relaxation;
 mod viscosity;
 
 fn structure(omega: f64, damping: f64) -> ModalAcousticTimeModel {
