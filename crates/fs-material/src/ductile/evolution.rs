@@ -1,15 +1,17 @@
 //! Progressive ductile degradation on the ORIGINAL energetic native J2 law.
 //!
-//! After initiation, `g = exp(-h/Gp * integral (sigma_y + H_iso*alpha) d alpha)`
-//! multiplies the effective deviatoric and tensile volumetric response. The
-//! compressive bulk response remains intact. `h` is an explicitly supplied
-//! characteristic band length; `Gp` is POST-INITIATION EQUIVALENT PLASTIC WORK
-//! per area, not total thermodynamic fracture dissipation. The degraded
-//! equivalent work is exactly `Gp*(1-g)` in this scalar evolution coordinate.
-//! Elastic and energetic hardening release are reported separately. Neither
-//! quantity silently becomes heat, geometric crack area or fragment energy.
+//! After initiation, an explicitly selected profile g(x) multiplies the
+//! effective deviatoric and tensile volumetric response, where
+//! `x = h/Gp * integral (sigma_y + H_iso*alpha) d alpha`. The compressive bulk
+//! response remains intact. Existing constructors retain `g=exp(-x)`; an
+//! authored finite-support option `g=max(1-x/3,0)^2` reaches exact zero at x=3.
+//! Both integrate to unit degraded equivalent work in x. Thus Gp remains
+//! POST-INITIATION EQUIVALENT PLASTIC-WORK CAPACITY per area, not total
+//! thermodynamic fracture dissipation. Its primitive equals damage only for
+//! the exponential profile. Elastic and energetic hardening release remain
+//! separate; no quantity silently becomes heat, crack area or fragment energy.
 //!
-//! This is the exponential energy form and nondeleted-3D compression split in
+//! The default exponential energy form and nondeleted-3D compression split are in
 //! SIMULIA, *Damage Evolution and Element Removal for Ductile Metals*:
 //! <https://docs.software.vt.edu/abaqusv2025/English/SIMACAEMATRefMap/simamat-c-damageevolductile.htm>.
 //! The native J2 return map, Prager history and algorithmic tangent are reused.
@@ -35,7 +37,10 @@
 //! paths. No element deletion, residual-stiffness floor, finite-strain law,
 //! crack-face contact, heat partition or measured validation
 //! is supplied. Exponential integrity stays positive; an unrepresentable value
-//! refuses instead of creating a hidden erosion threshold.
+//! refuses instead of creating a hidden erosion threshold. Finite-support
+//! failure retains the original compressive response and all native histories.
+//! A reduced plane-stress owner must refuse a singular transverse constraint;
+//! the scalar profile does not select a terminal thickness or crack opening.
 
 use core::fmt::Debug;
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
@@ -49,6 +54,10 @@ use crate::plastic::energy::{EnergyError, EnergyTolerances};
 use crate::plastic::{J2Plasticity, J2State};
 use crate::tensor::{contract, trace};
 use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
+
+/// Explicit profiles in the normalized original equivalent-work coordinate.
+mod work;
+pub use work::DuctileWorkEvolution;
 
 /// Original source-bound post-initiation work, not a toughness alias.
 pub mod source;
@@ -206,6 +215,7 @@ pub struct DuctileJ2<L> {
     settings: DuctileJ2Settings,
     bulk_modulus: f64,
     work_scale: f64,
+    evolution: DuctileWorkEvolution,
 }
 
 /// Accepted history bound to this exact owner, not an interchangeable clone.
@@ -215,6 +225,7 @@ pub struct DuctileJ2State<'a, L> {
     strain: Voigt,
     native: J2State,
     initiation: DuctileState,
+    // Original normalized work x; an exponent only for the default profile.
     exponent: f64,
     stored: f64,
     plastic_dissipated: f64,
@@ -313,7 +324,20 @@ impl<L: DifferentiableDuctileInitiationLaw> DuctileJ2<L> {
             settings,
             bulk_modulus,
             work_scale,
+            evolution: DuctileWorkEvolution::Exponential,
         })
+    }
+
+    /// Explicitly author the post-initiation shape on a new immutable owner.
+    /// The original Gp remains degraded equivalent-work capacity. Selecting a
+    /// shape neither changes its units nor qualifies that shape experimentally.
+    pub fn with_evolution(mut self, evolution: DuctileWorkEvolution) -> Self {
+        self.evolution = evolution;
+        self
+    }
+
+    pub const fn evolution(&self) -> DuctileWorkEvolution {
+        self.evolution
     }
 
     pub const fn native(&self) -> &J2Plasticity {
@@ -430,20 +454,26 @@ impl<L: DifferentiableDuctileInitiationLaw> DuctileJ2<L> {
                     triaxiality: step
                         .triaxiality
                         .ok_or(DuctileEvolutionError::Invalid("missing onset triaxiality"))?,
-                    lode_parameter: step
-                        .lode_parameter
-                        .ok_or(DuctileEvolutionError::Invalid("missing onset Lode parameter"))?,
+                    lode_parameter: step.lode_parameter.ok_or(DuctileEvolutionError::Invalid(
+                        "missing onset Lode parameter",
+                    ))?,
                 };
                 let gradient = self.initiation.fracture_strain_gradient_at(
                     stress_state,
                     step.strain_rate_s_inv,
                     conditions.temperature_k,
                 )?;
-                let stress_gradient = if gradient.triaxiality == 0.0 && gradient.lode_parameter == 0.0 {
-                    [0.0; 6]
-                } else {
-                    locus_stress_gradient(&native.stress_pa, &native_tangent, stress_state, gradient)?
-                };
+                let stress_gradient =
+                    if gradient.triaxiality == 0.0 && gradient.lode_parameter == 0.0 {
+                        [0.0; 6]
+                    } else {
+                        locus_stress_gradient(
+                            &native.stress_pa,
+                            &native_tangent,
+                            stress_state,
+                            gradient,
+                        )?
+                    };
                 for j in 0..6 {
                     onset_gradient[j] = finite(
                         remaining
@@ -473,9 +503,15 @@ impl<L: DifferentiableDuctileInitiationLaw> DuctileJ2<L> {
         let exponent_increment = nonnegative(self.work_scale * equivalent_work)?;
         let exponent = nonnegative(old.exponent + exponent_increment)?;
         finite(self.settings.post_initiation_plastic_work_j_m2 * exponent)?;
-        let integrity = positive(det::exp(-exponent))?;
+        let integrity = self.evolution.integrity(exponent);
+        let integrity = match self.evolution {
+            DuctileWorkEvolution::Exponential => positive(integrity)?,
+            DuctileWorkEvolution::FiniteSupportQuadratic => nonnegative(integrity)?,
+        };
         let old_integrity = old.integrity();
-        let damage_increment = nonnegative(old_integrity * (-det::expm1(-exponent_increment)))?;
+        let profile_increment = self.evolution.increment(old.exponent, exponent_increment);
+        let damage_increment = nonnegative(profile_increment.damage)?;
+        let degradation_slope = self.evolution.degradation_slope(exponent);
         if damage_increment > self.settings.maximum_damage_increment {
             return Err(DuctileEvolutionError::DamageIncrement {
                 proposed: damage_increment,
@@ -517,7 +553,7 @@ impl<L: DifferentiableDuctileInitiationLaw> DuctileJ2<L> {
                 };
                 branch_tangent_pa[i][j] = finite(
                     integrity * native_tangent[i][j] + (1.0 - integrity) * compression_tangent
-                        - effective_active_stress * (integrity * exponent_gradient),
+                        - effective_active_stress * (degradation_slope * exponent_gradient),
                 )?;
             }
         }
@@ -570,7 +606,8 @@ impl<L: DifferentiableDuctileInitiationLaw> DuctileJ2<L> {
                     self.settings.characteristic_length_m * equivalent_work,
                 )?,
                 degraded_equivalent_plastic_work_increment_j_m2: nonnegative(
-                    self.settings.post_initiation_plastic_work_j_m2 * damage_increment,
+                    self.settings.post_initiation_plastic_work_j_m2
+                        * profile_increment.degraded_work,
                 )?,
             },
         })
@@ -682,7 +719,7 @@ impl<L> DuctileJ2State<'_, L> {
     }
     pub fn integrity(&self) -> f64 {
         if self.is_valid() {
-            det::exp(-self.exponent)
+            self.owner.evolution.integrity(self.exponent)
         } else {
             f64::NAN
         }
@@ -690,10 +727,16 @@ impl<L> DuctileJ2State<'_, L> {
     /// Stable `1-g`; rounding to one does not mean an element was deleted.
     pub fn damage(&self) -> f64 {
         if self.is_valid() {
-            -det::expm1(-self.exponent)
+            self.owner.evolution.damage(self.exponent)
         } else {
             f64::NAN
         }
+    }
+    /// Exact zero of the explicitly selected finite-support profile. Rounded
+    /// damage=1 in the positive exponential tail is never complete failure.
+    /// This predicate does not erase history or authorize material removal.
+    pub fn is_fully_failed(&self) -> bool {
+        self.is_valid() && self.owner.evolution.is_fully_failed(self.exponent)
     }
     pub const fn stored_energy_j_m3(&self) -> f64 {
         self.stored
@@ -713,7 +756,12 @@ impl<L> DuctileJ2State<'_, L> {
     }
     /// Exact scalar attenuation-coordinate work, not additional physical loss.
     pub fn degraded_equivalent_plastic_work_j_m2(&self) -> f64 {
-        self.owner.settings.post_initiation_plastic_work_j_m2 * self.damage()
+        if self.is_valid() {
+            self.owner.settings.post_initiation_plastic_work_j_m2
+                * self.owner.evolution.degraded_work(self.exponent)
+        } else {
+            f64::NAN
+        }
     }
 }
 
@@ -757,15 +805,24 @@ impl<'a, L: DifferentiableDuctileInitiationLaw + Clone + Debug + PartialEq> Smal
         }
     }
     fn card(&self) -> ModelCard {
+        let (id, attenuation) = match self.owner.evolution {
+            DuctileWorkEvolution::Exponential => (
+                "material.ductile-j2-exponential-work",
+                "exponential equivalent-plastic-work attenuation and intact compressive bulk",
+            ),
+            DuctileWorkEvolution::FiniteSupportQuadratic => (
+                "material.ductile-j2-finite-support-work",
+                "authored quadratic finite-support equivalent-work attenuation and intact compressive bulk",
+            ),
+        };
         ModelCard::new(
-            "material.ductile-j2-exponential-work",
+            id,
             "0.1.0",
             Ambition::Solid,
             vec![
                 "native small-strain J2 with energetic isotropic/Prager hardening".into(),
                 "endpoint initiation quadrature and fixed characteristic length".into(),
-                "exponential equivalent-plastic-work attenuation and intact compressive bulk"
-                    .into(),
+                attenuation.into(),
             ],
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
@@ -839,7 +896,9 @@ pub(crate) fn locus_stress_gradient<const N: usize>(
                 q_gradient += (1.5 * dev[i] / q) * tangent[i][j] * if i < 3 { 1.0 } else { 2.0 };
             }
             derivative += locus.triaxiality
-                * finite((((mean_gradient - state.triaxiality * q_gradient) / scale) / dev_scale) / q)?;
+                * finite(
+                    (((mean_gradient - state.triaxiality * q_gradient) / scale) / dev_scale) / q,
+                )?;
         }
         if locus.lode_parameter != 0.0 {
             let mut xi_gradient = 0.0;

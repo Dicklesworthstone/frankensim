@@ -2,11 +2,13 @@
 //!
 //! The original plastic metric, Kirchhoff yield radius, spectral return and
 //! analytic derivatives remain with [`FiniteJ2`]. After initiation, integrity
-//! is `g=exp[-h/Gp integral R(alpha) d alpha]`, with the original linear/Voce/tabulated
-//! energetic resistance R. h is a fixed REFERENCE band width and Gp is
-//! post-initiation equivalent Kirchhoff plastic work per reference area. Neither
-//! is current crack area or total fracture dissipation. The shared initiation
-//! owner retains triaxiality, Lode and actual physical-rate dependence.
+//! is g(x), where `x=h/Gp integral R(alpha) d alpha` uses the original
+//! linear/Voce/tabulated energetic resistance R. Existing constructors select
+//! `g=exp(-x)`; explicitly authored finite support uses `g=max(1-x/3,0)^2`.
+//! Both have unit integral in x, so Gp is degraded equivalent Kirchhoff
+//! plastic-work CAPACITY per reference area, with fixed reference band width h.
+//! Neither is current crack area or total fracture dissipation. The shared
+//! initiation owner retains triaxiality, Lode and actual physical-rate dependence.
 //!
 //! Deviatoric/tensile storage degrades; compressive bulk storage remains intact:
 //! `psi=g*psi_native+(1-g)*K*min(log(J),0)^2/2`. Physical stress is its derivative
@@ -27,14 +29,18 @@
 //! to native physical plastic dissipation, not an inferred work calibration.
 //! Creep, caloric feedback, crack topology, contact and fragment transfer are
 //! not supplied. Temperature dependence belongs only to the initiation locus.
+//! At exact finite-support completion the original compressive bulk response
+//! and all histories remain. No native history is frozen, material deleted, or
+//! mass/caloric inventory discarded. A plane-stress constraint that loses its
+//! transverse stiffness requires an explicit higher-dimensional continuation.
 
+use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters, validate_viscous_committed};
 use super::{
     FiniteJ2, FiniteJ2Error, FiniteJ2State, RadialReturn, ReturnMap, ReturnSensitivities, dot, pack,
 };
-use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters, validate_viscous_committed};
 use crate::ductile::evolution::{
     DifferentiableDuctileInitiationLaw, DuctileEvolutionError, DuctileJ2Conditions,
-    DuctileJ2Settings, locus_stress_gradient,
+    DuctileJ2Settings, DuctileWorkEvolution, locus_stress_gradient,
 };
 use crate::ductile::{DuctileError, DuctileState, DuctileStressState};
 use fs_math::det;
@@ -55,6 +61,7 @@ pub struct FiniteDuctileJ2<L> {
     settings: DuctileJ2Settings,
     work_scale: f64,
     overstress: Option<FiniteOverstressParameters>,
+    evolution: DuctileWorkEvolution,
 }
 
 /// Complete accepted history bound to this exact immutable owner.
@@ -64,6 +71,7 @@ pub struct FiniteDuctileState<'a, L> {
     deformation: [f64; 9],
     native: FiniteJ2State,
     initiation: DuctileState,
+    // Original normalized work x; an exponent only for the default profile.
     exponent: f64,
     stored: f64,
     native_stored: f64,
@@ -110,7 +118,13 @@ pub enum FiniteDuctileError {
     StateMismatch,
     Native(FiniteJ2Error),
     Initiation(DuctileError),
-    DamageIncrement { proposed: f64, maximum: f64 },
+    DamageIncrement {
+        proposed: f64,
+        maximum: f64,
+    },
+    /// Exact zero integrity removes the transverse shear constraints. A
+    /// traction-free sheet can no longer determine its thickness and shear.
+    PlaneStressTerminalFailure,
     EnergyDefect(f64),
 }
 impl core::fmt::Display for FiniteDuctileError {
@@ -141,7 +155,9 @@ struct Returned {
     equivalent_work: f64,
     exponent: f64,
     integrity: f64,
+    degradation_slope: f64,
     damage_increment: f64,
+    degraded_work_increment: f64,
     compression_pressure: f64,
     compression_stored: f64,
     active_stored: f64,
@@ -181,7 +197,21 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
             settings,
             work_scale,
             overstress: None,
+            evolution: DuctileWorkEvolution::Exponential,
         })
+    }
+
+    /// Explicitly author the post-initiation shape on a new immutable owner.
+    /// Gp retains its original degraded equivalent Kirchhoff-work capacity.
+    /// This selection supplies no experimental shape calibration or permission
+    /// to delete failed material, its compression support, mass, or history.
+    pub fn with_evolution(mut self, evolution: DuctileWorkEvolution) -> Self {
+        self.evolution = evolution;
+        self
+    }
+
+    pub const fn evolution(&self) -> DuctileWorkEvolution {
+        self.evolution
     }
 
     /// Select fixed-temperature Perzyna flow on the same native backbone.
@@ -326,78 +356,89 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
             return self.replay(old);
         }
         let returned = self.return_map(f, old, conditions)?;
-        let mut sensitivities = ReturnSensitivities::default();
-        let native_tangent = self.native.return_derivatives(
-            f,
-            &old.native,
-            &returned.native,
-            Some(&mut sensitivities),
-        )?;
-        let alpha = returned.native.state.alpha;
-        let mut alpha_gradient = [0.0; 9];
-        if returned.native.dgamma > 0.0 {
-            let modulus = positive(
-                3.0 * self.native.parameters.shear_modulus_pa
-                    + self.native.hardening_tangent(alpha)
-                    + returned.viscous_modulus_pa,
+        let tangent_pa = if returned.integrity == 0.0 {
+            // The selected profile and its derivative are exactly zero.
+            // Retain the native return/history, but only compression contributes.
+            self.degraded_tangent(&returned.native, &[[0.0; 9]; 9], 0.0, 0.0, &[0.0; 9])?
+        } else {
+            let mut sensitivities = ReturnSensitivities::default();
+            let native_tangent = self.native.return_derivatives(
+                f,
+                &old.native,
+                &returned.native,
+                Some(&mut sensitivities),
             )?;
-            alpha_gradient = sensitivities.trial_equivalent.map(|dq| dq / modulus);
-        }
-        let mut onset_gradient = [0.0; 9];
-        if let Some((stress_state, rate, remaining)) = returned.onset {
-            let gradient = self.initiation.fracture_strain_gradient_at(
-                stress_state,
-                rate,
-                conditions.temperature_k,
-            )?;
-            let mut spatial = [[0.0; 9]; 6];
-            for j in 0..9 {
-                let column = pack(&core::array::from_fn(|k| sensitivities.kirchhoff[k][j]));
-                for i in 0..6 {
-                    spatial[i][j] = column[i];
+            let alpha = returned.native.state.alpha;
+            let mut alpha_gradient = [0.0; 9];
+            if returned.native.dgamma > 0.0 {
+                let modulus = positive(
+                    3.0 * self.native.parameters.shear_modulus_pa
+                        + self.native.hardening_tangent(alpha)
+                        + returned.viscous_modulus_pa,
+                )?;
+                alpha_gradient = sensitivities.trial_equivalent.map(|dq| dq / modulus);
+            }
+            let mut onset_gradient = [0.0; 9];
+            if let Some((stress_state, rate, remaining)) = returned.onset {
+                let gradient = self.initiation.fracture_strain_gradient_at(
+                    stress_state,
+                    rate,
+                    conditions.temperature_k,
+                )?;
+                let mut spatial = [[0.0; 9]; 6];
+                for j in 0..9 {
+                    let column = pack(&core::array::from_fn(|k| sensitivities.kirchhoff[k][j]));
+                    for i in 0..6 {
+                        spatial[i][j] = column[i];
+                    }
+                }
+                let stress_gradient =
+                    if gradient.triaxiality == 0.0 && gradient.lode_parameter == 0.0 {
+                        [0.0; 9]
+                    } else {
+                        locus_stress_gradient(
+                            &pack(&returned.native.tau),
+                            &spatial,
+                            stress_state,
+                            gradient,
+                        )
+                        .map_err(|error| match error {
+                            DuctileEvolutionError::Invalid(message) => {
+                                FiniteDuctileError::Invalid(message)
+                            }
+                            _ => FiniteDuctileError::Invalid(
+                                "stress-invariant derivative is not representable",
+                            ),
+                        })?
+                    };
+                for j in 0..9 {
+                    onset_gradient[j] = finite(
+                        remaining
+                            * (stress_gradient[j]
+                                + gradient.strain_rate_s_inv
+                                    * (alpha_gradient[j] / conditions.duration_s)),
+                    )?;
                 }
             }
-            let stress_gradient = if gradient.triaxiality == 0.0 && gradient.lode_parameter == 0.0 {
-                [0.0; 9]
-            } else {
-                locus_stress_gradient(
-                    &pack(&returned.native.tau),
-                    &spatial,
-                    stress_state,
-                    gradient,
-                )
-                .map_err(|error| match error {
-                    DuctileEvolutionError::Invalid(message) => FiniteDuctileError::Invalid(message),
-                    _ => FiniteDuctileError::Invalid(
-                        "stress-invariant derivative is not representable",
-                    ),
-                })?
-            };
-            for j in 0..9 {
-                onset_gradient[j] = finite(
-                    remaining
-                        * (stress_gradient[j]
-                            + gradient.strain_rate_s_inv
-                                * (alpha_gradient[j] / conditions.duration_s)),
-                )?;
+            let mut exponent_gradient = [0.0; 9];
+            if returned.post_alpha > 0.0 {
+                for j in 0..9 {
+                    exponent_gradient[j] = finite(
+                        self.work_scale
+                            * (self.native.yield_radius(alpha) * alpha_gradient[j]
+                                - self.native.yield_radius(returned.onset_alpha)
+                                    * onset_gradient[j]),
+                    )?;
+                }
             }
-        }
-        let mut exponent_gradient = [0.0; 9];
-        if returned.post_alpha > 0.0 {
-            for j in 0..9 {
-                exponent_gradient[j] = finite(
-                    self.work_scale
-                        * (self.native.yield_radius(alpha) * alpha_gradient[j]
-                            - self.native.yield_radius(returned.onset_alpha) * onset_gradient[j]),
-                )?;
-            }
-        }
-        let tangent_pa = self.degraded_tangent(
-            &returned.native,
-            &native_tangent,
-            returned.integrity,
-            &exponent_gradient,
-        )?;
+            self.degraded_tangent(
+                &returned.native,
+                &native_tangent,
+                returned.integrity,
+                returned.degradation_slope,
+                &exponent_gradient,
+            )?
+        };
         let delta_f = core::array::from_fn(|i| f[i] - old.deformation[i]);
         let work = finite(dot(&returned.first_piola, &delta_f))?;
         let plastic = nonnegative(returned.integrity * returned.native.dissipation)?;
@@ -434,7 +475,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
                 self.settings.characteristic_length_m * returned.equivalent_work,
             )?,
             degraded_equivalent_plastic_work_increment_j_m2: nonnegative(
-                self.settings.post_initiation_plastic_work_j_m2 * returned.damage_increment,
+                self.settings.post_initiation_plastic_work_j_m2 * returned.degraded_work_increment,
             )?,
         };
         let state = FiniteDuctileState {
@@ -471,15 +512,24 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         // Native hardening tables are immutable Arc-backed arrays: preparing
         // this interval neither allocates nor copies a measured curve. The
         // existing rate owner retains its scalar root, metric and work semantics.
-        let kinetics = self.overstress.map(|parameters| {
-            FiniteOverstressJ2::new(self.native.clone(), parameters, conditions.duration_s)
-        }).transpose()?;
-        let native = self.native.return_map_with_rate(f, &old.native, kinetics.as_ref())?;
+        let kinetics = self
+            .overstress
+            .map(|parameters| {
+                FiniteOverstressJ2::new(self.native.clone(), parameters, conditions.duration_s)
+            })
+            .transpose()?;
+        let native = self
+            .native
+            .return_map_with_rate(f, &old.native, kinetics.as_ref())?;
         let viscous_modulus_pa = if native.dgamma > 0.0 {
-            kinetics.as_ref().map(|law| {
-                law.endpoint_overstress_pa(native.dgamma)
-                    .map(|stress| (stress / native.dgamma) * (1.0 / law.parameters().exponent))
-            }).transpose()?.unwrap_or(0.0)
+            kinetics
+                .as_ref()
+                .map(|law| {
+                    law.endpoint_overstress_pa(native.dgamma)
+                        .map(|stress| (stress / native.dgamma) * (1.0 / law.parameters().exponent))
+                })
+                .transpose()?
+                .unwrap_or(0.0)
         } else {
             0.0
         };
@@ -533,7 +583,8 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         let mut equivalent_work = post_alpha
             * (p.yield_stress_pa + p.hardening_modulus_pa * (0.5 * onset_alpha + 0.5 * alpha));
         if let Some(table) = self.native.tabulated_hardening() {
-            equivalent_work += table.hardening_energy_increment_j_m3(onset_alpha, post_alpha)
+            equivalent_work += table
+                .hardening_energy_increment_j_m3(onset_alpha, post_alpha)
                 .map_err(FiniteJ2Error::Tabulated)?;
         }
         if let Some(voce) = self.native.voce {
@@ -551,8 +602,15 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
             ));
         }
         finite(self.settings.post_initiation_plastic_work_j_m2 * exponent)?;
-        let integrity = positive(det::exp(-exponent))?;
-        let damage_increment = nonnegative(old.integrity() * -det::expm1(-increment))?;
+        let integrity = self.evolution.integrity(exponent);
+        let integrity = match self.evolution {
+            DuctileWorkEvolution::Exponential => positive(integrity)?,
+            DuctileWorkEvolution::FiniteSupportQuadratic => nonnegative(integrity)?,
+        };
+        let profile_increment = self.evolution.increment(old.exponent, increment);
+        let damage_increment = nonnegative(profile_increment.damage)?;
+        let degraded_work_increment = nonnegative(profile_increment.degraded_work)?;
+        let degradation_slope = self.evolution.degradation_slope(exponent);
         if damage_increment > self.settings.maximum_damage_increment {
             return Err(FiniteDuctileError::DamageIncrement {
                 proposed: damage_increment,
@@ -596,7 +654,9 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
             equivalent_work,
             exponent,
             integrity,
+            degradation_slope,
             damage_increment,
+            degraded_work_increment,
             compression_pressure,
             compression_stored,
             active_stored,
@@ -611,6 +671,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         returned: &ReturnMap,
         native: &[[f64; 9]; 9],
         g: f64,
+        degradation_slope: f64,
         exponent_gradient: &[f64; 9],
     ) -> Result<[[f64; 9]; 9], FiniteDuctileError> {
         let inverse = &returned.inverse_transpose;
@@ -631,7 +692,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
                     - pressure * inverse[3 * i + l] * inverse[3 * k + j];
                 tangent[ij][kl] = finite(
                     g * native[ij][kl] + (1.0 - g) * compression
-                        - active_stress * (g * exponent_gradient[kl]),
+                        - active_stress * (degradation_slope * exponent_gradient[kl]),
                 )?;
             }
         }
@@ -665,10 +726,14 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
                 rate_potential: 0.0,
             },
         )?;
-        let native = self
-            .native
-            .return_tangent(&old.deformation, &old.native, &returned)?;
-        let tangent_pa = self.degraded_tangent(&returned, &native, old.integrity(), &[0.0; 9])?;
+        let native = if old.is_fully_failed() {
+            [[0.0; 9]; 9]
+        } else {
+            self.native
+                .return_tangent(&old.deformation, &old.native, &returned)?
+        };
+        let tangent_pa =
+            self.degraded_tangent(&returned, &native, old.integrity(), 0.0, &[0.0; 9])?;
         Ok(FiniteDuctileStep {
             first_piola_pa: old.first_piola,
             kirchhoff_pa: old.kirchhoff,
@@ -732,13 +797,23 @@ impl<L> FiniteDuctileState<'_, L> {
         &self.initiation
     }
     pub fn integrity(&self) -> f64 {
-        det::exp(-self.exponent)
+        self.owner.evolution.integrity(self.exponent)
     }
     pub fn damage(&self) -> f64 {
-        -det::expm1(-self.exponent)
+        self.owner.evolution.damage(self.exponent)
+    }
+    /// Exact terminal support of the explicitly authored finite-support law.
+    /// Rounded damage=1 in an exponential tail never qualifies as failure.
+    pub fn is_fully_failed(&self) -> bool {
+        self.is_valid() && self.owner.evolution.is_fully_failed(self.exponent)
     }
     pub const fn stored_energy_j_m3(&self) -> f64 {
         self.stored
+    }
+    /// Retained original compressive bulk storage. Complete deviatoric/tensile
+    /// failure does not authorize discarding this energy or its physical stress.
+    pub const fn compression_stored_energy_j_m3(&self) -> f64 {
+        self.compression_stored
     }
     pub const fn dissipated_plastic_j_m3(&self) -> f64 {
         self.plastic_dissipated
@@ -753,7 +828,8 @@ impl<L> FiniteDuctileState<'_, L> {
         self.owner.settings.post_initiation_plastic_work_j_m2 * self.exponent
     }
     pub fn degraded_equivalent_plastic_work_j_m2(&self) -> f64 {
-        self.owner.settings.post_initiation_plastic_work_j_m2 * self.damage()
+        self.owner.settings.post_initiation_plastic_work_j_m2
+            * self.owner.evolution.degraded_work(self.exponent)
     }
 }
 

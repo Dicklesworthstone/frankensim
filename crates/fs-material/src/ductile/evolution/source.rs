@@ -1,7 +1,10 @@
 //! Original calibration of post-initiation equivalent plastic work per area.
 //!
-//! The exact source property calibrates the exponential attenuation driven by
-//! `h * integral (sigma_y + H_iso * alpha) d(alpha)` after initiation. It is
+//! The exact source property supplies degraded equivalent-work capacity for
+//! attenuation driven by `h * integral (sigma_y + H_iso * alpha) d(alpha)`.
+//! Resolution retains the default exponential shape. An optional explicit
+//! builder authors a different normalized profile while preserving that capacity
+//! receipt; the receipt alone does not validate the new shape. This capacity is
 //! neither total fracture dissipation nor a cohesive traction-opening work.
 //! Damage releases stored energy separately; it is not added to plastic heat
 //! through this property. Toughness, engineering elongation and other fracture
@@ -14,6 +17,7 @@
 
 use super::{
     DuctileEvolutionError, DuctileJ2, DuctileJ2Conditions, DuctileJ2Law, DuctileJ2Settings,
+    DuctileWorkEvolution,
 };
 use crate::ductile::source::ResolvedDuctileLocus;
 use crate::plastic::energy::EnergyTolerances;
@@ -132,6 +136,16 @@ impl ResolvedDuctileJ2 {
             initiation,
             settings,
         )
+    }
+
+    /// Explicitly author a normalized post-initiation shape before borrowing
+    /// histories. The original equivalent-work CAPACITY, native J2, initiation,
+    /// typed context and source receipts remain unchanged. A scalar capacity
+    /// claim does not establish measured support for this shape or authorize
+    /// material removal, loss of compression support, or erased inventories.
+    pub fn with_evolution(mut self, evolution: DuctileWorkEvolution) -> Self {
+        self.law = self.law.with_evolution(evolution);
+        self
     }
 
     /// Original mechanical coefficients, work calibration and all source receipts.

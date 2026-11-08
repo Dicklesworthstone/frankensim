@@ -5,6 +5,9 @@
 //! with fixed reference width h and the selected native linear/Voce resistance.
 //! It is distinct from total fracture dissipation, cohesive work, current-area
 //! work and the existing small-strain property. Equal units do not alias them.
+//! Resolution retains the default exponential shape. An optional explicit
+//! builder authors a different normalized work profile while preserving the
+//! same capacity receipt; the receipt alone does not validate that shape.
 //!
 //! The original finite model must be a member of the same immutable material
 //! card as the work claim and initiation locus. Complete fixed typed contexts
@@ -13,8 +16,8 @@
 
 use super::{FiniteDuctileError, FiniteDuctileJ2};
 use crate::MaterialError;
-use crate::ductile::evolution::DuctileJ2Settings;
 use crate::ductile::evolution::source::{DuctileJ2SourceSettings, PLASTIC_WORK_PER_AREA_DIMS};
+use crate::ductile::evolution::{DuctileJ2Settings, DuctileWorkEvolution};
 use crate::ductile::source::ResolvedDuctileLocus;
 use crate::plastic::finite::source::ResolvedFiniteJ2;
 use crate::state_point::{
@@ -112,6 +115,16 @@ impl ResolvedFiniteDuctileJ2 {
             plastic,
             law,
         })
+    }
+
+    /// Explicitly author a normalized post-initiation shape before borrowing
+    /// histories. The original equivalent Kirchhoff-work CAPACITY, initiation,
+    /// native finite model, typed context and source receipts remain unchanged.
+    /// A scalar capacity claim does not establish measured support for a new
+    /// shape, total fracture energy, crack separation, or material removal.
+    pub fn with_evolution(mut self, evolution: DuctileWorkEvolution) -> Self {
+        self.law = self.law.with_evolution(evolution);
+        self
     }
 
     /// Exact work claim, immutable card identity and original property-use receipt.

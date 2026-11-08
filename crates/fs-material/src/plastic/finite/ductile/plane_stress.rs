@@ -11,6 +11,10 @@
 //! scalar incremental potential is introduced. This selects a regular local
 //! equilibrium branch. It does not certify its stability or global uniqueness.
 //! Shell bending, necking, tool contact and crack topology remain separate.
+//! Exact finite-support failure removes the transverse shear constraints.
+//! Terminal candidates refuse before dividing by integrity or inverting the
+//! transverse block; no arbitrary thickness, stiffness floor or deletion is
+//! substituted for the lost three-dimensional material constraint.
 
 use super::{FiniteDuctileError, FiniteDuctileJ2, FiniteDuctileState, FiniteDuctileStep};
 use crate::ductile::evolution::{DifferentiableDuctileInitiationLaw, DuctileJ2Conditions};
@@ -216,6 +220,9 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         settings: PlaneStressSettings,
     ) -> Result<FiniteDuctilePlaneStressStep<'a, L>, FiniteDuctileError> {
         self.admit(old, conditions)?;
+        if old.is_fully_failed() {
+            return Err(FiniteDuctileError::PlaneStressTerminalFailure);
+        }
         if !(settings.relative_tolerance.is_finite()
             && settings.relative_tolerance > 0.0
             && settings.relative_tolerance < 1.0)
@@ -252,6 +259,9 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         ];
         let evaluate = |gradient: &[f64; 9]| {
             let step = self.trial(gradient, old, conditions)?;
+            if step.state.is_fully_failed() {
+                return Err(FiniteDuctileError::PlaneStressTerminalFailure);
+            }
             let block = TransverseBlock::new(&step.tangent_pa)?;
             Ok::<_, FiniteDuctileError>((step, block))
         };

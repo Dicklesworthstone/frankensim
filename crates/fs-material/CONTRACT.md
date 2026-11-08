@@ -1,5 +1,17 @@
 # fs-material — CONTRACT
 
+## Exact finite-support ductile completion
+
+`DuctileWorkEvolution` selects the post-initiation profile explicitly; all existing numeric and source constructors retain `Exponential`. `FiniteSupportQuadratic` uses `x=(h/Gp) integral R d(alpha)`, `r=max(1-x/3,0)`, `g=r^2`, and `dg/dx=-2r/3` below its support, zero thereafter. Exact failure occurs at `x=3`, after undegraded equivalent work `3Gp`; `integral g dx=1`, so `Gp` remains integrated degraded equivalent plastic-work capacity, not total thermodynamic fracture energy.
+
+Cumulative and incremental attenuation-work diagnostics use `Phi=1-r^3` and a stable factored increment. They differ from damage and its increment. Physical plastic loss, release of old active storage, signed finite endpoint-work defects, numerical loss, and heat destinations retain their existing separate meanings. Perzyna attenuation retains the equilibrium resistance `R`; physical viscous loss remains in its original account.
+
+Exact terminal predicates cannot be triggered by rounded exponential damage or a stiffness cutoff. Full three-dimensional terminal states retain their original compressive bulk support and native histories. The finite tangent uses the exact zero profile and derivative without evaluating active spectral derivatives that no longer contribute. Explicit source builders retain the original capacity receipts while declaring an authored shape assumption; a scalar capacity claim does not establish measured support for that shape.
+
+Terminal finite plane-stress candidates return `PlaneStressTerminalFailure` before dividing by integrity or inverting the transverse block. Small-strain reduction also refuses its singular block. No stiffness floor, arbitrary terminal thickness, automatic crack direction, deletion, erased inventory, or experimental qualification is implied. Component fracture/contact transitions require their own geometry, traction, inventory, and work admission.
+
+Focused G0/G3 regressions in `tests/ductile_completion.rs` cover analytic capacity and stable terminal tails, full native tangents, retained compression and irreversible histories, physical-rate hold completion, exponential-default parity, and the plane-stress boundary. In this implementation session, pinned rustfmt parsed the source; Cargo typechecking and test execution remain unverified because the available workspace was full and the real dependency build had been killed by the memory limit.
+
 ## Progressive ductile plane-stress section work
 
 `DuctileJ2Law` audits accepted increments through the original

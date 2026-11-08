@@ -33,9 +33,10 @@ pub struct DuctileSectionEnergy {
     pub generalized_work_j_m2: f64,
     /// Signed work of the small remaining transverse equilibrium residual.
     pub transverse_residual_work_j_m2: f64,
-    /// Reference-thickness integral of `Gp * delta_damage / h`. This is a
-    /// diagnostic of the attenuation coordinate, NOT an additional loss term
-    /// or work per newly created crack area.
+    /// Reference-thickness integral of `Gp * delta(Phi(x)) / h`, where
+    /// Phi is the selected integrity profile's primitive. Only exponential
+    /// attenuation makes delta(Phi) equal delta(damage). This is a diagnostic,
+    /// NOT an additional loss term or work per newly created crack area.
     pub degraded_equivalent_plastic_work_j_m2: f64,
     /// Recovered `[Nx, Ny, Nxy, Mx, My, Mxy]`, in N/m and N respectively.
     pub resultants: [f64; 6],
