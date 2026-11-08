@@ -32,7 +32,8 @@ pub(super) struct KirchhoffHeat {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct KirchhoffTangent {
-    /// dq_f/dTc, positive, in W/K.
+    /// dq_f/dx_c: initially W/K, then W per specific energy when composed
+    /// with a caloric derivative. A latent plateau has zero cell derivatives.
     pub cell: [f64; 6],
     /// dq_f/dTg in W/K, stored as row f, column g.
     pub face: [[f64; 6]; 6],
@@ -53,7 +54,7 @@ impl KirchhoffRecovery {
         if face_increment.iter().any(|v| !v.is_finite()) {
             return None;
         }
-        // Scale into Kelvin before the reduction, avoiding an unnecessary
+        // Scale into the cell coordinate before reduction, avoiding an unnecessary
         // large intermediate heat when the final increment is representable.
         let mut increment = -self.cell_residual_w / self.diagonal;
         for (link, delta) in self.face_link.into_iter().zip(face_increment) {
@@ -83,13 +84,29 @@ impl KirchhoffCondensation {
 }
 
 impl KirchhoffTangent {
+    /// Compose only the cell column with the original dT/de. Face unknowns
+    /// remain Kelvin. Zero slope is a genuine latent plateau, not infinite Cp.
+    pub fn with_cell_temperature_slope(self, slope: f64) -> Option<Self> {
+        if !slope.is_finite() || slope < 0.0
+            || self.cell.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        {
+            return None;
+        }
+        let cell = self.cell.map(|value| value * slope);
+        if cell.iter().any(|v| !v.is_finite() || (slope > 0.0 && *v == 0.0)) {
+            return None;
+        }
+        Some(Self { cell, face: self.face })
+    }
+
     /// Eliminate one free cell from the exact original Newton equations.
     ///
     /// With positive endpoint face links b_g=-dq_g/dTg and
-    /// D=sum_f dq_f/dTc + added_diagonal, the sign-reversed face Schur
-    /// matrix is -dq_f/dTg-(dq_f/dTc)b_g/D. Its residual correction is
-    /// -(dq_f/dTc)Rc/D. The added diagonal is the original nonnegative
-    /// sink/storage tangent, not a damping or conductivity approximation.
+    /// D=sum_f dq_f/dx_c + added_diagonal, the sign-reversed face Schur
+    /// matrix is -dq_f/dTg-(dq_f/dx_c)b_g/D. Its residual correction is
+    /// -(dq_f/dx_c)Rc/D. The cell coordinate is temperature or original
+    /// specific energy. Positive physical storage keeps D positive even on
+    /// an isothermal latent plateau. No division by dT/de is introduced.
     pub fn condense(
         self,
         added_diagonal: f64,
@@ -98,7 +115,7 @@ impl KirchhoffTangent {
         if !added_diagonal.is_finite()
             || added_diagonal < 0.0
             || !cell_residual_w.is_finite()
-            || self.cell.iter().any(|v| !v.is_finite() || *v <= 0.0)
+            || self.cell.iter().any(|v| !v.is_finite() || *v < 0.0)
             || self.face.iter().flatten().any(|v| !v.is_finite())
         {
             return None;
@@ -262,6 +279,52 @@ mod tests {
             2.0 + 0.00002 / 3.0 * (from * from + from * to + to * to),
             3.0 + 0.0015 * (from + to),
         ])
+    }
+
+    #[test]
+    fn latent_plateau_condenses_with_mass_storage_without_dividing_by_temperature_slope() {
+        let geometry = KirchhoffCell::new([0.2, 0.7, 1.3]).unwrap();
+        let kelvin = geometry.tangent(BASE, [BASE; 6]).unwrap();
+        let latent = kelvin.with_cell_temperature_slope(0.0).unwrap();
+        let storage = 2.5; // m/dt in kg/s; not a heat capacity.
+        let residual = 17.0;
+        let condensed = latent.condense(storage, residual).unwrap();
+        for f in 0..6 {
+            assert_eq!(condensed.load[f], 0.0);
+            for g in 0..6 {
+                assert_eq!(condensed.matrix[f][g], -kelvin.face[f][g]);
+            }
+        }
+        let trace_increment = [0.2, -0.4, 0.7, 0.1, -0.3, 0.5];
+        let energy_increment = condensed.cell_increment(trace_increment).unwrap();
+        let expected = (-residual
+            + (0..6).map(|g| -kelvin.face[g][g] * trace_increment[g]).sum::<f64>())
+            / storage;
+        assert!((energy_increment - expected).abs() < 1e-13);
+        assert!(latent.condense(0.0, residual).is_none());
+        assert!(kelvin.with_cell_temperature_slope(-1.0).is_none());
+        assert!(kelvin.with_cell_temperature_slope(f64::NAN).is_none());
+    }
+
+    #[test]
+    fn caloric_chain_rule_scales_cell_column_and_preserves_face_derivatives() {
+        let geometry = KirchhoffCell::new([0.3, 0.4, 0.5]).unwrap();
+        let kelvin = geometry.tangent(BASE, [BASE; 6]).unwrap();
+        let slope = 1.0 / 700.0;
+        let caloric = kelvin.with_cell_temperature_slope(slope).unwrap();
+        assert_eq!(caloric.face, kelvin.face);
+        for f in 0..6 {
+            assert_eq!(caloric.cell[f], kelvin.cell[f] * slope);
+        }
+        let added = 0.2 + 3.0 * slope; // m/dt + sink_G*dT/de.
+        let residual = -11.0;
+        let condensed = caloric.condense(added, residual).unwrap();
+        let trace = [0.2, 0.4, -0.1, 0.3, -0.5, 0.7];
+        let energy = condensed.cell_increment(trace).unwrap();
+        let direct = (caloric.cell.iter().sum::<f64>() + added) * energy
+            + (0..6).map(|g| kelvin.face[g][g] * trace[g]).sum::<f64>()
+            + residual;
+        assert!(direct.abs() < 1e-12);
     }
 
     #[test]
