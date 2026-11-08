@@ -326,3 +326,330 @@ fn zero_gravity_is_bitwise_unchanged_and_invalid_gravity_is_atomic() {
     assert_eq!(density[1].density_kg_m3, 9.0);
     assert!(velocity.iter().all(|value| *value == 0.0));
 }
+
+#[test]
+fn spatial_acceleration_uses_transported_mass_and_resolves_angular_motion() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 0.6, 3, 2));
+    let system = FluxSystem::new(&mesh);
+    let density: Vec<_> = (0..mesh.tris.len())
+        .map(|cell| Cell {
+            density_kg_m3: 2.0 + 10.0 * cell as f64,
+            specific: [],
+        })
+        .collect();
+    let u = [0.7, -0.2];
+    let velocity = constant(&mesh, u);
+    let inlet: Vec<_> = mesh
+        .edges
+        .iter()
+        .map(|face| {
+            (face.tris.1 == usize::MAX).then_some(Cell {
+                density_kg_m3: 321.0,
+                specific: [],
+            })
+        })
+        .collect();
+    let exterior: Vec<_> = mesh
+        .edges
+        .iter()
+        .map(|face| (face.tris.1 == usize::MAX).then_some([u; 2]))
+        .collect();
+    let traction = |_, _| [0.0; 2];
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge, face)| {
+            (face.tris.1 == usize::MAX).then_some(Boundary::TotalTraction {
+                edge,
+                value: &traction,
+            })
+        })
+        .collect();
+    let history = || History {
+        density: &density,
+        velocity: &velocity,
+        inflow_density: &inlet,
+        inflow_velocity: &exterior,
+    };
+    // An affine angular acceleration has zero divergence and zero symmetric
+    // gradient. The exact native endpoint is a rigid rotation superposed on
+    // the transported free stream, even though rho_new differs in every cell.
+    let acceleration = |p: [f64; 2]| [1.3 * (p[1] + 0.2), -1.3 * (p[0] - 0.4)];
+    let mut reference_velocity = None;
+    for reference in [0.5, 7.0, 1000.0] {
+        let samples = std::cell::Cell::new(0);
+        let source = |_: usize, point| {
+            samples.set(samples.get() + 1);
+            acceleration(point)
+        };
+        let unloaded = system
+            .assemble_conservative_momentum_bdf1(
+                history(),
+                controls(reference),
+                MaterialFluxNumerics::default(),
+                &|_, _| 0.03,
+                &|_| [0.0; 2],
+                &boundaries,
+                || false,
+            )
+            .unwrap();
+        let loaded = system
+            .assemble_conservative_momentum_bdf1_with_acceleration(
+                history(),
+                controls(reference),
+                MaterialFluxNumerics::default(),
+                &|_, _| 0.03,
+                &|_| [0.0; 2],
+                &source,
+                &boundaries,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(samples.get(), 6 * mesh.tris.len());
+        assert!(loaded.density().iter().zip(&density).any(|(a, b)| a != b));
+        assert_eq!(loaded.density(), unloaded.density());
+        // Independent degree-two edge-midpoint triangle rule. The product
+        // of the affine acceleration and BDM test is quadratic: a centroid
+        // source sample would miss its covariance, including the odd modes.
+        let mut expected_load = vec![0.0; system.n];
+        for (cell, nodes) in mesh.tris.iter().enumerate() {
+            let vertices = nodes.map(|node| mesh.verts[node]);
+            for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+                let point = core::array::from_fn(|axis| {
+                    f64::midpoint(vertices[a][axis], vertices[b][axis])
+                });
+                let g = acceleration(point);
+                let mass = mesh.areas[cell] * loaded.density()[cell].density_kg_m3 / 3.0;
+                for local in 0..6 {
+                    let test = eval_basis(&system.bases[cell], local, point);
+                    let row = 2 * mesh.tri_edges[cell][local / 2].0 + local % 2;
+                    expected_load[row] += mass * (g[0] * test[0] + g[1] * test[1]);
+                }
+            }
+        }
+        for ((&with, &without), &expected) in
+            loaded.rhs().iter().zip(unloaded.rhs()).zip(&expected_load)
+        {
+            near(reference * (with - without), expected, 3e-9);
+        }
+        let accepted = loaded.solve(|| false).unwrap();
+        for (cell, nodes) in mesh.tris.iter().enumerate() {
+            for (point, _) in tri_quad(nodes.map(|node| mesh.verts[node]), mesh.areas[cell]) {
+                let mut actual = [0.0; 2];
+                for local in 0..6 {
+                    let test = eval_basis(&system.bases[cell], local, point);
+                    let row = 2 * mesh.tri_edges[cell][local / 2].0 + local % 2;
+                    for axis in 0..2 {
+                        actual[axis] += test[axis] * accepted.velocity_m_s()[row];
+                    }
+                }
+                for axis in 0..2 {
+                    near(
+                        actual[axis],
+                        u[axis] + controls(reference).timestep_s * acceleration(point)[axis],
+                        3e-9,
+                    );
+                }
+            }
+        }
+        for &pressure in accepted.pressure_pa() {
+            near(pressure, 0.0, 3e-7);
+        }
+        if let Some(previous) = &reference_velocity {
+            for (&a, &b) in accepted.velocity_m_s().iter().zip(previous) {
+                near(a, b, 3e-9);
+            }
+        } else {
+            reference_velocity = Some(accepted.velocity_m_s().to_vec());
+        }
+    }
+}
+
+#[test]
+fn centrifugal_acceleration_balances_quadratic_pressure_at_rest() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 0.6, 3, 2));
+    let system = FluxSystem::new(&mesh);
+    let rho = 17.0;
+    let omega_squared = 6.25;
+    let center = [-0.2, 0.4];
+    let density = vec![
+        Cell {
+            density_kg_m3: rho,
+            specific: []
+        };
+        mesh.tris.len()
+    ];
+    let velocity = vec![0.0; system.n_u];
+    let inlet = vec![None; mesh.edges.len()];
+    let exterior = vec![None; mesh.edges.len()];
+    let pressure = |point: [f64; 2]| {
+        30.0 + 0.5
+            * rho
+            * omega_squared
+            * ((point[0] - center[0]).powi(2) + (point[1] - center[1]).powi(2))
+    };
+    let traction = |point, normal: [f64; 2]| normal.map(|value| -pressure(point) * value);
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge, face)| {
+            (face.tris.1 == usize::MAX).then_some(Boundary::TotalTraction {
+                edge,
+                value: &traction,
+            })
+        })
+        .collect();
+    let accepted = system
+        .assemble_conservative_momentum_bdf1_with_acceleration(
+            History {
+                density: &density,
+                velocity: &velocity,
+                inflow_density: &inlet,
+                inflow_velocity: &exterior,
+            },
+            controls(1000.0),
+            MaterialFluxNumerics::default(),
+            &|_, _| 0.03,
+            &|_| [0.0; 2],
+            &|_, point| core::array::from_fn(|axis| omega_squared * (point[axis] - center[axis])),
+            &boundaries,
+            || false,
+        )
+        .unwrap()
+        .solve(|| false)
+        .unwrap();
+    for cell in accepted.density() {
+        near(cell.density_kg_m3, rho, 3e-13);
+    }
+    for &value in accepted.velocity_m_s() {
+        near(value, 0.0, 3e-10);
+    }
+    for (cell, nodes) in mesh.tris.iter().enumerate() {
+        let vertices = nodes.map(|node| mesh.verts[node]);
+        let expected = [(0, 1), (1, 2), (2, 0)]
+            .into_iter()
+            .map(|(a, b)| {
+                pressure(core::array::from_fn(|axis| {
+                    f64::midpoint(vertices[a][axis], vertices[b][axis])
+                })) / 3.0
+            })
+            .sum::<f64>();
+        near(accepted.pressure_pa()[cell], expected, 3e-8);
+    }
+}
+
+#[test]
+fn spatial_acceleration_preserves_uniform_paths_and_refuses_late_sources_atomically() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+    let system = FluxSystem::new(&mesh);
+    let density = vec![
+        Cell {
+            density_kg_m3: 2.0,
+            specific: [],
+        },
+        Cell {
+            density_kg_m3: 9.0,
+            specific: [],
+        },
+    ];
+    let velocity = vec![0.0; system.n_u];
+    let inlet = vec![None; mesh.edges.len()];
+    let exterior = vec![None; mesh.edges.len()];
+    let traction = |_, _| [0.0; 2];
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter_map(|(edge, face)| {
+            (face.tris.1 == usize::MAX).then_some(Boundary::TotalTraction {
+                edge,
+                value: &traction,
+            })
+        })
+        .collect();
+    let history = || History {
+        density: &density,
+        velocity: &velocity,
+        inflow_density: &inlet,
+        inflow_velocity: &exterior,
+    };
+    let assemble = |source: &dyn Fn(usize, [f64; 2]) -> [f64; 2]| {
+        system.assemble_conservative_momentum_bdf1_with_acceleration(
+            history(),
+            controls(7.0),
+            MaterialFluxNumerics::default(),
+            &|_, _| 0.1,
+            &|_| [0.2, -0.3],
+            source,
+            &boundaries,
+            || false,
+        )
+    };
+    for gravity in [[0.0; 2], [1.7, -3.2]] {
+        let constant = system
+            .assemble_conservative_momentum_bdf1_with_gravity(
+                history(),
+                controls(7.0),
+                MaterialFluxNumerics::default(),
+                &|_, _| 0.1,
+                &|_| [0.2, -0.3],
+                gravity,
+                &boundaries,
+                || false,
+            )
+            .unwrap();
+        let field = assemble(&|_, _| gravity).unwrap();
+        assert_eq!(constant.rhs(), field.rhs());
+        let a = constant.solve(|| false).unwrap();
+        let b = field.solve(|| false).unwrap();
+        assert_eq!(a.field().x, b.field().x);
+        assert_eq!(a.density(), b.density());
+    }
+    let samples = std::cell::Cell::new(0);
+    let refused = assemble(&|_, _| {
+        let count = samples.get() + 1;
+        samples.set(count);
+        if count == 12 {
+            [f64::NAN, 0.0]
+        } else {
+            [0.4, -0.7]
+        }
+    });
+    let expected_point = tri_quad(mesh.tris[1].map(|node| mesh.verts[node]), mesh.areas[1])[5].0;
+    assert!(
+        matches!(refused, Err(Error::NonFiniteAcceleration { cell: 1, point_m }) if point_m == expected_point)
+    );
+    assert_eq!(samples.get(), 12);
+    samples.set(0);
+    assert!(matches!(
+        system.assemble_conservative_momentum_bdf1_with_acceleration(
+            history(),
+            controls(7.0),
+            MaterialFluxNumerics::default(),
+            &|_, _| 0.1,
+            &|_| [0.2, -0.3],
+            &|_, _| {
+                samples.set(samples.get() + 1);
+                [0.4, -0.7]
+            },
+            &boundaries,
+            || samples.get() == 6,
+        ),
+        Err(Error::Transport(DensityTransportError::Cancelled))
+    ));
+    let first = assemble(&|_, _| [0.4, -0.7])
+        .unwrap()
+        .solve(|| false)
+        .unwrap();
+    let retry = assemble(&|_, _| [0.4, -0.7])
+        .unwrap()
+        .solve(|| false)
+        .unwrap();
+    assert_eq!(first.field().x, retry.field().x);
+    assert_eq!(first.density(), retry.density());
+    assert_eq!(density[0].density_kg_m3, 2.0);
+    assert_eq!(density[1].density_kg_m3, 9.0);
+    assert!(velocity.iter().all(|value| *value == 0.0));
+}

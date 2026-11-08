@@ -8601,3 +8601,33 @@ late cancellation rollback, motion-only refinement and unequal representable
 halves on a large clock. Existing stationary first/second-order adaptive tests
 also passed after the shared schedule extension. Full Cargo workspace
 validation is not claimed.
+
+### Conservative momentum with spatial body acceleration
+
+`assemble_conservative_momentum_bdf1_with_acceleration` accepts one held physical
+acceleration field in m/s² on the original cells. The existing mass transport
+first computes the endpoint P0 density; its original six positive triangle
+mass-quadrature weights then supply both inertia and the acceleration load.
+The field is sampled once per point, in the existing cell traversal, without
+a source array. Affine acceleration moments are exact up to roundoff. Additional
+volumetric force retains its independent N/m³ meaning, and the uniform/zero
+gravity paths retain their original arithmetic.
+
+A nonfinite sample identifies its original cell and point. Unrepresentable
+loads, transport or solver refusals, and cancellation publish no partial
+density/velocity endpoint. This is the original fixed-mesh, first-order IMEX
+scheme with transported P0 density and unchanged quadrature for general fields.
+The callback is a pure frozen endpoint source; prescribed centrifugal
+acceleration is admitted, but velocity-dependent Coriolis integration is outside
+this API.
+
+Four pinned-compiler probes of the actual mass loop, original BDM basis and
+quadrature passed: affine loads against independent degree-two moments,
+centrifugal source/pressure/traction balance, constant/zero exact compatibility,
+and located refusal/cancellation/retry. Their maximum load and weak-balance
+errors were 1.155e-14 and 1.919e-13. The three public coupled-solver regressions in
+`tests/conservative_density_momentum/gravity.rs` also exercise transported
+density, reference normalization and exact angular velocity. Those full Cargo
+regressions were added but not executed because the uncached dependency build
+exceeded the available storage; the probes do not replace transport or the
+Stokes solver.

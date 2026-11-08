@@ -55,6 +55,12 @@ pub struct ConservativeMomentumControls {
 pub enum ConservativeMomentumError {
     Transport(DensityTransportError),
     Flow(StokesBoundaryError),
+    /// A spatial acceleration source returned a nonfinite value at an original
+    /// mass-integration point. No candidate density or velocity is published.
+    NonFiniteAcceleration {
+        cell: usize,
+        point_m: [f64; 2],
+    },
 }
 
 impl core::fmt::Display for ConservativeMomentumError {
@@ -74,6 +80,27 @@ impl From<StokesBoundaryError> for ConservativeMomentumError {
     }
 }
 type Result<T> = core::result::Result<T, ConservativeMomentumError>;
+
+#[derive(Clone, Copy)]
+enum BodyAcceleration<'a> {
+    Uniform(Option<[f64; 2]>),
+    Spatial(&'a dyn Fn(usize, [f64; 2]) -> [f64; 2]),
+}
+
+impl BodyAcceleration<'_> {
+    fn sample(self, cell: usize, point_m: [f64; 2]) -> Result<Option<[f64; 2]>> {
+        match self {
+            Self::Uniform(value) => Ok(value),
+            Self::Spatial(source) => {
+                let value = source(cell, point_m);
+                if value.iter().any(|component| !component.is_finite()) {
+                    return Err(ConservativeMomentumError::NonFiniteAcceleration { cell, point_m });
+                }
+                Ok((value != [0.0; 2]).then_some(value))
+            }
+        }
+    }
+}
 
 /// Prepared native saddle operator with one immutable density/transport pair.
 /// Neither the supplied density nor velocity history is changed by preparation.
@@ -199,6 +226,76 @@ impl<'m> FluxSystem<'m> {
             ));
         }
         let gravity = (gravity_m_s2 != [0.0; 2]).then_some(gravity_m_s2);
+        self.assemble_conservative_momentum_with_acceleration(
+            history,
+            controls,
+            numerics,
+            dynamic_viscosity,
+            force_density,
+            BodyAcceleration::Uniform(gravity),
+            boundaries,
+            cancelled,
+        )
+    }
+
+    /// Advance with a spatial body acceleration [m/s²] acting on transported mass.
+    ///
+    /// The load is `rho_new(cell) * acceleration(cell, point) + force_density`.
+    /// The original density transport first determines rho_new; the SAME positive
+    /// mass-quadrature weights then supply inertia and this load. The source is
+    /// queried once at each of the six original triangle quadrature points, not
+    /// at a cell centroid. Affine acceleration therefore retains its quadratic
+    /// product with the native BDM test velocity exactly up to roundoff.
+    ///
+    /// The callback must be a pure, frozen endpoint field for this BDF1 interval.
+    /// It can describe nonuniform gravity or prescribed centrifugal acceleration;
+    /// it is not a velocity-dependent force callback or a Coriolis integrator.
+    /// Cell density remains the transported P0 value. General spatial fields keep
+    /// the original quadrature error, and temporal accuracy remains first order.
+    /// Additional force density keeps its separate N/m³ meaning. No density,
+    /// momentum, energy or pressure repair is introduced.
+    ///
+    /// Constant fields reproduce the uniform-gravity arithmetic, and zero samples
+    /// skip the extra load. The source adds no storage or extra cell traversal.
+    /// Nonfinite field samples identify their original cell and point; overflow,
+    /// transport/solver refusal and cancellation publish no partial endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_conservative_momentum_bdf1_with_acceleration<'s>(
+        &'s self,
+        history: ConservativeMomentumHistory<'_>,
+        controls: ConservativeMomentumControls,
+        numerics: MaterialFluxNumerics,
+        dynamic_viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        acceleration_m_s2: &dyn Fn(usize, [f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ConservativeMomentumAssembly<'s, 'm>> {
+        poll(&mut cancelled)?;
+        self.assemble_conservative_momentum_with_acceleration(
+            history,
+            controls,
+            numerics,
+            dynamic_viscosity,
+            force_density,
+            BodyAcceleration::Spatial(acceleration_m_s2),
+            boundaries,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_conservative_momentum_with_acceleration<'s>(
+        &'s self,
+        history: ConservativeMomentumHistory<'_>,
+        controls: ConservativeMomentumControls,
+        numerics: MaterialFluxNumerics,
+        dynamic_viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        acceleration: BodyAcceleration<'_>,
+        boundaries: &[MaterialStokesBoundary<'_>],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ConservativeMomentumAssembly<'s, 'm>> {
         let reference = controls.reference_density_kg_m3;
         if !reference.is_finite()
             || reference <= 0.0
@@ -302,6 +399,7 @@ impl<'m> FluxSystem<'m> {
                 {
                     return Err(invalid("old/new density inertia is not representable"));
                 }
+                let gravity = acceleration.sample(cell, point)?;
                 let values: [[f64; 2]; 6] =
                     core::array::from_fn(|i| eval_basis(&self.bases[cell], i, point));
                 let mut old_velocity = [0.0; 2];
