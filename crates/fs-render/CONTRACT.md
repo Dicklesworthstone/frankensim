@@ -9501,6 +9501,29 @@ refusals. These are representation-level arithmetic checks; this piecewise-const
 path makes no claim of continuous-field preintegration, lateral antialiasing,
 experimental optical calibration, scattering transport or measured performance.
 
+`render_density_transport_box`, `render_density_transmittance_box` and
+`render_transfer_transport_box` integrate the complete orthographic pixel
+footprint over the original cellwise columns. Exact integer overlap areas work
+at nondivisible resolutions and arbitrary world translations. Transport is
+evaluated before filtering: a half-clear, half-opaque footprint transmits half
+its background, and layered source emission retains its original correlation
+with foreground attenuation. This is lateral filtering of the represented
+columns, not reconstruction of an unknown interface inside a cell.
+
+The box and physical-camera paths share one compensated light accumulator.
+It averages premultiplied radiance, transmission and thin opacity separately,
+retaining finite effective log attenuation for bright backgrounds behind thick
+fields. Box rendering needs only output storage and constant scratch; it does
+not allocate a converted field, high-resolution image or supersampling buffer.
+Its exact column-cell work is `(nx+w-gcd(nx,w))*(ny+h-gcd(ny,h))*nz`, admitted
+before field scans and allocation against the existing cell-visit budget.
+These orthographic entry points remain synchronous without a cancellation hook.
+Eight focused G0/G1/G3 regressions cover analytic coverage, nondivisible 2-D
+footprints, layered emission, SI/refinement invariance, thin and opaque limits,
+radiance balance, exact work admission and integer coverage. They establish
+the represented box average up to floating-point error, not a measured speed
+or optical-data accuracy claim.
+
 ### Continuous scalar-field transfer preintegration
 
 `volumes::preintegrated` adds bounded source/extinction integration for linear

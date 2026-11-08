@@ -1,7 +1,9 @@
 //! Camera images of scalar-volume transfer, with radiance/transmission
 //! filtering across the original physical camera's pixel and pupil samples.
 
-use super::{DvrError, Sum, TransferRayError, TransferRayGrid, TransferTransportPixel};
+use super::{
+    DvrError, Sum, TransferRayError, TransferRayGrid, TransferTransportPixel, TransportAverage,
+};
 use crate::camera::{CameraError, LensSample, PhysicalCamera};
 use crate::volumes::Ray;
 use crate::volumes::preintegrated::{
@@ -9,7 +11,6 @@ use crate::volumes::preintegrated::{
 };
 use crate::volumes::transport::VolumeTransportError;
 use fs_exec::Cx;
-use fs_math::det;
 use fs_rand::StreamKey;
 
 /// Camera sampling and whole-image work limits. The admitted field retains
@@ -244,9 +245,9 @@ fn render_camera_with<P>(
                 tile: u32::try_from(pixel_index).map_err(|_| DvrError::PixelIdentityOverflow)?,
             }
             .stream();
-            let mut average = PixelAverage::default();
+            let mut average = TransportAverage::default();
             let mut errors = ErrorAverage::default();
-            for _ in 0..settings.samples_per_pixel {
+            for sample_index in 0..settings.samples_per_pixel {
                 checkpoint(cx)?;
                 let (jx, jy, lens) = if settings.samples_per_pixel == 1 {
                     (0.5, 0.5, centre_lens)
@@ -270,9 +271,9 @@ fn render_camera_with<P>(
                     remaining_cells,
                 )?;
                 remaining_cells -= u64::from(sample.visits);
-                average.add(sample.pixel);
+                average.add(sample.pixel, 1);
                 if let Some(error) = sample.errors {
-                    errors.add(error, average.samples);
+                    errors.add(error, sample_index + 1);
                 }
             }
             image.push(finish(average.finish()?, errors.finish()));
@@ -328,89 +329,6 @@ impl ErrorAverage {
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TransferCameraError> {
     cx.checkpoint()
         .map_err(|_| TransferRayError::Traversal(VolumeTransportError::Cancelled).into())
-}
-
-struct PixelAverage {
-    samples: u32,
-    emission: [Sum; 3],
-    opacity: Sum,
-    transmission: Sum,
-    minimum_depth: f64,
-    scaled_transmission: Sum,
-}
-
-impl Default for PixelAverage {
-    fn default() -> Self {
-        Self {
-            samples: 0,
-            emission: [Sum::default(); 3],
-            opacity: Sum::default(),
-            transmission: Sum::default(),
-            minimum_depth: f64::INFINITY,
-            scaled_transmission: Sum::default(),
-        }
-    }
-}
-
-impl PixelAverage {
-    fn add(&mut self, sample: TransferTransportPixel) {
-        self.samples += 1;
-        let count = f64::from(self.samples);
-        // Compensated online means cannot overflow merely because many finite
-        // bright samples were added, and retain constant subnormal sources.
-        for channel in 0..3 {
-            let mean = &mut self.emission[channel];
-            let increment = (sample.emission_rgb[channel] - mean.value) / count;
-            mean.add(increment);
-        }
-        self.opacity
-            .add((sample.opacity - self.opacity.value) / count);
-        self.transmission
-            .add((sample.transmittance - self.transmission.value) / count);
-        let depth = sample.optical_depth;
-        if depth.is_finite() {
-            if depth < self.minimum_depth {
-                let scale = det::exp(depth - self.minimum_depth);
-                self.scaled_transmission.value *= scale;
-                self.scaled_transmission.correction *= scale;
-                self.minimum_depth = depth;
-            }
-            self.scaled_transmission
-                .add(det::exp(self.minimum_depth - depth));
-        }
-    }
-
-    fn finish(self) -> Result<TransferTransportPixel, DvrError> {
-        let opacity = self.opacity.value;
-        let transmittance = self.transmission.value;
-        let optical_depth = if opacity <= 0.5 {
-            // Compensate the rounded subtraction in log(1-opacity). This
-            // retains thin samples even when transmission rounds to one.
-            let transmission = 1.0 - opacity;
-            -det::ln(transmission) - ((1.0 - transmission) - opacity) / transmission
-        } else if self.scaled_transmission.value > 0.0 {
-            // Log-mean-exp retains a finite depth when all unit-radiance
-            // transmissions underflow, so bright backgrounds can still survive.
-            self.minimum_depth - det::ln(self.scaled_transmission.value / f64::from(self.samples))
-        } else {
-            f64::INFINITY
-        };
-        let emission_rgb = self.emission.map(|sum| sum.value);
-        if emission_rgb.iter().any(|v| !v.is_finite() || *v < 0.0)
-            || !opacity.is_finite()
-            || !(0.0..=1.0).contains(&opacity)
-            || !transmittance.is_finite()
-            || !(0.0..=1.0).contains(&transmittance)
-        {
-            return Err(DvrError::UnrepresentableRadiance);
-        }
-        Ok(TransferTransportPixel {
-            emission_rgb,
-            transmittance,
-            opacity,
-            optical_depth,
-        })
-    }
 }
 
 #[cfg(test)]

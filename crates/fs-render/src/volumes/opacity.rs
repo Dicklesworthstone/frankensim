@@ -11,6 +11,11 @@ use super::{
 };
 use fs_math::det;
 
+mod area;
+pub use area::{
+    render_density_transmittance_box, render_density_transport_box, render_transfer_transport_box,
+};
+
 #[cfg(feature = "tracer")]
 mod camera;
 #[cfg(feature = "tracer")]
@@ -39,6 +44,21 @@ pub struct DensityAbsorption {
     pub length_unit_m: f64,
     /// Nonnegative mass absorption coefficient at the chosen wavelength, m²/kg.
     pub mass_absorption_m2_kg: f64,
+}
+
+impl DensityAbsorption {
+    fn validate(self) -> Result<(), DvrError> {
+        if !self.density_unit_kg_m3.is_finite()
+            || self.density_unit_kg_m3 <= 0.0
+            || !self.length_unit_m.is_finite()
+            || self.length_unit_m <= 0.0
+            || !self.mass_absorption_m2_kg.is_finite()
+            || self.mass_absorption_m2_kg < 0.0
+        {
+            return Err(DvrError::InvalidDensityAbsorption);
+        }
+        Ok(())
+    }
 }
 
 /// Direct transfer along a volume ray, column, or sampled camera pixel.
@@ -118,38 +138,19 @@ pub fn render_density_transmittance(
     settings: AbsorptionImageSettings,
     calibration: DensityAbsorption,
 ) -> Result<Vec<f64>, DvrError> {
-    if !calibration.density_unit_kg_m3.is_finite()
-        || calibration.density_unit_kg_m3 <= 0.0
-        || !calibration.length_unit_m.is_finite()
-        || calibration.length_unit_m <= 0.0
-        || !calibration.mass_absorption_m2_kg.is_finite()
-        || calibration.mass_absorption_m2_kg < 0.0
-    {
-        return Err(DvrError::InvalidDensityAbsorption);
-    }
+    calibration.validate()?;
     let pixels = admit_image(grid, settings)?;
     if let Some(index) = grid.data.iter().position(|value| *value < 0.0) {
         return Err(DvrError::NegativeGridAbsorption { index });
     }
     let mut image = reserve_image(pixels)?;
     let [width, height] = settings.resolution;
-    let [nx, ny, nz] = grid.dims;
-    let plane = nx * ny;
+    let [nx, ny, _] = grid.dims;
     for py in 0..height {
         let iy = pixel_centre_cell(py, height, ny);
         for px in 0..width {
             let column = pixel_centre_cell(px, width, nx) + nx * iy;
-            let mut depth = Sum::default();
-            for iz in (0..nz).rev() {
-                depth.add(optical_product(&[
-                    grid.data[column + plane * iz],
-                    grid.cell[2],
-                    calibration.density_unit_kg_m3,
-                    calibration.length_unit_m,
-                    calibration.mass_absorption_m2_kg,
-                ]));
-            }
-            image.push(det::exp(-depth.value));
+            image.push(det::exp(-density_column_depth(grid, column, calibration)));
         }
     }
     Ok(image)
@@ -173,21 +174,62 @@ pub fn render_transfer_transport(
     let pixels = admit_image(grid, settings)?;
     let mut image = reserve_image(pixels)?;
     let [width, height] = settings.resolution;
-    let [nx, ny, nz] = grid.dims;
-    let plane = nx * ny;
+    let [nx, ny, _] = grid.dims;
     for py in 0..height {
         let iy = pixel_centre_cell(py, height, ny);
         for px in 0..width {
             let column = pixel_centre_cell(px, width, nx) + nx * iy;
-            let mut integral = TransferIntegral::default();
-            for iz in (0..nz).rev() {
-                let optical = transfer.sample_finite(grid.data[column + plane * iz]);
-                integral.add(optical, grid.cell[2])?;
-            }
-            image.push(integral.finish());
+            image.push(transfer_column(grid, column, transfer)?);
         }
     }
     Ok(image)
+}
+
+fn density_column(
+    grid: &VolumeGrid<'_>,
+    column: usize,
+    calibration: DensityAbsorption,
+) -> TransferTransportPixel {
+    let depth = density_column_depth(grid, column, calibration);
+    TransferTransportPixel {
+        emission_rgb: [0.0; 3],
+        transmittance: det::exp(-depth),
+        opacity: -det::expm1(-depth),
+        optical_depth: depth,
+    }
+}
+
+fn density_column_depth(
+    grid: &VolumeGrid<'_>,
+    column: usize,
+    calibration: DensityAbsorption,
+) -> f64 {
+    let plane = grid.dims[0] * grid.dims[1];
+    let mut depth = Sum::default();
+    for iz in (0..grid.dims[2]).rev() {
+        depth.add(optical_product(&[
+            grid.data[column + plane * iz],
+            grid.cell[2],
+            calibration.density_unit_kg_m3,
+            calibration.length_unit_m,
+            calibration.mass_absorption_m2_kg,
+        ]));
+    }
+    depth.value
+}
+
+fn transfer_column(
+    grid: &VolumeGrid<'_>,
+    column: usize,
+    transfer: &TransferFunction,
+) -> Result<TransferTransportPixel, DvrError> {
+    let plane = grid.dims[0] * grid.dims[1];
+    let mut integral = TransferIntegral::default();
+    for iz in (0..grid.dims[2]).rev() {
+        let optical = transfer.sample_finite(grid.data[column + plane * iz]);
+        integral.add(optical, grid.cell[2])?;
+    }
+    Ok(integral.finish())
 }
 
 // The orthographic specialization and arbitrary-ray DDA use exactly the same
@@ -237,6 +279,94 @@ impl TransferIntegral {
             opacity: -det::expm1(-self.depth.value),
             optical_depth: self.depth.value,
         }
+    }
+}
+
+// Average transported radiance and survival, never density or optical depth.
+// Integer weights cover both camera samples and exact grid/pixel overlap areas.
+// Callers admit the total weight before using this allocation-free accumulator.
+struct TransportAverage {
+    weight: u64,
+    emission: [Sum; 3],
+    opacity: Sum,
+    transmission: Sum,
+    minimum_depth: f64,
+    scaled_transmission: Sum,
+}
+
+impl Default for TransportAverage {
+    fn default() -> Self {
+        Self {
+            weight: 0,
+            emission: [Sum::default(); 3],
+            opacity: Sum::default(),
+            transmission: Sum::default(),
+            minimum_depth: f64::INFINITY,
+            scaled_transmission: Sum::default(),
+        }
+    }
+}
+
+impl TransportAverage {
+    fn add(&mut self, sample: TransferTransportPixel, weight: u64) {
+        self.weight += weight;
+        let count = self.weight as f64;
+        let fraction = weight as f64 / count;
+        let increment = |difference: f64| {
+            // Retain the existing camera's ordinary-range arithmetic.
+            if weight == 1 {
+                difference / count
+            } else {
+                difference * fraction
+            }
+        };
+        for channel in 0..3 {
+            let mean = &mut self.emission[channel];
+            mean.add(increment(sample.emission_rgb[channel] - mean.value));
+        }
+        self.opacity
+            .add(increment(sample.opacity - self.opacity.value));
+        self.transmission
+            .add(increment(sample.transmittance - self.transmission.value));
+        let depth = sample.optical_depth;
+        if depth.is_finite() {
+            if depth < self.minimum_depth {
+                let scale = det::exp(depth - self.minimum_depth);
+                self.scaled_transmission.value *= scale;
+                self.scaled_transmission.correction *= scale;
+                self.minimum_depth = depth;
+            }
+            self.scaled_transmission
+                .add(weight as f64 * det::exp(self.minimum_depth - depth));
+        }
+    }
+
+    fn finish(self) -> Result<TransferTransportPixel, DvrError> {
+        let opacity = self.opacity.value;
+        let transmittance = self.transmission.value;
+        let optical_depth = if opacity <= 0.5 {
+            let transmission = 1.0 - opacity;
+            -det::ln(transmission) - ((1.0 - transmission) - opacity) / transmission
+        } else if self.scaled_transmission.value > 0.0 {
+            self.minimum_depth - det::ln(self.scaled_transmission.value / self.weight as f64)
+        } else {
+            f64::INFINITY
+        };
+        let emission_rgb = self.emission.map(|sum| sum.value);
+        if emission_rgb.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || !opacity.is_finite()
+            || !(0.0..=1.0).contains(&opacity)
+            || !transmittance.is_finite()
+            || !(0.0..=1.0).contains(&transmittance)
+        {
+            return Err(DvrError::UnrepresentableRadiance);
+        }
+        Ok(TransferTransportPixel {
+            emission_rgb,
+            transmittance,
+            opacity,
+            optical_depth,
+        })
     }
 }
 

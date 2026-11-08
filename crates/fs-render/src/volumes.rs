@@ -20,7 +20,8 @@ pub mod preintegrated;
 pub mod opacity;
 pub use opacity::{
     DensityAbsorption, TransferTransportPixel, render_density_transmittance,
-    render_transfer_transport,
+    render_density_transmittance_box, render_density_transport_box, render_transfer_transport,
+    render_transfer_transport_box,
 };
 
 /// SI absorption and local-equilibrium emission along surface-tracer rays.
