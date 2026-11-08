@@ -14,6 +14,9 @@
 //! Quadrature convergence and a sufficiently small heating interval remain
 //! separate physical requirements.
 
+/// Independent frequencies sharing one original finite gas inventory.
+pub mod spectrum;
+
 use crate::{
     cavity_phs::piston::thermal::{HeatExchangeSolve, feedback},
     finite_gas_thermal::FiniteGasThermalEnvironment,
@@ -87,6 +90,61 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), MolecularHeatingErro
     if cancelled() { Err(MolecularHeatingError::Cancelled) } else { Ok(()) }
 }
 
+fn admit_binding(
+    absorption: &PreparedMolecularAbsorption<'_>,
+    gas: &IsochoricGasParcel,
+    source: &RelaxationState,
+) -> Result<(), MolecularHeatingError> {
+    if source != absorption.source() {
+        return Err(MolecularHeatingError::Invalid(
+            "acoustic source must match the original complete gas and relaxation state",
+        ));
+    }
+    let ratio = absorption.volume_m3() / gas.volume_m3();
+    if !ratio.is_finite() || (ratio - 1.0).abs() > 64.0 * f64::EPSILON {
+        return Err(MolecularHeatingError::Invalid(
+            "positive acoustic quadrature must represent the original gas parcel volume",
+        ));
+    }
+    Ok(())
+}
+
+fn admit_duration(duration_s: f64) -> Result<(), MolecularHeatingError> {
+    if !duration_s.is_finite() || duration_s <= 0.0 {
+        return Err(MolecularHeatingError::Invalid(
+            "finite positive physical heating duration required",
+        ));
+    }
+    Ok(())
+}
+
+fn absorbed_power(
+    absorption: &mut PreparedMolecularAbsorption<'_>,
+    excitation: MolecularGasExcitation<'_>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, MolecularHeatingError> {
+    Ok(match excitation {
+        MolecularGasExcitation::Coherent(rates) => absorption
+            .evaluate_coherent(rates, cancelled)?.absorbed_power_w,
+        MolecularGasExcitation::CoherenceModes { factors, modes } => absorption
+            .evaluate_coherence_modes(factors, modes, cancelled)?.absorbed_power_w,
+        MolecularGasExcitation::IndependentSources(moments) => absorption
+            .evaluate_independent_sources(moments, cancelled)?.absorbed_power_w,
+    })
+}
+
+fn absorbed_energy(power_w: f64, duration_s: f64) -> Result<f64, MolecularHeatingError> {
+    let energy_j = power_w * duration_s;
+    if !power_w.is_finite() || power_w < 0.0 || !energy_j.is_finite()
+        || (power_w > 0.0 && energy_j <= 0.0)
+    {
+        return Err(MolecularHeatingError::Invalid(
+            "molecular absorbed power or its physical energy is unrepresentable",
+        ));
+    }
+    Ok(energy_j)
+}
+
 /// A finite, uniformly mixed parcel bound to its original acoustic readout.
 ///
 /// The caller supplies the ORIGINAL thermochemical parcel and relaxation law.
@@ -117,17 +175,7 @@ impl<'a> MolecularGasHeating<'a> {
     ) -> Result<Self, MolecularHeatingError> {
         poll(&mut cancelled)?;
         let source = relaxation.evaluate(&RelaxingMedium::from_thermochemical(gas.state())?)?;
-        if &source != absorption.source() {
-            return Err(MolecularHeatingError::Invalid(
-                "acoustic source must match the original complete gas and relaxation state",
-            ));
-        }
-        let ratio = absorption.volume_m3() / gas.volume_m3();
-        if !ratio.is_finite() || (ratio - 1.0).abs() > 64.0 * f64::EPSILON {
-            return Err(MolecularHeatingError::Invalid(
-                "positive acoustic quadrature must represent the original gas parcel volume",
-            ));
-        }
+        admit_binding(&absorption, gas, &source)?;
         poll(&mut cancelled)?;
         Ok(Self { absorption, gas, relaxation })
     }
@@ -158,28 +206,9 @@ impl<'a> MolecularGasHeating<'a> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularGasHeatLoad<'_>, MolecularHeatingError> {
         poll(&mut cancelled)?;
-        if !duration_s.is_finite() || duration_s <= 0.0 {
-            return Err(MolecularHeatingError::Invalid(
-                "finite positive physical heating duration required",
-            ));
-        }
-        let absorbed_power_w = match excitation {
-            MolecularGasExcitation::Coherent(rates) => self.absorption
-                .evaluate_coherent(rates, &mut cancelled)?.absorbed_power_w,
-            MolecularGasExcitation::CoherenceModes { factors, modes } => self.absorption
-                .evaluate_coherence_modes(factors, modes, &mut cancelled)?.absorbed_power_w,
-            MolecularGasExcitation::IndependentSources(moments) => self.absorption
-                .evaluate_independent_sources(moments, &mut cancelled)?.absorbed_power_w,
-        };
-        let absorbed_energy_j = absorbed_power_w * duration_s;
-        if !absorbed_power_w.is_finite() || absorbed_power_w < 0.0
-            || !absorbed_energy_j.is_finite()
-            || (absorbed_power_w > 0.0 && absorbed_energy_j <= 0.0)
-        {
-            return Err(MolecularHeatingError::Invalid(
-                "molecular absorbed power or its physical energy is unrepresentable",
-            ));
-        }
+        admit_duration(duration_s)?;
+        let absorbed_power_w = absorbed_power(&mut self.absorption, excitation, &mut cancelled)?;
+        let absorbed_energy_j = absorbed_energy(absorbed_power_w, duration_s)?;
         poll(&mut cancelled)?;
         Ok(MolecularGasHeatLoad {
             gas: self.gas,
@@ -253,26 +282,10 @@ impl<'a> MolecularGasHeatLoad<'a> {
         exchange: HeatExchangeSolve,
         maximum_gas_temperature_increment_k: f64,
     ) -> Result<FiniteGasThermalEnvironment<'b>, MolecularHeatingError> {
-        gas_solve.validate()?;
-        feedback::admit::<fs_conduction::ConductionError>(exchange)
-            .map_err(|_| MolecularHeatingError::Invalid(
-                "invalid reciprocal finite-body heat-exchange controls",
-            ))?;
-        if !maximum_gas_temperature_increment_k.is_finite()
-            || maximum_gas_temperature_increment_k <= 0.0
-        {
-            return Err(MolecularHeatingError::Invalid(
-                "finite positive maximum gas temperature increment required",
-            ));
-        }
-        Ok(FiniteGasThermalEnvironment {
-            gas: self.gas,
-            body,
-            gas_heat_j: self.absorbed_energy_j,
-            gas_solve,
-            exchange,
+        finite_body_environment(
+            self.gas, self.absorbed_energy_j, body, gas_solve, exchange,
             maximum_gas_temperature_increment_k,
-        })
+        )
     }
 
     /// Apply this load once to a candidate cloned from the ORIGINAL parcel.
@@ -289,33 +302,10 @@ impl<'a> MolecularGasHeatLoad<'a> {
         maximum_temperature_increment_k: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularGasHeatingStep<'a>, MolecularHeatingError> {
-        poll(&mut cancelled)?;
-        controls.validate()?;
-        if !maximum_temperature_increment_k.is_finite()
-            || maximum_temperature_increment_k <= 0.0
-        {
-            return Err(MolecularHeatingError::Invalid(
-                "finite positive maximum gas temperature increment required",
-            ));
-        }
-        let mut gas = (*self.gas).clone();
-        let energy = gas.add_heat(self.absorbed_energy_j, controls, &mut cancelled)?;
-        let increment = gas.state().state().temperature - self.gas.state().state().temperature;
-        if !increment.is_finite() || increment < 0.0 {
-            return Err(MolecularHeatingError::Invalid(
-                "passive molecular heat must retain finite nondecreasing gas temperature",
-            ));
-        }
-        if increment > maximum_temperature_increment_k {
-            return Err(MolecularHeatingError::TemperatureIncrement {
-                actual_k: increment,
-                maximum_k: maximum_temperature_increment_k,
-            });
-        }
-        poll(&mut cancelled)?;
-        let next_relaxation = self.relaxation
-            .evaluate(&RelaxingMedium::from_thermochemical(gas.state())?)?;
-        poll(&mut cancelled)?;
+        let (gas, next_relaxation, energy) = heated_gas(
+            self.gas, self.relaxation, self.absorbed_energy_j, controls,
+            maximum_temperature_increment_k, &mut cancelled,
+        )?;
         Ok(MolecularGasHeatingStep { load: *self, gas, next_relaxation, energy })
     }
 }
@@ -341,4 +331,67 @@ impl<'a> MolecularGasHeatingStep<'a> {
     /// Accept the candidate without modifying the original parcel implicitly.
     #[must_use]
     pub fn into_gas(self) -> IsochoricGasParcel { self.gas }
+}
+
+// Both single-frequency and spectrum loads enter the same thermal owners.
+fn finite_body_environment<'a>(
+    gas: &'a IsochoricGasParcel,
+    absorbed_energy_j: f64,
+    body: &'a LumpedThermalEnvironment,
+    gas_solve: GasEnergySolve,
+    exchange: HeatExchangeSolve,
+    maximum_gas_temperature_increment_k: f64,
+) -> Result<FiniteGasThermalEnvironment<'a>, MolecularHeatingError> {
+    gas_solve.validate()?;
+    feedback::admit::<fs_conduction::ConductionError>(exchange)
+        .map_err(|_| MolecularHeatingError::Invalid(
+            "invalid reciprocal finite-body heat-exchange controls",
+        ))?;
+    if !maximum_gas_temperature_increment_k.is_finite()
+        || maximum_gas_temperature_increment_k <= 0.0
+    {
+        return Err(MolecularHeatingError::Invalid(
+            "finite positive maximum gas temperature increment required",
+        ));
+    }
+    Ok(FiniteGasThermalEnvironment {
+        gas, body, gas_heat_j: absorbed_energy_j, gas_solve, exchange,
+        maximum_gas_temperature_increment_k,
+    })
+}
+
+fn heated_gas(
+    original: &IsochoricGasParcel,
+    relaxation: &RelaxationAbsorption,
+    absorbed_energy_j: f64,
+    controls: GasEnergySolve,
+    maximum_temperature_increment_k: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(IsochoricGasParcel, RelaxationState, GasHeatStep), MolecularHeatingError> {
+    poll(cancelled)?;
+    controls.validate()?;
+    if !maximum_temperature_increment_k.is_finite() || maximum_temperature_increment_k <= 0.0 {
+        return Err(MolecularHeatingError::Invalid(
+            "finite positive maximum gas temperature increment required",
+        ));
+    }
+    let mut gas = original.clone();
+    let energy = gas.add_heat(absorbed_energy_j, controls, &mut *cancelled)?;
+    let increment = gas.state().state().temperature - original.state().state().temperature;
+    if !increment.is_finite() || increment < 0.0 {
+        return Err(MolecularHeatingError::Invalid(
+            "passive molecular heat must retain finite nondecreasing gas temperature",
+        ));
+    }
+    if increment > maximum_temperature_increment_k {
+        return Err(MolecularHeatingError::TemperatureIncrement {
+            actual_k: increment,
+            maximum_k: maximum_temperature_increment_k,
+        });
+    }
+    poll(cancelled)?;
+    let next_relaxation = relaxation
+        .evaluate(&RelaxingMedium::from_thermochemical(gas.state())?)?;
+    poll(cancelled)?;
+    Ok((gas, next_relaxation, energy))
 }

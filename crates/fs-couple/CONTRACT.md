@@ -6664,3 +6664,36 @@ zero, no force schedule exists and the render is the unchanged one (the tests ch
 the absence of a force port, and a render of a card without the row was compared byte for byte, against the binary built
 before this change, on one host before landing). The attachment is refused on a plate or solid source and after the first
 accepted sample.
+
+## Broadband molecular absorption on finite gas storage
+
+`molecular_heating::spectrum::MolecularGasSpectrumHeating` binds distinct original
+prepared BEM absorption banks to one supplied thermochemical parcel and molecular
+relaxation law. Each complete evaluated medium/reservoir snapshot must agree,
+and each physical volume rule must represent the parcel volume. The caller owns
+the source-model identity and sampled region; snapshot and volume agreement do
+not establish provenance or spatial quadrature convergence.
+
+Coherent phasors, independent sources and low-rank coherence factors retain their
+original meaning within each frequency. Different frequencies contribute mean
+powers in frequency order using double-double accumulation. Duplicate frequencies
+refuse so same-frequency interference cannot silently disappear. Excitations
+already include their spectral quadrature weights and use native peak units.
+This is stationary ensemble or sufficiently long-time heating, not a finite-window
+beat integral, transient acoustic storage or a spectral-convergence guarantee.
+
+The sum converts to joules once, then uses the original nonlinear fixed-volume
+`u(T)` inversion and relaxation-law refresh shared with the single-frequency
+path. Alternatively it supplies exactly that energy and the ORIGINAL parcel to
+`FiniteGasThermalEnvironment` for reciprocal finite-body exchange. Per-bin powers
+are diagnostics, not extra deposits; classical shear/conduction and outgoing
+radiation are not inferred as molecular heat. A subsequent feedback step must
+re-solve every acoustic frequency at the accepted new state.
+
+The bin cap bounds extra storage/work before allocation, each native readout
+retains its own source/mode/product budgets, and repeated queries allocate no
+field arrays or dense covariance. Borrowed loads freeze their readouts; refusal
+or cancellation publishes no gas candidate and permits a complete retry.
+`tests/molecular_heating.rs` includes independent nonlinear calorimetry, coherent
+versus independent frequency powers, a finite-body quadratic energy reference,
+source/volume and duplicate refusals, and cancellation/retry regressions.
