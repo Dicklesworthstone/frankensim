@@ -27,6 +27,10 @@ use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Coherent reflection, transmission and P/SV fields in a finite solid plate.
+#[path = "interface/layer.rs"]
+pub mod layer;
+
 #[derive(Clone, Copy)]
 struct Mode {
     q: C64,
@@ -314,54 +318,80 @@ impl<'a> FluidViscoelasticInterface<'a> {
             amplitudes[0] * propagation(self.modes[0].q, self.omega, depth)?,
             amplitudes[1] * propagation(self.modes[1].q, self.omega, depth)?,
         ];
-        let velocity = core::array::from_fn(|i| {
-            self.modes[0].velocity[i] * a[0] + self.modes[1].velocity[i] * a[1]
-        });
-        let strain: [C64; 6] = core::array::from_fn(|i| {
-            self.modes[0].strain[i] * a[0] + self.modes[1].strain[i] * a[1]
-        });
-        let stress: [C64; 6] = core::array::from_fn(|i| {
-            self.modes[0].stress[i] * a[0] + self.modes[1].stress[i] * a[1]
-        });
-        let traction = [
-            stress[5].scale(core::f64::consts::FRAC_1_SQRT_2),
-            C64::ZERO,
-            stress[2],
-        ];
-        let trace = self.modes[0].trace * a[0] + self.modes[1].trace * a[1];
-        let mean = trace.scale(1.0 / 3.0);
-        let bulk = (quadratic(0.5 * self.moduli[0].im, trace) * Dd::from_f64(self.omega)).to_f64();
-        let shear = (strain.iter().enumerate().fold(Dd::ZERO, |s, (i, &e)| {
-            s + quadratic(self.moduli[1].im, if i < 3 { e - mean } else { e })
-        }) * Dd::from_f64(self.omega))
-        .to_f64();
-        let flux = ((0..3).fold(Dd::ZERO, |s, i| s - product(velocity[i], traction[i]))
-            * Dd::from_f64(0.5))
-        .to_f64();
-        if velocity
-            .iter()
-            .chain(&strain)
-            .chain(&stress)
-            .any(|v| !finite(*v))
-            || [bulk, shear, flux].iter().any(|x| !x.is_finite())
-            || bulk < 0.0
-            || shear < 0.0
-        {
-            return Err(Error::Invalid(
-                "viscoelastic half-space field is unrepresentable",
-            ));
-        }
-        Ok(ViscoelasticHalfSpaceField {
-            velocity_m_s: velocity,
-            strain_mandel: strain,
-            volumetric_strain: trace,
-            stress_mandel_pa: stress,
-            traction_pa: traction,
-            normal_power_w_m2: flux,
-            bulk_heat_density_w_m3: bulk,
-            shear_heat_density_w_m3: shear,
-        })
+        coherent_field(&self.modes, a, self.moduli, self.omega)
     }
+}
+
+/// Shared constitutive work and flux of the complete physical field. Keeping
+/// this after coherent assembly retains every P/S and counterpropagating term.
+fn coherent_field<const N: usize>(
+    modes: &[Mode; N],
+    amplitudes: [C64; N],
+    moduli: [C64; 2],
+    omega: f64,
+) -> Result<ViscoelasticHalfSpaceField, Error> {
+    let sum = |component: fn(&Mode) -> C64| {
+        modes
+            .iter()
+            .zip(amplitudes)
+            .fold(C64::ZERO, |s, (m, a)| s + component(m) * a)
+    };
+    let velocity = core::array::from_fn(|i| {
+        modes
+            .iter()
+            .zip(amplitudes)
+            .fold(C64::ZERO, |s, (m, a)| s + m.velocity[i] * a)
+    });
+    let strain: [C64; 6] = core::array::from_fn(|i| {
+        modes
+            .iter()
+            .zip(amplitudes)
+            .fold(C64::ZERO, |s, (m, a)| s + m.strain[i] * a)
+    });
+    let stress: [C64; 6] = core::array::from_fn(|i| {
+        modes
+            .iter()
+            .zip(amplitudes)
+            .fold(C64::ZERO, |s, (m, a)| s + m.stress[i] * a)
+    });
+    let traction = [
+        stress[5].scale(core::f64::consts::FRAC_1_SQRT_2),
+        C64::ZERO,
+        stress[2],
+    ];
+    let trace = sum(|m| m.trace);
+    let mean = trace.scale(1.0 / 3.0);
+    let bulk = (quadratic(0.5 * moduli[0].im, trace) * Dd::from_f64(omega)).to_f64();
+    let shear = (strain.iter().enumerate().fold(Dd::ZERO, |s, (i, &e)| {
+        s + quadratic(moduli[1].im, if i < 3 { e - mean } else { e })
+    }) * Dd::from_f64(omega))
+    .to_f64();
+    let flux = ((0..3).fold(Dd::ZERO, |s, i| s - product(velocity[i], traction[i]))
+        * Dd::from_f64(0.5))
+    .to_f64();
+    if velocity
+        .iter()
+        .chain(&strain)
+        .chain(&stress)
+        .any(|v| !finite(*v))
+        || [bulk, shear, flux].iter().any(|x| !x.is_finite())
+        || bulk < 0.0
+        || shear < 0.0
+    {
+        return Err(Error::Invalid(
+            "viscoelastic coherent field is unrepresentable",
+        ));
+    }
+    Ok(ViscoelasticHalfSpaceField {
+        velocity_m_s: velocity,
+        strain_mandel: strain,
+        volumetric_strain: trace,
+        stress_mandel_pa: stress,
+        traction_pa: traction,
+        normal_power_w_m2: flux,
+        bulk_heat_density_w_m3: bulk,
+        shear_heat_density_w_m3: shear,
+    })
 }
 
 impl DrivenFluidViscoelasticInterface<'_, '_> {

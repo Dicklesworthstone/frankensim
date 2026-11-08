@@ -21146,6 +21146,40 @@ amplitude limits and cancellation. This planar small-strain harmonic model does
 not claim roughness, anisotropy, finite-thickness layers, an incident solid wave,
 thermal evolution or experimental validation.
 
+## Finite fluid-loaded viscoelastic plates at oblique incidence
+
+`elastic::acoustic::viscoelastic::interface::layer::FluidViscoelasticLayer`
+retains the original homogeneous bulk/shear Maxwell laws, density, identity,
+frequency/strain support and both exterior fluid sources. A bounded six-by-six
+solve prepares coherent two-face pressure scattering with P/SV conversion.
+Waves anchored at their respective faces remain bounded in opaque/evanescent
+plates; an algebraic cosine/sinc basis preserves the independent solution at
+exact internal P or SV critical incidence. A zero-thickness layer reduces to
+the original two-fluid contact. Outgoing evanescent or cutoff exit-fluid fields
+are retained, while nonpropagating incoming ports are refused.
+
+Drives and depth queries allocate nothing. Original fluid small-signal limits
+and a conservative all-depth Mandel strain bound admit the complete coherent
+field. Reciprocal power-normalized scattering is exposed when both fluid ports
+propagate. Physical face flux, reflection/transmission and the flux deficit are
+distinct from local positive bulk/shear constitutive heat; interfaces receive
+no invented heat. Optional allocation-free depth work uses phase-resolved
+positive Gauss quadrature, explicit tolerance/work limits and 8/16-point error
+estimates, refusing unresolved ranges. This retains weak standing-wave heat
+below boundary-power subtraction roundoff. The estimate is not an interval
+certificate, and quadrature cost grows with resolved complex phase.
+
+Eight focused regressions cover independent complex normal Fabry–Pérot
+scattering, source reuse, distinct-fluid reciprocity, lossless resonances, exact
+P/S critical roots and basis crossover, evanescent tunnelling, opaque half-space
+limits, coherent bulk/shear work and depth subdivision, weak thin odd-wave
+heating, cutoff/evanescent exterior admission, source limits and cancellation.
+This is
+a fixed, isotropic, small-strain, laterally infinite single plate. Exact undriven
+guided-mode singularities may refuse. No anisotropy, roughness, compliant contact,
+arbitrary oblique stacks, finite aperture, thermal evolution or experimental
+material validation is inferred.
+
 ## Calibrated temperature snapshots of source-resolved plane-stress viscosity
 
 `TemperatureShift::shift_plane_stress_viscosity` applies the existing calibrated
