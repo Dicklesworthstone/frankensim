@@ -1,6 +1,9 @@
 //! Manufactured source laws exercise native electrothermal feedback.
 //! These fixtures are numerical verification, not measured filament data.
 
+#[path = "incandescent/history.rs"]
+mod history;
+
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
 use fs_conduction::lumped::{LumpedThermalEnvironment, LumpedThermalTransport};

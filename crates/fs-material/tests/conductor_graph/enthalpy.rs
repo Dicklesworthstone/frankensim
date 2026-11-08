@@ -337,7 +337,7 @@ fn g0_bound_retains_original_chart_card_and_declared_phase_limits() {
     );
     for points in [
         [(0.0, 300.0, 0.0), (100.0, 400.0, 1.0)],
-        [(0.0, 300.0, 0.0), (100.0, 401.0, 0.5)],
+        [(0.0, 300.0, 0.0), (100.0, 401.0, 1.0)],
     ] {
         assert!(
             law.maximum_positive_joule_specific_enthalpy_slope(
@@ -359,7 +359,7 @@ fn g0_bound_retains_original_chart_card_and_declared_phase_limits() {
     assert!(
         law.maximum_positive_joule_specific_enthalpy_slope(
             OhmicDrive::Current(1.0),
-            &caloric(&foreign, &[(0.0, 300.0, 0.0), (100.0, 400.0, 0.5)]),
+            &caloric(&foreign, &[(0.0, 300.0, 0.0), (100.0, 400.0, 1.0)]),
         )
         .is_err()
     );

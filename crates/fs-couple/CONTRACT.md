@@ -63,6 +63,18 @@ analytic current/voltage cases, turn-off cooling, latent storage, source-context
 refusals, phase feedback at constant temperature, chart binding and cancellation;
 it makes no measured-filament calibration claim.
 
+`incandescent::history::advance_history` consumes the existing SI `TimeSignal`
+constant or previous-sample hold table for current or voltage. Every original
+drive knot splits the physical step exactly: the incoming drive owns its
+interval endpoint, then the outgoing drive continues from the accepted enthalpy.
+Each held span prepares its chart-bound electrical feedback once; each substep
+uses the native implicit thermal owner. Explicit maximum duration and work
+limits bound temporal resolution, solves and retained output. Additional
+prescribed heat is partitioned across represented intervals as a constant power.
+Cancellation, source refusal or exhausted work publishes no partial history.
+Energy closure does not claim temporal convergence, automatic waveform
+averaging or a reconstructed signal between held samples.
+
 ## Coherent crystal absorption on native thermal cells
 
 `layered_wave_heating::substrate::crystal::PreparedCrystalWaveHeating` binds

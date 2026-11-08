@@ -5,6 +5,9 @@
 //! An accepted temperature can drive fs-render thermal emission independently.
 //! Observing that light must not debit radiative cooling a second time.
 
+/// Held-current and held-voltage histories on the original physical clock.
+pub mod history;
+
 use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
 use fs_conduction::lumped::LumpedThermalEnvironment;
