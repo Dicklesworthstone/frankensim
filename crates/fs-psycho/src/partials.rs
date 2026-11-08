@@ -3,6 +3,8 @@
 //! Every frame jointly fits DC and independently spaced partials through the
 //! existing `fs_fft::harmonic` owners. Stationary frames refine frequencies;
 //! ringdown frames refine both damped frequencies and amplitude decay rates.
+//! Linear-chirp frames infer first- and last-sample frequencies, retaining
+//! within-frame drift instead of charging it to a stationary fit's residual.
 //! This avoids forcing stiff-string partials onto integer harmonic bins or
 //! fitting one decay slope to an entire note. Equal-frequency, different-decay
 //! poles remain separate when the supplied decay bounds distinguish them.
@@ -11,16 +13,18 @@
 //! warm-start the next frame; unresolved frames retain their typed refusal and
 //! do not change those seeds. No automatic discovery, reassignment, silence
 //! substitution, uncertainty, noise-floor detection or instrument acceptance
-//! is implied. Within-frame chirps, attacks, growth and other omitted dynamics
-//! can bias a fit and remain in its residual; a frame-length ladder is needed
-//! when the local model is only an approximation.
+//! is implied. Nonlinear drift, attacks, growth and other omitted dynamics can
+//! bias a fit and remain in its residual; a frame-length ladder is needed when
+//! the selected local model is only an approximation.
 
 use core::{mem::size_of, ops::ControlFlow};
 use fs_fft::C64;
 use fs_fft::harmonic::{
-    DampedToneBounds, DampedTonePole, DampedTonePoleFit, DampedToneRefinementBudget,
-    DampedToneRefinementError, HarmonicFit, HarmonicFitError, ToneFrequencyBudget,
-    ToneFrequencyError, ToneFrequencyFit, refine_damped_tone_poles, refine_tone_frequencies,
+    ChirpedTone, ChirpedToneBounds, ChirpedToneFit, ChirpedToneRefinementBudget,
+    ChirpedToneRefinementError, DampedToneBounds, DampedTonePole, DampedTonePoleFit,
+    DampedToneRefinementBudget, DampedToneRefinementError, HarmonicFit, HarmonicFitError,
+    ToneFrequencyBudget, ToneFrequencyError, ToneFrequencyFit, refine_chirped_tones,
+    refine_damped_tone_poles, refine_tone_frequencies,
 };
 
 /// Complete-record frame schedule and its explicit work cap.
@@ -40,6 +44,7 @@ pub struct PartialFrameSchedule {
 /// Caller-authored local model, partial identities and numerical budgets.
 ///
 /// The fit's workspace cap also pays for the tracker's mutable seed array.
+/// Chirps retain both a successful anchor and a reusable prediction array.
 /// Input records, borrowed declarations and memory retained by the callback
 /// are caller-owned and excluded, as is allocator metadata.
 #[derive(Debug, Clone, Copy)]
@@ -64,18 +69,34 @@ pub enum PartialTrackingModel<'a> {
         /// Per-frame refinement, conditioning and total workspace limits.
         budget: DampedToneRefinementBudget,
     },
+    /// Independent linear frequency trajectories with constant per-frame
+    /// amplitudes. Frequencies refer to the first and last sampled values;
+    /// their separation in time is `(frame_samples - 1) * timestep_s`.
+    Chirped {
+        /// Initial endpoint frequencies for the first scheduled frame.
+        initial_tones: &'a [ChirpedTone],
+        /// Fixed endpoint rectangles, disjoint in at least one coordinate.
+        /// They must admit every frame in the intended trajectory.
+        bounds: &'a [ChirpedToneBounds],
+        /// Per-frame refinement, conditioning and total workspace limits.
+        budget: ChirpedToneRefinementBudget,
+    },
 }
 
 /// One estimated partial, in the original declaration order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrackedPartial {
     /// Measured oscillation frequency [Hz], not an integer harmonic label.
+    /// For a chirp this is the frequency at THIS frame's first sample.
     pub frequency_hz: f64,
-    /// Measured amplitude decay [1/s] for a ringdown model. Stationary frames
+    /// Last-sample instantaneous frequency [Hz] for a chirp. Other models
+    /// return `None` because they fit one frequency throughout the frame.
+    pub end_frequency_hz: Option<f64>,
+    /// Measured amplitude decay [1/s] for a ringdown model. Other models
     /// return `None`: they do not measure decay. Zero is an estimated zero.
     pub decay_rate_per_s: Option<f64>,
-    /// Peak `exp(-i omega t)` coefficient in input units, with t=0 at THIS
-    /// frame's first sample. A decaying coefficient is its initial amplitude,
+    /// Peak `exp(-i phase(t))` coefficient in input units, with phase zero at
+    /// THIS frame's first sample. A decaying coefficient is its initial amplitude,
     /// not its record-averaged amplitude. Frames have different phase origins.
     pub peak_phasor: C64,
 }
@@ -87,6 +108,8 @@ pub enum PartialFrameEstimate {
     Stationary(ToneFrequencyFit),
     /// Joint oscillatory-decay identification.
     Ringdown(DampedTonePoleFit),
+    /// Joint first/last-sample frequency-law identification.
+    Chirped(ChirpedToneFit),
 }
 
 impl PartialFrameEstimate {
@@ -96,6 +119,7 @@ impl PartialFrameEstimate {
         match self {
             Self::Stationary(result) => &result.fit,
             Self::Ringdown(result) => &result.fit,
+            Self::Chirped(result) => &result.fit,
         }
     }
 
@@ -103,15 +127,20 @@ impl PartialFrameEstimate {
     #[must_use]
     pub fn partial(&self, index: usize) -> Option<TrackedPartial> {
         let peak_phasor = *self.fit().phasors.get(index)?;
-        let (frequency_hz, decay_rate_per_s) = match self {
-            Self::Stationary(result) => (*result.frequencies_hz.get(index)?, None),
+        let (frequency_hz, end_frequency_hz, decay_rate_per_s) = match self {
+            Self::Stationary(result) => (*result.frequencies_hz.get(index)?, None, None),
             Self::Ringdown(result) => {
                 let pole = result.poles.get(index)?;
-                (pole.frequency_hz, Some(pole.decay_rate_per_s))
+                (pole.frequency_hz, None, Some(pole.decay_rate_per_s))
+            }
+            Self::Chirped(result) => {
+                let tone = result.tones.get(index)?;
+                (tone.start_frequency_hz, Some(tone.end_frequency_hz), None)
             }
         };
         Some(TrackedPartial {
             frequency_hz,
+            end_frequency_hz,
             decay_rate_per_s,
             peak_phasor,
         })
@@ -125,6 +154,8 @@ pub enum PartialFitFailure {
     Stationary(ToneFrequencyError),
     /// Damped-pole refusal.
     Ringdown(DampedToneRefinementError),
+    /// Linear-chirp refusal.
+    Chirped(ChirpedToneRefinementError),
 }
 
 impl PartialFitFailure {
@@ -139,6 +170,10 @@ impl PartialFitFailure {
                 DampedToneRefinementError::Unidentifiable { .. }
                     | DampedToneRefinementError::NotConverged { .. }
                     | DampedToneRefinementError::Fit(HarmonicFitError::IllConditioned { .. })
+            ) | Self::Chirped(
+                ChirpedToneRefinementError::Unidentifiable { .. }
+                    | ChirpedToneRefinementError::NotConverged { .. }
+                    | ChirpedToneRefinementError::Fit(HarmonicFitError::IllConditioned { .. })
             )
         )
     }
@@ -149,6 +184,7 @@ impl core::fmt::Display for PartialFitFailure {
         match self {
             Self::Stationary(error) => error.fmt(f),
             Self::Ringdown(error) => error.fmt(f),
+            Self::Chirped(error) => error.fmt(f),
         }
     }
 }
@@ -158,6 +194,7 @@ impl std::error::Error for PartialFitFailure {
         match self {
             Self::Stationary(error) => Some(error),
             Self::Ringdown(error) => Some(error),
+            Self::Chirped(error) => Some(error),
         }
     }
 }
@@ -251,6 +288,11 @@ pub struct PartialTrackingSummary {
 enum Seeds {
     Stationary(Vec<f64>),
     Ringdown(Vec<DampedTonePole>),
+    Chirped {
+        anchor: Vec<ChirpedTone>,
+        prediction: Vec<ChirpedTone>,
+        anchor_offset: usize,
+    },
 }
 
 fn invalid(what: &'static str) -> PartialTrackingError {
@@ -266,6 +308,12 @@ fn invalid(what: &'static str) -> PartialTrackingError {
 ///
 /// Only the latest successful frequencies/poles are retained as seeds. All
 /// search bounds and partial identities stay fixed, including across failures.
+/// A chirp's two endpoints advance from its last successful frame by the ACTUAL
+/// sample-offset gap, including shorter terminal hops and unresolved frames.
+/// Predictions are only initial guesses and are clamped to the fixed domains;
+/// fitted results must still satisfy the original untruncated-correction gates.
+/// The original source epoch stays integer; no absolute timestamp enters the
+/// predictor. Fixed rectangles do not provide arbitrary track reassignment.
 /// Unidentifiable, ill-conditioned and unconverged frames are delivered as
 /// `Err` observations; invalid declarations, storage refusals and nonfinite
 /// arithmetic abort with [`PartialTrackingError`]. All input samples are checked
@@ -277,7 +325,8 @@ fn invalid(what: &'static str) -> PartialTrackingError {
 /// the numerical owners have no mid-factorization cancellation. Caller-retained
 /// result clones are not charged to the working-memory budget. Work is at most
 /// F*E candidate sets, with the existing joint QR cost per candidate; numeric
-/// working storage is O(N*K + K*K) plus K warm seeds, independent of F.
+/// working storage is O(N*K + K*K) plus K warm seeds (two arrays for chirps),
+/// independent of F. Chirped frames do not also identify amplitude decay.
 pub fn track_partials(
     samples: &[f64],
     timestep_s: f64,
@@ -358,6 +407,30 @@ pub fn track_partials(
                 budget.max_evaluations,
             )
         }
+        PartialTrackingModel::Chirped {
+            initial_tones,
+            budget,
+            ..
+        } => {
+            reserve_seeds(
+                initial_tones.len(),
+                2 * size_of::<ChirpedTone>(),
+                &mut budget.fit,
+            )
+            .map_err(|error| {
+                fit_error(PartialFitFailure::Chirped(ChirpedToneRefinementError::Fit(
+                    error,
+                )))
+            })?;
+            (
+                Seeds::Chirped {
+                    anchor: initial_tones.to_vec(),
+                    prediction: initial_tones.to_vec(),
+                    anchor_offset: 0,
+                },
+                budget.max_evaluations,
+            )
+        }
     };
     let maximum_candidate_evaluations = planned_frames
         .checked_mul(max_evaluations)
@@ -395,6 +468,41 @@ pub fn track_partials(
                         PartialFrameEstimate::Ringdown(result)
                     })
                     .map_err(PartialFitFailure::Ringdown)
+            }
+            (
+                PartialTrackingModel::Chirped { bounds, budget, .. },
+                Seeds::Chirped {
+                    anchor,
+                    prediction,
+                    anchor_offset,
+                },
+            ) => {
+                let gap = offset - *anchor_offset;
+                if gap == 0 {
+                    // Admit the original declarations through the numerical
+                    // owner before any prediction may clamp search bounds.
+                    prediction.copy_from_slice(anchor);
+                } else {
+                    let advance = gap as f64 / (schedule.frame_samples - 1) as f64;
+                    for ((trial, accepted), domain) in
+                        prediction.iter_mut().zip(anchor.iter()).zip(bounds.iter())
+                    {
+                        let change = accepted.end_frequency_hz - accepted.start_frequency_hz;
+                        trial.start_frequency_hz = change
+                            .mul_add(advance, accepted.start_frequency_hz)
+                            .clamp(domain.start_frequency_hz[0], domain.start_frequency_hz[1]);
+                        trial.end_frequency_hz = change
+                            .mul_add(advance, accepted.end_frequency_hz)
+                            .clamp(domain.end_frequency_hz[0], domain.end_frequency_hz[1]);
+                    }
+                }
+                refine_chirped_tones(block, timestep_s, prediction, bounds, *budget)
+                    .map(|result| {
+                        anchor.copy_from_slice(&result.tones);
+                        *anchor_offset = offset;
+                        PartialFrameEstimate::Chirped(result)
+                    })
+                    .map_err(PartialFitFailure::Chirped)
             }
             _ => unreachable!("warm seeds retain their model kind"),
         };

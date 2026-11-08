@@ -1,12 +1,13 @@
 use core::{f64::consts::TAU, ops::ControlFlow};
 use fs_fft::C64;
 use fs_fft::harmonic::{
+    ChirpedTone, ChirpedToneBounds, ChirpedToneRefinementBudget, ChirpedToneRefinementError,
     DampedToneBounds, DampedTonePole, DampedToneRefinementBudget, HarmonicFitBudget,
     HarmonicFitError, ToneFrequencyBudget, ToneFrequencyError,
 };
 use fs_psycho::partials::{
-    PartialFitFailure, PartialFrame, PartialFrameSchedule, PartialTrackingError,
-    PartialTrackingModel, track_partials,
+    PartialFitFailure, PartialFrame, PartialFrameEstimate, PartialFrameSchedule,
+    PartialTrackingError, PartialTrackingModel, track_partials,
 };
 
 fn tone_budget() -> ToneFrequencyBudget {
@@ -29,6 +30,25 @@ fn pole_budget() -> DampedToneRefinementBudget {
         min_pole_reciprocal_condition: 1e-10,
         fit: tone_budget().fit,
     }
+}
+
+fn chirp_budget() -> ChirpedToneRefinementBudget {
+    ChirpedToneRefinementBudget {
+        absolute_frequency_tolerance_hz: 1e-8,
+        max_evaluations: 32,
+        min_chirp_reciprocal_condition: 1e-9,
+        fit: tone_budget().fit,
+    }
+}
+
+fn chirp_sample(t: f64, first_hz: f64, drift_hz_per_s: f64, phasor: C64) -> f64 {
+    let (s, c) = (TAU * (first_hz * t + 0.5 * drift_hz_per_s * t * t)).sin_cos();
+    phasor.re * c + phasor.im * s
+}
+
+fn translated_chirp_phasor(t: f64, first_hz: f64, drift_hz_per_s: f64, phasor: C64) -> C64 {
+    let (s, c) = (TAU * (first_hz * t + 0.5 * drift_hz_per_s * t * t)).sin_cos();
+    C64::new(phasor.re * c + phasor.im * s, phasor.im * c - phasor.re * s)
 }
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
@@ -101,6 +121,7 @@ fn moving_inharmonic_partials_keep_identity_phase_and_exact_source_indices() {
         for k in 0..2 {
             let partial = estimate.partial(k).unwrap();
             close(partial.frequency_hz, frequencies[j][k], 2e-8);
+            assert_eq!(partial.end_frequency_hz, None);
             assert_eq!(partial.decay_rate_per_s, None);
             close(partial.peak_phasor.re, initial_phasors[j][k].re, 2e-8);
             close(partial.peak_phasor.im, initial_phasors[j][k].im, 2e-8);
@@ -195,6 +216,7 @@ fn overlapping_frames_resolve_double_decay_and_cover_the_final_sample() {
         for k in 0..2 {
             let partial = estimate.partial(k).unwrap();
             close(partial.frequency_hz, poles[k].frequency_hz, 1e-7);
+            assert_eq!(partial.end_frequency_hz, None);
             close(
                 partial.decay_rate_per_s.unwrap(),
                 poles[k].decay_rate_per_s,
@@ -435,4 +457,305 @@ fn continuous_pitch_glide_has_a_measured_frame_length_ladder() {
         );
         previous_residual = max_residual;
     }
+}
+
+#[test]
+fn chirped_partials_follow_actual_frame_endpoints_and_short_terminal_hops() {
+    let dt = 1.0 / 2048.0;
+    let frame_samples = 257;
+    let first = [173.37, 605.2];
+    let drift = [20.0, -9.0];
+    let phasors = [C64::new(0.8, -0.3), C64::new(-0.2, 0.5)];
+    let record: Vec<_> = (0..1100)
+        .map(|j| {
+            let t = j as f64 * dt;
+            0.12 + (0..2)
+                .map(|k| chirp_sample(t, first[k], drift[k], phasors[k]))
+                .sum::<f64>()
+        })
+        .collect();
+    let initial = core::array::from_fn::<_, 2, _>(|k| ChirpedTone {
+        start_frequency_hz: first[k],
+        end_frequency_hz: first[k] + drift[k] * (frame_samples - 1) as f64 * dt,
+    });
+    let bounds = [
+        ChirpedToneBounds {
+            start_frequency_hz: [170.0, 190.0],
+            end_frequency_hz: [170.0, 190.0],
+        },
+        ChirpedToneBounds {
+            start_frequency_hz: [595.0, 610.0],
+            end_frequency_hz: [595.0, 610.0],
+        },
+    ];
+    let schedule = PartialFrameSchedule {
+        frame_samples,
+        hop_samples: 160,
+        max_frames: 7,
+        first_sample_index: (1_u64 << 53) + 113,
+    };
+    let model = PartialTrackingModel::Chirped {
+        initial_tones: &initial,
+        bounds: &bounds,
+        budget: ChirpedToneRefinementBudget {
+            // Every warm start must already match the physical trajectory.
+            // A wrong N vs N-1 duration or nominal final hop cannot be repaired.
+            max_evaluations: 1,
+            ..chirp_budget()
+        },
+    };
+    let mut frames = Vec::new();
+    let summary = track_partials(&record, dt, schedule, model, |frame| {
+        frames.push(frame.clone());
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert!(summary.completed);
+    assert_eq!(summary.planned_frames, 7);
+    assert_eq!(summary.resolved_frames, 7);
+    assert_eq!(summary.maximum_candidate_evaluations, 7);
+    let offsets = [0, 160, 320, 480, 640, 800, 843];
+    for (frame, offset) in frames.iter().zip(offsets) {
+        assert_eq!(
+            frame.first_sample_index,
+            schedule.first_sample_index + offset
+        );
+        assert_eq!(frame.sample_count, frame_samples);
+        let estimate = frame.estimate.as_ref().unwrap();
+        let PartialFrameEstimate::Chirped(result) = estimate else {
+            panic!("chirped model must retain its full numerical diagnostics");
+        };
+        assert_eq!(result.evaluations, 1);
+        close(estimate.fit().dc, 0.12, 2e-10);
+        assert!(estimate.fit().residual_rms < 3e-10);
+        assert!(estimate.partial(2).is_none());
+        let t = offset as f64 * dt;
+        let last_t = (offset + (frame_samples - 1) as u64) as f64 * dt;
+        for k in 0..2 {
+            let partial = estimate.partial(k).unwrap();
+            close(partial.frequency_hz, first[k] + drift[k] * t, 2e-8);
+            close(
+                partial.end_frequency_hz.unwrap(),
+                first[k] + drift[k] * last_t,
+                2e-8,
+            );
+            assert_eq!(partial.decay_rate_per_s, None);
+            let expected = translated_chirp_phasor(t, first[k], drift[k], phasors[k]);
+            close(partial.peak_phasor.re, expected.re, 2e-8);
+            close(partial.peak_phasor.im, expected.im, 2e-8);
+        }
+    }
+    let mut replay = Vec::new();
+    track_partials(&record, dt, schedule, model, |frame| {
+        replay.push(frame.clone());
+        ControlFlow::Continue(())
+    })
+    .unwrap();
+    assert_eq!(frames, replay);
+}
+
+#[test]
+fn chirp_dropout_retains_successful_anchor_and_full_sample_gap() {
+    let n = 513;
+    let dt = 1.0 / 4096.0;
+    let first = 213.2;
+    let drift = 20.0;
+    let phasor = C64::new(0.7, 0.2);
+    let mut record: Vec<_> = (0..3 * n)
+        .map(|j| 0.3 + chirp_sample(j as f64 * dt, first, drift, phasor))
+        .collect();
+    record[n..2 * n].fill(3.0);
+    let initial = [ChirpedTone {
+        start_frequency_hz: first,
+        end_frequency_hz: first + drift * (n - 1) as f64 * dt,
+    }];
+    let bounds = [ChirpedToneBounds {
+        start_frequency_hz: [205.0, 225.0],
+        end_frequency_hz: [205.0, 225.0],
+    }];
+    let mut frames = Vec::new();
+    let summary = track_partials(
+        &record,
+        dt,
+        PartialFrameSchedule {
+            frame_samples: n,
+            hop_samples: n,
+            max_frames: 3,
+            first_sample_index: 11,
+        },
+        PartialTrackingModel::Chirped {
+            initial_tones: &initial,
+            bounds: &bounds,
+            budget: ChirpedToneRefinementBudget {
+                max_evaluations: 1,
+                ..chirp_budget()
+            },
+        },
+        |frame| {
+            frames.push(frame.clone());
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert!(summary.completed);
+    assert_eq!(summary.resolved_frames, 2);
+    assert_eq!(summary.maximum_candidate_evaluations, 3);
+    assert!(matches!(
+        frames[1].estimate,
+        Err(PartialFitFailure::Chirped(
+            ChirpedToneRefinementError::Unidentifiable { .. }
+        ))
+    ));
+    let last = frames[2].estimate.as_ref().unwrap().partial(0).unwrap();
+    let t = (2 * n) as f64 * dt;
+    close(last.frequency_hz, first + drift * t, 2e-8);
+    close(
+        last.end_frequency_hz.unwrap(),
+        first + drift * (3 * n - 1) as f64 * dt,
+        2e-8,
+    );
+    let expected = translated_chirp_phasor(t, first, drift, phasor);
+    close(last.peak_phasor.re, expected.re, 2e-8);
+    close(last.peak_phasor.im, expected.im, 2e-8);
+}
+
+#[test]
+fn chirp_warm_prediction_clamps_only_initial_guesses_to_fixed_domains() {
+    let n = 257;
+    let dt = 1.0 / 2048.0;
+    let phasor = C64::new(0.8, -0.3);
+    let second_phasor = translated_chirp_phasor(n as f64 * dt, 170.0, 72.0, phasor);
+    let mut record: Vec<_> = (0..n)
+        .map(|j| 0.1 + chirp_sample(j as f64 * dt, 170.0, 72.0, phasor))
+        .collect();
+    // This frame has a different, shallower local frequency law. Extrapolating
+    // the successful first law predicts an end above the fixed 180 Hz bound.
+    record.extend((0..n).map(|j| 0.1 + chirp_sample(j as f64 * dt, 179.0, 4.0, second_phasor)));
+    let initial = [ChirpedTone {
+        start_frequency_hz: 170.0,
+        end_frequency_hz: 179.0,
+    }];
+    let bounds = [ChirpedToneBounds {
+        start_frequency_hz: [169.0, 190.0],
+        end_frequency_hz: [170.0, 180.0],
+    }];
+    let mut frames = Vec::new();
+    let summary = track_partials(
+        &record,
+        dt,
+        PartialFrameSchedule {
+            frame_samples: n,
+            hop_samples: n,
+            max_frames: 2,
+            first_sample_index: 0,
+        },
+        PartialTrackingModel::Chirped {
+            initial_tones: &initial,
+            bounds: &bounds,
+            budget: chirp_budget(),
+        },
+        |frame| {
+            frames.push(frame.clone());
+            ControlFlow::Continue(())
+        },
+    )
+    .unwrap();
+    assert_eq!(summary.resolved_frames, 2);
+    let last = frames[1].estimate.as_ref().unwrap();
+    let partial = last.partial(0).unwrap();
+    close(partial.frequency_hz, 179.0, 2e-8);
+    close(partial.end_frequency_hz.unwrap(), 179.5, 2e-8);
+    close(partial.peak_phasor.re, second_phasor.re, 2e-8);
+    close(partial.peak_phasor.im, second_phasor.im, 2e-8);
+    assert!(last.fit().residual_rms < 3e-10);
+}
+
+#[test]
+fn chirp_tracker_admits_both_seed_arrays_and_keeps_typed_refusals_and_stop() {
+    let n = 257;
+    let dt = 1.0 / 2048.0;
+    let record: Vec<_> = (0..2 * n)
+        .map(|j| chirp_sample(j as f64 * dt, 170.0, 4.0, C64::new(0.8, -0.3)))
+        .collect();
+    let initial = [ChirpedTone {
+        start_frequency_hz: 170.0,
+        end_frequency_hz: 170.5,
+    }];
+    let bounds = [ChirpedToneBounds {
+        start_frequency_hz: [165.0, 180.0],
+        end_frequency_hz: [165.0, 180.0],
+    }];
+    let schedule = PartialFrameSchedule {
+        frame_samples: n,
+        hop_samples: n,
+        max_frames: 2,
+        first_sample_index: 7,
+    };
+    let model = PartialTrackingModel::Chirped {
+        initial_tones: &initial,
+        bounds: &bounds,
+        budget: chirp_budget(),
+    };
+    let required_bytes = 2 * core::mem::size_of::<ChirpedTone>();
+    let max_bytes = required_bytes - 1;
+    let small = PartialTrackingModel::Chirped {
+        initial_tones: &initial,
+        bounds: &bounds,
+        budget: ChirpedToneRefinementBudget {
+            fit: HarmonicFitBudget {
+                max_workspace_bytes: max_bytes,
+                ..chirp_budget().fit
+            },
+            ..chirp_budget()
+        },
+    };
+    assert_eq!(
+        track_partials(&record, dt, schedule, small, |_| panic!(
+            "both seed arrays admitted before observation"
+        )),
+        Err(PartialTrackingError::Fit {
+            first_sample_index: 7,
+            failure: PartialFitFailure::Chirped(ChirpedToneRefinementError::Fit(
+                HarmonicFitError::BudgetExceeded {
+                    required_bytes,
+                    max_bytes
+                }
+            )),
+        })
+    );
+    let invalid_bounds = [ChirpedToneBounds {
+        start_frequency_hz: [180.0, 165.0],
+        ..bounds[0]
+    }];
+    assert!(matches!(
+        track_partials(
+            &record,
+            dt,
+            schedule,
+            PartialTrackingModel::Chirped {
+                initial_tones: &initial,
+                bounds: &invalid_bounds,
+                budget: chirp_budget(),
+            },
+            |_| panic!("initial declarations must refuse before prediction")
+        ),
+        Err(PartialTrackingError::Fit {
+            failure: PartialFitFailure::Chirped(
+                ChirpedToneRefinementError::InvalidParameter { .. }
+            ),
+            ..
+        })
+    ));
+    let mut called = 0;
+    let summary = track_partials(&record, dt, schedule, model, |frame| {
+        called += 1;
+        assert!(frame.estimate.is_ok());
+        ControlFlow::Break(())
+    })
+    .unwrap();
+    assert_eq!(called, 1);
+    assert_eq!(summary.visited_frames, 1);
+    assert_eq!(summary.resolved_frames, 1);
+    assert_eq!(summary.maximum_candidate_evaluations, 64);
+    assert!(!summary.completed);
 }
