@@ -17,7 +17,8 @@ impl RealGasWallOperator<'_> {
     /// time refinement. The final wall temperature generally differs from its
     /// earlier gas-contact endpoint, retained in the link-stage reports.
     ///
-    /// Conductances are complete authored W/K values; no geometry, material
+    /// Conductances are complete authored W/K values unless material resistance
+    /// is explicitly bound with `with_shared_wall_link_conduction`. No geometry,
     /// conductivity or spatial PDE is inferred. All source calls spend the
     /// shared attempt's work budget. Failure of any link prevents publication
     /// of the entire gas/wall interval, including the flow clock and reports.
@@ -96,6 +97,52 @@ impl RealGasWallOperator<'_> {
         let shared = self.shared.as_ref()?;
         shared.last_report?;
         Some(&shared.links.as_ref()?.accepted)
+    }
+
+    /// Add the original solid resistance on either side of each wall link.
+    /// Rows follow link order, and each pair follows that link's A/B wall order.
+    /// A bound link's authored G represents finite interface conductance; each
+    /// supplied bulk segment adds its original material/geometric resistance
+    /// once in series. Zero G stays insulation, and unbound links retain their
+    /// complete G. Each wall keeps its own caloric and phase inventory.
+    ///
+    /// Initial-state layers sample the entering link stage, including preceding
+    /// link transfers. Implicit layers follow their original proposed wall
+    /// state. All retained sources admit the final composed stage before gas,
+    /// wall, reports and clock publish. Integrated two-layer profiles retain
+    /// the shared kernel's refusal; no interface temperature is inferred.
+    pub fn with_shared_wall_link_conduction(
+        mut self,
+        layers: Vec<[Option<MaterialWallConduction>; 2]>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, RealGasFlowError> {
+        poll(&mut cancelled)?;
+        if self.last_report.is_some() {
+            return Err(RealGasFlowError::Invalid(
+                "real-gas wall link material must bind before evolution",
+            ));
+        }
+        let shared = self.shared.as_mut().ok_or(RealGasFlowError::Invalid(
+            "real-gas wall link material requires shared walls",
+        ))?;
+        let links = shared.links.as_mut().ok_or(RealGasFlowError::Invalid(
+            "real-gas wall link material requires existing links",
+        ))?;
+        links.bind_conduction(layers, |i| &shared.groups[i], &mut cancelled)?;
+        poll(&mut cancelled)?;
+        Ok(self)
+    }
+
+    /// Original material sources and resistance geometry in this link's A/B order.
+    pub fn shared_wall_link_conduction(
+        &self,
+        link: usize,
+    ) -> Option<&[Option<MaterialWallConduction>; 2]> {
+        self.shared
+            .as_ref()?
+            .links
+            .as_ref()?
+            .conduction_layers(link)
     }
 }
 

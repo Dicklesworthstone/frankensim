@@ -1,6 +1,7 @@
 //! One original finite wall inventory coupled to multiple real-gas cells.
 
 use super::*;
+use crate::multicomponent::network::wall_exchange::MaterialWallConduction;
 use crate::multicomponent::wall_exchange::WallDrag;
 use crate::multicomponent::wall_exchange::shared::{Group, Work};
 pub use crate::multicomponent::wall_exchange::shared::{
@@ -38,9 +39,10 @@ impl<'law> RealGasWallOperator<'law> {
     /// Bind before the first accepted wall interval. The outer flow owner
     /// publishes gas, wall, reports and clock only after all candidate cells
     /// pass complete source, transport and acoustic admission. This is a
-    /// uniform reduction within each wall region, with authored conductances.
-    /// Distinct regions can exchange heat through `with_shared_wall_links`;
-    /// no spatial PDE or dense-gas heat-transfer correlation is inferred.
+    /// uniform storage reduction within each wall region. Material resistance
+    /// and quasi-steady profiles bind through `with_shared_wall_conduction`;
+    /// distinct regions exchange heat through `with_shared_wall_links`.
+    /// No transient spatial PDE or dense-gas film correlation is inferred.
     pub fn with_shared_walls(
         mut self,
         walls: Vec<SharedWall<'law>>,
@@ -157,6 +159,57 @@ impl<'law> RealGasWallOperator<'law> {
     /// Last accepted shared storage/contact equations and actual bounded work.
     pub fn last_shared_wall_report(&self) -> Option<SharedWallReport> {
         self.shared.as_ref()?.last_report
+    }
+
+    /// Bind original solid conductivity and resistance geometry to gas ports.
+    /// Rows follow shared-wall order; entries follow each wall's port order.
+    /// A bound port's authored G remains its gas-side film. Its material layer
+    /// adds solid resistance once, without another mass, capacity or latent
+    /// inventory. `None` retains the port's complete authored conductance.
+    /// Bind after shared walls and before the first accepted source interval.
+    ///
+    /// Initial-state layers sample the original wall state at each source
+    /// stage; implicit layers follow its proposed nonlinear or latent storage.
+    /// An integrated profile instead uses the original conductivity integral
+    /// between the wall trace and the solved gas-facing surface, with exact
+    /// admitted planar or radial resistance geometry. The existing caloric
+    /// owner still holds all storage; transient internal gradients require
+    /// spatial refinement. Phase-dependent k requires its matching phase chart.
+    ///
+    /// Every runtime source query spends the shared attempt's work allowance,
+    /// across both thermal halves of a piston step. A later wall link must
+    /// leave every retained conductivity source and material face admissible.
+    pub fn with_shared_wall_conduction(
+        mut self,
+        layers: Vec<Vec<Option<MaterialWallConduction>>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, RealGasFlowError> {
+        poll(&mut cancelled)?;
+        let shared = self.shared.as_mut().ok_or(RealGasFlowError::Invalid(
+            "real-gas material conduction requires shared walls",
+        ))?;
+        if self.last_report.is_some()
+            || layers.len() != shared.groups.len()
+            || shared
+                .groups
+                .iter()
+                .any(|group| group.conduction_layers().is_some())
+            || !layers.iter().flatten().any(Option::is_some)
+        {
+            return Err(RealGasFlowError::Invalid(
+                "shared real-gas wall conduction state or topology",
+            ));
+        }
+        for (group, layers) in shared.groups.iter_mut().zip(layers) {
+            group.bind_conduction(layers, &mut cancelled)?;
+        }
+        poll(&mut cancelled)?;
+        Ok(self)
+    }
+
+    /// Original material, resistance geometry and time evaluation per gas port.
+    pub fn shared_wall_conduction(&self, wall: usize) -> Option<&[Option<MaterialWallConduction>]> {
+        self.shared.as_ref()?.groups.get(wall)?.conduction_layers()
     }
 }
 
@@ -306,6 +359,27 @@ impl SharedWalls<'_> {
                 &mut iterations,
                 cancelled,
             )?;
+            // Later links can move a wall beyond an earlier gas-port or link
+            // source's support. Admit the complete stage without transferring
+            // heat again. This runs in both stationary and piston source halves.
+            for group in &self.groups {
+                poll(cancelled)?;
+                group.admit_conduction_endpoint(group.candidate, true, &work, cancelled)?;
+                let original = |location, temperature| RealGasCaloric {
+                    gas,
+                    density: states[cell(location)].density,
+                    hint: Some(temperature),
+                };
+                group.admit_integrated_profile_endpoints(
+                    &original,
+                    group.candidate,
+                    duration,
+                    controls,
+                    &work,
+                    cancelled,
+                )?;
+            }
+            links.admit_conduction_endpoints(|i| &self.groups[i], &work, cancelled)?;
         }
         poll(cancelled)?;
         let report = total.report(duration);
