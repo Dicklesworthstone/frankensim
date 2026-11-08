@@ -12,6 +12,7 @@ mod strain;
 pub use plane_stress::PlaneStressHarmonic;
 mod response;
 pub use response::{TensorPronyHarmonic, TensorPronyHarmonicBranch, TensorPronyHarmonicPoint};
+pub use response::{TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint};
 
 /// Physical tensor derivatives with respect to angular frequency [rad/s].
 #[derive(Clone, Debug, PartialEq)]

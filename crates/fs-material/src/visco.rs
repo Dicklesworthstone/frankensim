@@ -61,6 +61,7 @@ pub use tensor::{
     Mandel6, NormalStressHarmonic, PlaneStressHarmonic, PronyBranch, TensorProny,
     TensorPronyFrequencyDerivative,
     TensorPronyHarmonic, TensorPronyHarmonicBranch, TensorPronyHarmonicPoint, TensorPronyState,
+    TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint,
 };
 
 /// Typed refusals of the viscoelastic layer. Display strings carry stable

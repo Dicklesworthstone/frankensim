@@ -30,6 +30,7 @@ pub(crate) use frequency::HarmonicWorkSum;
 pub use frequency::{
     NormalStressHarmonic, PlaneStressHarmonic, TensorPronyFrequencyDerivative, TensorPronyHarmonic,
     TensorPronyHarmonicBranch, TensorPronyHarmonicPoint,
+    TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint,
 };
 
 /// Maximum number of Prony relaxation branches admitted by [`TensorProny`].

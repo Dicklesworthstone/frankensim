@@ -5,6 +5,9 @@ use super::{Mandel6, TensorProny, ViscoError};
 use crate::visco::prony_spectrum::PronySpectrumWeights;
 use fs_math::{c64::C64, dd::Dd};
 
+mod window;
+pub use window::{TensorPronyHarmonicWindow, TensorPronyHarmonicWindowPoint};
+
 fn invalid() -> ViscoError {
     ViscoError::Parameters {
         what: "original harmonic material observation is not representable",

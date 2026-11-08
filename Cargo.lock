@@ -2100,6 +2100,7 @@ dependencies = [
  "fs-blake3",
  "fs-casebook",
  "fs-evidence",
+ "fs-fft",
  "fs-la",
  "fs-matdb",
  "fs-math",

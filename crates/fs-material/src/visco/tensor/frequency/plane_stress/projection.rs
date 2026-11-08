@@ -2,6 +2,8 @@
 
 use fs_math::{c64::C64, dd::Dd};
 
+pub(crate) mod window;
+
 // Each reduced entry owns its product scale. A huge eliminated normal slope
 // must not erase an unrelated weak in-plane slope. Keeping every product
 // factored also permits cancellation before restoring physical units. DD is

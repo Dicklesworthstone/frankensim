@@ -21331,6 +21331,46 @@ stress constraints, source/domain refusal and extreme relaxation scales. Their
 integration execution remains pending because the original runtime dependency
 build is blocked by this environment's memory limit.
 
+`TensorPronyHarmonic::prepare_window` extends that same original spectrum to
+physical finite intervals. Its allocation-free prepared observer reuses one
+analytic temporal Gram and source-clock rotations across all material points.
+`observe_window` is the single-point convenience path. Only uniform windows
+represent unweighted physical work, heat and endpoint conservation; shaped
+detector profiles refuse. Positive frequency, original source band and the
+complete-cycle strain envelope remain binding even for a short interval near
+a strain node.
+
+The interval account separately evaluates original equilibrium/Maxwell spring
+energy at both endpoints, Kelvin and Maxwell heat, and complete stress times
+strain rate. Its signed balance is work minus recoverable-energy change minus
+physical heat. The storage change is independently integrated from the original
+spring energy rate, so a short interval need not lose its change when both
+rounded endpoint energies coincide. Centered sine/cosine weights retain the
+twice-carrier terms that cycle averaging discards. Source time and duration
+remain separate through phase rotation. Original Gram channels, complex Prony
+weights, rates, duration and relaxation time retain their binary scales through
+the contractions; a rounded-away spring strain does not erase representable
+heat. Neither work nor heat is synthesized from a closure residual.
+Interval stress work contracts the original equilibrium, Kelvin and Maxwell
+coefficients with their binary spectrum, rate and duration before rounding.
+A loss entry too small for the cached complex modulus therefore does not erase
+representable interval work after a long physical exposure.
+
+This remains one settled sinusoidal particular response at fixed source
+conditions. It does not infer startup history, temperature evolution or
+cross-frequency interference by adding independent carrier accounts. The
+native 3-D solid observer consumes the interval account at every original
+constitutive quadrature point with its original geometry and source limits.
+
+Seven interval regressions passed against the selected actual production
+constructors, spectrum, source admission, Gram contractions and complete
+harmonic response/window owners, alongside eighteen existing numerical tests.
+They cover independent real-field Maxwell/Simpson oracles, phase and interval
+partition covariance, equal rounded endpoint energies with a retained short
+change, and both Kelvin and Maxwell work rescued from underflowed loss entries.
+The full Cargo/workspace build remains blocked by the runtime dependency's
+memory failure; the separate solid integration tests require that native build.
+
 ## Viscoelastic solid acoustic absorption
 
 `elastic::acoustic::viscoelastic::ViscoelasticSlab` evaluates normal-incidence
