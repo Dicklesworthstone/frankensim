@@ -46,6 +46,9 @@
 
 use fs_la::factor::lu;
 
+/// Original consistent-mass mechanics with nonproportional and Maxwell loss.
+pub mod mechanical;
+
 /// Opt-in exact linear evolution and frequency-matched discrete gradients.
 pub mod linear_exact;
 /// Continuous AC response of complete linear ODE and constrained DAE systems.

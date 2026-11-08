@@ -575,6 +575,41 @@ stepping, and Galerkin reduction preserves the structure.
 
 ## Public types and semantics
 
+### Original-coordinate linear mechanics and Maxwell memory
+
+`mechanical::LinearMechanicalSystem` admits the complete original row-major
+M, C, relaxed K and force map P for `M*q'' + C*q' + K*q + sum(b*s) = P*u`.
+The consistent mass is factored once, with its inverse retained in canonical
+kinetic storage; no lumping, modal projection or proportional-damping fit is
+introduced. The symmetric PSD part of C is physical resistance, checked by
+the existing positive-factor owner and retained with its resistance witness.
+The skew part enters J and is gyroscopic, with exactly zero physical loss.
+
+State order is `[q, p=M*v, z]`. Each original displacement strain b retains
+one existing Maxwell memory `z=sqrt(k)*viscous_strain`, including zero strain
+maps and distinct equal-time arms. Supplied K contains relaxed stiffness;
+the native relaxation owner adds each excess stiffness exactly once. Physical
+force inputs and velocity outputs remain reciprocal: `f=P*u`, `y=P^T*v`.
+Explicit initialization accepts viscous strains or fully relaxed memory;
+velocity and physical branch-stress queries retain every original coordinate.
+
+The returned `PortHamiltonian` uses existing prepared exact-ZOH, continuous-
+tone, discrete-gradient, harmonic and interconnection APIs. There is no new
+time integrator. Exact preparation retains all mechanical and memory states,
+and its independent positive resistance integral includes instantaneous and
+Maxwell heat; numerical balance residuals are not material loss. Warm cached
+steps retain their original allocation/factorization behavior. The adapter is
+bounded dense construction, not a sparse spatial solver, nonlinear constitutive
+law, modal reduction estimate or interval conditioning certificate.
+
+`tests/mechanical.rs` checks a dimensional oscillator against closed motion
+and independent velocity-squared heat quadrature; source-driven two-coordinate
+consistent-mass, nonproportional, gyroscopic and two-time Maxwell dynamics
+against an independent physical-variable ODE; exact time partition through
+warm caches; zero-loss free and gyroscopic trajectories; independently relaxing
+hidden memory; physical port work, and nonphysical/incomplete input refusal.
+
+
 ### Physical modal damping and rigid coordinates
 
 `modal_bank[_ports]_with_damping_rates` admits the physical coefficients c
