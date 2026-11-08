@@ -10004,6 +10004,39 @@ source/state rollback, global storage admission and impulses after loss.
 Exact integration concerns the declared fixed carriers and their envelopes;
 it does not resolve continuous peaks or remove aliasing from sparse outputs.
 
+### Retaining continuous force sources through physical parameter changes
+
+`HarmonicDampedSpectralSolid::replace_parameters` and
+`MultiToneDampedSpectralSolid::replace_parameters` use the same fixed-mass
+physical candidate and separate signed parameter-work account as the damped
+owner. They also rebuild every exact source motion/work/heat kernel against
+the new spectrum and admitted viscosity before publication. A late source
+preparation or capacity refusal preserves the complete previous physical
+state, parameter/force/heat histories and source caches.
+
+The retained source frequencies, ordering, interval length and constant/affine
+envelope mode do not change. Caller-owned force quadratures keep their phase
+and amplitudes; the zero-duration parameter event consumes no source rotation.
+Subsequent intervals use the new physical response with the same continuous
+carrier. Exact resonance and simultaneous-source interference use their
+existing scalar owners. At DC, the harmonic wrapper keeps its original
+held-force arithmetic and lower preparation cost.
+
+Nonzero single-frequency updates admit `128*n^2+8192*n` simultaneous bytes
+and `6*n^3+80*n^2+32768*n+8192*sum(s_i)` preparation terms. Multi-tone
+updates reserve `128*n^2+8192*n+32*n*K` physical bytes PLUS the old native
+bank's payload/peak-scratch bound, then clamp the new bank's supplied
+`ModalToneBudget` to the remaining global bytes. Thus both old and new
+banks are covered during transactional preparation. Native preparation/step
+work remains a separate aggregate allowance, with no per-mode reset.
+
+`tests/solid_spectral_source_update.rs` adds independent resonant convolution
+and affine multi-tone particular-plus-transient references, with continuous
+quadrature for work and combined viscous heat. Cases retain earlier heat,
+force work, clock and source phases through retuning, exercise DC after
+release, and reject late source-cache preparation, cancellation and
+insufficient simultaneous storage without publishing a partial update.
+
 
 ## Exact cubic force histories on the complete elastic spectrum
 

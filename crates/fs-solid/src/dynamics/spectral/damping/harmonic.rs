@@ -2,8 +2,8 @@
 
 use super::{
     CompleteSpectralSolidControls, DampedSpectralSolid, ExactLinearSolidStep,
-    LinearSolidImpulseError, LinearSolidImpulseReport, Result, TetElasticAssembly, add, bound,
-    invalid, poll, project, zeros,
+    LinearSolidImpulseError, LinearSolidImpulseReport, Result, SpectralParameterUpdate,
+    TetElasticAssembly, add, bound, invalid, poll, project, zeros,
 };
 use fs_exec::Cx;
 use fs_modal::time::{ModalAcousticState, PreparedHarmonicForce};
@@ -62,7 +62,7 @@ impl HarmonicDampedSpectralSolid {
         let n = assembly.free_dofs.len();
         let nn = n as u128;
         let phase = forcing_angular_frequency_rad_s * dt_s;
-        let mut preparation_terms = 6 * nn * nn * nn + 64 * nn * nn + 32768 * nn;
+        let preparation_terms = 6 * nn * nn * nn + 64 * nn * nn + 32768 * nn;
         if forcing_angular_frequency_rad_s != 0.0 {
             if !phase.is_finite() {
                 return Err(invalid("representable harmonic forcing phase required"));
@@ -88,14 +88,32 @@ impl HarmonicDampedSpectralSolid {
             controls,
             cx,
         )?;
+        Self::prepare_source(
+            solid,
+            forcing_angular_frequency_rad_s,
+            preparation_terms,
+            cx,
+        )
+    }
+
+    fn prepare_source(
+        solid: DampedSpectralSolid,
+        forcing_angular_frequency_rad_s: f64,
+        mut preparation_terms: u128,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        let n = solid.free_dofs().len();
+        let dt_s = solid.solid.dt_s;
+        let controls = solid.solid.controls;
+        let phase = forcing_angular_frequency_rad_s * dt_s;
         let mut transitions = Vec::new();
         if forcing_angular_frequency_rad_s != 0.0 {
             transitions
                 .try_reserve_exact(n)
                 .map_err(|_| invalid("harmonic coefficient allocation refused"))?;
-            for (i, &lambda) in eigenvalues_rad2_s2.iter().enumerate() {
+            for (i, oscillator) in solid.solid.oscillators.iter().enumerate() {
                 poll(cx)?;
-                let omega = lambda.sqrt();
+                let omega = oscillator.lambda.sqrt();
                 let rate = solid.damping_rates_per_s()[i];
                 let mut scale = (omega * dt_s).max(rate * dt_s).max(phase).max(1.0);
                 if !scale.is_finite() {
@@ -130,6 +148,56 @@ impl HarmonicDampedSpectralSolid {
         })
     }
 
+    /// Install K/C and a complete basis while retaining the live source clock.
+    ///
+    /// Physical state, parameter work, prior force/impulse work and heat follow
+    /// `DampedSpectralSolid::replace_parameters`. The forcing frequency and
+    /// interval length stay fixed; caller-owned quadratures keep their current
+    /// phase and amplitude. Replacement harmonic motion/work/heat coefficients
+    /// are prepared before any state or cache is published.
+    ///
+    /// For nonzero frequency, the live-plus-candidate envelope is
+    /// `128*n^2+8192*n` bytes and
+    /// `6*n^3+80*n^2+32768*n+8192*sum(s_i)` preparation product terms, with
+    /// the same source scaling count as initial harmonic preparation. DC uses
+    /// the ordinary parameter-update envelope. Refusal changes neither physics
+    /// nor source caches; no force impulse or source phase step is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_parameters(
+        &mut self,
+        stiffness_n_per_m: &Csr,
+        viscosity_kg_per_s: &Csr,
+        eigenvalues_rad2_s2: &[f64],
+        basis_columns: &[f64],
+        maximum_parameter_work_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SpectralParameterUpdate> {
+        poll(cx)?;
+        let n = self.free_dofs().len() as u128;
+        let controls = self.solid.solid.controls;
+        let terms = 6 * n * n * n + 80 * n * n + 32768 * n;
+        if self.forcing_angular_frequency_rad_s != 0.0 {
+            bound(
+                128 * n * n + 8192 * n,
+                controls.maximum_preparation_bytes as u128,
+            )?;
+            bound(terms, controls.maximum_preparation_multiply_terms as u128)?;
+        }
+        let (solid, report) = self.solid.parameter_candidate(
+            stiffness_n_per_m,
+            viscosity_kg_per_s,
+            eigenvalues_rad2_s2,
+            basis_columns,
+            maximum_parameter_work_j,
+            cx,
+        )?;
+        let candidate =
+            Self::prepare_source(solid, self.forcing_angular_frequency_rad_s, terms, cx)?;
+        poll(cx)?;
+        *self = candidate;
+        Ok(report)
+    }
+
     pub fn forcing_angular_frequency_rad_s(&self) -> f64 {
         self.forcing_angular_frequency_rad_s
     }
@@ -156,6 +224,9 @@ impl HarmonicDampedSpectralSolid {
     }
     pub fn cumulative_work_j(&self) -> f64 {
         self.solid.cumulative_work_j()
+    }
+    pub fn cumulative_parameter_work_j(&self) -> f64 {
+        self.solid.cumulative_parameter_work_j()
     }
     pub fn cumulative_dissipated_j(&self) -> f64 {
         self.solid.cumulative_dissipated_j()

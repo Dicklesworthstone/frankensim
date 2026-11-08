@@ -2,8 +2,8 @@
 
 use super::{
     CompleteSpectralSolidControls, DampedSpectralSolid, ExactLinearSolidStep,
-    LinearSolidImpulseError, LinearSolidImpulseReport, Result, TetElasticAssembly, add, bound,
-    invalid, poll, zeros,
+    LinearSolidImpulseError, LinearSolidImpulseReport, Result, SpectralParameterUpdate,
+    TetElasticAssembly, add, bound, invalid, poll, zeros,
 };
 use fs_exec::Cx;
 use fs_modal::time::{
@@ -100,10 +100,29 @@ impl MultiToneDampedSpectralSolid {
             controls,
             cx,
         )?;
-        let mut omega = zeros(n)?;
-        for (target, &lambda) in omega.iter_mut().zip(eigenvalues_rad2_s2) {
+        Self::prepare_source(
+            solid,
+            forcing_angular_frequencies_rad_s,
+            affine_envelopes,
+            tone_budget,
+            force_count,
+            cx,
+        )
+    }
+
+    fn prepare_source(
+        solid: DampedSpectralSolid,
+        forcing_angular_frequencies_rad_s: &[f64],
+        affine_envelopes: bool,
+        tone_budget: ModalToneBudget,
+        force_count: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        let dt_s = solid.solid.dt_s;
+        let mut omega = zeros(solid.free_dofs().len())?;
+        for (target, oscillator) in omega.iter_mut().zip(&solid.solid.oscillators) {
             poll(cx)?;
-            *target = lambda.sqrt();
+            *target = oscillator.lambda.sqrt();
         }
         let prepared = PreparedModalTones::try_new_with_damping_rates_controlled(
             &omega,
@@ -121,6 +140,69 @@ impl MultiToneDampedSpectralSolid {
             tones,
             force_count,
         })
+    }
+
+    /// Rebuild all physical modes and their combined source-power kernels.
+    ///
+    /// This has the fixed-mass and signed-work meaning of
+    /// `DampedSpectralSolid::replace_parameters`. Original tone order,
+    /// frequencies, duration and constant/affine envelope mode remain fixed.
+    /// Caller-owned quadratures are not touched or rotated by this event.
+    /// Both the complete physical candidate and its exact multi-tone caches
+    /// must pass before either is published.
+    ///
+    /// The global solid byte cap reserves `128*n^2+8192*n+32*n*K`, PLUS the
+    /// old bank's admitted payload/scratch envelope, before clamping the new
+    /// `tone_budget.maximum_storage_bytes` to what remains. Thus old and new
+    /// banks are covered simultaneously. Native preparation/step work remains
+    /// an additional aggregate `tone_budget`; no allowance resets per mode.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_parameters(
+        &mut self,
+        stiffness_n_per_m: &Csr,
+        viscosity_kg_per_s: &Csr,
+        eigenvalues_rad2_s2: &[f64],
+        basis_columns: &[f64],
+        maximum_parameter_work_j: f64,
+        mut tone_budget: ModalToneBudget,
+        cx: &Cx<'_>,
+    ) -> Result<SpectralParameterUpdate> {
+        poll(cx)?;
+        let (n, k) = (
+            self.solid.free_dofs().len() as u128,
+            self.tones.tone_count(),
+        );
+        if k > tone_budget.maximum_tones {
+            return Err(invalid("replacement tone budget excludes retained sources"));
+        }
+        let controls = self.solid.solid.controls;
+        let reserved = 128 * n * n
+            + 8192 * n
+            + 32 * n * k as u128
+            + self.tones.preparation_storage_bound_bytes();
+        bound(reserved, controls.maximum_preparation_bytes as u128)?;
+        tone_budget.maximum_storage_bytes = tone_budget
+            .maximum_storage_bytes
+            .min((controls.maximum_preparation_bytes as u128 - reserved) as usize);
+        let (solid, report) = self.solid.parameter_candidate(
+            stiffness_n_per_m,
+            viscosity_kg_per_s,
+            eigenvalues_rad2_s2,
+            basis_columns,
+            maximum_parameter_work_j,
+            cx,
+        )?;
+        let candidate = Self::prepare_source(
+            solid,
+            self.tones.angular_frequencies_rad_s(),
+            self.tones.is_affine(),
+            tone_budget,
+            self.force_count,
+            cx,
+        )?;
+        poll(cx)?;
+        *self = candidate;
+        Ok(report)
     }
 
     /// Borrow all physical state, free-coordinate labels and work/heat accounts.

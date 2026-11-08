@@ -1589,6 +1589,14 @@ and before return; one bounded power preparation remains atomic. Caller-owned
 physical state/energy acceptance and observation resolution remain separate;
 these endpoint previews are not peak finders or interval certificates.
 
+`PreparedModalTones::preparation_storage_bound_bytes()` exposes the SAME
+payload-plus-peak-scratch formula used by native admission, with its original
+mode count, distinct/input tone counts and envelope kind. It is a conservative
+bound, not an allocator measurement, and retains the same exclusions for
+caller workspace and model-owned state. Physical consumers can reserve an
+old bank while preparing its replacement without duplicating the native
+coefficient-size formula or understating simultaneous storage.
+
 `tests/physical_tone_banks.rs` covers duplicate cancellation, near-tone beats,
 affine work/heat against independent ODE integration across damping regimes,
 analytic rigid drag, high-frequency admission, preserved model binding,

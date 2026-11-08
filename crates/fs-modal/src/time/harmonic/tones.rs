@@ -369,6 +369,21 @@ impl PreparedModalTones {
         self.modes.len()
     }
 
+    /// The same conservative payload-plus-peak-scratch byte bound used at
+    /// admission, excluding caller workspace and any model-owned state.
+    /// It also bounds this bank's retained payload, so a transactional
+    /// replacement can reserve the old bank while preparing a new one.
+    /// This is a declared numerical envelope, not an allocator measurement.
+    #[must_use]
+    pub fn preparation_storage_bound_bytes(&self) -> u128 {
+        preparation_storage_bound(
+            self.modes.len(),
+            self.unique.len(),
+            self.frequencies.len(),
+            self.affine,
+        )
+    }
+
     /// Rotate one original tone's interval-local coefficients after a successful
     /// step. Checkpoints include these caller-owned phases with modal state.
     ///
@@ -742,6 +757,28 @@ fn poll_preparation(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalAco
     }
 }
 
+fn preparation_storage_bound(
+    mode_count: usize,
+    k: usize,
+    input_tones: usize,
+    affine: bool,
+) -> u128 {
+    let n = 2 + if affine { 4 } else { 2 } * k;
+    let square = n * n;
+    mode_count as u128
+        * (core::mem::size_of::<PreparedToneMode>()
+            + k * core::mem::size_of::<HarmonicForceTransition>()
+            + if affine {
+                k * core::mem::size_of::<[f64; 4]>()
+            } else {
+                0
+            }
+            + 2 * square * 8) as u128
+        + (4 * square * 8
+            + (10 * n + 20 * input_tones) * 8
+            + core::mem::size_of::<PreparedModalTones>()) as u128
+}
+
 #[allow(clippy::too_many_arguments)]
 fn admit_cost(
     mode_count: usize,
@@ -758,18 +795,7 @@ fn admit_cost(
     let square = n * n;
     // Widen the mode count before products: explicit physical banks have no
     // unrelated acoustic mode cap. Include shared maps and peak cold scratch.
-    let storage = mode_count as u128
-        * (core::mem::size_of::<PreparedToneMode>()
-            + k * core::mem::size_of::<HarmonicForceTransition>()
-            + if affine {
-                k * core::mem::size_of::<[f64; 4]>()
-            } else {
-                0
-            }
-            + 2 * square * 8) as u128
-        + (4 * square * 8
-            + (10 * n + 20 * input_tones) * 8
-            + core::mem::size_of::<PreparedModalTones>()) as u128;
+    let storage = preparation_storage_bound(mode_count, k, input_tones, affine);
     let step_work = mode_count as u128 * (16 * square + 128 * input_tones) as u128;
     for (what, value, limit) in [
         (

@@ -333,8 +333,7 @@ fn weak_parameter_work_survives_large_unchanged_storage() {
         vec![],
     )
     .unwrap();
-    let state = previous.state(&[1.0, 1.0], &[0.0, 0.0], &[]).unwrap();
-    let result = previous
+    let plan = previous
         .prepare_state_transfer(
             &target,
             MechanicalCoordinateMap::Unchanged,
@@ -342,17 +341,25 @@ fn weak_parameter_work_survives_large_unchanged_storage() {
             controls(),
             || false,
         )
-        .unwrap()
-        .transfer(&state, || false)
         .unwrap();
-    assert_eq!(
-        result.report.previous_stored_energy_j,
-        result.report.target_stored_energy_j
-    );
-    assert_eq!(result.report.elastic_parameter_work_j, 1.0);
-    assert_eq!(result.report.parameter_work_j, 1.0);
-    assert_eq!(result.report.storage_change_j, 1.0);
-    assert_eq!(result.report.energy_residual_j, 0.0);
+    // Nonunit coordinates give the unchanged large energy a nonzero
+    // product-rounding tail. Subtracting even two-word endpoint energies then
+    // loses the one-joule event; identical coefficients must cancel first.
+    for background in [1.0, 1.1, 1.2] {
+        let state = previous
+            .state(&[background, 1.0], &[0.0, 0.0], &[])
+            .unwrap();
+        let result = plan.transfer(&state, || false).unwrap();
+        assert_eq!(result.state_after, state);
+        assert_eq!(
+            result.report.previous_stored_energy_j,
+            result.report.target_stored_energy_j
+        );
+        assert_eq!(result.report.elastic_parameter_work_j, 1.0);
+        assert_eq!(result.report.parameter_work_j, 1.0);
+        assert_eq!(result.report.storage_change_j, 1.0);
+        assert_eq!(result.report.energy_residual_j, 0.0);
+    }
 }
 
 #[test]

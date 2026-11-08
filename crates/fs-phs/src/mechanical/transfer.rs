@@ -645,6 +645,35 @@ fn quadratic_difference(
     before: &[f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Sum> {
+    if after == before {
+        // Fixed-coordinate parameter changes must not subtract complete
+        // energies: even two words lose weak work below a large background's
+        // product-rounding tail. Cancel identical source entries first, then
+        // retain each changed coefficient's paired products before contraction.
+        let n = before.len();
+        let mut increment = Sum::default();
+        for i in 0..n {
+            poll(cancelled)?;
+            let mut row = Sum::default();
+            for j in 0..n {
+                let index = i * n + j;
+                if target[index] != previous[index] {
+                    let mut change = Sum::default();
+                    change
+                        .product(target[index], before[j])
+                        .ok_or_else(arithmetic)?;
+                    change
+                        .product(-previous[index], before[j])
+                        .ok_or_else(arithmetic)?;
+                    row.add_scaled(change, 1.0).ok_or_else(arithmetic)?;
+                }
+            }
+            increment
+                .add_half_scaled(row, before[i])
+                .ok_or_else(arithmetic)?;
+        }
+        return Ok(increment);
+    }
     let mut increment = quadratic(target, after, cancelled)?;
     increment
         .add_scaled(quadratic(previous, before, cancelled)?, -1.0)

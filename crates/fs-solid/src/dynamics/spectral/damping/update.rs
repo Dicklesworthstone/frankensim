@@ -70,6 +70,30 @@ impl DampedSpectralSolid {
         maximum_parameter_work_j: f64,
         cx: &Cx<'_>,
     ) -> Result<SpectralParameterUpdate> {
+        let (candidate, report) = self.parameter_candidate(
+            stiffness_n_per_m,
+            viscosity_kg_per_s,
+            eigenvalues_rad2_s2,
+            basis_columns,
+            maximum_parameter_work_j,
+            cx,
+        )?;
+        *self = candidate;
+        Ok(report)
+    }
+
+    // Source-specific owners must rebuild their caches before publishing the
+    // same physical candidate. No old state or account is changed here.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn parameter_candidate(
+        &self,
+        stiffness_n_per_m: &Csr,
+        viscosity_kg_per_s: &Csr,
+        eigenvalues_rad2_s2: &[f64],
+        basis_columns: &[f64],
+        maximum_parameter_work_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, SpectralParameterUpdate)> {
         poll(cx)?;
         if !maximum_parameter_work_j.is_finite() || maximum_parameter_work_j < 0.0 {
             return Err(invalid("finite nonnegative parameter-work budget required"));
@@ -157,8 +181,7 @@ impl DampedSpectralSolid {
             }
         }
         poll(cx)?;
-        *self = candidate;
-        Ok(report)
+        Ok((candidate, report))
     }
 }
 
