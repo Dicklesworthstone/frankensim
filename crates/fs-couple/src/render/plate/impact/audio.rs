@@ -3,8 +3,12 @@
 //! Offline velocity-to-far-field samples come from an acoustic solver, not
 //! from an instrument name or an arbitrary modal gain. Reuse the existing SH
 //! change of basis, vector fit, withheld complex-response gate and Tustin bank.
-//! Divide by -i*omega to drive that bank with actual velocity increments. This
-//! avoids a fitted DC velocity gain radiating steady translation forever.
+//! Divide by -i*omega to prepare an acceleration response. Apply that immutable
+//! bank to actual velocity, sum its fixed receiver weights, then differentiate
+//! the resulting receiver potential once with the shared bandlimited owner.
+//! Linear time-invariant filtering and differentiation commute; one derivative
+//! serves every input/SH channel without attenuating upper partials by a backward
+//! difference. Constant velocity does not radiate a steady pressure.
 //!
 //! A finite source can have an ADVANCE in its origin-referenced far field.
 //! Add a/c to the sampled filter and propagate the remaining (r-a)/c in a
@@ -12,13 +16,19 @@
 //! factor corrupts phase/arrival time. a must enclose the acoustic source about
 //! its declared origin. It is caller-provided geometry, not fitted latency.
 //!
-//! The causal backward velocity difference adds a half-mechanical-step delay
-//! and sinc attenuation relative to an exact derivative. Propagation rounds UP
-//! to whole mechanical samples within an explicit tolerance. Both errors are
-//! inspectable and converge with sample rate. Neither is time compensated.
+//! The causal derivative retains its explicit 48-mechanical-sample group delay
+//! and qualified band through 0.45 of the mechanical sample rate. Fitted bands
+//! beyond that limit refuse. This cannot recover source harmonics already
+//! aliased by the mechanics; refine the source clock and anti-alias before
+//! reducing it. Propagation still rounds UP to whole mechanical samples within
+//! an explicit tolerance. Reconstruction delay and travel remain separate;
+//! neither is time compensated.
 //! This is stationary-reference, ONE-WAY far-field observation: no acoustic
-//! reaction, near field, room, air absorption or moving-surface claim. Original
-//! each mechanical image retains its own numerical and allocation contract.
+//! reaction, near field, room, air absorption or moving-surface claim. Each
+//! original mechanical image retains its own numerical and allocation contract.
+//! Thermal/contact histories may change source motion, but never this frozen
+//! acoustic transfer, its projections or receiver. A time-varying transfer is
+//! unsupported: its product-rule terms cannot be obtained by this commutation.
 
 use super::{ImpactError, ImpactFrame, ImpactSystem};
 use super::linear::{LinearImpactFrame, LinearImpactSystem};
@@ -31,6 +41,7 @@ use crate::broadband_radiation::{
     evaluate_real_tesseral,
 };
 use crate::pcm_wav::observation::PressureRenderer;
+use crate::pcm_wav::decimate::Decimator;
 use crate::render::{ControlDelta, RenderError};
 use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
@@ -126,7 +137,9 @@ pub struct ImpactObservationTiming {
     pub propagation_samples: usize,
     /// Additional nonnegative delay due to integer propagation [s].
     pub propagation_rounding_s: f64,
-    /// Backward velocity difference's half-step phase delay [s].
+    /// Numerical derivative group delay [s], separate from propagation. The
+    /// retained field name also covered the former half-step difference;
+    /// the bandlimited reconstruction now reports 48 mechanical periods.
     pub velocity_difference_delay_s: f64,
 }
 
@@ -233,9 +246,9 @@ pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
     radiation: BroadbandRadiationRuntime<'a>,
     projections: Vec<VelocityProjection>,
     forces: Vec<f64>,
-    previous_velocity: Vec<f64>,
     velocity: Vec<f64>,
-    acceleration: Vec<f64>,
+    /// One derivative of the fixed receiver potential, not one per source mode.
+    derivative: Decimator,
     directional_weights: Vec<f64>,
     travel: Vec<f64>,
     head: usize,
@@ -259,6 +272,11 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
     /// listener. Forces are held until explicitly replaced between callbacks.
     /// Startup radiating velocity must be zero: otherwise its acoustic history
     /// is missing. A moving nonradiating striker remains fully legal.
+    ///
+    /// The borrowed radiation bank and receiver projections remain immutable
+    /// for the complete run. Its fitted band must lie at or below 0.45 of this
+    /// clock, where the shared bandlimited derivative preserves physical gain.
+    /// Its numerical group delay is reported separately from geometric travel.
     pub fn new(
         mechanics: M, radiation: &'a ImpactRadiation,
         projections: Vec<VelocityProjection>, forces: Vec<f64>,
@@ -269,6 +287,13 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
             || dt.to_bits() != mechanics.sample_period_s().to_bits()
             || dt.to_bits() != radiation.bank.sample_interval_s.to_bits()
         { return Err(input("impact/radiation clock mismatch, nonzero start or invalid block capacity")); }
+        let maximum_omega = core::f64::consts::TAU * (0.45 * f64::from(sample_rate_hz));
+        if radiation.bank.report.training_omega_rad_s.iter()
+            .chain(&radiation.bank.report.held_out_omega_rad_s)
+            .any(|&omega| !omega.is_finite() || omega > maximum_omega)
+        {
+            return Err(input("impact radiation band exceeds the bandlimited derivative's 0.45-rate limit; refine the source and radiation clock"));
+        }
         if mechanics.mode_count() == 0
             || mechanics.mode_count().checked_mul(2).is_none_or(|n| n > mechanics.state().len())
             || !mechanics.maximum_generalized_force().is_finite() || mechanics.maximum_generalized_force() <= 0.0
@@ -293,11 +318,9 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
         if rounding < 0.0 || rounding > listener.maximum_delay_error_s {
             return Err(input("listener propagation rounding exceeds its declared time tolerance"));
         }
-        let mut previous_velocity = Vec::with_capacity(projections.len());
         for p in &projections {
             let v: f64 = p.weights.iter().enumerate().map(|(i,b)| b * mechanics.state()[2*i+1]).sum();
             if !v.is_finite() || v != 0.0 { return Err(input("nonzero initial radiating velocity needs an acoustic-state initialization")); }
-            previous_velocity.push(v);
         }
         let mut travel = Vec::new();
         travel.try_reserve_exact(delay).map_err(|_| input("pressure propagation allocation failed"))?;
@@ -314,11 +337,12 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
             directional_weights.push(value); unit[i] = C64::ZERO;
         }
         let runtime = radiation.bank.try_runtime().map_err(owner)?;
+        let derivative = Decimator::new_differentiating(1, 1, sample_rate_hz).map_err(input)?;
         let timing = ImpactObservationTiming { source_time_shift_s: radiation.source_time_shift_s(),
             remaining_travel_time_s: time, propagation_samples: delay, propagation_rounding_s: rounding,
-            velocity_difference_delay_s: 0.5 * dt };
+            velocity_difference_delay_s: derivative.delay_output_frames() * dt };
         Ok(Self { mechanics, radiation: runtime, velocity: vec![0.0; projections.len()],
-            acceleration: vec![0.0; projections.len()], projections, forces, previous_velocity,
+            derivative, projections, forces,
             directional_weights, travel, head: 0, timing, sample_rate_hz, max_block,
             pressure_limit: listener.maximum_abs_pressure_pa, completed: 0, poisoned: false,
             gate: CancelGate::new_clock_free(), last_frame: None })
@@ -345,11 +369,15 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
         let frame = self.mechanics.advance(&self.forces, &self.gate).map_err(owner)?;
         for (k, p) in self.projections.iter().enumerate() {
             self.velocity[k] = p.weights.iter().enumerate().map(|(i,b)| b * self.mechanics.state()[2*i+1]).sum();
-            self.acceleration[k] = (self.velocity[k] - self.previous_velocity[k]) / self.mechanics.sample_period_s();
-            if !self.acceleration[k].is_finite() { return Err(input("radiating acceleration left finite set")); }
         }
-        let coefficients = self.radiation.step(&self.acceleration).map_err(owner)?;
-        let emitted: f64 = coefficients.iter().zip(&self.directional_weights).map(|(a,b)|a*b).sum();
+        // Every filter, projection and directional weight is fixed. The same
+        // derivative therefore commutes with the entire LTI bank and sum, even
+        // when the source's nonlinear mechanics or thermal state changes.
+        // The intermediate quantity is a receiver potential [Pa s], not Pa;
+        // the physical pressure ceiling belongs AFTER differentiation.
+        let coefficients = self.radiation.step(&self.velocity).map_err(owner)?;
+        let potential: f64 = coefficients.iter().zip(&self.directional_weights).map(|(a,b)|a*b).sum();
+        let emitted = self.derivative.preview(&[potential]).map_err(input)?[0];
         if !emitted.is_finite() || emitted.abs() > self.pressure_limit {
             return Err(input("physical pressure exceeded its declared ceiling"));
         }
@@ -357,7 +385,7 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
             let old = self.travel[self.head]; self.travel[self.head] = emitted;
             self.head = (self.head + 1) % self.travel.len(); old
         };
-        self.previous_velocity.copy_from_slice(&self.velocity);
+        self.derivative.commit();
         self.last_frame = Some(frame); self.completed += 1; Ok(pressure)
     }
 }

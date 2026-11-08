@@ -249,3 +249,4 @@ fn prepared_contact_image_reaches_the_same_radiation_decimator_and_pcm_stream() 
 
 mod prepared;
 mod heated;
+mod harmonics;

@@ -15,7 +15,7 @@ pub use fs_vfit::WeightPreset;
 use fs_vfit::discretize::{
     DiscreteStateSpace, DiscreteStateSpaceRuntime, DiscretizeError, bilinear_state_space,
 };
-use fs_vfit::{FitOptions, VfError, vector_fit};
+use fs_vfit::{FitOptions, VfError, vector_fit_transfer};
 
 /// Producer-neutral modal-velocity samples and continuous fits for exact ZOH.
 pub mod modal;
@@ -441,7 +441,9 @@ pub fn evaluate_real_tesseral(
 /// `(2/T) tan(omega T/2)`, so an unprewarped Tustin realization samples the
 /// intended physical response at the original digital frequency. A caller may
 /// admit constant direct feedthrough through `controls.fit_d`; the improper
-/// `s*e` term is always disabled.
+/// `s*e` term is always disabled. These are signed observation transfers:
+/// reversing a modal coordinate or SH direction must retain its pressure sign,
+/// so impedance-only nonnegative direct-term constraints do not apply.
 #[allow(clippy::too_many_lines)] // one coherent artifact build
 pub fn build_broadband_radiation_artifact(
     samples: &SampledRadiationData,
@@ -499,7 +501,7 @@ pub fn build_broadband_radiation_artifact(
                 filters.push(zero_filter(t_s));
                 continue;
             }
-            let fit = vector_fit(&fit_omega, &response, &fit_options)
+            let fit = vector_fit_transfer(&fit_omega, &response, &fit_options)
                 .map_err(|source| BroadbandRadiationError::Fit(input_index, channel, source))?;
             if !fit.model.is_stable() || fit.model.e != 0.0 || !controls.fit_d && fit.model.d != 0.0
             {
@@ -1088,6 +1090,69 @@ mod tests {
                 .iter()
                 .all(|filter| filter.e_leftover == 0.0)
         );
+    }
+
+    #[test]
+    fn g1_signed_dipole_modes_preserve_orientation_phase_and_cancellation() {
+        // An x-directed dipole has F(n) = H * n_x. In the real tesseral
+        // basis Y_11(cos) = -sqrt(3/(4*pi))*n_x, so its coefficient is
+        // NEGATIVE even when the physical transfer H has positive feedthrough.
+        // Reversing the original modal coordinate reverses that whole row.
+        let mut samples = neutral_one_pole_samples();
+        samples.source_id = "analytic x-dipole with opposite modal orientations".into();
+        samples.l_max = 1;
+        samples.input_ids = vec!["original-mode".into(), "reversed-mode".into()];
+        let normalization = (3.0 / (4.0 * core::f64::consts::PI)).sqrt();
+        for row in &mut samples.training {
+            let h = warped_one_pole_bem_coefficient(row.omega_rad_s);
+            let real = [C64::ZERO, C64::ZERO, h.scale(-1.0 / normalization), C64::ZERO];
+            let coefficients = real_tesseral_to_complex_sh(1, &real).unwrap();
+            let reversed = coefficients.iter().map(|&value| -value).collect();
+            row.coefficients_by_input = vec![coefficients, reversed];
+        }
+        for row in &mut samples.held_out {
+            let h = warped_one_pole_bem_coefficient(row.omega_rad_s);
+            // Independent Cartesian directivity, not evaluation of the fitted SH.
+            let fields: Vec<_> = row.directions.iter().map(|n| {
+                h.scale(n[0] / n.iter().map(|x| x*x).sum::<f64>().sqrt())
+            }).collect();
+            let reversed = fields.iter().map(|&value| -value).collect();
+            row.far_field_by_input = vec![fields, reversed];
+        }
+        let artifact = build_broadband_radiation_artifact(&samples, controls()).unwrap();
+        assert!(artifact.inputs[0].filters[2].d < 0.0);
+        assert!(artifact.inputs[1].filters[2].d > 0.0);
+        for row in &samples.held_out {
+            let coefficients: Vec<_> = artifact.inputs[0].filters.iter().map(|filter| {
+                if filter.n == 0 { C64::ZERO } else { filter.eval(row.omega_rad_s).unwrap().conj() }
+            }).collect();
+            for (&direction, &expected) in row.directions.iter().zip(&row.far_field_by_input[0]) {
+                let actual = evaluate_real_tesseral(1, &coefficients, direction).unwrap();
+                assert!((actual - expected).abs() < 1e-7 * expected.abs().max(1e-12));
+            }
+        }
+        let mut forward = artifact.try_runtime().unwrap();
+        let mut reversed = artifact.try_runtime().unwrap();
+        let mut cancelled = artifact.try_runtime().unwrap();
+        let (mut parity_error, mut cancellation_error, mut signal) = (0.0, 0.0, 0.0);
+        for sample in 0..512 {
+            let u = if sample < 384 {
+                (sample as f64 * 0.17).sin() + 0.2 * (sample as f64 * 0.071).cos()
+            } else { 0.0 };
+            let a = forward.step(&[u, 0.0]).unwrap();
+            // Reversing both mode and its coordinate must preserve the field.
+            let b = reversed.step(&[0.0, -u]).unwrap();
+            // Equal coordinates on opposite physical rows must cancel.
+            let zero = cancelled.step(&[u, u]).unwrap();
+            for ((&a, &b), &zero) in a.iter().zip(b).zip(zero) {
+                parity_error += (a-b).powi(2);
+                cancellation_error += zero*zero;
+                signal += a*a;
+            }
+        }
+        assert!(signal > 0.0);
+        assert!((parity_error / signal).sqrt() < 1e-7);
+        assert!((cancellation_error / signal).sqrt() < 1e-7);
     }
 
     #[test]

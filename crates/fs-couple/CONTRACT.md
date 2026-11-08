@@ -1835,6 +1835,48 @@ focused regressions specify independent shrink/growth energy and entropy
 balances, callback-visible coverage and source-k rebinding, exact-target event
 order, and transactional late failure including a caught contact-update error.
 
+## Bandlimited harmonic pressure from impacts
+
+The solver-neutral spherical-harmonic radiation bridge fits each channel
+through `fs_vfit::vector_fit_transfer`. Observation coefficients retain either
+sign, including direct feedthrough; the impedance-only nonnegative direct-term
+constraints do not apply. Stable poles, properness, declared direct-term policy
+and the independent complex-response gate remain authoritative. Opposite modal
+orientations preserve the field when their source coordinates also reverse,
+and equal drives on opposite radiation rows cancel.
+
+`render::plate::impact::audio::ImpactPressureRenderer` applies the original
+acceleration-response radiation bank to accepted modal velocities, sums its
+fixed spherical-harmonic receiver weights, and differentiates the resulting
+potential in Pa s with `pcm_wav::decimate::Decimator::new_differentiating`.
+The immutable borrowed bank, fixed projections and stationary receiver make
+this commutation valid for the whole run. One derivative serves all source
+and radiation channels; the callback retains its prepared buffers.
+
+The shared derivative replaces the backward difference's frequency-dependent
+sinc loss. Its 48-mechanical-sample group delay is reported by the existing
+`velocity_difference_delay_s` timing field, separately from source-radius shift,
+geometrical travel and propagation rounding. Fitted bands beyond 0.45 of the
+mechanical sample rate refuse. Source harmonics already aliased by mechanics
+remain unresolved; source-clock refinement and anti-aliasing before a rate
+change are still required. Mechanical/contact/thermal histories and energy
+accounts stay with their original owners. This frozen-reference acoustic model
+does not update its transfer from evolving geometry or material properties;
+time-varying transfers require their own derivative product terms and are not
+admitted by this interface.
+
+Focused regressions use the analytic compact-monopole Green function and the
+original exact linear-impact source to check amplitude and phase through the
+upper admitted harmonic band, unchanged mechanical states and energy records,
+vanishing pressure under coasting motion, and explicit band refusal.
+
+Bounded native verification executed four actual radiation-bank regressions
+and two real-bank/shared-derivative component tests. Relative pressure waveform
+error remained below 1.54e-6 through 0.45 of the sample rate with the declared
+delay; settled coasting pressure was zero. The full impact/contact/thermal
+integration tests were added but could not run within the available shared
+storage. This is scoped acoustic-owner verification, not a full Cargo gate.
+
 ## Spatial thermal networks in impact pressure playback
 
 `render::plate::impact::audio::network::ThermalNetworkSource` retains an original
