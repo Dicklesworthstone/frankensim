@@ -3,6 +3,8 @@ use super::super::images::{
     CurvedRayleighImageLightCameraScene, PointLightImageGroup, PointLightImageReceiver,
 };
 use crate::dielectric::DielectricSurface;
+use crate::polarization::photometry::SpectralOptics;
+use crate::polarization::dielectric::scene::curved::camera::point_lights::PointLightSourcePolarization;
 use crate::polarization::dielectric::scene::curved::bundle::connection::images::{
     BundleImageOptions, BundleImageSeed,
 };
@@ -10,6 +12,115 @@ use crate::polarization::dielectric::scene::curved::participating::transmittance
 use fs_geom::fixtures::SphereChart;
 
 mod rough;
+
+#[test]
+fn g1_polarized_point_fixture_rayleigh_vertices_and_images_keep_source_stokes() {
+    with_cx(|cx| {
+        let geometry = geometry();
+        let material = material();
+        let media = [SceneMedium::Homogeneous(&material)];
+        let reflectance = [SpectralReflectance::constant(REFLECTANCE).unwrap()];
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx, &geometry, &media, &[], &[], &reflectance, surfaces(), 100_000,
+        ).unwrap();
+        let emission = emitters();
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emission, None).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let beta = 0.4_f64;
+        let volumes = [Some(CurvedRayleighMedium::try_new(&spectrum, beta, &phase).unwrap())];
+        let transport = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+        let molecular = CurvedRayleighCameraScene::try_new(cx, &camera, &transport).unwrap();
+        let original = lamp().with_unpolarized_optics();
+        let perpendicular = original.through(&SpectralOptics::linear_polarizer(0.0).unwrap()).unwrap();
+        let parallel = original.through(&SpectralOptics::linear_polarizer(
+            core::f64::consts::FRAC_PI_2,
+        ).unwrap()).unwrap();
+        let mut limits = settings();
+        limits.max_source_free_flight_draws = 0;
+        limits.max_source_candidates = 0;
+        let flight = |ordinal| [
+            if ordinal == 0 { 1.0 - (-beta * 0.25).exp() } else { 0.99 },
+            0.0, 0.2, 0.0,
+        ];
+        let mut radiances = [0.0; 3];
+        for (slot, polarized) in [&original, &perpendicular, &parallel].into_iter().enumerate() {
+            let lamp = polarized.intensity_source();
+            let bindings = [PointLightSourcePolarization::try_new(lamp, polarized).unwrap()];
+            // The binding belongs to the original owner even when that owner
+            // has no surface branch; later molecular/image owners reuse it.
+            let fixtures = CurvedPointLightCameraScene::try_new(cx, &camera, &[]).unwrap()
+                .with_source_polarizations(cx, &bindings).unwrap();
+            let branches = [volume_branch(lamp)];
+            let single = CurvedRayleighPointLightCameraScene::try_new_with_volume_branches(
+                cx, &molecular, &fixtures, &branches,
+            ).unwrap();
+            let direct = single.sample_ray_with_tracking_samples(
+                cx, ray(), 550.0, 0, limits,
+                |_| panic!("backscattered camera path ends at the opaque wall"),
+                flight, |_, _| panic!("uniform source survival uses no random draws"),
+            ).unwrap();
+
+            let owner = CurvedRayleighPointLightCameraScene::try_new(
+                cx, &molecular, &fixtures,
+            ).unwrap();
+            let seed = BundleImageSeed {
+                initial_direction: branches[0].initial_direction,
+                policy: branches[0].policy,
+            };
+            let seeds = [seed, seed];
+            let groups = [PointLightImageGroup {
+                source: lamp,
+                receiver: PointLightImageReceiver::MolecularMedium(0),
+                initial_medium: 0,
+                source_transverse_axis: branches[0].source_transverse_axis,
+                seeds: &seeds,
+                image_options: BundleImageOptions {
+                    max_images: 1,
+                    min_separation_rad: 0.01,
+                    duplicate_tolerance_rad: 1e-5,
+                    max_trace_evaluations: 64,
+                },
+                position_tolerance_m: 2e-6,
+            }];
+            let images = CurvedRayleighImageLightCameraScene::try_new(cx, &owner, &groups).unwrap();
+            let mut workspace = CurvedTransmittanceImageWorkspace::try_new(1, 2).unwrap();
+            let discovered = images.sample_ray_with_tracking_samples(
+                cx, ray(), 550.0, 0, limits, &mut workspace,
+                |_| panic!("source discovery does not change camera surface samples"),
+                flight, |_, _| panic!("uniform source survival uses no random draws"),
+            ).unwrap();
+
+            // Analytic Rayleigh I response in the source scattering frame:
+            // 3/(16*pi) [(1+c²) + (1-c²) Q/I]. +Q is source y, transverse
+            // to the x-z scattering plane. Each polarizer already lost half
+            // the calibrated intensity; neither beta nor camera free-flight
+            // survival appears again in this conditional event contribution.
+            let distance = 1.0625_f64.sqrt();
+            let cosine_squared = 0.25_f64.powi(2) / distance.powi(2);
+            let q = [0.0, 1.0, -1.0][slot];
+            let phase_per_sr = 3.0 * ((1.0 + cosine_squared) + (1.0 - cosine_squared) * q)
+                / (16.0 * core::f64::consts::PI);
+            let intensity = lamp.flux_lm() * lamp.spectrum().bins_w_per_lumen_nm()[0]
+                / (4.0 * core::f64::consts::PI);
+            let expected = phase_per_sr * intensity / distance.powi(2)
+                * (-ABSORPTION * 0.25 - (ABSORPTION + beta) * distance).exp();
+            near(direct.fixture_radiance_w_m2_sr_nm(), expected);
+            near(discovered.fixture_radiance_w_m2_sr_nm(), expected);
+            assert_eq!(direct.radiance_sample().path(), discovered.radiance_sample().path());
+            for sample in [&direct, &discovered] {
+                assert_eq!(sample.connections(), 1, "a duplicate seed is not a second source");
+                assert_eq!(sample.volume_events(), 1);
+                assert_eq!(sample.free_flight_draws(), 2);
+                assert_eq!(sample.source_free_flight_draws(), 0);
+                assert_eq!(sample.source_candidates(), 0);
+            }
+            radiances[slot] = direct.fixture_radiance_w_m2_sr_nm();
+        }
+        assert!(radiances[1] > 10.0 * radiances[2]);
+        near(radiances[1] + radiances[2], radiances[0]);
+    });
+}
 
 #[test]
 fn g1_ball_lens_camera_sums_distinct_images_once_and_accepts_exact_trace_budget() {

@@ -6,6 +6,7 @@ use crate::conductor::{
 };
 use crate::dielectric::{DielectricEvent, DielectricSurface};
 use crate::polarization::Stokes;
+use crate::polarization::photometry::SpectralOptics;
 use crate::polarization::dielectric::transport::PolarizedBeam;
 use crate::surface_detail::{BrushingPattern, SurfaceDetail};
 use core::f64::consts::{FRAC_PI_2, PI};
@@ -59,6 +60,82 @@ fn oriented_panel(id: u64, center: Point3, normal: Vec3, radius: f64) -> Geometr
         RigidTransform::identity(),
     )
     .unwrap()
+}
+
+#[test]
+fn g1_polarized_point_fixture_retains_brewster_contrast_and_counts_polarizer_loss_once() {
+    with_cx(|cx, _| {
+        let index = 1.5_f64;
+        let cosine = 1.0 / (1.0 + index * index).sqrt();
+        let sine = index * cosine;
+        let alpha = 0.2_f64;
+        let geometry = InstanceScene::try_new(vec![
+            plane(1, 0.0, 0.0, 10.0), plane(9, 2.0, 0.0, 10.0),
+        ]).unwrap();
+        let materials = [glass(1.0, 0.0), glass(index, 0.0)];
+        let media = materials.each_ref().map(SceneMedium::Homogeneous);
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx, &geometry, &media, &[], &[], &[],
+            vec![SurfaceBinding {
+                object_id: 1,
+                interaction: Interaction::Dielectric {
+                    outside: 0, inside: 1,
+                    surface: DielectricSurface::try_rough(alpha).unwrap(),
+                },
+            }, opaque(9)], 100_000,
+        ).unwrap();
+        let camera = CurvedCameraScene::try_new(cx, &scene, &[], None).unwrap();
+        let camera_ray = Ray {
+            origin: Point3::new(-sine, 0.0, cosine),
+            dir: Vec3::new(sine, 0.0, -cosine),
+        };
+        let original = source(Point3::new(sine, 0.0, cosine)).with_unpolarized_optics();
+        let horizontal = original.through(&SpectralOptics::linear_polarizer(0.0).unwrap()).unwrap();
+        let vertical = original.through(&SpectralOptics::linear_polarizer(FRAC_PI_2).unwrap()).unwrap();
+        let cloned_intensity = horizontal.intensity_source().clone();
+        assert!(matches!(PointLightSourcePolarization::try_new(&cloned_intensity, &horizontal),
+            Err(PointLightCameraError::SourcePolarizationMismatch)));
+        let polarizations = [&original, &horizontal, &vertical];
+        let mut radiances = [0.0; 3];
+        for (slot, polarized) in polarizations.into_iter().enumerate() {
+            let lamp = polarized.intensity_source();
+            let branches = [branch(lamp, 1, Vec3::new(-sine, 0.0, -cosine))];
+            let binding = PointLightSourcePolarization::try_new(lamp, polarized).unwrap();
+            let bindings = [binding];
+            let duplicate = [binding, binding];
+            assert!(matches!(
+                CurvedPointLightCameraScene::try_new(cx, &camera, &branches).unwrap()
+                    .with_source_polarizations(cx, &duplicate),
+                Err(PointLightCameraError::DuplicateSourcePolarization { first: 0, second: 1 })
+            ));
+            let lit = CurvedPointLightCameraScene::try_new(cx, &camera, &branches).unwrap()
+                .with_source_polarizations(cx, &bindings).unwrap();
+            assert_eq!(lit.source_stokes(lamp, 800.0, 0).unwrap(), Stokes::unpolarized(1.0));
+            assert_eq!(lamp.spectrum().value_w_per_lumen_nm(800.0), 0.0);
+            let sample = lit.sample_ray_with_samples(
+                cx, camera_ray, 550.0, 0, settings(), |_| [0.0; 3],
+            ).unwrap();
+            if slot == 0 {
+                let legacy = CurvedPointLightCameraScene::try_new(cx, &camera, &branches).unwrap()
+                    .sample_ray_with_samples(cx, camera_ray, 550.0, 0, settings(), |_| [0.0; 3])
+                    .unwrap();
+                assert_eq!(sample, legacy);
+            }
+            // Independent normal-facet GGX and Fresnel at tan(theta)=n_t/n_i.
+            // Source +Q is y (s); the perpendicular input is p and has zero
+            // Brewster reflection. Irradiance already supplies cos(theta)/r².
+            let rs = ((1.0 - index * index) / (1.0 + index * index)).powi(2);
+            let fresnel = [0.5 * rs, rs, 0.0][slot];
+            let g1 = 2.0 / (1.0 + (1.0 + alpha * alpha * index * index).sqrt());
+            let expected = intensity(lamp) * fresnel * g1 * g1
+                / (4.0 * PI * alpha * alpha * cosine);
+            near(sample.fixture_radiance_w_m2_sr_nm(), expected);
+            assert_eq!(sample.connections(), 1);
+            radiances[slot] = sample.fixture_radiance_w_m2_sr_nm();
+        }
+        assert!(radiances[1] > 0.0);
+        near(radiances[1] + radiances[2], radiances[0]);
+    });
 }
 
 #[test]

@@ -36,6 +36,7 @@ use crate::charts::Ray;
 use crate::photometry::source::PhotometricSource;
 use crate::photometry::source::bundle::{BundlePhotometryError, PlanarIrradianceReceiver};
 use crate::polarization::Stokes;
+use crate::polarization::photometry::PolarizedSource;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleBranchPolicy, BundleConnection, BundleConnectionError, BundleConnectionLaunch,
     BundleConnectionOptions, BundleConnectionTarget,
@@ -53,6 +54,33 @@ pub mod participating;
 
 /// Fixed admission bound; camera rays allocate no fixture-owned workspace.
 pub const MAX_POINT_LIGHT_BRANCHES: usize = 64;
+
+/// Polarization attached to the EXACT calibrated intensity view of an original
+/// source-optics chain. Branches retain their existing source and transverse
+/// axis: the latter declares the frame of these spectral Stokes coordinates.
+/// The binding does not copy or renormalize the source's surviving intensity.
+#[derive(Clone, Copy, Debug)]
+pub struct PointLightSourcePolarization<'a> {
+    source: &'a PhotometricSource,
+    polarization: &'a PolarizedSource,
+}
+
+impl<'a> PointLightSourcePolarization<'a> {
+    /// A clone or independently calibrated fixture is not the same source.
+    /// Use `polarization.intensity_source()` in the original branch/group.
+    pub fn try_new(
+        source: &'a PhotometricSource,
+        polarization: &'a PolarizedSource,
+    ) -> Result<Self, PointLightCameraError> {
+        if !core::ptr::eq(source, polarization.intensity_source()) {
+            return Err(PointLightCameraError::SourcePolarizationMismatch);
+        }
+        Ok(Self { source, polarization })
+    }
+
+    pub const fn source(&self) -> &'a PhotometricSource { self.source }
+    pub const fn polarized_source(&self) -> &'a PolarizedSource { self.polarization }
+}
 
 /// One original fixture and one prescribed branch to a native continuous surface.
 /// Diffuse, rough dielectric and rough/brushed conductor receivers retain their
@@ -105,6 +133,12 @@ pub enum PointLightCameraError {
         index: usize,
     },
     DuplicateBinding {
+        first: usize,
+        second: usize,
+    },
+    /// The supplied intensity view is not owned by the bound polarized source.
+    SourcePolarizationMismatch,
+    DuplicateSourcePolarization {
         first: usize,
         second: usize,
     },
@@ -215,6 +249,7 @@ impl PointLightCameraSample {
 pub struct CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
     camera: &'a CurvedCameraScene<'s, 'm>,
     branches: &'a [PointLightBranch<'l>],
+    source_polarizations: &'a [PointLightSourcePolarization<'l>],
 }
 
 impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
@@ -262,7 +297,62 @@ impl<'a, 's, 'm, 'l> CurvedPointLightCameraScene<'a, 's, 'm, 'l> {
             }
         }
         cx.checkpoint()?;
-        Ok(Self { camera, branches })
+        Ok(Self { camera, branches, source_polarizations: &[] })
+    }
+
+    /// Retain source-optics polarization for native surface, molecular-vertex
+    /// and discovered-image connections. Every binding names its original
+    /// intensity view; unlisted sources keep the original unpolarized path.
+    /// Bindings may also name sources attached later by molecular/image owners.
+    ///
+    /// All branches for one source interpret its Stokes coordinates in their
+    /// declared `source_transverse_axis`, projected transverse to the actual
+    /// outgoing direction by the original bundle solver. The caller must use
+    /// the SAME physical source frame across its branch/image declarations.
+    /// This carries incoherent Stokes power, not mutual source coherence.
+    pub fn with_source_polarizations(
+        mut self,
+        cx: &Cx<'_>,
+        bindings: &'a [PointLightSourcePolarization<'l>],
+    ) -> Result<Self, PointLightCameraError> {
+        cx.checkpoint()?;
+        if bindings.len() > MAX_POINT_LIGHT_BRANCHES {
+            return Err(PointLightCameraError::TooManyBindings);
+        }
+        for (index, binding) in bindings.iter().enumerate() {
+            cx.checkpoint()?;
+            for (first, earlier) in bindings[..index].iter().enumerate() {
+                if core::ptr::eq(earlier.source, binding.source) {
+                    return Err(PointLightCameraError::DuplicateSourcePolarization {
+                        first,
+                        second: index,
+                    });
+                }
+            }
+        }
+        cx.checkpoint()?;
+        self.source_polarizations = bindings;
+        Ok(self)
+    }
+
+    fn source_stokes(
+        &self,
+        source: &PhotometricSource,
+        wavelength_nm: f64,
+        binding: usize,
+    ) -> Result<Stokes, PointLightCameraError> {
+        match self.source_polarizations.iter().find(|entry| core::ptr::eq(entry.source, source)) {
+            Some(entry) if source.spectrum().value_w_per_lumen_nm(wavelength_nm) != 0.0 => {
+                entry.polarization.normalized_stokes(wavelength_nm).map_err(|error| {
+                    PointLightCameraError::Photometry { binding, error: error.into() }
+                })
+            }
+            // The original calibrated source defines zero emission outside
+            // its visible band as well as at dark bins. Polarization does not
+            // invalidate those zero-intensity queries or replace their native
+            // geometry/visibility checks with an unsupported-spectrum error.
+            _ => Ok(Stokes::unpolarized(1.0)),
+        }
     }
 
     pub const fn source_camera(&self) -> &'a CurvedCameraScene<'s, 'm> {
@@ -572,7 +662,7 @@ impl<'q, 'a, 's, 'm, 'l> FixtureContributions<'q, 'a, 's, 'm, 'l> {
                 },
                 transverse_axis: branch.source_transverse_axis,
                 wavelength_nm,
-                normalized_source_stokes: Stokes::unpolarized(1.0),
+                normalized_source_stokes: self.owner.source_stokes(branch.source, wavelength_nm, index)?,
                 initial_medium: branch.initial_medium,
             };
             let request = FixtureConnectionRequest {

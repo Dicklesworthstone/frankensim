@@ -32,7 +32,6 @@ use super::super::{
 };
 use crate::charts::Ray;
 use crate::photometry::source::PhotometricSource;
-use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::curved::{CurvedTraceEvent, SceneMedium};
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnectionLaunch, BundleConnectionTarget,
@@ -349,7 +348,9 @@ impl<'g, 'a, 'c, 's, 'm, 'o, 'l>
                         },
                         transverse_axis: group.source_transverse_axis,
                         wavelength_nm: path.beam().wavelength_nm(),
-                        normalized_source_stokes: Stokes::unpolarized(1.0),
+                        normalized_source_stokes: self.owner.point_lights.source_stokes(
+                            group.source, path.beam().wavelength_nm(), binding,
+                        )?,
                         initial_medium: group.initial_medium,
                     },
                     target,

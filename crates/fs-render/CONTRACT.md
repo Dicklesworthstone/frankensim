@@ -713,7 +713,22 @@ differentiable lift). Pure Rust throughout.
   `(n_camera/n_contact)^2` are applied once. Native differentiated source
   connection and calibrated angular spectrum supply incident irradiance E;
   source solid-angle/receiver-area Jacobian, Fresnel transfer and Beer absorption
-  occur once. Rough glass admits reflection and transmission from either actual
+  occur once. Optional `with_source_polarizations` borrows at most 64 original
+  `PointLightSourcePolarization` bindings. Each binding requires pointer identity
+  between its scalar fixture and `PolarizedSource::intensity_source()`; a clone
+  or differently calibrated source refuses, as do duplicate source pointers.
+  The retained source-optics chain supplies normalized Stokes at the exact
+  piecewise-constant 80-bin wavelength selected by the original intensity
+  spectrum, including 380 and 780 nm. No fraction interpolation or restored
+  polarizer loss is introduced. Dark bins and the original source's zero
+  out-of-band emission keep zero intensity and use an unpolarized unit
+  bookkeeping state; native geometry/visibility checks still apply. The original branch/image
+  `source_transverse_axis` declares the polarization frame and must describe
+  the same physical source across its declarations. Unlisted sources preserve
+  the original unpolarized path. Bindings may precede later molecular or image
+  attachments; all three launch paths share the same source lookup. This is
+  incoherent Stokes emission, not mutual phase coherence between fixtures or
+  separate optical images. Rough glass admits reflection and transmission from either actual
   adjacent medium; its native radiance BSDF already owns local transmission eta.
   Irradiance projects onto the actual source-facing geometric receiving plane.
   Smooth delta receivers remain outside this continuous proposal. Source and
@@ -739,6 +754,9 @@ differentiable lift). Pure Rust throughout.
   transmission with radiance reciprocity, complex-index and anisotropic metal
   response, non-coplanar camera polarization, and a calibrated narrow-beam source
   through a glass slab with an independent refracted bundle-area reference.
+  Source-polarization regressions compare rough Brewster reflection and
+  conditional Rayleigh lighting against independent analytic formulas,
+  including discovered-image duplicate seeds and polarizer throughput once.
 
 - With `photometry` and `volumes`,
   `camera::point_lights::participating::CurvedRayleighPointLightCameraScene`

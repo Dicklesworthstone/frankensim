@@ -13,7 +13,6 @@ use super::super::{
 use crate::charts::Ray;
 use crate::photometry::source::PhotometricSource;
 use crate::photometry::source::bundle::{BundlePhotometryError, PlanarIrradianceReceiver};
-use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::PathTermination;
 use crate::polarization::dielectric::scene::curved::SceneMedium;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
@@ -147,7 +146,9 @@ impl FixtureContributions<'_, '_, '_, '_, '_> {
                     },
                     transverse_axis: branch.source_transverse_axis,
                     wavelength_nm: beam.wavelength_nm(),
-                    normalized_source_stokes: Stokes::unpolarized(1.0),
+                    normalized_source_stokes: self.owner.source_stokes(
+                        branch.source, beam.wavelength_nm(), index,
+                    )?,
                     initial_medium: branch.initial_medium,
                 },
                 target,

@@ -286,7 +286,7 @@ pub mod photometry {
 
     use crate::conductor::{CoherentCoatingStack, ConductorOptics};
     use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricIor};
-    use crate::photometry::source::{PhotometricSource, SPECTRAL_BINS, SourceError, wavelength_nm};
+    use crate::photometry::source::{BIN_WIDTH_NM, PhotometricSource, SPECTRAL_BINS, SourceError, wavelength_nm};
     use crate::polarization::dielectric::spectral_fresnel_dielectric_polarized_borrowed;
     use crate::polarization::{Mueller, Stokes};
 
@@ -552,6 +552,33 @@ pub mod photometry {
         #[must_use]
         pub const fn relative_stokes(&self) -> &[Stokes; SPECTRAL_BINS] { &self.relative }
 
+        /// Emitted polarization fractions at a vacuum wavelength in nanometres.
+        ///
+        /// This uses the SAME piecewise-constant 380--780 nm bins as the
+        /// calibrated intensity spectrum, including its upper endpoint. It
+        /// does not interpolate fractions or restore optical loss. The caller
+        /// uses `intensity_source()` for the surviving spectral intensity and
+        /// declares the transverse frame in which these coordinates apply.
+        /// A dark bin returns an unpolarized unit bookkeeping state; its
+        /// calibrated emitted intensity remains zero.
+        pub fn normalized_stokes(&self, wavelength_nm: f64) -> Result<Stokes, SourceError> {
+            if !wavelength_nm.is_finite()
+                || !(crate::spectral::LAMBDA_MIN..=crate::spectral::LAMBDA_MAX)
+                    .contains(&wavelength_nm)
+            {
+                return Err(SourceError::InvalidSpectrum);
+            }
+            let bin = (((wavelength_nm - crate::spectral::LAMBDA_MIN) / BIN_WIDTH_NM)
+                as usize).min(SPECTRAL_BINS - 1);
+            let state = self.relative[bin];
+            if state.i == 0.0 {
+                Ok(Stokes::unpolarized(1.0))
+            } else {
+                Stokes::try_new(1.0, state.q / state.i, state.u / state.i, state.v / state.i)
+                    .ok_or(SourceError::NumericalRange)
+            }
+        }
+
         /// Native calibrated intensity view, usable by existing illuminance,
         /// haze and spectral rendering consumers. Q/U/V is retained in this wrapper,
         /// not propagated by those scalar consumers.
@@ -612,6 +639,48 @@ pub mod photometry {
         }
 
         fn close(a: f64, b: f64) { assert!((a - b).abs() < 2e-10, "{a} != {b}"); }
+
+        #[test]
+        fn source_polarization_lookup_uses_exact_calibrated_bins_without_restoring_loss() {
+            let states = core::array::from_fn(|bin| match bin % 3 {
+                0 => Stokes::try_new(1.0, 1.0, 0.0, 0.0).unwrap(),
+                1 => Stokes::try_new(1.0, 0.0, 0.0, -1.0).unwrap(),
+                _ => Stokes::try_new(1.0, 0.3, -0.4, 0.2).unwrap(),
+            });
+            let transmission = core::array::from_fn(|bin| {
+                if bin == 7 { 0.0 } else { 0.2 + 0.6 * bin as f64 / SPECTRAL_BINS as f64 }
+            });
+            let original = source();
+            let polarized = PolarizedSource::try_new(original.clone(), states).unwrap()
+                .through(&SpectralOptics::neutral(transmission).unwrap()).unwrap();
+            for bin in 0..SPECTRAL_BINS {
+                let expected = if transmission[bin] == 0.0 {
+                    Stokes::unpolarized(1.0)
+                } else { states[bin] };
+                for wavelength in [
+                    crate::spectral::LAMBDA_MIN + bin as f64 * BIN_WIDTH_NM,
+                    wavelength_nm(bin),
+                    crate::spectral::LAMBDA_MIN + (bin as f64 + 0.9) * BIN_WIDTH_NM,
+                ] {
+                    let state = polarized.normalized_stokes(wavelength).unwrap();
+                    assert_eq!(state.i, 1.0);
+                    close(state.q, expected.q);
+                    close(state.u, expected.u);
+                    close(state.v, expected.v);
+                    let direction = Vec3::new(0.0, 0.0, 1.0);
+                    let before = original.spectral_intensity_w_sr_nm(direction, wavelength).unwrap();
+                    let after = polarized.intensity_source()
+                        .spectral_intensity_w_sr_nm(direction, wavelength).unwrap();
+                    close(after, before * transmission[bin]);
+                }
+            }
+            assert_eq!(polarized.normalized_stokes(780.0).unwrap(),
+                polarized.normalized_stokes(wavelength_nm(SPECTRAL_BINS - 1)).unwrap());
+            for wavelength in [379.0, 780.0_f64.next_up(), f64::NAN, f64::INFINITY] {
+                assert_eq!(polarized.normalized_stokes(wavelength), Err(SourceError::InvalidSpectrum));
+            }
+            assert!(polarized.intensity_source().flux_lm() < original.flux_lm());
+        }
 
         #[test]
         fn crossed_and_rotated_polarizers_change_native_flux_and_candela() {
