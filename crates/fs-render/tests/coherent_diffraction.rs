@@ -1620,3 +1620,6 @@ mod pupil;
 
 #[path = "coherent_diffraction/interferometer_pixel.rs"]
 mod interferometer_pixel;
+
+#[path = "coherent_diffraction/interferometer_polarization.rs"]
+mod interferometer_polarization;

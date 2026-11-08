@@ -4290,6 +4290,30 @@ not an optical error certificate. Independent square-pupil/Simpson references,
 spatial contrast loss, partition/factor additivity, work refusal and finite
 large-power cases supplement the original point-interferometer regressions.
 
+### Polarized interferometer arms and full output coherency
+
+`PreparedPolarizedCoherentDiffraction::observe_interferometer` carries both
+original transverse Jones fields through independent passive arm optics and
+the shared two-arm receiver. `CoherentJonesArm` caches at most eight ordered,
+uniform native `CoherentJonesPupilLayer` elements, preserving their principal
+transmissions, retardance and axes. Spatial gradients refuse; these uniform
+arm elements act after the pupil-to-sensor propagation. Their passive losses
+remain in the returned arm powers and are never renormalized away.
+
+Both combiner outputs retain full coherency and native Stokes, together with
+complex trace mutual coherence, total-power fringe visibility and pupil work.
+Each source bank interferes before the outer product; independent covariance
+banks add afterward. Orthogonal arm fields can change output polarization
+without modulating total intensity. An analyzer can reveal existing coherence
+but cannot create it between independent source banks. DD field differences
+precede output powers, retaining aligned weak populations and dark ports;
+arbitrary rotated cancellations retain the existing finite-precision limits.
+The shared scalar sensor/phase/passivity admissions remain authoritative.
+Queries allocate nothing, and ordered arm work is bounded by the layer cap and
+original source-bank limits. Focused regressions cover polarization/analyzer
+laws, circular phase, independent factors, scalar parity, weak populations,
+finite bright outputs and refusal/cancellation reuse.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored

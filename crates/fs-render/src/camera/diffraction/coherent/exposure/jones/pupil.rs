@@ -73,6 +73,17 @@ impl CoherentJonesPupilLayer {
         })
     }
 
+    // Image-arm optics reuse this exact Jones owner. A spatially patterned
+    // pupil cannot be substituted for one uniform sensor-plane transformation.
+    pub(in crate::camera::diffraction::coherent) fn uniform_matrix(
+        self,
+    ) -> Result<[[[Dd; 2]; 2]; 2], CoherentDiffractionError> {
+        if self.axis_gradient_rad_m != [0.0; 2] {
+            return Err(CoherentDiffractionError::InvalidJonesPupil);
+        }
+        Ok(self.harmonics()?.0[0].matrix)
+    }
+
     fn harmonics(self) -> Result<([Harmonic; 3], usize), CoherentDiffractionError> {
         let t: [Complex; 2] = std::array::from_fn(|axis| {
             let amplitude = Dd::from_f64(self.power_transmission[axis]).sqrt();

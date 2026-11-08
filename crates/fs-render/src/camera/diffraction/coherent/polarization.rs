@@ -28,6 +28,11 @@ use super::{
 use crate::polarization::Stokes;
 use fs_math::{c64::C64, dd::Dd};
 
+mod interferometer;
+pub use interferometer::{
+    CoherentJonesArm, MAX_COHERENT_JONES_ARM_LAYERS, PolarizedCoherentInterferometerSample,
+};
+
 type JonesField = [[Dd; 2]; 2];
 type Moments = [Dd; 4];
 
@@ -108,6 +113,7 @@ pub struct PolarizedCoherentDiffractionPixelPower {
 /// factor, paraxial, physical-pupil and pixel-work limits as the scalar query
 /// remain authoritative. Source data are borrowed immutably.
 pub struct PreparedPolarizedCoherentDiffraction<'camera, 'source> {
+    camera: &'camera PhysicalCamera,
     pupil: PreparedDiffractionAmplitude<'camera>,
     illumination: CoherentJonesPupilIllumination<'source>,
     wavelength_nm: f64,
@@ -155,7 +161,7 @@ impl PhysicalCamera {
         let pupil = PreparedDiffractionAmplitude::new(self, wavelength_nm)?;
         poll(&mut cancelled)?;
         Ok(PreparedPolarizedCoherentDiffraction {
-            pupil, illumination, wavelength_nm, waves,
+            camera: self, pupil, illumination, wavelength_nm, waves,
         })
     }
 }

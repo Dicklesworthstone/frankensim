@@ -35,6 +35,7 @@ mod pixel;
 mod polarization;
 pub use interferometer::CoherentInterferometerPixelPower;
 pub use interferometer::{CoherentDiffractionInterferometer, CoherentInterferometerSample};
+pub use polarization::{CoherentJonesArm, MAX_COHERENT_JONES_ARM_LAYERS, PolarizedCoherentInterferometerSample};
 pub use polarization::{
     PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
     PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
