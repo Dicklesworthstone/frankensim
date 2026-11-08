@@ -32,7 +32,7 @@ pub use illumination::PreparedCrystalIlluminationHeating;
 
 /// Finite absorbing crystal films on the same thermal-cell owner.
 pub mod slab;
-pub use slab::PreparedCrystalSlabHeating;
+pub use slab::{PreparedCrystalSlabHeating, PreparedCrystalSlabIlluminationHeating};
 
 // Only native electromagnetic owners implement this internal source seam.
 // Geometry, material admission, cell integration and thermal accounting stay

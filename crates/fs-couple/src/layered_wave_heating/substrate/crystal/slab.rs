@@ -18,6 +18,10 @@ use fs_em::plane_wave::uniaxial::oriented::{
     absorbing::slab::PreparedAbsorbingSlabField, slab::SlabRegion,
 };
 
+/// Independent polarization and spectral factors through the finite film.
+pub mod illumination;
+pub use illumination::PreparedCrystalSlabIlluminationHeating;
+
 impl CrystalHeatingSource for PreparedAbsorbingSlabField<'_, '_, '_> {
     fn material(&self) -> &ResolvedMaterialStatePoint {
         self.source()

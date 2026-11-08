@@ -6,6 +6,8 @@ use fs_em::plane_wave::uniaxial::oriented::{
     slab::{OrientedUniaxialSlab, SlabRegion},
 };
 
+mod illumination;
+
 fn film_density_integral(field: &PreparedAbsorbingSlabField<'_, '_, '_>, a: f64, b: f64) -> f64 {
     let n = 1024;
     let dz = (b - a) / n as f64;
