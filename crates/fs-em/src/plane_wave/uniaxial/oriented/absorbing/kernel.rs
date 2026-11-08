@@ -6,7 +6,7 @@
 //! for a tilted lossy tensor. All fields use the shared native eigenvectors,
 //! row-scaled boundary solve and compensated physical-point propagator.
 
-use super::super::super::kernel::binary_scale;
+use super::super::super::kernel::{binary_scale, unit_axis};
 use super::super::{
     Incidence, OrientedCrystalField, OrientedCrystalFieldSide,
     kernel::{
@@ -55,6 +55,7 @@ pub struct AbsorbingCrystalMode {
 /// entering the crystal at z=0, before its subsequent volumetric absorption.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AbsorbingCrystalResponse {
+    /// Signed magnitude along `incidence_plane_axis()`, not necessarily kx.
     pub tangential_wavenumber_rad_m: f64,
     pub incident_normal_wavenumber_rad_m: f64,
     pub incident_electric_v_m: Vector,
@@ -69,6 +70,7 @@ pub struct AbsorbingCrystalResponse {
     omega: f64,
     axis: [f64; 3],
     loss_f_m: [f64; 2],
+    incidence_plane_axis: [f64; 2],
 }
 
 /// Coherent peak-phasor E/H and energy transport, with material heat.
@@ -87,6 +89,13 @@ impl AbsorbingCrystalResponse {
 
     pub const fn omega_rad_s(&self) -> f64 {
         self.omega
+    }
+
+    /// Normalized transverse incidence direction in the original global
+    /// interface frame. Multiply by the signed tangential wavenumber to
+    /// obtain the physical [kx,ky] components.
+    pub const fn incidence_plane_axis(&self) -> [f64; 2] {
+        self.incidence_plane_axis
     }
 
     pub const fn principal_loss_permittivities_f_m(&self) -> [f64; 2] {
@@ -126,7 +135,7 @@ impl AbsorbingCrystalResponse {
                 h,
                 WaveGeometry {
                     tangential_wavenumber_rad_m: self.tangential_wavenumber_rad_m,
-                    incidence_plane_axis: [1.0, 0.0],
+                    incidence_plane_axis: self.incidence_plane_axis,
                     normal_wavenumber_rad_m: normal,
                     anchor_z_m: 0.0,
                 },
@@ -178,6 +187,55 @@ struct Mode {
     z: C64,
     e: Vector,
     h: Vector,
+}
+
+/// Passive coordinate rotation around the unchanged interface normal. The
+/// original global material axis and global Cartesian Jones input are both
+/// expressed in the local x-z plane for the same native Maxwell solve.
+pub(super) fn solve_in_plane(
+    mut data: Input,
+    plane_axis: [f64; 2],
+) -> Result<AbsorbingCrystalResponse> {
+    let p = unit_axis(plane_axis)
+        .map_err(|_| "absorbing incidence-plane axis must be finite and nonzero")?;
+    if p == [1.0, 0.0] {
+        return solve(data);
+    }
+    let global_axis = transparent::unit(data.axis)?;
+    let [x, y, z] = global_axis;
+    data.axis = [x * p[0] + y * p[1], y * p[0] - x * p[1], z];
+    let [ex, ey] = data.electric;
+    data.electric = [
+        ex.scale(p[0]) + ey.scale(p[1]),
+        ey.scale(p[0]) - ex.scale(p[1]),
+    ];
+    let mut response = solve(data)?;
+    // Same proper rotation as the transparent angular-spectrum owner: both
+    // polar E and axial H transform alike. A sign/index pair is not clipped.
+    let rotate = |v: Vector| -> Result<Vector> {
+        let global = [
+            v[0].scale(p[0]) - v[1].scale(p[1]),
+            v[0].scale(p[1]) + v[1].scale(p[0]),
+            v[2],
+        ];
+        if global.iter().any(|&v| !finite(v)) {
+            return Err("absorbing crystal global field rotation is unrepresentable");
+        }
+        Ok(global)
+    };
+    response.incident_electric_v_m = rotate(response.incident_electric_v_m)?;
+    response.incident_magnetic_a_m = rotate(response.incident_magnetic_a_m)?;
+    response.reflected_electric_v_m = rotate(response.reflected_electric_v_m)?;
+    response.reflected_magnetic_a_m = rotate(response.reflected_magnetic_a_m)?;
+    for mode in &mut response.transmitted {
+        mode.electric_v_m = rotate(mode.electric_v_m)?;
+        mode.magnetic_a_m = rotate(mode.magnetic_a_m)?;
+    }
+    // Dielectric work and all propagated phasors use the original global
+    // tensor frame, including the analytic ordinary/extraordinary cross term.
+    response.axis = global_axis;
+    response.incidence_plane_axis = p;
+    Ok(response)
 }
 
 pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
@@ -233,6 +291,7 @@ pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
             omega: data.omega,
             axis,
             loss_f_m: data.loss_f_m,
+            incidence_plane_axis: [1.0, 0.0],
         });
     }
     let scale = binary_scale(data.indices.iter().fold(data.ni, |s, n| s.max(n.abs())));
@@ -374,6 +433,7 @@ pub(super) fn solve(data: Input) -> Result<AbsorbingCrystalResponse> {
         omega: data.omega,
         axis,
         loss_f_m: data.loss_f_m,
+        incidence_plane_axis: [1.0, 0.0],
     };
     positive(result.incident_normal_power_w_m2)?;
     positive(result.incident_normal_wavenumber_rad_m)?;

@@ -85,9 +85,10 @@ impl<'p, 's, 'm> AbsorbingCrystalIllumination<'p, 's, 'm> {
     /// already passed its original spectral and light-cone admission. The
     /// source contributes no implicit field. Empty factors mean darkness.
     ///
-    /// For unpolarized light at one incidence cosine c, equal transverse
-    /// p/s peak amplitudes a use tangential factors [c*a,0] and [0,a]. Equal
-    /// tangential Ex/Ey powers at oblique incidence would not be unpolarized.
+    /// For unpolarized light with incidence cosine c and incidence-plane unit
+    /// vector u, equal transverse p/s peak amplitudes A use GLOBAL tangential
+    /// factors A*c*[u_x,u_y] and A*[-u_y,u_x]. Equal tangential Ex/Ey powers at
+    /// oblique incidence would not be unpolarized.
     /// Other positive Jones factorizations admit partial polarization without
     /// inferring a phase or degree of polarization from scalar intensity.
     pub fn try_new(

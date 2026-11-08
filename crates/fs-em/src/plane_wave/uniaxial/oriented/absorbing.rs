@@ -156,6 +156,7 @@ impl<'m> OrientedUniaxialInterface<'m> {
         self.prepare_absorbing(
             omega_rad_s,
             Incidence::Cosine(incidence_cosine),
+            [1.0, 0.0],
             incident_tangential_e_v_m,
         )
     }
@@ -172,6 +173,47 @@ impl<'m> OrientedUniaxialInterface<'m> {
         self.prepare_absorbing(
             omega_rad_s,
             Incidence::TangentialIndex(tangential_index),
+            [1.0, 0.0],
+            incident_tangential_e_v_m,
+        )
+    }
+
+    /// Prepare any transverse incidence azimuth on this same original
+    /// interface. The finite nonzero [x,y] incidence-plane axis is normalized;
+    /// the positive tangential wavevector points along it. Input amplitudes
+    /// are GLOBAL Cartesian [Ex,Ey] peak fields, not local p/s amplitudes.
+    /// The original optic axis remains fixed in the global material frame.
+    /// At normal incidence the plane axis has no physical effect.
+    pub fn prepare_absorbing_field_in_plane(
+        &self,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        incidence_plane_axis: [f64; 2],
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<PreparedAbsorbingCrystalField<'_, 'm>> {
+        self.prepare_absorbing(
+            omega_rad_s,
+            Incidence::Cosine(incidence_cosine),
+            incidence_plane_axis,
+            incident_tangential_e_v_m,
+        )
+    }
+
+    /// Signed k_t/k0 along an authored transverse incidence-plane axis.
+    /// Global [Ex,Ey], original source support and incident light-cone
+    /// admission are identical to `prepare_absorbing_field_in_plane`.
+    /// Reversing both the axis and signed index preserves the same wave.
+    pub fn prepare_absorbing_field_at_tangential_index_in_plane(
+        &self,
+        omega_rad_s: f64,
+        tangential_index: f64,
+        incidence_plane_axis: [f64; 2],
+        incident_tangential_e_v_m: [C64; 2],
+    ) -> Result<PreparedAbsorbingCrystalField<'_, 'm>> {
+        self.prepare_absorbing(
+            omega_rad_s,
+            Incidence::TangentialIndex(tangential_index),
+            incidence_plane_axis,
             incident_tangential_e_v_m,
         )
     }
@@ -180,6 +222,7 @@ impl<'m> OrientedUniaxialInterface<'m> {
         &self,
         omega_rad_s: f64,
         incidence: Incidence,
+        incidence_plane_axis: [f64; 2],
         electric: [C64; 2],
     ) -> Result<PreparedAbsorbingCrystalField<'_, 'm>> {
         let omega = positive(omega_rad_s)?;
@@ -187,17 +230,20 @@ impl<'m> OrientedUniaxialInterface<'m> {
         let ni = positive((C0 * det::sqrt(self.incident_mu_h_m)) * det::sqrt(epsilon))?;
         let indices = self.crystal.complex_principal_indices(omega)?;
         let permittivities = self.crystal.principal_permittivities_f_m(omega)?;
-        let boundary = kernel::solve(kernel::Input {
-            omega,
-            ni,
-            indices,
-            mui: self.incident_mu_h_m,
-            mut_: self.crystal.permeability_h_m(),
-            axis: self.optic_axis,
-            incidence,
-            electric,
-            loss_f_m: permittivities.map(|value| -value.im),
-        })
+        let boundary = kernel::solve_in_plane(
+            kernel::Input {
+                omega,
+                ni,
+                indices,
+                mui: self.incident_mu_h_m,
+                mut_: self.crystal.permeability_h_m(),
+                axis: self.optic_axis,
+                incidence,
+                electric,
+                loss_f_m: permittivities.map(|value| -value.im),
+            },
+            incidence_plane_axis,
+        )
         .map_err(ReflectionError::Invalid)?;
         Ok(PreparedAbsorbingCrystalField {
             source: self,

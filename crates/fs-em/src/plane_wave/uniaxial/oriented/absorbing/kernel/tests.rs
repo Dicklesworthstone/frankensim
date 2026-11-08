@@ -117,6 +117,7 @@ fn principal_axis_dichroism_has_original_complex_phases_and_analytic_heat() {
 
 fn check_maxwell(data: Input, response: &AbsorbingCrystalResponse) {
     let axis = transparent::unit(data.axis).unwrap();
+    let plane = response.incidence_plane_axis();
     let epsilon = data
         .indices
         .map(|n| (n * n).scale(1.0 / (data.mut_ * C0 * C0)));
@@ -124,8 +125,8 @@ fn check_maxwell(data: Input, response: &AbsorbingCrystalResponse) {
     let mut th = [C64::ZERO; 3];
     for mode in response.transmitted {
         let k = [
-            C64::from_re(response.tangential_wavenumber_rad_m),
-            C64::ZERO,
+            C64::from_re(response.tangential_wavenumber_rad_m * plane[0]),
+            C64::from_re(response.tangential_wavenumber_rad_m * plane[1]),
             mode.normal_wavenumber_rad_m,
         ];
         let dot = (0..3).fold(C64::ZERO, |s, j| s + mode.electric_v_m[j].scale(axis[j]));
@@ -162,6 +163,198 @@ fn check_maxwell(data: Input, response: &AbsorbingCrystalResponse) {
         response.transmitted_power_fraction,
         2e-14,
     );
+}
+
+#[test]
+fn arbitrary_azimuth_retains_global_maxwell_tensor_and_authored_spatial_phase() {
+    let d = input(
+        [1.0, 2.0, -0.6],
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        0.65,
+    );
+    for authored_plane in [[3.0, 4.0], [-2.0, 1.0], [0.0, -7.0]] {
+        let r = solve_in_plane(d, authored_plane).unwrap();
+        check_maxwell(d, &r);
+        for j in 0..2 {
+            complex_close(r.incident_electric_v_m[j], d.electric[j], 4e-16);
+        }
+        let plane = r.incidence_plane_axis();
+        let point = [0.13 * LAMBDA, -0.41 * LAMBDA, 0.23 * LAMBDA];
+        let mut expected_e = [C64::ZERO; 3];
+        let mut expected_h = [C64::ZERO; 3];
+        for mode in r.transmitted {
+            let angle = r.tangential_wavenumber_rad_m * (plane[0] * point[0] + plane[1] * point[1])
+                + mode.normal_wavenumber_rad_m.re * point[2];
+            let phase = C64::new(det::cos(angle), -det::sin(angle))
+                .scale(det::exp(mode.normal_wavenumber_rad_m.im * point[2]));
+            for j in 0..3 {
+                expected_e[j] = expected_e[j] + mode.electric_v_m[j] * phase;
+                expected_h[j] = expected_h[j] + mode.magnetic_a_m[j] * phase;
+            }
+        }
+        let actual = r
+            .field(OrientedCrystalFieldSide::Transmitted, point)
+            .unwrap();
+        for j in 0..3 {
+            complex_close(actual.field.electric_v_m[j], expected_e[j], 2e-15);
+            complex_close(actual.field.magnetic_a_m[j], expected_h[j], 2e-17);
+        }
+        let at_face = [point[0], point[1], 0.0];
+        let left = r
+            .field(OrientedCrystalFieldSide::TotalIncidentSide, at_face)
+            .unwrap();
+        let right = r
+            .field(OrientedCrystalFieldSide::Transmitted, at_face)
+            .unwrap();
+        for j in 0..2 {
+            complex_close(
+                left.field.electric_v_m[j],
+                right.field.electric_v_m[j],
+                3e-15,
+            );
+            complex_close(
+                left.field.magnetic_a_m[j],
+                right.field.magnetic_a_m[j],
+                3e-17,
+            );
+        }
+        close(
+            left.field.poynting_w_m2[2],
+            right.field.poynting_w_m2[2],
+            3e-17,
+        );
+    }
+}
+
+#[test]
+fn azimuth_rotational_covariance_preserves_original_heat_and_volume() {
+    let d = input(
+        [1.0, 2.0, -0.6],
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        -0.65,
+    );
+    let reference = solve(d).unwrap();
+    let plane = [0.6, 0.8];
+    let rotate = |v: Vector| {
+        [
+            v[0].scale(plane[0]) - v[1].scale(plane[1]),
+            v[0].scale(plane[1]) + v[1].scale(plane[0]),
+            v[2],
+        ]
+    };
+    let [ax, ay, az] = d.axis;
+    let e = rotate([d.electric[0], d.electric[1], C64::ZERO]);
+    let mut rotated = d;
+    rotated.axis = [
+        ax * plane[0] - ay * plane[1],
+        ax * plane[1] + ay * plane[0],
+        az,
+    ];
+    rotated.electric = [e[0], e[1]];
+    let response = solve_in_plane(rotated, plane).unwrap();
+    check_maxwell(rotated, &response);
+    let original_point = [0.17 * LAMBDA, -0.11 * LAMBDA, 0.41 * LAMBDA];
+    let rotated_point = [
+        original_point[0] * plane[0] - original_point[1] * plane[1],
+        original_point[0] * plane[1] + original_point[1] * plane[0],
+        original_point[2],
+    ];
+    let side = OrientedCrystalFieldSide::Transmitted;
+    let old = reference.field(side, original_point).unwrap();
+    let actual = response.field(side, rotated_point).unwrap();
+    let expected_e = rotate(old.field.electric_v_m);
+    let expected_h = rotate(old.field.magnetic_a_m);
+    let expected_flux = rotate(old.field.poynting_w_m2.map(C64::from_re));
+    for j in 0..3 {
+        complex_close(actual.field.electric_v_m[j], expected_e[j], 4e-15);
+        complex_close(actual.field.magnetic_a_m[j], expected_h[j], 4e-17);
+        close(actual.field.poynting_w_m2[j], expected_flux[j].re, 4e-17);
+    }
+    close(
+        actual.absorbed_power_density_w_m3,
+        old.absorbed_power_density_w_m3,
+        2e-13 * old.absorbed_power_density_w_m3,
+    );
+    let area = 0.3;
+    let (start, end) = (0.13 * LAMBDA, 2.7 * LAMBDA);
+    let watts = response.slab_absorbed_power_w(area, start, end).unwrap();
+    close(
+        watts,
+        reference.slab_absorbed_power_w(area, start, end).unwrap(),
+        3e-13 * watts,
+    );
+    let front = response
+        .electromagnetic_field(side, [0.0, 0.0, start])
+        .unwrap();
+    let back = response
+        .electromagnetic_field(side, [0.0, 0.0, end])
+        .unwrap();
+    close(
+        watts,
+        area * (front.poynting_w_m2[2] - back.poynting_w_m2[2]),
+        3e-13 * watts,
+    );
+    rotated.incidence = Incidence::TangentialIndex(0.65);
+    let equivalent = solve_in_plane(rotated, plane.map(|v| -v)).unwrap();
+    let equivalent_field = equivalent.field(side, rotated_point).unwrap();
+    for j in 0..3 {
+        complex_close(
+            equivalent_field.field.electric_v_m[j],
+            actual.field.electric_v_m[j],
+            4e-15,
+        );
+        complex_close(
+            equivalent_field.field.magnetic_a_m[j],
+            actual.field.magnetic_a_m[j],
+            4e-17,
+        );
+    }
+    close(
+        equivalent.slab_absorbed_power_w(area, start, end).unwrap(),
+        watts,
+        3e-13 * watts,
+    );
+}
+
+#[test]
+fn azimuth_admission_and_normal_incidence_keep_legacy_and_transparent_limits() {
+    for indices in [
+        [C64::new(1.4, -0.12), C64::new(2.1, -0.42)],
+        [C64::from_re(1.4), C64::from_re(2.1)],
+    ] {
+        let d = input([1.0, 2.0, -0.6], indices, 0.0);
+        let legacy = solve(d).unwrap();
+        assert_eq!(solve_in_plane(d, [1.0, 0.0]).unwrap(), legacy);
+        assert_eq!(solve_in_plane(d, [f64::MAX, 0.0]).unwrap(), legacy);
+        let side = OrientedCrystalFieldSide::Transmitted;
+        let point = [0.2 * LAMBDA, 0.8 * LAMBDA, 0.3 * LAMBDA];
+        let expected = legacy.field(side, point).unwrap();
+        for plane in [[3.0, 4.0], [0.0, -f64::MAX], [1e-300, -2e-300]] {
+            let response = solve_in_plane(d, plane).unwrap();
+            check_maxwell(d, &response);
+            let actual = response.field(side, point).unwrap();
+            for j in 0..3 {
+                complex_close(
+                    actual.field.electric_v_m[j],
+                    expected.field.electric_v_m[j],
+                    4e-15,
+                );
+                complex_close(
+                    actual.field.magnetic_a_m[j],
+                    expected.field.magnetic_a_m[j],
+                    4e-17,
+                );
+            }
+            close(
+                actual.absorbed_power_density_w_m3,
+                expected.absorbed_power_density_w_m3,
+                2e-13 * expected.absorbed_power_density_w_m3,
+            );
+        }
+        for plane in [[0.0, 0.0], [f64::NAN, 1.0], [1.0, f64::INFINITY]] {
+            assert!(solve_in_plane(d, plane).is_err());
+        }
+    }
 }
 
 #[test]

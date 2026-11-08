@@ -6883,6 +6883,18 @@ query, boundary solve or depth quadrature occurs in a slab query. A receiving
 thermal owner must identify this physical material/volume and supply its own
 hold interval; the prepared monochromatic source remains frozen.
 
+The absorbing field owner also admits an authored transverse incidence-plane
+axis through `prepare_absorbing_field_in_plane` and its signed-tangential-index
+counterpart. Jones inputs are global Cartesian `[Ex,Ey]`, with the original
+optic axis fixed in the same physical material frame. Preparation normalizes
+the plane axis, rotates both material and illumination into the existing local
+Maxwell solve, and rotates all electric/magnetic fields back once. Propagation
+retains both global transverse phase components; point and analytic volume
+heat contract against the original global loss tensor. The stored signed
+tangential wavenumber multiplies `incidence_plane_axis()` to give `[kx,ky]`.
+Existing x-z queries keep their original arithmetic. Factors with different
+azimuths can share the exact same original interface and thermal column.
+
 `AbsorbingCrystalIllumination` borrows the exact original oriented interface
 and an explicitly mutually uncorrelated bank of its prepared absorbing fields.
 Each factor includes its square-root statistical weight and retains coherent

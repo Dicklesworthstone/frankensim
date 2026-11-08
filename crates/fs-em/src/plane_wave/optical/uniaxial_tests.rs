@@ -297,16 +297,18 @@ fn crystal_statistical_illumination_retains_original_spectra_volume_and_source_i
     .unwrap();
     let factors = [
         interface
-            .prepare_absorbing_field(
+            .prepare_absorbing_field_in_plane(
                 frequency(400.0),
                 0.8,
+                [1.0, 0.0],
                 [C64::new(0.6, -0.2), C64::new(0.1, 0.7)],
             )
             .unwrap(),
         interface
-            .prepare_absorbing_field_at_tangential_index(
+            .prepare_absorbing_field_at_tangential_index_in_plane(
                 frequency(800.0),
                 -0.7,
+                [3.0, 4.0],
                 [C64::new(-0.2, 0.4), C64::new(0.3, 0.1)],
             )
             .unwrap(),
@@ -321,6 +323,23 @@ fn crystal_statistical_illumination_retains_original_spectra_volume_and_source_i
     assert_eq!(illumination.factor_count(), 2);
     assert_eq!(illumination.factors()[0].omega_rad_s(), frequency(400.0));
     assert_eq!(illumination.factors()[1].omega_rad_s(), frequency(800.0));
+    assert_eq!(
+        illumination.factors()[1]
+            .boundary_response()
+            .incidence_plane_axis(),
+        [0.6, 0.8]
+    );
+    assert_eq!(
+        factors[0].boundary_response(),
+        interface
+            .prepare_absorbing_field(
+                frequency(400.0),
+                0.8,
+                [C64::new(0.6, -0.2), C64::new(0.1, 0.7)]
+            )
+            .unwrap()
+            .boundary_response()
+    );
     let side = OrientedCrystalFieldSide::Transmitted;
     let point = [0.0, 0.0, 300e-9];
     let statistics = illumination

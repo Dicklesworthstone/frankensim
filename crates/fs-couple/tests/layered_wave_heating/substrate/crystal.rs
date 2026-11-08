@@ -393,9 +393,10 @@ fn crystal_illumination_spectral_heat_drives_one_native_thermal_solve() {
             )
             .unwrap(),
         interface
-            .prepare_absorbing_field(
+            .prepare_absorbing_field_in_plane(
                 core::f64::consts::TAU * C0 / 700e-9,
                 0.9,
+                [0.6, 0.8],
                 [C64::new(2e4, -4e4), C64::new(6e4, 3e4)],
             )
             .unwrap(),
