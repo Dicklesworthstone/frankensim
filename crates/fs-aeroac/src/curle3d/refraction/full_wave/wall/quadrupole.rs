@@ -4,15 +4,15 @@
 //! source coordinates twice. The existing reflected quadrupole channels retain
 //! trace, both physical shear contractions and all receiver velocity derivatives;
 //! the original wall kernel supplies the passive spectral reflection, including
-//! its evanescent amplification and resolved lossy surface mode.
+//! its evanescent amplification and lossy or outgoing lossless surface mode.
 
 use super::super::quadrupole::{FullWaveQuadrupoleLimits, cartesian};
 use super::super::reflection::{
-    ReflectionCoordinates, apply_quadrupole, field, line, quadrupole_channels,
-    quadrupole_image_transfer, singular_total,
+    ReflectionCoordinates, apply_quadrupole, field, line, quadrupole_angular_derivative_channels,
+    quadrupole_channels, quadrupole_image_transfer, singular_total,
 };
-use super::super::{QuadratureLimits, Spectrum, finite, integrate_spectrum, nonfinite, poll};
-use super::{PlanarImpedanceWall, WallKernel};
+use super::super::{QuadratureLimits, Spectrum, finite, nonfinite, poll};
+use super::{PlanarImpedanceWall, WallKernel, integrate_wall_spectrum};
 use crate::AeroacError;
 use crate::curle3d::CoherentCompactField;
 use crate::curle3d::quadrupole::{PreparedQuadrupoleObserver, QuadrupolePhasor};
@@ -31,16 +31,16 @@ const REFLECTED_SCOPE: &str = "Prescribed stationary symmetric 3D Lighthill stre
 moment [N m]; reflected spherical-wave pressure and vector velocity in one homogeneous \
 lossless fluid at an infinite passive locally reacting impedance wall. Full trace, \
 physical shear, propagating, evanescent and transverse near fields; numerical quadrature \
-estimates and analytic tail bounds, not interval certificates. No lossless compliant \
-pole, finite edges, mean flow, bulk absorption, unresolved SGS sound, source feedback \
+estimates and analytic tail bounds, not interval certificates. Includes outgoing lossless \
+compliant surface waves. No finite edges, mean flow, bulk absorption, unresolved SGS sound, source feedback \
 or measured-SPL qualification.";
 
 const TOTAL_SCOPE: &str = "Prescribed stationary symmetric 3D Lighthill stress \
 moment [N m]; coherent direct-plus-reflected pressure and vector velocity in one \
 homogeneous lossless fluid at an infinite passive locally reacting impedance wall. \
 Reflected-transfer absolute errors carry to the total; relative accuracy is not \
-guaranteed at interference nulls. No singular direct self-field, lossless compliant \
-pole, finite edges, mean flow, bulk absorption, unresolved SGS sound, source feedback, \
+guaranteed at interference nulls. Includes outgoing lossless compliant surface waves. \
+No singular direct self-field, finite edges, mean flow, bulk absorption, unresolved SGS sound, source feedback, \
 interval certificate or measured-SPL qualification.";
 
 type Transfer = [[C64; 6]; 4];
@@ -164,7 +164,37 @@ impl PreparedImpedanceWallQuadrupole {
                 log_pressure,
                 log_velocity,
             };
-            let result = integrate_spectrum::<14, 4>(&kernel, tail, limits.into(), cancelled)?;
+            let result = integrate_wall_spectrum::<14, 4>(
+                &kernel,
+                &kernel.common,
+                tail,
+                limits.into(),
+                [
+                    [2, 0],
+                    [2, 0],
+                    [1, 1],
+                    [0, 2],
+                    [3, 0],
+                    [3, 0],
+                    [2, 1],
+                    [1, 2],
+                    [3, 0],
+                    [2, 1],
+                    [2, 1],
+                    [2, 1],
+                    [1, 2],
+                    [0, 3],
+                ],
+                |region, x| {
+                    quadrupole_angular_derivative_channels(
+                        kernel.common.sample_weight(region, x)?,
+                        coordinates.range,
+                        log_pressure,
+                        log_velocity,
+                    )
+                },
+                cancelled,
+            )?;
             diagnostics.evaluations = result.evaluations;
             diagnostics.maximum_depth_reached = result.maximum_depth_reached;
             diagnostics.retained_panels = result.retained_panels;

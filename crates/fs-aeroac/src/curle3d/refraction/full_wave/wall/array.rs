@@ -29,8 +29,8 @@ pub const IMPEDANCE_WALL_REFLECTED_ARRAY_SCOPE: &str = "Prescribed stationary co
 one infinite passive locally reacting impedance plane in a homogeneous lossless fluid. \
 Propagating and evanescent components, original source phases and explicitly supplied \
 source statistics. Per-source quadrature estimates and tail bounds are not interval \
-certificates or relative guarantees at array nulls. No direct field, lossless compliant \
-pole, finite edges, nonlocal wall response, mean flow, bulk absorption, source feedback \
+certificates or relative guarantees at array nulls. Includes outgoing lossless compliant \
+surface waves. No direct field, finite edges, nonlocal wall response, mean flow, bulk absorption, source feedback \
 or measured-SPL qualification.";
 
 /// Each original source retains its own direct/reflected interference in statistics.
@@ -39,7 +39,7 @@ volume flows [m³/s] and forces on fluid [N]; coherent direct-plus-reflected sph
 fields at one infinite passive locally reacting impedance plane in a homogeneous \
 lossless fluid. Original Q/F and cross-source phases and explicitly supplied statistics. \
 Reflected-transfer error estimates give no relative guarantee at interference nulls. \
-No singular direct self-field, lossless compliant pole, finite edges, nonlocal wall \
+Includes outgoing lossless compliant surface waves. No singular direct self-field, finite edges, nonlocal wall \
 response, mean flow, bulk absorption, source feedback, interval certificate or \
 measured-SPL qualification.";
 

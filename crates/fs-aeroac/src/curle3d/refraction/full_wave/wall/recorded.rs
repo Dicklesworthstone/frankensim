@@ -26,8 +26,8 @@ reacting infinite wall in a homogeneous lossless fluid. Original source/componen
 cross terms survive within every Welch factor. Bin-integrated second moments and \
 stationary resolved-bin sums retain sampling, window, leakage and frequency-resolution \
 limitations. Native quadrature estimates are not interval certificates or relative \
-guarantees at interference nulls. No direct field, deterministic cross-frequency phases, \
-transient waveform, lossless compliant pole, inferred independence, unresolved SGS \
+guarantees at interference nulls. Includes outgoing lossless compliant surface waves. \
+No direct field, deterministic cross-frequency phases, transient waveform, inferred independence, unresolved SGS \
 sound, finite edges, mean flow, bulk loss, source feedback or measured-SPL qualification.";
 
 const TOTAL_SCOPE: &str = "Original synchronized stationary compact volume flows \
@@ -36,9 +36,10 @@ reflected spherical pressure and vector velocity at one passive frequency-depend
 locally reacting infinite wall in a homogeneous lossless fluid. Every source, tensor \
 and path cross term survives within its original Welch factor. Bin-integrated second \
 moments and stationary resolved-bin sums retain sampling, window, leakage and frequency- \
-resolution limitations. No relative accuracy guarantee at interference nulls, singular \
+resolution limitations. Includes outgoing lossless compliant surface waves. \
+No relative accuracy guarantee at interference nulls, singular \
 total self-field, interval certificate, deterministic cross-frequency phases, transient \
-waveform, lossless compliant pole, inferred independence, unresolved SGS sound, finite \
+waveform, inferred independence, unresolved SGS sound, finite \
 edges, mean flow, bulk loss, source feedback or measured-SPL qualification.";
 
 pub(super) const fn scope(field_kind: ImpedanceWallFieldKind) -> &'static str {
@@ -83,7 +84,8 @@ pub struct ImpedanceWallWelchBand {
 /// frequency. The callback is invoked once per bin, in increasing frequency,
 /// and returns the original owner's specific impedance [Pa s/m], fluid and
 /// plane. Only impedance may vary: a changed fluid or plane refuses. Native
-/// wall admission rejects active loads and unsupported lossless surface poles.
+/// wall admission rejects active loads; pure compliance retains its outgoing
+/// limiting-absorption surface wave within the same explicit work budget.
 /// No interpolation, material fit, damping floor or causality claim is added.
 ///
 /// Channels are 4N `[Q,Fx,Fy,Fz]` blocks followed by 6M physical symmetric

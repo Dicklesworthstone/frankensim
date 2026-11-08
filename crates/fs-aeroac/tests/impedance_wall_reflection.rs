@@ -119,6 +119,9 @@ fn full_spectrum_satisfies_robin_condition_including_lossy_surface_mode() {
         C64::new(4.0, -3.0),
         C64::new(0.15, 2.0),
         C64::new(0.0, -1.5),
+        C64::new(0.0, 0.2),
+        C64::new(0.0, 1.0),
+        C64::new(0.0, 2.0),
     ] {
         for radius in [0.0, 0.18] {
             let owner = prepare(Some(z), source, [radius, 0.0, 0.0]);
@@ -192,6 +195,97 @@ fn narrow_passive_surface_mode_matches_independent_fields_with_bounded_work() {
 }
 
 #[test]
+fn lossless_surface_wave_matches_independent_principal_value_and_residue() {
+    // Independent 90-digit arithmetic: for a=k/X, H=.06, the evanescent
+    // integrals are I0=1/H+2*a*I and I1=1/H²+2*a/H+2*a²*I, where
+    // I=-exp(-a*H)*Ei(a*H)+i*pi*exp(-a*H). Their pressure and outward
+    // velocity are -i*omega*rho*I0/(4*pi) and -I1/(4*pi). The remaining
+    // propagating integral was evaluated with an independent entire power
+    // series and rational moments, without the production quadrature.
+    for (reactance, pressure, normal_velocity) in [
+        (
+            0.2,
+            C64::new(-1650.1417773107182, 12307.677951028231),
+            C64::new(60.7157079516139, -42.272360402093314),
+        ),
+        (
+            1.0,
+            C64::new(11070.152457546734, 1778.4778983626435),
+            C64::new(-35.60627954605893, -41.887885006570245),
+        ),
+        (
+            2.0,
+            C64::new(9009.845676865571, -2592.240233489048),
+            C64::new(-36.9677355464601, -20.02170778055919),
+        ),
+    ] {
+        let budget = FullWaveMonopoleLimits {
+            maximum_evaluations: 16_384,
+            ..limits()
+        };
+        let owner = PreparedImpedanceWallMonopole::new(
+            wall(Some(C64::new(0.0, reactance))),
+            700.0,
+            [0.0, 0.0, -0.04],
+            [0.0, 0.0, -0.02],
+            budget,
+            &mut || false,
+        )
+        .unwrap();
+        let field = owner.evaluate_reflected(C64::ONE).unwrap();
+        close(field.pressure_pa, pressure, 2e-11, 1e-7);
+        close(
+            field.particle_velocity_m_s[2],
+            normal_velocity,
+            2e-11,
+            1e-10,
+        );
+        assert_eq!(field.particle_velocity_m_s[..2], [C64::ZERO; 2]);
+        assert!(owner.diagnostics().evaluations <= budget.maximum_evaluations);
+        // Three original 15-node regions plus the four cached numerator and
+        // analytic-derivative samples; every subdivision adds 30 samples.
+        assert_eq!(owner.diagnostics().evaluations % 30, 19);
+    }
+}
+
+#[test]
+fn positive_resistance_tends_to_the_same_outgoing_lossless_field() {
+    let source = [0.0, 0.0, -0.04];
+    for radius in [0.0, 0.17] {
+        let receiver = [radius, 0.0, -0.02];
+        let limit = prepare(Some(C64::new(0.0, 1.0)), source, receiver)
+            .evaluate_reflected(C64::ONE)
+            .unwrap();
+        let limit = [
+            limit.pressure_pa,
+            limit.particle_velocity_m_s[0],
+            limit.particle_velocity_m_s[1],
+            limit.particle_velocity_m_s[2],
+        ];
+        let mut previous = [f64::INFINITY; 4];
+        for resistance in [0.01, 0.001, 0.0001] {
+            let value = prepare(Some(C64::new(resistance, 1.0)), source, receiver)
+                .evaluate_reflected(C64::ONE)
+                .unwrap();
+            let value = [
+                value.pressure_pa,
+                value.particle_velocity_m_s[0],
+                value.particle_velocity_m_s[1],
+                value.particle_velocity_m_s[2],
+            ];
+            for i in 0..4 {
+                let error = (value[i] - limit[i]).abs();
+                assert!(error <= 0.15 * previous[i] + 1e-8);
+                previous[i] = error;
+                if resistance == 0.0001 {
+                    close(value[i], limit[i], 5e-4, 1e-8);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn matched_normal_incidence_retains_spherical_near_field_and_reciprocity() {
     let source = [0.0, 0.0, -0.018];
     let receiver = [0.0, 0.0, -0.026];
@@ -201,58 +295,91 @@ fn matched_normal_incidence_retains_spherical_near_field_and_reciprocity() {
     assert!(reflected.pressure_pa.abs() > 100.0);
     let a = [0.03, -0.01, -0.06];
     let b = [0.19, 0.08, -0.09];
-    let z = C64::new(0.2, 1.3);
-    let forward = prepare(Some(z), a, b).evaluate_total(C64::ONE).unwrap();
-    let reverse = prepare(Some(z), b, a).evaluate_total(C64::ONE).unwrap();
-    close(forward.pressure_pa, reverse.pressure_pa, 2e-10, 1e-7);
-    let coincident = prepare(Some(z), a, a);
-    assert!(!coincident.total_field_available());
-    assert!(coincident.evaluate_reflected(C64::ONE).is_ok());
-    assert!(coincident.evaluate_total(C64::ONE).is_err());
+    for z in [C64::new(0.2, 1.3), C64::new(0.0, 1.3)] {
+        let forward = prepare(Some(z), a, b).evaluate_total(C64::ONE).unwrap();
+        let reverse = prepare(Some(z), b, a).evaluate_total(C64::ONE).unwrap();
+        close(forward.pressure_pa, reverse.pressure_pa, 2e-10, 1e-7);
+        let coincident = prepare(Some(z), a, a);
+        assert!(!coincident.total_field_available());
+        assert!(coincident.evaluate_reflected(C64::ONE).is_ok());
+        assert!(coincident.evaluate_total(C64::ONE).is_err());
+    }
 }
 
 #[test]
 fn refined_quadrature_converges_without_changing_the_wall_physics() {
     let source = [0.0, 0.0, -0.04];
     let receiver = [0.17, 0.0, -0.02];
-    let mut values = Vec::new();
-    let mut evidence = Vec::new();
-    for relative in [1e-5, 1e-7, 1e-9] {
-        let mut budget = limits();
-        budget.relative_tolerance = relative;
-        budget.absolute_pressure_tolerance_pa_per_m3_s = relative;
-        budget.absolute_velocity_tolerance_per_m2 = relative * 1e-3;
-        let owner = PreparedImpedanceWallMonopole::new(
-            wall(Some(C64::new(0.1, 1.0))),
-            700.0,
-            source,
-            receiver,
-            budget,
-            &mut || false,
-        )
-        .unwrap();
-        values.push(owner.evaluate_reflected(C64::ONE).unwrap().pressure_pa);
-        evidence.push(
-            owner.diagnostics().pressure_quadrature_error_pa_per_m3_s
-                + owner.diagnostics().pressure_tail_bound_pa_per_m3_s,
-        );
+    for resistance in [0.1, 0.0] {
+        let mut values = Vec::new();
+        let mut evidence = Vec::new();
+        for relative in [1e-5, 1e-7, 1e-9] {
+            let mut budget = limits();
+            budget.relative_tolerance = relative;
+            budget.absolute_pressure_tolerance_pa_per_m3_s = relative;
+            budget.absolute_velocity_tolerance_per_m2 = relative * 1e-3;
+            let owner = PreparedImpedanceWallMonopole::new(
+                wall(Some(C64::new(resistance, 1.0))),
+                700.0,
+                source,
+                receiver,
+                budget,
+                &mut || false,
+            )
+            .unwrap();
+            values.push(owner.evaluate_reflected(C64::ONE).unwrap().pressure_pa);
+            evidence.push(
+                owner.diagnostics().pressure_quadrature_error_pa_per_m3_s
+                    + owner.diagnostics().pressure_tail_bound_pa_per_m3_s,
+            );
+        }
+        assert!((values[1] - values[2]).abs() <= evidence[1] + evidence[2] + 1e-7);
+        assert!((values[0] - values[2]).abs() <= evidence[0] + evidence[2] + 1e-7);
+        assert!(evidence[2] < evidence[0]);
     }
-    assert!((values[1] - values[2]).abs() <= evidence[1] + evidence[2] + 1e-7);
-    assert!((values[0] - values[2]).abs() <= evidence[0] + evidence[2] + 1e-7);
-    assert!(evidence[2] < evidence[0]);
 }
 
 #[test]
 fn cancellation_work_and_unsupported_wall_refusals_publish_no_response() {
-    for z in [
-        C64::new(-0.1, 0.0),
-        C64::new(0.0, 1.0),
-        C64::new(f64::NAN, 0.0),
-    ] {
+    for z in [C64::new(-0.1, 0.0), C64::new(f64::NAN, 0.0)] {
         assert!(PlanarImpedanceWall::new(fluid(), [0.0; 3], [0.0, 0.0, 1.0], Some(z)).is_err());
     }
     let source = [0.0, 0.0, -0.1];
     let receiver = [0.2, 0.0, -0.1];
+    // Pure compliance is admissible, but its four cached pole evaluations
+    // and subsequent quadrature still obey the caller's original work limit.
+    for maximum_evaluations in [4, 49] {
+        let budget = FullWaveMonopoleLimits {
+            maximum_evaluations,
+            ..limits()
+        };
+        assert!(
+            PreparedImpedanceWallMonopole::new(
+                wall(Some(C64::new(0.0, 1.0))),
+                700.0,
+                source,
+                receiver,
+                budget,
+                &mut || false,
+            )
+            .is_err()
+        );
+    }
+    let mut polls = 0;
+    assert!(
+        PreparedImpedanceWallMonopole::new(
+            wall(Some(C64::new(0.0, 1.0))),
+            700.0,
+            source,
+            receiver,
+            limits(),
+            &mut || {
+                polls += 1;
+                polls == 8
+            },
+        )
+        .is_err()
+    );
     assert!(
         PreparedImpedanceWallMonopole::new(
             wall(Some(C64::ONE)),

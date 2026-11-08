@@ -27,8 +27,8 @@ symmetric 3D Lighthill stress moments [N m] at their original positions and cloc
 reflected-only spherical pressure and vector velocity at an infinite passive locally \
 reacting impedance wall in a homogeneous lossless fluid. Full trace, physical shear, \
 near and evanescent fields; explicitly supplied source statistics. Per-cell quadrature \
-estimates and analytic tails give no relative guarantee at array nulls. No direct \
-field, lossless compliant pole, finite-source or SGS validation, finite edges, nonlocal \
+estimates and analytic tails give no relative guarantee at array nulls. Includes outgoing \
+lossless compliant surface waves. No direct field, finite-source or SGS validation, finite edges, nonlocal \
 wall response, mean flow, bulk absorption, source feedback, interval certificate or \
 measured-SPL qualification.";
 
@@ -39,7 +39,7 @@ coherent direct-plus-reflected spherical pressure and vector velocity at an infi
 passive locally reacting impedance wall in a homogeneous lossless fluid. Explicitly \
 supplied source statistics retain all tensor and per-cell direct/reflected cross terms. \
 Reflected-transfer absolute estimates give no relative guarantee at interference nulls. \
-No singular total self-field, lossless compliant pole, finite-source or SGS validation, \
+Includes outgoing lossless compliant surface waves. No singular total self-field, finite-source or SGS validation, \
 finite edges, nonlocal wall response, mean flow, bulk absorption, source feedback, \
 interval certificate or measured-SPL qualification.";
 

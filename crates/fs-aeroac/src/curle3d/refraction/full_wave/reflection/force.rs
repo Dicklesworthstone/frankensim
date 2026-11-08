@@ -9,6 +9,7 @@
 //! component; treating it as an unchanged force gives the wrong reflected field.
 
 use super::super::force::{admit, equal_speed, j1_over_argument};
+use super::super::quadrupole::j2_over_argument;
 use super::super::{
     FullWaveForceDiagnostics, FullWaveForceLimits, PlanarFluidInterface, Spectrum, finite,
     integrate_spectrum, j0, j1, nonfinite, poll, positive,
@@ -360,6 +361,28 @@ pub(in super::super) fn sample_force_spectrum(
     log_pressure: f64,
     log_velocity: f64,
 ) -> Result<[C64; 7], AeroacError> {
+    force_channels(weight, range, log_pressure, log_velocity, false)
+}
+
+/// Derivative of each angular Bessel factor with respect to q*range, retaining
+/// the original physical source/receiver powers and signs. The impedance-wall
+/// pole subtraction uses this to evaluate its removable singularity exactly.
+pub(in super::super) fn sample_force_angular_derivative(
+    weight: ReflectionSpectralWeight,
+    range: f64,
+    log_pressure: f64,
+    log_velocity: f64,
+) -> Result<[C64; 7], AeroacError> {
+    force_channels(weight, range, log_pressure, log_velocity, true)
+}
+
+fn force_channels(
+    weight: ReflectionSpectralWeight,
+    range: f64,
+    log_pressure: f64,
+    log_velocity: f64,
+    angular_derivative: bool,
+) -> Result<[C64; 7], AeroacError> {
     let argument = weight.q * range;
     if !argument.is_finite() {
         return Err(nonfinite("reflected force Bessel argument"));
@@ -367,6 +390,15 @@ pub(in super::super) fn sample_force_spectrum(
     let jzero = j0(argument);
     let jone = j1(argument);
     let ratio = j1_over_argument(argument, jone);
+    let (jzero, jone, ratio) = if angular_derivative {
+        (
+            -jone,
+            jzero - ratio,
+            -j2_over_argument(argument, jzero, ratio),
+        )
+    } else {
+        (jzero, jone, ratio)
+    };
     let q_log = det::ln(weight.q);
     let magnitude = weight.zeta.abs();
     let direction = if magnitude == 0.0 {

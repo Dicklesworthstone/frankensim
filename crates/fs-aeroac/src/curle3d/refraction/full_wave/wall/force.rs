@@ -7,11 +7,11 @@
 
 use super::super::force::{admit, equal_speed};
 use super::super::reflection::{
-    ReflectionCoordinates, apply_force, field, force_cartesian, line, sample_force_spectrum,
-    singular_total,
+    ReflectionCoordinates, apply_force, field, force_cartesian, line,
+    sample_force_angular_derivative, sample_force_spectrum, singular_total,
 };
-use super::super::{FullWaveForceLimits, Spectrum, finite, integrate_spectrum, nonfinite, poll};
-use super::{PlanarImpedanceWall, WallKernel};
+use super::super::{FullWaveForceLimits, Spectrum, finite, nonfinite, poll};
+use super::{PlanarImpedanceWall, WallKernel, integrate_wall_spectrum};
 use crate::AeroacError;
 use crate::curle3d::statistics::ComplexSum;
 use crate::curle3d::{CoherentCompactField, CompactSourcePhasor, PreparedCompactSourceObserver};
@@ -23,14 +23,14 @@ const REFLECTED_SCOPE: &str = "Prescribed stationary compact 3D force ON fluid [
 reflected spherical-wave pressure and velocity in one homogeneous lossless fluid \
 at an infinite passive locally reacting impedance wall. Full propagating, evanescent \
 and transverse near fields; numerical quadrature estimates and analytic tail bounds, \
-not interval certificates. No lossless compliant pole, finite edges, mean flow, bulk \
+not interval certificates. Includes outgoing lossless compliant surface waves. No finite edges, mean flow, bulk \
 absorption, source feedback or measured-SPL qualification.";
 
 const TOTAL_SCOPE: &str = "Prescribed stationary compact 3D force ON fluid [N]; \
 coherent direct-plus-reflected pressure and velocity in one homogeneous lossless fluid \
 at an infinite passive locally reacting impedance wall. Reflected-transfer absolute \
 errors carry to the total; relative accuracy is not guaranteed at interference nulls. \
-No singular direct self-field, lossless compliant pole, finite edges, mean flow, bulk \
+Includes outgoing lossless compliant surface waves. No singular direct self-field, finite edges, mean flow, bulk \
 absorption, source feedback, interval certificate or measured-SPL qualification.";
 
 type Transfer = [[C64; 3]; 4];
@@ -147,7 +147,22 @@ impl PreparedImpedanceWallForce {
                 log_pressure,
                 log_velocity,
             };
-            let result = integrate_spectrum::<7, 2>(&kernel, tail, limits.into(), cancelled)?;
+            let result = integrate_wall_spectrum::<7, 2>(
+                &kernel,
+                &kernel.common,
+                tail,
+                limits.into(),
+                [[1, 0], [0, 1], [2, 0], [2, 0], [1, 1], [1, 1], [0, 2]],
+                |region, x| {
+                    sample_force_angular_derivative(
+                        kernel.common.sample_weight(region, x)?,
+                        coordinates.range,
+                        log_pressure,
+                        log_velocity,
+                    )
+                },
+                cancelled,
+            )?;
             diagnostics.evaluations = result.evaluations;
             diagnostics.maximum_depth_reached = result.maximum_depth_reached;
             diagnostics.retained_panels = result.retained_panels;

@@ -190,7 +190,7 @@ fn finite_wall_stress_matches_all_original_source_derivatives_of_force() {
     let source = [0.025, -0.01, -0.08];
     let receiver = [0.17, 0.04, -0.11];
     let delta = 2e-4;
-    for z in [C64::new(1.3, -0.4), C64::new(0.01, 1.0)] {
+    for z in [C64::new(1.3, -0.4), C64::new(0.01, 1.0), C64::new(0.0, 1.0)] {
         let plane = wall(Some(z));
         let owner = PreparedImpedanceWallQuadrupole::new(
             plane,
@@ -256,7 +256,7 @@ fn rotated_boundary_obeys_robin_law_and_absorbs_positive_energy_for_every_stress
     let normal = [1.0 / 3.0, 2.0 / 3.0, -2.0 / 3.0];
     let tangent = [2.0 / 5.0_f64.sqrt(), -1.0 / 5.0_f64.sqrt(), 0.0];
     let source = core::array::from_fn(|i| origin[i] - 0.07 * normal[i] + 0.04 * tangent[i]);
-    for normalized in [C64::new(1.7, -0.4), C64::new(0.03, 1.1)] {
+    for normalized in [C64::new(1.7, -0.4), C64::new(0.03, 1.1), C64::new(0.0, 1.1)] {
         let impedance = normalized.scale(RHO * SPEED);
         let plane = PlanarImpedanceWall::new(
             FluidAcousticState::try_new(RHO, SPEED).unwrap(),

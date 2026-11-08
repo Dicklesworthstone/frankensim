@@ -13,9 +13,11 @@
 //! `(abs(z)+Im(z))/Re(z)` when Im(z)>0, and at most one otherwise. That factor
 //! enters the analytic tail bound; it is never clipped to one. The spectrum
 //! is split at its evanescent maximum to resolve a narrow lossy surface mode.
-//! Purely reactive compliance has a real-contour pole and explicitly refuses;
-//! a lossless surface-wave contour prescription is outside this implementation.
+//! Purely reactive compliance uses the outgoing limit as resistance tends to
+//! zero: an analytic principal-value subtraction plus the complete surface-wave
+//! residue. The same prescription applies to every pressure/velocity derivative.
 
+use super::force::j1_over_argument;
 use super::reflection::{
     self, ReflectionCoordinates, ReflectionSpectralWeight, prepare_reflected_tail,
 };
@@ -43,8 +45,8 @@ pub use quadrupole::{
 const SCOPE: &str = "Prescribed stationary compact 3D volume source in one homogeneous \
 lossless fluid, spherical reflection from an infinite passive locally reacting impedance \
 plane. Full propagating/evanescent pressure and velocity, coherent direct/reflected \
-interference, estimated quadrature error and separate analytic tail bound. No lossless \
-compliant surface-wave pole, nonlocal wall response, finite edges, mean flow, bulk \
+interference, outgoing lossless compliant surface waves, estimated quadrature error \
+and separate analytic tail bound. No nonlocal wall response, finite edges, mean flow, bulk \
 absorption, source feedback or measured-SPL qualification.";
 
 /// Original fluid, wall geometry and specific impedance [Pa s/m], at the
@@ -61,8 +63,9 @@ impl PlanarImpedanceWall {
     /// `outward_normal` points from the fluid INTO the wall. `None` denotes
     /// exact rigidity and zero impedance denotes exact pressure release.
     /// Finite impedances require nonnegative resistance. Pure compliance
-    /// (zero resistance and positive reactance in exp(-i omega t)) refuses
-    /// because its surface mode lies on the integration contour.
+    /// (zero resistance and positive reactance in exp(-i omega t)) retains
+    /// its outgoing surface wave through the exact limiting-absorption value,
+    /// without adding artificial loss. Preparation remains work bounded.
     pub fn new(
         fluid: FluidAcousticState,
         point_m: [f64; 3],
@@ -73,9 +76,9 @@ impl PlanarImpedanceWall {
         let normalized = match impedance_pa_s_m {
             None => None,
             Some(z) => {
-                if !finite(z) || z.re < 0.0 || (z.re == 0.0 && z.im > 0.0) {
+                if !finite(z) || z.re < 0.0 {
                     return Err(invalid(
-                        "passive wall impedance excludes a lossless compliant pole",
+                        "passive wall impedance requires nonnegative resistance",
                     ));
                 }
                 let reference = fluid.density_kg_m3() * fluid.sound_speed_m_s();
@@ -83,7 +86,10 @@ impl PlanarImpedanceWall {
                     return Err(nonfinite("wall acoustic impedance reference"));
                 }
                 let normalized = C64::new(z.re / reference, z.im / reference);
-                if !finite(normalized) || (normalized == C64::ZERO && z != C64::ZERO) {
+                if !finite(normalized)
+                    || (normalized == C64::ZERO && z != C64::ZERO)
+                    || (z.re > 0.0 && normalized.re == 0.0)
+                {
                     return Err(nonfinite("normalized wall impedance"));
                 }
                 Some(normalized)
@@ -216,7 +222,15 @@ impl PreparedImpedanceWallMonopole {
                 },
                 bound[1],
             ];
-            let result = integrate_spectrum::<3, 1>(&kernel, tail, limits.into(), cancelled)?;
+            let result = integrate_wall_spectrum::<3, 1>(
+                &kernel,
+                &kernel,
+                tail,
+                limits.into(),
+                [[0, 0], [1, 0], [0, 1]],
+                |region, x| kernel.channels(region, x, true),
+                cancelled,
+            )?;
             diagnostics.evaluations = result.evaluations;
             diagnostics.maximum_depth_reached = result.maximum_depth_reached;
             diagnostics.retained_panels = result.retained_panels;
@@ -342,6 +356,7 @@ struct WallKernel {
     log_gain: f64,
     tail_extent: f64,
     split: Option<f64>,
+    surface_pole: Option<f64>,
 }
 
 impl WallKernel {
@@ -356,7 +371,21 @@ impl WallKernel {
         if !positive(k) || !positive(z.abs()) {
             return Err(nonfinite("wall spectral scale"));
         }
-        let log_gain = if z.im > 0.0 {
+        let surface_pole = if z.re == 0.0 && z.im > 0.0 {
+            let pole = k / z.im;
+            if !positive(pole) || !positive(2.0 * pole) {
+                return Err(nonfinite("lossless wall surface-wave scale"));
+            }
+            Some(pole)
+        } else {
+            None
+        };
+        // The pole is integrated analytically below. Beyond T >= 2*a its
+        // evanescent reflection magnitude is at most three, rather than the
+        // infinite real-contour gain of a lossless surface mode.
+        let log_gain = if surface_pole.is_some() {
+            det::ln(3.0)
+        } else if z.im > 0.0 {
             det::ln(z.abs()) + det::ln(1.0 + z.im / z.abs()) - det::ln(z.re)
         } else {
             0.0
@@ -372,6 +401,7 @@ impl WallKernel {
             log_gain,
             tail_extent: 0.0,
             split: None,
+            surface_pole,
         })
     }
 
@@ -423,9 +453,11 @@ impl WallKernel {
             channels,
             cancelled,
         )?;
-        self.tail_extent = extent;
-        let peak = self.k / self.z.abs();
-        self.split = (peak > 0.0 && peak < extent).then_some(peak);
+        self.tail_extent = self
+            .surface_pole
+            .map_or(extent, |pole| extent.max(2.0 * pole));
+        let peak = self.surface_pole.unwrap_or(self.k / self.z.abs());
+        self.split = (peak > 0.0 && peak < self.tail_extent).then_some(peak);
         Ok(bounds)
     }
 
@@ -437,7 +469,13 @@ impl WallKernel {
         x: f64,
     ) -> Result<ReflectionSpectralWeight, AeroacError> {
         let (q, zeta, measure) = self.point(region, x);
-        let r = self.coefficient(zeta);
+        // For a real surface pole the wrapper integrates the full channel's
+        // regularized numerator and then restores its PV integral and residue.
+        let r = if region != 0 && self.surface_pole.is_some() {
+            C64::ONE
+        } else {
+            self.coefficient(zeta)
+        };
         let magnitude = r.abs();
         if !magnitude.is_finite() {
             return Err(nonfinite("wall spectral reflection"));
@@ -470,6 +508,42 @@ impl WallKernel {
             log_magnitude: det::ln(measure) + det::ln(magnitude) - decay,
         })
     }
+
+    fn channels(
+        &self,
+        region: usize,
+        x: f64,
+        angular_derivative: bool,
+    ) -> Result<[C64; 3], AeroacError> {
+        let weight = self.sample_weight(region, x)?;
+        let argument = weight.q * self.coordinates.range;
+        if !argument.is_finite() {
+            return Err(nonfinite("wall Bessel argument"));
+        }
+        let zero = j0(argument);
+        let one = j1(argument);
+        let (zero, one) = if angular_derivative {
+            (-one, zero - j1_over_argument(argument, one))
+        } else {
+            (zero, one)
+        };
+        let normal_abs = weight.zeta.abs();
+        let normal = if normal_abs == 0.0 {
+            C64::ZERO
+        } else {
+            C64::new(-weight.zeta.re / normal_abs, -weight.zeta.im / normal_abs)
+        };
+        let log_velocity = -det::ln(4.0 * PI);
+        let values = [
+            weight.scaled(C64::ONE, self.log_pressure, zero),
+            weight.scaled(C64::new(0.0, 1.0), log_velocity + det::ln(weight.q), one),
+            weight.scaled(normal, log_velocity + det::ln(normal_abs), zero),
+        ];
+        if values.iter().any(|v| !finite(*v)) {
+            return Err(nonfinite("wall reflected spectrum"));
+        }
+        Ok(values)
+    }
 }
 
 impl Spectrum<3> for WallKernel {
@@ -483,6 +557,13 @@ impl Spectrum<3> for WallKernel {
     fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
         let (q0, z0, _) = self.point(region, lower);
         let (q1, z1, _) = self.point(region, upper);
+        let h = self.coordinates.height.to_f64();
+        let geometry_resolved =
+            (q1 - q0).abs() * self.coordinates.range + h * (z1.re - z0.re).abs() <= FRAC_PI_2
+                && h * (z1.im - z0.im).abs() <= 2.0;
+        if region != 0 && self.surface_pole.is_some() {
+            return geometry_resolved;
+        }
         let (_, zm, _) = self.point(region, lower + 0.5 * (upper - lower));
         let r0 = self.coefficient(z0);
         let r1 = self.coefficient(z1);
@@ -493,34 +574,138 @@ impl Spectrum<3> for WallKernel {
         // would require work proportional to the (unbounded) passive gain.
         // The embedded quadrature still controls the absolute field errors.
         let scale = r0.abs().max(r1.abs()).max(rm.abs()).max(1.0);
-        let h = self.coordinates.height.to_f64();
         scale.is_finite()
-            && (q1 - q0).abs() * self.coordinates.range + h * (z1.re - z0.re).abs() <= FRAC_PI_2
-            && h * (z1.im - z0.im).abs() <= 2.0
+            && geometry_resolved
             && (r0 - rm).abs() <= 0.125 * scale
             && (r1 - rm).abs() <= 0.125 * scale
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
-        let weight = self.sample_weight(region, x)?;
-        let arg = weight.q * self.coordinates.range;
-        let normal_abs = weight.zeta.abs();
-        let normal = if normal_abs == 0.0 {
-            C64::ZERO
+        self.channels(region, x, false)
+    }
+}
+
+/// At z=iX, X>0, put a=k/X. Positive resistance moves the pole to
+/// a+i0, so R(t)=1+2a/(t-a-i0) and 1/(t-a-i0)=PV(1/(t-a))+i*pi*delta(t-a).
+/// Subtract each COMPLETE physical channel B(t), not just the Green weight:
+///
+/// integral_0^T B*R = integral_0^T [B+2a*(B-B(a))/(t-a)]
+///                  +2a*B(a)*[ln(T-a)-ln(a)+i*pi].
+///
+/// This retains source and receiver derivative residues without numerical
+/// differentiation, artificial resistance, or a clipped reflection coefficient.
+#[allow(clippy::too_many_arguments)]
+fn integrate_wall_spectrum<const N: usize, const PRESSURE: usize>(
+    kernel: &impl Spectrum<N>,
+    common: &WallKernel,
+    tail: [f64; N],
+    mut limits: QuadratureLimits,
+    powers: [[u32; 2]; N],
+    angular_derivative: impl Fn(usize, f64) -> Result<[C64; N], AeroacError>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<IntegratedSpectrum<N>, AeroacError> {
+    let Some(pole) = common.surface_pole else {
+        return integrate_spectrum::<N, PRESSURE>(kernel, tail, limits, cancelled);
+    };
+    if limits.maximum_evaluations <= 4 {
+        return Err(invalid("full-wave quadrature evaluation budget exhausted"));
+    }
+    // Two original numerator samples and two analytic angular-derivative
+    // samples are cached and charged to the same preparation work budget.
+    limits.maximum_evaluations -= 4;
+    // A potentially large analytic pole term cancels part of the regularized
+    // integral. Relative control of that intermediate integral would overstate
+    // accuracy of the returned field; retain the original absolute tolerances.
+    limits.relative = 0.0;
+    let q = det::hypot(common.k, pole);
+    let ratio = pole / q;
+    let square = ratio * ratio;
+    let angular_scale = q * common.coordinates.range * square;
+    let decay = (common.coordinates.height * Dd::from_f64(pole)).to_f64();
+    let mut numerator = [[C64::ZERO; N]; 2];
+    let mut removable_limit = [[C64::ZERO; N]; 2];
+    for (side, (region, x)) in [(1, 1.0), (2, 0.0)].into_iter().enumerate() {
+        poll(cancelled)?;
+        numerator[side] = kernel.sample(region, x)?;
+        poll(cancelled)?;
+        let angular = angular_derivative(region, x)?;
+        for channel in 0..N {
+            // B ~ exp(-t*h)*q^p*t^s*f(q*r):
+            // a*dB/dt = (p*a²/q²+s-a*h)*B + (q*r*a²/q²)*B_angular'.
+            let [p, s] = powers[channel];
+            let scale = f64::from(p) * square + f64::from(s) - decay;
+            let mut sum = ComplexSum::default();
+            sum.add(numerator[side][channel])?;
+            sum.add(numerator[side][channel].scale(2.0 * scale))?;
+            sum.add(angular[channel].scale(2.0 * angular_scale))?;
+            removable_limit[side][channel] = sum.value();
+            if !finite(removable_limit[side][channel]) {
+                return Err(nonfinite("wall removable-pole limit"));
+            }
+        }
+    }
+    let regularized = SurfacePoleSpectrum {
+        kernel,
+        common,
+        pole,
+        numerator,
+        removable_limit,
+    };
+    let mut result = integrate_spectrum::<N, PRESSURE>(&regularized, tail, limits, cancelled)?;
+    let pole_integral = C64::new(det::ln(common.tail_extent - pole) - det::ln(pole), PI);
+    for channel in 0..N {
+        let mut sum = ComplexSum::default();
+        sum.add(result.value[channel])?;
+        // The left interval measure is a, so this is already a*B(a).
+        sum.add(numerator[0][channel].scale(2.0) * pole_integral)?;
+        result.value[channel] = sum.value();
+    }
+    if result.value.iter().any(|value| !finite(*value)) {
+        return Err(nonfinite("lossless wall surface-wave field"));
+    }
+    result.evaluations += 4;
+    poll(cancelled)?;
+    Ok(result)
+}
+
+struct SurfacePoleSpectrum<'a, K, const N: usize> {
+    kernel: &'a K,
+    common: &'a WallKernel,
+    pole: f64,
+    numerator: [[C64; N]; 2],
+    removable_limit: [[C64; N]; 2],
+}
+
+impl<K: Spectrum<N>, const N: usize> Spectrum<N> for SurfacePoleSpectrum<'_, K, N> {
+    fn regions(&self) -> usize {
+        self.kernel.regions()
+    }
+    fn extent(&self) -> (f64, f64) {
+        self.kernel.extent()
+    }
+    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
+        self.kernel.resolved(region, lower, upper)
+    }
+    fn sample(&self, region: usize, x: f64) -> Result<[C64; N], AeroacError> {
+        if region == 0 {
+            return self.kernel.sample(region, x);
+        }
+        let side = region - 1;
+        if self.common.point(region, x).1.im == self.pole {
+            // Includes a transformed sample which rounds to a. No arbitrary
+            // distance floor: this is the analytic removable-singularity value.
+            return Ok(self.removable_limit[side]);
+        }
+        let factor = if region == 1 {
+            2.0 / (x - 1.0)
         } else {
-            C64::new(-weight.zeta.re / normal_abs, -weight.zeta.im / normal_abs)
+            (2.0 * self.pole) / ((self.common.tail_extent - self.pole) * x)
         };
-        let log_velocity = -det::ln(4.0 * PI);
-        let values = [
-            weight.scaled(C64::ONE, self.log_pressure, j0(arg)),
-            weight.scaled(
-                C64::new(0.0, 1.0),
-                log_velocity + det::ln(weight.q),
-                j1(arg),
-            ),
-            weight.scaled(normal, log_velocity + det::ln(normal_abs), j0(arg)),
-        ];
-        if values.iter().any(|v| !finite(*v)) {
-            return Err(nonfinite("wall reflected spectrum"));
+        let mut values = self.kernel.sample(region, x)?;
+        for (channel, value) in values.iter_mut().enumerate() {
+            let mut sum = ComplexSum::default();
+            sum.add(*value)?;
+            sum.add((*value - self.numerator[side][channel]).scale(factor))?;
+            *value = sum.value();
         }
         Ok(values)
     }

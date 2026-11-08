@@ -35,7 +35,10 @@ mod force;
 pub use force::{
     FULL_WAVE_REFLECTED_FORCE_SCOPE, FULL_WAVE_TOTAL_FORCE_SCOPE, PreparedReflectedFullWaveForce,
 };
-pub(super) use force::{apply as apply_force, cartesian as force_cartesian, sample_force_spectrum};
+pub(super) use force::{
+    apply as apply_force, cartesian as force_cartesian, sample_force_angular_derivative,
+    sample_force_spectrum,
+};
 
 mod quadrupole;
 pub use quadrupole::{
@@ -43,7 +46,8 @@ pub use quadrupole::{
     PreparedReflectedFullWaveQuadrupole,
 };
 pub(super) use quadrupole::{
-    apply as apply_quadrupole, image_transfer as quadrupole_image_transfer, quadrupole_channels,
+    apply as apply_quadrupole, image_transfer as quadrupole_image_transfer,
+    quadrupole_angular_derivative_channels, quadrupole_channels,
 };
 
 /// The returned field excludes the direct source contribution.

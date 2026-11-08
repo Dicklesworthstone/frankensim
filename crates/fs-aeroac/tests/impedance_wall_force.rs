@@ -139,50 +139,52 @@ fn ideal_wall_force_images_retain_orientation_and_coherent_intensity() {
 
 #[test]
 fn finite_wall_force_is_source_derivative_of_all_monopole_field_components() {
-    let plane = wall(Some(C64::new(0.3, 1.1)));
-    let source = [0.01, -0.02, -0.045];
-    let receiver = [0.12, 0.035, -0.035];
-    let owner =
-        PreparedImpedanceWallForce::new(plane, HZ, source, receiver, limits(), &mut || false)
-            .unwrap();
-    let mono_limits = FullWaveMonopoleLimits {
-        absolute_pressure_tolerance_pa_per_m3_s: 1e-9,
-        absolute_velocity_tolerance_per_m2: 1e-12,
-        relative_tolerance: 1e-12,
-        maximum_evaluations: 262_144,
-        maximum_depth: 40,
-    };
-    let delta = 2e-4;
-    for axis in 0..3 {
-        let samples = [-2.0, -1.0, 1.0, 2.0].map(|offset| {
-            let mut shifted = source;
-            shifted[axis] += offset * delta;
-            let monopole = PreparedImpedanceWallMonopole::new(
-                plane,
-                HZ,
-                shifted,
-                receiver,
-                mono_limits,
-                &mut || false,
-            )
-            .unwrap();
-            [
-                components(&monopole.evaluate_reflected(C64::ONE).unwrap()),
-                components(&monopole.evaluate_total(C64::ONE).unwrap()),
-            ]
-        });
-        let actual = [
-            components(&owner.evaluate_reflected(unit(axis)).unwrap()),
-            components(&owner.evaluate_total(unit(axis)).unwrap()),
-        ];
-        for mode in 0..2 {
-            for row in 0..4 {
-                // Fourth-order original-source derivative, including velocity.
-                let derivative = ((samples[2][mode][row] - samples[1][mode][row]).scale(8.0)
-                    - (samples[3][mode][row] - samples[0][mode][row]))
-                    .scale(1.0 / (12.0 * delta))
-                    * C64::new(0.0, 1.0 / (TAU * HZ * RHO));
-                close(actual[mode][row], derivative, 5e-7, 1e-9);
+    for impedance in [C64::new(0.3, 1.1), C64::new(0.0, 1.1)] {
+        let plane = wall(Some(impedance));
+        let source = [0.01, -0.02, -0.045];
+        let receiver = [0.12, 0.035, -0.035];
+        let owner =
+            PreparedImpedanceWallForce::new(plane, HZ, source, receiver, limits(), &mut || false)
+                .unwrap();
+        let mono_limits = FullWaveMonopoleLimits {
+            absolute_pressure_tolerance_pa_per_m3_s: 1e-9,
+            absolute_velocity_tolerance_per_m2: 1e-12,
+            relative_tolerance: 1e-12,
+            maximum_evaluations: 262_144,
+            maximum_depth: 40,
+        };
+        let delta = 2e-4;
+        for axis in 0..3 {
+            let samples = [-2.0, -1.0, 1.0, 2.0].map(|offset| {
+                let mut shifted = source;
+                shifted[axis] += offset * delta;
+                let monopole = PreparedImpedanceWallMonopole::new(
+                    plane,
+                    HZ,
+                    shifted,
+                    receiver,
+                    mono_limits,
+                    &mut || false,
+                )
+                .unwrap();
+                [
+                    components(&monopole.evaluate_reflected(C64::ONE).unwrap()),
+                    components(&monopole.evaluate_total(C64::ONE).unwrap()),
+                ]
+            });
+            let actual = [
+                components(&owner.evaluate_reflected(unit(axis)).unwrap()),
+                components(&owner.evaluate_total(unit(axis)).unwrap()),
+            ];
+            for mode in 0..2 {
+                for row in 0..4 {
+                    // Fourth-order original-source derivative, including velocity.
+                    let derivative = ((samples[2][mode][row] - samples[1][mode][row]).scale(8.0)
+                        - (samples[3][mode][row] - samples[0][mode][row]))
+                        .scale(1.0 / (12.0 * delta))
+                        * C64::new(0.0, 1.0 / (TAU * HZ * RHO));
+                    close(actual[mode][row], derivative, 5e-7, 1e-9);
+                }
             }
         }
     }
@@ -203,6 +205,7 @@ fn force_boundary_pressure_velocity_and_absorption_obey_the_rotated_robin_law() 
         C64::new(3.0, -2.0),
         C64::new(0.02, 1.4),
         C64::new(0.0, -1.5),
+        C64::new(0.0, 1.4),
     ] {
         let impedance = z.scale(RHO * SPEED);
         let plane = PlanarImpedanceWall::new(

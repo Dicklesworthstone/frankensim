@@ -408,6 +408,27 @@ pub(in crate::curle3d::refraction::full_wave) fn quadrupole_channels(
     log_pressure: f64,
     log_velocity: f64,
 ) -> Result<[C64; 14], AeroacError> {
+    channels(weight, range, log_pressure, log_velocity, false)
+}
+
+/// Angular derivatives with all source Hessian and receiver-velocity signs
+/// unchanged; used by the lossless surface-mode removable-pole limit.
+pub(in crate::curle3d::refraction::full_wave) fn quadrupole_angular_derivative_channels(
+    weight: ReflectionSpectralWeight,
+    range: f64,
+    log_pressure: f64,
+    log_velocity: f64,
+) -> Result<[C64; 14], AeroacError> {
+    channels(weight, range, log_pressure, log_velocity, true)
+}
+
+fn channels(
+    weight: ReflectionSpectralWeight,
+    range: f64,
+    log_pressure: f64,
+    log_velocity: f64,
+    angular_derivative: bool,
+) -> Result<[C64; 14], AeroacError> {
     let argument = weight.q * range;
     if !argument.is_finite() {
         return Err(nonfinite("reflected quadrupole Bessel argument"));
@@ -415,8 +436,25 @@ pub(in crate::curle3d::refraction::full_wave) fn quadrupole_channels(
     let zero = j0(argument);
     let one = j1(argument);
     let ratio = j1_over_argument(argument, one);
-    let derivative = zero - ratio;
     let second_ratio = j2_over_argument(argument, zero, ratio);
+    let (zero, one, ratio, second_ratio) = if angular_derivative {
+        let second_derivative = if argument.abs() < 0.1 {
+            // Differentiate the same convergent small-argument series used
+            // by j2_over_argument, including its finite on-axis limit.
+            let square = argument * argument;
+            1.0 / 8.0
+                - square
+                    * (1.0 / 32.0
+                        - square
+                            * (5.0 / 3072.0 - square * (7.0 / 184_320.0 - square / 1_966_080.0)))
+        } else {
+            ratio - 3.0 * (second_ratio / argument)
+        };
+        (-one, zero - ratio, -second_ratio, second_derivative)
+    } else {
+        (zero, one, ratio, second_ratio)
+    };
+    let derivative = zero - ratio;
     let third = one - second_ratio;
     let q_log = det::ln(weight.q);
     let magnitude = weight.zeta.abs();

@@ -162,9 +162,18 @@ splitting at that maximum prevents a narrow mode from escaping panel resolution.
 Fractional coefficient-variation controls resolve high gain without requiring
 work proportional to the peak amplitude; the requested field-error tolerances
 still govern quadrature acceptance.
-Pure compliance with zero resistance has a pole on the real contour and
-explicitly refuses pending a lossless surface-wave contour owner. No resistance
-floor or reflection clipping is introduced. Nonlocal/porous tangential motion,
+Pure compliance with zero resistance and positive reactance retains its outgoing
+surface wave by exact limiting absorption. For normalized `z=iX`, `a=k/X`, its
+evanescent coefficient is `1+2a/(t-a-i0)`. Each complete pressure or velocity
+derivative channel is integrated with analytic principal-value subtraction and
+the positive `i*pi` residue, retaining the same source and receiver derivatives.
+An analytic derivative supplies the removable-singularity value when a sampled
+coordinate rounds to the pole. The tail begins at `T>=2a`, where `|R|<=3`.
+The four cached pole/derivative samples count against the original work budget;
+absolute tolerance controls the regularized integral because the analytic pole
+term can cancel it. Small reactance can require a large cutoff and bounded
+preparation may refuse rather than claim uniform efficiency in that limit.
+No resistance floor or reflection clipping is introduced. Nonlocal/porous tangential motion,
 finite edges, multiple walls, mean flow, bulk attenuation and source feedback
 are outside this model.
 
@@ -177,21 +186,21 @@ or transcendental work. A coincident source/receiver may query the finite
 reflected field but cannot query the singular total field. G1/G3 tests in
 `impedance_wall_reflection` check independent analytic ideal images, the Robin
 boundary law and wall absorption, lossy surface-mode response, reciprocity,
-an independent exponential-integral reference for a narrow passive surface mode
-within a fixed work budget, three quadrature tolerance rungs, cancellation and
-work/physical refusals.
+independent exponential-integral references for narrow passive and exactly lossless
+surface modes within fixed work budgets, positive-resistance continuity on and off
+axis, three quadrature tolerance rungs, cancellation and work/physical refusals.
 
 `PreparedImpedanceWallForce` differentiates the original source position in this
 same Green field for a physical complex force ON fluid [N]. Seven analytic
 channels retain pressure, the full velocity tensor, opposite mixed-derivative
 signs and transverse motion on the symmetry axis. Exact rigid/release image
 forces reverse their normal component. Finite walls share the monopole's
-coefficient, surface-mode split, resolution and tail owner, with the extra
+coefficient, surface-mode split, lossless pole prescription, resolution and tail owner, with the extra
 derivative powers included in force-specific error bounds. Preparation caches
 reflected and coherent total 4-by-3 Cartesian matrices; application performs
 compensated linear reductions without allocation, integration or numerical
 differentiation. `impedance_wall_force` tests rotated analytic images, all
-pressure/velocity source derivatives, Robin pressure/velocity and passive wall
+pressure/velocity source derivatives including pure compliance, Robin pressure/velocity and passive wall
 absorption, independent narrow-surface-mode references within a fixed work
 budget, finite reflected self-fields, original-clock harmonic lines and refusals.
 
@@ -201,7 +210,7 @@ physical components `(xx,yy,zz,xy,xz,yz)` retain trace and both shear contractio
 Four pressure Hessian and ten velocity third-derivative channels preserve
 transverse motion at pressure nulls. Exact rigid/release limits reflect both
 tensor indices with `S M S`, `S=I-2nn^T`; finite walls reuse the original spectral
-coefficient, lossy surface-mode split and evanescent amplification bounds with
+coefficient, lossy surface-mode split, lossless pole prescription and evanescent amplification bounds with
 second/third derivative powers and Frobenius shear weights. Cached reflected
 and coherent total 4-by-6 transfers apply without allocation or integration;
 harmonic lines retain the original source clock. A receiver may lie on the wall,
