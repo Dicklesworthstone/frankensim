@@ -1373,6 +1373,16 @@ and does not replace the source's anisotropic domain or validate a material.
 G0/G3 checks in `tensor` and `tests/conformance.rs` exercise physical shear,
 hydrostatic strain, rotations, extreme representable scales and nonfinite input.
 
+Isotropic and orthotropic construction require finite positive strain bounds
+and representable stiffness. A positive isotropic Young's modulus cannot
+silently become zero shear stiffness through underflow. The existing compensated
+spherical/deviatoric isotropic stress owner, including its auxetic response,
+is retained; the constructor gate does not replace it with a dense matrix
+evaluation. Focused G0/G1 regressions cover domain and stiffness admission,
+nearly incompressible response and all six columns of the original consistent
+tangent. These remain small-strain laws; callers own strain admission, and
+no finite-rotation response or material-accuracy claim is implied.
+
 ## Integrated bulk conduction with an evolving source contact
 
 `ImplicitLayerLink::with_contact` composes the original

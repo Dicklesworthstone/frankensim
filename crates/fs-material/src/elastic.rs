@@ -43,7 +43,8 @@ impl IsotropicElastic {
     /// Construct with physical-bounds checking.
     ///
     /// # Errors
-    /// [`MaterialError::Parameters`] for E ≤ 0 or ν outside (−1, 0.5).
+    /// [`MaterialError::Parameters`] for E ≤ 0, ν outside (−1, 0.5), a
+    /// nonpositive/nonfinite strain bound, or unrepresentable stiffness.
     pub fn new(youngs: f64, poisson: f64, strain_limit: f64) -> Result<Self, MaterialError> {
         if !(youngs > 0.0 && youngs.is_finite()) {
             return Err(MaterialError::Parameters {
@@ -55,11 +56,24 @@ impl IsotropicElastic {
                 what: format!("nu = {poisson} outside (-1, 0.5)"),
             });
         }
-        Ok(IsotropicElastic {
+        validate_strain_limit(strain_limit)?;
+        let law = IsotropicElastic {
             youngs,
             poisson,
             strain_limit,
-        })
+        };
+        if law.lame().1 <= 0.0
+            || law
+                .stiffness()
+                .iter()
+                .flatten()
+                .any(|value| !value.is_finite())
+        {
+            return Err(MaterialError::Parameters {
+                what: "isotropic stiffness is not representable".to_string(),
+            });
+        }
+        Ok(law)
     }
 
     /// Lamé parameters (λ, μ).
@@ -87,6 +101,16 @@ impl IsotropicElastic {
             row[i] = 2.0 * mu; // tensor shear: σ_xy = 2μ ε_xy
         }
         c
+    }
+}
+
+fn validate_strain_limit(strain_limit: f64) -> Result<(), MaterialError> {
+    if strain_limit.is_finite() && strain_limit > 0.0 {
+        Ok(())
+    } else {
+        Err(MaterialError::Parameters {
+            what: "strain magnitude bound must be finite and positive".to_string(),
+        })
     }
 }
 
@@ -195,8 +219,9 @@ impl OrthotropicElastic {
     /// Construct with positivity and positive-definite compliance checks.
     ///
     /// # Errors
-    /// [`MaterialError::Parameters`] on non-positive moduli or an
-    /// indefinite compliance.
+    /// [`MaterialError::Parameters`] on non-positive moduli, a nonpositive/
+    /// nonfinite strain bound, an indefinite compliance, or unrepresentable
+    /// stiffness.
     pub fn new(
         e: [f64; 3],
         nu: [f64; 3],
@@ -211,6 +236,7 @@ impl OrthotropicElastic {
                 what: "all moduli must be positive".to_string(),
             });
         }
+        validate_strain_limit(strain_limit)?;
         let law = OrthotropicElastic {
             e,
             nu,
@@ -460,6 +486,80 @@ mod tests {
             (actual - expected).abs() <= tolerance * actual.abs().max(expected.abs()),
             "{actual:e} != {expected:e}"
         );
+    }
+
+    #[test]
+    fn g1_isotropic_deviatoric_strain_survives_near_incompressibility() {
+        let law = IsotropicElastic::new(1200.0, 0.5 - f64::EPSILON, 0.05).unwrap();
+        // Exactly trace-free normal strain, with all three tensor shears.
+        // Lambda is ~10^18 Pa, but the exact response contains only 2*mu.
+        let strain = [0.004, -0.002, -0.002, 0.001, -0.003, 0.002];
+        assert_eq!(crate::tensor::trace(&strain), 0.0);
+        for (stress, strain) in law.stress(&strain, &()).into_iter().zip(strain) {
+            close(stress, law.youngs * strain / (1.0 + law.poisson), 4e-15);
+        }
+    }
+
+    #[test]
+    fn g1_isotropic_direct_stress_has_the_original_consistent_tangent() {
+        let strain = [0.001, -0.0015, 0.00025, 0.002, -0.004, 0.003];
+        let delta = 1.0 / 1_048_576.0;
+        for poisson in [-0.8, 0.0, 0.3, 0.4999] {
+            let law = IsotropicElastic::new(1200.0, poisson, 0.05).unwrap();
+            let tangent = law.tangent(&strain, &());
+            for (actual, expected) in law
+                .stress(&strain, &())
+                .into_iter()
+                .zip(apply(&tangent, &strain))
+            {
+                close(actual, expected, 2e-12);
+            }
+            for column in 0..6 {
+                let mut above = strain;
+                let mut below = strain;
+                above[column] += delta;
+                below[column] -= delta;
+                let plus = law.stress(&above, &());
+                let minus = law.stress(&below, &());
+                for row in 0..6 {
+                    let derivative = (plus[row] - minus[row]) / (2.0 * delta);
+                    let expected = tangent[row][column];
+                    assert!(
+                        (derivative - expected).abs() <= 2e-10 * expected.abs().max(law.youngs),
+                        "nu={poisson}, ({row},{column}): {derivative:e} != {expected:e}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_elastic_laws_require_finite_positive_strain_domains() {
+        for limit in [0.0, -0.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(IsotropicElastic::new(1200.0, 0.3, limit).is_err());
+            assert!(OrthotropicElastic::new([1200.0; 3], [0.3; 3], [460.0; 3], limit).is_err());
+        }
+        // A caller may deliberately declare a wider domain. Admission must
+        // not invent a universal strain ceiling or forbid positive tiny bounds.
+        for limit in [f64::MIN_POSITIVE, 0.01, 1.0, f64::MAX] {
+            assert!(IsotropicElastic::new(1200.0, 0.3, limit).is_ok());
+            assert!(OrthotropicElastic::new([1200.0; 3], [0.3; 3], [460.0; 3], limit).is_ok());
+        }
+    }
+
+    #[test]
+    fn g0_isotropic_admission_requires_representable_stiffness() {
+        // E itself is finite, but the normal stiffness would overflow.
+        assert!(IsotropicElastic::new(f64::MAX, 0.25, 0.05).is_err());
+        assert!(IsotropicElastic::new(f64::MAX, -0.8, 0.05).is_err());
+        // Positive E must not silently become a zero shear modulus.
+        assert!(IsotropicElastic::new(f64::from_bits(1), 0.3, 0.05).is_err());
+        assert!(IsotropicElastic::new(f64::MAX, 0.0, 0.05).is_ok());
+        for scale in [1e-240, 1.0, 1e240] {
+            for poisson in [-0.8, 0.0, 0.3, 0.4999] {
+                assert!(IsotropicElastic::new(scale, poisson, 0.05).is_ok());
+            }
+        }
     }
 
     #[test]

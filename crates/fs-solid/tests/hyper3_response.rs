@@ -292,6 +292,47 @@ fn anisotropic_spatial_stress_is_objective_and_preserves_current_area_traction()
     });
 }
 
+#[test]
+fn native_deformation_retains_summed_sub_ulp_diagonal_strain() {
+    with_cx(|_, cx| {
+        // All three nonanchor shape gradients have x component one. Each
+        // x-displacement contribution rounds away if added separately to I,
+        // although their sum produces a representable stretch and stress.
+        let nodes = [
+            [0.0, 0.0, 0.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let material = nh(1.0, 0.0, 2.0);
+        let p = problem(&nodes, &TETS[..1], HyperelasticLawField::Uniform(&material));
+        let term = 0.5 * f64::EPSILON;
+        let u = [
+            0.0, 0.0, 0.0, term, 0.0, 0.0, term, 0.0, 0.0, term, 0.0, 0.0,
+        ];
+        let prepared = p.prepare(cx).unwrap();
+        let response = prepared.element_responses(&u, cx).unwrap().remove(0);
+        let stretch = 1.0 + 3.0 * term;
+        assert!(stretch > 1.0);
+        assert_eq!(
+            response.deformation_gradient,
+            [stretch, term, term, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        );
+        let extension = stretch - 1.0;
+        let expected_strain = extension * (1.0 + 0.5 * extension);
+        assert_eq!(response.green_lagrange_strain[0], expected_strain);
+
+        // Independent Neo-Hookean P00 = mu*(F00 - F^-T_00), lambda = 0.
+        // Use a relative gate: an ordinary unit-scale tolerance would pass
+        // the original zero-strain/zero-axial-stress defect.
+        let expected_stress = stretch - stretch.recip();
+        assert!((response.first_piola_pa[0] / expected_stress - 1.0).abs() < 16.0 * f64::EPSILON);
+        let internal = prepared.internal_force(&u, cx).unwrap();
+        assert!((internal[3] / (expected_stress / 6.0) - 1.0).abs() < 16.0 * f64::EPSILON);
+        assert_eq!(response, p.element_responses(&u, cx).unwrap().remove(0));
+    });
+}
+
 struct ReferenceDilation {
     law: Hyperelastic,
     stretch: f64,

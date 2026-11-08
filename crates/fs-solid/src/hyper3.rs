@@ -599,7 +599,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         element: &Element,
         mut displacement_at_node: impl FnMut(usize) -> [f64; 3],
     ) -> [f64; 9] {
-        let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let mut f = [0.0; 9];
         let first = displacement_at_node(element.nodes[0]);
         // Partition of unity removes the common displacement. Form relative
         // motion first so a large rigid translation cannot create strain.
@@ -611,6 +611,12 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     f[3 * i + j] = ui.mul_add(element.gradients[a][j], f[3 * i + j]);
                 }
             }
+        }
+        // Sum Grad(u) before adding I. Individually sub-ulp diagonal terms
+        // can have a representable sum; accumulating into unity erases them
+        // before the original material ever sees the deformation.
+        for i in 0..3 {
+            f[3 * i + i] += 1.0;
         }
         f
     }
