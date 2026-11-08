@@ -1,15 +1,17 @@
-//! Full-stick vector tractions from the original mixed-mode JKR equilibrium.
+//! Full-stick vector tractions from original mixed-mode and elastic torsion JKR.
 //!
 //! Mindlin (1949), Compliance of Elastic Bodies in Contact, equation 76:
 //! q_i(r) = T_i / (2 pi a sqrt(a*a-r*r)). This is the SAME circular,
 //! elastically decoupled, full-stick model used by SourceJkrMixedMode. Its
 //! singular shear field has the tensile flat-punch radial centroid, so force,
 //! first moments and work are integrated exactly without rim sampling.
+//! Fresh elastic torsion adds q_phi=-4 G_bar phi r/(pi sqrt(a*a-r*r)),
+//! retaining its original resisting torque and zero net tangential force.
 //!
 //! Ordinary JKR/Maugis profiles have zero shear. The original normal-only APIs
 //! remain unchanged; these vector operations are an explicit additional choice.
-//! Partial slip, torsional compliance and finite-body contact equilibrium are
-//! separate physical owners. A prescribed traction does not establish them.
+//! Plastic torsion and partial-slip fields cannot be inferred from a lumped
+//! moment history. A prescribed traction does not solve finite-body contact.
 
 use super::super::{AdhesiveTractionError, AdhesiveTractionProfile};
 use super::{
@@ -17,9 +19,10 @@ use super::{
     RadialMomentBudget, SectorAdhesiveTraction, SectorTractionError, angles, check_budget,
     check_sector, edge_root, finite, poll, sector_geometry, sector_with_geometry,
 };
-use core::f64::consts::TAU;
+use core::f64::consts::{PI, TAU};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
+use fs_math::det;
 
 /// A complete local traction sector. Local component order is x shear, y
 /// shear, normal; moments use position relative to the original disk centre.
@@ -105,6 +108,8 @@ pub struct VectorPolarRingScratch {
     normal: PolarRingScratch,
     tangential_force_n: [f64; 2],
     tangential_radial_moment_n_m: [f64; 2],
+    torsional_radial_force_n: f64,
+    torsional_radial_moment_n_m: f64,
 }
 
 /// Original source identities and all signed resultant residuals.
@@ -119,7 +124,27 @@ pub struct VectorPolarTractionTransfer {
 impl AdhesiveTractionProfile {
     /// Pointwise local traction [T_x,T_y,N], Pa. At a JKR edge use integrated
     /// sectors instead: both ideal tensile and full-stick shear fields diverge.
+    /// A nonzero torsional field also needs angle; use `traction_polar_pa`.
     pub fn traction_pa(&self, radius_m: f64) -> Result<[f64; 3], AdhesiveTractionError> {
+        if self.torsional_moment_n_m() != 0.0 {
+            return Err(AdhesiveTractionError::Invalid(
+                "torsional traction requires a polar angle",
+            ));
+        }
+        self.traction_polar_pa(radius_m, 0.0)
+    }
+
+    /// Pointwise local vector traction at radius and angle in [0,2 pi].
+    /// The tangent e_phi=(-sin(angle),cos(angle)) gives a resisting torque
+    /// with the same sign as the original torsion source.
+    pub fn traction_polar_pa(
+        &self,
+        radius_m: f64,
+        angle_rad: f64,
+    ) -> Result<[f64; 3], AdhesiveTractionError> {
+        if !angle_rad.is_finite() || !(0.0..=TAU).contains(&angle_rad) {
+            return Err(AdhesiveTractionError::Invalid("polar angle in [0,2pi]"));
+        }
         let normal = self.pressure_pa(radius_m)?;
         let mut tangential = [0.0; 2];
         if radius_m < self.contact_radius_m() && self.tangential_force_n().iter().any(|&q| q != 0.0)
@@ -129,6 +154,14 @@ impl AdhesiveTractionProfile {
             for (out, force) in tangential.iter_mut().zip(self.tangential_force_n()) {
                 *out = finite(((force / a) / TAU) / (a * root))?;
             }
+        }
+        if radius_m < self.contact_radius_m() && self.torsional_moment_n_m() != 0.0 {
+            let a = self.contact_radius_m();
+            let coefficient = (((self.torsional_moment_n_m() / a) / a) / a) * (0.75 / PI);
+            let azimuthal = finite(coefficient * ((radius_m / a) / edge_root(a, radius_m)))?;
+            let (sin, cos) = det::sin_cos(angle_rad);
+            tangential[0] = finite(tangential[0] - azimuthal * sin)?;
+            tangential[1] = finite(tangential[1] + azimuthal * cos)?;
         }
         Ok([tangential[0], tangential[1], normal])
     }
@@ -237,6 +270,8 @@ impl AdhesiveTractionProfile {
             self.tangential_force_n()[1],
             self.normal_force_n(),
         ];
+        let half_torque = 0.5 * self.torsional_moment_n_m();
+        let original_moments = [[0.0, -half_torque], [half_torque, 0.0], [0.0; 2]];
         let mut force_residual_n = [0.0; 3];
         let mut first_moment_residual_n_m = [[0.0; 2]; 3];
         let mut force_norm = 0.0_f64;
@@ -245,7 +280,8 @@ impl AdhesiveTractionProfile {
             force_residual_n[i] = finite((forces[i] - Dd::from_f64(original[i])).to_f64())?;
             force_norm = force_norm.hypot(force_residual_n[i]);
             for j in 0..2 {
-                first_moment_residual_n_m[i][j] = finite(moments[i][j].to_f64())?;
+                first_moment_residual_n_m[i][j] =
+                    finite((moments[i][j] - Dd::from_f64(original_moments[i][j])).to_f64())?;
                 moment_norm = moment_norm.hypot(first_moment_residual_n_m[i][j]);
             }
         }
@@ -308,7 +344,10 @@ impl AdhesiveTractionProfile {
         let a = self.contact_radius_m();
         let lo = inner.min(a);
         let hi = outer.min(a);
-        if hi > lo && self.tangential_force_n().iter().any(|&q| q != 0.0) {
+        if hi > lo
+            && (self.tangential_force_n().iter().any(|&q| q != 0.0)
+                || self.torsional_moment_n_m() != 0.0)
+        {
             // sqrt(1-lo²/a²)-sqrt(1-hi²/a²), factored for thin rings.
             let weight = finite(
                 ((hi - lo) / a) * ((hi / a + lo / a) / (edge_root(a, lo) + edge_root(a, hi))),
@@ -317,6 +356,24 @@ impl AdhesiveTractionProfile {
                 radial.tangential_force_n[i] = finite(self.tangential_force_n()[i] * weight)?;
                 radial.tangential_radial_moment_n_m[i] =
                     finite(radial.tangential_force_n[i] * (normal.tensile_centroid_m / TAU))?;
+            }
+            let torque = self.torsional_moment_n_m();
+            if torque != 0.0 {
+                // C=3 M/(4 pi a³). A=C∫r²/sqrt(a²-r²)dr uses the
+                // original singular-field centroid. B=C∫r³/sqrt(a²-r²)dr
+                // is a positive polynomial in the factored root difference,
+                // so neither thin edge rings nor small central disks cancel.
+                if need_moments {
+                    radial.torsional_radial_force_n = finite(
+                        ((torque / a) / TAU) * (1.5 * weight * (normal.tensile_centroid_m / a)),
+                    )?;
+                }
+                let s0 = lo / a;
+                let s1 = hi / a;
+                radial.torsional_radial_moment_n_m = finite(
+                    (torque / TAU)
+                        * (0.75 * weight * (s0 * s0 + s1 * s1) + 0.25 * weight * weight * weight),
+                )?;
             }
         }
         Ok(radial)
@@ -329,13 +386,52 @@ fn vector_sector_load(
     end: f64,
 ) -> SectorAdhesiveVectorTraction {
     let (fraction, angular) = sector_geometry(start, end);
-    SectorAdhesiveVectorTraction {
+    let mut result = SectorAdhesiveVectorTraction {
         normal: sector_with_geometry(radial.normal, fraction, angular),
         tangential_force_n: radial.tangential_force_n.map(|q| q * fraction),
         tangential_first_moment_n_m: radial
             .tangential_radial_moment_n_m
             .map(|q| [q * angular[0], q * angular[1]]),
+    };
+    if radial.torsional_radial_moment_n_m != 0.0 || radial.torsional_radial_force_n != 0.0 {
+        let a = radial.torsional_radial_force_n;
+        let b = radial.torsional_radial_moment_n_m;
+        result.tangential_force_n[0] -= a * angular[1];
+        result.tangential_force_n[1] += a * angular[0];
+        let [cos2, sin2, sin_cos] = angular_second_moments(start, end);
+        result.tangential_first_moment_n_m[0][0] -= b * sin_cos;
+        result.tangential_first_moment_n_m[0][1] -= b * sin2;
+        result.tangential_first_moment_n_m[1][0] += b * cos2;
+        result.tangential_first_moment_n_m[1][1] += b * sin_cos;
     }
+    result
+}
+
+// ∫[cos²(theta),sin²(theta),sin(theta)cos(theta)]dtheta. The narrow-axis
+// contribution (width-sin(width))/2 is evaluated without cancellation.
+fn angular_second_moments(start: f64, end: f64) -> [f64; 3] {
+    let width = end - start;
+    if width == TAU {
+        return [PI, PI, 0.0];
+    }
+    let sin_width = det::sin(width);
+    let small = if width < 0.1 {
+        let w2 = width * width;
+        width
+            * w2
+            * (1.0 / 12.0
+                + w2 * (-1.0 / 240.0
+                    + w2 * (1.0 / 10080.0 + w2 * (-1.0 / 725760.0 + w2 / 79833600.0))))
+    } else {
+        0.5 * (width - sin_width)
+    };
+    let large = width - small;
+    let (sin, cos) = det::sin_cos(0.5 * start + 0.5 * end);
+    [
+        cos * cos * large + sin * sin * small,
+        sin * sin * large + cos * cos * small,
+        sin * cos * sin_width,
+    ]
 }
 
 fn check_vector_sector(cell: SectorAdhesiveVectorTraction) -> Result<(), SectorTractionError> {

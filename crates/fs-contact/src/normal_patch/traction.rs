@@ -19,6 +19,7 @@ use super::{
     adhesive::{
         JkrError, SourceJkrSphereContact,
         mixed_mode::{JkrMixedModeError, JkrMixedModeResponse, SourceJkrMixedMode},
+        torsion::{SourceJkrTorsionContact, SourceJkrTorsionError},
     },
     maugis::{
         SourceMaugisSphereContact,
@@ -40,6 +41,8 @@ pub enum AdhesiveTractionError {
     Jkr(JkrError),
     /// The original full-stick mixed-mode source rejected the selected state.
     MixedMode(JkrMixedModeError),
+    /// The original bonded torsion source rejected the elastic path.
+    Torsion(SourceJkrTorsionError),
     /// The original finite-zone source rejected the requested branch or state.
     Maugis(MaugisContinuationError),
     /// An equilibrium belongs to another original material/geometry owner.
@@ -89,6 +92,9 @@ pub struct AdhesiveTractionProfile {
     // Canonical full-stick shear effort from the same mixed-mode evaluation.
     // Normal JKR and Maugis owners retain exactly zero here.
     tangential_force_n: [f64; 2],
+    // Resisting moment of the original fresh elastic torsion path, about the
+    // right-handed local normal. A scalar plastic history supplies no field.
+    torsional_moment_n_m: f64,
     distribution: Distribution,
 }
 
@@ -201,6 +207,7 @@ impl AdhesiveTractionProfile {
             interaction_radius_m: a,
             normal_force_n: response.normal_force_n,
             tangential_force_n: response.tangential_force_n,
+            torsional_moment_n_m: 0.0,
             distribution: Distribution::Jkr {
                 hertz_peak_pa,
                 tensile_pa,
@@ -234,11 +241,51 @@ impl AdhesiveTractionProfile {
             interaction_radius_m: a,
             normal_force_n: response.normal_force_n,
             tangential_force_n: [0.0; 2],
+            torsional_moment_n_m: 0.0,
             distribution: Distribution::Jkr {
                 hertz_peak_pa,
                 tensile_pa,
             },
         })
+    }
+
+    /// Full-stick torsion reached directly from the original untwisted state.
+    /// The signed angle is receiver-minus-counterpart rotation about the local
+    /// right-handed normal; positive angle produces a negative resisting moment.
+    ///
+    /// The original source fixes the JKR area and screens omitted mode-III
+    /// release. Its elastic field is q_phi=-4 G_bar phi r/(pi sqrt(a²-r²)).
+    /// Angles beyond its critical twist are refused. This deliberately accepts
+    /// no evolved state: unloading a lumped plastic history does not reconstruct
+    /// the unknown local slip memory. Normal-only queries remain unchanged.
+    pub fn jkr_torsion_elastic(
+        source: &SourceJkrTorsionContact,
+        twist_angle_rad: f64,
+    ) -> Result<Self, AdhesiveTractionError> {
+        if !twist_angle_rad.is_finite()
+            || twist_angle_rad.abs() > source.law().parameters().critical_twist_angle_rad
+        {
+            return Err(AdhesiveTractionError::Invalid(
+                "fresh full-stick twist within the original elastic threshold",
+            ));
+        }
+        let step = source
+            .advance(&source.initial_state(), twist_angle_rad)
+            .map_err(AdhesiveTractionError::Torsion)?;
+        if step.torsion().plastic_twist_increment_rad != 0.0
+            || step.torsion().irreversible_loss_j != 0.0
+        {
+            return Err(AdhesiveTractionError::Invalid(
+                "a lumped plastic twist does not determine a local traction field",
+            ));
+        }
+        let mut profile = Self::jkr_attached(
+            source.normal_source(),
+            source.normal_response().indentation_m,
+        )?;
+        profile.model_identity = source.identity();
+        profile.torsional_moment_n_m = step.torsion().endpoint_moment_n_m;
+        Ok(profile)
     }
 
     /// Retain an original immutable Maugis equilibrium. Noncontact attraction
@@ -268,6 +315,7 @@ impl AdhesiveTractionProfile {
             interaction_radius_m: equilibrium.cohesive_radius_m(),
             normal_force_n: equilibrium.normal_force_n(),
             tangential_force_n: [0.0; 2],
+            torsional_moment_n_m: 0.0,
             distribution: Distribution::Maugis {
                 hertz_peak_pa,
                 stress_pa,
@@ -311,6 +359,12 @@ impl AdhesiveTractionProfile {
     #[must_use]
     pub const fn tangential_force_n(&self) -> [f64; 2] {
         self.tangential_force_n
+    }
+    /// Original resisting torque about the right-handed local normal, N m.
+    /// Zero except for an explicitly selected fresh elastic torsion profile.
+    #[must_use]
+    pub const fn torsional_moment_n_m(&self) -> f64 {
+        self.torsional_moment_n_m
     }
 
     /// Pointwise continuum pressure, positive in compression. At an ideal JKR

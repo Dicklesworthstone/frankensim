@@ -1,9 +1,9 @@
 //! Original JKR/Maugis pressure on actual exterior P1 tetrahedral faces.
 //! Mixed-mode JKR profiles retain their actual shear-reduced footprint and
 //! normal opening. The default projects normal pressure. Explicit
-//! `with_full_stick_tractions` also projects the original mixed-mode tangential
-//! field and its work on the same physical P1 traces. The original source owns
-//! the full-stick constitutive state; prescribing its field is not an implicit
+//! `with_full_stick_tractions` also projects the original mixed-mode shear or
+//! fresh elastic torsion field and its work on the same physical P1 traces.
+//! The original source owns the full-stick constitutive state; prescribing its field is not an implicit
 //! finite-body contact or partial-slip solve.
 //!
 //! Each polar cell belongs wholly to one coplanar exterior face. Its three
@@ -301,8 +301,9 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
     /// subsequent assembly and native transient step. Local force order is
     /// [x tangent, y tangent, inward normal] in this patch's fixed frame.
     ///
-    /// The original source supplies each tangential resultant; its singular
-    /// flat-punch traction is integrated over the existing physical traces.
+    /// The original source supplies each tangential resultant and resisting
+    /// twist moment; its singular traction is integrated over the existing
+    /// physical traces. The moment is about this frame's inward normal.
     /// Setup allocates bounded scratch once. Normal-only profiles contribute
     /// zero tangential load. This does not infer friction or partial slip.
     #[must_use]
@@ -424,22 +425,26 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
             }
         }
         let shear = if self.vector.is_some() { profile.tangential_force_n() } else { [0.0; 2] };
+        let torque = if self.vector.is_some() { profile.torsional_moment_n_m() } else { 0.0 };
         let residual = std::array::from_fn(|i| {
             let expected = product(profile.normal_force_n(), self.normal[i])
                 + product(shear[0], self.frame.x_axis[i])
                 + product(shear[1], self.frame.y_axis[i]);
             (force[i] - expected).to_f64()
         });
+        let moment_residual = std::array::from_fn(|i| {
+            (moment[i] - product(torque, self.normal[i])).to_f64()
+        });
         let moment = moment.map(Dd::to_f64);
-        for value in residual.into_iter().chain(moment) {
+        for value in residual.into_iter().chain(moment).chain(moment_residual) {
             finite(value)?;
         }
         if norm(residual) > self.controls.projection_force_tolerance_n
-            || norm(moment) > self.controls.projection_moment_tolerance_n_m
+            || norm(moment_residual) > self.controls.projection_moment_tolerance_n_m
         {
             return Err(AdhesiveP1Error3::Projection {
                 force_residual_n: residual,
-                moment_residual_n_m: moment,
+                moment_residual_n_m: moment_residual,
             });
         }
         let transfer = AdhesiveP1Transfer3 {
@@ -448,7 +453,7 @@ impl<'g, 'm> AdhesiveP1Patch3<'g, 'm> {
             force_world_n: force.map(Dd::to_f64),
             moment_about_centre_n_m: moment,
             force_residual_n: residual,
-            moment_residual_n_m: moment,
+            moment_residual_n_m: moment_residual,
         };
         poll(gate, cx)?;
         Ok((

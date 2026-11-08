@@ -3773,12 +3773,33 @@ all translation and gradient components, and the wrench includes each sector's
 in-plane shear couple. No moment is divided by a possibly zero normal force.
 Original source identity, authority, applicability and control-dependent peeling
 admission persist. This exports the selected reversible circular full-stick
-model; partial slip, torsional compliance, finite-body equilibrium and a new
-fracture law are outside this transfer.
+model; partial slip, finite-body equilibrium and a new fracture law are outside
+this transfer. Torsional compliance remains with the separate original source.
+
+`AdhesiveTractionProfile::jkr_torsion_elastic` exports the original
+`SourceJkrTorsionContact` response only on a fresh untwisted-to-elastic path.
+It refuses angles beyond the source's critical twist and any plastic increment
+or loss; no evolved lumped history is accepted as a local slip field. The
+fixed-area source's radius, identity, authority and mode-III release screen
+remain binding. The circular elastic field is
+`q_phi=-4*G_bar*phi*r/(pi*sqrt(a*a-r*r))`, whose resultant torque is the original
+resisting moment `M=-16*G_bar*a^3*phi/3` about the local normal. Polar point
+queries require angle; the radius-only vector query refuses nonzero torsion.
+Normal-only queries retain the same original JKR pressure.
+
+Torsional force and first moments integrate the edge singularity analytically,
+using the original flat-punch centroid and a positive polynomial in the
+factored edge-root difference. Stable angular second moments retain narrow
+sector work. Complete-grid checks recover zero net shear and the nonzero
+canonical first-moment pair `m_yx=M/2`, `m_xy=-M/2`. This adds no quadrature,
+per-sector allocation, local plastic-slip approximation or new contact solve.
 
 The vector regressions specify dimensional Mindlin fields and quarter-disk
 moments, rigid and general affine work, complete-grid resultants, one-ULP edge
 rings, tangential rotation, zero-shear and finite-gap limits, and atomic refusal.
+Torsion regressions cover the independent circular field and quarter-disk
+loads, fresh elastic admission, one-ULP edge rings, narrow sectors and central
+disks, original source torque, and independent `M*omega` affine power.
 
 ## Source-owned orthotropic sliding on actual Hertz footprints
 

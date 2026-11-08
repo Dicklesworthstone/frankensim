@@ -1,5 +1,6 @@
 //! Full-stick adhesive vector fields on the original structural traces.
 use super::*;
+use fs_contact::normal_patch::adhesive::torsion::{JkrTorsionControls, SourceJkrTorsionContact};
 
 fn mixed_source() -> SourceJkrMixedMode {
     SourceJkrMixedMode::new(
@@ -340,5 +341,250 @@ fn prescribed_tangential_motion_accounts_for_adhesion_work_on_supported_nodes() 
         assert_eq!(step.other_external_work_j, 0.0);
         assert!(step.work_residual_j.abs() <= step.work_tolerance_j);
         assert_eq!(step.quadrature_work_estimate_j, 0.0);
+    });
+}
+
+fn torsion_profile() -> (SourceJkrTorsionContact, AdhesiveTractionProfile) {
+    let normal = sources::jkr();
+    let indentation = normal.evaluate_force_controlled(0.0).unwrap().indentation_m;
+    let source = SourceJkrTorsionContact::new(
+        normal,
+        indentation,
+        JkrTorsionControls {
+            critical_twist_angle_rad: 1e-5,
+            maximum_critical_twist_angle_rad: 0.01,
+            maximum_mode_iii_energy_release_to_adhesion: 0.01,
+        },
+    )
+    .unwrap();
+    let profile = AdhesiveTractionProfile::jkr_torsion_elastic(&source, 4e-6).unwrap();
+    (source, profile)
+}
+
+fn torsion_nodes(profile: &AdhesiveTractionProfile, moment: f64, l: f64) -> [[f64; 3]; 6] {
+    let mut result = [[0.0; 3]; 6];
+    for (dof, force) in jkr_nodal(profile, l) {
+        result[dof / 3][dof % 3] = force;
+    }
+    // On each original edge N=max(+/-x,0)/L or max(+/-y,0)/L.
+    // Integrating q_phi times N gives four forces of magnitude |M|/(4L),
+    // with zero centre load and world couple -M*z because local normal=-z.
+    result[1][1] = -moment / (4.0 * l);
+    result[2][0] = moment / (4.0 * l);
+    result[3][1] = moment / (4.0 * l);
+    result[4][0] = -moment / (4.0 * l);
+    result
+}
+
+#[test]
+fn elastic_torsion_projects_original_nodal_couple_and_drives_native_deformation() {
+    let (source, profile) = torsion_profile();
+    let a = profile.contact_radius_m();
+    let l = 4.0 * a;
+    let moment = -(16.0 / 3.0) * source.law().reduced_shear_modulus_pa() * a.powi(3) * 4e-6;
+    for rotated in [false, true] {
+        let nodes = nodes(l).map(|v| rotate(v, rotated));
+        let material = material();
+        let problem = TetLinearElasticProblem {
+            nodes_m: &nodes,
+            tetrahedra: &TETS,
+            materials: TetMaterialField::Uniform(&material),
+            fixed_dofs: &[],
+            budget: Default::default(),
+        };
+        support::with_cx(|cx| {
+            let geometry = TetLoadGeometry3::new(&nodes, &TETS, problem.budget, 16, cx).unwrap();
+            let other = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+            let base = frame();
+            let selected_frame = AdhesiveP1Frame3 {
+                centre_m: [0.0; 3],
+                x_axis: rotate(base.x_axis, rotated),
+                y_axis: rotate(base.y_axis, rotated),
+            };
+            let make = || {
+                AdhesiveP1Patch3::new(
+                    &geometry,
+                    selected_frame,
+                    grid(&geometry, vec![0.0, 0.37 * a, a]),
+                    controls(&profile),
+                    &gate(),
+                    cx,
+                )
+                .unwrap()
+            };
+            let (_, normal_only) = make().assemble(&profile, &other, &gate(), cx).unwrap();
+            assert!(normal_only.vector_source.is_none());
+            for m in normal_only.moment_about_centre_n_m {
+                close(m, 0.0, 1e-18);
+            }
+            let mut patch = make().with_full_stick_tractions();
+            let (load, transfer) = patch.assemble(&profile, &other, &gate(), cx).unwrap();
+            let expected = torsion_nodes(&profile, moment, l).map(|v| rotate(v, rotated));
+            let mut actual = [[0.0; 3]; 6];
+            for &(dof, force) in load.nodal_forces_n() {
+                actual[dof / 3][dof % 3] = force;
+            }
+            for (actual, expected) in actual
+                .into_iter()
+                .flatten()
+                .zip(expected.into_iter().flatten())
+            {
+                close(actual, expected, 1e-17);
+            }
+            for (actual, expected) in transfer
+                .moment_about_centre_n_m
+                .into_iter()
+                .zip(rotate([0.0, 0.0, -moment], rotated))
+            {
+                close(actual, expected, 1e-18);
+            }
+            for residual in transfer.moment_residual_n_m {
+                close(residual, 0.0, 1e-18);
+            }
+            assert_eq!(transfer.source.model_identity, source.identity());
+            assert!(transfer.vector_source.is_some());
+
+            let reference_load = geometry
+                .assemble(&[], VolumeLoad3::None, &sparse(&expected), cx)
+                .unwrap();
+            let mut native = patch
+                .begin_transient(
+                    &profile,
+                    &other,
+                    &problem,
+                    None,
+                    0.0,
+                    &[[0.0; 3]; 6],
+                    &[[0.0; 3]; 6],
+                    native_config(),
+                    &gate(),
+                    cx,
+                )
+                .unwrap();
+            let mut reference = reference_load
+                .begin_transient(
+                    &problem,
+                    None,
+                    0.0,
+                    &[[0.0; 3]; 6],
+                    &[[0.0; 3]; 6],
+                    native_config(),
+                    cx,
+                )
+                .unwrap();
+            let step = native
+                .advance(&profile, &other, 2e-7, &gate(), cx)
+                .unwrap()
+                .clone();
+            let expected_step = reference.advance(&reference_load, 2e-7, cx).unwrap();
+            for (&actual, &expected) in native
+                .native()
+                .state()
+                .displacement
+                .iter()
+                .zip(&reference.state().displacement)
+            {
+                close(actual, expected, 1e-20);
+            }
+            close(
+                step.traction_work_on_solid_j,
+                expected_step.mechanical_work_j,
+                1e-24,
+            );
+            close(
+                step.spatial_traction_work_j,
+                expected_step.mechanical_work_j,
+                1e-24,
+            );
+            assert!(native.native().state().strain_energy_j > 0.0);
+            // A source normal pressure alone cannot drive this tangential mode.
+            let tangential_dof = if rotated { 5 } else { 4 };
+            assert_ne!(native.native().state().displacement[tangential_dof], 0.0);
+        });
+    }
+}
+
+#[test]
+fn prescribed_p1_rotation_receives_original_torsional_work() {
+    let (source, profile) = torsion_profile();
+    let a = profile.contact_radius_m();
+    let nodes = nodes(4.0 * a);
+    let material = material();
+    let fixed: Vec<_> = (0..18).collect();
+    let problem = TetLinearElasticProblem {
+        nodes_m: &nodes,
+        tetrahedra: &TETS,
+        materials: TetMaterialField::Uniform(&material),
+        fixed_dofs: &fixed,
+        budget: Default::default(),
+    };
+    support::with_cx(|cx| {
+        let geometry = TetLoadGeometry3::new(&nodes, &TETS, problem.budget, 16, cx).unwrap();
+        let other = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        let patch = AdhesiveP1Patch3::new(
+            &geometry,
+            frame(),
+            grid(&geometry, vec![0.0, a]),
+            controls(&profile),
+            &gate(),
+            cx,
+        )
+        .unwrap()
+        .with_full_stick_tractions();
+        let mut native = patch
+            .begin_transient_with_supports(
+                &profile,
+                &other,
+                &problem,
+                None,
+                0.0,
+                &[[0.0; 3]; 6],
+                &[[0.0; 3]; 6],
+                &[[0.0; 3]; 6],
+                native_config(),
+                &gate(),
+                cx,
+            )
+            .unwrap();
+        let alpha = 4e6;
+        let acceleration: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .flat_map(|(node, p)| [(3 * node, alpha * p[1]), (3 * node + 1, -alpha * p[0])])
+            .collect();
+        let h = 2e-7;
+        let step = native
+            .advance_with_supports(
+                &profile,
+                &other,
+                AdhesiveP1SupportEndpoint3::Acceleration(&acceleration),
+                h,
+                &gate(),
+                cx,
+            )
+            .unwrap();
+        // The fixed traction performs M*delta_phi work on a rigid affine
+        // rotation. Native Newmark displacement is h²*alpha/4 from rest.
+        let moment = -(16.0 / 3.0) * source.law().reduced_shear_modulus_pa() * a.powi(3) * 4e-6;
+        let expected = moment * (0.25 * h * h * alpha);
+        assert!(expected < 0.0);
+        close(
+            step.traction_work_on_solid_j,
+            expected,
+            expected.abs() * 1e-12,
+        );
+        close(
+            step.spatial_traction_work_j,
+            expected,
+            expected.abs() * 1e-12,
+        );
+        close(
+            step.native.mechanical_work_j,
+            expected,
+            expected.abs() * 1e-12,
+        );
+        assert!(step.work_residual_j.abs() <= step.work_tolerance_j);
+        assert_eq!(step.quadrature_work_estimate_j, 0.0);
+        assert_eq!(step.other_external_work_j, 0.0);
     });
 }

@@ -12073,6 +12073,13 @@ and inward normal. Exact sector force and first moments supply every nodal
 component; singular edge tractions are integrated rather than sampled.
 Normal-only projection remains the default.
 
+The same explicit vector path accepts fresh elastic torsion profiles from the
+original `SourceJkrTorsionContact`. Its azimuthal traction projects through the
+same affine barycentric functions; original signed torque acts about the
+declared inward normal. Projection gates compare the actual represented nodal
+moment with this original nonzero couple. No force-normalized application
+point, plastic-history field or additional mechanical solver is introduced.
+
 The native transient owner retains the selected vector endpoint atomically,
 including receiver refusal and supported-node motion. Its independent spatial
 work reconstructs all three affine displacement components from the original
@@ -12086,6 +12093,9 @@ outside this explicit prescribed-traction extension.
 The focused vector regressions specify independent closed-form nodal forces,
 rotated-frame wrenches, actual Newmark motion under changing shear direction,
 atomic receiver retry and tangential adhesion work on prescribed supports.
+Elastic torsion cases independently recover four edge forces of magnitude
+`|M|/(4L)`, rotated source couples, native Newmark motion against independently
+assembled loads, and signed `M*delta_phi` work on actual P1 support rotation.
 
 ## Full original-quadrature harmonic material fields
 

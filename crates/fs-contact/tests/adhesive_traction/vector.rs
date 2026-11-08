@@ -1,6 +1,7 @@
 //! Full-stick shear distribution and work on the original peeled JKR disk.
 use super::*;
 use core::f64::consts::TAU;
+use fs_contact::normal_patch::adhesive::torsion::{JkrTorsionControls, SourceJkrTorsionContact};
 use fs_contact::normal_patch::traction::sectors::{
     PolarTransferBudget, RadialMomentBudget, SectorTractionError,
     vector::{SectorAdhesiveVectorTraction, VectorPolarRingScratch},
@@ -306,4 +307,210 @@ fn vector_partition_cancellation_and_original_source_refusals_are_atomic() {
             .is_err()
     );
     assert!(profile.traction_pa(f64::NAN).is_err());
+}
+
+fn elastic_torsion() -> (SourceJkrTorsionContact, f64, AdhesiveTractionProfile) {
+    let normal = jkr();
+    let indentation = normal.evaluate_force_controlled(0.0).unwrap().indentation_m;
+    let source = SourceJkrTorsionContact::new(
+        normal,
+        indentation,
+        JkrTorsionControls {
+            critical_twist_angle_rad: 1e-5,
+            maximum_critical_twist_angle_rad: 0.01,
+            maximum_mode_iii_energy_release_to_adhesion: 0.01,
+        },
+    )
+    .unwrap();
+    let angle = 4e-6;
+    let profile = AdhesiveTractionProfile::jkr_torsion_elastic(&source, angle).unwrap();
+    (source, angle, profile)
+}
+
+#[test]
+fn fresh_elastic_torsion_field_retains_original_area_sign_and_refuses_plastic_profiles() {
+    let (source, angle, profile) = elastic_torsion();
+    let a = source.normal_response().contact_radius_m;
+    let g = source.law().reduced_shear_modulus_pa();
+    let moment = -(16.0 / 3.0) * g * a.powi(3) * angle;
+    close(profile.torsional_moment_n_m(), moment, moment.abs(), 2e-14);
+    assert_eq!(profile.contact_radius_m(), a);
+    assert_eq!(profile.model_identity(), source.identity());
+    assert_eq!(
+        profile.normal_state_identity(),
+        source.normal_source().normal_state().identity()
+    );
+    assert_eq!(profile.tangential_force_n(), [0.0; 2]);
+    assert_eq!(profile.authority(), InputAuthority::SyntheticFixture);
+    let normal = AdhesiveTractionProfile::jkr_attached(
+        source.normal_source(),
+        source.normal_response().indentation_m,
+    )
+    .unwrap();
+    for s in [0.0_f64, 0.25, 0.8, 0.999] {
+        let azimuthal = -4.0 * g * angle * s / (PI * (1.0 - s * s).sqrt());
+        for theta in [0.0_f64, 0.7, PI / 2.0, 4.3] {
+            let t = profile.traction_polar_pa(s * a, theta).unwrap();
+            close(t[0], -azimuthal * theta.sin(), azimuthal.abs(), 3e-13);
+            close(t[1], azimuthal * theta.cos(), azimuthal.abs(), 3e-13);
+            assert_eq!(t[2], normal.pressure_pa(s * a).unwrap());
+        }
+    }
+    assert!(profile.traction_pa(0.3 * a).is_err());
+    assert_eq!(
+        profile.traction_polar_pa(a, 0.0),
+        Err(AdhesiveTractionError::SingularEdge)
+    );
+    assert_eq!(
+        profile.traction_polar_pa(a.next_up(), 0.0).unwrap(),
+        [0.0; 3]
+    );
+    assert!(profile.traction_polar_pa(0.0, f64::NAN).is_err());
+    let critical = source.law().parameters().critical_twist_angle_rad;
+    for phi in [critical, -critical, 0.0] {
+        let p = AdhesiveTractionProfile::jkr_torsion_elastic(&source, phi).unwrap();
+        close(
+            p.torsional_moment_n_m(),
+            -(16.0 / 3.0) * g * a.powi(3) * phi,
+            moment.abs(),
+            3e-14,
+        );
+    }
+    for phi in [critical.next_up(), -critical.next_up(), f64::NAN] {
+        assert!(AdhesiveTractionProfile::jkr_torsion_elastic(&source, phi).is_err());
+    }
+}
+
+#[test]
+fn torsion_sectors_integrate_edge_singularities_and_tiny_angular_moments() {
+    let (source, angle, profile) = elastic_torsion();
+    let a = profile.contact_radius_m();
+    let m = -(16.0 / 3.0) * source.law().reduced_shear_modulus_pa() * a.powi(3) * angle;
+    let gate = CancelGate::new();
+    let quarter = profile
+        .vector_sector(0.0, a, 0.0, PI / 2.0, exact(), &gate)
+        .unwrap();
+    // Independent integrals of r²/sqrt(a²-r²) and r³/sqrt(a²-r²).
+    close(
+        quarter.tangential_force_n[0],
+        -3.0 * m / (16.0 * a),
+        m.abs() / a,
+        3e-14,
+    );
+    close(
+        quarter.tangential_force_n[1],
+        3.0 * m / (16.0 * a),
+        m.abs() / a,
+        3e-14,
+    );
+    let expected = [[-m / (4.0 * PI), -m / 8.0], [m / 8.0, m / (4.0 * PI)]];
+    for (actual, expected) in quarter
+        .tangential_first_moment_n_m
+        .into_iter()
+        .flatten()
+        .zip(expected.into_iter().flatten())
+    {
+        close(actual, expected, m.abs(), 3e-14);
+    }
+    let edge = profile
+        .vector_sector(a.next_down(), a, 0.0, PI / 2.0, exact(), &gate)
+        .unwrap();
+    let u = (((a - a.next_down()) / a) * (1.0 + a.next_down() / a)).sqrt();
+    let edge_force = 3.0 * m / (8.0 * PI * a) * (u.asin() + u * a.next_down() / a);
+    close(
+        edge.tangential_force_n[0],
+        -edge_force,
+        edge_force.abs(),
+        3e-14,
+    );
+    close(
+        edge.tangential_force_n[1],
+        edge_force,
+        edge_force.abs(),
+        3e-14,
+    );
+    let edge_torque = 0.375 * m * (u - u.powi(3) / 3.0);
+    close(edge.wrench().1[2], edge_torque, edge_torque.abs(), 3e-14);
+    assert_ne!(edge_torque, 0.0);
+
+    let width = 1e-8;
+    let thin = profile
+        .vector_sector(0.0, a, 0.0, width, exact(), &gate)
+        .unwrap();
+    // ∫sin²(theta)dtheta ~ width³/3: subtracting width-sin(width)
+    // directly would erase this nonzero P1 work coefficient.
+    let small = -m * width.powi(3) / (6.0 * PI);
+    close(
+        thin.tangential_first_moment_n_m[0][1],
+        small,
+        small.abs(),
+        3e-14,
+    );
+    let central = profile
+        .vector_sector(0.0, 1e-6 * a, 0.0, TAU, exact(), &gate)
+        .unwrap();
+    let central_torque = m * 0.375 * 1e-24 * (1.0 + 1e-12 / 3.0);
+    close(
+        central.wrench().1[2],
+        central_torque,
+        central_torque.abs(),
+        3e-14,
+    );
+}
+
+#[test]
+fn torsion_vector_grid_recovers_source_couple_and_affine_rotation_work() {
+    let (_, _, profile) = elastic_torsion();
+    let a = profile.contact_radius_m();
+    let m = profile.torsional_moment_n_m();
+    let whole = profile.annulus(0.0, a).unwrap();
+    let scale = whole.hertz_force_n - whole.adhesive_force_n;
+    let gate = CancelGate::new();
+    let radii = [0.0, 0.2 * a, 0.63 * a, a.next_down(), a, 1.1 * a];
+    let angles = [0.0, 0.2, PI / 2.0, PI, 1.7 * PI, TAU];
+    let mut cells = vec![SectorAdhesiveVectorTraction::default(); 25];
+    let mut scratch = vec![VectorPolarRingScratch::default(); 5];
+    let report = profile
+        .transfer_vector_polar_grid(
+            &radii,
+            &angles,
+            &mut cells,
+            &mut scratch,
+            PolarTransferBudget {
+                radial_moment: exact(),
+                force_absolute_tolerance_n: 3e-12 * scale,
+                moment_absolute_tolerance_n_m: 3e-12 * scale * a,
+            },
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(report.normal.model_identity, profile.model_identity());
+    assert_eq!(report.normal.radial_evaluations, 0);
+    let omega = 1.7;
+    let (mut force, mut torque, mut power) = ([0.0; 2], 0.0, 0.0);
+    for cell in cells {
+        for i in 0..2 {
+            force[i] += cell.tangential_force_n[i];
+        }
+        torque += cell.wrench().1[2];
+        power += cell
+            .affine_power([0.0; 3], [[0.0, -omega], [omega, 0.0], [0.0; 2]])
+            .unwrap()
+            .0;
+    }
+    for f in force {
+        close(f, 0.0, m.abs() / a, 3e-13);
+    }
+    close(torque, m, m.abs(), 3e-13);
+    close(power, m * omega, (m * omega).abs(), 3e-13);
+    let full = profile
+        .vector_sector(0.0, a, 0.0, TAU, exact(), &gate)
+        .unwrap();
+    assert_eq!(full.tangential_force_n, [0.0; 2]);
+    close(full.wrench().1[2], m, m.abs(), 3e-14);
+    let (coarse_power, error) = full
+        .affine_power([0.0; 3], [[0.0, -omega], [omega, 0.0], [0.0; 2]])
+        .unwrap();
+    close(coarse_power, power, power.abs(), 3e-13);
+    assert_eq!(error, 0.0);
 }
