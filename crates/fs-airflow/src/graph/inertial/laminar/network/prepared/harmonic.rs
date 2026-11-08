@@ -9,6 +9,7 @@
 
 mod audit;
 mod batch;
+mod settled;
 #[cfg(test)]
 mod tests;
 
