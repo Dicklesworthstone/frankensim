@@ -651,6 +651,30 @@ impl<'a> IterativeBoundaryObservation<'a> {
         Ok(sample)
     }
 
+    /// Typed transient p/u from the SAME matrix-free material-wall solves.
+    /// Every sampled source keeps its original GMRES/FMM admission; the field
+    /// conversion adds neither a dense fallback nor a new propagation model.
+    /// An explicit bound lower window, existing delays and original separate
+    /// pressure/vector FIR convergence are retained for microphone replay.
+    pub fn bake_pressure_velocity(
+        &self,
+        declaration: &TransferDeclaration,
+        gate: &CancelGate,
+    ) -> Result<PressureVelocityBake, IterativeObservationError> {
+        poll(gate)?;
+        let lower = self.lower_band_window().ok_or(TransferError::Invalid(
+            "pressure/velocity FIR requires an explicit lower observation window",
+        ))?;
+        self.observation.admit_declaration(declaration, self.operator_hash())?;
+        super::super::field::bake_with_errors(
+            |omega| self.physical_frequency_sample(omega, gate).map(|sample| sample.transfer),
+            declaration,
+            self.medium(),
+            lower,
+            || gate.is_requested(),
+        )
+    }
+
     /// Every nonzero sampled source must pass the original GMRES convergence
     /// gate before the common FIR owner can inspect temporal convergence.
     /// FMM approximation and spatial error remain producer uncertainty.

@@ -228,9 +228,9 @@ impl<'a> MolecularBemObservation<'a> {
     /// equilibrium rho*c normalizes Y and is never replaced by a complex wave
     /// impedance. Porous laws retain their original equivalent-fluid model;
     /// no new molecular relaxation law inside their pores is inferred.
-    /// A positive material lower cutoff remains a harmonic-only binding here:
-    /// this owner's FIR artifact has no explicit lower-band window, so its
-    /// bake refuses instead of extrapolating such a wall to zero frequency.
+    /// A positive material lower cutoff requires the explicit window in
+    /// `bake_pressure_velocity`. The older p/gradient `bake` has no lower
+    /// window and still refuses instead of extrapolating the wall to DC.
     ///
     /// Surface work and gas absorption remain separate channels. This does
     /// not establish spatial convergence, a passive reduced realization or
@@ -489,6 +489,46 @@ impl<'a> MolecularBemObservation<'a> {
                     })
             })
             .collect())
+    }
+
+    /// Typed finite-band p/u through the same molecular gas and optional local
+    /// material wall. The explicit positive lower window keeps every nonzero
+    /// frequency inside the original source band without inventing static u.
+    /// Frozen-speed geometric prefixes and the full complex-k phase stay with
+    /// the original owner. Euler momentum uses real rho*omega; microphones use
+    /// the original real equilibrium rho*c calibration, not a complex load.
+    pub fn bake_pressure_velocity(
+        &self,
+        declaration: &TransferDeclaration,
+        lower_window: LowerBandWindow,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PressureVelocityBake, MolecularObservationError> {
+        if cancelled() {
+            return Err(TransferError::Cancelled.into());
+        }
+        declaration.admit_work()?;
+        lower_window.admit_ladder(declaration)?;
+        let band = self.exterior.band_rad_s();
+        if declaration.sources != self.boundary.sources
+            || declaration.receivers != self.boundary.receivers
+            || declaration.geometric_delays_s != self.geometric_delays_s()
+            || declaration.producer_hash != self.operator_hash()
+            || core::f64::consts::TAU * declaration.taper_stop_hz > band[1]
+            || core::f64::consts::TAU * lower_window.stop_hz() < band[0]
+            || matches!(declaration.producer_uncertainty, ProducerUncertainty::ExactAnalytic)
+        {
+            return Err(invalid(
+                "cross-wired or out-of-band molecular pressure/velocity declaration",
+            ));
+        }
+        let cancel = RefCell::new(cancelled);
+        super::field::bake_with_errors(
+            |omega| self.frequency_sample(omega, || (*cancel.borrow_mut())()),
+            declaration,
+            self.boundary.medium,
+            lower_window,
+            || (*cancel.borrow_mut())(),
+        )
     }
 
     /// The original bounded FIR owner, including material/boundary cancellation.

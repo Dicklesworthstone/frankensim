@@ -3692,3 +3692,25 @@ zero centered covariance; they do not claim the original ensemble variance.
 The source identity, original receivers, patterns and authored output-channel
 mapping remain accessible. These signals do not infer a finite source onset,
 frequency-dependent diaphragm response, electronic noise or new propagation.
+
+## Finite-band transient pressure and vector velocity
+
+`PressureVelocityBake` and its borrowing `PressureVelocityObserver` retain one
+original source history for co-located pressure [Pa] and Cartesian velocity
+[m/s]. Local, matrix-free iterative, and molecular material-boundary owners
+convert their original exp(-i omega t) pressure gradient by Euler momentum
+before the existing bounded Fourier realization. The original source/receiver
+identity, geometric prefixes, material dispersion, upper taper, reconstruction
+latency, and separate pressure/vector convergence remain authoritative.
+
+An explicit positive lower observation window is required; no static velocity,
+DC material extrapolation, gradient integration, or plane-wave substitution is
+inferred. Replay is allocation-free and entry-transactional, including invalid
+input, overflow, and cancellation. Signed instantaneous p*u and changing ideal
+FirstOrder microphone orientation read the same accepted field without advancing
+its history. Molecular microphone calibration uses real equilibrium rho*c;
+it does not replace the original dispersive propagation impedance.
+
+The typed field has a distinct content identity and does not expose a p/gradient
+artifact. FIR convergence remains separate from unresolved source, material, and
+spatial error; observer fields are not work-conjugate structural loading.

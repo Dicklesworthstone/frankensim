@@ -48,7 +48,7 @@ impl LowerBandWindow {
         self.pass_hz
     }
 
-    fn weight(self, frequency_hz: f64) -> f64 {
+    pub(super) fn weight(self, frequency_hz: f64) -> f64 {
         if frequency_hz <= self.stop_hz {
             return 0.0;
         }
@@ -63,7 +63,7 @@ impl LowerBandWindow {
         }
     }
 
-    fn admit_ladder(self, declaration: &TransferDeclaration) -> Result<(), TransferError> {
+    pub(super) fn admit_ladder(self, declaration: &TransferDeclaration) -> Result<(), TransferError> {
         if self.pass_hz >= declaration.pass_band_upper_hz {
             return Err(TransferError::Invalid(
                 "lower and upper observation transitions overlap",
@@ -575,6 +575,30 @@ impl<'a> LocalBoundaryObservation<'a> {
             }
         }
         Ok(field)
+    }
+
+    /// Realize the same finite material-boundary solution as typed p [Pa] and
+    /// vector u [m/s], with one source history and the original FIR ladder.
+    /// An explicit lower window is mandatory: steady velocity is not assigned
+    /// a fictitious zero DC, and replay never integrates a pressure gradient.
+    /// The source-bound medium also calibrates changing ideal microphones.
+    pub fn bake_pressure_velocity(
+        &self,
+        declaration: &TransferDeclaration,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PressureVelocityBake, TransferError> {
+        let lower = self.lower_window.ok_or(TransferError::Invalid(
+            "pressure/velocity FIR requires an explicit lower observation window",
+        ))?;
+        self.admit_declaration(declaration, self.operator_hash())?;
+        let cancel = RefCell::new(cancelled);
+        super::field::bake_with_errors(
+            |omega| self.physical_frequency_sample(omega, || (*cancel.borrow_mut())()),
+            declaration,
+            self.field_geometry().1,
+            lower,
+            || (*cancel.borrow_mut())(),
+        )
     }
 
     pub fn bake(

@@ -36,6 +36,8 @@ pub use scattering::{
     CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation, StressQuadrupoleSpec,
 };
 mod harmonic;
+mod field;
+pub use field::{PressureVelocityBake, PressureVelocityFrame, PressureVelocityObserver};
 pub use harmonic::{
     HarmonicAveragedField, HarmonicControlLimits, HarmonicEnergyGradient,
     HarmonicExposureFactorStatistics, HarmonicExposureLimits, HarmonicExposureLine,
@@ -277,8 +279,10 @@ impl core::fmt::Display for TransferError {
 impl std::error::Error for TransferError {}
 
 /// One computed DFT rung; fractions are the worst physical quantity, never a
-/// mixture of Pa and Pa/m. Tail is energy after N/4; wrap is energy in the
-/// second half. The Cartesian gradient is ONE vector quantity.
+/// mixture of pressure and Cartesian vector units. Tail is energy after N/4;
+/// wrap is energy in the second half. The Cartesian vector (gradient, or
+/// velocity in the typed pressure/velocity bake) is ONE physical quantity,
+/// separate from pressure.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LadderRung {
     pub n_fft: usize,
@@ -683,9 +687,9 @@ fn observation_window_containment(
     }
 }
 
-/// Channel ranges of the physical quantities, in kernel order p, dp/dx, dp/dy,
-/// dp/dz per source/receiver pair: pressure [Pa] alone, and the Cartesian
-/// gradient [Pa/m] as one vector. A component's fraction of its own energy is
+/// Channel ranges per source/receiver pair: pressure [Pa] alone, followed by
+/// one Cartesian vector (gradient [Pa/m], or velocity [m/s] for the typed field
+/// adapter). A component's fraction of its own energy is
 /// frame-dependent, and an on-axis receiver's zero-by-symmetry components hold
 /// only roundoff whose self-relative tail is ~3/4 at every resolution, so gates
 /// measure each component against its whole vector.
