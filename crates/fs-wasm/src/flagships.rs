@@ -41,9 +41,11 @@ use fs_qty::{Dims, QtyAny};
 use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
 use fs_render::volumes::{
-    AbsorptionImageSettings, AbsorptionMixtureSettings, IndexedSpectralAbsorptionImageSettings,
-    SpectralAbsorptionImageSettings, SpectralIllumination, VolumeGrid,
-    prepare_density_absorption_mixtures, render_absorption_transmittance,
+    AbsorptionImageSettings, AbsorptionMixtureSettings, BeamPropagation,
+    IndexedSpectralAbsorptionImageSettings, IndexedSpectralBeamDepositionSettings,
+    SpectralAbsorptionImageSettings, SpectralBeamDeposition, SpectralBeamDepositionSettings,
+    SpectralBeamIrradiance, SpectralIllumination, VolumeGrid, prepare_density_absorption_mixtures,
+    render_absorption_transmittance,
 };
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_sos::lyapunov_certifies_stability;
@@ -1408,6 +1410,143 @@ pub fn render_vessel_indexed_spectral_xyz(
     .unwrap_or_default()
 }
 
+/// Resolve absorbed and transmitted collimated-beam power on a captured frame.
+///
+/// `irradiance_w_m2_nm` is incident spectral irradiance, not camera radiance.
+/// With `irradiance_per_column == false`, supply one sample per wavelength;
+/// with `true`, index each original column's samples by
+/// `(y * nx + x) * wavelengths_nm.len() + band`. The explicit nonnegative
+/// `quadrature_weights_nm` supply wavelength integration widths. The core multiplies by each
+/// original column's physical area, `lattice_spacing_m²`, exactly once.
+///
+/// `positive_z` selects entry through the minimum-Z face; false selects the
+/// maximum-Z face. This captured two-dimensional field is one homogeneous
+/// extruded slab, so its total absorption is the same from either face.
+/// Source spectrum, mass absorption, SI density and slab-depth semantics match
+/// the physical pour views. One through sixteen positive wavelength nodes may
+/// include UV/IR; no visible observer, camera resolution or exposure is applied.
+///
+/// Output is `[incident_total_W, absorbed_total_W, transmitted_total_W,
+/// absorbed_W_per_cell..., transmitted_W_per_column...]`. Both maps have
+/// `nx * ny` entries in original x-fastest order, so the length is `3 + 2*nx*ny`.
+/// These are optical power transfers. Thermalization, duration and temperature
+/// evolution require a receiving physical owner; the captured state is unchanged.
+///
+/// Limits are 1,048,576 original cells and spectral evaluations, and 2,097,152
+/// combined map values. Invalid input, exceeded limits or allocation refusal
+/// returns an empty vector without a partial power report.
+#[allow(clippy::too_many_arguments)]
+pub fn deposit_vessel_spectral_beam(
+    mass_field: &[f64],
+    nx: u32,
+    ny: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+    irradiance_w_m2_nm: &[f64],
+    irradiance_per_column: bool,
+    quadrature_weights_nm: &[f64],
+    positive_z: bool,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny)) = (usize::try_from(nx), usize::try_from(ny)) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .deposit_beam(
+        mass_field,
+        [nx, ny],
+        vessel_beam_settings(),
+        vessel_beam_irradiance(irradiance_w_m2_nm, irradiance_per_column),
+        quadrature_weights_nm,
+        if positive_z {
+            BeamPropagation::PositiveZ
+        } else {
+            BeamPropagation::NegativeZ
+        },
+    )
+    .map(SpectralBeamDeposition::into_power_buffer)
+    .unwrap_or_default()
+}
+
+/// Resolve beam power using the captured frame's explicit spectral material map.
+///
+/// Material rows and original cell indices have the same layout as
+/// [`render_vessel_indexed_spectral_transmittance`]. Irradiance, quadrature,
+/// propagation, physical area and flat power-report layout match
+/// [`deposit_vessel_spectral_beam`]. Each cell absorbs using its own material
+/// before the power maps and totals are formed; prepared mixture rows can be used.
+/// The palette limit is 4,096 materials, with the same field/work/map limits
+/// and empty-vector refusal as the uniform-composition beam entry point.
+#[allow(clippy::too_many_arguments)]
+pub fn deposit_vessel_indexed_spectral_beam(
+    mass_field: &[f64],
+    cell_materials: &[u32],
+    nx: u32,
+    ny: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+    irradiance_w_m2_nm: &[f64],
+    irradiance_per_column: bool,
+    quadrature_weights_nm: &[f64],
+    positive_z: bool,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny)) = (usize::try_from(nx), usize::try_from(ny)) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourIndexedSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        cell_materials,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .deposit_beam(
+        mass_field,
+        [nx, ny],
+        IndexedSpectralBeamDepositionSettings {
+            deposition: vessel_beam_settings(),
+            max_materials: 4_096,
+        },
+        vessel_beam_irradiance(irradiance_w_m2_nm, irradiance_per_column),
+        quadrature_weights_nm,
+        if positive_z {
+            BeamPropagation::PositiveZ
+        } else {
+            BeamPropagation::NegativeZ
+        },
+    )
+    .map(SpectralBeamDeposition::into_power_buffer)
+    .unwrap_or_default()
+}
+
+fn vessel_beam_settings() -> SpectralBeamDepositionSettings {
+    SpectralBeamDepositionSettings {
+        max_grid_cells: 1_048_576,
+        max_spectral_evaluations: 1_048_576,
+        max_output_values: 2_097_152,
+    }
+}
+
+fn vessel_beam_irradiance(irradiance: &[f64], per_column: bool) -> SpectralBeamIrradiance<'_> {
+    if per_column {
+        SpectralBeamIrradiance::Columns(irradiance)
+    } else {
+        SpectralBeamIrradiance::Uniform(irradiance)
+    }
+}
+
 fn vessel_illumination_settings(resolution: usize) -> SpectralAbsorptionImageSettings {
     SpectralAbsorptionImageSettings {
         image: AbsorptionImageSettings {
@@ -2454,6 +2593,74 @@ mod wasm {
         )
     }
 
+    /// Original-cell absorbed and transmitted beam power, with explicit irradiance units.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_vessel_spectral_beam(
+        mass_field: &[f64],
+        nx: u32,
+        ny: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+        irradiance_w_m2_nm: &[f64],
+        irradiance_per_column: bool,
+        quadrature_weights_nm: &[f64],
+        positive_z: bool,
+    ) -> Vec<f64> {
+        super::deposit_vessel_spectral_beam(
+            mass_field,
+            nx,
+            ny,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+            irradiance_w_m2_nm,
+            irradiance_per_column,
+            quadrature_weights_nm,
+            positive_z,
+        )
+    }
+
+    /// Material-indexed absorbed and transmitted collimated-beam power.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_vessel_indexed_spectral_beam(
+        mass_field: &[f64],
+        cell_materials: &[u32],
+        nx: u32,
+        ny: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+        irradiance_w_m2_nm: &[f64],
+        irradiance_per_column: bool,
+        quadrature_weights_nm: &[f64],
+        positive_z: bool,
+    ) -> Vec<f64> {
+        super::deposit_vessel_indexed_spectral_beam(
+            mass_field,
+            cell_materials,
+            nx,
+            ny,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+            irradiance_w_m2_nm,
+            irradiance_per_column,
+            quadrature_weights_nm,
+            positive_z,
+        )
+    }
+
     #[wasm_bindgen]
     pub fn run_frame(seed: u32) -> Vec<f64> {
         super::run_frame(seed)
@@ -3176,6 +3383,202 @@ mod tests {
                 &[1.0, 2.0],
                 false,
                 &[20.0, 40.0],
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn browser_spectral_beam_power_report_matches_native_and_physical_balance() {
+        let mass = [1.0, 0.0, 2.0, 1.0];
+        let wavelengths = [450.0, 650.0];
+        let k = core::f64::consts::LN_2;
+        let coefficients = [k, 2.0 * k];
+        let irradiance = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+        let weights = [20.0, 40.0];
+        let native = fs_vessel::pour::PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 0.1,
+            slab_depth_m: 1e-3,
+        }
+        .deposit_beam(
+            &mass,
+            [2, 2],
+            SpectralBeamDepositionSettings {
+                max_grid_cells: 4,
+                max_spectral_evaluations: 8,
+                max_output_values: 8,
+            },
+            SpectralBeamIrradiance::Columns(&irradiance),
+            &weights,
+            BeamPropagation::PositiveZ,
+        )
+        .unwrap();
+        let browser = deposit_vessel_spectral_beam(
+            &mass,
+            2,
+            2,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            0.1,
+            1e-3,
+            &irradiance,
+            true,
+            &weights,
+            true,
+        );
+        assert_eq!(browser, native.into_power_buffer());
+        assert_eq!(browser.len(), 11);
+        let expected = [22.4, 13.6, 8.8, 1.4, 0.0, 6.0, 6.2, 0.6, 4.4, 0.8, 3.0];
+        for (&actual, expected) in browser.iter().zip(expected) {
+            assert!((actual - expected).abs() <= 3e-13 * expected.abs().max(1.0));
+        }
+        assert!((browser[0] - browser[1] - browser[2]).abs() < 1e-12);
+        let indexed = deposit_vessel_indexed_spectral_beam(
+            &[1.0; 4],
+            &[0, 1, 2, 0],
+            2,
+            2,
+            &wavelengths,
+            &[k, 2.0 * k, 0.0, 0.0, 2.0 * k, 4.0 * k],
+            1000.0,
+            0.1,
+            1e-3,
+            &irradiance,
+            true,
+            &weights,
+            false,
+        );
+        assert_eq!(indexed.len(), browser.len());
+        for (&actual, &expected) in indexed.iter().zip(&browser) {
+            assert!((actual - expected).abs() <= 3e-13 * expected.abs().max(1.0));
+        }
+        // Uniform irradiance is one spectrum shared by all four physical areas.
+        let uniform = deposit_vessel_spectral_beam(
+            &mass,
+            2,
+            2,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            0.1,
+            1e-3,
+            &[2.0, 4.0],
+            false,
+            &weights,
+            true,
+        );
+        assert_eq!(uniform.len(), 11);
+        for (&actual, expected) in uniform[..3].iter().zip([8.0, 4.6, 3.4]) {
+            assert!((actual - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn browser_spectral_beam_refuses_invalid_source_maps_weights_and_work() {
+        for (source, per_column) in [
+            (&[1.0][..], false),
+            (&[1.0, 2.0][..], true),
+            (&[1.0, -2.0][..], false),
+            (&[1.0, 2.0, f64::NAN, 4.0][..], true),
+        ] {
+            assert!(
+                deposit_vessel_spectral_beam(
+                    &[0.0, 1.0],
+                    2,
+                    1,
+                    &[450.0, 650.0],
+                    &[0.4, 0.1],
+                    1000.0,
+                    0.1,
+                    1e-3,
+                    source,
+                    per_column,
+                    &[20.0, 40.0],
+                    true,
+                )
+                .is_empty()
+            );
+        }
+        for weights in [&[20.0][..], &[20.0, -40.0][..], &[20.0, f64::INFINITY][..]] {
+            assert!(
+                deposit_vessel_spectral_beam(
+                    &[0.0, 1.0],
+                    2,
+                    1,
+                    &[450.0, 650.0],
+                    &[0.4, 0.1],
+                    1000.0,
+                    0.1,
+                    1e-3,
+                    &[1.0, 2.0],
+                    false,
+                    weights,
+                    true,
+                )
+                .is_empty()
+            );
+        }
+        for materials in [&[0][..], &[u32::MAX, 0][..]] {
+            assert!(
+                deposit_vessel_indexed_spectral_beam(
+                    &[0.0, 1.0],
+                    materials,
+                    2,
+                    1,
+                    &[450.0, 650.0],
+                    &[0.4, 0.1],
+                    1000.0,
+                    0.1,
+                    1e-3,
+                    &[1.0, 2.0],
+                    false,
+                    &[20.0, 40.0],
+                    true,
+                )
+                .is_empty()
+            );
+        }
+        // The original field and output maps fit, but all sixteen lanes together
+        // require 1,048,592 evaluations, exceeding the complete spectral budget.
+        let mass = vec![0.0; 65_537];
+        let wavelengths: Vec<_> = (0..16).map(|lane| 400.0 + 10.0 * lane as f64).collect();
+        assert!(
+            deposit_vessel_spectral_beam(
+                &mass,
+                65_537,
+                1,
+                &wavelengths,
+                &[0.0; 16],
+                1000.0,
+                0.1,
+                1e-3,
+                &[1.0; 16],
+                false,
+                &[1.0; 16],
+                true,
+            )
+            .is_empty()
+        );
+        let materials = vec![0; mass.len()];
+        assert!(
+            deposit_vessel_indexed_spectral_beam(
+                &mass,
+                &materials,
+                65_537,
+                1,
+                &wavelengths,
+                &[0.0; 16],
+                1000.0,
+                0.1,
+                1e-3,
+                &[1.0; 16],
+                false,
+                &[1.0; 16],
+                true,
             )
             .is_empty()
         );

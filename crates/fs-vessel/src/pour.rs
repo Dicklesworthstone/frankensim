@@ -17,11 +17,14 @@ use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR, update_tau};
 use fs_lbm::{Cell, Grid};
 use fs_render::volumes::{
-    AbsorptionImageSettings, DensityAbsorption, DensityAbsorptionSpectrum, DvrError,
-    IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
-    SpectralAbsorptionImageSettings, SpectralIllumination, SpectralOpacityImage, VolumeGrid,
-    render_absorption_transmittance, render_density_spectral_box,
-    render_density_spectral_indexed_box, render_density_spectral_indexed_radiance_box,
+    AbsorptionImageSettings, BeamPropagation, DensityAbsorption, DensityAbsorptionSpectrum,
+    DvrError, IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
+    IndexedSpectralBeamDepositionSettings, SpectralAbsorptionImageSettings, SpectralBeamDeposition,
+    SpectralBeamDepositionSettings, SpectralBeamIrradiance, SpectralIllumination,
+    SpectralOpacityImage, VolumeGrid, deposit_density_spectral_beam,
+    deposit_density_spectral_indexed_beam, render_absorption_transmittance,
+    render_density_spectral_box, render_density_spectral_indexed_box,
+    render_density_spectral_indexed_radiance_box,
     render_density_spectral_indexed_transmittance_box, render_density_spectral_indexed_xyz_box,
     render_density_spectral_radiance_box, render_density_spectral_transmittance_box,
     render_density_spectral_xyz_box, render_density_transmittance_box,
@@ -210,7 +213,7 @@ pub struct PourIndexedSpectralOpticalView<'a> {
     pub slab_depth_m: f64,
 }
 
-/// A physical pour view that cannot produce an admitted transmittance image.
+/// A physical pour view that cannot produce an admitted optical observation.
 #[derive(Debug)]
 pub enum PourOpticalError {
     /// The declared vacuum wavelength is nonfinite or nonpositive.
@@ -379,6 +382,44 @@ impl<'a> PourSpectralOpticalView<'a> {
         .map_err(PourOpticalError::Transport)
     }
 
+    /// Deposit the absorbed power of an explicit collimated beam on the mass cells.
+    ///
+    /// Irradiance is W/(m² nm), uniform or indexed by original XY column with
+    /// wavelengths fastest. Explicit quadrature widths integrate wavelengths;
+    /// the original column area is `lattice_spacing_m²`. This gives absorbed
+    /// W per original cell and transmitted W per column, without a camera
+    /// resolution, exposure or color observer. Spectral power totals are retained.
+    ///
+    /// The accepted mass field is borrowed in its single extruded slab. Either
+    /// propagation direction crosses that same complete slab. Absorbed optical
+    /// power is an energy-transfer input; thermalization, duration and caloric
+    /// evolution belong to the receiving physical owner.
+    pub fn deposit_beam(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: SpectralBeamDepositionSettings,
+        irradiance: SpectralBeamIrradiance<'_>,
+        quadrature_weights_nm: &[f64],
+        propagation: BeamPropagation,
+    ) -> Result<SpectralBeamDeposition, PourOpticalError> {
+        let grid = pour_optical_grid(
+            mass_field,
+            dimensions,
+            self.lattice_spacing_m,
+            self.slab_depth_m,
+        )?;
+        deposit_density_spectral_beam(
+            &grid,
+            settings,
+            self.absorption(),
+            irradiance,
+            quadrature_weights_nm,
+            propagation,
+        )
+        .map_err(PourOpticalError::Transport)
+    }
+
     fn absorption(self) -> DensityAbsorptionSpectrum<'a> {
         DensityAbsorptionSpectrum {
             wavelengths_nm: self.wavelengths_nm,
@@ -486,6 +527,38 @@ impl<'a> PourIndexedSpectralOpticalView<'a> {
             self.absorption(),
             illumination,
             quadrature_weights_nm,
+        )
+        .map_err(PourOpticalError::Transport)
+    }
+
+    /// Deposit beam power using each original cell's supplied material spectrum.
+    ///
+    /// Irradiance, spectral integration, original column area and the physical
+    /// power maps have the same meaning as [`PourSpectralOpticalView::deposit_beam`].
+    /// Material coefficients are applied to their original cells, including
+    /// prepared mixture rows, before spatial and spectral power totals are formed.
+    pub fn deposit_beam(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: IndexedSpectralBeamDepositionSettings,
+        irradiance: SpectralBeamIrradiance<'_>,
+        quadrature_weights_nm: &[f64],
+        propagation: BeamPropagation,
+    ) -> Result<SpectralBeamDeposition, PourOpticalError> {
+        let grid = pour_optical_grid(
+            mass_field,
+            dimensions,
+            self.lattice_spacing_m,
+            self.slab_depth_m,
+        )?;
+        deposit_density_spectral_indexed_beam(
+            &grid,
+            settings,
+            self.absorption(),
+            irradiance,
+            quadrature_weights_nm,
+            propagation,
         )
         .map_err(PourOpticalError::Transport)
     }
@@ -620,6 +693,46 @@ impl PourOutcome {
             settings,
             illumination,
             quadrature_weights_nm,
+        )
+    }
+
+    /// Resolve absorbed and transmitted beam power on this accepted mass field.
+    pub fn deposit_spectral_beam(
+        &self,
+        dimensions: [usize; 2],
+        view: PourSpectralOpticalView<'_>,
+        settings: SpectralBeamDepositionSettings,
+        irradiance: SpectralBeamIrradiance<'_>,
+        quadrature_weights_nm: &[f64],
+        propagation: BeamPropagation,
+    ) -> Result<SpectralBeamDeposition, PourOpticalError> {
+        view.deposit_beam(
+            &self.mass_field,
+            dimensions,
+            settings,
+            irradiance,
+            quadrature_weights_nm,
+            propagation,
+        )
+    }
+
+    /// Resolve beam power using the accepted field's explicit material map.
+    pub fn deposit_indexed_spectral_beam(
+        &self,
+        dimensions: [usize; 2],
+        view: PourIndexedSpectralOpticalView<'_>,
+        settings: IndexedSpectralBeamDepositionSettings,
+        irradiance: SpectralBeamIrradiance<'_>,
+        quadrature_weights_nm: &[f64],
+        propagation: BeamPropagation,
+    ) -> Result<SpectralBeamDeposition, PourOpticalError> {
+        view.deposit_beam(
+            &self.mass_field,
+            dimensions,
+            settings,
+            irradiance,
+            quadrature_weights_nm,
+            propagation,
         )
     }
 }
@@ -1664,6 +1777,319 @@ mod physical_opacity_tests {
             .render_transmittance(&mass, [2, 1], limits),
             Err(PourOpticalError::InvalidGeometry),
         ));
+    }
+
+    fn beam_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 3e-13 * expected.abs().max(1.0),
+            "{actual} != {expected}",
+        );
+    }
+
+    #[test]
+    fn pour_beam_deposits_si_power_on_original_cells_with_spectral_balance() {
+        let wavelengths = [450.0, 650.0];
+        let coefficients = [core::f64::consts::LN_2, 2.0 * core::f64::consts::LN_2];
+        let irradiance = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+        let weights = [20.0, 40.0];
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 0.1,
+            slab_depth_m: 1e-3,
+        };
+        let limits = SpectralBeamDepositionSettings {
+            max_grid_cells: 4,
+            max_spectral_evaluations: 8,
+            max_output_values: 8,
+        };
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: vec![1.0, 0.0, 2.0, 1.0],
+        };
+        let power = outcome
+            .deposit_spectral_beam(
+                [2, 2],
+                optics,
+                limits,
+                SpectralBeamIrradiance::Columns(&irradiance),
+                &weights,
+                BeamPropagation::PositiveZ,
+            )
+            .unwrap();
+        assert_eq!(power.dimensions(), [2, 2, 1]);
+        assert_eq!(power.wavelengths_nm(), &wavelengths);
+        assert_eq!(power.quadrature_weights_nm(), &weights);
+        assert_eq!(power.propagation(), BeamPropagation::PositiveZ);
+        // Each 0.01-m² column admits I_lambda * delta_lambda * area.
+        // Unit mass transmits one half at 450 nm and one quarter at 650 nm.
+        for (&actual, expected) in power
+            .cell_absorbed_power_w()
+            .iter()
+            .zip([1.4, 0.0, 6.0, 6.2])
+        {
+            beam_close(actual, expected);
+        }
+        for (&actual, expected) in power
+            .column_transmitted_power_w()
+            .iter()
+            .zip([0.6, 4.4, 0.8, 3.0])
+        {
+            beam_close(actual, expected);
+        }
+        for (&actual, expected) in power.incident_power_w().iter().zip([6.4, 16.0]) {
+            beam_close(actual, expected);
+        }
+        for (&actual, expected) in power.absorbed_power_w().iter().zip([3.1, 10.5]) {
+            beam_close(actual, expected);
+        }
+        for (&actual, expected) in power.transmitted_power_w().iter().zip([3.3, 5.5]) {
+            beam_close(actual, expected);
+        }
+        beam_close(power.total_incident_power_w(), 22.4);
+        beam_close(power.total_absorbed_power_w(), 13.6);
+        beam_close(power.total_transmitted_power_w(), 8.8);
+        beam_close(
+            power.total_incident_power_w(),
+            power.total_absorbed_power_w() + power.total_transmitted_power_w(),
+        );
+        let reverse = optics
+            .deposit_beam(
+                &outcome.mass_field,
+                [2, 2],
+                limits,
+                SpectralBeamIrradiance::Columns(&irradiance),
+                &weights,
+                BeamPropagation::NegativeZ,
+            )
+            .unwrap();
+        assert_eq!(reverse.propagation(), BeamPropagation::NegativeZ);
+        assert_eq!(
+            reverse.cell_absorbed_power_w(),
+            power.cell_absorbed_power_w()
+        );
+        assert_eq!(
+            reverse.column_transmitted_power_w(),
+            power.column_transmitted_power_w()
+        );
+        assert_eq!(outcome.mass_field, [1.0, 0.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn pour_beam_power_is_invariant_under_lateral_refinement_and_density_units() {
+        let mass = [1.0, 0.0, 2.0, 1.0];
+        let irradiance = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &[450.0, 650.0],
+            mass_absorption_m2_kg: &[core::f64::consts::LN_2, 2.0 * core::f64::consts::LN_2],
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 0.1,
+            slab_depth_m: 1e-3,
+        };
+        let limits = SpectralBeamDepositionSettings {
+            max_grid_cells: 16,
+            max_spectral_evaluations: 32,
+            max_output_values: 32,
+        };
+        let reference = optics
+            .deposit_beam(
+                &mass,
+                [2, 2],
+                limits,
+                SpectralBeamIrradiance::Columns(&irradiance),
+                &[20.0, 40.0],
+                BeamPropagation::PositiveZ,
+            )
+            .unwrap();
+        let mut fine_mass = Vec::new();
+        let mut fine_irradiance = Vec::new();
+        for y in 0..4 {
+            for x in 0..4 {
+                let original = x / 2 + 2 * (y / 2);
+                fine_mass.push(mass[original]);
+                fine_irradiance.extend_from_slice(&irradiance[2 * original..2 * original + 2]);
+            }
+        }
+        let refined = PourSpectralOpticalView {
+            lattice_spacing_m: 0.05,
+            ..optics
+        }
+        .deposit_beam(
+            &fine_mass,
+            [4, 4],
+            limits,
+            SpectralBeamIrradiance::Columns(&fine_irradiance),
+            &[20.0, 40.0],
+            BeamPropagation::PositiveZ,
+        )
+        .unwrap();
+        beam_close(
+            refined.total_incident_power_w(),
+            reference.total_incident_power_w(),
+        );
+        beam_close(
+            refined.total_absorbed_power_w(),
+            reference.total_absorbed_power_w(),
+        );
+        beam_close(
+            refined.total_transmitted_power_w(),
+            reference.total_transmitted_power_w(),
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                let original = x / 2 + 2 * (y / 2);
+                beam_close(
+                    refined.cell_absorbed_power_w()[x + 4 * y] * 4.0,
+                    reference.cell_absorbed_power_w()[original],
+                );
+            }
+        }
+        let rescaled = PourSpectralOpticalView {
+            density_unit_kg_m3: 500.0,
+            ..optics
+        }
+        .deposit_beam(
+            &mass.map(|value| 2.0 * value),
+            [2, 2],
+            limits,
+            SpectralBeamIrradiance::Columns(&irradiance),
+            &[20.0, 40.0],
+            BeamPropagation::PositiveZ,
+        )
+        .unwrap();
+        for (&actual, &expected) in rescaled
+            .cell_absorbed_power_w()
+            .iter()
+            .zip(reference.cell_absorbed_power_w())
+        {
+            beam_close(actual, expected);
+        }
+    }
+
+    #[test]
+    fn indexed_pour_beam_uses_material_rows_and_retains_explicit_admission() {
+        let k = core::f64::consts::LN_2;
+        let optics = PourIndexedSpectralOpticalView {
+            wavelengths_nm: &[450.0, 650.0],
+            mass_absorption_m2_kg: &[k, 2.0 * k, 0.0, 0.0, 2.0 * k, 4.0 * k],
+            cell_materials: &[0, 1, 2, 0],
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 0.1,
+            slab_depth_m: 1e-3,
+        };
+        let limits = IndexedSpectralBeamDepositionSettings {
+            deposition: SpectralBeamDepositionSettings {
+                max_grid_cells: 4,
+                max_spectral_evaluations: 8,
+                max_output_values: 8,
+            },
+            max_materials: 3,
+        };
+        let irradiance = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: vec![1.0; 4],
+        };
+        let power = outcome
+            .deposit_indexed_spectral_beam(
+                [2, 2],
+                optics,
+                limits,
+                SpectralBeamIrradiance::Columns(&irradiance),
+                &[20.0, 40.0],
+                BeamPropagation::PositiveZ,
+            )
+            .unwrap();
+        for (&actual, expected) in power
+            .cell_absorbed_power_w()
+            .iter()
+            .zip([1.4, 0.0, 6.0, 6.2])
+        {
+            beam_close(actual, expected);
+        }
+        for limit in [
+            IndexedSpectralBeamDepositionSettings {
+                max_materials: 2,
+                ..limits
+            },
+            IndexedSpectralBeamDepositionSettings {
+                deposition: SpectralBeamDepositionSettings {
+                    max_output_values: 7,
+                    ..limits.deposition
+                },
+                ..limits
+            },
+            IndexedSpectralBeamDepositionSettings {
+                deposition: SpectralBeamDepositionSettings {
+                    max_spectral_evaluations: 7,
+                    ..limits.deposition
+                },
+                ..limits
+            },
+        ] {
+            assert!(
+                optics
+                    .deposit_beam(
+                        &outcome.mass_field,
+                        [2, 2],
+                        limit,
+                        SpectralBeamIrradiance::Columns(&irradiance),
+                        &[20.0, 40.0],
+                        BeamPropagation::PositiveZ,
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            optics
+                .deposit_beam(
+                    &outcome.mass_field,
+                    [2, 2],
+                    limits,
+                    SpectralBeamIrradiance::Uniform(&[1.0]),
+                    &[20.0, 40.0],
+                    BeamPropagation::PositiveZ,
+                )
+                .is_err()
+        );
+        assert!(
+            optics
+                .deposit_beam(
+                    &outcome.mass_field,
+                    [2, 2],
+                    limits,
+                    SpectralBeamIrradiance::Columns(&irradiance),
+                    &[20.0, -40.0],
+                    BeamPropagation::PositiveZ,
+                )
+                .is_err()
+        );
+        let infrared = PourSpectralOpticalView {
+            wavelengths_nm: &[1000.0],
+            mass_absorption_m2_kg: &[0.0],
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 0.1,
+            slab_depth_m: 1e-3,
+        }
+        .deposit_beam(
+            &[1.0],
+            [1, 1],
+            limits.deposition,
+            SpectralBeamIrradiance::Uniform(&[10.0]),
+            &[5.0],
+            BeamPropagation::NegativeZ,
+        )
+        .unwrap();
+        beam_close(infrared.total_incident_power_w(), 0.5);
+        beam_close(infrared.total_transmitted_power_w(), 0.5);
+        assert_eq!(infrared.total_absorbed_power_w(), 0.0);
     }
 
     #[test]

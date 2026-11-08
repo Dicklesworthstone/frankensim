@@ -10243,6 +10243,36 @@ was compiled against the real fs-math/fs-rand libraries and executed:
 141 tests passed, zero failed. This lean configuration does not execute the
 material-state, native tracer camera or browser consumer feature tests.
 
+### Native and browser pour beam-power ports
+
+Uniform and indexed `PourSpectralOpticalView` owners expose `deposit_beam`;
+`PourOutcome` provides corresponding spectral beam entry points over its
+accepted mass field. They return the shared core's typed
+`SpectralBeamDeposition`, preserving original cell order and per-node power
+accounts. The original SI lattice spacing defines physical area.
+
+The `fs-wasm` functions and browser exports `deposit_vessel_spectral_beam`
+and `deposit_vessel_indexed_spectral_beam` consume that same core. Callers
+supply W/(m² nm) irradiance, explicit nm quadrature widths, a uniform or
+original-column layout, and the entering Z face. The returned buffer is
+`[incident_total_W, absorbed_total_W, transmitted_total_W, cell_absorbed_W...,
+column_transmitted_W...]`; it transfers the core allocation without another
+map copy. Browser admission caps cells and complete spectral work at 1,048,576,
+cell-plus-column map values at 2,097,152, and indexed material rows at 4,096.
+Camera resolution and visible-light observation are absent from these APIs.
+
+Three native and two browser G0/G3 regressions cover independent
+22.4 = 13.6 + 8.8 W accounting, original-cell and spectral totals, indexed
+sources, lateral refinement, density-unit changes, UV/IR nodes, flat output
+and source/weight/work/storage refusals. These consumer tests passed pinned
+Rust parsing and source review but were not compiled or executed in this
+environment; the shared `volumes` core separately passed 148 tests.
+
+The frozen two-dimensional pour has no accepted caloric/enthalpy state.
+These ports expose physically dimensioned absorbed incident power for an
+explicit thermal coupling; they do not invent temperature evolution or infer
+an optical-to-thermal map.
+
 ### Illuminated native and browser pour frames
 
 `PourSpectralOpticalView` and `PourIndexedSpectralOpticalView` now expose
