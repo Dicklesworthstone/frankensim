@@ -3986,6 +3986,45 @@ cascades or relativistic/thermal validity for a gas consumer. Published source:
 <https://www.pa.uky.edu/~verner/photo.html> and
 <https://arxiv.org/abs/astro-ph/9601009>.
 
+### Published He I and He II ground-state photon sources
+
+`AtomicPhotoionizationV1::verner_helium` and `verner_helium_ion` evaluate the
+literal He I and He II rows of Verner et al. (1996), Table 1, with the complete
+shifted Eq.(1). The neutral fit retains its nonzero yw, y0 and y1 parameters;
+it is not obtained by hydrogenic scaling. Source admission checks the He
+elemental row, adjacent charges, original level statistics, He-4 masses and
+the compatibility of the thermochemical gap with the published rounded onset.
+Arbitrary species display names are allowed. Cross-section evaluation is
+allocation-free and uses the existing deterministic elementary functions.
+
+He II retains the published 54.42..=50000 eV domain. For He I the equation's
+published 24.59 eV onset is retained, but this ground-state-only owner limits
+the upper energy to 65.39 eV. The first He+ excited level is 329179.2940 cm^-1
+above its ground state (about 40.81303 eV), so an incident photon can leave
+excited He+ above about 65.40042 eV. The total fit cannot then assign the upper
+ion's excitation and photoelectron heat to this single ground-state channel.
+The conservative 65.39 eV limit remains below the opening across the admitted
+0.005 eV source-gap rounding interval. It is an explicit restriction on this
+consumer, not a claim that the published fit ends there. Source levels:
+<https://physics.nist.gov/PhysRefData/Handbook/Tables/heliumtable6.htm> and
+<https://physics.nist.gov/cgi-bin/ASD/ie.pl?spectra=He&units=1>.
+
+All three selected fit laws decrease above their admitted onsets. The He I
+derivative proof is retained next to `maximum_cross_section_in_domain`; it
+uses the literal shifted-fit parameters and a strictly positive quadratic,
+not a hydrogen-only assumption or sampled maximum. This supplies the exact
+in-domain maximum for the existing Milne envelope admission. A global
+envelope beyond support still requires the caller's separate assertion.
+Low-temperature He I reciprocal capture can resolve its finite supported
+tail; hotter states refuse when omitted contributions cannot be bounded.
+The fit never supplies missing channel branches or a total recombination rate.
+
+G0/G1 regressions cover independently evaluated cross-section anchors,
+structural refusals, physical onset and upper support, monotonicity and Milne
+envelope admission, original-gap photoelectron heat, and independently
+integrated reciprocal event/kinetic-energy moments. These are numerical source
+and reciprocity checks, not experimental validation of a plasma trajectory.
+
 ## Reciprocal spontaneous radiative recombination
 
 `kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1`
@@ -4042,8 +4081,8 @@ they no longer imply that its actual source charge is zero. The source-bound
 Saha factor and three-body reverse use the two original level weights and
 masses at the actual electron temperature. Generic tabulated photoionization
 and its Milne radiative reverse use the same admitted stages and chemical gap.
-The published Verner H I convenience source continues to require actual
-neutral hydrogen and its singly charged ion; it is not reused for ionic targets.
+Each published Verner H I/He I/He II convenience source checks its own declared
+element and charge stage; the neutral H law is not reused for ionic targets.
 
 Three focused G0/G1 regressions compare higher-stage impact and Saha rates,
 their common-temperature derivatives, source charge/nucleus balance and

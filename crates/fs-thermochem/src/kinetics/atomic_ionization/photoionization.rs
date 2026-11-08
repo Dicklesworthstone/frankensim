@@ -14,9 +14,11 @@
 //! A thermal consumer must explicitly assume photoelectron thermalization.
 //!
 //! Source tables retain their interpolation and finite energy interval. The
-//! optional hydrogen preset directly evaluates the published Verner et al.
-//! fit (1996), <https://arxiv.org/abs/astro-ph/9601009>, within its original
-//! range; no high-energy continuation or spectral quadrature is inferred.
+//! optional H I, He I and He II presets directly evaluate the published
+//! Verner et al. fit (1996), <https://arxiv.org/abs/astro-ph/9601009>.
+//! He I support stops before excited residual-ion channels can open; the
+//! total fit cannot specify their individual energy or population yields.
+//! No high-energy continuation or spectral quadrature is inferred.
 
 use super::AtomicIonizationV1;
 use crate::electron_collision::{
@@ -74,8 +76,51 @@ impl std::error::Error for PhotoionizationErrorV1 {}
 #[derive(Clone, Debug, PartialEq)]
 enum PhotoionizationLaw {
     Table(std::sync::Arc<[PhotoionizationCrossSectionPointV1]>),
-    HydrogenVerner,
+    Verner {
+        fit: VernerFit,
+        maximum_energy: Energy,
+    },
 }
+
+/// Literal parameters from Verner et al. (1996), Eq.(1), Table 1. The energy
+/// and area scales retain the published eV and Mb convention until evaluation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VernerFit {
+    e0: f64,
+    sigma0: f64,
+    ya: f64,
+    p: f64,
+    yw: f64,
+    y0: f64,
+    y1: f64,
+}
+const VERNER_H_I: VernerFit = VernerFit {
+    e0: 0.4298,
+    sigma0: 54_750.0,
+    ya: 32.88,
+    p: 2.963,
+    yw: 0.0,
+    y0: 0.0,
+    y1: 0.0,
+};
+const VERNER_HE_I: VernerFit = VernerFit {
+    e0: 13.61,
+    sigma0: 949.2,
+    ya: 1.469,
+    p: 3.188,
+    yw: 2.039,
+    y0: 0.4434,
+    y1: 2.136,
+};
+const VERNER_HE_II: VernerFit = VernerFit {
+    e0: 1.720,
+    sigma0: 13_690.0,
+    ya: 32.88,
+    p: 2.963,
+    yw: 0.0,
+    y0: 0.0,
+    y1: 0.0,
+};
 
 /// Immutable photon source on the original validated atomic species bank.
 #[derive(Clone, Debug, PartialEq)]
@@ -195,7 +240,98 @@ impl AtomicPhotoionizationV1 {
                 license: "Published numerical fit parameters; independently implemented equation".into(),
                 artifact: None,
             },
-            law: PhotoionizationLaw::HydrogenVerner,
+            law: PhotoionizationLaw::Verner {
+                fit: VERNER_H_I,
+                maximum_energy: Energy::new(50_000.0 * ELECTRONVOLT_J),
+            },
+            threshold: Energy::new(edge.max(gap)),
+        })
+    }
+
+    /// Verner et al. (1996), Eq.(1) / Table 1 He I, on its ground-state channel.
+    /// The original rounded 24.59 eV onset and all seven fit parameters remain
+    /// unchanged. Structural He, charges (0,+1,-1), weights (1,2), He-4 masses
+    /// and a source gap in 24.585..=24.59 eV are required; names do not select it.
+    ///
+    /// The published total fit extends to 50 keV, but this single-ground-state
+    /// owner admits only up to 65.39 eV. He+ 2p_1/2 opens at about 65.40042 eV
+    /// from neutral He; above it the total cross section cannot assign the
+    /// residual ion's excitation or the electron's heat. 65.39 eV stays below
+    /// that opening even at the admitted source gap's lower rounding limit.
+    /// The first He+ excitation is 329179.2940 cm^-1 (about 40.81303 eV):
+    /// <https://physics.nist.gov/PhysRefData/Handbook/Tables/heliumtable6.htm>.
+    /// Unresolved higher-energy tails are not replaced with zero or a guessed
+    /// branching ratio. These are smoothed fit values, not resolved resonances.
+    pub fn verner_helium(channel: AtomicIonizationV1) -> Result<Self, PhotoionizationErrorV1> {
+        Self::verner_helium_stage(channel, false)
+    }
+
+    /// Verner et al. (1996), Eq.(1) / Table 1 He II, with published support
+    /// 54.42..=50000 eV. Requires structural He, charges (+1,+2,-1), ground
+    /// weights (2,1), He-4 masses and a source gap in 54.415..=54.42 eV.
+    /// The stripped upper ion has no unresolved excited electronic channel.
+    /// The rounded fit onset never replaces the original gap in energy accounts.
+    pub fn verner_helium_ion(
+        channel: AtomicIonizationV1,
+    ) -> Result<Self, PhotoionizationErrorV1> {
+        Self::verner_helium_stage(channel, true)
+    }
+
+    fn verner_helium_stage(
+        channel: AtomicIonizationV1,
+        ionized: bool,
+    ) -> Result<Self, PhotoionizationErrorV1> {
+        let bank = channel.thermodynamics();
+        let matrix = bank.elemental_matrix();
+        let he = matrix.elements().iter().position(|element| element.as_str() == "He")
+            .ok_or(PhotoionizationErrorV1::Invalid("Verner helium requires the He elemental row"))?;
+        let indices = [channel.lower_index(), channel.upper_index(), channel.electron_index()];
+        let weights = channel.statistical_weights();
+        let (charge, expected_weights, edge_ev, fit, maximum_ev, label) = if ionized {
+            (1, [2, 1], 54.42, VERNER_HE_II, 50_000.0, "He II")
+        } else {
+            (0, [1, 2], 24.59, VERNER_HE_I, 65.39, "He I")
+        };
+        if matrix.get(he, indices[0]) != Some(1)
+            || matrix.get(he, indices[1]) != Some(1)
+            || matrix.get(he, indices[2]) != Some(0)
+            || indices.map(|i| bank.charge_vector().get(i))
+                != [Some(charge), Some(charge + 1), Some(-1)]
+            || [weights.neutral, weights.ion] != expected_weights
+        {
+            return Err(PhotoionizationErrorV1::Invalid("Verner helium ground-state identities"));
+        }
+        // CODATA 2022 alpha mass; the 1e-3 relative window is the same identity
+        // policy as H I, not a fit-error bound or a He-3 isotope correction.
+        // https://physics.nist.gov/cuu/Constants/Table/allascii.txt
+        const ALPHA_MASS_KG: f64 = 6.644_657_345_0e-27;
+        let upper_mass = ALPHA_MASS_KG + if ionized { 0.0 } else { ELECTRON_MASS_KG };
+        for (index, expected) in indices.into_iter().zip([
+            upper_mass + ELECTRON_MASS_KG, upper_mass, ELECTRON_MASS_KG,
+        ]) {
+            let mass = bank.models()[index].molar_mass().value() / AVOGADRO_PER_MOL;
+            if (mass / expected - 1.0).abs() > 1e-3 {
+                return Err(PhotoionizationErrorV1::Invalid("Verner helium source masses"));
+            }
+        }
+        let gap = channel.ionization_energy_j_mol() / AVOGADRO_PER_MOL;
+        let edge = edge_ev * ELECTRONVOLT_J;
+        if gap < (edge_ev - 0.005) * ELECTRONVOLT_J
+            || gap - edge > 64.0 * f64::EPSILON * edge
+        {
+            return Err(PhotoionizationErrorV1::Invalid("Verner helium source ionization gap"));
+        }
+        Ok(Self {
+            channel,
+            provenance: Provenance {
+                source: format!("Verner, Ferland, Korista & Yakovlev (1996), ApJ 465, 487, Eq.(1), Table 1 {label}; https://www.pa.uky.edu/~verner/dima/photo/photo.dat; https://doi.org/10.1086/177435; He I ground-state support below the NIST He II 2p threshold: https://physics.nist.gov/PhysRefData/Handbook/Tables/heliumtable6.htm"),
+                license: "Published numerical fit parameters; independently implemented equation".into(),
+                artifact: None,
+            },
+            law: PhotoionizationLaw::Verner {
+                fit,
+                maximum_energy: Energy::new(maximum_ev * ELECTRONVOLT_J),
+            },
             threshold: Energy::new(edge.max(gap)),
         })
     }
@@ -221,9 +357,16 @@ impl AtomicPhotoionizationV1 {
                     .map(|p| p.cross_section.value())
                     .fold(0.0, f64::max),
             )),
-            // For x>=13.6/0.4298, d ln(sigma)/d ln(x) is negative:
-            // 2x/(x-1)+P/2-5.5-P*sqrt(x/ya)/(2*(1+sqrt(x/ya))) < 0.
-            PhotoionizationLaw::HydrogenVerner => self.cross_section(self.threshold),
+            // All three literal fits decrease above their admitted onset.
+            // H I/He II have y=x>31 and c=5.5-P/2=4.0185, so
+            // d ln(sigma)/d ln(x) < 2x/(x-1)-c < 0.
+            // For He I, c=3.906, b=y1, w=yw, x>0. The derivative of
+            // ((x-1)^2+w^2)*(x^2+b^2)^(-c/2) has sign -(x*Q(x)+2b^2),
+            // Q=1.906*x^2-5.812*x+11.020285026. Q's leading term is
+            // positive and discriminant -50.239309038224 < 0. The remaining
+            // (1+sqrt(y/ya))^-P factor also decreases. Thus this is an
+            // analytic maximum, not a sampled or hydrogen-only assumption.
+            PhotoionizationLaw::Verner { .. } => self.cross_section(self.threshold),
         }
     }
 
@@ -231,14 +374,14 @@ impl AtomicPhotoionizationV1 {
     pub fn maximum_energy(&self) -> Energy {
         match &self.law {
             PhotoionizationLaw::Table(points) => points[points.len() - 1].photon_energy,
-            PhotoionizationLaw::HydrogenVerner => Energy::new(50_000.0 * ELECTRONVOLT_J),
+            PhotoionizationLaw::Verner { maximum_energy, .. } => *maximum_energy,
         }
     }
-    /// Unmodified original samples; absent for the analytic hydrogen fit.
+    /// Unmodified original samples; absent for the analytic Verner fits.
     pub fn points(&self) -> Option<&[PhotoionizationCrossSectionPointV1]> {
         match &self.law {
             PhotoionizationLaw::Table(points) => Some(points.as_ref()),
-            PhotoionizationLaw::HydrogenVerner => None,
+            PhotoionizationLaw::Verner { .. } => None,
         }
     }
 
@@ -258,13 +401,13 @@ impl AtomicPhotoionizationV1 {
             return Ok(Area::new(0.0));
         }
         let sigma = match &self.law {
-            PhotoionizationLaw::HydrogenVerner => {
-                // H I has yw=y0=y1=0, hence y=x. Square and SI conversion
-                // remain ordinary arithmetic; powers use deterministic ln/exp.
-                let x = (e / ELECTRONVOLT_J) / 0.4298;
-                let exponent = (0.5 * 2.963 - 5.5) * ln(x)
-                    - 2.963 * ln(1.0 + sqrt(x / 32.88));
-                (54_750.0 * 1e-22) * (x - 1.0) * (x - 1.0) * exp(exponent)
+            PhotoionizationLaw::Verner { fit, .. } => {
+                let x = (e / ELECTRONVOLT_J) / fit.e0 - fit.y0;
+                let y = if fit.y1 == 0.0 { x } else { sqrt(x * x + fit.y1 * fit.y1) };
+                let exponent = (0.5 * fit.p - 5.5) * ln(y)
+                    - fit.p * ln(1.0 + sqrt(y / fit.ya));
+                (fit.sigma0 * 1e-22) * ((x - 1.0) * (x - 1.0) + fit.yw * fit.yw)
+                    * exp(exponent)
             }
             PhotoionizationLaw::Table(points) => {
                 let upper = points.partition_point(|p| p.photon_energy.value() < e);
