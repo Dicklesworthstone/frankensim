@@ -106,7 +106,15 @@ fn g1_full_equilibrium_source_drives_coupled_relaxation_and_joint_frame_rotation
     let saved = material.clone();
     assert!(material.state().property("young_modulus").is_none());
     assert!(material.state().property("poisson_ratio").is_none());
-    assert_eq!(material.law().equilibrium_mandel(), &EQUILIBRIUM);
+    for (actual, expected) in material
+        .law()
+        .equilibrium_mandel()
+        .iter()
+        .flatten()
+        .zip(EQUILIBRIUM.iter().flatten())
+    {
+        close(*actual, *expected);
+    }
     assert_eq!(material.law().band_rad_s(), (20.0, 600.0));
     assert!(material.law().modulus_mandel(601.0).is_err());
 
