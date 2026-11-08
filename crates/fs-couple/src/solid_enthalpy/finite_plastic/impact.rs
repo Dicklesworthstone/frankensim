@@ -1,6 +1,6 @@
 //! Zero-duration contact on the original source-bound caloric/mechanical pair.
 use super::{
-    FiniteThermoplasticError, FiniteThermoplasticMaterial, FiniteThermoplasticSolid, poll,
+    FiniteThermoplasticError, FiniteThermoplasticMaterialFamily, FiniteThermoplasticSolid, poll,
 };
 use crate::finite_solid::contact::mixed::FiniteSolidMixedContactKinematics;
 use crate::inelastic_impact::directional::{
@@ -46,7 +46,7 @@ pub type FiniteThermoplasticSourceImpactError<E> = FiniteThermoplasticImpactErro
     SourceInelasticMixedContactError<FiniteThermoplasticTetError, E>,
 >;
 
-impl<'a> FiniteThermoplasticSolid<'a> {
+impl<'a, M: FiniteThermoplasticMaterialFamily> FiniteThermoplasticSolid<'a, M> {
     /// Propose simultaneous rigid/solid and rigid/rigid contacts at this clock.
     ///
     /// The original thermal snapshot and exact caloric sources must still match.
@@ -184,10 +184,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
 
     fn retain_impact<R>(
         &self,
-        event: InelasticMixedContactCandidate<
-            FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
-            R,
-        >,
+        event: InelasticMixedContactCandidate<FiniteThermoplasticTetSolid<'a, M>, R>,
     ) -> InelasticMixedContactCandidate<Self, R> {
         InelasticMixedContactCandidate {
             solid: Self {

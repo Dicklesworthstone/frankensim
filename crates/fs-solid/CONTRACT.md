@@ -12951,3 +12951,25 @@ entropy model, thermal transport, automatic heat deposition, damage or healing.
 The spatial account independently retains stored energy, integrated flow potential, native plastic/viscous and combined-creep heat channels, and signed endpoint quadrature defect. Newton's potential is checked against storage plus flow potential, not physical dissipation. `inelastic_dissipation_j()` sums the original physical channels; numerical endpoint/kinetic losses are excluded. The native sole-Norton convention still uses the plastic-named metric/alpha/heat slots for creep, while combined laws keep plastic and creep accumulations separate. This adds no recovery energy, rupture qualification or P1 locking-accuracy claim.
 
 `tests/hyper_plastic_creep_recovery.rs` authors loaded free-sided recovery/dwell/reload against independent finite Hencky and quadratic kinetic equations, nonvirgin stress-free translation with consistent inertia, simultaneous creep/yielding with separate paths and heat, and clock refusals. Coefficients are manufactured. Native execution of this addition is not claimed; dependency compilation was killed before fs-solid was reached.
+
+## Complete finite thermal recovery histories in structural consumers
+
+The original `FiniteThermoplasticTetSolid` and step, pressure, sustained-plane
+contact and impulse paths accept `FiniteThermalInelasticMaterial` with its full
+associated state. Every mechanical/thermal trial freezes the same accepted
+history and actual interval. Permanent creep, plastic hardening, independent
+recovery resistance, deformation, temperature and optional momentum advance
+atomically. The original Newton/tangent, reference-volume, consistent-mass and
+work gates remain authoritative; there is no second structural solver.
+
+Caloric heat is physical native inelastic loss plus signed reversible transfer.
+Flow potential, signed endpoint quadrature defects and numerical kinetic loss
+remain separate. Sole Norton retains the original plastic-named loss field;
+combined families retain distinct plastic and creep channels. Zero-duration
+impulses preserve the complete material memory without recovery or flow.
+
+Synthetic free-coordinate thermal recovery regressions compare Hencky/Arrhenius
+loading, hot stress-free dwell, reload and full energy accounts to independent
+scalar equations; graded-mass impulse continuation and simultaneous yielding
+retain their original owners. No measured calibration, life prediction, locking-
+free P1 behavior or automatic remeshing/state transfer is claimed.

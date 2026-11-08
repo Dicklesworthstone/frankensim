@@ -1,6 +1,9 @@
 //! Source-bound, sub-yield finite Norton creep with free lateral contraction.
 //! The mechanical/caloric oracle is independent of the production return map.
 
+#[path = "creep/recovery.rs"]
+mod recovery;
+
 use super::*;
 use fs_material::creep::StrainHardeningCreep;
 use fs_material::plastic::finite::thermal::source::{

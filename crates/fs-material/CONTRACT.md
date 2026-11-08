@@ -21942,3 +21942,35 @@ loading/hold/reversal recurrence with varying temperature and duration, a
 rotated Voce/Prager thermal first-law check, actual section stress relaxation,
 and source-path/time/history refusals. These authored numerical fixtures do
 not establish empirical material accuracy.
+
+## Finite combined and thermal creep resistance recovery
+
+`FiniteRecoveringNortonJ2` uses the original simultaneous finite return with
+permanent plastic alpha, permanent creep_alpha, and independent primary resistance.
+Backward Euler evolves resistance as `r1=(r0+dc)/(1+k*dt)`; its bound uses the
+creep path. Recovery preserves the permanent metric and energetic hardening,
+creates no heat, and shares preparation with standalone finite recovery. The
+native analytic tangent, tangent-free line search, physical mechanism losses and
+integrated inverse-rate potential remain authoritative.
+
+`AffineThermalRecoveringCreep` adds independently activated Arrhenius recovery
+to the existing affine Kirchhoff/logarithmic thermal family. Complete associated
+histories pass through `FiniteThermalInelasticMaterial` and its frozen-point
+protocol. Existing J2 families and the default thermal increment state retain
+their original APIs. One shared thermal account owns total-F mapping, old-state
+inspection at old temperature, coefficient storage, entropy/internal energy,
+reversible heat, physical dissipation and the signed endpoint-work defect.
+Inspection consumes no duration; recovery adds no stored energy or heat capacity.
+
+`thermal::source::recovery` explicitly binds standalone, simultaneous linear-J2,
+and simultaneous Voce-J2 recovering Norton selectors. Law v1/state v3 requires
+primary coefficients, an independent recovery reference rate and activation,
+and the complete original source context/domain. Original cards and hashes remain
+intact; no small-strain or Cauchy-stress calibration is silently reinterpreted.
+The caloric consumer still must admit positive total heat capacity. Invalid,
+unrepresentable or unsupported histories/rates refuse transactionally.
+
+Focused native and thermal recovery tests retain independent manufactured flow,
+potential, entropy, tangent, objectivity, dwell/reload and source checks. These
+are bounded authored constitutive models; measured calibration, tertiary damage,
+rupture, and service-life qualification remain separate claims.

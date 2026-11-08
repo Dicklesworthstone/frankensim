@@ -12,7 +12,8 @@
 use super::feedback::{self, MechanicalEnergy, MechanicalProposal};
 use super::{
     FiniteThermoplasticCandidate, FiniteThermoplasticConfig, FiniteThermoplasticControls,
-    FiniteThermoplasticError, FiniteThermoplasticSolid, HyperTetSettings, finite,
+    FiniteThermoplasticError, FiniteThermoplasticMaterial, FiniteThermoplasticMaterialFamily,
+    FiniteThermoplasticSolid, HyperTetSettings, finite,
 };
 use crate::iqn_ils::driver::CouplingMethod;
 use fs_exec::Cx;
@@ -53,10 +54,10 @@ impl MechanicalEnergy for FiniteThermoplasticPressureEnergy {
 }
 
 /// Complete thermal, plastic/momentum and observer candidate with pressure work.
-pub type FiniteThermoplasticPressureCandidate<'a, 't, O> =
-    FiniteThermoplasticCandidate<'a, 't, O, FiniteThermoplasticPressureEnergy>;
+pub type FiniteThermoplasticPressureCandidate<'a, 't, O, M = FiniteThermoplasticMaterial<'a>> =
+    FiniteThermoplasticCandidate<'a, 't, O, FiniteThermoplasticPressureEnergy, M>;
 
-impl<'a> FiniteThermoplasticSolid<'a> {
+impl<'a, M: FiniteThermoplasticMaterialFamily> FiniteThermoplasticSolid<'a, M> {
     /// Hold the original pressure field over the actual coupled interval.
     ///
     /// Uniform pressure retains exact -p delta(V) work; per-face pressure retains
@@ -79,8 +80,10 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         thermal_config: StepConfig,
         config: FiniteThermoplasticConfig,
         cx: &Cx<'_>,
-    ) -> Result<FiniteThermoplasticPressureCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>>
-    {
+    ) -> Result<
+        FiniteThermoplasticPressureCandidate<'a, 't, O, M>,
+        FiniteThermoplasticError<O::Error>,
+    > {
         self.advance_with_pressure_and_coupling(
             thermal,
             observer,
@@ -124,8 +127,10 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         config: FiniteThermoplasticConfig,
         method: CouplingMethod,
         cx: &Cx<'_>,
-    ) -> Result<FiniteThermoplasticPressureCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>>
-    {
+    ) -> Result<
+        FiniteThermoplasticPressureCandidate<'a, 't, O, M>,
+        FiniteThermoplasticError<O::Error>,
+    > {
         let pressure = pressure.into();
         let next = feedback::advance_with_coupling(
             self.binding(),

@@ -15,7 +15,7 @@
 
 use fs_exec::Cx;
 use fs_solid::hyper3::plastic::thermal::{
-    FiniteThermoplasticControls, FiniteThermoplasticTetSolid,
+    FiniteThermoplasticControls, FiniteThermoplasticTetEnergy, FiniteThermoplasticTetSolid,
 };
 use fs_solid::hyper3::{HyperTetSettings, HyperTetSolution};
 use fs_thermal::enthalpy::conduction::{ConductionObserver, CurrentConductionGeometry};
@@ -32,10 +32,10 @@ use fs_solid::hyper3::plastic::thermal::contact::{
 
 use super::{
     FiniteThermoplasticCandidate, FiniteThermoplasticConfig, FiniteThermoplasticError,
-    FiniteThermoplasticMaterial, FiniteThermoplasticSolid, feedback, finite,
+    FiniteThermoplasticMaterialFamily, FiniteThermoplasticSolid, feedback, finite,
 };
 
-impl<'a> FiniteThermoplasticSolid<'a> {
+impl<'a, M: FiniteThermoplasticMaterialFamily> FiniteThermoplasticSolid<'a, M> {
     /// Solve material history, current normal conductances and caloric feedback.
     ///
     /// `geometry` must be a pure evaluation of the supplied proposed native
@@ -75,13 +75,19 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         method: CouplingMethod,
         maximum_geometry_relative_defect: f64,
         geometry: impl FnMut(
-            &FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
+            &FiniteThermoplasticTetSolid<'a, M>,
             &Cx<'_>,
         ) -> Result<CurrentConductionGeometry, DepositionError>,
         cx: &Cx<'_>,
     ) -> Result<
         (
-            FiniteThermoplasticCandidate<'a, 't, ConductionObserver<'k>>,
+            FiniteThermoplasticCandidate<
+                'a,
+                't,
+                ConductionObserver<'k>,
+                FiniteThermoplasticTetEnergy,
+                M,
+            >,
             f64,
         ),
         FiniteThermoplasticError<DepositionError>,
@@ -159,13 +165,13 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         method: CouplingMethod,
         maximum_geometry_relative_defect: f64,
         geometry: impl FnMut(
-            &FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
+            &FiniteThermoplasticTetSolid<'a, M>,
             &Cx<'_>,
         ) -> Result<CurrentConductionGeometry, DepositionError>,
         cx: &Cx<'_>,
     ) -> Result<
         (
-            FiniteThermoplasticContactCandidate<'a, 't, ConductionObserver<'k>>,
+            FiniteThermoplasticContactCandidate<'a, 't, ConductionObserver<'k>, M>,
             f64,
         ),
         FiniteThermoplasticError<DepositionError>,
@@ -214,21 +220,17 @@ impl<'a> FiniteThermoplasticSolid<'a> {
             &[f64],
             f64,
         ) -> Result<
-            feedback::MechanicalProposal<
-                FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
-                HyperTetSolution,
-                A,
-            >,
+            feedback::MechanicalProposal<FiniteThermoplasticTetSolid<'a, M>, HyperTetSolution, A>,
             FiniteThermoplasticError<DepositionError>,
         >,
         mut geometry: impl FnMut(
-            &FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
+            &FiniteThermoplasticTetSolid<'a, M>,
             &Cx<'_>,
         ) -> Result<CurrentConductionGeometry, DepositionError>,
         cx: &Cx<'_>,
     ) -> Result<
         (
-            FiniteThermoplasticCandidate<'a, 't, ConductionObserver<'k>, A>,
+            FiniteThermoplasticCandidate<'a, 't, ConductionObserver<'k>, A, M>,
             f64,
         ),
         FiniteThermoplasticError<DepositionError>,

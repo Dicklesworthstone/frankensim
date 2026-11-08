@@ -3,13 +3,16 @@ use super::*;
 
 /// Complete inertial solid candidate at unchanged deformation and temperature.
 #[derive(Debug)]
-pub struct FiniteThermoplasticTetImpulse<'a, L: FiniteThermalJ2Material = AffineThermalFiniteJ2> {
+pub struct FiniteThermoplasticTetImpulse<
+    'a,
+    L: FiniteThermalInelasticMaterial = AffineThermalFiniteJ2,
+> {
     pub solid: FiniteThermoplasticTetSolid<'a, L>,
     /// Actual momentum change and applied/support work; no caloric deposition.
     pub impulse: SolidImpulseReport,
 }
 
-impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
+impl<'a, L: FiniteThermalInelasticMaterial> FiniteThermoplasticTetSolid<'a, L> {
     fn impulse_motion(&self) -> Result<&ThermalMotion, FiniteThermoplasticTetError> {
         self.motion.as_ref().ok_or_else(|| {
             invalid("finite thermal impulse requires already bound reference inertia").into()

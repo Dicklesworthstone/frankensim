@@ -22,7 +22,10 @@ use fs_contact::frictional_multicontact::elliptic::{
     solve_elliptic_frictional_contacts,
 };
 use fs_exec::Cx;
-use fs_material::plastic::finite::{FiniteJ2Material, thermal::FiniteThermalJ2Material};
+use fs_material::plastic::finite::{
+    FiniteInelasticMaterial,
+    thermal::{FiniteThermalInelasticMaterial, FiniteThermalJ2Material},
+};
 use fs_mbd::{MassProperties, RigidBodyState};
 use fs_solid::hyper3::{
     plastic::{
@@ -181,9 +184,9 @@ macro_rules! source_candidate {
     }};
 }
 
-/// Sample original interface sources and retain every finite J2 return state.
+/// Sample original interface sources and retain every native finite inelastic state.
 #[allow(clippy::too_many_arguments)]
-pub fn plastic_source_elliptic_contact_candidate<'a, L: FiniteJ2Material, E>(
+pub fn plastic_source_elliptic_contact_candidate<'a, L: FiniteInelasticMaterial, E>(
     solid: &FinitePlasticTetMotion<'a, L>,
     held: &[usize],
     bodies: &[RigidBodyState],
@@ -259,7 +262,11 @@ pub fn visco_source_elliptic_contact_candidate<'a, E>(
 
 /// Source-derived Tet4 contact retaining plastic/thermal states and storage.
 #[allow(clippy::too_many_arguments)]
-pub fn thermoplastic_tet_source_elliptic_contact_candidate<'a, L: FiniteThermalJ2Material, E>(
+pub fn thermoplastic_tet_source_elliptic_contact_candidate<
+    'a,
+    L: FiniteThermalInelasticMaterial,
+    E,
+>(
     solid: &FiniteThermoplasticTetSolid<'a, L>,
     held: &[usize],
     bodies: &[RigidBodyState],

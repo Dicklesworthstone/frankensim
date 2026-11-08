@@ -20,7 +20,7 @@ use fs_thermal::enthalpy::{
 
 use super::material::ReferenceCaloricMaterial;
 use super::{
-    FiniteThermoplasticConfig, FiniteThermoplasticError, FiniteThermoplasticMaterial,
+    FiniteThermoplasticConfig, FiniteThermoplasticError, FiniteThermoplasticMaterialFamily,
     FiniteThermoplasticReport, finite, poll, positive,
 };
 
@@ -34,9 +34,9 @@ pub(in crate::solid_enthalpy) trait CaloricMaterial {
     }
 }
 
-impl CaloricMaterial for FiniteThermoplasticMaterial<'_> {
+impl<M: FiniteThermoplasticMaterialFamily> CaloricMaterial for M {
     fn caloric_source(&self) -> &ResolvedHeatCapacityCurve {
-        FiniteThermoplasticMaterial::caloric_source(self)
+        FiniteThermoplasticMaterialFamily::caloric_source(self)
     }
 }
 impl CaloricMaterial for ReferenceCaloricMaterial<'_> {

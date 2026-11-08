@@ -52,8 +52,9 @@ pub use impact::{
     FiniteThermoplasticSourceImpactError,
 };
 pub use material::{
-    CaloricReference, FiniteThermoplasticMaterial, FiniteThermoplasticQuery,
-    ReferenceCaloricMaterial, ReferenceCaloricQuery,
+    CaloricReference, FiniteRecoveringThermoplasticMaterial, FiniteThermoplasticMaterial,
+    FiniteThermoplasticMaterialFamily, FiniteThermoplasticQuery, ReferenceCaloricMaterial,
+    ReferenceCaloricQuery,
 };
 pub use pressure::{FiniteThermoplasticPressureCandidate, FiniteThermoplasticPressureEnergy};
 
@@ -147,8 +148,11 @@ pub struct FiniteThermoplasticConfig {
 
 /// Accepted finite solid and its exact thermal cell identities.
 #[derive(Debug)]
-pub struct FiniteThermoplasticSolid<'a> {
-    solid: FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
+pub struct FiniteThermoplasticSolid<
+    'a,
+    M: FiniteThermoplasticMaterialFamily = FiniteThermoplasticMaterial<'a>,
+> {
+    solid: FiniteThermoplasticTetSolid<'a, M>,
     cells: Vec<DepositedCell>,
     time_s: f64,
 }
@@ -205,7 +209,33 @@ impl<'a> FiniteThermoplasticSolid<'a> {
             },
         )
     }
+}
 
+impl<'a> FiniteThermoplasticSolid<'a, FiniteRecoveringThermoplasticMaterial<'a>> {
+    /// Advance permanent finite creep, yielding and independent resistance on
+    /// the same original caloric timeline. The selected source schema retains
+    /// recovery history through every mechanics/heat trial and accepted step.
+    pub fn try_new_with_recovery(
+        thermal: &DepositionSimulation<'_>,
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        sources: Vec<FiniteThermoplasticCell<'a>>,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteThermoplasticError> {
+        Self::prepare_sources(
+            thermal,
+            nodes_m,
+            tetrahedra,
+            sources,
+            budget,
+            cx,
+            FiniteRecoveringThermoplasticMaterial::try_new_recovering,
+        )
+    }
+}
+
+impl<'a, M: FiniteThermoplasticMaterialFamily> FiniteThermoplasticSolid<'a, M> {
     fn prepare_sources(
         thermal: &DepositionSimulation<'_>,
         nodes_m: &'a [[f64; 3]],
@@ -216,8 +246,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         mut prepare: impl FnMut(
             FiniteThermoplasticQuery<'a>,
             f64,
-        )
-            -> Result<FiniteThermoplasticMaterial<'a>, FiniteThermoplasticError>,
+        ) -> Result<M, FiniteThermoplasticError>,
     ) -> Result<Self, FiniteThermoplasticError> {
         poll(cx)?;
         if sources.len() != tetrahedra.len() {
@@ -251,6 +280,8 @@ impl<'a> FiniteThermoplasticSolid<'a> {
             let material = prepare(source.query, cell.specific_h_j_kg)?;
             temperatures.push(
                 material
+                    .caloric_source()
+                    .curve()
                     .state_at_specific_enthalpy(cell.specific_h_j_kg)
                     .map_err(FiniteThermoplasticError::Caloric)?
                     .temperature_k(),
@@ -301,7 +332,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
             .solid
             .families()
             .iter()
-            .map(FiniteThermoplasticMaterial::reference_density_kg_m3)
+            .map(FiniteThermoplasticMaterialFamily::reference_density_kg_m3)
             .collect();
         self.solid = self
             .solid
@@ -310,9 +341,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         Ok(self)
     }
 
-    pub const fn mechanics(
-        &self,
-    ) -> &FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>> {
+    pub const fn mechanics(&self) -> &FiniteThermoplasticTetSolid<'a, M> {
         &self.solid
     }
     pub const fn time_s(&self) -> f64 {
@@ -331,7 +360,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         self.binding().enthalpies(thermal, accepted, cx)
     }
 
-    fn binding(&self) -> feedback::ThermalBinding<'_, '_, FiniteThermoplasticMaterial<'a>> {
+    fn binding(&self) -> feedback::ThermalBinding<'_, '_, M> {
         feedback::ThermalBinding {
             cells: &self.cells,
             materials: FinitePlasticLawField::PerElement(self.solid.families()),
@@ -355,7 +384,10 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         thermal_config: StepConfig,
         config: FiniteThermoplasticConfig,
         cx: &Cx<'_>,
-    ) -> Result<FiniteThermoplasticCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>> {
+    ) -> Result<
+        FiniteThermoplasticCandidate<'a, 't, O, FiniteThermoplasticTetEnergy, M>,
+        FiniteThermoplasticError<O::Error>,
+    > {
         self.advance_with_coupling(
             thermal,
             observer,
@@ -395,7 +427,10 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         config: FiniteThermoplasticConfig,
         method: CouplingMethod,
         cx: &Cx<'_>,
-    ) -> Result<FiniteThermoplasticCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>> {
+    ) -> Result<
+        FiniteThermoplasticCandidate<'a, 't, O, FiniteThermoplasticTetEnergy, M>,
+        FiniteThermoplasticError<O::Error>,
+    > {
         let next = feedback::advance_with_coupling(
             self.binding(),
             self.time_s,
@@ -477,17 +512,25 @@ pub struct FiniteThermoplasticReport<E = HyperTetSolution, A = FiniteThermoplast
 }
 
 /// Commit the complete triple together; borrowing it cannot mutate accepted owners.
-pub struct FiniteThermoplasticCandidate<'m, 't, O, A = FiniteThermoplasticTetEnergy> {
+pub struct FiniteThermoplasticCandidate<
+    'm,
+    't,
+    O,
+    A = FiniteThermoplasticTetEnergy,
+    M: FiniteThermoplasticMaterialFamily = FiniteThermoplasticMaterial<'m>,
+> {
     thermal: DepositionSimulation<'t>,
-    solid: FiniteThermoplasticSolid<'m>,
+    solid: FiniteThermoplasticSolid<'m, M>,
     observer: O,
     report: FiniteThermoplasticReport<HyperTetSolution, A>,
 }
-impl<'m, 't, O, A> FiniteThermoplasticCandidate<'m, 't, O, A> {
+impl<'m, 't, O, A, M: FiniteThermoplasticMaterialFamily>
+    FiniteThermoplasticCandidate<'m, 't, O, A, M>
+{
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub const fn solid(&self) -> &FiniteThermoplasticSolid<'m> {
+    pub const fn solid(&self) -> &FiniteThermoplasticSolid<'m, M> {
         &self.solid
     }
     pub const fn observer(&self) -> &O {
@@ -500,7 +543,7 @@ impl<'m, 't, O, A> FiniteThermoplasticCandidate<'m, 't, O, A> {
         self,
     ) -> (
         DepositionSimulation<'t>,
-        FiniteThermoplasticSolid<'m>,
+        FiniteThermoplasticSolid<'m, M>,
         O,
         FiniteThermoplasticReport<HyperTetSolution, A>,
     ) {

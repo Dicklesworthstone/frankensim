@@ -27,7 +27,7 @@ use fs_contact::impact::{
     NormalImpactError, NormalImpactInput, NormalImpactResult, solve_normal_impact,
 };
 use fs_exec::Cx;
-use fs_material::plastic::finite::FiniteJ2Material;
+use fs_material::plastic::finite::FiniteInelasticMaterial;
 use fs_mbd::{
     DynamicsError, MassProperties, MomentumImpulseReceipt, PointKinematics, RigidBodyState, Vec3,
 };
@@ -121,11 +121,12 @@ impl<E: core::fmt::Debug> core::fmt::Display for InelasticImpactError<E> {
 }
 impl<E: core::fmt::Debug> std::error::Error for InelasticImpactError<E> {}
 
-/// Stage one rigid/plastic event using original consistent mass and history.
+/// Stage one rigid/inelastic event using original consistent mass and history.
+/// Creep and recovering resistance are retained without a constitutive interval.
 /// Held DOFs retain their CURRENT velocity, including nonzero driven supports.
 /// Dropping a candidate or any refusal leaves both accepted states intact.
 #[allow(clippy::too_many_arguments)]
-pub fn plastic_rigid_impact_candidate<'a, L: FiniteJ2Material>(
+pub fn plastic_rigid_impact_candidate<'a, L: FiniteInelasticMaterial>(
     solid: &FinitePlasticTetMotion<'a, L>,
     held_velocity_dofs: &[usize],
     rigid: RigidBodyState,

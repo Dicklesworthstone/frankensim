@@ -7738,3 +7738,28 @@ reciprocity, native harmonic/time parity, vertex relabeling, source binding and
 geometry/law/resource refusals. Source/API and independent physical review,
 pinned formatting and whitespace checks passed. Native Rust execution remains
 unverified under the known real-dependency build memory limitation.
+
+## Finite recovering creep on the shared caloric and contact timeline
+
+`FiniteThermoplasticSolid::try_new_with_recovery` binds exact recovering finite
+model cards to the original caloric chart, reference density and mesh inventory.
+The existing material/solid/candidate types retain their old defaults and now
+carry a complete typed material family. Total caloric plus mechanical capacity
+must stay positive over the admitted domain. Physical creep/yield losses and
+signed reversible exchange are deposited once; endpoint-work defects and
+numerical kinetic loss remain outside caloric heat.
+
+The original feedback solver repeats trials from the same accepted material,
+thermal and observer state. Thermal substeps do not repeat the physical recovery
+interval. Accepted candidates commit deformation, permanent histories, resistance,
+temperature, optional momentum and observer history together. The heated-body
+regression independently solves finite equilibrium, primary/recovery flow and
+caloric balance through loaded heating, unloading, hot dwell and reload for both
+standalone and simultaneous yielding families.
+
+Existing pressure, rigid-tool, impact and deformation-dependent conduction
+entrypoints carry the same generic family. Conductivity and admissible current
+normal-flow geometry remain with the original observer/callback. Thermal and
+isothermal Tet4 impact/surface/scene adapters preserve complete inelastic memory
+through zero-duration events; Hex8 support is unchanged. These extensions infer
+no impact-heat partition, distorted-tet Fourier law, remeshing, damage or rupture.

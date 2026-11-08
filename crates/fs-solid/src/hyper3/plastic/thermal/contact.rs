@@ -14,7 +14,7 @@ use super::super::plane_contact::{
     PlaneContactError, TetPlaneEndpoint, TetPlaneGeometry, solve_tet_planes,
 };
 use super::{
-    AffineThermalFiniteJ2, FiniteThermalJ2Material, FiniteThermoplasticControls,
+    AffineThermalFiniteJ2, FiniteThermalInelasticMaterial, FiniteThermoplasticControls,
     FiniteThermoplasticTetError, FiniteThermoplasticTetSolid, FiniteThermoplasticTetStep,
     HyperTetSettings,
 };
@@ -33,7 +33,7 @@ pub type FiniteThermoplasticPlaneContactError = PlaneContactError<FiniteThermopl
 #[derive(Debug)]
 pub struct FiniteThermoplasticPlaneContactStep<
     'a,
-    L: FiniteThermalJ2Material = AffineThermalFiniteJ2,
+    L: FiniteThermalInelasticMaterial = AffineThermalFiniteJ2,
 > {
     /// Native dead-load work includes applied contact forces. Count tool work
     /// with contact.dead_load_work_j to remove that contribution once.
@@ -41,7 +41,7 @@ pub struct FiniteThermoplasticPlaneContactStep<
     pub contact: PlaneContactReport,
 }
 
-impl<L: FiniteThermalJ2Material> TetPlaneEndpoint for FiniteThermoplasticTetStep<'_, L> {
+impl<L: FiniteThermalInelasticMaterial> TetPlaneEndpoint for FiniteThermoplasticTetStep<'_, L> {
     fn displacement_m(&self) -> &[[f64; 3]] {
         self.solid.displacement_m()
     }
@@ -66,7 +66,7 @@ impl<L: FiniteThermalJ2Material> TetPlaneEndpoint for FiniteThermoplasticTetStep
     }
 }
 
-impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
+impl<'a, L: FiniteThermalInelasticMaterial> FiniteThermoplasticTetSolid<'a, L> {
     /// Propose one physical interval against frictionless translating tools.
     ///
     /// All probes retain the original history, source families, physical time

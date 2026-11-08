@@ -8,7 +8,9 @@
 
 use super::{FiniteSolidContactSurface, FiniteSolidSurfaceControls};
 use fs_exec::Cx;
-use fs_material::plastic::finite::{FiniteJ2Material, thermal::FiniteThermalJ2Material};
+use fs_material::plastic::finite::{
+    FiniteInelasticMaterial, thermal::FiniteThermalInelasticMaterial,
+};
 use fs_mbd::RigidBodyState;
 use fs_solid::hyper3::{
     plastic::{
@@ -59,8 +61,8 @@ macro_rules! native_scene {
     };
 }
 
-native_scene!(plastic_contacts, ['a, L: FiniteJ2Material],
+native_scene!(plastic_contacts, ['a, L: FiniteInelasticMaterial],
     FinitePlasticTetMotion<'a, L>, plastic_sphere_separations);
 native_scene!(visco_contacts, ['a], FiniteViscoTetMotion<'a>, visco_sphere_separations);
-native_scene!(thermoplastic_tet_contacts, ['a, L: FiniteThermalJ2Material],
+native_scene!(thermoplastic_tet_contacts, ['a, L: FiniteThermalInelasticMaterial],
     FiniteThermoplasticTetSolid<'a, L>, thermoplastic_tet_sphere_separations);

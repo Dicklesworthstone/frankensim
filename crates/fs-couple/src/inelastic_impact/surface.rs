@@ -25,7 +25,9 @@ pub use crate::finite_solid::contact::surface::{
     FiniteSolidSurfaceControls, FiniteSolidSurfaceError, FiniteSolidSurfaceQuery,
 };
 use fs_exec::Cx;
-use fs_material::plastic::finite::{FiniteJ2Material, thermal::FiniteThermalJ2Material};
+use fs_material::plastic::finite::{
+    FiniteInelasticMaterial, thermal::FiniteThermalInelasticMaterial,
+};
 use fs_mbd::{MassProperties, RigidBodyState};
 use fs_solid::hyper3::{
     plastic::{
@@ -160,7 +162,7 @@ macro_rules! native_surface {
 
 native_surface!(
     for_plastic, plastic_sphere_separations, plastic_sphere_contact_candidate,
-    ['a, L: FiniteJ2Material], solid: FinitePlasticTetMotion<'a, L>, solid.solid(),
+    ['a, L: FiniteInelasticMaterial], solid: FinitePlasticTetMotion<'a, L>, solid.solid(),
     FinitePlasticTetError, plastic_mixed_contact_candidate
 );
 native_surface!(
@@ -171,6 +173,6 @@ native_surface!(
 native_surface!(
     for_thermoplastic_tet, thermoplastic_tet_sphere_separations,
     thermoplastic_tet_sphere_contact_candidate,
-    ['a, L: FiniteThermalJ2Material], solid: FiniteThermoplasticTetSolid<'a, L>, solid,
+    ['a, L: FiniteThermalInelasticMaterial], solid: FiniteThermoplasticTetSolid<'a, L>, solid,
     FiniteThermoplasticTetError, thermoplastic_tet_mixed_contact_candidate
 );

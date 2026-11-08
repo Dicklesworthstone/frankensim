@@ -21,7 +21,10 @@ use fs_contact::frictional_multicontact::{
     solve_frictional_contacts,
 };
 use fs_exec::Cx;
-use fs_material::plastic::finite::{FiniteJ2Material, thermal::FiniteThermalJ2Material};
+use fs_material::plastic::finite::{
+    FiniteInelasticMaterial,
+    thermal::{FiniteThermalInelasticMaterial, FiniteThermalJ2Material},
+};
 use fs_mbd::{MassProperties, RigidBodyState};
 use fs_solid::hyper3::{
     mixed::visco::{
@@ -204,9 +207,10 @@ pub fn mixed_visco_mixed_contact_candidate<'a>(
     )
 }
 
-/// Resolve a coupled impact while retaining every accepted plastic state.
+/// Resolve a coupled impact while retaining every accepted inelastic state.
+/// Native creep and recovering resistance remain fixed at this zero-duration event.
 #[allow(clippy::too_many_arguments)]
-pub fn plastic_mixed_contact_candidate<'a, L: FiniteJ2Material>(
+pub fn plastic_mixed_contact_candidate<'a, L: FiniteInelasticMaterial>(
     solid: &FinitePlasticTetMotion<'a, L>,
     held: &[usize],
     bodies: &[RigidBodyState],
@@ -265,7 +269,7 @@ pub fn visco_mixed_contact_candidate<'a>(
 /// Native thermal Tet4 event; temperature and free/internal energy stay fixed.
 /// The input must already own its native consistent mass and velocity field.
 #[allow(clippy::too_many_arguments)]
-pub fn thermoplastic_tet_mixed_contact_candidate<'a, L: FiniteThermalJ2Material>(
+pub fn thermoplastic_tet_mixed_contact_candidate<'a, L: FiniteThermalInelasticMaterial>(
     solid: &FiniteThermoplasticTetSolid<'a, L>,
     held: &[usize],
     bodies: &[RigidBodyState],

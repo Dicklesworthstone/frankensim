@@ -15,8 +15,8 @@
 use super::feedback::{self, MechanicalEnergy, MechanicalProposal};
 use super::{
     FiniteThermoplasticCandidate, FiniteThermoplasticConfig, FiniteThermoplasticControls,
-    FiniteThermoplasticError, FiniteThermoplasticMaterial, FiniteThermoplasticSolid,
-    HyperTetSettings, HyperTetSolution, finite,
+    FiniteThermoplasticError, FiniteThermoplasticMaterial, FiniteThermoplasticMaterialFamily,
+    FiniteThermoplasticSolid, HyperTetSettings, HyperTetSolution, finite,
 };
 use crate::iqn_ils::driver::CouplingMethod;
 use fs_exec::Cx;
@@ -64,10 +64,10 @@ impl MechanicalEnergy for FiniteThermoplasticContactEnergy {
 }
 
 /// Atomic solid, thermal and observer endpoint with its original contact solve.
-pub type FiniteThermoplasticContactCandidate<'a, 't, O> =
-    FiniteThermoplasticCandidate<'a, 't, O, FiniteThermoplasticContactEnergy>;
+pub type FiniteThermoplasticContactCandidate<'a, 't, O, M = FiniteThermoplasticMaterial<'a>> =
+    FiniteThermoplasticCandidate<'a, 't, O, FiniteThermoplasticContactEnergy, M>;
 
-impl<'a> FiniteThermoplasticSolid<'a> {
+impl<'a, M: FiniteThermoplasticMaterialFamily> FiniteThermoplasticSolid<'a, M> {
     /// Form against explicitly translating rigid planes while solving heat.
     ///
     /// Contact row scales condition the native natural map in N/m; they are
@@ -92,7 +92,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         thermal_config: StepConfig,
         config: FiniteThermoplasticConfig,
         cx: &Cx<'_>,
-    ) -> Result<FiniteThermoplasticContactCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>>
+    ) -> Result<FiniteThermoplasticContactCandidate<'a, 't, O, M>, FiniteThermoplasticError<O::Error>>
     {
         self.advance_with_plane_contact_and_coupling(
             thermal,
@@ -138,7 +138,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         config: FiniteThermoplasticConfig,
         method: CouplingMethod,
         cx: &Cx<'_>,
-    ) -> Result<FiniteThermoplasticContactCandidate<'a, 't, O>, FiniteThermoplasticError<O::Error>>
+    ) -> Result<FiniteThermoplasticContactCandidate<'a, 't, O, M>, FiniteThermoplasticError<O::Error>>
     {
         let next = feedback::advance_with_coupling(
             self.binding(),
@@ -196,7 +196,7 @@ impl<'a> FiniteThermoplasticSolid<'a> {
         cx: &Cx<'_>,
     ) -> Result<
         MechanicalProposal<
-            FiniteThermoplasticTetSolid<'a, FiniteThermoplasticMaterial<'a>>,
+            FiniteThermoplasticTetSolid<'a, M>,
             HyperTetSolution,
             FiniteThermoplasticContactEnergy,
         >,

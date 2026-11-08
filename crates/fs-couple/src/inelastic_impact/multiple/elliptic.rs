@@ -83,9 +83,9 @@ pub fn mixed_visco_mixed_elliptic_contact_candidate<'a>(
     )
 }
 
-/// Coupled directional impacts retaining finite J2 deformation and return state.
+/// Coupled directional impacts retaining native finite deformation and inelastic state.
 #[allow(clippy::too_many_arguments)]
-pub fn plastic_mixed_elliptic_contact_candidate<'a, L: FiniteJ2Material>(
+pub fn plastic_mixed_elliptic_contact_candidate<'a, L: FiniteInelasticMaterial>(
     solid: &FinitePlasticTetMotion<'a, L>,
     held: &[usize],
     bodies: &[RigidBodyState],
@@ -129,7 +129,7 @@ pub fn visco_mixed_elliptic_contact_candidate<'a>(
 
 /// Thermal Tet4 event retaining temperature, free/internal energy and plasticity.
 #[allow(clippy::too_many_arguments)]
-pub fn thermoplastic_tet_mixed_elliptic_contact_candidate<'a, L: FiniteThermalJ2Material>(
+pub fn thermoplastic_tet_mixed_elliptic_contact_candidate<'a, L: FiniteThermalInelasticMaterial>(
     solid: &FiniteThermoplasticTetSolid<'a, L>,
     held: &[usize],
     bodies: &[RigidBodyState],

@@ -6,7 +6,11 @@ pub use caloric::{ReferenceCaloricMaterial, ReferenceCaloricQuery};
 use fs_matdb::{ClaimSelection, MaterialCard, QueryPoint};
 use fs_material::phase::{EquilibriumPhaseState, ResolvedHeatCapacityCurve};
 use fs_material::plastic::finite::thermal::source::ResolvedAffineThermalFiniteJ2;
-use fs_material::plastic::finite::thermal::{AffineThermalFiniteJ2, FiniteThermalJ2Material};
+use fs_material::plastic::finite::thermal::source::recovery::ResolvedAffineThermalRecoveringCreep;
+use fs_material::plastic::finite::thermal::{
+    AffineThermalFiniteJ2, FiniteJ2ThermalError, FiniteJ2ThermalIncrement,
+    FiniteThermalInelasticMaterial, FiniteThermalJ2Material,
+};
 
 use super::FiniteThermoplasticError;
 
@@ -35,11 +39,23 @@ pub struct FiniteThermoplasticQuery<'a> {
 /// current physical density is rho_reference / det(F). The caloric chart's
 /// density metadata at another temperature is never substituted for that mass.
 #[derive(Clone, Debug)]
-pub struct FiniteThermoplasticMaterial<'a> {
+pub struct FiniteThermoplasticMaterial<'a, F = ResolvedAffineThermalFiniteJ2> {
     query: FiniteThermoplasticQuery<'a>,
-    family: ResolvedAffineThermalFiniteJ2,
+    family: F,
     caloric: ReferenceCaloricMaterial<'a>,
     minimum_total_heat_capacity_j_m3_k: f64,
+}
+
+/// Source-bound recovering finite creep on the original caloric chart and mass.
+pub type FiniteRecoveringThermoplasticMaterial<'a> =
+    FiniteThermoplasticMaterial<'a, ResolvedAffineThermalRecoveringCreep>;
+
+/// Complete typed finite material plus its exact reference caloric inventory.
+/// The coupled solver uses this seam without copying a constitutive law or
+/// replacing a material's internal history with a plasticity-only state.
+pub trait FiniteThermoplasticMaterialFamily: FiniteThermalInelasticMaterial {
+    fn caloric_source(&self) -> &ResolvedHeatCapacityCurve;
+    fn reference_density_kg_m3(&self) -> f64;
 }
 
 impl<'a> FiniteThermoplasticMaterial<'a> {
@@ -80,14 +96,42 @@ impl<'a> FiniteThermoplasticMaterial<'a> {
         .map_err(|e| FiniteThermoplasticError::Source(e.to_string()))?;
         Self::from_family(query, initial_specific_enthalpy_j_kg, family)
     }
+}
 
+impl<'a> FiniteRecoveringThermoplasticMaterial<'a> {
+    /// Select an explicit recovering finite model and retain its original card.
+    pub fn try_new_recovering(
+        query: FiniteThermoplasticQuery<'a>,
+        initial_specific_enthalpy_j_kg: f64,
+    ) -> Result<Self, FiniteThermoplasticError> {
+        let model =
+            query
+                .card
+                .models()
+                .get(query.model_index)
+                .ok_or(FiniteThermoplasticError::Invalid(
+                    "finite thermal model index is outside the material card",
+                ))?;
+        let family = ResolvedAffineThermalRecoveringCreep::try_from_model_card_at(
+            model,
+            &query.context,
+            &query.temperature_axis,
+        )
+        .map_err(|error| FiniteThermoplasticError::Source(error.to_string()))?;
+        Self::from_family(query, initial_specific_enthalpy_j_kg, family)
+    }
+}
+
+impl<'a, F> FiniteThermoplasticMaterial<'a, F> {
     fn from_family(
         query: FiniteThermoplasticQuery<'a>,
         initial_specific_enthalpy_j_kg: f64,
-        family: ResolvedAffineThermalFiniteJ2,
-    ) -> Result<Self, FiniteThermoplasticError> {
+        family: F,
+    ) -> Result<Self, FiniteThermoplasticError>
+    where
+        F: FiniteThermalInelasticMaterial,
+    {
         let invalid = FiniteThermoplasticError::Invalid;
-        let parameters = family.law().parameters();
         let caloric = ReferenceCaloricMaterial::try_new(
             ReferenceCaloricQuery {
                 card: query.card,
@@ -97,11 +141,11 @@ impl<'a> FiniteThermoplasticMaterial<'a> {
                 caloric_reference: query.caloric_reference,
             },
             initial_specific_enthalpy_j_kg,
-            parameters.reference_temperature_k,
-            parameters.temperature_range_k,
+            family.reference_temperature_k(),
+            family.temperature_range_k(),
         )?;
         let minimum_total_heat_capacity_j_m3_k = caloric.minimum_heat_capacity_j_m3_k()
-            + family.law().minimum_mechanical_heat_capacity_j_m3_k();
+            + family.minimum_mechanical_heat_capacity_j_m3_k();
         if !minimum_total_heat_capacity_j_m3_k.is_finite()
             || minimum_total_heat_capacity_j_m3_k <= 0.0
         {
@@ -120,7 +164,7 @@ impl<'a> FiniteThermoplasticMaterial<'a> {
     pub const fn query(&self) -> &FiniteThermoplasticQuery<'a> {
         &self.query
     }
-    pub const fn family(&self) -> &ResolvedAffineThermalFiniteJ2 {
+    pub const fn family(&self) -> &F {
         &self.family
     }
     pub const fn caloric_source(&self) -> &'a ResolvedHeatCapacityCurve {
@@ -144,5 +188,69 @@ impl<'a> FiniteThermoplasticMaterial<'a> {
 impl FiniteThermalJ2Material for FiniteThermoplasticMaterial<'_> {
     fn thermal_finite_j2(&self) -> &AffineThermalFiniteJ2 {
         self.family.law()
+    }
+}
+
+impl<F> FiniteThermoplasticMaterialFamily for FiniteThermoplasticMaterial<'_, F>
+where
+    Self: FiniteThermalInelasticMaterial,
+{
+    fn caloric_source(&self) -> &ResolvedHeatCapacityCurve {
+        FiniteThermoplasticMaterial::caloric_source(self)
+    }
+    fn reference_density_kg_m3(&self) -> f64 {
+        FiniteThermoplasticMaterial::reference_density_kg_m3(self)
+    }
+}
+
+impl FiniteThermalInelasticMaterial for FiniteRecoveringThermoplasticMaterial<'_> {
+    type State = <ResolvedAffineThermalRecoveringCreep as FiniteThermalInelasticMaterial>::State;
+    type Frozen = <ResolvedAffineThermalRecoveringCreep as FiniteThermalInelasticMaterial>::Frozen;
+
+    fn initial_state(&self) -> Self::State {
+        self.family.initial_state()
+    }
+    fn reference_temperature_k(&self) -> f64 {
+        self.family.reference_temperature_k()
+    }
+    fn temperature_range_k(&self) -> [f64; 2] {
+        self.family.temperature_range_k()
+    }
+    fn minimum_mechanical_heat_capacity_j_m3_k(&self) -> f64 {
+        self.family.minimum_mechanical_heat_capacity_j_m3_k()
+    }
+    fn at_temperature_for_inspection(
+        &self,
+        temperature_k: f64,
+    ) -> Result<Self::Frozen, FiniteJ2ThermalError> {
+        self.family.at_temperature_for_inspection(temperature_k)
+    }
+    fn at_temperature_for_step(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<Self::Frozen, FiniteJ2ThermalError> {
+        self.family
+            .at_temperature_for_step(temperature_k, duration_s)
+    }
+    fn checked_increment_for_step(
+        &self,
+        old_f: &[f64; 9],
+        old: &Self::State,
+        old_temperature_k: f64,
+        new_f: &[f64; 9],
+        new_temperature_k: f64,
+        yield_tolerance_pa: f64,
+        duration_s: f64,
+    ) -> Result<FiniteJ2ThermalIncrement<Self::State>, FiniteJ2ThermalError> {
+        self.family.checked_increment_for_step(
+            old_f,
+            old,
+            old_temperature_k,
+            new_f,
+            new_temperature_k,
+            yield_tolerance_pa,
+            duration_s,
+        )
     }
 }
