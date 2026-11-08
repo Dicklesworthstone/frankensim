@@ -470,7 +470,7 @@ impl ThermalLaw for GasEnthalpyLaw {
             .thermodynamics()
             .evaluate_properties(Temperature::new(t), pressure)
             .map_err(|_| DepositionError::MaterialDomain)?;
-        let eos = fs_thermochem::IdealGasEosV1::new(properties.molar_mass())
+        let eos = fs_thermochem::eos::IdealGasEosV1::new(properties.molar_mass())
             .and_then(|eos| eos.evaluate_pt(Temperature::new(t), pressure))
             .map_err(|_| DepositionError::MaterialDomain)?;
         Ok(Some(eos.mass_density().value()))
