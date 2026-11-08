@@ -6984,3 +6984,47 @@ Focused G1/G3 regressions independently integrate instantaneous `J(t) cross B(t)
 with degree-two tetrahedral quadrature and check nodal force, torque, nonrigid
 virtual work, zero-mean oscillation, quadratic amplitude and doubled phase,
 receiving frames, canonical selections and cancellation.
+
+### Source-bound 3D harmonic winding terminals and original circuits
+
+`spatial::vector_potential::induction::harmonic::winding` binds the original
+closed `SpatialWindingBasis` to the exact same linear magnetic problem and
+prescribed-edge traces. The shared spatial winding binder integrates resistance
+from each original conductor source, winding profile and authored fill
+fraction. Stranded support stays stationary and disjoint from resolved eddy
+conductors. Separate resolved conductors retain anisotropic conductivity,
+skin/proximity resolution admission and prescribed motional induction.
+
+At each positive frequency, native unit field solves construct the complete
+small terminal impedance, including resolved mutual flux and explicitly
+omitted end storage. Motion may make this matrix nonreciprocal or active;
+neither symmetry nor positive terminal resistance is assumed. Current and
+voltage drives recover the actual original field and close real and reactive
+terminal work against stranded copper, resolved eddy heat, signed motion work,
+active magnetic storage and original factored end storage. Source pairings are
+checked independently of potentially large end-region power.
+
+Only reduced unit cochains and solver reports are cached, without retaining
+redundant unit B/J/heat fields. A combined drive seeds the original real-block
+field solve; a sufficiently accurate seed avoids Krylov iterations but never
+bypasses the original Ampere, charge, divergence, skin, motion or power gates.
+Voltage drive uses the existing scaled small complex LU and checks every
+actually reconstructed terminal voltage against its commanded value.
+
+`harmonic::circuit` closes those same terminals on the original RLC, ideal
+transformer and source graph. It reuses the existing native descriptor and
+terminal closure shared with planar harmonic windings, including original
+source indexing, orientation, Kirchhoff constraints and transformer power.
+One descriptor factorization serves terminal unit drives and replay. Actual
+field voltages, reconstructed from original end factors, drive the replay;
+expanded end matrices do not replace those factors. Numerical reference
+terminations cancel and contribute no physical heat. Reported field heat and
+signed mechanical power remain separate, including electrical generation.
+
+Both paths retain bounded preparation/drive payloads, original source and body
+correspondence, exp(-i omega t) peak phasors and cancellation without transient
+history changes. They hold magnetic materials, geometry and motion fixed.
+They do not infer strand-scale eddies, end resistance, thermal updates,
+saturation or evolving mechanical feedback. Focused winding/circuit
+regressions cover independent mutual RL references, declared shared end modes,
+actual moving-field work, phase covariance, source refusal and retry.

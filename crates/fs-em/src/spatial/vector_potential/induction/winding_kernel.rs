@@ -176,23 +176,62 @@ fn ports(layout: &Layout, external: &[f64], currents: &[f64], voltage: &[f64]) -
 fn bind<S: FieldHistory>(
     field: &S,
     windings: &SpatialNonlinearWindings,
+    sources: Vec<SpatialWindingConductor>,
+    previous: Option<&[SpatialWindingConductor]>,
+    admit: impl FnMut(usize, &ResolvedConductorState) -> Result<()>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Rc<SourceBinding>> {
+    Ok(Rc::new(bind_profiles(
+        field.geometry(),
+        &windings.profiles_per_m2,
+        |cell| field.conducting_cell(cell),
+        sources,
+        previous,
+        admit,
+        cancelled,
+    )?))
+}
+
+// One source/volume/filling owner for transient graph coupling and native
+// harmonic winding terminals. The frequency lane needs no fictitious graph.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn bind_profiles(
+    geometry: Geometry<'_>,
+    profiles_per_m2: &[Vec<[f64; 3]>],
+    conducting_cell: impl Fn(usize) -> bool,
     mut sources: Vec<SpatialWindingConductor>,
     previous: Option<&[SpatialWindingConductor]>,
     mut admit: impl FnMut(usize, &ResolvedConductorState) -> Result<()>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Rc<SourceBinding>> {
-    let geometry = field.geometry();
+) -> Result<SourceBinding> {
     let nc = geometry.mesh().tets.len();
-    let nw = windings.profiles_per_m2.len();
-    if sources.len() > nw.checked_mul(nc).unwrap_or(0) {
+    let nw = profiles_per_m2.len();
+    let support_count = nw
+        .checked_mul(nc)
+        .ok_or_else(|| invalid("winding material support exceeds addressable storage"))?;
+    if nw == 0 || sources.len() > support_count {
         return Err(invalid("bounded complete winding material maps required"));
+    }
+    for profile in profiles_per_m2 {
+        poll(cancelled)?;
+        if profile.len() != nc {
+            return Err(invalid(
+                "winding profiles must retain every original mesh cell",
+            ));
+        }
+        for value in profile {
+            poll(cancelled)?;
+            if value.iter().any(|component| !component.is_finite()) {
+                return Err(invalid("finite original winding profiles required"));
+            }
+        }
     }
     // Canonical ordering makes source matching independent of caller insertion.
     sources.sort_by_key(|s| (s.winding, s.cell));
     if previous.is_some_and(|old| old.len() != sources.len()) {
         return Err(invalid("winding material refresh changed physical support"));
     }
-    let mut support = vec![false; nw * nc];
+    let mut support = vec![false; support_count];
     let mut filling = vec![0.0; nc];
     let mut cell_resistance_ohm = Vec::with_capacity(sources.len());
     let mut resistance_ohm = vec![0.0; nw];
@@ -203,13 +242,13 @@ fn bind<S: FieldHistory>(
             || !positive(source.fill_fraction)
             || source.fill_fraction > 1.0
             || support[source.winding * nc + source.cell]
-            || field.conducting_cell(source.cell)
+            || conducting_cell(source.cell)
         {
             return Err(invalid(
                 "distinct stationary stranded cells disjoint from eddy support required",
             ));
         }
-        let profile = windings.profiles_per_m2[source.winding][source.cell];
+        let profile = profiles_per_m2[source.winding][source.cell];
         let squared = finite(dot(profile, profile))?;
         if !positive(squared) || !source.conductor.has_admitted_static_sources() {
             return Err(invalid(
@@ -260,7 +299,7 @@ fn bind<S: FieldHistory>(
         cell_resistance_ohm.push(r);
         resistance_ohm[source.winding] = finite(resistance_ohm[source.winding] + r)?;
     }
-    for (winding, profile) in windings.profiles_per_m2.iter().enumerate() {
+    for (winding, profile) in profiles_per_m2.iter().enumerate() {
         for (cell, value) in profile.iter().enumerate() {
             poll(cancelled)?;
             if value.iter().any(|&v| v != 0.0) != support[winding * nc + cell] {
@@ -275,11 +314,11 @@ fn bind<S: FieldHistory>(
             "each winding requires represented positive stranded resistance",
         ));
     }
-    Ok(Rc::new(SourceBinding {
+    Ok(SourceBinding {
         conductors: sources,
         cell_resistance_ohm,
         resistance_ohm,
-    }))
+    })
 }
 
 impl Terminal {

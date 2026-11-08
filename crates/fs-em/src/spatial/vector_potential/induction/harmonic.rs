@@ -18,8 +18,12 @@
 //! Solver" (the MQS reduction omits displacement and wave-propagation terms):
 //! <https://ansyshelp.ansys.com/public/Views/Secured/Electronics/v261/en/Subsystems/Maxwell/Content/Maxwell/ACMagnetic_APhiSolver.htm>.
 
+/// Original electrical networks coupled to the resolved 3D harmonic field.
+pub mod circuit;
 /// Consistent mean and twice-frequency mechanical loads on original bodies.
 pub mod loads;
+/// Closed source-bound winding terminals with current and voltage drive.
+pub mod winding;
 
 use super::super::super::{cross, norm, sub};
 use super::*;
@@ -86,6 +90,10 @@ pub struct SpatialHarmonicInductionResponse<
 > {
     source: &'s SpatialInduction<'m, C>,
     omega_rad_s: f64,
+    // Original reduced A/q coordinates, real block followed by imaginary.
+    // Retained for exact linear superposition followed by original residual
+    // and physical recovery checks; never a detached field authority.
+    solution: Vec<f64>,
     potential_wb: Vec<C64>,
     flux_density_t: Vec<[C64; 3]>,
     cells: Vec<SpatialHarmonicInductionCell>,
@@ -147,6 +155,29 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         controls: SpatialHarmonicInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialHarmonicInductionResponse<'_, 'm, C>> {
+        self.solve_harmonic_seeded(
+            impressed_current_a_m2,
+            velocity_m_s,
+            omega_rad_s,
+            controls,
+            None,
+            cancelled,
+        )
+    }
+
+    // Cached unit winding solutions are only initial guesses. The same
+    // operator, original-equation gates and field/power recovery below remain
+    // authoritative at the actual combined source amplitude.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_harmonic_seeded(
+        &self,
+        impressed_current_a_m2: &[[C64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        omega_rad_s: f64,
+        controls: SpatialHarmonicInductionControls,
+        seed: Option<&[f64]>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialHarmonicInductionResponse<'_, 'm, C>> {
         poll(cancelled)?;
         let p = &self.prepared;
         let problem = self.problem();
@@ -160,6 +191,13 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             omega_rad_s,
             controls,
         )?;
+        if seed.is_some_and(|values| {
+            values.len() != 2 * n || values.iter().any(|value| !value.is_finite())
+        }) {
+            return Err(invalid(
+                "finite complete original harmonic coordinates required",
+            ));
+        }
         let omega = omega_rad_s;
         let re: Vec<_> = impressed_current_a_m2
             .iter()
@@ -226,7 +264,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         let target = controls
             .absolute_residual_a
             .max(finite(controls.relative_tolerance * rhs_norm)?);
-        let mut x = vec![0.0; 2 * n];
+        let mut x = seed.map_or_else(|| vec![0.0; 2 * n], <[f64]>::to_vec);
         let report;
         {
             let cancel = RefCell::new(&mut *cancelled);
@@ -248,10 +286,28 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 omega,
                 check: &check,
             };
+            let residual_rhs: std::borrow::Cow<'_, [f64]> = if seed.is_some() {
+                let mut image = vec![0.0; 2 * n];
+                operator.apply(&x, &mut image);
+                if check() {
+                    return Err(SpatialMagneticError::Cancelled);
+                }
+                for (value, b) in image.iter_mut().zip(&rhs) {
+                    *value = finite(b - *value)?;
+                }
+                std::borrow::Cow::Owned(image)
+            } else {
+                std::borrow::Cow::Borrowed(&rhs)
+            };
+            let initial_residual = finite(
+                residual_rhs
+                    .iter()
+                    .fold(0.0_f64, |r, value| r.hypot(*value)),
+            )?;
             let mut solved = None;
-            if rhs_norm > target {
-                let mut solver = FgmresState::new(&rhs, restart);
-                let tolerance = finite((0.25 * target / rhs_norm).min(0.5))?;
+            if initial_residual > target {
+                let mut solver = FgmresState::new(&residual_rhs, restart);
+                let tolerance = finite((0.25 * target / initial_residual).min(0.5))?;
                 if !positive(tolerance) {
                     return Err(invalid(
                         "unrepresentable harmonic induction residual target",
@@ -260,7 +316,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 let outcome = solver.run_controlled(
                     &operator,
                     &preconditioner,
-                    &rhs,
+                    &residual_rhs,
                     tolerance,
                     controls.maximum_cycles,
                     &mut || check(),
@@ -268,7 +324,9 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
                 if outcome.progress != SolverRunProgress::Complete || check() {
                     return Err(SpatialMagneticError::Cancelled);
                 }
-                x = solver.x;
+                for (value, correction) in x.iter_mut().zip(solver.x) {
+                    *value = finite(*value + correction)?;
+                }
                 solved = Some(outcome.report);
             }
             let mut ax = vec![0.0; 2 * n];
@@ -278,7 +336,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             }
             let residual = finite(rhs.iter().zip(ax).fold(0.0_f64, |r, (b, a)| r.hypot(b - a)))?;
             let scale = if rhs_norm == 0.0 { 1.0 } else { rhs_norm };
-            let mut history = solved.as_ref().map_or_else(Vec::new, |r| r.history.clone());
+            let mut history = solved.as_ref().map_or_else(Vec::new, |r| {
+                r.history
+                    .iter()
+                    .map(|value| value * (initial_residual / scale))
+                    .collect()
+            });
             history.push(residual / scale);
             report = SolveReport::from_claim(
                 solved.as_ref().map_or(0, |r| r.iters),
@@ -474,6 +537,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
         Ok(SpatialHarmonicInductionResponse {
             source: self,
             omega_rad_s: omega,
+            solution: x,
             potential_wb: a_re
                 .into_iter()
                 .zip(a_im)
