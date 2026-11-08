@@ -1277,6 +1277,36 @@ incomplete nullspaces, factor/border budgets and cancellation. This remains an
 instantaneous fixed-frame update; it does not infer support impulses, finite
 rotations, remeshing or constitutive-history transfer.
 
+### Atomic installation into the live modal runtime
+
+`time::ModalAcousticTimeModel::transfer_basis` connects that physical transfer
+to the accepted oscillator state. `ModalBasisChange` binds both original
+mass-normalized bases to their runtime spectra (only square-root roundoff is
+allowed). The supplied replacement is an admitted at-rest bank on the same
+sample clock. The original rigid/mass-transfer owner projects the current live
+state, and the replacement runtime rechecks displacement, velocity and energy
+budgets before its state, damping, observers and prepared transitions become
+visible together. Mode count, ordering and degenerate eigenvector orientation
+may change. Refusal or cancellation leaves the complete old bank unchanged.
+
+`ModalRuntimeTransfer` returns the original projection and signed parameter
+work plus independently contracted old/new runtime energies and the residual
+`H_new-H_old-W_parameter+E_discarded`. The original energy tolerance gates this
+additional check. An instantaneous stiffness change can supply real parametric
+excitation; its energy is parameter work, never hidden force work, heat or an
+amplitude normalization. The caller owns event timing and the physical source
+of that work. No continuous coefficient interpolation is inferred.
+
+This cold update allocates and qualifies original sparse operators; the target's
+existing exact transition cache is reused after commit. External force maps,
+receiver filters and material memory remain their owners' responsibility in an
+enclosing coupled transaction. The shared `fs-couple::modal_acoustic_time`
+re-export exposes the same API. Five focused G1/G3 regressions in
+`tests/modal_transfer.rs` cover changed-inertia momentum and subsequent damped
+motion, degenerate basis rotation, truncation/free release, analytically exact
+stiffness-switching parametric growth with a complete work account, and atomic
+refusal. Full crate execution still requires the canonical workspace siblings.
+
 
 ## Phase-continuous prescribed frequency modulation
 

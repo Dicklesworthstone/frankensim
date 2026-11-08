@@ -38,6 +38,8 @@ use heat::{DampedTransition, ViscousIntegral};
 
 mod impulse;
 mod damping;
+mod update;
+pub use update::{ModalBasisChange, ModalRuntimeTransfer, ModalRuntimeTransferError};
 
 /// Prepared exact transitions under linearly interpolated force samples.
 pub mod forcing;

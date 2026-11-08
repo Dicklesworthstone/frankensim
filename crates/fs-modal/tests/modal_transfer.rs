@@ -623,3 +623,237 @@ fn rigid_admission_detects_missing_nullspace_instability_and_bounded_truncation(
         &[0.0;3],rigid_controls(),cx),Err(ModalTransferError::Cancelled))));
     assert_eq!(states,[state(2.0,0.3),state(-1.0,0.4),state(0.5,-0.2)]);
 }
+
+fn runtime_for_basis(
+    modes: &[ModePair],
+    rates: &[f64],
+    sample_rate: u32,
+) -> fs_modal::time::ModalAcousticTimeModel {
+    use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeBudget, ModalAcousticTimeModel};
+    ModalAcousticTimeModel::try_new_with_damping_rates(
+        sample_rate,
+        modes.iter().map(|mode| ModalAcousticMode {
+            angular_frequency_rad_s: mode.lambda.sqrt(),
+            damping_ratio: 0.0,
+            pressure_per_modal_velocity: fs_math::c64::C64::ZERO,
+        }).collect(),
+        rates,
+        ModalAcousticTimeBudget {
+            maximum_abs_displacement_m_sqrt_kg: 1.0e4,
+            maximum_abs_velocity_m_sqrt_kg_per_s: 1.0e6,
+            ..ModalAcousticTimeBudget::audible_reference()
+        },
+    ).unwrap()
+}
+
+#[test]
+fn live_runtime_inertia_update_preserves_momentum_and_installs_new_damped_dynamics() {
+    use fs_modal::time::ModalBasisChange;
+    let old_mass = diagonal(&[4.0]);
+    let new_mass = diagonal(&[9.0]);
+    let new_stiffness = diagonal(&[81.0]);
+    let old = [mode(4.0, &[0.5])];
+    let new = [mode(9.0, &[1.0 / 3.0])];
+    let mut live = runtime_for_basis(&old, &[0.1], 48_000);
+    live.restore_states(&[state(2.0, 4.0)]).unwrap();
+    let original = live.clone();
+    let target = runtime_for_basis(&new, &[0.6], 48_000);
+    let mut independent = target.clone();
+    // x=1 and canonical p=8 survive. New v=8/9, hence q=3, qdot=8/3.
+    independent.restore_states(&[state(3.0, 8.0 / 3.0)]).unwrap();
+    with_cx(&CancelGate::new(), |cx| {
+        let report = live.transfer_basis(target, ModalBasisChange {
+            previous_mass: &old_mass,
+            target_mass: &new_mass,
+            target_stiffness: &new_stiffness,
+            previous_modes: &old,
+            target_modes: &new,
+            equilibrium_offset_m: &[0.0],
+        }, rigid_controls(), cx).unwrap();
+        close(live.states()[0].displacement_m_sqrt_kg / 3.0, 1.0);
+        close(3.0 * live.states()[0].velocity_m_sqrt_kg_per_s, 8.0);
+        close(report.previous_runtime_energy_j, 16.0);
+        close(report.retained_runtime_energy_j, 40.5 + 32.0 / 9.0);
+        close(report.physical.transfer.parameter_work_j, 24.5 + 32.0 / 9.0);
+        close(report.runtime_energy_residual_j, 0.0);
+        assert_eq!(live.damping_rates_per_s(), &[0.6]);
+        let got = live.step_duration(&[0.7], 0.13).unwrap();
+        let expected = independent.step_duration(&[0.7], 0.13).unwrap();
+        close(live.states()[0].displacement_m_sqrt_kg,
+            independent.states()[0].displacement_m_sqrt_kg);
+        close(live.states()[0].velocity_m_sqrt_kg_per_s,
+            independent.states()[0].velocity_m_sqrt_kg_per_s);
+        close(got.input_work_j, expected.input_work_j);
+        close(got.viscous_dissipation_j, expected.viscous_dissipation_j);
+        assert!(got.viscous_dissipation_j > 0.0);
+    });
+    assert_eq!(original.states(), &[state(2.0, 4.0)]);
+    assert_eq!(original.damping_rates_per_s(), &[0.1]);
+}
+
+#[test]
+fn live_runtime_crossing_and_degenerate_rotation_keep_the_original_physical_motion() {
+    use fs_modal::time::ModalBasisChange;
+    let mass = diagonal(&[1.0; 3]);
+    let stiffness = diagonal(&[25.0, 25.0, 81.0]);
+    let old = [mode(25.0, &[1.0, 0.0, 0.0]), mode(25.0, &[0.0, 1.0, 0.0]),
+        mode(81.0, &[0.0, 0.0, 1.0])];
+    let new = [mode(81.0, &[0.0, 0.0, -1.0]), mode(25.0, &[0.6, 0.8, 0.0]),
+        mode(25.0, &[-0.8, 0.6, 0.0])];
+    let states = [state(2.0, 0.3), state(-1.0, -0.4), state(0.5, 0.8)];
+    let mut live = runtime_for_basis(&old, &[0.0; 3], 48_000);
+    live.restore_states(&states).unwrap();
+    let mut original = live.clone();
+    with_cx(&CancelGate::new(), |cx| {
+        let report = live.transfer_basis(runtime_for_basis(&new, &[0.0; 3], 48_000),
+            ModalBasisChange {
+                previous_mass: &mass, target_mass: &mass, target_stiffness: &stiffness,
+                previous_modes: &old, target_modes: &new, equilibrium_offset_m: &[0.0; 3],
+            }, rigid_controls(), cx).unwrap();
+        close(report.physical.transfer.parameter_work_j, 0.0);
+        let before = reconstruct(&old, &states);
+        let after = reconstruct(&new, live.states());
+        for i in 0..3 { close(before.0[i], after.0[i]); close(before.1[i], after.1[i]); }
+        // Evolution commutes with a basis rotation of the degenerate eigenspace.
+        original.step_duration(&[0.0; 3], 0.19).unwrap();
+        live.step_duration(&[0.0; 3], 0.19).unwrap();
+        let before = reconstruct(&old, original.states());
+        let after = reconstruct(&new, live.states());
+        for i in 0..3 { close(before.0[i], after.0[i]); close(before.1[i], after.1[i]); }
+    });
+}
+
+#[test]
+fn live_runtime_truncation_and_free_release_keep_loss_and_parameter_work_separate() {
+    use fs_modal::time::ModalBasisChange;
+    let mass = diagonal(&[1.0; 2]);
+    let stiffness = diagonal(&[4.0, 9.0]);
+    let old = [mode(4.0, &[1.0, 0.0]), mode(9.0, &[0.0, 1.0])];
+    let mut live = runtime_for_basis(&old, &[0.0; 2], 48_000);
+    live.restore_states(&[state(2.0, 0.3), state(0.5, 0.4)]).unwrap();
+    let mut allowed = rigid_controls();
+    allowed.transfer.transfer.maximum_displacement_residual_m_sqrt_kg = 0.500001;
+    allowed.transfer.transfer.maximum_kinetic_residual_j = 0.080001;
+    allowed.transfer.transfer.maximum_elastic_residual_j = 1.125001;
+    with_cx(&CancelGate::new(), |cx| {
+        let report = live.transfer_basis(runtime_for_basis(&old[..1], &[0.0], 48_000),
+            ModalBasisChange {
+                previous_mass: &mass, target_mass: &mass, target_stiffness: &stiffness,
+                previous_modes: &old, target_modes: &old[..1], equilibrium_offset_m: &[0.0; 2],
+            }, allowed, cx).unwrap();
+        close(report.physical.transfer.parameter_work_j, 0.0);
+        close(report.physical.transfer.kinetic_residual_j, 0.08);
+        close(report.physical.transfer.elastic_residual_j, 1.125);
+        close(report.previous_runtime_energy_j - report.retained_runtime_energy_j, 1.205);
+        close(report.runtime_energy_residual_j, 0.0);
+        let frame = live.step_duration(&[0.0], 0.1).unwrap();
+        assert_eq!(frame.viscous_dissipation_j, 0.0);
+
+        // Releasing physical stiffness does not erase motion or create a tiny spring.
+        let mass = diagonal(&[1.0]);
+        let zero_stiffness = diagonal(&[0.0]);
+        let bound = [mode(4.0, &[1.0])];
+        let free = [mode(0.0, &[1.0])];
+        let mut released = runtime_for_basis(&bound, &[0.0], 48_000);
+        released.restore_states(&[state(2.0, 3.0)]).unwrap();
+        let report = released.transfer_basis(runtime_for_basis(&free, &[0.0], 48_000),
+            ModalBasisChange {
+                previous_mass: &mass, target_mass: &mass, target_stiffness: &zero_stiffness,
+                previous_modes: &bound, target_modes: &free, equilibrium_offset_m: &[0.0],
+            }, rigid_controls(), cx).unwrap();
+        close(report.physical.transfer.parameter_work_j, -8.0);
+        assert_eq!(released.states(), &[state(2.0, 3.0)]);
+        let frame = released.step_duration(&[0.0], 0.25).unwrap();
+        close(released.states()[0].displacement_m_sqrt_kg, 2.75);
+        close(released.states()[0].velocity_m_sqrt_kg_per_s, 3.0);
+        close(frame.total_modal_energy_j, 4.5);
+        assert_eq!(frame.viscous_dissipation_j, 0.0);
+    });
+}
+
+#[test]
+fn stiffness_switching_drives_parametric_resonance_with_all_growth_paid_as_parameter_work() {
+    use fs_modal::time::ModalBasisChange;
+    let mass = diagonal(&[1.0]);
+    let soft_k = diagonal(&[1.0]);
+    let hard_k = diagonal(&[4.0]);
+    let soft = [mode(1.0, &[1.0])];
+    let hard = [mode(4.0, &[1.0])];
+    let mut live = runtime_for_basis(&soft, &[0.0], 48_000);
+    live.restore_states(&[state(1.0, 0.0)]).unwrap();
+    with_cx(&CancelGate::new(), |cx| {
+        let mut work = 0.0;
+        for cycle in 1..=4 {
+            // Raise stiffness at maximum displacement, lower it at zero displacement.
+            // Two exact quarter-period flights multiply displacement by -omega_h/omega_l.
+            for (previous, next, k, duration) in [
+                (&soft[..], &hard[..], &hard_k, core::f64::consts::PI / 4.0),
+                (&hard[..], &soft[..], &soft_k, core::f64::consts::PI / 2.0),
+            ] {
+                let report = live.transfer_basis(runtime_for_basis(next, &[0.0], 48_000),
+                    ModalBasisChange {
+                        previous_mass: &mass, target_mass: &mass, target_stiffness: k,
+                        previous_modes: previous, target_modes: next, equilibrium_offset_m: &[0.0],
+                    }, rigid_controls(), cx).unwrap();
+                work += report.physical.transfer.parameter_work_j;
+                let frame = live.step_duration(&[0.0], duration).unwrap();
+                assert_eq!(frame.input_work_j, 0.0);
+                assert_eq!(frame.viscous_dissipation_j, 0.0);
+                close(frame.total_modal_energy_j, 0.5 + work);
+            }
+            close(live.states()[0].displacement_m_sqrt_kg, (-2.0_f64).powi(cycle));
+            close(live.states()[0].velocity_m_sqrt_kg_per_s, 0.0);
+            close(work, 0.5 * (4.0_f64.powi(cycle) - 1.0));
+        }
+    });
+}
+
+#[test]
+fn refused_live_basis_updates_preserve_the_complete_original_runtime() {
+    use fs_modal::time::{ModalAcousticTimeBudget, ModalAcousticTimeModel,
+        ModalBasisChange, ModalRuntimeTransferError};
+    let mass = diagonal(&[1.0]);
+    let stiffness = diagonal(&[9.0]);
+    let old = [mode(4.0, &[1.0])];
+    let new = [mode(9.0, &[1.0])];
+    let binding = ModalBasisChange {
+        previous_mass: &mass, target_mass: &mass, target_stiffness: &stiffness,
+        previous_modes: &old, target_modes: &new, equilibrium_offset_m: &[0.0],
+    };
+    let mut live = runtime_for_basis(&old, &[0.2], 48_000);
+    live.restore_states(&[state(2.0, 0.5)]).unwrap();
+    let mut original = live.clone();
+    with_cx(&CancelGate::new(), |cx| {
+        assert!(matches!(live.transfer_basis(runtime_for_basis(&new, &[0.7], 48_001),
+            binding, rigid_controls(), cx), Err(ModalRuntimeTransferError::Invalid(_))));
+        assert!(matches!(live.transfer_basis(runtime_for_basis(&new, &[0.7], 48_000),
+            ModalBasisChange { previous_modes: &new, ..binding }, rigid_controls(), cx),
+            Err(ModalRuntimeTransferError::Invalid(_))));
+        assert!(matches!(live.transfer_basis(runtime_for_basis(&old, &[0.7], 48_000),
+            binding, rigid_controls(), cx), Err(ModalRuntimeTransferError::Invalid(_))));
+        let mut nonzero = runtime_for_basis(&new, &[0.7], 48_000);
+        nonzero.restore_states(&[state(0.1, 0.0)]).unwrap();
+        assert!(matches!(live.transfer_basis(nonzero, binding, rigid_controls(), cx),
+            Err(ModalRuntimeTransferError::Invalid(_))));
+        let mut too_little_work = rigid_controls();
+        too_little_work.transfer.transfer.maximum_abs_parameter_work_j = 1.0;
+        assert!(matches!(live.transfer_basis(runtime_for_basis(&new, &[0.7], 48_000),
+            binding, too_little_work, cx), Err(ModalRuntimeTransferError::Transfer(_))));
+        let target = runtime_for_basis(&new, &[0.7], 48_000);
+        let too_small = ModalAcousticTimeModel::try_new_with_damping_rates(48_000,
+            target.modes().to_vec(), &[0.7], ModalAcousticTimeBudget::audible_reference()).unwrap();
+        assert!(matches!(live.transfer_basis(too_small, binding, rigid_controls(), cx),
+            Err(ModalRuntimeTransferError::Runtime(_))));
+    });
+    let gate = CancelGate::new(); gate.request();
+    with_cx(&gate, |cx| {
+        assert!(matches!(live.transfer_basis(runtime_for_basis(&new, &[0.7], 48_000),
+            binding, rigid_controls(), cx),
+            Err(ModalRuntimeTransferError::Transfer(ModalTransferError::Cancelled))));
+    });
+    assert_eq!(live.states(), original.states());
+    assert_eq!(live.modes(), original.modes());
+    assert_eq!(live.damping_rates_per_s(), original.damping_rates_per_s());
+    assert_eq!(live.step(&[0.3]).unwrap(), original.step(&[0.3]).unwrap());
+    assert_eq!(live.states(), original.states());
+}
