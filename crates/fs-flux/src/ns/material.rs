@@ -39,6 +39,9 @@ mod newton;
 mod porous;
 #[path = "material/rheology.rs"]
 mod rheology;
+#[cfg(feature = "experimental-sgs")]
+#[path = "material/sgs.rs"]
+mod sgs;
 pub use mixed::{
     MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
     MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
@@ -52,6 +55,8 @@ pub use newton::{MaterialFluxNewtonStep, MaterialFluxViscosityTangent};
 pub use porous::{
     MaterialBrinkmanDragExchange, MaterialBrinkmanSolution, MaterialForchheimerSolution,
 };
+#[cfg(feature = "experimental-sgs")]
+pub use sgs::{MaterialSgsConfig, MaterialSgsError, MaterialSgsStep};
 
 /// Numerical choices, separate from the material's physical viscosity.
 #[derive(Clone, Copy, Debug)]

@@ -644,7 +644,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         })
     }
 
-    fn material_navier_stokes_rheology_step<G>(
+    pub(super) fn material_navier_stokes_rheology_step<G>(
         &self,
         endpoint: NavierStokesStep,
         samples: Vec<MaterialFluxRheologySample<G>>,

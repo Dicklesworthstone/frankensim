@@ -8007,6 +8007,46 @@ review completed; these Rust tests were not compiled or executed here. This
 remains an exploratory frozen-material planar algebraic screen, without a
 three-dimensional turbulent cascade or Reynolds-averaged calibration.
 
+### Material rheology composed with planar SGS
+
+The material-bound native mixed flow exposes explicit SGS variants of steady
+rheology, BDF1, equal-step BDF2 and variable-step BDF2. A `MaterialSgsConfig`
+provides the existing Smagorinsky, WALE or Vreman model and one physical filter
+width per original triangle. At each nonlinear candidate, a single native cell
+gradient supplies both its objective source shear rate and the full-gradient
+SGS response. The original `RheologyField` resolves and caches the molecular
+owner; `nu_effective = mu_source/rho_reference + nu_t` supplies the original
+symmetric stress and harmonic SIP assembly. Source rates are not inflated by SGS.
+
+Convection, molecular viscosity and modeled stress converge at the same
+accepted endpoint under the existing unrelaxed-update and nonlinear-residual
+gates. The steady entry has no inertia. Transient entries retain the original
+physical histories and the native BDF1/BDF2 coefficients and step-growth
+admission; an artificial history combination never becomes a constitutive
+sample. Original physical traction, slip resistance, pressure datum, force
+density and reference-density conversions remain intact. Changed-density
+responses, source refusal, malformed closures and failed solves publish no
+partial result and change neither caller-owned velocity history.
+
+`MaterialSgsStep` retains the exact accepted material samples and SGS diagnostics
+using those molecular responses, with no reporting-time source requery. Its
+material viscous-heating report contains only `mu_source gamma^2`; the separate
+`modeled_transfer_w_per_m` is the area integral of `rho nu_t gamma^2`.
+Boundary reactions belong to the full solved molecular-plus-SGS stress. Modeled
+transfer is not automatically deposited as heat, and excludes SIP/upwind and
+time-discretization losses. The reference density remains fixed; temperature
+and composition captured by the provider are prescribed, not evolved.
+
+Manufactured regressions combine nonlinear source viscosity with mixed physical
+traction/slip boundaries and all four steady/time entries. Equal-strain,
+different-rotation fields distinguish the full-gradient models while retaining
+the same material rheology. Other checks cover exact zero-SGS/native equivalence,
+physical pressure and separate powers, original source samples, and late
+density refusal with unchanged histories. These new consumer tests were authored
+and source-reviewed; full runtime compilation remains blocked by unavailable
+dependency artifacts and build storage. This remains an exploratory planar
+screen, without a resolved three-dimensional cascade or wall/transition model.
+
 ### Physical-time Lagrangian SGS in evolving mixtures
 
 The experimental spatial mixture MolecularEuler3d now attaches an explicit

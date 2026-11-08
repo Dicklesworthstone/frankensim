@@ -196,16 +196,23 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
 
     // Constant-work, allocation-free cell response. This multiplication order
     // avoids squaring a length before its compensating strain scale is applied.
-    fn viscosities(&self, cell: usize, rate: f64) -> Result<(f64, f64), PlanarSgsError> {
+    fn smagorinsky_eddy(&self, cell: usize, rate: f64) -> Result<f64, PlanarSgsError> {
         let length = self.closure_lengths_m[cell];
         let eddy = length * (length * rate);
-        let effective = self.molecular_viscosity_m2_s[cell] + eddy;
         if !rate.is_finite()
             || rate < 0.0
             || !eddy.is_finite()
-            || !effective.is_finite()
             || (length > 0.0 && rate > 0.0 && eddy == 0.0)
         {
+            return Err(PlanarSgsError::UnrepresentableTransport { cell });
+        }
+        Ok(eddy)
+    }
+
+    fn viscosities(&self, cell: usize, rate: f64) -> Result<(f64, f64), PlanarSgsError> {
+        let eddy = self.smagorinsky_eddy(cell, rate)?;
+        let effective = self.molecular_viscosity_m2_s[cell] + eddy;
+        if !effective.is_finite() {
             return Err(PlanarSgsError::UnrepresentableTransport { cell });
         }
         Ok((eddy, effective))
@@ -218,10 +225,31 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
         cell: usize,
         velocity: &[f64],
     ) -> Result<(f64, f64, f64), PlanarSgsError> {
+        let (rate, eddy) = self.modeled_response(cell, velocity)?;
+        let effective = self.molecular_viscosity_m2_s[cell] + eddy;
+        if !effective.is_finite() {
+            return Err(PlanarSgsError::UnrepresentableTransport { cell });
+        }
+        Ok((rate, eddy, effective))
+    }
+
+    // Molecular rheology and SGS must see the SAME candidate strain. Keep the
+    // shared gradient model independent of the molecular snapshot so a source
+    // can supply its actual nonlinear viscosity without a second gradient or
+    // being admitted against an unused reference viscosity.
+    pub(in crate::ns) fn modeled_response(
+        &self,
+        cell: usize,
+        velocity: &[f64],
+    ) -> Result<(f64, f64), PlanarSgsError> {
         let kinematics = self
             .system
             .try_cell_kinematics(velocity, cell)
             .ok_or(PlanarSgsError::UnrepresentableTransport { cell })?;
+        let rate = kinematics.shear_rate();
+        if matches!(self.model, SgsModel::Smagorinsky { .. }) {
+            return Ok((rate, self.smagorinsky_eddy(cell, rate)?));
+        }
         let gradient = kinematics.gradient();
         let embedded = [
             [gradient[0][0], gradient[0][1], 0.0],
@@ -230,11 +258,7 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
         ];
         let eddy = eddy_viscosity(self.model, self.closure_lengths_m[cell], embedded)
             .map_err(|_| PlanarSgsError::UnrepresentableTransport { cell })?;
-        let effective = self.molecular_viscosity_m2_s[cell] + eddy;
-        if !effective.is_finite() {
-            return Err(PlanarSgsError::UnrepresentableTransport { cell });
-        }
-        Ok((kinematics.shear_rate(), eddy, effective))
+        Ok((rate, eddy))
     }
 
     // Prepare each cell once for an assembly. The same typed error channel
@@ -272,6 +296,16 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
     /// # Errors
     /// Refuses invalid velocity or unrepresentable local/integrated diagnostics.
     pub fn field(&self, velocity: &[f64]) -> Result<PlanarSgsField, PlanarSgsError> {
+        self.field_with_molecular(velocity, &|cell| self.molecular_viscosity_m2_s[cell])
+    }
+
+    // Endpoint reporting consumes retained material samples; it never asks a
+    // constitutive provider to evaluate again after native flow acceptance.
+    pub(in crate::ns) fn field_with_molecular(
+        &self,
+        velocity: &[f64],
+        molecular_viscosity: &dyn Fn(usize) -> f64,
+    ) -> Result<PlanarSgsField, PlanarSgsError> {
         if velocity.len() != self.system.n_u || velocity.iter().any(|value| !value.is_finite()) {
             return Err(PlanarSgsError::InvalidInput(
                 "finite original velocity coefficients required",
@@ -282,13 +316,17 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
         let mut cells = Vec::with_capacity(self.system.mesh.tris.len());
         let mut integrated = 0.0;
         for cell in 0..self.system.mesh.tris.len() {
-            let (rate, eddy, effective) = if let Some(rates) = &rates {
+            let (rate, eddy) = if let Some(rates) = &rates {
                 let rate = rates[cell];
-                let (eddy, effective) = self.viscosities(cell, rate)?;
-                (rate, eddy, effective)
+                (rate, self.smagorinsky_eddy(cell, rate)?)
             } else {
-                self.gradient_response(cell, velocity)?
+                self.modeled_response(cell, velocity)?
             };
+            let molecular = molecular_viscosity(cell);
+            let effective = molecular + eddy;
+            if !molecular.is_finite() || molecular <= 0.0 || !effective.is_finite() {
+                return Err(PlanarSgsError::UnrepresentableTransport { cell });
+            }
             let dissipation = (eddy * rate) * rate;
             let contribution = self.system.mesh.areas[cell] * dissipation;
             integrated += contribution;

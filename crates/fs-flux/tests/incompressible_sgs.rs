@@ -10,6 +10,9 @@ use fs_solid::Mesh2;
 #[path = "incompressible_sgs/steady.rs"]
 mod steady;
 
+#[path = "incompressible_sgs/material.rs"]
+mod material;
+
 fn moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
     let mut values = Vec::with_capacity(2 * mesh.edges.len());
     for edge in &mesh.edges {
