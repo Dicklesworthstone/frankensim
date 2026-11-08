@@ -10,8 +10,10 @@
 //! preserving its static priority when a distinct kinetic solution also exists.
 //! Bounded inverse-Broyden iterations with backtracking accelerate the remaining
 //! two-dimensional equation. Every trial starts from the same accepted history.
-//! Nonmonotone laws keep their own native branch selection; this adapter does
-//! not establish uniqueness or silently accept a failed constitutive solve.
+//! Occupied-branch laws requiring the physical load line instead use an exact
+//! principal-direction reduction. A numerical probe must not erase hysteresis
+//! by manufacturing a different stable branch. Unsupported oblique responses
+//! refuse; this adapter does not establish uniqueness.
 
 use core::fmt;
 
@@ -114,6 +116,9 @@ impl From<TriboError> for MatrixTangentialError {
 /// probe. Using the largest eigenvalue can incorrectly choose a static branch
 /// when static and kinetic Coulomb coefficients differ. Rank-one null motion
 /// bounds the probe using the explicit force budget. Neither choice changes C.
+/// Laws requiring physical scalar compliance instead receive the unchanged
+/// released motion and its principal compliance, with no static-priority probe.
+/// Oblique response of such a one-dimensional law is explicitly refused.
 pub fn advance_with_matrix_compliance<L: TangentialLaw>(
     law: &L,
     state: &L::State,
@@ -136,9 +141,22 @@ pub fn advance_with_matrix_compliance<L: TangentialLaw>(
             "negative original contact storage",
         ));
     }
-    let probe = matrix.probe(input, config)?;
-    let initial_force = matrix.zero_slip_reaction(input, config).unwrap_or([0.0; 2]);
-    let initial_inverse = matrix.inverse_initial(probe);
+    let physical_scalar = law.requires_physical_scalar_compliance();
+    let probe = if physical_scalar {
+        matrix.physical_scalar(input)?
+    } else {
+        matrix.probe(input, config)?
+    };
+    let initial_force = if physical_scalar {
+        [0.0; 2]
+    } else {
+        matrix.zero_slip_reaction(input, config).unwrap_or([0.0; 2])
+    };
+    let initial_inverse = if physical_scalar {
+        [[1.0, 0.0], [0.0, 1.0]]
+    } else {
+        matrix.inverse_initial(probe)
+    };
     let mut problem = Problem {
         law,
         state,
@@ -162,6 +180,11 @@ pub fn advance_with_matrix_compliance<L: TangentialLaw>(
                 law_evaluations: problem.evaluations,
                 body_work_residual_j: current.body_work_residual_j,
             });
+        }
+        if physical_scalar {
+            // Reparameterizing the load line here would change the law's
+            // occupied-branch policy even if a candidate closed body work.
+            return Err(problem.unresolved(&current));
         }
         if problem.evaluations == config.maximum_evaluations {
             return Err(problem.unresolved(&current));
@@ -327,6 +350,45 @@ struct Matrix {
 }
 
 impl Matrix {
+    fn physical_scalar(&self, input: &TangentialStepInput) -> Result<f64, MatrixTangentialError> {
+        if self.scale == 0.0 {
+            return Ok(0.0);
+        }
+        if self.original[0][1] == 0.0
+            && self.original[1][0] == 0.0
+            && self.original[0][0] == self.original[1][1]
+        {
+            return Ok(self.original[0][0]);
+        }
+        let distance = norm(input.slip_increment_m)?;
+        if input.normal_n == 0.0 || distance == 0.0 {
+            return Ok(0.0);
+        }
+        let axis = [
+            input.slip_increment_m[0] / distance,
+            input.slip_increment_m[1] / distance,
+        ];
+        let response = mul(self.normalized, axis);
+        let transverse = axis[0] * response[1] - axis[1] * response[0];
+        if transverse.abs() > 128.0 * f64::EPSILON * self.maximum {
+            return Err(MatrixTangentialError::Invalid(
+                "physical scalar branch requires a principal body-compliance direction",
+            ));
+        }
+        // Match the physical diagonal exactly when possible, including the
+        // isotropic case and a rank-one null direction. The full original C
+        // remains the final authority for compatibility and actual work.
+        if self.original[0][1] == 0.0 && self.original[1][0] == 0.0 {
+            if axis[1] == 0.0 {
+                return Ok(self.original[0][0]);
+            }
+            if axis[0] == 0.0 {
+                return Ok(self.original[1][1]);
+            }
+        }
+        number(dot(axis, response).max(0.0) * self.scale)
+    }
+
     fn admit(original: [[f64; 2]; 2], tolerance: f64) -> Result<Self, MatrixTangentialError> {
         let mut scale = 0.0_f64;
         for value in original.into_iter().flatten() {

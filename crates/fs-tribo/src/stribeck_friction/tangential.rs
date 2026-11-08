@@ -227,6 +227,10 @@ impl TangentialLaw for HystereticFriction {
         if &state.owner == self { 0.0 } else { f64::NAN }
     }
 
+    fn requires_physical_scalar_compliance(&self) -> bool {
+        true
+    }
+
     fn advance(
         &self,
         state: &Self::State,

@@ -4,7 +4,9 @@ use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::stribeck_friction::{
     ContactBranch, HystereticFriction, ImplicitFrictionError, StribeckLoadLine,
 };
-use fs_tribo::tangential::matrix::{MatrixTangentialConfig, advance_with_matrix_compliance};
+use fs_tribo::tangential::matrix::{
+    MatrixTangentialConfig, MatrixTangentialError, advance_with_matrix_compliance,
+};
 use fs_tribo::tangential::transport::{FramedTangentialState, TangentialTransportConfig};
 use fs_tribo::{
     ApplicabilityRange, DryFrictionApplicability, DryInterfaceSystemCard, FrictionLaw,
@@ -315,6 +317,208 @@ fn native_matrix_consumer_keeps_the_occupied_branch_and_actual_work() {
     assert_eq!(actual.contact, expected);
     assert_eq!(actual.contact.regime, FrictionRegime::Sliding);
     close(actual.body_work_residual_j, 0.0);
+}
+
+fn principal_matrix(axis: [f64; 2], along: f64, across: f64) -> [[f64; 2]; 2] {
+    let [x, y] = axis;
+    [
+        [along * x * x + across * y * y, (along - across) * x * y],
+        [(along - across) * x * y, along * y * y + across * x * x],
+    ]
+}
+
+fn one_matrix_evaluation() -> MatrixTangentialConfig {
+    MatrixTangentialConfig {
+        maximum_evaluations: 1,
+        displacement_tolerance_m: 1e-13,
+        energy_tolerance_j: 1e-13,
+        matrix_relative_tolerance: 1e-13,
+    }
+}
+
+#[test]
+fn anisotropic_matrix_preserves_occupied_sliding_arrest_and_restart() {
+    let law = HystereticFriction::new(gaussian()).unwrap();
+    // Include a rotated principal axis and a rank-one response: neither the
+    // coordinate basis nor the transverse stiffness may change this load line.
+    for axis in [[1.0, 0.0], [0.0, 1.0], [0.6, 0.8]] {
+        for across in [0.0002, 0.0] {
+            let mut moving = input(1.0);
+            moving.slip_increment_m = [0.01 * axis[0], 0.01 * axis[1]];
+            let initial = law.advance(&law.initial_state(), &moving).unwrap().state;
+            let mut scalar_state = initial.clone();
+            let mut matrix_state = initial;
+            let matrix = principal_matrix(axis, moving.compliance_m_per_n, across);
+            for (index, speed) in [0.5, 0.4, 0.3, 0.5, 0.7, -1.0, -0.5]
+                .into_iter()
+                .enumerate()
+            {
+                let mut x = input(speed);
+                x.slip_increment_m = [0.01 * speed * axis[0], 0.01 * speed * axis[1]];
+                let expected = law.advance(&scalar_state, &x).unwrap();
+                let unchanged = matrix_state.clone();
+                x.compliance_m_per_n = 0.0;
+                let actual = advance_with_matrix_compliance(
+                    &law,
+                    &matrix_state,
+                    &x,
+                    matrix,
+                    one_matrix_evaluation(),
+                    || false,
+                )
+                .unwrap();
+                assert_eq!(matrix_state, unchanged);
+                assert_eq!(actual.contact.regime, expected.regime);
+                assert_eq!(actual.contact.state.branch(), expected.state.branch());
+                assert_eq!(
+                    actual.contact.state.intersections(),
+                    expected.state.intersections()
+                );
+                assert_eq!(actual.law_evaluations, 1);
+                assert_eq!(actual.iterations, 0);
+                for i in 0..2 {
+                    close(actual.contact.traction_n[i], expected.traction_n[i]);
+                    close(
+                        actual.contact.slip_increment_m[i],
+                        expected.slip_increment_m[i],
+                    );
+                    close(actual.contact.compatibility_residual_m[i], 0.0);
+                }
+                close(actual.contact.dissipated_j, expected.dissipated_j);
+                close(actual.body_work_residual_j, 0.0);
+                if index == 0 {
+                    // A static reaction also exists, but the occupied high
+                    // branch remains physically stable and must still heat.
+                    assert_eq!(actual.contact.regime, FrictionRegime::Sliding);
+                    assert!(actual.contact.dissipated_j > 0.0);
+                    let mut fresh_input = x;
+                    fresh_input.compliance_m_per_n = moving.compliance_m_per_n;
+                    assert_eq!(
+                        law.advance(&law.initial_state(), &fresh_input)
+                            .unwrap()
+                            .regime,
+                        FrictionRegime::Sticking,
+                    );
+                }
+                if index == 2 || index == 3 {
+                    assert_eq!(actual.contact.regime, FrictionRegime::Sticking);
+                }
+                scalar_state = expected.state;
+                matrix_state = actual.contact.state;
+            }
+        }
+    }
+}
+
+#[test]
+fn anisotropic_matrix_applies_force_budget_to_the_physical_branch() {
+    let law = HystereticFriction::new(gaussian()).unwrap();
+    let moving = law.advance(&law.initial_state(), &input(1.0)).unwrap();
+    let mut x = input(0.5);
+    x.compliance_m_per_n = 0.0;
+    // The occupied sliding traction is approximately 1.56 N; the alternative
+    // static reaction is 2.5 N. A numerical static probe must not refuse this
+    // physically admissible sliding continuation before considering its branch.
+    x.solve.maximum_force_n = 2.0;
+    let matrix = [[0.002, 0.0], [0.0, 0.0002]];
+    let actual = advance_with_matrix_compliance(
+        &law,
+        &moving.state,
+        &x,
+        matrix,
+        one_matrix_evaluation(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(actual.contact.regime, FrictionRegime::Sliding);
+    assert!(actual.contact.traction_n[0] <= x.solve.maximum_force_n);
+    assert!(actual.contact.dissipated_j > 0.0);
+    close(actual.body_work_residual_j, 0.0);
+    // A fresh contact still selects its physical static branch and refuses
+    // that branch's force budget, rather than substituting a kinetic root.
+    assert!(matches!(
+        advance_with_matrix_compliance(
+            &law,
+            &law.initial_state(),
+            &x,
+            matrix,
+            one_matrix_evaluation(),
+            || false,
+        ),
+        Err(MatrixTangentialError::Law(TriboError::OutsideApplicability {
+            field: "maximum_force_n",
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn hysteretic_matrix_keeps_free_motion_and_refuses_oblique_branch_reduction() {
+    let law = HystereticFriction::new(gaussian()).unwrap();
+    let moving = law.advance(&law.initial_state(), &input(1.0)).unwrap();
+    let unchanged = moving.state.clone();
+    let mut x = input(0.5);
+    x.compliance_m_per_n = 0.0;
+    let prescribed = law.advance(&moving.state, &x).unwrap();
+    let null_direction = advance_with_matrix_compliance(
+        &law,
+        &moving.state,
+        &x,
+        [[0.0, 0.0], [0.0, 0.002]],
+        one_matrix_evaluation(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(null_direction.contact, prescribed);
+    close(null_direction.body_work_residual_j, 0.0);
+
+    let oblique = [[0.002, 0.0005], [0.0005, 0.001]];
+    assert!(matches!(
+        advance_with_matrix_compliance(
+            &law,
+            &moving.state,
+            &x,
+            oblique,
+            one_matrix_evaluation(),
+            || false,
+        ),
+        Err(MatrixTangentialError::Invalid(
+            "physical scalar branch requires a principal body-compliance direction"
+        ))
+    ));
+    let mut polls = 0;
+    assert!(matches!(
+        advance_with_matrix_compliance(
+            &law,
+            &moving.state,
+            &x,
+            [[0.002, 0.0], [0.0, 0.0002]],
+            one_matrix_evaluation(),
+            || {
+                polls += 1;
+                polls == 2
+            },
+        ),
+        Err(MatrixTangentialError::Cancelled)
+    ));
+    assert_eq!(moving.state, unchanged);
+
+    // Release removes the branch and all traction even for an oblique body
+    // response; there is then no one-dimensional friction load line to reduce.
+    x.normal_n = 0.0;
+    let released = advance_with_matrix_compliance(
+        &law,
+        &moving.state,
+        &x,
+        oblique,
+        one_matrix_evaluation(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(released.contact.state.branch(), ContactBranch::Fresh);
+    assert_eq!(released.contact.traction_n, [0.0; 2]);
+    assert_eq!(released.contact.slip_increment_m, x.slip_increment_m);
+    assert_eq!(released.contact.dissipated_j, 0.0);
 }
 
 #[test]

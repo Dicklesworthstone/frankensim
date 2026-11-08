@@ -589,7 +589,8 @@ isotropic mass replaces its off-diagonal or unequal-axis response. A zero
 scalar compliance in the input avoids two independent body-response owners.
 Exactly isotropic and zero matrices delegate to the native law in one call.
 
-General matrices use bounded inverse-secant iterations around that same law's
+For laws permitting numerical scalar-compliance probes, general matrices use
+bounded inverse-secant iterations around that same law's
 scalar-compliance solve. The full matrix's zero-slip reaction is tried through
 the original law first, including the minimum-norm reaction for rank-one
 response. This preserves a feasible static reaction's priority over a separate
@@ -606,6 +607,19 @@ cancellation. Arithmetic symmetry/PSD admission never rewrites physical matrix
 entries. Original-law calls are explicitly bounded (1 through 4096), with a
 cancellation poll before and after every call; the adapter allocates no solver
 workspace beyond the original law's candidate state.
+
+Occupied-branch laws such as `HystereticFriction` disclose
+`requires_physical_scalar_compliance`: changing their load line can remove a
+stable sliding branch even when a spurious static solution closes displacement
+and work. These laws receive the original released motion and the exact physical
+principal-direction compliance in one constitutive evaluation, without a
+static-priority probe. Anisotropic, rotated-principal and singular/free-axis
+responses preserve the scalar law's branch continuation, arrest and restart.
+Genuinely oblique body response refuses under the existing one-dimensional
+continuation contract; no two-axis branch model is inferred. The original full
+matrix still gates displacement and actual work, and the selected physical
+branch retains the native force budget and cancellation rules. The physical
+regressions are in `tests/hysteretic_friction.rs`.
 
 G1/G3 groups in `tests/tangential_matrix.rs` compare static and sliding Coulomb
 against an independent matrix/KKT multiplier solve, and retained two-axis layer

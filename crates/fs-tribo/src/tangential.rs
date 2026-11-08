@@ -109,6 +109,15 @@ pub trait TangentialLaw {
     fn initial_state(&self) -> Self::State;
     /// Reversible interface energy [J], excluding exported heat.
     fn stored_energy_j(&self, s: &Self::State) -> f64;
+    /// Whether occupied-branch selection requires the physical scalar load line.
+    ///
+    /// Matrix consumers must not replace this compliance with a numerical probe
+    /// for such a law: equivalent compatibility equations can have different
+    /// stable branches. They may reduce a principal direction exactly, but must
+    /// refuse a response that cannot be represented by the physical scalar law.
+    fn requires_physical_scalar_compliance(&self) -> bool {
+        false
+    }
     /// Resolves a held-effort interval and its storage/work/heat closure.
     fn advance(
         &self,
