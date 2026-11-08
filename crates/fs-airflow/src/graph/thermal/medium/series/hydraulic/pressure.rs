@@ -1,9 +1,10 @@
 //! Pressure-driven series flow from the existing material resistance law.
 //!
 //! At one frozen material state per section, the SAME conserved mass rate m
-//! obeys dp = A*m + B*m*|m|, where A=sum(a*mu/rho), B=sum(b/rho).
-//! Solve this scalar reduction without a flow search, then re-evaluate EVERY
-//! original section for Reynolds support, signed pressure, tangent and heat.
+//! obeys the sum of its ORIGINAL pressure-loss laws. Constant linear/quadratic
+//! laws use an analytic scalar inverse. An explicitly selected turbulent pipe
+//! uses bounded Newton/bisection inside the common Reynolds support instead.
+//! Re-evaluate every original section for signed pressure, tangent and heat.
 //! No temperature equation, pump curve, interpolation or fluid default is added.
 //! Opt-in gravity uses the same local densities, not a thermal-expansion proxy:
 //! `dp_loss = dp_imposed + sum(rho_i * gravity.dot(end_i - start_i))`.
@@ -17,6 +18,8 @@ use fs_qty::MassFlowRate;
 
 /// The same solved flow and material snapshot in the existing heat-transfer owner.
 pub mod convection;
+
+mod nonlinear;
 
 /// One physical series section and its ORIGINAL material owner. Geometry does
 /// not absorb viscosity or density; distinct local states retain their receipts.
@@ -201,8 +204,10 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
     ///
     /// The rationalized inverse scales by single-term flow estimates. It does
     /// not square dimensional pressure/loss coefficients or subtract similar
-    /// roots. No iteration bracket, Newton tolerance or solver workspace is
-    /// required. Work/storage are O(number of sections), under an explicit cap.
+    /// roots. Reynolds-dependent pipe laws use at most 96 scalar iterations,
+    /// with the original exact tangents and Reynolds-derived mass bracket.
+    /// No second material query or dense hydraulic matrix is needed.
+    /// Storage is O(number of sections), under an explicit cap.
     ///
     /// This is a prescribed differential pressure, NOT a source pressure update
     /// or pump model. Local states/geometry stay frozen. Sum(dp_i*Q_i) is actual
@@ -263,6 +268,7 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
             || !(0.0..1.0).contains(&budget.relative_pressure_tolerance)
         { return Err(invalid("nonempty bounded sections, finite drive and pressure tolerances required")); }
         let mut snapshots = Vec::with_capacity(sections.len());
+        let nonlinear = sections.iter().any(|section| section.resistance.relative_roughness.is_some());
         let (mut linear, mut quadratic) = (Sum::default(), Sum::default());
         for (index, section) in sections.iter().enumerate() {
             poll(gate)?;
@@ -276,20 +282,25 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
                 }
                 reference.reference_kg_m3
             } else { state.density_kg_m3() };
-            let a = finite((section.resistance.viscous_geometry * state.dynamic_viscosity_pa_s())
-                / rho)?;
-            let b = finite(section.resistance.inertial_geometry / rho)?;
-            if (section.resistance.viscous_geometry > 0.0 && a == 0.0)
-                || (section.resistance.inertial_geometry > 0.0 && b == 0.0) {
-                return Err(invalid("active series pressure mechanism underflows"));
+            if !nonlinear {
+                let a = finite((section.resistance.viscous_geometry * state.dynamic_viscosity_pa_s())
+                    / rho)?;
+                let b = finite(section.resistance.inertial_geometry / rho)?;
+                if (section.resistance.viscous_geometry > 0.0 && a == 0.0)
+                    || (section.resistance.inertial_geometry > 0.0 && b == 0.0) {
+                    return Err(invalid("active series pressure mechanism underflows"));
+                }
+                linear.add(a)?; quadratic.add(b)?;
             }
-            linear.add(a)?; quadratic.add(b)?; snapshots.push(state);
+            snapshots.push(state);
         }
         let mut hydrostatic = gravity.as_ref().map(|path|
             path.evaluate(&snapshots, MassFlowRate::new(0.0), gate)).transpose()?;
         let effective_pressure = finite(driving_pressure_pa
             + hydrostatic.as_ref().map_or(0.0, HydrostaticPressure::pressure_gain_pa))?;
-        let mass_flow_kg_s = invert(effective_pressure, linear.total()?, quadratic.total()?)?;
+        let mass_flow_kg_s = if nonlinear {
+            nonlinear::invert(&sections, &snapshots, boussinesq, effective_pressure, budget, gate)?
+        } else { invert(effective_pressure, linear.total()?, quadratic.total()?)? };
         if let (Some(head), Some(path)) = (&mut hydrostatic, &gravity) {
             head.gravitational_power_w = finite(mass_flow_kg_s * path.net_specific_work_j_kg)?;
         }

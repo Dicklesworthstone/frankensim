@@ -78,6 +78,12 @@ fn with_card_path_gate<R>(card: &MaterialCard, convention: LiquidPropertyTempera
 fn with_card_geometry_gate<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
     flow_geometry: FlowHeatGeometry,
     run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>, &CancelGate) -> R) -> R {
+    with_card_flow_gate(card, convention, flow_geometry, 0.001,
+        CorrelationId::CircularDuctLaminarCwt, run)
+}
+fn with_card_flow_gate<R>(card: &MaterialCard, convention: LiquidPropertyTemperature,
+    flow_geometry: FlowHeatGeometry, mass_flow_kg_s: f64, correlation: CorrelationId,
+    run: impl FnOnce(&Cx<'_>, &LiquidHeatPath<'_, '_>, &CancelGate) -> R) -> R {
     let law = LiquidTemperatureLaw::try_new(&card,&point(300.0),"T",LiquidViscosityBasis::Dynamic,
         MaterialPropertySelection::SingleClaimOnly).unwrap();
     let cp = PropertyKey::with_quantity("specific_heat_capacity",QuantitySpec::dimensional(Dims([2,0,-2,-1,0,0])));
@@ -90,9 +96,9 @@ fn with_card_geometry_gate<R>(card: &MaterialCard, convention: LiquidPropertyTem
     ArenaPool::new(ArenaConfig::default()).scope(|arena| {
         let cx = Cx::new(&gate,arena,StreamKey { seed: 91,kernel_id: 740,tile: 0,iteration: 0 },
             Budget::INFINITE,ExecMode::Deterministic);
-        let sections = [LiquidHeatSection { region: "first",geometry: flow_geometry,correlation: CorrelationId::CircularDuctLaminarCwt },
-            LiquidHeatSection { region: "last",geometry: flow_geometry,correlation: CorrelationId::CircularDuctLaminarCwt }];
-        let path = LiquidHeatPath::try_new(&cx,&law,&source,MassFlowRate::new(0.001),Temperature::new(300.0),
+        let sections = [LiquidHeatSection { region: "first",geometry: flow_geometry,correlation },
+            LiquidHeatSection { region: "last",geometry: flow_geometry,correlation }];
+        let path = LiquidHeatPath::try_new(&cx,&law,&source,MassFlowRate::new(mass_flow_kg_s),Temperature::new(300.0),
             &sections,convention).unwrap();
         run(&cx,&path,&gate)
     })
@@ -628,3 +634,92 @@ fn finite_inventory_does_not_invent_circulation_without_density_contrast() {
 #[cfg(feature = "transient-transport")]
 #[path = "liquid_pressure/source_graph.rs"]
 mod source_graph;
+
+
+#[test]
+fn turbulent_pipe_pressure_and_viscous_heat_match_independent_closed_forms() {
+    let material = card(false, 1.0);
+    with_card_flow_gate(&material, LiquidPropertyTemperature::BulkMean, geometry(),
+        0.2, CorrelationId::Gnielinski, |cx, path, _| {
+        // The heat correlation is independently admitted for this smooth tube.
+        let resistance = MaterialFlowResistance::circular_turbulent(Length::new(2.0),
+            Length::new(0.01), Length::new(0.0), (4000.0, 1e8)).unwrap();
+        let sections = [
+            LiquidResistanceSection { region: "first", resistance },
+            LiquidResistanceSection { region: "last", resistance },
+        ];
+        let budget = PressureDrivenBudget { mass_flow_bracket_kg_per_s: (0.1, 0.4),
+            maximum_neglected_hydraulic_power_w: 0.0, ..pressure_budget() };
+        let solved = path.solve_pressure_driven_with_dissipation(cx, &[300.0, 300.0],
+            &sections, Pressure::new(4e4), local(), budget).unwrap();
+
+        // Two equal tubes are one 4 m pressure loss. Eliminating f from
+        // Darcy-Weisbach/Colebrook gives mass directly at specified pressure.
+        let t = area().value() * (2.0_f64 * 0.01 * 1000.0 * 4e4 / 4.0).sqrt();
+        let mass = -2.0 * t * (2.51 * 0.002 * area().value() / (0.01 * t)).log10();
+        close(solved.mass_flow_kg_per_s, mass);
+        close(solved.hydraulics.total_pressure_drop_pa, 4e4);
+        close(solved.hydraulics.total_dissipated_power_w, 4e4 * mass / 1000.0);
+
+        // Constant-Cp uniform hydraulic heating plus the existing independently
+        // declared Gnielinski wall law has an exponential closed-form outlet.
+        let re = mass * 0.01 / (area().value() * 0.002);
+        let friction = 1.0 / (0.79 * re.ln() - 1.64).powi(2);
+        let nu = (friction / 8.0) * (re - 1000.0) * 8.0
+            / (1.0 + 12.7 * (friction / 8.0).sqrt() * (8.0_f64.powf(2.0 / 3.0) - 1.0));
+        let ua = nu * 0.5 / 0.01 * geometry().wetted_area.value();
+        let regional_heat = 2e4 * mass / 1000.0;
+        let outlet = 300.0 + regional_heat / ua * (-(-2.0 * ua / (mass * 2000.0)).exp_m1());
+        close(solved.thermal.regions[1].outlet.temperature_k(), outlet);
+        close(solved.thermal.total_heat_rate_w + solved.hydraulics.total_dissipated_power_w,
+            mass * 2000.0 * (outlet - 300.0));
+        assert!(solved.thermal.total_heat_rate_w < 0.0);
+        for region in &solved.hydraulics.regions {
+            assert_eq!(region.loss.law, resistance);
+            close(region.loss.pressure_drop_pa, 2e4);
+        }
+        // Omitting the same loss is forbidden when the allowance is zero.
+        assert!(path.solve_pressure_driven(cx, &[300.0, 300.0], &sections,
+            Pressure::new(4e4), local(), budget).is_err());
+    });
+}
+
+#[test]
+fn turbulent_pipe_recomputes_friction_at_each_heated_source_state() {
+    let material = card(true, 1.0);
+    with_card_flow_gate(&material, LiquidPropertyTemperature::BulkMean, geometry(),
+        0.2, CorrelationId::Gnielinski, |cx, path, _| {
+        let resistance = MaterialFlowResistance::circular_turbulent(Length::new(2.0),
+            Length::new(0.01), Length::new(0.0), (4000.0, 1e8)).unwrap();
+        let sections = [
+            LiquidResistanceSection { region: "first", resistance },
+            LiquidResistanceSection { region: "last", resistance },
+        ];
+        let budget = PressureDrivenBudget { mass_flow_bracket_kg_per_s: (0.1, 0.4),
+            maximum_neglected_hydraulic_power_w: 0.0, ..pressure_budget() };
+        let cold = path.solve_pressure_driven_with_dissipation(cx, &[300.0, 300.0],
+            &sections, Pressure::new(4e4), local(), budget).unwrap();
+        let hot = path.solve_pressure_driven_with_dissipation(cx, &[330.0, 330.0],
+            &sections, Pressure::new(4e4), local(), budget).unwrap();
+        assert!(hot.mass_flow_kg_per_s > cold.mass_flow_kg_per_s);
+        assert!(hot.hydraulics.regions[1].material.dynamic_viscosity_pa_s()
+            < hot.hydraulics.regions[0].material.dynamic_viscosity_pa_s());
+        for solved in [&cold, &hot] {
+            let mass = solved.mass_flow_kg_per_s;
+            let velocity = mass / (1000.0 * area().value());
+            for (heat, region) in solved.thermal.regions.iter().zip(&solved.hydraulics.regions) {
+                let bulk = 0.5 * (heat.inlet.temperature_k() + heat.outlet.temperature_k());
+                close(region.material.dynamic_viscosity_pa_s(), 0.005 - 1e-5 * bulk);
+                let friction = region.loss.pressure_drop_pa
+                    / ((2.0 / 0.01) * 1000.0 * velocity * velocity / 2.0);
+                let inverse = 1.0 / friction.sqrt();
+                let residual = inverse + 2.0 * (2.51 * inverse / region.loss.reynolds).log10();
+                assert!(residual.abs() < 1e-10);
+                close(region.loss.dissipated_power_w, region.loss.pressure_drop_pa * mass / 1000.0);
+            }
+            let gain = mass * 2000.0 * (solved.thermal.regions[1].outlet.temperature_k() - 300.0);
+            close(gain, solved.thermal.total_heat_rate_w + solved.hydraulics.total_dissipated_power_w);
+            close(solved.hydraulics.total_pressure_drop_pa, 4e4);
+        }
+    });
+}

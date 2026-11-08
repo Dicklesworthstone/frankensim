@@ -350,3 +350,90 @@ fn annular_resistance_selects_shared_mass_and_downstream_heat_transfer() {
     }
     assert!(values[1].0 < values[0].0 && values[1].1 < values[0].1);
 }
+
+
+#[test]
+fn turbulent_series_matches_closed_form_pressure_inversion_and_queries_each_source_once() {
+    struct Source { calls: std::cell::Cell<usize>, state: FluidTransportState }
+    impl FluidTransport for Source {
+        fn transport_state(&self) -> core::result::Result<FluidTransportState, MaterialError> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.state)
+        }
+    }
+    let gate = CancelGate::new_clock_free();
+    for roughness in [0.0, 0.001, 0.05] {
+        let pipe = MaterialFlowResistance::circular_turbulent(Length::new(2.0), Length::new(0.01),
+            Length::new(roughness * 0.01), (4000.0, 1e8)).unwrap();
+        for (rho, mu) in [(500.0, 0.002), (1000.0, 0.001)] {
+            for pressure in [2e4, 2e6] {
+                // Eliminate f directly: t = |m|sqrt(f), x = |m|/t.
+                // The original Colebrook equation then has no unknown on its
+                // logarithm's right side. This oracle uses no iterative solver.
+                let area = core::f64::consts::PI * 0.01_f64.powi(2) / 4.0;
+                let t = area * (2.0_f64 * 0.01 * rho * pressure / 2.0).sqrt();
+                let expected = -2.0 * t * (roughness / 3.7 + 2.51 * mu * area / (0.01 * t)).log10();
+                for sign in [-1.0, 1.0] {
+                    let source = Source { calls: std::cell::Cell::new(0), state: fluid(rho, mu) };
+                    let solved = SeriesPressureFlow::solve(vec![PressureSection { resistance: pipe, medium: source }],
+                        sign * pressure, budget(), &gate).unwrap();
+                    near(solved.mass_flow_kg_s(), sign * expected);
+                    near(solved.dissipated_power_w(), pressure * expected / rho);
+                    assert_eq!(solved.sections()[0].medium.calls.get(), 1);
+                    assert_eq!(solved.evaluations()[0].law, pipe);
+                    assert!(solved.dpressure_dmass_flow() > 0.0);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn turbulent_and_authored_losses_share_mass_but_retain_local_density_and_power() {
+    let gate = CancelGate::new_clock_free();
+    let area = core::f64::consts::PI * 0.01_f64.powi(2) / 4.0;
+    // Select x=1/sqrt(f)=7 and Re=1e5 in the original Colebrook equation.
+    let roughness = 3.7 * (10.0_f64.powf(-3.5) - 2.51 * 7.0 / 1e5);
+    let pipe = MaterialFlowResistance::circular_turbulent(Length::new(2.0), Length::new(0.01),
+        Length::new(roughness * 0.01), (4000.0, 1e8)).unwrap();
+    let mass = 1e5 * 0.001 * area / 0.01;
+    let first_pressure = (1.0 / 49.0) * (2.0 / 0.01) * mass * mass / (2.0 * 1000.0 * area * area);
+    let make_sections = || vec![
+        PressureSection { resistance: pipe, medium: fluid(1000.0, 0.001) },
+        PressureSection { resistance: law(1e10, 2e8), medium: fluid(500.0, 0.001) },
+    ];
+    for reference in [None, Some(BoussinesqDensity::try_new(1000.0, 0.6).unwrap())] {
+        let rho = reference.map_or(500.0, BoussinesqDensity::reference_kg_m3);
+        let q = mass / rho;
+        let last_pressure = 1e10 * 0.001 * q + 2e8 * rho * q * q;
+        let drive = first_pressure + last_pressure;
+        let solved = if let Some(density) = reference {
+            let gravity = SeriesGravity::try_new([0.0; 3], vec![[0.0; 3]; 3]).unwrap();
+            SeriesPressureFlow::solve_with_boussinesq_gravity(make_sections(), drive, gravity,
+                density, budget(), &gate).unwrap()
+        } else { SeriesPressureFlow::solve(make_sections(), drive, budget(), &gate).unwrap() };
+        near(solved.mass_flow_kg_s(), mass);
+        near(solved.evaluations()[0].pressure_drop_pa, first_pressure);
+        near(solved.evaluations()[1].pressure_drop_pa, last_pressure);
+        near(solved.evaluations()[1].transport.density_kg_m3(), 500.0);
+        near(solved.evaluations()[1].momentum_density_kg_m3, rho);
+        near(solved.dissipated_power_w(), first_pressure * mass / 1000.0 + last_pressure * q);
+    }
+}
+
+#[test]
+fn turbulent_series_refuses_unreachable_pressure_and_disjoint_original_support() {
+    let gate = CancelGate::new_clock_free();
+    let pipe = MaterialFlowResistance::circular_turbulent(Length::new(2.0), Length::new(0.01),
+        Length::new(1e-6), (4000.0, 1e8)).unwrap();
+    for drive in [0.0, 1.0, 1e20] {
+        assert!(SeriesPressureFlow::solve(vec![PressureSection { resistance: pipe, medium: fluid(1000.0, 0.001) }],
+            drive, budget(), &gate).is_err());
+    }
+    let narrow = MaterialFlowResistance::try_new(1e10, 0.0, Area::new(1e-4),
+        Length::new(0.01), (0.0, 1.0)).unwrap();
+    assert!(SeriesPressureFlow::solve(vec![
+        PressureSection { resistance: pipe, medium: fluid(1000.0, 0.001) },
+        PressureSection { resistance: narrow, medium: fluid(1000.0, 0.001) },
+    ], 1e4, budget(), &gate).is_err());
+}

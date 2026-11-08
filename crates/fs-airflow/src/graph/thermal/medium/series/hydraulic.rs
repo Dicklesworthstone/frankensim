@@ -1,11 +1,12 @@
-//! Material-scaled linear/quadratic pressure loss, independent of a heat solver.
+//! Material-scaled pressure loss, independent of a heat solver.
 //!
 //! `dp = a mu Q + b rho Q |Q|`. Geometry/calibration supplies `a` [1/m^3]
 //! and `b` [1/m^4]; the shared material snapshot supplies rho and mu. This is
 //! the lumped Darcy-Forchheimer form, not a second fluid database or a universal
 //! pipe-friction correlation. The coefficients and Reynolds interval are
-//! explicit authored assumptions. No roughness, entrance, phase, compressible
-//! flow, or Reynolds-dependent turbulent friction law is inferred.
+//! explicit authored assumptions. `circular_turbulent` instead selects the
+//! implicit Colebrook-White pipe law with declared equivalent sand roughness.
+//! Entrance, phase and compressible effects are not inferred.
 //!
 //! Source form: COMSOL, Forchheimer Flow model documentation,
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.models.ssf.forchheimer_flow/forchheimer_flow.html>.
@@ -22,6 +23,7 @@ pub mod pressure;
 
 // Geometry-derived Newtonian laminar laws feed this same material/flow owner.
 mod laminar;
+mod turbulent;
 
 /// Immutable geometry/calibration, not fluid-specific pressure-loss constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +33,8 @@ pub struct MaterialFlowResistance {
     flow_area: Area,
     reynolds_length: Length,
     reynolds_range: (f64, f64),
+    // Some selects Colebrook friction; inertial_geometry then excludes f(Re).
+    relative_roughness: Option<f64>,
 }
 
 /// Original material refusal or an unsupported pressure-loss evaluation.
@@ -104,7 +108,7 @@ impl MaterialFlowResistance {
             return Err(ResistanceError::Invalid("invalid resistance factors, geometry or Reynolds support"));
         }
         Ok(Self { viscous_geometry: viscous_geometry_per_m3, inertial_geometry: inertial_geometry_per_m4,
-            flow_area, reynolds_length, reynolds_range })
+            flow_area, reynolds_length, reynolds_range, relative_roughness: None })
     }
 
     /// Flow-normal area used by velocity and Reynolds admission.
@@ -141,6 +145,9 @@ impl MaterialFlowResistance {
     pub(crate) fn volume_coefficients(
         &self, transport: FluidTransportState, momentum_density: f64,
     ) -> Result<(f64, f64), ResistanceError> {
+        if self.relative_roughness.is_some() {
+            return Err(ResistanceError::Invalid("Reynolds-dependent pipe friction cannot be frozen into volume-flow coefficients"));
+        }
         if !positive(momentum_density) {
             return Err(ResistanceError::Invalid("positive momentum density required"));
         }
@@ -179,10 +186,13 @@ impl MaterialFlowResistance {
             return Err(ResistanceError::Reynolds { value: reynolds, admitted: self.reynolds_range });
         }
         let viscous = (self.viscous_geometry * mu) * q;
-        let inertial = (self.inertial_geometry * mass.abs()) * q;
+        let (friction, logarithmic_slope) = if let Some(roughness) = self.relative_roughness {
+            turbulent::colebrook(reynolds, roughness)?
+        } else { (1.0, 0.0) };
+        let inertial = ((self.inertial_geometry * friction) * mass.abs()) * q;
         let dp = viscous + inertial;
         let derivative = (self.viscous_geometry * mu) / rho
-            + (2.0 * self.inertial_geometry * q.abs());
+            + ((2.0 + logarithmic_slope) * (self.inertial_geometry * friction) * q.abs());
         let power = dp * q;
         if [viscous, inertial, dp, derivative, power].iter().any(|v| !v.is_finite())
             || derivative < 0.0 || power < 0.0

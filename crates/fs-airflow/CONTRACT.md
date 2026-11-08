@@ -534,6 +534,38 @@ retains the existing frozen-density approximation. Focused regressions compare
 analytic circular flow and an independent rectangular series, side exchange,
 SI rescaling, signed dissipation and the original material/coolant heat path.
 
+## Reynolds-dependent turbulent pipe resistance
+
+`MaterialFlowResistance::circular_turbulent` explicitly selects developed
+Newtonian circular-pipe Darcy-Weisbach loss with the implicit Colebrook-White
+factor. Length, diameter, equivalent sand-grain roughness and a Reynolds band
+are authored inputs. The band must lie within `[4000, 1e8]` and roughness/D
+within `[0, 0.05]`; transition, entrance, non-Newtonian and compressible effects
+are not inferred. Roughness is not substituted from a material label or RMS
+surface height. The formula follows NASA KSC-STD-Z-0017 Rev A, §7.4.1, Eq. 4
+and §7.5 (Colebrook 1939, DOI 10.1680/ijoti.1939.13150).
+
+Each trial reuses the original current density and viscosity for Re, signed
+pressure and `dp*Q`. A bounded allocation-free scalar Newton solve computes
+the friction factor and its implicit derivative together; the reported
+mass-flow tangent includes the change of friction with Reynolds number.
+Geometry/calibration is retained in the evaluation rather than replaced by a
+frozen quadratic fit. This owner feeds the existing liquid pressure, parallel,
+pump and optional viscous-heating paths. Hydraulic heat enters the existing
+enthalpy trajectory exactly once only when that dissipative path is selected.
+The new pressure law does not supply a rough-wall heat-transfer correlation.
+Thermal correlations remain separate declarations; a smooth-tube thermal
+correlation still requires a smooth tube and its own supported flow regime.
+
+Frozen-state `SeriesPressureFlow` keeps its analytic inverse for constant
+linear/quadratic laws. Paths containing this turbulent law instead solve
+inside the intersection of every original section's Reynolds support, with
+one material snapshot per source, exact pressure tangents, cancellation polls
+and at most 96 scalar iterations. Reverse flow uses the same passive curve;
+no supported root means refusal. Fixed-coefficient graph lowering rejects
+this mode rather than freezing its friction factor. This remains a
+quasi-steady engineering closure, not a resolved turbulence calculation.
+
 ## Static and total fan shaft power
 
 `qoi::FanPowerSpec` requires an explicit `FanPowerBasis`. Static efficiency
