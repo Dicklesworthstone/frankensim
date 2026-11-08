@@ -6960,19 +6960,29 @@ cross terms. Endpoint lumping assigns half the section spin inventory to each
 node. Neither path counts centerline orbital inertia a second time.
 
 `FrameInertiaProfile` and `add_element_with_inertia_profile` retain original
-line mass [kg/m] and centroidal section spin inertia per length [kg m] at both
-member endpoints in i-to-j order. Each moment is interpolated linearly on the
-original reference member; its cross-section mass centroid remains on the
-centerline. Consistent inertia uses closed-form endpoint-weighted Gram matrices
+line mass [kg/m] and section spin inertia per length [kg m] at both
+member endpoints in i-to-j order. `with_first_moment` also retains the signed
+transverse density moment `integral rho*y dA` [kg]; positive y is the original
+member's left normal, and spin is measured about its declared centerline.
+Each moment is interpolated linearly on the original reference member.
+Endpoint positive-semidefinite moment matrices enforce `first² <= mass*spin`
+throughout the member. The centerline centroid remains the default when no
+first moment is supplied. Consistent inertia uses closed-form endpoint-weighted
+Gram matrices
 for the existing linear axial, cubic Hermite transverse and quadratic slope
 velocities. These integrate the complete degree-seven density/velocity and
 degree-five spin/slope products exactly, without runtime quadrature or replacing
-the field by a member mean. The resulting physical rigid mass, first moment
+the field by a member mean. The signed term `-2*first*u_dot*v_dot'` integrates
+the actual Euler--Bernoulli velocity `u_dot-y*v_dot'` with exact degree-four
+products and no additional runtime quadrature. The resulting physical rigid
+mass, first moment
 and angular inertia retain the original density placement.
 
-Uniform profiles dispatch to the original constant-coefficient arithmetic.
+Uniform centered profiles dispatch to the original constant-coefficient arithmetic.
 Explicit lumping uses the positive partition `L*(2*value_i+value_j)/6` at
-endpoint i, preserving total inventory and its first axial moment. The complete
+endpoint i, preserving total inventory and its first axial moment. A
+nonzero transverse first moment requires consistent inertia; diagonal lumping
+refuses because it cannot retain the translation/rotation coupling. The complete
 profile is immutable member data, available through `reference_member_inertia`;
 cloning, constitutive history and motion retain it with the original geometry.
 Profile and accumulated-inventory refusal occurs before the frame is changed.
@@ -6980,6 +6990,9 @@ Profile and accumulated-inventory refusal occurs before the frame is changed.
 rotation and endpoint reversal, polynomial kinetic energy, equal-total-mass
 native modes and supported impulses, loaded/base-driven Newmark response under
 time-step refinement, positive lumping, uniform-path bits and refusal atomicity.
+Its eccentric-section cases independently integrate rigid spatial moments and
+polynomial kinetic energy, check signed rotation from an axial impulse, and
+reject nonphysical moments and a diagonal representation of eccentric inertia.
 
 One reference mass owner supplies the generalized vibration pencil, the
 initial acceleration solve, every Newmark inertial residual/tangent, Rayleigh

@@ -345,3 +345,168 @@ fn bad_profile_and_unrepresentable_inventory_refuse_without_frame_changes() {
     assert_eq!(frame.displacements(), &[0.0; 6]);
     assert_eq!(frame.velocities(), &[0.0; 6]);
 }
+
+#[test]
+fn eccentric_density_retains_physical_rigid_moments_and_member_orientation() {
+    let start = [0.7, -0.4];
+    // Direct axial integrals of mu=2+4s, first=.3-1.2s, spin=.2+.6s.
+    let mass = 12.0;
+    let axial_first = 21.0;
+    let transverse_first = -0.9;
+    for angle in [0.0_f64, 0.7, 1.9] {
+        let tangent = [angle.cos(), angle.sin()];
+        let normal = [-tangent[1], tangent[0]];
+        let end = [
+            start[0] + LENGTH * tangent[0],
+            start[1] + LENGTH * tangent[1],
+        ];
+        let center_moment: [f64; 2] = core::array::from_fn(|axis| {
+            mass * start[axis] + axial_first * tangent[axis] + transverse_first * normal[axis]
+        });
+        let angular = mass * dot(&start, &start)
+            + 2.0 * axial_first * dot(&start, &tangent)
+            + 2.0 * transverse_first * dot(&start, &normal)
+            + 45.0
+            + 1.5;
+        let expected = [
+            [mass, 0.0, -center_moment[1]],
+            [0.0, mass, center_moment[0]],
+            [-center_moment[1], center_moment[0], angular],
+        ];
+        let rigid = [
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            [-start[1], start[0], 1.0, -end[1], end[0], 1.0],
+        ];
+        for reverse in [false, true] {
+            let mut frame = Frame2d::with_mass_formulation(
+                Geometry::Linear,
+                FrameMassFormulation::ConsistentReference,
+            );
+            frame.add_node(start[0], start[1]);
+            frame.add_node(end[0], end[1]);
+            // Reversal reverses samples AND the reference left-normal sign.
+            let (i, j, moments) = if reverse {
+                (
+                    1,
+                    0,
+                    FrameInertiaProfile::with_first_moment([6.0, 2.0], [0.9, -0.3], [0.8, 0.2])
+                        .unwrap(),
+                )
+            } else {
+                (
+                    0,
+                    1,
+                    FrameInertiaProfile::with_first_moment([2.0, 6.0], [0.3, -0.9], [0.2, 0.8])
+                        .unwrap(),
+                )
+            };
+            frame
+                .add_element_with_inertia_profile(i, j, 5, moments, &section)
+                .unwrap();
+            assert_eq!(frame.reference_member_inertia(0).unwrap(), moments);
+            for a in 0..3 {
+                for b in 0..3 {
+                    near(
+                        dot(&rigid[a], &frame.inertial_forces(&rigid[b]).unwrap()),
+                        expected[a][b],
+                        (expected[a][a] * expected[b][b]).sqrt(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn eccentric_density_integrates_the_original_axial_slope_kinetic_correlation() {
+    let moments =
+        FrameInertiaProfile::with_first_moment([2.0, 6.0], [0.3, -0.9], [0.2, 0.8]).unwrap();
+    let frame = build(FrameMassFormulation::ConsistentReference, moments);
+    for v in [
+        [0.3, -0.7, 1.1, -0.2, 0.8, -0.9],
+        [0.0, 0.0, 1.0, 0.0, 0.0, -1.0],
+        [0.7, -1.2, 0.0, 0.7, -1.2, 0.0],
+    ] {
+        let axial = [v[0], v[3] - v[0]];
+        let transverse = [
+            v[1],
+            LENGTH * v[2],
+            -3.0 * v[1] - 2.0 * LENGTH * v[2] + 3.0 * v[4] - LENGTH * v[5],
+            2.0 * v[1] + LENGTH * v[2] - 2.0 * v[4] + LENGTH * v[5],
+        ];
+        let slope = [
+            transverse[1] / LENGTH,
+            2.0 * transverse[2] / LENGTH,
+            3.0 * transverse[3] / LENGTH,
+        ];
+        let mut cross = 0.0;
+        for (i, &a) in axial.iter().enumerate() {
+            for (j, &b) in slope.iter().enumerate() {
+                cross += a * b * (0.3 / (i + j + 1) as f64 - 1.2 / (i + j + 2) as f64);
+            }
+        }
+        let exact = LENGTH
+            * (polynomial_work(&axial, [2.0, 6.0])
+                + polynomial_work(&transverse, [2.0, 6.0])
+                + polynomial_work(&slope, [0.2, 0.8])
+                - 2.0 * cross);
+        assert!(exact > 0.0);
+        near(dot(&v, &frame.inertial_forces(&v).unwrap()), exact, exact);
+    }
+}
+
+#[test]
+fn asymmetric_density_drives_signed_rotation_from_an_axial_impulse() {
+    for first in [-0.4, 0.4] {
+        let moments =
+            FrameInertiaProfile::with_first_moment([5.0; 2], [first; 2], [0.2; 2]).unwrap();
+        let mut frame = build(FrameMassFormulation::ConsistentReference, moments);
+        frame.fix(0, [true; 3]);
+        frame.fix(1, [false, true, false]);
+        // Independent two-free-coordinate consistent mass for u_j, theta_j.
+        let axial = 5.0 * LENGTH / 3.0;
+        let spin = 5.0 * LENGTH.powi(3) / 105.0 + 2.0 * 0.2 * LENGTH / 15.0;
+        let coupling = -first * LENGTH / 12.0;
+        let determinant = axial * spin - coupling * coupling;
+        frame
+            .apply_nodal_impulse(&[0.0, 0.0, 0.0, 2.0, 0.0, 0.0])
+            .unwrap();
+        near(frame.velocities()[3], 2.0 * spin / determinant, 1.0);
+        near(frame.velocities()[5], -2.0 * coupling / determinant, 1.0);
+        assert_eq!(
+            frame.velocities()[5].is_sign_positive(),
+            first.is_sign_positive()
+        );
+        assert_eq!(
+            frame
+                .reference_member_inertia(0)
+                .unwrap()
+                .section_first_kg(),
+            [first; 2]
+        );
+    }
+}
+
+#[test]
+fn nonphysical_or_diagonally_lumped_eccentric_density_is_refused() {
+    for (mass, first, spin) in [
+        ([2.0; 2], [f64::NAN, 0.0], [1.0; 2]),
+        ([2.0; 2], [f64::INFINITY, 0.0], [1.0; 2]),
+        ([0.0, 2.0], [0.1, 0.0], [0.0, 1.0]),
+        ([2.0; 2], [0.1, 0.0], [0.0; 2]),
+        ([2.0; 2], [1.5, 0.0], [1.0; 2]),
+    ] {
+        assert!(FrameInertiaProfile::with_first_moment(mass, first, spin).is_err());
+    }
+    let moments = FrameInertiaProfile::with_first_moment([5.0; 2], [0.4; 2], [0.2; 2]).unwrap();
+    let mut frame = build(FrameMassFormulation::Lumped, profile());
+    let before = frame.inertial_forces(&[1.0; 6]).unwrap();
+    assert!(
+        frame
+            .add_element_with_inertia_profile(0, 1, 5, moments, &section)
+            .is_err()
+    );
+    assert_eq!(frame.inertial_forces(&[1.0; 6]).unwrap(), before);
+    assert!(frame.reference_member_inertia(1).is_err());
+}

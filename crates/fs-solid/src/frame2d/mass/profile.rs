@@ -1,17 +1,19 @@
 //! Graded original line mass in the existing Euler--Bernoulli inertia owner.
 
-use super::{Frame2d, SolidError, invalid};
+use super::{Frame2d, FrameMassFormulation, SolidError, invalid};
 use crate::frame2d::SectionModel;
 
-/// P1 original line mass and centroidal section spin inertia along a member.
+/// P1 original transverse density moments along a member.
 ///
 /// Values follow the element's i-to-j reference coordinate. Line mass is
-/// `integral rho dA` [kg/m]; spin inertia is `integral rho*y² dA` [kg m]. The
-/// cross-section mass centroid lies on the declared centerline. These are
-/// original inventories, not current density sampled on a deformed chord.
+/// `integral rho dA` [kg/m], first moment is `integral rho*y dA` [kg], and
+/// spin inertia is `integral rho*y² dA` [kg m]. Positive y is the reference
+/// member's left normal. These are original inventories, not current density
+/// sampled on a deformed chord.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameInertiaProfile {
     line_mass_kg_m: [f64; 2],
+    section_first_kg: [f64; 2],
     section_spin_kg_m: [f64; 2],
 }
 
@@ -19,19 +21,44 @@ impl FrameInertiaProfile {
     /// Admit finite nonnegative endpoint moments. Section spin requires line
     /// mass at the same endpoint; zero moments retain the massless-member lane.
     pub fn new(line_mass_kg_m: [f64; 2], section_spin_kg_m: [f64; 2]) -> Result<Self, SolidError> {
+        Self::with_first_moment(line_mass_kg_m, [0.0; 2], section_spin_kg_m)
+    }
+
+    /// Admit original line mass, signed first moment and second moment about
+    /// the declared reference centerline. Each is interpolated independently
+    /// as P1; their ratio is the resulting mass-centroid offset, not an
+    /// independently linear offset. Endpoint moment matrices must be positive
+    /// semidefinite (`first² <= mass*spin`), which also guarantees positivity
+    /// everywhere along the member. No density profile or material is inferred.
+    ///
+    /// Consistent reference inertia uses the Euler--Bernoulli velocity field
+    /// `(u_dot-y*v_dot', v_dot)`, retaining the signed axial/slope coupling.
+    /// Nonzero first moments require `ConsistentReference`; diagonal lumping
+    /// cannot preserve that coupling and is refused on element insertion.
+    pub fn with_first_moment(
+        line_mass_kg_m: [f64; 2],
+        section_first_kg: [f64; 2],
+        section_spin_kg_m: [f64; 2],
+    ) -> Result<Self, SolidError> {
         if (0..2).any(|i| {
             !line_mass_kg_m[i].is_finite()
                 || line_mass_kg_m[i] < 0.0
+                || !section_first_kg[i].is_finite()
                 || !section_spin_kg_m[i].is_finite()
                 || section_spin_kg_m[i] < 0.0
                 || (line_mass_kg_m[i] == 0.0 && section_spin_kg_m[i] != 0.0)
+                // Avoid forming mass*spin or first²: either can overflow for
+                // finite admissible moments. Zero mass/spin requires zero first.
+                || section_first_kg[i].abs()
+                    > line_mass_kg_m[i].sqrt() * section_spin_kg_m[i].sqrt()
         }) {
             return Err(invalid(
-                "finite nonnegative endpoint line mass and section spin required; spin requires mass",
+                "finite positive-semidefinite endpoint density moments required; spin requires mass",
             ));
         }
         Ok(Self {
             line_mass_kg_m,
+            section_first_kg,
             section_spin_kg_m,
         })
     }
@@ -42,7 +69,13 @@ impl FrameInertiaProfile {
         self.line_mass_kg_m
     }
 
-    /// Original endpoint centroidal spin inertias per length [kg m].
+    /// Original endpoint signed transverse first density moments [kg].
+    #[must_use]
+    pub const fn section_first_kg(self) -> [f64; 2] {
+        self.section_first_kg
+    }
+
+    /// Original endpoint spin inertias about the reference centerline [kg m].
     #[must_use]
     pub const fn section_spin_kg_m(self) -> [f64; 2] {
         self.section_spin_kg_m
@@ -157,21 +190,46 @@ impl FrameInertiaProfile {
                 local[transverse[j]][transverse[i]] = value;
             }
         }
+        if self.section_first_kg != [0.0; 2] {
+            // Integral_0^1 N_endpoint * N_axial * dH/ds ds. The negative
+            // sign follows u_dot-y*v_dot'; H's rotational columns carry L.
+            // Exact degree-four products require no new runtime quadrature.
+            let coupling = [
+                [
+                    [-3.0 / 10.0, 1.0 / 10.0, 3.0 / 10.0, -1.0 / 15.0],
+                    [-1.0 / 5.0, -1.0 / 60.0, 1.0 / 5.0, -1.0 / 60.0],
+                ],
+                [
+                    [-1.0 / 5.0, -1.0 / 60.0, 1.0 / 5.0, -1.0 / 60.0],
+                    [-3.0 / 10.0, -1.0 / 15.0, 3.0 / 10.0, 1.0 / 10.0],
+                ],
+            ];
+            for (a, axial) in [0, 3].into_iter().enumerate() {
+                for (b, transverse) in transverse.into_iter().enumerate() {
+                    let value = -(self.section_first_kg[0] * coupling[0][a][b]
+                        + self.section_first_kg[1] * coupling[1][a][b])
+                        * h_scale[b];
+                    local[axial][transverse] = value;
+                    local[transverse][axial] = value;
+                }
+            }
+        }
         local
     }
 }
 
 impl Frame2d {
-    /// Add a member retaining its original P1 line mass and section spin.
+    /// Add a member retaining its original P1 section density moments.
     ///
     /// The native consistent mass integrates the density--velocity correlation
     /// exactly; gravity, modes, impulses and Newmark all use that SAME owner.
     /// Explicit lumping uses `L*(2*value_i+value_j)/6` at endpoint i, preserving
     /// total inventory and its first axial moment. Both retain the undeformed
-    /// reference geometry. No cross-section eccentricity, shear deformation or
-    /// configuration-dependent inertia is introduced.
+    /// reference geometry. Nonzero signed section first moments retain density
+    /// eccentricity and require consistent inertia. Shear deformation and
+    /// configuration-dependent inertia are not introduced.
     ///
-    /// Uniform profiles dispatch to the existing constant-coefficient path.
+    /// Uniform centered profiles dispatch to the constant-coefficient path.
     /// Invalid geometry, section count or unrepresentable inventory refuses
     /// before changing the frame.
     pub fn add_element_with_inertia_profile(
@@ -184,7 +242,14 @@ impl Frame2d {
     ) -> Result<usize, SolidError> {
         let mass = profile.line_mass_kg_m;
         let spin = profile.section_spin_kg_m;
-        if mass[0] == mass[1] && spin[0] == spin[1] {
+        if profile.section_first_kg != [0.0; 2]
+            && self.mass_formulation != FrameMassFormulation::ConsistentReference
+        {
+            return Err(invalid(
+                "eccentric density moments require consistent reference inertia",
+            ));
+        }
+        if mass[0] == mass[1] && spin[0] == spin[1] && profile.section_first_kg == [0.0; 2] {
             return self.add_element_with_rotary_inertia(i, j, np, mass[0], spin[0], make_section);
         }
         self.add_element_with_reference_inertia(
@@ -212,6 +277,7 @@ impl Frame2d {
             .reference_inertia_profile
             .unwrap_or(FrameInertiaProfile {
                 line_mass_kg_m: [member.mass_per_length; 2],
+                section_first_kg: [0.0; 2],
                 section_spin_kg_m: [member.rotary_inertia_per_length; 2],
             }))
     }
