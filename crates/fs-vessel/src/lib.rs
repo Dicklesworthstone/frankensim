@@ -26,6 +26,8 @@
 //! [`LaminarFilmTransitStudy`] accumulates finite-path amplification at a fixed
 //! inlet frequency, with explicit weak-growth limits and distinct surface-wave
 //! transit and mean liquid residence times.
+//! [`LaminarFilmTransitBandStudy`] finds the worst outlet and upstream gains
+//! over a continuous inlet-frequency band without a frequency grid.
 //!
 //! [`FreeJetStudy`] adds the cylindrical capillary instability and the actual
 //! free-flight amplification for an explicit radius, flux and disturbance band.
@@ -58,8 +60,9 @@ pub use robust::{
 };
 pub use stability::laminar::{
     LaminarBandGrowthReport, LaminarFilmBandStudy, LaminarFilmError, LaminarFilmSection,
-    LaminarFilmStudy, LaminarFilmTransitStudy, LaminarGrowthObjective, LaminarGrowthReport,
-    LaminarPourConditions, LaminarTransitReport, LaminarTransitSection,
+    LaminarFilmStudy, LaminarFilmTransitBandStudy, LaminarFilmTransitStudy, LaminarGrowthObjective,
+    LaminarGrowthReport, LaminarPourConditions, LaminarTransitBandReport, LaminarTransitReport,
+    LaminarTransitSection,
 };
 pub use stability::{VesselProfile, growth_objective};
 

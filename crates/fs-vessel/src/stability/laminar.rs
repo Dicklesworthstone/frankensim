@@ -11,6 +11,9 @@
 
 use fs_lbm::film::{FilmError, FilmMaterial, LongWaveLimits, NusseltFilm};
 
+mod transit_band;
+pub use transit_band::{LaminarFilmTransitBandStudy, LaminarTransitBandReport};
+
 /// One locally parallel section of the actual liquid path, in SI units.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LaminarFilmSection {
@@ -178,7 +181,7 @@ pub enum LaminarFilmError {
     InvalidWidthScale,
     /// Total volume flow must be finite and strictly positive.
     InvalidVolumeFlow,
-    /// Frequency must be finite and positive, and the spatial-growth budget in (0,1).
+    /// The transit frequency/band or the spatial-growth budget is invalid.
     InvalidTransitInput,
     /// A section length is not finite and positive.
     InvalidLength {

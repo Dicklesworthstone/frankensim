@@ -43,6 +43,26 @@ Evaluation needs constant storage and work linear in section count. The G1/G3
 transit tests use independent dimensional coefficients, fixed-frequency
 transport, path ordering, length scaling and homogeneous section partitioning.
 
+`LaminarFilmTransitBandStudy` maximizes amplification over a continuous inlet
+frequency interval and the entire finite path. The original film owner exposes
+its dimensional dispersion `s(k)=a*k^2-b*k^4`. Each path prefix therefore has
+gain `A*omega^2-B*omega^4`, with `A=sum(a*L/c^3)` and `B=sum(b*L/c^5)>=0`.
+Endpoints and the positive stationary point exhaust its possible maxima.
+Section ends exhaust the spatial maxima because gain is linear in distance
+within each locally constant section. Evaluation uses normalized frequency,
+compensated prefix sums, constant storage and O(section count) work.
+
+The report distinguishes the worst outlet frequency from the frequency with
+the largest earlier amplification. An inlet peak has value zero, section count
+zero and `None` for its frequency: all inlet frequencies tie there. A zero
+frequency endpoint is the neutral mass-conservation limit; a point band
+recovers the existing single-frequency model. Every local wavelength in the
+band must satisfy native long-wave admission. The weak-growth budget also
+checks the interior extrema of `|s/omega|`, a cubic in frequency, so neutral
+band endpoints cannot hide an invalid interior conversion. The independent
+regressions in `tests/laminar_transit_band.rs` cover distinct interior optima,
+upstream decay, both full-band admission conditions and section subdivision.
+
 `robust::robustify_laminar` uses the same physical evaluator over an authored
 width-candidate set and fluid band, then invokes canonical empirical CVaR.
 It returns both candidates' band CVaR and worst sampled growth. Equal nominal

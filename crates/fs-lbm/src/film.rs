@@ -194,7 +194,12 @@ impl NusseltFilm {
     /// recomputed; this does not preserve the original supplied flow rate.
     /// The shear-free Benney screen is not carried into the sheared owner.
     pub fn with_surface_shear(self, surface_shear_pa: f64) -> Result<ShearedFilm, FilmError> {
-        ShearedFilm::new(self.material, self.thickness, self.tangent, surface_shear_pa)
+        ShearedFilm::new(
+            self.material,
+            self.thickness,
+            self.tangent,
+            surface_shear_pa,
+        )
     }
 
     /// Velocity at wall-normal distance y in [0,h], in m/s.
@@ -211,6 +216,21 @@ impl NusseltFilm {
         let value = self.wall_shear * ((self.thickness - y_m) / self.thickness);
         represented(value, y_m < self.thickness)?;
         Ok(value)
+    }
+
+    /// Original dimensional coefficients `[a, b]` of `s(k) = a*k² - b*k⁴`.
+    /// `a` is signed, in m²/s; `b` is nonnegative, in m⁴/s and vanishes only
+    /// when surface tension is zero. This exposes the same Benney dispersion
+    /// for analytic composition without recovering coefficients from sampled
+    /// modes. It does not admit any wavelength: callers must still enforce
+    /// [`Self::long_wave_mode`] or [`Self::long_wave_band`] budgets.
+    pub fn long_wave_coefficients(self) -> Result<[f64; 2], FilmError> {
+        let driving = self.long_wave_driving();
+        let quadratic = self.flow * driving;
+        let quartic = self.flow * self.capillary_length_squared();
+        represented(quadratic.abs(), driving != 0.0)?;
+        represented(quartic, self.material.surface_tension_n_m > 0.0)?;
+        Ok([quadratic, quartic])
     }
 
     /// Screen one nonnegative physical wavenumber. k=0 is exactly neutral by
@@ -253,10 +273,10 @@ impl NusseltFilm {
         let capillary = if sigma == 0.0 {
             0.0
         } else {
-            (((sigma / self.material.density_kg_m3) / self.tangent) * k) * k
+            (self.capillary_length_squared() * k) * k
         };
         represented(capillary, sigma > 0.0)?;
-        let driving = (6.0_f64 / 5.0).mul_add(self.reynolds, -self.normal_ratio) - capillary;
+        let driving = self.long_wave_driving() - capillary;
         let growth = rate * driving;
         represented(growth.abs(), driving != 0.0)?;
         Ok(FilmMode {
@@ -292,7 +312,7 @@ impl NusseltFilm {
             max_kh: high.kh,
             max_re_kh: high.re_kh,
         };
-        let driving = (6.0_f64 / 5.0).mul_add(self.reynolds, -self.normal_ratio);
+        let driving = self.long_wave_driving();
         let sigma = self.material.surface_tension_n_m;
         if driving > 0.0 && sigma > 0.0 && upper > lower {
             // Log scaling keeps the stationary point meaningful when forming
@@ -324,6 +344,14 @@ impl NusseltFilm {
             maximum.mode = high;
         }
         Ok(maximum)
+    }
+
+    fn long_wave_driving(self) -> f64 {
+        (6.0_f64 / 5.0).mul_add(self.reynolds, -self.normal_ratio)
+    }
+
+    fn capillary_length_squared(self) -> f64 {
+        (self.material.surface_tension_n_m / self.material.density_kg_m3) / self.tangent
     }
 
     fn coordinate(self, y: f64) -> Result<f64, FilmError> {
@@ -403,6 +431,9 @@ mod tests {
         let hydrostatic = 4.0 * h.powi(3) / (3.0 * WATER.kinematic_viscosity_m2_s);
         let capillary = WATER.surface_tension_n_m * h.powi(3)
             / (3.0 * WATER.density_kg_m3 * WATER.kinematic_viscosity_m2_s);
+        let coefficients = film.long_wave_coefficients().unwrap();
+        near(coefficients[0], inertial - hydrostatic);
+        near(coefficients[1], capillary);
         let cutoff = ((inertial - hydrostatic) / capillary).sqrt();
         for factor in [0.5, 2.0] {
             let k = cutoff * factor;
