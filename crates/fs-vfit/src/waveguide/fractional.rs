@@ -45,6 +45,14 @@ impl FractionalTransit {
     pub fn realized_dc_samples(&self) -> f64 {
         if self.requested == 0.0 { 0.0 } else { (1.0-self.a)/(1.0+self.a) }
     }
+    /// Actual allpass group delay [samples] at a normalized frequency in
+    /// [0, Nyquist). Its frequency dependence is interpolation dispersion;
+    /// the requested fractional transit is exact only at zero frequency.
+    pub fn group_delay_samples(&self, omega: f64) -> Result<f64, WaveguideError> {
+        super::dispersion::frequency(omega)?;
+        if self.requested == 0.0 { return Ok(0.0); }
+        super::dispersion::allpass_group_delay(self.a, omega)
+    }
     /// Maximum absolute one-way phase discrepancy from the requested ideal
     /// fractional delay on [0,omega_max], in radians per sample.
     ///
@@ -137,11 +145,13 @@ impl PassiveWaveguide {
     {
         let input=[outgoing,reflected];
         let (waves,state)=self.fractional.as_ref().map_or((input,[0.0;2]),|f|f.trial(input));
+        let (waves,dispersion_energy)=self.preview_dispersion(waves)?;
         let mut stored=self.replaced_root(0,self.wave_energy(waves[0]))
             +self.replaced_root(2*self.leaves,self.wave_energy(waves[1]));
         if self.fractional.is_some() {
             stored+=self.wave_energy(state[0])+self.wave_energy(state[1]);
         }
+        if !self.dispersion.is_empty() { stored+=dispersion_energy; }
         if !input.iter().chain(&waves).chain(&state).all(|x|x.is_finite()) || !stored.is_finite() {
             return Err(WaveguideError("fractional wave transit or storage left the finite set"));
         }

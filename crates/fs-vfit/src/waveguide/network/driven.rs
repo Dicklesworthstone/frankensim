@@ -12,6 +12,10 @@ pub struct DrivenBoundary {
     pub one_way_samples: usize,
     /// Original optional sub-sample transit; absent means integer travel.
     pub fractional_transit: Option<crate::waveguide::fractional::FractionalTransit>,
+    /// Number of additional authored allpass sections in each direction.
+    /// Query `section_propagation_response` for the complete frequency-dependent
+    /// transit; integer and fractional delay alone omit these stages.
+    pub dispersion_sections: usize,
     /// Wave arriving from this endpoint's own adjacent section [Pa].
     pub incoming_pressure_pa: f64,
     /// That section's positive pressure/volume-flow impedance [Pa s/m³].
@@ -52,6 +56,7 @@ impl WaveguideNetwork {
         let line = &self.lines[port / 2];
         Ok(DrivenBoundary { node, section: port / 2, incoming_pressure_pa: self.arriving(port),
             one_way_samples: line.spec.one_way_samples, fractional_transit: line.fractional_transit(),
+            dispersion_sections: line.dispersion_stages().len(),
             impedance_pa_s_m3: line.spec.impedance_pa_s_m3 })
     }
 

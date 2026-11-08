@@ -24,6 +24,8 @@ use crate::relaxation::RelaxationImpedanceSpec;
 pub mod admittance;
 /// Explicit fixed fractional transit on the same scattering and load runtime.
 pub mod fractional;
+/// Explicit allpass dispersion on the original energy-accounted network.
+pub mod dispersion;
 /// Simultaneous exact-ZOH rational feedback across selected physical outlets.
 pub mod multiport;
 /// Work-conjugate external boundaries sharing the same retained wave state.
@@ -120,7 +122,7 @@ pub struct NetworkFrame {
     pub inlet_flow_m3_s: f64,
     /// End-of-step wave plus reactive boundary energy [J].
     pub stored_energy_j: f64,
-    /// Energy in bidirectional buffers and optional fractional-transit states [J].
+    /// Energy in bidirectional buffers and optional fractional/dispersion states [J].
     pub wave_stored_energy_j: f64,
     /// Energy in local R-L-C/relaxation terminal and interior load states [J].
     /// Excludes an attached rational MIMO model, whose exchange is reported as work.
@@ -155,7 +157,7 @@ impl NetworkFrame {
 }
 
 /// A fixed topology and retained traveling waves. No allocation during stepping.
-/// Work is O(number of ports + sum(log(section delay))) per preview/commit.
+/// Work is O(number of ports + allpass stages + sum(log(section delay))) per preview/commit.
 /// All reductions follow declared node/section order, independent of callbacks.
 pub struct WaveguideNetwork {
     nodes: Vec<NetworkNode>,
@@ -366,7 +368,7 @@ impl WaveguideNetwork {
         self.lines[self.inlet_port / 2].spec.impedance_pa_s_m3
     }
 
-    /// Actual buffer and fractional-transit storage in declared section order [J].
+    /// Actual buffer and allpass storage in declared section order [J].
     #[must_use]
     pub fn wave_stored_energy_j(&self) -> f64 {
         self.lines.iter().fold(0.0, |sum, line| sum + line.stored_energy_j())

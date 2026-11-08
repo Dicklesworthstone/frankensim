@@ -5,7 +5,8 @@
 //! pressure waves. With volume-flow impedance Z, E = dt/Z sum(p+^2 + p-^2).
 //! At the far end p- = r p+, |r| <= 1; removed wave power is nonnegative.
 //! No fractional-delay interpolation, distributed loss, dispersion or radiation
-//! model is silently added. The explicit `fractional` image retains allpass energy. See Smith, Physical Audio Signal Processing,
+//! model is silently added. The explicit `fractional` and `dispersion` images
+//! retain their allpass energy. See Smith, Physical Audio Signal Processing,
 //! Digital Waveguide Theory, acoustic tubes and energy-density waves.
 
 /// Connected, variable-impedance characteristic sections and passive junctions.
@@ -13,6 +14,9 @@ pub mod network;
 /// Fixed sub-sample allpass propagation with actual quadratic storage.
 pub mod fractional;
 use fractional::FractionalPair;
+/// Authored lossless dispersion with retained bidirectional allpass storage.
+pub mod dispersion;
+use dispersion::DispersionStage;
 
 /// Parameters of an initially quiescent bidirectional characteristic line.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -84,9 +88,29 @@ pub struct PassiveWaveguide {
     head: usize,
     sqrt_energy_scale: f64,
     fractional: Option<FractionalPair>,
+    dispersion: Vec<DispersionStage>,
 }
 
 impl PassiveWaveguide {
+    /// Requested heap payload for the two wave buffers, energy trees and
+    /// bidirectional dispersion stages. Inline records, allocator overhead and
+    /// RSS are excluded. Zero dispersion stages selects the original line.
+    pub fn required_memory_bytes(
+        one_way_samples: usize, dispersion_sections: usize,
+    ) -> Result<usize, WaveguideError> {
+        let error = WaveguideError("waveguide buffer size overflow");
+        if one_way_samples == 0 {
+            return Err(WaveguideError("waveguide transit must be positive"));
+        }
+        let leaves = one_way_samples.checked_next_power_of_two().ok_or(error)?;
+        one_way_samples.checked_mul(2)
+            .and_then(|n| leaves.checked_mul(4).and_then(|e| n.checked_add(e)))
+            .and_then(|n| n.checked_mul(core::mem::size_of::<f64>()))
+            .and_then(|n| dispersion_sections.checked_mul(core::mem::size_of::<DispersionStage>())
+                .and_then(|d| n.checked_add(d)))
+            .ok_or(error)
+    }
+
     /// Create a zero-state line under an explicit memory-payload budget.
     ///
     /// # Errors
@@ -107,8 +131,7 @@ impl PassiveWaveguide {
         let leaves = spec.one_way_samples.checked_next_power_of_two().ok_or(size_error)?;
         let wave_len = spec.one_way_samples.checked_mul(2).ok_or(size_error)?;
         let energy_len = leaves.checked_mul(4).ok_or(size_error)?;
-        let bytes = wave_len.checked_add(energy_len)
-            .and_then(|n| n.checked_mul(core::mem::size_of::<f64>())).ok_or(size_error)?;
+        let bytes = Self::required_memory_bytes(spec.one_way_samples, 0)?;
         if bytes > spec.max_memory_bytes {
             return Err(WaveguideError("waveguide buffer payload exceeds memory budget"));
         }
@@ -122,6 +145,7 @@ impl PassiveWaveguide {
         Ok(Self {
             spec, waves: allocate(wave_len)?, energy: allocate(energy_len)?,
             leaves, head: 0, sqrt_energy_scale: fs_math::det::sqrt(scale), fractional: None,
+            dispersion: Vec::new(),
         })
     }
 
@@ -139,10 +163,11 @@ impl PassiveWaveguide {
     #[must_use]
     pub fn stored_energy_j(&self) -> f64 {
         let stored = self.energy[1] + self.energy[2 * self.leaves + 1];
-        match &self.fractional {
+        let stored = match &self.fractional {
             None => stored,
             Some(f) => stored + (self.wave_energy(f.state[0]) + self.wave_energy(f.state[1])),
-        }
+        };
+        if self.dispersion.is_empty() { stored } else { stored + self.dispersion_energy_j() }
     }
 
     fn wave_energy(&self, pressure: f64) -> f64 {
@@ -226,11 +251,15 @@ impl PassiveWaveguide {
     // A network supplies BOTH endpoint waves after validating all junctions.
     // Keep the actual two-direction shift and energy update in one owner.
     fn commit_pair(&mut self, outgoing: f64, reflected: f64) {
-        let [outgoing, reflected] = if let Some(f) = &mut self.fractional {
+        let mut waves = if let Some(f) = &mut self.fractional {
             let (waves, state) = f.trial([outgoing, reflected]);
             f.state = state;
             waves
         } else { [outgoing, reflected] };
+        for stage in &mut self.dispersion {
+            waves = stage.commit(waves);
+        }
+        let [outgoing, reflected] = waves;
         self.replace_leaf(0, self.wave_energy(outgoing));
         self.replace_leaf(2 * self.leaves, self.wave_energy(reflected));
         self.waves[self.head] = outgoing;

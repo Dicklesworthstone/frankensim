@@ -237,6 +237,32 @@ certificate is created. Focused tests compare an independent state resolvent
 derivative, conjugacy, direct terms and extreme pole-distance scales. The
 assembled-shell MIMO harmonic adapter consumes this original source derivative.
 
+### Dispersive characteristic propagation
+
+`waveguide::dispersion::AllpassSection` admits a fixed first-order coefficient
+strictly inside (-1,1). `PassiveWaveguide::with_dispersive_transit` installs
+an authored cascade in both propagation directions, beside the original
+integer delay and optional fractional transit. Normalized scattering retains
+one quadratic energy coordinate per stage/direction; `stored_energy_j` includes
+these states. The original preview/commit path refuses nonfinite waves or
+energy without publishing any state. Empty cascades preserve original frames;
+zero coefficient is an additional exact sample, not bypass.
+
+`WaveguideNetwork::with_dispersive_transits` uses those same line states,
+junctions, loads and paired transactions. Allocation counts every stage before
+construction, and stepping allocates nothing. Work adds O(total stages) to the
+original network bound. Complete one-way phase and group delay include integer,
+fractional and dispersive transit once. Half-angle evaluation resolves near-
+unit-circle coefficients without DC/Nyquist cancellation.
+
+Coefficients and valid physical bands remain caller-owned. Negative coefficients
+provide decreasing phase delay as in stiff strings; they are not an automatic
+material fit. No continuum accuracy, attenuation, live retuning, hard-real-time
+or cross-ISA claim is supplied. G0/G1/G3 `tests/dispersive_waveguide.rs` compares
+independent direct-form and complex-frequency responses, both-direction energy,
+exact zero-coefficient delay, budget edges, network parity and refused paired
+updates. Allpass storage is never relabeled dissipation or accumulated work.
+
 ### Exact resonance states on FIR ports
 
 `DelayedFilter::with_exact_poles` retains conjugate Laplace pairs
