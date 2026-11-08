@@ -1562,3 +1562,34 @@ payload, including the original blocked factor's packing scratch. Queries
 bound gain factorizations and poll cancellation in the original numerical
 kernels. The borrowed controller freezes the source model for the query family;
 the physical model is not modified by preparation or a refused query.
+
+## Explicit physical-rate simultaneous tones
+
+`PreparedModalTones::try_new_with_damping_rates` and its affine-envelope
+variant admit complete physical oscillator banks for
+`q'' + c*q' + omega^2*q = sum_j F_j(t)`. The supplied nonnegative rate is
+the coefficient c [1/s], not c/2 or a damping ratio. Zero-stiffness coordinates
+may have positive drag. No sampling clock, acoustic observer, Nyquist bound
+or acoustic mode cap is inferred. All modes and tones remain under one
+aggregate storage/preparation/step budget; widened integer counts prevent
+capacity arithmetic from wrapping before coefficient allocation.
+
+Pure `advance_mode_with_energy` and `advance_mode_affine_with_energy`
+return motion, independent signed work and positive viscous heat through the
+existing entire-convolution and paired-QR power owner. Exact duplicate tones
+coalesce coherently; distinct close frequencies retain beats and all power
+cross terms. Affine endpoint quadratures share the interval-start carrier
+basis. Neither accepted state nor external source phase changes in a preview.
+
+Existing model-based preparations retain their original ratio/rate arithmetic,
+Nyquist/observer admission and immutable-kernel identity. An explicit bank is
+unbound and cannot be passed to a model-mutating step. The controlled physical
+constructor polls before admission, between cost rows and prepared modes/tones,
+and before return; one bounded power preparation remains atomic. Caller-owned
+physical state/energy acceptance and observation resolution remain separate;
+these endpoint previews are not peak finders or interval certificates.
+
+`tests/physical_tone_banks.rs` covers duplicate cancellation, near-tone beats,
+affine work/heat against independent ODE integration across damping regimes,
+analytic rigid drag, high-frequency admission, preserved model binding,
+aggregate budgets and cooperative preparation cancellation.

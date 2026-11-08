@@ -7,7 +7,7 @@ use super::super::{
     ModalAcousticTimeModel, ModalAcousticWorkspace, ModalStepData, stage_modal_frame,
 };
 use super::{
-    HarmonicForceTransition, advance_response, affine::delta_gains, invalid,
+    HarmonicForceFrame, HarmonicForceTransition, advance_response, affine::delta_gains, invalid,
     runtime::require_mechanical_observation,
 };
 use power::{TonePower, scaling_with_envelope};
@@ -76,13 +76,15 @@ struct PreparedToneMode {
 /// interval certificates. Severe cancellation can lose relative accuracy;
 /// neither force amplitudes nor physical damping are normalized to hide it.
 ///
-/// Bound to the model's immutable kernel and its clones, just like
-/// [`super::PreparedModalHarmonic`]. Legacy natural-frequency pressure
-/// transfers must be zero; use a separate physical broadband observer.
+/// Model-based constructors bind to the immutable kernel and its clones, like
+/// [`super::PreparedModalHarmonic`], and require zero narrow-band pressure
+/// transfers. Explicit-rate constructors instead prepare an unbound physical
+/// oscillator bank: no sampling clock, acoustic observer or Nyquist bound is
+/// inferred. Its pure previews leave state/work admission to the caller.
 #[derive(Clone, Debug)]
 pub struct PreparedModalTones {
     affine: bool,
-    owner: Arc<ExactZohKernel>,
+    owner: Option<Arc<ExactZohKernel>>,
     frequencies: Box<[f64]>,
     unique: Box<[f64]>,
     source_to_unique: Box<[usize]>,
@@ -124,6 +126,92 @@ impl PreparedModalTones {
         Self::prepare(model, angular_frequencies_rad_s, duration_s, budget, true)
     }
 
+    /// Prepare q'' + c*q' + omega^2*q = F(t), with physical c [1/s].
+    /// The coefficient is c, not the amplitude decay c/2 or damping ratio.
+    /// All natural and forcing frequencies and rates must be finite and
+    /// nonnegative, including drag on zero-stiffness coordinates. Every mode
+    /// and source is retained under one aggregate budget. No sample rate or
+    /// acoustic/Nyquist ceiling is imposed. Use the pure per-mode previews;
+    /// this unbound preparation cannot mutate a ModalAcousticTimeModel.
+    pub fn try_new_with_damping_rates(
+        natural_frequencies_rad_s: &[f64],
+        damping_rates_per_s: &[f64],
+        forcing_frequencies_rad_s: &[f64],
+        duration_s: f64,
+        budget: ModalToneBudget,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        Self::try_new_with_damping_rates_controlled(
+            natural_frequencies_rad_s,
+            damping_rates_per_s,
+            forcing_frequencies_rad_s,
+            duration_s,
+            budget,
+            false,
+            || false,
+        )
+    }
+
+    /// Same physical bank with affine quadrature envelopes. Both endpoints
+    /// refer to the interval-start carrier basis, just as in try_new_affine.
+    pub fn try_new_affine_with_damping_rates(
+        natural_frequencies_rad_s: &[f64],
+        damping_rates_per_s: &[f64],
+        forcing_frequencies_rad_s: &[f64],
+        duration_s: f64,
+        budget: ModalToneBudget,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        Self::try_new_with_damping_rates_controlled(
+            natural_frequencies_rad_s,
+            damping_rates_per_s,
+            forcing_frequencies_rad_s,
+            duration_s,
+            budget,
+            true,
+            || false,
+        )
+    }
+
+    /// Same explicit physical bank, with cooperative cancellation before
+    /// admission, between cost rows and prepared modes/tones, and before return.
+    /// One bounded TonePower preparation remains atomic. Cancellation returns
+    /// InvalidInput with "physical tone preparation cancelled"; no state changes.
+    pub fn try_new_with_damping_rates_controlled(
+        omega: &[f64],
+        rates: &[f64],
+        frequencies: &[f64],
+        h: f64,
+        budget: ModalToneBudget,
+        affine: bool,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        poll_preparation(&mut cancelled)?;
+        if omega.is_empty()
+            || omega.len() != rates.len()
+            || omega
+                .iter()
+                .chain(rates)
+                .any(|x| !x.is_finite() || *x < 0.0)
+        {
+            return Err(invalid(
+                "one finite nonnegative natural frequency and damping rate per physical mode required",
+            ));
+        }
+        Self::prepare_modes(
+            frequencies,
+            h,
+            budget,
+            affine,
+            None,
+            omega.len(),
+            f64::INFINITY,
+            |i| (omega[i], rates[i] * h),
+            |i, frequency| {
+                HarmonicForceTransition::try_new_with_damping_rate(omega[i], rates[i], frequency, h)
+            },
+            cancelled,
+        )
+    }
+
     fn prepare(
         model: &ModalAcousticTimeModel,
         angular_frequencies_rad_s: &[f64],
@@ -132,6 +220,41 @@ impl PreparedModalTones {
         affine: bool,
     ) -> Result<Self, ModalAcousticTimeError> {
         require_mechanical_observation(model)?;
+        let maximum =
+            core::f64::consts::PI * model.budget.nyquist_guard_fraction / model.sample_period_s;
+        Self::prepare_modes(
+            angular_frequencies_rad_s,
+            duration_s,
+            budget,
+            affine,
+            Some(Arc::clone(&model.transition_kernel)),
+            model.modes.len(),
+            maximum,
+            |i| {
+                (
+                    model.modes[i].angular_frequency_rad_s,
+                    model.damping_over_interval(i, duration_s),
+                )
+            },
+            |i, frequency| model.prepare_harmonic_mode(i, frequency, duration_s),
+            || false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_modes(
+        angular_frequencies_rad_s: &[f64],
+        duration_s: f64,
+        budget: ModalToneBudget,
+        affine: bool,
+        owner: Option<Arc<ExactZohKernel>>,
+        mode_count: usize,
+        maximum: f64,
+        parameters: impl Fn(usize) -> (f64, f64),
+        prepare_motion: impl Fn(usize, f64) -> Result<HarmonicForceTransition, ModalAcousticTimeError>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalAcousticTimeError> {
+        poll_preparation(&mut cancelled)?;
         let count = angular_frequencies_rad_s.len();
         if count == 0 || count > MAX_HARMONIC_TONES || count > budget.maximum_tones {
             return Err(invalid(
@@ -141,16 +264,16 @@ impl PreparedModalTones {
         if !duration_s.is_finite() || duration_s <= 0.0 {
             return Err(invalid("tone duration must be positive and finite"));
         }
-        let maximum =
-            core::f64::consts::PI * model.budget.nyquist_guard_fraction / model.sample_period_s;
         let mut unique = [0.0; MAX_HARMONIC_TONES];
         let mut mapping = [0; MAX_HARMONIC_TONES];
         let mut distinct = 0;
         for (index, &frequency) in angular_frequencies_rad_s.iter().enumerate() {
             if !frequency.is_finite() || frequency < 0.0 || frequency > maximum {
-                return Err(invalid(
-                    "all tones must lie inside the model's nominal Nyquist guard",
-                ));
+                return Err(invalid(if maximum.is_finite() {
+                    "all tones must lie inside the model's nominal Nyquist guard"
+                } else {
+                    "physical tone frequencies must be finite and nonnegative"
+                }));
             }
             mapping[index] =
                 if let Some(found) = unique[..distinct].iter().position(|&x| x == frequency) {
@@ -162,18 +285,23 @@ impl PreparedModalTones {
                 };
         }
         admit_cost(
-            model,
+            mode_count,
+            &parameters,
             &unique[..distinct],
             count,
             duration_s,
             budget,
             affine,
+            &mut cancelled,
         )?;
-        let mut modes = Vec::with_capacity(model.modes.len());
-        for (index, mode) in model.modes.iter().enumerate() {
+        let mut modes = Vec::with_capacity(mode_count);
+        for index in 0..mode_count {
+            poll_preparation(&mut cancelled)?;
+            let (omega, drag) = parameters(index);
             let mut motion = Vec::with_capacity(distinct);
             for &frequency in &unique[..distinct] {
-                motion.push(model.prepare_harmonic_mode(index, frequency, duration_s)?);
+                poll_preparation(&mut cancelled)?;
+                motion.push(prepare_motion(index, frequency)?);
             }
             let delta = if affine {
                 Some(
@@ -192,21 +320,17 @@ impl PreparedModalTones {
             } else {
                 TonePower::try_new
             };
-            let power = prepare_power(
-                mode.angular_frequency_rad_s,
-                model.damping_over_interval(index, duration_s),
-                &unique[..distinct],
-                duration_s,
-            )?;
+            let power = prepare_power(omega, drag, &unique[..distinct], duration_s)?;
             modes.push(PreparedToneMode {
                 motion: motion.into_boxed_slice(),
                 delta,
                 power,
             });
         }
+        poll_preparation(&mut cancelled)?;
         Ok(Self {
             affine,
-            owner: Arc::clone(&model.transition_kernel),
+            owner,
             frequencies: angular_frequencies_rad_s.into(),
             unique: unique[..distinct].into(),
             source_to_unique: mapping[..count].into(),
@@ -313,6 +437,79 @@ impl PreparedModalTones {
         let [c, s, dc, ds] = self.collect_affine(cosine_start, sine_start, cosine_end, sine_end)?;
         let n = self.unique.len();
         mode.advance(state, &c[..n], &s[..n], Some((&dc[..n], &ds[..n])))
+    }
+
+    /// Pure endpoint, signed force work and positive viscous heat for one mode.
+    /// All cross-frequency terms and the initial transient are retained. No
+    /// acoustic/state budget is applied and no accepted state is mutated.
+    pub fn advance_mode_with_energy(
+        &self,
+        mode_index: usize,
+        state: ModalAcousticState,
+        cosine: &[f64],
+        sine: &[f64],
+    ) -> Result<HarmonicForceFrame, ModalAcousticTimeError> {
+        self.mode_frame(mode_index, state, cosine, sine, None)
+    }
+
+    /// Same independent accounts for affine quadrature envelopes. Both endpoint
+    /// rows use the same interval-start carrier basis and original tone order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_mode_affine_with_energy(
+        &self,
+        mode_index: usize,
+        state: ModalAcousticState,
+        cosine_start: &[f64],
+        sine_start: &[f64],
+        cosine_end: &[f64],
+        sine_end: &[f64],
+    ) -> Result<HarmonicForceFrame, ModalAcousticTimeError> {
+        self.mode_frame(
+            mode_index,
+            state,
+            cosine_start,
+            sine_start,
+            Some((cosine_end, sine_end)),
+        )
+    }
+
+    fn mode_frame(
+        &self,
+        index: usize,
+        state: ModalAcousticState,
+        cosine: &[f64],
+        sine: &[f64],
+        ends: Option<(&[f64], &[f64])>,
+    ) -> Result<HarmonicForceFrame, ModalAcousticTimeError> {
+        if self.affine != ends.is_some() {
+            return Err(invalid("tone step must use its prepared envelope law"));
+        }
+        let mode = self
+            .modes
+            .get(index)
+            .ok_or_else(|| invalid("tone mode index must be admitted"))?;
+        let n = self.unique.len();
+        let (next, accounts) = if let Some((ce, se)) = ends {
+            let [c, s, dc, ds] = self.collect_affine(cosine, sine, ce, se)?;
+            (
+                mode.advance(state, &c[..n], &s[..n], Some((&dc[..n], &ds[..n])))?,
+                mode.power
+                    .evaluate_affine(state, &c[..n], &s[..n], &dc[..n], &ds[..n])?,
+            )
+        } else {
+            let (c, s) = self.collect_forces(cosine, sine)?;
+            (
+                mode.advance(state, &c[..n], &s[..n], None)?,
+                mode.power.evaluate(state, &c[..n], &s[..n])?,
+            )
+        };
+        Ok(HarmonicForceFrame {
+            state: next,
+            input_work_j: accounts.0,
+            input_work_roundoff_tolerance_j: accounts.1,
+            viscous_dissipation_j: accounts.2,
+            dissipation_roundoff_tolerance_j: accounts.3,
+        })
     }
 
     fn collect_affine(
@@ -481,7 +678,11 @@ impl ModalAcousticTimeModel {
         if prepared.affine != ends.is_some() {
             return Err(invalid("tone step must use its prepared envelope law"));
         }
-        if !Arc::ptr_eq(&prepared.owner, &self.transition_kernel) {
+        if !prepared
+            .owner
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, &self.transition_kernel))
+        {
             return Err(invalid(
                 "tone preparation must belong to this model or its clone",
             ));
@@ -512,35 +713,19 @@ impl ModalAcousticTimeModel {
             |index, _mode, state| {
                 let begin = index * prepared.tone_count();
                 let end = begin + prepared.tone_count();
-                let mode = &prepared.modes[index];
-                let n = prepared.unique.len();
-                let (next, accounts) = if let Some((ce, se)) = ends {
-                    let [c, s, dc, ds] = prepared.collect_affine(
-                        &cosine_forces[begin..end],
-                        &sine_forces[begin..end],
-                        &ce[begin..end],
-                        &se[begin..end],
-                    )?;
-                    (
-                        mode.advance(state, &c[..n], &s[..n], Some((&dc[..n], &ds[..n])))?,
-                        mode.power
-                            .evaluate_affine(state, &c[..n], &s[..n], &dc[..n], &ds[..n])?,
-                    )
-                } else {
-                    let (c, s) = prepared
-                        .collect_forces(&cosine_forces[begin..end], &sine_forces[begin..end])?;
-                    (
-                        mode.advance(state, &c[..n], &s[..n], None)?,
-                        mode.power.evaluate(state, &c[..n], &s[..n])?,
-                    )
-                };
-                let (work, work_allowance, loss, loss_allowance) = accounts;
+                let frame = prepared.mode_frame(
+                    index,
+                    state,
+                    &cosine_forces[begin..end],
+                    &sine_forces[begin..end],
+                    ends.map(|(c, s)| (&c[begin..end], &s[begin..end])),
+                )?;
                 Ok(ModalStepData {
-                    next,
-                    work,
-                    work_allowance,
-                    loss,
-                    loss_allowance,
+                    next: frame.state,
+                    work: frame.input_work_j,
+                    work_allowance: frame.input_work_roundoff_tolerance_j,
+                    loss: frame.viscous_dissipation_j,
+                    loss_allowance: frame.dissipation_roundoff_tolerance_j,
                 })
             },
         )?;
@@ -549,21 +734,31 @@ impl ModalAcousticTimeModel {
     }
 }
 
+fn poll_preparation(cancelled: &mut impl FnMut() -> bool) -> Result<(), ModalAcousticTimeError> {
+    if cancelled() {
+        Err(invalid("physical tone preparation cancelled"))
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn admit_cost(
-    model: &ModalAcousticTimeModel,
+    mode_count: usize,
+    parameters: impl Fn(usize) -> (f64, f64),
     frequencies: &[f64],
     input_tones: usize,
     h: f64,
     budget: ModalToneBudget,
     affine: bool,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), ModalAcousticTimeError> {
     let k = frequencies.len();
     let n = 2 + if affine { 4 } else { 2 } * k;
     let square = n * n;
-    let count = model.modes.len();
-    // The hard mode/tone caps keep these small integer products representable.
-    // Include both retained forms, motion, shared maps, and preparation scratch.
-    let storage = count
+    // Widen the mode count before products: explicit physical banks have no
+    // unrelated acoustic mode cap. Include shared maps and peak cold scratch.
+    let storage = mode_count as u128
         * (core::mem::size_of::<PreparedToneMode>()
             + k * core::mem::size_of::<HarmonicForceTransition>()
             + if affine {
@@ -571,45 +766,41 @@ fn admit_cost(
             } else {
                 0
             }
-            + 2 * square * 8)
-        + 4 * square * 8
-        + (10 * n + 20 * input_tones) * 8
-        + core::mem::size_of::<PreparedModalTones>();
-    let step_work = count * (16 * square + 128 * input_tones);
-    let mut preparation = 0usize;
-    for (index, mode) in model.modes.iter().enumerate() {
-        let (_, _, _, _, doublings) = scaling_with_envelope(
-            mode.angular_frequency_rad_s,
-            model.damping_over_interval(index, h),
-            frequencies,
-            h,
-            affine,
-        )?;
-        let cost = 160 * square
-            + doublings * (8 * n * square + 80 * square)
-            + k * (if affine { 2 } else { 1 }) * (2000 + 80 * doublings);
-        preparation = preparation
-            .checked_add(cost)
-            .ok_or_else(|| invalid("tone preparation work score overflow"))?;
-    }
+            + 2 * square * 8) as u128
+        + (4 * square * 8
+            + (10 * n + 20 * input_tones) * 8
+            + core::mem::size_of::<PreparedModalTones>()) as u128;
+    let step_work = mode_count as u128 * (16 * square + 128 * input_tones) as u128;
     for (what, value, limit) in [
         (
             "tone coefficient and preparation storage bytes",
             storage,
             budget.maximum_storage_bytes,
         ),
-        (
-            "tone preparation work score",
-            preparation,
-            budget.maximum_preparation_work,
-        ),
         ("tone step work score", step_work, budget.maximum_step_work),
     ] {
-        if value > limit {
+        if value > limit as u128 {
             return Err(ModalAcousticTimeError::BudgetExceeded {
                 what,
                 value: value as f64,
                 limit: limit as f64,
+            });
+        }
+    }
+    let mut preparation = 0u128;
+    for index in 0..mode_count {
+        poll_preparation(cancelled)?;
+        let (omega, drag) = parameters(index);
+        let (_, _, _, _, doublings) = scaling_with_envelope(omega, drag, frequencies, h, affine)?;
+        let square = square as u128;
+        preparation += 160 * square
+            + doublings as u128 * (8 * n as u128 * square + 80 * square)
+            + k as u128 * (if affine { 2 } else { 1 }) * (2000 + 80 * doublings as u128);
+        if preparation > budget.maximum_preparation_work as u128 {
+            return Err(ModalAcousticTimeError::BudgetExceeded {
+                what: "tone preparation work score",
+                value: preparation as f64,
+                limit: budget.maximum_preparation_work as f64,
             });
         }
     }
