@@ -11,7 +11,7 @@ use super::{
     MaterialBoundaryLoad, MaterialStokesBoundary, MaterialStokesFlowControlSolution,
     flow_control::physical_control, physical_boundary_load, with_physical_boundaries,
 };
-use crate::ns::boundary::{StokesPressureReference, StokesSolution};
+use crate::ns::boundary::{StokesAssembly, StokesPressureReference, StokesSolution};
 use crate::ns::{FluxParams, FluxSolution, FluxSystem};
 
 /// One original material owner and its admitted, immutable cell snapshot.
@@ -121,7 +121,7 @@ impl<'s, 'm, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, '_, F> {
     }
 }
 
-impl<G> MaterialStokesField<'_, '_, G> {
+impl<'s, 'm, G> MaterialStokesField<'s, 'm, G> {
     /// Exact original owners and frozen snapshots, in triangle order.
     #[must_use]
     pub fn samples(&self) -> &[MaterialStokesCell<G>] {
@@ -155,31 +155,128 @@ impl<G> MaterialStokesField<'_, '_, G> {
     ) -> Result<MaterialStokesFlowControlSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
     {
         let reference = self.reference_density_kg_m3;
-        with_physical_boundaries(boundaries, reference, |primitive| {
-            let prepared = self
-                .system
-                .assemble_stokes_mixed_variable_density(
-                    self.params,
-                    &|cell, _| self.samples[cell].relative_density,
-                    &|cell, _| self.samples[cell].normalized_viscosity,
-                    &|point| {
-                        let force = force_density(point);
-                        [force[0] / reference, force[1] / reference]
-                    },
-                    primitive,
-                )
-                .and_then(|assembly| assembly.prepare_flow_control(ports))
+        let assembly = with_physical_boundaries(boundaries, reference, |primitive| {
+            self.system.assemble_stokes_mixed_variable_density(
+                self.params,
+                &|cell, _| self.samples[cell].relative_density,
+                &|cell, _| self.samples[cell].normalized_viscosity,
+                &|point| {
+                    let force = force_density(point);
+                    [force[0] / reference, force[1] / reference]
+                },
+                primitive,
+            )
+        })
+        .map_err(MaterialFluxError::Boundary)?;
+        self.solve_controlled_assembly(
+            assembly,
+            ports,
+            outward_volume_rates_m2_s,
+            absolute_tolerance_m2_s,
+        )
+    }
+
+    /// Resolve the pressure for one backward-Euler endpoint flow constraint.
+    ///
+    /// Each frozen cell's original density weights inertia and history, and
+    /// its dynamic viscosity supplies the one-sided stress. Input force is
+    /// N/m³, total traction and required pressure are Pa, velocity is m/s and
+    /// time is seconds. Outward flow targets and their absolute tolerance are
+    /// m²/s per depth. Callbacks and targets specify the new time level.
+    /// Port profiles remain unknown; every controlled component retains an
+    /// uncontrolled traction datum. No material source is queried again.
+    ///
+    /// # Errors
+    /// Retains native history, material, port-flow and equation checks and SI
+    /// recovery. Previous velocity and frozen sources remain unchanged; only
+    /// a completely accepted endpoint supplies the next velocity history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_stokes_mixed_flow_control(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        absolute_tolerance_m2_s: f64,
+    ) -> Result<MaterialStokesFlowControlSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        self.bdf2_stokes_mixed_variable_step_flow_control(
+            force_density,
+            boundaries,
+            ports,
+            outward_volume_rates_m2_s,
+            previous_velocity,
+            None,
+            timestep_s,
+            absolute_tolerance_m2_s,
+        )
+    }
+
+    /// Resolve variable-step BDF2 pressure for prescribed endpoint port flows.
+    ///
+    /// `older_history` pairs u_(n-1) with the actual preceding interval; `None`
+    /// performs native backward-Euler startup. The new/previous step ratio is
+    /// in (0, 2]. The same frozen cell density metric weights both histories,
+    /// endpoint inertia, reactions and physical kinetic energy. Dynamic
+    /// viscosities and source owners remain those bound to the original cells.
+    /// Force, traction, flow units and pressure datums follow
+    /// [`Self::bdf1_stokes_mixed_flow_control`]. No convection, density transport
+    /// or material-interface evolution is added.
+    ///
+    /// # Errors
+    /// Retains native history/ratio, flow/datum and equation checks and SI
+    /// representability. Histories and source snapshots are immutable; a
+    /// refused candidate returns no partial velocity or pressure endpoint.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_stokes_mixed_variable_step_flow_control(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        absolute_tolerance_m2_s: f64,
+    ) -> Result<MaterialStokesFlowControlSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        let assembly = self.assemble_material_stokes_bdf2(
+            force_density,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+        )?;
+        self.solve_controlled_assembly(
+            assembly,
+            ports,
+            outward_volume_rates_m2_s,
+            absolute_tolerance_m2_s,
+        )
+    }
+
+    fn solve_controlled_assembly(
+        &self,
+        assembly: StokesAssembly<'_, '_>,
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        absolute_tolerance_m2_s: f64,
+    ) -> Result<MaterialStokesFlowControlSolution<MaterialStokesFieldSolution<G>>, MaterialFluxError>
+    {
+        let prepared = assembly
+            .prepare_flow_control(ports)
+            .map_err(MaterialFluxError::Boundary)?;
+        let result = prepared
+            .solve(outward_volume_rates_m2_s, absolute_tolerance_m2_s)
+            .map_err(MaterialFluxError::Boundary)?;
+        let energy = self.reference_density_kg_m3
+            * prepared
+                .kinetic_energy(&result.flow.field.x)
                 .map_err(MaterialFluxError::Boundary)?;
-            let result = prepared
-                .solve(outward_volume_rates_m2_s, absolute_tolerance_m2_s)
-                .map_err(MaterialFluxError::Boundary)?;
-            let energy = reference
-                * prepared
-                    .kinetic_energy(&result.flow.field.x)
-                    .map_err(MaterialFluxError::Boundary)?;
-            physical_control(result, reference, |flow| {
-                self.recover_solution(flow, energy)
-            })
+        physical_control(result, self.reference_density_kg_m3, |flow| {
+            self.recover_solution(flow, energy)
         })
     }
 
@@ -271,10 +368,34 @@ impl<G> MaterialStokesField<'_, '_, G> {
         older_history: Option<(&[f64], f64)>,
         timestep_s: f64,
     ) -> Result<MaterialStokesFieldSolution<G>, MaterialFluxError> {
+        let assembly = self.assemble_material_stokes_bdf2(
+            force_density,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+        )?;
+        let flow = assembly.solve().map_err(MaterialFluxError::Boundary)?;
+        let kinetic_energy_j_per_m = self.reference_density_kg_m3
+            * assembly
+                .kinetic_energy(&flow.field.x)
+                .map_err(MaterialFluxError::Boundary)?;
+        self.recover_solution(flow, kinetic_energy_j_per_m)
+    }
+
+    // Share the exact sampled material metric and native BDF history between
+    // prescribed-traction and prescribed-flow endpoints.
+    fn assemble_material_stokes_bdf2(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+    ) -> Result<StokesAssembly<'s, 'm>, MaterialFluxError> {
         let reference = self.reference_density_kg_m3;
         with_physical_boundaries(boundaries, reference, |primitive_boundaries| {
-            let assembly = self
-                .system
+            self.system
                 .assemble_stokes_mixed_bdf2_variable_density_variable_step(
                     self.params,
                     &|cell, _| self.samples[cell].relative_density,
@@ -288,13 +409,7 @@ impl<G> MaterialStokesField<'_, '_, G> {
                     older_history,
                     timestep_s,
                 )
-                .map_err(MaterialFluxError::Boundary)?;
-            let flow = assembly.solve().map_err(MaterialFluxError::Boundary)?;
-            let kinetic_energy_j_per_m = reference
-                * assembly
-                    .kinetic_energy(&flow.field.x)
-                    .map_err(MaterialFluxError::Boundary)?;
-            self.recover_solution(flow, kinetic_energy_j_per_m)
+                .map_err(MaterialFluxError::Boundary)
         })
     }
 

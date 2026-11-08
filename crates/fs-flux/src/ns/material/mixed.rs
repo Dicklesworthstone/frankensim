@@ -6,8 +6,8 @@ use super::{
 };
 use crate::ns::FluxSolution;
 use crate::ns::boundary::{
-    BoundaryWrench, StokesBoundary, StokesPressureReference, StokesRheologyControls,
-    StokesRheologySolution, StokesSolution,
+    BoundaryWrench, StokesAssembly, StokesBoundary, StokesPressureReference,
+    StokesRheologyControls, StokesRheologySolution, StokesSolution,
 };
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -444,7 +444,7 @@ impl<G> MaterialStokesRheologySolution<G> {
     }
 }
 
-impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
+impl<'s, 'm, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, '_, F> {
     /// Advance linear incompressible Stokes by one backward-Euler step, with
     /// endpoint force density [N/m³], velocity [m/s] and TOTAL traction [Pa].
     ///
@@ -529,9 +529,32 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         older_history: Option<(&[f64], f64)>,
         timestep_s: f64,
     ) -> Result<MaterialStokesSolution, MaterialFluxError> {
+        let flow = self
+            .assemble_material_stokes_bdf2(
+                force_density,
+                boundaries,
+                previous_velocity,
+                older_history,
+                timestep_s,
+            )?
+            .solve()
+            .map_err(MaterialFluxError::Boundary)?;
+        self.material_stokes_solution(flow)
+    }
+
+    // The ordinary and flow-controlled endpoints use this same history,
+    // material conversion and native temporal assembly.
+    pub(super) fn assemble_material_stokes_bdf2(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+    ) -> Result<StokesAssembly<'s, 'm>, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
-        let flow = with_physical_boundaries(boundaries, density, |primitive_boundaries| {
-            self.system.bdf2_stokes_mixed_variable_step(
+        with_physical_boundaries(boundaries, density, |primitive_boundaries| {
+            self.system.assemble_stokes_mixed_bdf2_variable_step(
                 self.params,
                 &|point| {
                     let physical = force_density(point);
@@ -543,8 +566,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 timestep_s,
             )
         })
-        .map_err(MaterialFluxError::Boundary)?;
-        self.material_stokes_solution(flow)
+        .map_err(MaterialFluxError::Boundary)
     }
 
     // One SI recovery for linear and nonlinear mixed-boundary endpoints.
