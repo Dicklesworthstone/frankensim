@@ -10,7 +10,10 @@
 use fs_math::{det, qd::Qd};
 
 mod spectrum;
-pub use spectrum::{DuffingSpectrum, MAX_DUFFING_HARMONICS, duffing_spectrum_exact};
+pub use spectrum::{
+    DuffingKinematicSpectrum, DuffingSpectrum, MAX_DUFFING_HARMONICS,
+    duffing_kinematic_spectrum_exact, duffing_spectrum_exact,
+};
 
 /// Refusal of the scalar conservative periodic-orbit query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

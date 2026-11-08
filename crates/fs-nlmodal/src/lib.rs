@@ -54,9 +54,10 @@ pub mod longitudinal;
 pub mod preload;
 pub mod sav;
 pub use backbone::{
-    DuffingBackboneDerivative, DuffingBackboneDirection, DuffingBackboneError, DuffingSpectrum,
-    MAX_DUFFING_HARMONICS, duffing_backbone_directional_derivative, duffing_backbone_exact,
-    duffing_spectrum_exact,
+    DuffingBackboneDerivative, DuffingBackboneDirection, DuffingBackboneError,
+    DuffingKinematicSpectrum, DuffingSpectrum, MAX_DUFFING_HARMONICS,
+    duffing_backbone_directional_derivative, duffing_backbone_exact,
+    duffing_kinematic_spectrum_exact, duffing_spectrum_exact,
 };
 pub use preload::PreloadedModalStorage;
 
@@ -283,6 +284,42 @@ impl SosModalStorage {
                 "spectrum axis couples to other displacement coordinates"
             } else {
                 "spectrum mode, amplitude, harmonic count or scalar spectrum is not representable"
+            },
+        })
+    }
+
+    /// Physical displacement, velocity and acceleration harmonics of one axis.
+    ///
+    /// This uses the same original coefficients and channel-by-channel
+    /// invariance rule as [`Self::invariant_axis_spectrum`]. Derivative
+    /// coefficients retain their physical phases and units; separate tail
+    /// estimates expose the greater bandwidth required for velocity and force.
+    /// Products are scaled before rounding, so a representable derivative can
+    /// survive even when its displacement harmonic is unrepresentably small.
+    /// An unrepresentable derivative coefficient or tail refuses this opt-in
+    /// query without narrowing the displacement-only query's range.
+    pub fn invariant_axis_kinematic_spectrum(
+        &self,
+        mode: usize,
+        amplitude: f64,
+        odd_harmonics: usize,
+    ) -> Result<DuffingKinematicSpectrum, NlModalError> {
+        self.validate()?;
+        backbone::invariant_axis_parameters(
+            &self.omegas,
+            self.channels
+                .iter()
+                .map(|channel| (channel.coefficient, channel.coupling.as_slice())),
+            mode,
+        )
+        .and_then(|(omega, beta)| {
+            duffing_kinematic_spectrum_exact(omega, beta, amplitude, odd_harmonics)
+        })
+        .map_err(|error| NlModalError::Parameter {
+            what: if error == DuffingBackboneError::NonInvariantAxis {
+                "kinematic spectrum axis couples to other displacement coordinates"
+            } else {
+                "kinematic spectrum parameters, coefficients or tails are not representable"
             },
         })
     }

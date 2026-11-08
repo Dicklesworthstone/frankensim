@@ -14,6 +14,9 @@ use super::{
 };
 use fs_math::{dd::Dd, det, qd::Qd};
 
+mod kinematics;
+pub use kinematics::{DuffingKinematicSpectrum, duffing_kinematic_spectrum_exact};
+
 /// Maximum number of retained odd harmonics; this is a work/storage limit.
 pub const MAX_DUFFING_HARMONICS: usize = 4096;
 
@@ -58,6 +61,8 @@ pub struct DuffingSpectrum {
 /// reference. It adds no damping, forcing, mode coupling or stability claim,
 /// and is not an instrument-render replacement. For velocity seeds, multiply
 /// each complex displacement coefficient by `i*(2*j+1)*angular_frequency`.
+/// [`duffing_kinematic_spectrum_exact`] performs derivative scaling before
+/// rounding and reports the separate physical velocity/acceleration tails.
 ///
 /// References: <https://dlmf.nist.gov/22.11.E2>,
 /// <https://dlmf.nist.gov/22.11.E4>, <https://dlmf.nist.gov/22.2.E1>.
@@ -67,17 +72,39 @@ pub fn duffing_spectrum_exact(
     amplitude: f64,
     odd_harmonics: usize,
 ) -> Result<DuffingSpectrum, DuffingBackboneError> {
+    prepare_spectrum(omega0, beta, amplitude, odd_harmonics)?.displacement(odd_harmonics)
+}
+
+/// Scalar preparation shared by displacement and physical derivative queries.
+struct PreparedSpectrum {
+    angular_frequency: f64,
+    amplitude: f64,
+    first_ratio: f64,
+    root_nome: f64,
+    decay: f64,
+    one_minus_nome: f64,
+    softening: bool,
+}
+
+fn prepare_spectrum(
+    omega0: f64,
+    beta: f64,
+    amplitude: f64,
+    odd_harmonics: usize,
+) -> Result<PreparedSpectrum, DuffingBackboneError> {
     if !(1..=MAX_DUFFING_HARMONICS).contains(&odd_harmonics) {
         return Err(DuffingBackboneError::InvalidInput);
     }
     let angular_frequency = duffing_backbone_exact(omega0, beta, amplitude)?;
     if beta == 0.0 || amplitude == 0.0 {
-        let mut cosine_amplitudes = vec![0.0; odd_harmonics];
-        cosine_amplitudes[0] = amplitude;
-        return Ok(DuffingSpectrum {
+        return Ok(PreparedSpectrum {
             angular_frequency,
-            cosine_amplitudes,
-            displacement_tail_bound: 0.0,
+            amplitude,
+            first_ratio: 1.0,
+            root_nome: 0.0,
+            decay: f64::INFINITY,
+            one_minus_nome: 1.0,
+            softening: false,
         });
     }
     let parameters = scaled_parameters(omega0, beta, amplitude)?;
@@ -123,43 +150,66 @@ pub fn duffing_spectrum_exact(
     let nome = root_nome * root_nome;
     let one_minus_nome = -det::expm1(-decay);
     let normalization = infinite_normalization(nome, decay, softening, one_minus_nome)?;
-    let mut numerator = amplitude * (denominator(decay, 1, softening) / normalization);
-    let mut cosine_amplitudes = Vec::with_capacity(odd_harmonics);
-    for j in 0..odd_harmonics {
-        let magnitude = numerator / denominator(decay, 2 * j + 1, softening);
-        if !magnitude.is_finite() {
+    Ok(PreparedSpectrum {
+        angular_frequency,
+        amplitude,
+        first_ratio: denominator(decay, 1, softening) / normalization,
+        root_nome,
+        decay,
+        one_minus_nome,
+        softening,
+    })
+}
+
+impl PreparedSpectrum {
+    fn displacement(&self, odd_harmonics: usize) -> Result<DuffingSpectrum, DuffingBackboneError> {
+        if self.root_nome == 0.0 {
+            let mut cosine_amplitudes = vec![0.0; odd_harmonics];
+            cosine_amplitudes[0] = self.amplitude;
+            return Ok(DuffingSpectrum {
+                angular_frequency: self.angular_frequency,
+                cosine_amplitudes,
+                displacement_tail_bound: 0.0,
+            });
+        }
+        let mut numerator = self.amplitude * self.first_ratio;
+        let mut cosine_amplitudes = Vec::with_capacity(odd_harmonics);
+        for j in 0..odd_harmonics {
+            let magnitude = numerator / denominator(self.decay, 2 * j + 1, self.softening);
+            if !magnitude.is_finite() {
+                return Err(DuffingBackboneError::NumericalRange);
+            }
+            cosine_amplitudes.push(if self.softening && j % 2 != 0 {
+                -magnitude
+            } else {
+                magnitude
+            });
+            // Split the nome multiplication so a small dimensionless nome does
+            // not erase a representable physical harmonic before multiplication.
+            numerator = (numerator * self.root_nome) * self.root_nome;
+        }
+        // If a_j = C q^j/(1 +/- q^(2j+1)), the omitted absolute sum is
+        // <= C q^N/(1-q) for cn; for cd also divide by 1-q^(2N+1).
+        let tail_denominator = if self.softening {
+            denominator(self.decay, 2 * odd_harmonics + 1, true)
+        } else {
+            1.0
+        };
+        let tail = (numerator / self.one_minus_nome) / tail_denominator;
+        let displacement_tail_bound = if tail == 0.0 {
+            f64::from_bits(1)
+        } else {
+            tail.next_up()
+        };
+        if !displacement_tail_bound.is_finite() {
             return Err(DuffingBackboneError::NumericalRange);
         }
-        cosine_amplitudes.push(if softening && j % 2 != 0 {
-            -magnitude
-        } else {
-            magnitude
-        });
-        // Split the nome multiplication so a small dimensionless nome does
-        // not erase a representable physical harmonic before multiplication.
-        numerator = (numerator * root_nome) * root_nome;
+        Ok(DuffingSpectrum {
+            angular_frequency: self.angular_frequency,
+            cosine_amplitudes,
+            displacement_tail_bound,
+        })
     }
-    // If a_j = C q^j/(1 +/- q^(2j+1)), the omitted absolute sum is
-    // <= C q^N/(1-q) for cn; for cd also divide by 1-q^(2N+1).
-    let tail_denominator = if softening {
-        denominator(decay, 2 * odd_harmonics + 1, true)
-    } else {
-        1.0
-    };
-    let tail = (numerator / one_minus_nome) / tail_denominator;
-    let displacement_tail_bound = if tail == 0.0 {
-        f64::from_bits(1)
-    } else {
-        tail.next_up()
-    };
-    if !displacement_tail_bound.is_finite() {
-        return Err(DuffingBackboneError::NumericalRange);
-    }
-    Ok(DuffingSpectrum {
-        angular_frequency,
-        cosine_amplitudes,
-        displacement_tail_bound,
-    })
 }
 
 fn denominator(decay: f64, order: usize, softening: bool) -> f64 {

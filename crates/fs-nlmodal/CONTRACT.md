@@ -312,6 +312,21 @@ the crash cascade with structurally exact energy accounting.
   G1/G3 tests compare full waveforms and harmonics against independent RK4
   trajectories using an energy-quadrature period, check weak-nonlinearity and
   quartic/softening limits, truncation/refinement and physical-unit scaling.
+- `duffing_kinematic_spectrum_exact` / `DuffingKinematicSpectrum` extend the
+  same prepared Jacobi series with signed physical velocity sine coefficients
+  and acceleration cosine coefficients. Scalar frequency/nome preparation is
+  shared once, and displacement remains the existing spectrum. Binary-scaled
+  source amplitudes retain derivative harmonics even when their displacement
+  rounds below the subnormal range; no intermediate squared frequency is
+  required. Closed weighted geometric sums report separate uniform omitted
+  velocity and acceleration bounds in their original physical units. These
+  estimate harmonic truncation, excluding coefficient roundoff; they are not
+  interval enclosures. A displacement tolerance alone does not establish
+  derivative resolution. This opt-in query refuses unrepresentable derivatives
+  or bounds without narrowing the displacement query. The storage adapter
+  `invariant_axis_kinematic_spectrum` preserves all source channels and the
+  same coupling refusal. Original-ODE, source-force, truncation and extreme
+  physical-scale tests cover the complete interleaved kinematic seed.
 - The `assemble*` systems retain fs-phs's original-energy discrete-gradient
   stepping, striking, damping, and work ledger.
 - `sav::{SavStepper, SavConfig, SavState, SavRecord}` is a separate opt-in
