@@ -28,6 +28,11 @@ pub use coating::{
 /// Finite-film optical constants on the original temperature or enthalpy state.
 pub mod coating_feedback;
 pub use coating_feedback::SurfaceCoatingLaw;
+/// Original dielectric opacity versus the accepted native slab temperature.
+#[cfg(feature = "material-state")]
+pub mod slab_feedback;
+#[cfg(feature = "material-state")]
+pub use slab_feedback::MaterialSlabLaw;
 /// Read-only coherent emission from the same native film/substrate states.
 pub mod coating_emission;
 pub use coating_emission::{NativeCoatingEmission, NativeCoatingEmissionError};

@@ -2305,10 +2305,11 @@ state, an existing typed absolute-temperature axis, and smooth uncoated glass.
 `IsothermalCoatingStack::IncoherentSlab` and
 `NativeCoatingEmission::try_incoherent_slab` connect the same opacity to native
 caloric storage, step restrictions, cached quadrature and signed energy
-accounting. Native observer optical laws are explicitly frozen over their
-admitted temperature interval; material-dependent optical changes require a
-refreshed binding. No bolometric continuation, coherent/strongly absorbing
-interface model, rough face or geometry-derived thickness is inferred. Focused
+accounting. These fixed-optics entry points retain their original optical laws
+over the admitted temperature interval; material-dependent optical changes use
+`MaterialSlabLaw`, described below. No bolometric continuation,
+coherent/strongly absorbing interface model, rough face or geometry-derived
+thickness is inferred. Focused
 regressions exercise directional emission, transparent/thin/black limits,
 material-state refresh, two exposed faces, equilibrium and native energy closure.
 
@@ -8121,6 +8122,32 @@ cell; thermalization is prompt and accepted-start optical feedback is explicit.
 No thermal expansion, arbitrary depth profile, phase-mixture rule, bulk thermal
 card association, unsupported spectral tail or new caloric integrator is added.
 <!-- material-temperature-coating:end -->
+
+### Original dielectric claims drive native slab opacity and thermal exchange
+
+With `material-state` and `optical-heating`, `MaterialSlabLaw` retains an
+original tabulated dielectric or analytic Sellmeier source and its independent
+spectral absorption. Each accepted native temperature refreshes all selected
+claims, including auxiliary properties, wavelength coordinates and fit limits.
+The existing material optical binding admits the resulting glass; other state
+coordinates, claim selection and quantity conventions remain fixed. Declared
+temperature bounds further restrict queries without certifying source coverage.
+
+`NativeCoatingEmission::try_material_incoherent_slab` and
+`IsothermalCoatingStack::MaterialIncoherentSlab` feed the existing finite-band
+emission and native exchange owners. Material resolution occurs outside optical
+quadrature. Complete source-property counts share distinct-law budgets; accepted
+source identity governs optical-cache reuse. Endpoint refusal publishes neither
+candidate heat nor candidate emission/cache state.
+
+The original weak-absorption, real-interface, incoherent slab model remains
+binding. Its geometry and lossless opposite medium are explicitly fixed; one
+native receiver owns its isothermal storage. Only true absorption exchanges heat,
+and transparent slabs emit zero. No temperature/emissivity fit, phase mixture,
+thermal expansion, unsupported spectral continuation or new caloric solver is
+introduced. Accepted-start thermal feedback remains explicit and requires time
+refinement.
+
 
 ## Source-bounded quantum-efficiency detector channels
 

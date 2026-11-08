@@ -18,6 +18,8 @@ pub mod transmitting_pair;
 /// Mutual screening and heat exchange through an ordered stack of coated bodies.
 pub mod radiative_stack;
 
+#[cfg(feature = "material-state")]
+use super::MaterialSlabLaw;
 use super::{
     CoatingOpticsModel, NativeCoatingEmission, NativeCoatingEmissionError, StatefulCoatingLayer,
     SubstrateOpticsModel, SurfaceHeatingError, SurfaceHeatingReceiver,
@@ -68,12 +70,31 @@ pub enum IsothermalCoatingStack {
         thickness_m: f64,
         opposite_ior: DielectricIor,
     },
+    /// Original dielectric source claims refreshed at this receiver's accepted
+    /// temperature; bulk absorption and emission share the same finite slab.
+    #[cfg(feature = "material-state")]
+    MaterialIncoherentSlab {
+        law: Arc<MaterialSlabLaw>,
+        thickness_m: f64,
+        opposite_ior: DielectricIor,
+    },
 }
 impl IsothermalCoatingStack {
     fn films(&self) -> &[CoatingOpticsModel] {
         match self {
             Self::Opaque { films, .. } | Self::Transmitting { films, .. } => films,
             Self::IncoherentSlab { .. } => &[],
+            #[cfg(feature = "material-state")]
+            Self::MaterialIncoherentSlab { .. } => &[],
+        }
+    }
+
+    fn is_transmitting(&self) -> bool {
+        match self {
+            Self::Opaque { .. } => false,
+            Self::Transmitting { .. } | Self::IncoherentSlab { .. } => true,
+            #[cfg(feature = "material-state")]
+            Self::MaterialIncoherentSlab { .. } => true,
         }
     }
 }
@@ -746,6 +767,21 @@ fn resolve_stack_emitter(
             source_identity,
             check,
         )?,
+        #[cfg(feature = "material-state")]
+        IsothermalCoatingStack::MaterialIncoherentSlab {
+            law,
+            thickness_m,
+            opposite_ior,
+        } => NativeCoatingEmission::try_material_incoherent_slab(
+            thermal,
+            receiver,
+            law,
+            *thickness_m,
+            *opposite_ior,
+            source_identity,
+            maximum_rows,
+            check,
+        )?,
     };
     Ok(snapshot.emitter().clone())
 }
@@ -762,11 +798,25 @@ fn admit_law_rows(
             IsothermalCoatingStack::Opaque { substrate, .. } => Some(substrate),
             IsothermalCoatingStack::Transmitting { .. }
             | IsothermalCoatingStack::IncoherentSlab { .. } => None,
+            #[cfg(feature = "material-state")]
+            IsothermalCoatingStack::MaterialIncoherentSlab { .. } => None,
         },
         laws,
         rows,
         maximum,
-    )
+    )?;
+    #[cfg(feature = "material-state")]
+    if let IsothermalCoatingStack::MaterialIncoherentSlab { law, .. } = stack {
+        if laws.insert((2, *law.identity().as_bytes())) {
+            *rows = rows
+                .checked_add(law.budget_size())
+                .ok_or(NativeCoatingExchangeError::Budget)?;
+        }
+        if *rows > maximum {
+            return Err(NativeCoatingExchangeError::Budget);
+        }
+    }
+    Ok(())
 }
 
 fn admit_optical_law_rows<'a>(

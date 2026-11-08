@@ -123,7 +123,7 @@ fn original_model(water: bool) -> ThermochemicalGasModel {
         )
         .unwrap(),
         transport,
-        water.then(|| SpeciesId::new("B").unwrap()),
+        water.then(|| SpeciesId::new("B").unwrap()).as_ref(),
     )
     .unwrap()
 }

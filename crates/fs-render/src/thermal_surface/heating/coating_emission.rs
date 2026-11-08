@@ -239,6 +239,63 @@ impl NativeCoatingEmission {
         Self::finish(thermal.time_s(), emitter, resolver, &mut checkpoint)
     }
 
+    /// Refresh original dielectric claims at the receiver's actual temperature
+    /// before preparing its incoherent slab emission. The complete source is
+    /// resolved once here, outside spectral/angular quadrature, and its identity
+    /// invalidates cached optics when the accepted material state changes.
+    /// Geometry and the lossless opposite medium remain explicitly fixed.
+    #[cfg(feature = "material-state")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_material_incoherent_slab(
+        thermal: &DepositionSimulation<'_>,
+        receiver: SurfaceHeatingReceiver,
+        law: &MaterialSlabLaw,
+        thickness_m: f64,
+        opposite_ior: DielectricIor,
+        source_identity: ContentHash,
+        max_total_optical_knots: usize,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, NativeCoatingEmissionError> {
+        checkpoint()?;
+        if source_identity == ContentHash([0; 32]) {
+            return Err(invalid("native material slab needs a nonzero source identity").into());
+        }
+        let mut resolver =
+            Resolver::new(thermal.time_s(), max_total_optical_knots, source_identity);
+        resolver.hash.update(&[3]);
+        let temperature = resolver.receiver(thermal, receiver)?;
+        resolver.law(2, law.identity(), law.budget_size())?;
+        let (lo, hi) = law.temperature_bounds_k();
+        if temperature < lo || temperature > hi {
+            return Err(SurfaceHeatingError::TemperatureDomain {
+                thermal_cell: receiver.thermal_cell,
+                temperature_k: temperature,
+                minimum_k: lo,
+                maximum_k: hi,
+            }
+            .into());
+        }
+        let binding = law.at_temperature(temperature)?;
+        let crate::tracer::Material::Dielectric { glass, .. } = binding.material() else {
+            return Err(invalid("native material slab requires dielectric optics").into());
+        };
+        // Retain the caller's patch identity, the future source law and this
+        // accepted material snapshot. None may be replaced by current n/alpha.
+        let mut source = DomainHasher::new("org.frankensim.render.native-material-slab.v1");
+        for identity in [source_identity, law.identity(), binding.identity()] {
+            source.update(identity.as_bytes());
+        }
+        checkpoint()?;
+        let emitter = CoatingThermalEmission::try_incoherent_slab(
+            glass,
+            thickness_m,
+            temperature,
+            opposite_ior,
+            source.finalize(),
+        )?;
+        Self::finish(thermal.time_s(), emitter, resolver, &mut checkpoint)
+    }
+
     /// Prepare independently emitting films and their opaque substrate from
     /// original native states. The explicit films replace any substrate coating.
     /// Unique optical-law rows or original material property queries share one
