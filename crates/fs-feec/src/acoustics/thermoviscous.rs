@@ -326,6 +326,7 @@ pub struct ThermoviscousFe<'c> {
     conductive: PreparedWallTraces,
     pub(crate) physical_modes: Vec<Vec<PhysicalTrace>>,
     moving_wall: Option<MovingWall>,
+    moving_wall_damping: Option<moving_wall::MovingWallDamping>,
 }
 
 /// One reusable factorization at a single frequency and caloric state.
@@ -370,7 +371,8 @@ pub struct ThermoviscousPower {
     pub solid_conductive_w: f64,
     /// Molecular/caloric relaxation from passive complex heat capacity.
     pub caloric_w: f64,
-    /// Original structural modal damping; excludes the resolved fluid losses.
+    /// Original structural damping, including attached cross-mode channels;
+    /// excludes the resolved fluid losses.
     pub structural_damping_w: f64,
 }
 impl ThermoviscousPower {
@@ -828,6 +830,7 @@ impl<'c> ThermoviscousFe<'c> {
             conductive: PreparedWallTraces::default(),
             physical_modes: Vec::new(),
             moving_wall: None,
+            moving_wall_damping: None,
         };
         model.assemble(cancelled)?;
         for mode in &boundary.ports {
@@ -1196,19 +1199,25 @@ impl<'c> ThermoviscousFe<'c> {
 
     fn operator_entry(&self, row: usize, col: usize, omega: f64, cp: C64) -> C64 {
         let fluid = self.fluid_operator_entry(row, col, omega, cp);
-        if row == col && row >= 3 * self.velocity_count && row < self.pressure_start {
+        let wall_start = 3 * self.velocity_count;
+        if row == col && row >= wall_start && row < self.pressure_start {
             let structure = &self
                 .moving_wall
                 .as_ref()
                 .expect("moving coordinate")
                 .structure;
-            let mode = row - 3 * self.velocity_count;
+            let mode = row - wall_start;
             fluid
                 + moving_wall::modal_impedance(
                     &structure.modes()[mode],
-                    structure.damping_rate_per_s(mode),
+                    self.wall_damping_entry(mode, mode),
                     omega,
                 )
+        } else if self.moving_wall_damping.is_some()
+            && (wall_start..self.pressure_start).contains(&row)
+            && (wall_start..self.pressure_start).contains(&col)
+        {
+            fluid + C64::from_re(self.wall_damping_entry(row - wall_start, col - wall_start))
         } else {
             fluid
         }

@@ -5,6 +5,9 @@
 //! `GasState` or a shared material fluid, evaluates original gas molecular reservoirs once per frequency,
 //! and exports the same work-conjugate ports to the existing duct algebra.
 //! There is no additional attenuation coefficient or fitted wall resistance.
+//! Original material/joint viscosity can retain its full cross-mode operator
+//! through [`ThermoviscousInterior::with_structural_viscosity`], in both harmonic
+//! and causal moving-wall response, separately from these resolved fluid losses.
 //!
 //! The FE fields use exp(+i omega t), while material calorics and ducts use
 //! exp(-i omega t). Both changes of convention are explicit conjugations.
@@ -39,6 +42,8 @@ pub mod wall;
 
 /// Original distributed force and heat mechanisms in fields and duct networks.
 pub mod volume_source;
+
+mod viscosity;
 
 /// Retains the original material, finite-element and duct-composition refusals.
 #[derive(Debug)]

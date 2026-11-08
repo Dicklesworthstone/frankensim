@@ -7288,3 +7288,24 @@ The same source must remain unchanged, and harmonic order needs independent
 refinement. Tests cover phased multiharmonic force/stiffness mechanics and a
 nonlinear original storage with an explicit relaxing strain, including its
 material derivative, native/declared Hessian agreement and bandwidth refusals.
+
+## Full material damping in the resolved thermoviscous interior
+
+`ThermoviscousInterior::with_structural_viscosity` binds the existing
+`ModalPlateViscosity` passive channels to the original resolved moving-wall
+coordinates. Each channel is scaled by the square root of its original
+reference resistance, then admitted once by
+`ThermoviscousFe::with_moving_wall_damping_channels`. The full positive
+semidefinite material matrix, including signed cross-mode terms and loss null
+spaces, reaches both harmonic impedance and the original causal energy/heat
+operator. No additional constitutive fit, modal diagonalization, or per-step
+material evaluation is introduced. Resolved fluid losses remain separate.
+
+The existing modal damping rates must be zero, and a second material attachment
+refuses. Channel mode count must match; physical basis identity remains the
+caller's obligation. The same existing `ModalPlateViscosity` and FE channel
+limits apply. The focused regression varies reference resistance over 240
+orders of magnitude while holding the physical channels fixed, and checks
+harmonic response, causal motion, heat, and extent refusal. It is authored but
+not claimed executed: native Rust validation remains blocked by the bounded
+shared dependency build.

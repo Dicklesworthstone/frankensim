@@ -2734,3 +2734,30 @@ regular coupled response at a local lossless wall-impedance zero, and source
 admission, binding and cancellation. Bounded independent source/physics review,
 pinned formatting and whitespace checks passed. Native Rust compilation and
 these four regression groups remain unexecuted in this environment.
+
+### Complete material damping on resolved thermoviscous moving walls
+
+`ThermoviscousFe::with_moving_wall_damping_channels` retains complete passive
+material/joint channels in the original mass-normalized structural coordinates.
+The admitted operator is `C = sum l_k l_k^T`, including signed cross terms and
+rank-deficient loss null spaces. Harmonic impedance, causal dissipation, and
+structural heat use this same operator; harmonic heat evaluates the original
+channel amplitudes directly with double-double dot products. Fluid reaction
+continues to use only the fluid operator, and resolved viscous, thermal, and
+caloric losses remain separate from structural heat.
+
+The caller must provide channels in the wall's original physical modal basis;
+a matching mode count alone does not establish that identity. At most 64
+complete channels are admitted. Empty channels explicitly select zero material
+dissipation. Invalid extents, nonfinite entries, nonrepresentable Gram entries,
+nonzero existing modal damping, duplicate attachments, and cancellation refuse.
+Omitting the attachment preserves the existing diagonal modal-damping behavior.
+The Gram matrix is prepared once; no material query or reassembly enters a
+harmonic solve or causal step.
+
+Four focused regressions specify common-motion loss null spaces, differential
+motion with an independent damped solution, transient integrated heat and
+energy balance, signed coordinate changes, and admission/cancellation. Source
+and reciprocal-physics review plus pinned formatting and whitespace checks
+passed. Native Rust execution remains unverified because the shared dependency
+build exhausted the bounded validation environment.

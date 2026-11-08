@@ -5,11 +5,15 @@
 //! including pressure, shear and dilatational stress. Original mass-normalized
 //! structural inertia, stiffness and viscous damping enter those same rows;
 //! no iteration, acoustic spring, pressure-only force or second loss is added.
+//! Optional original passive damping channels retain the complete cross-mode
+//! material/joint operator in harmonic and causal solves. Their signed channel
+//! work also retains undamped common motion and other exact loss null spaces.
 //!
 //! Shapes are vectors in the mesh's global Cartesian frame, with their actual
 //! signs. No face-normal magnitude or automatic sign flip replaces them.
-//! This is linear harmonic motion on a FIXED reference domain. It is not ALE,
-//! finite deformation, a time advance, or a modal/mesh convergence certificate.
+//! This is linear motion on a FIXED reference domain. A causal advance uses
+//! the separately prepared time cache. The attachment is not ALE, finite
+//! deformation, or a modal/mesh convergence certificate.
 //! The no-slip coupling is full displacement/velocity continuity, unlike a
 //! normal-only slip boundary; see
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.aco/aco_ug_multiphysics_couplings.14.06.html>.
@@ -19,6 +23,14 @@ use fs_modal::time::{ModalAcousticMode, ModalAcousticTimeModel};
 
 /// Hard cap on retained structural coordinates in this local dense owner.
 pub const MAX_MOVING_WALL_MODES: usize = 64;
+
+/// Original passive channels and their complete cached Gram matrix [1/s].
+/// Both harmonic and causal operators read this one matrix; harmonic heat
+/// retains the channels to avoid cancellation in a quadratic matrix contraction.
+pub(super) struct MovingWallDamping {
+    channels: Vec<Vec<f64>>,
+    matrix: Vec<f64>,
+}
 
 /// One retained ORIGINAL structural model and its conforming velocity traces.
 ///
@@ -95,6 +107,121 @@ fn moving_faces(wall: &MovingWall) -> Result<BTreeSet<[u32; 3]>, ThermoviscousEr
 }
 
 impl<'c> ThermoviscousFe<'c> {
+    /// Attach full material/joint damping in the ORIGINAL mass-normalized
+    /// structural coordinates, before preparing harmonic or causal motion.
+    /// Channel k supplies `l_k` [1/sqrt(s)] and defines
+    /// `C = sum_k l_k l_k^T` [1/s]. Its resisting generalized force is `C v`;
+    /// instantaneous heat is `sum_k (l_k dot v)^2`. Every signed cross term
+    /// survives, including rank-deficient damping and undamped common motion.
+    ///
+    /// The same original moving wall, fluid, shapes, inertia and stiffness
+    /// remain. Existing source damping rates must ALL be zero, and a second
+    /// attachment refuses. Channels must exclude this resolved fluid's losses.
+    /// Empty channels explicitly select zero structural dissipation. A missing
+    /// attachment preserves the source's original diagonal damping unchanged.
+    ///
+    /// At most 64 channels are admitted, each covering all original modes.
+    /// Matrix-only source owners can supply their existing passive factor;
+    /// this method does not fit, diagonalize, clip or invent a material law.
+    /// Matching the source's physical basis, not merely its count, is the
+    /// caller's responsibility. Cancellation publishes no partial attachment.
+    pub fn with_moving_wall_damping_channels(
+        mut self,
+        channels_per_sqrt_s: Vec<Vec<f64>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        poll(cancelled)?;
+        let wall = self
+            .moving_wall
+            .as_ref()
+            .ok_or(ThermoviscousError::InvalidInput(
+                "structural damping requires an original moving wall",
+            ))?;
+        let modes = wall.structure.modes().len();
+        if self.moving_wall_damping.is_some()
+            || wall
+                .structure
+                .damping_rates_per_s()
+                .iter()
+                .any(|&c| c != 0.0)
+        {
+            return Err(ThermoviscousError::InvalidInput(
+                "full structural damping and existing damping owners are exclusive",
+            ));
+        }
+        if channels_per_sqrt_s.len() > MAX_MOVING_WALL_MODES {
+            return Err(ThermoviscousError::Budget {
+                what: "moving-wall damping channels",
+                requested: channels_per_sqrt_s.len(),
+                limit: MAX_MOVING_WALL_MODES,
+            });
+        }
+        for channel in &channels_per_sqrt_s {
+            poll(cancelled)?;
+            if channel.len() != modes || channel.iter().any(|x| !x.is_finite()) {
+                return Err(ThermoviscousError::InvalidInput(
+                    "finite damping channels in the complete original wall basis required",
+                ));
+            }
+        }
+        let mut matrix = vec![0.0; modes * modes];
+        for i in 0..modes {
+            poll(cancelled)?;
+            for j in 0..=i {
+                let mut value = Dd::ZERO;
+                for channel in &channels_per_sqrt_s {
+                    value = value + Dd::from_f64(channel[i]) * Dd::from_f64(channel[j]);
+                }
+                let value = value.to_f64();
+                if !value.is_finite()
+                    || (i == j
+                        && value == 0.0
+                        && channels_per_sqrt_s.iter().any(|channel| channel[i] != 0.0))
+                {
+                    return Err(ThermoviscousError::NonFinite);
+                }
+                matrix[i * modes + j] = value;
+                matrix[j * modes + i] = value;
+            }
+        }
+        poll(cancelled)?;
+        self.moving_wall_damping = Some(MovingWallDamping {
+            channels: channels_per_sqrt_s,
+            matrix,
+        });
+        Ok(self)
+    }
+
+    /// Original attached passive channels [1/sqrt(s)], in structural order.
+    /// None means the source's original per-coordinate damping remains active.
+    pub fn moving_wall_damping_channels(&self) -> Option<&[Vec<f64>]> {
+        self.moving_wall_damping
+            .as_ref()
+            .map(|owner| owner.channels.as_slice())
+    }
+
+    /// Complete attached structural C [1/s], row-major, without diagonalization.
+    pub fn moving_wall_damping_matrix_per_s(&self) -> Option<&[f64]> {
+        self.moving_wall_damping
+            .as_ref()
+            .map(|owner| owner.matrix.as_slice())
+    }
+
+    pub(super) fn wall_damping_entry(&self, row: usize, column: usize) -> f64 {
+        let structure = &self
+            .moving_wall
+            .as_ref()
+            .expect("moving wall coordinate")
+            .structure;
+        if let Some(owner) = &self.moving_wall_damping {
+            owner.matrix[row * structure.modes().len() + column]
+        } else if row == column {
+            structure.damping_rate_per_s(row)
+        } else {
+            0.0
+        }
+    }
+
     /// Assemble a general-fluid/structural problem with exact conforming
     /// no-slip modal motion. For a gas, use the original ideal_gas derivatives.
     /// Empty pressure ports are admitted: a closed cavity may be driven entirely
@@ -433,10 +560,25 @@ impl PreparedThermoviscous<'_, '_> {
             let force = C64::new(re.to_f64(), im.to_f64());
             result.external_input_w +=
                 0.5 * (forces.get(i).copied().unwrap_or(C64::ZERO).conj() * u).re;
-            result.damping_w += 0.5 * damping * u.norm_sq();
+            if model.moving_wall_damping.is_none() {
+                result.damping_w += 0.5 * damping * u.norm_sq();
+            }
             result.power_into_fluid_w -= 0.5 * (force.conj() * u).re;
             result.modal_velocity_m_sqrt_kg_per_s.push(u);
             result.fluid_force_n_per_sqrt_kg.push(force);
+        }
+        if let Some(owner) = &model.moving_wall_damping {
+            for channel in &owner.channels {
+                poll(cancelled)?;
+                let (mut re, mut im) = (Dd::ZERO, Dd::ZERO);
+                for (&coefficient, &velocity) in
+                    channel.iter().zip(&result.modal_velocity_m_sqrt_kg_per_s)
+                {
+                    re = re + Dd::from_f64(coefficient) * Dd::from_f64(velocity.re);
+                    im = im + Dd::from_f64(coefficient) * Dd::from_f64(velocity.im);
+                }
+                result.damping_w += 0.5 * C64::new(re.to_f64(), im.to_f64()).norm_sq();
+            }
         }
         if result.fluid_force_n_per_sqrt_kg.iter().any(|z| !finite(*z))
             || [

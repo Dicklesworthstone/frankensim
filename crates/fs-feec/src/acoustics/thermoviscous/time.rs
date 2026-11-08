@@ -522,8 +522,11 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             let coupling = wall_scale[i] / scale[row];
             physical_j[row * n + displacement] = -coupling;
             physical_j[displacement * n + row] = coupling;
-            heat[2][row * n + row] =
-                structure.damping_rate_per_s(i) / (scale[row] * scale[row]);
+            for j in 0..walls {
+                let column = 3 * model.velocity_count + j;
+                heat[2][row * n + column] =
+                    model.wall_damping_entry(i, j) / (scale[row] * scale[column]);
+            }
             input[row * ports + model.loads.len() + i] = 1.0 / scale[row];
         }
         let j = congruence(&physical_j, &inverse, n, cancelled)?;
