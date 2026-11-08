@@ -8,6 +8,10 @@
 //! CG owns that solve; no fitted mean-flow inertia or apparent viscosity is
 //! introduced. Zero-storage junctions retain endpoint flow continuity when
 //! their initial histories already satisfy the held volume inputs.
+//! A connected component may be sealed: a positive physical compliance then
+//! anchors its pressure through the stored-volume equation, without an ideal
+//! reservoir or an arbitrary pressure pin. Every storage pressure remains a
+//! solved unknown. Components with neither storage nor a reservoir refuse.
 //!
 //! Storage is an explicitly authored constant incremental volume compliance
 //! on a declared pressure interval. Its energy is `C*p*p/2` in the same pressure
@@ -610,6 +614,9 @@ impl TransientCarreauGraph {
     /// nodes cannot also be ideal pressure reservoirs. A held injection at a
     /// zero-storage node requires a compatible initial radial flow; changing
     /// it discontinuously refuses instead of inventing an impulsive pressure.
+    /// Each component needs a reservoir OR a physical storage node. An empty
+    /// boundary list therefore admits sealed compliant circuits, including
+    /// transient injection/withdrawal whose net volume changes their storage.
     /// Failure leaves the complete accepted state and time unchanged.
     #[allow(clippy::too_many_arguments)]
     pub fn step(
@@ -636,7 +643,12 @@ impl TransientCarreauGraph {
         if next_time <= state.accepted_time_s {
             return Err(GraphError::NonFinite("transient time increment is unresolved").into());
         }
-        let layout = self.graph.boundary_layout(boundaries, injections, cx)?;
+        let layout = self.graph.boundary_layout_with_storage(
+            boundaries,
+            injections,
+            Some(&state.storage_pressures),
+            cx,
+        )?;
         let mut storage_slope = Vec::with_capacity(layout.free_nodes.len());
         for (node, &fixed) in layout.fixed.iter().enumerate() {
             periodic_checkpoint(node, cx)?;

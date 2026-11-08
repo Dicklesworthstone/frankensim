@@ -315,6 +315,15 @@ step swaps all branch histories, storage pressures and common time. Source
 refusal, work exhaustion, invalid storage and cancellation preserve accepted
 history and permit an identical retry.
 
+Each transient connected component may instead be sealed and anchored by its
+own positive physical storage. Stored pressures remain unknowns in the original
+Schur solve; no storage node becomes a pressure boundary and no artificial
+reservoir, fixed gauge or volume sink is introduced. Net signed injection changes
+the actual stored volume, while zero-storage junctions retain their original
+continuity constraint. Disconnected sealed and reservoir-driven components may
+coexist. A component with neither storage nor prescribed pressure still refuses,
+and steady Carreau solves still require a reservoir in every component.
+
 The model is a radially resolved, axially developed, laminar, fixed-density
 hydraulic network with lumped incremental compliance. It does not infer a bulk
 modulus or nominal fluid volume, resolve axial acoustic waves/water hammer,

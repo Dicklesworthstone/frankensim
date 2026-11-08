@@ -213,8 +213,9 @@ pub struct CarreauGraphSolution {
     pub pressure_attempts: usize,
 }
 
-/// Immutable pipe topology. Parallel branches and anchored disconnected
-/// components are supported; every component must have a pressure reservoir.
+/// Immutable pipe topology. Parallel branches and disconnected components are
+/// supported. Steady components require a pressure reservoir; the transient
+/// owner can instead anchor a sealed component with its physical storage.
 #[derive(Clone, Debug)]
 pub struct CarreauPipeGraph {
     branches: Vec<CarreauPipeBranch>,
@@ -400,6 +401,29 @@ impl CarreauPipeGraph {
         injections: &[FlowInjection],
         cx: &Cx<'_>,
     ) -> Result<BoundaryLayout, GraphError> {
+        self.boundary_layout_with_storage(boundaries, injections, None, cx)
+    }
+
+    // A stored pressure is an INITIAL GUESS and a positive transient pressure
+    // direction, never a fixed-pressure boundary. Its node stays in the same
+    // Schur solve and obeys the original volume/storage equation. The steady
+    // owner passes None and still requires a physical reservoir in each component.
+    fn boundary_layout_with_storage(
+        &self,
+        boundaries: &[FixedPressure],
+        injections: &[FlowInjection],
+        initial_storage: Option<&[Option<Pressure>]>,
+        cx: &Cx<'_>,
+    ) -> Result<BoundaryLayout, GraphError> {
+        if initial_storage.is_some_and(|values| {
+            values.len() != self.node_count()
+                || values
+                    .iter()
+                    .flatten()
+                    .any(|value| !value.value().is_finite())
+        }) {
+            return Err(GraphError::InvalidInput("invalid stored pressure anchors"));
+        }
         let mut fixed = vec![false; self.node_count()];
         let mut visited = fixed.clone();
         let mut reference_pressure = vec![0.0; self.node_count()];
@@ -419,6 +443,16 @@ impl CarreauPipeGraph {
             fixed[boundary.node] = true;
             reference_pressure[boundary.node] = boundary.pressure.value();
         }
+        if let Some(storage) = initial_storage {
+            for (node, pressure) in storage.iter().enumerate() {
+                periodic_checkpoint(node, cx)?;
+                if pressure.is_some() && fixed[node] {
+                    return Err(GraphError::InvalidInput(
+                        "storage node cannot be an ideal pressure reservoir",
+                    ));
+                }
+            }
+        }
         let mut injection_sums = vec![Sum::default(); self.node_count()];
         for (index, injection) in injections.iter().enumerate() {
             periodic_checkpoint(index, cx)?;
@@ -429,7 +463,7 @@ impl CarreauPipeGraph {
             }
             injection_sums[injection.node].add(injection.flow.value())?;
         }
-        // Every component starts at its OWN uniform pressure. Translating a
+        // Every component starts at its OWN reference pressure. Translating a
         // different component's gauge must never consume this fluid's rate
         // envelope or continuation budget. Boundary values are gathered before
         // replacing them by the component midpoint; each vertex/edge is visited
@@ -451,6 +485,9 @@ impl CarreauPipeGraph {
                 if fixed[node] {
                     low = low.min(reference_pressure[node]);
                     high = high.max(reference_pressure[node]);
+                } else if let Some(pressure) = initial_storage.and_then(|values| values[node]) {
+                    low = low.min(pressure.value());
+                    high = high.max(pressure.value());
                 }
                 for (ordinal, &edge) in self.adjacency[node].iter().enumerate() {
                     periodic_checkpoint(ordinal, cx)?;

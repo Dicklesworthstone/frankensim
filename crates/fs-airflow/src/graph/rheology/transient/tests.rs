@@ -1,5 +1,7 @@
 //! Synthetic G1/G3 coupled-flow fixtures, not calibrated material data.
 
+mod sealed;
+
 use super::super::CarreauPipeBranch;
 use super::*;
 use crate::graph::tests::with_cx;
