@@ -482,3 +482,246 @@ fn source_owned_rates_include_coefficient_changes_and_relaxed_thermal_motion() {
         near(rate.first_piola_rate_pa_s()[i], 0.0, 2e-9, 0.0);
     }
 }
+
+// Closed constrained NH potential with independently specified exponential
+// natural stretch and rational mu(T)=E(T)/(2*(1+nu(T))).
+struct ExactThermalOracle {
+    energy: f64,
+    entropy: f64,
+    internal_energy: f64,
+    capacity: f64,
+    pressure: f64,
+    pressure_t: f64,
+    piola: [f64; 4],
+    beta: [f64; 4],
+    deformation: [f64; 9],
+    elastic_deformation: [f64; 9],
+}
+fn exact_thermal_jet(delta: f64) -> ThermalReferenceJet {
+    let alpha = 0.002;
+    let stretch = 1.1 * (alpha * delta).exp();
+    ThermalReferenceJet::try_new(
+        ReferenceDeformation::try_new(diagonal(stretch)).unwrap(),
+        diagonal(alpha * stretch),
+        diagonal(alpha * alpha * stretch),
+    )
+    .unwrap()
+}
+fn exact_thermal_oracle(delta: f64, a: [f64; 4]) -> ExactThermalOracle {
+    let alpha = 0.002;
+    let s = 1.1 * (alpha * delta).exp();
+    let e = YOUNGS + SLOPES[0] * delta;
+    let n = 1.0 + POISSON + SLOPES[1] * delta;
+    let mu = e / (2.0 * n);
+    let mu_t = SLOPES[0] / (2.0 * n) - e * SLOPES[1] / (2.0 * n * n);
+    let mu_tt = -SLOPES[0] * SLOPES[1] / (n * n) + e * SLOPES[1] * SLOPES[1] / n.powi(3);
+    let d = a[0] * a[3] - a[1] * a[2];
+    let da = [a[3], -a[2], -a[1], a[0]];
+    let ia: f64 = a.iter().map(|v| v * v).sum();
+    let h = 0.5 * (s * ia + s.powi(7) / (d * d) - 3.0 * s.powi(3));
+    let h_t = 0.5 * alpha * (s * ia + 7.0 * s.powi(7) / (d * d) - 9.0 * s.powi(3));
+    let h_tt = 0.5 * alpha * alpha * (s * ia + 49.0 * s.powi(7) / (d * d) - 27.0 * s.powi(3));
+    let energy = mu * h;
+    let entropy = -mu_t * h - mu * h_t;
+    let pressure_shape = s.powi(4) / (d * d) - 1.0;
+    let deformation = [a[0], a[1], 0.0, a[2], a[3], 0.0, 0.0, 0.0, s.powi(3) / d];
+    ExactThermalOracle {
+        energy,
+        entropy,
+        internal_energy: energy + (T + delta) * entropy,
+        capacity: -(T + delta) * (mu_tt * h + 2.0 * mu_t * h_t + mu * h_tt),
+        pressure: mu * pressure_shape,
+        pressure_t: mu_t * pressure_shape + 4.0 * mu * alpha * s.powi(4) / (d * d),
+        piola: core::array::from_fn(|i| mu * (s * a[i] - s.powi(7) * da[i] / d.powi(3))),
+        beta: core::array::from_fn(|i| {
+            mu_t * (s * a[i] - s.powi(7) * da[i] / d.powi(3))
+                + mu * alpha * (s * a[i] - 7.0 * s.powi(7) * da[i] / d.powi(3))
+        }),
+        deformation,
+        elastic_deformation: deformation.map(|v| v / s),
+    }
+}
+
+#[test]
+fn exact_volume_sources_match_independent_modulus_and_natural_volume_product_rule() {
+    use fs_material::hyper::plane_stress::PlaneStressSettings;
+    let source = bind(&card(SLOPES, false, 1.0), [290.0, 310.0]).unwrap();
+    let a = [1.22, 0.16, -0.05, 0.91];
+    for delta in [0.0, 4.0] {
+        let state = source
+            .incompressible_plane_stress_state_at_temperature(
+                T + delta,
+                &a,
+                exact_thermal_jet(delta),
+                None,
+                PlaneStressSettings::default(),
+            )
+            .unwrap();
+        let expected = exact_thermal_oracle(delta, a);
+        for (actual, expected) in [
+            (state.free_energy_j_m3(), expected.energy),
+            (state.entropy_j_m3_k(), expected.entropy),
+            (state.internal_energy_j_m3(), expected.internal_energy),
+            (state.mechanical_heat_capacity_j_m3_k(), expected.capacity),
+            (state.response().pressure_pa, expected.pressure),
+            (
+                state.pressure_temperature_derivative_pa_k(),
+                expected.pressure_t,
+            ),
+        ] {
+            near(actual, expected, 3e-9, 3e-11);
+        }
+        for i in 0..4 {
+            near(state.response().piola[i], expected.piola[i], 3e-9, 3e-11);
+            near(
+                state.stress_temperature_derivative_pa_k()[i],
+                expected.beta[i],
+                3e-10,
+                3e-11,
+            );
+        }
+    }
+    for temperature in [289.9, 310.1, f64::NAN, f64::INFINITY] {
+        assert!(
+            source
+                .incompressible_plane_stress_state_at_temperature(
+                    temperature,
+                    &a,
+                    exact_thermal_jet(0.0),
+                    None,
+                    PlaneStressSettings::default(),
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn exact_volume_source_rates_follow_the_same_closed_thermal_trajectory() {
+    use fs_material::hyper::plane_stress::PlaneStressSettings;
+    let source = bind(&card(SLOPES, false, 1.0), [290.0, 310.0]).unwrap();
+    let a = [1.22, 0.16, -0.05, 0.91];
+    let adot = [0.08, -0.03, 0.01, -0.05];
+    let tdot = 2.3;
+    let state = source
+        .incompressible_plane_stress_state(
+            &a,
+            exact_thermal_jet(0.0),
+            None,
+            PlaneStressSettings::default(),
+        )
+        .unwrap();
+    let rate = state.rate(adot, tdot).unwrap();
+    let h = 0.01;
+    let samples = [-2.0 * h, -h, h, 2.0 * h].map(|time| {
+        exact_thermal_oracle(tdot * time, core::array::from_fn(|i| a[i] + time * adot[i]))
+    });
+    for i in 0..9 {
+        near(
+            rate.material().deformation_gradient_rate_per_s()[i],
+            derivative(samples.each_ref().map(|s| s.deformation[i]), h),
+            3e-10,
+            3e-9,
+        );
+        near(
+            rate.material().elastic_deformation_gradient_rate_per_s()[i],
+            derivative(samples.each_ref().map(|s| s.elastic_deformation[i]), h),
+            3e-10,
+            3e-9,
+        );
+    }
+    for (i, component) in [0, 1, 3, 4].into_iter().enumerate() {
+        near(
+            rate.material().first_piola_rate_pa_s()[component],
+            derivative(samples.each_ref().map(|s| s.piola[i]), h),
+            3e-7,
+            3e-8,
+        );
+    }
+    for (actual, samples) in [
+        (
+            rate.pressure_rate_pa_s(),
+            samples.each_ref().map(|s| s.pressure),
+        ),
+        (
+            rate.material().free_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.energy),
+        ),
+        (
+            rate.material().entropy_rate_w_m3_k(),
+            samples.each_ref().map(|s| s.entropy),
+        ),
+        (
+            rate.material().internal_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.internal_energy),
+        ),
+    ] {
+        near(actual, derivative(samples, h), 3e-7, 3e-8);
+    }
+    for component in [2, 5, 8] {
+        near(
+            rate.material().first_piola_rate_pa_s()[component],
+            0.0,
+            3e-10,
+            0.0,
+        );
+    }
+}
+
+#[test]
+fn exact_source_constant_limit_and_changing_bulk_modulus_keep_native_remainder_scope() {
+    use fs_material::hyper::plane_stress::PlaneStressSettings;
+    use fs_material::hyper::thermoelastic::incompressible_plane_stress::IncompressibleThermoelasticPlaneStressState;
+    let a = [1.22, 0.16, -0.05, 0.91];
+    let settings = PlaneStressSettings::default();
+    let constant = bind(&card([0.0; 2], false, 1.0), [290.0, 310.0]).unwrap();
+    let sourced = constant
+        .incompressible_plane_stress_state(&a, jet(), None, settings)
+        .unwrap();
+    let native = IncompressibleThermoelasticPlaneStressState::try_new(
+        constant.model().law(),
+        &a,
+        T,
+        jet(),
+        None,
+        settings,
+    )
+    .unwrap();
+    assert_eq!(sourced.response().full_piola, native.response().full_piola);
+    assert_eq!(sourced.response().tangent, native.response().tangent);
+    assert_eq!(sourced.entropy_j_m3_k(), native.entropy_j_m3_k());
+    assert_eq!(
+        sourced.mechanical_heat_capacity_j_m3_k(),
+        native.mechanical_heat_capacity_j_m3_k()
+    );
+    assert_eq!(
+        sourced.rate([0.08, -0.03, 0.01, -0.05], 2.3).unwrap(),
+        native.rate([0.08, -0.03, 0.01, -0.05], 2.3).unwrap(),
+    );
+    // E=2*mu*(1+nu) changes while mu is constant. The original lambda
+    // source has a nonzero derivative, which must not enter this exact mode.
+    let variable = bind(&card([9.6, 0.004], false, 1.0), [290.0, 310.0]).unwrap();
+    assert!(variable.first_derivatives_pa_k()[1].abs() > 1.0);
+    let held =
+        ThermalReferenceJet::try_new(ReferenceDeformation::identity(), [0.0; 9], [0.0; 9]).unwrap();
+    let state = variable
+        .incompressible_plane_stress_state(&a, held, None, settings)
+        .unwrap();
+    near(state.entropy_j_m3_k(), 0.0, 3e-11, 0.0);
+    near(state.mechanical_heat_capacity_j_m3_k(), 0.0, 3e-10, 0.0);
+    for beta in state.stress_temperature_derivative_pa_k() {
+        near(*beta, 0.0, 3e-11, 0.0);
+    }
+    let rate = state.rate([0.0; 4], 2.3).unwrap();
+    near(rate.pressure_rate_pa_s(), 0.0, 3e-10, 0.0);
+    for value in rate.material().first_piola_rate_pa_s() {
+        near(*value, 0.0, 3e-10, 0.0);
+    }
+    for value in [
+        rate.material().free_energy_rate_w_m3(),
+        rate.material().entropy_rate_w_m3_k(),
+        rate.material().internal_energy_rate_w_m3(),
+    ] {
+        near(value, 0.0, 3e-10, 0.0);
+    }
+}

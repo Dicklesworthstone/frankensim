@@ -7,9 +7,11 @@
 //! refit a model, reinterpret a prestressed tangent modulus, or change its
 //! current energy/stress/tangent. Source receipts remain attached.
 
+use super::incompressible_plane_stress::IncompressibleThermoelasticPlaneStressState;
 use super::{ElasticTemperatureDerivatives, FiniteThermoelasticState, ThermalReferenceJet};
 use crate::MaterialError;
 use crate::hyper::cards::ResolvedHyperelastic;
+use crate::hyper::plane_stress::PlaneStressSettings;
 use crate::hyper::{Hyperelastic, HyperelasticModel, neo_hookean_energy};
 use crate::state_point::{
     MaterialStatePointError, POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint,
@@ -397,6 +399,98 @@ impl ResolvedNeoHookeanThermalCoefficients {
             reference_jet,
         )
     }
+
+    /// Exact elastic-volume plane stress on the original coefficient sources.
+    /// Only mu(T) and its derivatives enter the native NH remainder; lambda
+    /// and every bulk-coefficient derivative are excluded by this explicit
+    /// constitutive choice. No large penalty substitutes for incompressibility.
+    ///
+    /// The natural-map jet is independently supplied at this owner's anchor
+    /// temperature. The constrained thermal owner includes the pressure work
+    /// of det(G(T)); entropy and heat capacity use that same moving constraint.
+    pub fn incompressible_plane_stress_state(
+        &self,
+        in_plane: &[f64; 4],
+        reference_jet: ThermalReferenceJet,
+        initial_shear: Option<[f64; 2]>,
+        settings: PlaneStressSettings,
+    ) -> Result<IncompressibleThermoelasticPlaneStressState> {
+        incompressible_thermal_state(
+            self.model.law(),
+            self.temperature_k,
+            [
+                self.first_derivatives_pa_k[0],
+                self.second_derivatives_pa_k2[0],
+            ],
+            in_plane,
+            reference_jet,
+            initial_shear,
+            settings,
+        )
+    }
+
+    /// The same exact-volume thermal response elsewhere on the originally
+    /// admitted affine E(T)/nu(T) paths. Source receipts, fixed conditions and
+    /// the anchor law remain unchanged; the natural-map jet must describe
+    /// this SAME temperature. Interval endpoints retain the admitted one-sided
+    /// derivative convention. No property reselection or finite differencing
+    /// supplies coefficient curvature.
+    pub fn incompressible_plane_stress_state_at_temperature(
+        &self,
+        temperature_k: f64,
+        in_plane: &[f64; 4],
+        reference_jet: ThermalReferenceJet,
+        initial_shear: Option<[f64; 2]>,
+        settings: PlaneStressSettings,
+    ) -> Result<IncompressibleThermoelasticPlaneStressState> {
+        if !temperature_k.is_finite()
+            || temperature_k < self.temperature_range_k[0]
+            || temperature_k > self.temperature_range_k[1]
+        {
+            return Err(invalid(
+                "temperature leaves the original coefficient source interval",
+            ));
+        }
+        if temperature_k == self.temperature_k {
+            return self.incompressible_plane_stress_state(
+                in_plane,
+                reference_jet,
+                initial_shear,
+                settings,
+            );
+        }
+        if self.source_slopes == [0.0; 2] {
+            return incompressible_thermal_state(
+                self.model.law(),
+                temperature_k,
+                [0.0; 2],
+                in_plane,
+                reference_jet,
+                initial_shear,
+                settings,
+            );
+        }
+        let values = core::array::from_fn(|i| {
+            self.source_slopes[i].mul_add(temperature_k - self.temperature_k, self.source_values[i])
+        });
+        let jet = coefficient_jet(values, self.source_slopes)?;
+        let law = Hyperelastic::new(
+            HyperelasticModel::NeoHookean {
+                mu: jet.values[0],
+                lambda: jet.values[1],
+            },
+            self.model.law().stretch_limit,
+        )?;
+        incompressible_thermal_state(
+            &law,
+            temperature_k,
+            [jet.first[0], jet.second[0]],
+            in_plane,
+            reference_jet,
+            initial_shear,
+            settings,
+        )
+    }
 }
 
 fn thermal_state(
@@ -432,6 +526,50 @@ fn thermal_state(
                 Ok(ElasticTemperatureDerivatives {
                     energy_j_m3_k,
                     energy_j_m3_k2: neo_hookean_energy(elastic_f, mu_tt, lambda_tt),
+                    piola_pa_k,
+                })
+            },
+        )?,
+    )
+}
+
+fn incompressible_thermal_state(
+    law: &Hyperelastic,
+    temperature_k: f64,
+    shear_derivatives: [f64; 2],
+    in_plane: &[f64; 4],
+    reference_jet: ThermalReferenceJet,
+    initial_shear: Option<[f64; 2]>,
+    settings: PlaneStressSettings,
+) -> Result<IncompressibleThermoelasticPlaneStressState> {
+    if shear_derivatives == [0.0; 2] {
+        return Ok(IncompressibleThermoelasticPlaneStressState::try_new(
+            law,
+            in_plane,
+            temperature_k,
+            reference_jet,
+            initial_shear,
+            settings,
+        )?);
+    }
+    Ok(
+        IncompressibleThermoelasticPlaneStressState::with_elastic_temperature_derivatives(
+            law,
+            in_plane,
+            temperature_k,
+            reference_jet,
+            initial_shear,
+            settings,
+            |elastic_f| {
+                let [mu_t, mu_tt] = shear_derivatives;
+                // Signed partial coefficients differentiate the same native
+                // NH remainder. They are not substitute physical laws. Bulk
+                // lambda(T) is absent even when its source derivative is large.
+                let (energy_j_m3_k, piola_pa_k) =
+                    fs_ad::gradient::<9>(*elastic_f, |f| neo_hookean_energy(&f, mu_t, 0.0));
+                Ok(ElasticTemperatureDerivatives {
+                    energy_j_m3_k,
+                    energy_j_m3_k2: neo_hookean_energy(elastic_f, mu_tt, 0.0),
                     piola_pa_k,
                 })
             },
