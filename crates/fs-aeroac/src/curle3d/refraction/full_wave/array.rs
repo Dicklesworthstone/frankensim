@@ -543,7 +543,7 @@ pub(super) fn remaining_budget(
 }
 
 impl<D> Transfer<D> {
-    fn accumulate(
+    pub(in crate::curle3d::refraction::full_wave) fn accumulate(
         &self,
         source: CompactSourcePhasor,
         sums: &mut [ComplexSum; 4],

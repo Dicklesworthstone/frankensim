@@ -1,3 +1,35 @@
+## Broadband coherent mixed sources at a dispersive impedance wall
+
+`PreparedImpedanceWallCompactSourceObserver::evaluate_welch_bin` propagates
+original synchronized `[Q,Fx,Fy,Fz]` factors. Its
+`evaluate_welch_bin_with_quadrupoles` adds physical
+`[xx,yy,zz,xy,xz,yz]` stress blocks from the SAME record. Both banks require
+identical fluid, oriented plane, impedance, receiver, exact frequency and
+reflected/total field. Every source, tensor component and direct/returned path
+enters one compensated pressure/vector-velocity sum before second moments.
+The native peak-bin owner applies `sqrt(2 df)` once. Geometry and channel order
+of raw mixed records remain caller-bound; no correlation or duplicate
+permeable-surface volume source is inferred.
+
+`wall::recorded::observe_welch_band` evaluates the caller's original wall law
+once at each selected interior-bin frequency. Only impedance may vary across
+the band. It retains one frequency's native transfer banks at a time, shares
+a total quadrature cap across all sources/frequencies, and checks aggregate
+bin/segment/source work before propagation. One compensated accumulator forms
+pressure power, full velocity covariance and signed active/reactive intensity.
+Results add resolved stationary-bin moments; they do not supply deterministic
+cross-frequency phase, finite-window beats or a transient waveform. Source and
+wall variation inside a bin, and spectral leakage, require frequency refinement.
+DC, even-record Nyquist, changed domains, incomplete channel layouts, exhausted
+work and cancellation refuse without publishing a partial band.
+
+The existing original-recorded-stress observers and their geometry/clock
+binding remain available. `tests/impedance_wall_mixed_recorded.rs` adds
+independent spherical image derivatives, mixed pressure cancellation with
+surviving velocity, finite wall dispersion against an explicit windowed DFT,
+original recorded geometry/clock, and combined admission/refusal checks.
+The original `tests/impedance_wall_recorded.rs` stress-only suite is retained.
+
 ## Moving-receiver history composition seams
 
 `PreparedKinematicTrajectory::next_source_knot_after` exposes only the next

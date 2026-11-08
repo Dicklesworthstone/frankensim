@@ -2,7 +2,8 @@
 
 use super::*;
 use crate::curle3d::quadrupole::recorded::RecordedQuadrupoleSpectrum;
-use fs_fft::welch::WelchCrossSpectrum;
+use crate::curle3d::statistics::ComplexSum;
+use fs_fft::welch::{WelchCrossSpectrum, WelchPeakBin};
 
 impl PreparedImpedanceWallQuadrupoleObserver {
     /// Propagate one original interior Welch bin through the cached wall field.
@@ -30,6 +31,17 @@ impl PreparedImpedanceWallQuadrupoleObserver {
     ) -> Result<CompactFieldStatistics, AeroacError> {
         self.view()
             .evaluate_welch_bin(spectrum, bin, budget, cancelled)
+    }
+
+    pub(in crate::curle3d::refraction::full_wave::wall) fn accumulate_welch_factor(
+        &self,
+        factor: &[fs_fft::C64],
+        measured: WelchPeakBin<'_>,
+        sums: &mut [ComplexSum; 4],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        self.view()
+            .accumulate_welch_factor(factor, measured, sums, cancelled)
     }
 }
 

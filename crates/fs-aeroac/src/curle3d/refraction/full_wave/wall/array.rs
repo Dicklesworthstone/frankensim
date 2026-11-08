@@ -21,6 +21,8 @@ use crate::curle3d::{
 use crate::observation::HarmonicFieldLine;
 use fs_math::c64::C64;
 
+mod recorded;
+
 /// Returning fields retain the original source identity and joint Q/F phase.
 pub const IMPEDANCE_WALL_REFLECTED_ARRAY_SCOPE: &str = "Prescribed stationary compact \
 3D volume flows [m³/s] and forces on fluid [N]; reflected-only spherical fields from \

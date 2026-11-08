@@ -26,6 +26,8 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 mod array;
 mod force;
 mod quadrupole;
+/// Original synchronized source spectra at frequency-dependent impedance walls.
+pub mod recorded;
 pub use array::{
     IMPEDANCE_WALL_REFLECTED_ARRAY_SCOPE, IMPEDANCE_WALL_TOTAL_ARRAY_SCOPE,
     ImpedanceWallCompactSourceDiagnostics, ImpedanceWallFieldKind,
