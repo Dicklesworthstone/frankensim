@@ -49,6 +49,11 @@ impl HeatedConcentricSection<'_> {
     pub fn with_axial_constraint(
         mut self, constraint: AxialConstraint, linear_strain_limit: f64,
     ) -> Result<Self, SectionHeatingError> {
+        if self.observer.density_geometry.is_some() {
+            return Err(SectionHeatingError::Invalid(
+                "free density expansion cannot also carry a constrained axial geometry",
+            ));
+        }
         self.observer.axial = Some(SectionAxialState::resolve(
             &self.observer.law, self.observer.section.clone(), constraint, linear_strain_limit,
         )?);
@@ -59,7 +64,8 @@ impl HeatedConcentricSection<'_> {
     /// did not request thermoelastic response. No stale or partial state escapes.
     pub const fn axial_state(&self) -> Option<&SectionAxialState> { self.observer.axial.as_ref() }
 
-    /// Fixed physical length used by the thermal and electrical geometry [m].
-    /// It is not recomputed from a quasistatic force-controlled strain response.
+    /// Physical electrical length [m]: fixed for ordinary heating, current for
+    /// the explicitly selected free-density-expansion mode. A diagnostic axial
+    /// constraint alone never changes the thermal or electrical geometry.
     pub const fn length_m(&self) -> f64 { self.observer.length_m }
 }

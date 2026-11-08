@@ -7,7 +7,10 @@
 //! No replacement heat integrator, caloric formula or electrical law is used.
 //!
 //! Layer lumping and resistance geometry are caller modelling assumptions.
-//! Density must be constant on this fixed-volume rung. Optional axial response
+//! Density must be constant on the fixed-volume rung. The opt-in single-layer
+//! free-expansion entry updates electrical geometry and exposed convection area
+//! from the original density source while retaining mass and reporting p*dV.
+//! Optional axial response on the fixed-volume path
 //! follows the same accepted temperatures; thermodynamic work feedback, radial
 //! temperature profiles within a layer, skin effects and melting are outside it.
 //! Source stiffness is not an explicit-stability bound: refine the
@@ -16,6 +19,10 @@
 /// Source-pinned thermal expansion and support response on the shared clock.
 pub mod axial;
 pub use axial::SectionAxialState;
+
+/// Fixed-mass isotropic density expansion in the same electrical/thermal loop.
+pub mod density_geometry;
+pub use density_geometry::SectionDensityGeometry;
 
 use super::ConcentricSectionTemperatureLaw;
 use crate::conductor::{ConductorError, OhmicDrive};
@@ -91,6 +98,7 @@ struct HeatingObserver<'a> {
     applied_power_w: f64,
     electrical_energy_j: f64,
     axial: Option<SectionAxialState>,
+    density_geometry: Option<density_geometry::DensityGeometry<'a>>,
 }
 
 /// Coupled thermal history and source-resolved mechanical section.
@@ -112,6 +120,9 @@ pub struct SectionHeatingReport {
     pub electrical_energy_j: f64,
     /// Endpoint response, not the time-integrated or start-of-step power.
     pub endpoint: ElectrothermalSectionResponse,
+    /// Actual endpoint enthalpy/internal-energy and p*dV account when free
+    /// density expansion was selected. Native thermal storage remains m*h.
+    pub expansion: Option<crate::phase::isobaric::IsobaricHeatStep>,
 }
 
 impl<'a> HeatedConcentricSection<'a> {
@@ -131,6 +142,18 @@ impl<'a> HeatedConcentricSection<'a> {
         boundaries: &[Boundary],
         interfaces: Vec<SectionThermalInterface>,
         budget: DepositionBudget,
+    ) -> Result<Self, SectionHeatingError> {
+        Self::build(law, caloric, length_m, boundaries, interfaces, budget, None)
+    }
+
+    fn build(
+        law: ConcentricSectionTemperatureLaw<'a>,
+        caloric: &[&'a ResolvedHeatCapacityCurve],
+        length_m: f64,
+        boundaries: &[Boundary],
+        interfaces: Vec<SectionThermalInterface>,
+        budget: DepositionBudget,
+        density_geometry: Option<density_geometry::DensityGeometry<'a>>,
     ) -> Result<Self, SectionHeatingError> {
         positive(length_m)?;
         let reference = law.reference();
@@ -156,7 +179,8 @@ impl<'a> HeatedConcentricSection<'a> {
             let density = reference.density_source_property(index)?;
             let rho = integrals.density_kg_m3();
             if caloric.curve().knots().iter()
-                .any(|k| k.liquid_mass_fraction != 0.0 || k.bulk_density_kg_m3 != rho)
+                .any(|k| k.liquid_mass_fraction != 0.0
+                    || (density_geometry.is_none() && k.bulk_density_kg_m3 != rho))
             {
                 return Err(SectionHeatingError::Invalid("fixed section heating requires a solid constant-density caloric span"));
             }
@@ -190,8 +214,9 @@ impl<'a> HeatedConcentricSection<'a> {
             }) });
             inner = layer.outer_radius_m;
         }
-        let observer = HeatingObserver { section: reference.clone(), law, interfaces, length_m,
-            drive: OhmicDrive::Current(0.0), applied_power_w: 0.0, electrical_energy_j: 0.0, axial: None };
+        let mut observer = HeatingObserver { section: reference.clone(), law, interfaces, length_m,
+            drive: OhmicDrive::Current(0.0), applied_power_w: 0.0, electrical_energy_j: 0.0,
+            axial: None, density_geometry };
         // Admit electrical/thermal data before allocating the thermal timeline.
         observer.electrical()?;
         for (index, &conductance) in observer.link_conductances()?.iter().enumerate() {
@@ -202,13 +227,18 @@ impl<'a> HeatedConcentricSection<'a> {
         }
         let (thermal, _) = DepositionSimulation::new(schedule, &materials, budget)?
             .advance_to(0.0, StepConfig { max_dt_s: 1.0, energy_tolerance_j: 0.0 }, || Ok(()))?;
+        if observer.density_geometry.is_some() {
+            observer.refresh(&thermal)?;
+            observer.electrical()?;
+        }
         Ok(Self { thermal, caloric: caloric.to_vec(), observer })
     }
 
     /// Current mechanical coefficients and all material receipts at the SAME
     /// temperatures as the accepted thermal history. No stale room-temperature E.
     pub const fn section(&self) -> &ConcentricElasticSection { &self.observer.section }
-    /// Thermal history, reference masses, topology and declared boundaries.
+    /// Thermal history, invariant reference masses/geometry and declared boundaries.
+    /// Free expansion exposes current dimensions through density_geometry().
     pub const fn thermal(&self) -> &DepositionSimulation<'a> { &self.thermal }
     /// Original caloric sources and their complete source receipts.
     pub fn caloric(&self) -> &[&'a ResolvedHeatCapacityCurve] { &self.caloric }
@@ -232,8 +262,12 @@ impl<'a> HeatedConcentricSection<'a> {
         let (thermal, observer, audit) = self.thermal.advance_observed(
             &observer, target_s, config, &mut checkpoint,
         )?;
+        let expansion = self.observer.density_geometry.as_ref().map(|geometry| {
+            geometry.account(&self.thermal, &thermal, audit.external_heat_j)
+        }).transpose()?;
         let report = SectionHeatingReport { thermal: audit,
-            electrical_energy_j: observer.electrical_energy_j, endpoint: observer.electrical()? };
+            electrical_energy_j: observer.electrical_energy_j, endpoint: observer.electrical()?,
+            expansion };
         checkpoint()?;
         Ok((Self { thermal, observer, caloric: self.caloric.clone() }, report))
     }
@@ -243,10 +277,15 @@ impl HeatingObserver<'_> {
     fn refresh(&mut self, thermal: &DepositionSimulation<'_>) -> Result<(), SectionHeatingError> {
         let temperatures = (0..self.law.bindings.len()).map(|i| thermal.temperature_k(CellId(i as u64)))
             .collect::<Result<Vec<_>, _>>()?;
-        let section = self.law.at_temperatures_k(&temperatures)?;
-        for (current, reference) in section.layer_integrals().iter().zip(self.law.reference().layer_integrals()) {
-            if current.line_density_kg_m() != reference.line_density_kg_m() {
-                return Err(SectionHeatingError::Invalid("temperature changed density on a fixed-volume constant-mass section"));
+        let mut section = self.law.at_temperatures_k(&temperatures)?;
+        if let Some(geometry) = &mut self.density_geometry {
+            section = geometry.refresh(&self.law, section, thermal)?;
+            self.length_m = geometry.current.length_m;
+        } else {
+            for (current, reference) in section.layer_integrals().iter().zip(self.law.reference().layer_integrals()) {
+                if current.line_density_kg_m() != reference.line_density_kg_m() {
+                    return Err(SectionHeatingError::Invalid("temperature changed density on a fixed-volume constant-mass section"));
+                }
             }
         }
         let axial = self.axial.as_ref().map(|previous| SectionAxialState::resolve(
@@ -299,6 +338,18 @@ impl DepositionObserver for HeatingObserver<'_> {
     {
         checkpoint()?;
         Ok(self.link_conductances()?.into_iter().enumerate().map(|(i, g)| (i as u64, g)).collect())
+    }
+    fn ambient_conductances(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error>
+    {
+        checkpoint()?;
+        if let Some(geometry) = &self.density_geometry {
+            let conductance = nonnegative(thermal.cells()[&CellId(0)].boundary.htc_w_m2_k
+                * geometry.current.surface_area_m2)?;
+            return Ok(BTreeMap::from([(CellId(0), conductance)]));
+        }
+        Ok(BTreeMap::new())
     }
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         Err(SectionHeatingError::Invalid("section geometry is fixed during thermal evolution"))

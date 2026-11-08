@@ -131,6 +131,48 @@ pub mod isobaric {
                     "heat increment is lost at the chosen enthalpy datum",
                 ));
             }
+            self.account_isobaric_transition(current, state, mass_kg, pressure_pa, supplied_heat_j)
+        }
+
+        /// Account for two ALREADY accepted states on this same caloric chart.
+        ///
+        /// No temperature or enthalpy is advanced or reconstructed. This lets a
+        /// coupled heat solver retain its exact accepted endpoints while sharing
+        /// the same fixed-mass volume and pressure-work account. Supplied heat
+        /// includes every external thermal channel; Joule heat alone is not the
+        /// total when a bath or another source also exchanges energy.
+        ///
+        /// The returned heat residual is Q - m*delta_h, including unresolved or
+        /// oppositely signed supplied heat. The caller's original energy audit
+        /// decides whether that residual is acceptable. This accounting method
+        /// does not repair an inconsistent trajectory or select a timestep.
+        ///
+        /// Both states must belong to this curve. Mass must be positive, pressure
+        /// nonnegative, and all supplied/derived quantities representable.
+        pub fn account_isobaric_transition(
+            &self,
+            current: EquilibriumPhaseState,
+            state: EquilibriumPhaseState,
+            mass_kg: f64,
+            pressure_pa: f64,
+            supplied_heat_j: f64,
+        ) -> Result<IsobaricHeatStep, PhaseStateError> {
+            let invalid = |what| PhaseStateError::InvalidIsobaricHeatStep { what };
+            if current.phase_curve_identity() != self.identity()
+                || state.phase_curve_identity() != self.identity()
+            {
+                return Err(PhaseStateError::StateCurveMismatch);
+            }
+            if !mass_kg.is_finite() || mass_kg <= 0.0
+                || !pressure_pa.is_finite() || pressure_pa < 0.0
+                || !supplied_heat_j.is_finite()
+            {
+                return Err(invalid("isobaric accounting requires positive mass, nonnegative pressure and finite heat"));
+            }
+            let dh = state.specific_enthalpy_j_kg() - current.specific_enthalpy_j_kg();
+            if !dh.is_finite() {
+                return Err(invalid("accepted enthalpy difference is not representable"));
+            }
             let enthalpy_change_j = mass_kg * dh;
             if !enthalpy_change_j.is_finite() || (dh != 0.0 && enthalpy_change_j == 0.0) {
                 return Err(invalid("represented enthalpy change is not representable"));
