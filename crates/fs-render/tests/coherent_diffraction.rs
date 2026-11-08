@@ -1635,3 +1635,6 @@ mod interferometer_jones_exposure;
 
 #[path = "coherent_diffraction/interferometer_jones_pixel.rs"]
 mod interferometer_jones_pixel;
+
+#[path = "coherent_diffraction/interferometer_arm_spectrum.rs"]
+mod interferometer_arm_spectrum;

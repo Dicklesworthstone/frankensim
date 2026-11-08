@@ -30,6 +30,7 @@ use super::{CameraError, PhysicalCamera, PreparedDiffractionAmplitude};
 use fs_math::{c64::C64, dd::Dd};
 
 mod exposure;
+pub use exposure::{CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer};
 pub use exposure::PolarizedCoherentInterferometerPixelExposure;
 pub use exposure::PolarizedCoherentInterferometerExposureSample;
 pub use exposure::CoherentInterferometerPixelExposure;
@@ -144,6 +145,8 @@ pub enum CoherentDiffractionError {
     InvalidJonesPupil,
     /// Every distinct source frequency needs exactly one pupil response.
     InconsistentJonesPupilSpectrum,
+    /// Every distinct source frequency needs exactly one pair of arm responses.
+    InconsistentJonesArmSpectrum,
     /// The original analytic shutter kernel refused its clock or contraction.
     Shutter(fs_fft::harmonic_window::WindowError),
     /// A preparation count exceeds the caller's explicit bound.

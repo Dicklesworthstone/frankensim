@@ -1,7 +1,7 @@
 //! Full polarized spectral interference through the original finite shutter.
 //!
 //! The native Jones source owner supplies one two-component field per shared
-//! frequency/covariance column. Uniform arm optics act before each frequency's
+//! frequency/covariance column. Passive arm optics act before each frequency's
 //! balanced combiner; its output fields then use the original temporal
 //! coherency contraction. Independent source columns add only afterward.
 
@@ -21,6 +21,24 @@ use fs_math::c64::C64;
 mod pixel;
 pub use pixel::PolarizedCoherentInterferometerPixelExposure;
 
+mod spectrum;
+pub use spectrum::{CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer};
+
+#[derive(Clone, Copy)]
+enum InterferometerArms<'a> {
+    Uniform(&'a [CoherentJonesArm; 2]),
+    Spectral(&'a [[CoherentJonesArm; 2]]),
+}
+
+impl<'a> InterferometerArms<'a> {
+    fn at(self, group: usize) -> &'a [CoherentJonesArm; 2] {
+        match self {
+            Self::Uniform(arms) => arms,
+            Self::Spectral(arms) => &arms[group],
+        }
+    }
+}
+
 /// Full polarized, shutter-averaged output densities of a passive two-arm receiver.
 ///
 /// Each coherency retains both diagonal populations, its complex cross moment,
@@ -29,7 +47,7 @@ pub use pixel::PolarizedCoherentInterferometerPixelExposure;
 /// scan, not the contrast of a broadband optical-path scan.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolarizedCoherentInterferometerExposureSample {
-    /// Arm powers after the passive split and uniform Jones arm elements.
+    /// Arm powers after the passive split and all authored Jones arm elements.
     pub arm_power_density_w: [f64; 2],
     /// Full time/ensemble-averaged coherency at the plus and minus ports.
     pub output_coherency_density_w: [PolarizedDiffractionCoherency; 2],
@@ -84,13 +102,28 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         receiver: CoherentDiffractionInterferometer,
         arms: [CoherentJonesArm; 2],
         limits: CoherentInterferometerExposureLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PolarizedCoherentInterferometerExposureSample, CoherentDiffractionError> {
+        self.observe_interferometer_with_arms(
+            receiver,
+            InterferometerArms::Uniform(&arms),
+            limits,
+            cancelled,
+        )
+    }
+
+    fn observe_interferometer_with_arms(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        arms: InterferometerArms<'_>,
+        limits: CoherentInterferometerExposureLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PolarizedCoherentInterferometerExposureSample, CoherentDiffractionError> {
         poll(&mut cancelled)?;
         let (pupil_evaluations, pair_contractions) =
             self.jones_interferometer_work(receiver, limits)?;
         let moments =
-            self.jones_interferometer_moments(receiver, &arms, [0.0; 2], &mut cancelled)?;
+            self.jones_interferometer_moments(receiver, arms, [0.0; 2], &mut cancelled)?;
         let duration = Dd::from_f64(self.shutter().duration_s());
         let result = PolarizedCoherentInterferometerExposureSample {
             arm_power_density_w: [rounded(moments.arms[0])?, rounded(moments.arms[1])?],
@@ -159,7 +192,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
     fn jones_interferometer_moments(
         &self,
         receiver: CoherentDiffractionInterferometer,
-        arms: &[CoherentJonesArm; 2],
+        arms: InterferometerArms<'_>,
         relay_offset: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<InterferometerMoments, CoherentDiffractionError> {
@@ -192,7 +225,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
                 for i in 0..self.frequency_count() {
                     poll(cancelled)?;
                     let split = [amplitudes[arm], Dd::ZERO];
-                    let field = arms[arm].apply([
+                    let field = arms.at(i)[arm].apply([
                         product(fields[arm][i][0], split)?,
                         product(fields[arm][i][1], split)?,
                     ])?;

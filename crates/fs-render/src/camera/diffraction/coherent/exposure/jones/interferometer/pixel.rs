@@ -9,7 +9,7 @@ use super::super::super::super::{
 };
 use super::super::super::interferometer::energy;
 use super::super::coherency::{energy as coherency_energy, physical};
-use super::InterferometerMoments;
+use super::{InterferometerArms, InterferometerMoments};
 use fs_math::{c64::C64, dd::Dd};
 
 /// Two-port polarized energy collected over a finite relay pixel and shutter.
@@ -20,7 +20,7 @@ use fs_math::{c64::C64, dd::Dd};
 /// statistics; no single Jones field is assigned to that mixed observation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolarizedCoherentInterferometerPixelExposure {
-    /// Collected arm powers after the passive split and uniform arm optics.
+    /// Collected arm powers after the passive split and all authored arm optics.
     pub arm_power_w: [f64; 2],
     /// Complete average coherencies at the plus and minus output ports, in W.
     pub output_coherency_w: [PolarizedDiffractionCoherency; 2],
@@ -66,6 +66,23 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         arms: [CoherentJonesArm; 2],
         relay_offsets: CoherentDiffractionPixel,
         limits: CoherentDiffractionExposurePixelLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PolarizedCoherentInterferometerPixelExposure, CoherentDiffractionError> {
+        self.integrate_interferometer_pixel_with_arms(
+            receiver,
+            InterferometerArms::Uniform(&arms),
+            relay_offsets,
+            limits,
+            cancelled,
+        )
+    }
+
+    pub(super) fn integrate_interferometer_pixel_with_arms(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        arms: InterferometerArms<'_>,
+        relay_offsets: CoherentDiffractionPixel,
+        limits: CoherentDiffractionExposurePixelLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PolarizedCoherentInterferometerPixelExposure, CoherentDiffractionError> {
         poll(&mut cancelled)?;
@@ -92,7 +109,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
             &mut cancelled,
             |offset, cancelled| {
                 let moments =
-                    self.jones_interferometer_moments(receiver, &arms, offset, cancelled)?;
+                    self.jones_interferometer_moments(receiver, arms, offset, cancelled)?;
                 let values = flatten(moments);
                 for (flag, index) in active.iter_mut().zip(diagonal_indices) {
                     *flag |= values[index] != Dd::ZERO;

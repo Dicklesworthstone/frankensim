@@ -4450,6 +4450,34 @@ exact budgets, closed receivers and deterministic cancellation/reuse. The
 combined original-source optical harness passed all 76 selected tests; native
 full-workspace and tracer-feature integration were not exercised in that run.
 
+### Prepared frequency-specific interferometer arm optics
+
+`CoherentJonesInterferometerResponse` supplies a pair of passive Jones-arm
+sequences for one exact original source frequency. The exposure owner's
+`prepare_interferometer` binds a receiver and a complete response table into
+`PreparedCoherentJonesInterferometer`, whose `observe` and `integrate_pixel`
+methods use the same full-coherency, shutter and spatial moment evaluators as
+the uniform-arm APIs. Each frequency retains its own transmission, retardance,
+principal axes and common phase before interference. Passive losses remain
+physical; no missing response, interpolation or material dispersion is inferred.
+
+Preparation accepts arbitrary response order but requires exactly one response
+per distinct authored frequency, including shared equal-frequency source entries.
+Missing, duplicate and foreign identities refuse. Cache payload bytes are admitted
+before allocation as N*size_of::<[CoherentJonesArm;2]>(), excluding Vec/allocator
+metadata. Existing 64-frequency and eight-layer-per-arm limits bound the cache.
+Bounded matching occurs once; observation uses direct group indexing without
+allocation or frequency search. The immutable source borrow prevents changing
+its pupil/source owner while the receiver is live. Failure/cancellation publishes
+no receiver and preserves the source.
+
+Five focused G1/G3/G4 groups cover bitwise uniform-arm parity including patterned
+pupils, independent chromatic Jones/shutter references, retained common spectral
+phase versus independent sources, response/source order and equal-frequency
+identity, exact cache bounds and cancellation/reuse. The combined original-source
+optical harness passed all 81 selected tests. Native full-workspace and tracer
+feature integration remain unverified by that harness.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored

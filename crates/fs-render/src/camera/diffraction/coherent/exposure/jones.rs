@@ -39,6 +39,7 @@ pub use coherency::{
 
 mod interferometer;
 pub use interferometer::{
+    CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer,
     PolarizedCoherentInterferometerExposureSample, PolarizedCoherentInterferometerPixelExposure,
 };
 

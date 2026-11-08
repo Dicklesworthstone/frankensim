@@ -46,6 +46,7 @@ mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
 pub use coherent::{
+    CoherentJonesInterferometerResponse, PreparedCoherentJonesInterferometer,
     PolarizedCoherentInterferometerPixelExposure,
     PolarizedCoherentInterferometerExposureSample,
     CoherentInterferometerPixelExposure,
