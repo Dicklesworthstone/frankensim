@@ -176,15 +176,6 @@ pub(super) fn evaluate(
 }
 
 impl<'a> Workspace<'a> {
-    pub fn new(
-        cells: &[DiffuseRecombinationCell<'a>],
-        area: Area,
-        controls: DiffuseRecombinationSolve,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Self, Error> {
-        Self::with_illumination(cells, area, &[], controls, cancelled)
-    }
-
     pub fn with_illumination(
         cells: &[DiffuseRecombinationCell<'a>],
         area: Area,
@@ -209,6 +200,10 @@ impl<'a> Workspace<'a> {
 
     pub fn preparation_work(&self) -> usize {
         self.prepared.work
+    }
+
+    pub fn illuminated(&self) -> bool {
+        self.prepared.beams.iter().any(|beam| beam.incoming_per_s > 0.0)
     }
 
     /// Refresh only actual populations and temperature; immutable source and

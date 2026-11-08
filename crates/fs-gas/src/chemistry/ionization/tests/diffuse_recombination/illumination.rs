@@ -132,3 +132,133 @@ fn g4_empty_columns_and_source_work_cancellation_admission() {
         &cells, Area::new(1.0), &beams, controls(1e-7), || true,
     ).unwrap_err(), DiffuseRecombinationError::Cancelled);
 }
+
+use crate::chemistry::collisional_radiative::CollisionalRadiativeSolve;
+use crate::chemistry::diffuse_recombination::evolution::*;
+use fs_qty::{Temperature, Time};
+
+fn live_controls(duration: f64) -> DiffuseRecombinationEvolutionSolve {
+    let mut chemistry =
+        CollisionalRadiativeSolve::new(Temperature::new(1000.0), Temperature::new(50000.0));
+    chemistry.relative_tolerance = 1e-7;
+    chemistry.initial_step_s = duration.max(1e-8) / 8.0;
+    chemistry.maximum_step_s = duration.max(1e-8);
+    chemistry.energy_tolerance_j = 1e-5;
+    DiffuseRecombinationEvolutionSolve::new(chemistry)
+}
+
+fn audit_illuminated(result: &DiffuseRecombinationEvolutionResult) {
+    let b = result.balance();
+    let radiation: f64 = result.cells().iter().map(|c| c.radiation().net_gas_energy_j).sum();
+    let pairs: f64 = result.cells().iter().map(|c| c.radiation().net_ionization_extent_mol).sum();
+    let tolerance = result.controls().chemistry.energy_tolerance_j;
+    assert!((b.gas_energy_change_j + b.escaped_energy_j - b.incident_energy_j
+        - b.external_work_j).abs() <= 2.0 * tolerance);
+    assert!((radiation + b.escaped_energy_j - b.incident_energy_j).abs() <= 2.0 * tolerance);
+    assert!((pairs * NA + b.escaped_photons - b.incident_photons).abs()
+        <= NA * 1e-10 + 1e-13 * b.incident_photons);
+    assert!(b.energy_residual_j.abs() <= tolerance);
+    assert!(b.maximum_normalized_local_error <= 1.0);
+    for cell in result.cells() {
+        let end = cell.state();
+        assert_eq!(end.amounts()[1], end.amounts()[2]);
+        close(end.amounts()[0].value() + end.amounts()[1].value(), 1.0, 3e-15);
+        assert_eq!(end.volume(), cell.initial_state().volume());
+        assert_eq!(end.thermodynamics(), cell.initial_state().thermodynamics());
+    }
+}
+
+#[test]
+fn g1_live_beam_ionization_matches_independent_self_shielding_solution() {
+    // A very dilute, formally quasi-static column suppresses reciprocal
+    // recombination without replacing its original law. This is an analytic
+    // temporal reference, not a claim about propagation over this slab length.
+    let duration = 0.2;
+    let area = Area::new(SIGMA * NA);
+    let beams = [beam(15.0, 5e21, 1.0)];
+    let mut endpoints = Vec::new();
+    for initial_te in [1000.0, 45000.0] {
+        let (state, source) = parcel(0.0, initial_te, 1.0, 1e16);
+        let result = advance_diffuse_recombination_with_illumination(
+            &[DiffuseRecombinationEvolutionCell::new(&state, &source)],
+            area, &beams, Time::new(duration), live_controls(duration), || false,
+        ).unwrap();
+        // dn/dt = -b(1-exp(-a*n)); exp(a*n)-1 decays as exp(-a*b*t).
+        // Here a=1 per mol and b=SIGMA*flux=0.5 mol/s.
+        let neutral = (1.0_f64.exp_m1() * (-0.5 * duration).exp()).ln_1p();
+        let ionized = 1.0 - neutral;
+        let gap = source.source().channel().ionization_energy_j_mol() / NA;
+        let birth_temperature = (15.0 * EV - gap) / (1.5 * KB);
+        let cell = &result.cells()[0];
+        close(cell.state().amounts()[1].value(), ionized, 4e-6);
+        close(cell.state().electron_temperature().value(), birth_temperature, 4e-8);
+        assert!(cell.balance().radiative_recombination_extent_mol < 1e-11);
+        close(cell.radiation().incident_absorbed_photons / NA, ionized, 4e-6);
+        close(cell.radiation().incident_absorbed_energy_j, ionized * NA * 15.0 * EV, 4e-6);
+        close(result.balance().incident_photons, area.value() * 5e21 * duration, 2e-14);
+        assert_eq!(result.incident_beams(), &beams);
+        assert!(cell.state().amounts()[2].value() > 0.0);
+        audit_illuminated(&result);
+        endpoints.push(cell.state().clone());
+    }
+    // The temperature attached to an absent electron pool cannot provide heat.
+    close(endpoints[0].amounts()[1].value(), endpoints[1].amounts()[1].value(), 2e-7);
+    close(endpoints[0].electron_temperature().value(),
+        endpoints[1].electron_temperature().value(), 2e-8);
+}
+
+#[test]
+fn g3_live_illumination_and_recombination_share_one_energy_account() {
+    let (state, source) = parcel(0.2, 10000.0, 1.0, 0.2);
+    let duration = 1e-6;
+    let area = Area::new(SIGMA * NA);
+    let beams = [beam(16.0, 2e26, 0.7), beam(18.0, 1e26, -0.5)];
+    let result = advance_diffuse_recombination_with_illumination(
+        &[DiffuseRecombinationEvolutionCell::new(&state, &source)],
+        area, &beams, Time::new(duration), live_controls(duration), || false,
+    ).unwrap();
+    let cell = &result.cells()[0];
+    assert!(cell.radiation().incident_absorbed_photons > 0.0);
+    assert!(cell.radiation().self_absorbed_photons > 0.0);
+    assert!(cell.balance().radiative_recombination_extent_mol > 0.0);
+    assert_ne!(cell.state().amounts(), state.amounts());
+    assert_ne!(cell.state().electron_temperature(), state.electron_temperature());
+    audit_illuminated(&result);
+}
+
+#[test]
+fn g4_live_incidence_retains_empty_exposure_and_transactional_refusals() {
+    let duration = 1e-5;
+    let beams = [beam(15.0, 1e22, 0.5), beam(16.0, 2e22, -0.8)];
+    let area = Area::new(2.0);
+    let controls = live_controls(duration);
+    let empty = advance_diffuse_recombination_with_illumination(
+        &[], area, &beams, Time::new(duration), controls, || false,
+    ).unwrap();
+    close(empty.balance().incident_photons,
+        area.value() * (0.5 * 1e22 + 0.8 * 2e22) * duration, 2e-14);
+    assert_eq!(empty.balance().incident_photons, empty.balance().escaped_photons);
+    assert_eq!(empty.balance().incident_energy_j, empty.balance().escaped_energy_j);
+    assert_eq!(empty.balance().gas_energy_change_j, 0.0);
+    let (state, source) = parcel(0.0, 10000.0, 1.0, 0.2);
+    let original = state.clone();
+    let cells = [DiffuseRecombinationEvolutionCell::new(&state, &source)];
+    let zero = advance_diffuse_recombination_with_illumination(
+        &cells, area, &beams, Time::new(0.0), controls, || false,
+    ).unwrap();
+    assert_eq!(zero.cells()[0].state(), &state);
+    assert_eq!(zero.balance().incident_energy_j, 0.0);
+    let mut limited = controls;
+    limited.maximum_radiation_evaluations = 1;
+    assert_eq!(advance_diffuse_recombination_with_illumination(
+        &cells, area, &beams, Time::new(duration), limited, || false,
+    ).unwrap_err(), DiffuseRecombinationEvolutionError::RadiationBudget);
+    let mut polls = 0;
+    assert_eq!(advance_diffuse_recombination_with_illumination(
+        &cells, area, &beams, Time::new(duration), controls, || {
+            polls += 1;
+            polls == 100
+        },
+    ).unwrap_err(), DiffuseRecombinationEvolutionError::Cancelled);
+    assert_eq!(state, original);
+}

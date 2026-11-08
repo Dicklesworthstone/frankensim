@@ -1,6 +1,6 @@
 use super::super::{
     DiffuseRecombinationCell,
-    solve::{RadiationState, Workspace},
+    solve::{RadiationState, Workspace, retained_beams},
 };
 use super::*;
 use crate::chemistry::collisional_radiative::solve::{DiffuseIncrement, Point, Problem};
@@ -18,27 +18,27 @@ struct Column<'a> {
     balance: DiffuseRecombinationEvolutionBalance,
 }
 
-/// Per-cell self/nonlocal photons, net mol, net electron/gas J; per-face
+/// Per-cell self/nonlocal photons, net mol, net electron/gas J, incident photons/J; per-face
 /// right photons/J and left photons/J. Trial increments are distinct from the
 /// cumulative accepted account so a rejected step cannot leak into publication.
 struct Accounts {
-    cells: Vec<[Dd; 5]>,
+    cells: Vec<[Dd; 7]>,
     faces: Vec<[Dd; 4]>,
 }
 impl Accounts {
     fn new(n: usize) -> Result<Self, Error> {
         Ok(Self {
-            cells: buffer(n, [Dd::ZERO; 5])?,
+            cells: buffer(n, [Dd::ZERO; 7])?,
             faces: buffer(n + 1, [Dd::ZERO; 4])?,
         })
     }
     fn clear(&mut self) {
-        self.cells.fill([Dd::ZERO; 5]);
+        self.cells.fill([Dd::ZERO; 7]);
         self.faces.fill([Dd::ZERO; 4]);
     }
     fn add(&mut self, other: &Self) -> Result<(), Error> {
         for (total, increment) in self.cells.iter_mut().zip(&other.cells) {
-            for j in 0..5 {
+            for j in 0..7 {
                 total[j] = finite_sum(total[j], increment[j])?;
             }
         }
@@ -57,6 +57,8 @@ impl Accounts {
                 cell.net_ionization_rate_mol_per_s,
                 cell.net_electron_power_w,
                 cell.net_gas_power_w,
+                cell.incident_absorbed_photons_per_s,
+                cell.incident_absorbed_power_w,
             ]) {
                 *sum = finite_sum(*sum, Dd::from_f64(product(rate, dt)?))?;
             }
@@ -81,9 +83,9 @@ impl Accounts {
     ) -> Result<f64, Error> {
         let mut error = 0.0_f64;
         for (c, old) in self.cells.iter().enumerate() {
-            for j in 0..5 {
-                let units = if j < 2 { NA } else { 1.0 };
-                let absolute = if j < 3 {
+            for j in 0..7 {
+                let units = if j < 2 || j == 5 { NA } else { 1.0 };
+                let absolute = if j < 3 || j == 5 {
                     controls.absolute_amount_tolerance_mol
                 } else {
                     controls.energy_tolerance_j
@@ -123,11 +125,13 @@ impl Accounts {
 pub(super) fn advance(
     cells: &[DiffuseRecombinationEvolutionCell<'_>],
     area: Area,
+    incident_beams: &[DiffuseRecombinationBeam],
     duration: Time,
     controls: DiffuseRecombinationEvolutionSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DiffuseRecombinationEvolutionResult, Error> {
-    let mut column = Column::new(cells, area, duration, controls, &mut cancelled)?;
+    let mut column =
+        Column::new(cells, area, incident_beams, duration, controls, &mut cancelled)?;
     let mut points = buffer(cells.len(), Point::default())?;
     let mut statistics = buffer(cells.len(), CollisionalRadiativeBalance::default())?;
     for (c, problem) in column.problems.iter().enumerate() {
@@ -247,6 +251,7 @@ pub(super) fn advance(
         &accounts,
         statistics,
         area,
+        incident_beams,
         duration,
         &mut cancelled,
     )
@@ -256,6 +261,7 @@ impl<'a> Column<'a> {
     fn new(
         cells: &[DiffuseRecombinationEvolutionCell<'a>],
         area: Area,
+        incident_beams: &[DiffuseRecombinationBeam],
         duration: Time,
         controls: DiffuseRecombinationEvolutionSolve,
         cancelled: &mut impl FnMut() -> bool,
@@ -309,8 +315,9 @@ impl<'a> Column<'a> {
         radiation_controls.maximum_work = radiation_controls
             .maximum_work
             .min(controls.maximum_radiation_work);
-        let field = Workspace::new(&frozen, area, radiation_controls, cancelled)
-            .map_err(radiation_error)?;
+        let field =
+            Workspace::with_illumination(&frozen, area, incident_beams, radiation_controls, cancelled)
+                .map_err(radiation_error)?;
         let work = field.preparation_work();
         if work > controls.maximum_radiation_work {
             return Err(Error::RadiationBudget);
@@ -333,6 +340,11 @@ impl<'a> Column<'a> {
         statistics: &mut [CollisionalRadiativeBalance],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, Error> {
+        // A neutral or transparent illuminated column still transports a real
+        // boundary exposure, even before the first charged particles appear.
+        if self.field.illuminated() {
+            return Ok(false);
+        }
         // Only exact absence of every emitting pair permits the dark shortcut.
         // Gross self-recycling is still physical traffic even when its net is zero.
         for (c, problem) in self.problems.iter().enumerate() {
@@ -448,7 +460,9 @@ impl<'a> Column<'a> {
                     net_electron_energy_j: product(b.net_electron_power_w, dt)?,
                     net_gas_energy_j: product(b.net_gas_power_w, dt)?,
                     absorbed_mol: product(
-                        b.self_absorbed_photons_per_s / NA + b.nonlocal_absorbed_photons_per_s / NA,
+                        b.self_absorbed_photons_per_s / NA
+                            + b.nonlocal_absorbed_photons_per_s / NA
+                            + b.incident_absorbed_photons_per_s / NA,
                         dt,
                     )?,
                     captured_mol: product(b.emitted_photons_per_s / NA, dt)?,
@@ -467,6 +481,7 @@ impl<'a> Column<'a> {
         accounts: &Accounts,
         mut statistics: Vec<CollisionalRadiativeBalance>,
         area: Area,
+        incident_beams: &[DiffuseRecombinationBeam],
         duration: Time,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<DiffuseRecombinationEvolutionResult, Error> {
@@ -492,6 +507,8 @@ impl<'a> Column<'a> {
             let radiation = DiffuseRecombinationIntegratedRates {
                 self_absorbed_photons: a[0].to_f64(),
                 nonlocal_absorbed_photons: a[1].to_f64(),
+                incident_absorbed_photons: a[5].to_f64(),
+                incident_absorbed_energy_j: a[6].to_f64(),
                 net_ionization_extent_mol: a[2].to_f64(),
                 net_electron_energy_j: a[3].to_f64(),
                 net_gas_energy_j: a[4].to_f64(),
@@ -547,9 +564,12 @@ impl<'a> Column<'a> {
         let n = cells.len();
         let escaped = accounts.faces[0][2] + accounts.faces[n][0];
         let escaped_energy = accounts.faces[0][3] + accounts.faces[n][1];
-        let photon_residual = (radiative_extent * Dd::from_f64(NA) + escaped).to_f64();
+        let incident = accounts.faces[0][0] + accounts.faces[n][2];
+        let incident_energy = accounts.faces[0][1] + accounts.faces[n][3];
+        let photon_residual = (radiative_extent * Dd::from_f64(NA) + escaped - incident).to_f64();
         let photon_allowance = NA * self.controls.chemistry.absolute_amount_tolerance_mol
-            + 128.0 * f64::EPSILON * (NA * net_traffic + escaped.to_f64());
+            + 128.0 * f64::EPSILON
+                * (NA * net_traffic + escaped.to_f64() + incident.to_f64());
         if !photon_residual.is_finite()
             || !photon_allowance.is_finite()
             || photon_residual.abs() > photon_allowance
@@ -558,8 +578,8 @@ impl<'a> Column<'a> {
                 residual_photons: photon_residual,
             });
         }
-        let energy_residual = (gas + escaped_energy - work).to_f64();
-        let radiation_residual = (net_radiation + escaped_energy).to_f64();
+        let energy_residual = (gas + escaped_energy - incident_energy - work).to_f64();
+        let radiation_residual = (net_radiation + escaped_energy - incident_energy).to_f64();
         for residual in [energy_residual, radiation_residual] {
             if !residual.is_finite() || residual.abs() > self.controls.chemistry.energy_tolerance_j
             {
@@ -568,6 +588,8 @@ impl<'a> Column<'a> {
                 });
             }
         }
+        self.balance.incident_photons = incident.to_f64();
+        self.balance.incident_energy_j = incident_energy.to_f64();
         self.balance.escaped_photons = escaped.to_f64();
         self.balance.escaped_energy_j = escaped_energy.to_f64();
         self.balance.net_radiative_extent_mol = radiative_extent.to_f64();
@@ -584,6 +606,7 @@ impl<'a> Column<'a> {
             area,
             elapsed: duration,
             controls: self.controls,
+            incident_beams: retained_beams(incident_beams).map_err(radiation_error)?,
         })
     }
 }

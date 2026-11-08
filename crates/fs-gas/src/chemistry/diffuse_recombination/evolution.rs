@@ -4,8 +4,9 @@
 //! Impact ionization, three-body capture, optional electron/heavy exchange and
 //! held pool powers alternate symmetrically with the shared spectral diffuse
 //! transfer kernel. Every radiation stage refreshes opacity and the Milne
-//! spectrum at its actual populations and electron temperature. Only photons
-//! crossing the two vacuum boundaries leave the column; self-recycled photons
+//! spectrum at its actual populations and electron temperature. Prescribed
+//! boundary beams share the same reaction/heat update. Only photons crossing
+//! the two boundaries enter or leave the column; self-recycled photons
 //! cancel before rounding in net species and energy updates.
 //!
 //! A single full/two-half controller estimates temporal error in populations,
@@ -18,12 +19,12 @@
 //!
 //! Geometry is homogeneous plane-parallel slabs, transversely infinite, with
 //! quasi-static photon propagation and immediate electron thermalization. There
-//! is no incident beam, finite photon inventory, radiation-pressure work,
+//! is no finite photon inventory, radiation-pressure work,
 //! scattering, stimulated emission, excited-level cascade, spatial gas flow or
 //! multichannel opacity within a slab. The local/source and spectral estimates
 //! do not certify the evolving solution, spatial resolution or source accuracy.
 
-use super::{DiffuseRecombinationError, DiffuseRecombinationSolve};
+use super::{DiffuseRecombinationBeam, DiffuseRecombinationError, DiffuseRecombinationSolve};
 use crate::chemistry::collisional_radiative::{
     CollisionalRadiativeBalance, CollisionalRadiativeError, CollisionalRadiativeSolve,
     CollisionalRadiativeThermal,
@@ -159,6 +160,10 @@ pub struct DiffuseRecombinationIntegratedRates {
     pub self_absorbed_photons: f64,
     /// Photons absorbed after emission by another slab.
     pub nonlocal_absorbed_photons: f64,
+    /// Photons absorbed from the prescribed external boundary beams.
+    pub incident_absorbed_photons: f64,
+    /// Their absorbed energy [J].
+    pub incident_absorbed_energy_j: f64,
     /// Radiation-only net pair creation [mol]; self-recycling cancels first.
     pub net_ionization_extent_mol: f64,
     /// Radiation-only net electron sensible-energy input [J].
@@ -170,7 +175,11 @@ pub struct DiffuseRecombinationIntegratedRates {
 /// Actual whole-column conservation and bounded integration/query work.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct DiffuseRecombinationEvolutionBalance {
-    /// Integrated photons escaping both vacuum boundaries.
+    /// Integrated prescribed photons entering both boundaries.
+    pub incident_photons: f64,
+    /// Their integrated input energy [J].
+    pub incident_energy_j: f64,
+    /// Integrated outgoing photons, including transmitted boundary beams.
     pub escaped_photons: f64,
     /// Their integrated energy [J].
     pub escaped_energy_j: f64,
@@ -182,9 +191,9 @@ pub struct DiffuseRecombinationEvolutionBalance {
     pub gas_energy_change_j: f64,
     /// Held external electron and heavy work [J].
     pub external_work_j: f64,
-    /// Net radiative pair creation times N_A + boundary escape.
+    /// Net radiative pair creation times N_A + outgoing - incoming photons.
     pub photon_residual: f64,
-    /// Actual gas energy change + boundary escape - external work [J].
+    /// Actual gas energy change + outgoing - incoming radiation - external work [J].
     pub energy_residual_j: f64,
     /// Complete accepted steps; two-half-step endpoints are retained.
     pub accepted_steps: usize,
@@ -213,13 +222,14 @@ pub struct DiffuseRecombinationEvolutionResult {
     area: Area,
     elapsed: Time,
     controls: DiffuseRecombinationEvolutionSolve,
+    incident_beams: Vec<DiffuseRecombinationBeam>,
 }
 impl DiffuseRecombinationEvolutionResult {
     /// Ordered source-retained gas endpoints.
     pub fn cells(&self) -> &[DiffuseRecombinationEvolutionCellResult] {
         &self.cells
     }
-    /// N+1 directional integrated exposures, including vacuum boundaries.
+    /// N+1 directional integrated exposures, including illuminated boundaries.
     pub fn interfaces(&self) -> &[DiffuseRecombinationExposure] {
         &self.interfaces
     }
@@ -238,6 +248,10 @@ impl DiffuseRecombinationEvolutionResult {
     /// Applied source, temporal and radiation controls.
     pub const fn controls(&self) -> DiffuseRecombinationEvolutionSolve {
         self.controls
+    }
+    /// Original prescribed boundary beams, held throughout this exposure.
+    pub fn incident_beams(&self) -> &[DiffuseRecombinationBeam] {
+        &self.incident_beams
     }
 }
 
@@ -286,5 +300,24 @@ pub fn advance_diffuse_recombination(
     controls: DiffuseRecombinationEvolutionSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<DiffuseRecombinationEvolutionResult, DiffuseRecombinationEvolutionError> {
-    solve::advance(cells, area, duration, controls, cancelled)
+    solve::advance(cells, area, &[], duration, controls, cancelled)
+}
+
+/// Evolve ionization, shielding and thermal pools with external illumination.
+///
+/// Every radiation stage transports the prescribed discrete boundary beams
+/// through its current populations together with spontaneous diffuse emission.
+/// Absorption may create the first electrons without an artificial seed, and
+/// all incident energy is charged to the incoming photon boundary accounts.
+/// The beams are held over the interval; no drive time profile or photon flight
+/// delay is inferred. Empty columns retain their complete transmitted exposure.
+pub fn advance_diffuse_recombination_with_illumination(
+    cells: &[DiffuseRecombinationEvolutionCell<'_>],
+    area: Area,
+    incident_beams: &[DiffuseRecombinationBeam],
+    duration: Time,
+    controls: DiffuseRecombinationEvolutionSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DiffuseRecombinationEvolutionResult, DiffuseRecombinationEvolutionError> {
+    solve::advance(cells, area, incident_beams, duration, controls, cancelled)
 }

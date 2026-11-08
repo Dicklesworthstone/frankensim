@@ -8345,6 +8345,45 @@ manufactured numerical tests do not validate those extreme parameters as a
 physical plasma or bound the quasi-static approximation.
 
 
+## External illumination during diffuse ionization evolution
+
+`chemistry::diffuse_recombination::evolution::advance_diffuse_recombination_with_illumination`
+evolves the original atomic populations and electron/heavy thermal pools while
+the same prescribed discrete boundary beams pass through the changing opacity.
+Every explicit-midpoint radiation stage combines beam attenuation with the
+current spontaneous spectrum and its self/nonlocal reabsorption. The existing
+collision/thermal half-steps still exclude both photon processes; neither
+incident work nor diffuse emission is counted twice. Source cross sections are
+prepared once and retained across all accepted and rejected trials.
+
+Incident photon absorption and its energy have distinct per-cell integrals.
+Their net reaction and excess-energy effects enter the original chemical and
+electron accounts. Integrated incoming and outgoing interface traffic closes
+against actual gas storage and held external pool work. A neutral illuminated
+column cannot take the dark shortcut: the first carriers are created from
+absorbed photons with their actual excess energy, not an arbitrary seed or the
+temperature stored on an absent electron pool. Empty columns preserve their
+complete transmitted exposure; zero duration preserves identity.
+
+The existing temporal controller now includes incident absorption integrals
+alongside all population, temperature, diffuse and interface accounts. Source
+support, cancellation, field work, step and conservation failures publish no
+partial result. The fixed-volume, mixed-slab, quasi-static assumptions remain:
+beams are held over the requested interval, no photon flight time or stored
+radiation field is introduced, and the caller supplies the discrete spectral
+and angular approximation. This does not resolve excited channels, scattering,
+gas motion or competing absorbing charge stages inside one slab.
+
+New G1/G3/G4 regressions use the independent self-shielding solution
+`exp(a*n_neutral(t))-1 = (exp(a*n_neutral(0))-1)*exp(-a*b*t)` in a formally
+dilute column where original recombination is negligible; compare first-carrier
+temperature against absorbed excess energy; retain simultaneous incident and
+diffuse recycling with independent energy/charge checks; and exercise empty
+exposure, zero duration, work and cancellation refusals. These new tests were
+authored after the execution environment became unavailable and have not run.
+No native build, temporal-order validation or empirical accuracy is claimed for
+this extension in the absence of executed results.
+
 ### Original-source real-gas moving chambers and mechanical forcing
 
 With `material,experimental-euler`, `RealGasEuler1d::step_with_moving_walls`
