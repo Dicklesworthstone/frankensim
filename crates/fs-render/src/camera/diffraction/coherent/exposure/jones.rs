@@ -38,7 +38,9 @@ pub use coherency::{
 
 
 mod interferometer;
-pub use interferometer::PolarizedCoherentInterferometerExposureSample;
+pub use interferometer::{
+    PolarizedCoherentInterferometerExposureSample, PolarizedCoherentInterferometerPixelExposure,
+};
 
 type JonesFields = [[[Dd; 2]; 2]; MAX_COHERENT_DIFFRACTION_TONES];
 

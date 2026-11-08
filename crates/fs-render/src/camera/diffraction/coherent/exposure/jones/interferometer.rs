@@ -18,6 +18,9 @@ use super::{
 };
 use fs_math::c64::C64;
 
+mod pixel;
+pub use pixel::PolarizedCoherentInterferometerPixelExposure;
+
 /// Full polarized, shutter-averaged output densities of a passive two-arm receiver.
 ///
 /// Each coherency retains both diagonal populations, its complex cross moment,

@@ -30,6 +30,7 @@ pub use interferometer::{
 };
 
 mod jones;
+pub use jones::PolarizedCoherentInterferometerPixelExposure;
 pub use jones::PolarizedCoherentInterferometerExposureSample;
 pub use jones::{
     CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,

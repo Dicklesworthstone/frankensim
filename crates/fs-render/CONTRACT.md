@@ -4402,6 +4402,32 @@ Seven focused groups cover monochromatic parity, analytic polarization beats
 and analyzers, source independence, equal-line and weak-channel cancellation,
 patterned-pupil work, exact limits/cancellation and finite bright-port range.
 
+### Joint polarized spectral interferograms on finite pixels
+
+`PreparedCoherentJonesDiffractionExposure::integrate_interferometer_pixel`
+combines polarization, spectral exposure and physical detector area in one
+observation. `PolarizedCoherentInterferometerPixelExposure` returns both output
+coherencies/Stokes in watts and joules, collected arm powers/energies, complex
+mutual coherence, visibility and exact sample/pupil/contraction counts. A mixed
+spatial/temporal observation is not assigned a single Jones field.
+
+The receiver integrates twelve unrounded DD moments with the native positive
+area rule. Source-bank fields recombine before temporal coherency contraction;
+complex mutual coherence integrates before visibility is formed. It reuses the
+scalar spectral receiver's complete footprint and cross-arm/frequency phase
+bound, including DD relay offsets. All work is preflighted, scratch is fixed,
+and each sample borrows the uniform arm sequences without allocating or copying
+their full cache. Wholly underflowed nonzero diagonal populations are refused.
+The original equal-area relays, paraxial cycle-averaged detector, frequency-specific
+pupil responses and frequency-independent uniform arm matrices define scope.
+
+Four focused regression groups cover native patterned-pupil pixel parity,
+independent separable square-pupil and analytic-shutter polarization beats,
+Mueller/analyzer and pixel-partition laws, weak dark channels, energy closure,
+exact budgets, closed receivers and deterministic cancellation/reuse. The
+combined original-source optical harness passed all 76 selected tests; native
+full-workspace and tracer-feature integration were not exercised in that run.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored
