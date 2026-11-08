@@ -27,6 +27,8 @@ use fs_math::special::{SphericalBesselMoments, spherical_bessel_moments};
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod multipole;
+mod convected;
+pub use convected::{CONVECTED_MONOPOLE_POWER_SCOPE, PreparedConvectedMonopolePower};
 pub use multipole::{
     CompactMultipolePhasor, MULTIPOLE_IDEAL_BOUNDARY_POWER_SCOPE, MULTIPOLE_POWER_SCOPE,
     PreparedMultipoleRadiatedPower,

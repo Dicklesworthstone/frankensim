@@ -1506,6 +1506,47 @@ They pass a focused native exact-source leaf build using the production
 with nominal error carriers only. This is not a full-crate
 Cargo/DSR gate or experimental source validation.
 
+## Integrated acoustic power in uniform subsonic flow
+
+`curle3d::PreparedConvectedMonopolePower` integrates the total cycle-average
+quadratic perturbation-energy transport `<p u> + U <E>` of fixed prescribed
+volume sources Q [m^3/s], retaining the original material, mean velocity,
+frequency and common source clock. Its source law and convected Green function
+are those of `PreparedConvectedMonopoleObserver`, including the original
+[Wang (2020), equations 3.28–3.30](https://pure.tue.nl/ws/portalfiles/portal/149260007/20200511_Z.Wang.pdf)
+reference. Volume enters at the mean velocity without extra force or entropy.
+This observable is distinct from pressure work alone or mean-flow energy change.
+
+For M = U/c, beta^2 = 1-|M|^2, e parallel to M, and
+A = beta I + (beta^2-beta) e e^T, each source pair uses
+`d = A^-1(s_j-s_l)`, `x = k |d|`, `a = M.d/|d|`, and the exact angular
+kernel `exp(i a x) [j0(x) + i a j1(x)]`. The common power factor is
+`rho omega^2 / (8 pi c beta^4)`. The scalar/vector sphere integrals follow
+[DLMF 10.54.2](https://dlmf.nist.gov/10.54.E2). Thus separated-source phases and
+flow direction affect interference; even a single fixed volume source has the
+Mach factor `1/(1-|M|^2)^2` relative to the same source in a stationary fluid.
+
+Exactly coincident source sums, the coincident baseline and pair contractions
+use double-double arithmetic. The separate `j0-1` and `cos(a x)-1` decrements
+preserve subwavelength opposed-source radiation without subtracting rounded
+order-one powers. This is not a certified relative enclosure at every null;
+negative or nonfinite numerical power refuses. Preparation takes O(N^2) work
+and stores O(N + G^2) data for G distinct positions. Immutable evaluation is
+allocation-free O(N G + G^2) without trigonometry or angular quadrature.
+Explicit source-coherence factors add powers between factors and preserve
+interference within each factor; they use peak spectral-line units, not PSD/Hz.
+Source/pair/factor work bounds and cancellation precede result publication.
+
+The `from_observer` adapter preserves a free-space observer's actual source
+geometry; it refuses wall images rather than discarding them. The model assumes
+homogeneous, subsonic, lossless flow and individually compact prescribed sources.
+It adds no force-source vortical wake, nonuniform flow, absorption, boundary
+scattering, source feedback, finite-source validation or measured-SPL authority.
+`tests/convected_power.rs` compares integrated power with the original full
+pressure/velocity/energy flux on two enclosing spheres and checks the stationary
+limit, Mach scaling, weak directional pairs, coherence, rigid transformations,
+source-owner binding, resource admission and cancellation.
+
 ## Measured force coherence through the original line-dipole observer
 
 `curle2d::PreparedDipoleObserver::evaluate_welch_bin` propagates a joint
