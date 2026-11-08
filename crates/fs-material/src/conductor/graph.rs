@@ -26,6 +26,7 @@ use fs_qty::{Dims, Temperature};
 mod phase;
 use phase::PreparedOhmicPhase;
 mod feedback;
+mod enthalpy_feedback;
 
 const LAW: &str = "source-bound-uniform-ohmic";
 const CURRENT: Dims = Dims([0, 0, 0, 0, 1, 0]);
@@ -473,6 +474,16 @@ impl MaterialOhmicNode {
     /// Source fraction defining zero on the optional phase-change graph input.
     pub fn reference_liquid_mass_fraction(&self) -> Option<f64> {
         self.phase.as_ref().map(|phase| phase.reference)
+    }
+
+    /// Original coordinate owned by this node's liquid mass fraction response.
+    pub fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.phase.as_ref().map(|phase| phase.axis.as_str())
+    }
+
+    /// Admitted mass fraction interval; it does not fill holes in source support.
+    pub fn liquid_mass_fraction_range(&self) -> Option<[f64; 2]> {
+        self.phase.as_ref().map(|phase| phase.range)
     }
 
     /// Resolve the same fixed-geometry conductor at actual two-coordinate state.

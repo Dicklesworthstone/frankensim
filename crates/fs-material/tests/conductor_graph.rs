@@ -2,6 +2,8 @@
 //! Manufactured property tables verify integration; no measured-material claim.
 #[path = "conductor_graph/expansion.rs"]
 mod expansion;
+#[path = "conductor_graph/enthalpy.rs"]
+mod enthalpy;
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

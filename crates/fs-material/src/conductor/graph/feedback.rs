@@ -1,9 +1,47 @@
-//! Positive-feedback bound for one original affine electrical-source interval.
+//! Positive-feedback bounds for original affine electrical-source intervals.
 //! Native conductor powers are supplied by the graph owner, never re-solved here.
+
+/// Lower bound on delta_h for one affine source-path parameter interval.
+/// Retained Cp(T) gives dh/dt >= delta_T * min(Cp); authored T(h)/f(h)
+/// intervals use their original delta_h. Rounding down keeps dP/dh bounded up.
+pub(super) fn minimum_enthalpy_path_width(
+    parameter_width: f64,
+    enthalpy_span: f64,
+    sensible: Option<(f64, f64)>,
+) -> Option<f64> {
+    if !parameter_width.is_finite()
+        || parameter_width <= 0.0
+        || parameter_width > 1.0
+        || !enthalpy_span.is_finite()
+        || enthalpy_span <= 0.0
+    {
+        return None;
+    }
+    let span = if let Some((temperature_span, minimum_capacity)) = sensible {
+        if !temperature_span.is_finite()
+            || temperature_span <= 0.0
+            || !minimum_capacity.is_finite()
+            || minimum_capacity <= 0.0
+        {
+            return None;
+        }
+        let span = temperature_span.next_down() * minimum_capacity;
+        if !span.is_finite() {
+            return None;
+        }
+        span.next_down()
+    } else {
+        enthalpy_span.next_down()
+    };
+    let width = (parameter_width.next_down() * span).next_down();
+    (width.is_finite() && width > 0.0).then_some(width)
+}
 
 /// For q(T)>0, P=C*q has constant derivative; P=C/q has its largest
 /// positive derivative at the smallest q. Only the declared source is affine,
 /// not its reciprocal. Inputs are source endpoints and their native powers.
+/// The same algebra applies to any affine coordinate width, including a lower
+/// bound on enthalpy width; the output is power per unit of that coordinate.
 pub(super) fn positive_segment_slope_w_k(
     width_k: f64,
     source: [f64; 2],
@@ -59,6 +97,32 @@ mod tests {
     fn bounded(actual: f64, exact: f64) {
         assert!(actual >= exact, "{actual} < {exact}");
         assert!(actual <= exact * (1.0 + 1.0e-12), "{actual} > {exact}");
+    }
+
+    #[test]
+    fn g1_enthalpy_width_keeps_latent_and_original_nonlinear_capacity() {
+        let latent = minimum_enthalpy_path_width(0.25, 100.0, None).unwrap();
+        assert!(latent <= 25.0 && latent >= 25.0 * (1.0 - 1.0e-14));
+        // Cp increases from 2 to 8 across 100 K: the original enthalpy span
+        // is 500 J/kg, but its slowest enthalpy/path rate is 200 J/kg.
+        let sensible = minimum_enthalpy_path_width(1.0, 500.0, Some((100.0, 2.0))).unwrap();
+        assert!(sensible <= 200.0 && sensible >= 200.0 * (1.0 - 1.0e-14));
+        bounded(
+            positive_segment_slope_w_k(sensible, [2.0, 4.0], [18.0, 36.0], false).unwrap(),
+            0.09,
+        );
+    }
+
+    #[test]
+    fn g0_enthalpy_width_refuses_invalid_or_unrepresentable_coordinates() {
+        for width in [0.0, -1.0, 1.01, f64::NAN, f64::INFINITY] {
+            assert!(minimum_enthalpy_path_width(width, 100.0, None).is_none());
+        }
+        for span in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(minimum_enthalpy_path_width(1.0, span, None).is_none());
+            assert!(minimum_enthalpy_path_width(1.0, 100.0, Some((1.0, span))).is_none());
+        }
+        assert!(minimum_enthalpy_path_width(1.0, 100.0, Some((f64::MAX, 2.0))).is_none());
     }
 
     #[test]
