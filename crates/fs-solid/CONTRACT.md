@@ -9381,6 +9381,51 @@ represented-pencil temporal evidence, not mesh convergence or measured-material
 validation. The previous nine held/affine and five viscosity regressions pass
 alongside these new tests.
 
+### Complete-spectrum viscous motion
+
+`dynamics::spectral::DampedSpectralSolid::prepare_with_basis` adds an original
+free-coordinate viscosity matrix C to the same complete M/K/basis admission.
+Every column remains, including a rigid coordinate with nonzero physical drag.
+The computed symmetric `Phi^T C Phi` must have finite nonnegative diagonal
+rates. Each absolute off-diagonal row sum must be no larger than
+`maximum_relative_operator_error` times that row's diagonal. A zero diagonal
+requires an exactly zero row; a large rate elsewhere cannot mask a coupling to
+a weakly damped mode. Negative rates and meaningful nonclassical viscosity
+refuse, without clipping or a unit-sized floor. General coupled viscosity
+continues to use `ExactLinearSolid`.
+
+Held and affine force intervals use one prepared
+`fs-modal::time::LinearForceTransition` per mode. Underdamped, critical,
+overdamped and damped zero-stiffness coordinates share the same continuous
+entire-function transition, with no division by frequency or pole separation.
+Scalar force moments independently integrate supplied work, and prepared
+positive velocity Gramians independently integrate viscous heat. Heat is never
+an energy residual. Original M/K energies and compensated cumulative work and
+heat must satisfy the caller's joule allowance before any state is published.
+Impulses use the existing original-mass momentum audit and retain earlier heat
+without introducing instantaneous dissipation. A zero C delegates to the
+conservative arithmetic. The separate public type exposes no conservative
+cubic, moving-support or sustained-contact operation that could omit damping.
+
+The reported heat is the integral of the admitted classical diagonal law.
+`relative_damping_projection_error()` reports the maximum off-diagonal row
+sum divided by its diagonal. Along the represented trajectory, this bounds
+the omitted symmetric modal cross-term work by that value times the reported
+heat, before projection roundoff. It does not assert exact equality to an
+arbitrary original C, an interval enclosure, or experimental material accuracy.
+Preparation requires `96*n^2 + 2048*n` bytes and admits
+`6*n^3 + 64*n^2 + 8192*n + 512*sum(s_i)` scalar-product terms, where each `s_i`
+halves `max(omega_i*dt, c_i*dt, 1)` down to at most 1/4. Warm intervals retain
+the `16*n^2 + 512*n` bound. Cancellation and every admission or arithmetic
+refusal preserve accepted motion, time, work and heat.
+
+`tests/solid_spectral_damping.rs` checks all 128 coupled consistent-mass
+coordinates against independent continuous underdamped, critical, overdamped
+and rigid affine solutions, with independent quadrature for work and heat.
+Additional regressions cover terminal velocity and rigid heat, tiny high-Q
+loss, impulse history, nonclassical/negative viscosity refusal, cancellation
+and arithmetic rollback, and zero-C conservative bit equivalence.
+
 
 ## Exact cubic force histories on the complete elastic spectrum
 

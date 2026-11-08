@@ -1,4 +1,4 @@
-//! Exact conservative motion in a complete, admitted generalized eigenbasis.
+//! Exact motion in a complete, admitted generalized eigenbasis.
 //!
 //! All n modes of the original n-coordinate pencil are mandatory. This is a
 //! change of coordinates, not modal reduction. The caller supplies the basis;
@@ -6,6 +6,8 @@
 //! coefficients replace the large augmented exponential. Preparation costs
 //! O(n^3), retained storage and warm intervals O(n^2), with explicit capacities.
 //! Force work is integrated in original coordinates independently of energy.
+//! `DampedSpectralSolid` additionally admits a classical physical viscosity
+//! and integrates its heat through the shared exact scalar oscillator owner.
 
 use super::{
     ExactLinearSolidEnergy, ExactLinearSolidStep, LinearSolidImpulseError,
@@ -18,6 +20,8 @@ use fs_sparse::Csr;
 
 /// Exact cubic forces and continuous displacement moments for moving supports.
 pub mod polynomial;
+mod damping;
+pub use damping::DampedSpectralSolid;
 mod sustained;
 
 /// Required capacities and numerical allowances; no implicit defaults.
@@ -459,6 +463,21 @@ impl CompleteSpectralSolid {
         maximum_impulse_error_kg_m_s: f64,
         cx: &Cx<'_>,
     ) -> core::result::Result<SpectralImpulseCandidate, LinearSolidImpulseError> {
+        self.trial_momentum_impulse_with_dissipation(
+            impulse_kg_m_s,
+            maximum_impulse_error_kg_m_s,
+            0.0,
+            cx,
+        )
+    }
+
+    fn trial_momentum_impulse_with_dissipation(
+        &self,
+        impulse_kg_m_s: &[f64],
+        maximum_impulse_error_kg_m_s: f64,
+        cumulative_dissipated_j: f64,
+        cx: &Cx<'_>,
+    ) -> core::result::Result<SpectralImpulseCandidate, LinearSolidImpulseError> {
         let n = self.free_dofs.len();
         impulse::admit(impulse_kg_m_s, n, maximum_impulse_error_kg_m_s, cx)?;
         let map_error = |error| match error {
@@ -504,7 +523,7 @@ impl CompleteSpectralSolid {
                 initial_energy_j: self.initial_energy_j,
                 cumulative_work_j: self.cumulative_work_j,
                 work_correction_j: self.work_correction_j,
-                cumulative_dissipated_j: 0.0,
+                cumulative_dissipated_j,
                 maximum_work_error_j: self.controls.maximum_work_error_j,
             },
             cx,
@@ -618,6 +637,34 @@ impl CompleteSpectralSolid {
         time_s: f64,
         cx: &Cx<'_>,
     ) -> Result<ExactLinearSolidStep> {
+        self.accept_force_path_with_dissipation(
+            q,
+            v,
+            displacement,
+            velocity,
+            supplied_work_j,
+            0.0,
+            0.0,
+            step,
+            time_s,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn accept_force_path_with_dissipation(
+        &mut self,
+        q: Vec<f64>,
+        v: Vec<f64>,
+        displacement: Vec<f64>,
+        velocity: Vec<f64>,
+        supplied_work_j: f64,
+        dissipated_j: f64,
+        cumulative_dissipated_j: f64,
+        step: u64,
+        time_s: f64,
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep> {
         let n = self.free_dofs.len();
         let mut mean_velocity_mps = zeros(n)?;
         for i in 0..n {
@@ -644,10 +691,10 @@ impl CompleteSpectralSolid {
             kinetic_before_j: self.kinetic_j,
             kinetic_after_j,
             supplied_work_j,
-            dissipated_j: 0.0,
-            cumulative_dissipated_j: 0.0,
-            balance_error_j: supplied_work_j - change,
-            cumulative_balance_error_j: cumulative_work_j
+            dissipated_j,
+            cumulative_dissipated_j,
+            balance_error_j: supplied_work_j - dissipated_j - change,
+            cumulative_balance_error_j: cumulative_work_j - cumulative_dissipated_j
                 - (stored_after_j + kinetic_after_j - self.initial_energy_j),
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
