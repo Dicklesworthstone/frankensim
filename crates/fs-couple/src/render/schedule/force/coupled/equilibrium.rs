@@ -4,6 +4,7 @@ use super::*;
 mod preload;
 mod normal;
 mod free;
+pub(super) mod pressure;
 use free::FreeResponse;
 pub(super) use normal::solve_joint;
 
@@ -264,6 +265,30 @@ impl CoupledModalSystem {
 
 // One static inverse-stiffness owner, also used for contact cross-compliance.
 // The dynamic exact-ZOH response is NOT the static inverse stiffness.
+struct StaticSystem<'a> {
+    models: &'a [ModalAcousticTimeModel],
+    columns: &'a [Vec<f64>],
+    connections: &'a [ConnectionLaw],
+    config: ModalCouplingConfig,
+    count: usize,
+}
+
+impl<'a> From<&'a CoupledModalSystem> for StaticSystem<'a> {
+    fn from(network: &'a CoupledModalSystem) -> Self {
+        Self {
+            models: &network.models,
+            columns: &network.columns,
+            connections: &network.connections,
+            config: network.config,
+            count: network.mode_count(),
+        }
+    }
+}
+
+impl StaticSystem<'_> {
+    fn mode_count(&self) -> usize { self.count }
+}
+
 pub(super) struct StaticResponse {
     compliance: Vec<f64>,
     roots: Vec<f64>,
@@ -280,21 +305,35 @@ impl StaticResponse {
     fn new_with_gauges(network: &CoupledModalSystem, nullspace: &[Vec<f64>], gate: &CancelGate)
         -> Result<Self, ModalCouplingError>
     {
+        Self::for_system(&StaticSystem::from(network), nullspace, None, gate)
+    }
+
+    // Observation adjoints only need stiffness islands touched by their right
+    // hand sides. Unobserved islands have exactly zero adjoint displacement;
+    // excluding them neither gauges nor projects the actual mechanical state.
+    fn for_system(network: &StaticSystem<'_>, nullspace: &[Vec<f64>], active: Option<&[bool]>,
+        gate: &CancelGate) -> Result<Self, ModalCouplingError>
+    {
         let free_count = network.models.iter().flat_map(|m| m.modes())
             .filter(|m| m.angular_frequency_rad_s == 0.0).count();
         let mut indices = Vec::with_capacity(free_count);
         let mut gauges = Vec::new();
         let mut compliance = Vec::with_capacity(network.mode_count());
-        for model in &network.models {
+        for model in network.models {
             poll(Some(gate))?;
             for mode in model.modes() {
+                if active.is_some_and(|mask| !mask[compliance.len()]) {
+                    gauges.push(compliance.len());
+                    compliance.push(0.0);
+                    continue;
+                }
                 if mode.angular_frequency_rad_s == 0.0 {
                     let index = compliance.len();
                     // With nonnegative spring stiffness, a stiffness row is
                     // exactly zero iff it has no participation in ANY positive
                     // spring. A dashpot contributes no static force. Do not
                     // classify small or linearly dependent support as a gauge.
-                    if !nullspace.is_empty() || network.columns.iter().zip(&network.connections)
+                    if !nullspace.is_empty() || network.columns.iter().zip(network.connections)
                         .any(|(column, link)| link.stiffness_n_m > 0.0 && column[index] != 0.0) {
                         indices.push(index);
                     } else {
@@ -310,7 +349,7 @@ impl StaticResponse {
         }
         FreeResponse::admit(network, indices.len(), nullspace.len())?;
         let roots: Vec<f64> = network.connections.iter().map(|c| c.stiffness_n_m.sqrt()).collect();
-        let matrix = connection_matrix(&network.columns, &compliance, &roots, Some(gate))?;
+        let matrix = connection_matrix(network.columns, &compliance, &roots, Some(gate))?;
         let factor = cholesky(&matrix, roots.len()).map_err(ModalCouplingError::Factor)?;
         let free = if indices.is_empty() { None } else {
             Some(FreeResponse::new(network, indices, &roots, &matrix, &factor, nullspace, gate)?)
@@ -333,6 +372,14 @@ impl StaticResponse {
         enforce_limits: bool, roundoff: Option<&[f64]>, gate: &CancelGate)
         -> Result<Vec<f64>, ModalCouplingError>
     {
+        self.solve_system(&StaticSystem::from(network), external, include_rest,
+            enforce_limits, roundoff, gate)
+    }
+
+    fn solve_system(&self, network: &StaticSystem<'_>, external: &[f64], include_rest: bool,
+        enforce_limits: bool, roundoff: Option<&[f64]>, gate: &CancelGate)
+        -> Result<Vec<f64>, ModalCouplingError>
+    {
         if roundoff.is_some_and(|a| a.len() != external.len()
             || a.iter().any(|v| !v.is_finite() || *v < 0.0)) {
             return Err(invalid("static roundoff bounds must be finite complete nonnegative values"));
@@ -347,7 +394,7 @@ impl StaticResponse {
         }
         let free: Vec<f64> = self.compliance.iter().zip(external).map(|(d,g)| finite(d*g)).collect::<Result<_,_>>()?;
         let mut rhs = Vec::with_capacity(self.roots.len());
-        for ((column, link), root) in network.columns.iter().zip(&network.connections).zip(&self.roots) {
+        for ((column, link), root) in network.columns.iter().zip(network.connections).zip(&self.roots) {
             let rest = if include_rest { link.rest_extension_m } else { 0.0 };
             rhs.push(finite(root * (dot(column, &free)? - rest))?);
         }

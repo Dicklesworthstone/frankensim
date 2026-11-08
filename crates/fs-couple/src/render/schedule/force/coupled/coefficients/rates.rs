@@ -54,6 +54,7 @@ impl PreparedMaterialRelaxationTimes {
         if let Some((branches, operator)) = &mut self.replacement {
             std::mem::swap(branches, &mut network.relaxation_branches);
             std::mem::swap(&mut operator.exact, &mut network.exact);
+            std::mem::swap(&mut operator.pressure, &mut network.pressure);
             std::mem::swap(&mut operator.harmonic_damping_columns, &mut network.harmonic_damping_columns);
         }
     }
@@ -181,7 +182,7 @@ impl CoupledModalSystem {
         let operator_models = replacements.as_ref().map_or(self.models.as_slice(), |(models, _)| models.as_slice());
         let operator = preparation::prepare(operator_models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &branches,
-            self.radiation.as_ref(), gate)?;
+            self.radiation.as_ref(), self.config, gate)?;
         poll(Some(gate))?;
         Ok(PreparedMaterialRelaxationTimes { replacement: Some((branches, operator)), models: replacements, staged, report })
     }

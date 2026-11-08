@@ -62,14 +62,14 @@ impl PreparedJointTones {
             || frequencies
                 .iter()
                 .any(|w| !w.is_finite() || *w < 0.0 || *w > maximum_frequency)
-            || network
+            || (frequencies.iter().any(|&w| w != 0.0) && network
                 .models
                 .iter()
                 .flat_map(|model| model.modes())
-                .any(|mode| mode.pressure_per_modal_velocity.im != 0.0)
+                .any(|mode| mode.pressure_per_modal_velocity.im != 0.0))
         {
             return Err(invalid(
-                "coupled tones require bounded resolved nonnegative frequencies and real instantaneous pressure maps",
+                "coupled tones require bounded resolved nonnegative frequencies and real pressure maps except for held DC",
             ));
         }
         let mut unique = Vec::new();
@@ -468,6 +468,7 @@ impl PreparedJointTones {
             .copy_from_slice(&network.material_memory);
         next += network.material_memory.len();
         self.initial[next..].copy_from_slice(&network.radiation_state);
+        let mut held_forcing = self.frequencies.iter().all(|&w| w == 0.0);
         for mode in 0..count {
             poll(gate)?;
             let mut endpoint_sum = Sum::default();
@@ -494,6 +495,7 @@ impl PreparedJointTones {
                 } else {
                     (fc, fs)
                 };
+                held_forcing &= fc == fc_end;
                 let (end, _) = self
                     .flow
                     .advance_force_phase(tone, fc_end, fs_end)
@@ -537,6 +539,16 @@ impl PreparedJointTones {
             }
             self.endpoint_external[mode] = endpoint_sum.value()?;
             self.force_envelope[mode] = envelope;
+        }
+        // A zero carrier is a held force only if its coalesced cosine
+        // coefficient is constant. An affine DC ramp still needs a broadband
+        // pressure realization, just as every nonzero-frequency tone does.
+        if !held_forcing && network.models.iter().flat_map(|model| model.modes())
+            .any(|mode| mode.pressure_per_modal_velocity.im != 0.0)
+        {
+            return Err(invalid(
+                "varying coupled tone envelopes require real instantaneous pressure maps",
+            ));
         }
         let record = if end_forces.is_some() {
             self.flow.step_affine_observed_into(
@@ -623,6 +635,7 @@ impl PreparedJointTones {
                 initial_bound_energy,
                 external_work: Some(external_work),
                 connection_transfers: Some(transfers),
+                pressure_forcing: if held_forcing { PressureForcing::Held } else { PressureForcing::Varying },
             },
             gate,
         )

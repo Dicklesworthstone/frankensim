@@ -27,7 +27,9 @@ pub use fs_phs::linear_exact::DenseExponentialBudget as CoupledToneBudget;
 /// The complete source pencil is assembled by the existing exact owner; no
 /// independent-component approximation or steady-state substitution is used.
 /// Real instantaneous pressure-per-velocity maps remain valid. A nonzero
-/// imaginary natural-mode pressure map refuses, because its quadrature is not
+/// imaginary natural-mode pressure map is also supported for held zero-frequency
+/// forcing, observed about the complete network's static load equilibrium.
+/// It refuses varying tones or DC envelopes because its quadrature is not
 /// a broadband observer of the actual forced trajectory.
 ///
 /// The runtime owns the source, preventing a cached propagator from outliving

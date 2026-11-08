@@ -258,6 +258,7 @@ pub struct CoupledModalSystem {
     /// Fixed-size scratch for allocation-free instantaneous momentum staging.
     impulse_states: Vec<ModalAcousticState>,
     exact: Option<exact::ExactNetwork>,
+    pressure: equilibrium::pressure::EquilibriumPressure,
     prepared_budget: Option<PreparedModalBudget>,
     harmonic_only: bool,
     harmonic_damping_columns: Vec<Option<Vec<f64>>>,
@@ -460,7 +461,7 @@ impl CoupledModalSystem {
         let linear_frequency_upper_bound_rad_s = upper_squared.sqrt();
         if linear_frequency_upper_bound_rad_s > guard { return Err(invalid("coupled stiffness bound exceeds the Nyquist guard")); }
         let operator = preparation::prepare(&models, &columns, &connections,
-            count, dt, preparation, &[], None, gate)?;
+            count, dt, preparation, &[], None, config, gate)?;
         let candidates = models.clone();
         let frame = CoupledModalFrame {
             sample: 0, observer_pressure_pa: 0.0, modal_energy_j: 0.0, connection_energy_j: 0.0,
@@ -491,7 +492,7 @@ impl CoupledModalSystem {
         }
         let system = Self {
             impulse_states: models.iter().flat_map(|model| model.states().iter().copied()).collect(),
-            models, candidates, exact: operator.exact,
+            models, candidates, exact: operator.exact, pressure: operator.pressure,
             prepared_budget: preparation.prepared_budget(),
             harmonic_only: preparation.is_harmonic_only(),
             harmonic_damping_columns: operator.harmonic_damping_columns,
@@ -527,10 +528,14 @@ impl CoupledModalSystem {
         if self.samples_rendered() != 0 || self.prepared_budget.is_some() {
             return Err(invalid("prepared exact propagation requires one cold budget binding"));
         }
-        self.exact = Some(exact::ExactNetwork::new_prepared_with_relaxation(
+        let operator = preparation::prepare(
             &self.models, &self.columns, &self.connections, self.mode_count(),
-            self.dt, budget, &self.relaxation_branches, self.radiation.as_ref(), gate,
-        )?);
+            self.dt, ModalPreparation::Prepared(budget), &self.relaxation_branches,
+            self.radiation.as_ref(), self.config, gate,
+        )?;
+        self.exact = operator.exact;
+        self.pressure = operator.pressure;
+        self.harmonic_damping_columns = operator.harmonic_damping_columns;
         self.prepared_budget = Some(budget);
         poll(Some(gate))?;
         Ok(self)
@@ -556,8 +561,9 @@ impl CoupledModalSystem {
         anchor_constant_loss(&mut self.connections, constant_loss)?;
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            self.radiation.as_ref(), gate)?;
+            self.radiation.as_ref(), self.config, gate)?;
         self.exact = operator.exact;
+        self.pressure = operator.pressure;
         self.harmonic_damping_columns = operator.harmonic_damping_columns;
         poll(Some(gate))?;
         Ok(self)

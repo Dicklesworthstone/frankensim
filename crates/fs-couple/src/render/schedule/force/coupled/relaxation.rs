@@ -218,9 +218,10 @@ impl CoupledModalSystem {
         all_memory.extend(memory);
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &all_branches,
-            self.radiation.as_ref(), gate)?;
+            self.radiation.as_ref(), self.config, gate)?;
         poll(Some(gate))?;
         self.exact = operator.exact;
+        self.pressure = operator.pressure;
         self.harmonic_damping_columns = operator.harmonic_damping_columns;
         self.relaxation_branches = all_branches;
         self.candidate_material_memory = all_memory.clone();

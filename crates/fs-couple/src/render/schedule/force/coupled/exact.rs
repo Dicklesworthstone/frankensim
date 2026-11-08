@@ -957,16 +957,21 @@ pub(super) fn stage(
         endpoint: rec_x, start: x, input: u,
         losses: [component_loss, connection_loss, material_loss, radiation_loss],
         initial_bound_energy: h_x, external_work: None, connection_transfers: None,
+        pressure_forcing: PressureForcing::Held,
     }, gate)
 }
 
 // The original endpoint/material/budget/accounting gates also admit complete
 // joint trajectories. A varying boundary effort supplies its actual integrated
 // work and original connection integrals, never endpoint pressure times travel.
+#[derive(Clone, Copy)]
+enum PressureForcing { Held, Varying }
+
 struct PropagatedCandidate {
     endpoint: Vec<f64>, start: Vec<f64>, input: Vec<f64>, losses: [f64; 4],
     initial_bound_energy: f64, external_work: Option<f64>,
     connection_transfers: Option<Vec<crate::port_adoption::PortTransfer>>,
+    pressure_forcing: PressureForcing,
 }
 fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate: PropagatedCandidate,
     gate: Option<&CancelGate>) -> Result<(), ModalCouplingError>
@@ -977,13 +982,15 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
     let before=network.total_energy_j()?;
     let PropagatedCandidate { endpoint: rec_x, start: x, input: u,
         losses: [component_loss,connection_loss,material_loss,radiation_loss],
-        initial_bound_energy: h_x, external_work, connection_transfers }=candidate;
+        initial_bound_energy: h_x, external_work, connection_transfers, pressure_forcing }=candidate;
     let mut pressure = 0.0;
     let mut modal_after = 0.0;
     let mut work = external_work.unwrap_or(0.0);
     for i in 0..network.models.len() {
         poll(gate)?;
         let range = network.offsets[i]..network.offsets[i + 1];
+        let equilibrium_pressure = matches!(pressure_forcing, PressureForcing::Held)
+            && network.pressure.needs_correction(i);
         let states: Vec<_> = range
             .clone()
             .map(|k| ModalAcousticState {
@@ -998,7 +1005,7 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
                 source,
             })?;
         let mut component_pressure = 0.0;
-        for ((k, mode), state) in range.zip(network.models[i].modes()).zip(&states) {
+        for ((k, mode), state) in range.clone().zip(network.models[i].modes()).zip(&states) {
             network.old_q[k] = x[2 * k];
             network.free_delta[k] = finite(rec_x[2 * k] - x[2 * k])?;
             if external_work.is_none() { work = finite(work + external[k] * network.free_delta[k])?; }
@@ -1009,12 +1016,19 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
                             + (mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg)
                                 .powi(2)),
             )?;
-            component_pressure = finite(
-                component_pressure
-                    + mode.pressure_per_modal_velocity.re * state.velocity_m_sqrt_kg_per_s
-                    + mode.pressure_per_modal_velocity.im
-                        * mode.angular_frequency_rad_s
-                        * state.displacement_m_sqrt_kg,
+            if !equilibrium_pressure {
+                component_pressure = finite(
+                    component_pressure
+                        + mode.pressure_per_modal_velocity.re * state.velocity_m_sqrt_kg_per_s
+                        + mode.pressure_per_modal_velocity.im
+                            * mode.angular_frequency_rad_s
+                            * state.displacement_m_sqrt_kg,
+                )?;
+            }
+        }
+        if equilibrium_pressure {
+            component_pressure = network.pressure.observe(
+                i, &network.candidates[i], &external[range], external, gate,
             )?;
         }
         limit(

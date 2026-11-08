@@ -47,6 +47,7 @@ pub(super) enum CoefficientEndpoint {
 struct Replacement {
     connections: Vec<ConnectionLaw>,
     exact: Option<exact::ExactNetwork>,
+    pressure: equilibrium::pressure::EquilibriumPressure,
     harmonic_damping_columns: Vec<Option<Vec<f64>>>,
     mechanical_bound: f64,
     frequency_bound: f64,
@@ -260,7 +261,7 @@ impl CoupledModalSystem {
         let radiation = refreshed_radiation.as_ref().or(self.radiation.as_ref());
         let operator = preparation::prepare(&self.models, &self.columns, &connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            radiation, gate)?;
+            radiation, self.config, gate)?;
         // A changed stiffness can also change a different constant-loss port's
         // projected damping column. Admit ALL actual new reactions.
         for (index, law) in connections.iter().enumerate() {
@@ -293,6 +294,7 @@ impl CoupledModalSystem {
             replacement: Some(Replacement {
                 connections,
                 exact: operator.exact,
+                pressure: operator.pressure,
                 harmonic_damping_columns: operator.harmonic_damping_columns,
                 mechanical_bound,
                 frequency_bound,
@@ -338,6 +340,7 @@ impl CoupledModalSystem {
         if let Some(replacement) = prepared.replacement {
             self.connections = replacement.connections;
             self.exact = replacement.exact;
+            self.pressure = replacement.pressure;
             self.harmonic_damping_columns = replacement.harmonic_damping_columns;
             self.linear_frequency_upper_bound_rad_s = replacement.frequency_bound;
             if let Some(r) = &mut self.radiation {

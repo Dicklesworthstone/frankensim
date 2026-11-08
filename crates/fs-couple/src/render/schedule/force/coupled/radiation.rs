@@ -110,12 +110,13 @@ impl CoupledModalSystem {
         }
         let operator = preparation::prepare(&self.models, &self.columns, &self.connections,
             self.mode_count(), self.dt, self.preparation(), &self.relaxation_branches,
-            Some(&binding), gate)?;
+            Some(&binding), self.config, gate)?;
         poll(Some(gate))?;
         self.radiation_state = vec![0.0; 2*model.poles.len()];
         self.candidate_radiation_state = self.radiation_state.clone();
         self.radiation = Some(binding);
         self.exact = operator.exact;
+        self.pressure = operator.pressure;
         self.harmonic_damping_columns = operator.harmonic_damping_columns;
         self.linear_frequency_upper_bound_rad_s = bound;
         Ok(self)

@@ -42,6 +42,7 @@ impl ModalPreparation {
 pub(super) struct PreparedOperator {
     pub(super) exact: Option<exact::ExactNetwork>,
     pub(super) harmonic_damping_columns: Vec<Option<Vec<f64>>>,
+    pub(super) pressure: equilibrium::pressure::EquilibriumPressure,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -54,9 +55,17 @@ pub(super) fn prepare(
     choice: ModalPreparation,
     branches: &[fs_phs::RelaxationBranch],
     radiation: Option<&radiation::Binding>,
+    config: ModalCouplingConfig,
     gate: &CancelGate,
 ) -> Result<PreparedOperator, ModalCouplingError> {
     poll(Some(gate))?;
+    let pressure = if choice.is_harmonic_only() {
+        equilibrium::pressure::EquilibriumPressure::default()
+    } else {
+        equilibrium::pressure::EquilibriumPressure::prepare(
+            models, columns, links, config, choice.prepared_budget(), gate,
+        )?
+    };
     let exact = match choice {
         ModalPreparation::HarmonicOnly(budget) => {
             admit_harmonic(
@@ -73,11 +82,12 @@ pub(super) fn prepare(
             return Ok(PreparedOperator {
                 exact: None,
                 harmonic_damping_columns,
+                pressure,
             });
         }
         ModalPreparation::Prepared(budget) => {
             Some(exact::ExactNetwork::new_prepared_with_relaxation(
-                models, columns, links, count, dt, budget, branches, radiation, gate,
+                models, columns, links, count, dt, pressure.reserve(budget)?, branches, radiation, gate,
             )?)
         }
         ModalPreparation::Ordinary
@@ -96,6 +106,7 @@ pub(super) fn prepare(
     Ok(PreparedOperator {
         exact,
         harmonic_damping_columns: Vec::new(),
+        pressure,
     })
 }
 

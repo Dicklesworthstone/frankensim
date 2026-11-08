@@ -661,6 +661,7 @@ impl PreparedJointDg {
                 },
                 external_work: Some(finite(authored_external_work_j - inlet_work_j)?),
                 connection_transfers: Some(transfers),
+                pressure_forcing: PressureForcing::Varying,
             },
             Some(gate),
         )?;

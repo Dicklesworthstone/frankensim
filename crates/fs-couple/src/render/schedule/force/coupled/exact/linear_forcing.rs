@@ -383,6 +383,7 @@ impl PreparedLinearForcing {
             )?,
             external_work: Some(self.integrals[0]),
             connection_transfers: Some(transfers),
+            pressure_forcing: if start == end { PressureForcing::Held } else { PressureForcing::Varying },
         };
         // stage_candidate deliberately does not publish a held-input material
         // trajectory for this varying force. All physical history, source-domain

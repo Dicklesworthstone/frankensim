@@ -1,3 +1,36 @@
+## Equilibrium-relative pressure in coupled modal networks
+
+Held-force `CoupledModalSystem` frames observe vibration relative to the complete
+loaded equilibrium. The static operator is `K = diag(omega^2) + sum(k b b^T)`;
+connector rest lengths supply `f_rest = sum(k r b)`. For each component's
+displacement-quadrature weights `w_i = Im(H_i) omega_i`, preparation uses the
+existing static Schur owner to solve `K z = w`. The runtime pressure subtracts
+`z^T (F + f_rest)` from that component's original quadrature observation before
+applying its pressure ceiling and the combined ceiling.
+
+Preparation checks the original adjoint residual, admits setup work and storage,
+and retains compact indexed coefficients. Runtime correction uses compensated
+dot products and preallocated transfer data. Real-only observations retain their
+original arithmetic, and uncoupled observations use the existing equilibrium-aware
+modal owner. Unobserved stiffness islands are excluded from the static solve;
+their free motion and applied forces remain part of the physical propagation.
+A required elastic/free island with unresolved static support refuses observation
+preparation through the existing support-rank admission.
+
+The pressure map is installed with the original prepared operator and rebuilt
+with coefficient, material and radiation changes. A refused replacement preserves
+the accepted state and previous map. Mechanical coordinates, spring storage,
+external work, heat and reaction-force accounting retain their existing owners.
+Equal-endpoint force ramps and constant zero-frequency tones use the held-force
+observation; genuinely varying ramps, tones and continuous DG boundaries retain
+their distinct observation law. This remains a narrow-band modal transfer and
+does not establish broadband radiation accuracy.
+
+The `pressure_observation` module in `tests/modal_coupling.rs` contains independent
+two-mode analytic amplitude, static-silence, signed load/release, parameter-update,
+pressure-limit, mechanical-invariance and free-island regressions for ordinary
+and prepared propagation.
+
 ## Incident sound drives original material shells in relaxing gas
 
 `tensor_shell_radiation::open::molecular` composes the original full-coordinate

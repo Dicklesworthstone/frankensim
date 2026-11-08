@@ -20,7 +20,7 @@ pub(super) struct FreeResponse {
 impl FreeResponse {
     // Includes the existing setup screen plus bounded free-block solves,
     // contractions, declared-nullspace checks and factor work.
-    pub(super) fn admit(network: &CoupledModalSystem, free: usize, gauges: usize)
+    pub(super) fn admit(network: &StaticSystem<'_>, free: usize, gauges: usize)
         -> Result<(), ModalCouplingError>
     {
         if gauges > free {
@@ -41,7 +41,7 @@ impl FreeResponse {
         Ok(())
     }
 
-    pub(super) fn new(network: &CoupledModalSystem, indices: Vec<usize>, roots: &[f64],
+    pub(super) fn new(network: &StaticSystem<'_>, indices: Vec<usize>, roots: &[f64],
         matrix: &[f64], factor: &Cholesky, nullspace: &[Vec<f64>], gate: &CancelGate)
         -> Result<Self, ModalCouplingError>
     {
@@ -208,7 +208,7 @@ impl FreeResponse {
 // must vanish on elastic modes and annihilate EACH positive-stiffness b.
 // Checking columns separately prevents weak springs from being discarded by
 // comparison with a stronger spring. No loads or basis vectors are repaired.
-fn admit_nullspace(network: &CoupledModalSystem, indices: &[usize],
+fn admit_nullspace(network: &StaticSystem<'_>, indices: &[usize],
     basis: &[Vec<f64>], gate: &CancelGate) -> Result<Vec<Vec<f64>>, ModalCouplingError>
 {
     let n = network.mode_count();
@@ -230,7 +230,7 @@ fn admit_nullspace(network: &CoupledModalSystem, indices: &[usize],
                 return Err(invalid("static null directions must be orthonormal"));
             }
         }
-        for (column, link) in network.columns.iter().zip(&network.connections) {
+        for (column, link) in network.columns.iter().zip(network.connections) {
             poll(Some(gate))?;
             if link.stiffness_n_m > 0.0 {
                 check_zero_dot(column, vector, tolerance,
