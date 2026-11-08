@@ -16,7 +16,7 @@
 pub mod nozzle;
 /// Simultaneous selective streams carrying original partial species enthalpy.
 pub mod species;
-mod mixing;
+pub(in crate::thermochemical_gas) mod mixing;
 
 use super::IsochoricRealGasParcel;
 use crate::thermochemical_gas::energy::{

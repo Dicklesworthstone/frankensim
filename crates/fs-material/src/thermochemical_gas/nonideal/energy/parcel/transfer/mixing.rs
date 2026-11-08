@@ -38,7 +38,7 @@ pub(super) fn receiver_model(
 
 /// Bind a source-compatible target inventory to the original critical/pair
 /// catalogs. The caller uses the shared ideal catalog join before this step.
-pub(super) fn model_for_source(
+pub(in crate::thermochemical_gas) fn model_for_source(
     originals: &[&ThermochemicalPengRobinsonModel],
     source: ThermochemicalGasModel,
 ) -> Result<ThermochemicalPengRobinsonModel, GasEnergyError> {

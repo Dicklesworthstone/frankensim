@@ -21,6 +21,8 @@ use fs_thermochem::eos::peng_robinson::{
 pub mod acoustics;
 /// Entropy-constrained pressure changes through the same original phase owner.
 pub mod entropy;
+/// Conservative original phase calorics for distinct-composition material feeds.
+pub mod mixing;
 /// Reusable original inlet for bounded repeated pressure/enthalpy increments.
 pub mod prepared;
 /// Conserved internal-energy and volume closure over the same phase owner.
