@@ -390,7 +390,12 @@ impl FlueFilePerformance {
     /// more than 5 % from the exact one in the receiver's band, or a Re Z with no
     /// Cholesky factor on a 5 Hz grid to Nyquist. The mouth is not an outlet and gets
     /// no mutual term; no body scattering or baffle image is modeled. Without the row,
-    /// nothing changes.
+    /// nothing changes. `outlet_mutual pritchard` instead weights that term by the
+    /// openings' own radiation resistance, Pritchard's (1960) mutual impedance as
+    /// printed by Butler (2022, Eq. 1) with sqrt(R_ii R_jj) for unequal openings,
+    /// passive by construction with the compact self loads; it also refuses a pair
+    /// closer than ten samples of travel and a load whose resistance does not vanish
+    /// as w^2 at DC, and its band gate is against the weighted exact term.
     /// `radiation mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS`
     /// instead loads one explicit reciprocal rational operator for all declared
     /// outlets, in their original order. The shared artifact decoder retains its
@@ -613,18 +618,21 @@ impl FlueFilePerformance {
         };
         let (outlet_node, additional_outlets, outlet_flanges) =
             duct.read_outlets(&mut rows, radiation_reaction)?;
-        // Optional `outlet_mutual free-field` after the outlet rows: delayed
-        // free-field mutual radiation between the compact outlets.
+        // Optional `outlet_mutual free-field` (or `outlet_mutual pritchard`)
+        // after the outlet rows: delayed mutual radiation between the compact
+        // outlets, plain free-field or weighted by their own resistance.
         let outlet_mutual = if rows.next_is("outlet_mutual") {
             let mut row = rows.row("outlet_mutual")?;
-            if row.fields.next() != Some("free-field") {
-                return Err(bad(rows.line, "outlet_mutual requires free-field"));
-            }
+            let form = match row.fields.next() {
+                Some("free-field") => crate::flue_loop::network::outlet_mutual::OutletMutualForm::FreeField,
+                Some("pritchard") => crate::flue_loop::network::outlet_mutual::OutletMutualForm::Pritchard,
+                _ => return Err(bad(rows.line, "outlet_mutual requires free-field or pritchard")),
+            };
             row.end()?;
             if !radiation_reaction {
                 return Err(bad(rows.line, "outlet_mutual requires radiation compact-baffled"));
             }
-            Some(rows.line)
+            Some((rows.line, form))
         } else { None };
         let aperture_size_m = read_mouth_aperture(&mut rows)?;
         let mouth_radiation = if rows.next_is("mouth_radiation") {
@@ -802,7 +810,7 @@ impl FlueFilePerformance {
             voice.with_opening_losses(opening_losses, gate).map_err(FlueInputError::Physics)?
         };
         let voice = match outlet_mutual {
-            Some(line) => {
+            Some((line, form)) => {
                 // The self loads' own exterior gas, one for every outlet.
                 let Some(first) = radiation_bindings.first().map(|b| *b.load()) else {
                     return Err(bad(line, "outlet_mutual requires installed compact outlet loads"));
@@ -815,7 +823,7 @@ impl FlueFilePerformance {
                 }
                 let mut outlets = vec![(outlet_node, [0.0; 2])];
                 outlets.extend(additional_outlets.iter().map(|outlet| (outlet.node, outlet.center_m)));
-                voice.with_outlet_mutual(&outlets, density, sound_speed, receiver.maximum_frequency_hz, gate)
+                voice.with_outlet_mutual_form(form, &outlets, density, sound_speed, receiver.maximum_frequency_hz, gate)
                     .map_err(|error| match error {
                         FlueError::Invalid { what } => bad(line, what),
                         other => FlueInputError::Physics(other),

@@ -258,3 +258,147 @@ fn the_cold_admission_refuses_what_it_cannot_certify() {
     let exact = a.with_sampling(RelaxationSampling::ExactHeldFlow);
     assert!(what(OutletMutual::admit(&[2, 3], &[[0.0; 2], [D, 0.0]], &[exact, b], RHO, C, DT, BAND, &gate())).contains("bilinear"));
 }
+
+// ---- `pritchard`: the free-field term weighted by sqrt(R_ii R_jj)/(rho w^2/(4 pi c)).
+
+fn pritchard(d: f64) -> Result<OutletMutual, FlueError> {
+    OutletMutual::admit_form(OutletMutualForm::Pritchard, &[2, 3], &[[0.0, 0.0], [d, 0.0]], &loads(), RHO, C, DT, BAND, &gate())
+}
+
+/// The alto recorder's E5 fingering as the scale stops play it: the foot's open end at the origin and six open
+/// holes in a line, every one an unflanged compact load (radii from the cards' own load poles).
+fn recorder_e5(form: OutletMutualForm) -> Result<OutletMutual, FlueError> {
+    let radii = [0.005_63, 0.002_86, 0.002_81, 0.002_63, 0.002_90, 0.002_43, 0.002_38];
+    let x = [0.0, -0.231_475, -0.199_560, -0.164_109, -0.135_276, -0.108_711, -0.078_246];
+    let loads: Vec<RelaxationImpedanceSpec> = radii.iter()
+        .map(|&a| BaffledRadiationLoad::with_flange(a, RHO, C, DT, BAND, RadiationFlange::Unflanged, &gate()).unwrap().load())
+        .collect();
+    let centers: Vec<[f64; 2]> = x.iter().map(|&v| [v, 0.0]).collect();
+    OutletMutual::admit_form(form, &[24, 11, 13, 15, 17, 19, 21], &centers, &loads, RHO, C, DT, BAND, &gate())
+}
+
+#[test]
+fn free_field_pressures_are_the_closed_form_bit_for_bit() {
+    let mut mutual = two(D).unwrap();
+    let record = mutual.record().clone();
+    assert_eq!(record.form, OutletMutualForm::FreeField);
+    assert_eq!(record.min_weight_half_taps, 0);
+    assert_eq!(record.max_free_field_deviation.to_bits(), record.max_band_error.to_bits());
+    assert_eq!(mutual.min_read_lag(), 24);
+    let pair = mutual.pairs()[0];
+    let (n, f, g) = (pair.delay_samples, pair.delay_fraction, pair.gain);
+    let mut history: Vec<[f64; 2]> = Vec::new();
+    let mut out = [0.0; 2];
+    for k in 0..400usize {
+        mutual.exterior_pressures(&mut out);
+        // q[now - lag] of each outlet, zero before the start.
+        let q = |o: usize, lag: usize| if lag <= history.len() { history[history.len() - lag][o] } else { 0.0 };
+        let slope = |o: usize| (1.0 - f) * (q(o, n) - q(o, n + 2)) + f * (q(o, n + 1) - q(o, n + 3));
+        assert_eq!(out[0].to_bits(), (g * slope(1)).to_bits(), "step {k}");
+        assert_eq!(out[1].to_bits(), (g * slope(0)).to_bits(), "step {k}");
+        #[allow(clippy::cast_precision_loss)]
+        let flows = [fs_math::det::sin(0.37 * k as f64) * 1e-5, fs_math::det::cos(0.11 * k as f64) * 2e-5];
+        mutual.push_flows(&flows);
+        history.push(flows);
+    }
+}
+
+#[test]
+fn pritchard_admits_the_recorder_line_the_free_field_term_refuses() {
+    assert!(what(recorder_e5(OutletMutualForm::FreeField)).contains("not passive"));
+    let mutual = recorder_e5(OutletMutualForm::Pritchard).unwrap();
+    let record = mutual.record().clone();
+    assert_eq!(record.form, OutletMutualForm::Pritchard);
+    assert_eq!(mutual.pairs().len(), 21);
+    assert!(record.min_weight_half_taps >= PRITCHARD_MIN_HALF_TAPS && record.min_weight_half_taps <= PRITCHARD_MAX_HALF_TAPS, "{record:?}");
+    assert!(record.min_pivot_ratio > 0.0 && record.grid_points >= 28_799, "{record:?}");
+    // Against its own exact term, and how far that is from the plain free-field one.
+    assert!(record.max_band_error < 0.005, "{record:?}");
+    assert!(record.max_free_field_deviation < 0.05, "{record:?}");
+    assert!(mutual.min_read_lag() >= 1, "{}", mutual.min_read_lag());
+    for (k, pair) in mutual.pairs().iter().enumerate() {
+        let half = mutual.weight_half_taps(k);
+        assert_eq!(half, (pair.delay_samples - 1).min(PRITCHARD_MAX_HALF_TAPS));
+        // At low frequency the weight is 1 for two unflanged loads: the free-field monopole term.
+        let low = TAU * 20.0;
+        assert!(rel(mutual.realized_term(k, low), pair.realized(low, DT)) < 1e-3, "pair {k}");
+    }
+}
+
+#[test]
+fn pritchard_kernel_realizes_its_weighted_term_reciprocally() {
+    let mutual = pritchard(D).unwrap();
+    let record = mutual.record().clone();
+    assert_eq!(record.form, OutletMutualForm::Pritchard);
+    assert!(record.max_band_error < 0.01 && record.min_pivot_ratio > 0.0, "{record:?}");
+    let [la, lb] = loads();
+    let mono = RHO / (4.0 * PI * C);
+    for hz in [500.0, 1125.0, 2250.0] {
+        let omega = TAU * hz;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let period = (RATE / hz).round() as usize;
+        let (start, steps) = (4096, 4096 + 32 * period);
+        let mut runs = [mutual.clone(), mutual.clone()];
+        let (mut seen, mut drive) = ([vec![], vec![]], vec![]);
+        let mut out = [0.0; 2];
+        for k in 0..steps {
+            #[allow(clippy::cast_precision_loss)]
+            let q = fs_math::det::cos(omega * k as f64 * DT);
+            for (r, run) in runs.iter_mut().enumerate() {
+                run.exterior_pressures(&mut out);
+                // Only the other outlet moves: this one sees M q.
+                if k >= start { seen[r].push(out[r]); }
+                run.push_flows(&[[0.0, q], [q, 0.0]][r]);
+            }
+            if k >= start { drive.push(q); }
+        }
+        assert_eq!(seen[0], seen[1], "{hz} Hz: reciprocity");
+        let h = bin(&seen[0], omega, start) / bin(&drive, omega, start);
+        let realized = mutual.realized_term(0, omega);
+        assert!(rel(h, realized) < 1e-9, "{hz} Hz: {h:?} vs realized {realized:?}");
+        let pair = mutual.pairs()[0];
+        let target = pair.exact(omega, RHO, C).scale(pritchard_weight(&la, &lb, mono, omega));
+        assert!(rel(h, target) <= record.max_band_error + 1e-9, "{hz} Hz: {h:?} vs target {target:?}");
+    }
+}
+
+#[test]
+fn from_rest_the_pritchard_exterior_never_returns_more_than_it_took() {
+    let mut net = network();
+    let mut mutual = pritchard(D).unwrap();
+    let (mut supplied, mut taken, mut peak) = (0.0f64, 0.0f64, 0.0f64);
+    for k in 0..40_000 {
+        mutual.apply(&mut net).unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        let x = if k < 400 { 40.0 * fs_math::det::sin(0.11 * k as f64) * fs_math::det::sin(PI * k as f64 / 400.0) } else { 0.0 };
+        let frame = net.step(x).unwrap();
+        mutual.record_step(&net);
+        supplied += frame.inlet_work_j;
+        for node in [2, 3] {
+            let o = net.node_frame(node).unwrap();
+            taken += o.pressure_pa * o.net_flow_into_node_m3_s * DT;
+        }
+        peak = peak.max(frame.stored_energy_j);
+        let scale = peak + supplied.abs() + 1e-30;
+        assert!(frame.balance_residual_j().abs() <= 1e-11 * scale, "step {k}: {frame:?}");
+        assert!(taken >= -1e-11 * scale, "step {k}: the outlets returned {taken} J net");
+        assert!(frame.wave_stored_energy_j <= supplied + 1e-11 * scale, "step {k}: wave energy above supplied");
+    }
+    assert!(peak > 0.0);
+    assert!(net.stored_energy_j() < 1e-9 * peak, "{} of {peak}", net.stored_energy_j());
+}
+
+#[test]
+fn pritchard_refuses_what_its_weight_cannot_carry() {
+    // Nine samples of travel leave a weight filter shorter than eight taps.
+    assert!(what(pritchard(9.5 * C * DT)).contains("ten samples"));
+    assert!(pritchard(10.5 * C * DT).is_ok());
+    // A base resistance does not vanish at DC: no weight there.
+    let [a, b] = loads();
+    let base = SeriesImpedanceSpec { resistance_pa_s_m3: 1.0e3, inertance_pa_s2_m3: 0.0, compliance_m3_pa: None };
+    let lossy = RelaxationImpedanceSpec::new(base, a.terms()).unwrap();
+    assert!(what(OutletMutual::admit_form(OutletMutualForm::Pritchard, &[2, 3], &[[0.0; 2], [D, 0.0]], &[lossy, b],
+        RHO, C, DT, BAND, &gate())).contains("vanishes"));
+    // The plain row still admits that pair.
+    assert!(OutletMutual::admit(&[2, 3], &[[0.0; 2], [D, 0.0]], &[lossy, b], RHO, C, DT, BAND, &gate()).is_ok());
+}

@@ -19,6 +19,22 @@
 //! Cholesky factor at every 5 Hz from 5 Hz to Nyquist, and M must stay within
 //! 5 % of the exact term over the receiver's band.
 //!
+//! The `pritchard` form weights that term by the openings' own radiation
+//! resistance: Pritchard's (1960) mutual impedance of small radiators, as
+//! printed by Butler (2022, Eq. 1), Z_12 = R_11 [sin(kd) + j cos(kd)]/(kd) for
+//! (ka)^2 << 1 and a/d << 1, with R_11 -> sqrt(R_ii R_jj) for unequal openings.
+//! It is the free-field term times w_ij = sqrt(R_ii R_jj)/(rho w^2/(4 pi c)),
+//! so Re Z = (rho w^2/(4 pi c)) diag(g) S diag(g) with S_ij = sinc(k d_ij) and
+//! g_i^2 = R_ii/(rho w^2/(4 pi c)): positive semidefinite by the Schur product,
+//! where compact unflanged self loads (whose resistance falls under a free-field
+//! monopole's) make the plain free-field term indefinite once three or more
+//! openings sit in a line within a wavelength. The weight is realized as a
+//! symmetric FIR of half-length T = min(N - 1, 16) taps, from the self loads'
+//! bilinear-realized resistance at the warped frequency, normalized to its
+//! exact DC value and convolved into the pair's kernel; every tap still reads
+//! an accepted flow. The same cold admission applies, its band gate against
+//! the weighted exact term.
+//!
 //! Not modeled: scattering by the instrument body (the outlets sit in the
 //! card's flat plane at their declared centers, in free field), the image of
 //! a baffle, the mouth (it is not an outlet), and any mean flow.
@@ -38,8 +54,36 @@ pub const MAX_MUTUAL_OUTLETS: usize = 64;
 pub const MAX_MUTUAL_HISTORY: usize = 1 << 16;
 // Largest admitted whole delay, N + 3 <= MAX_MUTUAL_HISTORY - 1.
 const MAX_DELAY: f64 = 65_532.0;
+/// Largest half-length of a `pritchard` weight filter [samples].
+pub const PRITCHARD_MAX_HALF_TAPS: usize = 16;
+/// Smallest admitted half-length of a `pritchard` weight filter [samples].
+pub const PRITCHARD_MIN_HALF_TAPS: usize = 8;
+// Midpoints on (0, pi) of the weight filter's inverse transform.
+const PRITCHARD_QUADRATURE: usize = 4096;
 
 fn invalid(what: &'static str) -> FlueError { FlueError::Invalid { what } }
+
+/// The mutual term a card row asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutletMutualForm {
+    /// The free-field monopole term j w rho exp(-j k d)/(4 pi d).
+    FreeField,
+    /// Pritchard's term, the free-field one times sqrt(R_ii R_jj)/(rho w^2/(4 pi c)).
+    Pritchard,
+}
+
+/// A pair's `pritchard` weight filter and its convolved kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Weighted {
+    /// Half-length T [samples].
+    half: usize,
+    /// Start of w[0..=T] in the weight store.
+    weights: usize,
+    /// Start of the 2T + 4 kernel taps in the tap store.
+    taps: usize,
+    /// Lag of the first kernel tap, N - T >= 1.
+    first_lag: usize,
+}
 
 /// One coupled pair, in the declared outlet order (`outlets[0] < outlets[1]`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -79,6 +123,13 @@ pub struct OutletMutualRecord {
     pub min_pivot_ratio: f64,
     /// Frequency of that pivot [Hz].
     pub min_pivot_hz: f64,
+    /// The admitted form; `max_band_error` is against its own exact term.
+    pub form: OutletMutualForm,
+    /// Smallest weight-filter half-length over the pairs (0 for `free-field`).
+    pub min_weight_half_taps: usize,
+    /// Largest relative distance of the realized term from the plain
+    /// free-field term in band (equal to `max_band_error` for `free-field`).
+    pub max_free_field_deviation: f64,
 }
 
 /// Explicit delayed mutual radiation: one flow ring per outlet.
@@ -91,6 +142,66 @@ pub struct OutletMutual {
     rings: Vec<f64>,
     scratch: Vec<f64>,
     record: OutletMutualRecord,
+    dt: f64,
+    // `pritchard` only: one entry per pair, its weights and convolved taps.
+    weighted: Vec<Weighted>,
+    weights: Vec<f64>,
+    taps: Vec<f64>,
+}
+
+/// lim Re Z(w)/w^2 at DC of a load whose resistance vanishes there as w^2:
+/// no base resistance and no compliance term, at least one relaxation term.
+fn dc_curvature(load: &RelaxationImpedanceSpec) -> Option<f64> {
+    if load.base().resistance_pa_s_m3.abs() > 0.0 || !load.compliance_terms().is_empty() || load.terms().is_empty() {
+        return None;
+    }
+    let c: f64 = load.terms().iter().map(|t| t.resistance_pa_s_m3 / (t.rate_per_s * t.rate_per_s)).sum();
+    (c.is_finite() && c > 0.0).then_some(c)
+}
+
+/// sqrt(Re Z_a Re Z_b)/(mono w^2) at angular frequency `w`, mono = rho/(4 pi c).
+fn pritchard_weight(a: &RelaxationImpedanceSpec, b: &RelaxationImpedanceSpec, mono: f64, w: f64) -> f64 {
+    fs_math::det::sqrt(self_resistance(a, w) * self_resistance(b, w)) / (mono * w * w)
+}
+
+/// Symmetric weight filter w[0..=half] of the bilinear-realized weight
+/// W(theta) = pritchard_weight at (2/dt) tan(theta/2), by the midpoint rule on
+/// (0, pi), scaled so that w[0] + 2 sum w[m] equals its exact DC value `dc`.
+fn pritchard_filter(a: &RelaxationImpedanceSpec, b: &RelaxationImpedanceSpec, mono: f64, dc: f64, dt: f64,
+    half: usize, out: &mut [f64],
+) {
+    out.fill(0.0);
+    #[allow(clippy::cast_precision_loss)]
+    let q = PRITCHARD_QUADRATURE as f64;
+    for k in 0..PRITCHARD_QUADRATURE {
+        #[allow(clippy::cast_precision_loss)]
+        let theta = core::f64::consts::PI * (k as f64 + 0.5) / q;
+        let value = pritchard_weight(a, b, mono, 2.0 * fs_math::det::tan(0.5 * theta) / dt);
+        let c1 = fs_math::det::cos(theta);
+        let (mut prev, mut cur) = (c1, 1.0);
+        for tap in out.iter_mut().take(half + 1) {
+            *tap += value * cur;
+            let next = 2.0 * c1 * cur - prev;
+            (prev, cur) = (cur, next);
+        }
+    }
+    for tap in out.iter_mut().take(half + 1) { *tap /= q; }
+    let sum = out[0] + 2.0 * out[1..=half].iter().sum::<f64>();
+    let scale = dc / sum;
+    for tap in out.iter_mut().take(half + 1) { *tap *= scale; }
+}
+
+/// W(theta) = w[0] + 2 sum_m w[m] cos(m theta) of a symmetric filter.
+fn filter_response(w: &[f64], theta: f64) -> f64 {
+    let c1 = fs_math::det::cos(theta);
+    let (mut prev, mut cur) = (c1, 1.0);
+    let mut sum = 0.0;
+    for (m, &tap) in w.iter().enumerate() {
+        sum += if m == 0 { tap } else { 2.0 * tap * cur };
+        let next = 2.0 * c1 * cur - prev;
+        (prev, cur) = (cur, next);
+    }
+    sum
 }
 
 /// Bilinear-realized self resistance Re Z(w) of an admitted relaxation load.
@@ -148,6 +259,21 @@ impl OutletMutual {
     pub fn admit(nodes: &[usize], centers: &[[f64; 2]], loads: &[RelaxationImpedanceSpec],
         density: f64, sound_speed: f64, dt: f64, band_hz: f64, gate: &fs_exec::CancelGate,
     ) -> Result<Self, FlueError> {
+        Self::admit_form(OutletMutualForm::FreeField, nodes, centers, loads, density, sound_speed, dt, band_hz, gate)
+    }
+
+    /// [`Self::admit`] for either form. `pritchard` also refuses a load whose
+    /// resistance does not vanish as w^2 at DC (a base resistance or a
+    /// compliance term), a pair closer than ten samples of travel (its weight
+    /// filter would not fit inside the delay), and a realized term more than
+    /// 5 % from the weighted exact term in band.
+    ///
+    /// # Errors
+    /// As [`Self::admit`], plus the `pritchard` refusals above.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn admit_form(form: OutletMutualForm, nodes: &[usize], centers: &[[f64; 2]], loads: &[RelaxationImpedanceSpec],
+        density: f64, sound_speed: f64, dt: f64, band_hz: f64, gate: &fs_exec::CancelGate,
+    ) -> Result<Self, FlueError> {
         let n = nodes.len();
         if n < 2 || n > MAX_MUTUAL_OUTLETS {
             return Err(invalid("outlet_mutual couples two to 64 outlets"));
@@ -196,13 +322,54 @@ impl OutletMutual {
                     gain: density / (4.0 * core::f64::consts::PI * d) / (2.0 * dt) });
             }
         }
-        let len = longest + 3;
+        let mut len = longest + 3;
+        let mono = density / (4.0 * core::f64::consts::PI * sound_speed);
+        let (mut weighted, mut weights, mut taps) = (Vec::new(), Vec::new(), Vec::new());
+        if form == OutletMutualForm::Pritchard {
+            let mut curvature = Vec::with_capacity(n);
+            for load in loads {
+                let Some(c) = dc_curvature(load) else {
+                    return Err(invalid("outlet_mutual pritchard needs self loads whose resistance vanishes as w^2 at DC (no base resistance or compliance term)"));
+                };
+                curvature.push(c);
+            }
+            for pair in &pairs {
+                if pair.delay_samples < PRITCHARD_MIN_HALF_TAPS + 1 {
+                    return Err(invalid("outlet_mutual pritchard pair is closer than ten samples of travel: its weight filter would not fit inside the delay"));
+                }
+                let half = (pair.delay_samples - 1).min(PRITCHARD_MAX_HALF_TAPS);
+                let first_lag = pair.delay_samples - half;
+                if pair.delay_samples + half + 3 > MAX_MUTUAL_HISTORY - 1 {
+                    return Err(invalid("outlet_mutual pair delay exceeds the retained history"));
+                }
+                len = len.max(pair.delay_samples + half + 3);
+                let [a, b] = pair.outlets;
+                let entry = Weighted { half, weights: weights.len(), taps: taps.len(), first_lag };
+                weights.try_reserve(half + 1).map_err(|_| invalid("outlet_mutual allocation failed"))?;
+                weights.resize(entry.weights + half + 1, 0.0);
+                let dc = fs_math::det::sqrt(curvature[a] * curvature[b]) / mono;
+                pritchard_filter(&loads[a], &loads[b], mono, dc, dt, half, &mut weights[entry.weights..]);
+                // Kernel taps at lags N - T + i: gain [(1-f), f, -(1-f), -f] at
+                // lags N..N+3, convolved with w[|s|] at shifts s = -T..T.
+                let f = pair.delay_fraction;
+                let h4 = [1.0 - f, f, -(1.0 - f), -f];
+                taps.try_reserve(2 * half + 4).map_err(|_| invalid("outlet_mutual allocation failed"))?;
+                taps.resize(entry.taps + 2 * half + 4, 0.0);
+                for (i, &h) in h4.iter().enumerate() {
+                    for m in 0..=2 * half {
+                        taps[entry.taps + i + m] += pair.gain * h * weights[entry.weights + m.abs_diff(half)];
+                    }
+                }
+                weighted.push(entry);
+            }
+        }
         // Grid: 5 Hz steps strictly below Nyquist.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let points = ((nyquist / OUTLET_MUTUAL_GRID_HZ).ceil() as usize).saturating_sub(1);
         let mut matrix = vec![0.0; n * n];
         let mut factor = vec![0.0; n * n];
         let (mut worst_err, mut worst_err_hz) = (0.0f64, 0.0);
+        let mut worst_dev = 0.0f64;
         let (mut worst_pivot, mut worst_pivot_hz) = (f64::INFINITY, 0.0);
         for k in 1..=points {
             if k % 4096 == 0 && gate.is_requested() {
@@ -215,15 +382,25 @@ impl OutletMutual {
             for (i, load) in loads.iter().enumerate() {
                 matrix[i * n + i] = self_resistance(load, warped);
             }
-            for pair in &pairs {
-                let m = pair.realized(omega, dt);
+            for (p, pair) in pairs.iter().enumerate() {
+                let mut m = pair.realized(omega, dt);
                 let [i, j] = pair.outlets;
+                if let Some(entry) = weighted.get(p) {
+                    m = m.scale(filter_response(&weights[entry.weights..=entry.weights + entry.half], omega * dt));
+                }
                 matrix[i * n + j] = m.re;
                 matrix[j * n + i] = m.re;
                 if hz <= band_hz {
                     let exact = pair.exact(omega, density, sound_speed);
                     let e = (m - exact).abs() / exact.abs();
-                    if !e.is_finite() || e > worst_err { (worst_err, worst_err_hz) = (e, hz); }
+                    if weighted.is_empty() {
+                        if !e.is_finite() || e > worst_err { (worst_err, worst_err_hz) = (e, hz); }
+                    } else {
+                        if !e.is_finite() || e > worst_dev { worst_dev = e; }
+                        let target = exact.scale(pritchard_weight(&loads[i], &loads[j], mono, omega));
+                        let e = (m - target).abs() / target.abs();
+                        if !e.is_finite() || e > worst_err { (worst_err, worst_err_hz) = (e, hz); }
+                    }
                 }
             }
             // Cholesky of the symmetric Re Z; every pivot must be positive.
@@ -245,16 +422,53 @@ impl OutletMutual {
             }
         }
         if !(worst_err <= OUTLET_MUTUAL_BAND_ERROR) {
-            return Err(invalid("outlet_mutual realized term is more than 5 % from the exact free-field term in band"));
+            return Err(invalid(if weighted.is_empty() {
+                "outlet_mutual realized term is more than 5 % from the exact free-field term in band"
+            } else {
+                "outlet_mutual pritchard realized term is more than 5 % from its exact term in band"
+            }));
         }
         let mut rings = Vec::new();
         rings.try_reserve_exact(n * len).map_err(|_| invalid("outlet_mutual allocation failed"))?;
         rings.resize(n * len, 0.0);
         let min_delay = pairs.iter().map(|p| p.delay_samples).min().unwrap_or(0);
+        let min_half = weighted.iter().map(|w| w.half).min().unwrap_or(0);
+        let deviation = if weighted.is_empty() { worst_err } else { worst_dev };
         Ok(Self { nodes: nodes.to_vec(), pairs, len, head: 0, rings, scratch: vec![0.0; n],
             record: OutletMutualRecord { density_kg_m3: density, sound_speed_m_s: sound_speed, time_step_s: dt,
                 band_hz, grid_points: points, min_delay_samples: min_delay, max_band_error: worst_err,
-                max_band_error_hz: worst_err_hz, min_pivot_ratio: worst_pivot, min_pivot_hz: worst_pivot_hz } })
+                max_band_error_hz: worst_err_hz, min_pivot_ratio: worst_pivot, min_pivot_hz: worst_pivot_hz,
+                form, min_weight_half_taps: min_half, max_free_field_deviation: deviation },
+            dt, weighted, weights, taps })
+    }
+
+    /// The realized term of pair `index` at angular frequency `omega`: the
+    /// pair's kernel, times its weight filter's response under `pritchard`.
+    ///
+    /// # Panics
+    /// An `index` outside [`Self::pairs`].
+    #[must_use]
+    pub fn realized_term(&self, index: usize, omega: f64) -> C64 {
+        let m = self.pairs[index].realized(omega, self.dt);
+        match self.weighted.get(index) {
+            Some(entry) => m.scale(filter_response(&self.weights[entry.weights..=entry.weights + entry.half], omega * self.dt)),
+            None => m,
+        }
+    }
+
+    /// Weight-filter half-length T of pair `index` (0 under `free-field`).
+    #[must_use]
+    pub fn weight_half_taps(&self, index: usize) -> usize { self.weighted.get(index).map_or(0, |w| w.half) }
+
+    /// Smallest lag any kernel tap reads [samples]: N under `free-field`,
+    /// N - T under `pritchard`; at least 1, so every read is an accepted flow.
+    #[must_use]
+    pub fn min_read_lag(&self) -> usize {
+        if self.weighted.is_empty() {
+            self.pairs.iter().map(|p| p.delay_samples).min().unwrap_or(0)
+        } else {
+            self.weighted.iter().map(|w| w.first_lag).min().unwrap_or(0)
+        }
     }
 
     /// Terminal nodes, in the declared outlet order.
@@ -276,6 +490,20 @@ impl OutletMutual {
     /// accepted flows only. `out` holds one value per outlet.
     pub fn exterior_pressures(&self, out: &mut [f64]) {
         out.fill(0.0);
+        if !self.weighted.is_empty() {
+            for (pair, entry) in self.pairs.iter().zip(&self.weighted) {
+                let [a, b] = pair.outlets;
+                let kernel = &self.taps[entry.taps..entry.taps + 2 * entry.half + 4];
+                let (mut pa, mut pb) = (0.0, 0.0);
+                for (i, &c) in kernel.iter().enumerate() {
+                    pa += c * self.past(b, entry.first_lag + i);
+                    pb += c * self.past(a, entry.first_lag + i);
+                }
+                out[a] += pa;
+                out[b] += pb;
+            }
+            return;
+        }
         for pair in &self.pairs {
             let (n, f) = (pair.delay_samples, pair.delay_fraction);
             let [a, b] = pair.outlets;

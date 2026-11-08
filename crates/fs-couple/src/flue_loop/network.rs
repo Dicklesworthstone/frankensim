@@ -440,8 +440,20 @@ impl FlueVoice {
     /// An advanced or poisoned voice, no physical graph, an attached MIMO
     /// exterior or earlier mutual term, an outlet without a relaxation load,
     /// or an [`outlet_mutual::OutletMutual::admit`] refusal. No mutation.
-    pub fn with_outlet_mutual(mut self, outlets: &[(usize, [f64; 2])], density: f64, sound_speed: f64,
+    pub fn with_outlet_mutual(self, outlets: &[(usize, [f64; 2])], density: f64, sound_speed: f64,
         band_hz: f64, gate: &CancelGate,
+    ) -> Result<Self, FlueError> {
+        self.with_outlet_mutual_form(outlet_mutual::OutletMutualForm::FreeField, outlets, density, sound_speed, band_hz, gate)
+    }
+
+    /// [`Self::with_outlet_mutual`] with the mutual term's `form`: `FreeField`,
+    /// or `Pritchard` (the free-field term weighted by the openings' own
+    /// radiation resistance, see [`outlet_mutual`]).
+    ///
+    /// # Errors
+    /// As [`Self::with_outlet_mutual`], with that form's admission refusals.
+    pub fn with_outlet_mutual_form(mut self, form: outlet_mutual::OutletMutualForm, outlets: &[(usize, [f64; 2])],
+        density: f64, sound_speed: f64, band_hz: f64, gate: &CancelGate,
     ) -> Result<Self, FlueError> {
         poll(gate)?;
         if self.poisoned || self.samples != 0 {
@@ -465,7 +477,7 @@ impl FlueVoice {
             centers.push(center);
             loads.push(load);
         }
-        let mutual = outlet_mutual::OutletMutual::admit(&nodes, &centers, &loads, density, sound_speed, dt, band_hz, gate)?;
+        let mutual = outlet_mutual::OutletMutual::admit_form(form, &nodes, &centers, &loads, density, sound_speed, dt, band_hz, gate)?;
         let mut ascending = nodes;
         ascending.sort_unstable();
         network.physics.attach_terminal_exterior_pressures(&ascending).map_err(wave)?;

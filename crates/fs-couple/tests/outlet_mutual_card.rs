@@ -1,6 +1,9 @@
 //! The card row `outlet_mutual free-field` (delayed free-field mutual radiation
 //! between compact outlets): where it is admitted, what it binds, that it
-//! changes the rendered pressure, and that a card without it is untouched.
+//! changes the rendered pressure, and that a card without it is untouched; and
+//! `outlet_mutual pritchard`, the same term weighted by the openings' own
+//! radiation resistance.
+use fs_couple::flue_loop::network::outlet_mutual::OutletMutualForm;
 use fs_couple::flue_loop::network::performance::file::FlueFilePerformance;
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_exec::CancelGate;
@@ -58,6 +61,29 @@ fn the_row_binds_every_observed_outlet_in_order_with_its_admission_record() {
     assert!((record.time_step_s * 288_000.0 - 1.0).abs() < 1e-15);
     assert_eq!(record.band_hz, 2800.0);
     assert!(record.max_band_error < 0.05 && record.min_pivot_ratio > 0.0, "{record:?}");
+    // The plain row carries no weight filter.
+    assert_eq!(record.form, OutletMutualForm::FreeField);
+    assert_eq!(record.min_weight_half_taps, 0);
+    assert_eq!(record.max_free_field_deviation.to_bits(), record.max_band_error.to_bits());
+}
+
+#[test]
+fn the_pritchard_row_binds_the_same_outlets_and_renders_apart_from_free_field() {
+    let base = recorder_a1();
+    let file = parse(&with_row(&base, "outlet_mutual pritchard")).unwrap();
+    let mutual = file.renderer().voice().network().unwrap().outlet_mutual().expect("attached");
+    assert_eq!(mutual.nodes(), [24, 19, 21]);
+    assert_eq!(mutual.pairs().len(), 3);
+    let record = mutual.record();
+    assert_eq!(record.form, OutletMutualForm::Pritchard);
+    assert!(record.min_weight_half_taps >= 8, "{record:?}");
+    assert!(record.max_band_error < 0.05 && record.min_pivot_ratio > 0.0, "{record:?}");
+    assert!(mutual.min_read_lag() >= 1);
+    let (plain, free, weighted) = (render(&base), render(&with_row(&base, "outlet_mutual free-field")),
+        render(&with_row(&base, "outlet_mutual pritchard")));
+    assert_eq!(weighted, render(&with_row(&base, "outlet_mutual pritchard")), "the same bits twice");
+    assert_ne!(weighted, plain, "planted negative: the weighted coupling must reach the microphone");
+    assert_ne!(weighted, free, "planted negative: the weight must change the coupling");
 }
 
 #[test]
@@ -73,8 +99,9 @@ fn the_row_changes_the_rendered_pressure_and_its_absence_changes_nothing() {
 fn the_row_is_refused_outside_its_scope() {
     let base = recorder_a1();
     assert!(parse(&with_row(&base, "outlet_mutual free-field")).is_ok());
+    assert!(parse(&with_row(&base, "outlet_mutual pritchard")).is_ok());
     for (row, reason) in [("outlet_mutual", "free-field"), ("outlet_mutual half-space", "free-field"),
-        ("outlet_mutual free-field extra", "")] {
+        ("outlet_mutual free-field extra", ""), ("outlet_mutual Pritchard", "pritchard"), ("outlet_mutual pritchard extra", "")] {
         let error = parse(&with_row(&base, row)).err().unwrap_or_else(|| panic!("{row} was admitted"));
         assert!(error.contains(reason), "{row}: {error}");
     }
