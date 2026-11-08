@@ -564,7 +564,7 @@ impl input::Spec {
         let bank = if profile.as_ref().is_some_and(body::Profile::has_thermal_cavity) {
             bank // Gas inertia precedes the material/thermal memory prefix.
         } else if let Some(resolution) = self.cylinder_gas_loading {
-            bank.with_cylinder_gas_loading(resolution, gate)?
+            bank.with_cylinder_gas_loading_selected(resolution, &self.cylinder_gas_selection(), gate)?
         } else { bank };
         let bank = if let Some((slope, config)) = self.geometric_stretching {
             bank.with_geometric_stretching(slope, config, gate)?
@@ -1292,6 +1292,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             .network_dimensions_with_body_modes(ready.body_profile.is_some(),additional,air_modes)?;
         eprintln!("cylinder_gas_loading={:?}; complete_modes={modes}; connection_allowance={links}; setup_terms_allowance={terms}",
             loading.resolution());
+        if loading.strings().len() != ready.spec.strings.len() {
+            eprintln!("cylinder_gas_loaded_strings={:?}", loading.strings().iter().map(|s| s.string_index()).collect::<Vec<_>>());
+        }
     }
     eprintln!("input_bytes={}; gas={:?}; preload_J={:?}",ready.spec.bytes.len(),ready.spec.gas,ready.performance.preload_energy_j());
     let gas_source_json=thermochemical::provenance(core::slice::from_ref(&ready.spec.gas_record));

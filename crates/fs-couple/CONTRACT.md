@@ -3212,6 +3212,23 @@ transverse and is named as such; the word is off by default, and a record
 without it refuses a measured string as before. The transverse-only strings'
 longitudinal waves are absent from the model, not approximated.
 
+## Per-string cylinder gas loading
+
+`with_cylinder_gas_loading_selected` takes one flag per original string. `true` loads that string exactly as
+`with_cylinder_gas_loading` does; `false` leaves it in the old sampled-resistance model: its card, modes and
+damping are the unloaded ones and it has no fluid coordinates. `with_cylinder_gas_loading` is the
+every-string case and builds the same bank bit for bit. A selection that names no string refuses with
+`cylinder gas loading needs a selection on at least one original string`, and a selection of the wrong length
+refuses. The complete mode and connection budgets count only the loaded strings' memory.
+
+`StringCylinderLoading` gains `string_index`; `StringBankFluidLoading::strings()` lists only the loaded strings
+and `string(i)` returns the loading of original string i when it has one. The fluid components follow the
+bodies, one per loaded string in string order. With `with_longitudinal_waves_selected`, the axial fluid
+components follow the axial ones, one per axial string that is also loaded; an axial string without gas
+loading has `axial_fluid_component() == None` and no axial tail damping. The `material_strings` example
+reaches the selection through the optional trailing words `strings COUNT INDEX...` of the
+`cylinder-gas-loading` record; without them every string is loaded.
+
 ## Tensile envelopes with longitudinal waves and moving string ends
 
 `SupportedMaterialStrings::in_stationary_gas_with_longitudinal_waves` carries

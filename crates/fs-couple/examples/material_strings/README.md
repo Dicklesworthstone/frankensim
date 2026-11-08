@@ -2274,6 +2274,22 @@ independent approximation controls. Refine both cutoffs, interval count, the
 string/body basis and time/control discretization before making accuracy claims.
 A finer memory grid alone does not establish instrument fidelity.
 
+The record loads every string by default. Appending `strings COUNT INDEX...` (zero-based, strictly
+increasing original string indices) loads only the named strings:
+
+```text
+cylinder-gas-loading 0.001 30 12 strings 1 5
+```
+
+A string left out keeps the old sampled-resistance model, so its modes and damping are exactly the
+unloaded ones, and it carries no fluid coordinates. This matters for the complete-network budget: every
+loaded transverse mode adds one memory coordinate per interval, so a six-string network that cannot carry
+gas memory on every string within the ceilings can carry it on the one string that needs it. With `longitudinal-waves`, an axial string
+that is left out of the selection has no axial fluid memory either; one that is loaded has it. A count of
+zero, an index past the last string or an index that does not increase refuses. The default, no `strings`
+words, is unchanged byte for byte. The unloaded strings' own air loss is then whatever their model says:
+a measured whole string already includes it, a bonded wire keeps its sampled resistance.
+
 The supplied `cylinder-flow.material-strings` fixture selects a V3 bonded string
 with one bending mode in each of two planes, one twist mode, a two-mode body and
 a cavity neck. Twelve memory branches per transverse mode add 24 coordinates,

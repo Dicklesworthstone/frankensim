@@ -279,7 +279,7 @@ impl Profile {
             // Explicit layered memory retains the final mass-normalized string
             // basis, so source-gas inertia must precede that selection.
             let bank = match spec.cylinder_gas_loading {
-                Some(resolution) => bank.with_cylinder_gas_loading(resolution, gate)?,
+                Some(resolution) => bank.with_cylinder_gas_loading_selected(resolution, &spec.cylinder_gas_selection(), gate)?,
                 None => bank,
             };
             let bank = self.bind_material_memory(bank, gate)?;

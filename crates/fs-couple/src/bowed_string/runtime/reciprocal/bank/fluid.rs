@@ -23,6 +23,8 @@ pub struct StringCylinderLoading {
     solid_card: BowedStringCard,
     flow: CylinderFlow,
     rotary: Option<RotaryCylinderFlow>,
+    /// Original string this loading belongs to (its position in the bank's declaration order).
+    string_index: usize,
 }
 impl StringCylinderLoading {
     /// Original solid mass, bending, tension and old sampled loss realization.
@@ -35,6 +37,11 @@ impl StringCylinderLoading {
     /// Rotational fluid memory for the same section, when solid torsion exists.
     #[must_use]
     pub const fn rotary_flow(&self) -> Option<&RotaryCylinderFlow> { self.rotary.as_ref() }
+    /// Zero-based index of the original string this loading belongs to. With a partial selection
+    /// (`with_cylinder_gas_loading_selected`) it differs from the loading's position in
+    /// `StringBankFluidLoading::strings()`, which lists only the loaded strings.
+    #[must_use]
+    pub const fn string_index(&self) -> usize { self.string_index }
 }
 
 /// Frozen fluid and structural provenance retained through every performance.
@@ -47,10 +54,16 @@ pub struct StringBankFluidLoading {
 impl StringBankFluidLoading {
     #[must_use]
     pub const fn resolution(&self) -> CylinderFlowResolution { self.resolution }
-    /// Same original material-string order. Fluid is never merged into a solid
-    /// density property or hidden inside per-mode authored damping.
+    /// The loaded strings, in original material-string order (every string unless a partial selection
+    /// was bound). Fluid is never merged into a solid density property or hidden inside per-mode
+    /// authored damping.
     #[must_use]
     pub fn strings(&self) -> &[StringCylinderLoading] { &self.strings }
+    /// The loading of original string `string`, or `None` when that string was left without gas loading.
+    #[must_use]
+    pub fn string(&self, string: usize) -> Option<&StringCylinderLoading> {
+        self.strings.iter().find(|loading| loading.string_index == string)
+    }
 
     // The exact steady rotary resistance and collapsed low tail act against
     // stationary gas. Every remaining torque is a reciprocal fluid branch.
@@ -60,8 +73,8 @@ impl StringBankFluidLoading {
         card: &BowedStringCard, modes: &mut [ModalAcousticMode])
         -> Result<(), ReciprocalStringError>
     {
-        let loading = self.strings.get(index)
-            .ok_or_else(|| invalid("rotary loading lost its original string"))?;
+        // A string left without gas loading keeps its own torsional damping: no rotary drag is added to it.
+        let Some(loading) = self.string(index) else { return Ok(()); };
         let Some(flow) = &loading.rotary else {
             if source.torsion_source().is_some() {
                 return Err(invalid("cylinder loading omitted the original torsion"));
@@ -98,13 +111,16 @@ impl StringBankFluidLoading {
         options: &StringBankOptions,
         gate: &CancelGate,
     ) -> Result<(), ReciprocalStringError> {
-        if self.strings.len() != cards.len() || sources.len() != cards.len()
+        if self.strings.is_empty() || self.strings.len() > cards.len() || sources.len() != cards.len()
             || components.len() != cards.len() + self.body_components {
             return Err(invalid("cylinder memory must retain original strings and physical body layout"));
         }
         let fluid_start = components.len();
-        for (index, (card, loading)) in cards.iter().zip(&self.strings).enumerate() {
+        for (position, loading) in self.strings.iter().enumerate() {
             poll(gate)?;
+            // `position` addresses the fluid component among the loaded strings; `index` the original string.
+            let index = loading.string_index;
+            let card = cards.get(index).ok_or_else(|| invalid("cylinder memory lost its original string"))?;
             let transverse_modes = transverse_count(&sources[index].source, card);
             let fluid_modes = sources[index].source.modes().checked_mul(loading.flow.branches().len())
                 .ok_or_else(|| invalid("cylinder memory dimension overflow"))?;
@@ -125,7 +141,7 @@ impl StringBankFluidLoading {
                     right[k * loading.flow.branches().len() + branch_index] = branch_shape;
                     links.push(ModalConnection {
                         left: ModalAttachment { component: index, shapes: left },
-                        right: ModalAttachment { component: fluid_start + index, shapes: right },
+                        right: ModalAttachment { component: fluid_start + position, shapes: right },
                         stiffness_n_m: 0.0,
                         damping_n_s_m: resistance,
                         rest_extension_m: 0.0,
@@ -165,7 +181,7 @@ impl StringBankFluidLoading {
                         right[offset + k * flow.branches().len() + branch_index] = fluid_surface;
                         links.push(ModalConnection {
                             left: ModalAttachment { component: index, shapes: left },
-                            right: ModalAttachment { component: fluid_start + index, shapes: right },
+                            right: ModalAttachment { component: fluid_start + position, shapes: right },
                             stiffness_n_m: 0.0, damping_n_s_m: resistance, rest_extension_m: 0.0,
                         });
                         modes.push(ModalAcousticMode {
@@ -181,7 +197,7 @@ impl StringBankFluidLoading {
             components.push(ModalAcousticTimeModel::try_new_with_free_coordinates(
                 options.sample_rate_hz, modes, options.string_budget,
             ).map_err(|source| ReciprocalStringError::Network(
-                ModalCouplingError::Component { component: fluid_start + index, source },
+                ModalCouplingError::Component { component: fluid_start + position, source },
             ))?);
         }
         Ok(())
@@ -257,12 +273,35 @@ impl ReciprocalStringBank {
     /// The underlying continuum is small-motion, incompressible, local, circular
     /// and unconfined; it is not the general finite-amplitude atmosphere solver.
     pub fn with_cylinder_gas_loading(
+        self,
+        resolution: CylinderFlowResolution,
+        gate: &CancelGate,
+    ) -> Result<Self, ReciprocalStringError> {
+        let every = vec![true; self.cards.len()];
+        self.with_cylinder_gas_loading_selected(resolution, &every, gate)
+    }
+
+    /// The same binding with an explicit choice per original string: `true` loads that string exactly as
+    /// `with_cylinder_gas_loading` does; `false` leaves it in the old sampled-resistance model, with its card,
+    /// modes and damping exactly the unloaded ones and no fluid coordinates (a mass-normalized observation is
+    /// therefore unchanged for it). At least one string must be selected. The complete mode and connection
+    /// budgets count only the loaded strings' fluid memory, which is the point: a network too large to carry
+    /// gas memory on every string can carry it on the strings that need it. With every string selected this
+    /// is the unchanged all-string binding. The caller names the strings left unloaded; none is exempted silently.
+    pub fn with_cylinder_gas_loading_selected(
         mut self,
         resolution: CylinderFlowResolution,
+        selected: &[bool],
         gate: &CancelGate,
     ) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
         resolution.validate().map_err(ReciprocalStringError::Material)?;
+        if selected.len() != self.cards.len() {
+            return Err(invalid("cylinder gas loading needs one selection per original string"));
+        }
+        if !selected.iter().any(|on| *on) {
+            return Err(invalid("cylinder gas loading needs a selection on at least one original string"));
+        }
         if self.system.has_nonlinear_potentials() {
             return Err(invalid("bind cylinder gas loading before geometric stretching; a rebuild must not discard its storage"));
         }
@@ -272,12 +311,13 @@ impl ReciprocalStringBank {
             return Err(invalid("cylinder loading requires one cold binding before string motion or playback"));
         }
         // A measured whole-string torsion's Q is the string's own loss in air; rotary drag would count it twice.
-        if self.source.strings.iter().any(|member| member.source.torsion_source().is_some_and(|t| t.measured().is_some())) {
+        if self.source.strings.iter().zip(selected).any(|(member, on)| *on
+            && member.source.torsion_source().is_some_and(|t| t.measured().is_some())) {
             return Err(invalid("measured whole-string torsion already includes its air loss; cylinder loading refuses it"));
         }
         // Bound complete dimensions BEFORE allocating quadrature or port arrays.
-        let moving_modes = self.source.strings.iter()
-            .try_fold(0usize, |n, member| n.checked_add(member.source.modes()))
+        let moving_modes = self.source.strings.iter().zip(selected).filter(|(_, on)| **on)
+            .try_fold(0usize, |n, (member, _)| n.checked_add(member.source.modes()))
             .ok_or_else(|| invalid("complete transverse and torsional mode count overflow"))?;
         let added_modes = moving_modes.checked_mul(resolution.intervals)
             .ok_or_else(|| invalid("complete fluid memory dimension overflow"))?;
@@ -295,8 +335,13 @@ impl ReciprocalStringBank {
         }
         let mut cards = Vec::with_capacity(self.cards.len());
         let mut loading = Vec::with_capacity(self.cards.len());
-        for (solid, member) in self.cards.iter().zip(&self.source.strings) {
+        for (index, ((solid, member), on)) in self.cards.iter().zip(&self.source.strings).zip(selected).enumerate() {
             poll(gate)?;
+            if !*on {
+                // Left in the old sampled-resistance model: its card is exactly the unloaded one.
+                cards.push(solid.clone());
+                continue;
+            }
             let (radius, (lo, hi)) = geometry_and_band(&member.source)?;
             let flow = CylinderFlow::from_gas(radius, self.source.gas, resolution, gate)
                 .map_err(ReciprocalStringError::Material)?;
@@ -339,7 +384,7 @@ impl ReciprocalStringBank {
                 RotaryCylinderFlow::from_gas(radius, self.source.gas, resolution, gate)
                     .map_err(ReciprocalStringError::Material)
             }).transpose()?;
-            loading.push(StringCylinderLoading { solid_card: solid.clone(), flow, rotary });
+            loading.push(StringCylinderLoading { solid_card: solid.clone(), flow, rotary, string_index: index });
         }
         let bodies = self.system.components()[self.cards.len()..].to_vec();
         let fluid = StringBankFluidLoading { resolution, strings: loading,

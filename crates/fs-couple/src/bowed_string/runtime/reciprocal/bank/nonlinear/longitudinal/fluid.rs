@@ -24,7 +24,7 @@ pub(super) fn admit(
     gate: &CancelGate,
 ) -> Result<(), ImpactError> {
     let loading = source.cylinder_gas_loading();
-    if loading.is_some_and(|fluid| fluid.strings().len() != selections.len()) {
+    if loading.is_some_and(|fluid| fluid.strings().len() > selections.len()) {
         return Err(invalid(
             "axial gas loading lost its original material strings",
         ));
@@ -40,9 +40,11 @@ pub(super) fn admit(
         };
         resolution.validate()?;
         let modes = resolution.axial_modes.len();
+        // A selected axial string without gas loading has no axial fluid memory.
         let memory = loading
-            .map_or(Some(0), |fluid| {
-                modes.checked_mul(fluid.strings()[index].flow().branches().len())
+            .and_then(|fluid| fluid.string(index))
+            .map_or(Some(0), |string| {
+                modes.checked_mul(string.flow().branches().len())
             })
             .ok_or_else(|| invalid("axial gas-memory dimension overflow"))?;
         count = count
@@ -77,14 +79,14 @@ pub(super) fn tail_damping_ratio(
     solid_line_mass: f64,
     omega: f64,
 ) -> Result<f64, ImpactError> {
-    let Some(loading) = source.cylinder_gas_loading() else {
+    // No gas loading on this string (none bound, or the string was left out of the selection): no tail.
+    let Some(string_loading) = source
+        .cylinder_gas_loading()
+        .and_then(|loading| loading.string(string))
+    else {
         return Ok(0.0);
     };
-    let flow = loading
-        .strings()
-        .get(string)
-        .ok_or_else(|| invalid("axial gas tail lost its original string"))?
-        .flow();
+    let flow = string_loading.flow();
     let ratio = 0.5 * flow.axial_low_tail_resistance_per_length_n_s_m2() / solid_line_mass / omega;
     if !ratio.is_finite() || ratio <= 0.0 {
         return Err(invalid(
@@ -105,7 +107,7 @@ pub(super) fn append(
     let Some(loading) = source.cylinder_gas_loading() else {
         return Ok(());
     };
-    if loading.strings().len() != source.strings.len() || additional.len() != strings.len() {
+    if loading.strings().len() > source.strings.len() || additional.len() != strings.len() {
         return Err(invalid(
             "axial gas must follow every original solid axial component",
         ));
@@ -114,7 +116,11 @@ pub(super) fn append(
     let axial_count: usize = additional.iter().map(|c| c.modes().len()).sum();
     let memory_count: usize = strings
         .iter()
-        .map(|law| law.model.axial_modes().len() * loading.strings()[law.string_index].flow().branches().len())
+        .filter_map(|law| {
+            loading
+                .string(law.string_index)
+                .map(|string| law.model.axial_modes().len() * string.flow().branches().len())
+        })
         .sum();
     // All sums/products and this complete column size were admitted before
     // construction, against the original owner (at most 4096 coordinates).
@@ -131,7 +137,17 @@ pub(super) fn append(
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }
-        let loading = &loading.strings()[law.string_index];
+        let mode_count = law.model.axial_modes().len();
+        let Some(string_loading) = loading.string(law.string_index) else {
+            // This axial string carries no gas loading, so it has no axial fluid component either.
+            if law.axial_fluid_component.is_some() || law.axial_component != original.len() + index {
+                return Err(invalid(
+                    "axial gas changed an original solid component address",
+                ));
+            }
+            axial_offset += mode_count;
+            continue;
+        };
         let component = original.len() + additional.len();
         if law.axial_fluid_component != Some(component)
             || law.axial_component != original.len() + index
@@ -140,9 +156,8 @@ pub(super) fn append(
                 "axial gas changed an original solid component address",
             ));
         }
-        let flow = loading.flow();
-        let length = loading.solid_card().length_m;
-        let mode_count = law.model.axial_modes().len();
+        let flow = string_loading.flow();
+        let length = string_loading.solid_card().length_m;
         let branch_count = flow.branches().len();
         let mut modes = Vec::with_capacity(mode_count * branch_count);
         let solid_shape = det::sqrt(2.0 / law.solid_linear_density_kg_m / length);

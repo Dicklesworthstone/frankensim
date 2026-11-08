@@ -603,7 +603,7 @@ impl ReciprocalStringBank {
             bearings.len(),
             gate,
         )?;
-        let mut strings = Vec::with_capacity(selected);
+        let mut strings: Vec<MaterialLongitudinalString> = Vec::with_capacity(selected);
         let mut components = Vec::with_capacity(selected);
         let mut bindings = Vec::with_capacity(selected);
         for (index, ((member, card), selection)) in self
@@ -622,6 +622,12 @@ impl ReciprocalStringBank {
             };
             // Position among the selected strings; equal to `index` when every string is selected.
             let position = strings.len();
+            // Position among the selected strings that also carry gas loading: their axial fluid components
+            // follow all axial components, in this order.
+            let gas_position = strings
+                .iter()
+                .filter(|law| law.axial_fluid_component.is_some())
+                .count();
             resolution.validate()?;
             let mut band = None;
             let solid_mass = member.source.longitudinal_material(&mut band)?;
@@ -709,7 +715,8 @@ impl ReciprocalStringBank {
                 axial_fluid_component: self
                     .source
                     .cylinder_gas_loading()
-                    .map(|_| self.system.components().len() + selected + position),
+                    .filter(|loading| loading.string(index).is_some())
+                    .map(|_| self.system.components().len() + selected + gas_position),
                 string_index: index,
                 elastic_frequency_band_rad_s: band,
                 axial_material_loss,

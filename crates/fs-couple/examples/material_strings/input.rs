@@ -315,6 +315,9 @@ pub struct Spec {
     pub rotational_bridges: Vec<RotationalBridge>,
     pub translational_bridges: Vec<TranslationalBridge>,
     pub cylinder_gas_loading: Option<CylinderFlowResolution>,
+    /// The `cylinder-gas-loading` record's optional trailing selection `strings COUNT INDEX...` (zero-based, strictly increasing
+    /// original string indices): only those strings carry gas loading and its fluid memory. `None`, the default, loads every string.
+    pub cylinder_gas_strings: Option<Vec<usize>>,
     pub prepared_linear: Option<PreparedModalBudget>,
     /// `residual-flexibility exact-static-green`: the omitted bending modes' static compliance in series with
     /// every bridge and fixed stop (pexfp.299). Absent means the retained modes alone.
@@ -692,6 +695,7 @@ impl Spec {
                 translational_bridges.push(joint);
             }
         }
+        let mut cylinder_gas_strings: Option<Vec<usize>> = None;
         let cylinder_gas_loading = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("cylinder-gas-loading") {
             let mut row = r.row("cylinder-gas-loading")?;
@@ -700,6 +704,21 @@ impl Spec {
                 maximum_wavenumber_radius: row.positive()?,
                 intervals: row.count(4096)?,
             };
+            if row.next_is("strings") {
+                let count = row.count(strings.len())?;
+                if count == 0 {
+                    return Err("cylinder-gas-loading with strings names no string".into());
+                }
+                let mut chosen: Vec<usize> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let string = row.count(strings.len().saturating_sub(1))?;
+                    if chosen.last().is_some_and(|&prior| string <= prior) {
+                        return Err("cylinder-gas-loading strings must be strictly increasing zero-based string indices".into());
+                    }
+                    chosen.push(string);
+                }
+                cylinder_gas_strings = Some(chosen);
+            }
             row.end()?;
             resolution.validate()?;
             Some(resolution)
@@ -1438,7 +1457,7 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
+            rotational_bridges, translational_bridges, cylinder_gas_loading, cylinder_gas_strings, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
             longitudinal_waves, longitudinal_measured_transverse, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, body_damping, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, observer_molecular, cavity, friction, contact_thermal: false, dry_contact_thermal: false, material_body_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
@@ -1497,6 +1516,15 @@ impl Spec {
     /// How many strings carry the axial law (all of them unless `measured-strings-transverse` is set).
     pub fn longitudinal_selected_count(&self) -> usize {
         (0..self.strings.len()).filter(|&string| self.longitudinal_selected(string)).count()
+    }
+    /// Whether original string `string` carries the cylinder gas loading: every string, or only those the
+    /// record's `strings COUNT INDEX...` names.
+    pub fn cylinder_gas_selected(&self, string: usize) -> bool {
+        self.cylinder_gas_strings.as_ref().is_none_or(|chosen| chosen.contains(&string))
+    }
+    /// One flag per original string for `with_cylinder_gas_loading_selected`.
+    pub fn cylinder_gas_selection(&self) -> Vec<bool> {
+        (0..self.strings.len()).map(|string| self.cylinder_gas_selected(string)).collect()
     }
     pub fn validate_cavity_gas(&self) -> Result<()> {
         fs_couple::cavity_modal::validate_cavity_media(self.cavity_gas(), &self.gas)?;
@@ -1657,15 +1685,17 @@ impl Spec {
             modes = modes.checked_add(fibers.mode_count(self)?).ok_or("complete fiber mode count overflow")?;
         }
         let mut fluid_loaded_string_modes = 0usize;
-        for wire in &self.strings {
+        for (string, wire) in self.strings.iter().enumerate() {
             let planes = if wire.polarizations.is_some() { 2 } else { 1 };
             let bending = wire.bending_modes.checked_mul(planes)
                 .ok_or("transverse mode count overflow")?;
-            // Every transverse and torsional coordinate has its own causal
+            // Every transverse and torsional coordinate of a gas-loaded string has its own causal
             // cylinder-fluid memory. Count both before enforcing exact budgets.
-            fluid_loaded_string_modes = fluid_loaded_string_modes.checked_add(bending)
-                .and_then(|n| n.checked_add(wire.twist_modes))
-                .ok_or("fluid-loaded string mode count overflow")?;
+            if self.cylinder_gas_selected(string) {
+                fluid_loaded_string_modes = fluid_loaded_string_modes.checked_add(bending)
+                    .and_then(|n| n.checked_add(wire.twist_modes))
+                    .ok_or("fluid-loaded string mode count overflow")?;
+            }
             modes = modes.checked_add(bending).and_then(|n| n.checked_add(wire.twist_modes))
                 .ok_or("complete string/body mode count overflow")?;
         }
@@ -1712,7 +1742,11 @@ impl Spec {
             // Beside the causal cylinder operator every axial mode has its own fluid branches, each one
             // coordinate and one connection, which the longitudinal owner admits against this same budget.
             if let Some(flow) = self.cylinder_gas_loading {
-                let memory = axial.checked_mul(flow.intervals)
+                // Only an axial string that also carries gas loading has axial fluid memory.
+                let gas_axial = resolution.axial_modes.len().checked_mul(
+                    (0..self.strings.len()).filter(|&string| self.longitudinal_selected(string) && self.cylinder_gas_selected(string)).count())
+                    .ok_or("axial fluid memory dimension overflow")?;
+                let memory = gas_axial.checked_mul(flow.intervals)
                     .ok_or("axial fluid memory dimension overflow")?;
                 modes = modes.checked_add(memory).ok_or("complete axial fluid mode count overflow")?;
                 links = links.checked_add(memory).ok_or("complete axial fluid connection count overflow")?;
