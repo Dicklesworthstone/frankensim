@@ -8358,6 +8358,32 @@ common-translation invariance, safe elastic turns, hidden-yield refusal and
 atomic source/geometry/budget/cancellation refusal. Existing rolling tests
 remain the regression seam for the shared native arithmetic.
 
+### Applied loads on adhesive rolling and torsion
+
+Both native moment owners provide `prepare_*_with_wrenches` and
+`apply_*_with_wrenches`. The two original bodies' held world COM forces and
+body-frame torques enter the same source-owned midpoint solve. Actual full
+inertia determines the free angular acceleration; an applied scalar effective
+torque or an already rounded free-body predictor does not replace it. Contact
+and applied impulses are summed before updating each body once. Existing
+zero-load entry points use this same path with zero wrenches.
+
+Reports retain actual COM and held-frame angular travel, external work, contact
+work, recoverable storage and irreversible rolling/twist loss separately.
+Independent checks close kinetic change against both work channels and total
+kinetic-plus-storage-plus-loss against external work. Individual commanded
+impulses and pair linear/orbital-plus-spin changes are checked against the
+actual applied loads. Applied force does not silently become a contact reaction.
+Poses, normal area and contact history geometry remain held; returned angular
+travel is not a finite-rotation pose update. A reversal under an applied body
+torque requires interval refinement because the unforced energy-orbit bound
+does not constrain a driven orbit.
+
+The existing rolling/torsion G1/G3/G4 tests additionally cover analytic driven
+elastic response with rotated full inertia, loading from rest into irreversible
+yield, independent applied work and angular momentum, common translation,
+zero-load equivalence and atomic invalid-load/cancellation/reversal refusal.
+
 
 ## Finite battery power in original rotor motion
 

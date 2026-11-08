@@ -4,9 +4,12 @@
 //! original source. This owner shares the actual native inertia, source-checked
 //! midpoint solve, turn admission and independent momentum/work checks.
 
-use super::super::hertz::{RigidHertzError, points, prepare_pair_wrench, relative_spin};
-use super::super::{RigidContactBinding, RigidFrictionError, magnitude, poll};
-use crate::{DynamicsError, MassProperties, PointKinematics, Pose, RigidBodyState, Vec3};
+use super::super::hertz::{RigidHertzError, points, relative_spin};
+use super::super::{
+    ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, magnitude, poll,
+    rounded_components,
+};
+use crate::{DynamicsError, MassProperties, PointKinematics, Pose, RigidBodyState, Vec3, Wrench};
 use fs_contact::normal_patch::adhesive::{rolling::*, torsion::*};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
@@ -145,15 +148,22 @@ pub(super) struct MomentReport<S: MomentSource> {
     pub rate_after_rad_s: f64,
     pub rotational_mobility_per_kg_m2: f64,
     pub angular_impulse_on_a_world_nms: Vec3,
+    pub external_wrenches: [Wrench; 2],
+    pub body_displacement_world_m: [Vec3; 2],
+    pub angular_displacement_body_rad: [Vec3; 2],
     pub kinetic_energy_change_j: f64,
     pub midpoint_impulse_work_j: f64,
+    pub external_work_j: f64,
     pub work_energy_residual_j: f64,
     pub total_energy_residual_j: f64,
     pub angle_residual_rad: f64,
     pub angular_velocity_residual_rad_s: f64,
     pub body_angular_impulse_residual_nms: [Vec3; 2],
+    pub body_linear_impulse_residual_ns: [Vec3; 2],
     pub linear_momentum_change_ns: Vec3,
     pub angular_momentum_change_nms: Vec3,
+    pub linear_momentum_residual_ns: Vec3,
+    pub angular_momentum_residual_nms: Vec3,
     pub evaluations: usize,
 }
 pub(super) struct MomentCandidate<S: MomentSource> {
@@ -280,6 +290,7 @@ pub(super) fn prepare<S: MomentSource>(
     geometry: HeldGeometry,
     source: &S,
     state: &S::State,
+    wrenches: [Wrench; 2],
     dt_s: f64,
     controls: RigidAdhesiveMomentControls,
     gate: &CancelGate,
@@ -292,7 +303,20 @@ pub(super) fn prepare<S: MomentSource>(
     }
     source.check(state).map_err(MomentError::Source)?;
     let rate_before = finite(relative_spin(native.initial).dot(native.axis))?;
-    let free = finite(dt_s * rate_before)?;
+    let mut accelerations = [Vec3::ZERO; 2];
+    for i in 0..2 {
+        wrenches[i].validate()?;
+        accelerations[i] = native.before[i].pose().orientation().rotate_body_to_world(
+            native.geometry.properties[i].angular_velocity_body_checked(wrenches[i].torque_body)?,
+        );
+    }
+    let free_acceleration = finite(accelerations[0].sub(accelerations[1]).dot(native.axis))?;
+    let free = finite(
+        (Dd::from_f64(dt_s)
+            * (Dd::from_f64(rate_before)
+                + Dd::from_f64(0.5 * dt_s) * Dd::from_f64(free_acceleration)))
+        .to_f64(),
+    )?;
     let compliance = finite((0.5 * dt_s) * (dt_s * native.mobility))?;
     if compliance <= 0.0 {
         return Err(MomentError::Invalid("unrepresentable angular compliance"));
@@ -301,40 +325,112 @@ pub(super) fn prepare<S: MomentSource>(
     let work = S::work(&step);
     let impulse = finite(dt_s * work.mean)?;
     let angular_impulse = native.axis.scale(impulse);
-    let phase = prepare_pair_wrench(
-        native.before,
-        native.geometry.properties,
-        native.geometry.arms,
-        Vec3::ZERO,
-        angular_impulse,
-        gate,
-    )?;
-    let after = phase.bodies_after;
+    let mut after = native.before;
+    let mut kinetic_change = Dd::ZERO;
+    let mut linear_change = [Dd::ZERO; 3];
+    let mut angular_change = [Dd::ZERO; 3];
+    let mut external_linear = [Dd::ZERO; 3];
+    let mut external_angular = [Dd::ZERO; 3];
+    let mut body_residual = [Vec3::ZERO; 2];
+    let mut body_linear_residual = [Vec3::ZERO; 2];
+    for (i, sign) in [(0, 1.0), (1, -1.0)] {
+        poll(gate)?;
+        let body = native.before[i];
+        let orientation = body.pose().orientation();
+        let external_impulse = wrenches[i].force_world.scale(dt_s);
+        let external_torque = wrenches[i].torque_body.scale(dt_s);
+        let mut resultant = ResultantImpulse::default();
+        resultant.add(
+            body,
+            native.geometry.arms[i],
+            Vec3::ZERO,
+            angular_impulse.scale(sign),
+        );
+        add_components(&mut resultant.linear, external_impulse);
+        add_components(&mut resultant.angular, external_torque);
+        // Apply the simultaneous contact and applied loads once per body, so
+        // rounding an intermediate free state cannot change the contact law.
+        let receipt = body.apply_momentum_impulse(
+            native.geometry.properties[i],
+            rounded_components(resultant.linear),
+            rounded_components(resultant.angular),
+        )?;
+        after[i] = receipt.state_after;
+        body_residual[i] = receipt.angular_residual_body;
+        body_linear_residual[i] = receipt.linear_residual_world;
+        kinetic_change = kinetic_change + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+        add_components(&mut linear_change, receipt.linear_increment_world);
+        add_components(&mut external_linear, external_impulse);
+        add_components(
+            &mut angular_change,
+            body.pose()
+                .position_world()
+                .cross(receipt.linear_increment_world),
+        );
+        add_components(
+            &mut angular_change,
+            orientation.rotate_body_to_world(receipt.angular_increment_body),
+        );
+        add_components(
+            &mut external_angular,
+            body.pose().position_world().cross(external_impulse),
+        );
+        add_components(
+            &mut external_angular,
+            orientation.rotate_body_to_world(external_torque),
+        );
+    }
     let final_points = points(after, native.geometry.properties, native.geometry.arms)?;
     let rate_after = finite(relative_spin(final_points).dot(native.axis))?;
     if ((rate_before > 0.0 && rate_after < 0.0) || (rate_before < 0.0 && rate_after > 0.0))
-        && !admits_elastic_turn(&native, source, work, rate_before)
+        && (wrenches.iter().any(|w| w.torque_body != Vec3::ZERO)
+            || !admits_elastic_turn(&native, source, work, rate_before))
     {
         return Err(MomentError::Reversal);
     }
     let midpoint = (Dd::from_f64(rate_before) + Dd::from_f64(rate_after)) * Dd::from_f64(0.5);
     let native_angle = midpoint * Dd::from_f64(dt_s);
     let impulse_work = finite((midpoint * Dd::from_f64(impulse)).to_f64())?;
-    let mut body_residual = [Vec3::ZERO; 2];
-    for (i, sign) in [(0, 1.0), (1, -1.0)] {
-        let expected = native.before[i]
-            .pose()
-            .orientation()
-            .rotate_world_to_body(angular_impulse.scale(sign));
-        let a = after[i].angular_momentum_body();
-        let b = native.before[i].angular_momentum_body();
-        let difference = |x, y, z| (Dd::from_f64(x) - Dd::from_f64(y) - Dd::from_f64(z)).to_f64();
-        body_residual[i] = Vec3::new(
-            difference(a.x, b.x, expected.x),
-            difference(a.y, b.y, expected.y),
-            difference(a.z, b.z, expected.z),
+    let mut body_travel = [Vec3::ZERO; 2];
+    let mut angular_travel = [Vec3::ZERO; 2];
+    let mut external_work = Dd::ZERO;
+    let travel = |a: Vec3, b: Vec3| {
+        let component =
+            |x, y| ((Dd::from_f64(x) + Dd::from_f64(y)) * Dd::from_f64(0.5 * dt_s)).to_f64();
+        Vec3::new(
+            component(a.x, b.x),
+            component(a.y, b.y),
+            component(a.z, b.z),
+        )
+    };
+    let pairing = |a: Vec3, b: Vec3| {
+        Dd::from_f64(a.x) * Dd::from_f64(b.x)
+            + Dd::from_f64(a.y) * Dd::from_f64(b.y)
+            + Dd::from_f64(a.z) * Dd::from_f64(b.z)
+    };
+    for i in 0..2 {
+        body_travel[i] = travel(
+            native.initial[i].center_of_mass_velocity_world,
+            final_points[i].center_of_mass_velocity_world,
         );
+        angular_travel[i] = travel(
+            native.initial[i].angular_velocity_body,
+            final_points[i].angular_velocity_body,
+        );
+        if !body_travel[i].is_finite() || !angular_travel[i].is_finite() {
+            return Err(MomentError::Invalid("unrepresentable native travel"));
+        }
+        external_work = external_work
+            + pairing(wrenches[i].force_world, body_travel[i])
+            + pairing(wrenches[i].torque_body, angular_travel[i]);
     }
+    let external_work_j = finite(external_work.to_f64())?;
+    let linear_residual = rounded_components(core::array::from_fn(|d| {
+        linear_change[d] - external_linear[d]
+    }));
+    let angular_residual = rounded_components(core::array::from_fn(|d| {
+        angular_change[d] - external_angular[d]
+    }));
     let report = MomentReport {
         contact: step,
         angle_increment_rad: angle,
@@ -342,27 +438,34 @@ pub(super) fn prepare<S: MomentSource>(
         rate_after_rad_s: rate_after,
         rotational_mobility_per_kg_m2: native.mobility,
         angular_impulse_on_a_world_nms: angular_impulse,
-        kinetic_energy_change_j: phase.kinetic_change_j,
+        external_wrenches: wrenches,
+        body_displacement_world_m: body_travel,
+        angular_displacement_body_rad: angular_travel,
+        kinetic_energy_change_j: finite(kinetic_change.to_f64())?,
         midpoint_impulse_work_j: impulse_work,
+        external_work_j,
         work_energy_residual_j: finite(
-            (Dd::from_f64(phase.kinetic_change_j) - Dd::from_f64(impulse_work)).to_f64(),
+            (kinetic_change - Dd::from_f64(impulse_work) - external_work).to_f64(),
         )?,
         total_energy_residual_j: finite(
-            (Dd::from_f64(phase.kinetic_change_j)
-                + Dd::from_f64(work.storage_change)
-                + Dd::from_f64(work.loss))
-            .to_f64(),
+            (kinetic_change + Dd::from_f64(work.storage_change) + Dd::from_f64(work.loss)
+                - external_work)
+                .to_f64(),
         )?,
         angle_residual_rad: finite((native_angle - Dd::from_f64(angle)).to_f64())?,
         angular_velocity_residual_rad_s: finite(
             (Dd::from_f64(rate_after)
                 - Dd::from_f64(rate_before)
+                - Dd::from_f64(dt_s) * Dd::from_f64(free_acceleration)
                 - Dd::from_f64(native.mobility) * Dd::from_f64(impulse))
             .to_f64(),
         )?,
         body_angular_impulse_residual_nms: body_residual,
-        linear_momentum_change_ns: phase.linear_change_ns,
-        angular_momentum_change_nms: phase.angular_change_nms,
+        body_linear_impulse_residual_ns: body_linear_residual,
+        linear_momentum_change_ns: rounded_components(linear_change),
+        angular_momentum_change_nms: rounded_components(angular_change),
+        linear_momentum_residual_ns: linear_residual,
+        angular_momentum_residual_nms: angular_residual,
         evaluations,
     };
     if report.work_energy_residual_j.abs() > controls.energy_tolerance_j
@@ -373,8 +476,13 @@ pub(super) fn prepare<S: MomentSource>(
         || body_residual
             .iter()
             .any(|x| !x.is_finite() || magnitude(*x) > controls.angular_momentum_tolerance_nms)
-        || magnitude(phase.linear_change_ns) > controls.linear_momentum_tolerance_ns
-        || magnitude(phase.angular_change_nms) > controls.angular_momentum_tolerance_nms
+        || body_linear_residual
+            .iter()
+            .any(|x| !x.is_finite() || magnitude(*x) > controls.linear_momentum_tolerance_ns)
+        || !linear_residual.is_finite()
+        || !angular_residual.is_finite()
+        || magnitude(linear_residual) > controls.linear_momentum_tolerance_ns
+        || magnitude(angular_residual) > controls.angular_momentum_tolerance_nms
     {
         return Err(MomentError::Audit(Box::new(report)));
     }

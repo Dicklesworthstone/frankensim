@@ -7,7 +7,7 @@ use fs_contact::normal_patch::adhesive::torsion::{JkrTorsionControls, SourceJkrT
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};
 use fs_exec::CancelGate;
 use fs_mbd::tangential_friction::{RigidContactBinding, adhesive::torsion::*};
-use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3};
+use fs_mbd::{MassProperties, Pose, RigidBodyState, UnitQuaternion, Vec3, Wrench};
 use fs_tribo::partial_slip::TangentFrame;
 
 fn source(tensile: bool) -> SourceJkrTorsionContact {
@@ -449,4 +449,209 @@ fn g4_cancel_foreign_source_geometry_and_budget_refuse_atomically() {
     ));
     assert_eq!(state, initial);
     assert_eq!(bodies, f.bodies);
+}
+
+#[test]
+fn g1_loaded_torsion_uses_actual_inertia_and_accounts_for_applied_work() {
+    let source = source(true);
+    let dt = 1e-4;
+    let critical = source.law().parameters().critical_twist_angle_rad;
+    let stiffness = source.law().stiffness_nm_per_rad();
+    let f = fixture(0.1 * critical / dt, 0.0, true);
+    let axis = vector(f.frame.normal());
+    let contact = f.contact(&source);
+    let state = contact
+        .initial_state(&f.bodies, &f.properties, controls(), &CancelGate::new())
+        .unwrap();
+    let wrenches = [
+        Wrench {
+            force_world: Vec3::new(1e-8, -2e-8, 3e-8),
+            torque_body: Vec3::new(2e-8, -1e-8, 3e-8),
+        },
+        Wrench {
+            force_world: Vec3::new(-2e-8, 3e-8, 1e-8),
+            torque_body: Vec3::new(-1e-8, 2e-8, -2e-8),
+        },
+    ];
+    let acceleration: [Vec3; 2] = core::array::from_fn(|i| {
+        f.bodies[i].pose().orientation().rotate_body_to_world(
+            f.properties[i]
+                .angular_velocity_body_checked(wrenches[i].torque_body)
+                .unwrap(),
+        )
+    });
+    let alpha = acceleration[0].sub(acceleration[1]).dot(axis);
+    let expected = (0.1 * critical + 0.5 * dt * dt * alpha)
+        / (1.0 + 0.25 * dt * dt * f.mobility() * stiffness);
+    let candidate = prepare_rigid_adhesive_torsion_with_wrenches(
+        &f.bodies,
+        &f.properties,
+        &state,
+        contact,
+        wrenches,
+        dt,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    close(candidate.report.angle_increment_rad, expected, 1e-18);
+    close(
+        candidate.report.contact.torsion().mean_moment_n_m,
+        -0.5 * stiffness * expected,
+        1e-23,
+    );
+    assert_eq!(candidate.report.contact.torsion().irreversible_loss_j, 0.0);
+    let mut work = 0.0;
+    let mut angular_impulse = Vec3::ZERO;
+    for i in 0..2 {
+        let before = f.bodies[i];
+        let after = candidate.bodies_after[i];
+        let mean_velocity = before
+            .center_of_mass_velocity_world(f.properties[i])
+            .unwrap()
+            .add(
+                after
+                    .center_of_mass_velocity_world(f.properties[i])
+                    .unwrap(),
+            )
+            .scale(0.5);
+        let mean_omega = f.properties[i]
+            .angular_velocity_body_checked(before.angular_momentum_body())
+            .unwrap()
+            .add(
+                f.properties[i]
+                    .angular_velocity_body_checked(after.angular_momentum_body())
+                    .unwrap(),
+            )
+            .scale(0.5);
+        work += dt
+            * (wrenches[i].force_world.dot(mean_velocity)
+                + wrenches[i].torque_body.dot(mean_omega));
+        angular_impulse = angular_impulse
+            .add(
+                before
+                    .pose()
+                    .position_world()
+                    .cross(wrenches[i].force_world.scale(dt)),
+            )
+            .add(
+                before
+                    .pose()
+                    .orientation()
+                    .rotate_body_to_world(wrenches[i].torque_body.scale(dt)),
+            );
+    }
+    close(candidate.report.external_work_j, work, 1e-25);
+    close(
+        candidate.report.kinetic_energy_change_j
+            + candidate.report.contact.torsion().storage_change_j,
+        work,
+        1e-25,
+    );
+    vec_close(
+        candidate.report.angular_momentum_change_nms,
+        angular_impulse,
+        1e-25,
+    );
+    vec_close(
+        candidate.report.angular_momentum_residual_nms,
+        Vec3::ZERO,
+        1e-25,
+    );
+}
+
+#[test]
+fn g1_loaded_twist_reaches_yield_and_invalid_loads_cannot_publish() {
+    let source = source(false);
+    let f = fixture(0.0, 0.0, false);
+    let contact = f.contact(&source);
+    let initial = contact
+        .initial_state(&f.bodies, &f.properties, controls(), &CancelGate::new())
+        .unwrap();
+    let mut bodies = f.bodies;
+    let mut state = initial;
+    let dt = 1e-3;
+    let alpha = 6.0 * source.law().parameters().critical_twist_angle_rad / (dt * dt)
+        + 2.0 * f.mobility() * source.law().critical_moment_n_m();
+    let wrenches = [
+        Wrench {
+            force_world: Vec3::ZERO,
+            torque_body: f.properties[0]
+                .angular_momentum_body_checked(Vec3::new(0.0, 0.0, alpha))
+                .unwrap(),
+        },
+        Wrench::ZERO,
+    ];
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    assert!(
+        apply_rigid_adhesive_torsion_with_wrenches(
+            &mut bodies,
+            &f.properties,
+            &mut state,
+            contact,
+            wrenches,
+            dt,
+            controls(),
+            &cancelled,
+        )
+        .is_err()
+    );
+    assert_eq!(bodies, f.bodies);
+    assert_eq!(state, initial);
+    let invalid = [
+        Wrench {
+            force_world: Vec3::new(f64::INFINITY, 0.0, 0.0),
+            ..wrenches[0]
+        },
+        Wrench::ZERO,
+    ];
+    assert!(
+        apply_rigid_adhesive_torsion_with_wrenches(
+            &mut bodies,
+            &f.properties,
+            &mut state,
+            contact,
+            invalid,
+            dt,
+            controls(),
+            &CancelGate::new(),
+        )
+        .is_err()
+    );
+    assert_eq!(bodies, f.bodies);
+    assert_eq!(state, initial);
+    let expected = prepare_rigid_adhesive_torsion_with_wrenches(
+        &bodies,
+        &f.properties,
+        &state,
+        contact,
+        wrenches,
+        dt,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let report = apply_rigid_adhesive_torsion_with_wrenches(
+        &mut bodies,
+        &f.properties,
+        &mut state,
+        contact,
+        wrenches,
+        dt,
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    assert_eq!(report, expected.report);
+    assert_eq!(bodies, expected.bodies_after);
+    assert_eq!(state, expected.state_after);
+    assert!(report.contact.torsion().irreversible_loss_j > 0.0);
+    close(
+        report.kinetic_energy_change_j
+            + report.contact.torsion().storage_change_j
+            + report.contact.torsion().irreversible_loss_j,
+        report.external_work_j,
+        1e-25,
+    );
 }
