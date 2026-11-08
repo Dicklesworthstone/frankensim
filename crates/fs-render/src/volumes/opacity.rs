@@ -18,9 +18,11 @@ pub use area::{
 
 mod spectral;
 pub use spectral::{
-    DensityAbsorptionSpectrum, MAX_OPACITY_WAVELENGTHS, SpectralAbsorptionImageSettings,
-    SpectralOpacityImage, SpectralOpacitySample, render_density_spectral_box,
-    render_density_spectral_transmittance_box,
+    DensityAbsorptionSpectrum, IndexedDensityAbsorptionSpectrum,
+    IndexedSpectralAbsorptionImageSettings, MAX_OPACITY_WAVELENGTHS,
+    SpectralAbsorptionImageSettings, SpectralOpacityImage, SpectralOpacitySample,
+    render_density_spectral_box, render_density_spectral_indexed_box,
+    render_density_spectral_indexed_transmittance_box, render_density_spectral_transmittance_box,
 };
 
 #[cfg(feature = "tracer")]

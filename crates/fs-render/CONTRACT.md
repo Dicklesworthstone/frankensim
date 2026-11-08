@@ -9751,6 +9751,27 @@ depth behind an overflowing mass sum, thin/opaque backgrounds, flat layout and
 work/input refusal. The targeted native volumes-enabled source build passed
 117 tests, including these eight; this is not a full-workspace or tracer gate.
 
+### Indexed material opacity
+
+`IndexedDensityAbsorptionSpectrum` borrows the original x-fastest density
+field, one `u32` material/state index per cell, and a material-major,
+wavelength-fastest table of mass absorption in m²/kg on common 1–16 positive
+increasing vacuum wavelengths. The indexed full-image and direct-transmission
+entry points integrate each cell's density, selected coefficient and physical
+length before averaging transported intensity over exact pixel footprints.
+Distinct layers and adjacent materials retain their original assignments;
+there is no converted extinction grid or inferred mixing law.
+
+Indexed spectral work counts every intersected original cell times wavelengths;
+uniform spectral work remains overlapping columns times wavelengths and keeps
+its single density-column reduction. A separate `max_materials` bounds every
+palette row, including unused rows. The complete palette and every map index,
+including zero-density cells, are validated before output allocation. Outputs
+retain the existing pixel-major spectral layout, SI scaling, thin opacity and
+effective log-survival semantics. Six regressions cover independent layered
+Beer–Lambert references, colored subpixel coverage/refinement, uniform and SI
+parity, range limits, palette/map refusal and exact spectral work admission.
+
 ### Continuous scalar-field transfer preintegration
 
 `volumes::preintegrated` adds bounded source/extinction integration for linear

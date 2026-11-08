@@ -19,9 +19,11 @@ pub mod preintegrated;
 /// Exact scalar-transfer transport and physical mass-density opacity.
 pub mod opacity;
 pub use opacity::{
-    DensityAbsorption, DensityAbsorptionSpectrum, MAX_OPACITY_WAVELENGTHS,
+    DensityAbsorption, DensityAbsorptionSpectrum, IndexedDensityAbsorptionSpectrum,
+    IndexedSpectralAbsorptionImageSettings, MAX_OPACITY_WAVELENGTHS,
     SpectralAbsorptionImageSettings, SpectralOpacityImage, SpectralOpacitySample,
-    TransferTransportPixel, render_density_spectral_box, render_density_spectral_transmittance_box,
+    TransferTransportPixel, render_density_spectral_box, render_density_spectral_indexed_box,
+    render_density_spectral_indexed_transmittance_box, render_density_spectral_transmittance_box,
     render_density_transmittance, render_density_transmittance_box, render_density_transport_box,
     render_transfer_transport, render_transfer_transport_box,
 };
@@ -125,6 +127,24 @@ pub enum DvrError {
     /// Spectral opacity requires 1--16 increasing positive finite wavelengths
     /// and exactly as many finite nonnegative mass absorption coefficients.
     InvalidAbsorptionSpectrum,
+    /// The material palette or per-cell index map has an invalid shape.
+    InvalidAbsorptionMaterialMap,
+    /// A cell selects a material absent from the absorption palette.
+    AbsorptionMaterialIndexOutOfBounds {
+        /// Linear x-major field index.
+        cell: usize,
+        /// Supplied palette index.
+        material: u32,
+        /// Number of admitted palette materials.
+        materials: usize,
+    },
+    /// The absorption palette exceeds its explicit material-count budget.
+    AbsorptionMaterialBudgetExceeded {
+        /// Requested palette materials.
+        requested: usize,
+        /// Admitted palette materials.
+        limit: usize,
+    },
     /// Background radiance is negative or non-finite.
     InvalidBackgroundRadiance,
     /// Accumulated or composited source radiance cannot be represented.

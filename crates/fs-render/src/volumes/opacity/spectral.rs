@@ -10,6 +10,12 @@ use super::{
 };
 use fs_math::det;
 
+mod indexed;
+pub use indexed::{
+    IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
+    render_density_spectral_indexed_box, render_density_spectral_indexed_transmittance_box,
+};
+
 /// Maximum supplied wavelength samples in one lean opacity image.
 pub const MAX_OPACITY_WAVELENGTHS: usize = 16;
 
@@ -67,9 +73,11 @@ impl DensityAbsorptionSpectrum<'_> {
 pub struct SpectralAbsorptionImageSettings {
     /// Original field, image and exact footprint cell-visit admission limits.
     pub image: AbsorptionImageSettings,
-    /// Maximum overlapping original columns times supplied wavelengths.
-    /// Transparent columns and zero-absorption wavelengths still count. This
-    /// also bounds the number of output spectral samples before allocation.
+    /// Maximum spectral coefficient evaluations. Uniform spectra count
+    /// overlapping original columns times wavelengths; indexed spectra count
+    /// intersected original cells times wavelengths. Transparent cells and
+    /// zero-absorption wavelengths still count. This also bounds the number of
+    /// output spectral samples before allocation.
     pub max_spectral_evaluations: u64,
 }
 
@@ -136,6 +144,22 @@ pub struct SpectralOpacityImage {
 }
 
 impl SpectralOpacityImage {
+    fn from_samples(
+        resolution: [usize; 2],
+        wavelengths: &[f64],
+        samples: Vec<SpectralOpacitySample>,
+    ) -> Self {
+        let lanes = wavelengths.len();
+        let mut wavelengths_nm = [0.0; MAX_OPACITY_WAVELENGTHS];
+        wavelengths_nm[..lanes].copy_from_slice(wavelengths);
+        Self {
+            resolution,
+            wavelengths_nm,
+            lanes,
+            samples,
+        }
+    }
+
     /// Original output width and height.
     #[must_use]
     pub const fn resolution(&self) -> [usize; 2] {
@@ -182,16 +206,12 @@ pub fn render_density_spectral_box(
     settings: SpectralAbsorptionImageSettings,
     spectrum: DensityAbsorptionSpectrum<'_>,
 ) -> Result<SpectralOpacityImage, DvrError> {
-    let samples = render::<TransportAverage>(grid, settings, spectrum)?;
-    let lanes = spectrum.wavelengths_nm.len();
-    let mut wavelengths_nm = [0.0; MAX_OPACITY_WAVELENGTHS];
-    wavelengths_nm[..lanes].copy_from_slice(spectrum.wavelengths_nm);
-    Ok(SpectralOpacityImage {
-        resolution: settings.image.resolution,
-        wavelengths_nm,
-        lanes,
+    let samples = render::<TransportAverage, _>(grid, settings, spectrum)?;
+    Ok(SpectralOpacityImage::from_samples(
+        settings.image.resolution,
+        spectrum.wavelengths_nm,
         samples,
-    })
+    ))
 }
 
 /// The same spectral footprint integration, retaining only transmission.
@@ -205,22 +225,23 @@ pub fn render_density_spectral_transmittance_box(
     settings: SpectralAbsorptionImageSettings,
     spectrum: DensityAbsorptionSpectrum<'_>,
 ) -> Result<Vec<f64>, DvrError> {
-    render::<TransmissionAverage>(grid, settings, spectrum)
+    render::<TransmissionAverage, _>(grid, settings, spectrum)
 }
 
-fn render<A: ColumnAverage>(
+fn render<A: ColumnAverage, S: ColumnAbsorption>(
     grid: &VolumeGrid<'_>,
     settings: SpectralAbsorptionImageSettings,
-    spectrum: DensityAbsorptionSpectrum<'_>,
+    spectrum: S,
 ) -> Result<Vec<A::Output>, DvrError> {
-    spectrum.validate()?;
+    spectrum.admit(grid)?;
     let pixels = area::admit_work(grid, settings.image)?;
     let [width, height] = settings.image.resolution;
     let [nx, ny, nz] = grid.dims;
-    let lanes = spectrum.wavelengths_nm.len();
+    let lanes = spectrum.wavelengths().len();
     let evaluations = area::overlap_count(nx, width)
         .checked_mul(area::overlap_count(ny, height))
-        .and_then(|columns| columns.checked_mul(lanes as u128))
+        .and_then(|columns| columns.checked_mul(spectrum.spectral_steps(nz) as u128))
+        .and_then(|steps| steps.checked_mul(lanes as u128))
         .and_then(|work| u64::try_from(work).ok())
         .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
     if evaluations > settings.max_spectral_evaluations {
@@ -232,6 +253,7 @@ fn render<A: ColumnAverage>(
     let output_samples = pixels
         .checked_mul(lanes)
         .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
+    spectrum.validate_values()?;
     validate_transfer_grid(grid)?;
     if let Some(index) = grid.data.iter().position(|value| *value < 0.0) {
         return Err(DvrError::NegativeGridAbsorption { index });
@@ -245,21 +267,7 @@ fn render<A: ColumnAverage>(
                 for (ix, wx) in area::overlaps(px, width, nx) {
                     let weight = (wx * wy) as u64;
                     let column = ix + nx * iy;
-                    let mut density = ColumnDensity::default();
-                    for iz in (0..nz).rev() {
-                        density.add(grid.data[column + plane * iz]);
-                    }
-                    for (lane, &coefficient) in spectrum.mass_absorption_m2_kg.iter().enumerate() {
-                        let depth = optical_product(&[
-                            density.scale.max(density.sum.value),
-                            coefficient,
-                            density.scale.min(density.sum.value),
-                            spectrum.density_unit_kg_m3,
-                            grid.cell[2],
-                            spectrum.length_unit_m,
-                        ]);
-                        average[lane].add(depth, weight);
-                    }
+                    spectrum.add_column(grid, column, plane, &mut average[..lanes], weight);
                 }
             }
             for value in average.into_iter().take(lanes) {
@@ -268,6 +276,65 @@ fn render<A: ColumnAverage>(
         }
     }
     Ok(image)
+}
+
+// The footprint traversal, work admission and averaging are shared. Static
+// dispatch preserves the uniform spectrum's single density reduction without
+// allocating per-cell extinction or introducing per-wavelength density scans.
+trait ColumnAbsorption {
+    fn wavelengths(&self) -> &[f64];
+    fn admit(&self, grid: &VolumeGrid<'_>) -> Result<(), DvrError>;
+    fn validate_values(&self) -> Result<(), DvrError> {
+        Ok(())
+    }
+    fn spectral_steps(&self, depth_cells: usize) -> usize;
+    fn add_column<A: ColumnAverage>(
+        &self,
+        grid: &VolumeGrid<'_>,
+        column: usize,
+        plane: usize,
+        average: &mut [A],
+        weight: u64,
+    );
+}
+
+impl ColumnAbsorption for DensityAbsorptionSpectrum<'_> {
+    fn wavelengths(&self) -> &[f64] {
+        self.wavelengths_nm
+    }
+
+    fn admit(&self, _grid: &VolumeGrid<'_>) -> Result<(), DvrError> {
+        self.validate()
+    }
+
+    fn spectral_steps(&self, _depth_cells: usize) -> usize {
+        1
+    }
+
+    fn add_column<A: ColumnAverage>(
+        &self,
+        grid: &VolumeGrid<'_>,
+        column: usize,
+        plane: usize,
+        average: &mut [A],
+        weight: u64,
+    ) {
+        let mut density = ColumnDensity::default();
+        for iz in (0..grid.dims[2]).rev() {
+            density.add(grid.data[column + plane * iz]);
+        }
+        for (lane, &coefficient) in self.mass_absorption_m2_kg.iter().enumerate() {
+            let depth = optical_product(&[
+                density.scale.max(density.sum.value),
+                coefficient,
+                density.scale.min(density.sum.value),
+                self.density_unit_kg_m3,
+                grid.cell[2],
+                self.length_unit_m,
+            ]);
+            average[lane].add(depth, weight);
+        }
+    }
 }
 
 // Ordinary compensated density sums cost one addition per crossed cell. If a
