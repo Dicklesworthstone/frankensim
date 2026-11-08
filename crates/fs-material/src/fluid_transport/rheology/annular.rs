@@ -7,14 +7,18 @@
 //!
 //! This is a fixed-geometry, no-slip, incompressible laminar reduction at one
 //! uniform frozen temperature. The caller owns entrance/transition admission,
-//! pressure limits and thermal evolution. Cylinder rotation, eccentricity,
-//! cavitation, slip and density transport are not supplied. A zero inner radius
-//! is a circular pipe with an axis, not an annulus with a material wall.
+//! pressure limits and thermal evolution. Pure cylinder rotation is provided
+//! separately by [`rotation`]; nonlinear axial and rotational profiles cannot
+//! be superposed. Eccentricity, cavitation, slip and density transport are not
+//! supplied. A zero inner radius is a pipe with an axis, not a material wall.
 
 use super::pipe::{CarreauPipeControls, PreparedCarreau, RateState, integrate, product_ratio};
 use super::slit::{Moments, integrate_moments};
 use super::{MaterialError, ThermalCarreauYasuda, parameters, positive, state_error};
 use fs_math::det;
+
+/// Pure circular Couette flow on the same source and concentric geometry.
+pub mod rotation;
 
 #[cfg(test)]
 mod tests;
@@ -23,8 +27,9 @@ mod tests;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CarreauAnnularControls {
     pub local: CarreauPipeControls,
-    /// Wall-speed residual relative to max(|Uouter-Uinner|, gap*max wall rate),
-    /// AND stress correction relative to the solved pressure/shear stress scale.
+    /// Relative wall-speed and constitutive correction tolerance. Axial flow
+    /// uses max(|Uouter-Uinner|, gap*max wall rate); pure rotation uses the
+    /// nonzero angular-speed difference and the inner-wall shear rate.
     pub relative_wall_velocity_tolerance: f64,
     /// From one through 128 bounded stress corrections.
     pub maximum_wall_stress_iterations: u32,
