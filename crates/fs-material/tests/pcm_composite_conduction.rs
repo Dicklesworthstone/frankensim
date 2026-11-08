@@ -18,9 +18,9 @@ use fs_material::thermal::source::ThermalMaterialPoint;
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionSimulation, Event,
-    MaterialId, Reservoir, StepConfig, ThermalLink, TimedEvent,
+    MaterialId, Reservoir, StepConfig, ThermalLaw, ThermalLink, TimedEvent,
     conduction::{
-        ConductionObserver, ConductiveLink, ConductiveReservoir,
+        ConductionObserver, ConductiveLink, ConductiveReservoir, PlanarDensityLayer,
         implicit::{
             ImplicitConductionChain, ImplicitConductionControls, ImplicitConductionLaw,
             ImplicitConductionWorkspace,
@@ -196,6 +196,22 @@ fn source_transport_uses_volume_fractions_and_complete_latent_tangents() {
                     / (2.0 * delta),
                 1e-11,
             );
+            near(
+                sample.caloric.specific_volume_slope_m3_j,
+                (plus.caloric.state.specific_volume_m3_kg
+                    - minus.caloric.state.specific_volume_m3_kg)
+                    / (2.0 * delta),
+                1e-13,
+            );
+            assert_eq!(
+                ThermalLaw::bulk_density_kg_m3(&caloric, h).unwrap(),
+                Some(state.bulk_density_kg_m3)
+            );
+            assert_eq!(
+                ImplicitConductionLaw::specific_volume_derivative_at_specific_enthalpy(&law, h)
+                    .unwrap(),
+                Some(sample.caloric.specific_volume_slope_m3_j)
+            );
             if (125.0..175.0).contains(&h) {
                 assert_eq!(sample.caloric.temperature_slope_kg_k_j, 0.0);
                 assert_eq!(sample.caloric.matrix_enthalpy_derivative, 0.0);
@@ -299,7 +315,7 @@ fn exact_cp_composite_endpoint_keeps_the_original_left_conductivity_tangent() {
 #[test]
 fn affine_density_sources_keep_the_original_volume_derivative() {
     let (_, pcm) = constituents(ContentHash([1; 32]), ContentHash([2; 32]), [0.0; 2]);
-    let matrix = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(
+    let matrix = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
         ContentHash([3; 32]),
         SolidLiquidPhase::Solid,
         0.0,
@@ -311,26 +327,40 @@ fn affine_density_sources_keep_the_original_volume_derivative() {
             },
             HeatCapacityKnot {
                 temperature_k: 500.0,
-                specific_heat_capacity_j_kg_k: 1.0,
+                specific_heat_capacity_j_kg_k: 3.0,
                 bulk_density_kg_m3: 4000.0,
             },
         ],
-        1e-6,
     )
     .unwrap();
     let law = PcmComposite::try_new(&matrix, &pcm, 0.25, 0.0).unwrap();
-    let h = 62.5;
+    let h = 71.875;
     let sample = law.response_at_specific_enthalpy(h).unwrap();
+    near(sample.state.temperature_k, 350.0, 1e-12);
     near(sample.state.matrix.bulk_density_kg_m3, 7000.0, 1e-10);
     let a: f64 = 0.75 / 7000.0;
     let b: f64 = 0.25 / 1000.0;
-    let da: f64 = 0.75 * 20.0 / (7000.0 * 7000.0) * 0.8;
+    // Original matrix Cp(350 K)=1.5 and PCM Cp=2 give composite Cp=1.625.
+    let da: f64 = 0.75 * 20.0 / (7000.0 * 7000.0) / 1.625;
+    near(sample.specific_volume_slope_m3_j, da, 1e-18);
     near(
         sample.pcm_volume_fraction_slope_kg_j,
         -b * da / (a + b).powi(2),
         1e-15,
     );
     let delta = 1e-3;
+    near(
+        sample.specific_volume_slope_m3_j,
+        (law.values_at_specific_enthalpy(h + delta)
+            .unwrap()
+            .specific_volume_m3_kg
+            - law
+                .values_at_specific_enthalpy(h - delta)
+                .unwrap()
+                .specific_volume_m3_kg)
+            / (2.0 * delta),
+        1e-13,
+    );
     near(
         sample.pcm_volume_fraction_slope_kg_j,
         (law.values_at_specific_enthalpy(h + delta)
@@ -367,6 +397,10 @@ fn original_source_identity_domains_and_inward_zero_conductivity_are_enforced() 
         PreparedPcmConductivity::new(&caloric, &mk, &pk, Morphology::Parallel, || Ok(())).unwrap();
     for h in [f64::NAN, -1.0, 313.0] {
         assert!(law.state_at_specific_enthalpy(h).is_err());
+        assert!(ThermalLaw::bulk_density_kg_m3(&caloric, h).is_err());
+        assert!(
+            ImplicitConductionLaw::specific_volume_derivative_at_specific_enthalpy(&law, h).is_err()
+        );
     }
     let zero = card(
         "T",
@@ -392,7 +426,12 @@ fn native_implicit_conduction_melts_and_freezes_composite_without_extra_heat() {
     let (mk, pk) = (prepare(&mc, &matrix), prepare(&pc, &pcm));
     for morphology in [Morphology::Parallel, Morphology::Series] {
         let law = PreparedPcmConductivity::new(&caloric, &mk, &pk, morphology, || Ok(())).unwrap();
-        for bath in [350.0, 450.0] {
+        for (bath, material_density) in [
+            (350.0, false),
+            (450.0, false),
+            (350.0, true),
+            (450.0, true),
+        ] {
             let volume = caloric.volume_m3(140.0, 2.0).unwrap();
             let half_distance = 0.5 * volume;
             let dt = 0.01 * half_distance;
@@ -410,7 +449,11 @@ fn native_implicit_conduction_melts_and_freezes_composite_without_extra_heat() {
                             start_m: [0.0; 3],
                             end_m: [volume, 0.0, 0.0],
                             volume_m3: volume,
-                            surface_area_m2: 2.0 + 4.0 * volume,
+                            surface_area_m2: if material_density {
+                                2.0
+                            } else {
+                                2.0 + 4.0 * volume
+                            },
                         },
                         boundary: Boundary {
                             ambient_k: 300.0,
@@ -455,6 +498,20 @@ fn native_implicit_conduction_melts_and_freezes_composite_without_extra_heat() {
                 || Ok(()),
             )
             .unwrap();
+            let observer = if material_density {
+                observer
+                    .with_material_density_layers(
+                        &original,
+                        &[PlanarDensityLayer {
+                            cell_id: CellId(1),
+                            footprint_area_m2: 1.0,
+                        }],
+                        || Ok(()),
+                    )
+                    .unwrap()
+            } else {
+                observer
+            };
             let chain = ImplicitConductionChain::new(
                 &original,
                 &observer,
@@ -469,6 +526,7 @@ fn native_implicit_conduction_melts_and_freezes_composite_without_extra_heat() {
                     dt,
                     ImplicitConductionControls {
                         maximum_dt_s: dt,
+                        maximum_halvings: 0,
                         cell_tolerance_j: 1e-10,
                         total_tolerance_j: 1e-9,
                         ..ImplicitConductionControls::default()
@@ -479,18 +537,30 @@ fn native_implicit_conduction_melts_and_freezes_composite_without_extra_heat() {
                 .unwrap();
             // Independent scalar extensive-energy root, with analytic source k
             // and phase specific volume; no production constitutive query.
-            let (mut lo, mut hi) = (130.0, 150.0);
-            for _ in 0..70 {
-                let h = 0.5 * (lo + hi);
+            let residual = |h: f64, moving_density: bool| {
                 let fraction = (h - 125.0) / 50.0;
                 let vp = (1.0 - fraction) / 1000.0 + fraction / 800.0;
-                let phi = 0.25 * vp / (0.75 / 8000.0 + 0.25 * vp);
+                let specific_volume = 0.75 / 8000.0 + 0.25 * vp;
+                let phi = 0.25 * vp / specific_volume;
                 let kp = 2.0 + 8.0 * fraction;
                 let k = match morphology {
                     Morphology::Parallel => (1.0 - phi) * 30.0 + phi * kp,
                     Morphology::Series => 1.0 / ((1.0 - phi) / 30.0 + phi / kp),
                 };
-                if 2.0 * (h - 140.0) - 0.01 * k * (bath - 400.0) > 0.0 {
+                let distance = if moving_density {
+                    // Conserved mass=2 kg and fixed face area=1 m2.
+                    0.5 * 2.0 * specific_volume
+                } else {
+                    half_distance
+                };
+                2.0 * (h - 140.0) - (dt / distance) * k * (bath - 400.0)
+            };
+            let (mut lo, mut hi) = (130.0, 150.0);
+            assert!(residual(lo, material_density) < 0.0);
+            assert!(residual(hi, material_density) > 0.0);
+            for _ in 0..70 {
+                let h = 0.5 * (lo + hi);
+                if residual(h, material_density) > 0.0 {
                     hi = h;
                 } else {
                     lo = h;
@@ -502,6 +572,14 @@ fn native_implicit_conduction_melts_and_freezes_composite_without_extra_heat() {
             near(audit.energy.external_heat_j, 2.0 * (h - 140.0), 1e-9);
             near(audit.energy.residual_j, 0.0, 1e-9);
             assert_eq!(next.mass_kg(), 2.0);
+            assert_eq!(
+                next.cells()[&CellId(1)].geometry,
+                original.cells()[&CellId(1)].geometry
+            );
+            if material_density {
+                // A frozen initial distance gives a measurably different energy root.
+                assert!(residual(h, false).abs() > 1e-4);
+            }
             assert_eq!(original.cells()[&CellId(1)].specific_h_j_kg, 140.0);
             assert!((h - 140.0) * (bath - 400.0) > 0.0);
         }

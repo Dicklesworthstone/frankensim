@@ -7,7 +7,9 @@
 //! changes imply free expansion at fixed mass, not creation of cell inventory.
 //! Confinement, stress, transport, evolving geometry and pressure work remain with
 //! their existing owners. This law can be registered directly on the thermal
-//! timeline or its implicit residual through [`ThermalLaw`].
+//! timeline or its implicit residual through [`ThermalLaw`]. Its original density
+//! also supports explicitly selected fixed-footprint thermal layers with conserved
+//! total mass; their transport owner decides how free expansion changes resistance.
 //!
 //! Only the PCM can change phase. Its liquid fraction is a fraction of PCM mass;
 //! the composite's liquid mass fraction is that value times the PCM mass fraction.
@@ -71,6 +73,9 @@ pub struct PcmCompositeResponse {
     pub matrix_enthalpy_derivative: f64,
     /// d(h_PCM)/dH in the original constituent enthalpy coordinate.
     pub pcm_enthalpy_derivative: f64,
+    /// d(1/rho_composite)/dH [m3/J], from the original constituent volume laws.
+    /// This can remain nonzero during isothermal melting or freezing.
+    pub specific_volume_slope_m3_j: f64,
     /// Derivative of PCM volume fraction with respect to composite H [kg/J].
     pub pcm_volume_fraction_slope_kg_j: f64,
     /// Derivative of liquid mass / total composite mass [kg/J].
@@ -438,6 +443,7 @@ impl<'a> PcmComposite<'a> {
             state.pcm,
             pcm_slope,
         )?;
+        let specific_volume_slope = matrix_volume_slope + pcm_volume_slope;
         let phi = state.pcm_volume_fraction;
         let fraction_slope = ((1.0 - phi) * pcm_volume_slope - phi * matrix_volume_slope)
             / state.specific_volume_m3_kg;
@@ -455,6 +461,7 @@ impl<'a> PcmComposite<'a> {
         if ![
             matrix_volume_slope,
             pcm_volume_slope,
+            specific_volume_slope,
             fraction_slope,
             liquid_slope,
         ]
@@ -468,6 +475,7 @@ impl<'a> PcmComposite<'a> {
             temperature_slope_kg_k_j: temperature_slope,
             matrix_enthalpy_derivative: matrix_slope,
             pcm_enthalpy_derivative: pcm_slope,
+            specific_volume_slope_m3_j: specific_volume_slope,
             pcm_volume_fraction_slope_kg_j: fraction_slope,
             liquid_mass_fraction_slope_kg_j: liquid_slope,
         })
@@ -670,6 +678,12 @@ impl ThermalLaw for PcmComposite<'_> {
 
     fn maximum_temperature_slope(&self) -> f64 {
         self.maximum_slope
+    }
+
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        self.values_at_specific_enthalpy(h)
+            .map(|state| Some(state.bulk_density_kg_m3))
+            .map_err(|_| DepositionError::MaterialDomain)
     }
 
     fn specific_entropy_change_j_kg_k(

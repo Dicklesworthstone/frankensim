@@ -5,6 +5,9 @@
 //! homogenizations, not a universal foam or isotropic-composite mixing rule.
 //! Original constituent density and conductivity changes enter the tangent even
 //! on an isothermal latent plateau. Storage remains the original composite H.
+//! Original density and its specific-volume tangent let selected material-density
+//! layers refresh normal thermal resistance at fixed mass and footprint. This adds
+//! no latent-heat or pressure-work source.
 //!
 //! Geometry and reference mass belong to the transport owner. This does not
 //! model expansion work, interfacial thermal resistance, melt convection,
@@ -196,6 +199,15 @@ impl ImplicitConductionLaw for PreparedPcmConductivity<'_, '_> {
     }
     fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
         self.caloric.enthalpy_range_j_kg()
+    }
+    fn specific_volume_derivative_at_specific_enthalpy(
+        &self,
+        h: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        self.caloric
+            .response_at_specific_enthalpy(h)
+            .map(|response| Some(response.specific_volume_slope_m3_j))
+            .map_err(|_| DepositionError::MaterialDomain)
     }
     fn state_at_specific_enthalpy(
         &self,
