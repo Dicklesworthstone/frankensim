@@ -28,6 +28,8 @@ use std::sync::Mutex;
 
 mod pressure;
 mod rheology;
+/// Conservative D3Q7 heat transport on the same native open-grid transaction.
+pub mod thermal;
 
 use pressure::PressureProfile3;
 
@@ -189,6 +191,22 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         collisions: Option<&[L::Collision]>,
         origin: [f64; 3],
     ) -> Result<OpenBoundaryMomentumTransport3, GridError3<L::Error>> {
+        let (receipt, step) = self.stage_serial_with_plan(cx, plan, collisions, origin)?;
+        core::mem::swap(&mut self.grid.f, &mut self.grid.next);
+        self.grid.completed_steps = step;
+        self.plan = plan;
+        Ok(receipt)
+    }
+
+    // The thermal owner admits its final source kick and independent heat
+    // receipt before either native population field becomes visible.
+    fn stage_serial_with_plan(
+        &mut self,
+        cx: &Cx<'_>,
+        plan: FacePlan,
+        collisions: Option<&[L::Collision]>,
+        origin: [f64; 3],
+    ) -> Result<(OpenBoundaryMomentumTransport3, usize), GridError3<L::Error>> {
         let mut poll = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
         let step = self.admit_step(collisions, origin, &mut poll)?;
         let grid = &mut self.grid;
@@ -218,10 +236,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         }
         let receipt = view.measure(&grid.post, &grid.next, origin, &mut poll)?;
         poll()?;
-        core::mem::swap(&mut grid.f, &mut grid.next);
-        grid.completed_steps = step;
-        self.plan = plan;
-        Ok(receipt)
+        Ok((receipt, step))
     }
 
     /// Executor counterpart using the same fixed 64-cell collision and stream
@@ -684,3 +699,4 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> TileKernel for OpenStream<'_, '_
         ControlFlow::Continue(FirstError(outcome.err()))
     }
 }
+

@@ -7,6 +7,8 @@
 
 pub mod sources;
 pub mod tensor;
+/// Conservative temperature transport on native three-dimensional open flow.
+pub mod open;
 /// Thermal boundary laws on the existing stationary halfway slab walls.
 pub mod boundary;
 pub(crate) mod advection;
