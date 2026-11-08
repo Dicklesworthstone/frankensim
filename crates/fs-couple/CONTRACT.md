@@ -1,3 +1,31 @@
+## Modal convergence with conservative and cancelling fields
+
+The modal vibroacoustic convergence APIs now require both the original active
+input-power comparison and a normalization-invariant reference energy-norm
+comparison of the complex displacement/pressure fields. The latter retains
+conservative resonances, source-work cancellation, omitted coordinates and
+phase error. `ConvergedResponse` exposes `input_power_delta` and
+`energy_norm_delta` separately; their maximum is `truncation_delta` and
+controls refusal. Existing callers can therefore receive a truncation refusal
+for a field that previously passed on power alone.
+
+This is observed sensitivity to one basis reduction, not a bound on pointwise
+pressure or modes absent from both bases. The fixed reference metric includes
+structural kinetic/strain and fluid compression/kinetic energy; additional
+storage owned by dispersive materials, boundary loads or exterior radiation is
+not claimed by this metric. The comparison uses one allocation-free linear pass
+over the existing solve results and adds no dense solves. Deterministic hypot
+accumulation avoids squaring quiet modal coefficients before weighting.
+
+Five new regressions cover omitted lossless structural/acoustic resonances,
+a representable quiet source whose pressure squares underflow, coherent
+structural/acoustic work cancellation, an independently integrated physical
+field with signed cavity-basis rescaling, and exactly zero fields. The existing
+power-specific regressions now inspect `input_power_delta`. These Rust tests
+were added but could not be executed in this session after the execution
+environment became unavailable; source review and independent numerical
+fixture checks do not substitute for a native test pass.
+
 ## Synchronized transient Rayleigh field and microphone orientation
 
 `baffled_pressure::field::BaffledField` observes pressure and all three fluid

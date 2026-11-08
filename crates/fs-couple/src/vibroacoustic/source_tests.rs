@@ -237,7 +237,11 @@ fn acoustic_source_truncation_uses_the_original_full_basis_and_checks_sources() 
     let checked = coupled
         .frf_with_sources_and_convergence(190.0, &forces, &flows, 2.0 * delta)
         .unwrap();
-    near(checked.truncation_delta, delta, delta);
+    near(checked.input_power_delta, delta, delta);
+    assert_eq!(
+        checked.truncation_delta,
+        checked.input_power_delta.max(checked.energy_norm_delta),
+    );
     assert_eq!(checked.mode_counts, (2, 2, 1, 1));
     assert!(matches!(
         coupled.frf_with_sources_and_convergence(190.0, &forces, &flows, 0.5 * delta),

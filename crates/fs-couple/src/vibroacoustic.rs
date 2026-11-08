@@ -79,8 +79,11 @@
 //!
 //! TRUNCATION HONESTY: modal truncation error is OBSERVED, not
 //! assumed. [`VibroacousticModel::frf_with_convergence`] re-solves on
-//! the half-retained bases and refuses to report a converged value
-//! when the relative delta exceeds the caller's tolerance.
+//! the half-retained bases and compares both active input power and the
+//! complex displacement/pressure fields in their reference energy norm.
+//! Reactive motion and pressure therefore remain observable when active
+//! work vanishes or coherent sources exchange equal and opposite work.
+//! Either relative delta exceeding the caller's tolerance refuses convergence.
 //!
 //! Determinism: dense assembly and solves in fixed traversal order via
 //! `fs_la::eigen_complex`; repeat solves are bitwise identical.
@@ -687,8 +690,17 @@ pub struct VibroResponse {
 pub struct ConvergedResponse {
     /// The full-basis response.
     pub response: VibroResponse,
-    /// Relative input-power delta between full and halved bases.
+    /// Maximum of [`Self::input_power_delta`] and [`Self::energy_norm_delta`].
     pub truncation_delta: f64,
+    /// Relative signed input-power delta between full and halved bases,
+    /// normalized by `max(|P_full|, 1e-300 W)`.
+    pub input_power_delta: f64,
+    /// Norm of the complex full-minus-halved response, divided by the full
+    /// response norm. Omitted modal coordinates are zero, and the norm squared
+    /// is the reference lossless structural plus cavity energy. Thus phase
+    /// changes and conservative resonances are visible even at zero active
+    /// power. See [`VibroacousticModel::frf_with_convergence`] for the metric.
+    pub energy_norm_delta: f64,
     /// Mode counts used: (structure full, cavity full, structure half,
     /// cavity half).
     pub mode_counts: (usize, usize, usize, usize),
@@ -1313,11 +1325,35 @@ impl VibroacousticModel {
         })
     }
 
-    /// Solve with OBSERVED truncation error: the response is
-    /// re-computed on the half-retained bases and the relative
-    /// input-power delta must sit inside `tolerance`, else the solve
-    /// refuses (`FS-COUPLE-VIBRO-TRUNCATION-NOT-CONVERGED`) rather
-    /// than reporting an unconverged value as converged.
+    /// Solve on full and half-retained bases, requiring both the relative
+    /// active input-power delta and the relative complex response energy-norm
+    /// delta to lie within `tolerance`.
+    ///
+    /// With missing coordinates extended by zero, the response comparison is
+    /// `sqrt(E(full - half) / E(full))`, where the original mass-normalized
+    /// structural and cavity bases give the positive reference metric
+    ///
+    /// ```text
+    /// 4 E(b, a) = sum_r (omega^2 + omega_r^2) |b_r|^2
+    ///          + sum_q Lambda_q/(rho0 c0^2) (1 + omega_q^2/omega^2) |a_q|^2.
+    /// ```
+    ///
+    /// These are structural kinetic/strain and fluid compression/kinetic
+    /// energies of the lossless reference fields, not a sum of displacement
+    /// and pressure coefficients with incompatible units. Rescaling a cavity
+    /// mode changes `Lambda_q` and `a_q` reciprocally and leaves this norm
+    /// unchanged. Comparing the complex difference retains phase error even
+    /// when the two solutions have equal energies or zero net source power.
+    /// Zero full and half fields have zero relative error. The fluid terms
+    /// follow the acoustic volume energies in the [ANSYS Theory Reference].
+    ///
+    /// This measures sensitivity to this one basis reduction; it does not
+    /// bound pointwise pressure, a quiet notch, or modes absent from both
+    /// bases. Attached dispersive materials/boundaries and exterior radiation
+    /// retain their own storage: this fixed reference norm is not a claim
+    /// about their additional stored energy.
+    ///
+    /// [ANSYS Theory Reference]: https://ansyshelp.ansys.com/public/Views/Secured/corp/v252/en/ans_thry/thyacous_aoq.html
     ///
     /// # Errors
     /// As for [`Self::frf`], plus the truncation refusal.
@@ -1332,9 +1368,9 @@ impl VibroacousticModel {
 
     /// [`Self::frf_with_sources`] with the same observed full-versus-halved
     /// modal convergence check as [`Self::frf_with_convergence`]. The same
-    /// physical force/flow projections drive both solves, and the compared
-    /// quantity is total signed source power. As for the existing check,
-    /// this one quantity does not bound pointwise pressure or a quiet notch.
+    /// physical force/flow projections drive both solves. Total signed source
+    /// power and the complex response energy norm are both compared, including
+    /// when coherent structural/acoustic sources exchange cancelling work.
     ///
     /// # Errors
     /// As [`Self::frf_with_sources`], plus the original truncation refusal.
@@ -1366,8 +1402,15 @@ impl VibroacousticModel {
         let half_s = (n_s / 2).max(1);
         let half_a = (n_a / 2).max(1);
         let half = self.solve_sources(omega, modal_force, cavity_volume_flow, half_s, half_a)?;
+        if !full.power.input.is_finite() || !half.power.input.is_finite() {
+            return Err(VibroError::BadParameter {
+                what: "modal convergence power comparison is unrepresentable",
+            });
+        }
         let denom = full.power.input.abs().max(1e-300);
-        let truncation_delta = (full.power.input - half.power.input).abs() / denom;
+        let input_power_delta = (full.power.input - half.power.input).abs() / denom;
+        let energy_norm_delta = self.response_energy_norm_delta(&full, &half)?;
+        let truncation_delta = input_power_delta.max(energy_norm_delta);
         if truncation_delta > tolerance {
             return Err(VibroError::TruncationNotConverged {
                 relative_delta: truncation_delta,
@@ -1377,7 +1420,49 @@ impl VibroacousticModel {
         Ok(ConvergedResponse {
             response: full,
             truncation_delta,
+            input_power_delta,
+            energy_norm_delta,
             mode_counts: (n_s, n_a, half_s, half_a),
+        })
+    }
+
+    fn response_energy_norm_delta(
+        &self,
+        full: &VibroResponse,
+        half: &VibroResponse,
+    ) -> Result<f64, VibroError> {
+        let mut full_norm = 0.0;
+        let mut error_norm = 0.0;
+        let mut accumulate = |value: C64, reduced: C64, weight: f64| {
+            // Accumulate square-root energy without squaring raw coefficients:
+            // cavity normalization and small source amplitudes must not turn
+            // representable physical errors into underflowed coefficient squares.
+            full_norm = fs_math::det::hypot(full_norm, weight * value.abs());
+            error_norm = fs_math::det::hypot(error_norm, weight * (value - reduced).abs());
+        };
+        for (r, &value) in full.b.iter().enumerate() {
+            let weight = fs_math::det::hypot(full.omega, self.omegas_s[r]);
+            accumulate(value, half.b.get(r).copied().unwrap_or(C64::ZERO), weight);
+        }
+        let root_bulk = self.rho_c2.sqrt();
+        for (q, &value) in full.a.iter().enumerate() {
+            let weight = (self.lambdas[q].sqrt() / root_bulk)
+                * fs_math::det::hypot(1.0, self.omegas_a[q] / full.omega);
+            accumulate(value, half.a.get(q).copied().unwrap_or(C64::ZERO), weight);
+        }
+        if !full_norm.is_finite() || !error_norm.is_finite() {
+            return Err(VibroError::BadParameter {
+                what: "modal convergence energy norm is unrepresentable",
+            });
+        }
+        Ok(if full_norm == 0.0 {
+            if error_norm == 0.0 {
+                0.0
+            } else {
+                f64::INFINITY
+            }
+        } else {
+            error_norm / full_norm
         })
     }
 }
@@ -2258,3 +2343,6 @@ mod gas_tests;
 
 #[cfg(test)]
 mod source_tests;
+
+#[cfg(test)]
+mod convergence_tests;

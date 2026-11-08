@@ -165,7 +165,7 @@ fn truncation_uses_the_original_principal_matrix_and_channel_prefix() {
     // The convergence driver must use the same damping in both solves.
     let checked = full.frf_with_convergence(2.7, &force, 10.0).unwrap();
     let half = full.frf_truncated(2.7, &force, 1, 1).unwrap();
-    close(checked.truncation_delta,
+    close(checked.input_power_delta,
         (checked.response.power.input - half.power.input).abs()/checked.response.power.input.abs(),
         2e-14);
 }
