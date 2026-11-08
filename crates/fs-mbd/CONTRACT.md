@@ -144,6 +144,46 @@ every cancellation/representability refusal. Orientation, spin and work errors
 reduce approximately fourfold under each step halving. Rustfmt check also
 passes; full Cargo/DSR is not claimed.
 
+## Loaded finite internal actuation
+
+`spatial_loads::internal_motion::step_internal_wrench_with_loads` and
+`internal_motion::network::step_internal_wrench_network_with_loads` compose the
+simultaneous internal half-kicks with one loaded original rigid-body midpoint
+step per body. `HeldExternalLoads` borrows one world-held COM force/body-held
+free couple per original body plus uniform gravity. Isolated bodies still
+receive the environment; mismatched load banks refuse. Original masses, full
+inertias, poses and nonlinear rotation remain authoritative.
+
+With no body couple the original default native step retains its exact
+exponential special cases. A nonzero body-held external couple selects the
+existing Cayley owner, giving independent spin impulse
+`dt*(R0+R1)/2*tau_body`; external orbital impulse is
+`(x_mid-origin) cross dt*(F_world+m*g)`. Products, source reductions and
+original-state momentum differences use compensated arithmetic. Source
+impulses are never inferred from observed momentum changes.
+
+Native `StepWorkDiagnostics` supplies force work on actual COM displacement,
+conjugate body-couple work and gravitational work. These remain separate from
+each internal connector's signed actuator work, including regeneration. Each
+body's middle-step source balance must close before the complete pair/network
+gate admits `delta(K+V_g)-W_external-W_actuator`. Numerical drift defects remain
+signed and are never deposited as heat. Internal kicks do not move poses, so
+`delta V_g=-W_g` covers the complete trajectory.
+
+The composition is second order for smooth held commands; rotations and
+continuous actuator work require timestep refinement, especially near the
+Cayley half-turn. Pair motion remains allocation-free, and network work/storage
+remains linear in bodies plus links with the existing complete-peak budgets and
+atomic refusal. Unloaded entry points retain their native motion. This does not
+infer constraints, external point-force arms, feedback control or a thermal law.
+
+Focused tests cover closed-form unequal-mass recoil/free fall, loaded rotor
+generation, shared-body force chains and isolated bodies, full-tensor
+trajectory/source-work refinement against the independent Newton/Euler ODE,
+invalid sources, load counts and zero-load parity. These added tests have not
+been executed in the current resource-limited environment; the broad rigid-body
+lane remains open.
+
 ## Native internal spatial-wrench impulse transfer
 
 `spatial_loads::internal_impulse::apply_internal_wrench_impulse` transfers a

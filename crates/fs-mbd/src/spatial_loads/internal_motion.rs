@@ -1,7 +1,8 @@
 //! Finite motion of two native bodies driven by one prescribed internal wrench.
 //!
-//! Two accepted internal half-impulses surround the original native free rigid
-//! drift. The opposite wrench is transported at each actual endpoint geometry,
+//! Two accepted internal half-impulses surround the original native rigid-body
+//! motion, optionally under external loading and gravity. The opposite wrench
+//! is transported at each actual endpoint geometry,
 //! so evolving attachments retain both linear and spin-plus-orbital momentum.
 //! Full inertia, quaternion evolution and rotational nonlinear solve stay with
 //! the original rigid-body owner; no pose or momentum is projected.
@@ -17,7 +18,8 @@ use super::internal_impulse::{
     InternalWrenchImpulseReceipt, apply_internal_wrench_impulse,
 };
 use crate::{
-    DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
+    DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3,
+    Wrench,
 };
 use fs_math::dd::Dd;
 
@@ -40,10 +42,41 @@ pub struct PrescribedInternalWrench {
     pub couple_on_second_world_nm: Vec3,
 }
 
+/// Held environment for a pair or network of internally actuated native bodies.
+///
+/// There must be exactly one original native wrench per body, including zero
+/// loads on isolated bodies. Each force is world-held and acts at the COM;
+/// each free couple is body-held. Uniform gravity acts on every original mass.
+/// The borrowed loads require no per-step allocation or new inertia ownership.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HeldExternalLoads<'a> {
+    pub wrenches: &'a [Wrench],
+    pub gravity: Gravity,
+}
+
+/// Source work and impulse, independently evaluated from the prescribed loads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ExternalLoadAccount {
+    /// Force work on the actual COM displacements, excluding gravity [J].
+    pub applied_force_work_j: f64,
+    /// Body-couple work at the native conjugate midpoint angular velocity [J].
+    pub applied_torque_work_j: f64,
+    /// Signed force plus couple work; negative means energy recovery [J].
+    pub applied_work_j: f64,
+    /// Uniform gravity work, equal to minus its potential-energy change [J].
+    pub gravity_work_j: f64,
+    /// Integrated external force, including gravity, in world coordinates [N s].
+    pub linear_impulse_world_ns: Vec3,
+    /// External spin-plus-orbital impulse about the receipt's declared origin
+    /// [N m s], evaluated from the native source quadrature, never inferred
+    /// from the bodies' observed momentum change.
+    pub angular_impulse_world_nms: Vec3,
+}
+
 /// Accepted finite trajectory and actual whole-step physical accounts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InternalWrenchStep {
-    /// Actual duration of the native free drift [s].
+    /// Actual duration of the native intervening motion [s].
     pub duration_s: f64,
     /// Original native states with both poses and momenta advanced.
     pub states_after: [RigidBodyState; 2],
@@ -57,15 +90,21 @@ pub struct InternalWrenchStep {
     /// Sum of accepted conjugate half-impulse works [J]. This is a discrete
     /// actuator-work quadrature; it is not an exact continuous power integral.
     pub actuator_work_j: f64,
-    /// Signed kinetic-energy change in the original free drift [J]. The native
+    /// Independent environment account, separate from internal actuator work.
+    pub external_loads: ExternalLoadAccount,
+    /// Actual uniform-gravity potential-energy increment [J].
+    pub gravitational_potential_energy_change_j: f64,
+    /// Actual kinetic plus uniform-gravity potential-energy increment [J].
+    pub mechanical_energy_change_j: f64,
+    /// Native kinetic change minus applied and gravitational work [J]. The
     /// implicit rotation keeps this at solve tolerance and roundoff. This defect
     /// remains in the total work gate and is never deposited as heat.
     pub native_drift_energy_defect_j: f64,
-    /// Actual total linear-momentum change in this internally driven pair [N s].
+    /// Actual total linear change minus the external impulse [N s].
     pub linear_momentum_residual_ns: Vec3,
-    /// Actual total spin-plus-orbital change about the declared origin [N m s].
+    /// Actual spin-plus-orbital change minus external angular impulse [N m s].
     pub angular_momentum_residual_nms: Vec3,
-    /// Actual kinetic-energy change minus discrete actuator work [J].
+    /// Actual mechanical change minus applied and internal actuator work [J].
     pub work_energy_residual_j: f64,
 }
 
@@ -79,15 +118,17 @@ pub enum InternalWrenchStepError {
     /// The duration cannot be halved exactly, or a nonzero held wrench produces
     /// an underflowed/overflowed half-impulse. No source is silently discarded.
     UnrepresentableImpulse,
-    /// Measured native free-drift or complete-trajectory budgets did not close.
+    /// Every original body must have one explicit external wrench.
+    ExternalLoadCount { bodies: usize, wrenches: usize },
+    /// Measured native-motion or complete-trajectory budgets did not close.
     Balance {
-        /// Some(i) identifies one body's free drift; None is the whole step.
+        /// Some(i) identifies one body's native motion; None is the whole step.
         body: Option<usize>,
-        /// Norm of actual linear change [N s].
+        /// Norm of actual linear change minus external impulse [N s].
         linear_residual_ns: f64,
-        /// Norm of actual spin-plus-orbital change [N m s].
+        /// Norm of actual spin-plus-orbital change minus external impulse [N m s].
         angular_residual_nms: f64,
-        /// Signed actual kinetic change minus supplied actuator work [J].
+        /// Signed actual mechanical change minus applied and actuator work [J].
         work_residual_j: f64,
     },
     /// Cancellation was observed before complete publication.
@@ -142,9 +183,49 @@ pub fn step_internal_wrench(
     drive: PrescribedInternalWrench,
     duration_s: f64,
     controls: InternalWrenchImpulseControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<InternalWrenchStep, InternalWrenchStepError> {
+    step_internal_wrench_with_loads(
+        states,
+        properties,
+        drive,
+        HeldExternalLoads {
+            wrenches: &[Wrench::ZERO; 2],
+            gravity: Gravity::ZERO,
+        },
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Advance an internally actuated pair while it carries external loads and falls.
+///
+/// The same simultaneous internal half-kicks surround one original loaded
+/// midpoint step per body. Held COM forces and gravity retain exact constant-
+/// acceleration translation, including actuator recoil. Body-held couples use
+/// [`RigidBodyIntegrator::step_cayley`], whose independent spatial impulse is
+/// `dt * (R0 + R1)/2 * torque_body`. With zero body couple the original default
+/// step retains its exact exponential special cases, so zero external loads
+/// preserve [`step_internal_wrench`]'s motion exactly.
+///
+/// Native force, couple and gravity work remain distinct from signed internal
+/// actuator work. Each body's intervening source balance is gated before the
+/// whole pair's original-state momentum and mechanical-energy balances. This
+/// is a symmetric second-order composition, not an exact continuous rotation
+/// or actuator-work integral; bound rotation increments and refine the step.
+/// No load callback, point-force arm, constraint or heat law is inferred.
+pub fn step_internal_wrench_with_loads(
+    states: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    drive: PrescribedInternalWrench,
+    loads: HeldExternalLoads<'_>,
+    duration_s: f64,
+    controls: InternalWrenchImpulseControls,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<InternalWrenchStep, InternalWrenchStepError> {
     poll(&mut cancelled)?;
+    check_load_count(2, loads)?;
     if !duration_s.is_finite() || duration_s <= 0.0 {
         return Err(DynamicsError::InvalidStepDuration.into());
     }
@@ -162,12 +243,17 @@ pub fn step_internal_wrench(
     let kicked = initial.bodies.map(|event| event.state_after);
     let mut drifted = kicked;
     let mut drift_energy = Dd::ZERO;
-    let free = RigidBodyIntegrator::new(Gravity::ZERO);
+    let mut external = LoadChange::ZERO;
     for i in 0..2 {
         poll(&mut cancelled)?;
-        drifted[i] = free
-            .step(kicked[i], properties[i], Wrench::ZERO, duration_s)?
-            .state_after;
+        let step = native_loaded_step(
+            kicked[i],
+            properties[i],
+            loads.wrenches[i],
+            loads.gravity,
+            duration_s,
+        )?;
+        drifted[i] = step.state_after;
         poll(&mut cancelled)?;
         let change = state_change(
             kicked[i],
@@ -175,8 +261,16 @@ pub fn step_internal_wrench(
             properties[i],
             controls.angular_origin_world_m,
         )?;
-        accept(change, Dd::ZERO, controls, Some(i))?;
-        drift_energy = drift_energy + change.energy;
+        let source = LoadChange::from_step(
+            &step,
+            properties[i],
+            loads.wrenches[i],
+            loads.gravity,
+            controls.angular_origin_world_m,
+        );
+        accept(source.residual(change), source.work(), controls, Some(i))?;
+        drift_energy = drift_energy + change.energy - source.work();
+        external = external.add(source);
     }
     poll(&mut cancelled)?;
     let endpoint =
@@ -202,7 +296,8 @@ pub fn step_internal_wrench(
         energy: changes[0].energy + changes[1].energy,
     };
     let work = Dd::from_f64(initial.connector_work_j) + Dd::from_f64(endpoint.connector_work_j);
-    accept(total, work, controls, None)?;
+    let residual = external.residual(total);
+    accept(residual, work + external.work(), controls, None)?;
     let result = InternalWrenchStep {
         duration_s,
         states_after,
@@ -210,13 +305,142 @@ pub fn step_internal_wrench(
         angular_origin_world_m: controls.angular_origin_world_m,
         kinetic_energy_change_j: finite(total.energy.to_f64())?,
         actuator_work_j: finite(work.to_f64())?,
+        external_loads: external.receipt()?,
+        gravitational_potential_energy_change_j: finite((-external.gravity_work).to_f64())?,
+        mechanical_energy_change_j: finite((total.energy - external.gravity_work).to_f64())?,
         native_drift_energy_defect_j: finite(drift_energy.to_f64())?,
-        linear_momentum_residual_ns: rounded(total.linear)?,
-        angular_momentum_residual_nms: rounded(total.angular)?,
-        work_energy_residual_j: finite((total.energy - work).to_f64())?,
+        linear_momentum_residual_ns: rounded(residual.linear)?,
+        angular_momentum_residual_nms: rounded(residual.angular)?,
+        work_energy_residual_j: finite((total.energy - work - external.work()).to_f64())?,
     };
     poll(&mut cancelled)?;
     Ok(result)
+}
+
+fn check_load_count(
+    bodies: usize,
+    loads: HeldExternalLoads<'_>,
+) -> Result<(), InternalWrenchStepError> {
+    if bodies != loads.wrenches.len() {
+        return Err(InternalWrenchStepError::ExternalLoadCount {
+            bodies,
+            wrenches: loads.wrenches.len(),
+        });
+    }
+    Ok(())
+}
+
+fn native_loaded_step(
+    before: RigidBodyState,
+    properties: MassProperties,
+    wrench: Wrench,
+    gravity: Gravity,
+    duration_s: f64,
+) -> Result<StepReceipt, DynamicsError> {
+    let native = RigidBodyIntegrator::new(gravity);
+    if wrench.torque_body == Vec3::ZERO {
+        native.step(before, properties, wrench, duration_s)
+    } else {
+        native.step_cayley(before, properties, wrench, duration_s)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LoadChange {
+    linear: WideVec,
+    angular: WideVec,
+    force_work: Dd,
+    torque_work: Dd,
+    applied_work: Dd,
+    gravity_work: Dd,
+}
+impl LoadChange {
+    const ZERO: Self = Self {
+        linear: [Dd::ZERO; 3],
+        angular: [Dd::ZERO; 3],
+        force_work: Dd::ZERO,
+        torque_work: Dd::ZERO,
+        applied_work: Dd::ZERO,
+        gravity_work: Dd::ZERO,
+    };
+
+    fn from_step(
+        step: &StepReceipt,
+        properties: MassProperties,
+        wrench: Wrench,
+        gravity: Gravity,
+        origin: Vec3,
+    ) -> Self {
+        if wrench == Wrench::ZERO && gravity == Gravity::ZERO {
+            return Self::ZERO;
+        }
+        let (before, after) = (step.state_before, step.state_after);
+        let (duration, mass) = (
+            Dd::from_f64(step.duration_seconds),
+            Dd::from_f64(properties.mass()),
+        );
+        let force = dd(wrench.force_world);
+        let acceleration = dd(gravity.acceleration_world());
+        let linear = core::array::from_fn(|i| (force[i] + mass * acceleration[i]) * duration);
+        let spin = if wrench.torque_body == Vec3::ZERO {
+            [Dd::ZERO; 3]
+        } else {
+            let half = Dd::from_f64(0.5);
+            add(
+                world_vector(before, wrench.torque_body),
+                world_vector(after, wrench.torque_body),
+            )
+            .map(|c| c * half * duration)
+        };
+        let radius = sub(
+            midpoint(
+                before.pose().position_world(),
+                after.pose().position_world(),
+            ),
+            dd(origin),
+        );
+        Self {
+            linear,
+            angular: add(spin, cross(radius, linear)),
+            force_work: Dd::from_f64(step.work.applied_force_work_j),
+            torque_work: Dd::from_f64(step.work.applied_torque_work_j),
+            // The native combined work retains cancellation before the public
+            // force and couple components are rounded independently.
+            applied_work: Dd::from_f64(step.work.applied_work_j),
+            gravity_work: Dd::from_f64(step.work.gravity_work_j),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            linear: add(self.linear, other.linear),
+            angular: add(self.angular, other.angular),
+            force_work: self.force_work + other.force_work,
+            torque_work: self.torque_work + other.torque_work,
+            applied_work: self.applied_work + other.applied_work,
+            gravity_work: self.gravity_work + other.gravity_work,
+        }
+    }
+    fn work(self) -> Dd {
+        self.applied_work + self.gravity_work
+    }
+    fn residual(self, change: Change) -> Change {
+        Change {
+            linear: sub(change.linear, self.linear),
+            angular: sub(change.angular, self.angular),
+            energy: change.energy,
+        }
+    }
+    fn receipt(self) -> Result<ExternalLoadAccount, InternalWrenchStepError> {
+        Ok(ExternalLoadAccount {
+            applied_force_work_j: finite(self.force_work.to_f64())?,
+            applied_torque_work_j: finite(self.torque_work.to_f64())?,
+            applied_work_j: finite(self.applied_work.to_f64())?,
+            gravity_work_j: finite(self.gravity_work.to_f64())?,
+            linear_impulse_world_ns: rounded(self.linear)?,
+            angular_impulse_world_nms: rounded(self.angular)?,
+        })
+    }
 }
 
 fn scaled_impulse(force: Vec3, half: f64) -> Result<Vec3, InternalWrenchStepError> {
@@ -342,13 +566,16 @@ fn dot(a: WideVec, b: WideVec) -> Dd {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 fn world_spin(state: RigidBodyState) -> WideVec {
+    world_vector(state, state.angular_momentum_body())
+}
+fn world_vector(state: RigidBodyState, vector_body: Vec3) -> WideVec {
     let axes = [
         Vec3::new(1.0, 0.0, 0.0),
         Vec3::new(0.0, 1.0, 0.0),
         Vec3::new(0.0, 0.0, 1.0),
     ]
     .map(|v| dd(state.pose().orientation().rotate_body_to_world(v)));
-    let h = dd(state.angular_momentum_body());
+    let h = dd(vector_body);
     core::array::from_fn(|i| axes[0][i] * h[0] + axes[1][i] * h[1] + axes[2][i] * h[2])
 }
 fn finite(value: f64) -> Result<f64, InternalWrenchStepError> {

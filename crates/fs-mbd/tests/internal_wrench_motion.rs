@@ -4,7 +4,8 @@ use fs_mbd::spatial_loads::internal_impulse::{
     InternalWrenchImpulseControls, InternalWrenchImpulseError,
 };
 use fs_mbd::spatial_loads::internal_motion::{
-    InternalWrenchStepError, PrescribedInternalWrench, step_internal_wrench,
+    HeldExternalLoads, InternalWrenchStepError, PrescribedInternalWrench, step_internal_wrench,
+    step_internal_wrench_with_loads,
 };
 use fs_mbd::{
     Gravity, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState, UnitQuaternion, Vec3,
@@ -675,4 +676,234 @@ fn g4_late_cancellation_and_unrepresentable_drive_publish_no_partial_motion() {
         accepted,
         step_internal_wrench(before, props, load, 0.1, controls(Vec3::ZERO), || false).unwrap()
     );
+}
+
+#[test]
+fn g1_loaded_pair_has_exact_recoil_free_fall_and_independent_regenerative_work() {
+    let props = properties();
+    let before = core::array::from_fn(|i| {
+        state(
+            Vec3::new([-1.0, 1.0][i], 2.0, 0.0),
+            UnitQuaternion::IDENTITY,
+            Vec3::new([0.5, -0.25][i], 0.75, 0.0).scale(props[i].mass()),
+            Vec3::ZERO,
+        )
+    });
+    let drive = PrescribedInternalWrench {
+        force_on_second_world_n: Vec3::new(3.0, 0.0, 0.0),
+        ..no_drive()
+    };
+    let wrenches = [1.0, -2.0].map(|f| Wrench {
+        force_world: Vec3::new(f, 0.0, 0.0),
+        torque_body: Vec3::ZERO,
+    });
+    let gravity = Gravity::new(Vec3::new(0.0, -4.0, 0.0)).unwrap();
+    let time = 0.25;
+    let origin = Vec3::new(2.0, -3.0, 1.0);
+    let out = step_internal_wrench_with_loads(
+        before,
+        props,
+        drive,
+        HeldExternalLoads {
+            wrenches: &wrenches,
+            gravity,
+        },
+        time,
+        controls(origin),
+        || false,
+    )
+    .unwrap();
+    let mut actuator = 0.0;
+    let mut applied = 0.0;
+    let mut gravitational = 0.0;
+    let mut expected_linear = Vec3::ZERO;
+    let mut expected_angular = Vec3::ZERO;
+    for i in 0..2 {
+        let internal = drive
+            .force_on_second_world_n
+            .scale(if i == 0 { -1.0 } else { 1.0 });
+        let external = wrenches[i]
+            .force_world
+            .add(gravity.acceleration_world().scale(props[i].mass()));
+        let acceleration = external.add(internal).scale(1.0 / props[i].mass());
+        let displacement = before[i]
+            .linear_momentum_world()
+            .scale(time / props[i].mass())
+            .add(acceleration.scale(0.5 * time * time));
+        vector(
+            out.states_after[i].pose().position_world(),
+            before[i].pose().position_world().add(displacement),
+            2e-14,
+        );
+        vector(
+            out.states_after[i].linear_momentum_world(),
+            before[i]
+                .linear_momentum_world()
+                .add(external.add(internal).scale(time)),
+            2e-14,
+        );
+        actuator += internal.dot(displacement);
+        applied += wrenches[i].force_world.dot(displacement);
+        gravitational += props[i].mass() * gravity.acceleration_world().dot(displacement);
+        expected_linear = expected_linear.add(external.scale(time));
+        expected_angular = expected_angular.add(
+            before[i]
+                .pose()
+                .position_world()
+                .add(displacement.scale(0.5))
+                .sub(origin)
+                .cross(external.scale(time)),
+        );
+    }
+    assert!(
+        actuator < 0.0,
+        "the actuator recovers energy under the combined loads"
+    );
+    close(out.actuator_work_j, actuator, 3e-14);
+    close(out.external_loads.applied_work_j, applied, 3e-14);
+    close(out.external_loads.gravity_work_j, gravitational, 3e-14);
+    close(
+        out.gravitational_potential_energy_change_j,
+        -gravitational,
+        3e-14,
+    );
+    close(
+        out.kinetic_energy_change_j,
+        kinetic(out.states_after) - kinetic(before),
+        3e-14,
+    );
+    close(out.mechanical_energy_change_j, actuator + applied, 3e-14);
+    vector(
+        out.external_loads.linear_impulse_world_ns,
+        expected_linear,
+        3e-14,
+    );
+    vector(
+        out.external_loads.angular_impulse_world_nms,
+        expected_angular,
+        3e-14,
+    );
+    vector(
+        linear(out.states_after).sub(linear(before)),
+        expected_linear,
+        3e-14,
+    );
+    vector(
+        angular(out.states_after, origin).sub(angular(before, origin)),
+        expected_angular,
+        3e-14,
+    );
+}
+
+#[test]
+fn g1_loaded_coaxial_rotors_separate_external_motor_work_from_internal_generation() {
+    let props = properties();
+    let z = Vec3::new(0.0, 0.0, 1.0);
+    let before =
+        [8.0, -5.0].map(|h| state(Vec3::ZERO, UnitQuaternion::IDENTITY, Vec3::ZERO, z.scale(h)));
+    let drive = PrescribedInternalWrench {
+        couple_on_second_world_nm: z.scale(3.0),
+        ..no_drive()
+    };
+    let wrenches = [1.0, 2.0].map(|t| Wrench {
+        force_world: Vec3::ZERO,
+        torque_body: z.scale(t),
+    });
+    let out = step_internal_wrench_with_loads(
+        before,
+        props,
+        drive,
+        HeldExternalLoads {
+            wrenches: &wrenches,
+            gravity: Gravity::ZERO,
+        },
+        0.4,
+        controls(Vec3::ZERO),
+        || false,
+    )
+    .unwrap();
+    for i in 0..2 {
+        vector(
+            out.states_after[i].angular_momentum_body(),
+            z.scale([7.2, -3.0][i]),
+            3e-14,
+        );
+        let angle = 2.0 * (0.2_f64 * [1.9, -0.8][i]).atan();
+        vector(
+            out.states_after[i]
+                .pose()
+                .orientation()
+                .rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0)),
+            Vec3::new(angle.cos(), angle.sin(), 0.0),
+            3e-14,
+        );
+    }
+    close(out.actuator_work_j, -3.24, 3e-14);
+    close(out.external_loads.applied_force_work_j, 0.0, 1e-15);
+    close(out.external_loads.applied_torque_work_j, 0.12, 3e-14);
+    close(out.kinetic_energy_change_j, -3.12, 3e-14);
+    vector(
+        out.external_loads.angular_impulse_world_nms,
+        z.scale(1.2),
+        3e-14,
+    );
+}
+
+#[test]
+fn g3_g4_loaded_pair_preserves_zero_load_motion_and_requires_every_body_load() {
+    let before = initial();
+    let props = properties();
+    let zero = [Wrench::ZERO; 2];
+    let old =
+        step_internal_wrench(before, props, drive(), 0.1, controls(Vec3::ZERO), || false).unwrap();
+    let loaded = step_internal_wrench_with_loads(
+        before,
+        props,
+        drive(),
+        HeldExternalLoads {
+            wrenches: &zero,
+            gravity: Gravity::ZERO,
+        },
+        0.1,
+        controls(Vec3::ZERO),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(old, loaded);
+    assert_eq!(
+        step_internal_wrench_with_loads(
+            before,
+            props,
+            drive(),
+            HeldExternalLoads {
+                wrenches: &zero[..1],
+                gravity: Gravity::ZERO
+            },
+            0.1,
+            controls(Vec3::ZERO),
+            || false,
+        ),
+        Err(InternalWrenchStepError::ExternalLoadCount {
+            bodies: 2,
+            wrenches: 1
+        })
+    );
+    let mut invalid = zero;
+    invalid[1].force_world.x = f64::NAN;
+    assert!(
+        step_internal_wrench_with_loads(
+            before,
+            props,
+            drive(),
+            HeldExternalLoads {
+                wrenches: &invalid,
+                gravity: Gravity::ZERO
+            },
+            0.1,
+            controls(Vec3::ZERO),
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(before, initial());
 }

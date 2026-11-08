@@ -1,9 +1,10 @@
-//! One native free drift per body between complete internal network kicks.
+//! One native body step, optionally loaded, between complete internal network kicks.
 
 use super::{
-    Change, Dd, DynamicsError, Gravity, InternalWrenchImpulse, InternalWrenchStepError,
-    MassProperties, PrescribedInternalWrench, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
-    accept, add, finite, poll, rounded, scaled_impulse, state_change,
+    Change, Dd, DynamicsError, ExternalLoadAccount, Gravity, HeldExternalLoads,
+    InternalWrenchImpulse, InternalWrenchStepError, LoadChange, MassProperties,
+    PrescribedInternalWrench, RigidBodyState, Vec3, Wrench, accept, add, check_load_count, finite,
+    native_loaded_step, poll, rounded, scaled_impulse, state_change,
 };
 use crate::StepReceipt;
 use crate::spatial_loads::internal_impulse::network::{
@@ -19,20 +20,26 @@ pub struct PrescribedInternalLink {
     pub drive: PrescribedInternalWrench,
 }
 
-/// Complete finite motion and its internal momentum and actuator-work account.
+/// Complete finite motion with independent internal and external source accounts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InternalWrenchNetworkStep {
     pub duration_s: f64,
     pub states_after: Vec<RigidBodyState>,
     /// Each stage coalesces all connectors before any native body update.
     pub half_impulses: [InternalWrenchNetworkReceipt; 2],
-    /// Exactly one original unconstrained free step per body, in body order.
+    /// Exactly one original unconstrained native step per body, in body order.
+    /// These include external loads when using the loaded entry point.
     pub free_steps: Vec<StepReceipt>,
     pub angular_origin_world_m: Vec3,
     pub kinetic_energy_change_j: f64,
     pub actuator_work_j: f64,
-    /// Actual native free-drift energy defect, not a heat or dissipation law.
+    pub external_loads: ExternalLoadAccount,
+    pub gravitational_potential_energy_change_j: f64,
+    pub mechanical_energy_change_j: f64,
+    /// Native kinetic change minus applied and gravitational work [J].
+    /// This numerical defect is not a heat or dissipation law.
     pub native_drift_energy_defect_j: f64,
+    /// Actual momentum changes minus independently integrated external impulses.
     pub linear_momentum_residual_ns: Vec3,
     pub angular_momentum_residual_nms: Vec3,
     pub work_energy_residual_j: f64,
@@ -102,6 +109,53 @@ pub fn step_internal_wrench_network(
     links: &[PrescribedInternalLink],
     duration_s: f64,
     controls: InternalWrenchNetworkControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<InternalWrenchNetworkStep, InternalWrenchNetworkStepError> {
+    step_network(
+        states, properties, links, None, duration_s, controls, cancelled,
+    )
+}
+
+/// Advance all internal actuators together under held external loads and gravity.
+///
+/// The native middle step uses each body's original mass and full inertia, with
+/// the same chart and source quadrature as [`super::step_internal_wrench_with_loads`].
+/// Shared-body actuator work therefore includes the velocity induced by every
+/// connector and its external environment. The native force, couple and gravity
+/// work stay separate from each connector's signed work, including regeneration.
+///
+/// Each original body's source balance is admitted before the complete network
+/// balance. Isolated bodies still receive their external load and gravity. The
+/// borrowed wrench bank must match the body bank exactly; no load is omitted or
+/// broadcast. Storage and work remain linear in bodies plus connectors, with
+/// the same complete-peak admission and atomic refusal as the unloaded owner.
+pub fn step_internal_wrench_network_with_loads(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[PrescribedInternalLink],
+    loads: HeldExternalLoads<'_>,
+    duration_s: f64,
+    controls: InternalWrenchNetworkControls,
+    cancelled: impl FnMut() -> bool,
+) -> Result<InternalWrenchNetworkStep, InternalWrenchNetworkStepError> {
+    step_network(
+        states,
+        properties,
+        links,
+        Some(loads),
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+fn step_network(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    links: &[PrescribedInternalLink],
+    loads: Option<HeldExternalLoads<'_>>,
+    duration_s: f64,
+    controls: InternalWrenchNetworkControls,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<InternalWrenchNetworkStep, InternalWrenchNetworkStepError> {
     poll(&mut cancelled)?;
@@ -114,6 +168,9 @@ pub fn step_internal_wrench_network(
     }
     if states.len() != properties.len() {
         return Err(InternalWrenchNetworkError::Invalid("body/property counts differ").into());
+    }
+    if let Some(loads) = loads {
+        check_load_count(states.len(), loads)?;
     }
     let (n, e) = (states.len(), links.len());
     admit_limit("bodies", n as u128, controls.maximum_bodies as u128)?;
@@ -157,12 +214,14 @@ pub fn step_internal_wrench_network(
         native_controls,
         &mut cancelled,
     )?;
-    let free = RigidBodyIntegrator::new(Gravity::ZERO);
+    let gravity = loads.map_or(Gravity::ZERO, |loads| loads.gravity);
+    let mut external = LoadChange::ZERO;
     let mut drift_energy = Dd::ZERO;
     for (i, event) in first.bodies.iter().enumerate() {
         poll(&mut cancelled)?;
         let before = event.state_after;
-        let step = free.step(before, properties[i], Wrench::ZERO, duration_s)?;
+        let wrench = loads.map_or(Wrench::ZERO, |loads| loads.wrenches[i]);
+        let step = native_loaded_step(before, properties[i], wrench, gravity, duration_s)?;
         poll(&mut cancelled)?;
         let change = state_change(
             before,
@@ -170,8 +229,21 @@ pub fn step_internal_wrench_network(
             properties[i],
             controls.balance.angular_origin_world_m,
         )?;
-        accept(change, Dd::ZERO, controls.balance, Some(i))?;
-        drift_energy = drift_energy + change.energy;
+        let source = LoadChange::from_step(
+            &step,
+            properties[i],
+            wrench,
+            gravity,
+            controls.balance.angular_origin_world_m,
+        );
+        accept(
+            source.residual(change),
+            source.work(),
+            controls.balance,
+            Some(i),
+        )?;
+        drift_energy = drift_energy + change.energy - source.work();
+        external = external.add(source);
         candidate.push(step.state_after);
         free_steps.push(step);
     }
@@ -201,7 +273,8 @@ pub fn step_internal_wrench_network(
         total.energy = total.energy + change.energy;
     }
     let work = Dd::from_f64(first.connector_work_j) + Dd::from_f64(second.connector_work_j);
-    accept(total, work, controls.balance, None)?;
+    let residual = external.residual(total);
+    accept(residual, work + external.work(), controls.balance, None)?;
     let result = InternalWrenchNetworkStep {
         duration_s,
         states_after: candidate,
@@ -210,10 +283,13 @@ pub fn step_internal_wrench_network(
         angular_origin_world_m: controls.balance.angular_origin_world_m,
         kinetic_energy_change_j: finite(total.energy.to_f64())?,
         actuator_work_j: finite(work.to_f64())?,
+        external_loads: external.receipt()?,
+        gravitational_potential_energy_change_j: finite((-external.gravity_work).to_f64())?,
+        mechanical_energy_change_j: finite((total.energy - external.gravity_work).to_f64())?,
         native_drift_energy_defect_j: finite(drift_energy.to_f64())?,
-        linear_momentum_residual_ns: rounded(total.linear)?,
-        angular_momentum_residual_nms: rounded(total.angular)?,
-        work_energy_residual_j: finite((total.energy - work).to_f64())?,
+        linear_momentum_residual_ns: rounded(residual.linear)?,
+        angular_momentum_residual_nms: rounded(residual.angular)?,
+        work_energy_residual_j: finite((total.energy - work - external.work()).to_f64())?,
         planned_live_bytes: bytes as usize,
     };
     poll(&mut cancelled)?;

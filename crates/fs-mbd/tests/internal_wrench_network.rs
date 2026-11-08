@@ -9,9 +9,10 @@ use fs_mbd::spatial_loads::internal_impulse::{
     },
 };
 use fs_mbd::spatial_loads::internal_motion::{
-    PrescribedInternalWrench,
+    HeldExternalLoads, PrescribedInternalWrench,
     network::{
         InternalWrenchNetworkStepError, PrescribedInternalLink, step_internal_wrench_network,
+        step_internal_wrench_network_with_loads,
     },
     step_internal_wrench,
 };
@@ -804,5 +805,243 @@ fn g4_whole_network_budgets_swallowed_updates_and_every_cancellation_refuse_atom
     .unwrap();
     for i in 0..2 {
         assert_eq!(cancelled.bodies[i].state_after, huge[i]);
+    }
+}
+
+#[test]
+fn g1_loaded_chain_and_isolated_bodies_share_exact_motion_and_each_source_work() {
+    let p = properties();
+    let initial = core::array::from_fn::<_, 3, _>(|i| {
+        state(
+            X.scale([-1., 0., 2.][i]),
+            UnitQuaternion::IDENTITY,
+            Vec3::new([0.2, -0.1, 0.3][i], 0.7, 0.).scale(p[i].mass()),
+            Vec3::ZERO,
+        )
+    });
+    let links = core::array::from_fn::<_, 2, _>(|i| PrescribedInternalLink {
+        bodies: [i, i + 1],
+        drive: PrescribedInternalWrench {
+            arms_body_m: [Vec3::ZERO; 2],
+            force_on_second_world_n: X.scale([0.8, -0.3][i]),
+            couple_on_second_world_nm: Vec3::ZERO,
+        },
+    });
+    let wrenches = [1., -2., 0.5].map(|f| Wrench {
+        force_world: X.scale(f),
+        torque_body: Vec3::ZERO,
+    });
+    let gravity = Gravity::new(Y.scale(-4.)).unwrap();
+    let time = 0.3;
+    for active in [0, 2] {
+        let mut force = [Vec3::ZERO; 3];
+        for link in &links[..active] {
+            let [a, b] = link.bodies;
+            force[a] = force[a].sub(link.drive.force_on_second_world_n);
+            force[b] = force[b].add(link.drive.force_on_second_world_n);
+        }
+        let displacement = core::array::from_fn::<_, 3, _>(|i| {
+            initial[i]
+                .linear_momentum_world()
+                .scale(time / p[i].mass())
+                .add(
+                    force[i]
+                        .add(wrenches[i].force_world)
+                        .scale(0.5 * time * time / p[i].mass()),
+                )
+                .add(gravity.acceleration_world().scale(0.5 * time * time))
+        });
+        let out = step_internal_wrench_network_with_loads(
+            &initial,
+            &p,
+            &links[..active],
+            HeldExternalLoads {
+                wrenches: &wrenches,
+                gravity,
+            },
+            time,
+            controls(),
+            || false,
+        )
+        .unwrap();
+        for i in 0..3 {
+            vector(
+                out.states_after[i].pose().position_world(),
+                initial[i].pose().position_world().add(displacement[i]),
+                5e-14,
+            );
+            vector(
+                out.states_after[i].linear_momentum_world(),
+                initial[i].linear_momentum_world().add(
+                    force[i]
+                        .add(wrenches[i].force_world)
+                        .add(gravity.acceleration_world().scale(p[i].mass()))
+                        .scale(time),
+                ),
+                5e-14,
+            );
+        }
+        let actuator: f64 = (0..active)
+            .map(|i| {
+                let expected = links[i]
+                    .drive
+                    .force_on_second_world_n
+                    .dot(displacement[i + 1].sub(displacement[i]));
+                let actual: f64 = out
+                    .half_impulses
+                    .iter()
+                    .map(|s| s.connectors[i].connector_work_j)
+                    .sum();
+                near(actual, expected, 5e-14);
+                expected
+            })
+            .sum();
+        let applied: f64 = (0..3)
+            .map(|i| wrenches[i].force_world.dot(displacement[i]))
+            .sum();
+        let gravitational: f64 = (0..3)
+            .map(|i| p[i].mass() * gravity.acceleration_world().dot(displacement[i]))
+            .sum();
+        near(out.actuator_work_j, actuator, 5e-14);
+        near(out.external_loads.applied_work_j, applied, 5e-14);
+        near(out.external_loads.gravity_work_j, gravitational, 5e-14);
+        near(out.mechanical_energy_change_j, actuator + applied, 5e-14);
+    }
+    let zero = [Wrench::ZERO; 3];
+    let old =
+        step_internal_wrench_network(&initial, &p, &links, time, controls(), || false).unwrap();
+    let equivalent = step_internal_wrench_network_with_loads(
+        &initial,
+        &p,
+        &links,
+        HeldExternalLoads {
+            wrenches: &zero,
+            gravity: Gravity::ZERO,
+        },
+        time,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(old, equivalent);
+}
+
+#[test]
+fn g1_g3_loaded_full_tensor_cycle_refines_to_continuous_motion_and_actuator_work() {
+    let p = properties();
+    let initial = initial();
+    let links = drives();
+    let gravity = Gravity::new(Vec3::new(0.2, -0.4, 0.1)).unwrap();
+    let wrenches = core::array::from_fn::<_, 3, _>(|i| Wrench {
+        force_world: [X.scale(0.3), Y.scale(-0.2), Z.scale(0.4)][i],
+        torque_body: [
+            Vec3::new(0.1, -0.2, 0.3),
+            Vec3::new(-0.2, 0.4, 0.1),
+            Vec3::new(0.3, 0.1, -0.2),
+        ][i],
+    });
+    // Independent original-coordinate Newton/Euler ODE, with three actuator
+    // integrals and one extra external body-couple power integral.
+    let derivative = |y: [f64; 43]| {
+        let native: Ode = core::array::from_fn(|i| y[i]);
+        let base = rhs(native, &links);
+        let mut out: [f64; 43] = core::array::from_fn(|i| if i < 42 { base[i] } else { 0. });
+        for i in 0..3 {
+            let force = wrenches[i]
+                .force_world
+                .add(gravity.acceleration_world().scale(p[i].mass()));
+            for (j, f) in [force.x, force.y, force.z].into_iter().enumerate() {
+                out[13 * i + 3 + j] += f;
+            }
+            for (j, t) in [
+                wrenches[i].torque_body.x,
+                wrenches[i].torque_body.y,
+                wrenches[i].torque_body.z,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                out[13 * i + 10 + j] += t;
+            }
+            out[42] += wrenches[i]
+                .torque_body
+                .dot(omega(triple(&native, 13 * i + 10), i));
+        }
+        out
+    };
+    let time = 0.6;
+    let integrate = |count| {
+        let start = ode_initial(initial);
+        let mut y = core::array::from_fn(|i| if i < 42 { start[i] } else { 0. });
+        let h = time / f64::from(count);
+        for _ in 0..count {
+            let a = derivative(y);
+            let b = derivative(core::array::from_fn(|i| y[i] + 0.5 * h * a[i]));
+            let c = derivative(core::array::from_fn(|i| y[i] + 0.5 * h * b[i]));
+            let d = derivative(core::array::from_fn(|i| y[i] + h * c[i]));
+            y = core::array::from_fn(|i| y[i] + h * (a[i] + 2. * b[i] + 2. * c[i] + d[i]) / 6.);
+        }
+        y
+    };
+    let reference = integrate(2048);
+    let fine = integrate(4096);
+    for i in 0..43 {
+        near(reference[i], fine[i], 3e-12);
+    }
+    let target = core::array::from_fn::<_, 3, _>(|i| {
+        state(
+            Vec3::new(fine[13 * i], fine[13 * i + 1], fine[13 * i + 2]),
+            UnitQuaternion::new(
+                fine[13 * i + 6],
+                fine[13 * i + 7],
+                fine[13 * i + 8],
+                fine[13 * i + 9],
+            )
+            .unwrap(),
+            Vec3::new(fine[13 * i + 3], fine[13 * i + 4], fine[13 * i + 5]),
+            Vec3::new(fine[13 * i + 10], fine[13 * i + 11], fine[13 * i + 12]),
+        )
+    });
+    let mut errors = Vec::new();
+    let mut work_errors = Vec::new();
+    for count in [20, 40, 80] {
+        let mut s = initial.to_vec();
+        let mut work = [0.; 3];
+        let mut external = 0.;
+        for _ in 0..count {
+            let out = step_internal_wrench_network_with_loads(
+                &s,
+                &p,
+                &links,
+                HeldExternalLoads {
+                    wrenches: &wrenches,
+                    gravity,
+                },
+                time / f64::from(count),
+                controls(),
+                || false,
+            )
+            .unwrap();
+            for stage in &out.half_impulses {
+                for (i, connector) in stage.connectors.iter().enumerate() {
+                    work[i] += connector.connector_work_j;
+                }
+            }
+            external += out.external_loads.applied_torque_work_j;
+            s = out.states_after;
+        }
+        errors.push((0..3).map(|i| error(s[i], target[i])).fold(0., f64::max));
+        work_errors.push(
+            (0..3)
+                .map(|i| (work[i] - fine[39 + i]).abs())
+                .fold((external - fine[42]).abs(), f64::max),
+        );
+    }
+    for values in [&errors, &work_errors] {
+        assert!(values[2] < 1e-4, "{values:?}");
+        assert!(
+            values[1] < 0.28 * values[0] && values[2] < 0.28 * values[1],
+            "{values:?}"
+        );
     }
 }
