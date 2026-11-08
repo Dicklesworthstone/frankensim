@@ -16633,7 +16633,36 @@ without changing state. This extension assumes dilute Fick diffusion with
 admitted constant diffusivities and negligible film storage at prescribed
 temperature, fixed volumes and fixed area. Stefan flow, finite diffusion-layer
 transients, nucleation, moving bubbles and adiabatic heat feedback remain
-outside the model; a selected numerical fixture is not measured validation.
+outside these isothermal entry points; a selected numerical fixture is not measured validation.
+
+### Adiabatic finite-solvent absorption
+
+`HenryDissolution::advance_adiabatic` couples the existing finite-inventory
+Henry/two-film exchange to explicitly supplied solvent mass and original liquid
+Cp(T). Gas and solution share one evolving temperature under a fast thermal
+equilibration assumption. Original NASA-9 gas Cv and source-exact solvent/solute
+caloric integrals close the combined energy balance, with no external thermostat
+heat. Original Henry, diffusivity and optional gas-film sources continue at the
+actual new temperature before further uptake. The thermal balance remains
+anchored to the beginning of the requested interval to avoid accumulating
+independent substep residuals.
+
+The kinetic integration is first-order splitting with bounded full/two-half-step
+refinement in both dissolved moles and temperature. Reported absolute error
+estimates are not certified global errors or source uncertainty. Source, mass,
+energy and final cancellation checks precede publication of law, gas and liquid
+together. Any unsupported source or thermal-bracket trial refuses atomically.
+Synthetic tests cover absorption heating, exsolution cooling, nonlinear gas
+calorics, temperature-dependent solubility against an independent closed-energy
+ODE, and thermal/work-budget/final-cancellation refusal.
+
+Rigid volumes, dilute solution, quasi-steady films, negligible liquid expansion
+and negligible dissolved partial volume remain explicit assumptions. Solvent
+mass is authored independently of chart density. Finite thermal contact
+resistance, solvent evaporation, phase change, reaction and simultaneous
+multisolute adiabatic exchange are outside this entry point. Authors must align
+caloric datums and qualify Henry/caloric laws together; no entropy-production
+theorem is inferred.
 
 
 ## Thermal Voce with physical overstress kinetics

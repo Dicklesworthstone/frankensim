@@ -37,8 +37,10 @@
 //! additional timescale check. Neither check certifies a gas-film transient.
 //! The authored film-relaxation/concentration bounds
 //! do not validate those assumptions. This model supplies no nucleation,
-//! moving bubble radius, transient diffusion field, evaporation, gas reaction,
-//! or adiabatic thermal evolution. No entropy-production theorem is claimed.
+//! moving bubble radius, transient diffusion field, evaporation or gas reaction.
+//! The separate [`adiabatic`] entry point supplies finite-solvent thermal
+//! feedback under an explicit common-temperature assumption. No
+//! entropy-production theorem is claimed.
 //!
 //! Sources: IUPAC Gold Book, H_s^cp, https://goldbook.iupac.org/terms/view/09024 ;
 //! MIT 1.85, gas transfer through a water-side film,
@@ -48,6 +50,9 @@
 
 /// Simultaneous absorption/exsolution of independent dilute species into one liquid.
 pub mod mixture;
+
+/// Adiabatic finite-solvent absorption with a common gas/liquid temperature.
+pub mod adiabatic;
 
 mod gas_film;
 use gas_film::{FilmResponse, ResolvedGasFilm};

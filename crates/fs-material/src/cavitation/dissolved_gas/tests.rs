@@ -11,6 +11,8 @@ use fs_matdb::{
 };
 use fs_thermochem::{Composition, CompositionBasis};
 
+#[path = "tests/adiabatic.rs"]
+mod adiabatic;
 #[path = "tests/gas_film.rs"]
 mod gas_film;
 #[path = "tests/mixture.rs"]
