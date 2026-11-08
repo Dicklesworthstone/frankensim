@@ -33,6 +33,8 @@ pub mod enclosure;
 pub mod luminescence;
 mod mixture;
 pub use mixture::{MAX_OPTICAL_MIXTURE_COMPONENTS, OpticalMixtureBudget};
+#[cfg(feature = "material-state")]
+pub(crate) use mixture::{PositiveSum, weighted_product};
 mod palette;
 pub use palette::{CellPalette, CellPaletteBudget};
 mod thermal;

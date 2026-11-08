@@ -286,7 +286,7 @@ pub(super) fn deposit<const N: usize>(
 /// coefficients. The original DDA and stable optical-depth/power arithmetic
 /// are the sole implementation for both owners.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(super) fn deposit_prepared<const N: usize>(
+pub(crate) fn deposit_prepared<const N: usize>(
     check: &mut (impl FnMut() -> Result<(), VolumeTransportError> + ?Sized),
     medium: &AbsorbingGrid<'_>,
     ray: (Point3, Vec3, f64),

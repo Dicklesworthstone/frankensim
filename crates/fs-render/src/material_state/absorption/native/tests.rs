@@ -8,9 +8,9 @@ use crate::volumes::transport::{AbsorbingGridBudget, CellPaletteBudget, MassAbso
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use std::sync::Arc;
 
-const LENGTH: f64 = 1e-5;
+pub(super) const LENGTH: f64 = 1e-5;
 
-fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
+pub(super) fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -32,7 +32,7 @@ fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     });
 }
 
-fn geometry<'a>(cx: &Cx<'_>, density: &'a [f64], steps: u32) -> AbsorbingGrid<'a> {
+pub(super) fn geometry<'a>(cx: &Cx<'_>, density: &'a [f64], steps: u32) -> AbsorbingGrid<'a> {
     AbsorbingGrid::try_new(
         cx,
         VolumeGrid::new(
@@ -53,7 +53,7 @@ fn geometry<'a>(cx: &Cx<'_>, density: &'a [f64], steps: u32) -> AbsorbingGrid<'a
     .unwrap()
 }
 
-fn palette<'a>(
+pub(super) fn palette<'a>(
     cx: &Cx<'_>,
     values: Vec<MaterialAbsorptionBinding<'a>>,
     indices: &[u32],
@@ -65,14 +65,14 @@ fn palette<'a>(
     CellPalette::try_new(cx, values, Arc::from(indices), budget).unwrap()
 }
 
-fn budget() -> MaterialAbsorptionPreparationBudget {
+pub(super) fn budget() -> MaterialAbsorptionPreparationBudget {
     MaterialAbsorptionPreparationBudget {
         max_models: 8,
         max_spectral_evaluations: 128,
     }
 }
 
-fn settings() -> VolumeCameraSettings {
+pub(super) fn settings() -> VolumeCameraSettings {
     VolumeCameraSettings {
         resolution: [1, 1],
         samples_per_pixel: 1,
@@ -83,13 +83,13 @@ fn settings() -> VolumeCameraSettings {
     }
 }
 
-fn origin() -> Point3 {
+pub(super) fn origin() -> Point3 {
     Point3::new(0.0, 0.0, -LENGTH)
 }
-fn direction() -> Vec3 {
+pub(super) fn direction() -> Vec3 {
     Vec3::new(0.0, 0.0, 1.0)
 }
-fn camera() -> PhysicalCamera {
+pub(super) fn camera() -> PhysicalCamera {
     PhysicalCamera::try_look_at(
         origin(),
         Point3::new(0.0, 0.0, LENGTH),
@@ -101,7 +101,7 @@ fn camera() -> PhysicalCamera {
     .unwrap()
 }
 
-fn close(actual: f64, expected: f64) {
+pub(super) fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() <= 8e-12 * expected.abs().max(1e-300),
         "{actual:e} != {expected:e}"
@@ -109,7 +109,7 @@ fn close(actual: f64, expected: f64) {
 }
 
 // Independent SI Planck equation at moderate test wavelengths/temperatures.
-fn planck(temperature: f64, wavelength_nm: f64) -> f64 {
+pub(super) fn planck(temperature: f64, wavelength_nm: f64) -> f64 {
     let h = 6.626_070_15e-34;
     let c = 299_792_458.0;
     let k = 1.380_649e-23;

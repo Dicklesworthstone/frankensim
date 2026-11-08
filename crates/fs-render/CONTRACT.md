@@ -10035,6 +10035,68 @@ precedes endpoint roundtrip correction, so no out-of-band input is extrapolated.
 Source identity, density receipts, complete state matching and refresh behavior
 remain those of the original accepted claims. This adds no new measured data.
 
+### Accepted constituent opacity mixtures
+
+`MaterialAbsorptionComponent` pairs an original accepted absorption binding
+with explicit kg-of-constituent per kg-of-reference-mass loading.
+`MaterialAbsorptionMixture` borrows bounded component declarations, retains
+original source identities and support, and never normalizes weights.
+`MaterialAbsorptionMixtureField::try_new_mixtures` samples every original law
+at the exact immutable wavelength nodes. Its mass absorption is
+`kappa_mix = sum(w_i*kappa_i)`; accepted LTE source radiance is
+`sum(w_i*kappa_i*B_lambda(T_i))/kappa_mix`. Constituent temperatures remain
+distinct. The common-temperature case uses the original single Planck value.
+
+The same prepared `MaterialAbsorptionField`, cameras and transport methods
+serve individual bindings and mixtures through a default model parameter.
+Existing single-binding API, numerical preparation and identity ordering are
+preserved. Final storage is O(recipes times nodes); source evaluation,
+constituent loops and Planck evaluation occur during preparation only.
+Preparation charges every component/node pair, including unused models and
+zero weights, before allocation, and retains the existing 64-component cap.
+Original compensated positive sums and range-aware weighted products are
+shared unchanged. A positive coefficient that cannot be represented refuses.
+
+Zero-weight components still participate in source admission, support and
+identity, but need no temperature and create no absorption or emission.
+An all-zero recipe is transparent. This is additive homogeneous independent
+absorption on an explicit reference-mass basis; it does not imply effective
+refractive indices, interfaces, scattering, chemical interactions or thermal
+equilibration. New accepted states or wavelengths require new preparation.
+
+Four G0/G3 tests cover exact original spectra, independent 300/400 K Planck
+sources in native camera radiance, beam power closure, unnormalized loadings,
+common-temperature and single-component parity, zero weights, complete work
+budgets, source support, coefficient range and cancellation.
+
+### Material beam deposition and thermal input
+
+`MaterialAbsorptionField::deposit_beam_power` accepts incident watts already
+integrated over beam area and the caller's spectral widths at the field's
+fixed nodes. Individual materials and mixtures reuse the existing native
+DDA and conservative `deposit_prepared` kernel; no new traversal or partition
+owner is introduced. Original density cells, accepted identity, source-band
+intersection, finite endpoints, traversal/output limits and cancellation
+remain authoritative. The shared native kernel retains its existing
+compensated cumulative-depth implementation.
+
+The result is the existing `BeamPowerDeposition`, directly admitted by
+`OpticalHeating::try_new` with an explicit optical-to-thermal cell map and that
+owner's original source-support requirements. It reports absorbed incident
+watts even with accepted LTE emission enabled. Cooling, source/state refresh,
+thermalization assumptions and material feedback remain explicit; the
+deposition call does not silently advance temperature.
+
+Three native G0/G3 tests exercise original source coefficients, per-cell and
+reverse finite-beam accounting, incident-only heating, thin/opaque representable
+power, vacuum, budgets and cancellation. One `optical-heating` integration test
+feeds original thermal cells and the actual native enthalpy clock while
+retaining boundary heat and energy accounts. These four tests and the four
+mixture tests passed pinned Rust parsing and independent source review.
+They were **not compiled or executed** because the material/tracer/heating
+dependency closure is unavailable here; no runtime claim follows for that
+feature configuration.
+
 ### Accepted material opacity in native transport
 
 `material_state::absorption::native::MaterialAbsorptionField` prepares one

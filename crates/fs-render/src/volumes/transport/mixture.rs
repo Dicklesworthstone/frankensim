@@ -94,7 +94,7 @@ pub(super) fn validate_weight(weight: f64) -> Result<(), VolumeTransportError> {
     Ok(())
 }
 
-pub(super) fn weighted_product(weight: f64, coefficient: f64) -> Result<f64, VolumeTransportError> {
+pub(crate) fn weighted_product(weight: f64, coefficient: f64) -> Result<f64, VolumeTransportError> {
     let result = weight * coefficient;
     if !result.is_finite() || (weight > 0.0 && coefficient > 0.0 && result == 0.0) {
         return Err(VolumeTransportError::Unrepresentable);
@@ -134,13 +134,13 @@ fn insert_knot(
 
 /// Fixed-order Neumaier sum for nonnegative physical contributions.
 #[derive(Default)]
-pub(super) struct PositiveSum {
+pub(crate) struct PositiveSum {
     sum: f64,
     correction: f64,
 }
 
 impl PositiveSum {
-    pub(super) fn add(&mut self, value: f64) -> Result<(), VolumeTransportError> {
+    pub(crate) fn add(&mut self, value: f64) -> Result<(), VolumeTransportError> {
         let next = self.sum + value;
         if !value.is_finite() || value < 0.0 || !next.is_finite() {
             return Err(VolumeTransportError::Unrepresentable);
@@ -154,7 +154,7 @@ impl PositiveSum {
         Ok(())
     }
 
-    pub(super) fn finish(self) -> Result<f64, VolumeTransportError> {
+    pub(crate) fn finish(self) -> Result<f64, VolumeTransportError> {
         let result = self.sum + self.correction;
         if result.is_finite() && result >= 0.0 {
             Ok(result)

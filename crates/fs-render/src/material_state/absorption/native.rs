@@ -15,18 +15,26 @@ use crate::volumes::transport::camera::{
 use crate::volumes::transport::{
     AbsorbingGrid, CellPalette, GridSegmentTransport, SegmentTransport, VolumeTransportError,
 };
+use core::marker::PhantomData;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
+
+mod deposition;
+mod mixture;
+pub use mixture::{
+    MaterialAbsorptionComponent, MaterialAbsorptionMixture, MaterialAbsorptionMixtureField,
+};
 
 /// Explicit source choice at each original material condition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaterialAbsorptionEmission {
     /// Absorption only. No material temperature is required or evaluated.
     None,
-    /// Each absorbing model emits at its own accepted absolute temperature.
+    /// Each absorbing material emits at its own accepted absolute temperature.
     /// No average temperature, independent emissivity or state evolution is
-    /// inferred. The native source is B_lambda(T), linked to that same absorber.
+    /// inferred. Mixture constituents need not share a temperature; each native
+    /// Planck source remains linked to that same original absorber.
     AcceptedLte,
 }
 
@@ -35,8 +43,9 @@ pub enum MaterialAbsorptionEmission {
 pub struct MaterialAbsorptionPreparationBudget {
     /// Maximum prepared models, including unused palette entries.
     pub max_models: usize,
-    /// Maximum material/wavelength pairs. Each pair evaluates the original
-    /// absorption law and, in accepted LTE mode, at most one Planck value.
+    /// Maximum constituent/wavelength pairs, including zero-weight mixture
+    /// entries. Each pair evaluates the original absorption law and, in
+    /// accepted LTE mode, at most one Planck value.
     pub max_spectral_evaluations: u64,
 }
 
@@ -53,7 +62,8 @@ struct PreparedMaterial<const N: usize> {
 /// Its existing absorption law and temperature sources are not used. All
 /// absorption and optional LTE source state come from the material bindings.
 /// Intrinsic material density already normalizes each mass coefficient; the
-/// borrowed grid's density remains mass of its selected material per bulk m³.
+/// borrowed grid's density remains its declared reference mass per bulk m³:
+/// the selected material for a single binding, or the recipe's explicit basis.
 /// The caller owns that continuum model; no interface reflection, particle
 /// scattering, partial-coverage law or density/temperature extrapolation follows.
 ///
@@ -62,9 +72,15 @@ struct PreparedMaterial<const N: usize> {
 /// and tracing evaluates neither material sources nor Planck functions. Every
 /// transport and camera method uses exactly the stored nodes. A new wavelength
 /// packet or accepted material state requires a new preparation.
-pub struct MaterialAbsorptionField<'g, 'field, 'material, const N: usize> {
+pub struct MaterialAbsorptionField<
+    'g,
+    'field,
+    'material,
+    const N: usize,
+    Model = MaterialAbsorptionBinding<'material>,
+> {
     geometry: &'g AbsorbingGrid<'field>,
-    materials: CellPalette<MaterialAbsorptionBinding<'material>>,
+    materials: CellPalette<Model>,
     wavelengths_nm: [f64; N],
     source_bounds_nm: [f64; 2],
     models: Vec<PreparedMaterial<N>>,
@@ -72,6 +88,7 @@ pub struct MaterialAbsorptionField<'g, 'field, 'material, const N: usize> {
     vacuum: bool,
     has_emission: bool,
     identity: ContentHash,
+    _material_lifetime: PhantomData<&'material ()>,
 }
 
 impl<'g, 'field, 'material, const N: usize> MaterialAbsorptionField<'g, 'field, 'material, N> {
@@ -87,14 +104,62 @@ impl<'g, 'field, 'material, const N: usize> MaterialAbsorptionField<'g, 'field, 
         emission: MaterialAbsorptionEmission,
         budget: MaterialAbsorptionPreparationBudget,
     ) -> Result<Self, MaterialAbsorptionFieldError> {
+        Self::prepare(
+            cx,
+            geometry,
+            materials,
+            wavelengths_nm,
+            emission,
+            budget,
+            "org.frankensim.render.material-absorption-field.v1",
+            |_| 1,
+            |material, index| {
+                let model = prepare_material(material, &wavelengths_nm, emission, index)?;
+                Ok((model, material.wavelength_bounds_nm(), material.identity()))
+            },
+        )
+    }
+}
+
+impl<'g, 'field, 'material, const N: usize, Model>
+    MaterialAbsorptionField<'g, 'field, 'material, N, Model>
+{
+    // One prepared packet, map and observer owner serves individual materials
+    // and constituent mixtures. The source-specific closures run only here.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        cx: &Cx<'_>,
+        geometry: &'g AbsorbingGrid<'field>,
+        materials: CellPalette<Model>,
+        wavelengths_nm: [f64; N],
+        emission: MaterialAbsorptionEmission,
+        budget: MaterialAbsorptionPreparationBudget,
+        identity_domain: &'static str,
+        component_count: impl Fn(&Model) -> usize,
+        mut prepare_model: impl FnMut(
+            &Model,
+            usize,
+        ) -> Result<
+            (PreparedMaterial<N>, [f64; 2], ContentHash),
+            MaterialAbsorptionFieldError,
+        >,
+    ) -> Result<Self, MaterialAbsorptionFieldError> {
         checkpoint(cx)?;
         let model_count = materials.values().len();
-        let evaluations = u64::try_from(model_count)
-            .ok()
-            .and_then(|models| models.checked_mul(u64::try_from(N).ok()?))
-            .ok_or(VolumeTransportError::Budget)?;
-        if model_count > budget.max_models || evaluations > budget.max_spectral_evaluations {
+        if model_count > budget.max_models {
             return Err(VolumeTransportError::Budget.into());
+        }
+        let mut evaluations = 0_u64;
+        for model in materials.values() {
+            checkpoint(cx)?;
+            evaluations = u64::try_from(component_count(model))
+                .ok()
+                .and_then(|count| count.checked_mul(u64::try_from(N).ok()?))
+                .and_then(|count| evaluations.checked_add(count))
+                .ok_or(VolumeTransportError::Budget)?;
+            if evaluations > budget.max_spectral_evaluations {
+                return Err(VolumeTransportError::Budget.into());
+            }
         }
         if materials.cell_indices().len() != geometry.cell_count() {
             return Err(VolumeTransportError::Palette.into());
@@ -110,7 +175,7 @@ impl<'g, 'field, 'material, const N: usize> MaterialAbsorptionField<'g, 'field, 
         models
             .try_reserve_exact(model_count)
             .map_err(|_| VolumeTransportError::Budget)?;
-        let mut hash = DomainHasher::new("org.frankensim.render.material-absorption-field.v1");
+        let mut hash = DomainHasher::new(identity_domain);
         hash.update(geometry.content_identity().as_bytes());
         hash.update(&(model_count as u64).to_le_bytes());
         hash.update(&(N as u64).to_le_bytes());
@@ -123,41 +188,20 @@ impl<'g, 'field, 'material, const N: usize> MaterialAbsorptionField<'g, 'field, 
         let mut source_bounds_nm = [0.0_f64, f64::INFINITY];
         for (index, material) in materials.values().iter().enumerate() {
             checkpoint(cx)?;
-            let samples = material.sample(&wavelengths_nm)?;
-            let mut absorption = [0.0; N];
-            absorption.copy_from_slice(samples.mass_absorption_m2_kg());
-            let bounds = material.wavelength_bounds_nm();
+            let (model, bounds, source_identity) = prepare_model(material, index)?;
             source_bounds_nm[0] = source_bounds_nm[0].max(bounds[0]);
             source_bounds_nm[1] = source_bounds_nm[1].min(bounds[1]);
-            hash.update(material.identity().as_bytes());
-            let source = if emission == MaterialAbsorptionEmission::AcceptedLte
-                && absorption.iter().any(|value| *value > 0.0)
-            {
-                let temperature = material
-                    .accepted_temperature_k()
-                    .ok_or(MaterialAbsorptionFieldError::Temperature { model: index })?;
-                let mut source = [0.0; N];
-                for lane in 0..N {
-                    if absorption[lane] > 0.0 {
-                        source[lane] =
-                            planck_radiance_w_m2_sr_nm(temperature, wavelengths_nm[lane])
-                                .map_err(|_| VolumeTransportError::Unrepresentable)?;
-                    }
-                }
-                Some(source)
-            } else {
-                None
-            };
-            for coefficient in absorption {
+            hash.update(source_identity.as_bytes());
+            for coefficient in model.absorption {
                 hash.update(&coefficient.to_bits().to_le_bytes());
             }
-            hash.update(&[u8::from(source.is_some())]);
-            if let Some(source) = source {
+            hash.update(&[u8::from(model.source.is_some())]);
+            if let Some(source) = model.source {
                 for value in source {
                     hash.update(&value.to_bits().to_le_bytes());
                 }
             }
-            models.push(PreparedMaterial { absorption, source });
+            models.push(model);
         }
         let mut vacuum = true;
         let mut has_emission = false;
@@ -189,12 +233,13 @@ impl<'g, 'field, 'material, const N: usize> MaterialAbsorptionField<'g, 'field, 
             vacuum,
             has_emission,
             identity: hash.finalize(),
+            _material_lifetime: PhantomData,
         })
     }
 
-    /// Original immutable material palette, with the unchanged native cell map.
+    /// Original immutable source models or recipes, with the native cell map.
     #[must_use]
-    pub const fn materials(&self) -> &CellPalette<MaterialAbsorptionBinding<'material>> {
+    pub const fn materials(&self) -> &CellPalette<Model> {
         &self.materials
     }
 
@@ -344,6 +389,35 @@ impl<'g, 'field, 'material, const N: usize> MaterialAbsorptionField<'g, 'field, 
     }
 }
 
+fn prepare_material<const N: usize>(
+    material: &MaterialAbsorptionBinding<'_>,
+    wavelengths_nm: &[f64; N],
+    emission: MaterialAbsorptionEmission,
+    index: usize,
+) -> Result<PreparedMaterial<N>, MaterialAbsorptionFieldError> {
+    let samples = material.sample(wavelengths_nm)?;
+    let mut absorption = [0.0; N];
+    absorption.copy_from_slice(samples.mass_absorption_m2_kg());
+    let source = if emission == MaterialAbsorptionEmission::AcceptedLte
+        && absorption.iter().any(|value| *value > 0.0)
+    {
+        let temperature = material
+            .accepted_temperature_k()
+            .ok_or(MaterialAbsorptionFieldError::Temperature { model: index })?;
+        let mut source = [0.0; N];
+        for lane in 0..N {
+            if absorption[lane] > 0.0 {
+                source[lane] = planck_radiance_w_m2_sr_nm(temperature, wavelengths_nm[lane])
+                    .map_err(|_| VolumeTransportError::Unrepresentable)?;
+            }
+        }
+        Some(source)
+    } else {
+        None
+    };
+    Ok(PreparedMaterial { absorption, source })
+}
+
 /// Preparation publishes no partial field on any original source or native
 /// admission refusal. Transport and camera calls retain their native errors.
 #[derive(Clone, Debug, PartialEq)]
@@ -354,6 +428,8 @@ pub enum MaterialAbsorptionFieldError {
     Transport(VolumeTransportError),
     /// An absorbing model lacks one positive accepted Kelvin temperature.
     Temperature { model: usize },
+    /// An active mixture constituent lacks one positive accepted temperature.
+    ComponentTemperature { model: usize, component: usize },
 }
 
 impl From<MaterialAbsorptionError> for MaterialAbsorptionFieldError {
