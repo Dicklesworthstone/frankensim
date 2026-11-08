@@ -2,8 +2,12 @@
 
 use super::FreeSurface;
 use crate::{
-    Cell, E, W,
-    impulse::{ImpulseControls, ImpulseError, ImpulseReport, ImpulseSum, poll},
+    Cell, E, Q, W,
+    impulse::{
+        ImpulseControls, ImpulseError, ImpulseReport, ImpulseSum, WrenchImpulse2,
+        WrenchImpulseControls2, WrenchImpulseReport2, poll,
+        wrench::{WrenchCell2, WrenchPlan2, planar_momentum_change},
+    },
 };
 use fs_exec::CancelGate;
 
@@ -38,6 +42,116 @@ impl FreeSurface {
         self.apply_impulse_density_with_receipt(impulses, controls, gate, Ok)
     }
 
+    /// Apply a total planar wrench using original located liquid mass.
+    ///
+    /// Strictly increasing original x-fastest indices select cell centers
+    /// `(x+1/2,y+1/2)`. Fluid cells contribute `sum(f)` and interface cells their
+    /// tracked liquid mass; gas, walls and unresolved inventory cannot carry
+    /// the wrench. Translation plus rotation gives the least mass-weighted
+    /// velocity increment with the requested linear and angular impulse.
+    /// An independent couple requires at least two distinct wet cell centers.
+    /// Nonperiodic topology is required for a physical angular coordinate chart.
+    ///
+    /// The original mass, fill, density, Guo frame, viscous stress and wetting
+    /// history survive. Linear/angular momentum and signed kinetic work are
+    /// independently checked on staged populations before publication. No time,
+    /// collision, heat or opposite body reaction is assigned. Uses the owner's
+    /// population scratch and one compact stencil, with no dense impulse field.
+    pub fn apply_wrench_impulse(
+        &mut self,
+        indices: &[usize],
+        wrench: WrenchImpulse2,
+        controls: WrenchImpulseControls2,
+        gate: &CancelGate,
+    ) -> Result<WrenchImpulseReport2, ImpulseError> {
+        poll(gate)?;
+        let count = self
+            .grid
+            .nx
+            .checked_mul(self.grid.ny)
+            .ok_or(ImpulseError::Invalid("invalid liquid grid size"))?;
+        controls.impulse.admit(count)?;
+        if self.grid.periodic_x
+            || self.grid.periodic_y
+            || indices.is_empty()
+            || indices.len() > count
+            || self.grid.f.len() != count
+            || self.grid.flags.len() != count
+            || self.grid.fext.len() != count
+            || self.mass.len() != count
+        {
+            return Err(ImpulseError::Invalid(
+                "wrench requires complete nonperiodic fields and a nonempty bounded liquid stencil",
+            ));
+        }
+        let mut cells = Vec::new();
+        cells
+            .try_reserve_exact(indices.len())
+            .map_err(|_| ImpulseError::Invalid("liquid wrench stencil allocation refused"))?;
+        for (i, &index) in indices.iter().enumerate() {
+            if i % 64 == 0 {
+                poll(gate)?;
+            }
+            if index >= count {
+                return Err(ImpulseError::Invalid(
+                    "wrench stencil index outside original liquid",
+                ));
+            }
+            let rho = self.grid.f[index].iter().sum::<f64>();
+            let mass = match self.grid.flags[index] {
+                Cell::Fluid => rho,
+                Cell::Interface => self.mass[index],
+                Cell::Gas | Cell::Wall => {
+                    return Err(ImpulseError::Invalid(
+                        "wrench stencil contains no liquid inertia",
+                    ));
+                }
+            };
+            if !rho.is_finite() || rho <= 0.0 || mass > rho {
+                return Err(ImpulseError::Cell { index });
+            }
+            cells.push(WrenchCell2 {
+                index,
+                position: [
+                    (index % self.grid.nx) as f64 + 0.5,
+                    (index / self.grid.nx) as f64 + 0.5,
+                ],
+                mass,
+            });
+        }
+        let plan = WrenchPlan2::prepare(&cells, wrench, controls, gate)?;
+        let mut next_cell = 0;
+        self.apply_impulse_with_receipt(
+            controls.impulse,
+            gate,
+            |index| {
+                if next_cell < cells.len() && cells[next_cell].index == index {
+                    let impulse = plan.impulse(cells[next_cell]);
+                    next_cell += 1;
+                    impulse
+                } else {
+                    [0.0; 2]
+                }
+            },
+            |report, before, after| {
+                plan.finish(&cells, report, controls, gate, |index| {
+                    let mass = if before.grid.flags[index] == Cell::Fluid {
+                        before.grid.f[index].iter().sum()
+                    } else {
+                        before.mass[index]
+                    };
+                    planar_momentum_change(
+                        &before.grid.f[index],
+                        &after[index],
+                        before.grid.g,
+                        before.grid.fext[index],
+                        Some(mass),
+                    )
+                })
+            },
+        )
+    }
+
     /// Admit a dependent receipt before publishing any original populations.
     /// Physical wrappers use this for fallible unit conversion without cloning
     /// the liquid owner or permitting a failure after accepted state changes.
@@ -47,6 +161,27 @@ impl FreeSurface {
         controls: ImpulseControls,
         gate: &CancelGate,
         admit: impl FnOnce(ImpulseReport<2>) -> Result<R, ImpulseError>,
+    ) -> Result<R, ImpulseError> {
+        poll(gate)?;
+        if impulses.len() != self.grid.f.len() {
+            return Err(ImpulseError::Invalid(
+                "impulse must cover the original liquid grid",
+            ));
+        }
+        self.apply_impulse_with_receipt(
+            controls,
+            gate,
+            |index| impulses[index],
+            |report, _, _| admit(report),
+        )
+    }
+
+    fn apply_impulse_with_receipt<R>(
+        &mut self,
+        controls: ImpulseControls,
+        gate: &CancelGate,
+        mut impulse_at: impl FnMut(usize) -> [f64; 2],
+        admit: impl FnOnce(ImpulseReport<2>, &Self, &[[f64; Q]]) -> Result<R, ImpulseError>,
     ) -> Result<R, ImpulseError> {
         poll(gate)?;
         let count = self
@@ -59,7 +194,6 @@ impl FreeSurface {
             || self.grid.flags.len() != count
             || self.grid.fext.len() != count
             || self.mass.len() != count
-            || impulses.len() != count
         {
             return Err(ImpulseError::Invalid(
                 "impulse and liquid fields must cover the original grid",
@@ -71,10 +205,11 @@ impl FreeSurface {
             .map_err(|_| ImpulseError::Invalid("liquid impulse scratch allocation refused"))?;
         let directions = E.map(|(x, y)| [f64::from(x), f64::from(y)]);
         let mut sum = ImpulseSum::new();
-        for (index, (&original, &impulse)) in self.grid.f.iter().zip(impulses).enumerate() {
+        for (index, &original) in self.grid.f.iter().enumerate() {
             if index % 64 == 0 {
                 poll(gate)?;
             }
+            let impulse = impulse_at(index);
             let mut next = original;
             if impulse != [0.0; 2] {
                 let mass = match self.grid.flags[index] {
@@ -102,7 +237,7 @@ impl FreeSurface {
         }
         let report = sum.finish(controls)?;
         let changed = report.affected_cells != 0;
-        let report = admit(report)?;
+        let report = admit(report, self, &self.scratch)?;
         poll(gate)?;
         if changed {
             core::mem::swap(&mut self.grid.f, &mut self.scratch);
@@ -137,11 +272,18 @@ mod tests {
                 Err::<(), _>(ImpulseError::Invalid("dependent SI receipt refused"))
             },
         );
-        assert_eq!(result, Err(ImpulseError::Invalid("dependent SI receipt refused")));
+        assert_eq!(
+            result,
+            Err(ImpulseError::Invalid("dependent SI receipt refused"))
+        );
         assert_eq!(liquid.grid.f, before.grid.f);
         assert_eq!(liquid.mass, before.mass);
         assert_eq!(liquid.grid.flags, before.grid.flags);
         assert_eq!(liquid.carry, before.carry);
-        assert!(liquid.apply_impulse_density(&[[0.001, 0.0]; 4], controls, &gate).is_ok());
+        assert!(
+            liquid
+                .apply_impulse_density(&[[0.001, 0.0]; 4], controls, &gate)
+                .is_ok()
+        );
     }
 }

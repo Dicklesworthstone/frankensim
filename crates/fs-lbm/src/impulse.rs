@@ -19,7 +19,10 @@
 use fs_exec::{CancelGate, reduce::Compensated};
 
 pub mod wrench;
-pub use wrench::{WrenchImpulse3, WrenchImpulseControls3, WrenchImpulseReport3};
+pub use wrench::{
+    WrenchImpulse2, WrenchImpulse3, WrenchImpulseControls2, WrenchImpulseControls3,
+    WrenchImpulseReport2, WrenchImpulseReport3,
+};
 
 /// Explicit allocation, low-Mach, and independent readback limits.
 #[derive(Clone, Copy, Debug, PartialEq)]

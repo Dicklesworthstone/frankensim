@@ -9,6 +9,10 @@ use super::{ImpulseControls, ImpulseError, ImpulseReport, poll};
 use crate::angular_momentum::angular_correction;
 use fs_exec::{CancelGate, reduce::Compensated};
 
+mod planar;
+pub(crate) use planar::{WrenchCell2, WrenchPlan2, planar_momentum_change};
+pub use planar::{WrenchImpulse2, WrenchImpulseControls2, WrenchImpulseReport2};
+
 /// An instantaneous wrench in lattice units, applied TO the fluid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WrenchImpulse3 {

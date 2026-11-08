@@ -19,6 +19,28 @@ unconditional stability of the split LBM. G1/G3/G4 integration cases compare an
 independent nonlinear two-cell tensor reference, exact constant-law replay in
 both dimensions, weak-axis admission, and transactional failure/replay.
 
+## Planar fluid force-and-couple impulses
+
+`Grid::apply_wrench_impulse` and `FreeSurface::apply_wrench_impulse` accept a total
+linear impulse and out-of-plane angular impulse on strictly increasing original
+wet-cell indices. Actual population mass, or retained partial liquid mass at an
+interface, determines the centroid and scalar moment of inertia. The resulting
+translation plus rotation is the least mass-weighted velocity increment realizing
+the wrench. Cell centers are `(x+1/2,y+1/2)` in lattice lengths; native planar
+impulse and work are per unit depth. A single cell cannot carry a free couple.
+Periodic topology refuses because no unwrapped angular coordinate chart is owned.
+
+The shared population impulse retains the original Guo force frame, intrinsic
+density and physical viscous stress. Independent linear/angular momentum and
+signed kinetic-work readback must meet separate budgets before publication;
+invalid inertia, excessive speed, unsupported cells and cancellation preserve
+accepted state. Partial liquid mass, fill and classification are retained exactly.
+The implementation uses existing population scratch, one compact stencil and a
+scalar inertia solve, without a dense impulse field or additional collision.
+No time, heat or reciprocal body reaction is assigned. Six focused integration
+tests cover the physical quadratures, partial inertia, stress, origin covariance,
+Galilean work, braking, unresolved couples and transactional refusal/zero input.
+
 ## Compact borrowed free-surface impulse staging
 
 `FreeSurface3::prepare_impulse_stencil` retains a mutable borrow of the original native owner while sampling a bounded, strictly increasing wet-cell stencil. Native populations, located retained liquid mass, physical Guo-frame velocity and original cell centers feed the shared population impulse kernel. Gas, inactive/static solid, piston, unresolved interface inventory, excessive speed and unrepresentable states refuse. Staging preserves original populations until the final commit; dropping a stage/candidate or final cancellation leaves the original unchanged. Candidate readback exposes each original mass/position and actual endpoint velocity so a finite receiving owner can independently gate reciprocal angular momentum and work before joint publication. No fluid clock, held force, fill/classification, geometry or unlocated carry is changed.
