@@ -1,6 +1,4 @@
-use super::{
-    DuffingBackboneError, DuffingSpectrum, MAX_DUFFING_HARMONICS, duffing_spectrum_exact,
-};
+use super::{DuffingBackboneError, DuffingSpectrum, MAX_DUFFING_HARMONICS, duffing_spectrum_exact};
 use crate::{SosModalStorage, StressChannel};
 
 fn close(got: f64, expected: f64, relative: f64, absolute: f64) {
@@ -47,14 +45,8 @@ fn energy_period(omega0: f64, beta: f64, amplitude: f64) -> f64 {
 fn rk4(x: f64, v: f64, step: f64, omega0: f64, beta: f64) -> (f64, f64) {
     let acceleration = |q: f64| -(omega0 * omega0 + beta * q * q) * q;
     let (q1, v1) = (v, acceleration(x));
-    let (q2, v2) = (
-        v + 0.5 * step * v1,
-        acceleration(x + 0.5 * step * q1),
-    );
-    let (q3, v3) = (
-        v + 0.5 * step * v2,
-        acceleration(x + 0.5 * step * q2),
-    );
+    let (q2, v2) = (v + 0.5 * step * v1, acceleration(x + 0.5 * step * q1));
+    let (q3, v3) = (v + 0.5 * step * v2, acceleration(x + 0.5 * step * q2));
     let (q4, v4) = (v + step * v3, acceleration(x + step * q3));
     (
         x + step * (q1 + 2.0 * q2 + 2.0 * q3 + q4) / 6.0,
@@ -88,8 +80,7 @@ fn g1_harmonics_waveforms_and_tail_match_independent_physical_trajectories() {
         for j in 0..steps {
             let phase = core::f64::consts::TAU * f64::from(j) / f64::from(steps);
             for (n, coefficient) in projected.iter_mut().enumerate() {
-                *coefficient +=
-                    2.0 * x * (((2 * n + 1) as f64) * phase).cos() / f64::from(steps);
+                *coefficient += 2.0 * x * (((2 * n + 1) as f64) * phase).cos() / f64::from(steps);
             }
             if j % 128 == 0 {
                 let physical_phase = resolved.angular_frequency * step * f64::from(j);
@@ -173,13 +164,10 @@ fn g3_retained_order_never_renormalizes_physical_amplitudes() {
 fn g3_physical_units_and_subnormal_nome_preserve_harmonics() {
     for beta in [-0.75, 3.0] {
         let reference = duffing_spectrum_exact(1.0, beta, 1.0, 8).unwrap();
-        for (time_exponent, amplitude_exponent) in
-            [(400, 0), (-400, 0), (800, 400), (-800, -400)]
-        {
+        for (time_exponent, amplitude_exponent) in [(400, 0), (-400, 0), (800, 400), (-800, -400)] {
             let rate = 2.0_f64.powi(time_exponent);
             let amplitude = 2.0_f64.powi(amplitude_exponent);
-            let scaled_beta =
-                beta * 2.0_f64.powi(2 * time_exponent - 2 * amplitude_exponent);
+            let scaled_beta = beta * 2.0_f64.powi(2 * time_exponent - 2 * amplitude_exponent);
             let result = duffing_spectrum_exact(rate, scaled_beta, amplitude, 8).unwrap();
             close(
                 result.angular_frequency / rate,
@@ -210,12 +198,7 @@ fn g3_physical_units_and_subnormal_nome_preserve_harmonics() {
     )
     .unwrap();
     // beta*A^2/omega0^2 = 2^-1400; q underflows, but A*q does not.
-    close(
-        extreme.cosine_amplitudes[1],
-        2.0_f64.powi(-605),
-        5e-12,
-        0.0,
-    );
+    close(extreme.cosine_amplitudes[1], 2.0_f64.powi(-605), 5e-12, 0.0);
     assert!(extreme.displacement_tail_bound > 0.0);
 }
 
@@ -223,8 +206,7 @@ fn g3_physical_units_and_subnormal_nome_preserve_harmonics() {
 fn g0_softening_separatrix_and_parameter_refusals() {
     let t = 2.0_f64.powi(-53);
     let amplitude = 1.0 - t;
-    let result =
-        duffing_spectrum_exact(1.0, -(1.0 + 2.0 * t), amplitude, 512).unwrap();
+    let result = duffing_spectrum_exact(1.0, -(1.0 + 2.0 * t), amplitude, 512).unwrap();
     assert!(result.angular_frequency > 0.0);
     close(waveform(&result, 0.0).0, amplitude, 0.0, 3e-14);
     assert!(result.cosine_amplitudes[0] > amplitude);

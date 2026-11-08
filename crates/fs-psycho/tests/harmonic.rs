@@ -2,7 +2,8 @@
 
 use fs_fft::C64;
 use fs_psycho::harmonic::{
-    FundamentalStatus, HarmonicAnalysisPlan, HarmonicFitBudget, HarmonicFitError, HarmonicLevelRatio,
+    FundamentalStatus, HarmonicAnalysisPlan, HarmonicFitBudget, HarmonicFitError,
+    HarmonicLevelRatio,
 };
 
 fn budget() -> HarmonicFitBudget {
@@ -206,8 +207,7 @@ fn unmodeled_inharmonic_energy_is_residual_not_harmonic_distortion() {
     // columns. It is not an integer multiple of the physical fundamental.
     let count = 1024;
     let timestep = 1.0 / 8192.0;
-    let plan =
-        HarmonicAnalysisPlan::new(count, timestep, 128.0, &[1, 2], 1e-9, budget()).unwrap();
+    let plan = HarmonicAnalysisPlan::new(count, timestep, 128.0, &[1, 2], 1e-9, budget()).unwrap();
     let mut samples = signal(
         count,
         timestep,
@@ -253,7 +253,10 @@ fn absent_orders_zero_reference_and_declared_resolution_are_distinct() {
     let analysis = no_fundamental
         .analyze_into(&samples, &mut scratch, &mut phasors)
         .unwrap();
-    assert_eq!(analysis.fundamental_status(), FundamentalStatus::NotRetained);
+    assert_eq!(
+        analysis.fundamental_status(),
+        FundamentalStatus::NotRetained
+    );
     assert_eq!(analysis.distortion().unwrap(), None);
     assert!(analysis.component(1).is_none());
     assert_eq!(analysis.component(2).unwrap().relative_level, None);
@@ -287,18 +290,17 @@ fn absent_orders_zero_reference_and_declared_resolution_are_distinct() {
         timestep,
         193.7,
         &[1, 2, 3],
-        &[
-            C64::new(1e-7, 0.0),
-            C64::new(0.4, 0.0),
-            C64::new(0.2, 0.0),
-        ],
+        &[C64::new(1e-7, 0.0), C64::new(0.4, 0.0), C64::new(0.2, 0.0)],
         1.0,
         0.0,
     );
     let analysis = dense
         .analyze_into(&samples, &mut scratch, &mut phasors)
         .unwrap();
-    assert_eq!(analysis.fundamental_status(), FundamentalStatus::BelowMinimum);
+    assert_eq!(
+        analysis.fundamental_status(),
+        FundamentalStatus::BelowMinimum
+    );
     assert_eq!(analysis.distortion().unwrap(), None);
     assert_eq!(analysis.component(2).unwrap().relative_level, None);
     assert!(analysis.component(1).unwrap().peak_phasor.re > 0.0);
@@ -319,8 +321,7 @@ fn absent_orders_zero_reference_and_declared_resolution_are_distinct() {
     assert_eq!(analysis.dc(), 7.0);
     assert_eq!(analysis.residual_rms(), 0.0);
 
-    let single =
-        HarmonicAnalysisPlan::new(count, timestep, 193.7, &[1], 1e-8, budget()).unwrap();
+    let single = HarmonicAnalysisPlan::new(count, timestep, 193.7, &[1], 1e-8, budget()).unwrap();
     let samples = signal(
         count,
         timestep,
@@ -347,9 +348,7 @@ fn analysis_keeps_the_shared_clock_budget_and_transactional_fit_refusals() {
             Err(HarmonicFitError::InvalidParameter { .. })
         ));
     }
-    assert!(
-        HarmonicAnalysisPlan::new(257, 1.0 / 8192.0, 1024.0, &[1, 4], 0.0, budget()).is_err()
-    );
+    assert!(HarmonicAnalysisPlan::new(257, 1.0 / 8192.0, 1024.0, &[1, 4], 0.0, budget()).is_err());
     let mut too_small = budget();
     too_small.max_workspace_bytes = 1;
     assert!(matches!(

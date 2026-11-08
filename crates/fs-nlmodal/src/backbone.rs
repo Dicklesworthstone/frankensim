@@ -189,10 +189,8 @@ pub fn duffing_backbone_exact(
         };
     }
     let parameters = scaled_parameters(omega0, beta, amplitude)?;
-    let mean = arithmetic_geometric_mean(
-        det::sqrt(parameters.endpoint),
-        det::sqrt(parameters.middle),
-    )?;
+    let mean =
+        arithmetic_geometric_mean(det::sqrt(parameters.endpoint), det::sqrt(parameters.middle))?;
     let frequency = Qd::from_f64(mean)
         .scale_power_of_two(parameters.rate_exponent)
         .to_f64();

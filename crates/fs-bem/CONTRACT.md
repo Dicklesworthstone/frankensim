@@ -2880,6 +2880,30 @@ references give -0.001546695268142812 W/m^2 standing-wave flux and
 1.378634354255046e-25 Pa^2 for the weak proper beat; these are reference
 calculations, not executed Rust results.
 
+## Coherent physical waveforms from retained BEM harmonics
+
+`PreparedHarmonicExposure::realize[_cancellable]` applies one explicitly supplied
+real/proper-complex draw to each entire original factor, shared across all its
+frequencies, sources and receivers. The draw variant must match the authored
+factor law; no distribution, normalization or new random phase is inferred.
+`PreparedHarmonicRealization` retains DD pressure and actual Cartesian velocity,
+coalesces exactly equal native rad/s frequencies across the mean and drawn
+factors, and preserves original receiver/source identity and source clock.
+Zero draws and coherent nulls retain their physical frequencies.
+
+`sample_fields_into[_cancellable]` writes simultaneous physical p/u samples in
+sample-major receiver order. Absolute integer sample indices and a DD epoch
+preserve counters beyond 2^53 and make block partitioning bit-identical. Every
+physical line must be strictly below output Nyquist before any buffer write.
+Sampling reuses the same DD trigonometric owner as harmonic window integration,
+shares each phase across the array, allocates nothing, and performs no BEM solve
+or pressure-to-velocity approximation. Preparation has bounded line, field-work
+and heap payload limits; sampling has bounded frame and receiver-line work.
+Admission failures leave output untouched; runtime overflow/cancellation can
+leave a prefix, which the caller must discard. This is settled harmonic
+continuation: source onset, anti-alias filtering and producer accuracy are not
+inferred. Original spatial and source uncertainty remains unresolved.
+
 ## Joint uncertainty of averaged acoustic sensor readouts
 
 `PreparedHarmonicExposure::observe_readout[_cancellable]` observes a linear

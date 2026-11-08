@@ -30,6 +30,12 @@ pub use readout::{
     MAX_READOUT_RECEIVER_PAIRS, WindowedHarmonicReadout,
 };
 
+mod realization;
+pub use realization::{
+    HarmonicFactorDraw, HarmonicFieldSample, HarmonicRealizationLimits, HarmonicSampleClock,
+    HarmonicSampleLimits, PreparedHarmonicRealization,
+};
+
 mod surface;
 pub use surface::{
     HarmonicSurfacePowerLimits, HarmonicSurfaceQuadrature, MAX_SURFACE_QUADRATURE_POINTS,
@@ -662,3 +668,6 @@ mod tests;
 
 #[cfg(test)]
 mod mixed_tests;
+
+#[cfg(test)]
+mod realization_tests;

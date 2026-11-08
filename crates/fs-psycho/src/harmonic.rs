@@ -118,13 +118,7 @@ impl HarmonicAnalysisPlan {
             });
         }
         Ok(Self {
-            fit: HarmonicFitPlan::new(
-                sample_count,
-                timestep_s,
-                fundamental_hz,
-                harmonics,
-                budget,
-            )?,
+            fit: HarmonicFitPlan::new(sample_count, timestep_s, fundamental_hz, harmonics, budget)?,
             minimum_fundamental_peak,
         })
     }
@@ -217,12 +211,13 @@ impl HarmonicAnalysis<'_> {
     pub fn component(&self, order: usize) -> Option<HarmonicComponent> {
         let index = self.harmonics().binary_search(&order).ok()?;
         let peak_phasor = self.phasors[index];
-        let relative_level = (self.fundamental_status() == FundamentalStatus::Resolved).then(|| {
-            level_ratio(
-                ScaledSquares::of(peak_phasor).log_norm(),
-                ScaledSquares::of(self.phasors[0]).log_norm(),
-            )
-        });
+        let relative_level =
+            (self.fundamental_status() == FundamentalStatus::Resolved).then(|| {
+                level_ratio(
+                    ScaledSquares::of(peak_phasor).log_norm(),
+                    ScaledSquares::of(self.phasors[0]).log_norm(),
+                )
+            });
         Some(HarmonicComponent {
             order,
             frequency_hz: self.plan.fit.fundamental_hz() * order as f64,
@@ -257,8 +252,9 @@ impl HarmonicAnalysis<'_> {
                 odd.add_phasor(phasor);
             }
         }
-        let ratio =
-            |present: bool, norm: ScaledSquares| present.then(|| norm.ratio(fundamental)).transpose();
+        let ratio = |present: bool, norm: ScaledSquares| {
+            present.then(|| norm.ratio(fundamental)).transpose()
+        };
         let highest_order = self.harmonics()[self.harmonics().len() - 1];
         Ok(Some(HarmonicDistortion {
             total_ratio: ratio(have_even || have_odd, total)?,
@@ -387,7 +383,11 @@ mod tests {
         assert!((ratio / (0.5 / (1e-200 * 2.0_f64.sqrt())) - 1.0).abs() < 3e-15);
         let subnormal = ScaledSquares::of(C64::new(f64::from_bits(1), 0.0));
         assert!(loud.ratio(subnormal).is_err());
-        assert!(subnormal.ratio(ScaledSquares::of(C64::new(1e100, 0.0))).is_err());
+        assert!(
+            subnormal
+                .ratio(ScaledSquares::of(C64::new(1e100, 0.0)))
+                .is_err()
+        );
         assert_eq!(ScaledSquares::default().ratio(weak), Ok(0.0));
     }
 }

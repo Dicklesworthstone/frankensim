@@ -1,8 +1,8 @@
 //! Exact two-carrier mixing of the retained linear induction fields.
 
 use super::{
-    CellLoad, SpatialConductorMaterial, SpatialHarmonicInductionResponse,
-    SpatialLorentzLoadError, SpatialLorentzLoadLimits, SpatialLorentzLoads, integrate,
+    CellLoad, SpatialConductorMaterial, SpatialHarmonicInductionResponse, SpatialLorentzLoadError,
+    SpatialLorentzLoadLimits, SpatialLorentzLoads, integrate,
 };
 use fs_math::c64::C64;
 
@@ -173,11 +173,13 @@ impl<C: SpatialConductorMaterial> SpatialHarmonicInductionResponse<'_, '_, C> {
         let mut coefficient = |index| {
             integrate(
                 problem.positions_m(),
-                selected.iter().map(|(_, vertices, volume, density)| CellLoad {
-                    vertices: *vertices,
-                    volume_m3: *volume,
-                    force_density_n_m3: &density[index],
-                }),
+                selected
+                    .iter()
+                    .map(|(_, vertices, volume, density)| CellLoad {
+                        vertices: *vertices,
+                        volume_m3: *volume,
+                        force_density_n_m3: &density[index],
+                    }),
                 limits,
                 cancelled,
             )

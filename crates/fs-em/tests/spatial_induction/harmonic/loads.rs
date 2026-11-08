@@ -42,7 +42,12 @@ fn instantaneous_superposition_reference(
     let high = (5.0 + 3.0 * 5.0_f64.sqrt()) / 20.0;
     let low = (5.0 - 5.0_f64.sqrt()) / 20.0;
     for &cell in selected {
-        let record = responses[0].0.cells().iter().find(|c| c.cell == cell).unwrap();
+        let record = responses[0]
+            .0
+            .cells()
+            .iter()
+            .find(|c| c.cell == cell)
+            .unwrap();
         let tet = problem.mesh().tets[cell].map(|v| v as usize);
         let mut b = [0.0; 3];
         let mut current = [[0.0; 3]; 4];
@@ -59,11 +64,7 @@ fn instantaneous_superposition_reference(
         }
         for point in 0..4 {
             let shape: [f64; 4] = std::array::from_fn(|i| if i == point { high } else { low });
-            let j = std::array::from_fn(|axis| {
-                (0..4)
-                    .map(|i| shape[i] * current[i][axis])
-                    .sum()
-            });
+            let j = std::array::from_fn(|axis| (0..4).map(|i| shape[i] * current[i][axis]).sum());
             let position = std::array::from_fn(|axis| {
                 (0..4)
                     .map(|i| shape[i] * problem.positions_m()[tet[i]][axis])
@@ -513,14 +514,11 @@ fn cross_carrier_loads_refuse_incompatible_sources_motion_and_partial_work() {
             &mut || false,
         )
         .unwrap();
-    let other_state = SpatialInduction::new(
-        &initial,
-        sources.clone(),
-        preparation(),
-        2e-9,
-        &mut || false,
-    )
-    .unwrap();
+    let other_state =
+        SpatialInduction::new(&initial, sources.clone(), preparation(), 2e-9, &mut || {
+            false
+        })
+        .unwrap();
     let state =
         SpatialInduction::new(&initial, sources, preparation(), 2e-9, &mut || false).unwrap();
     let stationary = [[0.0; 3]; 8];
@@ -531,34 +529,22 @@ fn cross_carrier_loads_refuse_incompatible_sources_motion_and_partial_work() {
         .collect();
     let source = [[C64::new(4.0, 0.0); 3]; 6];
     let first = state
-        .solve_harmonic(
-            &source,
-            &stationary,
-            3.0,
-            harmonic_controls(),
-            &mut || false,
-        )
+        .solve_harmonic(&source, &stationary, 3.0, harmonic_controls(), &mut || {
+            false
+        })
         .unwrap();
     let second = state
-        .solve_harmonic(
-            &source,
-            &stationary,
-            9.0,
-            harmonic_controls(),
-            &mut || false,
-        )
+        .solve_harmonic(&source, &stationary, 9.0, harmonic_controls(), &mut || {
+            false
+        })
         .unwrap();
     let changed_motion = state
         .solve_harmonic(&source, &moving, 9.0, harmonic_controls(), &mut || false)
         .unwrap();
     let changed_source = other_state
-        .solve_harmonic(
-            &source,
-            &stationary,
-            9.0,
-            harmonic_controls(),
-            &mut || false,
-        )
+        .solve_harmonic(&source, &stationary, 9.0, harmonic_controls(), &mut || {
+            false
+        })
         .unwrap();
     for incompatible in [&changed_motion, &changed_source] {
         assert!(matches!(
