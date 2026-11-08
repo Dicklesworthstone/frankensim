@@ -70,8 +70,9 @@ impl LoadedPiezoelectricStep {
 impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     /// Solve the SAME coupled midpoint system with source-bound shunts. A held
     /// external current controls charge supply, while resistor current is solved
-    /// simultaneously from the actual midpoint potential. Source types cannot
-    /// switch. Resistors may join only the same retained dielectric/gauge component.
+    /// simultaneously from the actual midpoint potential. Source types remain
+    /// fixed within this step; explicit electrode release occurs between steps.
+    /// Resistors may join only the same retained dielectric/gauge component.
     /// The candidate's ordinary step report accounts for net electrode work into
     /// the body. The returned load report instead encloses body AND resistors,
     /// separating external electrical source work from their dissipated heat.
@@ -148,8 +149,15 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         LoadedPiezoelectricStep,
     )> {
         self.advance_loaded_with_acoustic_candidate(
-            dt_s, endpoint_support_velocities_m_s, &[], drives, loads,
-            midpoint_nodal_forces_n, endpoint_nodal_free_charge_c, controls, cx,
+            dt_s,
+            endpoint_support_velocities_m_s,
+            &[],
+            drives,
+            loads,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
         )
     }
 
@@ -189,10 +197,10 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let mut joule_heat = Dd::ZERO;
         for flow in &heat {
             poll(cx)?;
-            outgoing[flow.load.electrodes[0]] = outgoing[flow.load.electrodes[0]]
-                + Dd::from_f64(flow.transferred_charge_c);
-            outgoing[flow.load.electrodes[1]] = outgoing[flow.load.electrodes[1]]
-                - Dd::from_f64(flow.transferred_charge_c);
+            outgoing[flow.load.electrodes[0]] =
+                outgoing[flow.load.electrodes[0]] + Dd::from_f64(flow.transferred_charge_c);
+            outgoing[flow.load.electrodes[1]] =
+                outgoing[flow.load.electrodes[1]] - Dd::from_f64(flow.transferred_charge_c);
             joule_heat = joule_heat + Dd::from_f64(flow.joule_heat_j);
         }
         let source_work = source_work(
@@ -211,7 +219,8 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             + Dd::from_f64(candidate.step.material_heat_j)
             + Dd::from_f64(candidate.step.acoustic_outward_work_j)
             - candidate.step.retained_mechanical_work_j()
-            - source_work).to_f64();
+            - source_work)
+            .to_f64();
         if [electrical_source_work_j, joule_heat_j, energy_residual_j]
             .iter()
             .any(|v| !v.is_finite())

@@ -8,6 +8,8 @@ mod acoustic;
 mod equilibrium;
 #[path = "spatial_transient/relaxation.rs"]
 mod relaxation;
+#[path = "spatial_transient/release.rs"]
+mod release;
 #[path = "spatial_transient/support_motion.rs"]
 mod support_motion;
 

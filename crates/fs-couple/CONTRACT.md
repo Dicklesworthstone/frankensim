@@ -3322,6 +3322,21 @@ needs an accounted thermal memory owner; this increment is fixed-temperature.
 Focused regressions exercise held hot bias, open-circuit voltage, relaxed-field
 admission, polarized resistor discharge and Maxwell motion under thermal preload.
 
+`release_electrodes_candidate` on the native and reactive transient owners
+disconnects selected ideal voltage sources at an accepted endpoint. Each
+released electrode retains its actual conductor charge; displacement, velocity,
+time, fields, intrinsic memories and storage are unchanged. The reactive owner
+also retains all attached source branches, capacitor charges and winding fluxes.
+The native boundary map keeps current moving-support coordinates and original
+electrode topology. At least one voltage reference remains per component.
+Reference changes use retained relative potentials, with representability
+admission before publication; large absolute gauges never enter that subtraction.
+Subsequent steps use charge/current control at released electrodes. This
+zero-time operation supplies no charge impulse or work and performs no new
+field solve. It does not model a voltage-clamp jump, switch resistance or arcing.
+Focused physical regressions cover partially charged Debye redistribution,
+weak fields under large gauges, moving supports, reactive storage and refusal.
+
 ## Moving stress histories on the pressure/PCM path
 
 `pcm_wav::observation::quadrupole::moving::MovingQuadrupoleRenderer` reads

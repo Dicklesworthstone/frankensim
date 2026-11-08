@@ -9,15 +9,15 @@
 //! sparse reciprocal solid/dielectric solve as the existing Ohmic loads.
 //! No separate circuit trajectory or artificial mechanical damping is used.
 //!
-//! Sources and topology stay fixed. Inductors/capacitors use the original
+//! Material sources and branch topology stay fixed. Inductors/capacitors use the original
 //! `fs-material` uniform-field reductions, with their source and geometry
 //! receipts. A resistor is optional on each inductive branch; its Joule heat
 //! belongs to that conductor. Mutual inductance, internal circuit nodes,
 //! nonlinear switching, thermal refresh and parasitic losses require other
 //! models. Stored reactive energy and charge are never reset at step boundaries.
 
-use super::*;
 use super::super::acoustic::{TransientAcousticPort, TransientAcousticPortResponse};
+use super::*;
 use fs_material::field_storage::{ResolvedCapacitor, ResolvedInductor};
 
 /// Fixed material/geometry branch between two original spatial electrodes.
@@ -201,6 +201,27 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         })
     }
 
+    /// Release selected ideal voltage sources without advancing time or
+    /// changing any physical storage. The native body retains actual conductor
+    /// charges, mechanical motion and intrinsic memories; original capacitor
+    /// charges and winding fluxes remain exactly unchanged.
+    ///
+    /// Material branches and their electrode topology remain attached. Later
+    /// steps supply Current drives at released electrodes; zero removes the
+    /// external source while the original shunts still exchange charge.
+    /// The body's reference/representability admission applies transactionally.
+    pub fn release_electrodes_candidate(&self, electrodes: &[usize], cx: &Cx<'_>) -> Result<Self> {
+        let body = self.body.release_electrodes_candidate(electrodes, cx)?;
+        let candidate = Self {
+            body,
+            loads: Arc::clone(&self.loads),
+            states: self.states.clone(),
+            resistors: Arc::clone(&self.resistors),
+        };
+        poll(cx)?;
+        Ok(candidate)
+    }
+
     /// Original spatial state. Advance this joint owner to retain load memory.
     pub const fn body(&self) -> &TetPiezoelectricTransient<'model, 'mesh> {
         &self.body
@@ -336,10 +357,10 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         let mut joule_heat = Dd::ZERO;
         for flow in &resistors {
             poll(cx)?;
-            outgoing[flow.load.electrodes[0]] = outgoing[flow.load.electrodes[0]]
-                + Dd::from_f64(flow.transferred_charge_c);
-            outgoing[flow.load.electrodes[1]] = outgoing[flow.load.electrodes[1]]
-                - Dd::from_f64(flow.transferred_charge_c);
+            outgoing[flow.load.electrodes[0]] =
+                outgoing[flow.load.electrodes[0]] + Dd::from_f64(flow.transferred_charge_c);
+            outgoing[flow.load.electrodes[1]] =
+                outgoing[flow.load.electrodes[1]] - Dd::from_f64(flow.transferred_charge_c);
             joule_heat = joule_heat + Dd::from_f64(flow.joule_heat_j);
         }
         let mut reactive_energy_j = [0.0; 2];
@@ -372,7 +393,8 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             + Dd::from_f64(candidate.step.material_heat_j)
             + Dd::from_f64(candidate.step.acoustic_outward_work_j)
             - candidate.step.retained_mechanical_work_j()
-            - source_work).to_f64();
+            - source_work)
+            .to_f64();
         if reactive_energy_j
             .iter()
             .chain([&joule_heat_j, &energy_residual_j])
@@ -651,12 +673,16 @@ pub(in crate::piezoelectric::spatial::transient) fn recover(
         };
         let energy = [load.energy(state)?, load.energy(next)?];
         let (old_coordinate, new_coordinate, storage) = match (load, state, next) {
-            (ReactiveElectrodeLoad::SeriesRl { inductor, .. },
-                ReactiveElectrodeState::FluxLinkage(old), ReactiveElectrodeState::FluxLinkage(new)) =>
-                (old, new, inductor.inductance_h()),
-            (ReactiveElectrodeLoad::Capacitor { capacitor, .. },
-                ReactiveElectrodeState::Charge(old), ReactiveElectrodeState::Charge(new)) =>
-                (old, new, capacitor.capacitance_f()),
+            (
+                ReactiveElectrodeLoad::SeriesRl { inductor, .. },
+                ReactiveElectrodeState::FluxLinkage(old),
+                ReactiveElectrodeState::FluxLinkage(new),
+            ) => (old, new, inductor.inductance_h()),
+            (
+                ReactiveElectrodeLoad::Capacitor { capacitor, .. },
+                ReactiveElectrodeState::Charge(old),
+                ReactiveElectrodeState::Charge(new),
+            ) => (old, new, capacitor.capacitance_f()),
             _ => unreachable!("reactive storage kind admitted above"),
         };
         let mut products = Products::default();
@@ -668,7 +694,8 @@ pub(in crate::piezoelectric::spatial::transient) fn recover(
         let stored_change = products.value();
         let change = stored_change.to_f64();
         let residual = (stored_change + Dd::from_f64(heat)
-            - Dd::from_f64(voltage) * Dd::from_f64(charge)).to_f64();
+            - Dd::from_f64(voltage) * Dd::from_f64(charge))
+        .to_f64();
         if [voltage, charge, current, heat, change, residual]
             .iter()
             .any(|v| !v.is_finite())

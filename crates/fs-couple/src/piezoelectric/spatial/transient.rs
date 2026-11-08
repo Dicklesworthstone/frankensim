@@ -6,8 +6,10 @@
 //! `-K_e`. This resolves the retained mesh's elastic waves without replacing
 //! the material by a fitted actuator gain or a single oscillator.
 //!
-//! Support coordinates and electrode topology/types are fixed. Supports may
-//! follow explicitly supplied endpoint velocities through the same midpoint
+//! Support coordinates and electrode topology are fixed. Ordinary timesteps
+//! retain source kinds; explicit zero-time electrode release preserves physical
+//! charge and material history. Supports may follow supplied endpoint velocities
+//! through the same midpoint
 //! kinematics. Their full inertial/constitutive reactions supply boundary work.
 //! Prescribed voltages and
 //! charges vary linearly between accepted endpoints; force is the caller's
@@ -33,6 +35,7 @@ use fs_math::quadratic::{self, QuadraticError};
 use std::sync::Arc;
 
 mod energy;
+mod release;
 use energy::Products;
 
 /// Reciprocal guide loading and real incident acoustic waves on this solve.
