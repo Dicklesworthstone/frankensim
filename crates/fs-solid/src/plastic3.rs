@@ -107,10 +107,11 @@ impl Default for IncrementSettings {
 
 /// Constitutive data over a continuum mesh.
 ///
-/// Use `Uniform` for one material and `PerElement` for different material
-/// cards or spatially varying states of the same constitutive family. Entries
-/// follow the element connectivity order. All coefficients remain fixed
-/// over this problem's load path; each element evolves its own internal state.
+/// Use `Uniform` for one material, `PerElement` for elementwise material
+/// states, or `PerQuadrature` for resolved gradients inside an element.
+/// Entries follow the element connectivity and native quadrature order. All
+/// coefficients remain fixed over this problem's load path; every integration
+/// point evolves its own internal state with its original constitutive law.
 /// Retain source receipts alongside these laws when lowering material cards.
 #[derive(Debug, Clone, Copy)]
 pub enum SmallStrainLawField<'a, L: SmallStrainLaw> {
@@ -118,25 +119,72 @@ pub enum SmallStrainLawField<'a, L: SmallStrainLaw> {
     Uniform(&'a L),
     /// One constitutive law per element, without homogenization.
     PerElement(&'a [L]),
+    /// One borrowed law per native integration point, grouped by element.
+    ///
+    /// Each group must cover the element's exact quadrature: one centroid for
+    /// P1 tetrahedra, three points for P1 plane triangles, four for Q1 plane
+    /// quadrilaterals, or eight for HEX8 bricks. Plane ordering is
+    /// `mesh2::quad_points`; HEX8 uses ascending Gauss coordinates, with x
+    /// outermost and z innermost. Values are neither interpolated nor averaged.
+    PerQuadrature(&'a [&'a [L]]),
 }
 
 impl<L: SmallStrainLaw> SmallStrainLawField<'_, L> {
-    fn validate_count(&self, expected: usize) -> Result<(), SmallStrainTetError> {
-        if let Self::PerElement(laws) = self
-            && laws.len() != expected
-        {
+    pub(crate) fn validate_count(&self, expected: usize) -> Result<(), SmallStrainTetError> {
+        self.validate_quadrature_counts(std::iter::repeat_n(1, expected))
+    }
+
+    pub(crate) fn validate_quadrature_counts(
+        &self,
+        points: impl ExactSizeIterator<Item = usize>,
+    ) -> Result<(), SmallStrainTetError> {
+        let expected = points.len();
+        let got = match self {
+            Self::Uniform(_) => return Ok(()),
+            Self::PerElement(laws) => laws.len(),
+            Self::PerQuadrature(laws) => laws.len(),
+        };
+        if got != expected {
             return Err(SmallStrainTetError::LawCountMismatch {
                 expected,
-                got: laws.len(),
+                got,
             });
+        }
+        if let Self::PerQuadrature(laws) = self {
+            for (element, (laws, expected)) in laws.iter().zip(points).enumerate() {
+                if laws.len() != expected {
+                    return Err(SmallStrainTetError::InvalidInput {
+                        what: format!(
+                            "element {element} needs {expected} quadrature laws, got {}",
+                            laws.len()
+                        ),
+                    });
+                }
+            }
         }
         Ok(())
     }
 
-    fn at(&self, element: usize) -> &L {
+    pub(crate) fn at(&self, element: usize) -> &L {
+        self.at_point(element, 0)
+    }
+
+    pub(crate) fn at_point(&self, element: usize, point: usize) -> &L {
         match self {
             Self::Uniform(law) => law,
             Self::PerElement(laws) => &laws[element],
+            Self::PerQuadrature(laws) => &laws[element][point],
+        }
+    }
+
+    pub(crate) fn tangent_symmetric(&self) -> bool {
+        match self {
+            Self::Uniform(law) => law.admissibility().tangent_symmetric,
+            Self::PerElement(laws) => laws.iter().all(|law| law.admissibility().tangent_symmetric),
+            Self::PerQuadrature(laws) => laws
+                .iter()
+                .flat_map(|points| points.iter())
+                .all(|law| law.admissibility().tangent_symmetric),
         }
     }
 }
@@ -148,7 +196,7 @@ pub struct SmallStrainTetProblem<'a, L: SmallStrainLaw> {
     pub nodes_m: &'a [[f64; 3]],
     /// Four vertex indices per conforming tetrahedron.
     pub tetrahedra: &'a [[usize; 4]],
-    /// Uniform or per-element constitutive laws, in connectivity order.
+    /// Native constitutive laws, with one integration point per tetrahedron.
     pub laws: SmallStrainLawField<'a, L>,
     /// Reference prescribed displacements: (`3 node + component`, m).
     pub prescribed_m: &'a [(usize, f64)],
@@ -398,10 +446,10 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         if n == 0 || self.tetrahedra.is_empty() || self.load_path.is_empty() {
             return invalid("empty mesh or load path".into());
         }
-        self.laws.validate_count(self.tetrahedra.len())?;
         if n > self.budget.maximum_nodes || self.tetrahedra.len() > self.budget.maximum_tetrahedra {
             return invalid(format!("mesh exceeds the budget {:?}", self.budget));
         }
+        self.laws.validate_count(self.tetrahedra.len())?;
         if self
             .nodes_m
             .iter()
@@ -875,12 +923,7 @@ impl<L: SmallStrainLaw> increment::IncrementOperator for TetIncrement<'_, '_, L>
             // the underlying smooth material does. Use the native general solve.
             return false;
         }
-        match self.problem.laws {
-            SmallStrainLawField::Uniform(law) => law.admissibility().tangent_symmetric,
-            SmallStrainLawField::PerElement(laws) => {
-                laws.iter().all(|law| law.admissibility().tangent_symmetric)
-            }
-        }
+        self.problem.laws.tangent_symmetric()
     }
 
     fn commit(

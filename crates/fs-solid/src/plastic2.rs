@@ -91,7 +91,7 @@ impl Default for PlaneAssemblyBudget {
 pub struct SmallStrainPlaneProblem<'a, L: SmallStrainLaw> {
     /// Existing body-fitted mesh. Coordinates are in metres.
     pub mesh: &'a Mesh2,
-    /// Native laws in element connectivity order; no region averaging.
+    /// Native laws in element and optional quadrature order; no averaging.
     pub laws: SmallStrainLawField<'a, L>,
     /// Zero transverse strain or zero transverse stress.
     pub plane: PlaneKind,
@@ -223,11 +223,8 @@ struct Trial<S> {
 }
 
 impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
-    fn law(&self, element: usize) -> &L {
-        match &self.laws {
-            SmallStrainLawField::Uniform(law) => law,
-            SmallStrainLawField::PerElement(laws) => &laws[element],
-        }
+    fn law(&self, element: usize, point: usize) -> &L {
+        self.laws.at_point(element, point)
     }
 
     fn prepare(&self, cx: &Cx<'_>) -> Result<Vec<Element>, SmallStrainPlaneError> {
@@ -249,19 +246,11 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
         {
             return Err(invalid("empty, oversized or inadmissible plane problem"));
         }
-        if let SmallStrainLawField::PerElement(laws) = &self.laws
-            && laws.len() != ne
-        {
-            return Err(invalid("material count must equal the element count"));
-        }
         if self.formulation == Formulation::BBar
             && (self.plane != PlaneKind::Strain || self.mesh.elems.iter().any(|e| e.len() != 4))
         {
             return Err(invalid("B-bar requires Q1 quadrilaterals in plane strain"));
         }
-        // Validate the shared controls once, even when no transverse solve is needed.
-        PlaneStressReduction::new(self.law(0), self.reduction)
-            .map_err(|e| invalid(e.to_string()))?;
         let s = self.settings;
         if s.max_newton_iterations == 0
             || s.max_linear_iterations == 0
@@ -323,6 +312,13 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                 "quadrature histories or tangent entries exceed the budget",
             ));
         }
+        self.laws
+            .validate_quadrature_counts(self.mesh.elems.iter().map(Vec::len))
+            .map_err(|error| invalid(error.to_string()))?;
+        // Validate controls after exact, nonempty native point coverage, even
+        // when no transverse solve is needed.
+        PlaneStressReduction::new(self.law(0, 0), self.reduction)
+            .map_err(|e| invalid(e.to_string()))?;
         let mut elements = Vec::with_capacity(ne);
         for (e, conn) in self.mesh.elems.iter().enumerate() {
             checkpoint(cx)?;
@@ -471,10 +467,10 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
         let mut bounds = vec![0.0; u.len()];
         for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
-            let law = self.law(e);
-            let reduction = PlaneStressReduction::new(law, self.reduction)
-                .map_err(|e| invalid(e.to_string()))?;
             for (q, point) in element.points.iter().enumerate() {
+                let law = self.law(e, q);
+                let reduction = PlaneStressReduction::new(law, self.reduction)
+                    .map_err(|e| invalid(e.to_string()))?;
                 let (strain, rotation) = Self::strain_and_rotation(element, point, u);
                 if !rotation.is_finite() || rotation.abs() > self.rotation_limit_rad {
                     return Err(invalid(format!(
@@ -709,7 +705,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
         initial: Option<(&[f64], &[ReducedState<L::State>])>,
         cx: &Cx<'_>,
     ) -> Result<SmallStrainPlaneSolution<L::State>, SmallStrainPlaneError> {
-        let symmetric = (0..elements.len()).all(|e| self.law(e).admissibility().tangent_symmetric);
+        let symmetric = self.laws.tangent_symmetric();
         let n = 2 * self.mesh.nodes.len();
         let mut fixed = vec![false; n];
         for &(d, _) in self.prescribed_m {
@@ -734,9 +730,9 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                     .iter()
                     .enumerate()
                     .flat_map(|(e, element)| {
-                        (0..element.points.len()).map(move |_| ReducedState {
+                        (0..element.points.len()).map(move |q| ReducedState {
                             strain: [0.0; 6],
-                            history: self.law(e).initial_state(),
+                            history: self.law(e, q).initial_state(),
                         })
                     })
                     .collect(),

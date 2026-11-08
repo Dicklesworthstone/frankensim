@@ -7637,11 +7637,30 @@ finite-strain forming. Existing geometric choices keep their own model limits.
 ## Incremental plane continua
 
 `plastic2::SmallStrainPlaneProblem` uses the existing `Mesh2` P1 triangles and
-Q1 quadrilaterals with a native uniform or per-element `SmallStrainLaw`.
+Q1 quadrilaterals with native uniform, per-element or per-quadrature laws.
 Plane stress solves all transverse stress constraints with the original
 material reduction and its condensed algorithmic tangent. Plane strain
 retains the constrained transverse stress. Every quadrature point carries its
 complete three-dimensional strain and committed constitutive history.
+
+`SmallStrainLawField::PerQuadrature` borrows each original constitutive law in
+the exact native integration order. P1 plane triangles require three laws,
+Q1 planes four, HEX8 bricks eight, and P1 tetrahedra one. Spatial source
+temperature, expansion, stiffness and material directions can therefore vary
+inside an element without replacing them by element averages. The same point
+law initializes history and supplies stress, tangent and accepted history;
+B-bar projects kinematics while retaining these separate constitutive owners.
+Pointwise symmetry declarations select the existing general or symmetric sparse
+solve. Native fatigue gauges bind the source at their actual quadrature point.
+Coefficients remain fixed within an interval; source refresh and retained
+continuation use the existing `solve_from` semantics. This adds no thermal
+transport, quadrature-error estimate or material interpolation model.
+
+Focused `thermoelastic_plane` regressions exercise actual differential expansion
+and restrained stresses under a within-element thermal gradient, with an
+independent integrated energy solution for both planes and bricks. They also
+check pointwise stress, tangent and exact P1/Q1 coverage. `plastic_hex` checks
+separate point histories through reversal and unchanged uniform-field behavior.
 
 Absolute chronological load factors support loading, unloading, reversal and
 repeated physical intervals for timed laws. All Newton and line-search trials

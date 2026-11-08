@@ -32,6 +32,14 @@ fn point(t: f64) -> QueryPoint {
 }
 
 fn potential(isotropic: bool, axial_only: bool) -> AffineThermoelastic {
+    potential_with_expansion_slope(isotropic, axial_only, 1e-8)
+}
+
+fn potential_with_expansion_slope(
+    isotropic: bool,
+    axial_only: bool,
+    expansion_slope: f64,
+) -> AffineThermoelastic {
     let mut claims = ClaimSet::new();
     let mut insert = |name: &str, dims: Dims, base: f64, slope: f64| {
         claims.insert_claim(PropertyClaim {
@@ -60,7 +68,7 @@ fn potential(isotropic: bool, axial_only: bool) -> AffineThermoelastic {
     if isotropic {
         insert(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, 12e9, -3e7);
         insert(POISSON_RATIO_PROPERTY, Dims::NONE, 0.23, 0.0);
-        insert(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, inverse_t, 1e-5, 1e-8);
+        insert(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY, inverse_t, 1e-5, expansion_slope);
         elastic_names.extend([
             (YOUNG_MODULUS_PROPERTY, Pressure::DIMS),
             (POISSON_RATIO_PROPERTY, Dims::NONE),
@@ -81,7 +89,7 @@ fn potential(isotropic: bool, axial_only: bool) -> AffineThermoelastic {
             }
             let alpha = if axial_only { [1e-5, 0.0, 0.0] } else { [1e-5, -0.4e-5, 2e-5] };
             insert(ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES[i], inverse_t,
-                alpha[i], [1e-8, 0.0, 0.0][i]);
+                alpha[i], [expansion_slope, 0.0, 0.0][i]);
             expansion_names.push((ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES[i], inverse_t));
         }
     }
@@ -277,6 +285,322 @@ fn g1_nonuniform_heating_and_dead_load_use_each_original_source_stiffness() {
         for stress in &solved.quadrature_stress_pa {
             close(stress[0], 1e6, 1e6);
             for &s in &stress[1..] { close(s, 0.0, 1e6); }
+        }
+    });
+}
+
+#[test]
+fn g1_within_element_thermal_gradient_drives_constrained_plane_and_brick_deformation() {
+    use fs_solid::linear3::hex::HEX27_REFERENCE_NODES;
+    use fs_solid::plastic3::hex::{HexAssemblyBudget, SmallStrainHexProblem};
+
+    // A transversely restrained strip has the exact Q1 displacement
+    // u_x = x(a + b y), u_y = u_z = 0. A linear temperature field gives
+    // E(y) = E0 + E1 y and free axial strain a_T + b_T y. Independently
+    // minimizing its integrated axial/shear energy determines a and b:
+    // [M0 M1; M1 M2 + G L^2/3] [a;b] = [M0 a_T+M1 b_T; M1 a_T+M2 b_T].
+    // All integrands have degree <= 3 per coordinate, so native Gauss is exact.
+    let length: f64 = 2.0;
+    let thickness = 0.2;
+    let (mean_rise, gradient) = (20.0, 40.0);
+    let (a_t, b_t) = (1e-5 * mean_rise, 1e-5 * gradient);
+    let (e0, e1, shear) = (12e9 - 3e7 * mean_rise, -3e7 * gradient, 3e9);
+    let (m0, m1, m2) = (e0, e1 / 12.0, e0 / 12.0);
+    let bending = m2 - m1 * m1 / m0;
+    let b = bending * b_t / (bending + shear * length * length / 3.0);
+    let a = a_t + m1 / m0 * (b_t - b);
+    let expected_energy = 0.5
+        * length
+        * thickness
+        * (m0 * (a - a_t).powi(2)
+            + 2.0 * m1 * (a - a_t) * (b - b_t)
+            + m2 * (b - b_t).powi(2)
+            + shear * length * length * b * b / 3.0);
+    assert!(b.abs() > 5e-5, "the gradient must change the deformation");
+    let potential = potential_with_expansion_slope(false, true, 0.0);
+    let g = 1.0 / 3.0_f64.sqrt();
+    let plane_points = [(-g, -g), (g, -g), (g, g), (-g, g)]
+        .map(|(xi, eta)| [0.5 * length * (1.0 + xi), 0.5 * eta]);
+    let plane_sources: Vec<_> = plane_points
+        .iter()
+        .map(|p| {
+            potential
+                .at_temperature(300.0 + mean_rise + gradient * p[1])
+                .unwrap()
+        })
+        .collect();
+    let plane_laws: Vec<_> = plane_sources
+        .iter()
+        .map(|source| source.try_mechanical_law().unwrap())
+        .collect();
+    let plane_field = [plane_laws.as_slice()];
+    let mut mesh = Mesh2::quads(length, 1.0, 1, 1);
+    for p in &mut mesh.nodes {
+        p[1] -= 0.5;
+    }
+    let mut supports = Vec::new();
+    for (node, p) in mesh.nodes.iter().enumerate() {
+        supports.push((2 * node + 1, 0.0));
+        if p[0] == 0.0 {
+            supports.push((2 * node, 0.0));
+        }
+    }
+    let expected_stress = |[x, y]: [f64; 2]| {
+        [
+            (e0 + e1 * y) * (a + b * y - a_t - b_t * y),
+            0.0,
+            0.0,
+            shear * b * x,
+            0.0,
+            0.0,
+        ]
+    };
+    with_cx(|cx| {
+        for plane in [PlaneKind::Stress, PlaneKind::Strain] {
+            let problem = SmallStrainPlaneProblem {
+                mesh: &mesh,
+                laws: SmallStrainLawField::PerQuadrature(&plane_field),
+                plane,
+                formulation: Formulation::Standard,
+                thickness_m: thickness,
+                reduction: ReductionConfig {
+                    max_iterations: 8,
+                    stress_tolerance_pa: 1e-6,
+                    strain_limit: 0.02,
+                },
+                rotation_limit_rad: 0.02,
+                prescribed_m: &supports,
+                nodal_forces_n: &[],
+                load_path: &[1.0],
+                budget: PlaneAssemblyBudget::default(),
+                settings: IncrementSettings::default(),
+            };
+            let solved = problem.solve(cx).unwrap();
+            for (p, u) in mesh.nodes.iter().zip(&solved.displacement_m) {
+                close(u[0], p[0] * (a + b * p[1]), 0.001);
+                close(u[1], 0.0, 0.001);
+            }
+            let mut energy = 0.0;
+            for (q, state) in solved.quadrature_states.iter().enumerate() {
+                for (actual, expected) in solved.quadrature_stress_pa[q]
+                    .iter()
+                    .zip(expected_stress(plane_points[q]))
+                {
+                    close(*actual, expected, 1e6);
+                }
+                energy += plane_sources[q]
+                    .state(tensor::to_mandel(&state.strain), length * thickness / 4.0)
+                    .unwrap()
+                    .free_energy_j;
+            }
+            close(energy, expected_energy, 1.0);
+            let u = solved.displacement_m.as_flattened();
+            let force = problem
+                .internal_force(u, &solved.quadrature_states, cx)
+                .unwrap();
+            for (node, p) in mesh.nodes.iter().enumerate() {
+                if p[0] == length {
+                    close(force[2 * node], 0.0, 1e6);
+                }
+            }
+            // The pointwise source stiffness must also enter every tangent row.
+            let tangent = problem
+                .tangent_matrix(u, &solved.quadrature_states, cx)
+                .unwrap()
+                .to_dense();
+            let direction = [0.2, -0.1, -0.3, 0.4, 0.1, 0.2, -0.4, -0.2];
+            let h = 1e-6;
+            let plus: Vec<_> = u.iter().zip(direction).map(|(v, d)| v + h * d).collect();
+            let minus: Vec<_> = u.iter().zip(direction).map(|(v, d)| v - h * d).collect();
+            let fp = problem
+                .internal_force(&plus, &solved.quadrature_states, cx)
+                .unwrap();
+            let fm = problem
+                .internal_force(&minus, &solved.quadrature_states, cx)
+                .unwrap();
+            for i in 0..u.len() {
+                let kd: f64 = direction
+                    .iter()
+                    .enumerate()
+                    .map(|(j, d)| tangent[i * u.len() + j] * d)
+                    .sum();
+                close((fp[i] - fm[i]) / (2.0 * h), kd, 1e10);
+            }
+        }
+
+        let nodes: Vec<_> = HEX27_REFERENCE_NODES[..8]
+            .iter()
+            .map(|r| {
+                [
+                    0.5 * length * (1.0 + f64::from(r[0])),
+                    0.5 * f64::from(r[1]),
+                    0.5 * thickness * (1.0 + f64::from(r[2])),
+                ]
+            })
+            .collect();
+        let mut hex_points = Vec::new();
+        for xi in [-g, g] {
+            for eta in [-g, g] {
+                for _ in [-g, g] {
+                    hex_points.push([0.5 * length * (1.0 + xi), 0.5 * eta]);
+                }
+            }
+        }
+        let sources: Vec<_> = hex_points
+            .iter()
+            .map(|p| {
+                potential
+                    .at_temperature(300.0 + mean_rise + gradient * p[1])
+                    .unwrap()
+            })
+            .collect();
+        let laws: Vec<_> = sources
+            .iter()
+            .map(|s| s.try_mechanical_law().unwrap())
+            .collect();
+        let field = [laws.as_slice()];
+        let mut supports = Vec::new();
+        for (node, p) in nodes.iter().enumerate() {
+            supports.extend([(3 * node + 1, 0.0), (3 * node + 2, 0.0)]);
+            if p[0] == 0.0 {
+                supports.push((3 * node, 0.0));
+            }
+        }
+        let problem = SmallStrainHexProblem {
+            nodes_m: &nodes,
+            hexahedra: &[[0, 1, 2, 3, 4, 5, 6, 7]],
+            laws: SmallStrainLawField::PerQuadrature(&field),
+            formulation: Formulation::Standard,
+            strain_limit: 0.02,
+            rotation_limit_rad: 0.02,
+            prescribed_m: &supports,
+            nodal_forces_n: &[],
+            load_path: &[1.0],
+            budget: HexAssemblyBudget::default(),
+            settings: IncrementSettings::default(),
+        };
+        let solved = problem.solve(cx).unwrap();
+        let mut energy = 0.0;
+        for (p, u) in nodes.iter().zip(&solved.displacement_m) {
+            close(u[0], p[0] * (a + b * p[1]), 0.001);
+            close(u[1], 0.0, 0.001);
+            close(u[2], 0.0, 0.001);
+        }
+        for q in 0..8 {
+            for (actual, expected) in solved.quadrature_stress_pa[q]
+                .iter()
+                .zip(expected_stress(hex_points[q]))
+            {
+                close(*actual, expected, 1e6);
+            }
+            energy += sources[q]
+                .state(
+                    tensor::to_mandel(&solved.quadrature_strain[q]),
+                    solved.quadrature_volume_m3[q],
+                )
+                .unwrap()
+                .free_energy_j;
+        }
+        close(energy, expected_energy, 1.0);
+    });
+}
+
+#[test]
+fn g0_original_triangle_and_quad_points_keep_distinct_thermal_stresses_and_exact_coverage() {
+    use fs_solid::mesh2::{quad_points, shapes_at};
+
+    let potential = potential_with_expansion_slope(false, true, 0.0);
+    with_cx(|cx| {
+        for mesh in [
+            Mesh2::triangles(1.0, 1.0, 1, 1),
+            Mesh2::quads(1.0, 1.0, 1, 1),
+        ] {
+            let temperatures: Vec<Vec<_>> = mesh
+                .elems
+                .iter()
+                .map(|conn| {
+                    quad_points(conn.len())
+                        .iter()
+                        .map(|&(xi, eta, _)| {
+                            let (shape, _, _) = shapes_at(&mesh.nodes, conn, xi, eta);
+                            let y: f64 = conn
+                                .iter()
+                                .zip(shape)
+                                .map(|(&node, s)| s * mesh.nodes[node][1])
+                                .sum();
+                            300.0 + 40.0 * y
+                        })
+                        .collect()
+                })
+                .collect();
+            let sources: Vec<Vec<_>> = temperatures
+                .iter()
+                .map(|points| {
+                    points
+                        .iter()
+                        .map(|&t| potential.at_temperature(t).unwrap())
+                        .collect()
+                })
+                .collect();
+            let laws: Vec<Vec<_>> = sources
+                .iter()
+                .map(|points| {
+                    points
+                        .iter()
+                        .map(|s| s.try_mechanical_law().unwrap())
+                        .collect()
+                })
+                .collect();
+            let field: Vec<_> = laws.iter().map(Vec::as_slice).collect();
+            let supports: Vec<_> = (0..2 * mesh.nodes.len()).map(|d| (d, 0.0)).collect();
+            let mut problem = SmallStrainPlaneProblem {
+                mesh: &mesh,
+                laws: SmallStrainLawField::PerQuadrature(&field),
+                plane: PlaneKind::Strain,
+                formulation: Formulation::Standard,
+                thickness_m: 0.2,
+                reduction: ReductionConfig {
+                    max_iterations: 8,
+                    stress_tolerance_pa: 1e-6,
+                    strain_limit: 0.02,
+                },
+                rotation_limit_rad: 0.02,
+                prescribed_m: &supports,
+                nodal_forces_n: &[],
+                load_path: &[1.0],
+                budget: PlaneAssemblyBudget::default(),
+                settings: IncrementSettings::default(),
+            };
+            for formulation in [Formulation::Standard, Formulation::BBar] {
+                if formulation == Formulation::BBar && mesh.elems[0].len() == 3 {
+                    continue;
+                }
+                problem.formulation = formulation;
+                let solved = problem.solve(cx).unwrap();
+                for (stress, &t) in solved
+                    .quadrature_stress_pa
+                    .iter()
+                    .zip(temperatures.iter().flatten())
+                {
+                    let dt = t - 300.0;
+                    close(stress[0], -(12e9 - 3e7 * dt) * 1e-5 * dt, 1e7);
+                    for value in &stress[1..] {
+                        close(*value, 0.0, 1e7);
+                    }
+                }
+            }
+            problem.laws = SmallStrainLawField::PerQuadrature(&field[..field.len() - 1]);
+            assert!(
+                problem.solve(cx).is_err(),
+                "missing elements cannot be broadcast"
+            );
+            let mut incomplete = field.clone();
+            incomplete[0] = &laws[0][..laws[0].len() - 1];
+            problem.laws = SmallStrainLawField::PerQuadrature(&incomplete);
+            assert!(
+                problem.solve(cx).is_err(),
+                "missing points cannot be averaged"
+            );
         }
     });
 }

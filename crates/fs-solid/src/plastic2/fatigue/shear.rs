@@ -108,7 +108,7 @@ pub(super) fn prepare<L: SourceBoundFatigueLaw>(
             ));
         }
         bind(
-            problem.law(gauge.element),
+            problem.law(gauge.element, gauge.quadrature_point),
             source_index_offset + index,
             &gauge,
         )?;

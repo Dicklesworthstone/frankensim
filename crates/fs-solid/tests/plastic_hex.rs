@@ -209,6 +209,78 @@ fn hex8_geometry_and_cyclic_plastic_patch_preserve_transverse_flow_and_permanent
 }
 
 #[test]
+fn g3_quadrature_laws_preserve_pointwise_plastic_history_through_reversal() {
+    let (nodes, cells) = mesh([1, 1, 1], |s, t, v| [s, t, v]);
+    let elastic = IsotropicElastic::new(E, NU, 0.05).unwrap();
+    let laws: Vec<_> = (0..8)
+        .map(|q| J2Plasticity::new_mixed(elastic.clone(), 0.5 + 0.2 * q as f64, HI, HK).unwrap())
+        .collect();
+    let field = [laws.as_slice()];
+    for formulation in [Formulation::Standard, Formulation::BBar] {
+        let mut accepted: Option<SmallStrainHexSolution<J2State>> = None;
+        let mut expected: Vec<_> = laws.iter().map(SmallStrainLaw::initial_state).collect();
+        for axial in [0.004, -0.003, 0.001] {
+            let strain = [axial, -0.001, -0.0005, 0.0003, 0.0, 0.0];
+            let prescribed: Vec<_> = nodes
+                .iter()
+                .flat_map(|x| {
+                    [
+                        axial * x[0] + 0.0003 * x[1],
+                        -0.001 * x[1] + 0.0003 * x[0],
+                        -0.0005 * x[2],
+                    ]
+                })
+                .enumerate()
+                .collect();
+            let mut p = problem(&nodes, &cells, &laws[0], &prescribed, &[1.0]);
+            p.laws = SmallStrainLawField::PerQuadrature(&field);
+            p.formulation = formulation;
+            let next = with_cx(|cx| match &accepted {
+                Some(old) => p.solve_from(
+                    old.displacement_m.as_flattened(),
+                    &old.quadrature_states,
+                    cx,
+                ),
+                None => p.solve(cx),
+            })
+            .unwrap();
+            for q in 0..8 {
+                let stress = laws[q].stress(&strain, &expected[q]);
+                expected[q] = laws[q].update_state(&strain, &expected[q]);
+                for i in 0..6 {
+                    close(next.quadrature_stress_pa[q][i], stress[i], 1e-11);
+                    close(
+                        next.quadrature_states[q].plastic_strain[i],
+                        expected[q].plastic_strain[i],
+                        1e-13,
+                    );
+                }
+                close(next.quadrature_states[q].alpha, expected[q].alpha, 1e-13);
+            }
+            assert!(
+                next.quadrature_states
+                    .windows(2)
+                    .any(|pair| (pair[0].alpha - pair[1].alpha).abs() > 1e-5)
+            );
+            accepted = Some(next);
+        }
+    }
+
+    let fixed = supports(&nodes, Some(0.004));
+    let uniform = vec![metal(); 8];
+    let uniform_field = [uniform.as_slice()];
+    let mut p = problem(&nodes, &cells, &uniform[0], &fixed, &[1.0]);
+    let original = with_cx(|cx| p.solve(cx)).unwrap();
+    p.laws = SmallStrainLawField::PerQuadrature(&uniform_field);
+    assert_eq!(with_cx(|cx| p.solve(cx)).unwrap(), original);
+    for count in [0, 7] {
+        let incomplete = [&uniform[..count]];
+        p.laws = SmallStrainLawField::PerQuadrature(&incomplete);
+        assert!(with_cx(|cx| p.solve(cx)).is_err());
+    }
+}
+
+#[test]
 fn distorted_bbar_hex_keeps_local_histories_and_the_full_nonproportional_tangent() {
     use fs_material::plastic::chaboche::{BackstressBranch, ChabocheJ2};
     use fs_material::plastic::voce::VoceJ2;

@@ -28,9 +28,7 @@ use fs_material::{SmallStrainLaw, Voigt};
 use crate::plastic2::{SmallStrainPlaneError, SmallStrainPlaneProblem, SmallStrainPlaneSolution};
 use crate::plastic3::dynamics::BackwardEulerStep;
 use crate::plastic3::hex::{SmallStrainHexProblem, SmallStrainHexSolution};
-use crate::plastic3::{
-    SmallStrainLawField, SmallStrainTetError, SmallStrainTetProblem, SmallStrainTetSolution,
-};
+use crate::plastic3::{SmallStrainTetError, SmallStrainTetProblem, SmallStrainTetSolution};
 
 /// Finite-deformation, thermoplastic and inertial consumers of the same gate.
 pub mod finite;
@@ -438,17 +436,17 @@ impl<'a> DuctileHistory<'a, fs_material::ductile::source::ResolvedDuctileLocus> 
         if problem.tetrahedra.len() != self.points.len() {
             return Err(DuctileSolidError::Input("source-bound native and ductile point counts differ"));
         }
-        if let SmallStrainLawField::PerElement(native) = problem.laws {
-            if native.len() != self.points.len() {
-                return Err(DuctileSolidError::Input("native J2 field does not cover every tetrahedron"));
-            }
-        }
+        problem
+            .laws
+            .validate_count(self.points.len())
+            .map_err(|_| {
+                DuctileSolidError::Input(
+                    "native J2 field must cover exactly one point per tetrahedron",
+                )
+            })?;
         for point in 0..self.points.len() {
             if point % 256 == 0 { checkpoint(cx)?; }
-            let native = match problem.laws {
-                SmallStrainLawField::Uniform(law) => law,
-                SmallStrainLawField::PerElement(entries) => &entries[point],
-            };
+            let native = problem.laws.at(point);
             if !self.laws.at(point).source().matches_material(native.material()) {
                 return Err(DuctileSolidError::Input("fracture calibration does not match native material card, state and context"));
             }

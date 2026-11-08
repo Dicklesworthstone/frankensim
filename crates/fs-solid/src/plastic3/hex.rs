@@ -76,7 +76,7 @@ pub struct SmallStrainHexProblem<'a, L: SmallStrainLaw> {
     /// Canonical corners: four around z-, then the corresponding four at z+.
     /// Ordering matches the first eight [`HEX27_REFERENCE_NODES`].
     pub hexahedra: &'a [[usize; 8]],
-    /// Native laws in connectivity order; coefficients are not homogenized.
+    /// Native laws in connectivity and optional quadrature order, without averaging.
     pub laws: SmallStrainLawField<'a, L>,
     /// Full compatible integration or volumetric B-bar projection.
     pub formulation: Formulation,
@@ -211,7 +211,8 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
                 "inadmissible hex kinematic, geometry or solver limits",
             ));
         }
-        self.laws.validate_count(cells)?;
+        self.laws
+            .validate_quadrature_counts(std::iter::repeat_n(8, cells))?;
         if self
             .nodes_m
             .iter()
@@ -421,8 +422,8 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
         let mut bounds = prescribed.map(|_| vec![0.0; u.len()]);
         for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
-            let law = self.laws.at(e);
             for (q, point) in element.points.iter().enumerate() {
+                let law = self.laws.at_point(e, q);
                 let strain = self.strain(element, point, u, e, q)?;
                 let stress = law.stress(&strain, &states[8 * e + q]);
                 if stress.iter().any(|value| !value.is_finite()) {
@@ -465,9 +466,9 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
         let mut coo = Coo::new(u.len(), u.len());
         for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
-            let law = self.laws.at(e);
             let mut local = [[0.0; 24]; 24];
             for (q, point) in element.points.iter().enumerate() {
+                let law = self.laws.at_point(e, q);
                 let strain = self.strain(element, point, u, e, q)?;
                 let tangent = law.tangent(&strain, &states[8 * e + q]);
                 if tangent.iter().flatten().any(|value| !value.is_finite()) {
@@ -620,7 +621,7 @@ impl<L: SmallStrainLaw> IncrementOperator for HexOperator<'_, '_, L> {
 
     fn initial_states(&self) -> Vec<Self::State> {
         (0..self.elements.len())
-            .flat_map(|e| (0..8).map(move |_| self.problem.laws.at(e).initial_state()))
+            .flat_map(|e| (0..8).map(move |q| self.problem.laws.at_point(e, q).initial_state()))
             .collect()
     }
 
@@ -645,7 +646,7 @@ impl<L: SmallStrainLaw> IncrementOperator for HexOperator<'_, '_, L> {
     }
 
     fn tangent_symmetric(&self) -> bool {
-        (0..self.elements.len()).all(|e| self.problem.laws.at(e).admissibility().tangent_symmetric)
+        self.problem.laws.tangent_symmetric()
     }
 
     fn commit(
@@ -658,9 +659,9 @@ impl<L: SmallStrainLaw> IncrementOperator for HexOperator<'_, '_, L> {
         let mut evolving = 0;
         for (e, element) in self.elements.iter().enumerate() {
             checkpoint(cx)?;
-            let law = self.problem.laws.at(e);
             let mut changed = false;
             for (q, point) in element.points.iter().enumerate() {
+                let law = self.problem.laws.at_point(e, q);
                 let strain = self.problem.strain(element, point, u, e, q)?;
                 let old = &states[8 * e + q];
                 if let Some(stresses) = &mut final_stress {

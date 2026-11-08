@@ -1261,6 +1261,7 @@ pub(super) fn with_path<'a, L: SmallStrainLaw>(
         laws: match &problem.laws {
             SmallStrainLawField::Uniform(law) => SmallStrainLawField::Uniform(law),
             SmallStrainLawField::PerElement(laws) => SmallStrainLawField::PerElement(laws),
+            SmallStrainLawField::PerQuadrature(laws) => SmallStrainLawField::PerQuadrature(laws),
         },
         prescribed_m: problem.prescribed_m,
         nodal_forces_n: problem.nodal_forces_n,

@@ -203,7 +203,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
                     "gauge is outside the original plane quadrature",
                 ));
             }
-            bind_curve(problem.law(gauge.element), index, &gauge)?;
+            bind_curve(problem.law(gauge.element, gauge.quadrature_point), index, &gauge)?;
             bank.push(GaugeState {
                 element: gauge.element,
                 point: gauge.quadrature_point,
@@ -259,7 +259,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.gauges
             .get(gauge)
-            .map(|g| self.problem.law(g.element).fatigue_source())
+            .map(|g| self.problem.law(g.element, g.point).fatigue_source())
     }
     /// Damage on each declared plane before unresolved endpoint half cycles.
     pub fn plane_summaries(&self, gauge: usize) -> Option<Vec<StrainLifeSummary>> {
@@ -298,7 +298,7 @@ impl<'p, 'm, L: SourceBoundFatigueLaw> PlaneFatiguePath<'p, 'm, L> {
     ) -> Option<&ResolvedMaterialStatePoint> {
         self.fatemi_socie
             .get(gauge)
-            .map(|g| self.problem.law(g.element).fatigue_source())
+            .map(|g| self.problem.law(g.element, g.point).fatigue_source())
     }
 
     /// Begin a new declared representative cycle at the actual current native
@@ -467,6 +467,7 @@ fn endpoint<'a, L: SourceBoundFatigueLaw>(
         laws: match &problem.laws {
             SmallStrainLawField::Uniform(law) => SmallStrainLawField::Uniform(law),
             SmallStrainLawField::PerElement(laws) => SmallStrainLawField::PerElement(laws),
+            SmallStrainLawField::PerQuadrature(laws) => SmallStrainLawField::PerQuadrature(laws),
         },
         plane: problem.plane,
         formulation: problem.formulation,
@@ -507,7 +508,7 @@ fn sample_at<L: SourceBoundFatigueLaw>(
     let point = solution.element_offsets[element] + quadrature_point;
     let state = &solution.quadrature_states[point];
     problem
-        .law(element)
+        .law(element, quadrature_point)
         .validate_fatigue_history(&state.strain, &state.history)
         .map_err(|_| {
             PlaneFatigueError::Invalid("native fatigue material history is inadmissible")
