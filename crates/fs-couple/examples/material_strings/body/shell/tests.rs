@@ -273,6 +273,41 @@ fn joints_for(ready: &Ready) -> Vec<f64> {
     ready.performance.bank().source().bank().translational_body_connections()[0].body.shapes.clone()
 }
 
+/// A directed translational bridge (a component along the string's own bridge axis) on a residual-flexible string
+/// whose plain bridge carries a spring and a damper lowers to one more pure-damper column than the connection
+/// allowance counted (coupled residual bank, coupled_bridge/columns.rs); the runtime refused the viola's row at the
+/// budget (MagentaBadger 12551). The allowance now holds that column, only when the row can add it.
+#[test]
+fn a_directed_bridge_on_a_residual_flexible_string_is_counted_in_the_connection_allowance() {
+    let card = |flexible: bool, plain: &str, row: &str| include_str!("../../cylinder-flow.material-strings")
+        .replace("48000 4096 0.01 128", "48000 96 0.01 128")
+        .replace("0.8 3000 0.1", plain)
+        .replace("cylinder-gas-loading 0.001 30 12", &format!("translational-bridges 1\n{row}\ncylinder-gas-loading 0.001 30 4"))
+        .replace("cavity neck", &format!("{}cavity neck",
+            if flexible { "residual-flexibility exact-static-green\n" } else { "" }));
+    let directed = "translational-bridge 0 0.8 0.6 0.8 0 11 1 0 0 1500 0.02 0";
+    scoped(|cx, gate| {
+        let compile = |text: String| input::Spec::parse(text.as_bytes()).unwrap()
+            .compile_with_body(cx, gate, Some(shell_profile()), |name|
+                Ok(if name == "body.fsmatpk" { pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) }));
+        let mut bound = compile(card(true, "0.8 3000 0.1", directed))
+            .expect("the allowance must hold the directed bridge's extra damper column");
+        let source = bound.performance.bank().source().bank();
+        assert!(source.residual_flexibility());
+        let joints = source.translational_body_connections();
+        assert_eq!(joints.len(), 1);
+        assert!(joints[0].direction.components().iter().zip([0.6, 0.8]).all(|(a, b)| (a - b).abs() <= 1e-12));
+        assert!(pressure(&mut bound, 7).iter().any(|p| p.abs() > 1e-14));
+    });
+    let links = |flexible: bool, plain: &str|
+        input::Spec::parse(card(flexible, plain, directed).as_bytes()).unwrap().network_dimensions(true).unwrap().1;
+    // The plain bridge has a spring and a damper: one more column than without residual flexibility.
+    assert_eq!(links(true, "0.8 3000 0.1"), links(false, "0.8 3000 0.1") + 1);
+    // A plain bridge without a damper or without a spring adds none.
+    assert_eq!(links(true, "0.8 3000 0"), links(false, "0.8 3000 0"));
+    assert_eq!(links(true, "0.8 0 0.1"), links(false, "0.8 0 0.1"));
+}
+
 #[test]
 fn independent_bridge_axes_require_real_shell_geometry_and_physical_directions() {
     let base = include_str!("../../directional-pluck.material-strings");

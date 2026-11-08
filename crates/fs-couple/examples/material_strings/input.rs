@@ -1678,6 +1678,18 @@ impl Spec {
             .and_then(|n| n.checked_add(if tensor_body { self.body.modes } else { 0 }))
             .and_then(|n| n.checked_add(additional_body_connections))
             .ok_or("complete connection count overflow")?;
+        // A directed translational bridge on a residual-flexible string whose plain bridge carries both a spring and
+        // a damper lowers to one more pure-damper column in the coupled residual bank (coupled_bridge/columns.rs).
+        // Reserve it here so the declared connection allowance holds it: the runtime refused a viola row (K 2e5,
+        // C 0.1) at exactly the allowance. A direction with no component along the original axis adds no column;
+        // counting it anyway only raises a ceiling.
+        if self.residual_flexibility {
+            let separate = self.translational_bridges.iter()
+                .filter(|bridge| self.strings.get(bridge.string).is_some_and(|wire|
+                    wire.bridge.stiffness_n_m > 0.0 && wire.bridge.damping_n_s_m > 0.0))
+                .count();
+            links = links.checked_add(separate).ok_or("complete connection count overflow")?;
+        }
         if let Some(resolution) = self.cylinder_gas_loading {
             resolution.validate()?;
             let memory = fluid_loaded_string_modes.checked_mul(resolution.intervals)
