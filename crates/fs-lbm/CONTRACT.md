@@ -53,7 +53,26 @@ heated Young--Dupre corner response through the public material owner.
 
 ## Material-flow enthalpy reconstruction
 
-`MaterialFlowAdvection::with_reconstruction` attaches the original thermal owner's shared `LimitedEnthalpyReconstruction` to solved material face fluxes. Selected contiguous axial cells reconstruct total specific enthalpy, including a declared passive equal-density latent inventory; paired face transfers, source-law inversion, accepted history and the combined conduction/advection timestep restriction remain with `fs-thermal`. Unselected cells and external streams retain donor enthalpy. Empty plans retain the donor-cell arithmetic. This is an explicit first-order-in-time stationary-control-volume model; it does not infer multidimensional junction slopes, phase mobility, density-change flow, pressure work or moving interfaces. The `advection()` accessor exposes the underlying graph and actual transport audit; implicit clients must attach the same `reconstruction()` plan to their own native implicit transport owner.
+`MaterialFlowAdvection::with_reconstruction` attaches the original thermal owner's shared `LimitedEnthalpyReconstruction` to solved material face fluxes. Selected contiguous axial cells reconstruct total specific enthalpy, including a declared passive equal-density latent inventory; paired face transfers, source-law inversion, accepted history and the combined conduction/advection timestep restriction remain with `fs-thermal`. Unselected cells and external streams retain donor enthalpy. Empty plans retain the donor-cell arithmetic. The observed timeline retains first-order time integration on stationary control volumes; it does not infer multidimensional junction slopes, phase mobility, density-change flow, pressure work or moving interfaces. The `advection()` accessor exposes the underlying graph and actual transport audit; implicit clients must attach the same `reconstruction()` plan to their own native implicit transport owner.
+
+Pure frozen `MaterialFlowAdvection<_, ()>` owners additionally expose native
+`advance_ssprk2_to` and `advance_ssprk2_adaptive_to`, including corresponding
+`with_coefficients` entries for repeatable stage sources and link/bath
+conductances. These methods retain the solved `rho * face_volume_flux` graph,
+original material/density snapshot and selected reconstruction in the returned
+accepted wrapper. Original fluid-cell mass, geometry and caloric-law identity
+are admitted at stage queries and before publication. The native thermal owner
+alone integrates storage and heat/mass accounts. Adaptive comparisons are one
+full step versus two fine steps, and publish only the conservative fine state
+and its ledgers. Mandatory datum-invariant h error resolves latent storage at
+unchanged temperature; optional T error queries the original caloric law.
+Native events, CFL/caloric admission, shared work budgets and cancellation
+remain authoritative. The smooth-solution local estimate gives no spatial or
+certified global accuracy bound. Stateful inner observers and live momentum
+feedback are not repeatable coefficient queries and do not expose these methods.
+Integration regressions use actual material-driven momentum for analytic
+latent-throughflow temporal refinement, reconstruction in both flow directions,
+separate supplied/stream heat, map/law admission and transactional refusal.
 
 `MaterialFlowFeedback::with_reconstruction` retains that same shared plan across
 live source viscosity, bounded Boussinesq buoyancy, mushy resistance and retained

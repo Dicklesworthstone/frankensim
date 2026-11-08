@@ -11,6 +11,9 @@ pub mod liquid;
 /// Local material feedback through the existing momentum and enthalpy owners.
 pub mod feedback;
 
+/// Conservative second-order and adaptive transport with frozen solved flow.
+pub mod explicit;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -109,7 +112,8 @@ impl<'a, F: FluidTransport + ?Sized, O> MaterialFlowAdvection<'a, F, O> {
     /// inlet/outlet boundaries retain donor enthalpy. The original explicit
     /// timeline combines conduction with the stricter reconstructed transport
     /// timestep bound, and applies one paired energy transfer at every face.
-    /// Time integration remains first order and requires timestep refinement.
+    /// `advance_observed` retains first-order time integration. Pure `()` owners
+    /// also expose SSPRK2 and adaptive SSPRK2 with this same reconstruction.
     ///
     /// Plans are shared by candidate clones. Empty plans retain the exact
     /// original donor-cell arithmetic. Geometry, mass, original caloric-law

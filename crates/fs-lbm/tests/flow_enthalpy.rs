@@ -62,6 +62,9 @@ fn initial_profile<'a>(domain: &VoxelDomain, rho: f64, law: &'a dyn ThermalLaw,
 #[path = "flow_enthalpy/reconstruction.rs"]
 mod reconstruction;
 
+#[path = "flow_enthalpy/explicit.rs"]
+mod explicit;
+
 fn input<'a>(ids: &'a [Option<CellId>], law: &'a dyn ThermalLaw) -> FlowEnthalpyInput<'a> {
     FlowEnthalpyInput { cell_ids: ids, material_id: MAT, caloric: law,
         inlet_specific_h_j_kg: [Some(0.0); 6], max_cells: ids.len(), max_connections: 64 }
