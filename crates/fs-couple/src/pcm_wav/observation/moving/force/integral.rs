@@ -12,7 +12,7 @@ use fs_math::dd::Dd;
 
 const MAX_DEPTH: usize = 24;
 
-/// Accuracy and work controls for one retained moving-force history renderer.
+/// Accuracy and work controls for a retained moving force or stress history.
 #[derive(Clone, Copy, Debug)]
 pub struct ForceHistoryQuadrature {
     /// Absolute adaptive error target for each path's complete history integral
@@ -26,13 +26,15 @@ pub struct ForceHistoryQuadrature {
     pub maximum_evaluations: u64,
 }
 
-pub(super) struct Work {
-    pub(super) used: u64,
+pub(in crate::pcm_wav::observation) struct Work {
+    pub(in crate::pcm_wav::observation) used: u64,
     limit: u64,
 }
 
 impl Work {
-    pub(super) fn new(config: ForceHistoryQuadrature) -> Result<Self, RenderError> {
+    pub(in crate::pcm_wav::observation) fn new(
+        config: ForceHistoryQuadrature,
+    ) -> Result<Self, RenderError> {
         if !config.absolute_tolerance_n_s_m3.is_finite()
             || config.absolute_tolerance_n_s_m3 <= 0.0
             || config.maximum_subdivision_depth > MAX_DEPTH
@@ -89,7 +91,7 @@ fn simpson(first: f64, last: f64, a: [Dd; 3], m: [Dd; 3], b: [Dd; 3]) -> [Dd; 3]
     core::array::from_fn(|i| width * (a[i] + Dd::from_f64(4.0) * m[i] + b[i]))
 }
 
-pub(super) fn integrate(
+pub(in crate::pcm_wav::observation) fn integrate(
     first: f64,
     last: f64,
     tolerance: f64,

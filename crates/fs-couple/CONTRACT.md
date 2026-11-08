@@ -2719,6 +2719,40 @@ prior renderer tests passed focused native builds of the actual source
 modules and original math/material/interval owners. The previous WAV-end-to-end
 test and full Cargo/DSR workspace gates were not executed in that focused lane.
 
+## Moving stress fields and directional PCM
+
+`quadrupole::moving::field::MovingQuadrupoleFieldRenderer` binds the original
+`PreparedQuadrupoleHistory` to the admitted uniform/curved source motion,
+moving receiver and complete ideal-image paths. Its explicit zero-prehistory
+constructor requires authored initial stress, stress rate and stress integral
+to vanish, and each trajectory to start at its original recorded position.
+The original spline supplies Q/Qdot/Qddot without a second reconstruction.
+
+The full velocity includes the spatially weighted past-worldline stress
+integral required by linear momentum, not a pressure/impedance approximation.
+It reuses the existing bounded vector quadrature and continuous past-clearance
+admission. Fixed receivers cache complete source/geometry-cell prefixes;
+moving receivers integrate at their current virtual receiver position.
+Original physical tensors and history integrals reach the field owner before
+it applies image parity and the polar-vector transformation exactly once.
+
+Coherent pressure and Cartesian velocity are summed in DD before signed p*u
+intensity and first-order microphone pickup. The same sample cursor supplies
+full fields and the existing pressure/decimation/WAV interface. Callbacks
+allocate nothing and publish output and cursor only after complete success.
+History memory, original path/sample work and lifetime quadrature work have
+explicit caps; failed and cancelled attempts do not refund numerical work.
+Adaptive quadrature reports an error estimate, not an interval certificate.
+The source compactness, bandwidth, spline convergence and prescribed-motion
+validity remain producer obligations. Scope is the homogeneous lossless fluid
+rest frame with fixed-axis ideal microphones and native ideal boundaries;
+unknown initial fields, arbitrary walls and capsule dynamics are not inferred.
+
+Five focused `tests/moving_quadrupole_fields.rs` regression definitions cover
+stationary near fields and shear pressure nulls, block/cancellation behavior,
+prehistory and finite budgets, moving receivers and oblique ideal reflections.
+Native execution remains a separate verification obligation.
+
 ## Weak directional modal damping
 
 `ModalPlateViscosity::from_psd_modal_matrix` retains positive dissipative

@@ -16,7 +16,7 @@
 //! A continuous-speed geometric refinement guard additionally prevents a
 //! narrow close pass from falling unnoticed between quadrature samples.
 
-mod integral;
+pub(in crate::pcm_wav::observation) mod integral;
 mod motion;
 mod receiver;
 

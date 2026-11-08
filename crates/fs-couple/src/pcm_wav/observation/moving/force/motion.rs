@@ -13,14 +13,14 @@ use fs_aeroac::curle3d::moving::{MovingCompactObserver, UniformSourceMotion};
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct ForceHistoryPath {
-    pub(super) observer: MovingCompactObserver,
+    pub(in crate::pcm_wav::observation) observer: MovingCompactObserver,
     pub(super) pressure_sign: f64,
     // Includes pressure parity and the inverse image Jacobian exactly once.
     pub(super) velocity_transform: Option<[[f64; 3]; 3]>,
-    pub(super) source_end_s: f64,
-    pub(super) maximum_source_speed_m_s: f64,
+    pub(in crate::pcm_wav::observation) source_end_s: f64,
+    pub(in crate::pcm_wav::observation) maximum_source_speed_m_s: f64,
     // Zero for fixed paths whose complete past geometry was admitted earlier.
-    pub(super) minimum_history_distance_m: f64,
+    pub(in crate::pcm_wav::observation) minimum_history_distance_m: f64,
 }
 
 /// Source motion whose every propagation path has one fixed fluid-frame receiver.

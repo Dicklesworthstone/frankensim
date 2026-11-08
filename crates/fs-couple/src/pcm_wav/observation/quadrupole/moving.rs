@@ -28,6 +28,9 @@ use fs_math::dd::Dd;
 mod motion;
 pub use motion::QuadrupoleMotion;
 
+/// Complete stress fields, causal history and directional microphone pickup.
+pub mod field;
+
 /// One original physical stress history and its independent admitted motion.
 #[derive(Clone, Copy, Debug)]
 pub struct MovingQuadrupoleSourceWindow<M = UniformSourceMotion> {

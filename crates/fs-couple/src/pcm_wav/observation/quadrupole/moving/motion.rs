@@ -8,7 +8,9 @@ use fs_aeroac::curle3d::moving::trajectory::{
     PreparedReflectedSourceTrajectory, PreparedSourceTrajectory,
 };
 use fs_aeroac::curle3d::moving::{MovingCompactObserver, UniformSourceMotion};
-use fs_aeroac::curle3d::quadrupole::transient::moving::PreparedMovingQuadrupoleSample;
+use fs_aeroac::curle3d::quadrupole::transient::moving::{
+    PreparedMovingQuadrupoleFieldSample, PreparedMovingQuadrupoleSample,
+};
 
 /// Original direct/image paths supplying complete stress-potential derivatives.
 ///
@@ -20,6 +22,18 @@ use fs_aeroac::curle3d::quadrupole::transient::moving::PreparedMovingQuadrupoleS
 /// receiver identity, complete path group and whole-window Doppler admission.
 /// Mixed fixed-receiver ensembles use the existing `CompactSourceMotion` enum.
 pub trait QuadrupoleMotion: CompactMotion {
+    /// Complete local pressure/velocity operator for one original image path.
+    /// Its explicit history argument uses the corresponding virtual receiver;
+    /// the prepared field applies image parity and vector transformation once.
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &Self::Observer,
+        receiver_time_s: f64,
+        maximum_time_residual_s: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError>;
+
     /// Prepare the original stress-potential Hessian at one receiver event.
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
@@ -54,6 +68,23 @@ pub trait QuadrupoleMotion: CompactMotion {
 }
 
 impl QuadrupoleMotion for UniformSourceMotion {
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &MovingCompactObserver,
+        time: f64,
+        tolerance: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError> {
+        check_cancel(cancelled)?;
+        if path != 0 {
+            return Err(sizing("uniform quadrupole has only its direct path"));
+        }
+        observer
+            .prepare_uniform_quadrupole_field(time, &self, tolerance)
+            .map_err(RenderError::Acoustic)
+    }
+
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
         observer: &MovingCompactObserver,
@@ -69,6 +100,23 @@ impl QuadrupoleMotion for UniformSourceMotion {
 }
 
 impl QuadrupoleMotion for &PreparedSourceTrajectory {
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &MovingCompactObserver,
+        time: f64,
+        tolerance: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError> {
+        check_cancel(cancelled)?;
+        if path != 0 {
+            return Err(sizing("free-space quadrupole has only its direct path"));
+        }
+        self.admit_observer(observer)?;
+        self.prepare_quadrupole_field_receiver(time, tolerance, cancelled)
+            .map_err(RenderError::Acoustic)
+    }
+
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
         observer: &MovingCompactObserver,
@@ -83,6 +131,24 @@ impl QuadrupoleMotion for &PreparedSourceTrajectory {
 }
 
 impl QuadrupoleMotion for CompactSourceMotion<'_> {
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &MovingCompactObserver,
+        time: f64,
+        tolerance: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError> {
+        match self {
+            Self::Uniform(motion) => {
+                motion.prepare_quadrupole_field_path_at(path, observer, time, tolerance, cancelled)
+            }
+            Self::Trajectory(motion) => {
+                motion.prepare_quadrupole_field_path_at(path, observer, time, tolerance, cancelled)
+            }
+        }
+    }
+
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
         observer: &MovingCompactObserver,
@@ -102,6 +168,21 @@ impl QuadrupoleMotion for CompactSourceMotion<'_> {
 }
 
 impl QuadrupoleMotion for &PreparedReflectedSourceTrajectory<'_> {
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &Self::Observer,
+        time: f64,
+        tolerance: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError> {
+        check_cancel(cancelled)?;
+        self.admit_observer(observer)?;
+        self.admit_clock(time, time, tolerance)?;
+        self.prepare_quadrupole_field_path(path, time, tolerance, cancelled)
+            .map_err(RenderError::Acoustic)
+    }
+
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
         observer: &Self::Observer,
@@ -129,6 +210,24 @@ impl QuadrupoleMotion for &PreparedReflectedSourceTrajectory<'_> {
 }
 
 impl QuadrupoleMotion for &PreparedMovingReceiverSource<'_> {
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &Self::Observer,
+        time: f64,
+        tolerance: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError> {
+        check_cancel(cancelled)?;
+        if path != 0 {
+            return Err(sizing("free-space quadrupole has only its direct path"));
+        }
+        self.admit_observer(observer)?;
+        self.admit_clock(time, time, tolerance)?;
+        self.prepare_quadrupole_field_receiver(time, cancelled)
+            .map_err(RenderError::Acoustic)
+    }
+
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
         observer: &Self::Observer,
@@ -145,6 +244,21 @@ impl QuadrupoleMotion for &PreparedMovingReceiverSource<'_> {
 }
 
 impl QuadrupoleMotion for &PreparedReflectedMovingReceiverSource<'_> {
+    fn prepare_quadrupole_field_path_at<Cancel: FnMut() -> bool>(
+        self,
+        path: usize,
+        observer: &Self::Observer,
+        time: f64,
+        tolerance: f64,
+        cancelled: &mut Cancel,
+    ) -> Result<PreparedMovingQuadrupoleFieldSample, RenderError> {
+        check_cancel(cancelled)?;
+        self.admit_observer(observer)?;
+        self.admit_clock(time, time, tolerance)?;
+        self.prepare_quadrupole_field_path(path, time, cancelled)
+            .map_err(RenderError::Acoustic)
+    }
+
     fn prepare_quadrupole_at<Cancel: FnMut() -> bool>(
         self,
         observer: &Self::Observer,
