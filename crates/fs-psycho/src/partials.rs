@@ -19,6 +19,10 @@
 //! bias a fit and remain in its residual; a frame-length ladder is needed when
 //! the selected local model is only an approximation.
 
+//! [`track_partial_channels`] shares each physical trajectory across synchronized
+//! common-unit channels while retaining their separate complex amplitudes.
+//! The scalar entry point uses the same scheduler and numerical path.
+
 use core::{mem::size_of, ops::ControlFlow};
 use fs_fft::C64;
 use fs_fft::harmonic::{
@@ -27,9 +31,12 @@ use fs_fft::harmonic::{
     DampedChirpedToneRefinementBudget, DampedChirpedToneRefinementError, DampedToneBounds,
     DampedTonePole, DampedTonePoleFit, DampedToneRefinementBudget, DampedToneRefinementError,
     HarmonicFit, HarmonicFitError, ToneFrequencyBudget, ToneFrequencyError, ToneFrequencyFit,
-    refine_chirped_tones, refine_damped_chirped_tones, refine_damped_tone_poles,
-    refine_tone_frequencies,
+    refine_chirped_tones_channels, refine_damped_chirped_tones_channels,
+    refine_damped_tone_poles_channels, refine_tone_frequencies_channels,
 };
+
+mod channels;
+pub use channels::{PartialChannelsFrame, PartialChannelsFrameEstimate, track_partial_channels};
 
 /// Complete-record frame schedule and its explicit work cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,8 +54,9 @@ pub struct PartialFrameSchedule {
 
 /// Caller-authored local model, partial identities and numerical budgets.
 ///
-/// The fit's workspace cap also pays for the tracker's mutable seed array.
-/// Chirps retain both a successful anchor and a reusable prediction array.
+/// The fit's workspace cap also pays for the tracker's mutable seed array and,
+/// for multiple channels, its reusable frame-slice views. Chirps retain both
+/// a successful anchor and a reusable prediction array.
 /// Input records, borrowed declarations and memory retained by the callback
 /// are caller-owned and excluded, as is allocator metadata.
 #[derive(Debug, Clone, Copy)]
@@ -270,8 +278,8 @@ pub enum PartialTrackingError {
     Fit {
         /// Exact starting sample of the refused frame.
         first_sample_index: u64,
-        /// Original numerical refusal. Its workspace cap has the tracker seed
-        /// storage subtracted, as documented by [`PartialTrackingModel`].
+        /// Original numerical refusal. Its workspace cap has tracker seed and
+        /// channel-view storage subtracted, as documented by [`PartialTrackingModel`].
         failure: PartialFitFailure,
     },
 }
@@ -377,20 +385,35 @@ pub fn track_partials(
     samples: &[f64],
     timestep_s: f64,
     schedule: PartialFrameSchedule,
-    mut model: PartialTrackingModel<'_>,
+    model: PartialTrackingModel<'_>,
     mut visit: impl FnMut(&PartialFrame) -> ControlFlow<()>,
 ) -> Result<PartialTrackingSummary, PartialTrackingError> {
+    track_channels(&[samples], timestep_s, schedule, model, |frame| {
+        let frame = frame.into_scalar();
+        visit(&frame)
+    })
+}
+
+fn track_channels(
+    channels: &[&[f64]],
+    timestep_s: f64,
+    schedule: PartialFrameSchedule,
+    mut model: PartialTrackingModel<'_>,
+    mut visit: impl FnMut(PartialChannelsFrame) -> ControlFlow<()>,
+) -> Result<PartialTrackingSummary, PartialTrackingError> {
+    let sample_count = channels.first().map_or(0, |samples| samples.len());
     if !(timestep_s.is_finite() && timestep_s > 0.0)
         || schedule.frame_samples == 0
         || schedule.hop_samples == 0
         || schedule.hop_samples > schedule.frame_samples
-        || samples.len() < schedule.frame_samples
+        || sample_count < schedule.frame_samples
+        || channels.iter().any(|samples| samples.len() != sample_count)
     {
         return Err(invalid(
-            "need a positive clock and full, gap-free analysis windows",
+            "need a positive clock, equal-length channels and full, gap-free analysis windows",
         ));
     }
-    let last_offset = samples.len() - schedule.frame_samples;
+    let last_offset = sample_count - schedule.frame_samples;
     let planned_frames = (last_offset / schedule.hop_samples)
         .checked_add(1 + usize::from(last_offset % schedule.hop_samples != 0))
         .ok_or_else(|| invalid("frame count overflows"))?;
@@ -400,10 +423,14 @@ pub fn track_partials(
             max_frames: schedule.max_frames,
         });
     }
-    let last_index = u64::try_from(samples.len() - 1)
+    let last_index = u64::try_from(sample_count - 1)
         .ok()
         .and_then(|offset| schedule.first_sample_index.checked_add(offset));
-    if last_index.is_none() || samples.iter().any(|sample| !sample.is_finite()) {
+    if last_index.is_none()
+        || channels
+            .iter()
+            .any(|samples| samples.iter().any(|sample| !sample.is_finite()))
+    {
         return Err(invalid(
             "source sample indices must fit u64 and all samples must be finite",
         ));
@@ -418,9 +445,10 @@ pub fn track_partials(
             budget,
             ..
         } => {
-            reserve_seeds(
+            reserve_tracking_storage(
                 initial_frequencies_hz.len(),
                 size_of::<f64>(),
+                channels.len(),
                 &mut budget.fit,
             )
             .map_err(|error| {
@@ -438,9 +466,10 @@ pub fn track_partials(
             budget,
             ..
         } => {
-            reserve_seeds(
+            reserve_tracking_storage(
                 initial_poles.len(),
                 size_of::<DampedTonePole>(),
+                channels.len(),
                 &mut budget.fit,
             )
             .map_err(|error| {
@@ -458,9 +487,10 @@ pub fn track_partials(
             budget,
             ..
         } => {
-            reserve_seeds(
+            reserve_tracking_storage(
                 initial_tones.len(),
                 2 * size_of::<ChirpedTone>(),
+                channels.len(),
                 &mut budget.fit,
             )
             .map_err(|error| {
@@ -482,9 +512,10 @@ pub fn track_partials(
             budget,
             ..
         } => {
-            reserve_seeds(
+            reserve_tracking_storage(
                 initial_tones.len(),
                 2 * size_of::<DampedChirpedTone>(),
+                channels.len(),
                 &mut budget.fit,
             )
             .map_err(|error| {
@@ -506,6 +537,13 @@ pub fn track_partials(
         .checked_mul(max_evaluations)
         .ok_or_else(|| invalid("candidate evaluation count overflows"))?;
     let mut seeds = seeds;
+    // A scalar observation uses a stack view, preserving its original storage
+    // budget. Multiple channels reuse one admitted view array across frames.
+    let mut channel_views: Vec<&[f64]> = if channels.len() > 1 {
+        vec![&[]; channels.len()]
+    } else {
+        Vec::new()
+    };
     let mut summary = PartialTrackingSummary {
         planned_frames,
         visited_frames: 0,
@@ -516,7 +554,16 @@ pub fn track_partials(
     let mut offset = 0;
     loop {
         let first_sample_index = schedule.first_sample_index + offset as u64;
-        let block = &samples[offset..offset + schedule.frame_samples];
+        let end = offset + schedule.frame_samples;
+        let single = [&channels[0][offset..end]];
+        let blocks = if channels.len() == 1 {
+            &single[..]
+        } else {
+            for (view, samples) in channel_views.iter_mut().zip(channels) {
+                *view = &samples[offset..end];
+            }
+            &channel_views
+        };
         let estimate = match (&model, &mut seeds) {
             (
                 PartialTrackingModel::Stationary {
@@ -525,17 +572,23 @@ pub fn track_partials(
                     ..
                 },
                 Seeds::Stationary(seed),
-            ) => refine_tone_frequencies(block, timestep_s, seed, frequency_bounds_hz, *budget)
-                .map(|result| {
-                    seed.copy_from_slice(&result.frequencies_hz);
-                    PartialFrameEstimate::Stationary(result)
-                })
-                .map_err(PartialFitFailure::Stationary),
+            ) => refine_tone_frequencies_channels(
+                blocks,
+                timestep_s,
+                seed,
+                frequency_bounds_hz,
+                *budget,
+            )
+            .map(|result| {
+                seed.copy_from_slice(&result.frequencies_hz);
+                PartialChannelsFrameEstimate::Stationary(result)
+            })
+            .map_err(PartialFitFailure::Stationary),
             (PartialTrackingModel::Ringdown { bounds, budget, .. }, Seeds::Ringdown(seed)) => {
-                refine_damped_tone_poles(block, timestep_s, seed, bounds, *budget)
+                refine_damped_tone_poles_channels(blocks, timestep_s, seed, bounds, *budget)
                     .map(|result| {
                         seed.copy_from_slice(&result.poles);
-                        PartialFrameEstimate::Ringdown(result)
+                        PartialChannelsFrameEstimate::Ringdown(result)
                     })
                     .map_err(PartialFitFailure::Ringdown)
             }
@@ -566,11 +619,11 @@ pub fn track_partials(
                             .clamp(domain.end_frequency_hz[0], domain.end_frequency_hz[1]);
                     }
                 }
-                refine_chirped_tones(block, timestep_s, prediction, bounds, *budget)
+                refine_chirped_tones_channels(blocks, timestep_s, prediction, bounds, *budget)
                     .map(|result| {
                         anchor.copy_from_slice(&result.tones);
                         *anchor_offset = offset;
-                        PartialFrameEstimate::Chirped(result)
+                        PartialChannelsFrameEstimate::Chirped(result)
                     })
                     .map_err(PartialFitFailure::Chirped)
             }
@@ -601,13 +654,15 @@ pub fn track_partials(
                         trial.decay_rate_per_s = accepted.decay_rate_per_s;
                     }
                 }
-                refine_damped_chirped_tones(block, timestep_s, prediction, bounds, *budget)
-                    .map(|result| {
-                        anchor.copy_from_slice(&result.tones);
-                        *anchor_offset = offset;
-                        PartialFrameEstimate::DampedChirped(result)
-                    })
-                    .map_err(PartialFitFailure::DampedChirped)
+                refine_damped_chirped_tones_channels(
+                    blocks, timestep_s, prediction, bounds, *budget,
+                )
+                .map(|result| {
+                    anchor.copy_from_slice(&result.tones);
+                    *anchor_offset = offset;
+                    PartialChannelsFrameEstimate::DampedChirped(result)
+                })
+                .map_err(PartialFitFailure::DampedChirped)
             }
             _ => unreachable!("warm seeds retain their model kind"),
         };
@@ -621,7 +676,7 @@ pub fn track_partials(
         } else {
             summary.resolved_frames += 1;
         }
-        let frame = PartialFrame {
+        let frame = PartialChannelsFrame {
             first_sample_index,
             sample_count: schedule.frame_samples,
             timestep_s,
@@ -629,19 +684,27 @@ pub fn track_partials(
         };
         summary.visited_frames += 1;
         summary.completed = offset == last_offset;
-        if visit(&frame).is_break() || summary.completed {
+        if visit(frame).is_break() || summary.completed {
             return Ok(summary);
         }
         offset = offset.saturating_add(schedule.hop_samples).min(last_offset);
     }
 }
 
-fn reserve_seeds(
+fn reserve_tracking_storage(
     count: usize,
     element_bytes: usize,
+    channels: usize,
     budget: &mut fs_fft::harmonic::HarmonicFitBudget,
 ) -> Result<(), HarmonicFitError> {
-    let required_bytes = count.checked_mul(element_bytes);
+    let views = if channels > 1 {
+        channels.checked_mul(size_of::<&[f64]>())
+    } else {
+        Some(0)
+    };
+    let required_bytes = count
+        .checked_mul(element_bytes)
+        .and_then(|seeds| views.and_then(|views| seeds.checked_add(views)));
     let remaining = required_bytes.and_then(|bytes| budget.max_workspace_bytes.checked_sub(bytes));
     budget.max_workspace_bytes = remaining.ok_or(HarmonicFitError::BudgetExceeded {
         required_bytes: required_bytes.unwrap_or(usize::MAX),

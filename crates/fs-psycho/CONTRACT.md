@@ -428,3 +428,28 @@ independent of the stationary loudness filterbank's skip interval.
   sharpness is a recorded follow-up.
 - Mono, free/diffuse-field assumption per ISO 532-1; no binaural
   claims.
+
+## Synchronized partial trajectories
+
+`partials::track_partial_channels` fits a shared physical frequency, decay and/or
+linear-chirp trajectory to synchronized, equal-length, common-unit channels.
+Each channel retains its original DC, complex peak phasors and sampled residual;
+no channel is averaged, individually normalized, reordered or replaced by zero.
+A partial invisible at one sensor can remain identifiable through the array.
+The objective is the sum of original-channel squared residuals; different units,
+sensor-noise weights or delay alignment require explicit caller conversion.
+
+Both scalar and array entry points use the same schedule, immutable identity
+domains, successful-anchor warm starts and actual-gap chirp predictor. An
+unresolved shared fit returns one typed failure for the whole array. Channel
+shapes and samples are admitted before callbacks. The original fit workspace
+budget includes warm seeds and reusable channel-slice views; a single channel
+uses a stack view and retains the scalar API's original storage budget.
+Callbacks borrow one frame at a time and can stop subsequent work between fits.
+
+`tests/partial_channels.rs` exercises sensor nodes and opposite-sign responses,
+rotation of common-unit vector observations with nonzero residual, coherent
+double decay, chirp and damped-chirp dropouts, shortened terminal hops,
+deterministic replay and channel-shape/storage/callback refusals. This is a
+shared-law observation, not mode discovery, automatic channel calibration or
+instrument acceptance.
