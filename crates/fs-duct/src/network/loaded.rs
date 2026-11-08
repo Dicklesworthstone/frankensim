@@ -438,6 +438,7 @@ fn retained_source_system_bound<'a>(
                     omega,
                     *loss,
                     edge.corrections,
+                    super::media::edge_wall_model(media, &edge.id),
                 )?;
                 Ok((two_port, condition))
             }

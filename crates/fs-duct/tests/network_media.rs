@@ -446,3 +446,143 @@ fn g0_material_binding_refuses_missing_identity_pressure_jumps_and_incoherence()
         .is_err()
     );
 }
+
+// N1 (MB 15606): an edge may carry the series duct's locally reacting wall.
+// The walled one-edge graph is the series `WallModel::Pin` impedance on the
+// same duct and load, to the tolerance the rigid comparison above uses; an
+// edge without a bound wall keeps the original rigid bits.
+#[test]
+fn g6_edge_wall_is_the_series_pin_wall_and_unbound_edges_keep_rigid_bits() {
+    let net = one_edge();
+    let gas = air();
+    // A test pin (not a specimen): soft enough that it moves the impedance.
+    let pin = fs_phs::WallPin {
+        surface_density: 1.5,
+        stiffness_per_area: 2.0e5,
+        resistance: 40.0,
+    };
+    let rigid = NetworkMedia::new(&net, vec![("bore".into(), gas.clone())], gas.clone()).unwrap();
+    let walled = rigid
+        .clone()
+        .with_edge_walls(&net, vec![("bore".into(), pin)])
+        .unwrap();
+    assert_eq!(walled.edge_wall("bore"), Some(&pin));
+    assert_eq!(rigid.edge_wall("bore"), None);
+    let loads = [PortTermination {
+        label: "out".into(),
+        load: NetworkLoad::Radiation {
+            radius: 0.006,
+            termination: Termination::FlangedOpen,
+        },
+    }];
+    for loss in [LossModel::Lossless, LossModel::Bessel] {
+        for hz in [97.0, 239.0, 631.0, 1289.0, 3517.0] {
+            let omega = core::f64::consts::TAU * hz;
+            let expected = fs_duct::exterior::input_impedance(
+                &net.edges[0].duct,
+                gas.state(),
+                gas.state(),
+                omega,
+                loss,
+                Termination::FlangedOpen,
+                WallModel::Pin(&pin),
+            )
+            .unwrap()
+            .impedance;
+            let bound = network_port_impedance_regional(&net, &walled, omega, loss)
+                .unwrap()
+                .drive_bound("in", &loads)
+                .unwrap();
+            close(bound.impedance, expected, 3e-12);
+            let driven = fs_duct::network::network_drive_regional(
+                &net, &walled, omega, loss, "in", &loads,
+            )
+            .unwrap();
+            close(driven.impedance, expected, 3e-12);
+            let plain = network_port_impedance_regional(&net, &rigid, omega, loss).unwrap();
+            let old = network_port_impedance(&net, gas.state(), omega, loss).unwrap();
+            assert_eq!(bits(&plain.z), bits(&old.z));
+            let stiff = plain.drive_bound("in", &loads).unwrap().impedance;
+            assert!((stiff - bound.impedance).abs() > 1e-6 * stiff.abs(), "{hz} Hz");
+        }
+    }
+    let mut two = one_edge();
+    two.edges.push(edge("parallel", 0, 1, 0.004, 0.33));
+    let media = NetworkMedia::new(
+        &two,
+        vec![("bore".into(), gas.clone()), ("parallel".into(), gas.clone())],
+        gas.clone(),
+    )
+    .unwrap();
+    assert!(media.clone().with_edge_walls(&two, vec![("missing".into(), pin)]).is_err());
+    assert!(
+        media
+            .clone()
+            .with_edge_walls(&two, vec![("bore".into(), pin), ("bore".into(), pin)])
+            .is_err()
+    );
+    let once = media.with_edge_walls(&two, vec![("parallel".into(), pin)]).unwrap();
+    assert!(once.clone().with_edge_walls(&two, vec![("bore".into(), pin)]).is_err());
+    assert_eq!(once.edge_wall("bore"), None);
+    assert_eq!(once.edge_wall("parallel"), Some(&pin));
+}
+
+// Network cylinder heat is the rigid-wall Bessel line. A walled edge is solved
+// on the walled line, so its heat refuses instead of mixing the two lines; the
+// same edge without a bound wall keeps its heat.
+#[test]
+fn g7_cylinder_heat_refuses_a_walled_edge_and_keeps_an_unbound_one() {
+    use fs_duct::network::field::{
+        NetworkFieldBudget, NetworkFieldProbe, NetworkFieldRequest, NetworkFieldSection,
+        PreparedNetworkFields,
+    };
+    use fs_duct::network::{PortExcitation, PortSource};
+    let net = one_edge();
+    let gas = air();
+    let pin = fs_phs::WallPin {
+        surface_density: 1.5,
+        stiffness_per_area: 2.0e5,
+        resistance: 40.0,
+    };
+    let rigid = NetworkMedia::new(&net, vec![("bore".into(), gas.clone())], gas.clone()).unwrap();
+    let walled = rigid
+        .clone()
+        .with_edge_walls(&net, vec![("bore".into(), pin)])
+        .unwrap();
+    let sources = [PortSource {
+        label: "in".into(),
+        excitation: PortExcitation::Pressure {
+            open_circuit_pressure_pa: C64::ONE,
+            impedance_pa_s_m3: C64::ZERO,
+        },
+    }];
+    let loads = [PortTermination {
+        label: "out".into(),
+        load: NetworkLoad::Radiation {
+            radius: 0.006,
+            termination: Termination::FlangedOpen,
+        },
+    }];
+    let probes: Vec<NetworkFieldProbe> = [0.0, 0.105]
+        .into_iter()
+        .map(|offset_m| NetworkFieldProbe {
+            edge_id: "bore".into(),
+            section: NetworkFieldSection::Cylinder { segment: 0, offset_m },
+        })
+        .collect();
+    let request = NetworkFieldRequest {
+        omega: core::f64::consts::TAU * 631.0,
+        loss: LossModel::Bessel,
+        source_clock: "n1-wall-heat",
+        sources: &sources,
+        source_bank: None,
+        loads: &loads,
+        coupled_load: None,
+        probes: &probes,
+        budget: NetworkFieldBudget::default(),
+    };
+    let plain = PreparedNetworkFields::new_regional(&net, &rigid, &request, || false).unwrap();
+    assert!(plain.prepare_cylinder_absorption(&[[0, 1]], 1, || false).is_ok());
+    let soft = PreparedNetworkFields::new_regional(&net, &walled, &request, || false).unwrap();
+    assert!(soft.prepare_cylinder_absorption(&[[0, 1]], 1, || false).is_err());
+}

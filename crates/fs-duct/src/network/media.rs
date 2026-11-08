@@ -4,10 +4,16 @@
 //! supplied homogeneous exterior, including chimneys embedded in an edge.
 //! Junction pressure and volume flow stay in the original nodal solver. No
 //! mixture, temperature, density or wave impedance is averaged at a junction.
+//!
+//! An edge may also carry the series duct's locally reacting wall
+//! ([`NetworkMedia::with_edge_walls`]): its chain is then composed with
+//! `WallModel::Pin`, exactly as `input_impedance_wall` composes a series duct.
+//! An edge without a bound wall is composed rigid, as before, bit for bit.
 
 use super::{DuctError, DuctNetwork, bad};
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::GasRecord;
+use fs_phs::WallPin;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -26,6 +32,9 @@ pub struct NetworkMedia {
     // receipts into every NetworkResponse. Only immutable handles are shared.
     edges: Arc<BTreeMap<String, GasRecord>>,
     exterior: Arc<GasRecord>,
+    // Locally reacting walls by edge identity. Empty unless bound; an edge
+    // absent here is rigid.
+    walls: Arc<BTreeMap<String, WallPin>>,
 }
 
 impl NetworkMedia {
@@ -55,9 +64,45 @@ impl NetworkMedia {
         let result = Self {
             edges: Arc::new(indexed),
             exterior: Arc::new(exterior),
+            walls: Arc::new(BTreeMap::new()),
         };
         result.validate_for(net)?;
         Ok(result)
+    }
+
+    /// Bind a locally reacting wall to named edges; every other edge stays
+    /// rigid. The pin is the series duct's own law (`WallModel::Pin`); its
+    /// physical admission (`σ > 0`, `K > 0`) is the chain owner's, unchanged.
+    ///
+    /// # Errors
+    /// A wall naming no edge of `net`, a duplicated identity, or a second
+    /// binding on media that already carry walls.
+    pub fn with_edge_walls(
+        mut self,
+        net: &DuctNetwork,
+        walls: Vec<(String, WallPin)>,
+    ) -> Result<Self, DuctError> {
+        if !self.walls.is_empty() {
+            return Err(bad("network media already carry edge walls"));
+        }
+        let mut indexed = BTreeMap::new();
+        for (id, pin) in walls {
+            if !net.edges.iter().any(|edge| edge.id == id) {
+                return Err(bad("network wall names an edge the graph lacks"));
+            }
+            if indexed.insert(id, pin).is_some() {
+                return Err(bad("network wall edge identity is duplicated"));
+            }
+        }
+        self.walls = Arc::new(indexed);
+        self.validate_for(net)?;
+        Ok(self)
+    }
+
+    /// The wall bound to an exact edge identity; `None` is rigid.
+    #[must_use]
+    pub fn edge_wall(&self, id: &str) -> Option<&WallPin> {
+        self.walls.get(id)
     }
 
     /// Verify complete identity coverage before using the binding with a graph.
@@ -75,6 +120,11 @@ impl NetworkMedia {
                 .edge_gas(&edge.id)
                 .ok_or_else(|| bad("network media omit an authored edge identity"))?;
             crate::exterior::admit(gas, self.exterior_gas())?;
+        }
+        for id in self.walls.keys() {
+            if !net.edges.iter().any(|edge| &edge.id == id) {
+                return Err(bad("network media wall names an edge the graph lacks"));
+            }
         }
         Ok(())
     }
@@ -102,4 +152,13 @@ impl NetworkMedia {
     pub fn exterior_gas(&self) -> &GasState {
         self.exterior.state()
     }
+}
+
+/// The wall an edge's chain is composed with: its bound pin, otherwise rigid
+/// (the original composition).
+pub(crate) fn edge_wall_model<'a>(
+    media: Option<&'a NetworkMedia>,
+    id: &str,
+) -> crate::WallModel<'a> {
+    crate::WallModel::from_pin(media.and_then(|bound| bound.edge_wall(id)))
 }

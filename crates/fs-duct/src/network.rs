@@ -1005,13 +1005,16 @@ pub fn network_chain_admittance_in_exterior(
     loss: LossModel,
     corrections: JunctionCorrections,
 ) -> Result<([C64; 4], f64, f64), DuctError> {
-    let (s, condition, shear) =
-        network_chain_scattering(duct, interior, exterior, omega, loss, corrections)?;
+    let (s, condition, shear) = network_chain_scattering(
+        duct, interior, exterior, omega, loss, corrections, crate::WallModel::Rigid,
+    )?;
     let (y, c) = s.admittance(MAX_NETWORK_CONDITION)?;
     let (_, yc) = inverse(&y, 2)?;
     Ok((y, condition.max(c).max(yc), shear))
 }
 
+// `wall` is the edge's bound wall (`media::edge_wall_model`); rigid unless the
+// media bind one, which is the original composition.
 fn network_chain_scattering(
     duct: &Duct,
     interior: &GasState,
@@ -1019,6 +1022,7 @@ fn network_chain_scattering(
     omega: f64,
     loss: LossModel,
     corrections: JunctionCorrections,
+    wall: crate::WallModel<'_>,
 ) -> Result<(crate::compose::TwoPort, f64, f64), DuctError> {
     let gas = interior;
     validate_medium(gas, omega)?;
@@ -1036,7 +1040,7 @@ fn network_chain_scattering(
         exterior,
         omega,
         loss,
-        crate::WallModel::Rigid,
+        wall,
         options,
         corrections == JunctionCorrections::ChainLocal,
         || false,
@@ -1488,8 +1492,15 @@ fn network_port_impedance_bound(
                 .edge_gas(&e.id)
                 .expect("complete edge identities admitted")
         });
-        let (two_port, composition_condition, edge_shear) =
-            network_chain_scattering(&e.duct, interior, exterior, omega, loss, e.corrections)?;
+        let (two_port, composition_condition, edge_shear) = network_chain_scattering(
+            &e.duct,
+            interior,
+            exterior,
+            omega,
+            loss,
+            e.corrections,
+            media::edge_wall_model(media, &e.id),
+        )?;
         let endpoint = |node: usize, end: EdgeEnd| {
             if matches!(net.nodes[node].boundary, NodeBoundary::JunctionMultiport(_)) {
                 terminal_slots

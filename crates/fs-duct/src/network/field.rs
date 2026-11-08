@@ -301,7 +301,15 @@ impl PreparedNetworkFields {
                 let gas = gas_at(edge);
                 (gas.density, gas.sound_speed)
             },
-            |edge| Some(crate::WallDiffusionInputs::from_gas(gas_at(edge))),
+            // Cylinder heat is the rigid-wall Bessel line. An edge with a bound
+            // wall is solved on the walled line, so it supplies no diffusion
+            // snapshot and its heat refuses rather than mixing the two lines.
+            |edge| match super::media::edge_wall_model(media, &edge.id) {
+                crate::WallModel::Rigid => {
+                    Some(crate::WallDiffusionInputs::from_gas(gas_at(edge)))
+                }
+                _ => None,
+            },
             |selected, _cancelled| {
                 super::loaded::prepare_spatial_transfers(
                     net,
@@ -323,7 +331,7 @@ impl PreparedNetworkFields {
                     exterior,
                     request.omega,
                     request.loss,
-                    crate::WallModel::Rigid,
+                    super::media::edge_wall_model(media, &edge.id),
                     options,
                     crate::hole_lengths::HoleLengths::from_compact(
                         edge.corrections == JunctionCorrections::ChainLocal),
