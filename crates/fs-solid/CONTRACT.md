@@ -1,5 +1,29 @@
 # fs-solid CONTRACT
 
+## Ductile initiation in finite plastic sheet forming
+
+`DuctileHistory::advance_finite_sheet` and `advance_thermoplastic_sheet` gate
+the original P1/Q1 sheet endpoint at every material point. The complete native
+Piola/deformation pair supplies spatial stress, including solved transverse
+stretch and shear. Neither in-plane Piola components nor element-average
+resultants substitute for triaxiality or the Lode invariant. The original
+plastic metric, accumulated plastic strain, thickness and energy accounts
+remain with the sheet solver; observation performs no second return map.
+
+Explicit Perzyna and simultaneous Norton/J2 sheets retain their actual physical
+interval. A mismatched ductility interval refuses, and independent creep
+accumulation never consumes plastic ductility. Pure-creep thermal families
+refuse before solving. Thermal sheets use actual endpoint quadrature
+temperatures, not element means. Initiation, material/domain, clock, history or
+cancellation refusals publish neither a mechanical nor an initiation endpoint.
+
+The synthetic G1/G3 tests in `ductile_sheet` check independent equibiaxial
+Hencky stress/thickness and initiation, rotated P1/Q1 specimens, rate-sensitive
+flow and held-deformation relaxation, creep/plastic separation, nonuniform
+point temperatures and transactional retries. This is the original local,
+endpoint-held initiation criterion, not a forming-limit/necking solution,
+progressive sheet fracture or experimental qualification of an alloy.
+
 ## Source-refreshed thermal strain with prescribed support dynamics
 
 `TetTransientRun3::advance_thermal_with_supports_candidate` and

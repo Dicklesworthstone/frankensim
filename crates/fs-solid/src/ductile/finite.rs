@@ -4,6 +4,9 @@
 //! must never drive triaxiality. The positive Jacobian factor between Kirchhoff
 //! and Cauchy stress cancels from mean stress / equivalent stress.
 
+/// Pointwise initiation on native finite plastic and thermoplastic sheets.
+pub mod sheet;
+
 use fs_material::plastic::finite::FiniteJ2Material;
 use fs_material::plastic::finite::thermal::FiniteThermalJ2Material;
 
