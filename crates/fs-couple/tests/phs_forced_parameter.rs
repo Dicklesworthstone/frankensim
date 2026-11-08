@@ -4,8 +4,8 @@ use core::cell::Cell;
 use fs_couple::phs_orbit::{
     AutonomousPortFeedback, PeriodicPortInput,
     sideband::{
-        PhsPortSidebandControls, PhsPortSidebandError, PhsPortSidebandSource,
-        PhsStorageParameterControls,
+        PhsForcedParameterDirection, PhsPortSidebandControls, PhsPortSidebandError,
+        PhsPortSidebandSource, PhsStorageParameterControls,
     },
     solve_forced_harmonic_balance_scaled_seeded,
     spectrum::{PortSpectrumControls, observe_port_spectrum},
@@ -18,7 +18,7 @@ use fs_orbit::{
     HbAnchor, HbBudget, HbOrbit, HbScales,
     sideband::{SidebandControls, SidebandError, SidebandScales},
 };
-use fs_phs::{PortHamiltonian, RelaxationBranch};
+use fs_phs::{PhsStructureParameterDirection, PortHamiltonian, QuadraticStorage, RelaxationBranch};
 
 fn controls(n: usize, m: usize, h: usize, output: usize) -> PhsPortSidebandControls {
     PhsPortSidebandControls {
@@ -383,6 +383,301 @@ fn material_direction_retains_the_original_maxwell_memory_response() {
             2e-11,
         );
     }
+
+    // Change relaxation TIME and physical viscous damping together. The
+    // normalized memory coordinate is fixed; its original R entry is 1/tau.
+    let (dtau, dc) = (0.08, -0.1);
+    let dr = [0.0, 0.0, 0.0, 0.0, dc, 0.0, 0.0, 0.0, -dtau / (tau * tau)];
+    let result = prepared
+        .forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                structure: PhsStructureParameterDirection {
+                    dissipation: Some(&dr),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &parameter_controls(3),
+            || false,
+        )
+        .unwrap();
+    for k in 0..=2 {
+        let s = C64::new(0.0, k as f64 * omega);
+        let denominator = C64::ONE + s.scale(tau);
+        let dynamic = C64::new(
+            stiffness - mass * (k as f64 * omega).powi(2),
+            damping * k as f64 * omega,
+        ) + (s.scale(tau) / denominator).scale(arm);
+        let q = exact(k).0[0];
+        let dq = -q * (s.scale(dc) + s.scale(arm * dtau) / (denominator * denominator)) / dynamic;
+        let dz =
+            (dq / denominator - q * s.scale(dtau) / (denominator * denominator)).scale(arm.sqrt());
+        for (j, expected) in [dq, s * dq.scale(mass), dz].into_iter().enumerate() {
+            near(
+                result.state_parameter_derivative.coefficients[(2 + k) * 3 + j],
+                expected,
+                2e-11,
+            );
+        }
+        near(result.port_parameter_derivative[2 + k], s * dq, 2e-11);
+    }
+}
+
+#[test]
+fn resonant_damping_reciprocal_gain_and_authored_drive_slopes_match_exact_response() {
+    let (omega, stiffness, damping, gain): (f64, f64, f64, f64) = (2.0, 4.0, 0.02, 1.3);
+    let system = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, damping],
+        vec![0.0, gain],
+        Box::new(QuadraticStorage::new(vec![stiffness, 0.0, 0.0, 1.0], 2).unwrap()),
+    )
+    .unwrap();
+    let input_coefficients = [
+        C64::from_re(0.02),
+        C64::new(0.03, -0.02),
+        C64::new(0.01, 0.01),
+        C64::ZERO,
+    ];
+    let input_slopes = [
+        C64::from_re(-0.01),
+        C64::new(-0.02, 0.03),
+        C64::new(0.005, -0.02),
+        C64::new(0.01, 0.02),
+    ];
+    let input = PeriodicPortInput::new(omega, vec![input_coefficients.to_vec()]).unwrap();
+    let input_derivative = PeriodicPortInput::new(omega, vec![input_slopes.to_vec()]).unwrap();
+    let mut coefficients = vec![vec![C64::ZERO; 4]; 2];
+    for k in 0..=3 {
+        let w = k as f64 * omega;
+        coefficients[0][k] =
+            input_coefficients[k].scale(gain) / C64::new(stiffness - w * w, damping * w);
+        coefficients[1][k] = C64::new(0.0, w) * coefficients[0][k];
+    }
+    let base = orbit(omega, coefficients);
+    let mut source =
+        PhsPortSidebandSource::forced(&system, &input, &base, &controls(2, 1, 3, 3)).unwrap();
+    let mut prepared = source.prepare(&scales(2), || false).unwrap();
+    let mut factor = prepared.factor(0.0, || false).unwrap();
+    let (dc, dg) = (-0.03, 0.2);
+    let dr = [0.0, 0.0, 0.0, dc];
+    let port_direction = [0.0, dg];
+    let result = factor
+        .forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                structure: PhsStructureParameterDirection {
+                    dissipation: Some(&dr),
+                    ports: Some(&port_direction),
+                    ..Default::default()
+                },
+                input: Some(&input_derivative),
+                ..Default::default()
+            },
+            &parameter_controls(2),
+            || false,
+        )
+        .unwrap();
+    for k in 0..=3 {
+        let w = k as f64 * omega;
+        let dq = (input_coefficients[k].scale(dg) + input_slopes[k].scale(gain)
+            - C64::new(0.0, dc * w) * base.coeffs[0][k])
+            / C64::new(stiffness - w * w, damping * w);
+        let dp = C64::new(0.0, w) * dq;
+        near(
+            result.state_parameter_derivative.coefficients[(3 + k) * 2],
+            dq,
+            2e-10,
+        );
+        near(
+            result.state_parameter_derivative.coefficients[(3 + k) * 2 + 1],
+            dp,
+            2e-10,
+        );
+        near(
+            result.port_parameter_derivative[3 + k],
+            dp.scale(gain) + base.coeffs[1][k].scale(dg),
+            2e-10,
+        );
+        near(
+            result.port_parameter_derivative[3 - k],
+            (dp.scale(gain) + base.coeffs[1][k].scale(dg)).conj(),
+            2e-10,
+        );
+    }
+    // A changing reciprocal gain appears twice in y=G^T*effort, once through
+    // the driven motion and once directly. The SAME factor serves this probe.
+    let only_gain = factor
+        .forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                structure: PhsStructureParameterDirection {
+                    ports: Some(&port_direction),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &parameter_controls(2),
+            || false,
+        )
+        .unwrap();
+    near(
+        only_gain.state_parameter_derivative.coefficients[4 * 2],
+        base.coeffs[0][1].scale(dg / gain),
+        2e-11,
+    );
+    near(
+        only_gain.port_parameter_derivative[4],
+        base.coeffs[1][1].scale(2.0 * dg),
+        2e-11,
+    );
+    assert!(result.state_parameter_derivative.coefficients[6 * 2].abs() > 1e-4); // newly driven third harmonic
+}
+
+fn mixed_model(parameter: f64) -> PortHamiltonian {
+    PortHamiltonian::new(
+        2,
+        2,
+        vec![0.0, 1.0 + 0.04 * parameter, -1.0 - 0.04 * parameter, 0.0],
+        vec![0.0, 0.0, 0.0, 0.3 - 0.04 * parameter],
+        vec![
+            1.0 + 0.1 * parameter,
+            -0.03 * parameter,
+            0.07 * parameter,
+            1.0 + 0.2 * parameter,
+        ],
+        Box::new(material(parameter)),
+    )
+    .unwrap()
+}
+
+fn mixed_input(base: &HbOrbit, parameter: f64) -> (PeriodicPortInput, PeriodicPortInput) {
+    let q = base.coeffs[0][1];
+    let h = base.coeffs[0].len() - 1;
+    let mut input = vec![vec![C64::ZERO; h + 1]; 2];
+    input[1][1] = q * C64::new(
+        4.0 - base.omega * base.omega + 6.0 * q.abs().powi(2),
+        0.3 * base.omega,
+    );
+    input[1][3] = (q * q * q).scale(2.0);
+    let mut derivative = vec![vec![C64::ZERO; h + 1]; 2];
+    derivative[0][1] = C64::new(0.02, -0.01);
+    for k in [1, 3] {
+        derivative[1][k] = input[1][k] * C64::new(0.1, -0.15);
+    }
+    for p in 0..2 {
+        for k in 0..=h {
+            input[p][k] = input[p][k] + derivative[p][k].scale(parameter);
+        }
+    }
+    (
+        PeriodicPortInput::new(base.omega, input).unwrap(),
+        PeriodicPortInput::new(base.omega, derivative).unwrap(),
+    )
+}
+
+#[test]
+fn complete_nonlinear_physical_direction_matches_independently_resolved_orbits() {
+    let storage = material(0.0);
+    let system = mixed_model(0.0);
+    let (_, base) = sinusoid(2.0, 0.3, 9);
+    let (input, input_derivative) = mixed_input(&base, 0.0);
+    let channels = [StressChannelParameterDirection {
+        coefficient: 0.5,
+        coupling: Some(&[0.1]),
+    }];
+    let storage_direction = SosModalParameterDirection {
+        omegas: Some(&[0.15]),
+        channels: Some(&channels),
+    };
+    let action = |state: &[f64], out: &mut [f64]| {
+        storage
+            .gradient_parameter_derivative(state, storage_direction, out)
+            .is_ok()
+    };
+    let mut source =
+        PhsPortSidebandSource::forced(&system, &input, &base, &controls(2, 2, 9, 11)).unwrap();
+    let mut prepared = source.prepare(&scales(2), || false).unwrap();
+    let derivative = prepared
+        .forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                structure: PhsStructureParameterDirection {
+                    interconnection: Some(&[0.0, 0.04, -0.04, 0.0]),
+                    dissipation: Some(&[0.0, 0.0, 0.0, -0.04]),
+                    ports: Some(&[0.1, -0.03, 0.07, 0.2]),
+                },
+                storage: Some(&action),
+                input: Some(&input_derivative),
+            },
+            &parameter_controls(2),
+            || false,
+        )
+        .unwrap();
+    let budget = HbBudget {
+        harmonics: 9,
+        max_newton: 40,
+        tolerance: 2e-12,
+        deflate_equilibrium: false,
+    };
+    let hb_scales = HbScales {
+        states: vec![0.3, 0.6],
+        equations: vec![0.6, 1.2],
+        angular_frequency: base.omega,
+    };
+    let observation = PortSpectrumControls {
+        harmonics: 11,
+        initial_samples: 32,
+        max_samples: 128,
+        max_source_evaluations: 256,
+        max_workspace_bytes: 1 << 20,
+        rms_tolerances: vec![2e-12; 2],
+    };
+    let solve = |parameter: f64| {
+        let system = mixed_model(parameter);
+        let input = mixed_input(&base, parameter).0;
+        let result = solve_forced_harmonic_balance_scaled_seeded(
+            &system,
+            &input,
+            base.packed_seed(&HbAnchor::Forced { omega: base.omega }),
+            &budget,
+            &hb_scales,
+        )
+        .unwrap();
+        let output = observe_port_spectrum(&system, &result.orbit, &observation, || false).unwrap();
+        (result.orbit, output)
+    };
+    let mut errors = Vec::new();
+    for step in [0.002, 0.001, 0.0005] {
+        let (plus, yp) = solve(step);
+        let (minus, ym) = solve(-step);
+        let mut error = 0.0_f64;
+        for k in 0..=9 {
+            for j in 0..2 {
+                let finite = (plus.coeffs[j][k] - minus.coeffs[j][k]).scale(0.5 / step);
+                error = error.max(
+                    (finite - derivative.state_parameter_derivative.coefficients[(9 + k) * 2 + j])
+                        .abs(),
+                );
+            }
+        }
+        for k in 0..=11 {
+            for p in 0..2 {
+                let finite = if k == 0 {
+                    C64::from_re((yp.dc[p] - ym.dc[p]) / (2.0 * step))
+                } else {
+                    (yp.peak_phasors[p][k - 1] - ym.peak_phasors[p][k - 1])
+                        .conj()
+                        .scale(0.25 / step)
+                };
+                error = error
+                    .max((finite - derivative.port_parameter_derivative[(11 + k) * 2 + p]).abs());
+            }
+        }
+        errors.push(error);
+    }
+    assert!(errors[0] > 3.5 * errors[1], "{errors:?}");
+    assert!(errors[1] > 3.5 * errors[2], "{errors:?}");
+    assert!(errors[2] < 3e-6, "{errors:?}");
 }
 
 #[test]
@@ -422,6 +717,36 @@ fn source_resolution_refusal_cancellation_and_retry_remain_explicit() {
         Err(PhsPortSidebandError::Budget(_))
     ));
     assert_eq!(calls.get(), 0);
+    let wrong_clock = PeriodicPortInput::new(base.omega * 1.01, vec![vec![C64::ONE]; 2]).unwrap();
+    let mut wide = vec![vec![C64::ZERO; 33]; 2];
+    wide[1][32] = C64::ONE;
+    let wide = PeriodicPortInput::new(base.omega, wide).unwrap();
+    for direction in [
+        PhsForcedParameterDirection {
+            storage: Some(&counted),
+            input: Some(&wrong_clock),
+            ..Default::default()
+        },
+        PhsForcedParameterDirection {
+            storage: Some(&counted),
+            input: Some(&wide),
+            ..Default::default()
+        },
+        PhsForcedParameterDirection {
+            structure: PhsStructureParameterDirection {
+                interconnection: Some(&[0.0, 1.0, 1.0, 0.0]),
+                ..Default::default()
+            },
+            storage: Some(&counted),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            factor.forced_parameter_tangent(direction, &parameter_controls(2), || false),
+            Err(PhsPortSidebandError::Invalid(_))
+        ));
+    }
+    assert_eq!(calls.get(), 0);
     for mode in 0..3 {
         let bad = |_: &[f64], out: &mut [f64]| {
             if mode == 0 {
@@ -443,7 +768,18 @@ fn source_resolution_refusal_cancellation_and_retry_remain_explicit() {
     }
     assert_eq!(
         factor
-            .forced_storage_parameter_tangent(&counted, &parameter_controls(2), || calls.get() > 10)
+            .forced_parameter_tangent(
+                PhsForcedParameterDirection {
+                    structure: PhsStructureParameterDirection {
+                        dissipation: Some(&[0.0, 0.0, 0.0, -0.1]),
+                        ..Default::default()
+                    },
+                    storage: Some(&counted),
+                    ..Default::default()
+                },
+                &parameter_controls(2),
+                || calls.get() > 10
+            )
             .unwrap_err(),
         PhsPortSidebandError::Cancelled
     );
@@ -480,6 +816,28 @@ fn source_resolution_refusal_cancellation_and_retry_remain_explicit() {
     loose.forcing_rms_tolerances.fill(1.0);
     assert!(matches!(
         prepared.forced_storage_parameter_tangent(&action, &loose, || false),
+        Err(PhsPortSidebandError::Sideband(
+            SidebandError::OmittedSidebands { .. }
+        ))
+    ));
+    let new_harmonic = PeriodicPortInput::new(
+        base.omega,
+        vec![
+            vec![C64::ZERO; 4],
+            vec![C64::ZERO, C64::ZERO, C64::ZERO, C64::new(0.02, -0.01)],
+        ],
+    )
+    .unwrap();
+    let direction = PhsForcedParameterDirection {
+        input: Some(&new_harmonic),
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared.forced_parameter_tangent(direction, &parameter_controls(2), || false),
+        Err(PhsPortSidebandError::ObservationUnresolved { .. })
+    ));
+    assert!(matches!(
+        prepared.forced_parameter_tangent(direction, &loose, || false),
         Err(PhsPortSidebandError::Sideband(
             SidebandError::OmittedSidebands { .. }
         ))

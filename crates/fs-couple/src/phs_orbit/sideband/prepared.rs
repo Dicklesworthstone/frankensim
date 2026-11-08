@@ -32,7 +32,10 @@ pub use adaptive::{
     PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck,
 };
 pub use frequency::PhsForcedFrequencyTangent;
-pub use parameter::{PhsForcedStorageParameterTangent, PhsStorageParameterControls};
+pub use parameter::{
+    PhsForcedParameterDirection, PhsForcedParameterTangent, PhsForcedStorageParameterTangent,
+    PhsParameterControls, PhsStorageParameterControls,
+};
 pub use resonance::{PhsPortResonanceRequest, PhsPortResonanceResponse};
 pub use sensitivity::PhsPortSidebandCarrierDerivativeResponse;
 pub use stability::{

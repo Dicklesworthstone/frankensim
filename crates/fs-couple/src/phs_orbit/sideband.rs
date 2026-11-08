@@ -32,7 +32,8 @@ pub use prepared::{
     AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsBaseStabilityControls,
     PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport, PhsBaseTransientControls,
     PhsBaseTransientError, PhsBaseTransientLevel, PhsBaseTransientReport,
-    PhsForcedFrequencyTangent, PhsForcedStorageParameterTangent, PhsPortAdaptiveResonanceRequest,
+    PhsForcedFrequencyTangent, PhsForcedParameterDirection, PhsForcedParameterTangent,
+    PhsForcedStorageParameterTangent, PhsParameterControls, PhsPortAdaptiveResonanceRequest,
     PhsPortResonanceRefinementCheck, PhsPortResonanceRequest, PhsPortResonanceResponse,
     PhsPortSidebandCarrierDerivativeResponse, PhsPortSidebandSource, PhsStorageParameterControls,
     PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
@@ -670,6 +671,38 @@ pub(super) fn observe_effort_with_budget(
     budget: &mut ObservationBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
+    observe_sampled_effort_with_budget(
+        problem,
+        orbit,
+        response,
+        c,
+        envelope_tolerances,
+        output_count,
+        extra_work_per_sample,
+        &|_, _, effort, _, out| map_effort(effort, out),
+        effort_observation,
+        budget,
+        cancelled,
+    )
+}
+
+// The original phase and state are available to a changing physical map.
+// A real parameter's direct terms occur only in the real envelope component.
+// Legacy maps ignore these arguments and retain their original observer path.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_sampled_effort_with_budget(
+    problem: &PhsOrbitProblem<'_>,
+    orbit: &HbOrbit,
+    response: &[C64],
+    c: &PhsPortSidebandControls,
+    envelope_tolerances: &[f64],
+    output_count: usize,
+    extra_work_per_sample: u128,
+    map_effort: &impl Fn(f64, &[f64], &[f64], bool, &mut [f64]) -> bool,
+    effort_observation: EffortObservation<'_>,
+    budget: &mut ObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
     if output_count == 0
         || envelope_tolerances.len() != output_count
         || envelope_tolerances
@@ -773,7 +806,7 @@ fn project(
     response: &[C64],
     c: &PhsPortSidebandControls,
     output_count: usize,
-    map_effort: &impl Fn(&[f64], &mut [f64]) -> bool,
+    map_effort: &impl Fn(f64, &[f64], &[f64], bool, &mut [f64]) -> bool,
     effort_observation: EffortObservation<'_>,
     samples: usize,
     shift: f64,
@@ -846,6 +879,7 @@ fn project(
     };
     let mut flows = vec![0.0; m];
     for j in 0..samples {
+        let phase = core::f64::consts::TAU * j as f64 / samples as f64 + shift;
         for imaginary in [false, true] {
             if imaginary && !effort_observation.state() {
                 continue;
@@ -880,7 +914,13 @@ fn project(
             }
             flows.fill(f64::NAN);
             if effort.iter().any(|value| !value.is_finite())
-                || !map_effort(&effort, &mut flows)
+                || !map_effort(
+                    phase,
+                    &states[j * n..(j + 1) * n],
+                    &effort,
+                    imaginary,
+                    &mut flows,
+                )
                 || flows.iter().any(|x| !x.is_finite())
             {
                 return Err(PhsPortSidebandError::SourceRefused);

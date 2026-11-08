@@ -824,6 +824,32 @@ cover high-Q mass/stiffness/loss, descriptor RLC constraints, Maxwell strength
 and relaxation time, coupled mutual/gyroscopic/port changes, conjugate port
 scales `1e-120..1e120`, nonlinear total `dT`, exact antiresonance and admission.
 
+### Original nonlinear coefficient-direction contractions
+
+`PortHamiltonian::prepare_parameter_direction` binds complete original
+`PhsStructureParameterDirection` derivatives of J/R/G to their immutable source.
+J's direction retains skew structure and R's symmetry; signed local slopes
+need not be positive semidefinite. No source, storage matrix, basis or finite
+parameter interval is reconstructed. The prepared owner applies
+`(J-R)e_p+(J_p-R_p)e+G_p*u+G*u_p` and observes `G^T*e_p+G_p^T*e`.
+Callers supply the complete original effort and its direct or total derivative,
+so nonlinear storage and explicit material-memory coordinates remain available.
+
+Every equation and port output retains all parameter terms in the existing
+compensated contraction before rounding. Changing the reciprocal port map
+therefore changes both excitation and observation, and opposing strong terms
+cannot erase a representable weak remainder by premature separate rounding.
+The allocation-free actions cost O(n²+n*ports) and O(n*ports), with constant
+scratch; admission happens once in O(n²+n*ports). Incomplete/nonfinite data,
+wrong source symmetry or unrepresentable arithmetic refuse. This primitive
+does not solve a changing orbit, supply a missing storage/drive chain rule,
+differentiate a coordinate chart, or establish derivative passivity.
+
+Three regressions compare independently reconstructed original sources, retain
+weak flow/output remainders through strong cancellation, and distinguish signed
+loss slopes from invalid symmetry, dimensions and nonfinite inputs. The
+`fs-couple` periodic consumer supplies the changing full-state orbit derivative.
+
 ### Driven resonance peaks and half-power bandwidth
 
 `HarmonicModel::driven_resonance` resolves a caller-bracketed local maximum of

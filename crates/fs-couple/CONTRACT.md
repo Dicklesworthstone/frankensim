@@ -5055,38 +5055,47 @@ but unexecuted without the complete constellation dependency closure. Targeted
 formatting and API review passed; neither full integration nor continuum,
 branch-selection, Floquet or forward-error qualification is inferred.
 
-## Storage-parameter sensitivity of an original forced periodic response
+## Physical-parameter sensitivity of an original forced periodic response
 
-`PreparedPhsPortSidebands::forced_storage_parameter_tangent` and its factored
+`PreparedPhsPortSidebands::forced_parameter_tangent` and its factored
 counterpart reuse the same zero-carrier periodic factor for
-`D*x_p=(J-R)*partial_p grad H`, with fixed original J/R/G, physical
-coordinates, drive clock and authored phasors. The complete caller-supplied
-storage derivative retains every nonlinear and material-memory coordinate.
+`D*x_p=(J-R)*h_p+(J_p-R_p)*e+G_p*u+G*u_p`, where e=grad H and
+h_p=partial_p grad H, at fixed original physical coordinates and drive clock.
+`PhsForcedParameterDirection` supplies complete skew/symmetric J/R directions,
+the same reciprocal G direction for excitation and observation, an optional
+complete storage derivative, and optional original-port Fourier input
+derivatives. The source-bound fs-phs owner contracts every direct flow term
+before rounding. Every nonlinear and material-memory coordinate remains.
+`forced_storage_parameter_tangent` and its existing control/result names
+remain compatibility wrappers/aliases of this same implementation.
 SOS sources expose `SosModalStorage::gradient_parameter_derivative` for exact
 original frequency, stress-coefficient and symmetric coupling directions.
 
-The shared independently refined FFT observer first resolves the material
-forcing, then observes `G^T*(Hxx*x_p+partial_p grad H)`. The direct material
-output term and both signed Fourier coefficients remain. Measured forcing
-grid change and omitted forcing use the original equation scales and share
-the native omitted-equation allowance with the solved response. This is
-finite-grid evidence, not an infinite-tail or forward-error bound. Both
-observations share work, payload and Hessian caps and one parameter-action cap.
+The shared independently refined FFT observer first resolves the complete
+parameter forcing, then observes `G^T*(Hxx*x_p+h_p)+G_p^T*e`. Direct terms
+enter once on the real envelope; both signed Fourier coefficients remain.
+Measured forcing-grid change and omitted forcing use the original equation
+scales and share the native omitted-equation allowance with the solved response.
+This is finite-grid evidence, not an infinite-tail or forward-error bound.
+Both projections share work, payload and Hessian caps and one real parameter
+sample cap, including any original-gradient/storage callbacks. Input directions
+retain original clock/ports and must resolve their declared bandwidth.
 
-Feedback sources refuse because their direct material-input chain rule is
-not supplied. Changes in R/J/G, drive coefficients or the coordinate chart
-need additional derivatives. Singular, unresolved, source-refused or cancelled
-operations publish no partial tangent and leave the factor reusable. There
-is no perturbed model, finite-difference solve, regularization or branch switch.
+Feedback sources, changed coordinates/clock and missing chain rules refuse.
+Singular, unresolved, source-refused or cancelled operations publish no partial
+tangent and leave the factor reusable. There is no finite parameter interval,
+perturbed production solve, regularization or branch switch.
 
-Five focused regressions cover the exact cubic-parameter response at a linear
-baseline, including the third harmonic and direct force output; converging
-independently solved nonlinear material perturbations; original Maxwell-memory
-response; unresolved source harmonics, budgets, cancellation and retry; and
-feedback refusal. The native source lane compiles the new parameter adapter
-and original FFT, pHS and periodic solver owners, without executor substitutes.
-This does not establish the complete workspace dependency build or continuum
-and branch-stability qualification.
+Nineteen relevant native tests pass: three original fs-phs coefficient-direction
+tests, seven full parameter regressions, four existing forced-frequency tests
+and five existing State-only sideband tests. These include analytic resonant
+damping, reciprocal gain, complex drive and newly excited harmonics; simultaneous
+nonlinear J/R/G/storage/input changes compared with independently re-solved
+original models; Maxwell time/damping with original memory; and admission,
+forcing tails, cancellation and retry. The actual source lane compiles the
+complete fs-phs owner and original coupled FFT/periodic numerical bodies with
+real numerical dependencies, without executor substitutes. This does not
+establish the blocked full Cargo workspace, continuum or stability qualification.
 
 ## Independent MITC material spectra in the shared memory runtime
 

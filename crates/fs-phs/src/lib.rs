@@ -65,6 +65,8 @@ pub use modal_bank::{
 };
 mod vector_field;
 pub(crate) use vector_field::port_input_row;
+mod parameter;
+pub use parameter::{PhsStructureParameterDirection, PreparedPhsParameterDirection};
 /// Physical outlet volume flow on the original acoustic-chain state.
 pub mod acoustic_outlet;
 

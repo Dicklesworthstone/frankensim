@@ -1,37 +1,56 @@
-//! Original storage-parameter sensitivities of a changing forced periodic orbit.
+//! Original physical-parameter sensitivities of a changing forced periodic orbit.
 
+use super::super::super::InputKind;
 use super::super::{
     EffortObservation, ObservationBudget, PhsPortSidebandCheck, PhsStorageParameterAction,
-    minimum_observation_work, observe_effort_with_budget,
+    minimum_observation_work, observe_sampled_effort_with_budget,
 };
 use super::sensitivity::trace_payload;
 use super::{
-    C64, FactoredPhsPortSidebands, OrbitProblem, PhsPortSidebandError, PreparedPhsPortSidebands,
-    Result, SidebandResponse, SourceProblem, poll,
+    C64, FactoredPhsPortSidebands, OrbitProblem, PeriodicPortInput, PhsPortSidebandError,
+    PreparedPhsPortSidebands, Result, SidebandResponse, SourceProblem, poll,
 };
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use fs_math::det;
 use fs_orbit::sideband::SidebandError;
+use fs_phs::PhsStructureParameterDirection;
+
+/// ONE real parameter's original physical derivatives at fixed phase/clock.
+/// None holds the corresponding source fixed. The storage action covers every
+/// nonlinear and memory coordinate; the SAME port direction changes excitation
+/// and observation. The input holds derivatives of authored Fourier coefficients
+/// in the original port chart, with the SAME clock and coefficient convention.
+/// No model/basis/drive derivative is inferred from a scalar parameter label.
+#[derive(Clone, Copy, Default)]
+pub struct PhsForcedParameterDirection<'a> {
+    pub structure: PhsStructureParameterDirection<'a>,
+    pub storage: Option<&'a PhsStorageParameterAction<'a>>,
+    pub input: Option<&'a PeriodicPortInput>,
+}
 
 /// Additional physical source-resolution and work limits for ONE derivative.
 #[derive(Clone, Debug)]
-pub struct PhsStorageParameterControls {
-    /// Positive absolute RMS tolerances on the projection of
-    /// `(J-R) partial_p grad H`, per original equation, in equation units per
-    /// parameter unit. Retained-grid change and observed omitted forcing share
+pub struct PhsParameterControls {
+    /// Positive absolute RMS tolerances on the projection of the complete
+    /// direct parameter forcing, in original equation units per parameter unit.
+    /// Retained-grid change and observed omitted forcing share
     /// each allowance. The complete normalized defect also shares the native
     /// omitted-equation budget with the solved response; it is never hidden by
     /// treating unlisted source harmonics as exactly zero.
     pub forcing_rms_tolerances: Vec<f64>,
-    /// Total constitutive parameter-action calls across forcing projection AND
-    /// complete output observation. Each needs two successful grid comparisons.
+    /// Total real parameter samples across forcing projection AND complete
+    /// output observation. Each evaluates the optional storage action once and
+    /// at most one original gradient, and needs two successful grid comparisons.
     pub maximum_parameter_actions: usize,
 }
 
-/// Local derivatives at fixed drive frequency, phase and authored input phasors.
+/// Compatibility name for the storage-only subset of the same physical owner.
+pub type PhsStorageParameterControls = PhsParameterControls;
+
+/// Local derivatives at fixed drive frequency, phase and physical state chart.
 /// All original states, including material memory, keep their order and units.
 #[derive(Clone, Debug)]
-pub struct PhsForcedStorageParameterTangent {
+pub struct PhsForcedParameterTangent {
     pub omega_rad_s: f64,
     pub state_harmonics: usize,
     pub output_harmonics: usize,
@@ -40,11 +59,12 @@ pub struct PhsForcedStorageParameterTangent {
     /// Sideband-major `(k+state_harmonics)*state_dimension+j`; physical state
     /// units per parameter. Both signed Fourier coefficients participate.
     /// Its native residual refers to the resolved finite projection of the
-    /// original constitutive parameter forcing; its projection errors follow.
+    /// complete original parameter forcing; its projection errors follow.
     pub state_parameter_derivative: SidebandResponse,
     /// `(k+output_harmonics)*port_count+p`, in physical output units per
-    /// parameter. This is `G^T (Hxx x_p + partial_p grad H)`, including the
-    /// DIRECT material term. These are Fourier coefficients, not doubled peaks.
+    /// parameter. This is `G^T (Hxx x_p + partial_p grad H) + G_p^T grad H`,
+    /// including DIRECT material/map terms. These are Fourier coefficients,
+    /// not doubled peaks.
     pub port_parameter_derivative: Vec<C64>,
     /// Grid and omitted-forcing norms in original equation units per parameter.
     pub forcing_projection_trace: Vec<PhsPortSidebandCheck>,
@@ -60,10 +80,13 @@ pub struct PhsForcedStorageParameterTangent {
     pub parameter_actions: usize,
 }
 
+/// Compatibility name for a storage-only direction of the same response owner.
+pub type PhsForcedStorageParameterTangent = PhsForcedParameterTangent;
+
 fn require_forced(problem: &SourceProblem<'_>) -> Result<()> {
     if !matches!(problem, SourceProblem::Forced(_)) || problem.autonomous() {
         Err(PhsPortSidebandError::Invalid(
-            "storage parameter tangents require an original externally forced source without feedback",
+            "physical parameter tangents require an original externally forced source without feedback",
         ))
     } else {
         Ok(())
@@ -78,12 +101,30 @@ impl PreparedPhsPortSidebands<'_, '_> {
         &mut self,
         action: &PhsStorageParameterAction<'_>,
         controls: &PhsStorageParameterControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PhsForcedStorageParameterTangent> {
+        self.forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                storage: Some(action),
+                ..Default::default()
+            },
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Factor at zero carrier and differentiate complete physical coefficients,
+    /// storage and drive using the factored entry's original-source contract.
+    pub fn forced_parameter_tangent(
+        &mut self,
+        direction: PhsForcedParameterDirection<'_>,
+        controls: &PhsParameterControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PhsForcedParameterTangent> {
         poll(&mut cancelled)?;
         require_forced(&self.source.problem)?;
         self.factor(0.0, &mut cancelled)?
-            .forced_storage_parameter_tangent(action, controls, cancelled)
+            .forced_parameter_tangent(direction, controls, cancelled)
     }
 }
 
@@ -127,8 +168,49 @@ impl FactoredPhsPortSidebands<'_, '_> {
         &mut self,
         action: &PhsStorageParameterAction<'_>,
         controls: &PhsStorageParameterControls,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<PhsForcedStorageParameterTangent> {
+        self.forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                storage: Some(action),
+                ..Default::default()
+            },
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Differentiate the complete original forced response with this SAME LU.
+    ///
+    /// At fixed physical chart and clock, `e=grad H` and `h_p=partial_p grad H`
+    /// give `D x_p=(J-R)h_p+(J_p-R_p)e+G_p u+G u_p`. The original source-bound
+    /// coefficient owner contracts ALL terms before rounding each equation.
+    /// Independently refined source projection precedes the existing native
+    /// solve; measured source errors share the original equation normalization
+    /// and omitted-equation allowance with the solved response.
+    ///
+    /// Output is `G^T(Hxx x_p+h_p)+G_p^T e`, including direct storage and
+    /// reciprocal map changes. The same observer resolves its total waveform,
+    /// not the terms separately. Only the real envelope gets direct parameter
+    /// terms. Every original nonlinear/material-memory state remains.
+    ///
+    /// Signed J/R/G directions retain their source symmetry without requiring
+    /// positivity. Input derivatives include DC, amplitude and phase changes,
+    /// with matching original ports/clock and explicitly resolved bandwidth.
+    /// No finite parameter interval, changing basis/clock or feedback-chain
+    /// rule is inferred. Feedback sources refuse. Singular/unresolved/cancelled
+    /// operations publish no partial result and leave the factor reusable.
+    ///
+    /// Both projections share work/payload/Hessian and real-parameter-sample
+    /// caps. Storage callback/gradient internal work remains source-defined.
+    /// This finite-harmonic local slope is not a stability, branch uniqueness,
+    /// infinite-tail or near-pole forward-error certificate.
+    pub fn forced_parameter_tangent(
+        &mut self,
+        direction: PhsForcedParameterDirection<'_>,
+        controls: &PhsParameterControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PhsForcedParameterTangent> {
         poll(&mut cancelled)?;
         require_forced(&self.source.problem)?;
         if self.carrier_angular_frequency() != 0.0 {
@@ -141,6 +223,33 @@ impl FactoredPhsPortSidebands<'_, '_> {
         let base = self.source.orbit;
         let c = &self.source.controls;
         let (n, m, h) = (system.state_dim(), system.port_dim(), c.sideband.harmonics);
+        let InputKind::Forced { periodic, .. } = &original.input else {
+            return Err(PhsPortSidebandError::Invalid(
+                "original periodic input required",
+            ));
+        };
+        let physical = system
+            .prepare_parameter_direction(direction.structure)
+            .map_err(|_| {
+                PhsPortSidebandError::Invalid(
+                    "complete finite original skew/symmetric parameter direction required",
+                )
+            })?;
+        if direction.input.is_some_and(|input| {
+            input.port_count() != m
+                || input.omega_rad_s() != base.omega
+                || input.highest_nonzero_harmonic() >= c.initial_samples / 2
+        }) || (direction.structure.ports.is_some()
+            && periodic.highest_nonzero_harmonic() >= c.initial_samples / 2)
+        {
+            return Err(PhsPortSidebandError::Invalid(
+                "parameter forcing needs original ports/clock and a resolved initial source bandwidth",
+            ));
+        }
+        let storage_only = direction.structure.interconnection.is_none()
+            && direction.structure.dissipation.is_none()
+            && direction.structure.ports.is_none()
+            && direction.input.is_none();
         if controls.forcing_rms_tolerances.len() != n
             || controls
                 .forcing_rms_tolerances
@@ -156,10 +265,23 @@ impl FactoredPhsPortSidebands<'_, '_> {
                 "parameter forcing and output require two independent grid comparisons each",
             ));
         }
-        let source_map_work = 128 * n as u128 * (2 * n + m) as u128;
+        let source_map_work =
+            128 * n as u128 * (2 * n + m) as u128 * if storage_only { 1 } else { 2 }
+                + 64 * m as u128
+                    * (if direction.structure.ports.is_some() {
+                        periodic.harmonic_count()
+                    } else {
+                        0
+                    } + direction.input.map_or(0, PeriodicPortInput::harmonic_count))
+                        as u128;
+        let output_map_work = if direction.structure.ports.is_some() {
+            64 * n as u128 * m as u128
+        } else {
+            0
+        };
         let minimum_work = minimum_observation_work(n, n, c.initial_samples)
             + minimum_observation_work(n, m, c.initial_samples)
-            + source_map_work * (7 * c.initial_samples) as u128;
+            + (source_map_work + output_map_work) * (7 * c.initial_samples) as u128;
         if minimum_work > c.max_observation_work as u128 {
             return Err(PhsPortSidebandError::Budget(
                 "parameter forcing and output exceed the combined physical work cap",
@@ -173,20 +295,33 @@ impl FactoredPhsPortSidebands<'_, '_> {
                 return false;
             }
             actions.set(actions.get() + 1);
-            action(state, effort)
+            if let Some(action) = direction.storage {
+                action(state, effort)
+            } else {
+                effort.fill(0.0);
+                true
+            }
         };
         let mut budget = ObservationBudget {
             actions: 0,
             work: 0,
-            retained_bytes: 16 * m as u128,
+            retained_bytes: if storage_only {
+                16 * m as u128
+            } else {
+                8 * (n as u128 + 3 * m as u128)
+            },
         };
         let (state_parameter_derivative, forcing_projection_trace, combined_defect) = {
             // No second projection implementation: the SAME observer samples
-            // the constitutive derivative alone and maps it through original J-R.
+            // the original state/phase and maps the complete direct source.
             let mut projection = c.clone();
             projection.output_harmonics = h;
-            let zero_input = vec![0.0; m];
-            let result = observe_effort_with_budget(
+            let scratch = RefCell::new((
+                vec![0.0; if storage_only { 0 } else { n }],
+                vec![0.0; m],
+                vec![0.0; if storage_only { 0 } else { m }],
+            ));
+            let result = observe_sampled_effort_with_budget(
                 original,
                 base,
                 &[],
@@ -194,9 +329,38 @@ impl FactoredPhsPortSidebands<'_, '_> {
                 &controls.forcing_rms_tolerances,
                 n,
                 source_map_work,
-                &|effort, flow| {
-                    system
-                        .vector_field_from_effort_into(effort, &zero_input, flow)
+                &|phase, state, effort, _, flow| {
+                    let mut scratch = scratch.borrow_mut();
+                    let (original_effort, input, input_derivative) = &mut *scratch;
+                    if storage_only {
+                        return system
+                            .vector_field_from_effort_into(effort, input, flow)
+                            .is_ok();
+                    }
+                    if direction.structure.interconnection.is_some()
+                        || direction.structure.dissipation.is_some()
+                    {
+                        original_effort.fill(f64::NAN);
+                        system.storage().gradient(state, original_effort);
+                    }
+                    if direction.structure.ports.is_some()
+                        && !periodic.sample_at_frequency_into(phase, 1.0, input)
+                    {
+                        return false;
+                    }
+                    if direction.input.is_some_and(|source| {
+                        !source.sample_at_frequency_into(phase, 1.0, input_derivative)
+                    }) {
+                        return false;
+                    }
+                    physical
+                        .vector_field_from_effort_into(
+                            original_effort,
+                            effort,
+                            input,
+                            input_derivative,
+                            flow,
+                        )
                         .is_ok()
                 },
                 EffortObservation::Parameter(&counted),
@@ -205,7 +369,7 @@ impl FactoredPhsPortSidebands<'_, '_> {
             );
             if exhausted.get() {
                 return Err(PhsPortSidebandError::Budget(
-                    "constitutive parameter-action cap exhausted",
+                    "physical parameter-sample cap exhausted",
                 ));
             }
             let (forcing, trace, _) = result?;
@@ -252,28 +416,50 @@ impl FactoredPhsPortSidebands<'_, '_> {
         budget.retained_bytes = trace_payload(
             &forcing_projection_trace,
             forcing_projection_trace.capacity(),
-        );
-        let result = observe_effort_with_budget(
+        ) + if direction.structure.ports.is_some() {
+            8 * n as u128
+        } else {
+            0
+        };
+        let output_effort = RefCell::new(vec![
+            0.0;
+            if direction.structure.ports.is_some() {
+                n
+            } else {
+                0
+            }
+        ]);
+        let result = observe_sampled_effort_with_budget(
             original,
             base,
             &state_parameter_derivative.coefficients,
             c,
             &c.envelope_tolerances,
             m,
-            0,
-            &|effort, output| system.output_from_effort_into(effort, output).is_ok(),
+            output_map_work,
+            &|_, state, effort, imaginary, output| {
+                if imaginary || direction.structure.ports.is_none() {
+                    return system.output_from_effort_into(effort, output).is_ok();
+                }
+                let mut original_effort = output_effort.borrow_mut();
+                original_effort.fill(f64::NAN);
+                system.storage().gradient(state, &mut original_effort);
+                physical
+                    .output_from_effort_into(&original_effort, effort, output)
+                    .is_ok()
+            },
             EffortObservation::StateAndParameter(&counted),
             &mut budget,
             &mut cancelled,
         );
         if exhausted.get() {
             return Err(PhsPortSidebandError::Budget(
-                "constitutive parameter-action cap exhausted",
+                "physical parameter-sample cap exhausted",
             ));
         }
         let (port_parameter_derivative, observation_trace, hessian_actions) = result?;
         poll(&mut cancelled)?;
-        Ok(PhsForcedStorageParameterTangent {
+        Ok(PhsForcedParameterTangent {
             omega_rad_s: base.omega,
             state_harmonics: h,
             output_harmonics: c.output_harmonics,
