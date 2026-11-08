@@ -4,6 +4,9 @@
 //! native PH policy remain fixed; every trial retains the original phase
 //! calorics and computes source-integrated enthalpy and entropy increments.
 
+mod response;
+pub use response::MixtureWallStreamResponse;
+
 use super::{
     MAX_HEAT_EXCHANGER_DUTY_EVALUATIONS, MAX_HEAT_EXCHANGER_PT_EVALUATIONS,
     MixtureHeatExchangerError as Error, MixtureHeatExchangerInlet, Work,

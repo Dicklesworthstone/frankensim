@@ -405,3 +405,6 @@ fn g0_shared_work_source_limits_and_final_cancellation_leave_wall_atomic() {
         Err(E::NotBracketed { .. })));
     assert_eq!(replay, baseline);
 }
+
+#[path = "phase_equilibrium_finite_wall_streams/spatial.rs"]
+mod spatial;

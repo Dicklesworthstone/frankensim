@@ -11,6 +11,8 @@ pub mod wall_stream;
 /// Finite original material storage coupled to quasi-steady mixture streams.
 #[cfg(feature = "experimental-euler")]
 pub mod wall;
+#[cfg(feature = "experimental-euler")]
+pub mod spatial_wall;
 
 use crate::chemistry::ThermalConductance;
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;

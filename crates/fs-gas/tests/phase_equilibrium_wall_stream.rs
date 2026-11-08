@@ -188,3 +188,91 @@ fn g0_source_limits_shared_work_and_late_cancellation_are_refusals() {
     }).unwrap_err(), E::Cancelled);
     assert_eq!(ordinary(&original, ordinary_controls(), || false).unwrap(), accepted);
 }
+
+fn response_policy(control: &mut Control)
+    -> fs_material::thermochemical_gas::nonideal::flash::equilibrium::acoustics::PhaseEquilibriumAcousticControls
+{
+    use fs_material::thermochemical_gas::nonideal::flash::equilibrium::acoustics::PhaseEquilibriumAcousticControls;
+    let response = PhaseEquilibriumAcousticControls::default();
+    control.equilibrium.stability = response.phase.stability;
+    control.equilibrium.enthalpy.flash_options = response.phase.flash;
+    response
+}
+
+#[test]
+fn g1_original_two_phase_response_matches_independent_contact_heat_differences() {
+    let original = source();
+    let mut control = ordinary_controls();
+    let policy = response_policy(&mut control);
+    let prepared = PreparedMixtureWallStream::new(
+        inlet(&original, 210.0, 0.5, 3e6), control, || false).unwrap();
+    let tw = 228.945_170_130_525_04;
+    let g = ThermalConductance::new(500.0);
+    let response = prepared.evaluate_response(Temperature::new(tw), g, policy,
+        control.maximum_duty_evaluations, control.maximum_pt_evaluations, || false).unwrap();
+    let step = 0.01;
+    let values = [tw - step, tw + step].map(|t| prepared.evaluate(Temperature::new(t), g,
+        control.maximum_duty_evaluations, control.maximum_pt_evaluations, || false).unwrap());
+    let derivative = (values[1].enthalpy_flow_change_w - values[0].enthalpy_flow_change_w)
+        / (2.0 * step);
+    close(response.heat_power_temperature_derivative_w_k, derivative, 0.05);
+    let temperature_derivative = (values[1].outlet_equilibrium.state().temperature_k()
+        - values[0].outlet_equilibrium.state().temperature_k()) / (2.0 * step);
+    close(response.outlet_temperature_derivative, temperature_derivative, 2e-5);
+    let native = response.outlet_response.as_ref().unwrap();
+    assert_eq!(native.source(), response.stream.outlet_equilibrium.state());
+    assert!(native.source().phase().two_phase().is_some());
+    // Equilibrium phase redistribution is substantial: frozen ideal Cp would
+    // give a materially different wall-source Newton tangent.
+    assert!(native.isobaric_heat_capacity_j_kg_k() > 2.0 * 4.0 * R / MIXTURE_MASS);
+    assert!(response.heat_power_temperature_derivative_w_k > 0.0);
+    assert!(response.heat_power_temperature_derivative_w_k < g.value());
+    assert_eq!(response.pt_evaluations(), response.stream.pt_evaluations + 9);
+    assert_eq!(response.eos_evaluation_upper_bound(),
+        response.stream.eos_evaluation_upper_bound + native.eos_evaluation_upper_bound());
+    let value = prepared.evaluate(Temperature::new(tw), g,
+        control.maximum_duty_evaluations, control.maximum_pt_evaluations, || false).unwrap();
+    assert_eq!(response.stream, value);
+}
+
+#[test]
+fn g0_zero_drive_retains_a_tangent_but_zero_conductance_needs_no_response_probes() {
+    let original = source();
+    let mut control = controls([-50_000.0, 50_000.0], [295.0, 405.0]);
+    let policy = response_policy(&mut control);
+    let prepared = PreparedMixtureWallStream::new(
+        inlet(&original, 300.0, 0.5, 1.0), control, || false).unwrap();
+    let rest = prepared.evaluate_response(Temperature::new(300.0),
+        ThermalConductance::new(500.0), policy, 1, 9, || false).unwrap();
+    assert_eq!(rest.stream.enthalpy_flow_change_w, 0.0);
+    assert_eq!(rest.stream.pt_evaluations, 0);
+    assert_eq!(rest.pt_evaluations(), 9);
+    let expected = 500.0 / (1.0 + 500.0 / (0.5 * 4.0 * R / MIXTURE_MASS));
+    close(rest.heat_power_temperature_derivative_w_k, expected, 1e-4);
+    let isolated = prepared.evaluate_response(Temperature::new(400.0),
+        ThermalConductance::new(0.0), policy, 1, 0, || false).unwrap();
+    assert_eq!(isolated.stream.enthalpy_flow_change_w, 0.0);
+    assert_eq!(isolated.heat_power_temperature_derivative_w_k, 0.0);
+    assert_eq!(isolated.outlet_temperature_derivative, 0.0);
+    assert_eq!(isolated.pt_evaluations(), 0);
+    assert!(isolated.outlet_response.is_none());
+}
+
+#[test]
+fn g0_response_preserves_phase_policy_work_ceiling_and_cancellation() {
+    let original = source();
+    let mut control = ordinary_controls();
+    let policy = response_policy(&mut control);
+    let prepared = PreparedMixtureWallStream::new(
+        inlet(&original, 210.0, 0.5, 3e6), control, || false).unwrap();
+    let wall = Temperature::new(210.0);
+    let g = ThermalConductance::new(500.0);
+    assert!(matches!(prepared.evaluate_response(wall, g, policy, 1, 8, || false),
+        Err(E::WorkLimit { duty_evaluations: 0, pt_evaluations: 0 })));
+    let mut changed = policy;
+    changed.phase.flash.log_k_tolerance *= 10.0;
+    assert!(matches!(prepared.evaluate_response(wall, g, changed, 1, 9, || false),
+        Err(E::Invalid(_))));
+    assert_eq!(prepared.evaluate_response(wall, g, policy, 1, 9, || true).unwrap_err(),
+        E::Cancelled);
+}
