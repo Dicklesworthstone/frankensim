@@ -42,6 +42,57 @@ fn close(actual: C64, expected: C64) {
 }
 
 #[test]
+fn harmonic_intensity_preserves_finite_peak_to_mean_range() {
+    let pressure = [Dd::from_f64(1.0e308), Dd::ZERO];
+    let velocity = [Dd::from_f64(2.0), Dd::ZERO];
+    let intensity = harmonic_intensity(pressure, velocity);
+    assert!(finite_parts(intensity));
+    assert_eq!(rounded(intensity), C64::new(1.0e308, 0.0));
+}
+
+#[test]
+fn coherent_node_retains_weak_pressure_and_transient_energy_flux() {
+    let positions = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let complex = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&complex, &positions, 1, GEOMETRY_MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let probe = model.probe(0, [0.25; 4], &mut |_, _| Ok::<_, AcousticFeError>(MEDIUM)).unwrap();
+    let large = 2.0_f64.powi(55);
+    let pressure = [large, 1.0, -large, 1.0];
+    let harmonic = probe.harmonic(&pressure.map(|p| C64::new(p, -p)), 1.0).unwrap();
+    // The exact P1 value is (large + 1 - large + 1)/4. Summing rounded
+    // products in this vertex order used to discard the first quiet term.
+    assert_eq!(harmonic.pressure_pa, C64::new(0.5, -0.5));
+
+    let time = model.prepare_time(0.01, &[], HeterogeneousTimeLimits::default(),
+        &mut || false).unwrap();
+    let potential = [0.0, -MEDIUM.density_kg_m3, 0.0, 0.0];
+    let state = time.state(&potential, &pressure).unwrap();
+    let sample = probe.transient(&state).unwrap();
+    assert_eq!(sample.pressure_pa, 0.5);
+    assert!((sample.particle_velocity_m_s[0] - 1.0).abs() < 2e-15);
+    assert!((sample.instantaneous_intensity_w_m2[0] - 0.5).abs() < 2e-15);
+}
+
+#[test]
+fn coherent_active_intensity_uses_unrounded_pressure_and_velocity() {
+    let positions = [[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let complex = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&complex, &positions, 1, GEOMETRY_MEDIUM).unwrap();
+    let model = uniform(&geometry);
+    let probe = model.probe(0, [0.25; 4], &mut |_, _| Ok::<_, AcousticFeError>(MEDIUM)).unwrap();
+    let large = 2.0_f64.powi(53);
+    let coefficients = [C64::new(large, large), C64::new(large - 2.0, large - 2.0),
+        C64::new(large + 4.0, large), C64::new(large, large)];
+    let sample = probe.harmonic(&coefficients, 1.0 / core::f64::consts::TAU).unwrap();
+    // p=(large+1/2)+i(large-1/2), d_x p=-2-2i, omega=1.
+    // Both pressure components round to large, but Re(p conj(v_x))/2=1/rho.
+    assert_eq!(sample.pressure_pa, C64::new(large, large));
+    assert!((sample.active_intensity_w_m2[0] - 1.0 / MEDIUM.density_kg_m3).abs() < 2e-15);
+    assert_eq!((sample.pressure_pa.scale(0.5) * sample.particle_velocity_m_s[0].conj()).re, 0.0);
+}
+
+#[test]
 fn high_order_probes_recover_physical_polynomial_gradients_on_reordered_skew_tets() {
     let lambda = [0.13, 0.21, 0.29, 0.37];
     let linear = [

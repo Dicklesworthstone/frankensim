@@ -1830,6 +1830,14 @@ operator and recover `v = -grad(psi)/rho` with instantaneous flux `p v`.
 Reactive evanescent flow is retained and is not interpreted as heat or normal
 transported power. Pointwise gradient/flux error has its own h/p convergence
 obligation; probes do not impose continuity or correct the solved field.
+Spatial interpolation and derivative products now retain double-double
+residuals through pressure, velocity and their quadratic intensity. The same
+rule applies to harmonic and transient surface-power quadrature. This preserves
+weak signals at destructive nodes and finite transported flux between large
+nearly cancelling components; recomputing intensity from the separately rounded
+display phasors need not reproduce that retained flux. No allocation or extra
+material query is introduced. The original binary64 coefficients, geometry and
+material accuracy still bound the observation.
 Focused checks cover analytic P1–P4 gradients on skew/reordered tetrahedra,
 one-sided density-jump velocity, propagating/standing/evanescent flux, a solved
 Snell intensity mesh ladder, and transient gauge-invariant velocity/flux.

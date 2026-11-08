@@ -8,15 +8,50 @@
 
 use super::time::HeterogeneousTimeState;
 use super::{
-    AcousticFeError, HeterogeneousError, HeterogeneousHelmholtzFe, Medium, finite, invalid,
+    AcousticFeError, HeterogeneousError, HeterogeneousHelmholtzFe, Medium, invalid,
     medium_coefficients,
 };
-use fs_math::c64::C64;
+use fs_math::{c64::C64, dd::Dd};
 
 mod surface;
 pub use surface::{
     ElementFace, HarmonicSurfacePower, HeterogeneousSurfaceProbe, SurfaceProbeLimits,
 };
+
+// Keep spatial product residuals through the complete field and its quadratic
+// observation. Rounding p and v independently can erase a finite active flux
+// even when their displayed peak phasors both round to the same large value.
+type ComplexParts = [Dd; 2];
+
+fn add_scaled(sum: &mut ComplexParts, value: C64, scale: f64) {
+    let scale = Dd::from_f64(scale);
+    sum[0] = sum[0] + Dd::from_f64(value.re) * scale;
+    sum[1] = sum[1] + Dd::from_f64(value.im) * scale;
+}
+
+fn harmonic_velocity(gradient: ComplexParts, factor: f64) -> ComplexParts {
+    let factor = Dd::from_f64(factor);
+    [-gradient[1] * factor, gradient[0] * factor]
+}
+
+fn harmonic_intensity(pressure: ComplexParts, velocity: ComplexParts) -> ComplexParts {
+    let half = Dd::from_f64(0.5);
+    // Apply the peak-to-mean factor before multiplication, retaining the
+    // original range when a full peak product would overflow binary64.
+    let pressure = pressure.map(|p| p * half);
+    [
+        pressure[0] * velocity[0] + pressure[1] * velocity[1],
+        pressure[1] * velocity[0] - pressure[0] * velocity[1],
+    ]
+}
+
+fn finite_parts(value: ComplexParts) -> bool {
+    value.iter().all(|v| v.hi.is_finite() && v.lo.is_finite())
+}
+
+fn rounded(value: ComplexParts) -> C64 {
+    C64::new(value[0].to_f64(), value[1].to_f64())
+}
 
 /// Complex peak fields in `exp(+i omega t)` and time-averaged energy flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -373,32 +408,32 @@ impl HeterogeneousProbe<'_, '_, '_> {
             )
             .into());
         }
-        let mut pressure = C64::ZERO;
-        let mut gradient = [C64::ZERO; 3];
+        let mut pressure = [Dd::ZERO; 2];
+        let mut gradient = [[Dd::ZERO; 2]; 3];
         for shape in &self.shapes {
             let coefficient = pressure_pa[shape.dof];
-            pressure = pressure + coefficient.scale(shape.value);
+            add_scaled(&mut pressure, coefficient, shape.value);
             for (axis, component) in gradient.iter_mut().enumerate() {
-                *component = *component + coefficient.scale(shape.gradient_m_inv[axis]);
+                add_scaled(component, coefficient, shape.gradient_m_inv[axis]);
             }
         }
-        let velocity = gradient.map(|g| C64::new(-g.im, g.re).scale(velocity_factor));
-        let intensity = velocity.map(|v| pressure.scale(0.5) * v.conj());
-        if !finite(pressure)
+        let velocity = gradient.map(|g| harmonic_velocity(g, velocity_factor));
+        let intensity = velocity.map(|v| harmonic_intensity(pressure, v));
+        if !finite_parts(pressure)
             || gradient
                 .iter()
                 .chain(&velocity)
                 .chain(&intensity)
-                .any(|&v| !finite(v))
+                .any(|&v| !finite_parts(v))
         {
             return Err(invalid("nonfinite harmonic acoustic observation").into());
         }
         Ok(HarmonicAcousticSample {
-            pressure_pa: pressure,
-            pressure_gradient_pa_m: gradient,
-            particle_velocity_m_s: velocity,
-            active_intensity_w_m2: intensity.map(|i| i.re),
-            reactive_intensity_w_m2: intensity.map(|i| i.im),
+            pressure_pa: rounded(pressure),
+            pressure_gradient_pa_m: gradient.map(rounded),
+            particle_velocity_m_s: velocity.map(rounded),
+            active_intensity_w_m2: intensity.map(|i| i[0].to_f64()),
+            reactive_intensity_w_m2: intensity.map(|i| i[1].to_f64()),
         })
     }
 
@@ -415,35 +450,35 @@ impl HeterogeneousProbe<'_, '_, '_> {
             )
             .into());
         }
-        let mut pressure = 0.0;
-        let mut potential = 0.0;
-        let mut gradient = [0.0; 3];
+        let mut pressure = Dd::ZERO;
+        let mut potential = Dd::ZERO;
+        let mut gradient = [Dd::ZERO; 3];
         for shape in &self.shapes {
-            pressure += state.pressure_pa()[shape.dof] * shape.value;
-            let coefficient = state.pressure_potential_pa_s()[shape.dof];
-            potential += coefficient * shape.value;
+            pressure = pressure
+                + Dd::from_f64(state.pressure_pa()[shape.dof]) * Dd::from_f64(shape.value);
+            let coefficient = Dd::from_f64(state.pressure_potential_pa_s()[shape.dof]);
+            potential = potential + coefficient * Dd::from_f64(shape.value);
             for (axis, component) in gradient.iter_mut().enumerate() {
-                *component += coefficient * shape.gradient_m_inv[axis];
+                *component = *component + coefficient * Dd::from_f64(shape.gradient_m_inv[axis]);
             }
         }
-        let velocity = gradient.map(|g| -g * self.inverse_density);
+        let velocity = gradient.map(|g| -g * Dd::from_f64(self.inverse_density));
         let intensity = velocity.map(|v| pressure * v);
-        if !pressure.is_finite()
-            || !potential.is_finite()
+        if !finite_parts([pressure, potential])
             || gradient
                 .iter()
                 .chain(&velocity)
                 .chain(&intensity)
-                .any(|v| !v.is_finite())
+                .any(|v| !v.hi.is_finite() || !v.lo.is_finite())
         {
             return Err(invalid("nonfinite transient acoustic observation").into());
         }
         Ok(TransientAcousticSample {
-            pressure_pa: pressure,
-            pressure_potential_pa_s: potential,
-            potential_gradient_pa_s_m: gradient,
-            particle_velocity_m_s: velocity,
-            instantaneous_intensity_w_m2: intensity,
+            pressure_pa: pressure.to_f64(),
+            pressure_potential_pa_s: potential.to_f64(),
+            potential_gradient_pa_s_m: gradient.map(Dd::to_f64),
+            particle_velocity_m_s: velocity.map(Dd::to_f64),
+            instantaneous_intensity_w_m2: intensity.map(Dd::to_f64),
         })
     }
 }

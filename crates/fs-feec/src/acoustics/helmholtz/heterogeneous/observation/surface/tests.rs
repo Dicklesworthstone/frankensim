@@ -21,6 +21,26 @@ fn uniform<'f, 'c>(geometry: &'f HelmholtzFe<'c>) -> HeterogeneousHelmholtzFe<'f
         &mut |_, _| Ok::<_, AcousticFeError>(MEDIUM), &mut || false).unwrap()
 }
 
+#[test]
+fn coherent_surface_flux_retains_sub_ulp_pressure_differences() {
+    let complex = TetComplex::from_tets(4, vec![[0, 1, 2, 3]]);
+    let geometry = HelmholtzFe::new(&complex, &POSITIONS, 1, PLACEHOLDER).unwrap();
+    let model = uniform(&geometry);
+    let surface = model.surface_probe(&[ElementFace { element: 0, vertices: [0, 2, 3] }],
+        2, SurfaceProbeLimits::default(), &mut |_, _| Ok::<_, AcousticFeError>(MEDIUM),
+        &mut || false).unwrap();
+    let large = 2.0_f64.powi(53);
+    let coefficients = [C64::new(large, large), C64::new(large - 2.0, large - 2.0),
+        C64::new(large + 4.0, large), C64::new(large, large)];
+    let power = surface.harmonic(&coefficients, 1.0 / core::f64::consts::TAU,
+        &mut || false).unwrap();
+    // On x=0: p=(large+4y)+i*large and outward velocity=-1+i.
+    // Active intensity is -2y, so its unit-triangle integral is -1/3 W.
+    close(power.active_power_w, -1.0 / 3.0);
+    assert_eq!(surface.harmonic(&coefficients, 1.0 / core::f64::consts::TAU,
+        &mut || false).unwrap(), power);
+}
+
 fn p2(geometry: &HelmholtzFe<'_>, field: impl Fn([f64; 3]) -> C64) -> Vec<C64> {
     let mut coefficients = vec![C64::ZERO; geometry.ndof()];
     for (element, tet) in geometry.tetrahedra().iter().enumerate() {

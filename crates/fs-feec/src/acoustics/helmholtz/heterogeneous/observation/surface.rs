@@ -8,8 +8,9 @@ use super::super::super::tri_quadrature;
 use super::super::time::HeterogeneousTimeState;
 use super::super::{
     AcousticFeError, HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER, Medium,
-    finite, invalid, poll,
+    invalid, poll,
 };
+use super::{add_scaled, finite_parts, harmonic_intensity, harmonic_velocity};
 use fs_math::{c64::C64, dd::Dd};
 use std::collections::BTreeSet;
 
@@ -281,20 +282,21 @@ impl HeterogeneousSurfaceProbe<'_, '_, '_> {
             if !factor.is_finite() || factor <= 0.0 {
                 return Err(invalid("unrepresentable acoustic surface velocity factor").into());
             }
-            let mut pressure = C64::ZERO;
-            let mut derivative = C64::ZERO;
+            let mut pressure = [Dd::ZERO; 2];
+            let mut derivative = [Dd::ZERO; 2];
             for shape in &sample.shapes {
                 let coefficient = pressure_pa[shape.dof];
-                pressure = pressure + coefficient.scale(shape.value);
-                derivative = derivative + coefficient.scale(shape.normal_derivative_m_inv);
+                add_scaled(&mut pressure, coefficient, shape.value);
+                add_scaled(&mut derivative, coefficient, shape.normal_derivative_m_inv);
             }
-            let velocity = C64::new(-derivative.im, derivative.re).scale(factor);
-            let intensity = pressure.scale(0.5) * velocity.conj();
-            if !finite(pressure) || !finite(derivative) || !finite(velocity) || !finite(intensity) {
+            let velocity = harmonic_velocity(derivative, factor);
+            let intensity = harmonic_intensity(pressure, velocity);
+            if !finite_parts(pressure) || !finite_parts(derivative)
+                || !finite_parts(velocity) || !finite_parts(intensity) {
                 return Err(invalid("nonfinite harmonic acoustic surface field").into());
             }
-            active = active + Dd::from_f64(intensity.re) * Dd::from_f64(sample.weight_m2);
-            reactive = reactive + Dd::from_f64(intensity.im) * Dd::from_f64(sample.weight_m2);
+            active = active + intensity[0] * Dd::from_f64(sample.weight_m2);
+            reactive = reactive + intensity[1] * Dd::from_f64(sample.weight_m2);
         }
         poll(cancelled)?;
         let power = HarmonicSurfacePower {
@@ -323,19 +325,20 @@ impl HeterogeneousSurfaceProbe<'_, '_, '_> {
         let mut power = Dd::ZERO;
         for sample in &self.samples {
             poll(cancelled)?;
-            let mut pressure = 0.0;
-            let mut derivative = 0.0;
+            let mut pressure = Dd::ZERO;
+            let mut derivative = Dd::ZERO;
             for shape in &sample.shapes {
-                pressure += state.pressure_pa()[shape.dof] * shape.value;
-                derivative +=
-                    state.pressure_potential_pa_s()[shape.dof] * shape.normal_derivative_m_inv;
+                pressure = pressure
+                    + Dd::from_f64(state.pressure_pa()[shape.dof]) * Dd::from_f64(shape.value);
+                derivative = derivative
+                    + Dd::from_f64(state.pressure_potential_pa_s()[shape.dof])
+                        * Dd::from_f64(shape.normal_derivative_m_inv);
             }
-            let velocity = -derivative * sample.inverse_density;
-            if !pressure.is_finite() || !derivative.is_finite() || !velocity.is_finite() {
+            let velocity = -derivative * Dd::from_f64(sample.inverse_density);
+            if !finite_parts([pressure, derivative]) || !finite_parts([velocity, Dd::ZERO]) {
                 return Err(invalid("nonfinite transient acoustic surface field").into());
             }
-            power = power
-                + Dd::from_f64(pressure) * Dd::from_f64(velocity) * Dd::from_f64(sample.weight_m2);
+            power = power + pressure * velocity * Dd::from_f64(sample.weight_m2);
         }
         poll(cancelled)?;
         let power = power.to_f64();
