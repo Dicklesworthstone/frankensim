@@ -47,8 +47,12 @@ pub enum NetworkFieldSection {
     /// A point within an authored cone, including either endpoint. Lossy
     /// cones retain their original spherical-wave subdivision and each
     /// slice's original midpoint material: a probe does not refine the solve.
-    /// Smooth Profile segments still expose their native endpoints only.
     Cone { segment: usize, offset_m: f64 },
+    /// An original Magnus-panel boundary in an authored smooth profile.
+    /// Boundaries run from 0 at the inlet to `steps.0` at the outlet.
+    /// Interior observations retain the original quadrature, material and
+    /// resolution; they do not interpolate within panels or remesh the solve.
+    Profile { segment: usize, boundary: usize },
 }
 
 /// Stable physical edge identity and unambiguous section.
@@ -425,6 +429,13 @@ impl PreparedNetworkFields {
                         let cut = boundaries[segment + 1];
                         (prefix[cut], suffix[cut])
                     }
+                    NetworkFieldSection::Profile { segment, boundary } => {
+                        // Every original profile panel contributes one block.
+                        // Reuse the native cut: no new material samples,
+                        // propagation operators or within-panel model.
+                        let cut = boundaries[segment] + boundary;
+                        (prefix[cut], suffix[cut])
+                    }
                     NetworkFieldSection::Cylinder { segment, offset_m } => {
                         let Segment::Cylinder { radius, length } = edge.duct.segments[segment]
                         else {
@@ -758,6 +769,27 @@ fn resolve_location(
                 .get(segment)
                 .ok_or_else(|| bad("unknown probe segment"))?;
             (segment, s.axial_length(), s.outlet_radius())
+        }
+        NetworkFieldSection::Profile { segment, boundary } => {
+            let Some(Segment::Profile { profile, steps }) = edge.duct.segments.get(segment)
+            else {
+                return Err(bad("profile field probe requires an authored smooth profile"));
+            };
+            steps.validate()?;
+            if boundary > steps.0 {
+                return Err(bad("profile field probe exceeds the original panel count"));
+            }
+            let length = profile.length();
+            let offset = if boundary == 0 {
+                0.0
+            } else if boundary == steps.0 {
+                length
+            } else {
+                // The native Magnus owner integrates from the outlet with
+                // h=-L/N, then reverses its blocks into inlet-to-outlet order.
+                length + (steps.0 - boundary) as f64 * (-length / steps.0 as f64)
+            };
+            (segment, offset, profile.radius(offset)?)
         }
         NetworkFieldSection::Cylinder { segment, offset_m } => {
             let Some(&Segment::Cylinder { radius, length }) = edge.duct.segments.get(segment)

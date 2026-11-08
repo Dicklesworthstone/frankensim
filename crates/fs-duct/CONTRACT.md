@@ -3519,8 +3519,13 @@ original spherical-wave block, retaining its original midpoint constitutive
 coefficients and gas or explicit material slice resolution. Adding probes does
 not refine propagation or resample loss. Native slice boundaries and segment
 endpoints reuse their exact cached cuts. Compact zero-length holes retain two
-distinct states at one axial coordinate; smooth profiles expose their original
-endpoints only. Radius-step sides retain their own areas. Returned volume flow is
+distinct states at one axial coordinate. Smooth profiles additionally expose
+every original Magnus-panel boundary through `Profile { segment, boundary }`,
+indexed from inlet 0 to outlet `steps.0`. These cuts reuse the original
+two-node constitutive quadrature and backward integration grid, with the actual
+profile radius at each location. Their resolution is the authored
+`RiccatiSteps`; no within-panel interpolation or propagation refinement is
+inferred. Radius-step sides retain their own areas. Returned volume flow is
 positive along the edge's from-to orientation, while particle velocity is
 the section mean U/A, not a radial viscothermal velocity profile.
 
@@ -3564,6 +3569,9 @@ compact-hole flow removal, graph/source reindexing, budgets and cancellation.
 Conical regressions cover independent spherical-wave interference and pressure
 nulls, widening/shrinking lossy tapers, explicit material slice counts, the
 uniform-cylinder limit, adjacent slice-boundary probes and geometry refusals.
+Profile regressions in `network/tests/field/profile.rs` cover exponential-horn
+standing-wave refinement, original lossy material panels, coherent finite-window
+observations, exact endpoint cuts, coordinate placement and admission limits.
 They are synthetic numerical/model checks, not experimental duct validation.
 
 ### Native broadband interior-field interference

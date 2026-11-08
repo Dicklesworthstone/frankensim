@@ -2,6 +2,7 @@ use super::*;
 use crate::network::field::*;
 use fs_fft::harmonic_window::HarmonicWindow;
 
+mod profile;
 mod spectrum;
 mod welch;
 
