@@ -14,6 +14,13 @@
 //! wall does not resolve a viscous boundary layer or certify fluid circulation
 //! from the particle-strength inventory alone.
 
+// The same history window/result types serve both native advection owners.
+pub use crate::conservative::{TimeDependentVpmError, TimeDependentVpmRun};
+mod time_dependent;
+/// Changing homogeneous viscosity with chronological wall diffusion and motion.
+pub use time_dependent::simulate_with_cx as simulate_time_dependent_viscous_with_cx;
+
+
 use crate::{
     VelocityKernel, VortexParticle, VpmBudget, VpmError, VpmRun, checked_induced_contribution,
     invalid_scalar, validate_particle,

@@ -727,6 +727,33 @@ scalar integral, exact event segmentation, physical inventory, source retention,
 and atomic refusals. The dependency-free history module also tests difficult
 floating-point time and coefficient ranges directly.
 
+### Changing viscosity at a planar stress-free wall
+
+`planar_wall::simulate_time_dependent_viscous_with_cx` consumes the same
+`PseViscosityHistory` (including a retained material-source binding) on the
+original wall-aware RK4/PSE transaction. Steps end at coefficient knots, the
+requested endpoint and the represented-time ceiling. Each physical diffusion
+half uses its own integrated viscosity before or after image-driven motion.
+Thus changing wall loss changes the strength that actually drives advection;
+a whole-step mean is not substituted for this chronological composition.
+
+The wall remains stationary, flat and stress-free, with zero bulk vorticity
+through the existing odd extension. Signed bulk circulation may leave through
+wall diffusion. Images are not physical particles; no boundary vortex sheet,
+no-slip generation, wall reaction or temperature/density evolution is added.
+The declared coefficient interpolation is exact in exposure, while motion and
+diffusion splitting remain second order and require temporal/spatial refinement.
+
+The original RK4 stage helper and reusable scratch serve both constant and
+changing laws. Planning allocates no timeline, respects the step cap and polls
+every 256 intervals before aggregate admission. Pair work is `8*N*N` per
+step plus `2*N*N` per positive-viscosity half; linear work and payload bytes
+retain the original RK4 formulas. Every refusal preserves whole-window atomic
+publication. Constant histories on the same partition retain native bits and
+resource receipts. `tests/time_dependent_wall_viscosity.rs` compares exact
+self-image decay and second-order travel with independent continuous ODEs,
+checks half-exposure chronology, constant-law parity, knot cuts and refusals.
+
 ### Adaptive coupled motion and diffusion
 
 `conservative::adaptive::simulate_viscous_with_cx` completes an explicit

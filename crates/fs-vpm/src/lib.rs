@@ -946,111 +946,17 @@ fn simulate_impl(
                 wall,
             )?;
         }
-        checked_velocities(
-            &state,
-            kernel,
-            wall,
-            &mut scratch.k1,
-            &mut pair_evaluations,
-            &mut meter,
-            &mut accountant,
-            cx,
-            "fs-vpm.rk4-k1",
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-k1-complete")?;
-
-        checked_displaced(
-            &state,
-            &scratch.k1,
-            0.5 * dt,
-            wall,
-            &mut scratch.s2,
-            &mut meter,
-            &mut accountant,
-            cx,
-            "fs-vpm.rk4-s2",
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-s2-complete")?;
-        checked_velocities(
-            &scratch.s2,
-            kernel,
-            wall,
-            &mut scratch.k2,
-            &mut pair_evaluations,
-            &mut meter,
-            &mut accountant,
-            cx,
-            "fs-vpm.rk4-k2",
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-k2-complete")?;
-
-        checked_displaced(
-            &state,
-            &scratch.k2,
-            0.5 * dt,
-            wall,
-            &mut scratch.s3,
-            &mut meter,
-            &mut accountant,
-            cx,
-            "fs-vpm.rk4-s3",
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-s3-complete")?;
-        checked_velocities(
-            &scratch.s3,
-            kernel,
-            wall,
-            &mut scratch.k3,
-            &mut pair_evaluations,
-            &mut meter,
-            &mut accountant,
-            cx,
-            "fs-vpm.rk4-k3",
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-k3-complete")?;
-
-        checked_displaced(
-            &state,
-            &scratch.k3,
+        checked_rk4_step(
+            &mut state,
             dt,
-            wall,
-            &mut scratch.s4,
-            &mut meter,
-            &mut accountant,
-            cx,
-            "fs-vpm.rk4-s4",
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-s4-complete")?;
-        checked_velocities(
-            &scratch.s4,
             kernel,
             wall,
-            &mut scratch.k4,
+            &mut scratch,
             &mut pair_evaluations,
             &mut meter,
             &mut accountant,
             cx,
-            "fs-vpm.rk4-k4",
         )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-k4-complete")?;
-
-        checked_combined(
-            &state,
-            dt,
-            wall,
-            &scratch.k1,
-            &scratch.k2,
-            &scratch.k3,
-            &scratch.k4,
-            &mut scratch.next,
-            &mut meter,
-            &mut accountant,
-            cx,
-        )?;
-        meter.boundary(&mut accountant, cx, "fs-vpm.rk4-combine-complete")?;
-        meter.unit(&mut accountant, cx, "fs-vpm.step-commit", || Ok(()))?;
-        core::mem::swap(&mut state, &mut scratch.next);
-        scratch.next.clear();
         if let Some((areas, law)) = active_diffusion {
             diffusion::boundary_sweep(
                 &mut state,
@@ -1091,6 +997,128 @@ fn simulate_impl(
         peak_live_bytes: plan.peak_live_bytes,
         budget: consumption,
     })
+}
+
+// One original checked RK4 step, shared by constant and time-dependent
+// diffusion compositions. Keep stage order, arithmetic and checkpoints intact.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn checked_rk4_step(
+    state: &mut Vec<VortexParticle>,
+    dt: f64,
+    kernel: VelocityKernel,
+    wall: Option<planar_wall::PlanarWall2>,
+    scratch: &mut RkScratch,
+    pair_evaluations: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+) -> Result<(), VpmError> {
+    checked_velocities(
+        state,
+        kernel,
+        wall,
+        &mut scratch.k1,
+        pair_evaluations,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-k1",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-k1-complete")?;
+
+    checked_displaced(
+        state,
+        &scratch.k1,
+        0.5 * dt,
+        wall,
+        &mut scratch.s2,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-s2",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-s2-complete")?;
+    checked_velocities(
+        &scratch.s2,
+        kernel,
+        wall,
+        &mut scratch.k2,
+        pair_evaluations,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-k2",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-k2-complete")?;
+
+    checked_displaced(
+        state,
+        &scratch.k2,
+        0.5 * dt,
+        wall,
+        &mut scratch.s3,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-s3",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-s3-complete")?;
+    checked_velocities(
+        &scratch.s3,
+        kernel,
+        wall,
+        &mut scratch.k3,
+        pair_evaluations,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-k3",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-k3-complete")?;
+
+    checked_displaced(
+        state,
+        &scratch.k3,
+        dt,
+        wall,
+        &mut scratch.s4,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-s4",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-s4-complete")?;
+    checked_velocities(
+        &scratch.s4,
+        kernel,
+        wall,
+        &mut scratch.k4,
+        pair_evaluations,
+        meter,
+        accountant,
+        cx,
+        "fs-vpm.rk4-k4",
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-k4-complete")?;
+
+    checked_combined(
+        state,
+        dt,
+        wall,
+        &scratch.k1,
+        &scratch.k2,
+        &scratch.k3,
+        &scratch.k4,
+        &mut scratch.next,
+        meter,
+        accountant,
+        cx,
+    )?;
+    meter.boundary(accountant, cx, "fs-vpm.rk4-combine-complete")?;
+    meter.unit(accountant, cx, "fs-vpm.step-commit", || Ok(()))?;
+    core::mem::swap(state, &mut scratch.next);
+    scratch.next.clear();
+    Ok(())
 }
 
 /// The total circulation `Σ Γᵢ` (a conserved invariant).
