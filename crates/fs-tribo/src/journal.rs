@@ -18,6 +18,9 @@
 use crate::{TriboError, positive_finite};
 use fs_math::det;
 
+/// Explicit curved-wall slip and separate liquid/interface dissipation.
+pub mod slip;
+
 /// Explicit storage and evaluation bound on a source viscosity line.
 pub const MAX_JOURNAL_VISCOSITY_KNOTS: usize = 256;
 

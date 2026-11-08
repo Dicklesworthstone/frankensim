@@ -1185,6 +1185,29 @@ separate radial quadrature, and retain the nearly constant limit. A bounded
 solve regression spans broad source support down to the zero-shear plateau.
 Nonmonotone stress, unsupported shear and exhausted solve budgets are refused.
 
+`journal::slip::NavierSlipJournal` binds explicit nonnegative slip lengths to
+the original source-line journal. The curved-wall boundary law uses the
+physical shear `du_theta/dr-u_theta/r`: each interfacial angular-speed drop is
+`b*gamma_wall/r_wall`. Both wall shear rates and their stress derivatives come
+from the same source viscosity line, so a wall's mobility is `b/mu(gamma_wall)`
+rather than a frozen apparent viscosity. The stress root retains the analytic
+bulk integral, adds both interface drops and their exact one-sided tangents,
+and preserves the original bracket and source-rate limits. Constant viscosity
+has a direct finite-gap solution; zero slip retains the original response.
+Evaluation allocates nothing.
+
+The response separates bulk viscous dissipation from the inner and outer
+interface losses, returns fluid-minus-wall slip velocities, and carries the
+heat-sum defect against the same torque/angular-velocity work. Interface heat
+partition and time integration belong to the coupled owner; the total torque
+power must not also be deposited as bulk heat. Common solid-body rotation
+does not generate shear. Independent tests recover Newtonian torque and all
+three heat integrals, nonlinear power-law Couette flow, a thinning line with
+source knots inside the gap against radial volume quadrature, and the
+representable thin-gap limit. Unsupported rates and invalid slip data refuse.
+This extension does not infer slip lengths, thermal wall models, yield stress,
+pressure-supported load, inertia, cavitation or turbulent transitions.
+
 ## Quasistatic Reynolds film
 
 `resistive_film` owns the solver-independent incompressible thin-film pressure
