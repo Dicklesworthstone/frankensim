@@ -7,24 +7,51 @@ use super::*;
 /// All circuit consumers use the same branch-count, geometry and scale gates.
 pub(crate) fn lower_resistors(
     graph: &CircuitGraph,
-    mut sources: Vec<MaterialResistor>,
+    sources: Vec<MaterialResistor>,
 ) -> Result<(CircuitGraph, Vec<MaterialResistor>), MaterialCircuitError> {
+    lower_resistors_with_field_inductors(graph, sources, &[])
+}
+
+/// Native field terminals retain their original inductor slots without stamping
+/// a second physical inductance. All other source and storage admission is the
+/// same as for the original material circuit.
+pub(crate) fn lower_resistors_with_field_inductors(
+    graph: &CircuitGraph,
+    sources: Vec<MaterialResistor>,
+    field_inductors: &[usize],
+) -> Result<(CircuitGraph, Vec<MaterialResistor>), MaterialCircuitError> {
+    admit_graph_with_field_inductors(graph, field_inductors)?;
+    let sources = admit_resistor_sources(graph, sources)?;
+    let mut lowered = graph.clone();
+    for source in &sources {
+        lowered.branches[source.branch].2 = Branch::Resistor {
+            ohms: source.conductor.resistance_ohm(),
+        };
+    }
+    Ok((lowered, sources))
+}
+
+// Shared source correspondence for lowering and harmonic branch-work recovery.
+// This neither assigns storage ownership nor changes unrelated graph branches.
+pub(super) fn admit_resistor_sources(
+    graph: &CircuitGraph,
+    mut sources: Vec<MaterialResistor>,
+) -> Result<Vec<MaterialResistor>, MaterialCircuitError> {
     use MaterialCircuitError::Invalid;
-    let count = admit_graph(graph)?;
+    let count = admit_graph_shape(graph)?;
     if sources.len() != count {
         return Err(Invalid(
             "every resistor requires exactly one material binding",
         ));
     }
     sources.sort_by_key(|source| source.branch);
-    let mut lowered = graph.clone();
     for (index, source) in sources.iter().enumerate() {
         if index > 0 && sources[index - 1].branch == source.branch {
             return Err(Invalid("duplicate resistor binding"));
         }
-        let branch = lowered
+        let branch = graph
             .branches
-            .get_mut(source.branch)
+            .get(source.branch)
             .ok_or(Invalid("material branch index out of range"))?;
         if !matches!(branch.2, Branch::Resistor { .. }) {
             return Err(Invalid("material binding does not name a resistor"));
@@ -33,10 +60,12 @@ pub(crate) fn lower_resistors(
         if !positive(resistance) || !positive(1.0 / resistance) {
             return Err(Invalid("resistor conductance is unrepresentable"));
         }
-        branch.2 = Branch::Resistor { ohms: resistance };
     }
-    Ok((lowered, sources))
+    Ok(sources)
 }
+
+#[cfg(test)]
+mod tests;
 
 /// Independently evaluate original material/contact power at native midpoint
 /// node efforts. Whole-circuit storage and other loss channels are checked by

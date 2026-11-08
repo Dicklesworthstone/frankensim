@@ -1,4 +1,6 @@
 //! Real material and circuit owners; synthetic coefficients, not measured fits.
+mod harmonic;
+
 use fs_couple::material_circuit::*;
 use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, ResolvedConductor, resolve_uniform_conductor};
 use fs_material::state_point::MaterialPropertySelection;

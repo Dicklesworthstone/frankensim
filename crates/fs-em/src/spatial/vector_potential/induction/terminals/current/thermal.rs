@@ -1,5 +1,8 @@
 //! Source-temperature AC refresh of original physical current electrodes.
 
+mod circuit;
+pub use circuit::SpatialHarmonicCurrentMaterialFrequency;
+
 use super::{
     ResolvedConductorState, Result, SpatialConductorMaterial, SpatialCurrentInduction,
     SpatialMagneticMaterial, WeightedAssemblyLimits, poll,

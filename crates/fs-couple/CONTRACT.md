@@ -7944,3 +7944,22 @@ normal-flow geometry remain with the original observer/callback. Thermal and
 isothermal Tet4 impact/surface/scene adapters preserve complete inelastic memory
 through zero-duration events; Hex8 support is unchanged. These extensions infer
 no impact-heat partition, distorted-tet Fourier law, remeshing, damage or rupture.
+
+## Source-owned material-resistor heat from native AC phasors
+
+`material_circuit::harmonic::account_harmonic_resistor_heat` retains actual peak
+complex branch efforts and original resistor source/geometry. Mean heat comes
+from the original conductor kernels applied to both quadratures with the peak
+factor one half. Complete unique branch/source correspondence, source-owned
+current, real/reactive work and summed native resistor loss are independently
+checked. Original storage/source branches and canceled field reference
+terminations create no resistor heat. Instantaneous E/J-, frequency- or
+rate-dependent sources refuse, including applicability-only restrictions;
+resolved static temperature-dependent resistance remains supported.
+
+Field-aware source lowering skips numeric inductance checks only at explicitly
+named, unique native field-owned inductor slots. It never stamps substitute
+storage. Ordinary material circuits retain all physical L/C checks and existing
+bounded graph capacities. Focused regression definitions cover source/phase
+orientation, peak scaling, original branch ordering, placeholder ownership,
+source-domain refusal, inconsistent receipts and cancellation.

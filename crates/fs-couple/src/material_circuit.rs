@@ -16,6 +16,8 @@ pub mod motion;
 pub mod conductivity;
 /// Source-bound electrical contacts in series with original bulk branches.
 pub mod contacts;
+/// Source-bound cycle-mean resistor heat from actual native AC branch phasors.
+pub mod harmonic;
 /// Source-derived piezoelectric motion on the same Kirchhoff storage solver.
 pub mod piezoelectric;
 /// Reciprocal biased magnetostrictive motion inside the native RLC descriptor.
@@ -33,7 +35,7 @@ pub mod capacitance;
 pub mod inductance;
 use contacts::{SeriesElectricalContact, ContactHeat};
 mod resistors;
-pub(crate) use resistors::{account_resistor_heat, lower_resistors};
+pub(crate) use resistors::{account_resistor_heat, lower_resistors, lower_resistors_with_field_inductors};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
 use fs_phs::circuit::{
@@ -201,6 +203,51 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), MaterialCircuitError
 /// Shared bounded graph/storage admission for lumped and spatial conductors.
 /// Returns resistor count; the native circuit owner still admits all topology.
 pub(crate) fn admit_graph(graph: &CircuitGraph) -> Result<usize, MaterialCircuitError> {
+    admit_graph_with_field_inductors(graph, &[])
+}
+
+/// Original field terminals occupy distinct inductor slots whose numeric L is
+/// replaced by the native field owner. Every other storage coefficient remains
+/// physical and passes ordinary material-circuit admission.
+pub(crate) fn admit_graph_with_field_inductors(
+    graph: &CircuitGraph, field_inductors: &[usize],
+) -> Result<usize, MaterialCircuitError> {
+    use MaterialCircuitError::Invalid;
+    let resistor_count = admit_graph_shape(graph)?;
+    if field_inductors.len() > graph.branches.len() {
+        return Err(Invalid("field inductor bindings exceed the original graph"));
+    }
+    let mut field_owned = [false; MAX_MATERIAL_CIRCUIT_BRANCHES];
+    for &index in field_inductors {
+        if !matches!(graph.branches.get(index), Some((_, _, Branch::Inductor { .. }))) {
+            return Err(Invalid("field binding must name an original inductor branch"));
+        }
+        if field_owned[index] {
+            return Err(Invalid("duplicate field inductor binding"));
+        }
+        field_owned[index] = true;
+    }
+    for (index, &(_, _, branch)) in graph.branches.iter().enumerate() {
+        match branch {
+            Branch::Inductor { henries } if !field_owned[index] => {
+                if !positive(henries) || !positive(1.0/henries) {
+                    return Err(Invalid("unrepresentable inductive storage"));
+                }
+            }
+            Branch::Capacitor { farads } => {
+                if !positive(farads) || !positive(1.0/farads) {
+                    return Err(Invalid("unrepresentable capacitive storage"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(resistor_count)
+}
+
+// Bounded original topology only. Branch-effort heat accounting has no storage
+// ownership and must not reinterpret native field placeholders as physical L.
+fn admit_graph_shape(graph: &CircuitGraph) -> Result<usize, MaterialCircuitError> {
     use MaterialCircuitError::Invalid;
     if graph.node_count > MAX_MATERIAL_CIRCUIT_NODES
         || graph.branches.len() > MAX_MATERIAL_CIRCUIT_BRANCHES
@@ -214,14 +261,8 @@ pub(crate) fn admit_graph(graph: &CircuitGraph) -> Result<usize, MaterialCircuit
         // shunt loss (including the legacy owner's resistor self-loop case).
         if a == b { return Err(Invalid("circuit branches require distinct terminals")); }
         match branch {
-            Branch::Inductor { henries } => {
-                if !positive(henries) || !positive(1.0/henries) { return Err(Invalid("unrepresentable inductive storage")); }
-                n_l += 1;
-            }
-            Branch::Capacitor { farads } => {
-                if !positive(farads) || !positive(1.0/farads) { return Err(Invalid("unrepresentable capacitive storage")); }
-                n_c += 1;
-            }
+            Branch::Inductor { .. } => n_l += 1,
+            Branch::Capacitor { .. } => n_c += 1,
             Branch::Resistor { .. } => n_r += 1,
             Branch::VoltageSource { port } | Branch::CurrentSource { port } => {
                 if port >= MAX_PORTS { return Err(Invalid("circuit source port exceeds capacity")); }

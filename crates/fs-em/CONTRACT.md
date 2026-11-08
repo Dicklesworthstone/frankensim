@@ -7497,3 +7497,17 @@ permeability and slow-thermal restrictions as isolated AC heating. Their focused
 regression definitions compare independent current/voltage diffusion and source
 work at the accepted temperature, coherent Joule heat, common-mode invariance
 and transactional material/thermal refusal.
+
+### Loaded AC views of source-temperature electrode trials
+
+`SpatialHarmonicCurrentMaterialTrial::prepare_harmonic_frequency` exposes the
+original affine electrode/circuit response at the admitted material temperature.
+Its restricted frequency view retains native port probes, impressed excitation,
+cochains and original diagnostics without exposing a refreshed transient owner.
+Preparation reports the actual field-trial count; each current/circuit recovery
+adds one native solve even when the cached seed already satisfies the residual.
+`HarmonicCircuitResponse::map_field` moves the complete circuit receipt alongside
+an owned field observation without cloning network vectors or recomputing work.
+Existing field/circuit material, topology, residual, storage and cancellation
+admissions remain authoritative. A harmonic trial does not supply transient
+magnetic parameter work or advance accepted history.

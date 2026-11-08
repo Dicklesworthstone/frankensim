@@ -176,6 +176,37 @@ pub struct HarmonicCircuitResponse<F = HarmonicWindingResponse> {
     pub maximum_kirchhoff_current_defect_a: f64,
 }
 
+impl<F> HarmonicCircuitResponse<F> {
+    /// Consume the field payload while retaining the complete original circuit
+    /// receipt. Coupled consumers can retain owned heat/force observations after
+    /// a borrowed material trial ends, without cloning circuit vectors or
+    /// reconstructing branch, source, transformer or power diagnostics.
+    pub fn map_field<G>(self, map: impl FnOnce(F) -> G) -> HarmonicCircuitResponse<G> {
+        HarmonicCircuitResponse {
+            field: map(self.field),
+            node_voltages_v: self.node_voltages_v,
+            branches: self.branches,
+            sources: self.sources,
+            transformers: self.transformers,
+            source_outputs: self.source_outputs,
+            mean_network_stored_energy_j: self.mean_network_stored_energy_j,
+            mean_resistor_power_w: self.mean_resistor_power_w,
+            mean_field_power_w: self.mean_field_power_w,
+            mean_field_mechanical_power_w: self.mean_field_mechanical_power_w,
+            circuit_supplied_power_va: self.circuit_supplied_power_va,
+            impressed_supplied_power_va: self.impressed_supplied_power_va,
+            supplied_power_va: self.supplied_power_va,
+            absorbed_power_va: self.absorbed_power_va,
+            power_residual_va: self.power_residual_va,
+            relative_terminal_residual: self.relative_terminal_residual,
+            relative_network_residual: self.relative_network_residual,
+            maximum_terminal_voltage_defect_v: self.maximum_terminal_voltage_defect_v,
+            maximum_terminal_current_defect_a: self.maximum_terminal_current_defect_a,
+            maximum_kirchhoff_current_defect_a: self.maximum_kirchhoff_current_defect_a,
+        }
+    }
+}
+
 /// Physical field diagnostics consumed by the shared original-circuit replay.
 /// These come from the accepted field response, never from a circuit residual.
 pub(crate) trait HarmonicCircuitField {
