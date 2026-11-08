@@ -1,8 +1,9 @@
 //! Causal integer-rate observation, never a force filter or a material law.
 //! The Euler-film resampler requires a complete horizon and reflected edges;
 //! this streaming image instead starts from rest and retains explicit latency.
-//! Blackman-Harris windowed sinc; power-of-two rates use sparse half-band
-//! cascades. Other integer ratios use a direct polyphase output evaluation.
+//! Blackman-Harris windowed sinc; composite ratios use a minimum-work cascade
+//! of sparse half-bands and short polyphase stages. The final stage owns the
+//! narrow audio transition; intermediate stages reject only their foldover.
 //! Passband is 0..0.45 of OUTPUT rate. For half-bands, rejection is specified
 //! at 0.55 output rate and above (foldover into the retained passband), not
 //! in the transition around Nyquist. No future samples or delay compensation.
@@ -169,14 +170,41 @@ impl Decimator {
         if !(1..=16).contains(&ratio) || !(1..=128).contains(&channels) {
             return Err("decimator needs 1..16 mechanics frames and 1..128 channels");
         }
+        // Minimize paired convolution work over every integer factorization.
+        // The search is cold, bounded by the supported ratio, and independent
+        // of signal/channel count. A nonfinal stage sees at least twice the
+        // audio clock: half=8*factor keeps its passband and first folded image
+        // outside the four-term window's main lobe. Only the final stage needs
+        // half=80*factor (or 80 for a sparse half-band) at the audio edge.
+        let mut work = [0; 17];
+        let mut factors = [0; 17];
+        for rate in 2..=ratio {
+            work[rate] = if rate == 2 { 41 } else { 80 * rate + 1 };
+            factors[rate] = rate;
+            for factor in 2..rate {
+                if rate % factor != 0 { continue; }
+                let tail = rate / factor;
+                let stage_work = if factor == 2 { 9 } else { 8 * factor + 1 };
+                let candidate = tail * stage_work + work[tail];
+                if candidate < work[rate] {
+                    work[rate] = candidate;
+                    factors[rate] = factor;
+                }
+            }
+        }
         let mut stages = Vec::new();
         let mut buffers = vec![vec![0.0; ratio * channels]];
         let mut remaining = ratio;
         let mut delay = 0.0;
         while remaining > 1 {
-            let (factor, half, halfband) = if ratio.is_power_of_two() {
-                (2, if remaining == 2 { 80 } else { 16 }, true)
-            } else { (remaining, 80 * remaining, false) };
+            let factor = factors[remaining];
+            let halfband = factor == 2;
+            let half = match (halfband, factor == remaining) {
+                (true, true) => 80,
+                (true, false) => 16,
+                (false, true) => 80 * factor,
+                (false, false) => 8 * factor,
+            };
             delay += half as f64 / remaining as f64;
             stages.push(Stage::new(factor, channels, half, halfband));
             remaining /= factor;
@@ -325,7 +353,9 @@ mod tests {
     }
     #[test]
     fn unity_gain_delay_and_bypass_are_explicit() {
-        for (ratio, delay) in [(1,0.0),(2,40.0),(4,44.0),(8,46.0),(16,47.0),(3,80.0)] {
+        for (ratio, delay) in [(1,0.0),(2,40.0),(4,44.0),(8,46.0),(16,47.0),(3,80.0),
+            (6,44.0),(9,80.0+8.0/3.0),(10,44.0),(12,44.0),
+            (14,44.0),(15,80.0+8.0/3.0)] {
             let mut d=Decimator::new(ratio,1).unwrap(); assert_eq!(d.delay_output_frames(),delay);
             for frame in 0..400 {
                 let y=d.preview(&vec![1.0;ratio]).unwrap()[0]; d.commit();
@@ -334,6 +364,65 @@ mod tests {
         }
         assert!(Decimator::new(0,1).is_err()); assert!(Decimator::new(4,129).is_err());
     }
+    #[test]
+    fn composite_rates_reduce_work_without_rescaling_multichannel_observations() {
+        // A direct ratio-r kernel costs (80*r+1) paired multiplies. Keep a
+        // real work bound: the savings make higher mechanics clocks usable
+        // when nonlinear contact/wind harmonics require extra resolution.
+        for (ratio, maximum) in [(6, 91), (9, 316), (10, 123), (12, 139), (14, 155), (15, 364)] {
+            for channels in [1, 3, 128] {
+                let d = Decimator::new(ratio, channels).unwrap();
+                let old_work = (80 * ratio + 1) * channels;
+                let work = d.multiplies_per_output_frame();
+                assert!(work <= maximum * channels, "ratio {ratio}: {work}");
+                assert!(work * 5 < old_work * 3, "ratio {ratio}: {work} vs {old_work}");
+                assert_eq!(d.input_frames(), ratio);
+                let differentiated = Decimator::new_differentiating(ratio, channels, 48_000).unwrap();
+                // Differentiation remains at the final clock; it must not
+                // erase the savings by filtering every mechanics sample.
+                let derivative_work = if ratio % 2 == 0 { 56 } else { 16 };
+                assert!(differentiated.multiplies_per_output_frame() <= (maximum + derivative_work) * channels);
+            }
+        }
+    }
+
+    #[test]
+    fn composite_rate_stream_preserves_harmonic_phase_and_rejects_foldover() {
+        let audio_rate = 48_000.0;
+        for ratio in [6, 9, 10, 12, 14, 15] {
+            for differentiating in [false, true] {
+                let mut d = if differentiating {
+                    Decimator::new_differentiating(ratio, 1, audio_rate as u32).unwrap()
+                } else { Decimator::new(ratio, 1).unwrap() };
+                let delay = d.delay_output_frames();
+                let mut block = vec![0.0; ratio];
+                for frame in 0..1024 {
+                    for (sub, value) in block.iter_mut().enumerate() {
+                        let t = (frame * ratio + sub) as f64 / ratio as f64;
+                        // Coherent low/high harmonics plus two unresolved
+                        // harmonics whose aliases would enter the audio band.
+                        *value = (2.0 * PI * 0.03125 * t).sin()
+                            + 0.25 * (2.0 * PI * 0.375 * t).cos()
+                            + 0.25 * (2.0 * PI * 1.125 * t).sin()
+                            + 0.125 * (2.0 * PI * (0.5 * ratio as f64 - 0.125) * t).cos();
+                    }
+                    let observed = d.preview(&block).unwrap()[0];
+                    d.commit();
+                    if frame < 220 { continue; } // finite causal startup
+                    let t = (frame + 1) as f64 - 1.0 / ratio as f64 - delay;
+                    let low = 2.0 * PI * 0.03125 * t;
+                    let high = 2.0 * PI * 0.375 * t;
+                    let (observed, expected) = if differentiating {
+                        (observed / audio_rate,
+                            2.0 * PI * 0.03125 * low.cos() - 0.25 * 2.0 * PI * 0.375 * high.sin())
+                    } else { (observed, low.sin() + 0.25 * high.cos()) };
+                    assert!((observed - expected).abs() < 0.0001,
+                        "ratio {ratio}, derivative {differentiating}, frame {frame}: {observed} vs {expected}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn filter_rejects_foldover_into_the_retained_audio_band() {
         for ratio in 2..=16 {
@@ -400,7 +489,7 @@ mod tests {
             for rate in [8_000, 48_000, 192_000] {
                 let mut d = Decimator::new_differentiating(ratio, 2, rate).unwrap();
                 let base = Decimator::new(ratio, 2).unwrap().delay_output_frames();
-                let factor = if ratio.is_power_of_two() && ratio>1 { 2 } else { ratio };
+                let factor = if ratio % 2 == 0 { 2 } else if ratio == 9 || ratio == 15 { 3 } else { ratio };
                 let extra = if ratio==1 { 48.0 } else { 16.0/factor as f64 };
                 assert_eq!(d.delay_output_frames(), base+extra);
                 for frame in 0..240 {
