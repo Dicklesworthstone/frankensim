@@ -2990,6 +2990,7 @@ dependencies = [
  "fs-ivl",
  "fs-la",
  "fs-math",
+ "fs-phs",
  "fs-solver",
  "fs-vvreg",
  "fsci-integrate",

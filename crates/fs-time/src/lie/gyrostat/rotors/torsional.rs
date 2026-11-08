@@ -6,6 +6,13 @@ use super::{
 };
 use fs_ga::Vec3;
 
+#[path = "torsional/exponential.rs"]
+mod exponential;
+pub use exponential::{
+    ExponentialTorsionalRotorStep, ExponentialTorsionalRotorStepper,
+    MAX_EXPONENTIAL_TORSIONAL_ROTORS, TorsionalExponentialError,
+};
+
 /// Prepared rotor/carrier springs, held drive and passive relative-shaft drag.
 ///
 /// Each potential is `K_i*(q_i-q_rest_i)^2/2` on the existing UNWRAPPED

@@ -26,7 +26,11 @@ pub use viscous::{
 
 #[path = "rotors/torsional.rs"]
 mod torsional;
-pub use torsional::{TorsionalRotorStep, TorsionalRotorStepper};
+pub use torsional::{
+    ExponentialTorsionalRotorStep, ExponentialTorsionalRotorStepper,
+    MAX_EXPONENTIAL_TORSIONAL_ROTORS, TorsionalExponentialError, TorsionalRotorStep,
+    TorsionalRotorStepper,
+};
 
 #[path = "rotors/torsional_network.rs"]
 mod torsional_network;

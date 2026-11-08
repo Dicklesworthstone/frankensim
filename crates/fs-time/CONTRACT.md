@@ -319,6 +319,27 @@ where claimed below.
   symplecticity, moving gimbals, variable stiffness/rest phase or parametric
   preload work is claimed. Full Cargo remains unavailable with missing
   constellation siblings.
+- `RotorBank::torsional_exponential_stepper` retains complete canonical
+  spring/shaft/carrier dynamics through the existing `fs-phs` exact ZOH and
+  positive-heat owners. Full inertia recoil, nonorthogonal shafts, zero spring
+  or loss directions and simultaneous body/space torque remain explicit.
+  Held-drive-relative spring coordinates preserve force-supported equilibrium
+  without fictitious motion or heat. Cached shaft stages use bounded dense maps
+  without warm allocation, factorization or exponentials. Original integrated
+  impulse laws, actual phase increments and local work checks remain
+  authoritative. Spring-bearing preparation admits at most 12 original rotors
+  (27 states, 110 augmented rows); all-zero stiffness delegates exactly to the
+  existing 64-rotor exponential viscous path. Cancellation/refusal publishes no
+  partial state and permits retry. Physical drive/external work, aggregate
+  physical heat, original elastic storage and native gyrostat drift defect
+  remain separate. Frozen-attitude shaft subflows are exact; the complete
+  gyrostat composition remains second order. Seven new checks cover analytic
+  under/critical/overdamping and independent heat, stiff undamped oscillations,
+  coupled zero-loss/zero-spring channels, supported equilibrium, covariance,
+  refusal/retry and original-frame Euler/work/heat refinement. All 24 existing
+  torsional, viscous, exponential-viscous and rotor-bank groups also pass.
+  Native dense admission can refuse unresolved dynamics; no arbitrary-step
+  accuracy, full Cargo/DSR gate or experimental validation is claimed.
 - `RotorBank::torsional_network_stepper(couplings, duration)` adds finite
   elastic/viscous transmission BETWEEN distinct original rotor shafts.
   Each authored port has strain `x=q_first-ratio*q_second-rest`, potential
