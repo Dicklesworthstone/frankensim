@@ -2569,6 +2569,7 @@ dependencies = [
  "fs-alloc",
  "fs-blake3",
  "fs-conduction",
+ "fs-em",
  "fs-evidence",
  "fs-exec",
  "fs-fft",

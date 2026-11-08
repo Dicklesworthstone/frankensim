@@ -15,6 +15,7 @@ fs-ad = { path = "../fs-ad", optional = true }
 fs-alloc = { path = "../fs-alloc", optional = true }
 fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-conduction = { path = "../fs-conduction", optional = true }
+fs-em = { path = "../fs-em", optional = true, features = ["plane-wave"] }
 fs-evidence = { path = "../fs-evidence", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
 fs-fft = { path = "../fs-fft", optional = true }
@@ -71,6 +72,8 @@ photometry = ["tracer", "volumes", "dep:fs-ivl"]
 material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conduction", "dep:fs-qty", "dep:fs-thermochem"]
 # Fixed SI incident-beam absorption coupled to the original enthalpy timeline.
 optical-heating = ["tracer", "volumes", "dep:fs-thermal"]
+# Reciprocal polarized thermal emission from original absorbing crystal films.
+crystal-emission = ["tracer", "dep:fs-em", "dep:fs-material", "dep:fs-qty"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.
 material-geometry = ["chart-backends", "dep:fs-mbd-material", "dep:fs-solid"]
 # Original detached-liquid fill snapshots through the shared isosurface owner.

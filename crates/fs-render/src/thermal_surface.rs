@@ -65,6 +65,13 @@ pub mod diffuse_exchange;
 mod coating_emission;
 pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingThermalEmission};
 
+#[cfg(feature = "crystal-emission")]
+mod crystal_emission;
+#[cfg(feature = "crystal-emission")]
+pub use crystal_emission::{
+    CrystalEmissionError, PreparedUniaxialSlabEmission, UniaxialSlabThermalEmission,
+};
+
 mod coating_exchange;
 pub use coating_exchange::{
     CoatingExchangeBudget, CoatingExchangeError, CoatingExchangeQuadrature, CoatingExchangeRates,
