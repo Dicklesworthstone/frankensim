@@ -15,6 +15,9 @@ mod one_sided;
 #[path = "plane_wave_plasma/depth_heat.rs"]
 mod depth_heat;
 
+#[path = "plane_wave_plasma/dispersion.rs"]
+mod dispersion;
+
 use fs_em::plane_wave::{
     DielectricResponse, IonizedGasWaveResponse, PlanarDielectricInterface, Polarization,
     ReflectionError,

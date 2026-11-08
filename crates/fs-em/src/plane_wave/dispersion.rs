@@ -64,12 +64,14 @@ pub struct BulkPropagation {
 impl<'a> DielectricResponse<'a> {
     /// Prepare phase, group and second-order dispersion at a positive angular
     /// frequency [rad/s], using the original passive nondispersive, Debye,
-    /// Lorentz, Ohmic and original finite-band optical laws. Source/material
-    /// semantics match native interfaces. Optical derivatives retain Cauchy,
-    /// Sellmeier, linear wavelength tables or the original IAPWS water law;
-    /// endpoints and nonsmooth source knots refuse. Frequency-prepared gas/plasma
-    /// sources refuse until their derivative owner is supplied; a monochromatic
-    /// value is never treated as a constant law.
+    /// Lorentz, Ohmic, collisional plasma and finite-band optical laws.
+    /// Source/material semantics match native interfaces. Plasma derivatives
+    /// retain the original frozen carrier spectrum, including mutual drag;
+    /// the cached native frequency and response must already be admitted.
+    /// Optical derivatives retain Cauchy, Sellmeier, linear wavelength tables
+    /// or the original IAPWS water law; endpoints and nonsmooth knots refuse.
+    /// Frequency-prepared molecular gas sources refuse until their derivative
+    /// owner is supplied; a monochromatic value is never treated as a constant law.
     pub fn bulk_dispersion(self, omega_rad_s: f64) -> Result<BulkWaveDispersion<'a>> {
         let omega = positive(omega_rad_s)?;
         let optical = match self {
@@ -307,6 +309,16 @@ fn derivatives(
 ) -> Result<([C64; 2], [f64; 2])> {
     let mut sum = DerivativeSum::default();
     let (debye, lorentz, conductivity) = match source {
+        DielectricResponse::IonizedGas(response) => {
+            // bulk_dispersion already admits the original cached frequency and
+            // native value. Differentiate the retained coupled carrier modes.
+            let jet = response.transport()
+                .permittivity_frequency_derivatives(omega, || false)?;
+            return Ok((
+                jet.scaled_permittivity_derivatives_f_m,
+                jet.permittivity_loss_moments_f_m,
+            ));
+        }
         DielectricResponse::Lossless(_) => (None, None, 0.0),
         DielectricResponse::Debye(model) => (Some(model), None, 0.0),
         DielectricResponse::Lorentz(model) => (None, Some(model), 0.0),

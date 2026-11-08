@@ -16,6 +16,9 @@
 //! supplies kinetic/nonlocal response, transient initial conditions, dielectric
 //! background, a wave solve or measured broadband qualification.
 
+mod frequency;
+pub use frequency::IonizedGasFrequencyDerivatives;
+
 mod magnetized;
 pub use magnetized::{
     IonizedGasMagneticLimits, IonizedGasMagnetizedHarmonic, IonizedGasMagnetizedHarmonicResponse,

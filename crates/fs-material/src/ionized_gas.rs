@@ -38,7 +38,8 @@ mod refresh;
 mod relaxation;
 mod sources;
 pub use harmonic::{
-    IonizedGasHarmonic, IonizedGasHarmonicResponse, IonizedGasMagneticLimits,
+    IonizedGasFrequencyDerivatives, IonizedGasHarmonic, IonizedGasHarmonicResponse,
+    IonizedGasMagneticLimits,
     IonizedGasMagnetizedHarmonic, IonizedGasMagnetizedHarmonicResponse,
 };
 pub use refresh::IonizedGasRefreshError;
