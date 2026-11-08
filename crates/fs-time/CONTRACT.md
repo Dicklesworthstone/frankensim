@@ -269,6 +269,25 @@ where claimed below.
   refusals and a reproduced large-carrier work-loss counterexample. They and
   the seven existing rotor-bank groups pass; the full Cargo target remains
   unexecuted where the constellation runtime dependency closure is absent.
+- `RotorBank::viscous_exponential_stepper` prepares stiff relative-shaft
+  damping with the complete carrier/shaft mobility, nonorthogonal axes and
+  full inertia recoil. Only positive-damping channels enter the native
+  Cholesky/eigensolve preparation; undamped shaft drives retain their original
+  impulses and carrier forcing. No damping inverse, clipping or independent
+  shaft approximation is used. The existing scalar exponential response
+  integrates shaft phases, individual drive work and nonnegative aggregate
+  slip heat. Original mobility constraints determine continuous external
+  carrier work; heat is not allocated to individual shafts. The existing
+  64-rotor cap bounds preparation/storage. Cached shaft stages use fixed stack
+  buffers without allocation, factorization, eigensolves or exponentials.
+  Native impulse/recoil checks and local work checks include actual opposing
+  carrier/rotor transfer scales, never unchanged background energy. Zero drag
+  delegates to the original held-torque trajectory. Frozen-attitude shaft
+  stages are exact; their gyrostat composition remains second order and
+  requires attitude/tumbling refinement. Unresolvable momentum and phase
+  changes refuse. Seven new and seventeen existing rotor/viscous/torsional
+  native test groups pass; the 31 pair/single-body damping regressions also
+  pass. This does not establish a full workspace Cargo/DSR gate.
 - `RotorBank::torsional_stepper(stiffness, rest_phase, damping, duration)`
   adds finite rotor/carrier shaft compliance on actual unwrapped relative
   phases: `V_i=K_i*(q_i-q_rest_i)^2/2` and

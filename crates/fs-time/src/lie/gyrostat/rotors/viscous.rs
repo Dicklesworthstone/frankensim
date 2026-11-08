@@ -7,6 +7,10 @@ use super::{
 use fs_ga::{So3, Vec3};
 use fs_la::factor::{Cholesky, cholesky};
 
+#[path = "viscous/exponential.rs"]
+mod exponential;
+pub use exponential::{ExponentialViscousRotorStep, ExponentialViscousRotorStepper};
+
 /// Prepared midpoint shaft stages for `torque_i = drive_i - damping_i * relative_rate_i`.
 ///
 /// A positive interval and nonnegative viscous coefficients are held fixed.

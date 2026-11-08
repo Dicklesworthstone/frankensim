@@ -18,14 +18,14 @@ pub(super) struct ExponentialRelaxation {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct Response {
-    pub(super) decay_change: f64,
-    pub(super) response: f64,
-    pub(super) integrated_response: f64,
+pub(in crate::lie) struct Response {
+    pub(in crate::lie) decay_change: f64,
+    pub(in crate::lie) response: f64,
+    pub(in crate::lie) integrated_response: f64,
     // Two squares integrate each mode's heat, avoiding cancellation between
     // initial/forcing terms, including exact equilibrium and weak relaxation.
-    pub(super) heat_mean: [f64; 2],
-    pub(super) heat_deviation: [f64; 2],
+    pub(in crate::lie) heat_mean: [f64; 2],
+    pub(in crate::lie) heat_deviation: [f64; 2],
 }
 
 impl ExponentialRelaxation {
@@ -197,7 +197,7 @@ impl ExponentialRelaxation {
 }
 
 impl Response {
-    pub(super) fn prepare(rate: f64, h: f64) -> Result<Self, LieStepError> {
+    pub(in crate::lie) fn prepare(rate: f64, h: f64) -> Result<Self, LieStepError> {
         if rate == 0.0 {
             return Ok(Self {
                 response: h,

@@ -19,7 +19,10 @@ use fs_math::dd::Dd;
 
 #[path = "rotors/viscous.rs"]
 mod viscous;
-pub use viscous::{ViscousRotorStep, ViscousRotorStepper};
+pub use viscous::{
+    ExponentialViscousRotorStep, ExponentialViscousRotorStepper, ViscousRotorStep,
+    ViscousRotorStepper,
+};
 
 #[path = "rotors/torsional.rs"]
 mod torsional;

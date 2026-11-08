@@ -23,7 +23,7 @@ pub mod pair;
 type Vector = [Dd; 3];
 
 #[path = "viscous/exponential.rs"]
-mod exponential;
+pub(super) mod exponential;
 
 /// A fixed full inertia, body-frame viscous tensor and positive time interval.
 ///
