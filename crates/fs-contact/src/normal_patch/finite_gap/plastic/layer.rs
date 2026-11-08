@@ -26,10 +26,11 @@ use fs_tribo::{
 };
 
 use super::{
-    FiniteGapPlasticAdvance, FiniteGapPlasticDrive, FiniteGapPlasticDriveError,
-    FiniteGapPlasticDriveReceipt, FiniteGapPlasticError, FiniteGapPlasticLoadControls,
-    FiniteGapPlasticLoadError, FiniteGapPlasticLoadReceipt, FiniteGapPlasticModel,
-    FiniteGapPlasticReceipt, FiniteGapPlasticState, checkpoint,
+    FiniteGapPlasticAdvance, FiniteGapPlasticContinuation, FiniteGapPlasticContinuationReceipt,
+    FiniteGapPlasticDrive, FiniteGapPlasticDriveError, FiniteGapPlasticDriveReceipt,
+    FiniteGapPlasticError, FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError,
+    FiniteGapPlasticLoadReceipt, FiniteGapPlasticModel, FiniteGapPlasticReceipt,
+    FiniteGapPlasticState, checkpoint,
 };
 
 /// One fixed cell registration and its original extensive shear law.
@@ -89,6 +90,28 @@ pub struct FiniteGapPlasticLayerNormalAdvance<B = ()> {
     pub boundary: B,
 }
 
+/// Explicit material-coefficient continuation at fixed retained layer strains.
+///
+/// Only the normal owner re-equilibrates during this substep. Layer spring
+/// forces can change while elastic/plastic/Maxwell strains remain fixed. The
+/// next positive-time shear interval resolves actual mechanical recoil.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiniteGapPlasticLayerRefreshAdvance<B = ()> {
+    /// All original histories bound to the successor coefficients together.
+    pub candidate: FiniteGapPlasticLayerState,
+    /// Native normal re-equilibration, plastic work, boundary work and parameter work.
+    pub normal: FiniteGapPlasticContinuationReceipt,
+    /// Native signed change in each layer's mechanical free energy at fixed
+    /// retained strains [J], in the original site order. This is not heat,
+    /// shear dissipation, or a body's mechanical work at fixed external motion.
+    pub layer_coefficient_free_energy_change_j: Vec<f64>,
+    /// Compensated sum of the preceding layer potential changes [J].
+    /// Caloric/entropy accounting, if requested, belongs to the thermal owner.
+    pub total_layer_coefficient_free_energy_change_j: f64,
+    /// Unit at held approach, or the original maintained-load/spring receipt.
+    pub boundary: B,
+}
+
 /// Held-normal simultaneous shear candidate and independent physical accounts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteGapPlasticLayerShearAdvance {
@@ -129,6 +152,7 @@ pub enum FiniteGapPlasticLayerError {
     /// A held-normal shear step requires every registered layer to be compressed.
     DetachedLayer { cell_index: usize },
     /// Opening requires a separate physical release/transfer of this stored energy.
+    /// A coefficient refresh reports the larger predecessor/successor storage.
     OpeningWithStoredShear {
         cell_index: usize,
         stored_energy_j: f64,
@@ -462,6 +486,191 @@ impl FiniteGapPlasticLayerContact {
             dissipation,
             shear_force_n: [wrench[0], wrench[1]],
             spin_moment_n_m: wrench[2],
+        })
+    }
+
+    /// Continue explicit material coefficients at the accepted normal approach.
+    ///
+    /// Native normal continuation retains dents and recession while changed
+    /// modulus/hardness may create additional normal plastic flow. Native
+    /// layer continuation keeps every elastic, plastic and Maxwell strain
+    /// fixed and reports the signed coefficient potential change. Changing
+    /// viscosity or yield force alone contributes no stored-energy change.
+    ///
+    /// This is not shear equilibrium at held external displacement: the
+    /// prepared response maps the next released-motion/mean-force interval.
+    /// No shear time, slip increment, loss, heat or thermal field is inferred.
+    /// Original grid, cell registration, layer domains/branch order and full
+    /// mechanical response stay fixed. Prescribed temperature is part of the
+    /// explicitly supplied successor laws, not an autonomous temperature solve.
+    pub fn refresh_from(
+        &self,
+        previous: &Self,
+        before: &FiniteGapPlasticLayerState,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticLayerRefreshAdvance, FiniteGapPlasticLayerError> {
+        self.refresh_with(previous, before, cx, |state| {
+            Ok((
+                self.owner
+                    .normal
+                    .refresh_from(&previous.owner.normal, state, cx)?,
+                (),
+            ))
+        })
+    }
+
+    /// Continue coefficients while maintaining the already accepted normal force.
+    ///
+    /// The native force owner acts directly on accepted normal history, without
+    /// a held-approach plastic intermediate. Layer strains remain fixed under
+    /// the same coefficient-substep convention as the held-approach refresh.
+    pub fn refresh_from_at_load(
+        &self,
+        previous: &Self,
+        before: &FiniteGapPlasticLayerState,
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        FiniteGapPlasticLayerRefreshAdvance<FiniteGapPlasticLoadReceipt>,
+        FiniteGapPlasticLayerError,
+    > {
+        self.refresh_with(previous, before, cx, |state| {
+            let next = self.owner.normal.refresh_from_at_load(
+                &previous.owner.normal,
+                state,
+                target_force_n,
+                controls,
+                cx,
+            )?;
+            Ok((next.continuation, next.load))
+        })
+    }
+
+    /// Continue coefficients with the original loading spring held at its position.
+    ///
+    /// Native normal work is energy released by that spring; the stationary
+    /// actuator does no work. It stays separate from the fixed-strain layer
+    /// coefficient potential change and from any subsequent shear loss.
+    pub fn refresh_from_with_drive(
+        &self,
+        previous: &Self,
+        before: &FiniteGapPlasticLayerState,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        FiniteGapPlasticLayerRefreshAdvance<FiniteGapPlasticDriveReceipt>,
+        FiniteGapPlasticLayerError,
+    > {
+        self.refresh_with(previous, before, cx, |state| {
+            let next = self.owner.normal.refresh_from_with_drive(
+                &previous.owner.normal,
+                state,
+                drive,
+                controls,
+                cx,
+            )?;
+            Ok((next.continuation, next.drive))
+        })
+    }
+
+    fn refresh_with<B>(
+        &self,
+        previous: &Self,
+        before: &FiniteGapPlasticLayerState,
+        cx: &Cx<'_>,
+        refresh_normal: impl FnOnce(
+            &FiniteGapPlasticState,
+        ) -> Result<
+            (FiniteGapPlasticContinuation, B),
+            FiniteGapPlasticLayerError,
+        >,
+    ) -> Result<FiniteGapPlasticLayerRefreshAdvance<B>, FiniteGapPlasticLayerError> {
+        checkpoint(cx)?;
+        previous.admit(before)?;
+        if self.owner.sites.len() != previous.owner.sites.len()
+            || self
+                .owner
+                .sites
+                .iter()
+                .zip(&previous.owner.sites)
+                .any(|(new, old)| new.cell_index != old.cell_index)
+            || (!Arc::ptr_eq(&self.owner, &previous.owner)
+                && self.owner.response != previous.owner.response)
+        {
+            return Err(FiniteGapPlasticLayerError::Invalid(
+                "coefficient refresh requires original layer registration and mechanical response",
+            ));
+        }
+
+        // Stage native layer transfers before the expensive normal equilibrium.
+        // Each retains its original branch correspondence and finite strain domain.
+        let mut shear = Vec::with_capacity(self.owner.sites.len());
+        let mut layer_work = Vec::with_capacity(self.owner.sites.len());
+        let mut total_work = 0.0;
+        let mut correction = 0.0;
+        for (site, old_state) in self.owner.sites.iter().zip(&before.shear) {
+            checkpoint(cx)?;
+            let next = site
+                .law
+                .continue_state_with_work(old_state)
+                .map_err(|error| FiniteGapPlasticLayerError::Cell {
+                    cell_index: site.cell_index,
+                    error,
+                })?;
+            let value = next.coefficient_free_energy_change_j - correction;
+            let sum = total_work + value;
+            correction = (sum - total_work) - value;
+            total_work = sum;
+            layer_work.push(next.coefficient_free_energy_change_j);
+            shear.push(next.state);
+        }
+        if !total_work.is_finite() {
+            return Err(FiniteGapPlasticLayerError::Invalid(
+                "finite layer coefficient work",
+            ));
+        }
+        let (normal, boundary) = refresh_normal(&before.normal)?;
+        for (index, site) in self.owner.sites.iter().enumerate() {
+            checkpoint(cx)?;
+            if normal.candidate.pressure_pa()[site.cell_index] == 0.0 {
+                let old_energy = previous.owner.sites[index]
+                    .law
+                    .stored_energy_j(&before.shear[index]);
+                let new_energy = site.law.stored_energy_j(&shear[index]);
+                if !old_energy.is_finite()
+                    || !new_energy.is_finite()
+                    || old_energy < 0.0
+                    || new_energy < 0.0
+                {
+                    return Err(FiniteGapPlasticLayerError::Invalid("native layer storage"));
+                }
+                let energy = old_energy.max(new_energy);
+                if energy > 0.0 {
+                    return Err(FiniteGapPlasticLayerError::OpeningWithStoredShear {
+                        cell_index: site.cell_index,
+                        stored_energy_j: energy,
+                    });
+                }
+            }
+        }
+        checkpoint(cx)?;
+        let normal_state = if normal.candidate.identity() == before.normal.identity() {
+            Arc::clone(&before.normal)
+        } else {
+            Arc::new(normal.candidate)
+        };
+        Ok(FiniteGapPlasticLayerRefreshAdvance {
+            candidate: FiniteGapPlasticLayerState {
+                owner: Arc::clone(&self.owner),
+                normal: normal_state,
+                shear,
+            },
+            normal: normal.receipt,
+            layer_coefficient_free_energy_change_j: layer_work,
+            total_layer_coefficient_free_energy_change_j: total_work,
+            boundary,
         })
     }
 

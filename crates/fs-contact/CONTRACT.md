@@ -4187,3 +4187,39 @@ force/spin work, indentation/unloading plus tensor plastic reversal with
 independent normal and shear work, force/spring boundary continuity, and atomic
 opening, registration, late-cell and cancellation refusals. These are numerical
 integration regressions, not measured material calibration.
+
+### Retained plastic-layer coefficient continuation
+
+The fixed-registration `FiniteGapPlasticLayerContact` also accepts explicit successor
+normal and shear coefficients through `refresh_from`, `refresh_from_at_load`, and
+`refresh_from_with_drive`. These operations compose the existing native material
+continuations; they introduce no temperature-field solver or fitted material law.
+The normal owner re-equilibrates directly from accepted indentation/recession
+history under held approach, maintained resultant, or the original held loading
+spring. In particular, force/spring continuation does not first run an artificial
+fixed-approach plastic step.
+
+The layer update is a **fixed-retained-strain coefficient substep**. It preserves
+elastic slip, signed permanent slip, and every ordered Maxwell strain exactly,
+while rebinding their admitted constitutive owner. Changing stiffness can change
+spring force at fixed strain; this operation does not claim a new absolute shear
+equilibrium at fixed external displacement. The next positive-time shear interval
+uses the full prepared mechanical response to solve recoil and physical evolution.
+
+`FiniteGapPlasticLayerRefreshAdvance` reports the native signed normal parameter
+work, normal plastic work, and boundary work separately from each layer's signed
+`coefficient_free_energy_change_j` and their compensated sum. The latter is the
+difference of the old/new layer potentials at the retained strains; changing
+Kelvin viscosity, yield force, or relaxation times contributes no stored potential
+by itself. It is not dissipated heat. A thermal source must independently own its
+caloric/entropy balance and any refinement of the coefficient path.
+
+Continuation requires identical cell registration and prepared mechanical
+response, compatible native strain domains and Maxwell branch correspondence,
+and the original normal geometry/datum. A normal refresh that opens a mapped cell
+is refused if either its old or new layer potential has positive storage.
+Partial layer transfers, normal candidates, incompatibility, and cancellation
+never alter the caller's accepted state. Physical regressions cover tensor
+softening/cooling without plastic healing, independent potential and subsequent
+shear-work accounting, maintained-force stiffening without fictitious indentation,
+held-spring work, and refusal of opening with retained shear energy.

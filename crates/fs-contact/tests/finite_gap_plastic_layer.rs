@@ -656,3 +656,389 @@ fn opening_and_recontact_preserve_permanent_shear_when_storage_is_zero() {
         assert_eq!(reloaded.normal.plastic_work_j, 0.0);
     });
 }
+
+fn coefficient_successor(
+    before: &FiniteGapPlasticLayerContact,
+    modulus: f64,
+    hardness: f64,
+    laws: Vec<ThirdBodyLayerContact>,
+    cx: &Cx<'_>,
+) -> FiniteGapPlasticLayerContact {
+    assert_eq!(laws.len(), before.sites().len());
+    let normal = before
+        .normal_model()
+        .with_material_properties(
+            modulus,
+            vec![hardness; before.normal_model().config().hardness_pa.len()],
+            cx,
+        )
+        .unwrap();
+    let sites = before
+        .sites()
+        .iter()
+        .zip(laws)
+        .map(|(site, law)| FiniteGapPlasticLayerSite {
+            cell_index: site.cell_index,
+            law,
+        })
+        .collect();
+    FiniteGapPlasticLayerContact::new(normal, sites, before.mechanical_response().clone(), cx)
+        .unwrap()
+}
+
+fn assert_retained_layer_strains(
+    before: &FiniteGapPlasticLayerState,
+    after: &FiniteGapPlasticLayerState,
+) {
+    assert_eq!(before.layer_states().len(), after.layer_states().len());
+    for (old, new) in before.layer_states().iter().zip(after.layer_states()) {
+        assert_eq!(old.elastic_slip_m(), new.elastic_slip_m());
+        assert_eq!(old.plastic_slip_m(), new.plastic_slip_m());
+        assert_eq!(old.relaxation_slip_m(), new.relaxation_slip_m());
+    }
+}
+
+// Independent quadratic potentials. Kelvin and kinetic coefficients store no energy.
+fn scaled_tensor_energy(state: &ThirdBodyLayerState, equilibrium: f64, arm: f64) -> f64 {
+    let e = state.elastic_slip_m();
+    let r = state.relaxation_slip_m()[0];
+    equilibrium * 0.5 * (1000.0 * e[0].powi(2) + 140.0 * e[0] * e[1] + 700.0 * e[1].powi(2))
+        + arm * 0.5 * ((10.0 * r[0] + 2.0 * r[1]).powi(2) + (5.0 * r[1]).powi(2))
+}
+
+#[test]
+fn coefficient_softening_and_cooling_preserve_memory_and_account_signed_work() {
+    with_cx(|cx, _| {
+        let compliance = 4.0 * 1e-3 * (1.0 + 2.0_f64.sqrt()).ln() / (core::f64::consts::PI * 1e9);
+        let yield_approach = compliance * 1e6;
+        let matrix = vec![0.0002, 0.00003, 0.00003, 0.0003];
+        let cold = FiniteGapPlasticLayerContact::new(
+            normal(&[12], cx),
+            vec![FiniteGapPlasticLayerSite {
+                cell_index: 12,
+                law: memory_layer(),
+            }],
+            response(1, matrix.clone()),
+            cx,
+        )
+        .unwrap();
+        let loaded = cold
+            .advance_normal(&cold.initial_state(), yield_approach + 3e-6, cx)
+            .unwrap();
+        let before = cold
+            .advance_shear(&loaded.candidate, &[[0.003, -0.001]], 0.002, controls(), cx)
+            .unwrap()
+            .candidate;
+        let saved = before.clone();
+        assert!(before.layer_states()[0].plastic_slip_m()[0] > 0.0);
+        assert!(before.layer_states()[0].relaxation_slip_m()[0][0] > 0.0);
+        let scale = 0.75_f64.sqrt();
+        let hot_law = ThirdBodyLayerContact::new_tensor(
+            ShearStiffness::positive_definite([[500.0, 35.0], [35.0, 350.0]]).unwrap(),
+            vec![TensorLayerRelaxationArm {
+                stiffness: ShearStiffness::from_gram_rows(vec![
+                    [10.0 * scale, 2.0 * scale],
+                    [0.0, 5.0 * scale],
+                ])
+                .unwrap(),
+                relaxation_time_s: 0.05,
+            }],
+            0.04,
+            0.2,
+            420.0,
+            0.02,
+        )
+        .unwrap()
+        .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![[0.3, -0.05]]).unwrap())
+        .unwrap();
+        let hot = coefficient_successor(&cold, 1e9, 0.5e6, vec![hot_law], cx);
+        let refreshed = hot.refresh_from(&cold, &before, cx).unwrap();
+        assert_retained_layer_strains(&before, &refreshed.candidate);
+        assert_eq!(before, saved);
+        close(
+            refreshed.candidate.normal_state().pressure_pa()[12],
+            0.5e6,
+            1e-7,
+        );
+        close(
+            refreshed.candidate.normal_state().plastic_depth_m()[12],
+            3e-6 + 0.5 * yield_approach,
+            1e-17,
+        );
+        assert_eq!(
+            refreshed.candidate.normal_state().recession_m(),
+            before.normal_state().recession_m()
+        );
+        let old_normal_energy = 0.5 * yield_approach; // H*A = 1 N.
+        close(
+            refreshed.normal.elastic_energy_change_j,
+            -0.75 * old_normal_energy,
+            1e-17,
+        );
+        close(
+            refreshed.normal.response.plastic_work_j,
+            0.5 * old_normal_energy,
+            1e-17,
+        );
+        close(
+            refreshed.normal.parameter_work_j,
+            -0.25 * old_normal_energy,
+            1e-17,
+        );
+        assert_eq!(refreshed.normal.normal_work_j, 0.0);
+        let old_layer_energy = scaled_tensor_energy(&before.layer_states()[0], 1.0, 1.0);
+        let hot_layer_energy = scaled_tensor_energy(&before.layer_states()[0], 0.5, 0.75);
+        close(
+            refreshed.layer_coefficient_free_energy_change_j[0],
+            hot_layer_energy - old_layer_energy,
+            2e-18,
+        );
+        close(
+            refreshed.total_layer_coefficient_free_energy_change_j,
+            hot_layer_energy - old_layer_energy,
+            2e-18,
+        );
+
+        // Returning coefficients restores shear potential, never permanent indentation.
+        let cooled = cold.refresh_from(&hot, &refreshed.candidate, cx).unwrap();
+        assert_retained_layer_strains(&before, &cooled.candidate);
+        assert_eq!(
+            cooled.candidate.normal_state().plastic_depth_m(),
+            refreshed.candidate.normal_state().plastic_depth_m()
+        );
+        close(
+            cooled.candidate.normal_state().pressure_pa()[12],
+            0.5e6,
+            1e-7,
+        );
+        assert_eq!(cooled.normal.response.plastic_work_j, 0.0);
+        close(
+            cooled.total_layer_coefficient_free_energy_change_j
+                + refreshed.total_layer_coefficient_free_energy_change_j,
+            0.0,
+            2e-18,
+        );
+        let unchanged = cold.refresh_from(&cold, &before, cx).unwrap();
+        assert_eq!(unchanged.candidate, before);
+        assert_eq!(unchanged.total_layer_coefficient_free_energy_change_j, 0.0);
+        assert_eq!(unchanged.normal.parameter_work_j, 0.0);
+
+        // Only the next positive-time interval performs recoil and dissipative evolution.
+        let free = [-0.004, 0.001];
+        let dt = 0.002;
+        let next = hot
+            .advance_shear(&refreshed.candidate, &[free], dt, controls(), cx)
+            .unwrap();
+        let old = &refreshed.candidate.layer_states()[0];
+        let new = &next.candidate.layer_states()[0];
+        let dp = [
+            new.plastic_slip_m()[0] - old.plastic_slip_m()[0],
+            new.plastic_slip_m()[1] - old.plastic_slip_m()[1],
+        ];
+        let distance = dp[0].hypot(dp[1]);
+        let plastic = (0.04 + 0.2 * distance / dt) * distance;
+        let r = [
+            0.5 * (old.relaxation_slip_m()[0][0] + new.relaxation_slip_m()[0][0]),
+            0.5 * (old.relaxation_slip_m()[0][1] + new.relaxation_slip_m()[0][1]),
+        ];
+        let relaxation =
+            dt / 0.05 * 0.75 * ((10.0 * r[0] + 2.0 * r[1]).powi(2) + (5.0 * r[1]).powi(2));
+        let de = [
+            new.elastic_slip_m()[0] - old.elastic_slip_m()[0],
+            new.elastic_slip_m()[1] - old.elastic_slip_m()[1],
+        ];
+        let kelvin = (0.3 * de[0] - 0.05 * de[1]).powi(2) / dt;
+        close(next.dissipation[0].plastic_j, plastic, 2e-16);
+        close(next.dissipation[0].relaxation_j, relaxation, 2e-16);
+        close(next.dissipation[0].kelvin_j, kelvin, 2e-16);
+        let f = next.shear.contacts[0].traction_n;
+        let work = f[0] * (free[0] - matrix[0] * f[0] - matrix[1] * f[1])
+            + f[1] * (free[1] - matrix[2] * f[0] - matrix[3] * f[1]);
+        close(
+            scaled_tensor_energy(new, 0.5, 0.75) - hot_layer_energy + plastic + relaxation + kelvin,
+            work,
+            4e-12,
+        );
+        assert!(
+            cold.advance_shear(&refreshed.candidate, &[free], dt, controls(), cx)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn coefficient_refresh_at_load_and_held_spring_use_original_plastic_history() {
+    with_cx(|cx, _| {
+        let compliance = 4.0 * 1e-3 * (1.0 + 2.0_f64.sqrt()).ln() / (core::f64::consts::PI * 1e9);
+        let cold = FiniteGapPlasticLayerContact::new(
+            normal(&[12], cx),
+            vec![FiniteGapPlasticLayerSite {
+                cell_index: 12,
+                law: memory_layer(),
+            }],
+            response(1, vec![0.0002, 0.00003, 0.00003, 0.0003]),
+            cx,
+        )
+        .unwrap();
+        let drive = FiniteGapPlasticDrive {
+            stiffness_n_per_m: 1e5,
+            position_m: 2e-5,
+        };
+        let driven = cold
+            .advance_normal_with_drive(&cold.initial_state(), drive, load_controls(), cx)
+            .unwrap();
+        let sheared = cold
+            .advance_shear(&driven.candidate, &[[0.003, -0.001]], 0.002, controls(), cx)
+            .unwrap()
+            .candidate;
+        let unloaded = cold
+            .advance_normal_at_load(&sheared, 0.5, load_controls(), cx)
+            .unwrap()
+            .candidate;
+        let old_energy = 0.5 * 1e-6 * compliance * 0.5e6_f64.powi(2);
+        for (modulus_scale, hardness) in [(0.5, 0.8e6), (2.0, 0.75e6)] {
+            let successor = coefficient_successor(
+                &cold,
+                modulus_scale * 1e9,
+                hardness,
+                vec![memory_layer()],
+                cx,
+            );
+            let step = successor
+                .refresh_from_at_load(&cold, &unloaded, 0.5, load_controls(), cx)
+                .unwrap();
+            assert_retained_layer_strains(&unloaded, &step.candidate);
+            assert_eq!(
+                step.candidate.normal_state().plastic_depth_m(),
+                unloaded.normal_state().plastic_depth_m()
+            );
+            assert_eq!(step.normal.response.plastic_work_j, 0.0);
+            close(
+                step.normal.elastic_energy_change_j,
+                old_energy * (1.0 / modulus_scale - 1.0),
+                2e-15,
+            );
+            close(
+                step.normal.normal_work_j,
+                2.0 * old_energy * (1.0 / modulus_scale - 1.0),
+                3e-15,
+            );
+            close(
+                step.normal.parameter_work_j,
+                -old_energy * (1.0 / modulus_scale - 1.0),
+                3e-15,
+            );
+            assert_eq!(step.total_layer_coefficient_free_energy_change_j, 0.0);
+            // At the old approach the stiffer model would exceed its new cap.
+            // A preliminary fixed-approach refresh would manufacture a dent.
+            close(step.boundary.achieved_force_n, 0.5, 1e-10);
+        }
+        let softened = coefficient_successor(&cold, 1e9, 0.5e6, vec![memory_layer()], cx);
+        let spring = softened
+            .refresh_from_with_drive(&cold, &sheared, drive, load_controls(), cx)
+            .unwrap();
+        assert_retained_layer_strains(&sheared, &spring.candidate);
+        close(spring.boundary.achieved_force_n, 0.5, 1e-10);
+        close(spring.boundary.approach_m, 1.5e-5, 1e-14);
+        close(spring.boundary.spring_energy_j, 1.25e-6, 1e-15);
+        close(spring.normal.normal_work_j, 3.75e-6, 1e-15);
+        let plastic_work = 0.5 * (5e-6 + 0.5 * compliance * 1e6);
+        close(spring.normal.response.plastic_work_j, plastic_work, 1e-14);
+        let storage_change = -0.75 * 0.5 * compliance * 1e6;
+        close(spring.normal.elastic_energy_change_j, storage_change, 1e-15);
+        close(
+            spring.normal.parameter_work_j,
+            storage_change + plastic_work - 3.75e-6,
+            1e-14,
+        );
+        assert_eq!(spring.total_layer_coefficient_free_energy_change_j, 0.0);
+    });
+}
+
+#[test]
+fn coefficient_refresh_refuses_incompatible_memory_and_opening_without_partial_adoption() {
+    with_cx(|cx, gate| {
+        let mut config = normal(&[12, 13], cx).config().clone();
+        config.undeformed_gap_m[13] = 2e-7;
+        let cold = FiniteGapPlasticLayerContact::new(
+            FiniteGapPlasticModel::new(config, cx).unwrap(),
+            vec![
+                FiniteGapPlasticLayerSite {
+                    cell_index: 12,
+                    law: memory_layer(),
+                },
+                FiniteGapPlasticLayerSite {
+                    cell_index: 13,
+                    law: memory_layer(),
+                },
+            ],
+            response(2, vec![0.0; 16]),
+            cx,
+        )
+        .unwrap();
+        let loaded = cold
+            .advance_normal(&cold.initial_state(), 5e-7, cx)
+            .unwrap();
+        let force = loaded.normal.normal.normal_force_n;
+        assert!(loaded.candidate.normal_state().pressure_pa()[13] > 0.0);
+        let before = cold
+            .advance_shear(
+                &loaded.candidate,
+                &[[0.0, 0.0], [0.0001, 0.0]],
+                0.002,
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .candidate;
+        let saved = before.clone();
+        let incompatible =
+            coefficient_successor(&cold, 1e9, 1e6, vec![memory_layer(), elastic(500.0)], cx);
+        assert!(matches!(
+            incompatible.refresh_from(&cold, &before, cx),
+            Err(FiniteGapPlasticLayerError::Cell { cell_index: 13, .. })
+        ));
+        assert_eq!(before, saved);
+
+        // Stiffening at held resultant narrows the footprint: the neighbouring
+        // shear-bearing cell opens. Its stored shear cannot be discarded as heat.
+        let stiff =
+            coefficient_successor(&cold, 1e10, 1e6, vec![memory_layer(), memory_layer()], cx);
+        let normal_only = stiff
+            .normal_model()
+            .refresh_from_at_load(
+                cold.normal_model(),
+                before.normal_state(),
+                force,
+                load_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(normal_only.continuation.candidate.pressure_pa()[13], 0.0);
+        assert!(
+            matches!(stiff.refresh_from_at_load(&cold, &before, force, load_controls(), cx), Err(FiniteGapPlasticLayerError::OpeningWithStoredShear { cell_index: 13, stored_energy_j }) if stored_energy_j > 0.0)
+        );
+        assert_eq!(before, saved);
+
+        let changed_response = FiniteGapPlasticLayerContact::new(
+            cold.normal_model().clone(),
+            cold.sites().to_vec(),
+            response(
+                2,
+                vec![
+                    1e-4, 0.0, 0.0, 0.0, 0.0, 1e-4, 0.0, 0.0, 0.0, 0.0, 1e-4, 0.0, 0.0, 0.0, 0.0,
+                    1e-4,
+                ],
+            ),
+            cx,
+        )
+        .unwrap();
+        assert!(matches!(
+            changed_response.refresh_from(&cold, &before, cx),
+            Err(FiniteGapPlasticLayerError::Invalid(_))
+        ));
+        gate.request();
+        assert!(cold.refresh_from(&cold, &before, cx).is_err());
+        assert_eq!(before, saved);
+    });
+}
