@@ -1241,6 +1241,14 @@ impl Material {
                             update_material_scalar(&mut hasher, k);
                         }
                     }
+                    #[cfg(feature = "material-state")]
+                    BeerLambertParameters::HaleQuerryWater25C => {
+                        hasher.update(&[5]);
+                        hasher.update(
+                            fs_material::water_absorption::HaleQuerryWaterAbsorption::source_identity()
+                                .as_bytes(),
+                        );
+                    }
                 }
                 hasher.update(&[match glass.provenance() {
                     GlassProvenance::Custom => 0,

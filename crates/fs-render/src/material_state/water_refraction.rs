@@ -29,6 +29,36 @@ pub mod isobaric;
 /// Original IF97 water density driven by one joint pressure/temperature field.
 pub mod pressure_temperature;
 
+/// Native reference water at 25 degrees Celsius and one standard atmosphere.
+///
+/// Density comes from the original IF97 Region 1 law at 101325 Pa; absolute
+/// phase/group dispersion comes from IAPWS R9-97. Bulk absorption retains the
+/// complete historical Hale-Querry 1973 spectrum at this temperature. Pressure
+/// is an explicit reference-state choice, not measured pressure dependence of
+/// that absorption source. Purity, scattering and mixtures are not inferred.
+///
+/// The combined medium is limited to the IAPWS 200--1100 vacuum-nm band. Here
+/// the small source k supports the native real-index/Beer approximation; this
+/// constructor does not extend real-interface optics into strong infrared loss.
+pub fn hale_querry_water_25c() -> Result<crate::dielectric::DielectricGlass, DielectricError> {
+    use crate::dielectric::{DielectricGlass, GlassProvenance, IapwsWaterIor};
+    use fs_material::water_absorption::SOURCE_TEMPERATURE_K;
+    use fs_qty::{Pressure, Temperature};
+    use fs_thermochem::water::if97::{If97Region, If97State};
+
+    let state = If97State::at_pressure_temperature(
+        Pressure::new(101_325.0),
+        Temperature::new(SOURCE_TEMPERATURE_K),
+        If97Region::Region1,
+    )
+    .map_err(|_| DielectricError::InvalidIor)?;
+    Ok(DielectricGlass::new(
+        IapwsWaterIor::try_new(SOURCE_TEMPERATURE_K, state.density().value())?,
+        BeerLambertAbsorption::hale_querry_water_25c(),
+        GlassProvenance::Custom,
+    ))
+}
+
 /// One query of the same original temperature and mass-density reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterStateGradientSample {
@@ -395,3 +425,6 @@ fn admit_position(p: Point3) -> Result<(), WaterRefractiveFieldError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod absorption_tests;

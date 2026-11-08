@@ -783,6 +783,10 @@ pub enum BeerLambertParameters {
         /// Wavelength knots and their nonnegative dimensionless indices.
         spectrum: SpectralExtinctionIndex,
     },
+    /// Complete Hale-Querry (1973) liquid-water k spectrum at 25 degrees Celsius.
+    /// Its source identity, domain and interpolation are retained by fs-material.
+    #[cfg(feature = "material-state")]
+    HaleQuerryWater25C,
     /// A bounded lifted spectrum defining transmittance at one path length.
     ReferenceRgb {
         /// Declared linear-RGB reference transmittance.
@@ -798,6 +802,8 @@ enum AbsorptionModel {
     Constant(f64),
     Spectral(SpectralAbsorption),
     ExtinctionIndex(SpectralExtinctionIndex),
+    #[cfg(feature = "material-state")]
+    HaleQuerryWater25C,
     ReferenceRgb {
         spectrum: LiftedSpectrum,
         linear_rgb: [f64; 3],
@@ -817,6 +823,22 @@ impl BeerLambertAbsorption {
     pub const CLEAR: Self = Self {
         model: AbsorptionModel::Clear,
     };
+
+    /// Complete historical Hale-Querry water spectrum at 25 degrees Celsius.
+    ///
+    /// All 169 original k knots are shared immutably, without allocation or
+    /// enlarging the per-material table. Interpolation occurs before conversion
+    /// to intensity absorption. The source spans 200--200000 vacuum nm and has
+    /// no temperature/pressure dependence or scattering. Pairing it with another
+    /// water state is an explicit approximation, not local-temperature data.
+    /// Strongly absorbing infrared interfaces require complex-index optics.
+    #[cfg(feature = "material-state")]
+    #[must_use]
+    pub const fn hale_querry_water_25c() -> Self {
+        Self {
+            model: AbsorptionModel::HaleQuerryWater25C,
+        }
+    }
 
     /// Construct wavelength-independent extinction in inverse metres.
     /// This law has no spectral restriction of its own; it does not extend
@@ -937,6 +959,10 @@ impl BeerLambertAbsorption {
             AbsorptionModel::Clear | AbsorptionModel::Constant(_) => None,
             AbsorptionModel::Spectral(spectrum) => Some(spectrum.wavelength_bounds_nm()),
             AbsorptionModel::ExtinctionIndex(spectrum) => Some(spectrum.wavelength_bounds_nm()),
+            #[cfg(feature = "material-state")]
+            AbsorptionModel::HaleQuerryWater25C => Some(
+                fs_material::water_absorption::HaleQuerryWaterAbsorption::wavelength_bounds_nm(),
+            ),
             AbsorptionModel::ReferenceRgb { .. } => Some((LAMBDA_MIN, LAMBDA_MAX)),
         }
     }
@@ -953,6 +979,13 @@ impl BeerLambertAbsorption {
             AbsorptionModel::Constant(extinction) => *extinction,
             AbsorptionModel::Spectral(spectrum) => spectrum.extinction_per_m(wavelength_nm)?,
             AbsorptionModel::ExtinctionIndex(spectrum) => spectrum.extinction_per_m(wavelength_nm)?,
+            #[cfg(feature = "material-state")]
+            AbsorptionModel::HaleQuerryWater25C => {
+                fs_material::water_absorption::HaleQuerryWaterAbsorption::extinction_per_m(
+                    wavelength_nm,
+                )
+                .map_err(|_| DielectricError::InvalidWavelength)?
+            }
             AbsorptionModel::ReferenceRgb {
                 spectrum,
                 distance_m,
@@ -1008,6 +1041,8 @@ impl BeerLambertAbsorption {
             AbsorptionModel::ExtinctionIndex(spectrum) => {
                 BeerLambertParameters::ExtinctionIndex { spectrum }
             }
+            #[cfg(feature = "material-state")]
+            AbsorptionModel::HaleQuerryWater25C => BeerLambertParameters::HaleQuerryWater25C,
             AbsorptionModel::ReferenceRgb {
                 linear_rgb,
                 distance_m,

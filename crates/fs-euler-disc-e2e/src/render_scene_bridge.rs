@@ -3509,11 +3509,27 @@ fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
                         hasher.update(&extinction_per_m.to_bits().to_le_bytes());
                     }
                 }
+                BeerLambertParameters::ExtinctionIndex { spectrum } => {
+                    hasher.update(&[4]);
+                    hasher.update(&(spectrum.knots().len() as u64).to_le_bytes());
+                    for &(wavelength_nm, k) in spectrum.knots() {
+                        hasher.update(&wavelength_nm.to_bits().to_le_bytes());
+                        hasher.update(&k.to_bits().to_le_bytes());
+                    }
+                }
+                BeerLambertParameters::HaleQuerryWater25C => {
+                    hasher.update(&[5]);
+                    hasher.update(
+                        fs_material::water_absorption::HaleQuerryWaterAbsorption::source_identity()
+                            .as_bytes(),
+                    );
+                }
             }
             hasher.update(&[match glass.provenance() {
                 GlassProvenance::Custom => 0,
                 GlassProvenance::RepresentativeBorosilicateV1 => 1,
                 GlassProvenance::RepresentativeCrownV1 => 2,
+                GlassProvenance::CharmsCorning7980V1 => 3,
             }]);
             match surface.roughness_alpha() {
                 None => hasher.update(&[0]),

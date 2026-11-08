@@ -10865,3 +10865,11 @@ emission quadrature verifies spectral exitance. Controls also cover exact
 smooth/black/white limits, positive near-white absorption, original-source
 identity, finite-band and angle refusals, exact native facet/roughness admission,
 and both geometric sides.
+
+## Native sourced room-temperature water absorption
+
+With `material-state`, `BeerLambertAbsorption::hale_querry_water_25c()` consumes the complete, shared 169-knot Hale–Querry (1973) imaginary-index source from `fs-material`. It retains 200–200000 vacuum-nm absorption support, source temperature 298.15 K, linear-k interpolation before SI intensity conversion, existing zero/thin/deep Beer semantics, and source-sensitive material identity. No per-material table enlargement or allocation is introduced. This historical, fixed-temperature compilation supplies no pressure, temperature, scattering or mixture dependence; strongly absorbing infrared interfaces need their separate complex-index owner.
+
+`material_state::water_refraction::hale_querry_water_25c()` binds that absorption to original IF97 Region 1 density at explicitly chosen 101325 Pa and 298.15 K and original IAPWS phase/group refraction. The combined medium admits only their common 200–1100 nm band. Native tracer and Euler-disc material identities retain the full source identity and preserve existing tags; the Euler-disc exhaustive consumer also admits original imaginary-index tables and CHARMS glass provenance.
+
+Four focused native regressions cover source Beer semantics, reference-state/source-band binding, obliquely refracted physical-path absorption with phase/group length, and source identity. They are authored and formatted; their execution remains unverified because the existing original-renderer build was killed in upstream `asupersync` before `fs-render`. The source material's three independent-control tests and strict Clippy passed separately.
