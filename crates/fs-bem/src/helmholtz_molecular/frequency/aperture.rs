@@ -137,4 +137,5 @@ impl MolecularExterior {
 }
 
 #[cfg(test)]
+#[path = "aperture/tests.rs"]
 mod tests;

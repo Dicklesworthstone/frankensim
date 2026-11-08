@@ -147,4 +147,5 @@ pub(super) fn observe_traces(
 }
 
 #[cfg(test)]
+#[path = "observation/tests.rs"]
 mod tests;

@@ -436,7 +436,10 @@ impl SpatialConductionResponse {
             .enumerate()
         {
             check(cancelled)?;
-            contact::admit_source(index, &contact.source, axes, sources.contacts.as_ref())?;
+            contact::admit_source(index, &contact.source, axes, sources.contacts.as_ref())
+                .map_err(|_| {
+                    SpatialConductionError::Invalid("3D contact response source admission refused")
+                })?;
         }
         Ok(Self {
             native,

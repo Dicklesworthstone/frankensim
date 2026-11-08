@@ -5,9 +5,11 @@
 
 use super::*;
 
+#[path = "frequency/observation.rs"]
 mod observation;
 pub use observation::MolecularPointFrequencyResponse;
 
+#[path = "frequency/aperture.rs"]
 mod aperture;
 pub use aperture::MolecularApertureFrequencyResponse;
 
