@@ -47,7 +47,7 @@ fn separate_domains() -> TriMesh {
 /// equations u-p0+p1=epsilon, p0=P, u=0, hence p1-p0=epsilon. All unused velocity
 /// moments are fixed to zero. Both pressures belong to the SAME fluid component.
 #[test]
-fn sparse_pressure_restoration_refuses_an_unrepresentable_gradient() {
+fn linear_pressure_restoration_refuses_an_unrepresentable_gradient() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
     let system = FluxSystem::new(&mesh);
     assert_eq!(system.pressure_component_count(), 1);
@@ -67,30 +67,45 @@ fn sparse_pressure_restoration_refuses_an_unrepresentable_gradient() {
         tol: 1e-11,
         ..FluxParams::default()
     };
-    let datum = 134_217_728.0;
-    for gradient in [0.125, 1e-10] {
-        let mut rhs = vec![0.0; system.n];
-        rhs[0] = gradient;
-        rhs[p0] = datum;
-        let solution = system.solve_sparse(&matrix, &rhs, params);
-        assert!(
-            solution.rel_residual < params.tol,
-            "the large original load hides this gradient defect"
-        );
-        let returned_gradient = solution.x[p1] - solution.x[p0];
-        if gradient == 0.125 {
-            assert!(solution.converged(params.tol));
-            assert_eq!(returned_gradient, gradient);
-        } else {
-            assert_eq!(
-                returned_gradient, 0.0,
-                "this gradient is below the datum's ulp"
-            );
-            assert!(
-                !solution.converged(params.tol),
-                "an internally resolved gradient must not certify a rounded-away returned gradient"
-            );
-            assert!(solution.scaled_rel_residual > 0.5);
+    for datum in [0.0, 134_217_728.0] {
+        for gradient in [0.125, 1e-10] {
+            let mut rhs = vec![0.0; system.n];
+            rhs[0] = gradient;
+            rhs[p0] = datum;
+            for (solver, solution) in [
+                ("dense", system.solve_linear(&matrix, &rhs, params)),
+                ("sparse", system.solve_sparse(&matrix, &rhs, params)),
+            ] {
+                assert!(
+                    solution.rel_residual < params.tol,
+                    "{solver}: the large original load hides this gradient defect"
+                );
+                let returned_gradient = solution.x[p1] - solution.x[p0];
+                if datum == 0.0 || gradient == 0.125 {
+                    assert!(
+                        solution.converged(params.tol),
+                        "{solver}: representable pressure gradient must converge"
+                    );
+                    assert!((returned_gradient - gradient).abs() <= params.tol * gradient);
+                    if datum == 0.0 && solver == "dense" {
+                        assert_eq!(
+                            solution.x[p1].to_bits(),
+                            gradient.to_bits(),
+                            "zero-origin dense arithmetic preserves the exact pressure difference"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        returned_gradient, 0.0,
+                        "{solver}: this gradient is below the datum's ulp"
+                    );
+                    assert!(
+                        !solution.converged(params.tol),
+                        "{solver}: an internally resolved gradient must not certify a rounded-away returned gradient"
+                    );
+                    assert!(solution.scaled_rel_residual > 0.5);
+                }
+            }
         }
     }
 }

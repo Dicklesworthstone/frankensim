@@ -33,11 +33,11 @@ pub mod linearization;
 pub mod newton;
 /// Spatial intrinsic-permeability tensors in the existing Stokes operator.
 pub mod porous;
-/// Conservative directional volume transport on the original BDM1 faces.
-pub mod transport;
 /// Estimated planar Smagorinsky stress on the original implicit flow solver.
 #[cfg(feature = "experimental-sgs")]
 pub mod sgs;
+/// Conservative directional volume transport on the original BDM1 faces.
+pub mod transport;
 
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(
@@ -183,7 +183,7 @@ pub struct FluxSolution {
     /// Relative residual after dividing each equation and load by the largest
     /// absolute entry in its matrix row. This protects constraint equations
     /// from being hidden by large viscous momentum loads.
-    /// Sparse solves also retain the maximum relative defect of the equations
+    /// Linear solves also retain the maximum relative defect of the equations
     /// after translating each component's constant pressure origin, so a large
     /// traction pressure cannot hide a small flow-driving load. The final check
     /// uses the returned pressure, including rounding during datum restoration.
@@ -1075,7 +1075,9 @@ impl<'m> FluxSystem<'m> {
 
     /// Solve an assembled system: dense LU below the fixture cutoff,
     /// sparse block-preconditioned FGMRES above it. Both routes report
-    /// the residual of the original assembled equations.
+    /// the residual of the original assembled equations. Each route removes
+    /// constant component pressure origins before solving and checks that the
+    /// returned absolute pressures retain the resolved pressure differences.
     ///
     /// # Panics
     /// If the dense factorization hits a zero pivot (singular system).
@@ -1092,6 +1094,9 @@ impl<'m> FluxSystem<'m> {
         params: FluxParams,
     ) -> Result<FluxSolution, boundary::StokesBoundaryError> {
         if self.n <= 1500 {
+            let original_rhs = rhs;
+            let (shifted_rhs, pressure_offsets) = sparse::pressure_origin(self, a, rhs);
+            let rhs = shifted_rhs.as_slice();
             let mut flat = a.to_dense();
             let mut x = rhs.to_vec();
             // Isolate prescribed velocity moments and pressure pins before
@@ -1145,7 +1150,34 @@ impl<'m> FluxSystem<'m> {
                     x[i] += ax[i];
                 }
             }
-            let (rel_residual, scaled_rel_residual) = sparse::residuals(a, rhs, &x, &mut ax);
+            let (mut rel_residual, mut scaled_rel_residual) =
+                sparse::residuals(a, rhs, &x, &mut ax);
+            if pressure_offsets.iter().any(|offset| *offset != 0.0) {
+                let shifted_residual = rel_residual.max(scaled_rel_residual);
+                for (cell, &component) in self.pressure_component.iter().enumerate() {
+                    x[self.n_u + cell] += pressure_offsets[component];
+                }
+                // LU owns its factors. Reuse the now-unused dense input as
+                // returned-pressure scratch; no additional field is allocated.
+                flat.truncate(self.n);
+                let (returned_residual, returned_scaled_residual) =
+                    sparse::returned_pressure_residuals(
+                        self,
+                        a,
+                        rhs,
+                        &pressure_offsets,
+                        &x,
+                        &mut flat,
+                        &mut ax,
+                    );
+                let (original_residual, original_scaled_residual) =
+                    sparse::residuals(a, original_rhs, &x, &mut ax);
+                rel_residual = original_residual;
+                scaled_rel_residual = original_scaled_residual
+                    .max(shifted_residual)
+                    .max(returned_residual)
+                    .max(returned_scaled_residual);
+            }
             return Ok(FluxSolution {
                 x,
                 n_u: self.n_u,
@@ -1240,8 +1272,7 @@ impl<'m> FluxSystem<'m> {
             iterations = k + 1;
             if update < picard_tol || iterations == max_picard {
                 let (a, rhs) = assemble(&solution.x[..self.n_u]);
-                let (original, scaled) =
-                    sparse::residuals(&a, &rhs, &solution.x, &mut residual);
+                let (original, scaled) = sparse::residuals(&a, &rhs, &solution.x, &mut residual);
                 nonlinear_residual = if original.is_finite() && scaled.is_finite() {
                     original.max(scaled)
                 } else {

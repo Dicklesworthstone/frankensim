@@ -99,8 +99,8 @@ adjoints.
   conceal constraint errors. Every restart independently recomputes both
   residuals against the original matrix. `FluxSolution::rel_residual` remains
   the original Euclidean relative residual; `scaled_rel_residual` exposes the
-  row-equilibrated relative residual. Sparse solves remove a constant pressure
-  origin independently per connected component before iteration, accumulate
+  row-equilibrated relative residual. Both dense and sparse solves remove a
+  constant pressure origin independently per connected component, accumulate
   `b-A*origin` with double-double arithmetic, and restore the original physical
   pressure afterward. This affine translation leaves the operator, traction
   datum and sealed pressure pins unchanged. Its O(nnz+n) setup prevents a large
@@ -110,12 +110,17 @@ adjoints.
   The actually returned pressures are translated back for a final residual
   check, so a gradient lost when adding the datum refuses convergence even
   when the internal translated solve met tolerance. This reuses solver scratch.
+  Dense LU uses the translated load for prescribed-column elimination and the
+  same two residual corrections. Zero origins preserve the original load bits,
+  dense arithmetic and diagnostics. After factorization, the dense input buffer
+  supplies returned-pressure scratch; the LU owns its independent factors.
   Boundary assembly and returned absolute pressures retain f64 precision;
   translation cannot recover input pressure differences already rounded away.
   Manufactured affine-shear and disconnected hydrostatic regressions in
   `tests/stokes_boundary.rs` compare flow and pressure at large pressure datums.
   A minimal pressure-gradient system separately checks representable and
-  unrepresentable differences under the same large datum.
+  unrepresentable differences under the same large datum in both solver routes,
+  with a zero-origin case retaining the exact dense pressure difference.
   `converged(tol)` requires both diagnostics to pass,
   and the implicit rheology and physical material wrappers use that guard.
   Dense solves report both diagnostics after residual correction as well.

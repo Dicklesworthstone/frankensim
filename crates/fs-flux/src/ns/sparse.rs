@@ -70,7 +70,11 @@ fn equilibrate(matrix: &Csr, rhs: &[f64]) -> (Csr, Vec<f64>) {
 /// Each connected component gets its own origin; a prescribed pressure pin
 /// takes precedence over any momentum row. The largest nonzero constant-
 /// pressure response gives a well-scaled origin without a normal equation.
-fn pressure_origin(system: &FluxSystem<'_>, matrix: &Csr, rhs: &[f64]) -> (Vec<f64>, Vec<f64>) {
+pub(super) fn pressure_origin(
+    system: &FluxSystem<'_>,
+    matrix: &Csr,
+    rhs: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
     let count = system.pressure_roots.len();
     let mut offsets = vec![0.0; count];
     let mut pinned = vec![false; count];
@@ -112,6 +116,11 @@ fn pressure_origin(system: &FluxSystem<'_>, matrix: &Csr, rhs: &[f64]) -> (Vec<f
             }
         }
     }
+    if offsets.iter().all(|offset| *offset == 0.0) {
+        // Preserve the original load bits and arithmetic when no translation
+        // is needed, including the usual zero-pinned closed components.
+        return (rhs.to_vec(), offsets);
+    }
     let shifted_rhs: Vec<_> = rhs
         .iter()
         .enumerate()
@@ -134,6 +143,25 @@ fn pressure_origin(system: &FluxSystem<'_>, matrix: &Csr, rhs: &[f64]) -> (Vec<f
         return (rhs.to_vec(), vec![0.0; count]);
     }
     (shifted_rhs, offsets)
+}
+
+/// Recheck the pressure values that actually survive datum restoration.
+/// Both linear-solver routes reuse an existing work buffer for these returned
+/// pressure differences; the original operator and translated load are fixed.
+pub(super) fn returned_pressure_residuals(
+    system: &FluxSystem<'_>,
+    matrix: &Csr,
+    shifted_rhs: &[f64],
+    pressure_offsets: &[f64],
+    x: &[f64],
+    returned_shifted: &mut [f64],
+    work: &mut [f64],
+) -> (f64, f64) {
+    returned_shifted.copy_from_slice(x);
+    for (cell, &component) in system.pressure_component.iter().enumerate() {
+        returned_shifted[system.n_u + cell] -= pressure_offsets[component];
+    }
+    residuals(matrix, shifted_rhs, returned_shifted, work)
 }
 
 struct BlockWork {
@@ -322,12 +350,15 @@ impl FluxSystem<'_> {
         // that defect, so evaluate the same translated equations again. Reuse
         // the now-unused equilibrated load instead of allocating another field.
         let mut returned_shifted = scaled_rhs;
-        returned_shifted.copy_from_slice(&state.x);
-        for (cell, &component) in self.pressure_component.iter().enumerate() {
-            returned_shifted[self.n_u + cell] -= pressure_offsets[component];
-        }
-        let (returned_residual, returned_scaled_residual) =
-            residuals(matrix, &shifted_rhs, &returned_shifted, &mut work);
+        let (returned_residual, returned_scaled_residual) = returned_pressure_residuals(
+            self,
+            matrix,
+            &shifted_rhs,
+            &pressure_offsets,
+            &state.x,
+            &mut returned_shifted,
+            &mut work,
+        );
         let (original_residual, scaled_residual) = residuals(matrix, rhs, &state.x, &mut work);
         FluxSolution {
             x: state.x,
