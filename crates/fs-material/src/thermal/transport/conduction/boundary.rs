@@ -5,6 +5,10 @@
 //! time integration. This adapter supplies the exact derivative with respect
 //! to the same original h or u; it adds no surface heat inventory.
 
+#[path = "boundary/current.rs"]
+mod current;
+pub use current::CurrentPlanarCaloricBoundary;
+
 use super::CaloricConductionLayer;
 use crate::thermal::conduction::{
     LayerConductionConfig, ReservoirLayerGeometry, ReservoirLayerResponse,

@@ -14,6 +14,9 @@ mod gray_link;
 #[path = "tests/surface_link.rs"]
 mod surface_link;
 
+#[path = "tests/current_geometry.rs"]
+mod current_geometry;
+
 use super::*;
 use crate::thermal::transport::{
     CONDUCTIVITY, DENSITY, SPECIFIC_HEAT,

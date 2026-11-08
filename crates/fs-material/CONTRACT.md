@@ -10480,6 +10480,58 @@ geometry, source-domain and late-cancellation refusal with exact replay. These
 are numerical model checks on synthetic source cards, not measured-material
 validation.
 
+## Explicit current planar geometry on original integrated caloric faces
+
+`IntegratedCaloricLink::with_current_planar_geometry` prepares a
+`CurrentPlanarCaloricLink` borrowing the original integrated face. The caller
+supplies the current common area and both physical normal half-distances,
+then installs those same measures on the original native observer using
+`CurrentConductionGeometry`. Preparation checks the original ordered caloric
+objects, reference contact identity and per-side coverage, admits the source
+cells, and probes the actual current face before returning. Every native trial
+checks that its current measures and immutable reference coverage match the
+prepared binding. Original reference geometry, mass, h/u basis and heat storage
+remain unchanged.
+
+The wrapper calls the existing two-material Kirchhoff solve with those current
+measures and the original conductivity curves. An authored areal contact
+resistance remains areal; an original source contact is evaluated once per
+trial at the same two energies and supplies the complete resistance. Its exact
+`dQ/de` contribution remains part of the original native tangent. No material
+card is re-queried, source support widened, conductivity table copied, or
+independent heat inventory introduced.
+
+`IntegratedCaloricBoundary::with_current_planar_geometry` similarly prepares
+a `CurrentPlanarCaloricBoundary` for an original reservoir or exposed-ambient
+channel. It rebuilds the original planar half-cell geometry and converts the
+unchanged areal film resistance to total resistance using the CURRENT area,
+`R_film = R''/A_current`, once during preparation. Retaining the old total
+film resistance would incorrectly change that physical film. The original
+bounded material-face solve, supported conductivity integral, caloric chain
+rule, applied secant heat and bath entropy accounting remain with their
+existing owners. A bath outside source support is still permitted only when
+the actual material face remains supported.
+
+These explicitly prepared wrappers alone opt into current mechanical geometry;
+the original source adapters retain their reference-pinned admission. Each
+thermal interval holds the selected mechanical measures fixed. Rebinding
+prepares a later configuration without mutating the original source. This
+is distinct from density-driven thickness and does not infer geometric energy
+derivatives, density changes or mechanical work. Original fixed-density,
+fixed-volume, pressure and composition constraints still apply and require
+compatible mechanical motion. Radial equivalent distances cannot be rebound
+as physical planar lengths; gray, multilayer and other pinned source owners
+are not implicitly enabled.
+
+Four focused regression definitions compare quadratic Kirchhoff/contact
+oracles and film-face roots with the prepared fluxes and full energy
+derivatives; exercise native chain/graph backward Euler and SDIRK2 with mixed
+original Cp/Cv storage; check separate reservoir and ambient heat/entropy; and
+cover stale geometry, source/reference refusal and cancellation replay.
+These new native regressions are authored but unexecuted under the current
+workspace dependency/build limits; pinned Rustfmt parsing is not integration
+validation.
+
 ## Original reservoir response of source caloric exchange
 
 `IsobaricHeatCapacityLaw::linear_heat_exchange` retains analytic derivatives
