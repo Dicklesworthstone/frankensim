@@ -6,6 +6,9 @@
 //! kicks. Neither field, finite thermal wall, receipt nor time counter changes
 //! on any refused or cancelled step. Scratch buffers may contain a prefix.
 
+/// Temperature-dependent buoyancy with retained native force history.
+pub mod buoyancy;
+
 use super::{
     EquilibriumLattice3, Face3, FaceBoundary3, GridError3, OpenBoundaryGrid3,
     OpenBoundaryMomentumTransport3, macro_cell,

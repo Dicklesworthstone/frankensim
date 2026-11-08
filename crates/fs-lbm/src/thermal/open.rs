@@ -21,6 +21,8 @@ use super::boundary::{
 
 /// Implicit conduction between existing finite walls of the native open grid.
 pub mod conduction;
+/// Explicit small-density-departure law for native buoyancy feedback.
+pub mod buoyancy;
 
 /// Heat ownership on one native face, in XMin/XMax/YMin/YMax/ZMin/ZMax order.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,6 +71,11 @@ pub struct ThermalReservoirExchange3 {
     /// These are reference-volume fluxes, not native compressible mass fluxes.
     pub inward_volume: f64,
     pub outward_volume: f64,
+    /// Extrema of the actual fluid trace reconstructed from each accepted
+    /// incoming/outgoing pair. Meaningful only when `links > 0`; these need
+    /// not equal the authored reservoir temperature on outflow or backflow.
+    pub min_temperature: f64,
+    pub max_temperature: f64,
     pub links: usize,
 }
 
@@ -405,6 +412,14 @@ impl ThermalOpenField3 {
             .map(|g| g.iter().sum())
     }
 
+    /// Unpublished scalar endpoint for a composing force/source owner.
+    pub(crate) fn trial_temperature(&self, cell: usize) -> Option<f64> {
+        self.trial
+            .get(cell)
+            .filter(|_| !self.solid[cell])
+            .map(|g| g.iter().sum())
+    }
+
     /// Replace a reservoir temperature without stepping either physical field.
     /// Face kind is preserved; the value is admitted even if currently outflow.
     pub fn set_reservoir_temperature(
@@ -537,6 +552,14 @@ impl ThermalOpenField3 {
                                 let incoming = reservoir_incoming(outgoing, u, temperature);
                                 let trace = (0.5 * incoming + 0.5 * outgoing) / weight;
                                 check_boundary_temperature(face, trace, self.limits)?;
+                                let reservoir = &mut balance.reservoirs[face];
+                                if reservoir.links == 0 {
+                                    reservoir.min_temperature = trace;
+                                    reservoir.max_temperature = trace;
+                                } else {
+                                    reservoir.min_temperature = reservoir.min_temperature.min(trace);
+                                    reservoir.max_temperature = reservoir.max_temperature.max(trace);
+                                }
                                 let heat = incoming - outgoing;
                                 reservoir_heat[face].add(heat);
                                 if u > 0.0 {
@@ -655,6 +678,8 @@ impl ThermalOpenField3 {
                 reservoir.outflow_heat,
                 reservoir.inward_volume,
                 reservoir.outward_volume,
+                reservoir.min_temperature,
+                reservoir.max_temperature,
             ]
             .iter()
             .any(|v| !v.is_finite())
