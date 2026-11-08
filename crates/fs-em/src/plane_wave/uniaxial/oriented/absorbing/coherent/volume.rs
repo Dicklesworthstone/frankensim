@@ -77,6 +77,8 @@ impl AbsorbingCrystalBox {
 #[derive(Clone, Copy, Debug)]
 pub struct AbsorbingCrystalBoxLimits {
     /// Bounds (2 * component_count)^2 before equal-wavevector coalescing.
+    /// A partially coherent factor bank bounds the SUM of these counts,
+    /// without introducing pairs between independent factors.
     /// Each pair has at most seven fixed analytic contractions. Short boxes
     /// instead use at most 8^3 volume and 6 * 8^2 surface field samples, each
     /// linear in that same admitted mode count. No adaptive loop is hidden.
@@ -84,6 +86,8 @@ pub struct AbsorbingCrystalBoxLimits {
     /// Peak logical modal buffers, explicit integration scratch and result
     /// headers; includes this query's returned result header. Borrowed source
     /// storage, allocator overhead and ordinary call-stack locals are excluded.
+    /// A factor bank adds its own result/accumulators to the LARGEST coherent
+    /// factor workspace, since factor results are evaluated sequentially.
     pub maximum_workspace_bytes: usize,
 }
 

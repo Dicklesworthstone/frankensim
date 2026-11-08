@@ -7105,6 +7105,50 @@ no second optical interface, lateral thermal resolution or optical feedback.
 Native execution of the new box regressions remains unverified; the validation
 history below predates these box controls and does not report their execution.
 
+
+`AbsorbingCrystalPartiallyCoherentIllumination` borrows a bank of those original
+coherent angular illuminations and declares distinct factors mutually
+uncorrelated. Each factor's original peak amplitudes already contain its
+square-root statistical weight. All inter-beam and ordinary/extraordinary
+products remain inside that factor; the original dielectric work and six
+signed face powers add across factors. Equal-frequency factors do not acquire
+cross terms. A positive factorization therefore represents partial spatial
+and polarization coherence, including contrast between full interference and
+independent illumination, without inventing a mean ensemble phasor.
+
+Every factor must retain the exact same original interface object. Frequencies
+may differ between independent factors; each retains its own original
+spectral loss tensor. A coherent factor still requires one exact frequency.
+These are explicitly weighted spectral-line mean powers, not PSD/Hz, an
+inferred bandwidth, finite-exposure beat power or a stochastic realization.
+A unitary change of the coherent factor basis at one frequency preserves
+ensemble heat and all signed face powers.
+
+The bank's `box_absorption` observes the same physical `AbsorbingCrystalBox`
+and retains the complete source/factorization. Heat and six face powers are
+summed in DD in authored factor order. The reported residual is minus the sum
+of returned outward face powers minus returned heat; it is never deposited.
+Any child refusal, unrepresentable aggregate or cancellation publishes no
+partial result. There is no repeated material query or Maxwell solve.
+
+Construction is allocation-free O(factor_count), checks the authored
+maximum_factors even for empty coherent factors, and retains the checked sum
+of each factor's (2 times component_count) squared. `AbsorbingCrystalBoxLimits`
+admits that TOTAL pair work and the PEAK workspace before any factor query.
+The shared coherent admission helper supplies exactly the same requirements
+used by each original query. Peak storage is the aggregate result and seven
+DD accumulators plus the largest factor's coherent scratch/result headers,
+not the sum across factors. Borrowed sources, allocator overhead and ordinary
+stack locals are excluded. Sequential work includes factor_count plus the
+sum of admitted modal pairs and each factor's fixed short-box rule. Empty
+banks are dark, with no implied carrier, field or material heat.
+
+Authored G1/G3 controls cover finite-footprint fringe contrast and phase,
+complex unitary factor mixing with nonzero lateral power, mixed original
+spectral laws, independent opposite-phase factors, exact aggregate work/peak
+storage admission, source identity, darkness and atomic cancellation.
+Native execution of these new factor-bank regressions remains unverified.
+
 Each factor uses a monochromatic passive reciprocal uniaxial half-space with a
 lossless isotropic incident port. This lane does not advance temperature, infer magnetic loss,
 support an absorbing incident port or finite lossy stack, introduce a biaxial

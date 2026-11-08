@@ -65,15 +65,13 @@ pub(in super::super) struct BoxIntegral {
     pub(in super::super) workspace_bytes: usize,
 }
 
-pub(in super::super) fn coherent_box_absorption<'a>(
-    responses: impl ExactSizeIterator<Item = &'a AbsorbingCrystalResponse> + Clone,
-    region: AbsorbingCrystalBox,
-    limits: AbsorbingCrystalBoxLimits,
+/// Shared logical admission for a single original coherent factor. Keeping
+/// this arithmetic here makes ensemble preflight identical to actual queries.
+pub(in super::super) fn coherent_box_requirements(
+    component_count: usize,
     result_bytes: usize,
-    mut cancelled: impl FnMut() -> bool,
-) -> Result<BoxIntegral> {
-    poll_illumination(&mut cancelled)?;
-    let mode_count = responses.len().checked_mul(2).ok_or(bad("crystal box mode count overflows"))?;
+) -> Result<(usize, usize)> {
+    let mode_count = component_count.checked_mul(2).ok_or(bad("crystal box mode count overflows"))?;
     let mode_pair_count = mode_count.checked_mul(mode_count).ok_or(bad("crystal box pair count overflows"))?;
     let workspace_bytes = mode_count
         .checked_mul(core::mem::size_of::<Wave>() + core::mem::size_of::<Sample>())
@@ -82,6 +80,22 @@ pub(in super::super) fn coherent_box_absorption<'a>(
         .and_then(|n| n.checked_add(core::mem::size_of::<[Fields; 2]>()))
         .and_then(|n| n.checked_add(core::mem::size_of::<[[Dd; 8]; 2]>()))
         .ok_or(bad("crystal box workspace overflows"))?;
+    Ok((mode_pair_count, workspace_bytes))
+}
+
+pub(in super::super) fn coherent_box_absorption<'a>(
+    responses: impl ExactSizeIterator<Item = &'a AbsorbingCrystalResponse> + Clone,
+    region: AbsorbingCrystalBox,
+    limits: AbsorbingCrystalBoxLimits,
+    result_bytes: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<BoxIntegral> {
+    poll_illumination(&mut cancelled)?;
+    let component_count = responses.len();
+    let (mode_pair_count, workspace_bytes) =
+        coherent_box_requirements(component_count, result_bytes)?;
+    // The shared requirements check admitted this exact multiplication.
+    let mode_count = component_count * 2;
     if mode_pair_count > limits.maximum_mode_pairs || workspace_bytes > limits.maximum_workspace_bytes {
         return Err(bad("crystal box exceeds its pair work or workspace budget"));
     }

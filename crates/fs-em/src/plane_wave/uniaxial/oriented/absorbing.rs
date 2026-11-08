@@ -39,6 +39,11 @@ pub use coherent::{
     AbsorbingCrystalCoherentIllumination,
 };
 
+mod partial;
+pub use partial::{
+    AbsorbingCrystalPartiallyCoherentBoxAbsorption, AbsorbingCrystalPartiallyCoherentIllumination,
+};
+
 /// One original material/frequency/illumination snapshot. Point queries have
 /// fixed work, allocate nothing and never resolve source laws or solve the
 /// boundary again. The borrowed interface retains both original spectra.

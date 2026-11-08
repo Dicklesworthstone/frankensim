@@ -25,7 +25,7 @@ pub(super) mod absorption;
 
 #[path = "kernel/box_integral.rs"]
 mod box_integral;
-pub(super) use box_integral::coherent_box_absorption;
+pub(super) use box_integral::{coherent_box_absorption, coherent_box_requirements};
 
 #[path = "kernel/statistics.rs"]
 mod statistics;

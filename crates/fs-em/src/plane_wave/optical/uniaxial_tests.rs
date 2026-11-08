@@ -1494,3 +1494,6 @@ fn coherent_crystal_box_retains_original_material_volume_and_resource_admission(
     assert_eq!(result.outward_face_power_w(), [0.0; 6]);
     assert_eq!(result.mode_pair_count(), 0);
 }
+
+#[path = "uniaxial_tests/partial_coherence.rs"]
+mod partial_coherence;
