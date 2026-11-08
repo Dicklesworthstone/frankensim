@@ -16,6 +16,12 @@ use fs_math::det;
 
 mod impulse;
 pub use impulse::{MechanicalImpulse, MechanicalImpulseControls};
+mod transfer;
+pub use transfer::{
+    MechanicalCoordinateMap, MechanicalStateTransfer, MechanicalTransferControls,
+    MechanicalTransferError, MechanicalTransferReport, MechanicalTransferWorkspace,
+    PreparedMechanicalTransfer,
+};
 
 /// Maximum complete state dimension of this bounded dense source adapter.
 /// Exact-propagation owners impose their own additional preparation budgets.
@@ -39,6 +45,7 @@ pub struct LinearMechanicalSystem {
     coordinates: usize,
     mass: Vec<f64>,
     inverse_mass: Vec<f64>,
+    relaxed_stiffness: Vec<f64>,
     branches: Vec<RelaxationBranch>,
 }
 
@@ -192,6 +199,7 @@ impl LinearMechanicalSystem {
             coordinates: n,
             mass: mass.to_vec(),
             inverse_mass: inverse,
+            relaxed_stiffness: relaxed_stiffness.to_vec(),
             branches,
         })
     }

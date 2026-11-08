@@ -652,6 +652,55 @@ initialization uses the shared compensated contraction.
 simultaneous signed source work, weak cancellation, large fixed storage, analytic
 oscillator continuation, weak negative K, original momentum and refusal/zero events.
 
+### Physical mechanical changes with retained Maxwell histories
+
+`LinearMechanicalSystem::prepare_state_transfer` binds two admitted original
+mechanical owners and a complete authored branch permutation. Unchanged
+coordinates preserve displacement and canonical momentum bits; an invertible
+`MechanicalCoordinateMap::TargetFromPrevious(A)` uses `q_new=A*q_old` and
+`p_new=A^-T*p_old`. The existing partial-pivot LU prepares the complete map,
+with explicit infinity-norm condition and componentwise inverse/state residual
+limits. Original Maxwell strain covectors must satisfy `b_new^T*A=b_old^T`
+within the declared numerical allowance. No sorted eigenvectors, projection,
+truncation, diagonal damping or new time integrator is introduced.
+
+Each physical viscous strain survives: its energy coordinate scales by
+`sqrt(k_new)/sqrt(k_old)`. Equal-time and mechanically dark branches remain
+independent, and every branch must appear exactly once. Mass, relaxed stiffness,
+branch stiffness and relaxation time may change; target C/P and gyroscopic
+coupling remain the target's complete original dynamics. Displacement/momentum
+and all histories map together. The enclosing event owner retains time, source
+phase and accumulated force work/heat; this zero-duration map advances none.
+
+The report separates signed kinetic, relaxed-elastic and Maxwell parameter work
+from the complete original storage increment. Pullback coefficients and physical
+contractions retain compensated product remainders; small work is not determined
+by subtracting large rounded Hamiltonians. An independent original-state/operator
+increment gates the transfer. Work is externally supplied or extracted, never
+heat, damping, discarded-mode loss or amplitude normalization. Source binding
+must establish physical branch identities and the origin of parameter work.
+
+Preparation is bounded dense O(n^3) under the native 256-state ceiling (n<=128),
+with explicit coordinate/payload/conditioning limits and cancellation between
+bounded rows; the native LU call is one bounded cold operation. Payload covers
+preparation, one workspace and both retained relaxed-K arrays, excluding
+caller/returned states and other pre-existing source storage. A bound workspace
+performs O(n^2+n*b) transfer without allocation, factors or solves. Sources stay
+immutable; complete output publishes only after all checks and final cancellation.
+Rebuild propagation/observation caches from the target at the same instant.
+Continuous coefficient evolution, support impulses, mass flux, remeshing,
+branch creation/deletion and changes to physical strain laws need their own
+transport/event laws.
+
+Seven actual-source native regressions cover independently integrated new-
+coefficient motion/work/heat, reversible parameter work, repeated-spectrum
+rotation and equal-time branch permutation, full-inertia nonorthogonal
+coordinates, 2^200 coordinate scaling, weak work behind large unchanged storage,
+dark-history relaxation, and atomic refusal/cancellation/resume. Together with
+the existing mechanical, impulse and storage-admission suites, 22 native tests
+pass using the complete fs-phs production source and actual numerical owners.
+This scoped lane does not establish the blocked full Cargo dependency graph.
+
 ### Physical modal damping and rigid coordinates
 
 `modal_bank[_ports]_with_damping_rates` admits the physical coefficients c
