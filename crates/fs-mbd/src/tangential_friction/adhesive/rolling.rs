@@ -16,15 +16,18 @@
 //! Pose evolution, normal-area evolution, history transport, arbitrary vector
 //! rolling and heat allocation remain with their physical owners.
 
-use super::super::hertz::{RigidHertzError, points, prepare_pair_wrench, relative_spin};
-use super::super::{RigidContactBinding, RigidFrictionError, magnitude, poll, vector};
-use crate::{DynamicsError, MassProperties, PointKinematics, Pose, RigidBodyState, Vec3};
+use super::super::hertz::RigidHertzError;
+use super::super::{RigidContactBinding, RigidFrictionError, poll, vector};
+use super::moment::{self, HeldGeometry, MomentError, MomentReport};
+use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::normal_patch::adhesive::rolling::{
     SourceJkrRollingContact, SourceJkrRollingError, SourceJkrRollingState, SourceJkrRollingStep,
 };
 use fs_exec::CancelGate;
-use fs_math::dd::Dd;
 use fs_tribo::partial_slip::TangentFrame;
+
+/// Physical-step and native work/momentum gates shared with bonded torsion.
+pub use super::moment::RigidAdhesiveMomentControls as RigidAdhesiveRollingControls;
 
 /// Physical pair and coincident reaction markers; longitudinal is the rolling axis.
 #[derive(Clone, Copy, Debug)]
@@ -32,31 +35,6 @@ pub struct RigidAdhesiveRollingContact<'a> {
     pub binding: RigidContactBinding,
     pub frame: TangentFrame,
     pub source: &'a SourceJkrRollingContact,
-}
-
-/// Explicit physical-step limits and independent dimensional acceptance gates.
-#[derive(Clone, Copy, Debug)]
-pub struct RigidAdhesiveRollingControls {
-    pub maximum_bodies: usize,
-    pub maximum_step_s: f64,
-    pub maximum_angle_increment_rad: f64,
-    /// At most 128 bisections, two bracket evaluations and one elastic predictor.
-    pub maximum_iterations: usize,
-    pub angle_tolerance_rad: f64,
-    pub geometry_tolerance_m: f64,
-    pub angular_velocity_tolerance_rad_s: f64,
-    pub linear_momentum_tolerance_ns: f64,
-    pub angular_momentum_tolerance_nms: f64,
-    pub energy_tolerance_j: f64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct HeldGeometry {
-    indices: [usize; 2],
-    arms: [Vec3; 2],
-    poses: [Pose; 2],
-    properties: [MassProperties; 2],
-    frame: TangentFrame,
 }
 
 /// Sealed source memory bound to the original pair, frame and held geometry.
@@ -149,13 +127,6 @@ impl core::fmt::Display for RigidAdhesiveRollingError {
 }
 impl std::error::Error for RigidAdhesiveRollingError {}
 
-struct NativePair {
-    geometry: HeldGeometry,
-    before: [RigidBodyState; 2],
-    initial: [PointKinematics; 2],
-    axis: Vec3,
-    mobility: f64,
-}
 impl RigidAdhesiveRollingContact<'_> {
     /// Start unstrained rolling on this exact pair and accepted normal source.
     pub fn initial_state(
@@ -165,100 +136,23 @@ impl RigidAdhesiveRollingContact<'_> {
         controls: RigidAdhesiveRollingControls,
         gate: &CancelGate,
     ) -> Result<RigidAdhesiveRollingState, RigidAdhesiveRollingError> {
-        let native = self.capture(bodies, properties, controls, gate)?;
+        let native = moment::capture::<SourceJkrRollingContact>(
+            self.binding,
+            self.frame,
+            vector(self.frame.longitudinal()),
+            bodies,
+            properties,
+            controls,
+            gate,
+        )?;
         Ok(RigidAdhesiveRollingState {
             source: self.source.initial_state(),
             geometry: native.geometry,
         })
     }
-    fn capture(
-        &self,
-        bodies: &[RigidBodyState],
-        properties: &[MassProperties],
-        controls: RigidAdhesiveRollingControls,
-        gate: &CancelGate,
-    ) -> Result<NativePair, RigidAdhesiveRollingError> {
-        poll(gate)?;
-        controls.validate()?;
-        let binding = self.binding;
-        if bodies.len() != properties.len()
-            || bodies.len() > controls.maximum_bodies
-            || binding.body_a >= bodies.len()
-            || binding.body_b >= bodies.len()
-            || binding.body_a == binding.body_b
-        {
-            return Err(RigidAdhesiveRollingError::Invalid(
-                "distinct bounded finite body pair required",
-            ));
-        }
-        let before = [bodies[binding.body_a], bodies[binding.body_b]];
-        let properties = [properties[binding.body_a], properties[binding.body_b]];
-        let arms = [binding.arm_a_body, binding.arm_b_body];
-        let initial = points(before, properties, arms)?;
-        if magnitude(initial[0].point_world.sub(initial[1].point_world))
-            > controls.geometry_tolerance_m
-        {
-            return Err(RigidAdhesiveRollingError::GeometryMismatch);
-        }
-        let axis = vector(self.frame.longitudinal());
-        let mut mobility = 0.0;
-        for i in 0..2 {
-            let body_axis = before[i].pose().orientation().rotate_world_to_body(axis);
-            let factor = properties[i].angular_mobility_factor(body_axis);
-            mobility += factor.dot(factor);
-        }
-        if !mobility.is_finite() || mobility <= 0.0 {
-            return Err(RigidAdhesiveRollingError::Invalid(
-                "unrepresentable rotational mobility",
-            ));
-        }
-        Ok(NativePair {
-            geometry: HeldGeometry {
-                indices: [binding.body_a, binding.body_b],
-                arms,
-                poses: before.map(|b| b.pose()),
-                properties,
-                frame: self.frame,
-            },
-            before,
-            initial,
-            axis,
-            mobility,
-        })
-    }
-}
-impl RigidAdhesiveRollingControls {
-    fn validate(self) -> Result<(), RigidAdhesiveRollingError> {
-        if self.maximum_bodies < 2
-            || self.maximum_iterations == 0
-            || self.maximum_iterations > 128
-            || [
-                self.maximum_step_s,
-                self.maximum_angle_increment_rad,
-                self.angle_tolerance_rad,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-            || [
-                self.geometry_tolerance_m,
-                self.angular_velocity_tolerance_rad_s,
-                self.linear_momentum_tolerance_ns,
-                self.angular_momentum_tolerance_nms,
-                self.energy_tolerance_j,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x < 0.0)
-        {
-            return Err(RigidAdhesiveRollingError::Invalid(
-                "finite positive rolling budgets required",
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Prepare original-source rolling and actual native recoil without publication.
-#[allow(clippy::too_many_lines)]
 pub fn prepare_rigid_adhesive_rolling(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
@@ -268,118 +162,31 @@ pub fn prepare_rigid_adhesive_rolling(
     controls: RigidAdhesiveRollingControls,
     gate: &CancelGate,
 ) -> Result<RigidAdhesiveRollingCandidate, RigidAdhesiveRollingError> {
-    let native = contact.capture(bodies, properties, controls, gate)?;
-    if native.geometry != state.geometry {
-        return Err(RigidAdhesiveRollingError::GeometryMismatch);
-    }
-    if !dt_s.is_finite() || dt_s <= 0.0 || dt_s > controls.maximum_step_s {
-        return Err(RigidAdhesiveRollingError::StepLimit);
-    }
-    contact.source.stored_energy_j(&state.source)?;
-    let rate_before = finite(relative_spin(native.initial).dot(native.axis))?;
-    let free = finite(dt_s * rate_before)?;
-    let compliance = finite((0.5 * dt_s) * (dt_s * native.mobility))?;
-    if compliance <= 0.0 {
-        return Err(RigidAdhesiveRollingError::Invalid(
-            "unrepresentable angular compliance",
-        ));
-    }
-    let (angle, step, evaluations) = solve(
-        contact.source,
-        &state.source,
-        free,
-        compliance,
+    let native = moment::capture::<SourceJkrRollingContact>(
+        contact.binding,
+        contact.frame,
+        vector(contact.frame.longitudinal()),
+        bodies,
+        properties,
         controls,
         gate,
     )?;
-    let impulse = finite(dt_s * step.rolling().mean_moment_n_m)?;
-    let angular_impulse = native.axis.scale(impulse);
-    let phase = prepare_pair_wrench(
-        native.before,
-        native.geometry.properties,
-        native.geometry.arms,
-        Vec3::ZERO,
-        angular_impulse,
+    let candidate = moment::prepare(
+        native,
+        state.geometry,
+        contact.source,
+        &state.source,
+        dt_s,
+        controls,
         gate,
     )?;
-    let after = phase.bodies_after;
-    let final_points = points(after, native.geometry.properties, native.geometry.arms)?;
-    let rate_after = finite(relative_spin(final_points).dot(native.axis))?;
-    if ((rate_before > 0.0 && rate_after < 0.0) || (rate_before < 0.0 && rate_after > 0.0))
-        && !admits_elastic_turn(&native, contact.source, &step, rate_before)
-    {
-        return Err(RigidAdhesiveRollingError::UnresolvedRollingReversal);
-    }
-    let midpoint = (Dd::from_f64(rate_before) + Dd::from_f64(rate_after)) * Dd::from_f64(0.5);
-    let native_angle = midpoint * Dd::from_f64(dt_s);
-    let impulse_work = finite((midpoint * Dd::from_f64(impulse)).to_f64())?;
-    let mut body_residual = [Vec3::ZERO; 2];
-    for (i, sign) in [(0, 1.0), (1, -1.0)] {
-        let expected = native.before[i]
-            .pose()
-            .orientation()
-            .rotate_world_to_body(angular_impulse.scale(sign));
-        let a = after[i].angular_momentum_body();
-        let b = native.before[i].angular_momentum_body();
-        let difference = |x, y, z| (Dd::from_f64(x) - Dd::from_f64(y) - Dd::from_f64(z)).to_f64();
-        body_residual[i] = Vec3::new(
-            difference(a.x, b.x, expected.x),
-            difference(a.y, b.y, expected.y),
-            difference(a.z, b.z, expected.z),
-        );
-    }
-    let rolling = step.rolling();
-    let report = RigidAdhesiveRollingReport {
-        contact: step,
-        angle_increment_rad: angle,
-        rolling_rate_before_rad_s: rate_before,
-        rolling_rate_after_rad_s: rate_after,
-        rotational_mobility_per_kg_m2: native.mobility,
-        angular_impulse_on_a_world_nms: angular_impulse,
-        kinetic_energy_change_j: phase.kinetic_change_j,
-        midpoint_impulse_work_j: impulse_work,
-        work_energy_residual_j: finite(
-            (Dd::from_f64(phase.kinetic_change_j) - Dd::from_f64(impulse_work)).to_f64(),
-        )?,
-        total_energy_residual_j: finite(
-            (Dd::from_f64(phase.kinetic_change_j)
-                + Dd::from_f64(rolling.storage_change_j)
-                + Dd::from_f64(rolling.irreversible_loss_j))
-            .to_f64(),
-        )?,
-        angle_residual_rad: finite((native_angle - Dd::from_f64(angle)).to_f64())?,
-        angular_velocity_residual_rad_s: finite(
-            (Dd::from_f64(rate_after)
-                - Dd::from_f64(rate_before)
-                - Dd::from_f64(native.mobility) * Dd::from_f64(impulse))
-            .to_f64(),
-        )?,
-        body_angular_impulse_residual_nms: body_residual,
-        linear_momentum_change_ns: phase.linear_change_ns,
-        angular_momentum_change_nms: phase.angular_change_nms,
-        evaluations,
-    };
-    if report.work_energy_residual_j.abs() > controls.energy_tolerance_j
-        || report.total_energy_residual_j.abs() > controls.energy_tolerance_j
-        || (impulse_work + rolling.applied_work_j).abs() > controls.energy_tolerance_j
-        || report.angle_residual_rad.abs() > controls.angle_tolerance_rad
-        || report.angular_velocity_residual_rad_s.abs() > controls.angular_velocity_tolerance_rad_s
-        || body_residual
-            .iter()
-            .any(|x| !x.is_finite() || magnitude(*x) > controls.angular_momentum_tolerance_nms)
-        || magnitude(phase.linear_change_ns) > controls.linear_momentum_tolerance_ns
-        || magnitude(phase.angular_change_nms) > controls.angular_momentum_tolerance_nms
-    {
-        return Err(RigidAdhesiveRollingError::Audit(Box::new(report)));
-    }
-    poll(gate)?;
     Ok(RigidAdhesiveRollingCandidate {
-        bodies_after: after,
+        bodies_after: candidate.bodies_after,
         state_after: RigidAdhesiveRollingState {
-            source: step.state(),
+            source: candidate.source_after,
             geometry: state.geometry,
         },
-        report,
+        report: candidate.report.into(),
     })
 }
 
@@ -403,185 +210,45 @@ pub fn apply_rigid_adhesive_rolling(
     Ok(candidate.report)
 }
 
-fn solve(
-    source: &SourceJkrRollingContact,
-    state: &SourceJkrRollingState,
-    free: f64,
-    compliance: f64,
-    controls: RigidAdhesiveRollingControls,
-    gate: &CancelGate,
-) -> Result<(f64, SourceJkrRollingStep, usize), RigidAdhesiveRollingError> {
-    let span = finite(compliance * source.law().critical_moment_n_m())?;
-    let mut low = finite(free - span)?
-        .next_down()
-        .max(-controls.maximum_angle_increment_rad);
-    let mut high = finite(free + span)?
-        .next_up()
-        .min(controls.maximum_angle_increment_rad);
-    if low > high {
-        return Err(RigidAdhesiveRollingError::StepLimit);
-    }
-    let probe = |angle| -> Result<_, RigidAdhesiveRollingError> {
-        poll(gate)?;
-        let step = source.advance(state, angle)?;
-        let residual = finite(
-            (Dd::from_f64(angle)
-                - Dd::from_f64(free)
-                - Dd::from_f64(compliance) * Dd::from_f64(step.rolling().mean_moment_n_m))
-            .to_f64(),
-        )?;
-        Ok((step, residual))
-    };
-    // Ordinary elastic midpoint motion has an analytic solution. Use the
-    // original source to verify it, including low history bits and yield;
-    // this predictor never supplies a replacement constitutive response.
-    let mut evaluations = 0;
-    let critical_angle = source.law().critical_rolling_angle_rad();
-    let fraction =
-        state.elastic_shift_m() / source.law().parameters().critical_rolling_displacement_m;
-    let denominator = 1.0 + (0.5 * span) / critical_angle;
-    let predictor = (-span).mul_add(fraction, free) / denominator;
-    if denominator.is_finite() && predictor.is_finite() && predictor >= low && predictor <= high {
-        evaluations += 1;
-        match probe(predictor) {
-            Ok((step, residual))
-                if step.rolling().plastic_rolling_increment_m == 0.0
-                    && step.rolling().irreversible_loss_j == 0.0
-                    && residual.abs() <= controls.angle_tolerance_rad =>
-            {
-                return Ok((predictor, step, evaluations));
-            }
-            // An optional failed predictor cannot add a refusal to the
-            // original bracketed solve. Cancellation still takes precedence.
-            _ => poll(gate)?,
+impl From<MomentReport<SourceJkrRollingContact>> for RigidAdhesiveRollingReport {
+    fn from(r: MomentReport<SourceJkrRollingContact>) -> Self {
+        Self {
+            contact: r.contact,
+            angle_increment_rad: r.angle_increment_rad,
+            rolling_rate_before_rad_s: r.rate_before_rad_s,
+            rolling_rate_after_rad_s: r.rate_after_rad_s,
+            rotational_mobility_per_kg_m2: r.rotational_mobility_per_kg_m2,
+            angular_impulse_on_a_world_nms: r.angular_impulse_on_a_world_nms,
+            kinetic_energy_change_j: r.kinetic_energy_change_j,
+            midpoint_impulse_work_j: r.midpoint_impulse_work_j,
+            work_energy_residual_j: r.work_energy_residual_j,
+            total_energy_residual_j: r.total_energy_residual_j,
+            angle_residual_rad: r.angle_residual_rad,
+            angular_velocity_residual_rad_s: r.angular_velocity_residual_rad_s,
+            body_angular_impulse_residual_nms: r.body_angular_impulse_residual_nms,
+            linear_momentum_change_ns: r.linear_momentum_change_ns,
+            angular_momentum_change_nms: r.angular_momentum_change_nms,
+            evaluations: r.evaluations,
         }
     }
-    evaluations += 1;
-    let (low_step, f_low) = probe(low)?;
-    if f_low.abs() <= controls.angle_tolerance_rad {
-        return Ok((low, low_step, evaluations));
-    }
-    evaluations += 1;
-    let (high_step, f_high) = probe(high)?;
-    if f_high.abs() <= controls.angle_tolerance_rad {
-        return Ok((high, high_step, evaluations));
-    }
-    if f_low > 0.0 || f_high < 0.0 {
-        return Err(RigidAdhesiveRollingError::StepLimit);
-    }
-    let mut residual = f_low;
-    for _ in 0..controls.maximum_iterations {
-        let mid = 0.5 * low + 0.5 * high;
-        evaluations += 1;
-        let (step, value) = probe(mid)?;
-        residual = value;
-        if residual.abs() <= controls.angle_tolerance_rad {
-            return Ok((mid, step, evaluations));
-        }
-        if mid == low || mid == high {
-            break;
-        }
-        if residual < 0.0 {
-            low = mid;
-        } else {
-            high = mid;
-        }
-    }
-    Err(RigidAdhesiveRollingError::Unresolved {
-        evaluations,
-        angle_residual_rad: residual,
-    })
 }
-
-// At held geometry, a scalar couple impulse j gives omega=omega0+W*j and
-// K=K0+omega0*j+W*j^2/2. Hence K-omega^2/(2W) is invariant. Initial rolling
-// storage plus omega0^2/(2W) bounds every point of the conservative scalar orbit.
-// This guarded floating-point screen is not an interval or trajectory certificate.
-fn admits_elastic_turn(
-    native: &NativePair,
-    source: &SourceJkrRollingContact,
-    step: &SourceJkrRollingStep,
-    rate: f64,
-) -> bool {
-    let rolling = step.rolling();
-    if rolling.plastic_rolling_increment_m != 0.0
-        || rolling.irreversible_loss_j != 0.0
-        || (rolling.storage_before_j != 0.0 && !rolling.storage_before_j.is_normal())
-    {
-        return false;
-    }
-    // Normwise roundoff allowance for the fixed quaternion rotations, inverse
-    // principal inertias and projections, including the admitted quaternion
-    // norm drift. Unlike a relative error on omega or W, these absolute bounds
-    // retain cancellation and inertia-conditioning effects. They do not use
-    // the caller's authored mechanics/audit tolerances.
-    const GUARD: f64 = 4096.0 * f64::EPSILON;
-    let (mut inverse_scale, mut rate_scale) = (0.0, 0.0);
-    for i in 0..2 {
-        let inertia = native.geometry.properties[i].principal_inertia_body();
-        let minimum = inertia.x.min(inertia.y).min(inertia.z);
-        let inverse = minimum.recip().next_up();
-        let momentum = native.before[i].angular_momentum_body();
-        let norm = if momentum == Vec3::ZERO {
-            0.0
-        } else {
-            ((momentum.x.abs() + momentum.y.abs()).next_up() + momentum.z.abs()).next_up()
-        };
-        let amplitude = if norm == 0.0 {
-            0.0
-        } else {
-            (norm / minimum).next_up()
-        };
-        if !inverse.is_normal() || (norm != 0.0 && (!norm.is_normal() || !amplitude.is_normal())) {
-            return false;
+impl From<MomentError<SourceJkrRollingContact>> for RigidAdhesiveRollingError {
+    fn from(error: MomentError<SourceJkrRollingContact>) -> Self {
+        match error {
+            MomentError::Invalid(field) => Self::Invalid(field),
+            MomentError::Source(e) => Self::Source(e),
+            MomentError::Mechanics(e) => Self::Mechanics(e),
+            MomentError::GeometryMismatch => Self::GeometryMismatch,
+            MomentError::StepLimit => Self::StepLimit,
+            MomentError::Unresolved {
+                evaluations,
+                angle_residual_rad,
+            } => Self::Unresolved {
+                evaluations,
+                angle_residual_rad,
+            },
+            MomentError::Reversal => Self::UnresolvedRollingReversal,
+            MomentError::Audit(report) => Self::Audit(Box::new((*report).into())),
         }
-        inverse_scale = (inverse_scale + inverse).next_up();
-        if amplitude > 0.0 {
-            rate_scale = (rate_scale + amplitude).next_up();
-        }
-    }
-    let mobility_error = (GUARD * inverse_scale).next_up();
-    let rate_error = (GUARD * rate_scale).next_up();
-    let mobility_lower = (native.mobility - mobility_error).next_down();
-    let rate_upper = (rate.abs() + rate_error).next_up();
-    if !mobility_error.is_normal()
-        || !rate_error.is_normal()
-        || !mobility_lower.is_normal()
-        || mobility_lower <= 0.0
-        || !rate_upper.is_normal()
-    {
-        return false;
-    }
-    let moment = source.law().critical_moment_n_m();
-    let angle = source.law().critical_rolling_angle_rad();
-    if !moment.is_normal() || !angle.is_normal() {
-        return false;
-    }
-    let yield_lower = (Dd::from_f64(0.5) * Dd::from_f64(moment) * Dd::from_f64(angle))
-        .to_f64()
-        .next_down();
-    if !yield_lower.is_normal() || yield_lower <= 0.0 {
-        return false;
-    }
-    let reduced_rate = Dd::from_f64(rate_upper) / Dd::from_f64(mobility_lower.sqrt());
-    let energy_scale = moment.sqrt() * angle.sqrt();
-    if !reduced_rate.to_f64().is_normal() || !energy_scale.is_normal() {
-        return false;
-    }
-    let speed = reduced_rate / Dd::from_f64(energy_scale);
-    let fraction =
-        Dd::from_f64(rolling.storage_before_j) / Dd::from_f64(yield_lower) + speed * speed;
-    let upper = fraction.to_f64().next_up();
-    // Also covers ordinary rounded energy coefficients (Mcrit*theta_crit is
-    // formed in a different order from the original prepared yield storage).
-    upper.is_finite() && upper >= 0.0 && upper < 1.0 - GUARD
-}
-fn finite(value: f64) -> Result<f64, RigidAdhesiveRollingError> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(RigidAdhesiveRollingError::Invalid(
-            "unrepresentable native rolling arithmetic",
-        ))
     }
 }

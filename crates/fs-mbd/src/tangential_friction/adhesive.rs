@@ -38,6 +38,11 @@ pub mod jkr_mixed_mode;
 /// Fixed-axis JKR rolling spring and yield on the actual finite body pair.
 pub mod rolling;
 
+/// Bonded JKR torsional compliance, calibrated yield and actual normal-axis recoil.
+pub mod torsion;
+
+mod moment;
+
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::{

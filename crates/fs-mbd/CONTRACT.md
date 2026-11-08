@@ -8162,3 +8162,26 @@ poses, evolve normal area, transport memory or supply general vector rolling. G1
 cases in `tests/adhesive_rolling.rs` cover analytic elastic pair recoil, tensile
 yielding, full inertia in rotated frames, weak work beside common translation,
 and atomic cancellation, geometry and numerical-budget refusals.
+
+## Bonded adhesive torsion on a native rigid pair
+
+`tangential_friction::adhesive::torsion` binds the original JKR torsional source
+to a finite rigid pair and the original contact normal. Both actual inertia
+tensors determine normal-axis mobility; equal/opposite free couples change
+both original angular momenta. Original twist storage and irreversible loss
+close the compensated native kinetic change, including under large common
+translation. The source's explicitly calibrated critical twist and mode-III
+release/adhesion approximation ceiling remain load-bearing.
+
+Rolling and torsion share one private midpoint phase: the source-verified
+analytic elastic predictor, bounded monotone solve, guarded elastic-turn
+screen, and independent actual momentum/work audits. Their public source,
+history, axes and reports remain distinct. History binds pair, arms, poses,
+frame and mass properties; cancellation and any failed solve/source/audit leave
+bodies and memory unchanged. This fixed-normal phase does not enforce force
+reactions, transport rotating contact history, evolve area, resolve local
+partial slip, combine sliding capacities or assign irreversible loss to heat.
+G1/G3/G4 tests cover elastic recoil with rotated full inertia, tensile yielding,
+common-translation invariance, safe elastic turns, hidden-yield refusal and
+atomic source/geometry/budget/cancellation refusal. Existing rolling tests
+remain the regression seam for the shared native arithmetic.
