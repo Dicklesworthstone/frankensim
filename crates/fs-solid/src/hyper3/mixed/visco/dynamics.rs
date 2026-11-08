@@ -53,6 +53,12 @@ pub use impulse::{
 mod split;
 pub use split::MixedViscoForceKick;
 
+mod adaptive;
+pub use adaptive::{
+    MixedViscoAdaptiveControls, MixedViscoAdaptiveError, MixedViscoAdaptivePair,
+    MixedViscoPairEstimate, MixedViscoPairLoads,
+};
+
 /// Immutable accepted displacement, continuous pressure, memory and velocity.
 #[derive(Debug)]
 pub struct MixedViscoTetMotion<'a> {

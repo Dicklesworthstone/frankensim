@@ -403,6 +403,10 @@ pub(super) fn stress_strain_fields(
         }) / jacobian
     });
 
+    (cauchy_pa, green_lagrange_strain(deformation_gradient))
+}
+
+pub(super) fn green_lagrange_strain(deformation_gradient: &[f64; 9]) -> [f64; 9] {
     // E = sym(H) + H^T H/2, H = F-I, retains small strain without subtracting
     // nearly equal metric diagonals. Mirror strain only, never material stress.
     let mut h = *deformation_gradient;
@@ -418,5 +422,5 @@ pub(super) fn stress_strain_fields(
             green_lagrange_strain[3 * j + i] = strain;
         }
     }
-    (cauchy_pa, green_lagrange_strain)
+    green_lagrange_strain
 }

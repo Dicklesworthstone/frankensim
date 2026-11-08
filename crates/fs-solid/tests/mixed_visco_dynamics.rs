@@ -17,6 +17,8 @@ use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::linear3::tet10::{TET10_EDGES, promote_p1_to_p2};
 use fs_solver::nonlinear::NewtonKrylovConfig;
 
+#[path = "mixed_visco_dynamics/adaptive.rs"]
+mod adaptive;
 #[path = "mixed_visco_dynamics/impulse.rs"]
 mod impulse;
 #[path = "mixed_visco_dynamics/momentum.rs"]

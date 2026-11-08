@@ -8804,6 +8804,49 @@ P1/Hex8 arithmetic, budget and cancellation. The existing creep example also
 offers `--dynamic` to release the deformed body and report physical and
 numerical losses independently.
 
+### Adaptive physical intervals with retained finite-strain history
+
+`MixedViscoTetMotion::advance_adaptive_pair_toward` advances one accepted pair
+toward an explicit target time. It compares one original full interval with two
+original half intervals from the same accepted displacement, pressure, velocity
+and per-quadrature Maxwell history. Only the two-half trajectory is returned:
+there is no extrapolation of displacement, pressure, metrics or material work.
+The original consistent P2 mass and immutable reference geometry remain shared.
+
+A caller callback supplies explicit support, nodal-force, body-force and pressure-
+gauge snapshots at each actual candidate midpoint and endpoint. The captured end
+snapshot is reused by coarse and fine solves. No load/support interpolation is
+inferred. The caller must resolve source bandwidth and stop at discontinuities;
+local sampling cannot detect skipped source cycles.
+
+All original nodes, including supports, participate in displacement and velocity
+checks. Every original quadrature point contributes objective Green-strain and
+full Cauchy-stress checks, and every original branch contributes its symmetric
+inverse viscous-metric error with the true Frobenius shear weights. Cauchy stress
+is reevaluated at zero duration from the accepted native history and actual P1
+pressure; positive-duration incremental stress is not substituted for physical
+storage stress. Explicit SI absolute tolerances combine with change-relative
+motion/strain/history scales and rotation-invariant endpoint stress magnitudes.
+The largest local ratio controls first-order step-doubling refinement.
+
+One call accepts exactly two physical history intervals and performs at most
+three native endpoint solves per attempt, with an explicit cap of 32 attempts.
+The raw full/fine disagreement is a local consistency indicator, not a global
+error bound or a certificate for prescribed-support derivatives. Native source,
+material, equilibrium and work failures propagate; this is accuracy adaptation,
+not general failure recovery. Both fine reports retain actual material loss,
+signed endpoint defect and numerical kinetic loss separately. Pair-wide sums of
+absolute endpoint/balance defects and numerical kinetic loss must fit the same
+supplied work allowances. No rejected coarse history or work enters acceptance,
+and cancellation or any refusal leaves the original motion unchanged.
+
+The focused adaptive regressions contain independent quadratic-shear recurrence
+and time-refinement checks, scalar nonlinear uniaxial Maxwell log-strain updates,
+physical pressure-inclusive stress and frame-invariance checks, actual callback
+times under retries, pair-wide kinetic-budget refusal, and immutable rollback.
+Authored native tests have not been executed in this disk-constrained session;
+stdin rustfmt and independent scalar/equation checks are separate evidence.
+
 ### Instantaneous impulses with retained mixed viscoelastic memory
 
 `MixedViscoTetMotion::impulse_candidate` transfers nodal impulses through the
