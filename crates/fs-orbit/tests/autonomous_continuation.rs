@@ -345,9 +345,10 @@ fn exact_autonomous_tangents_respect_payload_and_original_residual_limits() {
     let mut b = budget(&problem);
     let seeds = [problem.seed(0.65, 0.0, 3), problem.seed(0.70, 0.0, 3)];
     let initial = [(lambda(0.65), &seeds[0]), (lambda(0.70), &seeds[1])];
-    // Enough for the original residual-probe corrector, but not its additional
-    // optional tangent tables. Refuse before evaluating or allocating that path.
-    b.maximum_payload_bytes = 128 << 10;
+    // The shared phase grid admits the 81,000-byte residual-probe corrector,
+    // but the optional tangent needs 83,848 bytes. Refuse that extra payload
+    // before evaluating or allocating its path.
+    b.maximum_payload_bytes = 82_000;
     assert!(matches!(
         continue_autonomous_branch(&mut problem, initial, &b, || false),
         Err(AutonomousContinuationError::Invalid(

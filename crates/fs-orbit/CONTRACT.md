@@ -47,6 +47,23 @@ API — never instrument-shaped.
   retained alongside the original physical residual trace. This is the entry
   for mixed-unit or very small physical responses; the original unscaled
   entry points retain their existing coefficient-relative convergence rule.
+- `solve_hb_backbone_coordinate_scaled_seeded` and its adaptive counterpart
+  pin the fundamental peak of any chosen original physical state. A static or
+  nodal first coordinate no longer excludes another modal family. A full-state
+  permutation reuses the existing backbone/Newton and refinement owners; island
+  rows, both axes of the exact Jacobian and frequency-dependent port, physical
+  state/equation scales, and per-coordinate refinement tolerances all follow
+  that same permutation. Returned coefficients retain original ordering. No
+  balance row, coupling, loss or material-memory state is removed. The pinned
+  fundamental amplitude is distinct from a nonlinear turning amplitude.
+  Selecting coordinate zero delegates directly and retains original bits.
+  Other coordinates add one prepared state buffer and allocation-free island
+  mapping; returned port matrices are permuted in place. Native G1/G3 tests in
+  `tests/backbone_coordinates.rs` compare nonlinear frequency to independent
+  energy quadrature, preserve dense port coupling and q/v harmonics under phase
+  changes, retain a static first state and a last-coordinate velocity anchor,
+  refine harmonic order, and propagate declared tangent refusals. These are
+  finite harmonic balances, not existence or stability certificates.
 - `solve_hb_autonomous_scaled_seeded` uses a complete physical seed and a
   fixed full-waveform phase hyperplane in the normalized Parseval state chart.
   All original coefficients and balance rows remain active; the first state may
@@ -774,5 +791,15 @@ former tables had maximum round-trip error 6.25e-17 and maximum projection
 difference 4.94e-15. Preparation and high-order projection improved locally;
 some smaller warmed kernels were slower. Those shared-host measurements are
 not stable release throughput guarantees. Full Cargo integration was attempted
-but blocked by shared disk exhaustion and subsequent environment loss; the
-new integration tests have not yet run in that environment.
+but blocked by shared disk exhaustion and subsequent environment loss.
+
+After execution recovered, a bounded native build compiled the complete orbit
+crate against actual fs-math/SIMD and the original fs-la LU/eigenvalue/complex
+LU/SVD owners plus their exact production GEMM functions. Unrelated executor,
+budget and provenance surfaces of fs-la were omitted; no numerical algorithm
+was substituted. The new five backbone-coordinate tests, all nine orbit unit
+tests and all thirteen autonomous tangent/continuation regressions pass. This
+is scoped numerical verification, not a full Cargo/workspace gate. The phase
+comparison allows eight machine epsilons for independent full-angle argument
+rounding. Payload-refusal tests now straddle the actual reduced allocations,
+retaining their admission-before-callback checks without restoring old tables.

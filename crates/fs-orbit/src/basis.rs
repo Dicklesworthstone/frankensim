@@ -91,8 +91,11 @@ mod tests {
             for stride in 0..samples {
                 for (j, phase) in basis.cycle(stride).take(3 * samples).enumerate() {
                     let angle = TAU * ((j * stride) % samples) as f64 / samples as f64;
-                    assert!((phase.re - angle.cos()).abs() < 1.0e-15);
-                    assert!((phase.im - angle.sin()).abs() < 1.0e-15);
+                    // The full-angle independent reference rounds its angle
+                    // differently from the conjugate half-grid construction.
+                    let tolerance = 8.0 * f64::EPSILON;
+                    assert!((phase.re - angle.cos()).abs() < tolerance);
+                    assert!((phase.im - angle.sin()).abs() < tolerance);
                 }
             }
             assert_eq!(basis.roots.len(), samples);

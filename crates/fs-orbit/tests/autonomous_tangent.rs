@@ -365,9 +365,10 @@ fn analytic_workspace_is_admitted_before_tangent_callbacks_and_residual_limits_s
         let seeds = [problem.seed(0.65, 0.0), problem.seed(0.70, 0.0)];
         let mut budget = problem.budget();
         budget.steps = 1;
-        // Enough for this problem's existing residual/dense solve path, but
-        // not for the additional retained Fourier tangent and phase tables.
-        budget.maximum_payload_bytes = 160_000;
+        // The shared phase grid lowers the base payload to 106,880 bytes;
+        // the retained Fourier tangent raises it to 114,592 bytes. Admit
+        // residual probing, but refuse the analytic path before its callbacks.
+        budget.maximum_payload_bytes = 110_000;
         let result = continue_autonomous_branch(
             &mut problem,
             [(lambda(0.65), &seeds[0]), (lambda(0.70), &seeds[1])],

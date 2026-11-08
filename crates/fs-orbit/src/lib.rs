@@ -49,14 +49,20 @@ pub use adaptive::{
 mod scaling;
 pub use scaling::{HbScales, ScaledHbOrbit, solve_hb_scaled_seeded};
 
+mod backbone;
+pub use backbone::{
+    solve_hb_backbone_coordinate_adaptive_scaled_seeded,
+    solve_hb_backbone_coordinate_scaled_seeded,
+};
+
 mod phase;
 pub use phase::solve_hb_autonomous_scaled_seeded;
 
 mod forced;
 pub use forced::{ContinuationScales, ScaledContinuationPoint, continue_branch_scaled_seeded};
 
-mod tangent;
 mod basis;
+mod tangent;
 use basis::PhaseBasis;
 
 /// Consistent discrete shooting tangents, physical scaling and Floquet maps.
@@ -607,8 +613,7 @@ fn hb_residual<P: OrbitProblem>(
             let mut ac = AftSum::new(0.0);
             for (n, phase) in (1..=n_harm).zip(aft.basis.cycle(j).skip(1)) {
                 ac.add(
-                    2.0 * (u[pack.re_index(n, k)] * phase.re
-                        - u[pack.im_index(n, k)] * phase.im),
+                    2.0 * (u[pack.re_index(n, k)] * phase.re - u[pack.im_index(n, k)] * phase.im),
                 );
             }
             aft.xs[j * d + k] = u[pack.re_index(0, k)] + ac.total();
