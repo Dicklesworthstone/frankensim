@@ -598,7 +598,7 @@ pub(crate) fn plane_stress_response_from(
     Ok(plane_stress_kinematic_response_from(state, a)?.response)
 }
 
-fn plane_stress_kinematic_response_from(
+pub(crate) fn plane_stress_kinematic_response_from(
     state: PlaneStressState,
     a: [[f64; 9]; 9],
 ) -> Result<PlaneStressKinematicResponse, MaterialError> {

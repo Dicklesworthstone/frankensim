@@ -143,6 +143,55 @@ pub struct FiniteThermoelasticState {
     stress_temperature_derivative_pa_k: [f64; 9],
 }
 
+/// Instantaneous reversible rates of one admitted thermal snapshot.
+/// Deformation gradients are dimensionless, Piola stress is per ORIGINAL
+/// area, and energy/entropy densities are per ORIGINAL volume. These are
+/// directional derivatives, not a time integrator or dissipative heat.
+/// Accepted internal variables remain fixed; temperature-dependent elastic
+/// coefficients and the natural map retain the snapshot's source derivatives.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteThermoelasticRate {
+    deformation_gradient_rate_per_s: [f64; 9],
+    elastic_deformation_gradient_rate_per_s: [f64; 9],
+    temperature_rate_k_s: f64,
+    first_piola_rate_pa_s: [f64; 9],
+    free_energy_rate_w_m3: f64,
+    entropy_rate_w_m3_k: f64,
+    internal_energy_rate_w_m3: f64,
+}
+
+impl FiniteThermoelasticRate {
+    /// Total Fdot in row-major order [1/s].
+    pub const fn deformation_gradient_rate_per_s(&self) -> &[f64; 9] {
+        &self.deformation_gradient_rate_per_s
+    }
+    /// Elastic Fedot=(Fdot-Fe*Gdot)*G^-1 in the original natural axes [1/s].
+    pub const fn elastic_deformation_gradient_rate_per_s(&self) -> &[f64; 9] {
+        &self.elastic_deformation_gradient_rate_per_s
+    }
+    pub const fn temperature_rate_k_s(&self) -> f64 {
+        self.temperature_rate_k_s
+    }
+    /// Material time derivative of first Piola stress, not an objective
+    /// spatial stress rate. A changing observer also contributes Qdot*P.
+    pub const fn first_piola_rate_pa_s(&self) -> &[f64; 9] {
+        &self.first_piola_rate_pa_s
+    }
+    /// Mechanical Helmholtz rate P:Fdot-S*Tdot [W/m³].
+    pub const fn free_energy_rate_w_m3(&self) -> f64 {
+        self.free_energy_rate_w_m3
+    }
+    /// Reversible mechanical entropy rate [W/(m³ K)]; no caloric or
+    /// irreversible entropy production is included.
+    pub const fn entropy_rate_w_m3_k(&self) -> f64 {
+        self.entropy_rate_w_m3_k
+    }
+    /// Mechanical internal-energy rate P:Fdot+T*Sdot [W/m³].
+    pub const fn internal_energy_rate_w_m3(&self) -> f64 {
+        self.internal_energy_rate_w_m3
+    }
+}
+
 impl FiniteThermoelasticState {
     /// Evaluate the original full elastic energy and its exact thermal chain
     /// rule. The elastic stretch envelope applies to Fe=F G^-1; total F has
@@ -446,6 +495,86 @@ impl FiniteThermoelasticState {
     /// Complete mixed derivative dP/dT at fixed TOTAL F [Pa/K].
     pub const fn stress_temperature_derivative_pa_k(&self) -> &[f64; 9] {
         &self.stress_temperature_derivative_pa_k
+    }
+
+    /// Differentiate this physical potential along prescribed total Fdot
+    /// and Tdot, using its original A=dP/dF, beta=dP/dT and heat capacity.
+    ///
+    /// Pdot=A:Fdot+beta*Tdot and Sdot=-beta:Fdot+(c_F/T)*Tdot retain both
+    /// temperature-dependent coefficients and the full noncommuting G(T)
+    /// chain rule. Fedot removes Gdot=G_T*Tdot before applying G^-1, so
+    /// thermal expansion is not reported as elastic strain rate.
+    ///
+    /// This is a local derivative, not a finite step or a source-band proof.
+    /// Caloric storage, irreversible heating and internal-variable rates are
+    /// absent. In particular a fixed-history viscoelastic snapshot remains a
+    /// fixed-history derivative even when Tdot is nonzero.
+    pub fn rate(
+        &self,
+        deformation_gradient_rate_per_s: [f64; 9],
+        temperature_rate_k_s: f64,
+    ) -> Result<FiniteThermoelasticRate, MaterialError> {
+        if !temperature_rate_k_s.is_finite()
+            || deformation_gradient_rate_per_s
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            return Err(invalid("finite deformation and temperature rates required"));
+        }
+        let h = self.reference_jet.reference.elastic_deformation(&IDENTITY);
+        let thermal_direction = product(
+            &self.elastic_deformation_gradient,
+            &self.reference_jet.first_derivative_per_k,
+        );
+        let elastic_numerator = core::array::from_fn(|i| {
+            (-temperature_rate_k_s)
+                .mul_add(thermal_direction[i], deformation_gradient_rate_per_s[i])
+        });
+        let elastic_deformation_gradient_rate_per_s = product(&elastic_numerator, &h);
+        let first_piola_rate_pa_s = core::array::from_fn(|i| {
+            self.stress_temperature_derivative_pa_k[i].mul_add(
+                temperature_rate_k_s,
+                dot(
+                    &self.isothermal_tangent_pa[i],
+                    &deformation_gradient_rate_per_s,
+                ),
+            )
+        });
+        let stress_power = dot(&self.first_piola_pa, &deformation_gradient_rate_per_s);
+        let entropy_rate_w_m3_k = (self.mechanical_heat_capacity_j_m3_k / self.temperature_k)
+            .mul_add(
+                temperature_rate_k_s,
+                -dot(
+                    &self.stress_temperature_derivative_pa_k,
+                    &deformation_gradient_rate_per_s,
+                ),
+            );
+        let free_energy_rate_w_m3 =
+            (-self.entropy_j_m3_k).mul_add(temperature_rate_k_s, stress_power);
+        let internal_energy_rate_w_m3 = self
+            .temperature_k
+            .mul_add(entropy_rate_w_m3_k, stress_power);
+        if [
+            free_energy_rate_w_m3,
+            entropy_rate_w_m3_k,
+            internal_energy_rate_w_m3,
+        ]
+        .iter()
+        .chain(&elastic_deformation_gradient_rate_per_s)
+        .chain(&first_piola_rate_pa_s)
+        .any(|value| !value.is_finite())
+        {
+            return Err(unrepresentable());
+        }
+        Ok(FiniteThermoelasticRate {
+            deformation_gradient_rate_per_s,
+            elastic_deformation_gradient_rate_per_s,
+            temperature_rate_k_s,
+            first_piola_rate_pa_s,
+            free_energy_rate_w_m3,
+            entropy_rate_w_m3_k,
+            internal_energy_rate_w_m3,
+        })
     }
 
     /// Freeze the local reversible tangent at constant total entropy.

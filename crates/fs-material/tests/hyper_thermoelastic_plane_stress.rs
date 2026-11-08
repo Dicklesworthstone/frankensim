@@ -391,5 +391,172 @@ fn aged_viscoelastic_snapshot_uses_the_same_reduction_without_changing_history()
         slow.mechanical_heat_capacity_j_m3_k(),
         state.mechanical_heat_capacity_j_m3_k()
     );
+    let rates = state.rate([0.08, -0.03, 0.01, -0.05], 3.0).unwrap();
+    let slow_rates = slow.rate([0.08, -0.03, 0.01, -0.05], 3.0).unwrap();
+    assert_eq!(rates, slow_rates);
+    for i in [2, 5, 8] {
+        near(rates.first_piola_rate_pa_s()[i], 0.0, 3e-11, 0.0);
+    }
     assert_eq!(accepted, saved);
+}
+
+#[test]
+fn coupled_plane_rates_follow_the_relaxed_thermal_path_in_all_three_transverse_components() {
+    let material = law();
+    let temperature = 310.0;
+    let adot = [0.08, -0.03, 0.01, -0.05];
+    let tdot = 3.0;
+    let state = FiniteThermoelasticPlaneStressState::try_new(
+        &material,
+        &A,
+        temperature,
+        jet(0.0),
+        settings(),
+    )
+    .unwrap();
+    let rate = state.rate(adot, tdot).unwrap();
+    let h = 0.005;
+    let samples = [-2.0 * h, -h, h, 2.0 * h].map(|time| {
+        let a = core::array::from_fn(|i| A[i] + time * adot[i]);
+        FiniteThermoelasticPlaneStressState::try_new(
+            &material,
+            &a,
+            temperature + tdot * time,
+            jet(tdot * time),
+            settings(),
+        )
+        .unwrap()
+    });
+    for i in 0..9 {
+        near(
+            rate.deformation_gradient_rate_per_s()[i],
+            derivative(
+                samples
+                    .each_ref()
+                    .map(|s| s.response().deformation_gradient[i]),
+                h,
+            ),
+            4e-8,
+            3e-7,
+        );
+        near(
+            rate.elastic_deformation_gradient_rate_per_s()[i],
+            derivative(
+                samples
+                    .each_ref()
+                    .map(|s| s.full_state().elastic_deformation_gradient()[i]),
+                h,
+            ),
+            4e-8,
+            3e-7,
+        );
+        near(
+            rate.first_piola_rate_pa_s()[i],
+            derivative(
+                samples
+                    .each_ref()
+                    .map(|s| s.full_state().first_piola_pa()[i]),
+                h,
+            ),
+            3e-7,
+            3e-7,
+        );
+    }
+    for (actual, values) in [
+        (
+            rate.free_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.free_energy_j_m3()),
+        ),
+        (
+            rate.entropy_rate_w_m3_k(),
+            samples.each_ref().map(|s| s.entropy_j_m3_k()),
+        ),
+        (
+            rate.internal_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.internal_energy_j_m3()),
+        ),
+    ] {
+        near(actual, derivative(values, h), 3e-7, 3e-7);
+    }
+    for i in [2, 5, 8] {
+        near(rate.first_piola_rate_pa_s()[i], 0.0, 3e-12, 0.0);
+    }
+    for (i, component) in [0, 1, 3, 4].into_iter().enumerate() {
+        let expected = state.stress_temperature_derivative_pa_k()[i] * tdot
+            + (0..4)
+                .map(|j| state.response().tangent[i][j] * adot[j])
+                .sum::<f64>();
+        near(
+            rate.first_piola_rate_pa_s()[component],
+            expected,
+            3e-12,
+            3e-12,
+        );
+    }
+    let expected_entropy = state.mechanical_heat_capacity_j_m3_k() / temperature * tdot
+        - (0..4)
+            .map(|i| state.stress_temperature_derivative_pa_k()[i] * adot[i])
+            .sum::<f64>();
+    near(rate.entropy_rate_w_m3_k(), expected_entropy, 3e-13, 3e-12);
+    let held = state.kinematics().deformation_gradient_rate(adot).unwrap();
+    let isothermal = state.rate(adot, 0.0).unwrap();
+    assert_eq!(isothermal.deformation_gradient_rate_per_s(), &held);
+    // A frozen-T lift would violate transverse equilibrium on this path.
+    let frozen_temperature = state.full_state().rate(held, tdot).unwrap();
+    assert!(
+        [2, 5, 8]
+            .iter()
+            .any(|&i| frozen_temperature.first_piola_rate_pa_s()[i].abs() > 1e-3)
+    );
+}
+
+#[test]
+fn plane_thermal_free_expansion_recovers_thickness_without_elastic_strain_or_heat() {
+    let (stretch, expansion, tdot) = (1.1, 0.002, 3.0);
+    let material = law();
+    let thermal = ThermalReferenceJet::try_new(
+        ReferenceDeformation::try_new(diagonal(stretch)).unwrap(),
+        diagonal(expansion),
+        [0.0; 9],
+    )
+    .unwrap();
+    let state = FiniteThermoelasticPlaneStressState::try_new(
+        &material,
+        &[stretch, 0.0, 0.0, stretch],
+        300.0,
+        thermal,
+        settings(),
+    )
+    .unwrap();
+    let before = state.full_state().clone();
+    let rate = state
+        .rate([expansion * tdot, 0.0, 0.0, expansion * tdot], tdot)
+        .unwrap();
+    for (actual, expected) in rate
+        .deformation_gradient_rate_per_s()
+        .iter()
+        .zip(diagonal(expansion * tdot))
+    {
+        near(*actual, expected, 2e-12, 2e-12);
+    }
+    for actual in rate
+        .elastic_deformation_gradient_rate_per_s()
+        .iter()
+        .chain(rate.first_piola_rate_pa_s())
+    {
+        near(*actual, 0.0, 3e-12, 0.0);
+    }
+    for actual in [
+        rate.free_energy_rate_w_m3(),
+        rate.entropy_rate_w_m3_k(),
+        rate.internal_energy_rate_w_m3(),
+    ] {
+        near(actual, 0.0, 3e-11, 0.0);
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(state.rate([bad; 4], 0.0).is_err());
+        assert!(state.rate([0.0; 4], bad).is_err());
+    }
+    assert!(state.rate([f64::MAX; 4], 0.0).is_err());
+    assert_eq!(state.full_state(), &before);
 }

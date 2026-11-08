@@ -14,13 +14,17 @@
 //! Exact-volume pressure constraints need a different constrained thermal
 //! derivation and are explicitly refused by the snapshot-reduction entry.
 
-use super::{FiniteThermoelasticState, ThermalReferenceJet, invalid, unrepresentable};
+use super::{
+    FiniteThermoelasticRate, FiniteThermoelasticState, ThermalReferenceJet, invalid,
+    unrepresentable,
+};
 use crate::MaterialError;
 use crate::hyper::Hyperelastic;
 use crate::hyper::mixed::VolumetricTreatment;
 use crate::hyper::plane_stress::{
-    PlaneStressResponse, PlaneStressSettings, PlaneStressState, PositiveBlock,
-    plane_stress_response_from, plane_stress_state, plane_stress_state_with_seed,
+    PlaneStressKinematicResponse, PlaneStressResponse, PlaneStressSettings, PlaneStressState,
+    PositiveBlock, plane_stress_kinematic_response_from, plane_stress_state,
+    plane_stress_state_with_seed,
 };
 use crate::hyper::reference::ReferencedHyperelastic;
 
@@ -33,7 +37,7 @@ const TRANSVERSE: [usize; 3] = [2, 5, 8];
 #[derive(Clone, Debug)]
 pub struct FiniteThermoelasticPlaneStressState {
     full_state: FiniteThermoelasticState,
-    response: PlaneStressResponse,
+    kinematics: PlaneStressKinematicResponse,
     mechanical_heat_capacity_j_m3_k: f64,
     stress_temperature_derivative_pa_k: [f64; 4],
     transverse_temperature_derivative_per_k: [f64; 3],
@@ -175,10 +179,10 @@ impl FiniteThermoelasticPlaneStressState {
         {
             return Err(unrepresentable());
         }
-        let response = plane_stress_response_from(plane, *a)?;
+        let kinematics = plane_stress_kinematic_response_from(plane, *a)?;
         Ok(Self {
             full_state,
-            response,
+            kinematics,
             mechanical_heat_capacity_j_m3_k,
             stress_temperature_derivative_pa_k,
             transverse_temperature_derivative_per_k: extension.map(|x| -x),
@@ -190,7 +194,44 @@ impl FiniteThermoelasticPlaneStressState {
     }
     /// Native total F, in-plane Piola stress and isothermal Schur tangent.
     pub const fn response(&self) -> &PlaneStressResponse {
-        &self.response
+        &self.kinematics.response
+    }
+    /// Prepared transverse sensitivity to in-plane F at fixed temperature
+    /// and history. Use `rate` when the temperature is changing.
+    pub const fn kinematics(&self) -> &PlaneStressKinematicResponse {
+        &self.kinematics
+    }
+    /// Reversible full material rates on the current plane-stress branch.
+    ///
+    /// The caller supplies [Fdot00,Fdot01,Fdot10,Fdot11] and Tdot. The same
+    /// native Hessian determines zdot=z_a*adot+z_T*Tdot, including transverse
+    /// shear and thickness. It therefore enforces
+    /// A_zz*zdot+A_za*adot+beta_z*Tdot=0, rather than holding temperature
+    /// fixed when lifting an in-plane rate.
+    ///
+    /// The original thermal owner then supplies full Piola, elastic-F,
+    /// entropy and energy rates. In-plane stress rates occupy [0,1,3,4] of
+    /// the returned full row-major array. Transverse stress-rate roundoff is
+    /// retained, not overwritten with zeros. At exact transverse equilibrium
+    /// these give Sdot=-beta_bar:adot+(c_a/T)*Tdot and
+    /// Psidot=P_a:adot-S*Tdot; no pressure, caloric law or history evolution
+    /// is inferred. Only matrix contractions are performed after preparation.
+    pub fn rate(
+        &self,
+        in_plane_rate_per_s: [f64; 4],
+        temperature_rate_k_s: f64,
+    ) -> Result<FiniteThermoelasticRate, MaterialError> {
+        if !temperature_rate_k_s.is_finite() {
+            return Err(invalid("finite temperature rate required"));
+        }
+        let mut rate = self
+            .kinematics
+            .deformation_gradient_rate(in_plane_rate_per_s)?;
+        for (i, component) in TRANSVERSE.into_iter().enumerate() {
+            rate[component] = self.transverse_temperature_derivative_per_k[i]
+                .mul_add(temperature_rate_k_s, rate[component]);
+        }
+        self.full_state.rate(rate, temperature_rate_k_s)
     }
     pub const fn temperature_k(&self) -> f64 {
         self.full_state.temperature_k()

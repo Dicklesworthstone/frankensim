@@ -358,3 +358,127 @@ fn coefficient_sources_refuse_kinks_wrong_model_context_and_unsupported_interval
     );
     assert_eq!(source.material().query(), point(T));
 }
+
+#[test]
+fn source_owned_rates_include_coefficient_changes_and_relaxed_thermal_motion() {
+    use fs_material::hyper::mixed::VolumetricTreatment;
+    use fs_material::hyper::plane_stress::{PlaneStressSettings, plane_stress_with_seed};
+    use fs_material::hyper::thermoelastic::plane_stress::FiniteThermoelasticPlaneStressState;
+
+    let source = bind(&card(SLOPES, false, 1.0), [290.0, 310.0]).unwrap();
+    let thermal_at = |delta: f64| {
+        ThermalReferenceJet::try_new(
+            reference_at(delta),
+            core::array::from_fn(|i| G1[i] + delta * G2[i]),
+            G2,
+        )
+        .unwrap()
+    };
+    let tdot = 2.3;
+    let fdot = [0.03, -0.04, 0.02, -0.01, 0.05, 0.03, -0.02, 0.01, -0.04];
+    let h = 0.01;
+    let state = source.thermoelastic_state(&F, jet()).unwrap();
+    let rate = state.rate(fdot, tdot).unwrap();
+    let samples = [-2.0 * h, -h, h, 2.0 * h]
+        .map(|time| independent(tdot * time, core::array::from_fn(|i| F[i] + time * fdot[i])));
+    near(
+        rate.free_energy_rate_w_m3(),
+        derivative(samples.map(|s| s.0), h),
+        2e-7,
+        2e-8,
+    );
+    for i in 0..9 {
+        near(
+            rate.first_piola_rate_pa_s()[i],
+            derivative(samples.map(|s| s.1[i]), h),
+            2e-7,
+            2e-8,
+        );
+    }
+    let settings = PlaneStressSettings {
+        relative_tolerance: 2e-12,
+        ..Default::default()
+    };
+    let a = [1.22, 0.16, -0.05, 0.91];
+    let adot = [0.08, -0.03, 0.01, -0.05];
+    let relaxed_at = |time: f64| {
+        let delta = tdot * time;
+        let a: [f64; 4] = core::array::from_fn(|i| a[i] + time * adot[i]);
+        let thermal = thermal_at(delta);
+        let reference = *thermal.reference();
+        // This independent native relaxation uses the authored E/nu fixture
+        // at the sample temperature. The thermal derivative owner below
+        // keeps the original card and source interval.
+        let young = YOUNGS + SLOPES[0] * delta;
+        let poisson = POISSON + SLOPES[1] * delta;
+        let mu = young / (2.0 * (1.0 + poisson));
+        let lambda = 2.0 * mu * poisson / (1.0 - 2.0 * poisson);
+        let law = Hyperelastic::new(HyperelasticModel::NeoHookean { mu, lambda }, 4.0).unwrap();
+        let plane = plane_stress_with_seed(
+            &ReferencedHyperelastic::new(&law, reference),
+            &a,
+            [
+                0.0,
+                0.0,
+                reference.volume_ratio() / (a[0] * a[3] - a[1] * a[2]),
+            ],
+            settings,
+        )
+        .unwrap();
+        let full = source
+            .thermoelastic_state_at_temperature(T + delta, &plane.deformation_gradient, thermal)
+            .unwrap();
+        FiniteThermoelasticPlaneStressState::try_from_state(
+            full,
+            VolumetricTreatment::OriginalMaterial,
+            settings,
+        )
+        .unwrap()
+    };
+    let plane = relaxed_at(0.0);
+    let rate = plane.rate(adot, tdot).unwrap();
+    let samples = [-2.0 * h, -h, h, 2.0 * h].map(relaxed_at);
+    for i in 0..9 {
+        near(
+            rate.deformation_gradient_rate_per_s()[i],
+            derivative(
+                samples
+                    .each_ref()
+                    .map(|s| s.response().deformation_gradient[i]),
+                h,
+            ),
+            5e-8,
+            3e-7,
+        );
+        near(
+            rate.first_piola_rate_pa_s()[i],
+            derivative(
+                samples
+                    .each_ref()
+                    .map(|s| s.full_state().first_piola_pa()[i]),
+                h,
+            ),
+            3e-6,
+            3e-7,
+        );
+    }
+    for (actual, values) in [
+        (
+            rate.free_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.free_energy_j_m3()),
+        ),
+        (
+            rate.entropy_rate_w_m3_k(),
+            samples.each_ref().map(|s| s.entropy_j_m3_k()),
+        ),
+        (
+            rate.internal_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.internal_energy_j_m3()),
+        ),
+    ] {
+        near(actual, derivative(values, h), 3e-6, 3e-7);
+    }
+    for i in [2, 5, 8] {
+        near(rate.first_piola_rate_pa_s()[i], 0.0, 2e-9, 0.0);
+    }
+}

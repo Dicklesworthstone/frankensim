@@ -465,3 +465,160 @@ fn g0_thermal_and_caloric_domains_refuse_without_mutating_the_snapshot() {
             .is_err()
     );
 }
+
+#[test]
+fn simultaneous_deformation_and_temperature_rates_match_full_path_differences() {
+    let material = law();
+    let temperature = 310.0;
+    let fdot = [0.03, -0.04, 0.02, -0.01, 0.05, 0.03, -0.02, 0.01, -0.04];
+    let tdot = 1.7;
+    let state = FiniteThermoelasticState::try_new(&material, &F, temperature, jet()).unwrap();
+    let rate = state.rate(fdot, tdot).unwrap();
+    assert_eq!(rate.deformation_gradient_rate_per_s(), &fdot);
+    assert_eq!(rate.temperature_rate_k_s(), tdot);
+    let h = 0.002;
+    let samples = [-2.0 * h, -h, h, 2.0 * h].map(|time| {
+        let delta = tdot * time;
+        let f = core::array::from_fn(|i| F[i] + time * fdot[i]);
+        let thermal = ThermalReferenceJet::try_new(
+            reference_at(delta),
+            core::array::from_fn(|i| G1[i] + delta * G2[i]),
+            G2,
+        )
+        .unwrap();
+        FiniteThermoelasticState::try_new(&material, &f, temperature + delta, thermal).unwrap()
+    });
+    for i in 0..9 {
+        near(
+            rate.first_piola_rate_pa_s()[i],
+            derivative(samples.each_ref().map(|s| s.first_piola_pa()[i]), h),
+            3e-8,
+            2e-7,
+        );
+        near(
+            rate.elastic_deformation_gradient_rate_per_s()[i],
+            derivative(
+                samples
+                    .each_ref()
+                    .map(|s| s.elastic_deformation_gradient()[i]),
+                h,
+            ),
+            2e-11,
+            2e-8,
+        );
+    }
+    for (actual, values) in [
+        (
+            rate.free_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.free_energy_j_m3()),
+        ),
+        (
+            rate.entropy_rate_w_m3_k(),
+            samples.each_ref().map(|s| s.entropy_j_m3_k()),
+        ),
+        (
+            rate.internal_energy_rate_w_m3(),
+            samples.each_ref().map(|s| s.internal_energy_j_m3()),
+        ),
+    ] {
+        near(actual, derivative(values, h), 3e-8, 2e-7);
+    }
+    near(
+        rate.internal_energy_rate_w_m3(),
+        rate.free_energy_rate_w_m3()
+            + temperature * rate.entropy_rate_w_m3_k()
+            + state.entropy_j_m3_k() * tdot,
+        2e-13,
+        2e-13,
+    );
+}
+
+#[test]
+fn thermal_rate_tracks_changing_observers_without_objectivizing_piola_by_fiat() {
+    let material = law();
+    let state = FiniteThermoelasticState::try_new(&material, &F, 310.0, jet()).unwrap();
+    let fdot = [0.03, -0.04, 0.02, -0.01, 0.05, 0.03, -0.02, 0.01, -0.04];
+    let tdot = -2.1;
+    let rate = state.rate(fdot, tdot).unwrap();
+    let q = [0.6, -0.8, 0.0, 0.8, 0.6, 0.0, 0.0, 0.0, 1.0];
+    let spin = [0.0, -0.7, 0.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let rotated_f = multiply(q, F);
+    let q_fdot = multiply(q, fdot);
+    let spin_f = multiply(spin, rotated_f);
+    let rotated_fdot = core::array::from_fn(|i| q_fdot[i] + spin_f[i]);
+    let rotated = FiniteThermoelasticState::try_new(&material, &rotated_f, 310.0, jet()).unwrap();
+    let observed = rotated.rate(rotated_fdot, tdot).unwrap();
+    let q_pdot = multiply(q, *rate.first_piola_rate_pa_s());
+    let spin_p = multiply(spin, multiply(q, *state.first_piola_pa()));
+    let q_fedot = multiply(q, *rate.elastic_deformation_gradient_rate_per_s());
+    let spin_fe = multiply(spin, multiply(q, *state.elastic_deformation_gradient()));
+    for i in 0..9 {
+        near(
+            observed.first_piola_rate_pa_s()[i],
+            q_pdot[i] + spin_p[i],
+            2e-11,
+            2e-11,
+        );
+        near(
+            observed.elastic_deformation_gradient_rate_per_s()[i],
+            q_fedot[i] + spin_fe[i],
+            2e-13,
+            2e-12,
+        );
+    }
+    for (actual, expected) in [
+        (
+            observed.free_energy_rate_w_m3(),
+            rate.free_energy_rate_w_m3(),
+        ),
+        (observed.entropy_rate_w_m3_k(), rate.entropy_rate_w_m3_k()),
+        (
+            observed.internal_energy_rate_w_m3(),
+            rate.internal_energy_rate_w_m3(),
+        ),
+    ] {
+        near(actual, expected, 2e-11, 2e-11);
+    }
+}
+
+#[test]
+fn thermal_free_expansion_has_no_elastic_rate_and_rate_failures_preserve_state() {
+    let material = law();
+    let (stretch, expansion, tdot) = (1.1, 0.002, 3.0);
+    let thermal = ThermalReferenceJet::try_new(
+        ReferenceDeformation::try_new(diagonal(stretch)).unwrap(),
+        diagonal(expansion),
+        [0.0; 9],
+    )
+    .unwrap();
+    let state =
+        FiniteThermoelasticState::try_new(&material, &diagonal(stretch), 300.0, thermal).unwrap();
+    let rate = state.rate(diagonal(expansion * tdot), tdot).unwrap();
+    for actual in rate
+        .first_piola_rate_pa_s()
+        .iter()
+        .chain(rate.elastic_deformation_gradient_rate_per_s())
+    {
+        near(*actual, 0.0, 2e-12, 0.0);
+    }
+    for actual in [
+        rate.free_energy_rate_w_m3(),
+        rate.entropy_rate_w_m3_k(),
+        rate.internal_energy_rate_w_m3(),
+    ] {
+        near(actual, 0.0, 2e-11, 0.0);
+    }
+    let before = state.clone();
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(state.rate([bad; 9], 0.0).is_err());
+        assert!(state.rate([0.0; 9], bad).is_err());
+    }
+    assert!(state.rate([f64::MAX; 9], 0.0).is_err());
+    let zero = state.rate([0.0; 9], 0.0).unwrap();
+    assert_eq!(zero.first_piola_rate_pa_s(), &[0.0; 9]);
+    assert_eq!(zero.elastic_deformation_gradient_rate_per_s(), &[0.0; 9]);
+    assert_eq!(zero.free_energy_rate_w_m3(), 0.0);
+    assert_eq!(zero.entropy_rate_w_m3_k(), 0.0);
+    assert_eq!(zero.internal_energy_rate_w_m3(), 0.0);
+    assert_eq!(state, before);
+}
