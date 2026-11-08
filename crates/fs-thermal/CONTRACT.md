@@ -3317,6 +3317,50 @@ entropy, stopped-solid heating into mobile coexistence, and late source-domain
 or cancellation refusal. These are authored native numerical checks, not
 experimental validation or a coupled temporal-order upgrade.
 
+### Second-order explicit prescribed enthalpy transport
+
+`Advected<()>::advance_ssprk2_to` and the corresponding
+`ReconstructedAdvected<()>` entry advance the original cell energy `E = m h`
+with SSPRK2: `E1 = E0 + dt Q(t0,E0)` followed by
+`Enew = E0 + dt [Q(t0,E0) + Q(t0+dt,E1)]/2`. Native donor or limited face
+transfers, fixed-mass continuity, source-caloric and liquid-carrier admission,
+conduction and original `T(h)` remain authoritative. No apparent heat capacity
+or separate temperature update replaces a latent plateau. The optional
+`advance_ssprk2_with_coefficients` callback supplies sources and link/ambient/
+reservoir conductances through the existing `BoundaryStepCoefficients<()>`
+carrier at each actual stage state; it advances no material or source history.
+
+Both stages use the native combined conduction/advection CFL, including the
+extra reconstruction decay budget. A tighter second-stage bound, or a caloric
+domain refusal at a speculative Euler endpoint, halves and retries the interval.
+Both forward-Euler endpoints and the final mixture must remain on the original
+caloric chart. `maximum_stage_evaluations` bounds stage queries and separately
+bounds rejected intervals, including predictor failures before another query;
+the native maximum-substeps budget bounds accepted intervals. Time must make
+representable progress. This is a CFL-controlled second-order method for smooth
+solutions, not an adaptive time-error certificate. Nonlinear-source stiffness,
+phase corners and limiter switches still require timestep refinement.
+
+Native events and continuous schedule knots cut intervals exactly. The endpoint
+stage uses the pre-event topology and authored boundary state; the event then
+executes once before the next interval. Coefficient callbacks must respect that
+state for discontinuous changes, rather than switching early solely from the
+endpoint's numerical time. Every accepted mass-throughput and external-enthalpy
+account uses the same two positive stage weights as thermal storage. Internal
+transfers remain equal and opposite. Rejected work changes no physical ledger;
+the original compensated per-cell/birth-relative final energy gate admits the
+complete candidate transactionally.
+
+Only pure `()` flow owners expose these methods. Arbitrary observer histories,
+unsteady momentum, interval-integrated heat and kinetics cannot be cloned and
+averaged as if they were repeatable coefficient queries. Attached Euler flow
+entropy histories explicitly refuse; the existing semidiscrete reconstructed
+face-entropy limiter makes no new finite-step entropy claim here. Focused
+regressions cover analytic second-order latent-ring transport in both directions,
+bounded and less-diffusive reconstructed latent pulses, accelerating pump CFL
+retries with exact mass quadrature, forcing/birth event sidedness, and bounded
+transactional stage or caloric refusal.
+
 ## Finite-lifetime luminescent excitation
 
 `luminescence::ExcitationDecay` advances an authored emitting-state energy store

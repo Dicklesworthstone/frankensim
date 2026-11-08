@@ -21,7 +21,8 @@ use std::sync::Arc;
 /// `dt <= 0.8/(a + 2*b)`. The actual nonuniform half-cell distances bound BOTH
 /// traces of each donor; outgoing mass Courant at most one half then expresses
 /// pure transport as a convex combination of those traces and incoming traces.
-/// The original timeline retains its 0.8 safety margin and Euler time accuracy.
+/// The original timeline retains its 0.8 safety margin and Euler time accuracy;
+/// pure owners can select `advance_ssprk2_to` for two-stage time sampling.
 /// Nonlinear source stiffness and temporal accuracy still require refinement.
 ///
 /// Nonempty plans retain the original geometry/material/stencil admissions.
@@ -78,11 +79,11 @@ impl<O> Advected<O> {
 impl<O> ReconstructedAdvected<O> {
     /// Attach a common pump multiplier and original-law inlet enthalpy history.
     ///
-    /// Rates and inlet h are sampled at each accepted substep START, preserving
-    /// the native explicit Euler time order. Schedule knots compose with inner
-    /// source transitions and authored events; clipping still occurs after the
-    /// combined CFL. Choose/refine max_dt_s for pump and inlet time variation,
-    /// including startup from zero flow; this is not an interval-average flux.
+    /// The native Euler timeline samples rates and inlet h at each substep
+    /// START. Pure `advance_ssprk2_to` owners sample both physical stage times
+    /// and use positive-weight quadrature. Schedule knots compose with inner
+    /// source transitions and authored events; clipping follows the combined
+    /// CFL. Choose/refine max_dt_s for pump and inlet time variation.
     ///
     /// Immutable baseline connections and the schedule are shared by clones.
     /// Native source, mass, liquid-support, entropy and energy admission use the
@@ -121,17 +122,20 @@ impl<O> ReconstructedAdvected<O> {
     pub fn audit(&self) -> AdvectionAudit {
         self.advection.audit()
     }
-    /// Signed connections; with a schedule, the latest prepared start sample.
+    /// Signed connections; with a schedule, the latest prepared stage sample.
     pub fn flows(&self) -> &[MassFlow] {
         self.advection.flows()
     }
-    /// External streams; with a schedule, the latest prepared start sample.
+    /// External streams; with a schedule, the latest prepared stage sample.
     pub fn boundaries(&self) -> &[MassBoundary] {
         self.advection.boundaries()
     }
     /// Original donor-cell transport owner, including its carrier bindings.
     pub fn advection(&self) -> &Advected<O> {
         &self.advection
+    }
+    pub(in crate::enthalpy::advection) fn advection_mut(&mut self) -> &mut Advected<O> {
+        &mut self.advection
     }
     /// Recover the donor-cell owner without reconstruction or schedule. The
     /// latest prepared start-sample rates/streams are retained as fixed values.

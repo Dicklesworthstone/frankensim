@@ -35,6 +35,10 @@ pub use reconstruction::ReconstructedAdvected;
 #[path = "advection/schedule.rs"]
 pub mod schedule;
 
+/// Second-order SSP stages on the native explicit enthalpy and flow owners.
+#[path = "advection/explicit.rs"]
+pub mod explicit;
+
 use std::collections::{BTreeMap, BTreeSet};
 use super::{CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, HeatTransfer, MaterialId, ThermalStorageBasis};
 

@@ -582,9 +582,23 @@ impl<'a> DepositionSimulation<'a> {
             observer.step(start_s, dt, &old_temperatures, &next, &mut checkpoint)?;
             checkpoint()?;
         }
-        // Subtract each cell's original enthalpy before reducing. Two large
-        // absolute totals can lose a representable heat increment; subtracting
-        // incoming birth energy afterwards repeats that cancellation.
+        self.admit_advance_energy(&next, &external_heat, &mut audit,
+            config.energy_tolerance_j, &mut checkpoint)?;
+        Ok((next, observer, audit))
+    }
+
+    // Shared final account for explicit Euler and positive-weight stages.
+    // Subtract each cell's original enthalpy before reducing. Two large
+    // absolute totals can lose a representable heat increment; subtracting
+    // incoming birth energy afterwards repeats that cancellation.
+    pub(super) fn admit_advance_energy(
+        &self,
+        next: &Self,
+        external_heat: &EnergySum,
+        audit: &mut EnergyAudit,
+        energy_tolerance_j: f64,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
         let mut birth_enthalpies = BTreeMap::new();
         let mut incoming = EnergySum::default();
         for (index, event) in next.schedule[self.cursor..next.cursor].iter().enumerate() {
@@ -616,18 +630,19 @@ impl<'a> DepositionSimulation<'a> {
                 finite(cell.mass_kg * cell.specific_h_j_kg)?
             })?;
         }
-        if originals.next().is_some() { return Err(DepositionError::Arithmetic.into()); }
+        if originals.next().is_some() { return Err(DepositionError::Arithmetic); }
         finite(next.energy_j())?;
         audit.incoming_energy_j = incoming.value()?;
         audit.stored_energy_change_j = stored_change.value()?;
         finite(next.mass_kg())?;
-        thermal_change.add_scaled(&external_heat, -1.0)?;
+        audit.external_heat_j = external_heat.value()?;
+        thermal_change.add_scaled(external_heat, -1.0)?;
         audit.residual_j = thermal_change.value()?;
-        if audit.residual_j.abs() > config.energy_tolerance_j {
-            return Err(DepositionError::EnergyBalance(audit.residual_j).into());
+        if audit.residual_j.abs() > energy_tolerance_j {
+            return Err(DepositionError::EnergyBalance(audit.residual_j));
         }
         checkpoint()?;
-        Ok((next, observer, audit))
+        Ok(())
     }
 }
 

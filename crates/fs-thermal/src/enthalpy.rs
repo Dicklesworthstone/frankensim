@@ -835,8 +835,24 @@ impl<'a> DepositionSimulation<'a> {
         excluded: Option<CellId>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(f64, BTreeMap<CellId, f64>), DepositionError> {
-        let HeatRates { temperatures, watts: rates, external_w, explicit_dt_s: dt } =
-            rates;
+        self.thermal_step_with_rates(&rates, audit, unrepresented_heat_j, excluded, checkpoint)?;
+        Ok((rates.explicit_dt_s, rates.temperatures))
+    }
+
+    // Stage integrators retain the same rates for positive-weight quadrature.
+    // This is the original enthalpy update and representability gate, borrowed
+    // rather than consumed; no second caloric or source equation is introduced.
+    fn thermal_step_with_rates(
+        &mut self,
+        rates: &HeatRates,
+        audit: &mut EnergyAudit,
+        unrepresented_heat_j: &mut f64,
+        excluded: Option<CellId>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), DepositionError> {
+        let dt = rates.explicit_dt_s;
+        let external_w = &rates.external_w;
+        let rates = &rates.watts;
         for (i, (&id, cell)) in self.cells.iter_mut().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
@@ -869,7 +885,7 @@ impl<'a> DepositionSimulation<'a> {
             }
         }
         audit.external_heat_j = finite(audit.external_heat_j + finite(dt * external_w.value()?)?)?;
-        Ok((dt, temperatures))
+        Ok(())
     }
 }
 
