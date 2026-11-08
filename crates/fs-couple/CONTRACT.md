@@ -1,3 +1,40 @@
+## Finite coherent gas films with reacting diffuse radiation
+
+`ionized_wave_heating::layers::LayeredIonizedGasHeating` binds every original
+finite Maxwell film to its exact gas state, atomic sources, complete momentum
+bank and immutable bound-charge material card. All finite films must be
+contiguous gas parcels with positive volume equal to area times thickness.
+Lossless films require an exactly neutral gas. The coherent drive must remain
+strictly below every supplied original photoionization threshold, including
+initially absent stages; this dielectric law supplies carrier friction and does
+not supply direct bound-free absorption of the drive.
+
+One native multicomponent diffuse column evolves all films together. Each
+film's signed electron and heavy Maxwell powers enter once, alongside original
+electron/heavy energy exchange, impact ionization, capture and reciprocal
+spectral recombination transport. Emission can create the first carriers in a
+different film. Optional original free-free cooling requires the caller's
+explicit optically thin escape assumption and remains separate from bound-free
+photon counts and interfaces. The bridge independently checks actual gas storage
+plus both escaped radiation energies against original Maxwell work. Signed
+Coulomb pool partitions retain a separate arithmetic roundoff allowance.
+
+The accepted endpoint must satisfy the declared heavy/electron temperature and
+per-species population increment limits. An initially empty electron pool has
+no physical initial electron temperature increment; newborn carriers still
+require native source support and obey the absolute population bound. Every
+complete transport bank and original material card refreshes successfully before
+any result is returned. Cancellation, source-domain and conservation failures
+leave the original column reusable without partially published endpoints.
+
+This is a held-field interval on uniform fixed-volume parcels. Its refreshed
+transport and backgrounds seed the next Maxwell preparation; the adapter does
+not continuously update coherent fields or account for a change of their stored
+energy between preparations. Diffuse photons retain the native quasi-static
+escaping boundaries, independently of coherent dielectric reflections.
+Composition-dependent applicability of original material/ion-drag cards,
+spatial mixing, conduction and flow require their own supported models.
+
 ## Reciprocal heat feedback for progressive finite ductile sheets
 
 `solid_enthalpy::finite_ductile::sheet::FiniteDuctileThermalSheet` binds each

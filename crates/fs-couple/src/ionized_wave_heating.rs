@@ -5,7 +5,7 @@
 //! caloric sources and neutral/Coulomb exchange at actual temperatures. The
 //! endpoint refreshes the original carrier drag and bound-charge background.
 //!
-//! This is a uniformly mixed, fixed-volume control parcel
+//! The top-level owner is a uniformly mixed, fixed-volume control parcel
 //! inside the original homogeneous half-space. Field and absorption rates are
 //! held over an explicit cycle-averaged heating interval. A refreshed result
 //! seeds a NEW Maxwell solve; it never mutates the original wave or promises a
@@ -13,6 +13,10 @@
 //! boundary, spatial conduction, flow or fast carrier transient. `advance`
 //! freezes populations; `advance_reacting` spends the same work through the
 //! native atomic ionization/recombination network before refreshing transport.
+//!
+//! [`layers`] couples contiguous finite coherent gas films to the shared
+//! multicomponent diffuse-radiation network, including carrier birth, original
+//! momentum/background refresh and explicitly selected thin free-free cooling.
 
 use fs_em::plane_wave::plasma::magnetized::MagnetizedIonizedGasSlabAbsorption;
 use fs_gas::chemistry::energy::{
@@ -31,6 +35,9 @@ use fs_thermochem::electron_collision::ElectronCrossSectionV1;
 
 mod reacting;
 pub use reacting::{IonizedGasReactingHeatControls, MagnetizedIonizedGasReactingHeatStep};
+
+/// Coherent finite gas films with shared diffuse atomic radiation.
+pub mod layers;
 
 /// Refusal leaves the original wave, material sources and gas unchanged.
 #[derive(Clone, Debug, PartialEq)]
