@@ -41,6 +41,9 @@ pub mod coordinates;
 /// Exact anisotropic creep and recovery under prescribed stress ramps.
 pub mod stress_control;
 
+/// Full-tensor stress control with positive-definite Kelvin viscosity.
+pub mod kelvin_control;
+
 /// Maximum retained relaxation branches per material.
 pub const MAX_BRANCHES: usize = 256;
 const WEIGHTS: Voigt = [1.0, 1.0, 1.0, core::f64::consts::SQRT_2,

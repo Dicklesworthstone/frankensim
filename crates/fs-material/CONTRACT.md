@@ -5667,6 +5667,25 @@ all-stress/all-strain parity, partition switching and atomic refusals.
 Coefficients and the component partition are fixed within each prepared
 controller; no Kelvin, thermal or finite-strain extension is inferred.
 
+`visco_tensor::kelvin_control::PreparedTensorKelvinStressControl` advances
+original tensor histories under stress ramps when the Kelvin viscosity is
+positive definite. Its complete passive operator includes all equilibrium and
+Maxwell energy coordinates; the existing QR/SVD owners prepare coupled loss
+coordinates without subtracting a large relaxed-equilibrium state. Exact Prony
+responses integrate strain, original memory, stress work and independent total
+Kelvin/Maxwell heat. Amplitudes are weighted before unresolved primitive
+integrals so representable physical increments survive weak and stiff limits.
+Stress jumps keep strain and memory continuous and do zero work; endpoint strain
+rate is reconstructed from the original constitutive equation. Original source,
+local work/storage/heat and whole-path strain checks precede the atomic update.
+Preparation has explicit dimension/storage/work ceilings, with no dense
+factorization during a ramp. Six focused checks cover Kelvin and combined
+Maxwell/Kelvin closed forms, a noncommuting original-equation ODE ladder,
+rotation and loading switches, extreme rates and transactional refusals.
+Singular Kelvin tensors require a constrained differential/algebraic evolution
+and refuse; this API does not infer mixed control, thermal evolution, derivatives
+or certified error bounds.
+
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated
 step heat through `TensorPronyMandelStep`. The increments are returned before
