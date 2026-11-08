@@ -15,6 +15,13 @@ use fs_lbm::film::{FilmError, FilmMaterial, LongWaveLimits, NusseltFilm};
 pub mod spectral;
 pub use spectral::{LaminarFilmSpectralStudy, LaminarSpectralError, LaminarSpectralReport};
 
+/// Actual thermal Carreau-Yasuda profiles and finite-wavelength free surfaces.
+pub mod carreau;
+pub use carreau::{
+    CarreauFilmSpectralError, CarreauFilmSpectralReport, CarreauFilmSpectralStudy,
+    CarreauPourConditions,
+};
+
 mod transit_band;
 pub use transit_band::{LaminarFilmTransitBandStudy, LaminarTransitBandReport};
 

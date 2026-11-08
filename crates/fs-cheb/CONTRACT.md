@@ -456,3 +456,31 @@ speed, free-surface viscous half-integer modes, finite-Re/finite-kh references
 from an independent generalized-QZ calculation, and resolution/cancellation
 refusal. The model assumes a locally parallel planar Newtonian film without
 gas dynamics, side walls, contact lines, nonlinear waves or evolving rheology.
+
+## Resolved generalized-Newtonian free-surface film spectrum
+
+`orr_sommerfeld::film::generalized` extends the original native film owner with
+the actual no-slip/shear-free base at both cached collocation grids. Velocities
+use thickness and mean-speed scales; apparent viscosity `mu` and differential
+viscosity `M=d(mu*gamma)/d(gamma)` use one common reference viscosity. The bulk
+stress is `(D²+alpha²)[M(D²+alpha²)phi]-4alpha²D(mu Dphi)`; convection retains
+actual `U` and `U''`. The exact one-sided surface `M'` is an explicit input
+to normal stress. Tangential displacement uses the actual surface curvature;
+neither a rigid lid nor a parabolic velocity profile replaces the free surface.
+
+`prepare_profile` retains both source arrays and computes viscosity derivatives
+once through original Chebyshev differentiation. Expanded product rules retain
+the analytic wall-factored basis derivatives without aliasing its final two
+columns. Each wavelength calls the same original equilibrated pencil, native
+LU/QR, paired-order matching and SVD residual admission. No alternate eigensolver,
+effective viscosity, fitted dispersion or turbulent threshold is introduced.
+
+Caller-supplied fields must be the same normalized physical base at both orders,
+with finite one-sided coefficient derivatives through second order. Original
+no-slip and zero-shear boundary states, positive apparent/tangent viscosities,
+finite source fields and cancellation are admitted before publication. The
+numerical resolution/residual indicators are not rigorous enclosures or a check
+of an unprovided constitutive law. The SI vessel adapter owns that original-law
+binding. Focused tests recover the Newtonian spectrum, nonlinear flux-wave speed,
+an independent uneliminated-surface generalized-QZ reference, and the nonzero
+surface differential-viscosity gradient term.

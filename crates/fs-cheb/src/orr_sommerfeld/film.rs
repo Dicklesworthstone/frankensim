@@ -31,13 +31,18 @@ use fs_la::eigen_complex::{
 };
 use fs_math::c64::C64;
 
+/// Original-profile generalized-Newtonian stress operator and surface conditions.
+pub mod generalized;
+
 /// Explicitly dense film lane; p has at most this Chebyshev degree.
 pub const MAX_FILM_ORDER: usize = 64;
 
-/// Dimensionless data for the same shear-free Nusselt base profile.
+/// Dimensionless data for a shear-free film, on thickness/mean-speed scales.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilmParameters {
-    /// Mean-speed Reynolds number Ubar*h/nu = q/nu, strictly positive.
+    /// Reference Reynolds number rho*Ubar*h/mu_ref, strictly positive.
+    /// Newtonian solves use mu_ref=mu; generalized profiles use their common
+    /// authored viscosity scale (the SI Carreau adapter uses the actual mu_0).
     pub reynolds: f64,
     /// Positive streamwise angular wavenumber times thickness, k*h.
     pub kh: f64,
@@ -164,19 +169,19 @@ impl PreparedFilmSpectrum {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<FilmEigenmode>, FilmSpectrumError> {
         poll(&mut cancelled)?;
-        if !positive(parameters.reynolds)
-            || !positive(parameters.kh)
-            || !parameters.normal_gravity.is_finite()
-            || parameters.normal_gravity < 0.0
-            || !parameters.capillarity.is_finite()
-            || parameters.capillarity < 0.0
-        {
-            return Err(FilmSpectrumError::Invalid(
-                "finite positive Re/kh and nonnegative gravity/capillarity required",
-            ));
-        }
+        validate_parameters(parameters)?;
         let coarse = self.coarse.pencil(parameters, &mut cancelled)?;
         let fine = self.fine.pencil(parameters, &mut cancelled)?;
+        self.solve_pencils(coarse, fine, cancelled)
+    }
+
+    // The same numerical acceptance owns every physical film operator.
+    fn solve_pencils(
+        &self,
+        coarse: Pencil,
+        fine: Pencil,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<FilmEigenmode>, FilmSpectrumError> {
         let coarse_values = coarse.eigenvalues(self.budget, &mut cancelled)?;
         let fine_values = fine.eigenvalues(self.budget, &mut cancelled)?;
         let mut used = vec![false; self.budget.modes];
@@ -301,6 +306,23 @@ impl Grid {
             a[kinematic] = C64::new(0.0, -alpha * (d0[j] + 1.5 * eta));
             b[kinematic] = C64::from_re(eta);
         }
+        Pencil::equilibrated(a, b, n, cancelled)
+    }
+}
+
+struct Pencil {
+    a: Vec<C64>,
+    b: Vec<C64>,
+    n: usize,
+}
+
+impl Pencil {
+    fn equilibrated(
+        mut a: Vec<C64>,
+        mut b: Vec<C64>,
+        n: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, FilmSpectrumError> {
         if a.iter().chain(&b).any(|&z| !finite(z)) {
             return Err(FilmSpectrumError::Invalid(
                 "film spectral pencil is not representable",
@@ -340,15 +362,6 @@ impl Grid {
         }
         Ok(Pencil { a, b, n })
     }
-}
-
-struct Pencil {
-    a: Vec<C64>,
-    b: Vec<C64>,
-    n: usize,
-}
-
-impl Pencil {
     fn eigenvalues(
         &self,
         budget: FilmSpectrumBudget,
@@ -454,6 +467,21 @@ impl Pencil {
         }
         Ok(maximum)
     }
+}
+
+fn validate_parameters(parameters: FilmParameters) -> Result<(), FilmSpectrumError> {
+    if !positive(parameters.reynolds)
+        || !positive(parameters.kh)
+        || !parameters.normal_gravity.is_finite()
+        || parameters.normal_gravity < 0.0
+        || !parameters.capillarity.is_finite()
+        || parameters.capillarity < 0.0
+    {
+        return Err(FilmSpectrumError::Invalid(
+            "finite positive Re/kh and nonnegative gravity/capillarity required",
+        ));
+    }
+    Ok(())
 }
 
 fn positive(value: f64) -> bool {

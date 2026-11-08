@@ -30,6 +30,8 @@
 //! over a continuous inlet-frequency band without a frequency grid.
 //! [`LaminarFilmSpectralStudy`] solves the actual free-surface Orr–Sommerfeld
 //! problem at finite wavelengths, with explicit residual and resolution checks.
+//! [`CarreauFilmSpectralStudy`] retains the original thermal constitutive law,
+//! nonlinear base and distinct apparent/differential viscosity profiles.
 //!
 //! [`FreeJetStudy`] adds the cylindrical capillary instability and the actual
 //! free-flight amplification for an explicit radius, flux and disturbance band.
@@ -61,8 +63,9 @@ pub use robust::{
     robustify_laminar,
 };
 pub use stability::laminar::{
-    LaminarBandGrowthReport, LaminarFilmBandStudy, LaminarFilmError, LaminarFilmSection,
-    LaminarFilmSpectralStudy, LaminarFilmStudy, LaminarFilmTransitBandStudy,
+    CarreauFilmSpectralError, CarreauFilmSpectralReport, CarreauFilmSpectralStudy,
+    CarreauPourConditions, LaminarBandGrowthReport, LaminarFilmBandStudy, LaminarFilmError,
+    LaminarFilmSection, LaminarFilmSpectralStudy, LaminarFilmStudy, LaminarFilmTransitBandStudy,
     LaminarFilmTransitStudy, LaminarGrowthObjective, LaminarGrowthReport, LaminarPourConditions,
     LaminarSpectralError, LaminarSpectralReport, LaminarTransitBandReport, LaminarTransitReport,
     LaminarTransitSection,

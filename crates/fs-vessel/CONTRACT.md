@@ -562,3 +562,36 @@ SI regressions cover finite-wavelength decay, physical clock/dimensional
 scaling, the shared growth-objective seam and geometry/wavelength/cancellation
 refusal. No material coefficients or physical kernel are replaced in the
 vessel adapter.
+
+## Original thermal Carreau film stability
+
+`CarreauFilmSpectralStudy` uses `CarreauPourConditions` to retain the original
+thermal Carreau-Yasuda law, actual temperature, density, surface tension and
+declared source-rate ceiling. Each actual path section resolves its nonlinear
+thickness at prescribed flux through `fs_lbm::film::carreau::CarreauFilm`.
+Both native spectral grids then sample that same accepted velocity, shear,
+curvature, apparent viscosity and stress tangent. No zero-shear parabolic base
+or single effective viscosity is substituted.
+
+The native reference Reynolds number is `rho*q_actual/mu0(T)`; both viscosity
+profiles use that same original `mu0(T)`. Source profiles and derivatives are
+prepared once per section and reused for every requested SI wavelength. Native
+free-surface eigenvalues return through the actual `Ubar/h` clock. Reports
+retain physical thickness ranges, actual/requested flux residual, native profile
+quadrature indicators, and the original spectral residual/resolution evidence.
+
+Nonconstant sources currently require transition exponent `a>=2`, admitting
+regular viscosity coefficient derivatives at the zero-shear surface. Their exact
+surface stress-tangent gradient is zero. Exact constant-law limits retain the
+original Newtonian behavior at the actual temperature for every admitted source
+exponent. Unsupported regularity, source support, lateral-width applicability,
+work exhaustion or cancellation returns no partial study.
+
+This is isothermal, planar, locally parallel, two-dimensional temporal stability
+of sampled finite wavelengths. It does not infer spatial amplification, global
+stability, thermal or viscoelastic response, or turbulent transition. Nonlinear
+operating conditions remain explicit rather than being passed through the
+constant-property Newtonian objective interface. Focused tests check original
+temperature, nonlinear thickness/spectrum against independent stress inversion
+and uneliminated-surface QZ, physical similarity including constitutive time,
+source limits and cancellation.
