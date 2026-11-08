@@ -95,6 +95,8 @@ pub enum ThermalForcingError {
     Layout,
     /// Native D3Q19 collision or prescribed plate transport refused a candidate.
     Flow3(crate::d3q19::PlateStepError3),
+    /// The prepared spatial wall solve refused an unaccepted candidate.
+    WallConduction(super::boundary::conduction::WallConductionError),
 }
 impl core::fmt::Display for ThermalForcingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -106,6 +108,7 @@ impl core::fmt::Display for ThermalForcingError {
             Self::NonFinite { cell, component } => write!(f, "nonfinite thermal force at cell {cell}, component {component}"),
             Self::Layout => write!(f, "invalid thermal force/temperature layout"),
             Self::Flow3(source) => write!(f, "thermal flow step: {source}"),
+            Self::WallConduction(source) => write!(f, "thermal wall conduction: {source}"),
         }
     }
 }

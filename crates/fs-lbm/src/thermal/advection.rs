@@ -29,6 +29,24 @@ impl<const D: usize> FluxHistory<D> {
         self.ready = false;
     }
 
+    /// Prepare a bounded carrier's retained history before any physical step.
+    pub(crate) fn try_prepare(
+        &mut self, cells: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        if self.flux.len() != cells {
+            self.flux.try_reserve_exact(cells.saturating_sub(self.flux.len()))?;
+            self.flux.resize(cells, [0.0; D]);
+            self.ready = false;
+        }
+        Ok(())
+    }
+
+    /// Copy an equally sized, already admitted transactional history in place.
+    pub(crate) fn copy_from(&mut self, other: &Self) {
+        self.flux.copy_from_slice(&other.flux);
+        self.ready = other.ready;
+    }
+
     fn prepare(&mut self, cells: usize) {
         if self.flux.len() != cells {
             self.flux.resize(cells, [0.0; D]);
@@ -61,6 +79,11 @@ pub(crate) const D3Q7: AxisLattice<3, 7> = AxisLattice {
 };
 
 impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
+    /// Positive/negative native scalar population indices for one coordinate.
+    pub(crate) fn direction_pair(&self, axis: usize) -> (usize, usize) {
+        (self.positive[axis], self.negative[axis])
+    }
+
     pub(crate) fn equilibrium(&self, temperature: f64, velocity: [f64; D]) -> [f64; Q] {
         let mut populations = [0.0; Q];
         populations[0] = self.weights[0] * temperature;
@@ -234,6 +257,47 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
         })
     }
 
+    /// Joint implicit solid-network and fluid-link exchange. The prepared
+    /// network owns no temperatures; publication updates the original cells.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn stream_with_wall_conduction(
+        &self,
+        populations: &mut [[f64; Q]],
+        post: &[f64],
+        shape: [usize; D],
+        uniform: [ThermalWall; 2],
+        spatial: Option<&mut [Vec<ThermalWall>; 2]>,
+        conduction: Option<&mut super::boundary::conduction::WallConduction>,
+    ) -> Result<[ThermalWallExchange; 2], super::boundary::conduction::WallConductionError> {
+        use super::boundary::conduction::WallConductionError;
+        let Some(conduction) = conduction else {
+            return Ok(self.stream_with_wall_state(populations, post, shape, uniform, spatial));
+        };
+        let plane: usize = shape[..D - 1].iter().product();
+        let cells = populations.len();
+        let (positive, negative) = self.direction_pair(D - 1);
+        let weight = self.weights[positive];
+        if conduction.plane() != plane || conduction.normal_weight() != weight
+            || cells != shape.iter().product::<usize>() || cells < 3 * plane
+            || post.len() < Q * cells
+        {
+            return Err(WallConductionError::Invalid("prepared wall geometry changed"));
+        }
+        let walls = spatial.ok_or(WallConductionError::Invalid(
+            "prepared wall conduction lost its spatial cells",
+        ))?;
+        conduction.prepare_reflections(walls, |side, link| {
+            if side == 0 {
+                post[Q * (plane + link) + negative]
+            } else {
+                post[Q * (cells - 2 * plane + link) + positive]
+            }
+        })?;
+        Ok(self.stream_reflected(populations, post, shape, true, |side, link, out, w| {
+            conduction.reflect(side, link, &mut walls[side][link], out, w)
+        }))
+    }
+
     fn stream_reflected(
         &self,
         populations: &mut [[f64; Q]],
@@ -260,7 +324,7 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
                 side.max_temperature = f64::NEG_INFINITY;
             }
         }
-        let mut correction = [[0.0; 5]; 2];
+        let mut correction = [[0.0; 6]; 2];
         let inverse_plane = 1.0 / plane as f64;
         // Fixed-order compensated reductions require no boundary arrays.
         let mut record = |side: usize, reflected: &WallReflection, outgoing: f64| {
@@ -289,8 +353,11 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
                 } else if solid.maximum_link_defect.is_finite() {
                     solid.maximum_link_defect = solid.maximum_link_defect.max(link.maximum_link_defect);
                 }
-                let values = [link.heat_in, link.stored_change, link.source];
-                let totals = [&mut solid.heat_in, &mut solid.stored_change, &mut solid.source];
+                let values = [link.heat_in, link.stored_change, link.source, link.conducted_in];
+                let totals = [
+                    &mut solid.heat_in, &mut solid.stored_change,
+                    &mut solid.source, &mut solid.conducted_in,
+                ];
                 for (column, (total, value)) in totals.into_iter().zip(values).enumerate() {
                     let correction = &mut correction[side][column + 2];
                     let increment = value - *correction;

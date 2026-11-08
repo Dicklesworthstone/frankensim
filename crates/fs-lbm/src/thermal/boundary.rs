@@ -7,6 +7,9 @@
 //! The original collision owns diffusivity; no relaxation factor is applied
 //! again to the incoming-minus-outgoing boundary exchange.
 
+/// Prepared spatial solid conduction coupled to the original wall reflections.
+pub mod conduction;
+
 /// One thermal law on a planar slab wall or one of its surface links.
 ///
 /// All temperatures use the same coordinates as the thermal populations.
@@ -44,7 +47,8 @@ pub enum ThermalWall {
 /// resistance but excluding the fluid's half cell. Zero resistance is
 /// perfect contact with this lumped cell; infinite sentinels are not accepted.
 ///
-/// Adjacent wall cells exchange no lateral heat. The outside is insulated
+/// Adjacent wall cells exchange no lateral heat unless a prepared wall
+/// conduction graph is attached to the slab. The outside is insulated
 /// except for `heat_per_step`, held over each original fluid step. This is
 /// first-order lumped storage, not a resolved solid diffusion solver.
 /// At extreme capacity ratios, a solid temperature increment may be below
@@ -128,7 +132,7 @@ impl FiniteThermalWall {
             incoming,
             temperature: (0.5 * incoming + 0.5 * outgoing) / weight,
             solid: Some(FiniteThermalWallExchange {
-                heat_in, stored_change, source,
+                heat_in, stored_change, source, conducted_in: 0.0,
                 maximum_link_defect: defect.abs(),
             }),
         }
@@ -145,7 +149,10 @@ pub struct FiniteThermalWallExchange {
     pub stored_change: f64,
     /// Prescribed external heat deposited into the solid cells.
     pub source: f64,
-    /// Largest absolute per-link `storage + heat_into_fluid - source`.
+    /// Net heat into these solid cells through authored solid-conduction links.
+    /// Internal graph transfers cancel across the complete solid account.
+    pub conducted_in: f64,
+    /// Largest absolute per-link `storage + heat_into_fluid - source - conducted_in`.
     /// Opposite local defects cannot hide in the plane sum.
     pub maximum_link_defect: f64,
 }
@@ -155,7 +162,7 @@ impl FiniteThermalWallExchange {
     /// system account, leaving only the authored external source.
     #[must_use]
     pub fn defect(self) -> f64 {
-        self.stored_change + (self.heat_in - self.source)
+        self.stored_change + (self.heat_in - self.source) - self.conducted_in
     }
 }
 

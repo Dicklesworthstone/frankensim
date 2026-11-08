@@ -396,6 +396,7 @@ impl Slab<2, 5> for ThermalLbm {
             coriolis: self.coriolis,
             wall_boundaries: self.wall_boundaries, wall_exchange: self.wall_exchange,
             spatial_wall_boundaries: self.spatial_wall_boundaries.clone(),
+            wall_conduction: self.wall_conduction.clone(),
             advection_history: self.advection_history.clone(),
         }, super::W5)
     }
@@ -471,6 +472,7 @@ impl Slab<3, 7> for ThermalLbm3 {
         s.coriolis = self.coriolis;
         s.wall_boundaries = self.wall_boundaries; s.wall_exchange = self.wall_exchange;
         s.spatial_wall_boundaries.clone_from(&self.spatial_wall_boundaries);
+        s.wall_conduction.clone_from(&self.wall_conduction);
         (s, weights)
     }
     fn walls(&self) -> (f64, f64) { (self.t_bottom, self.t_top) }
@@ -636,6 +638,50 @@ mod history_tests {
         let mut three_reference = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
         three.set_thermal_walls(walls).unwrap();
         three_reference.set_thermal_walls(walls).unwrap();
+        reject_then_advance::<_, 3, 7>(three, three_reference, [1e-5, -2e-6, 3e-6]);
+    }
+
+    #[test]
+    fn g0_spatial_wall_solve_rolls_back_with_thermal_history_and_flow() {
+        use super::super::boundary::FiniteThermalWall;
+        use super::super::boundary::conduction::{
+            WallCell, WallConductionControls, WallConductionLink,
+        };
+        let walls = [
+            ThermalWall::FiniteSolid(FiniteThermalWall {
+                temperature: 0.9, heat_capacity: 1.0, resistance: 0.4, heat_per_step: 0.0002,
+            }),
+            ThermalWall::FiniteSolid(FiniteThermalWall {
+                temperature: 0.1, heat_capacity: 3.0, resistance: 0.0, heat_per_step: 0.0,
+            }),
+        ];
+        // One lateral edge and one cross-plane path make both original wall
+        // stores and the prepared scratch participate in every candidate.
+        let links = [
+            WallConductionLink {
+                a: WallCell { side: 0, link: 0 }, b: WallCell { side: 0, link: 1 },
+                conductance: 10.0,
+            },
+            WallConductionLink {
+                a: WallCell { side: 0, link: 1 }, b: WallCell { side: 1, link: 0 },
+                conductance: 10.0,
+            },
+        ];
+        let controls = WallConductionControls::default();
+        let mut two = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        let mut two_reference = ThermalLbm::slab(7, 10, 0.9, 0.8, 1e-5);
+        for state in [&mut two, &mut two_reference] {
+            state.set_thermal_walls(walls).unwrap();
+            state.set_wall_conduction(&links, controls).unwrap();
+        }
+        reject_then_advance::<_, 2, 5>(two, two_reference, [1e-5, -2e-6]);
+
+        let mut three = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        let mut three_reference = ThermalLbm3::slab(5, 3, 10, 0.9, 0.8, 1e-5);
+        for state in [&mut three, &mut three_reference] {
+            state.set_thermal_walls(walls).unwrap();
+            state.set_wall_conduction(&links, controls).unwrap();
+        }
         reject_then_advance::<_, 3, 7>(three, three_reference, [1e-5, -2e-6, 3e-6]);
     }
 

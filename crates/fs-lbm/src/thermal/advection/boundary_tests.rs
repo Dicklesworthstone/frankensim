@@ -317,8 +317,12 @@ fn g0_trace_extrema_retain_nonfinite_refusals_after_later_finite_links() {
 fn finite_wall_storage<const D: usize, const Q: usize>(
     lattice: &AxisLattice<D, Q>,
     shape: [usize; D],
+    conducting: bool,
 ) {
     use super::super::boundary::FiniteThermalWall;
+    use super::super::boundary::conduction::{
+        WallCell, WallConduction, WallConductionControls, WallConductionLink,
+    };
 
     let cells: usize = shape.iter().product();
     let plane = cells / shape[D - 1];
@@ -358,6 +362,33 @@ fn finite_wall_storage<const D: usize, const Q: usize>(
         }
     }).sum::<f64>();
     let initial = storage(&populations, plane) + solid_energy(&walls);
+    let mut conduction = if conducting {
+        let mut links = Vec::new();
+        for side in 0..2 {
+            for link in 0..plane {
+                links.push(WallConductionLink {
+                    a: WallCell { side, link },
+                    b: WallCell { side, link: (link + 1) % plane },
+                    // Far above the explicit solid-diffusion stability limit.
+                    conductance: 32.0,
+                });
+            }
+        }
+        links.push(WallConductionLink {
+            a: WallCell { side: 0, link: 0 },
+            b: WallCell { side: 1, link: 0 },
+            conductance: 8.0,
+        });
+        Some(WallConduction::prepare(
+            &walls, plane, lattice.weights[lattice.direction_pair(D - 1).0], &links,
+            WallConductionControls {
+                max_nodes: 2 * plane, max_links: 2 * plane + 1,
+                max_factor_bytes: 4 * 1024 * 1024, balance_tolerance: 2e-11,
+            },
+        ).unwrap())
+    } else {
+        None
+    };
     let mut deposited = 0.0;
     for step in 0..2500 {
         // Finish a finite, spatially heterogeneous heating/cooling pulse, then
@@ -377,18 +408,22 @@ fn finite_wall_storage<const D: usize, const Q: usize>(
             &populations, &mut post, plane..cells - plane, 0.9, None,
             &mut history, |_| velocity,
         );
-        let report = lattice.stream_with_wall_state(
+        let report = lattice.stream_with_wall_conduction(
             &mut populations, &post, shape, [ThermalWall::Adiabatic; 2], Some(&mut walls),
-        );
+            conduction.as_mut(),
+        ).unwrap();
         let fluid_heat = report[0].heat_in + report[1].heat_in;
         let mut reported_source = 0.0;
+        let mut conducted = 0.0;
         for side in report {
             let solid = side.solid.expect("mutable finite cells retain their heat account");
             assert_eq!(solid.heat_in, side.heat_in);
             near(solid.defect(), 0.0, 2e-12);
             assert!(solid.maximum_link_defect < 2e-13);
             reported_source += solid.source;
+            conducted += solid.conducted_in;
         }
+        near(conducted, 0.0, 2e-12);
         near(reported_source, source, 1e-16);
         near(storage(&populations, plane) - before_fluid, fluid_heat, 2e-12);
         near(solid_energy(&walls) - before_solid, source - fluid_heat, 2e-12);
@@ -412,6 +447,12 @@ fn finite_wall_storage<const D: usize, const Q: usize>(
 
 #[test]
 fn g1_finite_wall_sources_and_storage_close_on_both_native_scalar_lattices() {
-    finite_wall_storage(&D2Q5, [3, 6]);
-    finite_wall_storage(&D3Q7, [3, 2, 6]);
+    finite_wall_storage(&D2Q5, [3, 6], false);
+    finite_wall_storage(&D3Q7, [3, 2, 6], false);
+}
+
+#[test]
+fn g1_spatial_wall_conduction_and_advection_share_one_conservative_step() {
+    finite_wall_storage(&D2Q5, [3, 6], true);
+    finite_wall_storage(&D3Q7, [3, 2, 6], true);
 }

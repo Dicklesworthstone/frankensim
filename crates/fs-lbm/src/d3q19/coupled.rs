@@ -753,6 +753,7 @@ pub struct ThermalLbm3 {
     pub(crate) coriolis: Option<crate::thermal::forcing::CoriolisSource>,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) spatial_wall_boundaries: Option<[Vec<ThermalWall>; 2]>,
+    pub(crate) wall_conduction: Option<crate::thermal::boundary::conduction::WallConduction>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     pub(crate) advection_history: advection::FluxHistory<3>,
 }
@@ -810,6 +811,7 @@ impl ThermalLbm3 {
             coriolis: None,
             wall_boundaries: None,
             spatial_wall_boundaries: None,
+            wall_conduction: None,
             wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
         }
@@ -916,6 +918,7 @@ impl ThermalLbm3 {
         self.spatial_wall_boundaries = walls.iter()
             .any(|wall| matches!(wall, ThermalWall::FiniteSolid(_)))
             .then(|| walls.map(|wall| vec![wall; self.grid.nx * self.grid.ny]));
+        self.wall_conduction = None;
         self.wall_exchange = None;
         Ok(())
     }
@@ -931,6 +934,7 @@ impl ThermalLbm3 {
             .ok_or(ThermalWallError::Invalid("wall plane overflows"))?;
         for wall in &walls { ThermalWallField::Spatial(wall).validate(links)?; }
         self.spatial_wall_boundaries = Some(walls);
+        self.wall_conduction = None;
         self.wall_exchange = None;
         Ok(())
     }
@@ -940,7 +944,41 @@ impl ThermalLbm3 {
     pub fn reset_thermal_walls(&mut self) {
         self.wall_boundaries = None;
         self.spatial_wall_boundaries = None;
+        self.wall_conduction = None;
         self.wall_exchange = None;
+    }
+
+    /// Three-dimensional counterpart of `ThermalLbm::set_wall_conduction`.
+    /// Links use x-fastest surface indices. Installing wall laws invalidates
+    /// this preparation; temperature/source evolution reuses its sparse factor.
+    pub fn set_wall_conduction(
+        &mut self,
+        links: &[crate::thermal::boundary::conduction::WallConductionLink],
+        controls: crate::thermal::boundary::conduction::WallConductionControls,
+    ) -> Result<(), crate::thermal::boundary::conduction::WallConductionError> {
+        use crate::thermal::boundary::conduction::{WallConduction, WallConductionError};
+        let prepared = if links.is_empty() {
+            None
+        } else {
+            let plane = self.grid.nx.checked_mul(self.grid.ny).ok_or(
+                WallConductionError::Invalid("wall surface size overflow"),
+            )?;
+            let fields = self.spatial_wall_boundaries.as_ref().ok_or(
+                WallConductionError::Invalid("wall conduction requires finite spatial cells"),
+            )?;
+            Some(WallConduction::prepare(
+                fields, plane, advection::D3Q7.weights[5], links, controls,
+            )?)
+        };
+        self.wall_conduction = prepared;
+        self.wall_exchange = None;
+        Ok(())
+    }
+
+    /// Current prepared spatial wall operator, if attached.
+    #[must_use]
+    pub fn wall_conduction(&self) -> Option<&crate::thermal::boundary::conduction::WallConduction> {
+        self.wall_conduction.as_ref()
     }
 
     /// Uniform bottom/top laws in scalar and per-step flux units. Spatial
@@ -1163,14 +1201,17 @@ impl ThermalLbm3 {
             );
         }
         let walls = self.thermal_walls();
-        self.wall_exchange = Some(advection::D3Q7.stream_with_wall_state(
+        let exchange = advection::D3Q7.stream_with_wall_conduction(
             &mut self.gpop,
             post.as_flattened(),
             [nx, ny, nz],
             walls,
             self.spatial_wall_boundaries.as_mut(),
-        ));
+            self.wall_conduction.as_mut(),
+        );
+        // Restore the original scratch owner even when the solid solve refuses.
         self.grid.post = post;
+        self.wall_exchange = Some(exchange.map_err(ThermalForcingError::WallConduction)?);
         let resolved = resolve.map(|resolve| resolve(self)).transpose()?;
         if let Some(forces) = resolved.as_deref() {
             validate_external_forces(

@@ -13,6 +13,9 @@ pub(crate) mod advection;
 pub(crate) mod forcing;
 pub use forcing::{BuoyancyQuadrature, ThermalForcingError};
 use boundary::{ThermalWall, ThermalWallError, ThermalWallExchange, ThermalWallField};
+use boundary::conduction::{
+    WallConduction, WallConductionControls, WallConductionError, WallConductionLink,
+};
 
 use crate::core2::{Cell, Grid};
 use crate::{CS2, Q};
@@ -48,6 +51,7 @@ pub struct ThermalLbm {
     pub(crate) coriolis: Option<forcing::CoriolisSource>,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) spatial_wall_boundaries: Option<[Vec<ThermalWall>; 2]>,
+    pub(crate) wall_conduction: Option<WallConduction>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     advection_history: advection::FluxHistory<2>,
     scratch: Vec<[f64; Q]>,
@@ -102,6 +106,7 @@ impl ThermalLbm {
             coriolis: None,
             wall_boundaries: None,
             spatial_wall_boundaries: None,
+            wall_conduction: None,
             wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
             scratch: Vec::new(),
@@ -207,6 +212,7 @@ impl ThermalLbm {
         self.spatial_wall_boundaries = walls.iter()
             .any(|wall| matches!(wall, ThermalWall::FiniteSolid(_)))
             .then(|| walls.map(|wall| vec![wall; self.grid.nx]));
+        self.wall_conduction = None;
         self.wall_exchange = None;
         Ok(())
     }
@@ -221,6 +227,7 @@ impl ThermalLbm {
     ) -> Result<(), ThermalWallError> {
         for wall in &walls { ThermalWallField::Spatial(wall).validate(self.grid.nx)?; }
         self.spatial_wall_boundaries = Some(walls);
+        self.wall_conduction = None;
         self.wall_exchange = None;
         Ok(())
     }
@@ -230,7 +237,36 @@ impl ThermalLbm {
     pub fn reset_thermal_walls(&mut self) {
         self.wall_boundaries = None;
         self.spatial_wall_boundaries = None;
+        self.wall_conduction = None;
         self.wall_exchange = None;
+    }
+
+    /// Couple selected finite wall cells through authored solid conductances.
+    ///
+    /// Preparation reuses the sparse factor for subsequent lattice steps;
+    /// original wall cells remain the only temperature/storage owners. Empty
+    /// links remove spatial conduction. Replacing wall laws also removes it.
+    /// Invalid preparation preserves the previous plan, wall state and report.
+    pub fn set_wall_conduction(
+        &mut self, links: &[WallConductionLink], controls: WallConductionControls,
+    ) -> Result<(), WallConductionError> {
+        let prepared = if links.is_empty() {
+            None
+        } else {
+            let fields = self.spatial_wall_boundaries.as_ref().ok_or(
+                WallConductionError::Invalid("wall conduction requires finite spatial cells"),
+            )?;
+            Some(WallConduction::prepare(fields, self.grid.nx, W5[2], links, controls)?)
+        };
+        self.wall_conduction = prepared;
+        self.wall_exchange = None;
+        Ok(())
+    }
+
+    /// Current prepared spatial wall operator, if attached.
+    #[must_use]
+    pub fn wall_conduction(&self) -> Option<&WallConduction> {
+        self.wall_conduction.as_ref()
     }
 
     /// Uniform bottom/top laws in scalar and per-step flux units. Spatial
@@ -439,13 +475,14 @@ impl ThermalLbm {
             );
         }
         let walls = self.thermal_walls();
-        self.wall_exchange = Some(advection::D2Q5.stream_with_wall_state(
+        self.wall_exchange = Some(advection::D2Q5.stream_with_wall_conduction(
             &mut self.gpop,
             self.scratch.as_flattened(),
             [nx, ny],
             walls,
             self.spatial_wall_boundaries.as_mut(),
-        ));
+            self.wall_conduction.as_mut(),
+        ).map_err(ThermalForcingError::WallConduction)?);
         let resolved = resolve.map(|resolve| resolve(self)).transpose()?;
         if let Some(forces) = resolved.as_deref() {
             // Admit the replacement field itself here. Its sum with the
