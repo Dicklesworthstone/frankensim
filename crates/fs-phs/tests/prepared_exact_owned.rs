@@ -126,6 +126,9 @@ fn owning_and_borrowed_flows_preserve_complete_work_and_warm_steps_allocate_noth
     let before = owned.system().hamiltonian(&x);
     let mut heat = 0.0;
     let mut supplied = 0.0;
+    let mut workspace = owned.workspace();
+    let mut shared_next = [0.0; 5];
+    let mut shared_output = [0.0; 2];
     TRACK.with(|cell| cell.set((true, 0)));
     for _ in 0..1000 {
         let (free, mobility) = owned.average_relation(&x, &[f64::NAN, -0.23], 0).unwrap();
@@ -135,6 +138,12 @@ fn owning_and_borrowed_flows_preserve_complete_work_and_warm_steps_allocate_noth
             .unwrap();
         close(work[0] + work[1], record.supplied);
         close(free + mobility * 0.17, output[0]);
+        let shared = owned.step_with_workspace_into(&mut workspace, &x, &[0.17, -0.23],
+            &mut shared_next, &mut shared_output).unwrap();
+        assert_eq!(shared_next, next);
+        assert_eq!(shared_output, output);
+        assert_eq!(shared.dissipated, record.dissipated);
+        assert_eq!(shared.supplied, record.supplied);
         heat += record.dissipated;
         supplied += record.supplied;
         x = next;

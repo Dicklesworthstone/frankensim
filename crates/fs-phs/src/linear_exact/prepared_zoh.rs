@@ -27,6 +27,7 @@ impl System<'_> {
         match self { Self::Borrowed(system) => system, Self::Owned(system) => system }
     }
 }
+#[derive(Clone)]
 struct Scratch {
     augmented: Vec<f64>, balanced: Vec<f64>, endpoint: Vec<f64>, integrals: Vec<f64>,
     midpoint: Vec<f64>, effort: Vec<f64>, output: Vec<f64>,
@@ -39,6 +40,26 @@ impl Scratch {
             integrals: vec![0.0; m], midpoint: vec![0.0; n], effort: vec![0.0; n],
             output: vec![0.0; m], heat_state: vec![0.0; 2*n],
             port_integrals: vec![Sum::default(); m] }
+    }
+}
+
+/// Reusable caller-owned scratch for one complete state/port layout.
+///
+/// This contains no accepted physical state. Clones have independent buffers,
+/// and one workspace can be reused with any immutable [`PreparedExactZoh`]
+/// having the same state and port dimensions, even when its operator or clock
+/// differs. A refused evaluation may change scratch but never caller outputs.
+#[derive(Clone)]
+pub struct ExactZohWorkspace {
+    scratch: Scratch,
+}
+
+impl core::fmt::Debug for ExactZohWorkspace {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExactZohWorkspace")
+            .field("state_dim", &self.scratch.endpoint.len())
+            .field("port_dim", &self.scratch.output.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -120,6 +141,38 @@ impl<'a> PreparedExactZoh<'a> {
     pub fn system(&self) -> &PortHamiltonian { self.system.get() }
     /// Prepared held-input duration [s]. It never changes during a warm step.
     pub fn duration(&self) -> f64 { self.duration }
+
+    /// Allocate independent scratch once for this complete state/port layout.
+    /// Immutable prepared operators can then be shared across continuing
+    /// trajectories without locking or copying the exponential/heat caches.
+    pub fn workspace(&self) -> ExactZohWorkspace {
+        let system = self.system();
+        ExactZohWorkspace { scratch: Scratch::new(system.n, system.m) }
+    }
+
+    /// Apply the unchanged exact flow and physical balance gate using external
+    /// scratch. This allocates nothing and evaluates no exponentials on a warm
+    /// call, subject to the same storage-callback contract as [`Self::step_into`].
+    ///
+    /// Both state AND port dimensions must match the workspace. All caller
+    /// outputs remain unchanged on every refusal; scratch is reusable afterward.
+    pub fn step_with_workspace_into(
+        &self, workspace: &mut ExactZohWorkspace, initial: &[f64], input: &[f64],
+        next: &mut [f64], average_output: &mut [f64],
+    ) -> Result<PreparedStepRecord, PhsError> {
+        let system = self.system();
+        if workspace.scratch.endpoint.len() != system.n
+            || workspace.scratch.output.len() != system.m
+            || next.len() != system.n || average_output.len() != system.m
+        {
+            return Err(refuse("prepared ZOH workspace and outputs must match complete state and ports"));
+        }
+        let record = evaluate_step(system, self.duration, self.flow.as_ref(), self.heat.as_ref(),
+            initial, input, &mut workspace.scratch)?;
+        next.copy_from_slice(&workspace.scratch.endpoint);
+        average_output.copy_from_slice(&workspace.scratch.output);
+        Ok(record)
+    }
 
     /// Original cached coefficients of one actual interval-mean output:
     /// `y_bar = state_row * initial + input_row * held_input`.

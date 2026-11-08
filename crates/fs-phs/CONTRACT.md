@@ -1792,6 +1792,18 @@ mode, damping term or port is removed. Warm calls perform matrix-vector products
 and quadratic contractions, with allocating result vectors. Heat is independently
 integrated from the original loss law, never recovered as an energy remainder.
 
+`PreparedExactZoh::workspace` supplies cloneable `ExactZohWorkspace` scratch for
+`step_with_workspace_into(&self, ...)`. Independent trajectories can share one
+immutable prepared cache without a lock or warm allocation. The same workspace
+can also serve different operators or clocks with identical complete state and
+port dimensions; it contains no accepted history. Both dimensions are checked
+before evaluation. The unchanged exact-flow, positive-heat, port-integral and
+physical balance implementation remains authoritative, and both caller output
+buffers publish only after success. Refused scratch is reusable. The
+`prepared_exact_workspace` regressions cover interleaved continuing histories,
+complete-layout and numerical refusals, reuse across operators/zero clocks, and
+independent stiff reciprocal-memory force/heat integrals.
+
 `PreparedExactZoh::step_with_work_inputs_into` independently integrates held
 work contributions on that same complete trajectory, retaining integrated port
 low words before rounding the mean outputs. The contributions need not sum to
