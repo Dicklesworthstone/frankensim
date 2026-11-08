@@ -11,8 +11,9 @@ use crate::phs_orbit::{
 use core::cell::{Cell, RefCell};
 use fs_math::c64::C64;
 use fs_orbit::{
-    ContinuableProblem, ContinuationBudget, ContinuationScales, HbScales, IslandStateJacobian,
-    OrbitProblem, VariationalShootControls, continue_branch_scaled_seeded,
+    ContinuableProblem, ContinuationBudget, ContinuationScales, ForcedParameterJacobian,
+    ForcedParameterPoint, HbScales, IslandStateJacobian, OrbitProblem, VariationalShootControls,
+    continue_branch_scaled_seeded,
 };
 use fs_phs::PortHamiltonian;
 
@@ -115,9 +116,10 @@ type Result<T> = core::result::Result<T, PhsForcedPortBranchError>;
 /// Fixed state-order and measured output/time-grid evidence do not establish
 /// infinite harmonic completeness, unique branch identity, exact fold locations,
 /// a physical hysteresis trajectory or global stability. In particular a local
-/// unresolved classification is preserved. The corrector's parameter column
-/// keeps fs-orbit's existing frequency probe; its state columns use the complete
-/// declared original Hessian, not a quadratic approximation to nonlinear H.
+/// unresolved classification is preserved. The corrector's frequency column
+/// is the exact `i*n*X_n` derivative for all original coordinates at fixed
+/// authored phase amplitudes; its state columns use the complete declared
+/// original Hessian, not a quadratic approximation to nonlinear H.
 ///
 /// Work is bounded by the original continuation budget, plus at most
 /// `max_steps + 1` cycle audits/output queries and, when requested, three native
@@ -380,6 +382,9 @@ impl CancellableBranch<'_, '_> {
     fn state_jacobian(&self, time: f64, state: &[f64], out: &mut [f64]) -> bool {
         !self.stopped() && self.original.state_jacobian(time, state, out)
     }
+    fn parameter_jacobian(&self, point: ForcedParameterPoint<'_>, out: &mut [f64]) -> bool {
+        !self.stopped() && self.original.frequency_parameter_jacobian(point, out)
+    }
 }
 impl OrbitProblem for CancellableBranch<'_, '_> {
     fn dim(&self) -> usize {
@@ -408,5 +413,11 @@ impl OrbitProblem for CancellableBranch<'_, '_> {
 impl ContinuableProblem for CancellableBranch<'_, '_> {
     fn set_parameter(&mut self, lambda: f64) {
         self.original.set_parameter(lambda);
+    }
+    fn forced_parameter_jacobian(&self) -> Option<ForcedParameterJacobian<Self>> {
+        self.original
+            .forced_parameter_jacobian()
+            .is_some()
+            .then_some(Self::parameter_jacobian)
     }
 }

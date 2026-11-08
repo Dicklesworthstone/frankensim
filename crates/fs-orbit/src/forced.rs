@@ -2,9 +2,9 @@
 
 use super::scaling::{AdmittedScales, length};
 use super::{
-    AftWorkspace, ContinuableProblem, ContinuationBudget, ContinuationPoint, HbAnchor, HbOrbit,
-    HbScales, MAX_AFT_REFINEMENTS, OrbitError, Packing, ScaledHbOrbit, check_sampling, det,
-    hb_residual, lu, norm, pack_orbit, solve_hb, solve_hb_scaled_seeded,
+    AftWorkspace, ContinuableProblem, ContinuationBudget, ContinuationPoint, ForcedParameterPoint,
+    HbAnchor, HbOrbit, HbScales, MAX_AFT_REFINEMENTS, OrbitError, Packing, ScaledHbOrbit,
+    check_sampling, det, hb_residual, lu, norm, pack_orbit, solve_hb, solve_hb_scaled_seeded,
 };
 
 /// Physical conditioning of a forced branch, including its swept parameter.
@@ -222,6 +222,7 @@ fn continue_impl<P: ContinuableProblem>(
     let mut residual = vec![0.0; nc];
     let mut aft = AftWorkspace::new(&pack)?;
     let state_jacobian = problem.island_state_jacobian();
+    let parameter_jacobian = problem.forced_parameter_jacobian();
     let mut tangent_workspace = state_jacobian
         .map(|_| super::tangent::Workspace::new(&pack))
         .transpose()?;
@@ -339,6 +340,7 @@ fn continue_impl<P: ContinuableProblem>(
             let mut jac = vec![0.0; nz * nz];
             let mut r2 = vec![0.0; nc];
             let mut valid = true;
+            let mut probed = false;
             if let (Some(callback), Some(workspace)) = (state_jacobian, tangent_workspace.as_mut())
             {
                 workspace.prepare(problem, callback, &pack, omega_of(zp[nc]), &aft)?;
@@ -349,6 +351,32 @@ fn continue_impl<P: ContinuableProblem>(
                     for row in 0..nc {
                         jac[row * nz + col] =
                             (workspace.coefficient_entry(row, col, &pack) / metric.row(row)) * unit;
+                    }
+                    jac[nc * nz + col] = tangent[col];
+                    continue;
+                }
+                if let Some(callback) = parameter_jacobian.filter(|_| col == nc) {
+                    r2.fill(f64::NAN);
+                    let point = ForcedParameterPoint {
+                        parameter: zp[nc],
+                        angular_frequency: omega_of(zp[nc]),
+                        harmonics: pack.n_harm,
+                        aft_samples: aft.samples,
+                        coefficients: &zp[..nc],
+                    };
+                    if !callback(problem, point, &mut r2)
+                        || r2.iter().any(|entry| !entry.is_finite())
+                    {
+                        return Err(OrbitError::ParameterTangentRefused);
+                    }
+                    for row in 0..nc {
+                        let entry = (r2[row] / metric.row(row)) * unit;
+                        if !entry.is_finite() {
+                            return Err(invalid(
+                                "scaled continuation parameter derivative is not representable",
+                            ));
+                        }
+                        jac[row * nz + col] = entry;
                     }
                     jac[nc * nz + col] = tangent[col];
                     continue;
@@ -369,6 +397,7 @@ fn continue_impl<P: ContinuableProblem>(
                         "continuation finite-difference column is not representable",
                     ));
                 }
+                probed = true;
                 valid = eval(problem, &zp, &mut aft, &mut r2);
                 zp[col] = saved;
                 if !valid {
@@ -384,7 +413,12 @@ fn continue_impl<P: ContinuableProblem>(
                 }
                 jac[nc * nz + col] = tangent[col];
             }
-            eval(problem, &zp, &mut aft, &mut residual);
+            // An all-analytic corrector has not changed the source parameter
+            // or AFT state samples. Replaying the source would do no work for
+            // its Jacobian; only finite-difference probes need restoration.
+            if probed {
+                eval(problem, &zp, &mut aft, &mut residual);
+            }
             if !valid {
                 break;
             }

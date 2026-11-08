@@ -87,6 +87,9 @@ pub enum OrbitError {
         /// Zero-based sample in the current AFT grid.
         sample: usize,
     },
+    /// A declared complete forced-parameter derivative refused or left
+    /// nonfinite entries. It is never silently replaced by a residual probe.
+    ParameterTangentRefused,
     /// Newton exhausted its iteration budget without meeting the
     /// tolerance. The residual trace is disclosed for diagnosis.
     NewtonStalled {
@@ -150,6 +153,12 @@ impl core::fmt::Display for OrbitError {
                 write!(
                     f,
                     "FS-ORBIT-TANGENT: exact island Jacobian refused at sample {sample}"
+                )
+            }
+            OrbitError::ParameterTangentRefused => {
+                write!(
+                    f,
+                    "FS-ORBIT-PARAMETER-TANGENT: exact forced parameter Jacobian refused"
                 )
             }
             OrbitError::NewtonStalled {
@@ -1445,11 +1454,59 @@ pub fn solve_shooting<P: OrbitProblem>(
 // ---------------------------------------------------------------------
 // Pseudo-arclength continuation.
 
+/// The original physical point at which a forced parameter column is requested.
+/// No arclength row or normalization is included in this chart.
+#[derive(Debug, Clone, Copy)]
+pub struct ForcedParameterPoint<'a> {
+    /// Current family parameter in its original physical units.
+    pub parameter: f64,
+    /// The clock supplied by the continuation caller's `omega_of(parameter)`.
+    pub angular_frequency: f64,
+    /// Number of retained positive harmonics; DC is also present.
+    pub harmonics: usize,
+    /// Current original AFT quadrature size, including any refinement.
+    pub aft_samples: usize,
+    /// Canonical real packing: DC for every state, then real and imaginary
+    /// parts for every state at each positive harmonic. No frequency slot.
+    pub coefficients: &'a [f64],
+}
+
+/// Complete derivative of the original forced HB residual per physical
+/// continuation parameter, with all Fourier coefficients held fixed.
+///
+/// The callback writes every residual row in the SAME packing as
+/// `point.coefficients`, in original residual units per declared parameter
+/// unit. These units need not equal the state-coefficient units. It includes
+/// parameter-dependent ports, source coefficients, and the changing physical
+/// time sampling chart induced by the caller's `omega_of`; it is not a
+/// fixed-frequency partial.
+/// Equivalence to that declared family and clock map is the implementer's
+/// obligation, just as for the original island and its state Jacobian.
+/// `point.aft_samples` identifies the original quadrature to differentiate.
+/// Return false when unavailable at this point; unwritten/nonfinite entries
+/// also refuse. Source parameters must not be changed by this callback.
+pub type ForcedParameterJacobian<P> = fn(&P, ForcedParameterPoint<'_>, &mut [f64]) -> bool;
+
 /// A problem family over one physical parameter.
 pub trait ContinuableProblem: OrbitProblem {
     /// Set the continuation parameter (blowing pressure, forcing
     /// frequency, lip tension, ...).
     fn set_parameter(&mut self, lambda: f64);
+
+    /// Optional complete original residual-parameter column for FORCED
+    /// continuation, including the caller's clock law. The family is already
+    /// at `point.parameter`. The shared corrector applies its own equation and
+    /// parameter scales and exact arclength row after this physical derivative.
+    ///
+    /// `None` retains the original finite-difference parameter column. Once
+    /// declared, refusal is [`OrbitError::ParameterTangentRefused`], without a
+    /// fallback probe. Autonomous continuation does not consume this callback.
+    fn forced_parameter_jacobian(&self) -> Option<ForcedParameterJacobian<Self>>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 /// Continuation budgets.

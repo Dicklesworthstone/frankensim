@@ -115,11 +115,22 @@ The physical HB trace and sampling defect remain separate from normalized
 HB/AFT/arclength diagnostics, including physical `SamplingUnresolved` fields.
 
 Declared island tangents reuse the shared `tangent::Workspace` for coefficient
-columns. The parameter column still probes the complete original residual,
-including parameter-dependent ports and physical frequency. Without a declared
-tangent, finite differences use each physical coordinate magnitude. Source
-parameter mutations remain owned by the supplied family; this entry does not
-add a separate model or claim to restore family state after refusal.
+columns. `ContinuableProblem::forced_parameter_jacobian` optionally supplies
+the COMPLETE original residual-parameter column in physical units. Its
+`ForcedParameterPoint` retains the original parameter, actual forcing clock,
+canonical coefficients and current AFT grid size. The derivative includes
+parameter-dependent ports, nonlinear laws, forcing and the caller's
+`omega_of(parameter)` sampling chart; a fixed-clock partial is insufficient.
+The generic source author is responsible for equivalence to that same family
+and clock. The corrector then applies its existing row/parameter units and
+exact arclength row. Refusal, incomplete writes or nonfinite entries produce
+`ParameterTangentRefused`, without a fallback probe. Without a declaration,
+the original finite-difference column remains. An all-analytic corrector also
+avoids replaying unmodified original source samples. No extra numerical buffer
+is needed; the bounded existing probe workspace is reused. Source parameter
+mutations remain owned by the supplied family; this entry does not add a
+separate model or claim to restore family state after refusal. Autonomous
+continuation does not consume the forced-column declaration.
 
 `fs-couple::phs_orbit::continue_forced_frequency_response_scaled_seeded` uses
 the original full pHS state and independently audits signed supply, storage and
@@ -127,11 +138,21 @@ resistance loss at every accepted frequency. Quadratic composition and linear
 relaxation storage supply cached complete-state tangents through explicitly
 exact `quadratic_part` metadata (borrowing exact Q when available); a partial
 quadratic with a nonlinear remainder never becomes a complete tangent.
+Both original pHS continuation adapters supply the exact `i*n*X_n` frequency
+column in their fixed-phase forcing chart: all original state and explicit
+material-memory rows remain, and DC has zero clock derivative. This declaration
+is limited to their original state-independent `PeriodicPortInput` and
+identity frequency map, never assumed for a general source or eliminated
+frequency-dependent port. The cancellable branch polls cancellation before
+its analytic column and preserves the existing source/error propagation.
 
 Native regressions traverse both Duffing folds under independent coordinate,
 equation and parameter unit changes, restart a selected higher-harmonic
 waveform, verify tiny-equation AFT alias refusal/refinement, and compare exact
-tangent versus residual-probe source calls. Original pHS tests retain tiny
+tangent versus residual-probe source calls. Parameter-column regressions also
+retain changing material/port coefficients, DC and complex forcing with a
+nonidentity clock, and refuse declared incomplete/nonfinite derivatives.
+Original pHS tests retain tiny
 complex forcing harmonics, Maxwell memory phasors and independently computed
 cycle dissipation. These remain fixed-order numerical branches: harmonic
 truncation, physical frequency validity, branch identity, precise bifurcation

@@ -6052,7 +6052,14 @@ The same declared Hessian enters the original continuation state Jacobian and
 optional shooting tangent. Storage-owned exact quadratic metadata or continuous
 tangents are discovered automatically; an unavailable or refusing tangent does
 not become a quadratic surrogate or an undeclared state finite difference.
-The native corrector's parameter column retains its existing frequency probe.
+Both original forced-frequency adapters supply the exact original parameter
+column `dR_n/domega = i*n*X_n`, with zero DC rows, for their fixed-phase
+`PeriodicPortInput` and identity frequency map. Every explicit material-memory
+coordinate remains. The shared corrector applies its original equation and
+parameter scales and arclength row; a declared refusing, incomplete or nonfinite
+derivative never falls back to a frequency probe. When both state and parameter
+columns are analytic, the unchanged source samples need no restoration replay.
+The cancellable branch polls before the analytic parameter column.
 
 The forcing's original DC values, harmonic amplitudes and relative phases stay
 fixed while its common fundamental changes. All Fourier coordinates, memory

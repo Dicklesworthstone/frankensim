@@ -2,9 +2,9 @@
 
 use fs_math::c64::C64;
 use fs_orbit::{
-    ContinuableProblem, ContinuationBudget, ContinuationScales, HbAnchor, HbBudget, HbScales,
-    IslandStateJacobian, OrbitError, OrbitProblem, ScaledContinuationPoint,
-    continue_branch_scaled_seeded, solve_hb_scaled_seeded,
+    ContinuableProblem, ContinuationBudget, ContinuationScales, ForcedParameterJacobian,
+    ForcedParameterPoint, HbAnchor, HbBudget, HbScales, IslandStateJacobian, OrbitError,
+    OrbitProblem, ScaledContinuationPoint, continue_branch_scaled_seeded, solve_hb_scaled_seeded,
 };
 use std::cell::Cell;
 
@@ -28,8 +28,19 @@ struct Duffing {
     equations: [f64; 2],
     parameter: f64,
     analytic: bool,
+    parameter_tangent: ParameterTangent,
     island_calls: Cell<usize>,
     tangent_calls: Cell<usize>,
+    parameter_calls: Cell<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum ParameterTangent {
+    Absent,
+    Exact,
+    Refuse,
+    Incomplete,
+    Nonfinite,
 }
 
 impl Duffing {
@@ -52,6 +63,35 @@ impl Duffing {
             -self.equations[1] * (1.0 + 0.45 * q * q) / self.state[0],
             -0.1 * self.equations[1] / self.state[1],
         ]);
+        true
+    }
+    fn parameter_tangent(&self, point: ForcedParameterPoint<'_>, out: &mut [f64]) -> bool {
+        self.parameter_calls.set(self.parameter_calls.get() + 1);
+        assert_eq!(point.angular_frequency, self.omega);
+        assert_eq!(point.parameter / self.parameter, self.omega);
+        assert!(point.aft_samples >= 4 * point.harmonics + 4);
+        match self.parameter_tangent {
+            ParameterTangent::Absent | ParameterTangent::Refuse => return false,
+            ParameterTangent::Incomplete => {
+                out[0] = 0.0;
+                return true;
+            }
+            ParameterTangent::Nonfinite => {
+                out.fill(f64::INFINITY);
+                return true;
+            }
+            ParameterTangent::Exact => {}
+        }
+        out.fill(0.0);
+        for harmonic in 1..=point.harmonics {
+            let real = 2 + 4 * (harmonic - 1);
+            for state in 0..2 {
+                let rate =
+                    harmonic as f64 * self.equations[state] / (self.state[state] * self.parameter);
+                out[real + state] = -rate * point.coefficients[real + 2 + state];
+                out[real + 2 + state] = rate * point.coefficients[real + state];
+            }
+        }
         true
     }
 }
@@ -88,6 +128,10 @@ impl ContinuableProblem for Duffing {
     fn set_parameter(&mut self, value: f64) {
         self.omega = value / self.parameter;
     }
+    fn forced_parameter_jacobian(&self) -> Option<ForcedParameterJacobian<Self>> {
+        (!matches!(self.parameter_tangent, ParameterTangent::Absent))
+            .then_some(Self::parameter_tangent)
+    }
 }
 
 fn family(state: [f64; 2], equations: [f64; 2], parameter: f64, analytic: bool) -> Duffing {
@@ -97,8 +141,14 @@ fn family(state: [f64; 2], equations: [f64; 2], parameter: f64, analytic: bool) 
         equations,
         parameter,
         analytic,
+        parameter_tangent: if analytic {
+            ParameterTangent::Exact
+        } else {
+            ParameterTangent::Absent
+        },
         island_calls: Cell::new(0),
         tangent_calls: Cell::new(0),
+        parameter_calls: Cell::new(0),
     }
 }
 
@@ -279,6 +329,173 @@ fn continuation_reuses_exact_tangents_without_coefficient_source_probes() {
         analytic.island_calls.get(),
         differenced.island_calls.get()
     );
+}
+
+#[test]
+fn exact_parameter_column_preserves_both_nonlinear_folds_with_less_source_work() {
+    let mut exact = family([1.0; 2], [1.0; 2], 1.0, true);
+    let mut probed = family([1.0; 2], [1.0; 2], 1.0, true);
+    probed.parameter_tangent = ParameterTangent::Absent;
+    let a = branch(&mut exact);
+    let b = branch(&mut probed);
+    assert_eq!(folds(&a).len(), 2);
+    assert_eq!(a.len(), b.len());
+    for (a, b) in a.iter().zip(&b) {
+        assert!((a.point.orbit.omega - b.point.orbit.omega).abs() < 2e-6);
+        for (x, y) in a
+            .point
+            .orbit
+            .coeffs
+            .iter()
+            .flatten()
+            .zip(b.point.orbit.coeffs.iter().flatten())
+        {
+            assert!((*x - *y).abs() < 5e-6);
+        }
+    }
+    assert!(exact.parameter_calls.get() > 0);
+    assert_eq!(probed.parameter_calls.get(), 0);
+    // Both use the same exact STATE tangent. The only extra source work in
+    // the other branch is the clock probe and restoring the original samples.
+    assert!(exact.island_calls.get() < probed.island_calls.get());
+}
+
+#[test]
+fn declared_parameter_derivative_refuses_instead_of_falling_back() {
+    for mode in [
+        ParameterTangent::Refuse,
+        ParameterTangent::Incomplete,
+        ParameterTangent::Nonfinite,
+    ] {
+        let mut problem = family([1.0; 2], [1.0; 2], 1.0, true);
+        problem.parameter_tangent = mode;
+        let scales = problem.scales();
+        assert_eq!(
+            continue_branch_scaled_seeded(
+                &mut problem,
+                |omega| omega,
+                0.6,
+                0.8,
+                vec![0.0; 30],
+                &budget(7),
+                &scales,
+            )
+            .unwrap_err(),
+            OrbitError::ParameterTangentRefused,
+        );
+        assert_eq!(problem.parameter_calls.get(), 1);
+    }
+}
+
+// Independent linear phasor oracle with a NONIDENTITY clock, changing material
+// coefficients, complex forcing, and DC preload. The complete parameter
+// derivative must include all three, not assume every family is a clock sweep.
+struct TunedOscillator {
+    parameter: f64,
+    tangent_calls: Cell<usize>,
+}
+impl TunedOscillator {
+    fn frequency(parameter: f64) -> f64 {
+        1.5 + 0.4 * parameter * parameter
+    }
+    fn force(parameter: f64) -> C64 {
+        C64::new(0.15 + 0.03 * parameter, -0.08 + 0.01 * parameter)
+    }
+    fn operator(parameter: f64, s: C64) -> C64 {
+        C64::from_re(4.0 + 0.2 * parameter)
+            + s.scale(0.1 + 0.03 * parameter)
+            + (s * s).scale(1.0 + 0.1 * parameter)
+    }
+    fn parameter_tangent(&self, point: ForcedParameterPoint<'_>, out: &mut [f64]) -> bool {
+        self.tangent_calls.set(self.tangent_calls.get() + 1);
+        assert_eq!(point.parameter, self.parameter);
+        assert_eq!(point.angular_frequency, Self::frequency(self.parameter));
+        out[0] = 0.2 * point.coefficients[0] - 0.1;
+        for harmonic in 1..=point.harmonics {
+            let i = 1 + 2 * (harmonic - 1);
+            let s = C64::new(0.0, harmonic as f64 * point.angular_frequency);
+            let ds = C64::new(0.0, harmonic as f64 * 0.8 * self.parameter);
+            let derivative = C64::from_re(0.2)
+                + s.scale(0.03)
+                + ds.scale(0.1 + 0.03 * self.parameter)
+                + (s * s).scale(0.1)
+                + (s * ds).scale(2.0 * (1.0 + 0.1 * self.parameter));
+            let force = if harmonic == 1 {
+                C64::new(0.03, 0.01)
+            } else {
+                C64::ZERO
+            };
+            let row =
+                derivative * C64::new(point.coefficients[i], point.coefficients[i + 1]) - force;
+            out[i] = row.re;
+            out[i + 1] = row.im;
+        }
+        true
+    }
+}
+impl OrbitProblem for TunedOscillator {
+    fn dim(&self) -> usize {
+        1
+    }
+    fn autonomous(&self) -> bool {
+        false
+    }
+    fn port(&self, s: C64) -> Vec<C64> {
+        vec![Self::operator(self.parameter, s)]
+    }
+    fn island(&self, time: f64, _: &[f64], out: &mut [f64]) {
+        let phase = Self::frequency(self.parameter) * time;
+        let force = Self::force(self.parameter);
+        out[0] =
+            0.4 + 0.1 * self.parameter + 2.0 * (force.re * phase.cos() - force.im * phase.sin());
+    }
+}
+impl ContinuableProblem for TunedOscillator {
+    fn set_parameter(&mut self, value: f64) {
+        self.parameter = value;
+    }
+    fn forced_parameter_jacobian(&self) -> Option<ForcedParameterJacobian<Self>> {
+        Some(Self::parameter_tangent)
+    }
+}
+
+#[test]
+fn parameter_tangent_retains_source_port_and_nonlinear_clock_dependence() {
+    let mut problem = TunedOscillator {
+        parameter: 0.2,
+        tangent_calls: Cell::new(0),
+    };
+    let scales = ContinuationScales {
+        hb: HbScales {
+            states: vec![0.1],
+            equations: vec![1.0],
+            angular_frequency: 2.0,
+        },
+        parameter: 1.0,
+    };
+    let points = continue_branch_scaled_seeded(
+        &mut problem,
+        TunedOscillator::frequency,
+        0.2,
+        1.2,
+        vec![0.0; 5],
+        &budget(2),
+        &scales,
+    )
+    .unwrap();
+    assert!(problem.tangent_calls.get() > 0);
+    for point in points {
+        let lambda = point.point.lambda;
+        let orbit = point.point.orbit;
+        let expected = TunedOscillator::force(lambda)
+            / TunedOscillator::operator(lambda, C64::new(0.0, orbit.omega));
+        assert!((orbit.coeffs[0][1] - expected).abs() < 2e-9);
+        assert!(
+            (orbit.coeffs[0][0].re - (0.4 + 0.1 * lambda) / (4.0 + 0.2 * lambda)).abs() < 2e-10
+        );
+        assert!(orbit.coeffs[0][2].abs() < 1e-10);
+        assert_eq!(orbit.omega, TunedOscillator::frequency(lambda));
+    }
 }
 
 struct Septic {

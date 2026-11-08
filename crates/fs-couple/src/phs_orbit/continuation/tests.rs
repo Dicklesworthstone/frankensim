@@ -1,6 +1,6 @@
 use super::*;
 use fs_math::{c64::C64, det};
-use fs_orbit::{HbAnchor, HbBudget, HbScales};
+use fs_orbit::{HbAnchor, HbBudget, HbScales, OrbitProblem};
 use fs_phs::{RelaxationBranch, Storage};
 
 fn budget(harmonics: usize) -> ContinuationBudget {
@@ -33,6 +33,113 @@ impl Storage for Spring {
         out[0] = self.stiffness * x[0] + self.cubic * x[0].powi(3);
         out[1] = x[1] / self.mass;
     }
+}
+
+#[test]
+fn frequency_tangent_matches_the_full_original_clocked_residual_with_memory() {
+    let system = fs_phs::mass_spring_damper(2.0, 4.0, 0.1)
+        .unwrap()
+        .with_relaxation_branches(vec![RelaxationBranch {
+            projection: vec![1.0, 0.0],
+            stiffness: 3.0,
+            relaxation_time_s: 0.4,
+        }])
+        .unwrap();
+    let omega = 1.7;
+    let input = PeriodicPortInput::new(
+        omega,
+        vec![vec![
+            C64::from_re(0.2),
+            C64::new(0.1, -0.05),
+            C64::new(-0.02, 0.03),
+            C64::new(0.01, -0.02),
+        ]],
+    )
+    .unwrap();
+    let mut problem = forced_problem(&system, &input).unwrap();
+    let (d, harmonics, samples) = (3, 3, 128);
+    let coefficients: Vec<_> = (0..d * (2 * harmonics + 1))
+        .map(|i| 0.03 * (0.7 * i as f64 + 0.2).sin())
+        .collect();
+    let point = ForcedParameterPoint {
+        parameter: omega,
+        angular_frequency: omega,
+        harmonics,
+        aft_samples: samples,
+        coefficients: &coefficients,
+    };
+    let callback = problem.forced_parameter_jacobian().unwrap();
+    let mut derivative = vec![f64::NAN; coefficients.len()];
+    assert!(callback(&problem, point, &mut derivative));
+    assert_eq!(&derivative[..d], &[0.0; 3]);
+    assert!(derivative[d + 2] != 0.0); // The retained memory has its own clock row.
+
+    // Independently integrate the ORIGINAL vector field on the physical clock,
+    // holding the complete Fourier waveform and forcing phase amplitudes fixed.
+    // This checks cancellation of the time/source-clock terms; it is not a
+    // second implementation of the analytic i*n*X parameter column.
+    let residual = |problem: &mut PhsOrbitProblem<'_>, frequency: f64| {
+        problem.set_parameter(frequency);
+        let mut projected = vec![0.0; coefficients.len()];
+        for sample in 0..samples {
+            let theta = core::f64::consts::TAU * sample as f64 / samples as f64;
+            let mut state = coefficients[..d].to_vec();
+            for harmonic in 1..=harmonics {
+                let real = d + 2 * (harmonic - 1) * d;
+                let (sine, cosine) = (harmonic as f64 * theta).sin_cos();
+                for k in 0..d {
+                    state[k] +=
+                        2.0 * (coefficients[real + k] * cosine - coefficients[real + d + k] * sine);
+                }
+            }
+            let mut flow = vec![0.0; d];
+            problem.island(theta / frequency, &state, &mut flow);
+            for k in 0..d {
+                projected[k] -= flow[k] / samples as f64;
+            }
+            for harmonic in 1..=harmonics {
+                let real = d + 2 * (harmonic - 1) * d;
+                let (sine, cosine) = (harmonic as f64 * theta).sin_cos();
+                for k in 0..d {
+                    projected[real + k] -= flow[k] * cosine / samples as f64;
+                    projected[real + d + k] += flow[k] * sine / samples as f64;
+                }
+            }
+        }
+        for harmonic in 1..=harmonics {
+            let real = d + 2 * (harmonic - 1) * d;
+            for k in 0..d {
+                projected[real + k] -= harmonic as f64 * frequency * coefficients[real + d + k];
+                projected[real + d + k] += harmonic as f64 * frequency * coefficients[real + k];
+            }
+        }
+        projected
+    };
+    let h = 1e-4;
+    let plus = residual(&mut problem, omega + h);
+    let minus = residual(&mut problem, omega - h);
+    for ((actual, plus), minus) in derivative.iter().zip(plus).zip(minus) {
+        assert!((actual - (plus - minus) / (2.0 * h)).abs() < 3e-10);
+    }
+    problem.set_parameter(omega);
+    assert!(!callback(
+        &problem,
+        ForcedParameterPoint {
+            angular_frequency: 2.0 * omega,
+            ..point
+        },
+        &mut derivative
+    ));
+    assert!(!callback(
+        &problem,
+        ForcedParameterPoint {
+            parameter: 2.0 * omega,
+            ..point
+        },
+        &mut derivative
+    ));
+    assert!(!callback(&problem, point, &mut derivative[..3]));
+    assert!(!problem.source_refused());
 }
 
 #[test]

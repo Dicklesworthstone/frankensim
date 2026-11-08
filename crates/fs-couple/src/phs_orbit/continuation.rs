@@ -5,8 +5,9 @@ use super::{
     audit_forced_orbit, bad, forced_problem,
 };
 use fs_orbit::{
-    ContinuableProblem, ContinuationBudget, ContinuationPoint, ContinuationScales, HbScales,
-    ScaledContinuationPoint, continue_branch, continue_branch_scaled_seeded,
+    ContinuableProblem, ContinuationBudget, ContinuationPoint, ContinuationScales,
+    ForcedParameterJacobian, ForcedParameterPoint, HbScales, ScaledContinuationPoint,
+    continue_branch, continue_branch_scaled_seeded,
 };
 use fs_phs::PortHamiltonian;
 
@@ -44,6 +45,60 @@ impl ContinuableProblem for PhsOrbitProblem<'_> {
             *omega_rad_s = lambda;
         }
     }
+
+    fn forced_parameter_jacobian(&self) -> Option<ForcedParameterJacobian<Self>> {
+        matches!(self.input, InputKind::Forced { .. }).then_some(Self::frequency_parameter_jacobian)
+    }
+}
+
+impl PhsOrbitProblem<'_> {
+    /// At fixed phase and Fourier coefficients the entire original vector
+    /// field is frequency independent: u(theta) keeps its authored complex
+    /// coefficients, and every material-memory variable remains an ODE state.
+    /// Only the original sI port changes, hence dR_n/domega = i*n*X_n.
+    fn frequency_parameter_jacobian(
+        &self,
+        point: ForcedParameterPoint<'_>,
+        out: &mut [f64],
+    ) -> bool {
+        let InputKind::Forced { omega_rad_s, .. } = &self.input else {
+            return false;
+        };
+        // These private adapters are only used with omega_of(lambda)=lambda.
+        // Do not silently reuse this tangent under another clock/source law.
+        if !omega_rad_s.is_finite()
+            || *omega_rad_s <= 0.0
+            || point.parameter.to_bits() != omega_rad_s.to_bits()
+            || point.angular_frequency.to_bits() != omega_rad_s.to_bits()
+        {
+            return false;
+        }
+        let d = self.system.state_dim();
+        let Some(expected) = point
+            .harmonics
+            .checked_mul(2)
+            .and_then(|orders| orders.checked_add(1))
+            .and_then(|orders| d.checked_mul(orders))
+        else {
+            return false;
+        };
+        if point.coefficients.len() != expected
+            || out.len() != expected
+            || point.coefficients.iter().any(|value| !value.is_finite())
+        {
+            return false;
+        }
+        out.fill(0.0);
+        for harmonic in 1..=point.harmonics {
+            let real = d + 2 * (harmonic - 1) * d;
+            let imaginary = real + d;
+            for state in 0..d {
+                out[real + state] = -(harmonic as f64) * point.coefficients[imaginary + state];
+                out[imaginary + state] = harmonic as f64 * point.coefficients[real + state];
+            }
+        }
+        out.iter().all(|value| value.is_finite())
+    }
 }
 
 /// Follow a forced nonlinear resonance branch through frequency folds.
@@ -54,6 +109,9 @@ impl ContinuableProblem for PhsOrbitProblem<'_> {
 /// frequency. The authored DC values, complex harmonic amplitudes and relative
 /// phases stay fixed while their shared fundamental changes. Every source
 /// evaluation uses the ORIGINAL storage, full dissipation and memory states.
+/// Its continuation frequency column is analytic in this fixed-phase chart:
+/// the complete original ODE gives `dR_n/domega = i*n*X_n`, including every
+/// memory coordinate, without perturbing or replaying the physical source.
 ///
 /// Each point retains fs-orbit's residual and AFT sampling evidence, plus an
 /// independent physical cycle audit. This is a fixed retained-harmonic solve:
