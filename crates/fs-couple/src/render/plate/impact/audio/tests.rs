@@ -76,8 +76,9 @@ fn pressure_has_real_travel_time_range_scaling_and_no_steady_velocity_tone() {
     let a=artifact();let near_range=0.08+343.0*32.0/f64::from(RATE);
     let far_range=near_range+343.0*32.0/f64::from(RATE);
     let mut near=renderer(&a,near_range,1000);let mut far=renderer(&a,far_range,1000);
-    let delta=far.timing().propagation_samples-near.timing().propagation_samples;
-    assert!((31..=33).contains(&delta));
+    let physical_delta=(far.timing().remaining_travel_time_s-near.timing().remaining_travel_time_s)*f64::from(RATE);
+    assert!((physical_delta-32.0).abs()<1e-12);
+    let delta=32;
     let mut np=Vec::new();let mut fp=Vec::new();
     for i in 0..1000 {
         let force=if i<16 {100.0}else{0.0};near.set_forces(&[force]).unwrap();far.set_forces(&[force]).unwrap();

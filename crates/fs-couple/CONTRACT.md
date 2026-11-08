@@ -1856,7 +1856,7 @@ and radiation channels; the callback retains its prepared buffers.
 The shared derivative replaces the backward difference's frequency-dependent
 sinc loss. Its 48-mechanical-sample group delay is reported by the existing
 `velocity_difference_delay_s` timing field, separately from source-radius shift,
-geometrical travel and propagation rounding. Fitted bands beyond 0.45 of the
+geometrical travel and propagation reconstruction. Fitted bands beyond 0.45 of the
 mechanical sample rate refuse. Source harmonics already aliased by mechanics
 remain unresolved; source-clock refinement and anti-aliasing before a rate
 change are still required. Mechanical/contact/thermal histories and energy
@@ -1865,10 +1865,27 @@ does not update its transfer from evolving geometry or material properties;
 time-varying transfers require their own derivative product terms and are not
 admitted by this interface.
 
+The receiver retains the original `(range - source_radius) / sound_speed`
+travel time rather than rounding arrival up to a whole mechanical sample.
+Its fixed delay line reuses the existing 65-tap Rayleigh path interpolation
+kernel, whose complex-response error is below 4e-4 through 0.45 of the clock.
+The additional 32-sample numerical delay is retained even for integral travel,
+so different receivers share a common reconstruction latency. Timing reports
+whole and fractional physical samples and `propagation_interpolation_delay_s`
+separately; `propagation_rounding_s` is zero. The historical nonnegative
+`maximum_delay_error_s` bound therefore accepts zero at fractional distances.
+`maximum_delay_samples` admits the complete travel/FIR history before allocation.
+One prepared mono ring serves the fixed summed field, with no per-mode delay
+filters, per-sample allocation or future samples. The physical pressure ceiling
+is checked after propagation as well as after differentiation.
+
 Focused regressions use the analytic compact-monopole Green function and the
 original exact linear-impact source to check amplitude and phase through the
 upper admitted harmonic band, unchanged mechanical states and energy records,
-vanishing pressure under coasting motion, and explicit band refusal.
+vanishing pressure under coasting motion, fractional listener distances,
+separate numerical latency and explicit band refusal. Native propagation tests
+also retain the signed interference between paths whose fractional travel
+differs even when their rounded integer delays would coincide.
 
 Bounded native verification executed four actual radiation-bank regressions
 and two real-bank/shared-derivative component tests. Relative pressure waveform

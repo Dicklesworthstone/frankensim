@@ -82,7 +82,8 @@ fn physical_high_harmonics_keep_derivative_gain_phase_and_original_mechanics() {
         let timing = observed.timing();
         assert!((timing.velocity_difference_delay_s - 48.0 / f64::from(RATE)).abs() < 1e-15);
         assert_eq!(timing.source_time_shift_s, 0.0);
-        let delay = timing.propagation_samples as f64 + 48.0;
+        let delay = (timing.remaining_travel_time_s + timing.velocity_difference_delay_s
+            + timing.propagation_interpolation_delay_s) * f64::from(RATE);
         let scale = RHO * AREA / (4.0 * core::f64::consts::PI * range);
         let (mut error, mut signal) = (0.0, 0.0);
         for n in 0..2048 {
@@ -106,6 +107,45 @@ fn physical_high_harmonics_keep_derivative_gain_phase_and_original_mechanics() {
             let old_gain = (core::f64::consts::PI * fraction).sin()
                 / (core::f64::consts::PI * fraction);
             assert!(1.0 - old_gain > 0.24);
+        }
+    }
+}
+
+#[test]
+fn fractional_listener_distance_keeps_physical_phase_and_separate_numerical_latency() {
+    let radiation = monopole(0.45 * f64::from(RATE));
+    let amplitude = 1e-3;
+    for travel in [0.125, 32.125, 32.5, 32.875] {
+        let range = 343.0 * travel / f64::from(RATE);
+        for fraction in [0.05, 0.2, 0.4, 0.45] {
+            let omega = core::f64::consts::TAU * fraction * f64::from(RATE);
+            let mut receiver = listener(range);
+            receiver.maximum_delay_error_s = 0.0;
+            let mut observed = ImpactPressureRenderer::new(
+                oscillator(fraction * f64::from(RATE), amplitude, 1024),
+                &radiation, projection(), vec![0.0], receiver, RATE, 97).unwrap();
+            let timing = observed.timing();
+            assert_eq!(timing.propagation_rounding_s, 0.0);
+            assert!((timing.propagation_samples as f64 + timing.propagation_fractional_samples
+                - travel).abs() < 1e-13);
+            assert!((timing.propagation_interpolation_delay_s * f64::from(RATE) - 32.0).abs() < 1e-13);
+            let scale = RHO * AREA / (4.0 * core::f64::consts::PI * range);
+            let (mut error, mut signal) = (0.0, 0.0);
+            for n in 0..1024 {
+                let mut pressure = [0.0];
+                observed.block(&mut pressure).unwrap();
+                if n >= 256 {
+                    // Physical time uses the original geometry; the separate
+                    // derivative/interpolation delays are retained, never removed.
+                    let time = (n + 1) as f64 / f64::from(RATE)
+                        - range / 343.0 - 80.0 / f64::from(RATE);
+                    let expected = -scale * omega * amplitude * (omega * time).cos();
+                    error += (pressure[0] - expected).powi(2);
+                    signal += expected * expected;
+                }
+            }
+            let relative = (error / signal).sqrt();
+            assert!(relative < 5e-4, "travel {travel}, fraction {fraction}: {relative}");
         }
     }
 }

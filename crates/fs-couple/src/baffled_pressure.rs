@@ -41,7 +41,7 @@ mod directional;
 pub mod aperture;
 
 #[path = "baffled_pressure_path.rs"]
-mod path;
+pub(crate) mod path;
 
 /// Continuous-frequency pressure, gradient and particle velocity on this surface basis.
 #[path = "baffled_pressure_harmonic.rs"]

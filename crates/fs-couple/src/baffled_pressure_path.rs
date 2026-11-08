@@ -4,8 +4,8 @@ use fs_math::{dd::Dd, det};
 use std::collections::BTreeMap;
 use std::f64::consts::{PI, TAU};
 
-pub(super) const HALF: usize = 32;
-pub(super) const TAPS: usize = 2 * HALF + 1;
+pub(crate) const HALF: usize = 32;
+pub(crate) const TAPS: usize = 2 * HALF + 1;
 
 /// Cold signed surface projection. Preserve products and cancellation until
 /// every area sample contributing to a (delay, input) coefficient is present.
@@ -45,7 +45,7 @@ impl KernelBins {
     }
 }
 
-pub(super) fn window() -> [f64; TAPS] {
+pub(crate) fn window() -> [f64; TAPS] {
     let mut w = [0.0; TAPS];
     for (i, value) in w.iter_mut().enumerate().take(TAPS - 1).skip(1) {
         let phase = TAU * i as f64 / (TAPS - 1) as f64;
@@ -54,7 +54,7 @@ pub(super) fn window() -> [f64; TAPS] {
     w
 }
 
-pub(super) fn taps(fraction: f64, window: &[f64; TAPS]) -> [f64; TAPS] {
+pub(crate) fn taps(fraction: f64, window: &[f64; TAPS]) -> [f64; TAPS] {
     let mut h = [0.0; TAPS];
     if fraction == 0.0 {
         h[HALF] = 1.0;

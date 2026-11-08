@@ -20,9 +20,10 @@
 //! and qualified band through 0.45 of the mechanical sample rate. Fitted bands
 //! beyond that limit refuse. This cannot recover source harmonics already
 //! aliased by the mechanics; refine the source clock and anti-alias before
-//! reducing it. Propagation still rounds UP to whole mechanical samples within
-//! an explicit tolerance. Reconstruction delay and travel remain separate;
-//! neither is time compensated.
+//! reducing it. Propagation retains the physical fractional travel with the
+//! shared Rayleigh path kernel, qualified over that same band. Its additional
+//! 32-sample reconstruction delay is explicit and common to every listener,
+//! including integral travel. Neither numerical delay is time compensated.
 //! This is stationary-reference, ONE-WAY far-field observation: no acoustic
 //! reaction, near field, room, air absorption or moving-surface claim. Each
 //! original mechanical image retains its own numerical and allocation contract.
@@ -48,6 +49,8 @@ use fs_math::{c64::C64, det};
 
 /// Retained spatial heat transport and material feedback during pressure playback.
 pub mod network;
+mod propagation;
+use propagation::Propagation;
 
 /// A velocity-response sample bank converted to causal acceleration response.
 /// Kept immutable so a caller cannot remove the source-time shift after fitting.
@@ -119,9 +122,12 @@ pub struct ImpactListener {
     /// Position [m]. Must lie outside the source's enclosing sphere. This check
     /// is NOT a far-field accuracy certificate; the caller must justify range.
     pub position_m: [f64; 3],
-    /// Maximum added propagation rounding delay [s]; zero requires exact transit.
+    /// Maximum added propagation rounding delay [s]. Fractional reconstruction
+    /// adds no integer rounding, so zero is legal at every admitted distance.
+    /// Its separate numerical latency is not part of this historical bound.
     pub maximum_delay_error_s: f64,
-    /// Maximum delay-line payload in samples, admitted before allocation.
+    /// Maximum delay-line payload in samples, including the complete causal
+    /// reconstruction FIR, admitted before allocation.
     pub maximum_delay_samples: usize,
     /// Physical pressure ceiling [Pa], a refusal threshold, never a gain control.
     pub maximum_abs_pressure_pa: f64,
@@ -131,12 +137,19 @@ pub struct ImpactListener {
 pub struct ImpactObservationTiming {
     /// Source radius/speed already included in the fitted bank [s].
     pub source_time_shift_s: f64,
-    /// Remaining geometrical propagation time before rounding [s].
+    /// Original remaining geometrical propagation time [s].
     pub remaining_travel_time_s: f64,
-    /// Delay samples actually retained after the bank.
+    /// Whole samples of geometrical travel after the bank, excluding numerical
+    /// reconstruction latency and the fractional physical sample below.
     pub propagation_samples: usize,
-    /// Additional nonnegative delay due to integer propagation [s].
+    /// Physical fraction of one mechanical period in [0, 1).
+    pub propagation_fractional_samples: f64,
+    /// Additional delay due to integer propagation [s], now zero because the
+    /// physical fraction is reconstructed rather than rounded up.
     pub propagation_rounding_s: f64,
+    /// Numerical propagation reconstruction delay [s]: 32 mechanical periods,
+    /// including integral travel, so independently observed fields stay coherent.
+    pub propagation_interpolation_delay_s: f64,
     /// Numerical derivative group delay [s], separate from propagation. The
     /// retained field name also covered the former half-step difference;
     /// the bandlimited reconstruction now reports 48 mechanical periods.
@@ -250,8 +263,7 @@ pub struct ImpactPressureRenderer<'a, M: ImpactSource = ImpactSystem> {
     /// One derivative of the fixed receiver potential, not one per source mode.
     derivative: Decimator,
     directional_weights: Vec<f64>,
-    travel: Vec<f64>,
-    head: usize,
+    travel: Propagation,
     timing: ImpactObservationTiming,
     sample_rate_hz: u32,
     max_block: usize,
@@ -276,7 +288,8 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
     /// The borrowed radiation bank and receiver projections remain immutable
     /// for the complete run. Its fitted band must lie at or below 0.45 of this
     /// clock, where the shared bandlimited derivative preserves physical gain.
-    /// Its numerical group delay is reported separately from geometric travel.
+    /// Its numerical group delay and that of fractional propagation are
+    /// reported separately from the original geometric travel.
     pub fn new(
         mechanics: M, radiation: &'a ImpactRadiation,
         projections: Vec<VelocityProjection>, forces: Vec<f64>,
@@ -309,22 +322,11 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
             || !listener.maximum_abs_pressure_pa.is_finite() || listener.maximum_abs_pressure_pa <= 0.0
         { return Err(input("listener needs finite exterior range, nonnegative delay tolerance and positive pressure limit")); }
         let time = (range - radiation.source_radius_m) / radiation.sound_speed_m_s;
-        let count = (time / dt).ceil();
-        if !time.is_finite() || !count.is_finite() || count < 0.0
-            || count >= usize::MAX as f64 || count > listener.maximum_delay_samples as f64
-        { return Err(input("listener propagation exceeds representable delay budget")); }
-        let delay = count as usize;
-        let rounding = count * dt - time;
-        if rounding < 0.0 || rounding > listener.maximum_delay_error_s {
-            return Err(input("listener propagation rounding exceeds its declared time tolerance"));
-        }
         for p in &projections {
             let v: f64 = p.weights.iter().enumerate().map(|(i,b)| b * mechanics.state()[2*i+1]).sum();
             if !v.is_finite() || v != 0.0 { return Err(input("nonzero initial radiating velocity needs an acoustic-state initialization")); }
         }
-        let mut travel = Vec::new();
-        travel.try_reserve_exact(delay).map_err(|_| input("pressure propagation allocation failed"))?;
-        travel.resize(delay, 0.0);
+        let travel = Propagation::new(time / dt, listener.maximum_delay_samples).map_err(input)?;
         // Cold-only SH evaluation. No spherical harmonics or allocation in the
         // observation loop. Keep the bank's declared real-channel order.
         let n = radiation.bank.channels.len();
@@ -339,11 +341,13 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
         let runtime = radiation.bank.try_runtime().map_err(owner)?;
         let derivative = Decimator::new_differentiating(1, 1, sample_rate_hz).map_err(input)?;
         let timing = ImpactObservationTiming { source_time_shift_s: radiation.source_time_shift_s(),
-            remaining_travel_time_s: time, propagation_samples: delay, propagation_rounding_s: rounding,
+            remaining_travel_time_s: time, propagation_samples: travel.whole_samples(),
+            propagation_fractional_samples: travel.fractional_samples(), propagation_rounding_s: 0.0,
+            propagation_interpolation_delay_s: travel.reconstruction_delay_samples() as f64 * dt,
             velocity_difference_delay_s: derivative.delay_output_frames() * dt };
         Ok(Self { mechanics, radiation: runtime, velocity: vec![0.0; projections.len()],
             derivative, projections, forces,
-            directional_weights, travel, head: 0, timing, sample_rate_hz, max_block,
+            directional_weights, travel, timing, sample_rate_hz, max_block,
             pressure_limit: listener.maximum_abs_pressure_pa, completed: 0, poisoned: false,
             gate: CancelGate::new_clock_free(), last_frame: None })
     }
@@ -381,10 +385,10 @@ impl<'a, M: ImpactSource> ImpactPressureRenderer<'a, M> {
         if !emitted.is_finite() || emitted.abs() > self.pressure_limit {
             return Err(input("physical pressure exceeded its declared ceiling"));
         }
-        let pressure = if self.travel.is_empty() { emitted } else {
-            let old = self.travel[self.head]; self.travel[self.head] = emitted;
-            self.head = (self.head + 1) % self.travel.len(); old
-        };
+        let pressure = self.travel.step(emitted);
+        if !pressure.is_finite() || pressure.abs() > self.pressure_limit {
+            return Err(input("propagated physical pressure exceeded its declared ceiling"));
+        }
         self.derivative.commit();
         self.last_frame = Some(frame); self.completed += 1; Ok(pressure)
     }
