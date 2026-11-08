@@ -16,6 +16,7 @@ use fs_math::{c64::C64, dd::Dd};
 
 mod array;
 pub use array::{
+    HarmonicMicrophoneCalibrationLine, HarmonicMicrophoneResponse,
     HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
     HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits,
     HarmonicPressureCorrelationPair, HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS,

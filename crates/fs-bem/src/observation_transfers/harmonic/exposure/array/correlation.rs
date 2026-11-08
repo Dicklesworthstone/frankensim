@@ -79,6 +79,7 @@ pub struct WindowedHarmonicPressureCorrelations<'a> {
     source_clock: &'a str,
     channels: &'a [HarmonicPressureChannel],
     microphone_patterns: Option<&'a [FirstOrder]>,
+    microphone_calibration: Option<&'a [HarmonicMicrophoneCalibrationLine]>,
     correlations: Vec<HarmonicPressureCorrelation>,
 }
 
@@ -108,6 +109,10 @@ impl WindowedHarmonicPressureCorrelations<'_> {
     }
     pub fn microphone_patterns(&self) -> Option<&[FirstOrder]> {
         self.microphone_patterns
+    }
+    /// Exact native-frequency response data retained by the original array.
+    pub fn microphone_calibration(&self) -> Option<&[HarmonicMicrophoneCalibrationLine]> {
+        self.microphone_calibration
     }
     pub fn correlations(&self) -> &[HarmonicPressureCorrelation] {
         &self.correlations
@@ -261,6 +266,7 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
                 source_clock: self.array.source_clock,
                 channels: &self.array.channels,
                 microphone_patterns: self.array.microphone_patterns.as_deref(),
+                microphone_calibration: self.array.microphone_calibration.as_deref(),
                 correlations: Vec::new(),
             });
         }
@@ -361,6 +367,7 @@ impl<'array, 'field> PreparedHarmonicPressureCorrelations<'array, 'field> {
             source_clock: self.array.source_clock,
             channels: &self.array.channels,
             microphone_patterns: self.array.microphone_patterns.as_deref(),
+            microphone_calibration: self.array.microphone_calibration.as_deref(),
             correlations,
         })
     }

@@ -3714,3 +3714,39 @@ it does not replace the original dispersive propagation impedance.
 The typed field has a distinct content identity and does not expose a p/gradient
 artifact. FIR convergence remains separate from unresolved source, material, and
 spatial error; observer fields are not work-conjugate structural loading.
+
+## Frequency-dependent calibrated harmonic microphones
+
+`HarmonicMicrophoneCalibrationLine` declares complete receiver responses at
+exact native angular frequencies. Each `HarmonicMicrophoneResponse` applies
+`m = Hp*p + Hv dot u` to the original complex field under `exp(-i omega t)`.
+`Hp` is dimensionless; Cartesian `Hv` has units Pa s/m in the original geometry
+frame. This is a local first-order readout. The caller supplies a fixed authored
+orientation and calibrated
+Pa-equivalent sensitivities. Actual reactive velocity, complex pressure/velocity
+phase and frequency-dependent polar response survive; a plane-wave velocity or
+a pressure-only coloration filter cannot replace this projection.
+
+`PreparedHarmonicPressureArray::new_with_calibration[_cancellable]` owns these
+data and projects before coherent signed/delayed taps. Mean and mixed real/proper
+factor laws, cross-frequency products and signed-lag correlations are unchanged.
+Calibration must cover exactly every retained frequency and original receiver,
+including silent lines, unused receivers and dark channels. Frequencies are
+ordered, finite and positive, and every sensitivity is finite. Nearest-frequency
+matching, interpolation and
+extrapolation are refused. Complete response storage and conversion/projection
+work enter the existing explicit resource bounds. Cancellation/refusal returns
+no partial prepared owner.
+
+`PreparedHarmonicPressureSignal::new_with_calibration[_cancellable]` uses this
+same projection for a fixed source draw. The existing BEM frame renderer and
+PCM stream consume it without another encoder, phase convention or per-sample
+response lookup. Array, window and correlation results retain calibration data
+beside receiver identity. Original Nyquist and absolute-clock admission remain.
+
+Finite response tables establish settled linear measurements at their declared
+lines, not a causal capsule/filter, an impulse response, microphone loading,
+noise, distortion, experimental accuracy or calibration uncertainty bounds.
+Independent first-order differential-response fixtures verify complex response,
+near-field pressure/velocity projection, mixed-factor/window/lag moments, quiet
+DD cancellation and waveform/PCM block partition behavior (plan M2.6).

@@ -530,6 +530,7 @@ pub use exposure::{
     HarmonicAveragedField, HarmonicExposureFactorStatistics, HarmonicExposureLimits,
     HarmonicExposureLine, HarmonicExposureMoments, HarmonicFactorDraw, HarmonicFieldSample,
     HarmonicMomentumLimits,
+    HarmonicMicrophoneCalibrationLine, HarmonicMicrophoneResponse,
     HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
     HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits,
     HarmonicPressureCorrelationPair, HarmonicPressureTap, HarmonicReadoutCovariance,

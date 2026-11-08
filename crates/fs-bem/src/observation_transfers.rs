@@ -44,6 +44,7 @@ pub use harmonic::{
     HarmonicExposureMoments, HarmonicFactorDraw, HarmonicField, HarmonicFieldCovector,
     HarmonicFieldSample, HarmonicFieldStatistics,
     HarmonicMomentumFlux, HarmonicMomentumLimits, HarmonicMomentumWelchLine,
+    HarmonicMicrophoneCalibrationLine, HarmonicMicrophoneResponse,
     HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
     HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits,
     HarmonicPressureCorrelationPair, HarmonicPressureTap, HarmonicReadoutCovariance,

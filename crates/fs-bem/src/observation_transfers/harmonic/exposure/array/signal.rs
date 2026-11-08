@@ -56,8 +56,38 @@ impl<'a> PreparedHarmonicPressureSignal<'a> {
             realization.pressure_input(),
             channels,
             patterns,
+            None,
             limits,
             &mut cancelled,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(Self { realization, array })
+    }
+
+    /// Prepare exact-frequency calibrated pressure/velocity microphone data.
+    /// This shares the original array projection and its owned calibration;
+    /// later waveform sampling performs no response lookup or interpolation.
+    pub fn new_with_calibration(
+        realization: &'a PreparedHarmonicRealization<'a>,
+        channels: &[HarmonicPressureChannel],
+        calibration: &[HarmonicMicrophoneCalibrationLine],
+        limits: HarmonicPressureArrayLimits,
+    ) -> Result<Self, TransferError> {
+        Self::new_with_calibration_cancellable(
+            realization, channels, calibration, limits, || false,
+        )
+    }
+
+    pub fn new_with_calibration_cancellable(
+        realization: &'a PreparedHarmonicRealization<'a>,
+        channels: &[HarmonicPressureChannel],
+        calibration: &[HarmonicMicrophoneCalibrationLine],
+        limits: HarmonicPressureArrayLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
+        let array = PreparedHarmonicPressureArray::prepare(
+            realization.pressure_input(), channels, None, Some(calibration),
+            limits, &mut cancelled,
         )?;
         poll(&mut cancelled)?;
         Ok(Self { realization, array })

@@ -363,3 +363,105 @@ fn pressure_only_channels_preserve_original_field_samples_and_wrong_sink_clock_r
     let (_, summary) = stream.finish().unwrap();
     assert_eq!(summary.frames, 0);
 }
+
+#[test]
+fn calibrated_frequency_dependent_capsules_reach_original_wav_without_phase_or_gain_rewrites() {
+    use fs_bem::observation_transfers::{
+        HarmonicMicrophoneCalibrationLine, HarmonicMicrophoneResponse,
+    };
+    let owners = owners();
+    let realization = realization(&owners);
+    let channels = channels();
+    let patterns = patterns();
+    let response = |omega: f64, tau: f64| {
+        let x = omega * tau;
+        C64::new(1.0, x).scale(1.0 / (1.0 + x * x))
+    };
+    let calibration: Vec<_> = OMEGAS
+        .iter()
+        .map(|&omega| HarmonicMicrophoneCalibrationLine {
+            angular_frequency_rad_s: omega,
+            responses: patterns
+                .iter()
+                .enumerate()
+                .map(|(r, pattern)| HarmonicMicrophoneResponse {
+                    pressure_gain: response(omega, 0.0003 + r as f64 * 0.0004)
+                        .scale(pattern.pressure_fraction()),
+                    particle_velocity_gain_pa_s_m: pattern.front_axis().map(|n| {
+                        response(omega, 0.0011 - r as f64 * 0.0002).scale(
+                            -(1.0 - pattern.pressure_fraction())
+                                * MEDIUM.density
+                                * MEDIUM.sound_speed
+                                * n,
+                        )
+                    }),
+                })
+                .collect(),
+        })
+        .collect();
+    let signal = PreparedHarmonicPressureSignal::new_with_calibration(
+        &realization,
+        &channels,
+        &calibration,
+        prepare(),
+    )
+    .unwrap();
+    let mut renderer = BemHarmonicPressureFrameRenderer::new(&signal, clock(), SAMPLE).unwrap();
+    let mut pressure = [0.0; 512];
+    renderer.frame_block(&mut pressure).unwrap();
+    assert_eq!(
+        renderer.signal().pressure_array().microphone_calibration(),
+        Some(calibration.as_slice())
+    );
+    let mut fields = [[HarmonicField::default(); 2]; 2];
+    for f in 0..2 {
+        let coefficient = MEAN[f] + REAL[f].scale(-0.7) + PROPER[f] * C64::new(0.3, -1.1);
+        owners[f]
+            .evaluate_coherent(&[coefficient], &mut fields[f], || false)
+            .unwrap();
+    }
+    for (frame, values) in pressure.chunks_exact(4).enumerate() {
+        let time = 0.031 + frame as f64 / 8000.0;
+        for (channel, &sample) in channels.iter().zip(values) {
+            let mut expected = 0.0;
+            for tap in &channel.taps {
+                for f in 0..2 {
+                    let field = fields[f][tap.receiver];
+                    let response = &calibration[f].responses[tap.receiver];
+                    let amplitude = field
+                        .particle_velocity_m_s
+                        .iter()
+                        .zip(&response.particle_velocity_gain_pa_s_m)
+                        .fold(response.pressure_gain * field.pressure_pa, |s, (&u, &h)| {
+                            s + h * u
+                        });
+                    let (sine, cosine) = (OMEGAS[f] * (time - tap.delay_s)).sin_cos();
+                    expected += tap.weight * (amplitude.re * cosine + amplitude.im * sine);
+                }
+            }
+            assert!(
+                (sample - expected).abs() < 5e-12,
+                "{sample:e} != {expected:e}"
+            );
+        }
+        assert_eq!(values[3], 0.0);
+    }
+    let (expected, _) = encode_pcm16_wav_interleaved(&pressure, 8000, 4, 10.0).unwrap();
+    for block_frames in [7, 31, 128] {
+        let mut renderer = BemHarmonicPressureFrameRenderer::new(&signal, clock(), SAMPLE).unwrap();
+        let mut stream =
+            Pcm16WavStream::new_interleaved(Cursor::new(Vec::new()), 8000, 4, 10.0, 128).unwrap();
+        assert_eq!(
+            render_pressure_frames_pcm16(
+                &mut renderer,
+                &mut stream,
+                &CancelGate::new_clock_free(),
+                &mut vec![0.0; 4 * block_frames],
+                128,
+            )
+            .unwrap(),
+            WavFrameProgress::Completed { frames: 128 }
+        );
+        assert_eq!(stream.finish().unwrap().0.into_inner(), expected);
+    }
+}

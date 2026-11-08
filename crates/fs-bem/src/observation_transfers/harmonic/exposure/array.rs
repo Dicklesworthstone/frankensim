@@ -2,8 +2,9 @@
 //!
 //! Every channel is y(t) = sum_r w_r m_r(t-delay_r), with authored real
 //! dimensionless weights and nonnegative delays. The default m_r is pressure;
-//! optional ideal first-order microphones project the actual pressure AND
-//! particle velocity before any channel sum or product. Under exp(-i omega t), its
+//! optional ideal first-order or exact-frequency calibrated microphones project
+//! actual pressure AND particle velocity before any channel sum or product.
+//! Under exp(-i omega t), its
 //! complex transfer is w_r exp(+i omega delay_r). Neither receiver powers nor
 //! cross spectra replace this field sum. A channel is a processed signal,
 //! not a new spatial receiver, pressure-to-intensity model or acoustic load.
@@ -44,6 +45,8 @@ pub struct HarmonicPressureArrayLimits {
     /// performs at most thirteen comparisons under the original 4096-line cap.
     /// Explicit microphone patterns add eight coefficient products per original
     /// receiver and four field projections per receiver and retained line.
+    /// Calibrated microphones count sixteen real DD products per projection
+    /// and complete frequency/response validation and conversion work.
     pub maximum_prepare_products: usize,
     /// Linear real contractions, channel/frequency pairs and averaged-channel
     /// covariance terms. Conservative counts include both matrix triangles.
@@ -114,6 +117,9 @@ impl<'a, 'b> PressureInput<'a, 'b> {
 mod signal;
 pub use signal::{HarmonicPressureSampleLimits, PreparedHarmonicPressureSignal};
 
+mod microphone;
+pub use microphone::{HarmonicMicrophoneCalibrationLine, HarmonicMicrophoneResponse};
+
 /// Prepared channel phasors, retaining original physical receiver provenance.
 ///
 /// The deterministic mean and authored real/proper factors come from the
@@ -131,6 +137,7 @@ pub struct PreparedHarmonicPressureArray<'a> {
     source_clock: &'a str,
     channels: Vec<HarmonicPressureChannel>,
     microphone_patterns: Option<Vec<FirstOrder>>,
+    microphone_calibration: Option<Vec<HarmonicMicrophoneCalibrationLine>>,
     // First bank is the deterministic mean, including when it is dark.
     banks: Vec<PressureBank>,
     workspace_bytes: usize,
@@ -144,6 +151,7 @@ pub struct WindowedHarmonicPressureArray<'a> {
     source_clock: &'a str,
     channels: &'a [HarmonicPressureChannel],
     microphone_patterns: Option<&'a [FirstOrder]>,
+    microphone_calibration: Option<&'a [HarmonicMicrophoneCalibrationLine]>,
     moments: Vec<HarmonicPressureChannelMoments>,
     // Row-major, symmetric centered covariance of average(y_c).
     averaged_covariance_pa2: Vec<f64>,
@@ -173,10 +181,14 @@ impl WindowedHarmonicPressureArray<'_> {
     pub fn channels(&self) -> &[HarmonicPressureChannel] {
         self.channels
     }
-    /// Ideal responses in original physical receiver order. None denotes the
-    /// original unprojected pressure array, not an inferred microphone model.
+    /// Ideal responses, when selected. Calibrated arrays instead expose
+    /// microphone_calibration(); neither response is inferred from the field.
     pub fn microphone_patterns(&self) -> Option<&[FirstOrder]> {
         self.microphone_patterns
+    }
+    /// Complete authored complex response, at exact native angular frequencies.
+    pub fn microphone_calibration(&self) -> Option<&[HarmonicMicrophoneCalibrationLine]> {
+        self.microphone_calibration
     }
     pub fn moments(&self) -> &[HarmonicPressureChannelMoments] {
         &self.moments
@@ -208,7 +220,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         limits: HarmonicPressureArrayLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
-        Self::prepare(PressureInput::from_exposure(exposure), channels, None, limits, cancelled)
+        Self::prepare(PressureInput::from_exposure(exposure), channels, None, None, limits, cancelled)
     }
 
     /// Prepare causal channels of the existing ideal first-order microphones.
@@ -242,27 +254,38 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         limits: HarmonicPressureArrayLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
-        Self::prepare(PressureInput::from_exposure(exposure), channels, Some(patterns), limits, cancelled)
+        Self::prepare(PressureInput::from_exposure(exposure), channels, Some(patterns), None, limits, cancelled)
     }
 
     fn prepare(
         source: PressureInput<'a, '_>,
         channels: &[HarmonicPressureChannel],
         patterns: Option<&[FirstOrder]>,
+        calibration: Option<&[HarmonicMicrophoneCalibrationLine]>,
         limits: HarmonicPressureArrayLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
         poll(&mut cancelled)?;
-        let microphones = match patterns {
-            Some(patterns) if patterns.len() == source.reference.receivers.len() => {
-                patterns.len()
+        if patterns.is_some() && calibration.is_some() {
+            return Err(bad("choose ideal or calibrated microphone response"));
+        }
+        let microphones = if let Some(calibration) = calibration {
+            microphone::admit_shape(
+                calibration, source.reference.receivers.len(), &mut cancelled,
+            )?;
+            source.reference.receivers.len()
+        } else {
+            match patterns {
+                Some(patterns) if patterns.len() == source.reference.receivers.len() => {
+                    patterns.len()
+                }
+                Some(_) => {
+                    return Err(bad(
+                        "microphone patterns differ from original receiver order",
+                    ));
+                }
+                None => 0,
             }
-            Some(_) => {
-                return Err(bad(
-                    "microphone patterns differ from original receiver order",
-                ));
-            }
-            None => 0,
         };
         let n = channels.len();
         admit(n, MAX_PRESSURE_ARRAY_CHANNELS)?;
@@ -315,13 +338,23 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         }
         // The number of unique frequencies is at most the retained line count.
         // Use this conservative admission before sorting or allocation.
+        let microphone_products = if let Some(calibration) = calibration {
+            microphone::extra_work(calibration.len(), microphones, lines)?
+        } else {
+            microphones.checked_mul(
+                lines.checked_mul(4).and_then(|v| v.checked_add(8)).ok_or_else(overflow)?
+            ).ok_or_else(overflow)?
+        };
+        let calibration_bytes = if let Some(calibration) = calibration {
+            microphone::extra_bytes(calibration.len(), microphones)?
+        } else {
+            0
+        };
         let prepare_products = lines
             .checked_mul(taps)
             .and_then(|p| p.checked_mul(2))
             .and_then(|p| p.checked_add(lines.checked_mul(bank_count)?))
-            .and_then(|p| {
-                p.checked_add(microphones.checked_mul(lines.checked_mul(4)?.checked_add(8)?)?)
-            })
+            .and_then(|p| p.checked_add(microphone_products))
             .ok_or_else(overflow)?;
         let query_products = lines
             .checked_mul(n)
@@ -365,12 +398,18 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                 )
             })
             .and_then(|v| {
-                v.checked_add(microphones.checked_mul(
-                    core::mem::size_of::<FirstOrder>()
-                        + core::mem::size_of::<[Dd; 4]>()
-                        + core::mem::size_of::<[Dd; 2]>(),
-                )?)
+                v.checked_add(microphones.checked_mul(core::mem::size_of::<[Dd; 2]>())?)
             })
+            .and_then(|v| {
+                if patterns.is_some() {
+                    v.checked_add(microphones.checked_mul(
+                        core::mem::size_of::<FirstOrder>() + core::mem::size_of::<[Dd; 4]>(),
+                    )?)
+                } else {
+                    Some(v)
+                }
+            })
+            .and_then(|v| v.checked_add(calibration_bytes))
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
 
@@ -381,7 +420,16 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         } else {
             None
         };
-        let mut projections = storage(microphones)?;
+        let microphone_calibration = if let Some(calibration) = calibration {
+            Some(microphone::copy_calibration(calibration, &mut cancelled)?)
+        } else {
+            None
+        };
+        let mut projections = storage(if patterns.is_some() { microphones } else { 0 })?;
+        let mut calibrated_projections = storage(if calibration.is_some() { microphones } else { 0 })?;
+        if calibration.is_some() {
+            calibrated_projections.resize(microphones, [Dd::ZERO; 8]);
+        }
         let mut projected = storage(microphones)?;
         projected.resize(microphones, [Dd::ZERO; 2]);
         if let Some(patterns) = patterns {
@@ -436,10 +484,18 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         }
         frequencies.sort_unstable_by(f64::total_cmp);
         frequencies.dedup_by(|a, b| a.to_bits() == b.to_bits());
+        if let Some(calibration) = calibration {
+            microphone::admit_frequencies(calibration, &frequencies, &mut cancelled)?;
+        }
         let mut weights = storage(taps)?;
         weights.resize(taps, [Dd::ZERO; 2]);
-        for omega in frequencies {
+        for (frequency, omega) in frequencies.into_iter().enumerate() {
             poll(&mut cancelled)?;
+            if let Some(calibration) = calibration {
+                microphone::coefficients(
+                    &calibration[frequency], &mut calibrated_projections, &mut cancelled,
+                )?;
+            }
             let mut index = 0;
             for channel in channels {
                 for &tap in &channel.taps {
@@ -482,6 +538,12 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                         ));
                     }
                 }
+                if calibration.is_some() {
+                    microphone::project(
+                        input, &calibrated_projections, &tapped_receivers,
+                        &mut projected, &mut cancelled,
+                    )?;
+                }
                 let mut offset = 0;
                 for (channel_index, channel) in channels.iter().enumerate() {
                     poll(&mut cancelled)?;
@@ -513,6 +575,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             source_clock: source.source_clock,
             channels: owned_channels,
             microphone_patterns,
+            microphone_calibration,
             banks,
             workspace_bytes,
             query_products,
@@ -523,9 +586,13 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         &self.channels
     }
     /// Explicit ideal responses in original receiver order, when authored.
-    /// None retains the original pressure-only observation semantics.
+    /// Calibrated arrays expose microphone_calibration() instead.
     pub fn microphone_patterns(&self) -> Option<&[FirstOrder]> {
         self.microphone_patterns.as_deref()
+    }
+    /// Complete owned response data. None and no ideal patterns mean pressure.
+    pub fn microphone_calibration(&self) -> Option<&[HarmonicMicrophoneCalibrationLine]> {
+        self.microphone_calibration.as_deref()
     }
     pub fn physical_receivers(&self) -> &[ReceiverSpec] {
         &self.reference.receivers
@@ -570,6 +637,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                 source_clock: self.source_clock,
                 channels: &self.channels,
                 microphone_patterns: self.microphone_patterns.as_deref(),
+                microphone_calibration: self.microphone_calibration.as_deref(),
                 moments: Vec::new(),
                 averaged_covariance_pa2: Vec::new(),
             });
@@ -655,6 +723,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             source_clock: self.source_clock,
             channels: &self.channels,
             microphone_patterns: self.microphone_patterns.as_deref(),
+            microphone_calibration: self.microphone_calibration.as_deref(),
             moments,
             averaged_covariance_pa2,
         })
