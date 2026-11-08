@@ -118,6 +118,44 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 impl TetPiezoelectricModel<'_> {
+    /// Reuse an admitted geometric trace when only the material snapshot changes.
+    /// Exact borrowed geometry and frame identity make the original exterior
+    /// topology, normals and shape integrals authoritative. This avoids another
+    /// whole-mesh face-owner scan for every finite-temperature Newton trial.
+    pub(in crate::piezoelectric::spatial) fn rebind_acoustic_port(
+        &self,
+        original: &PlaneWaveAcousticPort<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<PlaneWaveAcousticPort<'_>> {
+        poll(cx)?;
+        if !std::ptr::eq(self.nodes_m, original.model.nodes_m)
+            || !std::ptr::eq(self.tetrahedra, original.model.tetrahedra)
+            || self.mesh_frame != original.model.mesh_frame
+        {
+            return Err(invalid(
+                "acoustic trace refresh requires the exact original geometry and frame",
+            ));
+        }
+        let mut faces = Vec::with_capacity(original.faces.len());
+        for face in &original.faces {
+            poll(cx)?;
+            faces.push(*face);
+        }
+        let mut weights_m2 = Vec::with_capacity(original.weights_m2.len());
+        for weight in &original.weights_m2 {
+            poll(cx)?;
+            weights_m2.push(*weight);
+        }
+        Ok(PlaneWaveAcousticPort {
+            model: self,
+            faces,
+            weights_m2,
+            moving_area_m2: original.moving_area_m2,
+            section_area_m2: original.section_area_m2,
+            controls: original.controls,
+        })
+    }
+
     /// Prepare one complete exterior-face pressure trace with its adjoint flow
     /// map. Face order/orientation supplied by the caller does not change the
     /// result: the tetrahedron's opposite vertex defines the outward normal.

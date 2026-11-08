@@ -1,4 +1,7 @@
 //! G1/G3/G4 full-field temperature feedback, reversible heat and physical shunts.
+#[path = "tensor/bias.rs"]
+mod bias;
+
 use super::*;
 use fs_couple::piezoelectric::spatial::transient::load::thermal::tensor::{
     ThermalTensorPiezoelectricBody, TensorThermalReport,

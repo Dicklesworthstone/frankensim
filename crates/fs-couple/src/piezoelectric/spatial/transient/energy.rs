@@ -5,6 +5,8 @@
 //! the same fixed C^E and epsilon^S as the material response: in (S,E)
 //! coordinates W = S.C^E.S/2 + E.epsilon^S.E/2. The reciprocal e terms still
 //! enter both original field equations and cancel in this storage expression.
+//! A fixed thermal strain shifts the elastic coordinate to S-S_thermal. Its
+//! endpoint difference remains the unshifted total-strain increment.
 
 use fs_math::dd::Dd;
 
@@ -27,8 +29,7 @@ impl Products {
         let high = Dd::from_f64(left.hi) * Dd::from_f64(coefficient);
         let low = Dd::from_f64(left.lo) * Dd::from_f64(coefficient);
         self.leading = self.leading + high * Dd::from_f64(right.hi);
-        self.cross = self.cross + high * Dd::from_f64(right.lo)
-            + low * Dd::from_f64(right.hi);
+        self.cross = self.cross + high * Dd::from_f64(right.lo) + low * Dd::from_f64(right.hi);
         self.trailing = self.trailing + low * Dd::from_f64(right.lo);
     }
 
@@ -55,9 +56,50 @@ pub(super) fn quadratic_change<const N: usize>(
     products.value()
 }
 
+/// Change of (S-shift).C.(S-shift)/2, retaining the thermal subtraction in the
+/// mean and the original endpoint increment separately. Rounding both shifted
+/// endpoints first can erase a small physical increment under thermal preload.
+pub(super) fn quadratic_change_shifted<const N: usize>(
+    tensor: &[[f64; N]; N],
+    before: &[f64; N],
+    after: &[f64; N],
+    shift: &[f64; N],
+) -> Dd {
+    let mut products = Products::default();
+    for row in 0..N {
+        let mean = Dd::from_f64(0.5 * before[row]) + Dd::from_f64(0.5 * after[row])
+            - Dd::from_f64(shift[row]);
+        for column in 0..N {
+            let delta = Dd::from_f64(after[column]) - Dd::from_f64(before[column]);
+            products.add_scaled(mean, tensor[row][column], delta);
+        }
+    }
+    products.value()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_reference_keeps_a_strain_increment_below_its_rounded_offset() {
+        let shift = 2.0_f64.powi(-15);
+        let delta = 2.0_f64.powi(-70);
+        // (delta-shift)^2 - shift^2 = -2^-84 + 2^-140 exactly.
+        let expected = Dd::from_pair(-2.0_f64.powi(-84), 2.0_f64.powi(-140));
+        assert_eq!(
+            quadratic_change_shifted(&[[2.0]], &[0.0], &[delta], &[shift]),
+            expected
+        );
+        assert_eq!(
+            quadratic_change_shifted(&[[2.0]], &[delta], &[0.0], &[shift]),
+            -expected
+        );
+        assert_eq!(
+            quadratic_change(&[[2.0]], &[-shift], &[delta - shift]),
+            Dd::ZERO
+        );
+    }
 
     #[test]
     fn coupled_material_storage_retains_counteracting_coordinate_changes() {
@@ -65,8 +107,14 @@ mod tests {
         let datum = 2.0_f64.powi(54);
         let before = [datum, datum];
         let after = [datum + 4.0, datum - 4.0];
-        assert_eq!(quadratic_change(&tensor, &before, &after), Dd::from_f64(16.0));
-        assert_eq!(quadratic_change(&tensor, &after, &before), Dd::from_f64(-16.0));
+        assert_eq!(
+            quadratic_change(&tensor, &before, &after),
+            Dd::from_f64(16.0)
+        );
+        assert_eq!(
+            quadratic_change(&tensor, &after, &before),
+            Dd::from_f64(-16.0)
+        );
     }
 
     #[test]

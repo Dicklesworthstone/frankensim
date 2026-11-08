@@ -3007,7 +3007,38 @@ separate finite heat cells, guide work, moving supports and atomic refusals.
 
 ### Finite-temperature full-tensor spatial piezoelectric dynamics
 
-`spatial::transient::load::thermal::tensor::ThermalTensorPiezoelectricBody` couples the full native 3-D spatial fields and consistent-mass motion to one uniform finite ceramic temperature, with original per-cell tensor orientation and complete source-bound caloric inventory. Temperature proposals refresh the complete affine stress-charge C/e/epsilon source tensors and reassemble the same native operators under original budgets. The model may own refreshed tensors while borrowing unchanged geometry; identical-temperature trials reuse accepted operators. Each changed-temperature trial first solves electrostatics at fixed original displacement/free charge, restores physical momentum/history, and then runs the original shunt/current/support-motion midpoint solve. Signed reversible field/caloric transfer is derived from the full Helmholtz and entropy endpoints; actual resistor Joule heat is deposited only through its original receiver. Independent acceptance checks total field internal energy, kinetic energy, all finite caloric energy and actual external work/heat. Complete source/context/density/inventory checks, declared strain/electric-displacement bounds and a whole-interval caloric-plus-field capacity floor precede coupled Newton publication. This is fixed-reference geometry with one uniform ceramic temperature, fixed zero-voltage grounds and charge/current electrodes; intrinsic memory, nonzero ideal-voltage constraints, expansion, pyroelectric offsets, phase transitions and independent cell temperatures require additional accounted models. Endpoint-temperature coefficients make the thermal feedback generally first order in time. Four focused synthetic regression definitions cover moving/rotated supports, reversible caloric changes, heating-dependent capacitance at conserved charge across mesh refinements, separate finite shunt heating and transactional refusals; native execution remains a separate verification obligation.
+`spatial::transient::load::thermal::tensor::ThermalTensorPiezoelectricBody` couples the full native 3-D spatial fields and consistent-mass motion to one uniform finite ceramic temperature, with original per-cell tensor orientation and complete source-bound caloric inventory. Temperature proposals refresh the complete affine stress-charge C/e/epsilon source tensors and reassemble the same native operators under original budgets. The model may own refreshed tensors while borrowing unchanged geometry; identical-temperature trials reuse accepted operators. Each changed-temperature trial first solves electrostatics at fixed original displacement/free charge, restores physical momentum/history, and then runs the original shunt/current/support-motion midpoint solve. Signed reversible field/caloric transfer is derived from the full Helmholtz and entropy endpoints; actual resistor Joule heat is deposited only through its original receiver. Independent acceptance checks total field internal energy, kinetic energy, all finite caloric energy and actual external work/heat. Complete source/context/density/inventory checks, declared strain/electric-displacement bounds and a whole-interval caloric-plus-field capacity floor precede coupled Newton publication. This is fixed-reference geometry with one uniform ceramic temperature, fixed zero-voltage grounds and charge/current electrodes; intrinsic memory, nonzero ideal-voltage constraints, reactive circuit thermal feedback, phase transitions and independent cell temperatures require additional accounted models. Endpoint-temperature coefficients make the thermal feedback generally first order in time. Synthetic regression definitions cover moving/rotated supports, reversible caloric changes, heating-dependent capacitance at conserved charge across mesh refinements, separate finite shunt heating and transactional refusals; native execution remains a separate verification obligation.
+
+`TetPiezoelectricModel::assemble_thermal_materials` retains the original resolved
+thermal samples and their explicit expansion/clamped-pyroelectric sources.
+Static reference forces and charges are assembled once from the actual weak
+form. Static and transient fields recover `sigma=C*(S-alpha*dT)-e^T*E` and
+`D=e*S+epsilon*E+p_clamped*dT` with the same reciprocal tangent. Reference
+free energy at zero total strain/field is reported separately; ramp work
+includes initial stress and removes initial polarization from transferred
+charge. Fixed-temperature midpoint storage uses the shifted elastic potential
+with retained-precision endpoint contractions. This reference datum is not
+heat or an extra external energy supply. Zero-offset models retain the original
+response path. Nonzero bias refuses harmonic/memory combinations until those
+interfaces explicitly represent their operating point or memory reference.
+
+The finite thermal body admits the matching source/reference identities,
+including at zero offsets, and uses these same bias-aware samples in every
+changed-temperature trial. The caloric inventory represents stress-free,
+zero-field storage; thermoelastic and electrocaloric transfers follow the
+material potential's entropy and remain separate from dissipative heat.
+Both total and shifted elastic strains obey the small-signal envelope.
+`step_with_acoustic_ports_candidate` also receives/emits guide waves using
+traces on the original model. Identical borrowed geometry/frame permits reuse
+of the validated pressure/flow map across material snapshots without repeating
+the whole-mesh face-owner scan. Signed wave work crosses the joint energy
+boundary once, and the report retains the original acoustic responses.
+
+Focused synthetic regressions cover open/short and free/clamped thermal
+response, an independently solved shifted oscillator, reference/zero-bias
+behavior, finite heat-induced voltage, signed electrocaloric exchange, and
+secondary pyroelectric charge with moving-support/radiation work. Source,
+amplitude and cancellation failures preserve accepted field and thermal state.
 
 ## Moving stress histories on the pressure/PCM path
 

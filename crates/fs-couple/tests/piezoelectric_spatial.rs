@@ -23,6 +23,8 @@ mod harmonic;
 mod transient;
 #[path = "piezoelectric/spatial_transient_load.rs"]
 mod transient_load;
+#[path = "piezoelectric/thermal_bias.rs"]
+mod thermal_bias;
 
 const FRAME: ContentHash = ContentHash([79; 32]);
 const LENGTH: f64 = 1e-3;

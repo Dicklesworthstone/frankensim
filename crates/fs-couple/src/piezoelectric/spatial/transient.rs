@@ -324,6 +324,8 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     /// No history may be reset after time has advanced. `maximum_internal_variables`
     /// explicitly bounds all retained cell scalars before any state allocation.
     /// Frequency-limited source claims cannot authorize arbitrary transients.
+    /// Nonzero thermal bias requires a separately defined memory strain and
+    /// polarization reference and currently refuses.
     pub fn with_relaxation(
         mut self,
         materials: Vec<RelaxingTensorPiezoelectric>,
@@ -333,6 +335,11 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     ) -> Result<Self> {
         poll(cx)?;
         validate_controls(controls)?;
+        if self.model.has_thermal_bias() {
+            return Err(invalid(
+                "intrinsic memories require a declared thermal strain and polarization reference",
+            ));
+        }
         if self.intrinsic.is_some() || self.state.time_s != 0.0 {
             return Err(invalid(
                 "intrinsic memories can only be attached once at initialization",
@@ -531,9 +538,12 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 ));
             }
         }
-        for cell in &self.state.field.cells {
+        for (id, cell) in self.state.field.cells.iter().enumerate() {
             poll(cx)?;
             if norm(&cell.strain_mandel) > controls.maximum_strain_norm
+                || self.model.has_thermal_bias()
+                    && norm(&self.model.elastic_strain(id, cell.strain_mandel))
+                        > controls.maximum_strain_norm
                 || norm(&cell.response.electric_field_v_m) > controls.maximum_electric_field_v_m
             {
                 return Err(invalid(
@@ -1080,9 +1090,17 @@ fn field_storage_change(
         poll(cx)?;
         let material = &model.materials[if model.materials.len() == 1 { 0 } else { cell }];
         let volume = Dd::from_f64(model.dielectric.volumes_m3()[cell]);
-        change.add(volume, energy::quadratic_change(
-            material.stiffness_mandel_pa(), &old.strain_mandel, &new.strain_mandel,
-        ));
+        let elastic_change = if model.has_thermal_bias() {
+            energy::quadratic_change_shifted(
+                material.stiffness_mandel_pa(), &old.strain_mandel, &new.strain_mandel,
+                &model.thermal_strain(cell),
+            )
+        } else {
+            energy::quadratic_change(
+                material.stiffness_mandel_pa(), &old.strain_mandel, &new.strain_mandel,
+            )
+        };
+        change.add(volume, elastic_change);
         change.add(volume, energy::quadratic_change(
             material.permittivity_f_m(),
             &old.response.electric_field_v_m, &new.response.electric_field_v_m,

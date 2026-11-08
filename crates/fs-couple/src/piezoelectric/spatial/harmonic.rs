@@ -387,6 +387,11 @@ impl TetPiezoelectricModel<'_> {
         cx: &Cx<'_>,
     ) -> Result<HarmonicPiezoelectricResponse> {
         poll(cx)?;
+        if self.has_thermal_bias() {
+            return Err(invalid(
+                "harmonic thermal bias requires an explicit static operating point; constant offsets are not phasors",
+            ));
+        }
         validate_controls(controls.field)?;
         let n = self.nodes_m.len();
         let nu = 3 * n;

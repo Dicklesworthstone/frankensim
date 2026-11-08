@@ -15,6 +15,10 @@
 //! share these operators. Harmonic and transient paths can attach source-bound
 //! intrinsic material relaxation. Ferroelectricity, breakdown, acoustic
 //! radiation and exterior fringing fields remain outside these operators.
+//! Source-bound thermal strain and clamped polarization can be retained at a
+//! fixed temperature through [`TetPiezoelectricModel::assemble_thermal_materials`].
+//! Their affine loads leave the reciprocal tangent unchanged; harmonic response
+//! and intrinsic memories currently require zero thermal offsets.
 
 use fs_blake3::ContentHash;
 use fs_em::electrostatic::tetrahedral::{
@@ -23,6 +27,7 @@ use fs_em::electrostatic::tetrahedral::{
 use fs_exec::Cx;
 use fs_material::piezoelectric::PiezoelectricError;
 use fs_material::piezoelectric::tensor::{TensorPiezoelectric, TensorPiezoelectricResponse};
+use fs_material::piezoelectric::thermal::ResolvedThermalTensorPiezoelectric;
 use fs_rep_mesh::TetComplex;
 use fs_solid::linear3::{
     TetAssemblyBudget, TetElasticAssembly, TetElasticError, TetElasticMaterial,
@@ -34,6 +39,8 @@ use std::borrow::Cow;
 
 mod boundary;
 use boundary::{BoundaryMap, prepare_boundary};
+mod thermal_bias;
+use thermal_bias::ThermalReference;
 
 /// Coupled frequency response, electrode impedance and physical average power.
 pub mod harmonic;
@@ -71,7 +78,8 @@ pub struct TetPiezoelectricControls {
     pub charge_tolerance_c: f64,
     /// Maximum absolute error in the independent ramp-work/storage identity [J].
     pub energy_tolerance_j: f64,
-    /// Maximum Frobenius norm of each infinitesimal strain tensor, in (0,1).
+    /// Maximum Frobenius norm of total and thermally shifted elastic strain,
+    /// in (0,1). They coincide when the source has no thermal strain.
     pub maximum_strain_norm: f64,
     /// Maximum Euclidean magnitude of each electric field [V/m].
     pub maximum_electric_field_v_m: f64,
@@ -157,6 +165,8 @@ pub struct TetPiezoelectricModel<'a> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
     materials: Cow<'a, [TensorPiezoelectric]>,
+    thermal_materials: Option<Vec<ResolvedThermalTensorPiezoelectric>>,
+    thermal_reference: Option<ThermalReference>,
     elastic_materials: Vec<TetElasticMaterial>,
     mesh_frame: ContentHash,
     budget: TetAssemblyBudget,
@@ -201,13 +211,19 @@ pub struct TetPiezoelectricSolution {
     pub boundary_charge_c: Vec<f64>,
     /// Conducting electrode responses, in caller order.
     pub electrodes: Vec<PiezoelectricElectrodeResponse>,
-    /// Positive internal elastic plus electric storage [J], not saddle enthalpy.
+    /// Positive elastic plus electric free energy [J], not saddle enthalpy.
+    /// Thermal strain shifts its zero to the stress-free, zero-field state.
     pub stored_energy_j: f64,
-    /// One half displacement dot total mechanical load [J].
+    /// Free energy at zero total strain and zero electric field [J]. This is
+    /// nonzero for thermal expansion; ordinary zero-bias models report zero.
+    pub reference_energy_j: f64,
+    /// Mechanical work on a proportional strain/field ramp from zero fields,
+    /// with the thermal offsets held fixed [J]. Includes the initial stress.
     pub mechanical_ramp_work_j: f64,
-    /// One half potential dot total free charge [J].
+    /// Electric work on that ramp [J], with the initial polarization charge
+    /// removed from the charge increment.
     pub electrical_ramp_work_j: f64,
-    /// Storage minus the two proportional-load ramp works [J].
+    /// Storage minus reference storage and the two ramp works [J].
     pub energy_residual_j: f64,
     /// Maximum unconstrained-force residual [N].
     pub maximum_force_residual_n: f64,
@@ -350,6 +366,8 @@ impl<'a> TetPiezoelectricModel<'a> {
             nodes_m,
             tetrahedra,
             materials,
+            thermal_materials: None,
+            thermal_reference: None,
             elastic_materials,
             mesh_frame,
             budget,
@@ -410,7 +428,7 @@ impl<'a> TetPiezoelectricModel<'a> {
                 "complete finite loads and positive finite solve/amplitude controls required",
             ));
         }
-        let boundary = prepare_boundary(
+        let mut boundary = prepare_boundary(
             self.nodes_m,
             self.tetrahedra,
             prescribed_displacements_m,
@@ -436,6 +454,7 @@ impl<'a> TetPiezoelectricModel<'a> {
             budget: self.budget,
         }
         .validate_static_constraints(cx)?;
+        self.stamp_thermal_bias(&mut boundary, cx)?;
         let (matrix, rhs) = self.reduced_system(&boundary, 0.0, &[], cx)?;
         let (solution, iterations, relative_residual) =
             equilibrated_solve(matrix, rhs, controls, cx)?;
@@ -566,14 +585,15 @@ impl<'a> TetPiezoelectricModel<'a> {
                 }
             }
             if norm(&strain) > controls.maximum_strain_norm
+                || self.has_thermal_bias()
+                    && norm(&self.elastic_strain(cell, strain)) > controls.maximum_strain_norm
                 || norm(&electric[cell]) > controls.maximum_electric_field_v_m
             {
                 return Err(invalid(
                     "solved field leaves the declared small-signal envelope",
                 ));
             }
-            let material = &self.materials[if self.materials.len() == 1 { 0 } else { cell }];
-            let response = material.field_response(strain, electric[cell])?;
+            let response = self.cell_response(cell, strain, electric[cell])?;
             let volume = self.dielectric.volumes_m3()[cell];
             let energy = response.stored_energy_j_m3 * volume;
             stored_energy_j += energy;
@@ -665,9 +685,30 @@ impl<'a> TetPiezoelectricModel<'a> {
             };
             electrical_ramp_work_j += 0.5 * full[3 * n + electrode.nodes[0]] * charge;
         }
-        let energy_residual_j = stored_energy_j - mechanical_ramp_work_j - electrical_ramp_work_j;
+        // For affine constitutive offsets, zero S/E has initial stress and
+        // polarization. Along S(lambda)=lambda*S, E(lambda)=lambda*E,
+        // W_m = u.(f_final+f_reference)/2 and W_e = phi.(q_final-q_reference)/2.
+        // These are physical work increments, not fictitious thermal sources.
+        let reference_energy_j = if let Some(reference) = &self.thermal_reference {
+            for node in 0..n {
+                poll(cx)?;
+                for axis in 0..3 {
+                    mechanical_ramp_work_j +=
+                        0.5 * displacement_m[node][axis] * reference.force_n[node][axis];
+                }
+                electrical_ramp_work_j -=
+                    0.5 * full[3 * n + node] * reference.charge_c[node];
+            }
+            reference.energy_j
+        } else {
+            0.0
+        };
+        let energy_residual_j = stored_energy_j - reference_energy_j
+            - mechanical_ramp_work_j
+            - electrical_ramp_work_j;
         if [
             stored_energy_j,
+            reference_energy_j,
             mechanical_ramp_work_j,
             electrical_ramp_work_j,
             energy_residual_j,
@@ -709,6 +750,7 @@ impl<'a> TetPiezoelectricModel<'a> {
             boundary_charge_c,
             electrodes: electrode_responses,
             stored_energy_j,
+            reference_energy_j,
             mechanical_ramp_work_j,
             electrical_ramp_work_j,
             energy_residual_j,

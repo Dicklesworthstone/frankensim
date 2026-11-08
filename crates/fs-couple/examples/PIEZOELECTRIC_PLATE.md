@@ -323,6 +323,49 @@ immutable spatial solve while still checking every trial's actual sources.
 With endpoint-dependent thermal or resistor coefficients, the combined thermal
 path remains generally first order; energy closure does not certify time accuracy.
 
+### Thermal expansion, pyroelectricity and reversible heat
+
+The separate full-tensor thermal path supports explicit thermal expansion and
+pyroelectric response through
+`ThermalTensorPiezoelectric::with_thermal_bias(reference_temperature_k, selection)`.
+The same source card must declare all six
+`piezoelectric_thermal_expansion_mandel_1..6` coefficients in 1/K and all three
+`piezoelectric_pyroelectric_clamped_1..3` coefficients in C/(m² K), including
+zeros. They are expressed in the original tensor's source frame and must remain
+constant over the admitted temperature interval. The reference temperature
+defines zero thermal strain and zero polarization increment.
+
+The material potential uses total strain and clamped pyroelectric coefficients:
+
+```text
+sigma = C (S - alpha (T - Tref)) - transpose(e) E
+D     = e S + epsilon E + p_clamped (T - Tref)
+```
+
+Free thermal expansion therefore contributes the secondary response `e alpha`;
+a measured total pyroelectric coefficient must first be converted to the
+clamped convention. The caloric chart supplies the stress-free, zero-field
+reference heat capacity. Constraint-dependent field energy and entropy are
+accounted by the coupled law, including reversible electrocaloric heating or
+cooling. They are not assigned to a Joule-loss channel.
+
+`TetPiezoelectricModel::assemble_thermal_materials` accepts resolved thermal
+samples for static fields or fixed-temperature transients. For finite thermal
+evolution, use `ThermalTensorPiezoelectricBody` with the original complete
+caloric inventory. A bare initial spatial model is compatible only where the
+actual thermal offsets vanish; a nonzero initial bias needs a matching thermal
+model. Its `step_with_acoustic_ports_candidate` can retain an original guide
+trace while temperature, polarization and thermal strain evolve. Support work,
+electrical work, sound, resistor heat and reversible thermal exchange retain
+separate accounts.
+
+The nominal plate example does not invent the missing expansion/pyroelectric
+source claims, so those effects remain disabled in its demonstration modes.
+Synthetic analytic regressions exercise the new paths. Nonzero thermal bias
+does not yet support harmonic perturbations or intrinsic material memories;
+finite thermal feedback remains generally first order and uses one uniform
+ceramic temperature.
+
 ## Verification and boundaries
 
 Run the focused native spatial suite:
