@@ -2,8 +2,10 @@
 
 use super::{
     PreparedTensorStressControl, Result, TensorControlTangent, TensorPronyHistory,
-    TensorStressControlBudget, TensorStressRampStep, Voigt,
+    TensorStressControlBudget, TensorStressRampStep, TensorStressTemperatureStep, Voigt,
 };
+use crate::visco::temperature::TemperatureShift;
+use crate::visco_tensor::temperature::{TemperatureRamp, TemperatureRampControls};
 
 /// Exact mixed loading of a full three-dimensional generalized Maxwell law.
 ///
@@ -103,5 +105,35 @@ impl PreparedTensorMixedControl {
     ) -> Result<TensorStressRampStep> {
         self.inner
             .advance_controlled(history, prescribed, duration_s, cancelled)
+    }
+    /// Advance prescribed components and temperature in physical time.
+    ///
+    /// Stress-controlled entries prescribe stress and the other entries strain,
+    /// in tensor-shear order. Every original three-dimensional memory coordinate
+    /// and the whole-path strain admission survive each thermal subinterval.
+    /// The last endpoint uses the requested values exactly. See
+    /// [`PreparedTensorStressControl::advance_temperature_ramp`] for kinetics,
+    /// refinement and the fixed-modulus/no-Kelvin boundary.
+    ///
+    /// # Errors
+    /// The original source/strain/balance checks and temperature-ramp checks
+    /// apply atomically to the whole interval, including cancellation.
+    pub fn advance_temperature_ramp(
+        &self,
+        history: &mut TensorPronyHistory,
+        prescribed: Voigt,
+        ramp: TemperatureRamp,
+        calibration: &TemperatureShift,
+        controls: TemperatureRampControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TensorStressTemperatureStep> {
+        self.inner.advance_temperature_ramp(
+            history,
+            prescribed,
+            ramp,
+            calibration,
+            controls,
+            cancelled,
+        )
     }
 }

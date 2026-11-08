@@ -12,8 +12,9 @@
 //! combination of prescribed stress and strain components. In particular,
 //! plane-stress histories retain all original three-dimensional branch memory.
 //! Coefficients are fixed. Nonzero Kelvin viscosity is a different differential
-//! problem and refuses here. No thermal evolution or certified forward-error
-//! bound is inferred.
+//! problem and refuses here. Temperature-ramp methods reuse this reference law
+//! in reduced time with bounded midpoint kinetics; no caloric feedback or
+//! certified forward-error bound is inferred.
 
 use super::{
     TensorProny, TensorPronyError, TensorPronyHistory, Voigt, apply, dot, finite, invalid, mandel,
@@ -30,6 +31,8 @@ mod prepare;
 pub use mixed::PreparedTensorMixedControl;
 mod tangent;
 pub use tangent::TensorControlTangent;
+mod temperature;
+pub use temperature::TensorStressTemperatureStep;
 
 type Result<T> = core::result::Result<T, TensorPronyError>;
 

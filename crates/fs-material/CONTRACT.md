@@ -5760,8 +5760,8 @@ uses quadratic work in original memory coordinates. Five focused actual-source
 checks cover closed-form creep/recovery, an independent noncommuting tensor ODE
 ladder with work/heat, original-history switching and public material rotation,
 weak/stiff limits down to representable heat near 4e-304, and atomic refusals.
-Nonzero Kelvin viscosity, thermal evolution and certified forward-error bounds
-are outside this stress-control API.
+Nonzero Kelvin viscosity and certified forward-error bounds are outside this
+stress-control API. Its prescribed temperature-ramp extension is specified below.
 
 `visco_tensor::stress_control::PreparedTensorMixedControl` shares that same
 positive compliance preparation and exact ramp transaction for any partition
@@ -5778,8 +5778,43 @@ whole-path strain limits and transactional refusals apply to every partition.
 Five focused checks cover closed-form plane-stress creep/recovery and reaction
 work, an independent noncommuting original-equation ODE refinement ladder,
 all-stress/all-strain parity, partition switching and atomic refusals.
-Coefficients and the component partition are fixed within each prepared
-controller; no Kelvin, thermal or finite-strain extension is inferred.
+The component partition and elastic tensors stay fixed within each prepared
+controller; no Kelvin or finite-strain extension is inferred.
+
+Both controllers also expose `advance_temperature_ramp` for prescribed temperature
+and stress/mixed loading that are affine in physical time. The shared
+`TemperatureRamp` and `TemperatureRampControls` admit the original reference law
+and a bounded midpoint-temperature partition. Each physical interval h reuses the
+same prepared controller for reduced duration h/a_T; every original branch
+coordinate and full-tensor constraint remains present, without refactorization,
+material replacement or history resets. Mechanical work and independently
+integrated dashpot heat are invariant under this time substitution and receive
+no extra shift-factor multiplier. Elastic tensors stay fixed; this is the same
+common kinetic-shift law used by the strain-controlled thermal owner.
+
+`TensorStressTemperatureStep` carries the admitted endpoint shifts, actual
+substep count and original response. Local strain increments, quadratic storage
+changes, work and heat use compensated sums, while the reported strain bounds
+include the initial state and every accepted subinterval. Each native whole-path
+strain, original-source and energy admission remains binding. Positive physical
+intervals whose reduced durations underflow to zero or become nonfinite refuse.
+The changing-temperature transaction publishes only after all substeps and its
+final cancellation poll succeed. Constant reference temperature delegates to the
+original controller with unchanged response bits; zero physical time at fixed
+temperature retains the existing elastic jump, and a zero-time temperature
+change refuses.
+
+The coefficient-variation bound controls midpoint kinetic resolution, not
+trajectory error. Thermal/loading refinement is still required. No Kelvin
+extension, thermal expansion, temperature-dependent elastic modulus, caloric
+feedback or certified forward-error bound is inferred. The existing
+`ramp_tangent` remains the reference-law tangent, not a derivative of this
+variable-temperature path. Five focused regression sources cover isothermal
+Zener creep/recovery with independent work/heat, second-order thermal creep
+convergence against an independently integrated exposure, reference-temperature
+and deterministic-replay parity, coupled plane-stress thermal reversals against
+original physical-time equations with tensor-shear work, and atomic budget,
+applicability, whole-path strain, late cancellation and reduced-time refusals.
 
 Both tensor stress and mixed controllers expose `ramp_tangent` for exact
 endpoint strain/stress derivatives with respect to the six prescribed endpoint

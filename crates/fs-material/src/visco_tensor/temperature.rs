@@ -153,6 +153,108 @@ fn endpoint_stress(
     Ok(stress)
 }
 
+// The same physical-time partition serves strain, stress and mixed control.
+pub(super) struct TemperatureSchedule {
+    pub(super) start: TemperatureShiftState,
+    pub(super) end: TemperatureShiftState,
+    pub(super) substeps: usize,
+    pub(super) variation_per_step: f64,
+    ramp: TemperatureRamp,
+    count: f64,
+}
+
+impl TemperatureSchedule {
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub(super) fn new(
+        model: &TensorProny,
+        ramp: TemperatureRamp,
+        calibration: &TemperatureShift,
+        controls: TemperatureRampControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(cancelled)?;
+        if !ramp.duration_s.is_finite()
+            || ramp.duration_s < 0.0
+            || !controls.maximum_log_shift_change.is_finite()
+            || controls.maximum_log_shift_change <= 0.0
+            || controls.maximum_substeps == 0
+        {
+            return Err(invalid(
+                "finite nonnegative duration and positive thermal work controls required",
+            ));
+        }
+        let start = calibration.evaluate(ramp.start_k).map_err(shift_error)?;
+        let end = calibration.evaluate(ramp.end_k).map_err(shift_error)?;
+        if ramp.duration_s == 0.0 && ramp.start_k != ramp.end_k {
+            return Err(invalid(
+                "changing temperature requires positive physical duration",
+            ));
+        }
+        admit_scale(model, start.factor(), cancelled)?;
+        if ramp.start_k != ramp.end_k {
+            admit_scale(model, end.factor(), cancelled)?;
+        }
+        // Monotone shift/derivative laws and convex temperature support admit the
+        // whole path from these endpoint checks, without a sampling-band fiction.
+        let variation = (ramp.end_k - ramp.start_k).abs()
+            * start
+                .log_derivative_per_k()
+                .abs()
+                .max(end.log_derivative_per_k().abs());
+        let count = (variation / controls.maximum_log_shift_change)
+            .ceil()
+            .max(1.0);
+        if !variation.is_finite()
+            || !count.is_finite()
+            || count > controls.maximum_substeps as f64
+            || count >= usize::MAX as f64
+            || count > 4_503_599_627_370_496.0
+        {
+            return Err(invalid("temperature ramp substep budget exhausted"));
+        }
+        let substeps = count as usize;
+        let variation_per_step = variation / count;
+        Ok(Self {
+            start,
+            end,
+            substeps,
+            variation_per_step,
+            ramp,
+            count,
+        })
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    pub(super) fn interval(
+        &self,
+        step: usize,
+        elapsed: f64,
+        calibration: &TemperatureShift,
+    ) -> Result<(f64, f64, f64)> {
+        let ramp = self.ramp;
+        let endpoint = if step + 1 == self.substeps {
+            ramp.duration_s
+        } else {
+            ((step + 1) as f64 / self.count) * ramp.duration_s
+        };
+        let h = endpoint - elapsed;
+        let midpoint = (0.5 * h).mul_add(1.0, elapsed);
+        if !h.is_finite() || h <= 0.0 || midpoint <= elapsed || midpoint >= endpoint {
+            return Err(invalid(
+                "thermal subinterval is below representable physical time",
+            ));
+        }
+        let temperature =
+            (midpoint / ramp.duration_s).mul_add(ramp.end_k - ramp.start_k, ramp.start_k);
+        let shift = calibration.evaluate(temperature).map_err(shift_error)?;
+        Ok((endpoint, h, shift.factor()))
+    }
+}
+
 impl TensorPronyHistory {
     /// Advance linear physical strain and temperature ramps without resetting memory.
     ///
@@ -191,48 +293,15 @@ impl TensorPronyHistory {
         controls: TemperatureRampControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<TensorPronyTemperatureStep> {
-        poll(&mut cancelled)?;
-        if !ramp.duration_s.is_finite()
-            || ramp.duration_s < 0.0
-            || !controls.maximum_log_shift_change.is_finite()
-            || controls.maximum_log_shift_change <= 0.0
-            || controls.maximum_substeps == 0
-        {
-            return Err(invalid(
-                "finite nonnegative duration and positive thermal work controls required",
-            ));
-        }
-        let start = calibration.evaluate(ramp.start_k).map_err(shift_error)?;
-        let end = calibration.evaluate(ramp.end_k).map_err(shift_error)?;
-        if ramp.duration_s == 0.0 && ramp.start_k != ramp.end_k {
-            return Err(invalid(
-                "changing temperature requires positive physical duration",
-            ));
-        }
-        admit_scale(&self.model, start.factor(), &mut cancelled)?;
-        if ramp.start_k != ramp.end_k {
-            admit_scale(&self.model, end.factor(), &mut cancelled)?;
-        }
-        // Monotone shift/derivative laws and convex temperature support admit the
-        // whole path from these endpoint checks, without a sampling-band fiction.
-        let variation = (ramp.end_k - ramp.start_k).abs()
-            * start
-                .log_derivative_per_k()
-                .abs()
-                .max(end.log_derivative_per_k().abs());
-        let count = (variation / controls.maximum_log_shift_change)
-            .ceil()
-            .max(1.0);
-        if !variation.is_finite()
-            || !count.is_finite()
-            || count > controls.maximum_substeps as f64
-            || count >= usize::MAX as f64
-            || count > 4_503_599_627_370_496.0
-        {
-            return Err(invalid("temperature ramp substep budget exhausted"));
-        }
-        let substeps = count as usize;
-        let variation_per_step = variation / count;
+        let schedule =
+            TemperatureSchedule::new(&self.model, ramp, calibration, controls, &mut cancelled)?;
+        let TemperatureSchedule {
+            start,
+            end,
+            substeps,
+            variation_per_step,
+            ..
+        } = schedule;
         if ramp.start_k == ramp.end_k {
             // This owner already publishes atomically after its final poll. There
             // are no fallible operations after it, retaining reference-step bits.
@@ -271,21 +340,7 @@ impl TensorPronyHistory {
         let mut elapsed = 0.0;
         for step in 0..substeps {
             poll(&mut cancelled)?;
-            let endpoint = if step + 1 == substeps {
-                ramp.duration_s
-            } else {
-                ((step + 1) as f64 / count) * ramp.duration_s
-            };
-            let h = endpoint - elapsed;
-            let midpoint = (0.5 * h).mul_add(1.0, elapsed);
-            if !h.is_finite() || h <= 0.0 || midpoint <= elapsed || midpoint >= endpoint {
-                return Err(invalid(
-                    "thermal subinterval is below representable physical time",
-                ));
-            }
-            let temperature =
-                (midpoint / ramp.duration_s).mul_add(ramp.end_k - ramp.start_k, ramp.start_k);
-            let shift = calibration.evaluate(temperature).map_err(shift_error)?;
+            let (endpoint, h, scale) = schedule.interval(step, elapsed, calibration)?;
             let next_strain = if step + 1 == substeps {
                 strain_end
             } else {
@@ -296,7 +351,7 @@ impl TensorPronyHistory {
             let local = candidate.advance_with_kinetics(
                 next_strain,
                 h,
-                shift.factor(),
+                scale,
                 &mut cancelled,
                 |r, _| PronyRamp::new(r),
             )?;
