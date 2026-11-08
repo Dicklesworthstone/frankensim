@@ -289,7 +289,7 @@ impl<'m> FluxSystem<'m> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn solve_mixed_picard_with_flow_control<'a>(
+    pub(super) fn solve_mixed_picard_with_flow_control<'a>(
         &'a self,
         initial_velocity: &[f64],
         controls: StokesRheologyControls,

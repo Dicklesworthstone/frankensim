@@ -229,7 +229,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     }
 }
 
-pub(super) fn physical_control<N, S>(
+pub(in crate::material) fn physical_control<N, S>(
     native: StokesFlowControlSolution<N>,
     density: f64,
     recover: impl FnOnce(N) -> Result<S, MaterialFluxError>,

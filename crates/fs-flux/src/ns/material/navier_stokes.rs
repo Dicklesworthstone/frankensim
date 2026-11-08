@@ -1,9 +1,10 @@
 //! Shared-source SI pressure and inertia for nonlinear mixed-boundary flow.
 
+use super::mixed::physical_control;
 use super::rheology::RheologyField;
 use super::{
     MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxRheologySample, MaterialFluxSystem,
-    MaterialStokesSolution,
+    MaterialStokesFlowControlSolution, MaterialStokesSolution,
 };
 use crate::ns::boundary::{
     NavierStokesBoundary, NavierStokesControls, NavierStokesStep, OpenBoundaryPolicy,
@@ -175,10 +176,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         })
         .map_err(MaterialFluxError::Boundary);
         let (endpoint, samples) = field.finish(result)?;
-        let step = self.material_navier_stokes_step_with_viscosity(endpoint, &|cell| {
-            samples[cell].transport().dynamic_viscosity_pa_s()
-        })?;
-        Ok(MaterialNavierStokesRheologyStep { step, samples })
+        self.material_navier_stokes_rheology_step(endpoint, samples)
     }
 
     /// Advance fully implicit BDF1 Navier–Stokes with endpoint force density
@@ -433,10 +431,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         })
         .map_err(MaterialFluxError::Boundary);
         let (endpoint, samples) = field.finish(result)?;
-        let step = self.material_navier_stokes_step_with_viscosity(endpoint, &|cell| {
-            samples[cell].transport().dynamic_viscosity_pa_s()
-        })?;
-        Ok(MaterialNavierStokesRheologyStep { step, samples })
+        self.material_navier_stokes_rheology_step(endpoint, samples)
     }
 
     /// Advance Newtonian pressure-driven flow with variable-step BDF2.
@@ -534,6 +529,126 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         })
         .map_err(MaterialFluxError::Boundary);
         let (endpoint, samples) = field.finish(result)?;
+        self.material_navier_stokes_rheology_step(endpoint, samples)
+    }
+
+    /// Advance material-backed backward Euler to prescribed endpoint port flows.
+    ///
+    /// The existing source owner resolves viscosity at the candidate's actual
+    /// shear while the native loop converges convection, pressure and velocity.
+    /// The same frozen reference density scales mass history, momentum transport,
+    /// force density, traction and all physical pressure/reaction reporting.
+    /// Force is N/m³, traction and required pressures are Pa, time is seconds,
+    /// and signed outward targets and their absolute tolerance are m²/s per depth.
+    /// Port profiles remain unknown; callbacks specify the new time level.
+    ///
+    /// # Errors
+    /// Retains original material, temporal, open-boundary and nonlinear checks
+    /// together with port-flow/datum admission. History is immutable and only a
+    /// fully accepted endpoint publishes source owners, pressure and velocity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_navier_stokes_mixed_rheology_flow_control<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_tolerance_m2_s: f64,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<
+        MaterialStokesFlowControlSolution<MaterialNavierStokesRheologyStep<G>>,
+        MaterialFluxError,
+    > {
+        self.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+            force_density,
+            boundaries,
+            ports,
+            outward_volume_rates_m2_s,
+            previous_velocity,
+            None,
+            timestep_s,
+            controls,
+            absolute_tolerance_m2_s,
+            resolve,
+        )
+    }
+
+    /// Advance variable-step material BDF2 with unknown pressure at flow ports.
+    ///
+    /// `older_history` contains the older physical velocity and its actual
+    /// interval to u_n; None performs the original backward-Euler startup.
+    /// The new/previous step ratio must lie in (0, 2]. Only the inertial load
+    /// uses the original two-history combination. The actual u_n initializes
+    /// constitutive queries and nonlinear convection, and every final source
+    /// sample belongs to the accepted endpoint shear.
+    ///
+    /// Pressure increments relax with the complete field. Final viscosity,
+    /// convection, pressure-inclusive equations and actual port flows must all
+    /// pass their original checks. Sources preserve the same density and fixed
+    /// temperature/composition; native natural/dissipative backflow and incoming
+    /// reservoir momentum remain explicit. Units follow
+    /// [`Self::bdf1_navier_stokes_mixed_rheology_flow_control`]. Each controlled
+    /// component needs an uncontrolled traction datum. Endpoint heat is an
+    /// instantaneous rate, not a time-integrated energy or passivity guarantee.
+    ///
+    /// # Errors
+    /// Preserves source refusal, temporal admission before callbacks, boundary
+    /// policy and nonlinear/flow convergence. Neither history is changed and no
+    /// partial source set, pressure or velocity is returned on failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_navier_stokes_mixed_rheology_variable_step_flow_control<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_tolerance_m2_s: f64,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<
+        MaterialStokesFlowControlSolution<MaterialNavierStokesRheologyStep<G>>,
+        MaterialFluxError,
+    > {
+        let density = self.transport.density_kg_m3();
+        let field = RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
+        let result = with_kinematic_boundaries(density, boundaries, |native| {
+            self.system
+                .bdf2_navier_stokes_mixed_rheology_variable_step_flow_control_checked(
+                    self.params,
+                    &|cell, _, rate| field.viscosity(cell, rate),
+                    &|point| {
+                        let force = force_density(point);
+                        [force[0] / density, force[1] / density]
+                    },
+                    native,
+                    ports,
+                    outward_volume_rates_m2_s,
+                    previous_velocity,
+                    older_history,
+                    timestep_s,
+                    controls,
+                    absolute_tolerance_m2_s,
+                    &|| field.is_valid(),
+                )
+        })
+        .map_err(MaterialFluxError::Boundary);
+        let (controlled, samples) = field.finish(result)?;
+        physical_control(controlled, density, |endpoint| {
+            self.material_navier_stokes_rheology_step(endpoint, samples)
+        })
+    }
+
+    fn material_navier_stokes_rheology_step<G>(
+        &self,
+        endpoint: NavierStokesStep,
+        samples: Vec<MaterialFluxRheologySample<G>>,
+    ) -> Result<MaterialNavierStokesRheologyStep<G>, MaterialFluxError> {
         let step = self.material_navier_stokes_step_with_viscosity(endpoint, &|cell| {
             samples[cell].transport().dynamic_viscosity_pa_s()
         })?;

@@ -187,11 +187,8 @@ impl PreparedStokesFlowControl<'_, '_> {
         outward_volume_rates_m2_s: &[f64],
         absolute_tolerance_m2_s: f64,
     ) -> Result<StokesFlowControlSolution, StokesBoundaryError> {
-        admit_flow_targets(
-            self.ports.len(),
-            outward_volume_rates_m2_s,
-            absolute_tolerance_m2_s,
-        )?;
+        let count = self.ports.len();
+        admit_flow_targets(count, outward_volume_rates_m2_s, absolute_tolerance_m2_s)?;
         let mut pressures: Vec<_> = outward_volume_rates_m2_s
             .iter()
             .zip(&self.baseline_flows)

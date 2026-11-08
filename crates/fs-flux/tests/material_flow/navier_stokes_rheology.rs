@@ -627,3 +627,506 @@ fn mixed_material_rheology_preserves_endpoint_source_errors_and_history() {
     ));
     assert!(previous.iter().all(|value| *value == 0.0));
 }
+
+fn rheology_control_moments(mesh: &TriMesh, velocity: &dyn Fn([f64; 2]) -> [f64; 2]) -> Vec<f64> {
+    // Exact original BDM normal moments for an affine velocity; history is
+    // authored independently of the nonlinear solve and constitutive source.
+    mesh.edges
+        .iter()
+        .flat_map(|edge| {
+            let a = velocity(mesh.verts[edge.verts.0]);
+            let b = velocity(mesh.verts[edge.verts.1]);
+            let na = a[0] * edge.normal[0] + a[1] * edge.normal[1];
+            let nb = b[0] * edge.normal[0] + b[1] * edge.normal[1];
+            [0.5 * (na + nb), (nb - na) / 12.0]
+        })
+        .collect()
+}
+
+#[test]
+fn prescribed_transient_flow_closes_history_shear_convection_pressure_and_reactions() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let base = |p: [f64; 2]| [0.2 * p[0] + 0.3 * p[1] + 0.4, -0.2 * p[1] + 0.1];
+    let inlet: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, geometry)| mesh.is_boundary(*edge) && geometry.normal[0] < -0.5)
+        .map(|(edge, _)| edge)
+        .collect();
+    let time = 0.3;
+    let dt = 0.1;
+    // BE differentiates linear amplitude exactly; BDF2 differentiates quadratic
+    // amplitude exactly at each actual old time, including growth/shrinkage.
+    for previous_dt in [None, Some(0.05), Some(0.1), Some(0.2)] {
+        let amplitude = |t: f64| {
+            1.0 + 0.2 * t
+                + if previous_dt.is_some() {
+                    0.3 * t * t
+                } else {
+                    0.0
+                }
+        };
+        let scale = amplitude(time);
+        let derivative = 0.2
+            + if previous_dt.is_some() {
+                0.6 * time
+            } else {
+                0.0
+            };
+        let previous =
+            rheology_control_moments(&mesh, &|p| base(p).map(|u| amplitude(time - dt) * u));
+        let older = previous_dt.map(|k| {
+            rheology_control_moments(&mesh, &|p| base(p).map(|u| amplitude(time - dt - k) * u))
+        });
+        let snapshots = (previous.clone(), older.clone());
+        let target = |p| base(p).map(|u| scale * u);
+        let endpoint_rate = 0.5 * scale;
+        let viscosity = |rate: f64| 1.2 / (1.0 + 0.8 * rate);
+        for (density, policy) in [
+            (2.0, OpenBoundaryPolicy::NaturalTraction),
+            (7.0, OpenBoundaryPolicy::DissipativeBackflow),
+        ] {
+            let reference = transport(density, viscosity(0.0));
+            let owner = MaterialFluxSystem::new(
+                &system,
+                &reference,
+                MaterialFluxNumerics {
+                    linear_tolerance: 1e-11,
+                    ..MaterialFluxNumerics::default()
+                },
+            )
+            .unwrap();
+            // For u=A(t)*base, convection is A²*[.04x+.11,.04y-.02].
+            // The body source omits rho*A' in x; the required pressure drop
+            // must supply that exact inertial contribution. Viscosity is
+            // spatially uniform at this affine endpoint, so div(2mu D)=0.
+            let force = |p: [f64; 2]| {
+                let v = base(p);
+                [
+                    density * (derivative * (v[0] - 1.0) + scale * scale * (0.04 * p[0] + 0.11)),
+                    density * (derivative * v[1] + scale * scale * (0.04 * p[1] - 0.02)) - 3.0,
+                ]
+            };
+            let traction = |p: [f64; 2], n: [f64; 2]| {
+                let pressure = 7.0 - 3.0 * p[1];
+                let mu = viscosity(endpoint_rate);
+                let u = target(p);
+                let backflow = match policy {
+                    OpenBoundaryPolicy::NaturalTraction => 0.0,
+                    OpenBoundaryPolicy::DissipativeBackflow => {
+                        density * (u[0] * n[0] + u[1] * n[1]).min(0.0)
+                    }
+                };
+                [
+                    (0.4 * scale * mu - pressure) * n[0] + 0.3 * scale * mu * n[1]
+                        - backflow * u[0],
+                    0.3 * scale * mu * n[0] + (-0.4 * scale * mu - pressure) * n[1]
+                        - backflow * u[1],
+                ]
+            };
+            let boundaries: Vec<_> = mesh
+                .edges
+                .iter()
+                .enumerate()
+                .filter(|(edge, _)| mesh.is_boundary(*edge))
+                .map(|(edge, geometry)| {
+                    if geometry.normal[0].abs() > 0.5 {
+                        MaterialNavierStokesBoundary::Open {
+                            edge,
+                            traction: &traction,
+                            backflow: policy,
+                        }
+                    } else {
+                        MaterialNavierStokesBoundary::Velocity {
+                            edge,
+                            value: &target,
+                        }
+                    }
+                })
+                .collect();
+            let reads = Rc::new(Cell::new(0));
+            let mut first_rates = vec![None; mesh.tris.len()];
+            let mut queries = 0;
+            let resolve = |point: MaterialFluxRheologyPoint, retained: &FluidTransportState| {
+                assert_eq!(retained, &reference);
+                first_rates[point.cell].get_or_insert(point.shear_rate_per_s);
+                queries += 1;
+                Ok(RheologyResponse {
+                    transport: transport(density, viscosity(point.shear_rate_per_s)),
+                    point,
+                    temperature_k: 310.0,
+                    reads: Rc::clone(&reads),
+                })
+            };
+            let controls = NavierStokesControls {
+                maximum_iterations: 100,
+                relative_tolerance: 1e-10,
+                relaxation: 0.8,
+            };
+            let result = if previous_dt.is_some() {
+                owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+                    &force,
+                    &boundaries,
+                    &[&inlet],
+                    &[-0.55 * scale],
+                    &previous,
+                    older.as_deref().zip(previous_dt),
+                    dt,
+                    controls,
+                    1e-12,
+                    resolve,
+                )
+            } else {
+                owner.bdf1_navier_stokes_mixed_rheology_flow_control(
+                    &force,
+                    &boundaries,
+                    &[&inlet],
+                    &[-0.55 * scale],
+                    &previous,
+                    dt,
+                    controls,
+                    1e-12,
+                    resolve,
+                )
+            }
+            .unwrap();
+            let solution = &result.flow.step.solution;
+            let (error, divergence) = system.velocity_error(&solution.discrete().x, &target);
+            assert!(error < 4e-9 && divergence < 4e-9, "{error}, {divergence}");
+            near(result.pressure_offsets_pa[0], density * derivative, 8e-8);
+            near(result.outward_volume_rates_m2_s[0], -0.55 * scale, 1e-11);
+            assert!(result.flow.step.nonlinear_residual <= controls.relative_tolerance);
+            assert!(result.flow.step.relative_update <= controls.relative_tolerance);
+            assert!(
+                result
+                    .flow
+                    .step
+                    .open_boundary_policies
+                    .iter()
+                    .all(|(_, actual)| *actual == policy)
+            );
+            for (pressure, p) in solution.pressure_pa().iter().zip(&mesh.centroids) {
+                near(
+                    *pressure,
+                    7.0 - 3.0 * p[1] + density * derivative * (1.0 - p[0]),
+                    8e-8,
+                );
+            }
+            for first in first_rates {
+                near(first.unwrap(), 0.5 * amplitude(time - dt), 1e-12);
+            }
+            let rates = system.shear_rates(&solution.discrete().x);
+            for (cell, sample) in result.flow.samples().iter().enumerate() {
+                assert_eq!(sample.point(), sample.material().point);
+                assert_eq!(
+                    sample.point().shear_rate_per_s.to_bits(),
+                    rates[cell].to_bits()
+                );
+                near(
+                    sample.transport().dynamic_viscosity_pa_s(),
+                    viscosity(endpoint_rate),
+                    3e-8,
+                );
+                assert_eq!(sample.transport().density_kg_m3(), density);
+                assert_eq!(sample.material().temperature_k, 310.0);
+            }
+            // Integral |base|²=131/300; physical heat is instantaneous mu*gamma².
+            near(
+                solution.kinetic_energy_j_per_m(),
+                0.5 * density * scale * scale * 131.0 / 300.0,
+                5e-8,
+            );
+            near(
+                solution.viscous_dissipation().total_power_w_per_m(),
+                viscosity(endpoint_rate) * endpoint_rate.powi(2),
+                4e-8,
+            );
+            let mu = viscosity(endpoint_rate);
+            let load = solution.boundary_loads(&inlet, [0.0; 2], &[None]).unwrap();
+            near(
+                load.stress.force_n_per_m[0],
+                0.4 * mu * scale - 5.5 - density * derivative,
+                1e-7,
+            );
+            near(load.stress.force_n_per_m[1], 0.3 * mu * scale, 1e-7);
+            near(
+                load.stress.moment_n,
+                2.5 + 0.5 * density * derivative - 0.2 * mu * scale,
+                1e-7,
+            );
+            assert_eq!(
+                reads.get(),
+                queries,
+                "reporting retains the accepted source samples"
+            );
+            assert_eq!(previous, snapshots.0);
+            assert_eq!(older, snapshots.1);
+        }
+    }
+}
+
+#[test]
+fn pulsating_material_flow_pressure_retains_be_and_variable_bdf2_temporal_orders() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let density = 2.3;
+    let viscosity = |rate: f64| 1.2 / (1.0 + 0.8 * rate);
+    let reference = transport(density, viscosity(0.0));
+    let owner = MaterialFluxSystem::new(
+        &system,
+        &reference,
+        MaterialFluxNumerics {
+            linear_tolerance: 1e-12,
+            ..MaterialFluxNumerics::default()
+        },
+    )
+    .unwrap();
+    let time: f64 = 0.7;
+    let omega: f64 = 3.0;
+    let offset = (omega * time).sin();
+    let target = |p: [f64; 2]| [offset + 0.2 + 0.4 * p[1], 0.0];
+    let shear = viscosity(0.4) * 0.4;
+    let traction =
+        |_: [f64; 2], n: [f64; 2]| [shear * n[1] - 3.2 * n[0], shear * n[0] - 3.2 * n[1]];
+    let inlet: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, geometry)| mesh.is_boundary(*edge) && geometry.normal[0] < -0.5)
+        .map(|(edge, _)| edge)
+        .collect();
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, geometry)| {
+            if geometry.normal[0].abs() > 0.5 {
+                MaterialNavierStokesBoundary::Open {
+                    edge,
+                    traction: &traction,
+                    backflow: OpenBoundaryPolicy::NaturalTraction,
+                }
+            } else {
+                MaterialNavierStokesBoundary::Velocity {
+                    edge,
+                    value: &target,
+                }
+            }
+        })
+        .collect();
+    let controls = NavierStokesControls {
+        relative_tolerance: 1e-10,
+        ..NavierStokesControls::default()
+    };
+    let mut errors = [Vec::new(), Vec::new()];
+    for dt in [0.02, 0.01, 0.005] {
+        let previous_dt = 2.0 * dt;
+        let recent = (omega * (time - dt)).sin();
+        let old = (omega * (time - dt - previous_dt)).sin();
+        let previous = rheology_control_moments(&mesh, &|p| [recent + 0.2 + 0.4 * p[1], 0.0]);
+        let older = rheology_control_moments(&mesh, &|p| [old + 0.2 + 0.4 * p[1], 0.0]);
+        let snapshots = [previous.clone(), older.clone()];
+        for (method, errors) in errors.iter_mut().enumerate() {
+            let resolve = |point: MaterialFluxRheologyPoint, _: &FluidTransportState| {
+                Ok(transport(density, viscosity(point.shear_rate_per_s)))
+            };
+            let result = if method == 0 {
+                owner.bdf1_navier_stokes_mixed_rheology_flow_control(
+                    &zero_force,
+                    &boundaries,
+                    &[&inlet],
+                    &[-(offset + 0.4)],
+                    &previous,
+                    dt,
+                    controls,
+                    1e-12,
+                    resolve,
+                )
+            } else {
+                owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+                    &zero_force,
+                    &boundaries,
+                    &[&inlet],
+                    &[-(offset + 0.4)],
+                    &previous,
+                    Some((&older, previous_dt)),
+                    dt,
+                    controls,
+                    1e-12,
+                    resolve,
+                )
+            }
+            .unwrap();
+            let derivative = if method == 0 {
+                (offset - recent) / dt
+            } else {
+                (2.0 * dt + previous_dt) / (dt * (dt + previous_dt)) * offset
+                    - (dt + previous_dt) / (dt * previous_dt) * recent
+                    + dt / (previous_dt * (dt + previous_dt)) * old
+            };
+            near(result.pressure_offsets_pa[0], density * derivative, 8e-8);
+            let solution = &result.flow.step.solution;
+            let (error, divergence) = system.velocity_error(&solution.discrete().x, &target);
+            assert!(error < 4e-9 && divergence < 4e-9, "{error}, {divergence}");
+            near(
+                solution.viscous_dissipation().total_power_w_per_m(),
+                viscosity(0.4) * 0.16,
+                4e-8,
+            );
+            errors.push(
+                (result.pressure_offsets_pa[0] - density * omega * (omega * time).cos()).abs(),
+            );
+        }
+        assert_eq!(previous, snapshots[0]);
+        assert_eq!(older, snapshots[1]);
+    }
+    for (method, samples) in errors.iter().enumerate() {
+        for pair in samples.windows(2) {
+            assert!(
+                pair[0] / pair[1] > if method == 0 { 1.9 } else { 3.6 },
+                "{method}: {samples:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn transient_flow_control_preserves_sources_and_both_histories_on_refusal() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let reference = transport(2.0, 1.0);
+    let owner =
+        MaterialFluxSystem::new(&system, &reference, MaterialFluxNumerics::default()).unwrap();
+    let target = |p: [f64; 2]| [0.2 + 0.4 * p[1], 0.0];
+    let previous = rheology_control_moments(&mesh, &|p| [0.1 + 0.2 * p[1], 0.0]);
+    let older = rheology_control_moments(&mesh, &|p| [0.05 + 0.1 * p[1], 0.0]);
+    let snapshots = [previous.clone(), older.clone()];
+    let calls = Cell::new(0);
+    let force = |_: [f64; 2]| {
+        calls.set(calls.get() + 1);
+        [0.0; 2]
+    };
+    let traction = |_: [f64; 2], n: [f64; 2]| {
+        calls.set(calls.get() + 1);
+        [0.4 * n[1] - 3.2 * n[0], 0.4 * n[0] - 3.2 * n[1]]
+    };
+    let inlet: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, geometry)| mesh.is_boundary(*edge) && geometry.normal[0] < -0.5)
+        .map(|(edge, _)| edge)
+        .collect();
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, geometry)| {
+            if geometry.normal[0].abs() > 0.5 {
+                MaterialNavierStokesBoundary::Open {
+                    edge,
+                    traction: &traction,
+                    backflow: OpenBoundaryPolicy::NaturalTraction,
+                }
+            } else {
+                MaterialNavierStokesBoundary::Velocity {
+                    edge,
+                    value: &target,
+                }
+            }
+        })
+        .collect();
+    let controls = NavierStokesControls::default();
+    let mut queries = 0;
+    let failed = owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+        &force,
+        &boundaries,
+        &[&inlet],
+        &[-0.4],
+        &previous,
+        Some((&older, 0.01)),
+        0.1,
+        controls,
+        1e-12,
+        |_, _| {
+            queries += 1;
+            Ok(reference)
+        },
+    );
+    assert!(matches!(
+        failed,
+        Err(MaterialFluxError::Boundary(
+            StokesBoundaryError::InvalidInput(_)
+        ))
+    ));
+    assert_eq!(
+        (queries, calls.get()),
+        (0, 0),
+        "history refusal precedes physical callbacks"
+    );
+    let refusal = source_refusal();
+    let failed = owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+        &force,
+        &boundaries,
+        &[&inlet],
+        &[-0.4],
+        &previous,
+        Some((&older, 0.1)),
+        0.1,
+        controls,
+        1e-12,
+        |point, _| {
+            queries += 1;
+            if point.shear_rate_per_s > 0.25 {
+                Err(refusal.clone())
+            } else {
+                Ok(reference)
+            }
+        },
+    );
+    assert!(matches!(failed, Err(MaterialFluxError::Material(error)) if error == refusal));
+    assert!(
+        queries > mesh.tris.len(),
+        "the original source refuses the updated shear"
+    );
+    let failed = owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+        &force,
+        &boundaries,
+        &[&inlet],
+        &[-0.4],
+        &previous,
+        Some((&older, 0.1)),
+        0.1,
+        controls,
+        1e-12,
+        |_, _| Ok(transport(3.0, 1.0)),
+    );
+    assert!(matches!(failed, Err(MaterialFluxError::Invalid(_))));
+    let failed = owner.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+        &force,
+        &boundaries,
+        &[&inlet],
+        &[-0.4],
+        &previous,
+        Some((&older, 0.1)),
+        0.1,
+        NavierStokesControls {
+            maximum_iterations: 1,
+            ..controls
+        },
+        1e-12,
+        |_, _| Ok(reference),
+    );
+    assert!(matches!(
+        failed,
+        Err(MaterialFluxError::Boundary(StokesBoundaryError::Rheology(
+            fs_flux::FluxRheologyError::NonlinearConvergence { iterations: 1, .. }
+        )))
+    ));
+    assert_eq!(previous, snapshots[0]);
+    assert_eq!(older, snapshots[1]);
+}

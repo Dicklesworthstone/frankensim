@@ -1,8 +1,9 @@
 //! Steady and fully implicit pressure-driven flow on the original BDM1/P0 operators.
 
+use super::flow_control::FlowControl;
 use super::{
-    AdmittedBoundary, StokesAssembly, StokesBoundary, StokesBoundaryError, StokesRheologyControls,
-    StokesSolution,
+    AdmittedBoundary, StokesAssembly, StokesBoundary, StokesBoundaryError,
+    StokesFlowControlSolution, StokesRheologyControls, StokesSolution,
 };
 use crate::ns::{FluxParams, FluxSystem};
 
@@ -90,7 +91,8 @@ pub struct NavierStokesStep {
     /// Velocity and pressure with component-local datums and actual endpoint
     /// residuals, rather than only the last frozen Oseen solve's residuals.
     pub solution: StokesSolution,
-    /// Number of completed frozen-advection/constitutive solves.
+    /// Completed Picard updates. A flow-controlled update also solves one
+    /// pressure response for each controlled port.
     pub iterations: usize,
     /// Relative velocity correction before relaxation.
     pub relative_update: f64,
@@ -690,6 +692,146 @@ impl<'m> FluxSystem<'m> {
         )
     }
 
+    /// Advance backward Euler with endpoint rheology and prescribed port flows.
+    ///
+    /// This uses the original consistent mass history, conservative convection,
+    /// shear-dependent stress and explicit open-boundary policies. The actual
+    /// previous velocity initializes the nonlinear solve. Each update resolves
+    /// the pressure increments needed for the requested integral endpoint flows;
+    /// no normal velocity profile is imposed at a controlled port.
+    ///
+    /// Force is m/s², traction and required pressure are divided by the same
+    /// reference density, time is seconds, and signed outward targets and their
+    /// absolute tolerance are m²/s per unit depth. Callbacks specify the new
+    /// time level. Each controlled component retains an uncontrolled traction
+    /// datum, following [`StokesAssembly::prepare_flow_control`].
+    ///
+    /// # Errors
+    /// Preserves history, source, boundary, flow and coupled nonlinear checks.
+    /// The final viscosity and convection must satisfy both original and scaled
+    /// pressure-inclusive equations. No history or partial endpoint is published
+    /// on refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf1_navier_stokes_mixed_rheology_flow_control(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_tolerance_m2_s: f64,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+            params,
+            law,
+            force,
+            boundaries,
+            ports,
+            outward_volume_rates_m2_s,
+            previous_velocity,
+            None,
+            timestep_s,
+            controls,
+            absolute_tolerance_m2_s,
+        )
+    }
+
+    /// Advance variable-step BDF2 with coupled material and endpoint port flows.
+    ///
+    /// `older_history` pairs u_(n-1) with its actual preceding interval. None
+    /// performs the original backward-Euler startup; otherwise the new/previous
+    /// step ratio lies in (0, 2]. The existing BDF2 owner forms one mass history,
+    /// while the actual u_n initializes shear and convection. Each pressure
+    /// response retains that same mass operator and history.
+    ///
+    /// Endpoint viscosity, convection, pressure increments and reactions close
+    /// together in the original Picard loop. Pressure offsets relax with the
+    /// complete field; final equations and actual port flows are independently
+    /// checked. Units and datum requirements follow
+    /// [`Self::bdf1_navier_stokes_mixed_rheology_flow_control`]. Density and mesh
+    /// remain fixed. Endpoint viscous heating is a rate, not integrated heat,
+    /// and no general nonlinear energy or timestep-stability claim is added.
+    ///
+    /// # Errors
+    /// Preserves temporal admission before callbacks and all original source,
+    /// backflow, linear/nonlinear and port-flow refusals. Both histories remain
+    /// unchanged; no frozen-viscosity or frozen-convection candidate is accepted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_navier_stokes_mixed_rheology_variable_step_flow_control(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_tolerance_m2_s: f64,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_rheology_variable_step_flow_control_checked(
+            params,
+            law,
+            force,
+            boundaries,
+            ports,
+            outward_volume_rates_m2_s,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            absolute_tolerance_m2_s,
+            &|| true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf2_navier_stokes_mixed_rheology_variable_step_flow_control_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_tolerance_m2_s: f64,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
+            params,
+            &|velocity| {
+                let rates = self.shear_rates(velocity);
+                if rates.iter().any(|rate| !rate.is_finite()) {
+                    return Err(StokesBoundaryError::InvalidInput("nonfinite shear rate"));
+                }
+                Ok(rates)
+            },
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            source_is_valid,
+            Some(FlowControl {
+                ports,
+                targets: outward_volume_rates_m2_s,
+                absolute_tolerance_m2_s,
+            }),
+        )
+    }
+
     /// Variable-step BDF2 with constant viscosity. The older velocity and its
     /// interval are supplied together; None selects the original BDF1 startup.
     /// See [`Self::bdf2_navier_stokes_mixed_rheology_variable_step`] for the
@@ -1000,10 +1142,43 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
+            params,
+            prepare,
+            law,
+            force,
+            boundaries,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            source_is_valid,
+            None,
+        )
+        .map(|result| result.flow)
+    }
+
+    // One prepared constitutive response and one temporal mass-history owner
+    // serve both pressure-driven and integral-flow-driven endpoints.
+    #[allow(clippy::too_many_arguments)]
+    fn bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
+        &self,
+        params: FluxParams,
+        prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+        flow_control: Option<FlowControl<'_>>,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
         let (history, effective_timestep) =
             self.mixed_bdf2_history(previous_velocity, older_history, timestep_s)?;
         let mass_history = history.as_deref().unwrap_or(previous_velocity);
-        self.solve_navier_stokes_mixed_bdf1(
+        self.solve_navier_stokes_mixed_bdf1_with_flow_control(
             params,
             boundaries,
             previous_velocity,
@@ -1029,6 +1204,7 @@ impl<'m> FluxSystem<'m> {
                 )
             },
             source_is_valid,
+            flow_control,
         )
     }
 
@@ -1106,8 +1282,38 @@ impl<'m> FluxSystem<'m> {
         ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_bdf1_with_flow_control(
+            params,
+            boundaries,
+            previous_velocity,
+            timestep_s,
+            controls,
+            absolute_velocity_tolerance_m_s,
+            assemble,
+            source_is_valid,
+            None,
+        )
+        .map(|result| result.flow)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_navier_stokes_mixed_bdf1_with_flow_control<'a>(
+        &'a self,
+        params: FluxParams,
+        boundaries: &[NavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        assemble: &dyn Fn(
+            &AdmittedBoundary,
+            &[f64],
+        ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
+        source_is_valid: &dyn Fn() -> bool,
+        flow_control: Option<FlowControl<'_>>,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
         self.check_mixed_bdf1_history(previous_velocity, timestep_s)?;
-        self.solve_navier_stokes_mixed_endpoint(
+        self.solve_navier_stokes_mixed_endpoint_with_flow_control(
             params,
             boundaries,
             previous_velocity,
@@ -1116,6 +1322,7 @@ impl<'m> FluxSystem<'m> {
             &vec![true; self.pressure_roots.len()],
             assemble,
             source_is_valid,
+            flow_control,
         )
     }
 
@@ -1134,6 +1341,39 @@ impl<'m> FluxSystem<'m> {
         ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_endpoint_with_flow_control(
+            params,
+            boundaries,
+            initial_velocity,
+            controls,
+            absolute_velocity_tolerance_m_s,
+            anchors_velocity,
+            assemble,
+            source_is_valid,
+            None,
+        )
+        .map(|result| result.flow)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_navier_stokes_mixed_endpoint_with_flow_control<'a>(
+        &'a self,
+        params: FluxParams,
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+        absolute_velocity_tolerance_m_s: f64,
+        anchors_velocity: &[bool],
+        assemble: &dyn Fn(
+            &AdmittedBoundary,
+            &[f64],
+        ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError>,
+        source_is_valid: &dyn Fn() -> bool,
+        flow_control: Option<FlowControl<'_>>,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
+        if let Some(control) = flow_control {
+            control.admit()?;
+        }
         if initial_velocity.len() != self.n_u
             || initial_velocity.iter().any(|value| !value.is_finite())
             || controls.maximum_iterations == 0
@@ -1154,26 +1394,33 @@ impl<'m> FluxSystem<'m> {
             boundaries,
             anchors_velocity,
         )?;
-        let solved = self.solve_mixed_picard_with_velocity_tolerance(
+        let controlled = self.solve_mixed_picard_with_flow_control(
             initial_velocity,
             controls,
             absolute_velocity_tolerance_m_s,
             &|velocity| assemble(&admitted, velocity),
             source_is_valid,
+            flow_control,
         )?;
-        Ok(NavierStokesStep {
-            solution: solved.solution,
-            iterations: solved.iterations,
-            relative_update: solved.relative_update,
-            nonlinear_residual: solved.nonlinear_residual,
-            open_boundary_policies: admitted
-                .open_policies
-                .as_ref()
-                .expect("open policies")
-                .iter()
-                .enumerate()
-                .filter_map(|(edge, policy)| policy.map(|p| (edge, p)))
-                .collect(),
+        let solved = controlled.flow;
+        Ok(StokesFlowControlSolution {
+            flow: NavierStokesStep {
+                solution: solved.solution,
+                iterations: solved.iterations,
+                relative_update: solved.relative_update,
+                nonlinear_residual: solved.nonlinear_residual,
+                open_boundary_policies: admitted
+                    .open_policies
+                    .as_ref()
+                    .expect("open policies")
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(edge, policy)| policy.map(|p| (edge, p)))
+                    .collect(),
+            },
+            pressure_offsets_m2_s2: controlled.pressure_offsets_m2_s2,
+            outward_volume_rates_m2_s: controlled.outward_volume_rates_m2_s,
+            maximum_flow_residual_m2_s: controlled.maximum_flow_residual_m2_s,
         })
     }
 

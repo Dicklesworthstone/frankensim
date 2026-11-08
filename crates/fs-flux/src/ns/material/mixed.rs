@@ -18,6 +18,7 @@ pub use density::{MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSo
 #[path = "mixed/flow_control.rs"]
 mod flow_control;
 pub use flow_control::MaterialStokesFlowControlSolution;
+pub(super) use flow_control::physical_control;
 
 /// Conservative evolving density and native IMEX momentum on one fixed mesh.
 pub mod density_transport;
