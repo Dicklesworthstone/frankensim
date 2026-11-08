@@ -7089,3 +7089,33 @@ frequencies, both source power channels, moving-conductor voltage/current
 equivalence, complex common-mode invariance, second-order transient refinement,
 resource refusal and cancellation/retry. Synthetic source data qualify the
 equations and implementation, not an experimentally validated device.
+
+### Finite-interval three-dimensional induction heat
+
+With `harmonic-exposure` enabled,
+`SpatialHarmonicInductionResponse::observe_joule_heat` integrates the original
+conductor-frame `E(t)^T sigma E(t)` over a positive physical duration and an
+authored start phase. It retains the carrier's twice-frequency heating, which
+cycle-mean power times duration cannot resolve on a short interval. Each result
+borrows the accepted field and the original material sources and reports
+immutable per-tetrahedron and total heat.
+
+The shared normalized `fs-fft` temporal Gram and double-double phase arithmetic
+retain the positive short-window limit. The same admitted conductivity acts on
+the rotated electric field before quadratic evaluation, avoiding artificial
+negative heat from independently rounded E/J zero crossings. The original P1
+tetrahedral mass is factored into five vector quadratic forms per cell.
+Preparation of the temporal kernel is shared; observation is linear in the
+number of conducting cells, with no field re-solve, time sampling or per-cell
+trigonometry. Output bytes/cell counts are admitted before allocation and
+cancellation prevents partial publication.
+
+This observer reports resolved Ohmic heat only. It does not claim complete
+finite-window source work, magnetic storage change or mechanical work, and
+does not add stranded copper, operating DC/cross terms, switch-on transients
+or temperature feedback. A thermal consumer must retain the same source and
+volume correspondence, admit the frozen-field approximation and deposit this
+heat once. Four focused tests in
+`tests/spatial_induction/harmonic/exposure.rs` cover independent analytic and
+space/time quadrature references, tiny intervals at a field zero, phase and
+interval composition, original-source identity, budgets and cancellation.

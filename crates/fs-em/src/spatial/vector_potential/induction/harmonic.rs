@@ -22,6 +22,9 @@
 
 /// Original electrical networks coupled to the resolved 3D harmonic field.
 pub mod circuit;
+/// Exact finite-interval conductor heat from the original coherent AC field.
+#[cfg(feature = "harmonic-exposure")]
+pub mod exposure;
 /// Consistent mean and twice-frequency mechanical loads on original bodies.
 pub mod loads;
 /// Closed source-bound winding terminals with current and voltage drive.

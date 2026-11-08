@@ -1,6 +1,9 @@
 //! G1/G3: independently integrated cube mode and time-domain AC agreement.
 #[path = "harmonic/circuit.rs"]
 mod circuit;
+#[cfg(feature = "harmonic-exposure")]
+#[path = "harmonic/exposure.rs"]
+mod exposure;
 #[path = "harmonic/loads.rs"]
 mod loads;
 #[path = "harmonic/winding.rs"]
