@@ -5,8 +5,10 @@
 //! Prony response. Common force and total extension determine one scalar affine
 //! compatibility equation. No substitute elastic bond or fitted damping enters.
 //!
-//! Bulk temperatures may change within their original source domains. The
-//! interface's complete source query remains fixed, including its temperature.
+//! Bulk temperatures may change within their original source domains. Ordinary
+//! steps hold the interface query fixed; explicit temperature steps transfer
+//! the original adhesive spring strains before solving the same load line.
+//! Coefficient work remains separate from physical relaxation heat.
 //! This is a massless, small-strain axial joint with endpoint load/extension
 //! control; refine paths for transient accuracy. There is no damage, healing,
 //! thermal transport, automatic heat deposition or finite-body peel model.
@@ -19,6 +21,7 @@ use fs_material::cohesive::{
     CohesiveError,
     relaxation::{ViscoelasticBondPoint, source::ResolvedViscoelasticBond},
 };
+use fs_material::state_point::MaterialStatePointError;
 use fs_material::thermovisco::{Energy, source::ResolvedThermoMaxwell};
 use fs_math::dd::Dd;
 
@@ -60,6 +63,8 @@ pub enum Error {
         residual_n: f64,
     },
     Source(&'static str),
+    /// Original source/claim refusal during explicit interface continuation.
+    Interface(MaterialStatePointError),
 }
 impl From<JointError> for Error {
     fn from(error: JointError) -> Self {
@@ -109,6 +114,23 @@ pub struct Report {
     /// Common endpoint force times member extension changes minus original
     /// bulk mechanical work. Includes exact-ramp quadrature, never heat.
     pub bulk_work_correction_j: f64,
+    pub energy_residual_j: f64,
+}
+
+/// Explicit interface-temperature continuation and mechanical motion accepted
+/// together. All extensive accounts are joules on the original bonded area.
+#[derive(Clone, Debug)]
+pub struct TemperatureReport {
+    /// Original native series solve after the held-jump coefficient change.
+    pub mechanical: Report,
+    /// Signed external work of changing the original spring moduli at fixed
+    /// physical strains. A relaxation-time change alone supplies zero work.
+    pub interface_parameter_work_j: f64,
+    /// Held-jump storage change, before the actual mechanical/relaxation step.
+    pub interface_stored_change_j: f64,
+    /// Parameter work minus independently evaluated held-jump storage change.
+    pub interface_energy_residual_j: f64,
+    /// Complete old-to-new incremental joint balance, including parameter work.
     pub energy_residual_j: f64,
 }
 
@@ -273,6 +295,31 @@ impl<'a> SourceRelaxingJoint<'a> {
                 "interface conditions remain fixed; memory transfer is not inferred",
             ));
         }
+        self.advance_bond_controlled(
+            target_s,
+            control,
+            temperatures_k,
+            self.interface,
+            &self.bond,
+            config,
+            cancelled,
+        )
+    }
+
+    // One native solve for both fixed-query and explicitly transferred bonds.
+    // Borrow the staged bond so a temperature step does not clone all original
+    // member histories merely to substitute the adhesive coefficients.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_bond_controlled(
+        &self,
+        target_s: f64,
+        control: Control,
+        temperatures_k: &BTreeMap<u64, f64>,
+        interface: &'a ResolvedViscoelasticBond,
+        point: &ViscoelasticBondPoint<'a>,
+        config: Config,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, Report), Error> {
         let dt = finite(target_s - self.time_s)?;
         positive(dt)?;
         for value in [
@@ -311,10 +358,9 @@ impl<'a> SourceRelaxingJoint<'a> {
             interface: self.interface_id,
             error,
         };
-        let prepared = self.interface.law().prepare(dt).map_err(bond_error)?;
-        let old_gap = self.bond.jump_m()[0];
-        let held = self
-            .bond
+        let prepared = interface.law().prepare(dt).map_err(bond_error)?;
+        let old_gap = point.jump_m()[0];
+        let held = point
             .trial(
                 &prepared,
                 [old_gap, 0.0, 0.0],
@@ -344,8 +390,7 @@ impl<'a> SourceRelaxingJoint<'a> {
             }
         };
         let gap = finite(old_gap + delta)?;
-        let bond = self
-            .bond
+        let bond = point
             .trial(
                 &prepared,
                 [gap, 0.0, 0.0],
@@ -464,9 +509,9 @@ impl<'a> SourceRelaxingJoint<'a> {
             area_m2: self.area_m2,
             members,
             bulk_sources: self.bulk_sources.clone(),
-            interface: self.interface,
+            interface,
             surface_members: self.surface_members,
-            interface_query: self.interface_query.clone(),
+            interface_query: interface.resolved().query(),
             bond: bond.point,
         };
         finite(next.stored_energy_j())?;
@@ -508,6 +553,120 @@ impl<'a> SourceRelaxingJoint<'a> {
             control,
             temperatures_k,
             interface_query,
+            config,
+            || cx.checkpoint().is_err(),
+        )
+    }
+
+    /// Continue the original adhesive source to a supplied temperature endpoint
+    /// and advance the actual joint under the original force/extension control.
+    /// The successor must retain every selected claim, ordered surface, branch
+    /// identity, geometry, bound and nonthermal query coordinate. Resolve it
+    /// with `ResolvedViscoelasticBond::at_temperature`; no coefficients are
+    /// inferred from the bulk-member temperatures.
+    ///
+    /// First transfer coefficients at held jump and physical Maxwell spring
+    /// strains, with no elapsed time, mechanical work or relaxation heat. Then
+    /// the same series solve advances those memories using the new kinetics.
+    /// Source, clock, member and bond histories publish only after the complete
+    /// incremental energy check and final cancellation poll.
+    ///
+    /// This is a first-order staggered prescribed-temperature update; refine
+    /// combined thermal/load histories. Parameter work has an explicit external
+    /// destination, not an inferred heat source. No caloric, thermal-transport,
+    /// adhesive expansion, damage or entropy model is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_interface_temperature_controlled(
+        &self,
+        target_s: f64,
+        control: Control,
+        temperatures_k: &BTreeMap<u64, f64>,
+        interface: &'a ResolvedViscoelasticBond,
+        temperature_axis: &str,
+        config: Config,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Self, TemperatureReport), Error> {
+        poll(&mut cancelled)?;
+        positive(config.energy_tolerance_j)?;
+        self.interface
+            .require_temperature_successor(interface, temperature_axis)
+            .map_err(Error::Interface)?;
+        let transfer = self
+            .bond
+            .transfer_temperature(interface.law(), config.local_bond_energy_tolerance_j_m2)
+            .map_err(|error| Error::Bond {
+                interface: self.interface_id,
+                error,
+            })?;
+        let parameter_work = finite(self.area_m2 * transfer.parameter_work_j_m2)?;
+        let storage_change = finite(self.area_m2 * transfer.stored_change_j_m2)?;
+        let transfer_residual =
+            finite((Dd::from_f64(parameter_work) - Dd::from_f64(storage_change)).to_f64())?;
+        if transfer_residual.abs() > config.energy_tolerance_j {
+            return Err(JointError::Energy(transfer_residual).into());
+        }
+        poll(&mut cancelled)?;
+        let (next, mechanical) = self.advance_bond_controlled(
+            target_s,
+            control,
+            temperatures_k,
+            interface,
+            &transfer.point,
+            config,
+            &mut cancelled,
+        )?;
+        let bulk = &mechanical.bulk_energy_j;
+        // Use constitutive increments, never subtraction of whole-joint stored
+        // inventories: a small coefficient change must survive large bulk energy.
+        let residual = finite(
+            (Dd::from_f64(storage_change)
+                + Dd::from_f64(bulk.stored_change)
+                + Dd::from_f64(mechanical.bond_stored_change_j)
+                + Dd::from_f64(bulk.dissipated)
+                + Dd::from_f64(bulk.numerical_dissipation)
+                + Dd::from_f64(mechanical.bond_relaxation_heat_j)
+                + Dd::from_f64(mechanical.bond_work_correction_j)
+                + Dd::from_f64(mechanical.bulk_work_correction_j)
+                - Dd::from_f64(mechanical.endpoint_work_j)
+                - Dd::from_f64(bulk.thermal_strain_work)
+                - Dd::from_f64(bulk.modulus_work)
+                - Dd::from_f64(parameter_work))
+            .to_f64(),
+        )?;
+        if residual.abs() > config.energy_tolerance_j {
+            return Err(JointError::Energy(residual).into());
+        }
+        poll(&mut cancelled)?;
+        Ok((
+            next,
+            TemperatureReport {
+                mechanical,
+                interface_parameter_work_j: parameter_work,
+                interface_stored_change_j: storage_change,
+                interface_energy_residual_j: transfer_residual,
+                energy_residual_j: residual,
+            },
+        ))
+    }
+
+    /// Same explicit interface-temperature advance in the executor scope.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_interface_temperature(
+        &self,
+        cx: &Cx<'_>,
+        target_s: f64,
+        control: Control,
+        temperatures_k: &BTreeMap<u64, f64>,
+        interface: &'a ResolvedViscoelasticBond,
+        temperature_axis: &str,
+        config: Config,
+    ) -> Result<(Self, TemperatureReport), Error> {
+        self.advance_with_interface_temperature_controlled(
+            target_s,
+            control,
+            temperatures_k,
+            interface,
+            temperature_axis,
             config,
             || cx.checkpoint().is_err(),
         )

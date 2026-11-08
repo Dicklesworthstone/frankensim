@@ -12421,3 +12421,39 @@ rotated geometry and work ports, original inertia and normal-work refusal,
 omitted-row penetration and cancellation. Rust parsing/formatting passed;
 independent scalar fixture calculations do not substitute for native compilation
 or test execution, which remain unverified in this environment.
+
+## Temperature-dependent relaxation of original adhesive joints
+
+`cohesive::thermal_joint::relaxation::SourceRelaxingJoint` now exposes
+`advance_with_interface_temperature[_controlled]`. Its explicit successor is
+guarded by `ResolvedViscoelasticBond::require_temperature_successor`: original
+ordered surfaces, card and selected coefficient claims, indexed Maxwell
+branches, thickness, use bounds and every nonthermal query coordinate remain
+fixed. The ordinary fixed-query advance retains its original semantics.
+
+The existing material temperature transfer retains physical spring strains,
+total jump, elapsed adhesive time and accumulated mechanical/heat history. At
+held jump, changing spring moduli supplies signed parameter work; changing only
+relaxation times supplies exactly zero. The same native series compatibility
+solve then advances the original members and retained adhesive memory under
+prescribed endpoint force or extension. It borrows the transferred bond rather
+than cloning all member histories into a staging assembly.
+
+`TemperatureReport` separates interface parameter work and independently
+evaluated held-jump storage change from mechanical motion, physical relaxation
+heat and numerical endpoint-work corrections. The complete old-to-new balance
+uses constitutive increments and compensated sums, not subtraction of large
+whole-joint stored-energy inventories. Source, memory, geometry, displacement
+and clock publish together only after local/global energy and final
+cancellation gates; failed source admission or mechanics leaves the prior joint
+retryable.
+
+The existing `tests/relaxing_adhesive_joint.rs` includes G1 analytical
+heating/cooling references for force and extension control, retained branch
+memory, a kinetics-only heated series relaxation/time-refinement reference,
+and G3/G4 source/nonthermal-coordinate refusal and identical retry after late
+cancellation. Coefficients are manufactured inputs, not calibrated adhesive
+specimens. This is a first-order staggered prescribed-temperature update of an
+intact, massless, small-strain axial assembly; combined temperature/load paths
+require refinement. It introduces no adhesive thermal expansion, caloric or
+entropy model, thermal transport, automatic heat deposition, damage or healing.

@@ -9,7 +9,7 @@ use fs_material::cohesive::relaxation::{ViscoelasticBondLimits, source::*};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::thermovisco::source::{ResolvedThermoMaxwell, ThermoMaxwellSourceQuery};
 use fs_material::thermovisco::{HistoryIntegration, Limits};
-use fs_qty::{Dims, Length, Pressure, Temperature, Time};
+use fs_qty::{Dims, Length, Pressure, QuantitySpec, Temperature, Time};
 use fs_solid::cohesive::thermal_joint::{relaxation::*, source::SourceMember};
 use std::collections::BTreeMap;
 
@@ -21,7 +21,9 @@ const E_BRANCH: f64 = 2e6;
 const TAU: f64 = 1.0;
 
 fn query(t: f64) -> QueryPoint {
-    QueryPoint::new().with("T", t).unwrap()
+    QueryPoint::new()
+        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), t)
+        .unwrap()
 }
 fn claim(name: &str, dims: Dims, values: [f64; 2]) -> PropertyClaim {
     PropertyClaim {
@@ -32,7 +34,12 @@ fn claim(name: &str, dims: Dims, values: [f64; 2]) -> PropertyClaim {
             knots: vec![(280.0, values[0]), (520.0, values[1])],
             dims,
         },
-        validity: ValidityDomain::unconstrained().with("T", 280.0, 520.0),
+        validity: ValidityDomain::unconstrained().with_quantity(
+            "T",
+            QuantitySpec::dimensional(Temperature::DIMS),
+            280.0,
+            520.0,
+        ),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::LinearInside,
         observations: vec![],
@@ -102,6 +109,16 @@ fn material(
     .with_history_integration(integration)
 }
 fn bond(a: &ResolvedThermoMaxwell, b: &ResolvedThermoMaxwell) -> ResolvedViscoelasticBond {
+    resolve_bond(
+        &bond_card(a, b, [[E_INF; 2], [E_BRANCH; 2], [TAU; 2]]),
+        &query(300.0),
+    )
+}
+fn bond_card(
+    a: &ResolvedThermoMaxwell,
+    b: &ResolvedThermoMaxwell,
+    coefficients: [[f64; 2]; 3],
+) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(claim(
@@ -111,14 +128,14 @@ fn bond(a: &ResolvedThermoMaxwell, b: &ResolvedThermoMaxwell) -> ResolvedViscoel
         ))
         .unwrap();
     for prefix in [NORMAL_RELAXATION_PREFIX, SHEAR_RELAXATION_PREFIX] {
-        for (suffix, dims, value) in [
-            ("branch_count", Dims::NONE, 1.0),
-            ("equilibrium_modulus", Pressure::DIMS, E_INF),
-            ("modulus_1", Pressure::DIMS, E_BRANCH),
-            ("time_1", Time::DIMS, TAU),
+        for (suffix, dims, values) in [
+            ("branch_count", Dims::NONE, [1.0; 2]),
+            ("equilibrium_modulus", Pressure::DIMS, coefficients[0]),
+            ("modulus_1", Pressure::DIMS, coefficients[1]),
+            ("time_1", Time::DIMS, coefficients[2]),
         ] {
             claims
-                .insert_claim(claim(&format!("{prefix}_{suffix}"), dims, [value; 2]))
+                .insert_claim(claim(&format!("{prefix}_{suffix}"), dims, values))
                 .unwrap();
         }
     }
@@ -126,22 +143,24 @@ fn bond(a: &ResolvedThermoMaxwell, b: &ResolvedThermoMaxwell) -> ResolvedViscoel
         material: s.samples()[0].material().clone(),
         texture_frame: "fixed axial frame".into(),
     };
-    let card = InterfaceSystemCard::assemble(
+    InterfaceSystemCard::assemble(
         surface(a),
         surface(b),
         SystemContext {
             medium: "explicit intact adhesive".into(),
             third_body: None,
-            environment: "bond conditions held at 300K".into(),
+            environment: "manufactured prescribed bond temperature".into(),
             history: "stress-free bonded birth".into(),
         },
         claims,
         vec![],
     )
-    .unwrap();
+    .unwrap()
+}
+fn resolve_bond(card: &InterfaceSystemCard, point: &QueryPoint) -> ResolvedViscoelasticBond {
     resolve_viscoelastic_bond(
-        &card,
-        &query(300.0),
+        card,
+        point,
         MaterialPropertySelection::SingleClaimOnly,
         ViscoelasticBondLimits {
             maximum_jump_m: 2e-5,
@@ -587,4 +606,272 @@ fn sources_domains_and_late_cancellation_leave_all_accepted_memory_retryable() {
         retry.bond().stored_energy_j_m2(),
         expected.bond().stored_energy_j_m2()
     );
+}
+
+fn temperature_balance(
+    old: &SourceRelaxingJoint<'_>,
+    next: &SourceRelaxingJoint<'_>,
+    report: &TemperatureReport,
+) {
+    let r = &report.mechanical;
+    let bulk = &r.bulk_energy_j;
+    near(
+        next.stored_energy_j() - old.stored_energy_j(),
+        report.interface_stored_change_j + bulk.stored_change + r.bond_stored_change_j,
+        2e-10,
+        1e-15,
+    );
+    near(
+        report.interface_parameter_work_j,
+        report.interface_stored_change_j,
+        1e-13,
+        1e-20,
+    );
+    let stored = report.interface_stored_change_j + bulk.stored_change + r.bond_stored_change_j;
+    let lost = bulk.dissipated + bulk.numerical_dissipation + r.bond_relaxation_heat_j;
+    let work = r.endpoint_work_j - r.bond_work_correction_j - r.bulk_work_correction_j
+        + bulk.thermal_strain_work
+        + bulk.modulus_work
+        + report.interface_parameter_work_j;
+    near(stored + lost, work, 2e-10, 1e-15);
+    assert!(report.energy_residual_j.abs() <= config().energy_tolerance_j);
+    assert!(report.interface_energy_residual_j.abs() <= config().energy_tolerance_j);
+}
+
+#[test]
+fn temperature_changes_real_series_response_without_resetting_adhesive_memory() {
+    let a = material("A", 1e7, false, HistoryIntegration::ExactStrainRamp);
+    let b = material("B", 2e7, false, HistoryIntegration::BackwardEuler);
+    let card = bond_card(&a, &b, [[E_INF, 0.5e6], [E_BRANCH, 0.7e6], [TAU, 0.2]]);
+    let cold = resolve_bond(&card, &query(280.0));
+    let hot = cold.at_temperature(&card, "T", 520.0).unwrap();
+    let temperatures = BTreeMap::from([(1, 500.0), (2, 500.0)]);
+    let (loaded, _) = initial(&a, &b, &cold)
+        .advance_controlled(
+            0.1,
+            Control::ExtensionM(1e-6),
+            &temperatures,
+            &query(280.0),
+            config(),
+            || false,
+        )
+        .unwrap();
+    let compliance = LENGTH / (AREA * 1e7) + LENGTH / (AREA * 2e7);
+    for control in [Control::ExtensionM(1e-6), Control::ForceN(0.1)] {
+        let mut state = loaded.clone();
+        // Heat, then cool the same retained spring strains. Both prescribed
+        // extension and prescribed force must use the new source kinetics.
+        for (source, dt) in [(&hot, 0.2), (&cold, 0.3)] {
+            let old_spectrum = state.interface_source().law().normal_spectrum();
+            let spectrum = source.law().normal_spectrum();
+            let strain = state.bond().jump_m()[0] / THICKNESS;
+            let q = (state.bond().traction_pa()[0] - old_spectrum.e_inf * strain)
+                / old_spectrum.terms[0].0;
+            let (modulus, tau) = spectrum.terms[0];
+            let x = dt / tau;
+            let decay = (-x).exp();
+            let ramp = -(-x).exp_m1() / x;
+            let held_force = AREA * (spectrum.e_inf * strain + modulus * decay * q);
+            let stiffness = AREA * (spectrum.e_inf + modulus * ramp) / THICKNESS;
+            let increment = match control {
+                Control::ExtensionM(extension) => {
+                    (extension - state.bond().jump_m()[0] - compliance * held_force)
+                        / (1.0 + compliance * stiffness)
+                }
+                Control::ForceN(force) => (force - held_force) / stiffness,
+            };
+            let opening = state.bond().jump_m()[0] + increment;
+            let expected_q = decay * q + ramp * increment / THICKNESS;
+            let force = AREA * (spectrum.e_inf * opening / THICKNESS + modulus * expected_q);
+            let parameter_work = 0.5
+                * AREA
+                * THICKNESS
+                * ((spectrum.e_inf - old_spectrum.e_inf) * strain * strain
+                    + (modulus - old_spectrum.terms[0].0) * q * q);
+            let (next, report) = state
+                .advance_with_interface_temperature_controlled(
+                    state.time_s() + dt,
+                    control,
+                    &temperatures,
+                    source,
+                    "T",
+                    config(),
+                    || false,
+                )
+                .unwrap();
+            near(report.mechanical.opening_m, opening, 1e-12, 1e-17);
+            near(report.mechanical.force_n, force, 1e-12, 1e-14);
+            near(
+                report.interface_parameter_work_j,
+                parameter_work,
+                1e-12,
+                1e-20,
+            );
+            let actual_q =
+                (next.bond().traction_pa()[0] - spectrum.e_inf * opening / THICKNESS) / modulus;
+            near(actual_q, expected_q, 2e-12, 1e-17);
+            near(
+                next.bond().elapsed_s(),
+                state.bond().elapsed_s() + dt,
+                1e-14,
+                1e-16,
+            );
+            assert_eq!(next.interface_query(), &source.resolved().query());
+            assert!(core::ptr::eq(next.interface_source(), source));
+            assert!(core::ptr::eq(next.member_sources()[&1], &a));
+            temperature_balance(&state, &next, &report);
+            state = next;
+        }
+    }
+}
+
+#[test]
+fn temperature_dependent_relaxation_time_matches_the_heated_series_decay() {
+    let a = material("A", 1e7, false, HistoryIntegration::ExactStrainRamp);
+    let b = material("B", 2e7, false, HistoryIntegration::ExactStrainRamp);
+    let card = bond_card(&a, &b, [[E_INF; 2], [E_BRANCH; 2], [TAU, 0.2]]);
+    let cold = resolve_bond(&card, &query(280.0));
+    let hot = cold.at_temperature(&card, "T", 520.0).unwrap();
+    let temperatures = BTreeMap::from([(1, 500.0), (2, 500.0)]);
+    let extension = 1e-6;
+    let (loaded, first) = initial(&a, &b, &cold)
+        .advance_controlled(
+            0.1,
+            Control::ExtensionM(extension),
+            &temperatures,
+            &query(280.0),
+            config(),
+            || false,
+        )
+        .unwrap();
+    let ks = (LENGTH / (AREA * 1e7) + LENGTH / (AREA * 2e7)).recip();
+    let kinf = AREA * E_INF / THICKNESS;
+    let k0 = AREA * (E_INF + E_BRANCH) / THICKNESS;
+    let time = 0.2 * (ks + k0) / (ks + kinf);
+    let equilibrium = extension * ks * kinf / (ks + kinf);
+    let duration = 0.5;
+    let expected = equilibrium + (first.force_n - equilibrium) * (-duration / time).exp();
+    let mut errors = Vec::new();
+    for n in [8, 16, 32] {
+        let mut state = loaded.clone();
+        let mut last = first.force_n;
+        for i in 1..=n {
+            let (next, report) = state
+                .advance_with_interface_temperature_controlled(
+                    0.1 + duration * f64::from(i) / f64::from(n),
+                    Control::ExtensionM(extension),
+                    &temperatures,
+                    &hot,
+                    "T",
+                    config(),
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(report.interface_parameter_work_j, 0.0);
+            assert_eq!(report.interface_stored_change_j, 0.0);
+            assert!(report.mechanical.force_n < last);
+            temperature_balance(&state, &next, &report);
+            last = report.mechanical.force_n;
+            state = next;
+        }
+        errors.push((last - expected).abs());
+    }
+    assert!(
+        errors[0] / errors[1] > 3.8 && errors[1] / errors[2] > 3.8,
+        "{errors:?}"
+    );
+    near(errors[2], 0.0, 0.0, 3e-5 * expected.abs());
+}
+
+#[test]
+fn interface_temperature_refusal_or_late_cancellation_cannot_publish_partial_history() {
+    let a = material("A", 1e7, true, HistoryIntegration::ExactStrainRamp);
+    let b = material("B", 2e7, true, HistoryIntegration::BackwardEuler);
+    let card = bond_card(&a, &b, [[E_INF, 0.5e6], [E_BRANCH, 0.7e6], [TAU, 0.2]]);
+    let query_cold = query(280.0).with("humidity", 0.3).unwrap();
+    let cold = resolve_bond(&card, &query_cold);
+    let hot = cold.at_temperature(&card, "T", 520.0).unwrap();
+    let changed_condition = resolve_bond(&card, &query(520.0).with("humidity", 0.8).unwrap());
+    let foreign = bond(&a, &b);
+    let temperatures = BTreeMap::from([(1, 500.0), (2, 500.0)]);
+    let (loaded, _) = initial(&a, &b, &cold)
+        .advance_controlled(
+            0.1,
+            Control::ForceN(0.1),
+            &temperatures,
+            &query_cold,
+            config(),
+            || false,
+        )
+        .unwrap();
+    let snapshot = format!("{loaded:?}");
+    for (source, axis, target, force) in [
+        (&foreign, "T", 0.2, 0.1),
+        (&changed_condition, "T", 0.2, 0.1),
+        (&hot, "humidity", 0.2, 0.1),
+        (&hot, "T", 0.1, 0.1),
+        (&hot, "T", 0.2, 1e8),
+    ] {
+        assert!(
+            loaded
+                .advance_with_interface_temperature_controlled(
+                    target,
+                    Control::ForceN(force),
+                    &temperatures,
+                    source,
+                    axis,
+                    config(),
+                    || false,
+                )
+                .is_err()
+        );
+        assert_eq!(format!("{loaded:?}"), snapshot);
+    }
+    let mut polls = 0;
+    let (expected, expected_report) = loaded
+        .advance_with_interface_temperature_controlled(
+            0.2,
+            Control::ForceN(0.1),
+            &temperatures,
+            &hot,
+            "T",
+            config(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut calls = 0;
+    assert!(
+        loaded
+            .advance_with_interface_temperature_controlled(
+                0.2,
+                Control::ForceN(0.1),
+                &temperatures,
+                &hot,
+                "T",
+                config(),
+                || {
+                    calls += 1;
+                    calls == polls
+                },
+            )
+            .is_err()
+    );
+    assert_eq!(format!("{loaded:?}"), snapshot);
+    let (retry, retry_report) = loaded
+        .advance_with_interface_temperature_controlled(
+            0.2,
+            Control::ForceN(0.1),
+            &temperatures,
+            &hot,
+            "T",
+            config(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(format!("{retry:?}"), format!("{expected:?}"));
+    assert_eq!(format!("{retry_report:?}"), format!("{expected_report:?}"));
+    temperature_balance(&loaded, &retry, &retry_report);
 }
