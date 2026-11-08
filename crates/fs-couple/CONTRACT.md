@@ -10,15 +10,27 @@ admission, cancellation, bisection ceiling and thermal residual budgets.
 The electrical path must fill the declared thermal volume. Card identity,
 complete temperature support, caloric/transport fixed source conditions and
 quantity conventions must agree. Exact original electrical receipts survive
-the accepted endpoint. Prescribed heat and terminal work are counted once;
+the accepted endpoint. `try_new_with_caloric_curve` also follows a declared
+liquid-mass-fraction electrical source along the original caloric trajectory.
+Pinned source paths retain every curve knot and surface crossing and reject
+interior support holes. The cached positive dP/dh bound includes electrical
+changes on isothermal latent plateaus; sourced sensible spans use their original
+Cp minima rather than endpoint chords. The prepared bound belongs to the exact
+caloric chart. Trial fractions come from the native numeric enthalpy evaluator,
+and accepted current, resistance and power use that same final phase state.
+Prescribed heat and terminal work are counted once;
 rendering observes temperature without adding another cooling debit.
 
 The exposed maximum step is a sufficient feedback bound, not a temporal-error
-estimate. Mass and fixed geometry remain declared inputs. Electrical phase
-dependence, expansion and spatial current/temperature fields need their native
-coupled owners and are not inferred. `tests/incandescent.rs` supplies authored
+estimate. Mass and fixed geometry remain declared inputs. Expansion and spatial
+current/temperature fields need their native coupled owners and are not
+inferred. The temperature-only thermal transport owner cannot freeze a
+declared evolving phase coordinate: a sourced transport table carrying that
+fixed coordinate refuses. Declared or explicitly phase-independent thermal
+transport remains admissible. `tests/incandescent.rs` supplies authored
 analytic current/voltage cases, turn-off cooling, latent storage, source-context
-refusals and cancellation; it makes no measured-filament calibration claim.
+refusals, phase feedback at constant temperature, chart binding and cancellation;
+it makes no measured-filament calibration claim.
 
 ## Coherent crystal absorption on native thermal cells
 

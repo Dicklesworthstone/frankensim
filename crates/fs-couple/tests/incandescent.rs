@@ -22,7 +22,7 @@ use fs_material::state_point::{
     resolve_material_state_point,
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Density, QuantitySpec, Temperature};
+use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 
 fn pressure_quantity() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static))
@@ -46,21 +46,42 @@ fn knot(h: f64, t: f64, fraction: f64) -> EnthalpyPhaseKnot {
 }
 
 fn fixture(basis: ElectricalPropertyBasis) -> (MaterialOhmicNode, EquilibriumEnthalpyPhaseCurve) {
-    // q(T) = T/300 in the explicitly selected independent electrical basis.
+    source_fixture(basis, false)
+}
+
+fn source_fixture(
+    basis: ElectricalPropertyBasis,
+    phase_dependent: bool,
+) -> (MaterialOhmicNode, EquilibriumEnthalpyPhaseCurve) {
+    // q(T)=T/300 or q(f)=1+2f in the selected independent electrical basis.
     let key = PropertyKey::new("authored-filament-source", basis.dimensions());
     let mut claims = ClaimSet::new();
+    let validity = ValidityDomain::unconstrained()
+        .with("T", 300.0, 900.0)
+        .with_quantity("pressure", pressure_quantity(), 1e5, 2e5);
+    let validity = if phase_dependent {
+        validity.with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0)
+    } else {
+        validity
+    };
     claims
         .insert_claim(PropertyClaim {
             key: key.clone(),
             value: PropertyValue::Curve {
-                abscissa: "T".into(),
-                abscissa_dims: Temperature::DIMS,
-                knots: vec![(300.0, 1.0), (900.0, 3.0)],
+                abscissa: if phase_dependent { "f" } else { "T" }.into(),
+                abscissa_dims: if phase_dependent {
+                    Dims::NONE
+                } else {
+                    Temperature::DIMS
+                },
+                knots: if phase_dependent {
+                    vec![(0.0, 1.0), (1.0, 3.0)]
+                } else {
+                    vec![(300.0, 1.0), (900.0, 3.0)]
+                },
                 dims: basis.dimensions(),
             },
-            validity: ValidityDomain::unconstrained()
-                .with("T", 300.0, 900.0)
-                .with_quantity("pressure", pressure_quantity(), 1e5, 2e5),
+            validity,
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
@@ -105,7 +126,13 @@ fn fixture(basis: ElectricalPropertyBasis) -> (MaterialOhmicNode, EquilibriumEnt
         vec![],
     )
     .unwrap();
-    let query = point(300.0, 1e5);
+    let query = if phase_dependent {
+        point(300.0, 1e5)
+            .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0)
+            .unwrap()
+    } else {
+        point(300.0, 1e5)
+    };
     let material = resolve_material_state_point(
         &card,
         &query,
@@ -115,14 +142,40 @@ fn fixture(basis: ElectricalPropertyBasis) -> (MaterialOhmicNode, EquilibriumEnt
     .unwrap();
     let original =
         ResolvedConductorState::try_from_material_with_property(material, basis, &key).unwrap();
-    let node =
-        MaterialOhmicNode::try_new(&card, original, "T", [300.0, 900.0], 0.01, 0.01).unwrap();
-    let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
-        card.content_hash(),
-        SolidLiquidPhase::Solid,
-        vec![knot(0.0, 300.0, 0.0), knot(6000.0, 900.0, 0.0)],
-    )
-    .unwrap();
+    let (node, curve) = if phase_dependent {
+        (
+            MaterialOhmicNode::try_new_with_liquid_mass_fraction(
+                &card,
+                original.with_liquid_mass_fraction_axis("f").unwrap(),
+                "T",
+                [300.0, 900.0],
+                [0.0, 1.0],
+                0.01,
+                0.01,
+            )
+            .unwrap(),
+            EquilibriumEnthalpyPhaseCurve::try_new(
+                card.content_hash(),
+                vec![
+                    knot(0.0, 300.0, 0.0),
+                    knot(3000.0, 600.0, 0.0),
+                    knot(5000.0, 600.0, 1.0),
+                    knot(8000.0, 900.0, 1.0),
+                ],
+            )
+            .unwrap(),
+        )
+    } else {
+        (
+            MaterialOhmicNode::try_new(&card, original, "T", [300.0, 900.0], 0.01, 0.01).unwrap(),
+            EquilibriumEnthalpyPhaseCurve::try_single_phase(
+                card.content_hash(),
+                SolidLiquidPhase::Solid,
+                vec![knot(0.0, 300.0, 0.0), knot(6000.0, 900.0, 0.0)],
+            )
+            .unwrap(),
+        )
+    };
     (node, curve)
 }
 
@@ -389,4 +442,146 @@ fn same_card_caloric_and_transport_sources_retain_their_fixed_conditions() {
         let transport_result = source.advance(&bath, input(&authored, 0.0, 1.0), || Ok(()));
         assert_eq!(transport_result.is_ok(), pressure == 1e5);
     }
+}
+
+#[test]
+fn g1_melting_resistance_and_drive_feedback_follow_native_latent_enthalpy() {
+    for basis in [
+        ElectricalPropertyBasis::Resistivity,
+        ElectricalPropertyBasis::Conductivity,
+    ] {
+        let (node, curve) = source_fixture(basis, true);
+        for drive in [OhmicDrive::Current(2.0), OhmicDrive::Voltage(-2.0)] {
+            assert!(PreparedIncandescentSource::try_new(&node, drive).is_err());
+            let source =
+                PreparedIncandescentSource::try_new_with_caloric_curve(&node, drive, &curve)
+                    .unwrap();
+            let proposal = input(&curve, 4000.0, 1.0);
+            let direct = matches!(
+                (basis, drive),
+                (ElectricalPropertyBasis::Resistivity, OhmicDrive::Current(_))
+                    | (
+                        ElectricalPropertyBasis::Conductivity,
+                        OhmicDrive::Voltage(_)
+                    )
+            );
+            let limit = source
+                .maximum_step_s(&environment(), proposal, || Ok(()))
+                .unwrap();
+            if direct {
+                // dT/dh=0 on this plateau, but dP/dh=0.004 W/(J/kg).
+                assert!(limit < 12.5 && limit > 12.499_999);
+            } else {
+                assert_eq!(limit, f64::INFINITY);
+            }
+            let step = source.advance(&environment(), proposal, || Ok(())).unwrap();
+            // Independently solve m*delta_h=P(h0+delta_h)*dt.
+            let delta_h = if direct {
+                8.0 / (0.1 - 0.004)
+            } else {
+                80_000.0 / (2000.0 + 4_160_000.0_f64.sqrt())
+            };
+            let expected_fraction = 0.5 + delta_h / 2000.0;
+            assert_eq!(step.thermal.state.temperature_k(), 600.0);
+            assert!((step.thermal.state.specific_enthalpy_j_kg() - 4000.0 - delta_h).abs() < 1e-8);
+            assert!((step.thermal.state.liquid_mass_fraction() - expected_fraction).abs() < 1e-11);
+            assert_eq!(
+                step.electrical.conductor.material().query().axes()["f"],
+                step.thermal.state.liquid_mass_fraction()
+            );
+            let q = 1.0 + 2.0 * expected_fraction;
+            let resistance = if basis == ElectricalPropertyBasis::Resistivity {
+                q
+            } else {
+                1.0 / q
+            };
+            assert!((step.electrical.conductor.resistance_ohm() - resistance).abs() < 1e-10);
+            assert_eq!(
+                step.thermal.additional_internal_heat_j,
+                step.electrical.joule_power_w * proposal.duration_s
+            );
+            assert!(step.thermal.endpoint.residual_j.abs() <= 1e-9);
+        }
+    }
+}
+
+#[test]
+fn g4_phase_feedback_rejects_a_different_chart_and_frozen_phase_transport() {
+    let (node, curve) = source_fixture(ElectricalPropertyBasis::Resistivity, true);
+    let source = PreparedIncandescentSource::try_new_with_caloric_curve(
+        &node,
+        OhmicDrive::Current(2.0),
+        &curve,
+    )
+    .unwrap();
+    let different_chart = EquilibriumEnthalpyPhaseCurve::try_new(
+        curve.material_card_identity(),
+        vec![
+            knot(0.0, 300.0, 0.0),
+            knot(3000.0, 600.0, 0.0),
+            knot(4000.0, 600.0, 1.0),
+            knot(7000.0, 900.0, 1.0),
+        ],
+    )
+    .unwrap();
+    assert!(
+        source
+            .advance(&environment(), input(&different_chart, 3500.0, 1.0), || Ok(
+                ()
+            ))
+            .is_err()
+    );
+    let queries = [300.0, 900.0].map(|t| {
+        point(t, 1e5)
+            .with_quantity("f", QuantitySpec::dimensional(Dims::NONE), 0.0)
+            .unwrap()
+    });
+    let mut bath = environment();
+    bath.transport = LumpedThermalTransport::from_material_card_without_radiation(
+        node.source().card(),
+        &PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
+        "T",
+        &queries,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    assert!(
+        source
+            .advance(&bath, input(&curve, 4000.0, 1.0), || Ok(()))
+            .is_err()
+    );
+    // A wholly liquid chart has a fixed f=1 even when the electrical node's
+    // original reference query was solid. Match the actual chart, not that
+    // historical reference fraction, when admitting thermal transport.
+    let liquid = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+        curve.material_card_identity(),
+        SolidLiquidPhase::Liquid,
+        vec![knot(0.0, 300.0, 1.0), knot(6000.0, 900.0, 1.0)],
+    )
+    .unwrap();
+    let source = PreparedIncandescentSource::try_new_with_caloric_curve(
+        &node,
+        OhmicDrive::Current(0.0),
+        &liquid,
+    )
+    .unwrap();
+    assert!(
+        source
+            .advance(&bath, input(&liquid, 0.0, 1.0), || Ok(()))
+            .is_err()
+    );
+    let queries = queries.map(|query| query.with("f", 1.0).unwrap());
+    bath.transport = LumpedThermalTransport::from_material_card_without_radiation(
+        node.source().card(),
+        &PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
+        "T",
+        &queries,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    assert!(
+        source
+            .advance(&bath, input(&liquid, 0.0, 1.0), || Ok(()))
+            .is_ok()
+    );
 }

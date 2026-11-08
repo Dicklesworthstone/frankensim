@@ -5,12 +5,15 @@
 //! An accepted temperature can drive fs-render thermal emission independently.
 //! Observing that light must not debit radiative cooling a second time.
 
+use fs_blake3::ContentHash;
 use fs_conduction::ConductionError;
 use fs_conduction::lumped::LumpedThermalEnvironment;
 use fs_conduction::lumped::endpoint::{DrivenLumpedEnthalpyStep, LumpedEnthalpyEndpoint};
 use fs_material::conductor::graph::MaterialOhmicNode;
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
-use fs_material::phase::UniformEnthalpyStepInput;
+use fs_material::phase::{
+    EquilibriumEnthalpyPhaseCurve, PhaseStateError, UniformEnthalpyStepInput,
+};
 use fs_thermal::enthalpy::ThermalLaw;
 
 /// One held ideal drive on an existing, continuously supported material law.
@@ -24,7 +27,16 @@ use fs_thermal::enthalpy::ThermalLaw;
 pub struct PreparedIncandescentSource<'a> {
     source: &'a MaterialOhmicNode,
     drive: OhmicDrive,
-    maximum_positive_power_slope_w_k: f64,
+    feedback: PreparedFeedback,
+}
+
+#[derive(Clone, Copy)]
+enum PreparedFeedback {
+    Temperature(f64),
+    SpecificEnthalpy {
+        curve: ContentHash,
+        maximum_positive_power_slope: f64,
+    },
 }
 
 /// Original endpoint electrical state, including its complete source receipts.
@@ -43,7 +55,7 @@ pub struct IncandescentElectricalState {
 pub struct IncandescentStep {
     /// Original caloric state and integrated storage/boundary/source balance.
     pub thermal: DrivenLumpedEnthalpyStep,
-    /// The SAME final temperature used by the implicit thermal source.
+    /// The SAME final temperature and phase used by the implicit heat source.
     pub electrical: IncandescentElectricalState,
 }
 
@@ -52,6 +64,7 @@ pub struct IncandescentStep {
 pub enum IncandescentError {
     Thermal(ConductionError),
     Electrical(ConductorError),
+    Caloric(PhaseStateError),
     Invalid(&'static str),
 }
 
@@ -60,6 +73,7 @@ impl core::fmt::Display for IncandescentError {
         match self {
             Self::Thermal(error) => write!(f, "incandescent thermal owner: {error}"),
             Self::Electrical(error) => write!(f, "incandescent electrical owner: {error}"),
+            Self::Caloric(error) => write!(f, "incandescent caloric owner: {error}"),
             Self::Invalid(what) => write!(f, "incandescent coupling: {what}"),
         }
     }
@@ -75,14 +89,19 @@ impl From<ConductorError> for IncandescentError {
         Self::Electrical(error)
     }
 }
+impl From<PhaseStateError> for IncandescentError {
+    fn from(error: PhaseStateError) -> Self {
+        Self::Caloric(error)
+    }
+}
 
 impl<'a> PreparedIncandescentSource<'a> {
     /// Retain a fixed-geometry, temperature-dependent source and signed drive.
     ///
     /// Current and voltage control retain their distinct feedback. Electrical
-    /// phase-fraction dependence and free expansion require additional tangent
-    /// bounds and are refused here; native caloric latent plateaus remain valid
-    /// when the electrical source has no independent phase coordinate.
+    /// phase dependence uses [`Self::try_new_with_caloric_curve`] instead;
+    /// native latent storage remains valid here when the electrical source has
+    /// no independent phase coordinate. Free expansion requires its own owner.
     pub fn try_new(
         source: &'a MaterialOhmicNode,
         drive: OhmicDrive,
@@ -92,7 +111,33 @@ impl<'a> PreparedIncandescentSource<'a> {
         Ok(Self {
             source,
             drive,
-            maximum_positive_power_slope_w_k,
+            feedback: PreparedFeedback::Temperature(maximum_positive_power_slope_w_k),
+        })
+    }
+
+    /// Bind electrical feedback to the original temperature/phase trajectory.
+    ///
+    /// Resistance may change as liquid mass fraction evolves at constant
+    /// melting temperature. Preparation follows every original caloric span
+    /// through the pinned electrical source, retaining source knots, surface
+    /// crossings and the original sensible Cp law. It caches a positive dP/dh
+    /// bound, including latent feedback, for this exact caloric chart and drive.
+    /// Successive steps reuse that bound; a different chart must be prepared
+    /// separately. Temperature-only electrical sources are also supported.
+    pub fn try_new_with_caloric_curve(
+        source: &'a MaterialOhmicNode,
+        drive: OhmicDrive,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+    ) -> Result<Self, IncandescentError> {
+        let maximum_positive_power_slope =
+            source.maximum_positive_joule_specific_enthalpy_slope(drive, curve)?;
+        Ok(Self {
+            source,
+            drive,
+            feedback: PreparedFeedback::SpecificEnthalpy {
+                curve: curve.identity(),
+                maximum_positive_power_slope,
+            },
         })
     }
 
@@ -125,7 +170,8 @@ impl<'a> PreparedIncandescentSource<'a> {
     }
 
     /// Advance one declared duration with resistance evaluated at the unknown
-    /// final temperature. This reuses the original bounded enthalpy bisection.
+    /// final temperature and liquid fraction. This reuses the original bounded
+    /// enthalpy bisection, including isothermal melting and solidification.
     ///
     /// `input.internal_heat_j` is an ADDITIONAL prescribed source, separate from
     /// terminal electrical work. The returned thermal report counts Joule heat
@@ -142,14 +188,18 @@ impl<'a> PreparedIncandescentSource<'a> {
     ) -> Result<IncandescentStep, IncandescentError> {
         checkpoint()?;
         let (endpoint, feedback) = self.prepare(environment, input)?;
-        let mut electrical_error = None;
+        let mut source_error = None;
         let result = endpoint.solve_with_internal_power(
             feedback,
-            |_, temperature| match self.electrical_state(temperature) {
+            |enthalpy, temperature| match self.trial_electrical_state(
+                input.curve,
+                enthalpy,
+                temperature,
+            ) {
                 Ok(sample) => Ok(sample.joule_power_w),
                 Err(error) => {
                     let what = error.to_string();
-                    electrical_error = Some(error);
+                    source_error = Some(error);
                     Err(ConductionError::ScenarioRow {
                         region: "incandescent source".to_owned(),
                         what,
@@ -159,11 +209,14 @@ impl<'a> PreparedIncandescentSource<'a> {
             },
             &mut checkpoint,
         );
-        if let Some(error) = electrical_error {
-            return Err(error.into());
+        if let Some(error) = source_error {
+            return Err(error);
         }
         let thermal = result?;
-        let electrical = self.electrical_state(thermal.state.temperature_k())?;
+        let electrical = self.electrical_state(
+            thermal.state.temperature_k(),
+            thermal.state.liquid_mass_fraction(),
+        )?;
         if electrical.joule_power_w * input.duration_s != thermal.additional_internal_heat_j {
             return Err(IncandescentError::Invalid(
                 "accepted electrical work must equal the native thermal deposition",
@@ -181,6 +234,13 @@ impl<'a> PreparedIncandescentSource<'a> {
         environment: &LumpedThermalEnvironment,
         input: UniformEnthalpyStepInput<'body>,
     ) -> Result<(LumpedEnthalpyEndpoint<'body>, f64), IncandescentError> {
+        if let PreparedFeedback::SpecificEnthalpy { curve, .. } = &self.feedback
+            && *curve != input.curve.identity()
+        {
+            return Err(IncandescentError::Invalid(
+                "prepared electrical feedback belongs to a different caloric chart",
+            ));
+        }
         let volume = self.source.length_m() * self.source.area_m2();
         if !volume.is_finite()
             || volume <= 0.0
@@ -202,18 +262,15 @@ impl<'a> PreparedIncandescentSource<'a> {
             ));
         }
         let material = self.source.source().original().material();
+        let phase_axis = self.source.liquid_mass_fraction_axis();
         // A card may contain measurements at many pressures or compositions.
         // Sharing its hash alone does not bind those physical conditions.
         // Authored charts carry no receipts and retain their declared authority.
-        for receipt in input
-            .curve
-            .source_receipts()
-            .iter()
-            .chain(environment.transport.conductivity_receipts())
-        {
+        for receipt in input.curve.source_receipts() {
             for (axis, value) in &receipt.query_point {
                 if receipt.axis_quantities.get(axis) != material.axis_quantities().get(axis)
                     || (axis != self.source.temperature_axis()
+                        && Some(axis.as_str()) != phase_axis
                         && material.state_coordinate(axis) != Some(*value))
                 {
                     return Err(IncandescentError::Invalid(
@@ -222,21 +279,53 @@ impl<'a> PreparedIncandescentSource<'a> {
                 }
             }
         }
+        let varying_phase =
+            knots[0].liquid_mass_fraction != knots[knots.len() - 1].liquid_mass_fraction;
+        for receipt in environment.transport.conductivity_receipts() {
+            for (axis, value) in &receipt.query_point {
+                let fixed_coordinate_matches = if Some(axis.as_str()) == phase_axis {
+                    !varying_phase && *value == knots[0].liquid_mass_fraction
+                } else {
+                    axis == self.source.temperature_axis()
+                        || material.state_coordinate(axis) == Some(*value)
+                };
+                if receipt.axis_quantities.get(axis) != material.axis_quantities().get(axis)
+                    || !fixed_coordinate_matches
+                {
+                    return Err(IncandescentError::Invalid(
+                        "thermal transport must share fixed conditions and cannot freeze an evolving phase coordinate",
+                    ));
+                }
+            }
+        }
         let endpoint = environment.prepare_endpoint(input)?;
         // The material thermal owner bounds its ORIGINAL Cp law, including
         // nonlinear sensible storage; latent plateaus contribute zero dT/dh.
-        let temperature_slope = input.curve.maximum_temperature_slope();
-        let slope = self.maximum_positive_power_slope_w_k;
-        let feedback = if slope == 0.0 || temperature_slope == 0.0 {
-            0.0
-        } else {
-            let direct = slope * (temperature_slope / input.mass_kg);
-            let feedback = if direct.is_finite() && direct > 0.0 {
-                direct
-            } else {
-                (slope / input.mass_kg) * temperature_slope
-            };
-            feedback.next_up()
+        let feedback = match self.feedback {
+            PreparedFeedback::SpecificEnthalpy {
+                maximum_positive_power_slope: slope,
+                ..
+            } => {
+                if slope == 0.0 {
+                    0.0
+                } else {
+                    (slope / input.mass_kg).next_up()
+                }
+            }
+            PreparedFeedback::Temperature(slope) => {
+                let temperature_slope = input.curve.maximum_temperature_slope();
+                if slope == 0.0 || temperature_slope == 0.0 {
+                    0.0
+                } else {
+                    let direct = slope * (temperature_slope / input.mass_kg);
+                    let feedback = if direct.is_finite() && direct > 0.0 {
+                        direct
+                    } else {
+                        (slope / input.mass_kg) * temperature_slope
+                    };
+                    feedback.next_up()
+                }
+            }
         };
         if !feedback.is_finite() || feedback < 0.0 {
             return Err(IncandescentError::Invalid(
@@ -246,11 +335,38 @@ impl<'a> PreparedIncandescentSource<'a> {
         Ok((endpoint, feedback))
     }
 
+    fn trial_electrical_state(
+        &self,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        enthalpy_j_kg: f64,
+        temperature_k: f64,
+    ) -> Result<IncandescentElectricalState, IncandescentError> {
+        // Reuse the native numeric chart without hashing a trial state at each
+        // bisection. The native endpoint already supplies its exact temperature.
+        let fraction = if self.source.liquid_mass_fraction_axis().is_some() {
+            curve
+                .values_at_specific_enthalpy(enthalpy_j_kg)?
+                .liquid_mass_fraction
+        } else {
+            0.0
+        };
+        Ok(self.electrical_state(temperature_k, fraction)?)
+    }
+
     fn electrical_state(
         &self,
         temperature_k: f64,
+        liquid_mass_fraction: f64,
     ) -> Result<IncandescentElectricalState, ConductorError> {
-        let conductor = self.source.resolve_at_temperature_k(temperature_k)?;
+        let conductor = if self.source.liquid_mass_fraction_axis().is_some() {
+            self.source
+                .resolve_at_temperature_and_liquid_mass_fraction(
+                    temperature_k,
+                    liquid_mass_fraction,
+                )?
+        } else {
+            self.source.resolve_at_temperature_k(temperature_k)?
+        };
         let current_a = conductor.current_a_for_drive(self.drive)?;
         let joule_power_w = conductor.joule_power_w(current_a)?;
         let voltage_v = match self.drive {
