@@ -38,6 +38,9 @@ pub mod source;
 /// Exact equal-time coordinates with original material-history reconstruction.
 pub mod coordinates;
 
+/// Exact anisotropic creep and recovery under prescribed stress ramps.
+pub mod stress_control;
+
 /// Maximum retained relaxation branches per material.
 pub const MAX_BRANCHES: usize = 256;
 const WEIGHTS: Voigt = [1.0, 1.0, 1.0, core::f64::consts::SQRT_2,

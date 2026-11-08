@@ -752,6 +752,40 @@ impl PronyRamp {
         }
         self.ramp * delta - self.decay_loss * q0
     }
+
+    /// Integral of the squared original ramp response, without multiplying by
+    /// the relaxation rate. The caller supplies the SAME nonnegative duration
+    /// and positive rate used to prepare this ramp. Infinite rate-duration
+    /// products are supported only for a held response (`delta == 0`).
+    ///
+    /// Divide the positive heat weights before squaring the amplitudes. This
+    /// retains finite creep heat when `rate * integral` would underflow.
+    pub(crate) fn squared_integral(
+        &self,
+        q0: f64,
+        delta: f64,
+        duration: f64,
+        rate: f64,
+    ) -> f64 {
+        if duration == 0.0 {
+            return 0.0;
+        }
+        let r = duration * rate;
+        let (first, second) = if r < f64::MIN_POSITIVE {
+            (duration, duration / 12.0)
+        } else if r < 0.1 {
+            (
+                duration * (self.heat_scale / r),
+                duration * (self.heat_remainder / r),
+            )
+        } else {
+            (self.heat_scale / rate, self.heat_remainder / rate)
+        };
+        let root = det::sqrt(first);
+        let a = root * q0 + (root * self.heat_shift) * delta;
+        let b = det::sqrt(second) * delta;
+        a * a + b * b
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -5630,6 +5630,25 @@ experiments, frame/unit/factor scaling, error bounds and transactional refusals.
 This is sampled calibration on an authored tensor cone: unknown directions,
 times, prehistory, uniqueness and unsampled applicability are not inferred.
 
+`visco_tensor::stress_control::PreparedTensorStressControl` binds an original
+history for exact full-tensor creep, recovery and piecewise-linear stress ramps.
+Existing strain and branch memory survive switches between strain/stress
+control. Original QR/SVD owners factor the positive compliance transform,
+retaining weak equilibrium springs without subtracting nearly equal tensors;
+rotated nontriangular Gram factors and rank-deficient branch directions remain
+physical inputs. Existing Prony ramps integrate modal memory and strain rate.
+Work and nonnegative heat are independent integrals, with heat weights applied
+before squaring to retain extremely weak representable dissipation. Local
+quadratic storage increments, original-source stress closure and conservative
+whole-path strain bounds gate the atomic history update. Preparation has
+explicit dimension/storage/work ceilings and bounded native factors; each ramp
+uses quadratic work in original memory coordinates. Five focused actual-source
+checks cover closed-form creep/recovery, an independent noncommuting tensor ODE
+ladder with work/heat, original-history switching and public material rotation,
+weak/stiff limits down to representable heat near 4e-304, and atomic refusals.
+Nonzero Kelvin viscosity, mixed stress/strain control, thermal evolution and
+certified forward-error bounds are outside this stress-control API.
+
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated
 step heat through `TensorPronyMandelStep`. The increments are returned before

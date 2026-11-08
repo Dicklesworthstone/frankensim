@@ -433,7 +433,7 @@ impl StressControlledMaxwell {
 // the ramp, so their endpoint intervals bound strain even through reversal.
 // Computing them directly for large lambda*dt retains finite creep strain and
 // work even when the mean underflows. Reuse the original Prony coefficients.
-fn modal_integrals(
+pub(crate) fn modal_integrals(
     y0: f64,
     delta: f64,
     rate: f64,
