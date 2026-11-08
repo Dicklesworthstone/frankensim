@@ -8,8 +8,8 @@
 //! This is a fixed-geometry, no-slip, incompressible laminar reduction at one
 //! uniform frozen temperature. The caller owns entrance/transition admission,
 //! pressure limits and thermal evolution. Pure cylinder rotation is provided
-//! separately by [`rotation`]; nonlinear axial and rotational profiles cannot
-//! be superposed. Eccentricity, cavitation, slip and density transport are not
+//! separately by [`rotation`], and [`helical`] resolves their coupled invariant
+//! shear. Nonlinear profiles cannot be superposed. Eccentricity, cavitation, slip and density transport are not
 //! supplied. A zero inner radius is a pipe with an axis, not a material wall.
 
 use super::pipe::{CarreauPipeControls, PreparedCarreau, RateState, integrate, product_ratio};
@@ -19,6 +19,9 @@ use fs_math::det;
 
 /// Pure circular Couette flow on the same source and concentric geometry.
 pub mod rotation;
+
+/// Coupled pressure, axial wall motion and rotation using one local viscosity.
+pub mod helical;
 
 #[cfg(test)]
 mod tests;
