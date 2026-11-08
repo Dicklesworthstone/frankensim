@@ -64,6 +64,9 @@ use crate::interface::{InterfaceFlux, ThermalInterfaces};
 use crate::material::{ConductivityModel, ElementMaterials, ProvenanceClass, TemperatureSpan};
 use crate::mesh::ConductionMesh;
 
+mod anchoring;
+pub(crate) use anchoring::require_anchored_components;
+
 mod maximum;
 pub use maximum::{LinearMaximumPolish, MaximumPhysicalGateRefusal, polish_linear_maximum};
 
@@ -712,6 +715,7 @@ pub struct ConductionSolver<'m> {
     last_system: Option<AssembledSystem>,
     stop_reason: Option<StopReason>,
     final_threshold: f64,
+    anchoring_checked: bool,
 }
 
 /// What one [`ConductionSolver::step`] did.
@@ -740,9 +744,9 @@ impl<'m> ConductionSolver<'m> {
     /// # Errors
     /// [`ConductionError::Config`] for an inadmissible configuration;
     /// [`ConductionError::SingularPureNeumann`] when neither a Dirichlet
-    /// nor a Robin row exists (the operator is singular up to a
-    /// constant, and a Krylov method would return a plausible wrong
-    /// answer rather than refuse);
+    /// nor a Robin row exists. At the first step the assembled operator also
+    /// checks that EVERY thermal component has a reservoir; finite contacts
+    /// may supply its path to another body's Dirichlet or Robin boundary.
     /// [`ConductionError::FieldLength`] for a mis-sized initial guess.
     pub fn new(
         problem: ConductionProblem<'m>,
@@ -826,6 +830,7 @@ impl<'m> ConductionSolver<'m> {
             last_system: None,
             stop_reason: None,
             final_threshold: f64::NAN,
+            anchoring_checked: false,
         })
     }
 
@@ -873,6 +878,7 @@ impl<'m> ConductionSolver<'m> {
         self.state = state;
         self.last_system = None;
         self.stop_reason = None;
+        self.anchoring_checked = false;
         Ok(provenance)
     }
 
@@ -902,7 +908,7 @@ impl<'m> ConductionSolver<'m> {
         }
     }
 
-    fn evaluate(&self, cx: &Cx<'_>) -> Result<Evaluated, ConductionError> {
+    fn evaluate(&mut self, cx: &Cx<'_>) -> Result<Evaluated, ConductionError> {
         cx.checkpoint().map_err(|_| ConductionError::Cancelled {
             stage: "nonlinear-iteration",
             at: self.state.iteration,
@@ -919,6 +925,10 @@ impl<'m> ConductionSolver<'m> {
             self.interfaces,
             self.element_materials,
         )?;
+        if !self.anchoring_checked {
+            require_anchored_components(cx, self.problem, &self.dofs, &system.operator)?;
+            self.anchoring_checked = true;
+        }
         let (a_ff, _) = reduce_matrix_and_lift(&system.operator, &self.dofs);
         let r = residual(&system, &self.dofs, &full);
         let rnorm = norm2(&r);

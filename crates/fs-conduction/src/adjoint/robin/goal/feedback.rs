@@ -89,6 +89,7 @@ impl RobinGoalLinearization {
             )
         };
         let reference_system = assemble(reference_temperature)?;
+        crate::solve::require_anchored_components(cx, problem, &dofs, &reference_system.operator)?;
         let (matrix, reference_rhs) = reduce(&reference_system, &dofs);
         let relative = true_residual(&matrix, &dofs.gather(reference_temperature), &reference_rhs)?;
         if relative >= linear.tolerance {

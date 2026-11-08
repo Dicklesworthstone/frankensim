@@ -269,6 +269,7 @@ impl<'m> ConductivityDesign<'m> {
             self.interfaces,
             self.element_materials,
         )?;
+        crate::solve::require_anchored_components(cx, self.problem, &self.dofs, &system.operator)?;
         Ok(reduce(&system, &self.dofs))
     }
 

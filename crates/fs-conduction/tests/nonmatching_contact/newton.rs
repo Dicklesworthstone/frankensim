@@ -235,6 +235,35 @@ fn check_solution(
 }
 
 #[test]
+fn a_live_contact_cannot_hide_an_unrelated_floating_body_from_newton() {
+    with_cx(|cx| {
+        for matching in [true, false] {
+            let (base, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+            let mut positions = base.positions().to_vec();
+            let offset = positions.len();
+            let mut tets = base.complex().tets.clone();
+            let (extra, points) = box_grid([1, 1, 1], [1.0; 3]);
+            tets.extend(extra.tets.into_iter().map(|tet| tet.map(|v| v + offset as u32)));
+            positions.extend(points.into_iter().map(|p| [p[0] + 4.0, p[1], p[2]]));
+            let mesh = ConductionMesh::new(TetComplex::from_tets(positions.len(), tets), positions).unwrap();
+            let bc = boundary(&mesh);
+            let card = steep_card();
+            let set = contacts(cx, &mesh, &bc, &card, split, matching);
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let mut initial = field(&mesh, split, 100.0);
+            initial[offset..].fill(315.0);
+            // The first pair is already at its exact nonlinear-contact
+            // equilibrium, and the floating third body's residual is zero.
+            let error = set.solve_steady_newton(cx, ConductionProblem {
+                mesh: &mesh, boundary: &bc, material: &material, source: &source, element_materials: None,
+            }, &initial, config()).unwrap_err();
+            assert!(matches!(error, ConductionError::SingularPureNeumann));
+        }
+    });
+}
+
+#[test]
 fn g1_coupled_newton_resolves_stiff_contact_feedback_on_both_trace_meshes() {
     with_cx(|cx| {
         for matching in [true, false] {

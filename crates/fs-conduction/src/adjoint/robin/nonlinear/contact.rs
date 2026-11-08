@@ -39,6 +39,7 @@ impl super::super::RobinResponse {
             temperature, None, Some(interfaces), problem.element_materials,
         )?;
         let residual = crate::assemble::full_residual(&system, temperature);
+        crate::solve::require_anchored_components(cx, problem, &dofs, &system.operator)?;
         for (i, &value) in residual.iter().enumerate() {
             if i % 256 == 0 { poll(cx, i)?; }
             checked(value)?;

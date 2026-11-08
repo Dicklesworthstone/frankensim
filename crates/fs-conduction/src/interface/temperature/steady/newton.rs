@@ -160,6 +160,7 @@ struct PhysicalProblem<'a, 'm, 'c, 'cx> {
     trial_refusal: RefCell<Option<ConductionError>>,
     residual_evaluations: Cell<usize>,
     jacobian_assemblies: Cell<usize>,
+    anchoring_checked: Cell<bool>,
 }
 
 fn same_field(a: &[f64], b: &[f64]) -> bool {
@@ -232,6 +233,12 @@ impl PhysicalProblem<'_, '_, '_, '_> {
             self.problem.source, &temperature, None, Some(contacts.frozen_interfaces()),
             self.problem.element_materials,
         )?;
+        if !self.anchoring_checked.get() {
+            crate::solve::require_anchored_components(
+                self.cx, self.problem, self.dofs, &system.operator,
+            )?;
+            self.anchoring_checked.set(true);
+        }
         let residual = full_residual(&system, &temperature);
         for (i, &value) in residual.iter().enumerate() {
             if i % 256 == 0 { poll(self.cx, i)?; }
@@ -459,6 +466,7 @@ impl TemperatureContacts<'_, '_> {
             physical: RefCell::new(None), tangent: RefCell::new(None),
             fatal: RefCell::new(None), trial_refusal: RefCell::new(None),
             residual_evaluations: Cell::new(0), jacobian_assemblies: Cell::new(0),
+            anchoring_checked: Cell::new(false),
         };
         let initialized = NewtonKrylovState::new(&adapter, initial, config.newton);
         if let Some(error) = adapter.fatal.borrow_mut().take() { return Err(error); }

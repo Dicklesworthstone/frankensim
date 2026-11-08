@@ -232,8 +232,8 @@ pub enum ConductionError {
     /// The problem has no free degree of freedom (every vertex is
     /// Dirichlet-pinned), so there is nothing to solve.
     NoFreeDofs,
-    /// A pure-Neumann/Robin-free problem: with no Dirichlet row and no
-    /// Robin row the steady operator is singular up to a constant.
+    /// At least one thermal component has no Dirichlet datum or represented
+    /// positive Robin coupling to fix its absolute steady temperature.
     SingularPureNeumann,
     /// A conductivity model is not admissible.
     Conductivity {
@@ -420,8 +420,9 @@ impl fmt::Display for ConductionError {
             ),
             ConductionError::SingularPureNeumann => write!(
                 f,
-                "no Dirichlet and no Robin row: the steady conduction operator is singular \
-                 (T + const is also a solution); pin a temperature or add a convective row"
+                "a thermal component has no Dirichlet datum or positive Robin coupling: \
+                 its absolute steady temperature lacks a physical datum; provide a \
+                 reservoir for each component or explicitly solve its caloric/mean constraint"
             ),
             ConductionError::Conductivity { what } => {
                 write!(f, "inadmissible conductivity model: {what}")

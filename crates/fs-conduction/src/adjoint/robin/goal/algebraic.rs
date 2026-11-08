@@ -207,6 +207,7 @@ impl<'m> LinearGoalAnalyzer<'m> {
             reference_temperature, None, interfaces, problem.element_materials,
         )?;
         let (matrix, rhs) = reduce(&system, &dofs);
+        crate::solve::require_anchored_components(cx, problem, &dofs, &system.operator)?;
         if matrix.nnz() > config.residual_limits.max_nonzeros {
             return Err(invalid("linear goal analysis exceeds its declared nonzero budget"));
         }

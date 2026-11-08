@@ -124,6 +124,7 @@ pub fn compare_discrete_goal(
         )
     };
     let reference_system = assemble(reference_temperature)?;
+    crate::solve::require_anchored_components(cx, problem, &dofs, &reference_system.operator)?;
     let (matrix, rhs) = reduce(&reference_system, &dofs);
     let primal_relative_residual =
         true_residual(&matrix, &dofs.gather(reference_temperature), &rhs)?;

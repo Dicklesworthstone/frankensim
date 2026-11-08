@@ -74,6 +74,49 @@ fn solve_case(cx:&fs_exec::Cx<'_>,mesh:&ConductionMesh,bc:&ThermalBoundary,
     solve_with_interfaces(cx,ConductionProblem{mesh,boundary:bc,material:&k,
         element_materials:None,source:&source},contact,config).unwrap()
 }
+
+#[test]
+fn one_reservoir_anchors_both_bodies_through_the_actual_contact_operator() {
+    with_cx(|cx| {
+        for matching in [true, false] {
+            let (mesh, split) = mesh(if matching { [1, 1, 1] } else { [1, 2, 3] }, 0.0);
+            let bc = ThermalBoundaryBuilder::new(&mesh)
+                .region("bath", |f| on_box_face(f.centroid[0], 0.0), ThermalBc::dirichlet(300.0).unwrap()).unwrap()
+                .region("heater", |f| on_box_face(f.centroid[0], 2.0), ThermalBc::neumann(-10.0).unwrap()).unwrap()
+                .adiabatic_remainder().finish().unwrap();
+            let (a, b) = sides(&mesh, split, 0.0);
+            let contact = if matching {
+                let pairs = ThermalInterfaces::coincident_face_pairs(&mesh).unwrap().into_iter()
+                    .map(|pair| if a.contains(&pair.side_a) { pair } else {
+                        InterfaceFacePair { side_a: pair.side_b, side_b: pair.side_a }
+                    }).collect();
+                ThermalInterfaces::new(&mesh, &bc, vec![
+                    InterfaceSurface::new("bond", pairs, resistance()).unwrap(),
+                ]).unwrap()
+            } else {
+                ThermalInterfaces::with_nonmatching(cx, &mesh, &bc, vec![], vec![declaration(a, b)]).unwrap()
+            };
+            let solution = solve_case(cx, &mesh, &bc, &contact);
+            for (i, (p, &actual)) in mesh.positions().iter().zip(&solution.temperature).enumerate() {
+                let expected = if i < split { 300.0 + p[0] } else { 301.0 + p[0] };
+                assert!((actual - expected).abs() < 1e-7, "{actual} versus {expected}");
+            }
+            let flux = contact.fluxes(&solution.temperature).unwrap();
+            assert!((flux[0].heat_rate_a_to_b_w + 10.0).abs() < 1e-7);
+            // The linear design/adjoint owner must use contact connectivity too.
+            let material = ConductivityModel::isotropic_declared(10.0).unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let design = fs_conduction::adjoint::ConductivityDesign::new(ConductionProblem {
+                mesh: &mesh, boundary: &bc, material: &material, source: &source, element_materials: None,
+            }, SolveConfig::default().linear).unwrap().with_interfaces(&contact).unwrap();
+            let designed = design.solve(cx, &vec![1.0; mesh.element_count()]).unwrap();
+            for (&actual, &expected) in designed.temperature.iter().zip(&solution.temperature) {
+                assert!((actual - expected).abs() < 1e-6);
+            }
+        }
+    });
+}
+
 #[test]
 fn unequal_trace_meshes_recover_the_exact_piecewise_linear_slab_and_contact_jump() {
     with_cx(|cx| {
