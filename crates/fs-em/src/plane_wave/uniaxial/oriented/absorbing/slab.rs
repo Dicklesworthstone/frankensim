@@ -27,12 +27,12 @@ use super::{AbsorbingCrystalField, kernel as crystal};
 use fs_material::field_storage::linear_magnetic_permeability;
 use fs_math::{c64::C64, dd::Dd, det};
 
-mod absorption;
-mod kernel;
+pub(super) mod absorption;
+pub(super) mod kernel;
 pub use absorption::AbsorbingSlabVolumeAbsorption;
 mod illumination;
 pub use illumination::{AbsorbingSlabCoherentIllumination, AbsorbingSlabIllumination};
-mod polarization;
+pub(super) mod polarization;
 pub use polarization::PreparedAbsorbingSlabPolarization;
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, ReflectionError>;

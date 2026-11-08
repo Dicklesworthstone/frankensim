@@ -711,6 +711,121 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
             .is_err()
     );
     check_absorbing_film_illumination(&slab, omega, electric);
+    check_absorbing_crystal_stack(&slab, omega, electric);
+}
+
+fn check_absorbing_crystal_stack(
+    slab: &fs_em::plane_wave::uniaxial::oriented::slab::OrientedUniaxialSlab<'_, '_>,
+    omega: f64,
+    electric: [C64; 2],
+) {
+    use fs_em::plane_wave::uniaxial::oriented::{
+        absorbing::stack::StackRegion,
+        slab::SlabRegion,
+        stack::{OrientedUniaxialStack, UniaxialStackLayer, UniaxialStackLimits},
+    };
+    let interface = slab.entrance_interface();
+    let layers = [UniaxialStackLayer::try_new(
+        interface.crystal_response(),
+        interface.optic_axis(),
+        slab.thickness_m() * 0.5,
+    )
+    .unwrap(); 2];
+    let stack = OrientedUniaxialStack::try_new(
+        interface.incident_response(),
+        slab.exit_response(),
+        &layers,
+        UniaxialStackLimits {
+            maximum_layers: 2,
+            maximum_workspace_bytes: 1 << 20,
+        },
+    )
+    .unwrap();
+    let prepared = stack
+        .prepare_absorbing_field(omega, 0.8, electric, || false)
+        .unwrap();
+    let single = slab.prepare_absorbing_field(omega, 0.8, electric).unwrap();
+    assert!(core::ptr::eq(prepared.source(), &stack));
+    assert!(core::ptr::eq(
+        prepared.source().layers()[1].crystal_response().material(),
+        interface.crystal_response().material(),
+    ));
+    close(
+        prepared.response().reflected_power_fraction,
+        single.response().reflected_power_fraction,
+    );
+    close(
+        prepared.response().transmitted_power_fraction,
+        single.response().transmitted_power_fraction,
+    );
+    for (layer, fraction) in [(0, 0.2), (1, 0.7)] {
+        let point = [0.3e-6, -0.2e-6, fraction * slab.thickness_m()];
+        let a = prepared.field_at(StackRegion::Layer(layer), point).unwrap();
+        let b = single.field_at(SlabRegion::Crystal, point).unwrap();
+        for j in 0..3 {
+            close_complex(a.field.electric_v_m[j], b.field.electric_v_m[j]);
+            close_complex(a.field.magnetic_a_m[j], b.field.magnetic_a_m[j]);
+        }
+        close(a.absorbed_power_density_w_m3, b.absorbed_power_density_w_m3);
+    }
+    let area = 0.7e-4;
+    let mut watts = 0.0;
+    for (index, layer) in layers.iter().enumerate() {
+        let volume = prepared
+            .layer_absorption(index, area, 0.0, layer.thickness_m())
+            .unwrap();
+        assert!(core::ptr::eq(volume.source(), &stack));
+        assert_eq!(volume.layer_index(), index);
+        watts += volume.absorbed_power_w();
+    }
+    close(
+        watts,
+        single
+            .slab_absorption(area, 0.0, slab.thickness_m())
+            .unwrap()
+            .absorbed_power_w(),
+    );
+
+    // The same original global axes also survive an arbitrary incidence plane.
+    let plane = [0.6, 0.8];
+    let direct = stack
+        .prepare_absorbing_field_in_plane(omega, 0.8, plane, electric, || false)
+        .unwrap();
+    let cached = stack
+        .prepare_absorbing_polarization(omega, 0.8, plane, || false)
+        .unwrap();
+    assert!(core::ptr::eq(cached.source(), &stack));
+    close(
+        cached.incident_normal_power_w_m2(electric).unwrap(),
+        direct.response().incident_normal_power_w_m2,
+    );
+    for (index, layer) in layers.iter().enumerate() {
+        close(
+            cached
+                .layer_absorbed_power_w(index, electric, area, 0.0, layer.thickness_m())
+                .unwrap(),
+            direct
+                .layer_absorption(index, area, 0.0, layer.thickness_m())
+                .unwrap()
+                .absorbed_power_w(),
+        );
+    }
+    assert!(prepared.layer_absorption(2, area, 0.0, 1e-6).is_err());
+    assert!(
+        prepared
+            .layer_absorption(0, area, 0.0, slab.thickness_m())
+            .is_err()
+    );
+    assert!(
+        stack
+            .prepare_absorbing_field(omega, 0.8, electric, || true)
+            .is_err()
+    );
+    assert!(
+        stack
+            .prepare_absorbing_field(WL_FREQUENCY_NM / 7000.0, 0.8, electric, || false)
+            .is_err()
+    );
 }
 
 // G0/G1/G3: source-bound positive factors preserve film interference, original

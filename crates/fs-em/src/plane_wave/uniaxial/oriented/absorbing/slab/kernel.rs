@@ -17,7 +17,7 @@ fn combine(waves: [Wave; 2], c: [C64; 2]) -> (Vector, Vector) {
     )
 }
 
-pub(super) fn solve(
+pub(in crate::plane_wave::uniaxial::oriented::absorbing) fn solve(
     data: Input,
     exit_index: f64,
     exit_mu: f64,

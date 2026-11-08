@@ -4,7 +4,8 @@
 //! permeability. Native Maxwell modes are matched at every parallel face.
 //! A right-to-left reflection/Schur sweep and forward field recovery use
 //! only decaying-side propagation, with O(layers) preparation and storage.
-//! No absorbing anisotropy, effective medium or causal reservoir is inferred.
+//! The absorbing extension retains these same original sources and placements;
+//! see [`super::absorbing::stack`]. No effective medium or causal reservoir is inferred.
 
 use super::{DielectricResponse, Incidence, ReflectionError, UniaxialOpticalResponse};
 use crate::plane_wave::angular_spectrum::AngularSpectrumError;
@@ -65,6 +66,7 @@ pub struct OrientedUniaxialStack<'s, 'm> {
     incident_mu: f64,
     exit_mu: f64,
     thickness_m: f64,
+    limits: UniaxialStackLimits,
 }
 
 impl<'s, 'm> OrientedUniaxialStack<'s, 'm> {
@@ -91,13 +93,19 @@ impl<'s, 'm> OrientedUniaxialStack<'s, 'm> {
             incident, exit, layers,
             incident_mu: linear_magnetic_permeability(incident.material()).map_err(ReflectionError::from)?,
             exit_mu: linear_magnetic_permeability(exit.material()).map_err(ReflectionError::from)?,
-            thickness_m: depth,
+            thickness_m: depth, limits,
         })
     }
     pub const fn incident_response(&self) -> DielectricResponse<'m> { self.incident }
     pub const fn exit_response(&self) -> DielectricResponse<'m> { self.exit }
     pub const fn layers(&self) -> &'s [UniaxialStackLayer<'m>] { self.layers }
     pub const fn thickness_m(&self) -> f64 { self.thickness_m }
+
+    pub(super) const fn preparation_limits(&self) -> UniaxialStackLimits { self.limits }
+
+    pub(super) const fn exterior_permeabilities_h_m(&self) -> [f64; 2] {
+        [self.incident_mu, self.exit_mu]
+    }
 
     /// Source-supported positive frequency and original complex tangential
     /// Ex/Ey [V/m]. All internal reflections and polarization conversion remain

@@ -235,7 +235,11 @@ fn combine_responses(
     Ok(response)
 }
 
-fn combine(a: Vector, b: Vector, coefficients: [C64; 2]) -> Result<Vector> {
+pub(in crate::plane_wave::uniaxial::oriented::absorbing) fn combine(
+    a: Vector,
+    b: Vector,
+    coefficients: [C64; 2],
+) -> Result<Vector> {
     let product = |x: C64, y: C64| {
         let [xr, xi, yr, yi] = [x.re, x.im, y.re, y.im].map(Dd::from_f64);
         [xr * yr - xi * yi, xr * yi + xi * yr]

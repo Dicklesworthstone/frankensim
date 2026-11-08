@@ -16,7 +16,8 @@ use super::super::kernel::{
     slab_volume_m3,
 };
 use super::{
-    AbsorbingSlabResponse, OrientedUniaxialSlab, PreparedAbsorbingSlabField, ReflectionError,
+    AbsorbingSlabResponse, AbsorbingSlabWave, OrientedUniaxialSlab, PreparedAbsorbingSlabField,
+    ReflectionError,
 };
 use fs_math::{c64::C64, dd::Dd, decay, det};
 
@@ -113,16 +114,52 @@ pub(super) fn integrated_heat(
     end: f64,
 ) -> Result<f64> {
     admit_volume(response, area, start, end)?;
-    if response.loss_f_m == [0.0; 2] {
+    integrated_layer_heat(
+        LayerWaves {
+            thickness_m: response.thickness_m,
+            omega: response.omega,
+            axis: response.axis,
+            loss_f_m: response.loss_f_m,
+            forward: &response.forward,
+            backward: &response.backward,
+        },
+        area,
+        start,
+        end,
+    )
+}
+
+/// Shared physical layer view: all four waves retain their two face anchors.
+/// A stack layer and a finite film use exactly the same tensor-work integral.
+pub(in crate::plane_wave::uniaxial::oriented::absorbing) struct LayerWaves<'a> {
+    pub thickness_m: f64,
+    pub omega: f64,
+    pub axis: [f64; 3],
+    pub loss_f_m: [f64; 2],
+    pub forward: &'a [AbsorbingSlabWave; 2],
+    pub backward: &'a [AbsorbingSlabWave; 2],
+}
+
+pub(in crate::plane_wave::uniaxial::oriented::absorbing) fn integrated_layer_heat(
+    layer: LayerWaves<'_>,
+    area: f64,
+    start: f64,
+    end: f64,
+) -> Result<f64> {
+    slab_volume_m3(area, start, end)?;
+    if end > layer.thickness_m {
+        return Err("absorbing control volume extends beyond the original layer");
+    }
+    if layer.loss_f_m == [0.0; 2] {
         return Ok(0.0);
     }
     let start = Dd::from_f64(start);
     let end = Dd::from_f64(end);
     let waves = [
-        response.forward[0],
-        response.forward[1],
-        response.backward[0],
-        response.backward[1],
+        layer.forward[0],
+        layer.forward[1],
+        layer.backward[0],
+        layer.backward[1],
     ];
     let geometry: [Geometry; 4] = core::array::from_fn(|m| {
         let orientation = if m < 2 { 1.0 } else { -1.0 };
@@ -131,7 +168,7 @@ pub(super) fn integrated_heat(
             anchor: if m < 2 {
                 Dd::ZERO
             } else {
-                Dd::from_f64(response.thickness_m)
+                Dd::from_f64(layer.thickness_m)
             },
             orientation,
             alpha: -orientation * waves[m].normal_wavenumber_rad_m.im,
@@ -168,7 +205,7 @@ pub(super) fn integrated_heat(
             }
         }
     }
-    let axis = response.axis.map(Dd::from_f64);
+    let axis = layer.axis.map(Dd::from_f64);
     let norm = axis.iter().fold(Dd::ZERO, |s, &v| s + v * v);
     let projected = electric.map(|e| {
         let parallel = [0, 1].map(|part| (0..3).fold(Dd::ZERO, |s, j| s + e[j][part] * axis[j]));
@@ -183,9 +220,9 @@ pub(super) fn integrated_heat(
     let mut power = Dd::ZERO;
     for channel in 0..4 {
         let loss = if channel == 3 {
-            response.loss_f_m[1] / norm.to_f64()
+            layer.loss_f_m[1] / norm.to_f64()
         } else {
-            response.loss_f_m[0]
+            layer.loss_f_m[0]
         };
         if loss == 0.0 {
             continue;
@@ -220,7 +257,7 @@ pub(super) fn integrated_heat(
                 integral,
                 length,
                 loss,
-                response.omega,
+                layer.omega,
                 area,
                 field_scale,
             ));

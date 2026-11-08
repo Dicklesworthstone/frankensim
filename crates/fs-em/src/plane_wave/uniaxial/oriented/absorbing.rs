@@ -9,9 +9,10 @@
 //!
 //! The half-space owner is homogeneous, reciprocal and uniaxial with a
 //! lossless incident port. The slab module adds a finite absorbing film with
-//! a second lossless port. Neither supplies gain, an absorbing incident port,
-//! a multilayer stack, a biaxial/Jordan model, a causal pulse reservoir or a
-//! thermal time step.
+//! a second lossless port; the stack module extends the original multilayer
+//! owner with independent lossy crystal axes. These paths do not supply gain,
+//! absorbing exterior ports, biaxial/Jordan modes, causal pulse reservoirs or
+//! thermal time steps.
 //! Spatial energy-flow reference: Passler, Jeannin and Paarmann (2020),
 //! <https://arxiv.org/abs/2002.03832>. The time/phase signs here remain the
 //! native exp(+i omega t-i k.r) convention.
@@ -20,6 +21,8 @@ use super::{C0, Incidence, OrientedUniaxialInterface, ReflectionError, Result, p
 use fs_math::{c64::C64, det};
 
 pub mod slab;
+/// Coherent absorbing multilayers and exact layer-resolved dielectric work.
+pub mod stack;
 
 mod kernel;
 pub use kernel::{
