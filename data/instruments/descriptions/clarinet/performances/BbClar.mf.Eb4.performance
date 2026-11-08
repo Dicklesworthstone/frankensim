@@ -2,7 +2,7 @@ frankensim-reed-performance-v1
 audio 48000 127200 20
 ambient pack breath-woodwind-exhaled-coltman1966-nederveen1969
 reed 0.0004 0.013 3464 3.8050000000000004e-06 659.0260000000001 0.11397702454754344 6.263e6 2.0 1.6e-4 0.0
-slit_length 0.025
+slit_length 0.0014
 tongue_contact 0.000026 0.0000761 0.2 0.15 0.005
 baffled_outlet 0 0 0.5 32 128 4800
 exterior 293.15 101325 0
@@ -140,6 +140,7 @@ gas_station 0.6551623859 294.96431630278 0.7607164577167036 0.1606450602903206 0
 open_hole_interaction tmmi 2
 tonehole_lengths lefebvre-scavone-2012
 constriction_noise 7 0.006935
+open_hole_orifice 10
 compile_limits 600000 8192
 schedule
 frankensim-gesture-schedule-v1
