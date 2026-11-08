@@ -8418,3 +8418,66 @@ zero-load equivalence and atomic invalid-load/cancellation/reversal refusal.
 `BatteryRotorStep` retains the original source and mechanical records, checks current and work continuity, and closes electrical/magnetic/kinetic changes plus original C/K/gyroscopic work, electrical/winding heat and auxiliary export against external generalized-load work. The nine heat channels are the original eight battery/converter channels followed by winding Joule heat. Active damping and nonsymmetric stiffness retain signed operator work and are not relabeled heat. The direct winding connection requires unit empirical bridge efficiencies because converter losses already have physical owners.
 
 Voltage curtailment, current/domain/power admission failure, finite SOC exhaustion, nonlinear refusal or cancellation publishes neither state. Motor power limits apply to the original held-discrete-voltage/linear-current reconstruction at the winding terminal, not total battery demand including converter loss and auxiliary demand or unresolved bus peaks. Original averaged electrical and constant-operating-point mechanical limits remain: no switching/protection events, thermal drift, stability/uniqueness or arbitrary-step accuracy claim. `rotordynamics_battery_drive` covers independent full physical equations and work, analytic mechanical regeneration into chemistry, and transactional refusal/retry.
+
+## Coupled normal and torsional JKR motion on native bodies
+
+`tangential_friction::adhesive::jkr_torsional::PreparedRigidJkrTorsionalPair`
+connects the original radius-relaxed mode-I/III Griffith potential to actual
+paired rigid bodies. Its two coordinates are normal approach in metres and
+retained elastic twist in radians. The complete normal-point-force/free-couple
+Gram matrix includes the off-diagonal response from actual lever arms and full
+inertia tensors; no independent effective masses or changing-radius coordinate
+substitution replaces it. Normal force, torsional moment and attached area
+therefore evolve together through the original work-consistent source path.
+
+Collinear original material markers and an immutable normal datum authenticate
+approach. Reactions act at one common midpoint plane so internal force and
+orbital-plus-spin angular impulse cancel. Normal-axis twist is source memory
+driven by actual relative angular velocity, not an arbitrary difference of
+endpoint quaternion logarithms. Held external COM forces and body torques
+enter the same coupled solve. Contact and applied impulses are accumulated
+before each body is updated once; compensated kinetic increments and actual
+midpoint COM/angular travel audit independent external and contact work.
+
+The native checks reconcile both mixed-unit coordinate increments and rates,
+the normal marker/reaction projection, individual impulses, total linear and
+angular momentum, and kinetic-plus-original-storage change against applied
+work. Elastic release can assist body motion without producing fictitious
+heat. Relative tangential point motion and transverse relative spin are
+screened at both endpoints, which bound these affine rates throughout the
+held-effort phase. The original source admits the entire quadratic trajectory
+against its attached branch and material limits, including hidden reversals.
+
+Preparation and every failed source, cancellation, nonlinear, geometry or
+native audit leave both bodies and elastic history unpublished. A state pins
+source chronology, native bodies and properties, body indices, original frame,
+marker arms and normal datum. After normal travel, another held-pose phase
+requires a compatible geometry continuation; the normal datum is never moved
+to hide stale geometry. Sealed COM travel and body angular travel retain a
+sticky eligibility flag for commuting principal-axis drift. This flag admits
+only roundoff-level departures of each individual world angular velocity and
+world spin momentum from the original normal, independent of user audit
+tolerances. Cancelling a transverse excursion cannot erase it.
+
+`continue_axial_geometry` consumes that sealed travel into actual COM positions
+and exponential-map orientations, restricted to commuting spin about the
+original fixed normal. It independently checks world spin, total orbital-plus-
+spin angular momentum, full native kinetic storage, actual marker approach,
+and both projected rates. It rebinds the original motion owner to the actual
+new mobility while retaining the exact source coordinates, cached response,
+time and step count. No caller attitude reset, coordinate projection, impulse,
+extra time or compensating work is introduced. The original body momenta stay
+unchanged, and the continuation returns both new captured pair and retained
+state together. Noncommuting paths or unresolved orbital drift refuse.
+
+This is reversible, small-deformation, ideal full-stick I/III motion on a local
+attached branch. General noncommuting attitude paths, shear/rolling compliance,
+partial slip, calibrated mixed-mode toughness, radial snap, detached landing,
+reattachment and heat transport remain outside this owner. The focused
+`adhesive_jkr_torsional` tests exercise changing area and original source work,
+the zero-twist normal limit, an independently applied full-inertia impulse
+oracle, off-axis held preload, actual applied work, elastic energy return,
+world-rotation covariance, stale geometry and atomic unrepresented-mode and
+cancellation refusal with retry. Geometry regressions exercise repeated actual
+pose evolution with retained twist and clock, energy conservation, cancellation
+and retry, and refusal of transverse finite rotation despite loose audit gates.

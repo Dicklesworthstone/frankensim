@@ -35,6 +35,9 @@ pub mod jkr_normal_motion;
 /// Coupled full-stick JKR normal/shear recoil on the actual finite body pair.
 pub mod jkr_mixed_mode;
 
+/// Coupled radius-relaxed JKR normal/torsion on the actual finite body pair.
+pub mod jkr_torsional;
+
 /// Fixed-axis JKR rolling spring and yield on the actual finite body pair.
 pub mod rolling;
 
