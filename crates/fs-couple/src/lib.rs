@@ -161,6 +161,8 @@ pub mod incandescent;
 pub mod induction_rotor;
 /// Reciprocal three-dimensional eddy-current and finite rotor-inertia feedback.
 pub mod spatial_induction;
+/// Source-bound mean and twice-frequency induction forcing of native linear solids.
+pub mod spatial_induction_vibration;
 /// Implicit guided-body motion driven by original material Stokes reactions.
 #[cfg(feature = "experimental-stokes-motion")]
 pub mod stokes_motion;

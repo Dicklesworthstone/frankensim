@@ -6252,3 +6252,40 @@ Source support, exhaustion, thermal events, budgets and cancellation refuse
 without publishing either state. `tests/converter_enthalpy/battery.rs` covers an
 independently calculated steady power path, eight-channel calorimetry, nonlinear
 load export, temperature feedback and transactional refusal/retry.
+
+## Native structural vibration from harmonic induction forces
+
+`spatial_induction_vibration::SpatialInductionVibration` transfers the original
+harmonic induction response's consistent P1 conduction-current Lorentz forces
+to an original `TetLinearElasticProblem`. Explicit one-to-one mechanical-node
+and tetrahedron maps must match the original EM coordinates and connectivity;
+permutations are admitted, while interpolation, changed geometry and duplicate
+entities refuse. Only mapped conducting cells contribute force. Nonconducting
+structural support cells may share the mesh. Original mechanical material
+states, full consistent mass/stiffness and homogeneous stationary constraints
+remain owned by `fs-solid`; constrained forces remain observable and do no work.
+
+The existing `ExactHarmonicSolid` advances simultaneous DC and twice-frequency
+forces, preserving mean load, peak phasor phase, startup transients and resonant
+growth. With `exp(-i omega t)`, `Re(F2)` multiplies cosine and `Im(F2)` multiplies
+positive sine. Native complete force-work and optional physical-viscosity heat
+include all transient/DC/AC cross terms; they are not isolated cycle-average
+estimates. Cached phase rotations are prepared before each native transaction
+and published only after accepted motion. Refusal preserves phase, state, time
+and accounts. Joule heat is not deposited into or added to structural damping.
+
+This is an explicitly **one-way, fixed-geometry, linear forced-vibration**
+response. Its mechanical source work is not a claimed closed debit from the
+unchanged EM solve. It does not introduce motion feedback, sidebands,
+magnetostriction, impressed-winding forces, magnetic interface traction,
+moving-support reactions, deformation updates or acoustic radiation. The
+existing two-tone exponential/work owner admits **at most 32 free mechanical
+coordinates**, with declared payload/work/step budgets. No modes are truncated
+and no sparse industrial-mesh scalability is claimed.
+
+`tests/spatial_induction_vibration.rs` defines independent instantaneous
+`J(t) cross B(t)` tetrahedral quadrature, damped scalar motion and work/heat
+integrals, exact twice-frequency resonance and interval subdivision, original
+mesh permutations, correspondence/support/resource refusals and atomic phase
+rollback. These are synthetic implementation references, not experimental
+validation of an electromagnetic device or its emitted sound.
