@@ -286,7 +286,7 @@ impl Response {
         Ok(response)
     }
 
-    fn retain(self, value: Dd) -> Dd {
+    pub(in crate::lie) fn retain(self, value: Dd) -> Dd {
         let factor = dd(self.retention_quarter);
         (((value * factor) * factor) * factor) * factor
     }

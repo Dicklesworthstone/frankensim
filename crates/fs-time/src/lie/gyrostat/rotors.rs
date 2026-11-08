@@ -400,6 +400,26 @@ impl<const N: usize> RotorBank<N> {
         external_impulse_body: Vec3,
         known_zero_recoil: [bool; 3],
     ) -> Result<RotorImpulse<N>, LieStepError> {
+        self.apply_impulse_with_axial_endpoints(
+            state,
+            shaft_impulse_nms,
+            external_impulse_body,
+            known_zero_recoil,
+            None,
+        )
+    }
+
+    // An exact constitutive owner may retain an endpoint that old + impulse
+    // cannot resolve after strong decay. The original requested-impulse,
+    // carrier-recoil and physical-work checks still admit the accepted state.
+    fn apply_impulse_with_axial_endpoints(
+        &self,
+        state: &RotorState<N>,
+        shaft_impulse_nms: [f64; N],
+        external_impulse_body: Vec3,
+        known_zero_recoil: [bool; 3],
+        axial_endpoints: Option<[f64; N]>,
+    ) -> Result<RotorImpulse<N>, LieStepError> {
         self.admit_state(state)?;
         let before_carrier = self.carrier_momentum(state)?;
         let before_omega = self.inertia.velocity(before_carrier)?;
@@ -423,6 +443,9 @@ impl<const N: usize> RotorBank<N> {
                 shaft_impulse_nms[i],
                 "rotor axial impulse",
             )?;
+            if let Some(endpoints) = &axial_endpoints {
+                after.axial_momentum_nms[i] = scalar(endpoints[i], "rotor axial endpoint")?;
+            }
             actual[i] = after.axial_momentum_nms[i] - state.axial_momentum_nms[i];
         }
         let after_carrier = self.carrier_momentum(&after)?;

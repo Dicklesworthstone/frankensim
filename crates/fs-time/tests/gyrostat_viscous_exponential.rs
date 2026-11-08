@@ -118,6 +118,85 @@ fn stiff_and_weak_scalar_decay_integrate_original_phase_and_heat() {
 }
 
 #[test]
+fn balanced_counterrotation_retains_stiff_decay_phase_and_heat() {
+    // With I=2 and J=1, total momentum zero gives carrier omega=-p/2
+    // and relative shaft rate=1.5*p. Neither final momentum is hidden by
+    // a finite common-spin equilibrium: p(t)=p(0)*exp(-1.5*d*t).
+    let bank = coaxial::<1>();
+    let time = 0.8;
+    for relaxation in [20.0_f64, 80.0, 200.0, 700.0] {
+        let damping = relaxation / (1.5 * time);
+        let prepared = bank.viscous_exponential_stepper([damping], time).unwrap();
+        for sign in [-1.0, 1.0] {
+            let initial = bank
+                .state_from_velocities(
+                    So3::identity(),
+                    Vec3::new(0.0, 0.0, -sign),
+                    [3.0 * sign],
+                    [0.0],
+                )
+                .unwrap();
+            assert_eq!(initial.total_momentum_body, Vec3::default());
+            let step = prepared.step(&initial, [0.0], zero()).unwrap();
+            let expected = sign * 2.0 * (-relaxation).exp();
+            close(
+                step.state_after.axial_momentum_nms[0],
+                expected,
+                expected.abs() * 5e-13,
+            );
+            close(
+                bank.angular_velocity(&step.state_after).unwrap().z,
+                -0.5 * expected,
+                expected.abs() * 5e-13,
+            );
+            close(
+                step.state_after.relative_angle_rad[0],
+                sign * 3.0 * time * -(-relaxation).exp_m1() / relaxation,
+                3e-14,
+            );
+            close(
+                step.dissipated_energy_j,
+                3.0 * -(-2.0 * relaxation).exp_m1(),
+                8e-14,
+            );
+            close(step.work_energy_residual_j, 0.0, 8e-14);
+            assert_eq!(step.state_after.total_momentum_body, Vec3::default());
+            assert_eq!(step.angular_momentum_residual_world, Vec3::default());
+        }
+    }
+}
+
+#[test]
+fn stiff_balanced_rotor_retains_a_small_driven_terminal_momentum() {
+    let bank = coaxial::<1>();
+    let initial = bank
+        .state_from_velocities(So3::identity(), Vec3::new(0.0, 0.0, -1.0), [3.0], [0.0])
+        .unwrap();
+    let damping: f64 = 400.0;
+    let time: f64 = 0.8;
+    let drive: f64 = 1e-50;
+    let terminal = drive / (1.5 * damping);
+    let exact = terminal + (2.0 - terminal) * (-1.5 * damping * time).exp();
+    let step = bank
+        .viscous_exponential_stepper([damping], time)
+        .unwrap()
+        .step(&initial, [drive], zero())
+        .unwrap();
+    close(
+        step.state_after.axial_momentum_nms[0],
+        exact,
+        exact.abs() * 5e-13,
+    );
+    close(
+        bank.angular_velocity(&step.state_after).unwrap().z,
+        -0.5 * exact,
+        exact.abs() * 5e-13,
+    );
+    close(step.work_energy_residual_j, 0.0, 8e-14);
+    assert_eq!(step.state_after.total_momentum_body, Vec3::default());
+}
+
+#[test]
 fn held_drive_and_external_carrier_torque_have_independent_continuous_work() {
     let bank = coaxial::<1>();
     let initial = bank

@@ -34,6 +34,9 @@ use fs_math::dd::Dd;
 /// refine the interval for tumbling and spatially held torque reorientation.
 /// Aggregate physical slip heat is integrated independently; individual
 /// shaft heat and continuous shaft-transfer work are not supplied.
+/// Strongly attenuated axial momenta use retained modal endpoints before
+/// native recoil and work admission, preserving finite counterrotation tails
+/// and small driven terminal motion without altering the conserved momentum.
 #[derive(Debug, Clone)]
 pub struct ExponentialViscousRotorStepper<const N: usize> {
     bank: RotorBank<N>,
@@ -428,6 +431,8 @@ impl<const N: usize> ExponentialViscousRotorStepper<N> {
             known_rates[row] =
                 -dot_dd(self.bank.rotors[self.active[row]].axis_body, known_velocity);
         }
+        let mut initial_modes = [Dd::ZERO; N];
+        let mut source_modes = [Dd::ZERO; N];
         let mut change = [Dd::ZERO; N];
         let mut mean_change = [Dd::ZERO; N];
         let mut mean = [Dd::ZERO; N];
@@ -452,6 +457,8 @@ impl<const N: usize> ExponentialViscousRotorStepper<N> {
             let source =
                 compensated::divide(dd(self.half_s) * drive_mode, dd(self.reference_moment))?
                     + known;
+            initial_modes[mode] = initial;
+            source_modes[mode] = source;
             let r = self.response[mode];
             // Applying phi_1 to the original initial torque residual preserves
             // exact driven equilibrium, even after exponential saturation.
@@ -478,9 +485,73 @@ impl<const N: usize> ExponentialViscousRotorStepper<N> {
             }
             impulses[i] = scalar(delta.to_f64(), "exponential shaft impulse")?;
         }
-        let impulse = self
-            .bank
-            .apply_impulse(state, impulses, requested_external)?;
+        let mut endpoints = core::array::from_fn(|i| state.axial_momentum_nms[i] + impulses[i]);
+        let needs_endpoint: [bool; N] = core::array::from_fn(|i| {
+            self.damping_nms[i] > 0.0
+                && state.axial_momentum_nms[i] != 0.0
+                && endpoints[i].abs() < state.axial_momentum_nms[i].abs() / 256.0
+        });
+        let endpoints = if needs_endpoint.iter().any(|&needed| needed) {
+            // r = M p - b, M^-1 = I_ref U U^T. Reconstruct p from the
+            // retained relative modes plus b at the actual external/undamped
+            // endpoint. No subtraction of an almost complete shaft impulse
+            // is involved, and total angular momentum remains authoritative.
+            let mut background = components(next_total).map(dd);
+            for i in 0..N {
+                if self.damping_nms[i] == 0.0 {
+                    for (value, axis) in background
+                        .iter_mut()
+                        .zip(components(self.bank.rotors[i].axis_body))
+                    {
+                        *value = *value - dd(axis) * dd(endpoints[i]);
+                    }
+                }
+            }
+            let background_velocity = self.bank.inertia.velocity(as_vector(
+                background,
+                "exponential shaft endpoint background",
+            )?)?;
+            let mut offset = [Dd::ZERO; N];
+            for row in 0..k {
+                offset[row] = dot_dd(
+                    self.bank.rotors[self.active[row]].axis_body,
+                    background_velocity,
+                );
+            }
+            let mut retained_modes = [Dd::ZERO; N];
+            for mode in 0..k {
+                let r = self.response[mode];
+                retained_modes[mode] =
+                    r.retain(initial_modes[mode]) + dd(r.response) * source_modes[mode];
+                for row in 0..k {
+                    retained_modes[mode] =
+                        retained_modes[mode] + dd(self.dual_modes[row * k + mode]) * offset[row];
+                }
+            }
+            for row in 0..k {
+                let i = self.active[row];
+                if needs_endpoint[i] {
+                    let mut value = Dd::ZERO;
+                    for mode in 0..k {
+                        value = value
+                            + dd(self.reference_moment)
+                                * dd(self.dual_modes[row * k + mode])
+                                * retained_modes[mode];
+                    }
+                    endpoints[i] = scalar(value.to_f64(), "exponential shaft endpoint")?;
+                }
+            }
+            Some(endpoints)
+        } else {
+            None
+        };
+        let impulse = self.bank.apply_impulse_with_axial_endpoints(
+            state,
+            impulses,
+            requested_external,
+            [false; 3],
+            endpoints,
+        )?;
         let mut carrier_mean_change = components(external).map(|x| dd(0.5) * dd(x));
         for i in 0..N {
             for (value, axis) in carrier_mean_change
