@@ -121,10 +121,10 @@ impl From<ContactResponseError> for ConductionResponseError {
 /// cannot silently freeze a nonlinear interface or lose its selected solver policy.
 #[derive(Clone, Debug)]
 pub struct ConductionResponseSources {
-    bulk: Arc<[ScalarConductorResponse]>,
-    relaxation: f64,
-    adaptive_relaxation: Option<AdaptiveConductionRelaxation>,
-    contacts: Option<ContactResponseSources>,
+    pub(crate) bulk: Arc<[ScalarConductorResponse]>,
+    pub(crate) relaxation: f64,
+    pub(crate) adaptive_relaxation: Option<AdaptiveConductionRelaxation>,
+    pub(crate) contacts: Option<ContactResponseSources>,
 }
 impl ConductionResponseSources {
     pub fn bulk(&self) -> &[ScalarConductorResponse] {
@@ -839,9 +839,7 @@ impl PlanarConductionResponse {
             .adaptive_relaxation
             .map(AdaptiveConductionRelaxation::prepare)
             .transpose()
-            .map_err(|_| {
-                ConductionResponseError::Invalid("invalid adaptive source relaxation")
-            })?;
+            .map_err(|_| ConductionResponseError::Invalid("invalid adaptive source relaxation"))?;
         let mut operating_coordinates = Vec::new();
         let mut relaxation_queries = 0usize;
         let mut contact_queries = 0usize;

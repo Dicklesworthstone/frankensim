@@ -1,4 +1,6 @@
 //! Independent nonlinear 3D current, caloric balance and continuation oracles.
+#[path = "response/circuit.rs"]
+mod circuit;
 #[path = "response/power.rs"]
 mod power;
 use super::*;

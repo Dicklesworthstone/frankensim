@@ -1427,6 +1427,45 @@ source bundle and relaxation policy across frozen-operator transfers. Its
 report retains actual-field contact source evaluations beside bulk source
 defects and native circuit work.
 
+## Nonlinear tetrahedral resistance with native circuit storage
+
+`conduction::spatial::circuit::response::SpatialConductionResponseCircuit`
+closes the complete original bulk/contact laws at the actual native circuit
+midpoint. Every iteration rebuilds the full multi-electrode conductance block,
+then proposes the same interval from the same accepted charges and fluxes.
+Initial source admission also uses the actual authored electrical state.
+Fixed C/L, reciprocal mutual links, original source ports and ideal transformers
+retain the existing native descriptor meanings; no pair-resistor replacement
+or accepted-resistance freeze is introduced.
+
+`SpatialConductionThermalNetwork::step_response_circuit_candidate` and
+`step_response_material_circuit_candidate` place this electrical closure inside
+the original finite-enthalpy residual. Complete pinned material sources refresh
+at each proposed temperature/phase, and accepted electrical coordinates remain
+the source-query seed on continuation. Source-bound graph resistors retain
+their own distinct whole-cell receivers. Each surface contact retains both
+original temperatures, nonlinear trace ownership and explicit physical heat
+partition. Actual volume E.J, exact contact loss and native graph-resistor heat
+enter their original finite receivers once. Discarded source/thermal trials
+neither advance storage nor deposit heat; source defects are diagnostics.
+
+The linear and nonlinear 3D circuits share one native trial body. Original
+terminal-current, factored-power and local-heat gates remain active. Independent
+midpoint port work and direct C/L storage increments, including mutual terms,
+close the combined electrical/thermal account without subtracting large stored
+energy endpoints. Every constitutive iteration reserves N-1 basis solves plus
+one circuit step against the common remaining work allowance before starting
+that iteration. Source support, finite work limits, nonconvergence and
+cancellation refuse the joint candidate atomically.
+
+The bounded lane is scalar, memoryless and fixed geometry. Source-dependent
+C/L parameter work, nonlinear tensors, general nonlinear contact quadrature
+and electrically dependent caloric/heat-transport laws are not inferred.
+Manufactured regressions cover nonlinear RC with two-body thermal feedback,
+both E- and J-dependent source laws, polarity and continuation; independent
+RL discharge and a three-electrode RLC midpoint; and field/combined work-budget
+refusal without modifying accepted storage.
+
 ## Relaxed nonlinear electrical source closure
 
 `ConductivitySolve::with_relaxation(weight)` explicitly selects a finite weight

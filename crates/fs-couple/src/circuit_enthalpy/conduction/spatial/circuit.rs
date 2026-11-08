@@ -2,6 +2,9 @@
 //! Every thermal trial starts from the accepted charges/fluxes, refreshes the
 //! original field/contact sources, and recovers actual midpoint E/J and heat.
 
+/// Nonlinear bulk/contact response on the same native charge/flux timeline.
+pub mod response;
+
 use super::super::circuit::consistent;
 use super::*;
 use crate::circuit_enthalpy::material::CellResistor;
@@ -113,6 +116,37 @@ impl<C: SpatialConductorMaterial> ThermalDriver for CircuitCandidate<C> {
     }
 }
 
+struct SpatialCircuitTrial {
+    graph: CircuitGraph,
+    material_resistors: Vec<MaterialResistor>,
+    fluxes_wb: Vec<f64>,
+    charges_c: Vec<f64>,
+    time_s: f64,
+    step: SpatialConductionCircuitStep,
+}
+impl SpatialCircuitTrial {
+    fn finish<C: SpatialConductorMaterial>(
+        self,
+        original: &SpatialConductionCircuit<C>,
+        problem: SpatialConduction<C>,
+    ) -> CircuitCandidate<C> {
+        CircuitCandidate {
+            circuit: SpatialConductionCircuit {
+                problem,
+                graph: self.graph,
+                mutual: original.mutual.clone(),
+                terminals: original.terminals.clone(),
+                nodes: original.nodes.clone(),
+                fluxes_wb: self.fluxes_wb,
+                charges_c: self.charges_c,
+                time_s: self.time_s,
+                material_resistors: self.material_resistors,
+            },
+            step: self.step,
+        }
+    }
+}
+
 fn electrical(error: CircuitError) -> Error {
     CircuitEnthalpyError::Circuit(MaterialCircuitError::Circuit(error))
 }
@@ -183,6 +217,28 @@ fn prepare<'p, C: SpatialConductorMaterial>(
             (*cancel.borrow_mut())()
         })
         .map_err(field_error)?;
+    let (block, dae) = prepare_matrix(&matrix, graph, mutual, nodes, cancel)?;
+    Ok((matrix, block, dae))
+}
+
+fn prepare_matrix<C: SpatialConductorMaterial>(
+    matrix: &SpatialConductanceMatrix<'_, C>,
+    graph: &CircuitGraph,
+    mutual: &[MutualInductance],
+    nodes: &[usize],
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<(ConductanceBlock, CircuitDae), Error> {
+    check(cancel)?;
+    if nodes.len() != matrix.terminal_faces().len()
+        || nodes.len() < 2
+        || nodes.len() > graph.node_count
+        || nodes.iter().any(|&node| node >= graph.node_count)
+        || nodes.iter().copied().collect::<BTreeSet<_>>().len() != nodes.len()
+    {
+        return Err(invalid(
+            "complete unique original terminal-to-circuit-node mapping required",
+        ));
+    }
     let n = nodes.len();
     let mut grounded = Vec::with_capacity((n - 1) * (n - 1));
     for row in 1..n {
@@ -201,7 +257,7 @@ fn prepare<'p, C: SpatialConductorMaterial>(
             checkpoint,
         )
     })?;
-    Ok((matrix, block, dae))
+    Ok((block, dae))
 }
 
 impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
@@ -386,22 +442,54 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
         if trials > remaining {
             return Err(CircuitEnthalpyError::CircuitBudget);
         }
+        if finite(target_s - self.time_s)? <= 0.0 {
+            return Err(invalid("positive spatial circuit interval required"));
+        }
+        let faces = self.terminals.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let matrix = problem
+            .conductance_matrix(&faces, response, field_controls, &mut || {
+                (*cancel.borrow_mut())()
+            })
+            .map_err(field_error)?;
+        let stage = self.trial_with_matrix(
+            &problem,
+            &matrix,
+            material_resistors,
+            target_s,
+            ports,
+            field_controls,
+            controls,
+            Some(contacts),
+            cancel,
+        )?;
+        drop(matrix);
+        Ok((stage.finish(self, problem), trials))
+    }
+
+    // The linear and nonlinear owners share the exact same descriptor,
+    // midpoint work, terminal-current and independent stored-energy gates.
+    // A supplied matrix belongs to this trial's original native operator.
+    #[allow(clippy::too_many_arguments)]
+    fn trial_with_matrix(
+        &self,
+        problem: &SpatialConduction<C>,
+        matrix: &SpatialConductanceMatrix<'_, C>,
+        material_resistors: Vec<MaterialResistor>,
+        target_s: f64,
+        ports: &[f64],
+        field_controls: ConductionControls,
+        controls: MaterialCircuitSolve,
+        contacts: Option<&contacts::PreparedContacts<'_, '_>>,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<SpatialCircuitTrial, Error> {
+        check(cancel)?;
         let dt = finite(target_s - self.time_s)?;
         if dt <= 0.0 {
             return Err(invalid("positive spatial circuit interval required"));
         }
         let (graph, material_resistors) =
             lower_resistors(&self.graph, material_resistors).map_err(material_circuit)?;
-        let (matrix, block, dae) = prepare(
-            &problem,
-            &graph,
-            &self.mutual,
-            &self.terminals,
-            &self.nodes,
-            response,
-            field_controls,
-            cancel,
-        )?;
+        let (block, dae) = prepare_matrix(matrix, &graph, &self.mutual, &self.nodes, cancel)?;
         let x0 = consistent(&dae, &self.fluxes_wb, &self.charges_c, ports)?;
         check(cancel)?;
         let (native, _) = dae.step_audited(&x0, ports, dt).map_err(electrical)?;
@@ -485,7 +573,6 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
                 ));
             }
         }
-        drop(matrix);
         let spatial_heat_j = finite(dt * field.power_w)?;
         let terminal_work = finite(dt * terminal_power)?;
         if (field.power_w > 0.0 && spatial_heat_j == 0.0)
@@ -569,7 +656,15 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
                 "independent fixed-C/L storage, local heat and authored port work do not close",
             ));
         }
-        let contact_heat = contacts.heat(&field.contacts)?;
+        let contact_heat = match contacts {
+            Some(contacts) => contacts.heat(&field.contacts)?,
+            None if field.contacts.is_empty() => Vec::new(),
+            None => {
+                return Err(invalid(
+                    "contact-bearing circuits require explicit thermal receivers",
+                ));
+            }
+        };
         let spatial = SpatialConductionThermalStep {
             start_s: self.time_s,
             end_s: target_s,
@@ -579,35 +674,26 @@ impl<C: SpatialConductorMaterial> SpatialConductionCircuit<C> {
             supplied_work_j: terminal_work,
         };
         check(cancel)?;
-        Ok((
-            CircuitCandidate {
-                circuit: Self {
-                    problem,
-                    graph,
-                    mutual: self.mutual.clone(),
-                    terminals: self.terminals.clone(),
-                    nodes: self.nodes.clone(),
-                    fluxes_wb,
-                    charges_c,
-                    time_s: target_s,
-                    material_resistors,
-                },
-                step: SpatialConductionCircuitStep {
-                    native,
-                    spatial,
-                    terminal_voltage_v,
-                    terminal_current_a,
-                    resistors,
-                    heat_j,
-                    stored_before_j,
-                    stored_after_j,
-                    stored_change_j,
-                    supplied_work_j,
-                    energy_residual_j,
-                },
+        Ok(SpatialCircuitTrial {
+            graph,
+            material_resistors,
+            fluxes_wb,
+            charges_c,
+            time_s: target_s,
+            step: SpatialConductionCircuitStep {
+                native,
+                spatial,
+                terminal_voltage_v,
+                terminal_current_a,
+                resistors,
+                heat_j,
+                stored_before_j,
+                stored_after_j,
+                stored_change_j,
+                supplied_work_j,
+                energy_residual_j,
             },
-            trials,
-        ))
+        })
     }
 }
 

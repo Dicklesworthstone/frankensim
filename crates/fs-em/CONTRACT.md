@@ -1605,6 +1605,18 @@ and current-dependent bar solutions, including third-component fields, floating
 and injecting electrodes, polarity, common bias, local heat and source-work
 closure, constitutive refusal and accumulated basis-solve budgets.
 
+
+The explicit `solve_coupled_terminal_candidate` seam rebuilds each frozen
+N-electrode response inside this same bounded source closure. An external
+driver returns actual terminal voltages and its private proposal; the original
+matrix itself recovers E/J, reactions and work for constitutive admission.
+No caller-constructed field can substitute for that native recovery. Every
+N-1 basis solve is charged before the external callback runs. The continuing
+driver must separately charge its descriptor steps and keep all source trials
+on one accepted storage history. `into_frozen_parts`/`from_frozen_parts`
+transfer and readmit the same complete bulk, contact and relaxation bundle
+without exposing the retained linearization as a nonlinear material law.
+
 ## Source-dependent resistance on uniform electrical contact traces
 
 Both `PlanarConductionResponse::new_with_contact_response` and
