@@ -8,21 +8,26 @@
 //! Each mode then uses the existing exact Prony ramp. Heat integrates |x|²
 //! independently; work integrates the prescribed stress against strain rate.
 //!
-//! This is full three-dimensional small-strain stress control at fixed
-//! coefficients. Nonzero Kelvin viscosity is a different differential problem
-//! and refuses here. No plane-stress condensation, mixed control, thermal
-//! evolution or certified forward-error bound is inferred.
+//! [`PreparedTensorMixedControl`] uses the same full-memory evolution with any
+//! combination of prescribed stress and strain components. In particular,
+//! plane-stress histories retain all original three-dimensional branch memory.
+//! Coefficients are fixed. Nonzero Kelvin viscosity is a different differential
+//! problem and refuses here. No thermal evolution or certified forward-error
+//! bound is inferred.
 
 use super::{
     TensorProny, TensorPronyError, TensorPronyHistory, Voigt, apply, dot, finite, invalid, mandel,
     poll, tensor, transpose_add,
 };
+use crate::Tangent6;
 use crate::visco::{PronyRamp, stress_control::modal_integrals};
 use fs_la::factor::Cholesky;
 use fs_math::dd::Dd;
 use std::sync::Arc;
 
+mod mixed;
 mod prepare;
+pub use mixed::PreparedTensorMixedControl;
 
 type Result<T> = core::result::Result<T, TensorPronyError>;
 
@@ -51,7 +56,8 @@ impl Default for TensorStressControlBudget {
 /// One accepted stress ramp; all energies are densities in J/m³.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorStressRampStep {
-    /// Prescribed endpoint stress in tensor-shear Voigt order [Pa].
+    /// Endpoint total stress in tensor-shear Voigt order [Pa]. Under mixed
+    /// control, this includes the reactions in strain-controlled components.
     pub stress: Voigt,
     /// Resulting endpoint strain in tensor-shear Voigt order.
     pub strain: Voigt,
@@ -86,7 +92,9 @@ pub struct TensorStressRampStep {
 #[derive(Clone, Debug)]
 pub struct PreparedTensorStressControl {
     model: Arc<TensorProny>,
-    instantaneous: Cholesky,
+    instantaneous: Option<Cholesky>,
+    instantaneous_stiffness: Tangent6,
+    stress_components: [bool; 6],
     stiffness_scale: f64,
     branch_rate_roots: Vec<f64>,
     rates: Vec<f64>,
@@ -119,8 +127,25 @@ fn dd_dot(a: &Voigt, b: &Voigt) -> Dd {
 
 impl PreparedTensorStressControl {
     fn compliance(&self, value: Voigt) -> Result<Voigt> {
-        let mut answer = value.map(|v| v / self.stiffness_scale);
-        self.instantaneous.solve(&mut answer);
+        let mut compressed = [0.0; 6];
+        let mut count = 0;
+        for (axis, &controlled) in self.stress_components.iter().enumerate() {
+            if controlled {
+                compressed[count] = value[axis] / self.stiffness_scale;
+                count += 1;
+            }
+        }
+        if let Some(factor) = &self.instantaneous {
+            factor.solve(&mut compressed[..count]);
+        }
+        let mut answer = [0.0; 6];
+        count = 0;
+        for (axis, &controlled) in self.stress_components.iter().enumerate() {
+            if controlled {
+                answer[axis] = compressed[count];
+                count += 1;
+            }
+        }
         if !finite(&answer) {
             return Err(invalid("unrepresentable instantaneous compliance response"));
         }
@@ -150,6 +175,17 @@ impl PreparedTensorStressControl {
         history: &mut TensorPronyHistory,
         stress: Voigt,
         duration_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TensorStressRampStep> {
+        self.advance_controlled(history, stress, duration_s, cancelled)
+    }
+
+    #[allow(clippy::too_many_lines)] // Shared full-memory transaction for every control partition.
+    fn advance_controlled(
+        &self,
+        history: &mut TensorPronyHistory,
+        prescribed: Voigt,
+        duration_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<TensorStressRampStep> {
         poll(&mut cancelled)?;
@@ -158,11 +194,18 @@ impl PreparedTensorStressControl {
                 "stress controller and history have different material bindings",
             ));
         }
-        if !duration_s.is_finite() || duration_s < 0.0 || !finite(&stress) {
-            return Err(invalid("finite stress and nonnegative duration required"));
+        if !duration_s.is_finite() || duration_s < 0.0 || !finite(&prescribed) {
+            return Err(invalid("finite controls and nonnegative duration required"));
         }
-        let target = mandel(&stress);
-        let delta = core::array::from_fn(|i| target[i] - history.stress[i]);
+        let target = mandel(&prescribed);
+        let delta = core::array::from_fn(|i| {
+            target[i]
+                - if self.stress_components[i] {
+                    history.stress[i]
+                } else {
+                    history.strain[i]
+                }
+        });
         if !finite(&target) || !finite(&delta) {
             return Err(invalid("unrepresentable prescribed stress increment"));
         }
@@ -179,12 +222,44 @@ impl PreparedTensorStressControl {
                 strain_bounds: [history.strain(); 2],
             });
         }
-        let elastic = self.compliance(delta)?;
+        let strain_delta = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                0.0
+            } else {
+                delta[i]
+            }
+        });
+        let strain_loading = apply(&self.instantaneous_stiffness, &strain_delta);
+        let rhs = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                delta[i] - strain_loading[i]
+            } else {
+                0.0
+            }
+        });
+        let response = self.compliance(rhs)?;
+        let elastic = core::array::from_fn(|i| response[i] + strain_delta[i]);
         let mut increment = elastic.map(Dd::from_f64);
         let mut lower = elastic.map(|v| v.min(0.0));
         let mut upper = elastic.map(|v| v.max(0.0));
-        let mean_stress = core::array::from_fn(|i| 0.5 * history.stress[i] + 0.5 * target[i]);
+        let base_stress = apply(&self.instantaneous_stiffness, &elastic);
+        let mean_stress = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                0.5 * history.stress[i] + 0.5 * target[i]
+            } else {
+                history.stress[i] + 0.5 * base_stress[i]
+            }
+        });
         let mut work = dd_dot(&mean_stress, &elastic);
+        // Stress ports integrate sigma_F * epsilon_F'; strain ports integrate
+        // their evolving reaction sigma_K against the imposed epsilon_K'.
+        let work_initial = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                history.stress[i]
+            } else {
+                -delta[i]
+            }
+        });
         let mut heat = Dd::ZERO;
         let n = self.rates.len();
         let mut responses = Vec::new();
@@ -219,6 +294,9 @@ impl PreparedTensorStressControl {
                 }
                 heat = heat + Dd::from_f64(mode_heat);
                 for axis in 0..6 {
+                    if !self.stress_components[axis] {
+                        continue;
+                    }
                     let direction = self.forcing[mode][axis];
                     increment[axis] =
                         increment[axis] + Dd::from_f64(direction) * Dd::from_f64(zeroth);
@@ -229,7 +307,7 @@ impl PreparedTensorStressControl {
                     }
                 }
                 work = work
-                    + dd_dot(&history.stress, &self.forcing[mode]) * Dd::from_f64(zeroth)
+                    + dd_dot(&work_initial, &self.forcing[mode]) * Dd::from_f64(zeroth)
                     + Dd::from_f64(forcing) * Dd::from_f64(first);
                 responses.push((ramp, initial, forcing));
             }
@@ -255,7 +333,13 @@ impl PreparedTensorStressControl {
                 dq[row / 6][row % 6] = change.to_f64();
             }
         }
-        let mut strain = core::array::from_fn(|i| history.strain[i] + de[i]);
+        let mut strain = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                history.strain[i] + de[i]
+            } else {
+                target[i]
+            }
+        });
         let mut q = history.q.clone();
         for (next, change) in q.iter_mut().zip(&dq) {
             for axis in 0..6 {
@@ -263,7 +347,13 @@ impl PreparedTensorStressControl {
             }
         }
         let (calculated, scale) = self.source_stress(&strain, &q)?;
-        let residual = core::array::from_fn(|i| target[i] - calculated[i]);
+        let residual = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                target[i] - calculated[i]
+            } else {
+                0.0
+            }
+        });
         let tolerance = 8192.0 * f64::EPSILON * (n + 6) as f64;
         for axis in 0..6 {
             if residual[axis].abs() > tolerance * (scale[axis] + target[axis].abs()) {
@@ -277,7 +367,9 @@ impl PreparedTensorStressControl {
         let correction = self.compliance(residual)?;
         for axis in 0..6 {
             de[axis] += correction[axis];
-            strain[axis] = history.strain[axis] + de[axis];
+            if self.stress_components[axis] {
+                strain[axis] = history.strain[axis] + de[axis];
+            }
         }
         for (j, next) in q.iter_mut().enumerate() {
             let b = self.model.branches()[j].resolved_gram_rows(&self.model.factors[j]);
@@ -342,7 +434,9 @@ impl PreparedTensorStressControl {
         }
         let (closed, scale) = self.source_stress(&strain, &q)?;
         for axis in 0..6 {
-            if (closed[axis] - target[axis]).abs() > tolerance * (scale[axis] + target[axis].abs())
+            if self.stress_components[axis]
+                && (closed[axis] - target[axis]).abs()
+                    > tolerance * (scale[axis] + target[axis].abs())
             {
                 return Err(invalid(
                     "stress-control rounded source closure is unresolved",
@@ -350,8 +444,22 @@ impl PreparedTensorStressControl {
             }
         }
         poll(&mut cancelled)?;
+        let next_stress = core::array::from_fn(|i| {
+            if self.stress_components[i] {
+                target[i]
+            } else {
+                closed[i]
+            }
+        });
+        let physical_stress = tensor(&next_stress);
         let report = TensorStressRampStep {
-            stress,
+            stress: core::array::from_fn(|i| {
+                if self.stress_components[i] {
+                    prescribed[i]
+                } else {
+                    physical_stress[i]
+                }
+            }),
             strain: tensor(&strain),
             strain_increment: tensor(&de),
             stored_energy: stored,
@@ -362,7 +470,7 @@ impl PreparedTensorStressControl {
             strain_bounds: [tensor(&bounds[0]), tensor(&bounds[1])],
         };
         history.strain = strain;
-        history.stress = target;
+        history.stress = next_stress;
         history.q = q;
         history.stored = stored;
         history.work = cumulative_work;

@@ -5646,8 +5646,26 @@ uses quadratic work in original memory coordinates. Five focused actual-source
 checks cover closed-form creep/recovery, an independent noncommuting tensor ODE
 ladder with work/heat, original-history switching and public material rotation,
 weak/stiff limits down to representable heat near 4e-304, and atomic refusals.
-Nonzero Kelvin viscosity, mixed stress/strain control, thermal evolution and
-certified forward-error bounds are outside this stress-control API.
+Nonzero Kelvin viscosity, thermal evolution and certified forward-error bounds
+are outside this stress-control API.
+
+`visco_tensor::stress_control::PreparedTensorMixedControl` shares that same
+positive compliance preparation and exact ramp transaction for any partition
+of prescribed stress and strain components. The stress-controlled principal
+block is eliminated from the original full tensor, retaining all branch
+coordinates and noncommuting couplings. Prescribed stresses and reaction
+stresses contribute independently to port work; heat remains the integral of
+the original dashpot squares. Plane-stress histories prescribe the three
+out-of-plane stresses and retain their evolving strain and memory, rather than
+condensing each relaxation branch independently. Controllers with different
+partitions can alternate on the same history; full stress and full strain are
+included as limiting partitions. Original source closure, local energy balance,
+whole-path strain limits and transactional refusals apply to every partition.
+Five focused checks cover closed-form plane-stress creep/recovery and reaction
+work, an independent noncommuting original-equation ODE refinement ladder,
+all-stress/all-strain parity, partition switching and atomic refusals.
+Coefficients and the component partition are fixed within each prepared
+controller; no Kelvin, thermal or finite-strain extension is inferred.
 
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated

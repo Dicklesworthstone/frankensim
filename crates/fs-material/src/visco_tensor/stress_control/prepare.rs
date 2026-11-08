@@ -15,6 +15,16 @@ impl PreparedTensorStressControl {
     pub fn new(
         history: &TensorPronyHistory,
         budget: TensorStressControlBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::prepare(history, [true; 6], budget, cancelled)
+    }
+
+    #[allow(clippy::too_many_lines)] // Same positive factor for full and partially constrained creep.
+    pub(super) fn prepare(
+        history: &TensorPronyHistory,
+        stress_components: [bool; 6],
+        budget: TensorStressControlBudget,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(&mut cancelled)?;
@@ -65,21 +75,39 @@ impl PreparedTensorStressControl {
             }
         }
         let c0 = c0.map(|r| r.map(Dd::to_f64));
-        let scale = c0.iter().flatten().fold(0.0_f64, |a, b| a.max(b.abs()));
+        if c0.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(invalid("unrepresentable instantaneous tensor stiffness"));
+        }
+        let axes: Vec<_> = (0..6).filter(|&i| stress_components[i]).collect();
+        let m = axes.len();
+        let scale = if m == 0 {
+            1.0
+        } else {
+            axes.iter()
+                .flat_map(|&i| axes.iter().map(move |&j| c0[i][j]))
+                .fold(0.0_f64, |a, b| a.max(b.abs()))
+        };
         if !scale.is_finite() || scale <= 0.0 {
             return Err(invalid("unrepresentable instantaneous tensor stiffness"));
         }
         let mut flat = [0.0; 36];
-        for i in 0..6 {
-            for j in 0..6 {
-                flat[6 * i + j] = c0[i][j] / scale;
+        for (i, &axis_i) in axes.iter().enumerate() {
+            for (j, &axis_j) in axes.iter().enumerate() {
+                flat[m * i + j] = c0[axis_i][axis_j] / scale;
             }
         }
-        let instantaneous = cholesky(&flat, 6)
-            .map_err(|_| invalid("instantaneous tensor stiffness is not numerically SPD"))?;
+        let instantaneous = if m == 0 {
+            None
+        } else {
+            Some(cholesky(&flat[..m * m], m).map_err(|_| {
+                invalid("controlled instantaneous tensor stiffness is not numerically SPD")
+            })?)
+        };
         let mut prepared = Self {
             model: Arc::clone(model),
             instantaneous,
+            instantaneous_stiffness: c0,
+            stress_components,
             stiffness_scale: scale,
             branch_rate_roots: Vec::new(),
             rates: Vec::new(),
@@ -93,18 +121,17 @@ impl PreparedTensorStressControl {
         // Rotated models retain a nontriangular original Gram factor. QR it
         // directly; treating its diagonal as a Cholesky factor would change
         // the physical compliance after a material-frame rotation.
-        let eq_scale = model
-            .equilibrium_gram
+        let eq_scale = axes
             .iter()
-            .flatten()
+            .flat_map(|&i| model.equilibrium_gram.iter().map(move |row| row[i]))
             .fold(0.0_f64, |a, b| a.max(b.abs()));
         let mut eq_rows = [0.0; 36];
         for i in 0..6 {
-            for j in 0..6 {
-                eq_rows[6 * i + j] = model.equilibrium_gram[i][j] / eq_scale;
+            for (j, &axis) in axes.iter().enumerate() {
+                eq_rows[m * i + j] = model.equilibrium_gram[i][axis] / eq_scale;
             }
         }
-        let eq_factor = qr(&eq_rows, 6, 6);
+        let eq_factor = (m > 0).then(|| qr(&eq_rows[..6 * m], 6, m));
         let tau_min = model
             .branches()
             .iter()
@@ -134,10 +161,14 @@ impl PreparedTensorStressControl {
                 let row = 6 * branch_index + coordinate;
                 normalized_roots[row] = normalized;
                 rows[row] = *original_row;
-                // P = B R_eq^-1; solve R_eq^T p^T = b^T without C_eq^-1.
+                // P = B_F R_eq,FF^-1; retain original six-row equilibrium
+                // factors restricted to the stress-controlled columns F.
                 let mut p = [0.0; 6];
-                for i in 0..6 {
-                    let mut value = Dd::from_f64(original_row[i] / eq_scale);
+                for (i, &axis) in axes.iter().enumerate() {
+                    let eq_factor = eq_factor
+                        .as_ref()
+                        .ok_or_else(|| invalid("missing controlled equilibrium factor"))?;
+                    let mut value = Dd::from_f64(original_row[axis] / eq_scale);
                     for (j, &coefficient) in p.iter().take(i).enumerate() {
                         value = value - Dd::from_f64(eq_factor.r(j, i)) * Dd::from_f64(coefficient);
                     }
@@ -152,15 +183,15 @@ impl PreparedTensorStressControl {
         }
         // [I; P^T] = Q Rj gives I + P P^T = Rj^T Rj. Retain I in
         // this rectangular factor rather than adding it to a huge Gram matrix.
-        let mut augmented = zeros((n + 6) * n)?;
+        let mut augmented = zeros((n + m) * n)?;
         for row in 0..n {
             augmented[row * n + row] = 1.0 / qr_scale;
-            for axis in 0..6 {
+            for axis in 0..m {
                 augmented[(n + axis) * n + row] = compliance_rows[row][axis] / qr_scale;
             }
         }
         poll(&mut cancelled)?;
-        let factor = qr(&augmented, n + 6, n);
+        let factor = qr(&augmented, n + m, n);
         poll(&mut cancelled)?;
         let mut relaxation_factor = zeros(n * n)?;
         // W = Rj^-T sqrt(R/rate_scale), and A/rate_scale = W^T W.
@@ -240,9 +271,19 @@ impl PreparedTensorStressControl {
                             * Dd::from_f64(original_row[axis]);
                 }
             }
-            prepared
-                .forcing
-                .push(prepared.compliance(forcing.map(Dd::to_f64))?);
+            let h = forcing.map(Dd::to_f64);
+            let controlled = prepared.compliance(h)?;
+            let coupled = apply(&c0, &controlled);
+            // G_F = C0_FF^-1 H_F^T; G_K = H_K^T - C0_KF G_F.
+            // The latter includes reaction work under imposed strain, without
+            // discarding any original branch coordinates or coupling terms.
+            prepared.forcing.push(core::array::from_fn(|axis| {
+                if stress_components[axis] {
+                    controlled[axis]
+                } else {
+                    h[axis] - coupled[axis]
+                }
+            }));
         }
         prepared.modes = decomposition.v;
         poll(&mut cancelled)?;
