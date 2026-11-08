@@ -3828,6 +3828,26 @@ No perturbation of the incidence angle or artificial transmitted-power floor
 is introduced. The modal storage budget includes the additional two complex
 magnetic traces; further-plane reconstruction still requires no film solve.
 
+`PlanarAngularSpectrum::probe_fields` evaluates arbitrary exterior observations
+directly, including tilted/irregular receiver layouts and different sides or
+depths in one query. All six peak phasors and the full complex cycle-mean
+Poynting vector use the original native Maxwell modes. Its real part is signed
+energy transport; its imaginary part retains reactive evanescent flow. Probe
+coordinates observe the same periodic envelope and authored carrier as the FFT
+planes, with no interpolation, paraxial approximation or implicit detector area.
+`PreparedAngularSpectrumLayer::probe_fields` supplies the same nonuniform field
+query inside one original finite film, plus local constitutive heat from the
+complete coherent electric field. Film depth includes either boundary; normal
+D/B and tangential E/H retain their respective material continuity laws.
+Neither query reevaluates material laws or rebuilds the prepared film response.
+For P probes and A exactly nonzero incident modes, direct synthesis costs A*P
+native mode/phase evaluations, two linear source-array scans and O(P) carrier
+and observable work. No tolerance
+removes a source coefficient. Point, modal-work and numerical-storage limits
+precede allocation; storage includes the original owner's conservative workspace,
+A indices, P outputs and one six-component double-double accumulator. Cancellation
+returns no partial result. Uniform planes retain the faster existing FFT path.
+
 Modewise power integrates over the original cell: reflected outward power,
 exit-face transmitted power and physical film absorption are separate. Loss
 after propagation into an absorbing exit is computed from the actual field,

@@ -8,7 +8,13 @@
 use super::*;
 
 mod kernels;
-use kernels::{electric_heat_density, mode_absorbed_power};
+use kernels::mode_absorbed_power;
+
+// Uniform planes and nonuniform film probes share the same scaled local loss
+// kernel; small constitutive loss is applied before squaring a large field.
+pub(super) fn electric_heat_density(electric: &[C64; 3], heat_scale: f64) -> f64 {
+    kernels::electric_heat_density(electric, heat_scale)
+}
 
 /// A coherent electric/magnetic field plane and its physical absorbed heat.
 /// Heat density is cycle-mean W/m³. Its transverse integral is W/m of depth,

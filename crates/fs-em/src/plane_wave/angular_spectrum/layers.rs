@@ -232,6 +232,69 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         self.field_for_beam(self.beam, depth_m, &mut cancelled)
     }
 
+    /// Resolve complete fields and local constitutive heat at arbitrary
+    /// transverse positions and depths inside this prepared original film.
+    /// Results retain input order. The cached native TE/TM film fields supply
+    /// each mode; no material law, film solve or FFT interpolation is repeated.
+    pub fn probe_fields(
+        &self,
+        observations: &[AngularSpectrumLayerObservation],
+        limits: AngularSpectrumProbeLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<AngularSpectrumLayerProbe>, AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if observations.len() > limits.maximum_points {
+            return Err(bad("probe count exceeds its budget"));
+        }
+        let thickness = self
+            .beam
+            .source
+            .layer(self.layer_index)
+            .unwrap()
+            .thickness_m;
+        for (index, observation) in observations.iter().enumerate() {
+            if index % 256 == 0 {
+                poll(&mut cancelled)?;
+            }
+            probes::admit_position(observation.position_m)?;
+            if !observation.depth_m.is_finite()
+                || observation.depth_m < 0.0
+                || observation.depth_m > thickness
+            {
+                return Err(bad("probe depth is outside the selected layer"));
+            }
+        }
+        let active = probes::admit::<AngularSpectrumLayerProbe>(
+            self.beam,
+            observations.len(),
+            self.workspace_bytes,
+            limits,
+            &mut cancelled,
+        )?;
+        let heat_scale = det::sqrt(self.heat_coefficient);
+        let mut output = Vec::with_capacity(observations.len());
+        for observation in observations {
+            let field = probes::synthesize(
+                self.beam,
+                &active,
+                observation.position_m,
+                |index| self.mode_field_for_beam(self.beam, index, observation.depth_m),
+                &mut cancelled,
+            )?;
+            let absorbed_power_density_w_m3 =
+                absorption::electric_heat_density(&field.electric_v_per_m, heat_scale);
+            if !absorbed_power_density_w_m3.is_finite() || absorbed_power_density_w_m3 < 0.0 {
+                return Err(bad("local probe heat is unrepresentable"));
+            }
+            output.push(AngularSpectrumLayerProbe {
+                field,
+                absorbed_power_density_w_m3,
+            });
+        }
+        poll(&mut cancelled)?;
+        Ok(output)
+    }
+
     // A coherence factor changes only the incident amplitudes. The source,
     // spatial bins and their TE/TM boundary responses must remain identical.
     fn admit_beam(&self, beam: &PlanarAngularSpectrum<'s, 'm>) -> Result<(), AngularSpectrumError> {
@@ -301,36 +364,43 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         let n = self.modes.len();
         let mut electric = Vec::with_capacity(n);
         let mut magnetic = Vec::with_capacity(n);
-        for (index, (mode, prepared)) in beam.modes.iter().zip(&self.modes).enumerate() {
+        for index in 0..n {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
-            let Some(prepared) = prepared else {
-                electric.push([C64::ZERO; 3]);
-                magnetic.push([C64::ZERO; 3]);
-                continue;
-            };
-            let p = basis(mode.kx, mode.ky);
-            let amplitude = polarized(mode.incident_e, p);
-            let te = prepared[0].field(depth_m)?;
-            let tm = prepared[1].field(depth_m)?;
-            let et = [
-                te.electric_v_per_m * amplitude[0],
-                tm.electric_v_per_m * amplitude[1],
-            ];
-            let ht = [
-                te.conjugate_magnetic_a_per_m * amplitude[0],
-                tm.conjugate_magnetic_a_per_m * amplitude[1],
-            ];
-            // Reconstruct from tangential E AND H, so critical kz=0 needs no
-            // singular division. Source epsilon and mu remain independent.
-            let (e, h) =
-                fields_from_tangential(mode.kx, mode.ky, self.omega_epsilon, self.omega_mu, et, ht)
-                    .ok_or_else(|| bad("internal beam field is unrepresentable"))?;
+            let (e, h) = self.mode_field_for_beam(beam, index, depth_m)?;
             electric.push(e);
             magnetic.push(h);
         }
         Ok((electric, magnetic))
+    }
+
+    // FFT planes and nonuniform probes use precisely the same native interior
+    // field reconstruction. Their callers admit depth and source identity.
+    fn mode_field_for_beam(
+        &self,
+        beam: &PlanarAngularSpectrum<'s, 'm>,
+        index: usize,
+        depth_m: f64,
+    ) -> Result<([C64; 3], [C64; 3]), AngularSpectrumError> {
+        let mode = &beam.modes[index];
+        let Some(prepared) = &self.modes[index] else {
+            return Ok(([C64::ZERO; 3], [C64::ZERO; 3]));
+        };
+        let amplitude = polarized(mode.incident_e, basis(mode.kx, mode.ky));
+        let te = prepared[0].field(depth_m)?;
+        let tm = prepared[1].field(depth_m)?;
+        let et = [
+            te.electric_v_per_m * amplitude[0],
+            tm.electric_v_per_m * amplitude[1],
+        ];
+        let ht = [
+            te.conjugate_magnetic_a_per_m * amplitude[0],
+            tm.conjugate_magnetic_a_per_m * amplitude[1],
+        ];
+        // Tangential E AND H retain exact-critical kz=0 without division.
+        fields_from_tangential(mode.kx, mode.ky, self.omega_epsilon, self.omega_mu, et, ht)
+            .ok_or_else(|| bad("internal beam field is unrepresentable"))
     }
 
     pub(super) fn field_for_beam(

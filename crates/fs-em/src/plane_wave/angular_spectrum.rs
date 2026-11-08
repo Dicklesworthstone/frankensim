@@ -46,6 +46,12 @@ pub use aperture::{
     AngularSpectrumAperture, AngularSpectrumApertureLimits, AngularSpectrumApertureReading,
 };
 
+mod probes;
+pub use probes::{
+    AngularSpectrumLayerObservation, AngularSpectrumLayerProbe, AngularSpectrumProbeField,
+    AngularSpectrumProbeLimits,
+};
+
 mod layers;
 pub use layers::{
     AngularSpectrumLayerField, AngularSpectrumLayerLimits, PreparedAngularSpectrumLayer,
