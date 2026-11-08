@@ -18,6 +18,8 @@ pub(super) struct SharedWalls<'law> {
     links: Option<WallLinks>,
     candidate_report: Option<SharedWallReport>,
     last_report: Option<SharedWallReport>,
+    midpoint: Vec<WallThermal>,
+    first_report: Option<SharedWallReport>,
 }
 
 impl<'law> RealGasWallOperator<'law> {
@@ -129,12 +131,15 @@ impl<'law> RealGasWallOperator<'law> {
             }
             groups.push(Group::new(wall, volumes)?);
         }
+        let midpoint = allocated(groups.len(), WallThermal::Adiabatic)?;
         self.shared = Some(SharedWalls {
             groups,
             controls,
             links: None,
             candidate_report: None,
             last_report: None,
+            midpoint,
+            first_report: None,
         });
         poll(&mut cancelled)?;
         Ok(self)
@@ -163,36 +168,109 @@ fn cell(location: SharedWallGas) -> usize {
 }
 
 impl SharedWalls<'_> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare(
         &mut self,
         gas: &RealGas,
+        mesh: &Mesh1d,
         states: &mut [Conserved],
         primitives: &mut [Primitive],
         duration: Time,
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<WallCellReport, RealGasFlowError> {
+        self.prepare_stage(
+            gas, mesh, states, primitives, duration, controls, false, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_piston_first(
+        &mut self,
+        gas: &RealGas,
+        mesh: &Mesh1d,
+        states: &mut [Conserved],
+        primitives: &mut [Primitive],
+        duration: Time,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallCellReport, RealGasFlowError> {
+        let report = self.prepare_stage(
+            gas, mesh, states, primitives, duration, controls, false, cancelled,
+        )?;
+        for (state, group) in self.midpoint.iter_mut().zip(&self.groups) {
+            poll(cancelled)?;
+            *state = group.candidate;
+        }
+        self.first_report = self.candidate_report;
+        Ok(report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_piston_second(
+        &mut self,
+        gas: &RealGas,
+        mesh: &Mesh1d,
+        states: &mut [Conserved],
+        primitives: &mut [Primitive],
+        duration: Time,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallCellReport, RealGasFlowError> {
+        self.prepare_stage(
+            gas, mesh, states, primitives, duration, controls, true, cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_stage(
+        &mut self,
+        gas: &RealGas,
+        mesh: &Mesh1d,
+        states: &mut [Conserved],
+        primitives: &mut [Primitive],
+        duration: Time,
+        controls: WallControl,
+        continuation: bool,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallCellReport, RealGasFlowError> {
         controls.validate()?;
+        let first = if continuation {
+            Some(self.first_report.ok_or(RealGasFlowError::Invalid(
+                "shared wall needs its first thermal half",
+            ))?)
+        } else {
+            None
+        };
         let work = Work {
-            used: Cell::new(0),
-            contacts: Cell::new(0),
+            // Both source halves spend ONE attempt's original work allowance.
+            used: Cell::new(first.map_or(0, |r| r.source_evaluations)),
+            contacts: Cell::new(first.map_or(0, |r| r.contact_solves)),
             limit: self.controls.maximum_source_evaluations,
         };
         let mut total = HeatSum::default();
-        let mut maximum_wall = 0.0_f64;
-        let mut iterations = 0_usize;
-        for group in &mut self.groups {
+        let mut maximum_wall = first.map_or(0.0_f64, |r| r.maximum_wall_residual_j);
+        let mut iterations = first.map_or(0_usize, |r| r.wall_iterations);
+        for (index, group) in self.groups.iter_mut().enumerate() {
             poll(cancelled)?;
             for (i, port) in group.accepted.ports.iter().enumerate() {
+                poll(cancelled)?;
                 let state = states[cell(port.gas)];
                 group.initial[i] = [state.momentum, state.energy];
+                // These are private source scratch, refreshed on EVERY stage,
+                // including a stationary call following a refused piston step.
+                group.volumes[i] = mesh.volumes()[cell(port.gas)];
             }
             let original = |location, temperature| RealGasCaloric {
                 gas,
                 density: states[cell(location)].density,
                 hint: Some(temperature),
             };
-            let initial = group.accepted.storage.thermal;
+            let initial = if continuation {
+                self.midpoint[index]
+            } else {
+                group.accepted.storage.thermal
+            };
             let report = group.solve(&original, duration, controls, &work, initial, cancelled)?;
             maximum_wall = maximum_wall.max(report.energy_residual_j.abs());
             iterations =
@@ -232,10 +310,13 @@ impl SharedWalls<'_> {
         poll(cancelled)?;
         let report = total.report(duration);
         self.candidate_report = Some(SharedWallReport {
-            elapsed: duration,
-            energy_residual_j: report.source_storage_residual_j,
+            elapsed: Time::new(duration.value() + first.map_or(0.0, |r| r.elapsed.value())),
+            energy_residual_j: report.source_storage_residual_j
+                + first.map_or(0.0, |r| r.energy_residual_j),
             maximum_wall_residual_j: maximum_wall,
-            maximum_contact_residual_j: report.maximum_thermal_residual_j,
+            maximum_contact_residual_j: report
+                .maximum_thermal_residual_j
+                .max(first.map_or(0.0, |r| r.maximum_contact_residual_j)),
             source_evaluations: work.used.get(),
             wall_iterations: iterations,
             contact_solves: work.contacts.get(),

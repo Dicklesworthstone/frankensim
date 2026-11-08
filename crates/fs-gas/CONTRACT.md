@@ -8240,6 +8240,33 @@ coupling does not compose wall heat, chemistry, distributed forcing, phase
 change or additional moving masses, and does not establish a general FSI
 stability or entropy theorem.
 
+### Wall heat and finite storage coupled to piston work
+
+`RealGasEuler1d::step_with_piston_and_walls` and
+`step_with_suspended_piston_and_walls` surround the original pressure/inertia
+solve with two wall heat/drag half intervals. The first source changes gas
+pressure before the piston solve; the second uses actual transported density
+and displaced cell volume. Independent local finite walls, shared material
+wall inventories and their authored conduction links carry their first-half
+storage into the second half. Both shared-source halves spend one attempt's
+bounded source-work allowance. Original nonlinear or latent h/u wall laws and
+their pressure-work convention remain intact; reservoir heat, prescribed
+sliding-drive work, internal slip heating, piston pressure work, spring storage
+and suspension loss retain separate accounts. Damping is not implicitly
+returned as heat. Complete gas/piston/wall balances and post-heat full-interval
+relative-face CFL are checked before gas, caches, geometry, clock, piston, walls
+and reports publish together. Refusal restarts the entire interval from accepted
+inventories; accepted wall bindings follow the moved mesh. Shared-link stage
+receipts describe the second heat half, and the shared aggregate covers both.
+
+Reusable source and geometry buffers avoid field clones inside midpoint-speed
+trials. Backward-Euler heat keeps this symmetric source/pressure/source
+composition first order. Conductances, wall amounts and sliding velocities
+are explicit inputs; no changing contact area or thermal piston mass is
+inferred. The existing constant-area, impermeable-end, frozen-composition and
+homogeneous real-gas branch restrictions remain. Chemistry, distributed body
+forcing and phase flash are not composed by these entry points.
+
 ## Physical-time thermal forcing during reacting compression
 
 `material::compression::thermal::schedule` adds immutable `HeatBathSchedule`

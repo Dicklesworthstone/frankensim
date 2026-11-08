@@ -8,6 +8,8 @@ use crate::dynamics::piston::{
     PistonSuspension, SuspendedPistonStep, mechanical_report, solve, suspension, validate,
 };
 
+mod thermal;
+
 impl RealGasEuler1d {
     /// Advance the original real-gas wave field and a finite-mass right piston.
     ///
@@ -49,6 +51,7 @@ impl RealGasEuler1d {
             load,
             None,
             controls,
+            None,
             cancelled,
         )
         .map(|step| step.piston)
@@ -79,6 +82,7 @@ impl RealGasEuler1d {
             load,
             Some(spring),
             controls,
+            None,
             cancelled,
         )
     }
@@ -92,10 +96,15 @@ impl RealGasEuler1d {
         load: PistonLoad,
         spring: Option<PistonSuspension>,
         controls: PistonControl,
+        mut walls: Option<(&mut RealGasWallOperator<'_>, WallControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep, PistonError> {
         poll(&mut cancelled)?;
         validate(*piston, maximum_duration, gas_controls, load, controls)?;
+        if let Some((walls, wall_controls)) = &walls {
+            walls.validate_binding(self)?;
+            wall_controls.validate().map_err(RealGasFlowError::from)?;
+        }
         let impermeable = |boundary| {
             matches!(
                 boundary,
@@ -126,6 +135,9 @@ impl RealGasEuler1d {
         }
         if self.moving.is_none() {
             self.moving = Some(MovingWorkspace::new(&self.mesh)?);
+        }
+        if walls.is_some() && self.force_work.is_none() {
+            self.force_work = Some(forcing::Workspace::new(end)?);
         }
         let moving = self
             .moving
@@ -172,42 +184,123 @@ impl RealGasEuler1d {
             } else {
                 gas_controls.reconstruction
             };
-            let result = solve(piston.velocity_m_s(), controls, |speed| {
-                gas_trials += 1;
-                moving.prepare_velocities(&self.mesh, [0.0, speed], &mut cancelled)?;
-                let stages = moving::attempt(
-                    &self.gas,
-                    &self.states,
-                    &self.primitive,
-                    &self.mesh,
-                    self.boundaries,
-                    self.boundary_primitive,
-                    reconstruction,
-                    dt,
-                    gas_controls.cfl,
-                    &mut self.work,
-                    moving,
-                    &mut cancelled,
-                )?;
-                let after = totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
-                let gas = reported_step(before, after, stages, dt, area)?;
-                let exchange = MechanicalExchange::from(&gas);
-                let displacement = moving.mesh.positions()[end] - self.mesh.positions()[end];
-                let trial_load =
-                    spring.map_or(Ok(load), |spring| spring.load(load, speed, displacement))?;
-                mechanical_report(
-                    gas,
-                    exchange,
-                    *piston,
-                    trial_load,
-                    speed,
-                    displacement,
-                    area,
-                )
-            })
-            .and_then(|report| suspension::finish(spring, report, load, dt, controls));
+            let mut wave_failure = false;
+            let result = (|| {
+                let first = if let Some((walls, wall_controls)) = &mut walls {
+                    let source = self
+                        .force_work
+                        .as_mut()
+                        .expect("prepared gas source buffers");
+                    for (i, &state) in self.states.iter().enumerate() {
+                        poll(&mut cancelled)?;
+                        source.states[i] = state;
+                        source.primitive[i] = self.primitive[i];
+                    }
+                    Some(walls.prepare_piston_first(
+                        &mut source.states,
+                        &mut source.primitive,
+                        Time::new(0.5 * dt),
+                        *wall_controls,
+                        &mut cancelled,
+                    )?)
+                } else {
+                    None
+                };
+                let (states, primitives, transport_before) = if first.is_some() {
+                    let source = self
+                        .force_work
+                        .as_ref()
+                        .expect("prepared gas source buffers");
+                    let total = totals(&source.states, self.mesh.volumes(), &mut cancelled)?;
+                    (&source.states[..], &source.primitive[..], total)
+                } else {
+                    (&self.states[..], &self.primitive[..], before)
+                };
+                let report = solve(piston.velocity_m_s(), controls, |speed| {
+                    gas_trials += 1;
+                    moving.prepare_velocities(&self.mesh, [0.0, speed], &mut cancelled)?;
+                    let stages = moving::attempt(
+                        &self.gas,
+                        states,
+                        primitives,
+                        &self.mesh,
+                        self.boundaries,
+                        self.boundary_primitive,
+                        reconstruction,
+                        dt,
+                        gas_controls.cfl,
+                        &mut self.work,
+                        moving,
+                        &mut cancelled,
+                    )
+                    .map_err(|error| {
+                        wave_failure = !matches!(
+                            error,
+                            RealGasFlowError::Cancelled
+                                | RealGasFlowError::Numerical(Error::CflExceeded { .. })
+                        );
+                        error
+                    })?;
+                    let after =
+                        totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
+                    let gas = reported_step(transport_before, after, stages, dt, area)?;
+                    let exchange = MechanicalExchange::from(&gas);
+                    let displacement = moving.mesh.positions()[end] - self.mesh.positions()[end];
+                    let trial_load =
+                        spring.map_or(Ok(load), |spring| spring.load(load, speed, displacement))?;
+                    mechanical_report(
+                        gas,
+                        exchange,
+                        *piston,
+                        trial_load,
+                        speed,
+                        displacement,
+                        area,
+                    )
+                })?;
+                let mut step = suspension::finish(spring, report, load, dt, controls)?;
+                let thermal = if let (Some((walls, wall_controls)), Some(first)) =
+                    (&mut walls, first)
+                {
+                    let second = walls.prepare_piston_second(
+                        &mut self.work.candidate,
+                        &mut self.work.candidate_primitive,
+                        &moving.mesh,
+                        Time::new(0.5 * dt),
+                        *wall_controls,
+                        &mut cancelled,
+                    )?;
+                    for (i, p) in self.work.candidate_primitive.iter().enumerate() {
+                        poll(&mut cancelled)?;
+                        let rate =
+                            moving.relative_signal_rate(&moving.mesh, i, p.velocity, p.sound_speed);
+                        if !positive(rate) {
+                            return Err(PistonError::Invalid(
+                                "thermal piston endpoint CFL overflow",
+                            ));
+                        }
+                        cfl_gate(rate * dt, gas_controls.cfl)?;
+                        step.piston.gas.maximum_cfl = step.piston.gas.maximum_cfl.max(rate * dt);
+                    }
+                    let after =
+                        totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
+                    Some(thermal::finish(
+                        &mut step,
+                        before,
+                        after,
+                        [first, second],
+                        *piston,
+                        load,
+                        area,
+                        controls,
+                    )?)
+                } else {
+                    None
+                };
+                Ok((step, thermal))
+            })();
             match result {
-                Ok(mut step) => {
+                Ok((mut step, thermal)) => {
                     let report = &mut step.piston;
                     report.gas.halvings = halvings;
                     report.gas.first_order_retry =
@@ -219,6 +312,9 @@ impl RealGasEuler1d {
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
                     self.time += dt;
                     piston.accept(report);
+                    if let (Some((walls, _)), Some(thermal)) = (&mut walls, thermal) {
+                        walls.commit_piston(thermal);
+                    }
                     return Ok(step);
                 }
                 Err(PistonError::Cancelled) => return Err(PistonError::Cancelled),
@@ -226,9 +322,9 @@ impl RealGasEuler1d {
                     return Err(PistonError::Gas(Error::Allocation));
                 }
                 Err(error) => {
-                    if matches!(&error, PistonError::RealGas(cause)
-                        if !matches!(cause.as_ref(), RealGasFlowError::Numerical(Error::CflExceeded { .. })))
-                    {
+                    // A refused heat half or endpoint CFL needs a shorter
+                    // complete interval, not a less accurate pressure field.
+                    if wave_failure {
                         first_order_retry = true;
                     }
                     last = error;

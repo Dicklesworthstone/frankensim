@@ -13,6 +13,9 @@ use fs_thermal::enthalpy::{
     ThermalLaw, ThermalStorageBasis,
 };
 
+#[path = "thermal/piston.rs"]
+mod piston;
+
 const R: f64 = 8.314_462_618_153_24;
 
 #[path = "thermal/shared_links.rs"]

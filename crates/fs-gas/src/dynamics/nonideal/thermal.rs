@@ -57,8 +57,9 @@ pub struct RealGasWallReport {
 /// is bound explicitly with [`Self::with_shared_walls`]. Reusing a constitutive
 /// source alone does not share its finite heat inventory.
 ///
-/// Local heat is backward Euler after the accepted wave interval: the overall
-/// transport/source splitting is first order. Conductance and radial drag are
+/// Local heat is backward Euler. The stationary entry applies it after waves;
+/// the piston entry surrounds pressure work with two source halves. Both
+/// transport/source compositions are first order. Conductance and radial drag are
 /// explicitly authored engineering inputs, not inferred dense-gas correlations.
 pub struct RealGasWallOperator<'law> {
     gas: RealGas,
@@ -68,6 +69,14 @@ pub struct RealGasWallOperator<'law> {
     heat_storage: Vec<Option<MaterialWallCaloric<'law>>>,
     shared: Option<shared::SharedWalls<'law>>,
     last_report: Option<RealGasWallReport>,
+    split: Option<SplitWorkspace>,
+}
+
+// One reusable intermediate wall inventory and unpublished moved geometry.
+// The gas owner's existing source buffers retain the first thermal endpoint.
+struct SplitWorkspace {
+    contacts: Vec<WallContact>,
+    mesh: Mesh1d,
 }
 
 impl<'law> RealGasWallOperator<'law> {
@@ -116,6 +125,7 @@ impl<'law> RealGasWallOperator<'law> {
             heat_storage,
             shared: None,
             last_report: None,
+            split: None,
         })
     }
 
@@ -147,64 +157,105 @@ impl<'law> RealGasWallOperator<'law> {
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<RealGasWallReport, RealGasFlowError> {
-        let mut total = HeatSum::default();
-        for (i, state) in states.iter_mut().enumerate() {
-            poll(cancelled)?;
-            let source = self.heat_storage[i].as_ref();
-            let contact = self.contacts[i];
-            let hint = match source {
-                Some(source) => Some(source.temperature_k(contact.thermal)?),
-                None => match contact.thermal {
-                    WallThermal::Reservoir { temperature_k, .. }
-                    | WallThermal::Lumped { temperature_k, .. } => Some(temperature_k),
-                    _ => None,
-                },
-            };
-            let caloric = RealGasCaloric {
-                gas: &self.gas,
-                density: state.density,
-                hint,
-            };
-            let update = match source {
-                Some(source) => exchange_caloric_with_heat_storage(
-                    &caloric,
-                    state.momentum,
-                    state.energy,
-                    self.mesh.volumes()[i],
-                    duration,
-                    contact,
-                    source,
-                    None,
-                    controls,
-                    &mut *cancelled,
-                )?,
-                None => exchange_caloric(
-                    &caloric,
-                    state.momentum,
-                    state.energy,
-                    self.mesh.volumes()[i],
-                    duration,
-                    contact,
-                    controls,
-                    &mut *cancelled,
-                )?,
-            };
-            let candidate = Conserved {
-                density: state.density,
-                momentum: update.momentum,
-                energy: update.energy,
-            };
-            // Final pressure, transport and acoustic admission always returns
-            // to the same original density/energy owner, including unchanged cells.
-            primitives[i] = self.gas.decode(candidate, cancelled)?;
-            total.add(update.report)?;
-            self.candidate_contacts[i] = update.contact;
-            *state = candidate;
-        }
+        let mut total = HeatSum::from_report(prepare_contacts(
+            &self.gas,
+            self.mesh.volumes(),
+            &self.contacts,
+            &self.heat_storage,
+            &mut self.candidate_contacts,
+            states,
+            primitives,
+            duration,
+            controls,
+            cancelled,
+        )?);
         if let Some(shared) = &mut self.shared {
-            total.add(shared.prepare(&self.gas, states, primitives, duration, controls, cancelled)?)?;
+            total.add(shared.prepare(
+                &self.gas, &self.mesh, states, primitives, duration, controls, cancelled,
+            )?)?;
         }
-        poll(cancelled)?;
+        Ok(total.report(duration))
+    }
+
+    pub(super) fn prepare_piston_first(
+        &mut self,
+        states: &mut [Conserved],
+        primitives: &mut [Primitive],
+        duration: Time,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RealGasWallReport, RealGasFlowError> {
+        if self.split.is_none() {
+            self.split = Some(SplitWorkspace {
+                contacts: allocated(self.contacts.len(), self.contacts[0])?,
+                mesh: self.mesh.try_copy()?,
+            });
+        }
+        let split = self
+            .split
+            .as_mut()
+            .expect("prepared real-gas thermal split");
+        let mut total = HeatSum::from_report(prepare_contacts(
+            &self.gas,
+            self.mesh.volumes(),
+            &self.contacts,
+            &self.heat_storage,
+            &mut split.contacts,
+            states,
+            primitives,
+            duration,
+            controls,
+            cancelled,
+        )?);
+        if let Some(shared) = &mut self.shared {
+            total.add(shared.prepare_piston_first(
+                &self.gas, &self.mesh, states, primitives, duration, controls, cancelled,
+            )?)?;
+        }
+        Ok(total.report(duration))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_piston_second(
+        &mut self,
+        states: &mut [Conserved],
+        primitives: &mut [Primitive],
+        mesh: &Mesh1d,
+        duration: Time,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RealGasWallReport, RealGasFlowError> {
+        let split = self
+            .split
+            .as_mut()
+            .expect("prepared real-gas thermal split");
+        // The accepted binding stays unchanged until the entire piston step
+        // succeeds. This copy preserves the original GCL volumes without a
+        // second geometry integration or any per-step allocation.
+        split.mesh.reset_motion_from(mesh, cancelled)?;
+        let mut total = HeatSum::from_report(prepare_contacts(
+            &self.gas,
+            split.mesh.volumes(),
+            &split.contacts,
+            &self.heat_storage,
+            &mut self.candidate_contacts,
+            states,
+            primitives,
+            duration,
+            controls,
+            cancelled,
+        )?);
+        if let Some(shared) = &mut self.shared {
+            total.add(shared.prepare_piston_second(
+                &self.gas,
+                &split.mesh,
+                states,
+                primitives,
+                duration,
+                controls,
+                cancelled,
+            )?)?;
+        }
         Ok(total.report(duration))
     }
 
@@ -215,6 +266,86 @@ impl<'law> RealGasWallOperator<'law> {
         }
         self.last_report = Some(report);
     }
+
+    pub(super) fn commit_piston(&mut self, report: RealGasWallReport) {
+        let split = self
+            .split
+            .as_mut()
+            .expect("prepared real-gas thermal split");
+        core::mem::swap(&mut self.mesh, &mut split.mesh);
+        self.commit(report);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_contacts(
+    gas: &RealGas,
+    volumes: &[f64],
+    contacts: &[WallContact],
+    heat_storage: &[Option<MaterialWallCaloric<'_>>],
+    candidate_contacts: &mut [WallContact],
+    states: &mut [Conserved],
+    primitives: &mut [Primitive],
+    duration: Time,
+    controls: WallControl,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RealGasWallReport, RealGasFlowError> {
+    let mut total = HeatSum::default();
+    for (i, state) in states.iter_mut().enumerate() {
+        poll(cancelled)?;
+        let source = heat_storage[i].as_ref();
+        let contact = contacts[i];
+        let hint = match source {
+            Some(source) => Some(source.temperature_k(contact.thermal)?),
+            None => match contact.thermal {
+                WallThermal::Reservoir { temperature_k, .. }
+                | WallThermal::Lumped { temperature_k, .. } => Some(temperature_k),
+                _ => None,
+            },
+        };
+        let caloric = RealGasCaloric {
+            gas,
+            density: state.density,
+            hint,
+        };
+        let update = match source {
+            Some(source) => exchange_caloric_with_heat_storage(
+                &caloric,
+                state.momentum,
+                state.energy,
+                volumes[i],
+                duration,
+                contact,
+                source,
+                None,
+                controls,
+                &mut *cancelled,
+            )?,
+            None => exchange_caloric(
+                &caloric,
+                state.momentum,
+                state.energy,
+                volumes[i],
+                duration,
+                contact,
+                controls,
+                &mut *cancelled,
+            )?,
+        };
+        let candidate = Conserved {
+            density: state.density,
+            momentum: update.momentum,
+            energy: update.energy,
+        };
+        // Final pressure, transport and acoustic admission always returns
+        // to the same original density/energy owner, including unchanged cells.
+        primitives[i] = gas.decode(candidate, cancelled)?;
+        total.add(update.report)?;
+        candidate_contacts[i] = update.contact;
+        *state = candidate;
+    }
+    poll(cancelled)?;
+    Ok(total.report(duration))
 }
 
 /// Borrow the SAME density-dependent original calorics and common energy gauge.
@@ -414,6 +545,23 @@ struct HeatSum {
 }
 
 impl HeatSum {
+    fn from_report(report: RealGasWallReport) -> Self {
+        Self {
+            values: [
+                report.wall_impulse_ns,
+                report.heat_to_gas_j,
+                report.wall_storage_change_j,
+                report.external_heat_to_gas_j,
+                report.mechanical_work_to_gas_j,
+                report.drag_heating_j,
+                report.source_storage_residual_j,
+            ],
+            correction: [0.0; 7],
+            maximum_thermal_residual_j: report.maximum_thermal_residual_j,
+            maximum_iterations: report.maximum_iterations,
+        }
+    }
+
     fn add(&mut self, report: WallCellReport) -> Result<(), RealGasFlowError> {
         for (i, value) in [
             report.wall_impulse_ns,

@@ -90,6 +90,8 @@ impl RealGasWallOperator<'_> {
 
     /// Last accepted stage states and heat balances in the authored link order.
     /// A refusal or cancellation retains the preceding accepted reports.
+    /// A thermal piston interval has two source stages: these receipts describe
+    /// the second half, while `last_shared_wall_report` covers both halves.
     pub fn shared_wall_link_reports(&self) -> Option<&[SharedWallLinkReport]> {
         let shared = self.shared.as_ref()?;
         shared.last_report?;
@@ -149,3 +151,4 @@ pub(super) fn prepare(
     poll(cancelled)?;
     Ok(())
 }
+
