@@ -374,6 +374,81 @@ fn oracle(
     (tr, tf, z, current)
 }
 
+
+#[test]
+fn dormant_source_field_cannot_hide_active_physical_energy_or_joule_heat() {
+    for alpha in [-0.001, 0.001] {
+        for sign in [-1.0, 1.0] {
+            let cards = [card(false, 0.0, 1.0), card(false, 0.0, 1.0), card(false, alpha, 2.0)];
+            let curves = cards.each_ref().map(caloric);
+            let mut thermal = history(&curves, 0.0);
+            let context = point(300.0);
+            let cells = cells(&cards, &curves, &context);
+            let resistors = [resistor()];
+            let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+            let (original, active) = initial_circuit(&material, &thermal, &cards, false);
+            let dormant = ResolvedCapacitor::resolve(&cards[1], &point(300.0),
+                MaterialPropertySelection::SingleClaimOnly, 1.0, 1.0).unwrap();
+            let dormant_law = ThermalFieldStorage::capacitor(
+                &cards[1], &dormant, "T", [250.0, 500.0]).unwrap();
+            let mut graph = original.graph().clone();
+            graph.node_count = 4;
+            graph.branches.push((3, 0, Branch::Capacitor { farads: f64::NAN }));
+            let mut storage = original.storage().to_vec();
+            storage.push(MaterialStorage { branch: 3,
+                element: MaterialStorageElement::Capacitor(dormant) });
+            let mut circuit = ConductionCircuit::new_with_material_storage(
+                original.problem().clone(), graph, original.terminal().clone(),
+                original.material_resistors().to_vec(), storage, 0.0, vec![],
+                vec![sign * 4.0, 1e12], &[], field_controls(), || false).unwrap();
+            // The existing owner permits independent field coordinates in a
+            // shared whole caloric volume. This dormant constant-C field has
+            // no entropy or capacity contribution as that load cell heats.
+            let bindings = [active, FieldThermalBinding { branch: 3, cell: IDS[1],
+                law: dormant_law, maximum_abs_coordinate: 1e12 }];
+            let layout = network(&cells);
+            let (mut tr0, mut tf0, mut z0) = (300.0, 300.0, 4.0);
+            let dt = 0.2;
+            for interval in 1..=2 {
+                let next = layout.step_field_circuit_candidate(
+                    &thermal, interval as f64 * dt, &circuit, &[], &resistors, &bindings,
+                    limits(), field_controls(), config(), &[0.0; 3], || false).unwrap();
+                let (tr, tf, z, current) = oracle(false, alpha, dt, tr0, tf0, z0, 0.0);
+                let report = next.report();
+                let source = &report.coupled.source;
+                let electrical = &report.coupled.electrical;
+                let physical_change = potential(alpha, tf, z) - potential(alpha, tf0, z0);
+                // Endpoint totals really do erase the active U change. They
+                // remain diagnostics, never the enclosing conservation input.
+                assert_eq!(source.field_internal_energy_j[1] - source.field_internal_energy_j[0], 0.0);
+                near(source.field_internal_energy_change_j, physical_change);
+                near(source.fields[1].state[0].internal_energy_j,
+                    source.fields[1].state[1].internal_energy_j);
+                assert_eq!(source.fields[1].reversible_heat_j, 0.0);
+                near(electrical.spatial_current_a, sign * current);
+                near(electrical.heat_j, 3.0 * (tr - tr0));
+                near(report.coupled.deposited_joule_j, electrical.heat_j);
+                near(source.fields[0].reversible_heat_j, 2.0 * (tf - tf0));
+                near(next.thermal().temperature_k(IDS[0]).unwrap(), tr);
+                near(next.thermal().temperature_k(IDS[2]).unwrap(), tf);
+                near(source.field_internal_energy_change_j
+                    + report.coupled.thermal.stored_energy_change_j, 0.0);
+                near(report.external_heat_j, 0.0);
+                near(report.total_energy_residual_j, 0.0);
+                // Physical U includes temperature/entropy work; the frozen
+                // native coordinate increment of psi is a different quantity.
+                assert!((source.field_internal_energy_change_j - electrical.stored_change_j).abs() > 1e-5);
+                near(next.circuit().charges_c()[0], sign * z);
+                assert_eq!(next.circuit().charges_c()[1], 1e12);
+                let (accepted_thermal, accepted_circuit, _) = next.into_parts();
+                thermal = accepted_thermal;
+                circuit = accepted_circuit;
+                (tr0, tf0, z0) = (tr, tf, z);
+            }
+        }
+    }
+}
+
 #[test]
 fn g1_spatial_rc_and_rl_follow_source_temperature_and_reversible_field_energy() {
     for magnetic in [false, true] {

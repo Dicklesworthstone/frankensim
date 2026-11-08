@@ -751,6 +751,7 @@ impl ConductionThermalNetwork<'_> {
                             samples,
                             candidate.circuit.circuit.field_view(),
                             rebound.parameter_work_j(),
+                            candidate.step.circuit.stored_change_j,
                             dt,
                             coefficients.source,
                             &mut coefficients.sources_w,
@@ -764,6 +765,7 @@ impl ConductionThermalNetwork<'_> {
                         network: coefficients.source,
                         fields: Vec::new(),
                         field_internal_energy_j: [0.0; 2],
+                        field_internal_energy_change_j: 0.0,
                         reversible_heat_j: 0.0,
                     }
                 };

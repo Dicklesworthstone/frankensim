@@ -41,6 +41,7 @@ use fs_material::{
     },
     state_point::ResolvedMaterialStatePoint,
 };
+use fs_math::dd::Dd;
 use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance};
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
@@ -104,7 +105,11 @@ pub struct FieldThermalSample {
 pub struct FieldThermalSource<S = MaterialNetworkSample> {
     pub network: S,
     pub fields: Vec<FieldThermalSample>,
+    /// Absolute endpoint totals, retained for diagnostics rather than differencing.
     pub field_internal_energy_j: [f64; 2],
+    /// Physical U increment: original frozen-temperature coordinate work plus
+    /// source parameter work and entropy-temperature increments.
+    pub field_internal_energy_change_j: f64,
     pub reversible_heat_j: f64,
 }
 
@@ -503,6 +508,7 @@ impl<'a> PreparedFieldThermal<'a> {
         samples: Vec<ResolvedThermalFieldStorage>,
         endpoint: FieldCircuitView<'_>,
         native_parameter_work_j: f64,
+        frozen_storage_change_j: f64,
         dt: f64,
         network: S,
         sources_w: &mut BTreeMap<CellId, f64>,
@@ -543,8 +549,13 @@ impl<'a> PreparedFieldThermal<'a> {
             &temperatures, &mut endpoint_states, cancel)?;
         let mut fields = Vec::with_capacity(self.bindings.len());
         let mut internal = [0.0; 2];
-        let mut parameter_work = 0.0;
-        let mut reversible_heat_j = 0.0;
+        let mut parameter_work = Dd::from_f64(0.0);
+        let mut reversible_heat = Dd::from_f64(0.0);
+        // The original accepted circuit owns the coordinate increment of psi
+        // at the proposed temperature. Add the independently sampled parameter
+        // and T*s increments to obtain physical U, never from loss or supply.
+        // A dormant field's absolute energy cannot bury another field's change.
+        let mut internal_change = Dd::from_f64(finite(frozen_storage_change_j)?);
         for ((((binding, before), sample), frozen), after) in self.bindings.iter()
             .zip(&self.initial).zip(samples).zip(frozen_states).zip(endpoint_states) {
             check(cancel)?;
@@ -572,8 +583,10 @@ impl<'a> PreparedFieldThermal<'a> {
             *destination = finite(*destination + power)?;
             internal[0] = finite(internal[0] + before.state.internal_energy_j)?;
             internal[1] = finite(internal[1] + after.internal_energy_j)?;
-            parameter_work = finite(parameter_work + work)?;
-            reversible_heat_j = finite(reversible_heat_j + dt * power)?;
+            parameter_work = parameter_work + Dd::from_f64(work);
+            internal_change = internal_change + Dd::from_f64(work) + Dd::from_f64(delta_ts);
+            // Retain the actual power-to-heat handoff used by the caloric owner.
+            reversible_heat = reversible_heat + Dd::from_f64(finite(dt * power)?);
             fields.push(FieldThermalSample {
                 branch: binding.branch,
                 cell: binding.cell,
@@ -585,7 +598,7 @@ impl<'a> PreparedFieldThermal<'a> {
                 reversible_heat_j: heat,
             });
         }
-        if finite(parameter_work - native_parameter_work_j)?.abs() > tolerance_j {
+        if finite(parameter_work.to_f64() - native_parameter_work_j)?.abs() > tolerance_j {
             return Err(invalid(
                 "original circuit parameter work and sourced thermodynamic field change disagree",
             ));
@@ -594,7 +607,8 @@ impl<'a> PreparedFieldThermal<'a> {
             network,
             fields,
             field_internal_energy_j: internal,
-            reversible_heat_j,
+            field_internal_energy_change_j: finite(internal_change.to_f64())?,
+            reversible_heat_j: finite(reversible_heat.to_f64())?,
         })
     }
 }
@@ -615,17 +629,18 @@ pub(super) fn close_report_with_internal_heat<D, S>(
     internal_heat_j: f64,
     tolerance_j: f64,
 ) -> Result<FieldThermalReport<D, S>, Error> {
-    let external_heat_j = finite(
-        coupled.non_electrical_heat_j - coupled.source.reversible_heat_j - internal_heat_j,
-    )?;
-    // Reconstruct physical U at both actual endpoints; the native electrical
-    // report instead measures isothermal psi after the coefficient update.
-    let total_energy_residual_j = finite(
-        coupled.source.field_internal_energy_j[1] - coupled.source.field_internal_energy_j[0]
-            + coupled.thermal.stored_energy_change_j
-            - electrical_work_j
-            - external_heat_j,
-    )?;
+    let external_heat_j = finite((Dd::from_f64(coupled.non_electrical_heat_j)
+        - Dd::from_f64(coupled.source.reversible_heat_j)
+        - Dd::from_f64(internal_heat_j)).to_f64())?;
+    // Physical U includes the original parameter and entropy-temperature terms.
+    // Absolute endpoint totals may round equal beside a large dormant store;
+    // only the independently retained constitutive increment owns this audit.
+    let total_energy_residual_j = finite((
+        Dd::from_f64(coupled.source.field_internal_energy_change_j)
+            + Dd::from_f64(coupled.thermal.stored_energy_change_j)
+            - Dd::from_f64(electrical_work_j)
+            - Dd::from_f64(external_heat_j)
+    ).to_f64())?;
     if total_energy_residual_j.abs() > tolerance_j {
         return Err(invalid(
             "physical field and caloric internal energy do not close the external supply",
@@ -735,7 +750,8 @@ pub(crate) fn driven_candidate<'m, S, E: From<FieldThermalError>>(
                 controls.circuit, || (*cancel.borrow_mut())(),
             )?;
             let source = fields.account(
-                samples, candidate.circuit().into(), rebound.parameter_work_j(), dt,
+                samples, candidate.circuit().into(), rebound.parameter_work_j(),
+                candidate.step().stored_energy_change_j(), dt,
                 bulk.source, &mut bulk.sources_w, controls.total_energy_tolerance_j, &cancel,
             ).map_err(map_field_error)?;
             Ok(DrivenCoefficients {
