@@ -885,4 +885,3 @@ material derivatives with separately solved parameter perturbations, and checks
 3/7/11/15-harmonic convergence against independently integrated continuous-time
 variational RK4. It also covers complete phased frequency-port/clock derivatives,
 physical unit changes, repeated-factor source-call counts and named refusals.
-

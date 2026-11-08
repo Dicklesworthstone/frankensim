@@ -20,6 +20,11 @@ use fs_phs::{
 
 use crate::{NlModalError, SosModalStorage};
 
+mod spectrum;
+pub use spectrum::{
+    PreloadedSpectrum, PreloadedSpectrumBudget, PreloadedSpectrumError, PreloadedSpectrumGuard,
+};
+
 struct ReferenceChannel {
     product: Vec<f64>,
     form: f64,

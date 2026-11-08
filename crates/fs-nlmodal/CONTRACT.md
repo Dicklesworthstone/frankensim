@@ -115,6 +115,31 @@ the crash cascade with structurally exact energy accounting.
   spring work, external work and physical viscous heat, the
   centered limit, represented-midpoint offsets, cubic instability in an
   admitted Hessian nullspace, and negative-curvature/asymmetric refusals.
+- `PreloadedModalStorage::invariant_axis_spectrum` derives the conservative
+  orbit about that held preload from the original cached tangent and stress
+  contractions. Every active channel must preserve the chosen coordinate,
+  including preload-induced cross-mode forces; no coupling threshold or
+  cross-channel cancellation manufactures an invariant axis. The scalar
+  potential must be globally convex and confining. The query retains its
+  unequal turning points, physical frequency, mean incremental displacement,
+  every cosine order through H, signed physical velocity sine amplitudes and
+  acceleration cosine amplitudes. The static reference is not added twice.
+  A turning-point substitution cancels the energy integral's endpoint square
+  roots before composite Simpson integration of time and Fourier coefficients.
+  Two consecutive grid refinements must resolve both relative frequency and
+  the normalized, h-squared-weighted coefficient changes through order 2H.
+  Caller budgets bound work and memory; exhausted budgets refuse. Symmetric
+  and zero-amplitude limits reuse the exact Jacobi kinematic owner. Binary
+  product scaling preserves representable physical derivatives without an
+  intermediate squared-frequency overflow. The measured H+1..2H guard-band
+  norms are finite omitted content, NOT an infinite-tail bound; refinement
+  estimates are not interval enclosures. This is an opt-in source/solver seed,
+  not a change to coupled dynamics, damping, rendering or stability admission.
+  `tests/preloaded_spectrum.rs` compares the waveform, period, DC/even/odd
+  coefficients and velocity with independent RK4 integration of the original
+  `Storage::gradient`; it checks original energy/force, preload-reflection
+  parity, symmetric limits, extreme physical-unit scaling, finite guard-band
+  refinement and exact coupling/work-budget refusals.
 - `assemble(storage, zetas, strike_weights)` — the pHS: symplectic
   pair blocks, per-mode viscous damping `R = diag(0, 2 zeta w)`
   (zetas come from the caller; the visco-damping facility's per-mode

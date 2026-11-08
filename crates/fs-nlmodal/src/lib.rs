@@ -61,7 +61,10 @@ pub use backbone::{
     duffing_kinematic_spectrum_exact, duffing_spectrum_exact,
 };
 pub use parameter::{SosModalParameterDirection, StressChannelParameterDirection};
-pub use preload::PreloadedModalStorage;
+pub use preload::{
+    PreloadedModalStorage, PreloadedSpectrum, PreloadedSpectrumBudget, PreloadedSpectrumError,
+    PreloadedSpectrumGuard,
+};
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the
 /// symmetric matrix `E` (row-major `n x n`) of `q^T E q`.
