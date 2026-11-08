@@ -1,4 +1,4 @@
-use fs_plate::viscosity::PlateViscosityBudget;
+use fs_plate::viscosity::{PlateBendingViscosity, PlateViscosityBudget, ViscousPlateSection};
 use fs_plate::{PlateMesh, PlateModel};
 use fs_plate_transient::PlateDynamicsBudget;
 use fs_plate_transient::relaxation::{
@@ -33,6 +33,28 @@ fn plate() -> PlateModel {
         free: 1,
     }
 }
+fn viscosity_budget(plate: &PlateModel) -> PlateViscosityBudget {
+    PlateViscosityBudget {
+        max_elements: 1,
+        max_dofs: plate.free,
+        max_full_dofs: 9,
+        max_assembly_entries: 81,
+    }
+}
+fn viscosity<'a>(
+    mesh: &PlateMesh,
+    plate: &'a PlateModel,
+    tensor: [f64; 9],
+) -> PlateBendingViscosity<'a> {
+    PlateBendingViscosity::assemble(
+        mesh,
+        plate,
+        vec![ViscousPlateSection::from_resultant(tensor).unwrap()],
+        viscosity_budget(plate),
+        &mut || false,
+    )
+    .unwrap()
+}
 fn branch<'a>(
     mesh: &PlateMesh,
     plate: &'a PlateModel,
@@ -45,12 +67,7 @@ fn branch<'a>(
         plate,
         vec![tensor],
         tau,
-        PlateViscosityBudget {
-            max_elements: 1,
-            max_dofs: plate.free,
-            max_full_dofs: 9,
-            max_assembly_entries: 81,
-        },
+        viscosity_budget(plate),
         &mut || false,
     )
     .unwrap()
@@ -78,21 +95,22 @@ fn quadratic(matrix: &Csr, x: &[f64]) -> f64 {
         .sum()
 }
 
-// Independent continuous ODE oracle, with heat as a fifth differential state.
+// G1: independent continuous ODE, with separate relaxation/viscous heat states.
 // This does not use the production ramp, effective matrix, factor or integrator.
-fn exact_reference(stiffness: [f64; 2], taus: [f64; 2], duration: f64) -> [f64; 5] {
+fn exact_reference(stiffness: [f64; 2], taus: [f64; 2], viscosity: f64, duration: f64) -> [f64; 6] {
     let count = 20000;
     let h = duration / count as f64;
-    let derivative = |x: [f64; 5]| {
+    let derivative = |x: [f64; 6]| {
         [
             x[1],
-            -(17.0 * x[0] + stiffness[0] * x[2] + stiffness[1] * x[3]) / 1.3,
+            -(17.0 * x[0] + viscosity * x[1] + stiffness[0] * x[2] + stiffness[1] * x[3]) / 1.3,
             x[1] - x[2] / taus[0],
             x[1] - x[3] / taus[1],
             stiffness[0] * x[2] * x[2] / taus[0] + stiffness[1] * x[3] * x[3] / taus[1],
+            viscosity * x[1] * x[1],
         ]
     };
-    let mut x = [0.02, 0.1, 0.02, 0.02, 0.0];
+    let mut x = [0.02, 0.1, 0.02, 0.02, 0.0, 0.0];
     for _ in 0..count {
         let a = derivative(x);
         let b = derivative(core::array::from_fn(|i| x[i] + 0.5 * h * a[i]));
@@ -104,7 +122,7 @@ fn exact_reference(stiffness: [f64; 2], taus: [f64; 2], duration: f64) -> [f64; 
 }
 
 #[test]
-fn original_plate_memory_matches_continuous_multitime_maxwell_motion() {
+fn original_plate_memory_matches_continuous_maxwell_and_kelvin_motion() {
     let mesh = mesh();
     let plate = plate();
     let taus = [0.035, 0.6];
@@ -113,57 +131,92 @@ fn original_plate_memory_matches_continuous_multitime_maxwell_motion() {
         branch(&mesh, &plate, taus[1], 0.7),
     ];
     let stiffness = core::array::from_fn(|i| source[i].excess_stiffness().get(0, 0));
-    let reference = exact_reference(stiffness, taus, 0.8);
-    let mut errors = Vec::new();
-    for steps in [400, 800, 1600] {
-        let branches = vec![
-            branch(&mesh, &plate, taus[0], 0.4),
-            branch(&mesh, &plate, taus[1], 0.7),
-        ];
-        let owner = RelaxingPlate::prepare(
-            &plate,
-            branches,
-            0.8 / steps as f64,
-            1e-12,
-            budget(&plate, 2),
-            &LdltOptions::default(),
-            &mut || false,
-        )
-        .unwrap();
-        let mut state = owner.state(&[0.02], &[0.1], &[0.02, 0.02]).unwrap();
-        let initial = state.mechanical_energy_j();
-        for _ in 0..steps {
-            let energy = state.mechanical_energy_j();
-            let step = state.advance(&[0.0], &mut || false).unwrap();
-            assert!(step.dissipated_j >= 0.0);
-            assert!(step.balance_residual_j.abs() < 2e-16);
-            assert!(state.mechanical_energy_j() <= energy + 2e-16);
-        }
-        let actual = [
-            state.displacement()[0],
-            state.velocity()[0],
-            state.branch_strains()[0],
-            state.branch_strains()[1],
-            state.dissipated_j(),
-        ];
-        errors.push(
-            actual
-                .iter()
-                .zip(reference)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0_f64, f64::max),
-        );
-        assert!((state.mechanical_energy_j() + state.dissipated_j() - initial).abs() < 2e-15);
-        assert!(
-            state.dissipated_j() > 0.2 * initial,
-            "material must measurably damp the trajectory"
-        );
-    }
-    assert!(
-        errors[0] > 3.8 * errors[1] && errors[1] > 3.8 * errors[2],
-        "second-order convergence: {errors:?}"
+    let viscosity = viscosity(
+        &mesh,
+        &plate,
+        [0.08, 0.01, 0.0, 0.01, 0.16, 0.0, 0.0, 0.0, 0.04],
     );
-    assert!(errors[2] < 2e-7, "continuous ODE mismatch: {errors:?}");
+    for with_viscosity in [false, true] {
+        let damping = if with_viscosity {
+            viscosity.matrix().get(0, 0)
+        } else {
+            0.0
+        };
+        let reference = exact_reference(stiffness, taus, damping, 0.8);
+        let mut errors = Vec::new();
+        for steps in [400, 800, 1600] {
+            let branches = vec![
+                branch(&mesh, &plate, taus[0], 0.4),
+                branch(&mesh, &plate, taus[1], 0.7),
+            ];
+            let owner = if with_viscosity {
+                let mut caps = budget(&plate, 2);
+                caps.max_effective_entries += viscosity.matrix().nnz();
+                RelaxingPlate::prepare_with_bending_viscosity(
+                    &mesh,
+                    &viscosity,
+                    branches,
+                    0.8 / steps as f64,
+                    1e-12,
+                    caps,
+                    viscosity_budget(&plate),
+                    &LdltOptions::default(),
+                    &mut || false,
+                )
+            } else {
+                RelaxingPlate::prepare(
+                    &plate,
+                    branches,
+                    0.8 / steps as f64,
+                    1e-12,
+                    budget(&plate, 2),
+                    &LdltOptions::default(),
+                    &mut || false,
+                )
+            }
+            .unwrap();
+            assert_eq!(owner.bending_viscosity().is_some(), with_viscosity);
+            let mut state = owner.state(&[0.02], &[0.1], &[0.02, 0.02]).unwrap();
+            let initial = state.mechanical_energy_j();
+            for _ in 0..steps {
+                let energy = state.mechanical_energy_j();
+                let step = state.advance(&[0.0], &mut || false).unwrap();
+                assert!(step.dissipated_j >= 0.0);
+                assert!(step.relaxation_dissipated_j >= 0.0 && step.viscous_dissipated_j >= 0.0);
+                assert_eq!(
+                    step.dissipated_j,
+                    step.relaxation_dissipated_j + step.viscous_dissipated_j
+                );
+                assert!(step.balance_residual_j.abs() < 2e-16);
+                assert!(state.mechanical_energy_j() <= energy + 2e-16);
+            }
+            let actual = [
+                state.displacement()[0],
+                state.velocity()[0],
+                state.branch_strains()[0],
+                state.branch_strains()[1],
+                state.relaxation_dissipated_j(),
+                state.viscous_dissipated_j(),
+            ];
+            errors.push(
+                actual
+                    .iter()
+                    .zip(reference)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0_f64, f64::max),
+            );
+            assert!((state.mechanical_energy_j() + state.dissipated_j() - initial).abs() < 2e-15);
+            assert!(
+                state.dissipated_j() > 0.2 * initial,
+                "material must measurably damp the trajectory"
+            );
+        }
+        assert!(
+            errors[0] > 3.8 * errors[1] && errors[1] > 3.8 * errors[2],
+            "second-order convergence: {errors:?}"
+        );
+        assert!(errors[2] < 2e-7, "continuous ODE mismatch: {errors:?}");
+    }
 }
 
 #[test]
@@ -214,12 +267,22 @@ fn full_consistent_inertia_and_anisotropic_memory_close_independent_forced_work(
         stiffness.get(0, 1).abs() > 1e-3,
         "the physical memory must couple coordinates"
     );
-    let owner = RelaxingPlate::prepare(
+    let viscosity = viscosity(
+        &mesh,
         &plate,
+        [0.08, 0.01, 0.0, 0.01, 0.16, 0.0, 0.0, 0.0, 0.04],
+    );
+    assert!(viscosity.matrix().get(0, 1).abs() > 1e-3);
+    let mut caps = budget(&plate, 1);
+    caps.max_effective_entries += viscosity.matrix().nnz();
+    let owner = RelaxingPlate::prepare_with_bending_viscosity(
+        &mesh,
+        &viscosity,
         vec![branch],
         0.005,
         1e-12,
-        budget(&plate, 1),
+        caps,
+        viscosity_budget(&plate),
         &LdltOptions::default(),
         &mut || false,
     )
@@ -238,9 +301,17 @@ fn full_consistent_inertia_and_anisotropic_memory_close_independent_forced_work(
     let mut work = 0.0;
     for step in 0..200 {
         let old = state.displacement().to_vec();
+        let old_velocity = state.velocity().to_vec();
         let t = (step as f64 + 0.5) * owner.step_s();
         let force = [0.03 * (3.0 * t).sin(), -0.04 * (2.0 * t).cos()];
         let record = state.advance(&force, &mut || false).unwrap();
+        let mean_velocity: Vec<_> = old_velocity
+            .iter()
+            .zip(state.velocity())
+            .map(|(a, b)| 0.5 * (a + b))
+            .collect();
+        let viscous_heat = owner.step_s() * quadratic(viscosity.matrix(), &mean_velocity);
+        assert!((record.viscous_dissipated_j - viscous_heat).abs() < 1e-17);
         work += force
             .iter()
             .zip(old.iter().zip(state.displacement()))
@@ -302,12 +373,17 @@ fn rigid_translation_stays_undamped_and_refused_advances_preserve_history() {
         ),
         Err(PlateRelaxationError::Budget(_))
     ));
-    let owner = RelaxingPlate::prepare(
-        &plate,
+    let viscosity = viscosity(&mesh, &plate, [0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let mut caps = budget(&plate, 1);
+    caps.max_effective_entries += viscosity.matrix().nnz();
+    let owner = RelaxingPlate::prepare_with_bending_viscosity(
+        &mesh,
+        &viscosity,
         vec![branch],
         0.01,
         1e-12,
-        budget(&plate, 1),
+        caps,
+        viscosity_budget(&plate),
         &LdltOptions::default(),
         &mut || false,
     )

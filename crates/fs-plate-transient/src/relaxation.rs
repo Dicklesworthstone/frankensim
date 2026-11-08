@@ -1,6 +1,8 @@
 //! Original-coordinate DKT plate dynamics with Maxwell bending memory.
 //!
-//! `M v_dot + K_eq u + sum(K_j q_j) = f`, `q_j_dot = v-q_j/tau_j`.
+//! `M v_dot + C v + K_eq u + sum(K_j q_j) = f`, `q_j_dot = v-q_j/tau_j`.
+//! Optional original anisotropic bending viscosity supplies `C`; its heat is
+//! independent of the Maxwell branches and retains their directional null loss.
 //! Each interval uses midpoint momentum and the exact constitutive solution
 //! along its affine displacement path. Branch heat is integrated in physical
 //! curvature Gram channels; it is not a work/energy remainder. The sparse
@@ -81,6 +83,59 @@ impl CurvatureChannels {
     }
 }
 
+fn curvature_channels<C: FnMut() -> bool>(
+    mesh: &PlateMesh,
+    spatial: &PlateBendingViscosity<'_>,
+    budget: PlateViscosityBudget,
+    cancelled: &mut C,
+) -> Result<Vec<CurvatureChannels>, Error> {
+    poll(cancelled)?;
+    let model = spatial.model();
+    let full = mesh.nodes.len().checked_mul(3);
+    let entries = mesh.tris.len().checked_mul(81);
+    if mesh.tris.len() > budget.max_elements
+        || model.free > budget.max_dofs
+        || full.is_none_or(|n| n > budget.max_full_dofs)
+        || entries.is_none_or(|n| n > budget.max_assembly_entries)
+    {
+        return Err(Error::Budget("curvature-channel assembly cap exceeded"));
+    }
+    if full != Some(model.dof_map.len()) || spatial.sections().len() != mesh.tris.len() {
+        return Err(Error::Invalid(
+            "original mesh and complete bending sections required",
+        ));
+    }
+    let mut channels = Vec::with_capacity(mesh.tris.len());
+    for (element, (tri, section)) in mesh.tris.iter().zip(spatial.sections()).enumerate() {
+        poll(cancelled)?;
+        if tri.iter().any(|&node| node >= mesh.nodes.len()) {
+            return Err(Error::Invalid("curvature mesh references an absent node"));
+        }
+        let (curvature, area2) = dkt_curvature_quadrature(
+            &tri.map(|i| mesh.nodes[i].0),
+            &tri.map(|i| mesh.nodes[i].1),
+            element,
+        )
+        .map_err(Error::Plate)?;
+        if area2 <= 1e-15 {
+            return Err(Error::Plate(PlateError::DegenerateElement {
+                element,
+                twice_area: area2,
+            }));
+        }
+        let factor = factor_passive_resultant(section.bending_n_m_s())
+            .map_err(|_| Error::Invalid("passive bending tensor required"))?;
+        channels.push(CurvatureChannels {
+            dofs: core::array::from_fn(|i| model.dof_map[3 * tri[i / 3] + i % 3]),
+            curvature,
+            factor,
+            weight: area2 / 6.0,
+        });
+    }
+    poll(cancelled)?;
+    Ok(channels)
+}
+
 /// One spatial excess bending stiffness [N m] and its positive relaxation time.
 /// Different times remain distinct; full directional and cross-coordinate
 /// stiffness survives. The supplied plate K must contain EQUILIBRIUM stiffness:
@@ -127,25 +182,7 @@ impl<'a> PlateRelaxationBranch<'a> {
             .map_err(Error::Plate)?;
         let spatial = PlateBendingViscosity::assemble(mesh, model, sections, budget, cancelled)
             .map_err(Error::Plate)?;
-        let mut channels = Vec::with_capacity(mesh.tris.len());
-        for (element, (tri, tensor)) in mesh.tris.iter().zip(excess_bending_n_m).enumerate() {
-            poll(cancelled)?;
-            let (curvature, area2) = dkt_curvature_quadrature(
-                &tri.map(|i| mesh.nodes[i].0),
-                &tri.map(|i| mesh.nodes[i].1),
-                element,
-            )
-            .map_err(Error::Plate)?;
-            let factor = factor_passive_resultant(&tensor)
-                .map_err(|_| Error::Invalid("passive Maxwell bending tensor required"))?;
-            channels.push(CurvatureChannels {
-                dofs: core::array::from_fn(|i| model.dof_map[3 * tri[i / 3] + i % 3]),
-                curvature,
-                factor,
-                weight: area2 / 6.0,
-            });
-        }
-        poll(cancelled)?;
+        let channels = curvature_channels(mesh, &spatial, budget, cancelled)?;
         Ok(Self {
             spatial,
             channels,
@@ -179,7 +216,7 @@ impl<'a> PlateRelaxationBranch<'a> {
 pub struct PlateRelaxationBudget {
     pub dynamics: PlateDynamicsBudget,
     pub max_branches: usize,
-    /// Combined M/K/branch entries BEFORE duplicate effective entries merge.
+    /// Combined M/K/viscosity/branch entries BEFORE effective entries merge.
     pub max_effective_entries: usize,
     /// Seven spatial vectors and two branch-history arrays: `(7+2*b)*n`.
     pub max_state_scalars: usize,
@@ -190,6 +227,8 @@ pub struct PlateRelaxationBudget {
 #[derive(Debug)]
 pub struct RelaxingPlate<'a> {
     model: &'a PlateModel,
+    bending_viscosity: Option<&'a PlateBendingViscosity<'a>>,
+    viscous_channels: Vec<CurvatureChannels>,
     branches: Vec<PlateRelaxationBranch<'a>>,
     ramps: Vec<PronyRamp>,
     effective: Csr,
@@ -201,6 +240,68 @@ impl<'a> RelaxingPlate<'a> {
     pub fn prepare<C: FnMut() -> bool>(
         model: &'a PlateModel,
         branches: Vec<PlateRelaxationBranch<'a>>,
+        step_s: f64,
+        solve_relative_tolerance: f64,
+        budget: PlateRelaxationBudget,
+        factor_options: &LdltOptions,
+        cancelled: &mut C,
+    ) -> Result<Self, Error> {
+        Self::prepare_internal(
+            model,
+            branches,
+            None,
+            step_s,
+            solve_relative_tolerance,
+            budget,
+            factor_options,
+            cancelled,
+        )
+    }
+
+    /// Combine the original physical bending viscosity with Maxwell memory.
+    /// `mesh` must be the same geometry used to assemble `viscosity`; its
+    /// retained model supplies equilibrium stiffness and consistent inertia.
+    /// The source is retained without a Rayleigh fit or modal diagonalization.
+    /// `viscosity_budget` also bounds 81 curvature and 18 factor scalars per
+    /// triangle, prepared once to integrate nonnegative viscous heat.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_bending_viscosity<C: FnMut() -> bool>(
+        mesh: &PlateMesh,
+        viscosity: &'a PlateBendingViscosity<'a>,
+        branches: Vec<PlateRelaxationBranch<'a>>,
+        step_s: f64,
+        solve_relative_tolerance: f64,
+        budget: PlateRelaxationBudget,
+        viscosity_budget: PlateViscosityBudget,
+        factor_options: &LdltOptions,
+        cancelled: &mut C,
+    ) -> Result<Self, Error> {
+        Self::prepare_internal(
+            viscosity.model(),
+            branches,
+            Some((mesh, viscosity, viscosity_budget)),
+            step_s,
+            solve_relative_tolerance,
+            budget,
+            factor_options,
+            cancelled,
+        )
+    }
+
+    /// Original authored instantaneous material loss, when supplied.
+    pub const fn bending_viscosity(&self) -> Option<&PlateBendingViscosity<'a>> {
+        self.bending_viscosity
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_internal<C: FnMut() -> bool>(
+        model: &'a PlateModel,
+        branches: Vec<PlateRelaxationBranch<'a>>,
+        viscous: Option<(
+            &PlateMesh,
+            &'a PlateBendingViscosity<'a>,
+            PlateViscosityBudget,
+        )>,
         step_s: f64,
         solve_relative_tolerance: f64,
         budget: PlateRelaxationBudget,
@@ -234,6 +335,11 @@ impl<'a> RelaxingPlate<'a> {
             .nnz()
             .checked_add(model.k.nnz())
             .ok_or(Error::Budget("effective operator extent overflow"))?;
+        if let Some((_, viscosity, _)) = viscous {
+            entries = entries
+                .checked_add(viscosity.matrix().nnz())
+                .ok_or(Error::Budget("effective operator extent overflow"))?;
+        }
         for branch in &branches {
             if !core::ptr::eq(branch.spatial.model(), model) {
                 return Err(Error::Invalid(
@@ -263,6 +369,13 @@ impl<'a> RelaxingPlate<'a> {
             cancelled,
         )
         .map_err(Error::Dynamics)?;
+        let viscous_channels = match viscous {
+            Some((mesh, viscosity, budget)) => {
+                curvature_channels(mesh, viscosity, budget, cancelled)?
+            }
+            None => Vec::new(),
+        };
+        let bending_viscosity = viscous.map(|(_, viscosity, _)| viscosity);
         let ramps: Vec<_> = branches
             .iter()
             .map(|b| PronyRamp::new(step_s / b.relaxation_time_s))
@@ -288,6 +401,12 @@ impl<'a> RelaxingPlate<'a> {
                     effective.push(i, j, weight * value);
                 }
             }
+            if let Some(viscosity) = bending_viscosity {
+                let (columns, values) = viscosity.matrix().row(i);
+                for (&j, &value) in columns.iter().zip(values) {
+                    effective.push(i, j, 0.5 * step_s * value);
+                }
+            }
         }
         let effective = effective.assemble();
         if (0..n).any(|i| !finite(effective.row(i).1)) {
@@ -308,6 +427,8 @@ impl<'a> RelaxingPlate<'a> {
         poll(cancelled)?;
         Ok(Self {
             model,
+            bending_viscosity,
+            viscous_channels,
             branches,
             ramps,
             effective,
@@ -358,7 +479,8 @@ impl<'a> RelaxingPlate<'a> {
             mean_velocity: vec![0.0; n],
             increment: vec![0.0; n],
             time_s: 0.0,
-            dissipated_j: 0.0,
+            relaxation_dissipated_j: 0.0,
+            viscous_dissipated_j: 0.0,
             supplied_work_j: 0.0,
         };
         if !state.mechanical_energy_j().is_finite() {
@@ -375,7 +497,10 @@ impl<'a> RelaxingPlate<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct PlateRelaxationStep {
     pub supplied_work_j: f64,
+    /// Sum of the independently integrated relaxation and viscous heat.
     pub dissipated_j: f64,
+    pub relaxation_dissipated_j: f64,
+    pub viscous_dissipated_j: f64,
     pub kinetic_change_j: f64,
     pub stored_change_j: f64,
     pub balance_residual_j: f64,
@@ -397,7 +522,8 @@ pub struct PlateRelaxationState<'s, 'a> {
     mean_velocity: Vec<f64>,
     increment: Vec<f64>,
     time_s: f64,
-    dissipated_j: f64,
+    relaxation_dissipated_j: f64,
+    viscous_dissipated_j: f64,
     supplied_work_j: f64,
 }
 impl PlateRelaxationState<'_, '_> {
@@ -416,7 +542,13 @@ impl PlateRelaxationState<'_, '_> {
         self.time_s
     }
     pub const fn dissipated_j(&self) -> f64 {
-        self.dissipated_j
+        self.relaxation_dissipated_j + self.viscous_dissipated_j
+    }
+    pub const fn relaxation_dissipated_j(&self) -> f64 {
+        self.relaxation_dissipated_j
+    }
+    pub const fn viscous_dissipated_j(&self) -> f64 {
+        self.viscous_dissipated_j
     }
     pub const fn supplied_work_j(&self) -> f64 {
         self.supplied_work_j
@@ -516,7 +648,19 @@ impl PlateRelaxationState<'_, '_> {
                 allowed: owner.solve_relative_tolerance,
             });
         }
-        let mut heat = 0.0;
+        let mut viscous_heat = 0.0;
+        for element in &owner.viscous_channels {
+            poll(cancelled)?;
+            viscous_heat += dt
+                * element.weight
+                * element
+                    .apply(&self.mean_velocity)
+                    .iter()
+                    .flatten()
+                    .map(|v| v * v)
+                    .sum::<f64>();
+        }
+        let mut relaxation_heat = 0.0;
         let mut stored = 0.0;
         for (j, (branch, ramp)) in owner.branches.iter().zip(&owner.ramps).enumerate() {
             let q = &self.history[j * n..(j + 1) * n];
@@ -535,7 +679,7 @@ impl PlateRelaxationState<'_, '_> {
                     .zip(increment.iter().flatten())
                     .zip(accepted_increment.iter().flatten())
                 {
-                    heat += element.weight * ramp.apply(q0, dq).2;
+                    relaxation_heat += element.weight * ramp.apply(q0, dq).2;
                     stored += element.weight * change * (q0 + 0.5 * change);
                 }
             }
@@ -562,8 +706,11 @@ impl PlateRelaxationState<'_, '_> {
             kinetic += (self.next_velocity[i] - self.velocity[i])
                 * (row(&model.m, i, &self.velocity) + 0.5 * momentum_change);
         }
+        let heat = relaxation_heat + viscous_heat;
         let balance = kinetic + stored + heat - work;
-        let total_heat = self.dissipated_j + heat;
+        let total_relaxation = self.relaxation_dissipated_j + relaxation_heat;
+        let total_viscous = self.viscous_dissipated_j + viscous_heat;
+        let total_heat = total_relaxation + total_viscous;
         let total_work = self.supplied_work_j + work;
         if !finite(&self.next_displacement)
             || !finite(&self.next_velocity)
@@ -578,11 +725,14 @@ impl PlateRelaxationState<'_, '_> {
         core::mem::swap(&mut self.velocity, &mut self.next_velocity);
         core::mem::swap(&mut self.history, &mut self.next_history);
         self.time_s = next_time;
-        self.dissipated_j = total_heat;
+        self.relaxation_dissipated_j = total_relaxation;
+        self.viscous_dissipated_j = total_viscous;
         self.supplied_work_j = total_work;
         Ok(PlateRelaxationStep {
             supplied_work_j: work,
             dissipated_j: heat,
+            relaxation_dissipated_j: relaxation_heat,
+            viscous_dissipated_j: viscous_heat,
             kinetic_change_j: kinetic,
             stored_change_j: stored,
             balance_residual_j: balance,

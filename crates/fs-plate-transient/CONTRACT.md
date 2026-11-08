@@ -396,19 +396,29 @@ nonzero tensors, and distinct times remain distinct. The original `PlateModel`
 stiffness is the equilibrium stiffness. Branches add memory forces, not an
 additional equilibrium spring, fitted modal damping, or prestress loss.
 
-`RelaxingPlate` advances `M v_dot + K_eq u + sum(K_j q_j) = f` with
-`q_j_dot = v - q_j/tau_j`. For `du = h*v_bar`, it uses the exact shared
-`PronyRamp` endpoint and interval-mean constitutive force, and midpoint
-momentum. The effective operator is
-`M + h^2*K_eq/4 + sum(h^2*c_j*K_j/2)`, where `c_j` is the exact ramp-mean
-coefficient. The full original consistent mass and all spatial coupling terms
-remain present. Existing sparse LDLT prepares one bounded factor at the fixed
+`RelaxingPlate` advances `M v_dot + C v + K_eq u + sum(K_j q_j) = f` with
+`q_j_dot = v - q_j/tau_j`. The existing `prepare` selects `C = 0`.
+`prepare_with_bending_viscosity` retains an authored original
+`PlateBendingViscosity`, including its full anisotropic spatial coupling and
+material source. Instantaneous Kelvin–Voigt viscosity and Maxwell relaxation
+remain distinct parallel constitutive mechanisms. For `du = h*v_bar`, the
+integrator uses the exact shared `PronyRamp` endpoint and interval-mean
+constitutive force, and midpoint momentum. The effective operator is
+`M + h*C/2 + h^2*K_eq/4 + sum(h^2*c_j*K_j/2)`, where `c_j` is the exact
+ramp-mean coefficient. The full original consistent mass and all spatial
+coupling terms remain present. Existing sparse LDLT prepares one bounded factor at the fixed
 time step. The warm advance uses existing state workspace and allocates no
 heap or dense matrix. Original support/material geometry remains fixed.
 
 Physical branch heat integrates each original positive curvature Gram channel
-independently of stored energy and applied work. This preserves directional
-null loss and rigid translation without imposing a viscous floor. Initial
+independently of stored energy and applied work. Attached instantaneous viscosity
+uses the same original curvature quadrature, with separately prepared positive
+Gram channels; its heat is exactly `h*v_bar^T C v_bar` on the affine interval.
+Both per-step and cumulative ledgers expose relaxation heat, viscous heat and
+their sum. Neither channel is reconstructed from a work/energy remainder.
+This preserves directional null loss and rigid translation without imposing a
+viscous floor. The supplied viscosity budget also bounds its cold curvature
+channel storage; effective-entry admission includes the original sparse C. Initial
 spring displacement/slope history is explicit: zero means a relaxed initial shape; copies
 of the displacement mean an instantaneous change from the original zero shape.
 The supplied interval-mean force does work `f_bar dot du` on the affine
@@ -432,9 +442,11 @@ supply changing supports/materials, thermal feedback, contact, generalized-alpha
 numerical damping, or a new trajectory adjoint.
 
 `tests/hereditary_damping.rs` compares the native plate trajectory and physical
-heat to an independently integrated continuous two-time Maxwell ODE, verifies
-second-order refinement, exact held-shape relaxation across `h/tau` from
-`1e-5` to `1e4`, full consistent-mass anisotropic work balance, undamped rigid
-translation, and atomic cancellation/input refusals.
+heat to an independently integrated continuous two-time Maxwell ODE, with and
+without simultaneous Kelvin–Voigt viscosity, and verifies second-order
+refinement of both motion and separate physical heat channels. It also checks
+exact held-shape relaxation across `h/tau` from `1e-5` to `1e4`, full
+consistent-mass anisotropic work balance with coupled viscosity, undamped rigid
+translation with both loss mechanisms, and atomic cancellation/input refusals.
 An additional rounding regression compares the ledger with accepted endpoints
 under sub-ulp motion, unresolved weak relaxation, and velocity-binade rounding.
