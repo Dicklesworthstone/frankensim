@@ -24,6 +24,9 @@
 //! fixed 63-row cap bounds factorization work between cancellation polls.
 
 use super::FrictionalContactError as E;
+use crate::multicontact::add_product;
+use fs_math::dd::Dd;
+use fs_math::eft::{two_prod, two_sum};
 use fs_solver::NonlinearProblem;
 use fs_solver::orthant::active_set::{PreparedSpdMatrix, SpdOrthantError};
 use std::cell::{Cell, RefCell};
@@ -162,8 +165,11 @@ impl<'a, C: Fn() -> bool> NaturalMap<'a, C> {
             let a = 3 * k;
             let mut v = [0.0; 3];
             for b in 0..3 {
-                v[b] = self.free[a + b]
-                    + fs_solver::dot(&self.matrix[(a + b) * d..(a + b + 1) * d], point);
+                v[b] = affine_row(
+                    self.free[a + b],
+                    &self.matrix[(a + b) * d..(a + b + 1) * d],
+                    point,
+                );
             }
             let normal_trial = point[a] - self.steps[a] * (v[0] - self.targets[k]);
             let trial = [
@@ -343,14 +349,26 @@ impl<C: Fn() -> bool> NonlinearProblem for NaturalMap<'_, C> {
             let a = 3 * k;
             let mut dv = [0.0; 3];
             for b in 0..3 {
-                dv[b] = fs_solver::dot(&self.matrix[(a + b) * d..(a + b + 1) * d], direction);
+                dv[b] = affine_row(0.0, &self.matrix[(a + b) * d..(a + b + 1) * d], direction);
             }
+            let local_direction = [
+                direction[a],
+                dv[0],
+                direction[a + 1],
+                dv[1],
+                direction[a + 2],
+                dv[2],
+            ];
             for i in 0..3 {
-                output[a + i] = 0.0;
-                for j in 0..3 {
-                    output[a + i] +=
-                        block.direct[i][j] * direction[a + j] + block.velocity[i][j] * dv[j];
-                }
+                let coefficients = [
+                    block.direct[i][0],
+                    block.velocity[i][0],
+                    block.direct[i][1],
+                    block.velocity[i][1],
+                    block.direct[i][2],
+                    block.velocity[i][2],
+                ];
+                output[a + i] = affine_row(0.0, &coefficients, &local_direction);
             }
         }
         if output.iter().any(|v| !v.is_finite()) {
@@ -449,9 +467,120 @@ impl<C: Fn() -> bool> NonlinearProblem for NaturalMap<'_, C> {
     }
 }
 
+// The affine offset must participate in the same accumulation as W*p. Rounding
+// the product sum first can hide actual slip and manufacture a sticking root,
+// even when the exact stopping impulse is representable. TwoProd/TwoSum retain
+// the first-order product and summation roundoff in a scalar correction; the
+// remaining accumulation error is second order. This keeps the hot row free of
+// both a products allocation and full double-double arithmetic per term. If an
+// intermediate overflows, reuse the physical audit's scaled product recovery.
+fn affine_row(offset: f64, row: &[f64], point: &[f64]) -> f64 {
+    let mut high = offset;
+    let mut low = 0.0;
+    for (&a, &b) in row.iter().zip(point) {
+        let (product, product_error) = two_prod(a, b);
+        let (next, sum_error) = two_sum(high, product);
+        high = next;
+        low += sum_error + product_error;
+    }
+    let result = high + low;
+    if result.is_finite() {
+        result
+    } else {
+        row.iter()
+            .zip(point)
+            .fold(Dd::from_f64(offset), |sum, (&a, &b)| add_product(sum, a, b))
+            .to_f64()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compensated_affine_row_preserves_group_cancellation_and_overflow_recovery() {
+        let epsilon = 2.0_f64.powi(-27);
+        for dimension in [3, 12, 63] {
+            let row = vec![1.0 + epsilon; dimension];
+            let point = vec![1.0 - epsilon; dimension];
+            // Every rounded product equals one, but their actual sum is
+            // dimension*(1-e^2). The residual is exactly representable.
+            let expected = -(dimension as f64) * epsilon * epsilon;
+            assert_eq!(affine_row(-(dimension as f64), &row, &point), expected);
+        }
+        assert_eq!(affine_row(-f64::MAX, &[f64::MAX], &[2.0]), f64::MAX);
+    }
+
+    #[test]
+    fn coupled_sticking_iteration_resolves_slip_hidden_by_affine_cancellation() {
+        use fs_solver::{NewtonKrylovConfig, NewtonKrylovState};
+
+        // This well-conditioned SPD mobility couples the two tangent axes.
+        // The loaded contact has ample static-friction capacity. Its exact
+        // stopping impulse is representable, even though forming W*p before
+        // adding free motion rounds away the residual tangential velocity.
+        let scale = 2.0_f64.powi(54);
+        let w = [1.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.0, 0.5, 1.0];
+        let free = [-2.0 * scale, scale, 2.0 * scale];
+        let count = Cell::new(0);
+        let problem = NaturalMap::new(
+            &w,
+            &free,
+            &[0.0],
+            &[1.0; 3],
+            &[2.0],
+            &count,
+            256,
+            Preconditioner::Identity,
+            || false,
+        );
+        let seed = vec![2.0 * scale, 1.0, -2.0 * scale];
+        let mut residual = [0.0; 3];
+        problem.residual(&seed, &mut residual);
+        assert_eq!(residual, [0.0, 1.0, 0.5]);
+
+        let config = NewtonKrylovConfig {
+            relative_tolerance: 0.0,
+            forcing_minimum: 1e-12,
+            forcing_maximum: 1e-12,
+            ..Default::default()
+        };
+        let mut state = NewtonKrylovState::new(&problem, seed, config).unwrap();
+        let report = state.run(&problem, 4);
+        assert!(report.converged, "{report:?}");
+        assert!(!problem.has_failed());
+        assert_eq!(state.x[0], 2.0 * scale);
+        assert!(state.x[1].abs() < 1e-12, "remaining slip: {:?}", state.x);
+        assert_eq!(state.x[2], -2.0 * scale);
+        problem.residual(&state.x, &mut residual);
+        assert!(residual[1].abs() < 1e-12);
+        assert!(residual[2].abs() < 1e-12);
+    }
+
+    #[test]
+    fn sticking_jacobian_retains_product_roundoff_in_coupled_tangent_motion() {
+        let epsilon = 2.0_f64.powi(-27);
+        let w = [1.0, 0.0, 0.0, 0.0, 1.0 + epsilon, 1.0, 0.0, 1.0, 2.0];
+        let count = Cell::new(0);
+        let problem = NaturalMap::new(
+            &w,
+            &[-2.0, 0.0, 0.0],
+            &[0.0],
+            &[1.0; 3],
+            &[2.0],
+            &count,
+            16,
+            Preconditioner::Identity,
+            || false,
+        );
+        let mut action = [0.0; 3];
+        problem.jacobian_apply(&[2.0, 0.0, 0.0], &[0.0, 1.0 - epsilon, -1.0], &mut action);
+        // (1+e)*(1-e)-1 = -e^2 exactly. A rounded products vector
+        // incorrectly makes this mobility direction a zero-slip direction.
+        assert_eq!(action, [0.0, -epsilon * epsilon, -1.0 - epsilon]);
+        assert!(!problem.has_failed());
+    }
 
     #[test]
     fn smooth_branch_actions_match_independent_central_differences() {
