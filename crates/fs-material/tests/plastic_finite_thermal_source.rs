@@ -2,6 +2,8 @@
 
 #[path = "plastic_finite_thermal_source/tabulated.rs"]
 mod tabulated;
+#[path = "plastic_finite_thermal_source/recovery.rs"]
+mod recovery;
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

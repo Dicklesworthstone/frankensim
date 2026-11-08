@@ -79,6 +79,13 @@ use super::{
 use crate::creep::StrainHardeningCreep;
 use fs_math::det;
 
+mod inelastic;
+pub use inelastic::{FiniteThermalInelasticMaterial, FiniteThermalInelasticPoint};
+/// Independent resistance recovery through the same thermal kinematics and energy.
+pub mod recovery;
+pub use recovery::{
+    AffineThermalRecoveringCreep, FiniteCreepThermalRecovery, FrozenThermalRecoveringCreep,
+};
 /// Exact model-card binding for the affine Kirchhoff/logarithmic thermal family.
 pub mod source;
 /// Bounded yield curves with affine temperature dependence on fixed strain knots.
@@ -244,9 +251,9 @@ pub struct FiniteJ2Thermodynamics {
 
 /// Complete native candidate and independently inspectable thermal work split.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FiniteJ2ThermalIncrement {
+pub struct FiniteJ2ThermalIncrement<S = FiniteJ2State> {
     /// Native history and reduced potential, with stress/tangent mapped to total F.
-    pub mechanical: FiniteJ2Response,
+    pub mechanical: FiniteJ2Response<S>,
     pub old: FiniteJ2Thermodynamics,
     pub new: FiniteJ2Thermodynamics,
     /// Change of coefficients at old mechanical deformation and old history.
@@ -267,7 +274,7 @@ pub struct FiniteJ2ThermalIncrement {
     /// The spatial/coupling owner applies its declared dimensional work gate.
     pub balance_error_j_m3: f64,
 }
-impl FiniteJ2ThermalIncrement {
+impl<S> FiniteJ2ThermalIncrement<S> {
     /// Deposit once: physical inelastic heat plus signed reversible exchange.
     pub fn caloric_heat_j_m3(&self) -> f64 {
         self.mechanical.inelastic_dissipation_j_m3() + self.reversible_heat_j_m3
@@ -906,17 +913,45 @@ impl AffineThermalFiniteJ2 {
         old_law: FrozenThermalFiniteJ2,
         new_law: FrozenThermalFiniteJ2,
     ) -> Result<FiniteJ2ThermalIncrement, FiniteJ2ThermalError> {
+        Self::increment_with_response(
+            old_f,
+            old_state,
+            new_f,
+            yield_tolerance_pa,
+            &old_law,
+            &new_law,
+            |fm| new_law.native_response(fm, old_state),
+            |state| state,
+        )
+    }
+
+    // One thermal account for the original native law and typed extensions.
+    // Only the constitutive candidate changes. Metric/history inspection,
+    // total-F mapping, coefficient work, entropy and physical heat remain here.
+    // The callback runs once, after accepted history is checked at its OLD T.
+    #[allow(clippy::too_many_arguments)]
+    fn increment_with_response<S>(
+        old_f: &[f64; 9],
+        old_state: &FiniteJ2State,
+        new_f: &[f64; 9],
+        yield_tolerance_pa: f64,
+        old_law: &FrozenThermalFiniteJ2,
+        new_law: &FrozenThermalFiniteJ2,
+        response: impl FnOnce(&[f64; 9]) -> Result<FiniteJ2Response<S>, FiniteJ2ThermalError>,
+        native_state: fn(&S) -> &FiniteJ2State,
+    ) -> Result<FiniteJ2ThermalIncrement<S>, FiniteJ2ThermalError> {
         let old_temperature_k = old_law.temperature_k;
         let new_temperature_k = new_law.temperature_k;
         old_law.validate_committed(old_f, old_state, yield_tolerance_pa)?;
         let old_endpoint = old_law.inspect(old_f, old_state)?;
         let old_fm = old_law.mechanical_deformation(old_f)?.0;
         let (new_fm, new_j) = new_law.mechanical_deformation(new_f)?;
-        let native = new_law.native_response(&new_fm, old_state)?;
+        let native = response(&new_fm)?;
         let native_piola = native.first_piola_pa;
         let mechanical = new_law.map_response(native, new_j)?;
-        let new_endpoint = new_law.inspect(new_f, &mechanical.state)?;
-        new_law.validate_committed(new_f, &mechanical.state, yield_tolerance_pa)?;
+        let state = native_state(&mechanical.state);
+        let new_endpoint = new_law.inspect(new_f, state)?;
+        new_law.validate_committed(new_f, state, yield_tolerance_pa)?;
         let old = old_endpoint.thermodynamics;
         let new = new_endpoint.thermodynamics;
         let old_p = old_law.backbone().parameters();
@@ -947,17 +982,16 @@ impl AffineThermalFiniteJ2 {
             }
         }
         if let Some(hardening) = &new_law.tabulated_hardening {
-            let slope = hardening.hardening_energy_temperature_derivative_j_m3_k(old_state.alpha)?;
+            let slope =
+                hardening.hardening_energy_temperature_derivative_j_m3_k(old_state.alpha)?;
             coefficient_storage_change_j_m3 = finite(
-                coefficient_storage_change_j_m3
-                    + (new_temperature_k - old_temperature_k) * slope,
+                coefficient_storage_change_j_m3 + (new_temperature_k - old_temperature_k) * slope,
             )?;
             // The native table owns the exact endpoint-temperature primitive.
             // Use the direct affine coefficient increment above instead of
             // subtracting two large accumulated hardening energies.
-            frozen_old_storage = finite(
-                frozen_old_storage + new_law.backbone().hardening_energy(old_state.alpha),
-            )?;
+            frozen_old_storage =
+                finite(frozen_old_storage + new_law.backbone().hardening_energy(old_state.alpha))?;
         }
         let delta_f = core::array::from_fn(|i| new_f[i] - old_f[i]);
         let delta_fm = core::array::from_fn(|i| new_fm[i] - old_fm[i]);
@@ -1068,11 +1102,11 @@ impl FrozenThermalFiniteJ2 {
         Ok((f.map(|x| x * self.inverse_thermal_stretch), j))
     }
 
-    fn map_response(
+    fn map_response<S>(
         &self,
-        mut response: FiniteJ2Response,
+        mut response: FiniteJ2Response<S>,
         j: f64,
-    ) -> Result<FiniteJ2Response, FiniteJ2ThermalError> {
+    ) -> Result<FiniteJ2Response<S>, FiniteJ2ThermalError> {
         response.first_piola_pa = response
             .first_piola_pa
             .map(|x| x * self.inverse_thermal_stretch);

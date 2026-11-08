@@ -119,6 +119,8 @@ use std::sync::Arc;
 
 /// Original two-coordinate hardening observations on the complete thermal owner.
 pub mod tabulated;
+/// Explicit independent recovery history on the same finite thermal source family.
+pub mod recovery;
 use crate::MaterialError;
 use crate::creep::StrainHardeningCreep;
 use crate::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
