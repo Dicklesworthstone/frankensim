@@ -1,4 +1,7 @@
 //! G1/G3/G4: original spatial motion and material C/L/R histories share one solve.
+#[path = "reactive/acoustic.rs"]
+mod acoustic;
+
 use super::*;
 use fs_couple::piezoelectric::spatial::transient::load::reactive::{
     ReactiveElectrodeLoad as Reactive, ReactiveElectrodeState as State,

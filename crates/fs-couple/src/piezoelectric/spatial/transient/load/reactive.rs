@@ -17,6 +17,7 @@
 //! models. Stored reactive energy and charge are never reset at step boundaries.
 
 use super::*;
+use super::super::acoustic::{TransientAcousticPort, TransientAcousticPortResponse};
 use fs_material::field_storage::{ResolvedCapacitor, ResolvedInductor};
 
 /// Fixed material/geometry branch between two original spatial electrodes.
@@ -116,8 +117,11 @@ pub struct ReactivePiezoelectricStep {
     pub reactive_energy_j: [f64; 2],
     /// Sum of all memoryless and series-conductor losses [J].
     pub joule_heat_j: f64,
-    /// Delta(body + reactive storage) + heat - mechanical/source work [J].
+    /// Delta(body + reactive storage) + heat + signed acoustic outflow
+    /// - mechanical/source work [J]. Outgoing waves are never conductor heat.
     pub energy_residual_j: f64,
+    /// Original guide waves and physical work, in input port order.
+    pub acoustic_ports: Vec<TransientAcousticPortResponse>,
     /// Original memoryless conductor currents and heat, in input order.
     pub resistors: Vec<ElectrodeLoadHeat>,
     /// Original reactive-branch currents, storage and heat, in input order.
@@ -232,6 +236,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         self.advance_candidate(
             dt_s,
             None,
+            &[],
             drives,
             midpoint_nodal_forces_n,
             endpoint_nodal_free_charge_c,
@@ -258,6 +263,40 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         self.advance_candidate(
             dt_s,
             Some(endpoint_support_velocities_m_s),
+            &[],
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance acoustic sensing/radiation and the original R/L/C histories in
+    /// the same reciprocal midpoint solve. The fluid's traction acts back on
+    /// motion while winding flux and capacitor charge remain conserved state.
+    /// Guide work, intrinsic ceramic heat and every conductor's heat retain
+    /// separate accounts. No acoustic or electrical history is reset.
+    ///
+    /// Supply `None` for stationary supports, or `Some` containing the endpoint
+    /// velocity of every original support DOF. Moving supports pay their full
+    /// dynamic reaction work, including outgoing sound.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_acoustic_ports_candidate(
+        &self,
+        dt_s: f64,
+        acoustic_ports: &[TransientAcousticPort<'_>],
+        endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<ReactivePiezoelectricCandidate<'model, 'mesh>> {
+        self.advance_candidate(
+            dt_s,
+            endpoint_support_velocities_m_s,
+            acoustic_ports,
             drives,
             midpoint_nodal_forces_n,
             endpoint_nodal_free_charge_c,
@@ -271,6 +310,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         &self,
         dt_s: f64,
         endpoint_support_velocities_m_s: Option<&[(usize, f64)]>,
+        acoustic_ports: &[TransientAcousticPort<'_>],
         drives: &[ElectrodeDrive],
         midpoint_nodal_forces_n: &[[f64; 3]],
         endpoint_nodal_free_charge_c: &[f64],
@@ -279,13 +319,14 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
     ) -> Result<ReactivePiezoelectricCandidate<'model, 'mesh>> {
         poll(cx)?;
         let endpoints = endpoint_conditions(&self.body, dt_s, drives, cx)?;
-        let (candidate, resistors, reactive) = self.body.advance_with_loads(
+        let (candidate, resistors, reactive) = self.body.advance_with_acoustic_loads(
             dt_s,
             endpoint_support_velocities_m_s,
             &endpoints,
             &self.resistors,
             &self.loads,
             &self.states,
+            acoustic_ports,
             midpoint_nodal_forces_n,
             endpoint_nodal_free_charge_c,
             controls,
@@ -329,6 +370,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             + reactive_change
             + joule_heat
             + Dd::from_f64(candidate.step.material_heat_j)
+            + Dd::from_f64(candidate.step.acoustic_outward_work_j)
             - candidate.step.retained_mechanical_work_j()
             - source_work).to_f64();
         if reactive_energy_j
@@ -342,15 +384,14 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         }
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(TetPiezoelectricError::Balance(
-                "body and reactive storage, material/conductor heat and external source work disagree",
+                "body/reactive storage, heat, acoustic outflow and external source work disagree",
             ));
         }
         let TetPiezoelectricTransientCandidate {
             body,
             step: body_step,
             midpoint_support_force_n,
-            // This reactive entry point invokes the solve without acoustic ports.
-            acoustic_ports: _,
+            acoustic_ports,
         } = candidate;
         // Repeat endpoint admission before publishing: a charge/voltage defect
         // cannot be concealed by the total energy account.
@@ -370,6 +411,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
                 reactive_energy_j,
                 joule_heat_j,
                 energy_residual_j,
+                acoustic_ports,
                 resistors,
                 reactive: reactive.steps,
             },
