@@ -237,7 +237,7 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
     // shared gradient model independent of the molecular snapshot so a source
     // can supply its actual nonlinear viscosity without a second gradient or
     // being admitted against an unused reference viscosity.
-    pub(in crate::ns) fn modeled_response(
+    pub(crate) fn modeled_response(
         &self,
         cell: usize,
         velocity: &[f64],
@@ -301,7 +301,7 @@ impl<'s, 'm> PlanarSgs<'s, 'm> {
 
     // Endpoint reporting consumes retained material samples; it never asks a
     // constitutive provider to evaluate again after native flow acceptance.
-    pub(in crate::ns) fn field_with_molecular(
+    pub(crate) fn field_with_molecular(
         &self,
         velocity: &[f64],
         molecular_viscosity: &dyn Fn(usize) -> f64,

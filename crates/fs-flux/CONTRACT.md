@@ -1254,6 +1254,51 @@ physical density-weighted acceleration and traction pressure, recovery of the
 original uniform-density Oseen matrix/load, and cancellation, CFL, invalid-source
 and unrepresentable-history refusals.
 
+### Implicit SGS stress with conservatively transported density
+
+Under `experimental-sgs`,
+`FluxSystem::density_momentum_bdf1_sgs_step` closes molecular rheology and
+Smagorinsky, WALE or Vreman stress at the same native BDM1 velocity endpoint.
+The molecular source receives the original cell/centroid, actual candidate
+shear rate and this step's transported density and specific inventories. It
+returns one positive dynamic viscosity per cell; the same value is used in
+volume stress, harmonic SIP traces and physical boundary reactions. The shared
+full-gradient kernels supply kinematic eddy viscosity, converted with the
+actual transported local density: `mu_eff = mu_molecular + rho_new * nu_sgs`.
+The arbitrary conditioning reference never replaces that density.
+
+Density and carried inventories advance exactly once. Their original mass
+flux, distinct old/new inertia, physical force and admitted boundary samples
+remain frozen through the original bounded Picard solve. Only constitutive
+stress changes with each candidate. Acceptance requires the unrelaxed velocity
+correction and both original and row-scaled residuals reassembled at the
+returned endpoint. Existing donor/limited density reconstruction, native
+pressure datums, conservative implicit momentum transport and support
+reactions retain their original owners. The fixed-viscosity entry and density
+subcycle/SSPRK2 paths retain their original arithmetic.
+
+The result keeps the exact accepted molecular source samples and modeled
+coefficients, without a reporting-time source query. Cell-interior molecular
+heating `mu_molecular * gamma^2` and modeled resolved-to-subgrid transfer
+`rho_new * nu_sgs * gamma^2` are separate [W/m^3] fields and physical volume
+integrals [W], including the authored depth. Neither is conflated with native
+temporal, upwind or SIP losses, nor silently deposited in a passive heat slot.
+
+This remains an Estimated planar turbulent-stress screen, with explicit
+isotropic filter widths and no DNS/three-dimensional LES validation,
+backscatter, SGS energy equation, turbulent density/species diffusion or wall
+model. Momentum is BDF1 with an explicitly frozen mass advector, not a fully
+implicit density/velocity iteration. Source laws are cellwise; no subcell
+viscosity reconstruction is inferred. Cancellation surrounds the original
+synchronous solve and polls source/observation loops. Refusal publishes no
+partial state and never modifies either caller history.
+
+`tests/density_momentum/sgs.rs` exercises all three closures against changing
+unequal-density counterflow, the native kinetic and wall-momentum identities,
+source/force/boundary sampling and reference-density invariance, an affine
+physical-traction solution with equal strain but different rotation, the exact
+zero-model limit, nonlinear refusal and cancellation.
+
 ### Bounded linear density with compatible native momentum
 
 `FluxSystem::with_density_reconstruction(DensityReconstruction::BoundedLinear)`

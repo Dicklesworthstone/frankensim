@@ -38,6 +38,10 @@ pub mod subcycle;
 /// Conservative SSPRK2 density stages with one original BDF1 momentum solve.
 pub mod ssprk2;
 
+/// Implicit SGS and molecular rheology on the same transported-density step.
+#[cfg(feature = "experimental-sgs")]
+pub mod sgs;
+
 /// Physical normalization and explicit density-transport allowances.
 #[derive(Clone, Copy, Debug)]
 pub struct DensityMomentumControls {
@@ -139,6 +143,56 @@ pub struct DensityMomentumAssembly<'a, 'm, const N: usize> {
     controls: DensityMomentumControls,
 }
 
+// Transport, physical force and boundary data are prepared once. Only the
+// viscous stress depends on the candidate in a nonlinear constitutive solve.
+struct PreparedDensityMomentum<'a, 'm, const N: usize> {
+    system: &'a FluxSystem<'m>,
+    params: FluxParams,
+    admitted: AdmittedBoundary,
+    inv_dt: f64,
+    current_weights: Vec<[f64; 6]>,
+    conservative: ConservativeMomentum,
+    cells: Vec<DensityTransportCell<N>>,
+    transport: DensityTransportReport<N>,
+    old_cells: &'a [DensityTransportCell<N>],
+    old_velocity: &'a [f64],
+    controls: DensityMomentumControls,
+}
+
+impl<'a, 'm, const N: usize> PreparedDensityMomentum<'a, 'm, N> {
+    fn assemble(
+        &self,
+        dynamic_viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        current_weights: Vec<[f64; 6]>,
+    ) -> core::result::Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.system.assemble_stokes_admitted_conservative(
+            self.params,
+            &|cell, point| dynamic_viscosity(cell, point) / self.controls.reference_density_kg_m3,
+            &|_| [0.0; 2],
+            &self.admitted,
+            None,
+            self.inv_dt,
+            None,
+            None,
+            None,
+            Some(current_weights),
+            Some(&self.conservative),
+        )
+    }
+
+    fn into_assembly(self, momentum: StokesAssembly<'a, 'm>) -> DensityMomentumAssembly<'a, 'm, N> {
+        DensityMomentumAssembly {
+            momentum,
+            cells: self.cells,
+            transport: self.transport,
+            old_cells: self.old_cells,
+            old_velocity: self.old_velocity,
+            faces: self.conservative.faces,
+            controls: self.controls,
+        }
+    }
+}
+
 impl<'a, 'm, const N: usize> DensityMomentumAssembly<'a, 'm, N> {
     /// Native mass, conservative momentum, viscosity and pressure operator.
     pub fn momentum(&self) -> &StokesAssembly<'a, 'm> {
@@ -156,83 +210,106 @@ impl<'a, 'm, const N: usize> DensityMomentumAssembly<'a, 'm, N> {
     pub fn solve(&self, mut cancelled: impl FnMut() -> bool) -> Result<DensityMomentumStep<N>> {
         poll(&mut cancelled)?;
         let flow = self.momentum.solve()?;
-        poll(&mut cancelled)?;
-        let system = self.momentum.system;
-        let before = observe(
-            system,
+        observe_step(
+            self.momentum.system,
+            flow,
+            &self.cells,
+            self.transport,
             self.old_cells,
             self.old_velocity,
-            self.controls.depth_m,
-            &mut cancelled,
-        )?;
-        let after = observe(
-            system,
-            &self.cells,
-            &flow.field.x,
-            self.controls.depth_m,
-            &mut cancelled,
-        )?;
-        let mut temporal = Sums::<1>::new();
-        for (cell, nodes) in system.mesh.tris.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let points = nodes.map(|node| system.mesh.verts[node]);
-            for (point, weight) in tri_quad(points, system.mesh.areas[cell]) {
-                let old = velocity(system, cell, point, self.old_velocity);
-                let new = velocity(system, cell, point, &flow.field.x);
-                let mass = weight * self.old_cells[cell].density_kg_m3 * self.controls.depth_m;
-                temporal
-                    .add([half_square(mass, new[0] - old[0]) + half_square(mass, new[1] - old[1])]);
-            }
-        }
-        let mut upwind = Sums::<1>::new();
-        for (index, edge) in system.mesh.edges.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let (a, b) = edge.tris;
-            if b == usize::MAX {
-                continue;
-            }
-            for sample in self.faces[index].points() {
-                let left = velocity(system, a, sample.point_m, &flow.field.x);
-                let right = velocity(system, b, sample.point_m, &flow.field.x);
-                let mass = sample.mass_rate_kg_m_s.abs()
-                    * self.transport.timestep_s
-                    * self.controls.depth_m;
-                upwind
-                    .add([half_square(mass, left[0] - right[0])
-                        + half_square(mass, left[1] - right[1])]);
-            }
-        }
-        let temporal = temporal.values()[0];
-        let upwind = upwind.values()[0];
-        if !temporal.is_finite() || temporal < 0.0 || !upwind.is_finite() || upwind < 0.0 {
-            return Err(invalid("unrepresentable numerical kinetic dissipation"));
-        }
-        let mut pressure_pa = allocate(flow.pressure.len(), 0.0)?;
-        for (target, &pressure) in pressure_pa.iter_mut().zip(&flow.pressure) {
-            *target = pressure * self.controls.reference_density_kg_m3;
-            if !target.is_finite() {
-                return Err(invalid("unrepresentable physical pressure"));
-            }
-        }
-        let mut cells = allocate(self.cells.len(), DensityTransportCell::default())?;
-        cells.copy_from_slice(&self.cells);
-        poll(&mut cancelled)?;
-        Ok(DensityMomentumStep {
-            flow,
-            pressure_pa,
-            cells,
-            transport: self.transport,
-            observations: DensityMomentumObservations {
-                momentum_before_kg_m_s: [before[0], before[1]],
-                momentum_after_kg_m_s: [after[0], after[1]],
-                kinetic_energy_before_j: before[2],
-                kinetic_energy_after_j: after[2],
-                temporal_dissipation_j: temporal,
-                interior_upwind_dissipation_j: upwind,
-            },
-            reference_density_kg_m3: self.controls.reference_density_kg_m3,
-        })
+            &self.faces,
+            self.controls,
+            cancelled,
+        )
     }
+}
+
+// Linear and nonlinear endpoints share the same physical inventory and
+// numerical-dissipation observations. This never queries a constitutive law.
+#[allow(clippy::too_many_arguments)]
+fn observe_step<const N: usize>(
+    system: &FluxSystem<'_>,
+    flow: StokesSolution,
+    cells: &[DensityTransportCell<N>],
+    transport: DensityTransportReport<N>,
+    old_cells: &[DensityTransportCell<N>],
+    old_velocity: &[f64],
+    faces: &[RelativeMassFluxFace],
+    controls: DensityMomentumControls,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<DensityMomentumStep<N>> {
+    poll(&mut cancelled)?;
+    let before = observe(
+        system,
+        old_cells,
+        old_velocity,
+        controls.depth_m,
+        &mut cancelled,
+    )?;
+    let after = observe(
+        system,
+        cells,
+        &flow.field.x,
+        controls.depth_m,
+        &mut cancelled,
+    )?;
+    let mut temporal = Sums::<1>::new();
+    for (cell, nodes) in system.mesh.tris.iter().enumerate() {
+        poll(&mut cancelled)?;
+        let points = nodes.map(|node| system.mesh.verts[node]);
+        for (point, weight) in tri_quad(points, system.mesh.areas[cell]) {
+            let old = velocity(system, cell, point, old_velocity);
+            let new = velocity(system, cell, point, &flow.field.x);
+            let mass = weight * old_cells[cell].density_kg_m3 * controls.depth_m;
+            temporal.add([half_square(mass, new[0] - old[0]) + half_square(mass, new[1] - old[1])]);
+        }
+    }
+    let mut upwind = Sums::<1>::new();
+    for (index, edge) in system.mesh.edges.iter().enumerate() {
+        poll(&mut cancelled)?;
+        let (a, b) = edge.tris;
+        if b == usize::MAX {
+            continue;
+        }
+        for sample in faces[index].points() {
+            let left = velocity(system, a, sample.point_m, &flow.field.x);
+            let right = velocity(system, b, sample.point_m, &flow.field.x);
+            let mass = sample.mass_rate_kg_m_s.abs() * transport.timestep_s * controls.depth_m;
+            upwind.add([
+                half_square(mass, left[0] - right[0]) + half_square(mass, left[1] - right[1])
+            ]);
+        }
+    }
+    let temporal = temporal.values()[0];
+    let upwind = upwind.values()[0];
+    if !temporal.is_finite() || temporal < 0.0 || !upwind.is_finite() || upwind < 0.0 {
+        return Err(invalid("unrepresentable numerical kinetic dissipation"));
+    }
+    let mut pressure_pa = allocate(flow.pressure.len(), 0.0)?;
+    for (target, &pressure) in pressure_pa.iter_mut().zip(&flow.pressure) {
+        *target = pressure * controls.reference_density_kg_m3;
+        if !target.is_finite() {
+            return Err(invalid("unrepresentable physical pressure"));
+        }
+    }
+    let mut accepted_cells = allocate(cells.len(), DensityTransportCell::default())?;
+    accepted_cells.copy_from_slice(cells);
+    poll(&mut cancelled)?;
+    Ok(DensityMomentumStep {
+        flow,
+        pressure_pa,
+        cells: accepted_cells,
+        transport,
+        observations: DensityMomentumObservations {
+            momentum_before_kg_m_s: [before[0], before[1]],
+            momentum_after_kg_m_s: [after[0], after[1]],
+            kinetic_energy_before_j: before[2],
+            kinetic_energy_after_j: after[2],
+            temporal_dissipation_j: temporal,
+            interior_upwind_dissipation_j: upwind,
+        },
+        reference_density_kg_m3: controls.reference_density_kg_m3,
+    })
 }
 
 impl<'m> FluxSystem<'m> {
@@ -282,6 +359,41 @@ impl<'m> FluxSystem<'m> {
         controls: DensityMomentumControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DensityMomentumAssembly<'a, 'm, N>> {
+        let mut prepared = self.prepare_density_momentum_bdf1(
+            numerics,
+            force_density,
+            boundaries,
+            advector,
+            previous_velocity,
+            cells,
+            inflow,
+            timestep_s,
+            controls,
+            &mut cancelled,
+        )?;
+        let weights = core::mem::take(&mut prepared.current_weights);
+        let momentum = prepared.assemble(
+            &|cell, point| dynamic_viscosity(cell, point, &prepared.cells[cell]),
+            weights,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(prepared.into_assembly(momentum))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_density_momentum_bdf1<'a, const N: usize>(
+        &'a self,
+        numerics: MaterialFluxNumerics,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        advector: &[f64],
+        previous_velocity: &'a [f64],
+        cells: &'a [DensityTransportCell<N>],
+        inflow: &[Option<DensityTransportCell<N>>],
+        timestep_s: f64,
+        controls: DensityMomentumControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedDensityMomentum<'a, 'm, N>> {
         poll(&mut cancelled)?;
         if !positive(controls.reference_density_kg_m3) || !positive(controls.depth_m) {
             return Err(invalid(
@@ -325,9 +437,8 @@ impl<'m> FluxSystem<'m> {
             &mut cancelled,
         )?;
         drop(plan);
-        self.assemble_transported_density_momentum_bdf1(
+        self.prepare_transported_density_momentum_bdf1(
             params,
-            dynamic_viscosity,
             force_density,
             boundaries,
             previous_velocity,
@@ -359,6 +470,43 @@ impl<'m> FluxSystem<'m> {
         controls: DensityMomentumControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<DensityMomentumAssembly<'a, 'm, N>> {
+        let mut prepared = self.prepare_transported_density_momentum_bdf1(
+            params,
+            force_density,
+            boundaries,
+            previous_velocity,
+            cells,
+            next,
+            transport,
+            mass_flux,
+            inv_dt,
+            controls,
+            &mut cancelled,
+        )?;
+        let weights = core::mem::take(&mut prepared.current_weights);
+        let momentum = prepared.assemble(
+            &|cell, point| dynamic_viscosity(cell, point, &prepared.cells[cell]),
+            weights,
+        )?;
+        poll(&mut cancelled)?;
+        Ok(prepared.into_assembly(momentum))
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn prepare_transported_density_momentum_bdf1<'a, const N: usize>(
+        &'a self,
+        params: FluxParams,
+        force_density: &dyn Fn(usize, [f64; 2], &DensityTransportCell<N>) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &'a [f64],
+        cells: &'a [DensityTransportCell<N>],
+        next: Vec<DensityTransportCell<N>>,
+        transport: DensityTransportReport<N>,
+        mass_flux: PreparedDensityMassFlux<'m>,
+        inv_dt: f64,
+        controls: DensityMomentumControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedDensityMomentum<'a, 'm, N>> {
         let nc = self.mesh.tris.len();
         let ne = self.mesh.edges.len();
         let admitted =
@@ -435,27 +583,18 @@ impl<'m> FluxSystem<'m> {
             loads,
             faces,
         };
-        let momentum = self.assemble_stokes_admitted_conservative(
-            params,
-            &|cell, point| dynamic_viscosity(cell, point, &next[cell]) / reference,
-            &|_| [0.0; 2],
-            &admitted,
-            None,
-            inv_dt,
-            None,
-            None,
-            None,
-            Some(current_weights),
-            Some(&conservative),
-        )?;
         poll(&mut cancelled)?;
-        Ok(DensityMomentumAssembly {
-            momentum,
+        Ok(PreparedDensityMomentum {
+            system: self,
+            params,
+            admitted,
+            inv_dt,
+            current_weights,
+            conservative,
             cells: next,
             transport,
             old_cells: cells,
             old_velocity: previous_velocity,
-            faces: conservative.faces,
             controls,
         })
     }

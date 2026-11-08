@@ -6,8 +6,8 @@
 
 use super::{MaterialStokesBoundary, with_physical_boundaries};
 use crate::bdm::{eval_basis, tri_quad};
+use crate::material::MaterialFluxNumerics;
 use crate::ns::boundary::{StokesAssembly, StokesBoundaryError, StokesPressureReference};
-use crate::ns::material::MaterialFluxNumerics;
 use crate::ns::transport::density::{
     DensityTransportCell, DensityTransportError, DensityTransportReport,
 };

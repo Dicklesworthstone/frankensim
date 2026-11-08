@@ -19,6 +19,10 @@ mod subcycle;
 #[path = "density_momentum/ssprk2.rs"]
 mod ssprk2;
 
+#[cfg(feature = "experimental-sgs")]
+#[path = "density_momentum/sgs.rs"]
+mod sgs;
+
 fn controls(reference: f64, depth: f64) -> Controls {
     Controls {
         reference_density_kg_m3: reference,

@@ -1,6 +1,6 @@
 //! Original material rheology plus SGS at one physical nonlinear endpoint.
 use super::*;
-use fs_flux::ns::material::{
+use fs_flux::material::{
     MaterialFluxError, MaterialFluxNumerics, MaterialFluxSystem, MaterialNavierStokesBoundary,
     MaterialSgsConfig, MaterialSgsError,
 };
@@ -128,7 +128,7 @@ fn material_sgs_couples_actual_rheology_full_gradient_and_physical_heating_at_ev
                     ]
                 };
                 let calls = Cell::new(0usize);
-                let resolve = |point: fs_flux::ns::material::MaterialFluxRheologyPoint,
+                let resolve = |point: fs_flux::material::MaterialFluxRheologyPoint,
                                _: &FluidTransportState| {
                     calls.set(calls.get() + 1);
                     source(density, point.shear_rate_per_s, point.cell)
