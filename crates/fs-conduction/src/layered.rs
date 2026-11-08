@@ -23,6 +23,7 @@ pub use nonlinear::{
 };
 mod contact;
 pub use contact::{
+    GeneratedTemperatureContactWallOptions, GeneratedTemperatureContactWallSolution,
     LayeredContactState, LayeredTemperatureContact, TemperatureContactWallOptions,
     TemperatureContactWallSolution,
 };

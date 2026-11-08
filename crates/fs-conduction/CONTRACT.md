@@ -1887,8 +1887,33 @@ plus varying and fixed contacts, equilibrium, ordered-source heat reversal,
 source support, bounded failure and cancellation. No extrapolation, claim
 switching, uniqueness, arbitrary-feedback convergence, continuous multiaxis
 source-path support or propagated uncertainty is inferred. This entry point is
-planar and source-free; generated/radial/transient contact feedback remains with
-the corresponding owners.
+planar and source-free; the generated variant below shares its contact-feedback
+kernel. Radial and transient contact feedback remain with their corresponding
+owners.
+
+`LayeredWall::solve_temperature_dependent_with_generation_and_contacts` composes
+that same bounded feedback with the existing nonlinear generated-wall owner.
+Every interface uses the original outgoing/incoming local fluxes, and each side
+must match the fresh pinned contact law under its own flux tolerance. Both
+native fluxes and their continuity residual are retained. Source-coordinate
+relaxation does not blend resistance values, returned temperatures or receipts.
+
+Prescribed signed generation is passed once to the original bulk solve. Its
+material-domain and interior-extremum checks, films, both reservoir conditions,
+heat split and complete source profiles remain authoritative. The original
+reservoir-minus-generation residual must also pass the native maximum-face-flux
+tolerance multiplied by area. Equal reservoir temperatures or zero NET generation
+do not imply zero internal flux; only a complete all-zero layer source vector
+permits equilibrium contact initialization. Independently supplied volumetric
+Joule loss is supported as prescribed heat; no electrical or temperature-dependent
+generation feedback is inferred.
+
+Focused analytical tests in `tests/layered_nonlinear/contact/generation.rs`
+cover equal-bath nonlinear heating/cooling and reflection with contact support
+excluding the baths, opposite local contact fluxes under zero net generation,
+source-free and fixed-source parity, unchanged films, original receipts,
+interior extrema, bounded refusal and cancellation. These definitions and
+independent numerical equation checks do not establish native test execution.
 
 `LayeredWall::solve_temperature_dependent_with_generation` combines the same
 source-segment integral/inverse with `dq/dx=s` for finite, signed, uniform

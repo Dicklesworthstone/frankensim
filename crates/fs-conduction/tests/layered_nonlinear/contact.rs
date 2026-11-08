@@ -1,4 +1,6 @@
 //! G1/G3/G4: actual interface temperatures, pinned contact laws and heat balance.
+#[path = "contact/generation.rs"]
+mod generation;
 
 use super::{close, curve, options, temperature, with_cancelled_cx, with_cx};
 use fs_conduction::interface::temperature::TemperatureContactCoordinates;
