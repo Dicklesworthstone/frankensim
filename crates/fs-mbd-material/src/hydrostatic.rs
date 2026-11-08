@@ -63,6 +63,8 @@ pub use finite_layered::{
 pub use finite_tank::{
     FiniteHydrostaticTank, FiniteTankBodiesLoad, FiniteTankBodiesStep, FiniteTankBody,
     FiniteTankControls, FiniteTankDensityChange, FiniteTankFill, FiniteTankSurface,
+    FiniteTankThermalAudit, FiniteTankThermalControls, FiniteTankThermalError,
+    FiniteTankThermalObserver,
     HydrostaticTankGeometry, MAX_TANK_BODIES, MAX_TANK_VOLUME_EVALUATIONS,
 };
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};

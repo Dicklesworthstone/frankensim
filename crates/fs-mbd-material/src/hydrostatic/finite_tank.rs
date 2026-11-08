@@ -29,6 +29,11 @@ mod solve;
 pub use bodies::{FiniteTankBodiesLoad, FiniteTankBodiesStep, FiniteTankBody, MAX_TANK_BODIES};
 pub(super) use bodies::step_bodies_with;
 pub use density_change::FiniteTankDensityChange;
+mod thermal;
+pub use thermal::{
+    FiniteTankThermalAudit, FiniteTankThermalControls, FiniteTankThermalError,
+    FiniteTankThermalObserver,
+};
 pub use solve::FiniteTankSurface;
 
 /// Hard bound on geometry evaluations per finite-bath load query.

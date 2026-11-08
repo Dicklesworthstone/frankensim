@@ -201,6 +201,60 @@ impl<'a> LiquidTemperatureLaw<'a> {
         }
         let state =
             caloric.advance_specific_energy(initial, net_specific_enthalpy_increment_j_kg)?;
+        self.finish_caloric_endpoint(
+            caloric,
+            initial,
+            state,
+            net_specific_enthalpy_increment_j_kg,
+            maximum_source_density_defect_kg_m3,
+        )
+    }
+
+    /// Refresh sources at an EXACT endpoint already accepted on the original chart.
+    ///
+    /// Native thermal owners supply their actual final state, so subtracting and
+    /// re-adding h cannot move its last bit or select a different source epoch.
+    /// Both states must belong to this same chart. The full original claim,
+    /// fixed-context, liquid-phase and source-density checks remain unchanged.
+    /// The reported requested increment equals the represented endpoint change;
+    /// no heat, mechanical work or independently integrated state is inferred.
+    pub fn prepare_caloric_state_endpoint(
+        &self,
+        caloric: &EquilibriumEnthalpyPhaseCurve,
+        initial: EquilibriumPhaseState,
+        state: EquilibriumPhaseState,
+        maximum_source_density_defect_kg_m3: f64,
+    ) -> Result<LiquidCaloricEndpoint<'a>, LiquidCaloricError> {
+        self.finish_caloric_endpoint(
+            caloric,
+            initial,
+            state,
+            state.specific_enthalpy_j_kg() - initial.specific_enthalpy_j_kg(),
+            maximum_source_density_defect_kg_m3,
+        )
+    }
+
+    fn finish_caloric_endpoint(
+        &self,
+        caloric: &EquilibriumEnthalpyPhaseCurve,
+        initial: EquilibriumPhaseState,
+        state: EquilibriumPhaseState,
+        net_specific_enthalpy_increment_j_kg: f64,
+        maximum_source_density_defect_kg_m3: f64,
+    ) -> Result<LiquidCaloricEndpoint<'a>, LiquidCaloricError> {
+        if !maximum_source_density_defect_kg_m3.is_finite()
+            || maximum_source_density_defect_kg_m3 < 0.0
+            || caloric.material_card_identity() != self.reference_state.material().card_identity()
+        {
+            return Err(invalid(
+                "liquid caloric endpoint needs its original card and a finite density-accuracy budget",
+            ));
+        }
+        if initial.phase_curve_identity() != caloric.identity()
+            || state.phase_curve_identity() != caloric.identity()
+        {
+            return Err(PhaseStateError::StateCurveMismatch.into());
+        }
         if initial.phase() != SolidLiquidPhase::Liquid || state.phase() != SolidLiquidPhase::Liquid
         {
             return Err(invalid(
