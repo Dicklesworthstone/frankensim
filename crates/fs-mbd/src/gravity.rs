@@ -24,6 +24,11 @@ pub mod mutual;
 mod superposition;
 pub use superposition::SuperposedGravity;
 
+mod adaptive;
+pub use adaptive::{
+    GravityAdvanceError, GravityAdvanceOptions, GravityAdvanceReceipt, GravityAdvanceStats,
+};
+
 /// Invalid field/frame, inadmissible finite-body approximation, or native failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GravityError {

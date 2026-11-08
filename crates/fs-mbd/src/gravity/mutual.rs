@@ -13,7 +13,11 @@
 pub mod quadrupole;
 pub use quadrupole::{MutualQuadrupoleGravity, MutualQuadrupoleLoad};
 
-use super::{GravityError, finite, inverse_radius_potential_increment, poll, same_frame};
+use super::adaptive::{NativeStep, advance_native};
+use super::{
+    GravityAdvanceError, GravityAdvanceOptions, GravityAdvanceReceipt, GravityError, finite,
+    inverse_radius_potential_increment, poll, same_frame,
+};
 use crate::{
     DynamicsDiagnostics, DynamicsError, Gravity, MassProperties, RigidBodyIntegrator,
     RigidBodyState, Vec3, Wrench,
@@ -174,7 +178,8 @@ impl MutualGravity {
     /// Both endpoints AND the complete straight relative drift segments must
     /// satisfy the separation cutoff. This prevents tunneling through a source
     /// during the split drift; it is not an enclosure of the true curved orbit.
-    /// Close encounters still require caller-owned timestep refinement. Inputs
+    /// Close encounters require timestep refinement; [`Self::advance`] provides
+    /// an optional local-error-controlled interval. Inputs
     /// are immutable; failures, exhausted budgets and late cancellation return
     /// no partly advanced system. External loads, collisions, variable masses,
     /// adaptivity and finite-body gravity are outside this closed-system map.
@@ -241,6 +246,46 @@ impl MutualGravity {
             potential_energy_change_j,
             pair_count: before.pair_count,
         })
+    }
+
+    /// Advance a complete interval with bounded native step-doubling trials.
+    ///
+    /// This retains the original simultaneous forces, native full-inertia spin,
+    /// immutable inputs and direct pair-potential work. Accepted states use two
+    /// native half steps, without extrapolation or momentum/energy projection.
+    /// The variable-step sequence is not claimed symplectic or reversible.
+    ///
+    /// The pair budget still bounds every native pass; `maximum_trials` bounds
+    /// the additional time-integration work. The original separation-cutoff,
+    /// invalid-input/arithmetic and cancellation errors return immediately.
+    /// Local error estimates do not certify the true path or its global error.
+    pub fn advance(
+        self,
+        frame: u64,
+        states: &[RigidBodyState],
+        properties: &[MassProperties],
+        duration_seconds: f64,
+        options: GravityAdvanceOptions,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GravityAdvanceReceipt, GravityAdvanceError> {
+        options.validate(duration_seconds)?;
+        self.load(frame, states, properties, &mut cancelled)?;
+        let mut initial = storage(states.len())?;
+        for &state in states {
+            poll(&mut cancelled)?;
+            initial.push(state);
+        }
+        advance_native(
+            initial,
+            properties,
+            duration_seconds,
+            options,
+            |states, duration, cancelled| {
+                self.step(frame, states, properties, duration, cancelled)
+                    .map(NativeStep::from)
+            },
+            cancelled,
+        )
     }
 
     fn pair_potential_change(

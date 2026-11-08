@@ -7,13 +7,17 @@
 //! higher moments are omitted. Declared COM bounding spheres must be disjoint
 //! and satisfy the caller's far-field ratio throughout the split drift.
 
+use super::super::adaptive::{NativeStep, advance_native};
+use super::super::{GravityAdvanceError, GravityAdvanceOptions, GravityAdvanceReceipt};
 use super::super::{quadrupole_correction, quadrupole_inertia_trace};
 use super::{
     GravityError, MutualGravity, MutualGravityStepReceipt, Sum, VectorSum, binary_parts,
     diagnostics, drift_potential_change, force_component, pair_magnitudes, poll, same_frame,
     scaled_positive, storage,
 };
-use crate::{DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench};
+use crate::{
+    DynamicsError, Gravity, MassProperties, RigidBodyIntegrator, RigidBodyState, Vec3, Wrench,
+};
 use fs_math::dd::Dd;
 
 /// An explicitly selected extended-body model on an existing mutual-gravity owner.
@@ -87,7 +91,9 @@ impl MutualQuadrupoleGravity<'_> {
         properties: &[MassProperties],
         cancelled: impl FnMut() -> bool,
     ) -> Result<MutualQuadrupoleLoad, GravityError> {
-        Ok(self.load_with_traces(frame, states, properties, cancelled)?.0)
+        Ok(self
+            .load_with_traces(frame, states, properties, cancelled)?
+            .0)
     }
 
     fn load_with_traces(
@@ -220,7 +226,8 @@ impl MutualQuadrupoleGravity<'_> {
     /// Endpoints and the closest point of every straight relative split drift
     /// satisfy both the original separation cutoff and the combined-radius
     /// far-field bound. This is not an enclosure of the true curved trajectory.
-    /// Close encounters require caller refinement. Cancellation, invalid
+    /// Close encounters require refinement; [`Self::advance`] provides optional
+    /// local-error control. Cancellation, invalid
     /// arithmetic or any domain/budget refusal publishes no partial system.
     pub fn step(
         self,
@@ -322,6 +329,47 @@ impl MutualQuadrupoleGravity<'_> {
             potential_energy_change_j,
             pair_count: before.pair_count,
         })
+    }
+
+    /// Advance a complete interval with bounded native Verlet step doubling.
+    ///
+    /// Original full-inertia rotation, recoil, tidal spin/orbital exchange and
+    /// direct pair-potential work remain owned by [`Self::step`]. The accepted
+    /// trajectory consists of native half steps and has no extrapolated state.
+    /// Variable step selection is not claimed symplectic or time reversible.
+    ///
+    /// Initial domain admission happens before any trials. A later typed
+    /// expansion-domain refusal may trigger bounded refinement; cancellation,
+    /// invalid arithmetic, pair-budget and separation-cutoff refusals propagate
+    /// immediately. Neither local error estimates nor split-drift guards certify
+    /// the true curved path, multipole truncation error or global time error.
+    pub fn advance(
+        self,
+        frame: u64,
+        states: &[RigidBodyState],
+        properties: &[MassProperties],
+        duration_seconds: f64,
+        options: GravityAdvanceOptions,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GravityAdvanceReceipt, GravityAdvanceError> {
+        options.validate(duration_seconds)?;
+        self.load(frame, states, properties, &mut cancelled)?;
+        let mut initial = storage(states.len())?;
+        for &state in states {
+            poll(&mut cancelled)?;
+            initial.push(state);
+        }
+        advance_native(
+            initial,
+            properties,
+            duration_seconds,
+            options,
+            |states, duration, cancelled| {
+                self.step(frame, states, properties, duration, cancelled)
+                    .map(NativeStep::from)
+            },
+            cancelled,
+        )
     }
 
     fn admit_pair_radius(self, i: usize, j: usize, radius: f64) -> Result<(), GravityError> {

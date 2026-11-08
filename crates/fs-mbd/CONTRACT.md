@@ -901,8 +901,9 @@ potential derivatives, the two-body Kepler period and second-order apocenter err
 20-orbit energy/momentum behavior, frame/boost/permutation covariance, reversal,
 native rotated-inertia spin, hidden interior source crossing and late cancellation
 (G1/G2/G3). This monopole lane does not include finite-body effects. Self-energy
-within a body, collisions, deformation, external loads, variable mass, adaptivity
-and FMM remain outside this closed-system map.
+within a body, collisions, deformation, external loads, variable mass and FMM
+remain outside this closed-system map. Adaptive interval advancement composes
+this same step through the explicitly selected controller described below.
 
 ### Recoiling extended bodies and tidal spin/orbital exchange
 
@@ -950,6 +951,39 @@ deformation and contact remain outside this opt-in model.
 full rotated inertia, body permutation, closed-system tidal momentum exchange
 and reversal, a resolved 36-pair mass-cloud potential oracle with fourth-moment
 refinement, combined-radius/interior-drift refusal, budgets and late cancellation.
+
+### Adaptive gravitational encounters on native states
+
+`MutualGravity::advance` and `MutualQuadrupoleGravity::advance` advance a requested
+interval using the existing force, recoil, full-inertia drift and potential-work
+owners. Each trial compares one full step with two half-steps. The accepted state
+is the actual two-half-step result; it is never Richardson-extrapolated or
+projected onto an energy/momentum constraint. The second-order local estimate is
+one third of their difference. Position, velocity, relative attitude and world
+angular velocity each have an explicit absolute tolerance in SI units; relative
+scales use local changes, so an arbitrary world origin or common velocity does
+not inflate the requested error allowance. Every body participates in the norm.
+
+`GravityAdvanceOptions` bounds the initial, minimum and maximum trial durations
+and the total number of trials. Accepted and rejected trials share that budget;
+each trial performs at most three original native steps. The result exposes the
+counts, largest accepted error ratio and a suggested next duration. Only accepted
+half-step potential changes enter a compensated interval work sum. Endpoint
+diagnostics retain the native original mass, pose, momenta and potential owners.
+Cancellation, invalid data, unrepresentable arithmetic, exhausted budgets or an
+unresolved minimum step return no candidate interval and leave inputs untouched.
+Initial domain admission is mandatory; only an explicit finite-body expansion
+domain refusal during a trial may be refined. Other native/source errors retain
+their identity and are not silently retried.
+
+The estimate is local and asymptotic, not a certified global error bound or a
+continuous-path enclosure. Native cutoff and expansion-domain checks remain
+binding; the controller is not a collision/event solver. State-dependent step
+selection is not claimed symplectic or time-reversible, even though each native
+fixed-step map retains its original structure. No discrete adjoint or bitwise
+equivalence between differently partitioned interval requests is claimed.
+`tests/adaptive_gravity.rs` exercises physical orbit accuracy/refinement, native
+rotational dynamics, momentum/work accounting and bounded atomic refusals.
 
 ## Configuration-dependent loads on the original rigid integrator
 
