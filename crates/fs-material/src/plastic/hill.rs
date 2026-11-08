@@ -38,6 +38,8 @@
 mod calibration;
 /// Fixed material orientation without changing the local history convention.
 pub mod oriented;
+/// Explicit-time associative linear overstress on the same anisotropic return.
+pub mod rate;
 /// Original material-card support for the directional constitutive parameters.
 pub mod source;
 /// Source-bound thermal softening and reciprocal heat for fixed material axes.
@@ -173,7 +175,15 @@ struct HillTrial {
     tangent: Option<PlasticTangent>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LinearRateReturn {
+    modulus_pa: f64,
+    scale: f64,
+    ratios: [f64; 5],
+}
+
 struct PlasticTangent {
+    return_scale: f64,
     radius_ratio: f64,
     denominators: [f64; 5],
     normalized: [f64; 5],
@@ -718,6 +728,19 @@ impl Hill48 {
     }
 
     fn returned(&self, strain: &Voigt, state: &HillState) -> Result<HillTrial, HillError> {
+        self.returned_with_rate(strain, state, None)
+    }
+
+    fn returned_with_rate(
+        &self,
+        strain: &Voigt,
+        state: &HillState,
+        rate: Option<&LinearRateReturn>,
+    ) -> Result<HillTrial, HillError> {
+        let (return_scale, return_ratios, incremental_hardening) = match rate {
+            Some(rate) => (rate.scale, rate.ratios, self.hardening + rate.modulus_pa),
+            None => (self.return_scale, self.return_ratios, self.hardening),
+        };
         let elastic = self.admit(strain, state)?;
         let trial = self.relative_modes(&elastic, state);
         let q_trial = self.modes.equivalent(&trial);
@@ -750,8 +773,9 @@ impl Hill48 {
         }
 
         // In mode i, xi_i = y*xi_trial_i / (y + (2mu+C)*lambda_i*dl),
-        // where y=y0+H*dl+Delta_R_Voce. Its denominator has derivative
-        // H+(2mu+C)*lambda_i+R'_Voce(alpha+dl), always strictly positive.
+        // where y=y0+(H+eta/dt)*dl+Delta_R_Voce for selected linear kinetics.
+        // Its denominator derivative H+eta/dt+(2mu+C)*lambda_i+R'_Voce
+        // is always strictly positive. eta/dt is zero in the native law.
         // Thus sum_i [sqrt(lambda_i)*xi_trial_i/denominator_i]^2 = 1.
         // Normalize stresses and moduli independently before solving for
         // z = return_scale*dl/q_trial. This retains stress-unit covariance.
@@ -765,11 +789,7 @@ impl Hill48 {
         // return_scale bounds every denominator derivative from above;
         // the minimum linear modal ratio bounds it from below, also for Voce.
         let mut lower = (q_trial - y0) / q_trial;
-        let minimum = self
-            .return_ratios
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let minimum = return_ratios.iter().copied().fold(f64::INFINITY, f64::min);
         let mut upper = lower / minimum;
         if !positive(upper) {
             return Err(HillError::Numerical(
@@ -779,14 +799,14 @@ impl Hill48 {
         let mut z = lower;
         let mut normalized = [0.0; 5];
         let mut denominators = [0.0; 5];
-        let mut derivative_ratios = self.return_ratios;
+        let mut derivative_ratios = return_ratios;
         let (remaining, initial_slope) = if self.saturation_pa == 0.0 {
             (0.0, 0.0)
         } else {
             let decay = det::exp(-self.saturation_rate_per_strain * state.alpha);
             (
                 self.saturation_pa * decay,
-                (self.saturation_pa * self.saturation_rate_per_strain) * decay / self.return_scale,
+                (self.saturation_pa * self.saturation_rate_per_strain) * decay / return_scale,
             )
         };
         let mut saturation_increment_ratio = 0.0;
@@ -794,17 +814,16 @@ impl Hill48 {
         let mut residual = f64::INFINITY;
         for _ in 0..MAX_RETURN_ITERATIONS {
             if self.saturation_pa > 0.0 {
-                let increment = (q_trial / self.return_scale) * z;
+                let increment = (q_trial / return_scale) * z;
                 saturation_increment_ratio =
                     hardening::strength(remaining, self.saturation_rate_per_strain, increment)
                         / q_trial;
-                let slope_ratio = initial_slope
-                    * det::exp(-self.saturation_rate_per_strain * increment);
-                derivative_ratios = self.return_ratios.map(|ratio| ratio + slope_ratio);
+                let slope_ratio =
+                    initial_slope * det::exp(-self.saturation_rate_per_strain * increment);
+                derivative_ratios = return_ratios.map(|ratio| ratio + slope_ratio);
             }
             for i in 0..5 {
-                denominators[i] = radius_ratio + self.return_ratios[i] * z
-                    + saturation_increment_ratio;
+                denominators[i] = radius_ratio + return_ratios[i] * z + saturation_increment_ratio;
                 normalized[i] = unit[i] / denominators[i];
             }
             let value = norm(&normalized);
@@ -842,15 +861,15 @@ impl Hill48 {
                 residual,
             });
         }
-        let increment = (q_trial / self.return_scale) * z;
+        let increment = (q_trial / return_scale) * z;
         let alpha = state.alpha + increment;
         if !positive(increment) || !alpha.is_finite() || alpha == state.alpha {
             return Err(HillError::Numerical(
                 "plastic increment or accumulation is not representable",
             ));
         }
-        let yield_ratio = radius_ratio + (self.hardening / self.return_scale) * z
-            + saturation_increment_ratio;
+        let yield_ratio =
+            radius_ratio + (incremental_hardening / return_scale) * z + saturation_increment_ratio;
         let ratios: [f64; 5] = core::array::from_fn(|i| yield_ratio / denominators[i]);
         let returned: [f64; 5] = core::array::from_fn(|i| trial[i] * ratios[i]);
         let offset = self.modes.tensor(&core::array::from_fn(|i| {
@@ -883,6 +902,7 @@ impl Hill48 {
             plastic_increment: increment,
             yield_residual_pa: yield_residual,
             tangent: Some(PlasticTangent {
+                return_scale,
                 // Differentiation uses y-dl*y', not the old yield radius or
                 // a secant slope. The concave Voce increment adds a positive
                 // remainder; its shared series avoids cancellation near yield.
@@ -909,6 +929,7 @@ impl Hill48 {
             return Ok(bulk_shear_stiffness(self.bulk, 0.5 * self.twice_shear));
         };
         let PlasticTangent {
+            return_scale,
             radius_ratio,
             denominators,
             normalized,
@@ -930,7 +951,7 @@ impl Hill48 {
         let w: [f64; 5] = core::array::from_fn(|i| {
             normalized[i]
                 * det::sqrt(
-                    ((self.twice_shear * self.modes.eigenvalues[i] / self.return_scale)
+                    ((self.twice_shear * self.modes.eigenvalues[i] / *return_scale)
                         / denominators[i]
                         / b)
                         * (*radius_ratio / denominators[i]),
@@ -974,7 +995,16 @@ impl Hill48 {
     /// cannot invent a new plastic step from roundoff. This is not a physical
     /// transition band. The scalar return has a fixed iteration cap.
     pub fn response(&self, strain: &Voigt, state: &HillState) -> Result<HillResponse, HillError> {
-        let trial = self.returned(strain, state)?;
+        self.response_with_rate(strain, state, None)
+    }
+
+    fn response_with_rate(
+        &self,
+        strain: &Voigt,
+        state: &HillState,
+        rate: Option<&LinearRateReturn>,
+    ) -> Result<HillResponse, HillError> {
+        let trial = self.returned_with_rate(strain, state, rate)?;
         let tangent = self.returned_tangent(&trial)?;
         Ok(HillResponse {
             stress_pa: trial.stress_pa,
@@ -1044,6 +1074,20 @@ impl Hill48 {
         strain: &Voigt,
         tolerances: EnergyTolerances,
     ) -> Result<HillEnergyIncrement, HillError> {
+        self.advance_with_rate_energy_from(
+            previous, old_strain, old_state, strain, tolerances, None,
+        )
+    }
+
+    fn advance_with_rate_energy_from(
+        &self,
+        previous: &Self,
+        old_strain: &Voigt,
+        old_state: &HillState,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+        rate: Option<&LinearRateReturn>,
+    ) -> Result<HillEnergyIncrement, HillError> {
         if !positive(tolerances.energy_j_m3) || !positive(tolerances.yield_pa) {
             return Err(HillError::Parameters(
                 "energy and yield allowances must be finite and positive",
@@ -1054,14 +1098,28 @@ impl Hill48 {
                 "thermal Hill history requires the same fixed anisotropic metric",
             ));
         }
-        previous.validate_committed_history(old_strain, old_state, tolerances.yield_pa)?;
-        let response = self.response(strain, old_state)?;
-        if response.yield_residual_pa > tolerances.yield_pa
+        if rate.is_some() {
+            // A valid viscous endpoint can lie outside the static yield surface.
+            // Check its actual old coefficient/history domain without projecting
+            // it or inventing another physical interval.
+            previous.admit(old_strain, old_state)?;
+        } else {
+            previous.validate_committed_history(old_strain, old_state, tolerances.yield_pa)?;
+        }
+        let response = self.response_with_rate(strain, old_state, rate)?;
+        let overstress = rate.map_or(0.0, |value| value.modulus_pa * response.plastic_increment);
+        let consistency_residual = response.yield_residual_pa - overstress;
+        if !overstress.is_finite() || !consistency_residual.is_finite() {
+            return Err(HillError::Numerical(
+                "viscous consistency is not representable",
+            ));
+        }
+        if consistency_residual > tolerances.yield_pa
             || (response.plastic_increment > 0.0
-                && response.yield_residual_pa.abs() > tolerances.yield_pa)
+                && consistency_residual.abs() > tolerances.yield_pa)
         {
             return Err(HillError::YieldResidual {
-                residual_pa: response.yield_residual_pa,
+                residual_pa: consistency_residual,
                 tolerance_pa: tolerances.yield_pa,
             });
         }
@@ -1092,7 +1150,7 @@ impl Hill48 {
             initial: self.stored_energy(old_strain, old_state)?,
             final_state: self.stored_energy(strain, &response.state)?,
             mechanical_work_j_m3: contract(&response.stress_pa, &total),
-            physical_dissipation_j_m3: self.yield_stress * da,
+            physical_dissipation_j_m3: self.yield_stress * da + overstress * da,
             numerical_dissipation_j_m3: 0.5 * self.bulk * trace(&de).powi(2)
                 + 0.5 * self.twice_shear * modes.iter().map(|v| v * v).sum::<f64>()
                 + 0.5 * self.hardening * da * da

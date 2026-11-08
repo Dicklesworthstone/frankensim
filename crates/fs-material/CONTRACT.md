@@ -21900,3 +21900,11 @@ at cdb00fe5f4eb2db4eeb21ab9a0cae934747916b7 with native linear/nonlinear numeric
 modules and nightly-2026-08-31, excluding only unrelated runtime wrappers.
 No thermal solver or material algorithm was substituted. Full workspace Cargo
 validation remains unrun.
+
+## Explicit-time anisotropic Hill overstress
+
+`plastic::hill::rate::LinearOverstressHill48` supplies the associative n=1 kinetic law `alpha_dot=max(q(sigma-X)-Y-R(alpha),0)/eta`, with independently selected positive viscosity [Pa s] and actual step duration [s]. Alpha remains the original Hill work-conjugate multiplier; coefficients fitted against a differently normalized J2 strain cannot be substituted implicitly. Aligned and fixed-oriented constructors retain the complete original linear/Voce/Prager law and local material history.
+
+The original five-mode scalar return and exact tensor tangent include `eta/dt` only in the incremental radius. Original yield and energetic hardening coefficients remain unchanged. Accepted viscous histories may have positive static overstress; duration-free history admission checks their finite, isochoric, reachable small-strain state without a static-yield projection. Repeated proposals borrow the same accepted history and consume no additional interval. A further accepted hold interval can relax stress and advance plastic history.
+
+Physical dissipation is `Y*delta_alpha + (eta/dt)*delta_alpha^2`. Original elastic, isotropic and Prager storage and backward-Euler losses retain their existing owners. The endpoint-frozen thermal seam preserves old-coefficient history admission and original material axes; coefficient work and entropy belong to the thermal owner. Native tests specify independent anisotropic shear relaxation and endpoint slopes, J2 correspondence, rotated nonproportional tangents, plane-stress holds and stress-unit covariance. This bounded law does not supply sub-yield creep, a nonlinear rate exponent, dynamic backstress recovery, evolving texture, finite-strain forming or measured-alloy calibration.

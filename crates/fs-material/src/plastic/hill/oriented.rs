@@ -82,7 +82,7 @@ impl OrientedHill48 {
         }
     }
 
-    fn local_strain(&self, strain: &Voigt) -> Voigt {
+    pub(super) fn local_strain(&self, strain: &Voigt) -> Voigt {
         if self.aligned {
             *strain
         } else {
@@ -90,7 +90,18 @@ impl OrientedHill48 {
         }
     }
 
-    fn spatial_response(&self, mut response: HillResponse) -> Result<HillResponse, HillError> {
+    pub(super) fn spatial_stress(&self, stress: &Voigt) -> Voigt {
+        if self.aligned {
+            *stress
+        } else {
+            apply(&self.to_spatial, stress)
+        }
+    }
+
+    pub(super) fn spatial_response(
+        &self,
+        mut response: HillResponse,
+    ) -> Result<HillResponse, HillError> {
         if self.aligned {
             return Ok(response);
         }
