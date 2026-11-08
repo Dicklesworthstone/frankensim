@@ -3,10 +3,12 @@
 
 #[path = "plastic_hill_thermal/mixed.rs"]
 mod mixed;
-#[path = "plastic_hill_thermal/voce.rs"]
-mod voce;
+#[path = "plastic_hill_thermal/power.rs"]
+mod power;
 #[path = "plastic_hill_thermal/rate.rs"]
 mod rate;
+#[path = "plastic_hill_thermal/voce.rs"]
+mod voce;
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

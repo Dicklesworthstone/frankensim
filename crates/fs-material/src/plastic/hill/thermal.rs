@@ -19,7 +19,11 @@
 //! zero, never divides by the modulus or discards a backstress history.
 //! Optional sourced linear overstress adds eta(T)*delta_alpha/dt to the
 //! endpoint flow resistance. Its yield and viscous work are physical heat;
-//! viscosity stores no energy and adds no mechanical entropy. Rate histories
+//! viscosity stores no energy and adds no mechanical entropy. Optional sourced
+//! power-law overstress instead uses alpha_dot=(s0/eta)*max(f/s0,0)^n, with
+//! independent positive stress scale s0 and exponent n>=1. All kinetic
+//! coefficients may depend on temperature without changing free energy.
+//! Rate histories
 //! may remain outside the static yield surface and relax during a held strain.
 //! Native endpoint yield work is physical heat. Coefficient storage and delta(Ts)
 //! give the separate reversible caloric transfer; numerical loss is never heat.
@@ -29,8 +33,11 @@
 mod source;
 pub use source::ThermalHillSourceQuery;
 
-use super::rate::{self, LinearOverstressHill48};
-use super::source::{HILL_OVERSTRESS_VISCOSITY_PROPERTY, HillSourceError, ResolvedHill48};
+use super::rate::{self, LinearOverstressHill48, PowerLawOverstressHill48};
+use super::source::{
+    HILL_OVERSTRESS_EXPONENT_PROPERTY, HILL_OVERSTRESS_STRESS_SCALE_PROPERTY,
+    HILL_OVERSTRESS_VISCOSITY_PROPERTY, HillSourceError, ResolvedHill48,
+};
 use super::{HillError, HillState};
 use crate::phase::{EquilibriumPhaseState, PhaseStateError, ResolvedHeatCapacityCurve};
 use crate::plastic::energy::EnergyTolerances;
@@ -117,8 +124,61 @@ pub struct ThermalHillSource<'a> {
     /// Explicit saturation selection, including Q=0 and Q'=0. The reference
     /// law retains b per Hill work-conjugate alpha and its original source.
     voce_slope_pa_k: Option<f64>,
-    /// Explicitly pinned dissipative viscosity; never a stored-energy modulus.
-    linear_overstress_selected: bool,
+    /// One explicitly selected dissipative rate law, with all original claims.
+    overstress_selected: Option<HillOverstressSelection>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HillOverstressSelection {
+    Linear,
+    PowerLaw,
+}
+
+/// Prepared kinetics share one native Hill history and thermodynamic backbone.
+#[derive(Clone, Debug)]
+enum HillOverstress {
+    Linear(LinearOverstressHill48),
+    PowerLaw(PowerLawOverstressHill48),
+}
+
+impl SmallStrainLaw for HillOverstress {
+    type State = HillState;
+    fn initial_state(&self) -> HillState {
+        match self {
+            Self::Linear(law) => law.initial_state(),
+            Self::PowerLaw(law) => law.initial_state(),
+        }
+    }
+    fn stress(&self, strain: &Voigt, old: &HillState) -> Voigt {
+        match self {
+            Self::Linear(law) => law.stress(strain, old),
+            Self::PowerLaw(law) => law.stress(strain, old),
+        }
+    }
+    fn tangent(&self, strain: &Voigt, old: &HillState) -> Tangent6 {
+        match self {
+            Self::Linear(law) => law.tangent(strain, old),
+            Self::PowerLaw(law) => law.tangent(strain, old),
+        }
+    }
+    fn update_state(&self, strain: &Voigt, old: &HillState) -> HillState {
+        match self {
+            Self::Linear(law) => law.update_state(strain, old),
+            Self::PowerLaw(law) => law.update_state(strain, old),
+        }
+    }
+    fn admissibility(&self) -> MaterialAdmissibility {
+        match self {
+            Self::Linear(law) => law.admissibility(),
+            Self::PowerLaw(law) => law.admissibility(),
+        }
+    }
+    fn card(&self) -> ModelCard {
+        match self {
+            Self::Linear(law) => law.card(),
+            Self::PowerLaw(law) => law.card(),
+        }
+    }
 }
 
 /// The original oriented Hill law at one endpoint, with stress-free expansion.
@@ -127,7 +187,7 @@ pub struct ThermalHillSource<'a> {
 pub struct ThermalHill {
     source: ResolvedHill48,
     expansion_strain: f64,
-    rate: Option<LinearOverstressHill48>,
+    rate: Option<HillOverstress>,
 }
 impl ThermalHill {
     /// Original claim identities, conditions, orientation and endpoint values.
@@ -135,10 +195,21 @@ impl ThermalHill {
         &self.source
     }
 
-    /// Prepared oriented overstress law at the actual physical interval.
-    /// None retains the original rate-independent Hill response exactly.
+    /// Prepared linear kinetics at the actual physical interval, when selected.
     pub const fn linear_overstress(&self) -> Option<&LinearOverstressHill48> {
-        self.rate.as_ref()
+        match &self.rate {
+            Some(HillOverstress::Linear(law)) => Some(law),
+            _ => None,
+        }
+    }
+
+    /// Prepared nonlinear kinetics at the actual physical interval, when selected.
+    /// Both getters return None for the original rate-independent Hill response.
+    pub const fn power_law_overstress(&self) -> Option<&PowerLawOverstressHill48> {
+        match &self.rate {
+            Some(HillOverstress::PowerLaw(law)) => Some(law),
+            _ => None,
+        }
     }
 
     fn mechanical_strain(&self, total: &Voigt) -> Result<Voigt, HillError> {
@@ -229,20 +300,36 @@ impl ThermalHillSource<'_> {
     ) -> Result<(EquilibriumPhaseState, ThermalHill), ThermalHillError> {
         duration(duration_s)?;
         let (phase, mut endpoint) = self.endpoint(h)?;
-        if self.linear_overstress_selected {
-            let viscosity = endpoint
-                .source
-                .material()
-                .property(HILL_OVERSTRESS_VISCOSITY_PROPERTY)
-                .ok_or(ThermalHillError::Invalid(
-                    "selected Hill viscosity is absent",
-                ))?
-                .value_si();
-            endpoint.rate = Some(LinearOverstressHill48::new_oriented(
-                endpoint.source.law().clone(),
-                viscosity,
-                duration_s,
-            )?);
+        if let Some(selected) = self.overstress_selected {
+            let coefficient = |name: &str| {
+                endpoint
+                    .source
+                    .material()
+                    .property(name)
+                    .map(|property| property.value_si())
+                    .ok_or(ThermalHillError::Invalid(
+                        "selected Hill kinetic coefficient is absent",
+                    ))
+            };
+            let viscosity = coefficient(HILL_OVERSTRESS_VISCOSITY_PROPERTY)?;
+            endpoint.rate = Some(match selected {
+                HillOverstressSelection::Linear => {
+                    HillOverstress::Linear(LinearOverstressHill48::new_oriented(
+                        endpoint.source.law().clone(),
+                        viscosity,
+                        duration_s,
+                    )?)
+                }
+                HillOverstressSelection::PowerLaw => {
+                    HillOverstress::PowerLaw(PowerLawOverstressHill48::new_oriented(
+                        endpoint.source.law().clone(),
+                        viscosity,
+                        coefficient(HILL_OVERSTRESS_STRESS_SCALE_PROPERTY)?,
+                        coefficient(HILL_OVERSTRESS_EXPONENT_PROPERTY)?,
+                        duration_s,
+                    )?)
+                }
+            });
         }
         Ok((phase, endpoint))
     }
@@ -266,22 +353,28 @@ impl ThermalHillSource<'_> {
         // Validate the old history at its actual temperature. A selected rate
         // law admits physical overstress; it must not project the old endpoint
         // onto the static surface or invent a second constitutive interval.
-        let native = if let Some(rate) = &current.rate {
-            rate.advance_with_energy_from(
+        let native = match &current.rate {
+            Some(HillOverstress::Linear(rate)) => rate.advance_with_energy_from(
                 previous.source.law(),
                 &old_mechanical,
                 old,
                 &mechanical,
                 tolerances,
-            )?
-        } else {
-            current.source.law().advance_with_energy_from(
+            )?,
+            Some(HillOverstress::PowerLaw(rate)) => rate.advance_with_energy_from(
                 previous.source.law(),
                 &old_mechanical,
                 old,
                 &mechanical,
                 tolerances,
-            )?
+            )?,
+            None => current.source.law().advance_with_energy_from(
+                previous.source.law(),
+                &old_mechanical,
+                old,
+                &mechanical,
+                tolerances,
+            )?,
         };
         let energy = &native.energy;
         let old_law = previous.source.local_law();
@@ -486,7 +579,7 @@ impl<'a> ThermalSectionSourceFamily<'a> for ThermalHillSource<'a> {
         let mechanical = law
             .mechanical_strain(strain)
             .map_err(ThermalHillError::from)?;
-        if self.linear_overstress_selected {
+        if self.overstress_selected.is_some() {
             if !stress_tolerance_pa.is_finite() || stress_tolerance_pa <= 0.0 {
                 return Err(
                     ThermalHillError::Invalid("positive finite stress allowance required").into(),

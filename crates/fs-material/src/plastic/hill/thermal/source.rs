@@ -307,7 +307,7 @@ impl<'a> ThermalHillSource<'a> {
             hardening_slope_pa_k: hardening_slope,
             kinematic_slope_pa_k: None,
             voce_slope_pa_k: None,
-            linear_overstress_selected: false,
+            overstress_selected: None,
         };
         // The native owner checks elasticity and the return-map denominator at
         // both affine extrema. Convex combinations keep the fixed Hill metric.
@@ -538,44 +538,65 @@ impl<'a> ThermalHillSource<'a> {
     /// Unlike stored moduli, eta may have nonlinear temperature dependence:
     /// it has no free-energy derivative or hidden heat-capacity contribution.
     pub fn with_linear_overstress(
-        mut self,
+        self,
         selection: MaterialPropertySelection,
     ) -> Result<Self, ThermalHillError> {
+        self.with_overstress_selection(selection, HillOverstressSelection::Linear)
+    }
+
+    /// Select independent eta(T) [Pa s], s0(T) [Pa] and n(T)>=1 for
+    /// alpha_dot=(s0/eta)*max((q(sigma-X)-Y-R(alpha))/s0,0)^n.
+    /// The stress scale is not inferred from yield, and the exponent is per
+    /// Hill work-conjugate alpha. All three original claims are pinned across
+    /// every crossed temperature cell. Kinetic coefficients may be nonlinear
+    /// in temperature because they store no free energy. Select one rate law
+    /// before retaining specimen histories; n=1 recovers linear viscosity.
+    pub fn with_power_law_overstress(
+        self,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ThermalHillError> {
+        self.with_overstress_selection(selection, HillOverstressSelection::PowerLaw)
+    }
+
+    fn with_overstress_selection(
+        mut self,
+        selection: MaterialPropertySelection,
+        kind: HillOverstressSelection,
+    ) -> Result<Self, ThermalHillError> {
         let invalid = ThermalHillError::Invalid;
-        if self.linear_overstress_selected
-            || self
-                .requirements
-                .iter()
-                .any(|r| r.name() == HILL_OVERSTRESS_VISCOSITY_PROPERTY)
+        let names = [
+            HILL_OVERSTRESS_VISCOSITY_PROPERTY,
+            HILL_OVERSTRESS_STRESS_SCALE_PROPERTY,
+            HILL_OVERSTRESS_EXPONENT_PROPERTY,
+        ];
+        if self.overstress_selected.is_some()
+            || self.requirements.iter().any(|r| names.contains(&r.name()))
         {
             return Err(invalid(
-                "Hill overstress viscosity must be selected once as a distinct material role",
+                "one Hill overstress law must be selected once with distinct kinetic roles",
             ));
         }
-        let requirement = ScalarPropertyRequirement::try_new(
+        let mut requirements = vec![ScalarPropertyRequirement::try_new(
             HILL_OVERSTRESS_VISCOSITY_PROPERTY,
             Dims([-1, 1, -1, 0, 0, 0]),
             ScalarAdmissibility::StrictlyPositive,
-        )?;
-        let selected = resolve_material_state_point(
-            self.card,
-            &self.context,
-            std::slice::from_ref(&requirement),
-            selection,
-        )?;
-        let property = &selected.properties()[0];
-        self.thermal_material_point().admit_static(property)?;
-        if !property.has_only_fixed_external_conditions(Some(&self.temperature_axis), false)
-            || property.angular_frequency_band_rad_s()?.is_some()
-        {
-            return Err(invalid(
-                "Hill viscosity requires the owned temperature and fixed external conditions, without a hidden rate or frequency axis",
-            ));
+        )?];
+        if matches!(kind, HillOverstressSelection::PowerLaw) {
+            requirements.extend([
+                ScalarPropertyRequirement::try_new(
+                    HILL_OVERSTRESS_STRESS_SCALE_PROPERTY,
+                    Pressure::DIMS,
+                    ScalarAdmissibility::StrictlyPositive,
+                )?,
+                ScalarPropertyRequirement::try_new(
+                    HILL_OVERSTRESS_EXPONENT_PROPERTY,
+                    Dims([0; 6]),
+                    ScalarAdmissibility::StrictlyPositive,
+                )?,
+            ]);
         }
-        let pin = property.answer().receipt.selected;
-        let claim = self.card.claims().claim(pin).ok_or(invalid(
-            "selected Hill viscosity is absent from the original material card",
-        ))?;
+        let resolved =
+            resolve_material_state_point(self.card, &self.context, &requirements, selection)?;
         let knots = self.caloric.curve().knots();
         let lower = point_at(
             &self.context,
@@ -587,28 +608,46 @@ impl<'a> ThermalHillSource<'a> {
             &self.temperature_axis,
             knots[knots.len() - 1].temperature_k,
         )?;
-        let path = pinned_temperature_line(
-            self.card,
-            &claim.key,
-            &self.temperature_axis,
-            &lower,
-            &upper,
-            pin,
-        )?;
-        if path
-            .iter()
-            .any(|(_, value)| !value.is_finite() || *value <= 0.0)
-        {
-            return Err(invalid(
-                "Hill viscosity must stay positive and finite on every source-line cell",
-            ));
+        let mut additional_pins = Vec::with_capacity(requirements.len());
+        for property in resolved.properties() {
+            self.thermal_material_point().admit_static(property)?;
+            if !property.has_only_fixed_external_conditions(Some(&self.temperature_axis), false)
+                || property.angular_frequency_band_rad_s()?.is_some()
+            {
+                return Err(invalid(
+                    "Hill kinetics require the owned temperature and fixed external conditions, without a hidden rate or frequency axis",
+                ));
+            }
+            let name = property.requirement().name();
+            let selected = property.answer().receipt.selected;
+            let claim = self.card.claims().claim(selected).ok_or(invalid(
+                "selected Hill kinetic coefficient is absent from the original material card",
+            ))?;
+            let path = pinned_temperature_line(
+                self.card,
+                &claim.key,
+                &self.temperature_axis,
+                &lower,
+                &upper,
+                selected,
+            )?;
+            if path.iter().any(|(_, value)| {
+                !value.is_finite()
+                    || *value <= 0.0
+                    || name == HILL_OVERSTRESS_EXPONENT_PROPERTY && *value < 1.0
+            }) {
+                return Err(invalid(
+                    "Hill viscosity and stress scale must stay positive and finite; exponent must stay at least one on every source-line cell",
+                ));
+            }
+            additional_pins.push((name.to_owned(), selected));
         }
         let MaterialPropertySelection::PinnedByProperty(pins) = &mut self.selection else {
             return Err(invalid("thermal Hill source lost its original claim pins"));
         };
-        pins.push((HILL_OVERSTRESS_VISCOSITY_PROPERTY.to_owned(), pin));
-        self.requirements.push(requirement);
-        self.linear_overstress_selected = true;
+        pins.extend(additional_pins);
+        self.requirements.extend(requirements);
+        self.overstress_selected = Some(kind);
         let bundle = resolve_material_state_point(
             self.card,
             &self.context,

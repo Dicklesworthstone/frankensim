@@ -22051,3 +22051,31 @@ energy/motion consumers retain the original rate history, yield/viscous heat,
 and hardening storage; native mechanical and inertia clocks must agree.
 Two independent shear-section load/hold/reversal regressions verify the
 linear and nonlinear accounts without a second relaxation during auditing.
+
+### Source-bound nonlinear Hill overstress
+
+`ThermalHillSource::with_power_law_overstress` selects independent original
+`hill_overstress_viscosity` [Pa s], `hill_overstress_stress_scale` [Pa], and
+`hill_overstress_exponent` [1] for
+`alpha_dot=(s0/eta)*max((q(sigma-X)-Y-R(alpha))/s0,0)^n`.
+All three claim identities remain pinned. The complete original caloric span,
+including every source-line knot/crossing, must keep eta and s0 positive and
+finite and n finite and at least one. No hidden frequency/rate axes or
+extrapolation are admitted. Selection is exclusive with linear kinetics and
+commutes with the existing independent Voce/Prager selections.
+
+Kinetic coefficients may vary nonlinearly with temperature: they have no
+stored potential, mechanical entropy or heat-capacity term. Endpoint laws
+prepare the actual physical interval once; original-temperature history is
+admitted without static projection or an artificial extra interval. The
+existing thermal section, shell and Hex8 consumers receive the same Hill
+history and exact tangent through the original source-family interface.
+Yield plus nonlinear viscous work is physical heat; hardening/coefficient
+storage, reversible caloric exchange and integration loss remain distinct.
+The n=1 case follows the existing linear arithmetic exactly.
+
+Four focused regressions specify independent scalar load/hold/reversal with
+varying kinetics and duration, rotated Voce/Prager thermodynamics and source
+pins, n=1 parity, and original-source/duplicate-selection refusal. Coefficients
+are authored fixtures, not empirical material validation. Fixed axes and
+small strain remain the native model boundaries.

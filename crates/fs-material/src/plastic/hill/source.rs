@@ -52,6 +52,11 @@ pub const HILL_VOCE_SATURATION_RATE_PROPERTY: &str = "hill_voce_saturation_rate"
 /// Linear overstress viscosity eta [Pa s] for Hill work-conjugate alpha.
 /// This is not fluid shear viscosity or a J2 rate under a different metric.
 pub const HILL_OVERSTRESS_VISCOSITY_PROPERTY: &str = "hill_overstress_viscosity";
+/// Independent stress scale s0 [Pa] in alpha_dot=(s0/eta)*max(f/s0,0)^n.
+/// It is not the reference yield radius, which may vary independently.
+pub const HILL_OVERSTRESS_STRESS_SCALE_PROPERTY: &str = "hill_overstress_stress_scale";
+/// Dimensionless n>=1 in the Hill work-conjugate multiplier rate.
+pub const HILL_OVERSTRESS_EXPONENT_PROPERTY: &str = "hill_overstress_exponent";
 /// Dimensionless coefficients in the exact order F, G, H, L, M, N.
 /// Normal stress differences use F/G/H; shear yz/zx/xy uses 2L/2M/2N.
 pub const HILL_COEFFICIENT_PROPERTIES: [&str; 6] = [
