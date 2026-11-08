@@ -552,3 +552,6 @@ mod boundaries;
 
 #[path = "phase_layered_transport/solid.rs"]
 mod solid;
+
+#[path = "phase_layered_transport/planar_density.rs"]
+mod planar_density;

@@ -15,6 +15,13 @@ pub use density_geometry::{
     SphericalLiquidCellGeometry, SphericalLiquidDensityObserver, SphericalLiquidGeometry,
 };
 
+/// Original liquid density in the native implicit/adaptive planar transport owner.
+#[path = "phase_transient/planar_density.rs"]
+pub mod planar_density;
+pub use planar_density::{
+    PlanarLiquidCellGeometry, PlanarLiquidDensityColumn, PlanarLiquidGeometry,
+};
+
 use super::transient::{LayeredThermalIds, MAX_LAYERED_THERMAL_CELLS};
 use super::{LayerStackGeometry, MAX_CONDUCTION_LAYERS};
 use crate::thermal::conduction::{LayerGeometry, phase::PreparedPhaseConductivity};
