@@ -20,6 +20,12 @@ use crate::enthalpy::{
 };
 use std::collections::BTreeMap;
 
+#[path = "explicit/adaptive.rs"]
+pub mod adaptive;
+pub use adaptive::{
+    AdaptiveSsprk2Controls, AdaptiveSsprk2Error, AdaptiveSsprk2Report, Ssprk2TimeError,
+};
+
 /// Physical interval/energy controls plus a shared cap on stage work.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Ssprk2Controls {
@@ -312,6 +318,119 @@ fn halve(dt: &mut f64, report: &mut Ssprk2Report, maximum: usize) -> Result<(), 
     Ok(())
 }
 
+struct Interval<'m, O> {
+    thermal: DepositionSimulation<'m>,
+    owner: O,
+    external_heat: EnergySum,
+    unrepresented_heat_j: f64,
+}
+
+/// Exactly one SSPRK2 interval, without hidden subcycling or event execution.
+/// A speculative caloric-domain or second-stage CFL failure asks the caller
+/// to shorten the entire interval; all queried stages still consume its budget.
+fn try_interval<'m, O: PureFlow>(
+    initial: &DepositionSimulation<'m>,
+    first: &mut Stage<O>,
+    end: f64,
+    dt: f64,
+    unrepresented_heat_j: f64,
+    controls: Ssprk2Controls,
+    report: &mut Ssprk2Report,
+    coefficients: &mut impl FnMut(
+        &DepositionSimulation<'m>,
+    ) -> Result<BoundaryStepCoefficients<()>, DepositionError>,
+    checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+) -> Result<Option<Interval<'m, O>>, DepositionError> {
+    let result = (|| {
+        first.rates.explicit_dt_s = dt;
+        let mut predictor = initial.clone();
+        let mut trial_roundoff = 0.0;
+        predictor.thermal_step_with_rates(
+            &first.rates,
+            &mut empty_energy(),
+            &mut trial_roundoff,
+            None,
+            checkpoint,
+        )?;
+        if trial_roundoff > controls.step.energy_tolerance_j {
+            return Err(DepositionError::Arithmetic);
+        }
+        predictor.time_s = end;
+        let mut second = evaluate(
+            &mut predictor,
+            &first.owner,
+            controls,
+            report,
+            coefficients,
+            checkpoint,
+        )?;
+        if dt > second.rates.explicit_dt_s {
+            return Ok(None);
+        }
+        // Admit both Euler endpoints before mixing. A valid average must not
+        // conceal an out-of-chart SSP stage; reuse the predictor allocation.
+        second.rates.explicit_dt_s = dt;
+        predictor.thermal_step_with_rates(
+            &second.rates,
+            &mut empty_energy(),
+            &mut trial_roundoff,
+            None,
+            checkpoint,
+        )?;
+        if trial_roundoff > controls.step.energy_tolerance_j {
+            return Err(DepositionError::Arithmetic);
+        }
+        let rates = average_rates(&first.rates, &second.rates, dt, checkpoint)?;
+        let mut accepted = initial.clone();
+        let mut accepted_roundoff = unrepresented_heat_j;
+        accepted.thermal_step_with_rates(
+            &rates,
+            &mut empty_energy(),
+            &mut accepted_roundoff,
+            None,
+            checkpoint,
+        )?;
+        if accepted_roundoff > controls.step.energy_tolerance_j {
+            return Err(DepositionError::Arithmetic);
+        }
+        let mut flow_audit = first.owner.flow().audit;
+        accumulate_flow(
+            &mut flow_audit,
+            first
+                .owner
+                .flow()
+                .pending
+                .as_ref()
+                .ok_or(DepositionError::Arithmetic)?,
+            second
+                .owner
+                .flow()
+                .pending
+                .as_ref()
+                .ok_or(DepositionError::Arithmetic)?,
+            dt,
+        )?;
+        let mut external_heat = EnergySum::default();
+        external_heat.add_scaled(&rates.external_w, dt)?;
+        accepted.time_s = end;
+        let mut owner = second.owner;
+        let flow = owner.flow_mut();
+        flow.audit = flow_audit;
+        flow.pending = None;
+        flow.boundary_pending = None;
+        Ok(Some(Interval {
+            thermal: accepted,
+            owner,
+            external_heat,
+            unrepresented_heat_j: accepted_roundoff,
+        }))
+    })();
+    match result {
+        Err(DepositionError::MaterialDomain) => Ok(None),
+        other => other,
+    }
+}
+
 fn advance<'m, O: PureFlow>(
     owner: &O,
     thermal: &DepositionSimulation<'m>,
@@ -401,113 +520,25 @@ fn advance<'m, O: PureFlow>(
             if end <= start {
                 return Err(DepositionError::Arithmetic);
             }
-            first.rates.explicit_dt_s = dt;
-            let mut predictor = next.clone();
-            let mut trial_roundoff = 0.0;
-            match predictor.thermal_step_with_rates(
-                &first.rates,
-                &mut empty_energy(),
-                &mut trial_roundoff,
-                None,
-                &mut checkpoint,
-            ) {
-                Ok(()) => {}
-                Err(DepositionError::MaterialDomain) => {
-                    halve(&mut dt, &mut report, controls.maximum_stage_evaluations)?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            if trial_roundoff > controls.step.energy_tolerance_j {
-                return Err(DepositionError::Arithmetic);
-            }
-            predictor.time_s = end;
-            let mut second = match evaluate(
-                &mut predictor,
-                &first.owner,
+            let Some(accepted) = try_interval(
+                &next,
+                &mut first,
+                end,
+                dt,
+                unrepresented_heat,
                 controls,
                 &mut report,
                 &mut coefficients,
                 &mut checkpoint,
-            ) {
-                Ok(stage) => stage,
-                Err(DepositionError::MaterialDomain) => {
-                    halve(&mut dt, &mut report, controls.maximum_stage_evaluations)?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if dt > second.rates.explicit_dt_s {
+            )?
+            else {
                 halve(&mut dt, &mut report, controls.maximum_stage_evaluations)?;
                 continue;
-            }
-            // Admit the second forward-Euler endpoint before mixing it with
-            // E0. A valid averaged state must not conceal an out-of-chart SSP
-            // stage. Reuse the predictor allocation; it is no longer queried.
-            second.rates.explicit_dt_s = dt;
-            match predictor.thermal_step_with_rates(
-                &second.rates,
-                &mut empty_energy(),
-                &mut trial_roundoff,
-                None,
-                &mut checkpoint,
-            ) {
-                Ok(()) => {}
-                Err(DepositionError::MaterialDomain) => {
-                    halve(&mut dt, &mut report, controls.maximum_stage_evaluations)?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            if trial_roundoff > controls.step.energy_tolerance_j {
-                return Err(DepositionError::Arithmetic);
-            }
-            let rates = average_rates(&first.rates, &second.rates, dt, &mut checkpoint)?;
-            let mut accepted = next.clone();
-            let mut accepted_roundoff = unrepresented_heat;
-            match accepted.thermal_step_with_rates(
-                &rates,
-                &mut empty_energy(),
-                &mut accepted_roundoff,
-                None,
-                &mut checkpoint,
-            ) {
-                Ok(()) => {}
-                Err(DepositionError::MaterialDomain) => {
-                    halve(&mut dt, &mut report, controls.maximum_stage_evaluations)?;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-            if accepted_roundoff > controls.step.energy_tolerance_j {
-                return Err(DepositionError::Arithmetic);
-            }
-            let mut flow_audit = owner.flow().audit;
-            accumulate_flow(
-                &mut flow_audit,
-                first
-                    .owner
-                    .flow()
-                    .pending
-                    .as_ref()
-                    .ok_or(DepositionError::Arithmetic)?,
-                second
-                    .owner
-                    .flow()
-                    .pending
-                    .as_ref()
-                    .ok_or(DepositionError::Arithmetic)?,
-                dt,
-            )?;
-            external_heat.add_scaled(&rates.external_w, dt)?;
-            accepted.time_s = end;
-            owner = second.owner;
-            let flow = owner.flow_mut();
-            flow.audit = flow_audit;
-            flow.pending = None;
-            flow.boundary_pending = None;
-            next = accepted;
-            unrepresented_heat = accepted_roundoff;
+            };
+            external_heat.add_scaled(&accepted.external_heat, 1.0)?;
+            next = accepted.thermal;
+            owner = accepted.owner;
+            unrepresented_heat = accepted.unrepresented_heat_j;
             report.energy.substeps += 1;
             break;
         }

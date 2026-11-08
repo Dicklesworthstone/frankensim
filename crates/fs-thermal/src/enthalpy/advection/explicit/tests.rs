@@ -1,5 +1,8 @@
 //! G1/G3/G4: latent transport accuracy, exact forcing boundaries and refusal.
 
+#[path = "adaptive_tests.rs"]
+mod adaptive;
+
 use super::*;
 use crate::enthalpy::advection::reconstruction::{AxialCellStencil, LimitedEnthalpyReconstruction};
 use crate::enthalpy::advection::schedule::{AdvectionSchedule, AdvectionScheduleKnot};

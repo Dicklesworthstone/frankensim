@@ -3361,6 +3361,43 @@ bounded and less-diffusive reconstructed latent pulses, accelerating pump CFL
 retries with exact mass quadrature, forcing/birth event sidedness, and bounded
 transactional stage or caloric refusal.
 
+### Adaptive explicit enthalpy time accuracy
+
+The same pure flow owners expose `advance_ssprk2_adaptive_to` and
+`advance_ssprk2_adaptive_with_coefficients`. Each proposal compares exactly one
+SSPRK2 interval with two fine SSPRK2 intervals using the shared original stage
+kernel. None of these three intervals secretly subcycles. Both fine intervals
+must satisfy their own stage CFL and original caloric-domain checks. The
+accepted state, integrated heat, mass throughput and flow ledger come only from
+the fine trajectory; there is no Richardson extrapolation of physical storage.
+
+The mandatory specific-enthalpy norm divides the coarse/fine difference by
+`absolute_h + relative * max(|h_coarse-h_start|, |h_fine-h_start|)`. It therefore
+resolves latent storage at unchanged temperature without scaling tolerances by
+an arbitrary formation-enthalpy datum. An optional temperature norm queries the
+original `T(h)` on all three states. The fine local-error estimate uses the
+existing second-order method arithmetic: a factor of `1/3` for equal halves,
+or `(a³+b³)/(3ab(a+b))` for the actual representable fine spans. The bounded
+cube-root controller shrinks rejected comparisons and grows accepted spans.
+This is a local smooth-solution estimate; phase and limiter corners may reduce
+order, and no certified global accuracy or spatial error bound is inferred.
+
+Native events and schedule knots end a complete comparison. Births and boundary
+changes execute once on the accepted timeline, after pre-event endpoint
+queries. All discarded coarse/fine stages and retries share one caller stage
+budget; an additional trial cap bounds comparisons, including early domain
+failures. The native accepted-substeps budget counts both fine intervals.
+The caller's minimum dt applies to a comparison; an exact event/target remainder
+may be shorter, but a rejected remainder cannot evade the floor. Cancellation,
+accuracy-floor refusal and work exhaustion return no partial candidate.
+Reports expose accepted energy, actual stage work, rejected trials, normalized
+local errors and a suggested next dt without hidden controller history.
+
+Regressions exercise semidiscrete latent-ring convergence in both flow
+directions, source relaxation under shifted enthalpy datums, optional original
+temperature control, accelerating pump schedules with forcing/birth events,
+fine-only mass/heat accounts, and shared transactional work/floor refusals.
+
 ## Finite-lifetime luminescent excitation
 
 `luminescence::ExcitationDecay` advances an authored emitting-state energy store
