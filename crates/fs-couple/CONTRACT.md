@@ -8060,3 +8060,39 @@ retain material and thermal histories, and advance the original flow afterwards.
 A directional endpoint-speed violation occurs after the rigid candidate is
 formed, checking refusal of both owners, retained enthalpy, cancellation and
 exact retry.
+
+### Native Hex8 plasticity with reciprocal spatial heat
+
+`solid_enthalpy::hex::ThermoplasticHexSolid` binds all eight original Hex8
+quadrature histories to distinct active caloric cells. Each cell must reproduce
+its own native reference integration volume and source density; matching only
+whole-element mass is insufficient on a warped brick. Original caloric chart
+objects, source families, geometry and formulation remain bound. Virgin binding
+uses the native geometry-only quadrature accessor and initial histories, without
+a material increment or elapsed physical time; initially stressed sources refuse.
+
+The native Standard/B-bar thermal Hex8 owner supplies equilibrium, or
+consistent-reference-mass backward-Euler motion after explicit initial velocity.
+The original Picard/IQN-ILS feedback driver now also accepts exact enthalpy
+coordinates; existing temperature-only callers retain their original behavior.
+Every trial reuses the same accepted displacement, complete material histories,
+velocity, enthalpy and clock. The source law receives exactly one physical
+duration. Physical plus signed reversible heat enters each original cell once
+through the existing conduction/events/observer timeline. Source-pinned
+conductivity can lower to the existing material-network observer.
+
+Free-energy plus temperature-times-mechanical-entropy change forms mechanical
+internal energy. Material and inertial numerical losses remain separate from
+physical heat. Native work, per-cell heat mismatch, thermal balance and combined
+balance must all close before the complete caloric/mechanical/observer candidate
+returns. Late source, observer, convergence or cancellation refusal changes no
+accepted state. A proposal evaluated at another rounded enthalpy cannot masquerade
+as the returned exact caloric endpoint.
+
+The supplied point network is not a generated geometric dual mesh. Thermal
+geometry, conductances and spatial refinement remain explicit; this is fixed
+reference, fully solid, small strain and rotation, without moving transport
+geometry, finite forming, contact or phase change. Four authored regressions
+cover force-held self-heating/softening/permanent set, timed relaxation,
+nonuniform warped B-bar point heat/conduction and consistent inertia with atomic
+late refusal. Native Cargo execution remains a separate verification requirement.

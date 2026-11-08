@@ -23,6 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod creep;
 /// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
 pub mod plastic;
+/// Eight independent native Hex8 point histories coupled to spatial enthalpy.
+pub mod hex;
 /// Finite-deformation plastic history with reciprocal caloric feedback.
 pub mod finite_plastic;
 /// Finite ductile softening and retained motion with reciprocal physical heat.

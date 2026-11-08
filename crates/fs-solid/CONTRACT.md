@@ -13143,3 +13143,9 @@ phase change, moving mass, or a new constitutive return map. Focused regressions
 cover free/restrained heating, thermal softening and residual set, nonuniform
 warped B-bar quadrature/tangents, consistent inertial support work, and
 source-bound Hill-Voce rate loading/holds at distinct physical durations.
+
+The native `SmallStrainHexProblem::reference_quadrature_volumes` accessor
+reuses the complete original geometry/budget/cancellation admission and returns
+eight reference-volume weights per element in native state order. It evaluates
+no constitutive stress, tangent or state update. Caloric owners can therefore
+bind warped-cell point masses without taking a fictitious material interval.

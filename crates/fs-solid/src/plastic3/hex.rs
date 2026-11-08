@@ -525,6 +525,22 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
         Ok(matrix)
     }
 
+    /// Original eight reference-volume weights per element, in the same order
+    /// as every native state and work account. This performs geometry, budget
+    /// and cancellation admission only; no stress, tangent or history advances.
+    pub fn reference_quadrature_volumes(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, SmallStrainTetError> {
+        let elements = self.prepare(cx)?;
+        let volumes = elements
+            .iter()
+            .flat_map(|element| element.points.iter().map(|point| point.volume))
+            .collect();
+        checkpoint(cx)?;
+        Ok(volumes)
+    }
+
     /// Full internal force evaluated from the supplied committed history.
     pub fn internal_force(
         &self,

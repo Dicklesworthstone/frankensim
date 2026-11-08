@@ -336,6 +336,52 @@ pub(in crate::solid_enthalpy) fn advance_with_coupling<
     .map(|(candidate, _)| candidate)
 }
 
+/// Keep exact caloric coordinates for native source families whose histories
+/// are expressed in specific enthalpy. The same feedback and transport loop is
+/// reused; no inverse temperature-to-enthalpy chart is constructed.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::solid_enthalpy) fn advance_with_enthalpy<
+    't,
+    S,
+    E,
+    O: DepositionObserver,
+    M: CaloricMaterial,
+    A: MechanicalEnergy,
+>(
+    binding: ThermalBinding<'_, '_, M>,
+    time_s: f64,
+    thermal: &DepositionSimulation<'t>,
+    observer: &O,
+    target_s: f64,
+    thermal_config: StepConfig,
+    config: FiniteThermoplasticConfig,
+    method: CouplingMethod,
+    cx: &Cx<'_>,
+    mechanics: impl FnMut(
+        &[f64],
+        f64,
+    )
+        -> Result<MechanicalProposal<S, E, A>, FiniteThermoplasticError<O::Error>>,
+) -> Result<FeedbackCandidate<'t, S, E, O, A>, FiniteThermoplasticError<O::Error>> {
+    advance_with_input(
+        binding,
+        time_s,
+        thermal,
+        observer,
+        target_s,
+        thermal_config,
+        config,
+        method,
+        MechanicalInput::Enthalpy,
+        None,
+        cx,
+        mechanics,
+        |original, _| Ok(original.clone()),
+        |_, _| Ok(0.0),
+    )
+    .map(|(candidate, _)| candidate)
+}
+
 /// The same feedback owner with a transport observer prepared from each actual
 /// native mechanical proposal. A separate geometric gate checks the transport
 /// used for heat against the mechanical state at the returned caloric endpoint.
@@ -357,6 +403,66 @@ pub(in crate::solid_enthalpy) fn advance_with_transport<
     thermal_config: StepConfig,
     config: FiniteThermoplasticConfig,
     method: CouplingMethod,
+    maximum_geometry_relative_defect: Option<f64>,
+    cx: &Cx<'_>,
+    mechanics: impl FnMut(
+        &[f64],
+        f64,
+    )
+        -> Result<MechanicalProposal<S, E, A>, FiniteThermoplasticError<O::Error>>,
+    prepare_transport: impl FnMut(&O, &S) -> Result<O, FiniteThermoplasticError<O::Error>>,
+    geometry_difference: impl FnMut(&O, &O) -> Result<f64, FiniteThermoplasticError<O::Error>>,
+) -> Result<(FeedbackCandidate<'t, S, E, O, A>, f64), FiniteThermoplasticError<O::Error>> {
+    advance_with_input(
+        binding,
+        time_s,
+        thermal,
+        observer,
+        target_s,
+        thermal_config,
+        config,
+        method,
+        MechanicalInput::Temperature,
+        maximum_geometry_relative_defect,
+        cx,
+        mechanics,
+        prepare_transport,
+        geometry_difference,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum MechanicalInput {
+    Temperature,
+    Enthalpy,
+}
+impl MechanicalInput {
+    fn values<'a>(self, enthalpies: &'a [f64], temperatures: &'a [f64]) -> &'a [f64] {
+        match self {
+            Self::Temperature => temperatures,
+            Self::Enthalpy => enthalpies,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_with_input<
+    't,
+    S,
+    E,
+    O: DepositionObserver,
+    M: CaloricMaterial,
+    A: MechanicalEnergy,
+>(
+    binding: ThermalBinding<'_, '_, M>,
+    time_s: f64,
+    thermal: &DepositionSimulation<'t>,
+    observer: &O,
+    target_s: f64,
+    thermal_config: StepConfig,
+    config: FiniteThermoplasticConfig,
+    method: CouplingMethod,
+    input: MechanicalInput,
     maximum_geometry_relative_defect: Option<f64>,
     cx: &Cx<'_>,
     mut mechanics: impl FnMut(
@@ -408,7 +514,7 @@ pub(in crate::solid_enthalpy) fn advance_with_transport<
         let trial = if let Some(cached) = next_trial.take() {
             cached
         } else {
-            mechanics(&trial_temperatures, duration_s)?
+            mechanics(input.values(&enthalpies, &trial_temperatures), duration_s)?
         };
         admit_heat(&trial.heat_j, binding.cells.len())?;
         let applied_heat_j = finite(trial.heat_j.iter().sum())?;
@@ -437,10 +543,19 @@ pub(in crate::solid_enthalpy) fn advance_with_transport<
         )?;
         let final_h = binding.enthalpies(&next_thermal, false, cx)?;
         let final_temperatures = binding.temperatures(&final_h)?;
-        let (actual, heat_defect_j) = if final_temperatures == trial_temperatures {
+        let same_input = match input {
+            MechanicalInput::Temperature => final_temperatures == trial_temperatures,
+            // The enthalpy owner returns exact caloric coordinates, including
+            // the sign of zero; reuse only the identical evaluated endpoint.
+            MechanicalInput::Enthalpy => final_h
+                .iter()
+                .zip(&enthalpies)
+                .all(|(actual, trial)| actual.to_bits() == trial.to_bits()),
+        };
+        let (actual, heat_defect_j) = if same_input {
             (trial, 0.0)
         } else {
-            let actual = mechanics(&final_temperatures, duration_s)?;
+            let actual = mechanics(input.values(&final_h, &final_temperatures), duration_s)?;
             admit_heat(&actual.heat_j, binding.cells.len())?;
             let defect = finite(
                 trial

@@ -91,6 +91,8 @@ pub enum FiniteThermoplasticError<E = Infallible> {
     DuctileSolid(fs_solid::hyper3::plastic::ductile::FiniteDuctileTetError),
     DuctileSheet(fs_solid::hyper2d::plastic::ductile::FiniteDuctileSheetError),
     Sheet(FiniteThermoplasticSheetError),
+    /// Original small-strain Hex8 source, history, geometry or energy refusal.
+    Hex(fs_solid::plastic3::hex::thermal::ThermalHexError),
     Porous(fs_solid::hyper3::plastic::porous::thermal::FiniteThermalPorousTetError),
     Thermal(DepositionError),
     /// Original IQN-ILS policy or arithmetic refusal.
