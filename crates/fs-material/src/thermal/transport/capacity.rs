@@ -149,7 +149,9 @@ impl CapacityInverse {
         if energy == 0.0 {
             return Ok(self.datum);
         }
-        let direct = || curve.temperature_after_energy_change(self.datum, energy);
+        let direct = || {
+            curve.temperature_after_energy_change_preserving_energy(self.datum, energy)
+        };
         if !energy.is_finite()
             || energy <= self.energy[0]
             || energy >= self.energy[self.energy.len() - 1]
@@ -183,7 +185,8 @@ impl CapacityInverse {
         // Prefix sums can round by a final ulp at source knots. Such an edge
         // must not make a supported query cross a different source interval.
         if change.abs() <= available.abs()
-            && let Ok(temperature) = curve.temperature_after_energy_change(start, change)
+            && let Ok(temperature) =
+                curve.temperature_after_energy_change_preserving_energy(start, change)
             && temperature >= start.min(end)
             && temperature <= start.max(end)
             && temperature != self.datum
@@ -324,6 +327,26 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
     }
 
     pub(super) fn linear_heat_exchange(
+        &self,
+        initial: f64,
+        reservoir: f64,
+        exposure: f64,
+    ) -> Result<CapacityExchange, ThermalTransportError> {
+        self.exchange::<false>(initial, reservoir, exposure)
+    }
+
+    /// Native energy owners retain the relative heat even when absolute T
+    /// cannot move. Temperature-only callers keep their original refusal.
+    pub(super) fn linear_heat_exchange_preserving_heat(
+        &self,
+        initial: f64,
+        reservoir: f64,
+        exposure: f64,
+    ) -> Result<CapacityExchange, ThermalTransportError> {
+        self.exchange::<true>(initial, reservoir, exposure)
+    }
+
+    fn exchange<const PRESERVE_HEAT: bool>(
         &self,
         initial: f64,
         reservoir: f64,
@@ -470,7 +493,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 } else {
                     reservoir - direction * (segment.distance - travel)
                 };
-                if temperature == initial {
+                if temperature == initial && !PRESERVE_HEAT {
                     return Err(invalid(
                         "nonzero heat exchange is below temperature resolution",
                     ));
@@ -558,6 +581,25 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
         initial: f64,
         change: f64,
     ) -> Result<f64, ThermalTransportError> {
+        self.invert_energy_change::<false>(initial, change)
+    }
+
+    /// A retained native energy can resolve a change below one temperature ULP.
+    /// Return its rounded T without erasing or rejecting that stored energy.
+    /// The caller retains the energy coordinate and its original support check.
+    pub(super) fn temperature_after_energy_change_preserving_energy(
+        &self,
+        initial: f64,
+        change: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        self.invert_energy_change::<true>(initial, change)
+    }
+
+    fn invert_energy_change<const PRESERVE_ENERGY: bool>(
+        &self,
+        initial: f64,
+        change: f64,
+    ) -> Result<f64, ThermalTransportError> {
         self.check_temperature(initial)?;
         if !change.is_finite() {
             return Err(invalid("storage change must be finite"));
@@ -615,7 +657,7 @@ impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
                 if !fraction.is_finite()
                     || !(0.0..=1.0).contains(&fraction)
                     || !temperature.is_finite()
-                    || temperature == initial
+                    || (temperature == initial && !PRESERVE_ENERGY)
                     || temperature < current.min(end)
                     || temperature > current.max(end)
                 {
@@ -1595,6 +1637,32 @@ mod tests {
     }
 
     #[test]
+    fn g1_native_exchange_retains_heat_below_absolute_temperature_resolution() {
+        let knots = [[300.0, 700.0], [475.0, 875.0], [700.0, 1100.0]];
+        let curve = CapacityCurve::new(&knots);
+        for (initial, reservoir) in [(300.0, 600.0), (600.0, 300.0)] {
+            let exposure = 1e-20;
+            assert!(curve.linear_heat_exchange(initial, reservoir, exposure).is_err());
+            let result = curve
+                .linear_heat_exchange_preserving_heat(initial, reservoir, exposure)
+                .unwrap();
+            let expected = exposure * (reservoir - initial);
+            assert_eq!(result.temperature, initial);
+            assert_eq!(result.mean_temperature, initial);
+            assert!((result.energy_change - expected).abs() <= 8.0 * f64::EPSILON * expected.abs());
+            assert!(result.inlet_energy_loss > 0.0);
+            assert!(result.reservoir_energy_derivative > 0.0);
+            assert!(result.mean_reservoir_derivative > 0.0);
+            assert_eq!(
+                curve
+                    .temperature_after_energy_change_preserving_energy(initial, result.energy_change)
+                    .unwrap(),
+                initial
+            );
+        }
+    }
+
+    #[test]
     fn g1_index_does_not_erase_small_heat_near_its_interior_datum() {
         let knots = [[200.0, 1000.0], [300.0, 2000.0], [400.0, 4000.0]];
         let curve = CapacityCurve::new(&knots);
@@ -1605,7 +1673,8 @@ mod tests {
             assert_ne!(heat, 0.0);
             assert_eq!(inverse.temperature(&curve, heat).unwrap(), target);
         }
-        assert!(inverse.temperature(&curve, f64::from_bits(1)).is_err());
+        assert_eq!(inverse.temperature(&curve, f64::from_bits(1)).unwrap(), datum);
+        assert!(curve.temperature_after_energy_change(datum, f64::from_bits(1)).is_err());
 
         // A non-dyadic datum exposes cancellation against a distant cached
         // prefix: it must not manufacture warming or cooling from tiny heat.
@@ -1614,7 +1683,8 @@ mod tests {
         let datum: f64 = 325.3;
         let inverse = CapacityInverse::new(&curve, datum).unwrap();
         for heat in [f64::from_bits(1), -f64::from_bits(1)] {
-            assert!(inverse.temperature(&curve, heat).is_err());
+            assert_eq!(inverse.temperature(&curve, heat).unwrap(), datum);
+            assert!(curve.temperature_after_energy_change(datum, heat).is_err());
         }
         for target in [datum.next_down(), datum.next_up()] {
             let heat = curve.energy_change(datum, target).unwrap();

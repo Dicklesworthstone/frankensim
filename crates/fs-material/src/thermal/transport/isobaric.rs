@@ -463,7 +463,11 @@ impl ThermalLaw for IsobaricHeatCapacityLaw {
             return Ok(hot);
         }
         self.inverse.as_ref().map_or_else(
-            || self.temperature_after_specific_heat(self.datum_temperature_k, specific_h_j_kg),
+            || {
+                CapacityCurve::new(&self.knots).temperature_after_energy_change_preserving_energy(
+                    self.datum_temperature_k, specific_h_j_kg,
+                )
+            },
             |inverse| inverse.temperature(&CapacityCurve::new(&self.knots), specific_h_j_kg),
         )
             .map_err(|_| DepositionError::MaterialDomain)
@@ -582,6 +586,21 @@ mod tests {
                     }, datum).unwrap();
                     let mut direct = indexed.clone();
                     direct.inverse = None;
+                    // Native energy can move below a temperature ULP. Cached
+                    // and fallback inverses agree; temperature-only updates refuse.
+                    for heat in [-1e-20, 1e-20] {
+                        if (datum == 290.0 && heat < 0.0) || (datum == 310.0 && heat > 0.0) {
+                            continue;
+                        }
+                        for native in [&indexed, &direct] {
+                            assert_eq!(native.temperature_k(heat).unwrap(), datum);
+                            assert!(native.temperature_after_specific_heat(datum, heat).is_err());
+                            assert_eq!(
+                                native.specific_entropy_change_j_kg_k(0.0, heat).unwrap(),
+                                Some(heat / datum)
+                            );
+                        }
+                    }
                     for target in [290.0, 293.25, 300.0, 306.75, 310.0,
                         datum.next_down(), datum, datum.next_up()]
                     {

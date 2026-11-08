@@ -236,6 +236,16 @@ impl PreparedVolumetricThermalTransport {
         CapacityCurve::new(&self.knots).temperature_after_energy_change(initial_k, change_j_m3)
     }
 
+    // Native specific storage remains the state even when its inverse T rounds.
+    pub(super) fn native_temperature_after_storage_change(
+        &self,
+        initial_k: f64,
+        change_j_m3: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots)
+            .temperature_after_energy_change_preserving_energy(initial_k, change_j_m3)
+    }
+
     pub(super) fn capacity_inverse(&self, datum_k: f64) -> Option<CapacityInverse> {
         CapacityInverse::new(&CapacityCurve::new(&self.knots), datum_k).ok()
     }

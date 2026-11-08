@@ -291,7 +291,11 @@ impl ThermalLaw for IsochoricHeatCapacityLaw {
         if u == low { return Ok(cold); }
         if u == high { return Ok(hot); }
         self.inverse.as_ref().map_or_else(
-            || self.temperature_after_specific_heat(self.datum_temperature_k, u),
+            || {
+                CapacityCurve::new(&self.knots).temperature_after_energy_change_preserving_energy(
+                    self.datum_temperature_k, u,
+                )
+            },
             |inverse| inverse.temperature(&CapacityCurve::new(&self.knots), u),
         ).map_err(|_| DepositionError::MaterialDomain)
     }

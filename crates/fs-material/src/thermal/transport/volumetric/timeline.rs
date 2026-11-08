@@ -244,7 +244,7 @@ impl ThermalLaw for FixedVolumeThermalLaw<'_> {
             .map_or_else(
                 || {
                     self.path
-                        .temperature_after_storage_change(self.datum_temperature, storage)
+                        .native_temperature_after_storage_change(self.datum_temperature, storage)
                 },
                 |inverse| self.path.temperature_from_index(inverse, storage),
             )

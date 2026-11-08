@@ -11,6 +11,11 @@
 pub mod boundary;
 pub use boundary::IntegratedCaloricBoundary;
 
+/// Exact fixed-bath exchange on the retained native caloric storage coordinate.
+#[path = "conduction/exchange.rs"]
+mod exchange;
+pub use exchange::CaloricHeatExchange;
+
 /// One source-integrated material surface exchanging convection and radiation.
 #[path = "conduction/gray_boundary.rs"]
 pub mod gray_boundary;

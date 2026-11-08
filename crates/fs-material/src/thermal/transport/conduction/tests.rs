@@ -5,6 +5,8 @@
 mod boundary;
 #[path = "tests/contact.rs"]
 mod contact;
+#[path = "tests/exchange.rs"]
+mod exchange;
 #[path = "tests/gray_boundary.rs"]
 mod gray_boundary;
 #[path = "tests/gray_link.rs"]

@@ -335,6 +335,10 @@ impl PreparedHeatStorage {
     pub fn temperatures_k(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
         self.knots.iter().map(|knot| knot[0])
     }
+    // Borrow the already prepared exact constituent sum for native exchange.
+    pub(super) fn capacity_knots(&self) -> &[[f64; 2]] {
+        &self.knots
+    }
     pub fn heat_capacity_j_k(&self, temperature_k: f64) -> Result<f64, ThermalTransportError> {
         CapacityCurve::new(&self.knots).capacity(temperature_k)
     }

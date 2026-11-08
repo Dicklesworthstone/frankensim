@@ -210,8 +210,8 @@ impl ThermalLaw for HeatStorageThermalLaw<'_> {
             .as_ref()
             .map_or_else(
                 || {
-                    self.storage
-                        .temperature_after_energy_change(self.datum, energy)
+                    CapacityCurve::new(&self.storage.knots)
+                        .temperature_after_energy_change_preserving_energy(self.datum, energy)
                 },
                 |inverse| inverse.temperature(&CapacityCurve::new(&self.storage.knots), energy),
             )
