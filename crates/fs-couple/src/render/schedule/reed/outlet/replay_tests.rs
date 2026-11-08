@@ -7,6 +7,17 @@
 //! note for one more window (0.341 s) and then cut to zero.
 use super::*;
 use crate::driving_point::regional::outlet::{OUTLET_REPLAY_GAIN_BOUND, replay_gain};
+#[path = "../field_input/tests/support.rs"]
+mod support;
+
+/// The repo cards' `gas_field` rows name N2 O2 Ar CO2 H2O and the loader refuses them without an explicit registry: the fixture's SYNTHETIC packs carry the names (support.rs: no species name supplies physical data); the assertions are the ones that were written for the card.
+fn load_card(text: &str) -> Result<ReedPerformance, super::super::ReedPerformanceError> {
+    let species = support::card_species();
+    let bindings: Vec<_> = species.iter().map(|p| p.binding()).collect();
+    let sources = fs_material::gas_species::input::ThermochemicalSources { species: &bindings, water_species: None,
+        phase: fs_material::gas_species::input::ThermochemicalPhase::FrozenGas };
+    ReedPerformance::from_bytes_with_gas_sources(text.as_bytes(), 512, crate::pcm_wav::observation::ObservationPolicy::Diagnostic, Some(&sources))
+}
 
 const G3: &str = include_str!(
     "../../../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance"
@@ -73,7 +84,7 @@ fn db(gain: f64) -> f64 {
 #[test]
 fn clarinet_outlet_observers_admit_no_audible_one_window_replay() {
     for (label, text, f0) in [("G3", G3, 195.74), ("D5", D5, 589.60)] {
-        let performance = ReedPerformance::from_bytes(text.as_bytes(), 512)
+        let performance = load_card(text)
             .unwrap_or_else(|error| panic!("{label}: {error}"));
         let terminal = performance
             .terminal
@@ -160,7 +171,7 @@ fn clarinet_g3_release_no_longer_holds_one_window() {
         "event\t1e0\t6e-2\tpressure-pa\t0e0\n",
     );
     assert_ne!(text, G3);
-    let mut performance = ReedPerformance::from_bytes(text.as_bytes(), 512).unwrap();
+    let mut performance = load_card(&text).unwrap();
     let mut out = vec![0.0; 72_000];
     for part in out.chunks_mut(480) {
         performance.pressure_block(part).unwrap();

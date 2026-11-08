@@ -3,6 +3,9 @@
 mod attachments;
 #[path = "wind_input/gas_sources.rs"]
 mod gas_sources;
+#[cfg(test)]
+#[path = "../../render/schedule/reed/field_input/tests/support.rs"]
+mod gas_fixture;
 #[path = "wind_input/finite_gas_heat.rs"]
 mod finite_gas_heat;
 use std::io::{Read, Write};
@@ -1813,11 +1816,16 @@ mod tests {
         const A4: &str = include_str!(
             "../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.A4.performance"
         );
+        // The repo cards' `gas_field` rows name N2 O2 Ar CO2 H2O and the loader refuses them without an explicit registry: the fixture's SYNTHETIC packs carry the names (support.rs: no species name supplies physical data); the assertions are the ones that were written for the card.
+        let species = gas_fixture::card_species();
+        let bindings: Vec<_> = species.iter().map(|p| p.binding()).collect();
+        let registry = ThermochemicalSources { species: &bindings, water_species: None,
+            phase: fs_material::gas_species::input::ThermochemicalPhase::FrozenGas };
         for (label, text, grid, latency, compensated) in [
             ("G3", G3, 16384_usize, OutletLatency::Retain, false),
             ("A4", A4, 32768, OutletLatency::Compensate, true),
         ] {
-            let loaded = load_with_all_sources(text.as_bytes(), 512, ObservationPolicy::Diagnostic, None,
+            let loaded = load_with_all_sources(text.as_bytes(), 512, ObservationPolicy::Diagnostic, Some(&registry),
                 |_| Err("no material cards".into()), |_| Err("no radiation artifacts".into()), None, latency)
                 .unwrap_or_else(|error| panic!("{label}: {error}"));
             let record = format!(

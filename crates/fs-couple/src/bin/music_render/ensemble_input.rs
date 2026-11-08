@@ -32,6 +32,9 @@ use fs_couple::render::plate::file::{PlatePerformance, PLATE_PERFORMANCE_SCHEMA}
 use fs_couple::render::schedule::{ScheduledRenderer, force::file::ModalPerformance};
 use fs_couple::render::schedule::reed::{ReedPerformance, REED_PERFORMANCE_SCHEMA, MAX_REED_PERFORMANCE_BYTES};
 use super::{RATE, create_outputs, json_string, stream_output};
+#[cfg(test)]
+#[path = "../../render/schedule/reed/field_input/tests/support.rs"]
+mod gas_fixture;
 
 // These aggregate limits supplement, never replace, each source loader's caps.
 const MAX_PARTS: usize = 16;
@@ -798,7 +801,12 @@ mod tests {
             voice retain-state 1 1\nmode 1000 0.01 1 0.1 0.0001 0\nport 1 1\nevents 1\nforce 37 0 0 0\n").unwrap();
         let o = options(&args(&["out.wav", "--reed", a4, "--modal", &dry.display().to_string(),
             "--full-scale-pa", "20"])).unwrap();
-        let (ensemble, sources, samples) = prepare(&o).unwrap();
+        // The repo cards' `gas_field` rows name N2 O2 Ar CO2 H2O and the loader refuses them without an explicit registry: the fixture's SYNTHETIC packs carry the names (support.rs: no species name supplies physical data); the assertions are the ones that were written for the card.
+        let species = gas_fixture::card_species();
+        let bindings: Vec<_> = species.iter().map(|p| p.binding()).collect();
+        let registry = ThermochemicalSources { species: &bindings, water_species: None,
+            phase: fs_material::gas_species::input::ThermochemicalPhase::FrozenGas };
+        let (ensemble, sources, samples) = prepare_with_gas_sources(&o, Some(&registry)).unwrap();
         assert_eq!(samples, 127_200);
         assert_eq!(sources.iter().map(|s| s.kind).collect::<Vec<_>>(), vec![Kind::Reed, Kind::Modal]);
         let parts = ensemble.part_info();

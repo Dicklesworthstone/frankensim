@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../field_input/tests/support.rs"]
+mod support;
 
 const SOURCE_FIXTURE: &str = include_str!("../../../../../examples/reed-baffled-mixture.performance");
 /// The fixture's physics without its sidecar declaration: these library tests
@@ -258,14 +260,20 @@ fn site_clarinet_outlet_latency_is_a_quarter_grid_on_16384_and_32768() {
     const A4: &str = include_str!(
         "../../../../../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.A4.performance"
     );
+    // The repo cards' `gas_field` rows name N2 O2 Ar CO2 H2O and the loader refuses them without an explicit registry: the fixture's SYNTHETIC packs carry the names (support.rs: no species name supplies physical data); the assertions are the ones that were written for the card.
+    let species = support::card_species();
+    let bindings: Vec<_> = species.iter().map(|p| p.binding()).collect();
+    let sources = fs_material::gas_species::input::ThermochemicalSources { species: &bindings, water_species: None,
+        phase: fs_material::gas_species::input::ThermochemicalPhase::FrozenGas };
     for (label, text, grid) in [("G3", G3, 16384), ("A4", A4, 32768)] {
-        let retained = ReedPerformance::from_bytes(text.as_bytes(), 512)
+        let retained = ReedPerformance::from_bytes_with_gas_sources(text.as_bytes(), 512, ObservationPolicy::Diagnostic, Some(&sources))
             .unwrap_or_else(|error| panic!("{label}: {error}"));
         let info = retained.outlet_receiver().unwrap();
         assert_eq!(info.fft_samples, grid, "{label}");
         assert_eq!(info.pre_arrival_latency_samples, grid / 4, "{label}");
         assert_eq!(retained.outlet_latency_discarded_samples(), 0, "{label}");
-        let compensated = with_outlet_latency(text, 512, OutletLatency::Compensate);
+        let compensated = ReedPerformance::from_bytes_with_sources_and_outlet_latency(text.as_bytes(), 512,
+            ObservationPolicy::Diagnostic, Some(&sources), |_| Err("no material cards".into()), OutletLatency::Compensate).unwrap();
         assert_eq!(compensated.outlet_receiver().unwrap().fft_samples, grid, "{label}");
         assert_eq!(compensated.outlet_latency_discarded_samples(), (grid / 4) as u64, "{label}");
         assert_eq!(compensated.remaining_samples(), compensated.info().samples, "{label}");

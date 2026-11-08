@@ -41,6 +41,15 @@ fn typed(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
 
+/// The five species that the repo's reed cards name in their `gas_field` rows, as SYNTHETIC packs of this file's kind (no species name supplies physical data):
+/// molar masses are the standard values (kg/mol), cp/R the equipartition values 3.5 (N2, O2) and 2.5 (Ar) and the rounded manufactured values 4.5 (CO2) and 4.0 (H2O),
+/// transport the same constants as every pack here. Tests that only need a card to parse (clocks, grids, delays) use it with `ThermochemicalPhase::FrozenGas`.
+#[allow(dead_code)]
+pub(super) fn card_species() -> Vec<Packs> {
+    [("N2", 0.0280134, 3.5), ("O2", 0.0319988, 3.5), ("Ar", 0.039948, 2.5), ("CO2", 0.0440095, 4.5), ("H2O", 0.01801528, 4.0)]
+        .iter().map(|&(name, mass, cp_r)| packs(name, mass, cp_r, 200.0)).collect()
+}
+
 pub(super) fn packs(name: &str, mass: f64, cp_r: f64, minimum_temperature: f64) -> Packs {
     let artifact = hash(name);
     let provenance = Provenance {
