@@ -21488,3 +21488,12 @@ Focused native regressions cover heterogeneous depth heating, scalar pulse
 fluence, boundary/contact events and restart, original latent storage, a
 three-rung conduction convergence ladder against an independent two-cell solution,
 and partition/inventory/source-domain/work/cancellation refusals.
+
+
+## Original NASA CHARMS Corning 7980 refraction
+
+`silica_refraction::Corning7980Silica` resolves the original Leviton–Frey Table-3 temperature-dependent Sellmeier fit for the measured Corning 7980 synthetic fused silica specimens. It admits only 30–300 K and 400–2600 vacuum nm, retains source and frozen-temperature identities, and exposes the existing three-term oscillator convention with squared resonance wavelengths. The material owner has no renderer dependency. Preparation and queries use fixed storage without allocation.
+
+Phase index, group index, wavelength derivative, and first/second temperature derivatives all come from the same original law, including the temperature dependence of resonance wavelengths. These are derivatives of the global index fit, not the separately processed Table-6 thermo-optic estimates; their discrepancy near the temperature endpoints is explicit. Source applicability and condition-dependent measurement uncertainty remain unchanged. Absorption, scattering, pressure response, stress optics, thermal expansion, and other silica grades are not inferred.
+
+The NASA primary source and public-use record are retained in the module. Four focused G0/G1/G3 tests compare 21 independently printed indices, independent high-precision numerical derivative controls, temperature/wavelength finite differences, frozen coefficients, identities, and domain refusals. These tests and strict Clippy passed in a narrow Cargo build of the exact source and original fs-math/fs-blake3 dependencies; no full-workspace or experimental validation is claimed.

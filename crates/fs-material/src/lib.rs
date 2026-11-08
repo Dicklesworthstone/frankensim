@@ -124,6 +124,8 @@ pub mod tensor;
 pub mod thermal;
 /// Source-bounded absolute phase, group and thermal derivatives for dielectrics.
 pub mod thermo_optic;
+/// Original NASA CHARMS Corning 7980 silica phase/group and thermal refraction.
+pub mod silica_refraction;
 /// Original IAPWS ordinary-water phase/group indices and state derivatives.
 pub mod water_refraction;
 /// Source-bound reciprocal Seebeck and Peltier cross-domain transport.
