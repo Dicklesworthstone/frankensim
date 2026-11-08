@@ -15,6 +15,36 @@ ignored release-only roofline harness reports attainment against measured
 STREAM and enforces its 85% gate only when `FS_SPARSE_ROOFLINE_GATE=1`;
 results are machine-specific, not a universal throughput guarantee.
 
+### Cooperative sparse products
+
+`Csr`, `Bsr`, `Sell`, and `CsrCompact` expose `spmv_with_checkpoint` and
+`spmm_with_checkpoint`. They compute directly from each format's storage,
+retain runtime AVX2/FMA dispatch and each output's ascending-column fused
+accumulation, and use eight-column RHS tiles. Explicit stored zeros retain
+their IEEE arithmetic; BSR padding and SELL's unused slots never read the RHS.
+
+The caller's fallible checkpoint can poll a `Cx`, deadline, or work budget.
+`APPLY_CHECKPOINT_WORK` bounds the gap to 256 visited row/storage slots,
+scalar FMAs, or staged writes, including wide single rows and BSR padding.
+Initialization of the output-sized temporary is checked in bounded chunks.
+Shape multiplication and buffer lengths are checked before allocation or
+callbacks; reservation failure is structured. `SparseApplyError::Interrupted`
+preserves the caller's error. Cancellation or an unwinding checkpoint panic
+leaves the entire destination, including signed-zero and NaN bits, unchanged.
+
+The final successful checkpoint is the local publication boundary. The
+subsequent copy completes without another checkpoint; requests arriving after
+that boundary apply to later work. Allocation and that final copy have no
+bounded latency claim. These APIs do not mint executor invocation, memory
+grant, finalized-run, or root-transaction authority. Existing allocation-free
+and parallel products remain available; the wider P0 sparse migration is not
+declared complete by these local APIs.
+
+The `checked_apply::tests` G0/G1/G4/G5 battery covers an independent integer
+oracle, all four formats, original FMA bits, RHS tails, inert NaN padding,
+shape/overflow refusals, zero-work huge RHS counts, wide-row and padded-block
+polling, cancellation at every observed checkpoint, and panic atomicity.
+
 ## Public types and semantics
 - `Coo` — triplet staging; duplicates ACCUMULATE (FEM element-assembly
   contract). `assemble()` produces canonical CSR.

@@ -156,6 +156,88 @@ impl Bsr {
         crate::fma::bsr_spmv_dispatch(self, x, y);
     }
 
+    /// Compute `y = A x` with bounded checkpoints and staged publication.
+    /// Padding is visited for cancellation but never reads `x`. Successful
+    /// values are bit-identical to [`Self::spmv`]. See
+    /// [`Csr::spmv_with_checkpoint`] for allocation and publication semantics.
+    pub fn spmv_with_checkpoint<E>(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), crate::SparseApplyError<E>> {
+        self.spmm_with_checkpoint(x, 1, y, checkpoint)
+    }
+
+    /// Row-major `Y = A X`, with bounded checkpoints inside blocks and RHS
+    /// tiles, including padding. Refusal leaves the whole destination intact.
+    /// Arithmetic matches [`Self::spmm`]; no CSR conversion is performed.
+    /// See [`Csr::spmv_with_checkpoint`] for the local atomicity boundary.
+    pub fn spmm_with_checkpoint<E>(
+        &self,
+        x: &[f64],
+        nrhs: usize,
+        y: &mut [f64],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), crate::SparseApplyError<E>> {
+        crate::checked_apply::apply(
+            self.nrows,
+            self.ncols,
+            x.len(),
+            nrhs,
+            y,
+            checkpoint,
+            |out, poll| crate::fma::bsr_checkpointed_dispatch(self, x, nrhs, out, poll),
+        )
+    }
+
+    #[allow(clippy::inline_always)] // inherit the registered FMA capsule
+    #[inline(always)]
+    pub(crate) fn spmm_checkpointed_body<E, F: FnMut() -> Result<(), E>>(
+        &self,
+        x: &[f64],
+        nrhs: usize,
+        y: &mut [f64],
+        poll: &mut crate::checked_apply::WorkPoll<F>,
+    ) -> Result<(), E> {
+        const WIDTH: usize = 8;
+        for first in (0..nrhs).step_by(WIDTH) {
+            let width = WIDTH.min(nrhs - first);
+            for rb in 0..self.brow_ptr.len() - 1 {
+                poll.work()?;
+                for i in 0..self.br {
+                    poll.work()?;
+                    let mut sums = [0.0; WIDTH];
+                    for slot in self.brow_ptr[rb]..self.brow_ptr[rb + 1] {
+                        poll.work()?;
+                        let column = self.bcol_idx[slot] * self.bc;
+                        let base = slot * self.br * self.bc + i * self.bc;
+                        for j in 0..self.bc {
+                            poll.work()?;
+                            if !self.stored[base + j] {
+                                continue;
+                            }
+                            let value = self.blocks[base + j];
+                            let offset = (column + j) * nrhs + first;
+                            for (sum, &rhs) in
+                                sums[..width].iter_mut().zip(&x[offset..offset + width])
+                            {
+                                poll.work()?;
+                                *sum = value.mul_add(rhs, *sum);
+                            }
+                        }
+                    }
+                    let offset = (rb * self.br + i) * nrhs + first;
+                    for (out, &sum) in y[offset..offset + width].iter_mut().zip(&sums[..width]) {
+                        poll.work()?;
+                        *out = sum;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Y = A·X for row-major X (ncols × nrhs) and Y (nrows × nrhs).
     /// Traverses stored blocks directly, retaining scalar ascending-column
     /// accumulation and bitwise agreement with CSR's blocked SpMM. Padding
@@ -367,15 +449,15 @@ mod tests {
         ] {
             let a = random_coo(n, n, 7, 0xB57 + n as u64).assemble();
             let b = Bsr::from_csr(&a, br, bc);
-            let x: Vec<f64> = (0..n * nrhs)
-                .map(|k| (k as f64 * 0.013).sin())
-                .collect();
-            let (mut expected, mut actual) =
-                (vec![0.0; n * nrhs], vec![0.0; n * nrhs]);
+            let x: Vec<f64> = (0..n * nrhs).map(|k| (k as f64 * 0.013).sin()).collect();
+            let (mut expected, mut actual) = (vec![0.0; n * nrhs], vec![0.0; n * nrhs]);
             a.spmm_blocked(&x, nrhs, &mut expected);
             b.spmm_blocked(&x, nrhs, &mut actual);
             assert!(
-                actual.iter().zip(&expected).all(|(x, y)| x.to_bits() == y.to_bits()),
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
                 "BSR {br}x{bc} nrhs={nrhs} must agree bitwise with CSR"
             );
         }
@@ -384,7 +466,11 @@ mod tests {
     #[test]
     fn g0_padding_does_not_read_unrelated_nonfinite_rhs() {
         let a = Csr::from_parts(
-            4, 6, vec![0, 1, 1, 2, 3], vec![1, 4, 5], vec![2.0, -3.0, 4.0],
+            4,
+            6,
+            vec![0, 1, 1, 2, 3],
+            vec![1, 4, 5],
+            vec![2.0, -3.0, 4.0],
         );
         let b = Bsr::from_csr(&a, 2, 3);
         let x = [f64::NAN, 3.0, f64::INFINITY, f64::NEG_INFINITY, 2.0, 1.0];
@@ -411,8 +497,16 @@ mod tests {
     #[test]
     fn g0_round_trip_preserves_explicit_zeros_and_nonfinite_payloads() {
         let a = Csr::from_parts(
-            2, 4, vec![0, 2, 4], vec![0, 3, 1, 2],
-            vec![-0.0, f64::from_bits(0x7ff8_0000_0000_0042), 0.0, f64::INFINITY],
+            2,
+            4,
+            vec![0, 2, 4],
+            vec![0, 3, 1, 2],
+            vec![
+                -0.0,
+                f64::from_bits(0x7ff8_0000_0000_0042),
+                0.0,
+                f64::INFINITY,
+            ],
         );
         let back = Bsr::from_csr(&a, 2, 2).to_csr();
         assert_eq!(back.nnz(), a.nnz());
@@ -467,10 +561,23 @@ mod tests {
     #[test]
     fn g0_spmm_skips_padding_but_not_stored_zeros() {
         let a = Csr::from_parts(
-            2, 4, vec![0, 1, 2], vec![0, 3], vec![-f64::from_bits(1), 2.0],
+            2,
+            4,
+            vec![0, 1, 2],
+            vec![0, 3],
+            vec![-f64::from_bits(1), 2.0],
         );
         let b = Bsr::from_csr(&a, 2, 2);
-        let x = [0.25, 1.0, f64::INFINITY, f64::NAN, f64::NAN, f64::NEG_INFINITY, 2.0, -3.0];
+        let x = [
+            0.25,
+            1.0,
+            f64::INFINITY,
+            f64::NAN,
+            f64::NAN,
+            f64::NEG_INFINITY,
+            2.0,
+            -3.0,
+        ];
         let mut expected = [0.0; 4];
         let mut actual = [f64::NAN; 4];
         a.spmm(&x, 2, &mut expected);
@@ -484,9 +591,14 @@ mod tests {
         let zeros = Csr::from_parts(2, 2, vec![0, 1, 1], vec![0], vec![0.0]);
         Bsr::from_csr(&zeros, 2, 2).spmm(&[f64::INFINITY, 2.0, f64::NAN, f64::NAN], 2, &mut actual);
         assert!(actual[0].is_nan());
-        assert_eq!(actual[1..].iter().map(|v| v.to_bits()).collect::<Vec<_>>(), vec![0; 3]);
+        assert_eq!(
+            actual[1..].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            vec![0; 3]
+        );
         Bsr::from_csr(&zeros, 2, 2).spmm_blocked(
-            &[f64::INFINITY, 2.0, f64::NAN, f64::NAN], 2, &mut actual,
+            &[f64::INFINITY, 2.0, f64::NAN, f64::NAN],
+            2,
+            &mut actual,
         );
         assert!(actual[0].is_nan());
         assert!(actual[1..].iter().all(|v| v.to_bits() == 0));
@@ -533,12 +645,18 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             b.spmm(&[], usize::MAX, &mut y);
         }));
-        assert!(result.is_err(), "output dimension overflow must be rejected");
+        assert!(
+            result.is_err(),
+            "output dimension overflow must be rejected"
+        );
         assert_eq!(y, [42.0]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             b.spmm_blocked(&[], usize::MAX, &mut y);
         }));
-        assert!(result.is_err(), "blocked output dimension overflow must be rejected");
+        assert!(
+            result.is_err(),
+            "blocked output dimension overflow must be rejected"
+        );
         assert_eq!(y, [42.0]);
     }
 

@@ -113,6 +113,76 @@ impl CsrCompact {
         crate::fma::compact_spmv_dispatch(self, x, y);
     }
 
+    /// Compact-index `y = A x` with checkpoints inside wide rows and staged
+    /// publication. Uses the original compact storage and FMA dispatch, with
+    /// bit-identical results to [`Self::spmv`]. See
+    /// [`Csr::spmv_with_checkpoint`] for allocation/publication semantics.
+    pub fn spmv_with_checkpoint<E>(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), crate::SparseApplyError<E>> {
+        self.spmm_with_checkpoint(x, 1, y, checkpoint)
+    }
+
+    /// Compact-index row-major `Y = A X` with bounded checkpoints, eight-RHS
+    /// tiles and all-or-nothing output. The per-column FMA sequence is the
+    /// same as applying [`Self::spmv`] to that column. No conversion occurs.
+    /// See [`Csr::spmv_with_checkpoint`] for the local atomicity boundary.
+    pub fn spmm_with_checkpoint<E>(
+        &self,
+        x: &[f64],
+        nrhs: usize,
+        y: &mut [f64],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), crate::SparseApplyError<E>> {
+        crate::checked_apply::apply(
+            self.nrows,
+            self.ncols,
+            x.len(),
+            nrhs,
+            y,
+            checkpoint,
+            |out, poll| crate::fma::compact_checkpointed_dispatch(self, x, nrhs, out, poll),
+        )
+    }
+
+    #[allow(clippy::inline_always)] // inherit the registered FMA capsule
+    #[inline(always)]
+    pub(crate) fn spmm_checkpointed_body<E, F: FnMut() -> Result<(), E>>(
+        &self,
+        x: &[f64],
+        nrhs: usize,
+        y: &mut [f64],
+        poll: &mut crate::checked_apply::WorkPoll<F>,
+    ) -> Result<(), E> {
+        const WIDTH: usize = 8;
+        for first in (0..nrhs).step_by(WIDTH) {
+            let width = WIDTH.min(nrhs - first);
+            for row in 0..self.nrows {
+                poll.work()?;
+                let mut sums = [0.0; WIDTH];
+                let lo = self.row_ptr[row];
+                let hi = self.row_ptr[row + 1];
+                for (&column, &value) in self.col_idx[lo..hi].iter().zip(&self.vals[lo..hi]) {
+                    poll.work()?;
+                    let offset = column as usize * nrhs + first;
+                    for (sum, &rhs) in sums[..width].iter_mut().zip(&x[offset..offset + width]) {
+                        poll.work()?;
+                        *sum = value.mul_add(rhs, *sum);
+                    }
+                }
+                let offset = row * nrhs + first;
+                for (out, &sum) in y[offset..offset + width].iter_mut().zip(&sums[..width]) {
+                    poll.work()?;
+                    *out = sum;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The serial loop body — recompiled by the x86 FMA-codegen capsule
     /// (bead nabk); MUST stay `inline(always)`.
     #[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule

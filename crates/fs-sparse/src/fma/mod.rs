@@ -67,6 +67,47 @@ use crate::direct::LdltFactor;
 use crate::perf::CsrCompact;
 use crate::sell::Sell;
 
+// The checkpointed kernels retain these same admitted instruction sets and
+// safe, inlined bodies; cancellation does not force per-entry libm FMA calls.
+macro_rules! checkpointed_dispatch {
+    ($name:ident, $ty:ty) => {
+        #[inline]
+        pub(crate) fn $name<E, F: FnMut() -> Result<(), E>>(
+            this: &$ty,
+            x: &[f64],
+            nrhs: usize,
+            y: &mut [f64],
+            poll: &mut crate::checked_apply::WorkPoll<F>,
+        ) -> Result<(), E> {
+            #[cfg(target_arch = "x86_64")]
+            {
+                #[target_feature(enable = "avx2,fma")]
+                unsafe fn accelerated<E, F: FnMut() -> Result<(), E>>(
+                    this: &$ty,
+                    x: &[f64],
+                    nrhs: usize,
+                    y: &mut [f64],
+                    poll: &mut crate::checked_apply::WorkPoll<F>,
+                ) -> Result<(), E> {
+                    this.spmm_checkpointed_body(x, nrhs, y, poll)
+                }
+                if std::arch::is_x86_feature_detected!("avx2")
+                    && std::arch::is_x86_feature_detected!("fma")
+                {
+                    // SAFETY: both features were checked; the numerical and
+                    // callback bodies use only safe Rust and checked slices.
+                    return unsafe { accelerated(this, x, nrhs, y, poll) };
+                }
+            }
+            this.spmm_checkpointed_body(x, nrhs, y, poll)
+        }
+    };
+}
+checkpointed_dispatch!(csr_checkpointed_dispatch, Csr);
+checkpointed_dispatch!(bsr_checkpointed_dispatch, Bsr);
+checkpointed_dispatch!(sell_checkpointed_dispatch, Sell);
+checkpointed_dispatch!(compact_checkpointed_dispatch, CsrCompact);
+
 macro_rules! fma_dispatch {
     ($name:ident, $ty:ty, $body:ident, ($($arg:ident: $t:ty),*) $(-> $ret:ty)?) => {
         /// FMA-codegen dispatch (bead nabk): native fused instruction

@@ -18,6 +18,7 @@
 /// Feature-gated accelerator kernel pilot and run evidence.
 pub mod accelerator_pilot;
 pub mod bsr;
+mod checked_apply;
 pub mod direct;
 mod fma;
 #[cfg(feature = "fnx-interop")]
@@ -37,6 +38,7 @@ pub use accelerator_pilot::{
     run_accelerator_spmv_pilot,
 };
 pub use bsr::Bsr;
+pub use checked_apply::{APPLY_CHECKPOINT_WORK, SparseApplyError};
 pub use direct::{
     DirectOrdering, FactorStats, Inertia, LdltError, LdltFactor, LdltOptions, SymbolicLdlt,
     amd_order,

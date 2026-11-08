@@ -27,6 +27,16 @@ The portable path IS the twin: the same `inline(always)` body compiled
 without the feature. The dispatcher falls back to it on every non-FMA
 host and on every non-x86 architecture.
 
+## Cooperative sparse products
+
+The `checkpointed_dispatch` entries for CSR, BSR, SELL and compact CSR use
+the same AVX2/FMA feature check and safe, inlined arithmetic bodies. Their
+fallible callbacks are ordinary safe Rust calls; unwinding crosses no foreign
+ABI and the staged output is dropped normally. Shape validation precedes
+dispatch. Checkpoints do not reorder any output's fused accumulation chain.
+The portable body and the dispatched body are compared directly in the local
+product tests, in addition to comparison with the original kernels.
+
 ## Direct LDLT solve
 
 The allocating direct solve uses the same block/panel order and fused reductions in both

@@ -207,6 +207,77 @@ impl Sell {
         self.ncols
     }
 
+    /// Compute `y = A x` with bounded checkpoints and staged publication.
+    /// True row lengths exclude padding from arithmetic; the original row
+    /// permutation and ascending-column FMA sequence remain unchanged.
+    /// See [`Csr::spmv_with_checkpoint`] for allocation/publication semantics.
+    pub fn spmv_with_checkpoint<E>(
+        &self,
+        x: &[f64],
+        y: &mut [f64],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), crate::SparseApplyError<E>> {
+        self.spmm_with_checkpoint(x, 1, y, checkpoint)
+    }
+
+    /// Row-major `Y = A X`, with cancellation inside wide slices and RHS
+    /// tiles. No CSR conversion occurs. A refusal leaves all of `y` unchanged;
+    /// successful entries follow the same arithmetic as [`Self::spmm`].
+    /// See [`Csr::spmv_with_checkpoint`] for the local atomicity boundary.
+    pub fn spmm_with_checkpoint<E>(
+        &self,
+        x: &[f64],
+        nrhs: usize,
+        y: &mut [f64],
+        checkpoint: impl FnMut() -> Result<(), E>,
+    ) -> Result<(), crate::SparseApplyError<E>> {
+        crate::checked_apply::apply(
+            self.nrows,
+            self.ncols,
+            x.len(),
+            nrhs,
+            y,
+            checkpoint,
+            |out, poll| crate::fma::sell_checkpointed_dispatch(self, x, nrhs, out, poll),
+        )
+    }
+
+    #[allow(clippy::inline_always)] // inherit the registered FMA capsule
+    #[inline(always)]
+    pub(crate) fn spmm_checkpointed_body<E, F: FnMut() -> Result<(), E>>(
+        &self,
+        x: &[f64],
+        nrhs: usize,
+        y: &mut [f64],
+        poll: &mut crate::checked_apply::WorkPoll<F>,
+    ) -> Result<(), E> {
+        const WIDTH: usize = 8;
+        for first in (0..nrhs).step_by(WIDTH) {
+            let width = WIDTH.min(nrhs - first);
+            for (position, &row) in self.perm.iter().enumerate() {
+                poll.work()?;
+                let mut sums = [0.0; WIDTH];
+                let start = self.chunk_ptr[position / self.c] + position % self.c;
+                for k in 0..self.row_len[position] {
+                    poll.work()?;
+                    let slot = start + k * self.c;
+                    let offset = self.col_idx[slot] * nrhs + first;
+                    let value = self.vals[slot];
+                    for (sum, &rhs) in sums[..width].iter_mut().zip(&x[offset..offset + width]) {
+                        poll.work()?;
+                        *sum = value.mul_add(rhs, *sum);
+                    }
+                }
+                let offset = row * nrhs + first;
+                for (out, &sum) in y[offset..offset + width].iter_mut().zip(&sums[..width]) {
+                    poll.work()?;
+                    *out = sum;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Physical slots including padding (the quantity the perf bead's
     /// padding-overhead metric is computed from).
     #[must_use]
@@ -275,10 +346,7 @@ impl Sell {
                 for k in 0..self.row_len[pos] {
                     let slot = self.chunk_ptr[ch] + k * self.c + lane;
                     let x_offset = self.col_idx[slot] * nrhs + j0;
-                    for (a, &v) in acc[..width]
-                        .iter_mut()
-                        .zip(&x[x_offset..x_offset + width])
-                    {
+                    for (a, &v) in acc[..width].iter_mut().zip(&x[x_offset..x_offset + width]) {
                         *a = self.vals[slot].mul_add(v, *a);
                     }
                 }
@@ -552,15 +620,15 @@ mod tests {
             }
             let a = coo.assemble();
             let s = Sell::from_csr(&a, c, sigma).expect("valid SELL geometry");
-            let x: Vec<f64> = (0..n * nrhs)
-                .map(|k| (k as f64 * 0.013).cos())
-                .collect();
-            let (mut expected, mut actual) =
-                (vec![0.0; n * nrhs], vec![0.0; n * nrhs]);
+            let x: Vec<f64> = (0..n * nrhs).map(|k| (k as f64 * 0.013).cos()).collect();
+            let (mut expected, mut actual) = (vec![0.0; n * nrhs], vec![0.0; n * nrhs]);
             a.spmm_blocked(&x, nrhs, &mut expected);
             s.spmm_blocked(&x, nrhs, &mut actual);
             assert!(
-                actual.iter().zip(&expected).all(|(x, y)| x.to_bits() == y.to_bits()),
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(x, y)| x.to_bits() == y.to_bits()),
                 "SELL C={c} sigma={sigma} nrhs={nrhs} must agree bitwise with CSR"
             );
         }
@@ -604,10 +672,23 @@ mod tests {
     #[test]
     fn g0_spmm_does_not_evaluate_padding() {
         let a = Csr::from_parts(
-            3, 4, vec![0, 1, 1, 3], vec![0, 0, 3], vec![-f64::from_bits(1), 0.0, 2.0],
+            3,
+            4,
+            vec![0, 1, 1, 3],
+            vec![0, 0, 3],
+            vec![-f64::from_bits(1), 0.0, 2.0],
         );
         let s = Sell::from_csr(&a, 4, 8).unwrap();
-        let x = [0.25, 1.0, f64::INFINITY, f64::NAN, f64::NAN, f64::NEG_INFINITY, 2.0, -3.0];
+        let x = [
+            0.25,
+            1.0,
+            f64::INFINITY,
+            f64::NAN,
+            f64::NAN,
+            f64::NEG_INFINITY,
+            2.0,
+            -3.0,
+        ];
         let mut expected = [0.0; 6];
         let mut actual = [f64::NAN; 6];
         a.spmm(&x, 2, &mut expected);
@@ -623,14 +704,22 @@ mod tests {
     fn g0_spmm_handles_zero_axes() {
         let empty_columns = Csr::from_parts(3, 0, vec![0; 4], vec![], vec![]);
         let mut y = [f64::NAN; 9];
-        Sell::from_csr(&empty_columns, 4, 8).unwrap().spmm(&[], 3, &mut y);
+        Sell::from_csr(&empty_columns, 4, 8)
+            .unwrap()
+            .spmm(&[], 3, &mut y);
         assert!(y.iter().all(|v| v.to_bits() == 0));
         y.fill(f64::NAN);
-        Sell::from_csr(&empty_columns, 4, 8).unwrap().spmm_blocked(&[], 3, &mut y);
+        Sell::from_csr(&empty_columns, 4, 8)
+            .unwrap()
+            .spmm_blocked(&[], 3, &mut y);
         assert!(y.iter().all(|v| v.to_bits() == 0));
         let empty_rows = Csr::from_parts(0, 6, vec![0], vec![], vec![]);
-        Sell::from_csr(&empty_rows, 4, 8).unwrap().spmm(&[f64::NAN; 18], 3, &mut []);
-        Sell::from_csr(&empty_rows, 4, 8).unwrap().spmm_blocked(&[f64::NAN; 18], 3, &mut []);
+        Sell::from_csr(&empty_rows, 4, 8)
+            .unwrap()
+            .spmm(&[f64::NAN; 18], 3, &mut []);
+        Sell::from_csr(&empty_rows, 4, 8)
+            .unwrap()
+            .spmm_blocked(&[f64::NAN; 18], 3, &mut []);
         let empty = Sell::from_csr(&Csr::identity(0), 4, 8).unwrap();
         empty.spmm(&[], usize::MAX, &mut []);
         empty.spmm_blocked(&[], usize::MAX, &mut []);
@@ -660,12 +749,18 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             s.spmm(&[], usize::MAX, &mut y);
         }));
-        assert!(result.is_err(), "output dimension overflow must be rejected");
+        assert!(
+            result.is_err(),
+            "output dimension overflow must be rejected"
+        );
         assert_eq!(y, [42.0]);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             s.spmm_blocked(&[], usize::MAX, &mut y);
         }));
-        assert!(result.is_err(), "blocked output dimension overflow must be rejected");
+        assert!(
+            result.is_err(),
+            "blocked output dimension overflow must be rejected"
+        );
         assert_eq!(y, [42.0]);
     }
 
