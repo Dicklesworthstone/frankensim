@@ -1,4 +1,4 @@
-//! Exact opacity and source transport through borrowed scalar-field columns.
+//! Exact opacity and source transport through borrowed scalar fields.
 //!
 //! Coefficients are constant within each cell. The solution is exact for that
 //! representation (up to floating-point arithmetic), not for an unresolved
@@ -6,10 +6,15 @@
 //! source is an explicitly supplied radiance, not a multiple-scattering solve.
 
 use super::{
-    AbsorptionImageSettings, DvrError, TransferFunction, VolumeGrid, pixel_centre_cell,
-    validate_transfer_grid,
+    AbsorptionImageSettings, DvrError, TransferFunction, TransferSample, VolumeGrid,
+    pixel_centre_cell, validate_transfer_grid,
 };
 use fs_math::det;
+
+#[cfg(feature = "tracer")]
+mod ray;
+#[cfg(feature = "tracer")]
+pub use ray::{TransferRayBudget, TransferRayError, TransferRayGrid};
 
 /// SI calibration for a borrowed mass-density field.
 ///
@@ -27,7 +32,7 @@ pub struct DensityAbsorption {
     pub mass_absorption_m2_kg: f64,
 }
 
-/// Exact direct transfer for one orthographic volume pixel.
+/// Exact direct transfer along one volume ray or orthographic pixel column.
 ///
 /// Emission is premultiplied by its physical attenuation. Opacity is evaluated
 /// independently with expm1, so a thin nonzero layer remains measurable even
@@ -47,7 +52,7 @@ impl TransferTransportPixel {
         self.emission_rgb
     }
 
-    /// Fraction of a background beam transmitted through the complete column.
+    /// Fraction of a background beam transmitted through the complete segment.
     #[must_use]
     pub const fn transmittance(self) -> f64 {
         self.transmittance
@@ -80,7 +85,8 @@ impl TransferTransportPixel {
                 // whose unit-radiance transmittance underflows.
                 det::exp(det::ln(background) - self.optical_depth) + self.emission_rgb[channel]
             } else {
-                self.transmittance.mul_add(background, self.emission_rgb[channel])
+                self.transmittance
+                    .mul_add(background, self.emission_rgb[channel])
             }
         });
         if result.iter().any(|v| !v.is_finite()) {
@@ -162,41 +168,65 @@ pub fn render_transfer_transport(
         let iy = pixel_centre_cell(py, height, ny);
         for px in 0..width {
             let column = pixel_centre_cell(px, width, nx) + nx * iy;
-            let mut depth = Sum::default();
-            let mut emission = [Sum::default(); 3];
+            let mut integral = TransferIntegral::default();
             for iz in (0..nz).rev() {
                 let optical = transfer.sample_finite(grid.data[column + plane * iz]);
-                let tau = optical_product(&[optical.extinction, grid.cell[2]]);
-                let alpha = -det::expm1(-tau);
-                let transmission = det::exp(-depth.value);
-                for channel in 0..3 {
-                    let source = optical.source_rgb[channel];
-                    let mut contribution = (source * alpha) * transmission;
-                    // A bright source behind a thick foreground can remain
-                    // representable after exp(-depth) itself has underflowed.
-                    if (transmission < f64::MIN_POSITIVE || contribution == 0.0)
-                        && source > 0.0
-                        && alpha > 0.0
-                    {
-                        contribution =
-                            det::exp(det::ln(source) + det::ln(alpha) - depth.value);
-                    }
-                    emission[channel].add(contribution);
-                    if !emission[channel].value.is_finite() {
-                        return Err(DvrError::UnrepresentableRadiance);
-                    }
-                }
-                depth.add(tau);
+                integral.add(optical, grid.cell[2])?;
             }
-            image.push(TransferTransportPixel {
-                emission_rgb: emission.map(|sum| sum.value),
-                transmittance: det::exp(-depth.value),
-                opacity: -det::expm1(-depth.value),
-                optical_depth: depth.value,
-            });
+            image.push(integral.finish());
         }
     }
     Ok(image)
+}
+
+// The orthographic specialization and arbitrary-ray DDA use exactly the same
+// ordered cell solution. No source/opacity buffer is copied or pretabulated.
+#[derive(Default)]
+struct TransferIntegral {
+    depth: Sum,
+    emission: [Sum; 3],
+}
+
+impl TransferIntegral {
+    fn add(&mut self, optical: TransferSample, length: f64) -> Result<(), DvrError> {
+        let tau = optical_product(&[optical.extinction, length]);
+        let alpha = -det::expm1(-tau);
+        let transmission = det::exp(-self.depth.value);
+        for channel in 0..3 {
+            let source = optical.source_rgb[channel];
+            let mut contribution = (source * alpha) * transmission;
+            if source > 0.0 && optical.extinction > 0.0 && length > 0.0 {
+                if tau < f64::MIN_POSITIVE {
+                    // In this limit 1-exp(-tau) = tau to binary64 accuracy.
+                    // A bright source can survive even when sigma*ds itself
+                    // underflows; retain its original positive factors.
+                    contribution = det::exp(
+                        det::ln(source) + det::ln(optical.extinction) + det::ln(length)
+                            - self.depth.value,
+                    );
+                } else if transmission < f64::MIN_POSITIVE || contribution == 0.0 {
+                    // A bright source can survive an underflowed foreground
+                    // transmission without changing ordinary-range arithmetic.
+                    contribution = det::exp(det::ln(source) + det::ln(alpha) - self.depth.value);
+                }
+            }
+            self.emission[channel].add(contribution);
+            if !self.emission[channel].value.is_finite() {
+                return Err(DvrError::UnrepresentableRadiance);
+            }
+        }
+        self.depth.add(tau);
+        Ok(())
+    }
+
+    fn finish(self) -> TransferTransportPixel {
+        TransferTransportPixel {
+            emission_rgb: self.emission.map(|sum| sum.value),
+            transmittance: det::exp(-self.depth.value),
+            opacity: -det::expm1(-self.depth.value),
+            optical_depth: self.depth.value,
+        }
+    }
 }
 
 fn reserve_image<T>(pixels: usize) -> Result<Vec<T>, DvrError> {

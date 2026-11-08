@@ -1864,7 +1864,7 @@ differentiable lift). Pure Rust throughout.
   mapped global majorant from the borrowed field and admits explicit
   field-scan, pixel, primary-sample, and per-sample null-collision
   budgets before rendering. Its bit contract is
-  `TRANSFER_RENDER_SEMANTICS_VERSION = 1`.
+  `TRANSFER_RENDER_SEMANTICS_VERSION = 3`.
 
   `render_absorption_transmittance` is the exact orthographic specialization
   for nonnegative, piecewise-constant intensity absorption in inverse world
@@ -9280,6 +9280,22 @@ There is no sampling seed, null-collision budget or opacity cutoff in this
 path. Work is proportional to admitted pixel/cell intersections, independent
 of extinction magnitude. The existing named Woodcock APIs retain their
 sampling semantics.
+
+With `tracer,volumes`, `volumes::opacity::TransferRayGrid` admits one immutable
+borrowed scalar field and transfer function, then integrates arbitrary clipped
+and perspective rays with the shared native cell DDA. Non-unit ray parameters
+are converted to actual world length; emission accumulates in camera order.
+Admission scans each field value once, polling cancellation every 1024 values;
+each ray allocates nothing and has an explicit crossing limit. Cancellation and
+budget refusal return no partial result, and optical thickness never changes
+the work limit. Orthographic and arbitrary-ray paths share the analytic cell
+solution, retaining representable source-scaled light when separate tiny opacity
+or foreground transmission underflows. Transfer rendering semantics version 3
+records the changed tiny-source arithmetic. This remains cellwise-constant
+prescribed RGB source plus direct extinction, without inferred LTE, in-scattering,
+refraction, continuous-field interpolation or pixel-area filtering. Regressions
+exercise camera-generated perspective rays, analytic ordered layers, clipped and
+rescaled rays, existing orthographic parity, extreme radiance and refusals.
 
 render_density_transmittance borrows the original density buffer and uses
 explicit kg/m³ per field unit, metres per grid unit and m²/kg mass absorption.

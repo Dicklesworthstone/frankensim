@@ -101,7 +101,7 @@ fn grid_column_with_checkpoint(
     Ok((total, visits))
 }
 
-pub(super) fn validate_ray(
+pub(in crate::volumes) fn validate_ray(
     origin: Point3,
     direction: Vec3,
     distance: f64,
@@ -119,14 +119,14 @@ pub(super) fn validate_ray(
     }
 }
 
-pub(super) struct CellSegment {
+pub(in crate::volumes) struct CellSegment {
     pub cell: usize,
     /// Parameter from the rebased entry point, avoiding distant-camera loss.
     pub start_m: f64,
     pub length_m: f64,
 }
 
-pub(super) struct CellRay<'g, 'a> {
+pub(in crate::volumes) struct CellRay<'g, 'a> {
     grid: &'g VolumeGrid<'a>,
     start: [f64; 3],
     direction: [f64; 3],

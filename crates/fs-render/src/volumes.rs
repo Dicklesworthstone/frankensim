@@ -35,7 +35,7 @@ pub mod heating;
 ///
 /// Bump this when transfer interpolation, stream keying, ray placement, or
 /// collision-estimator arithmetic changes in a way that can move image bits.
-pub const TRANSFER_RENDER_SEMANTICS_VERSION: u32 = 2;
+pub const TRANSFER_RENDER_SEMANTICS_VERSION: u32 = 3;
 
 /// One knot in a scalar-to-optical-properties transfer function.
 ///
@@ -396,6 +396,14 @@ impl<'a> VolumeGrid<'a> {
 }
 
 fn validate_transfer_grid(grid: &VolumeGrid<'_>) -> Result<(), DvrError> {
+    validate_transfer_grid_geometry(grid)?;
+    if let Some(index) = grid.data.iter().position(|value| !value.is_finite()) {
+        return Err(DvrError::NonFiniteGridValue { index });
+    }
+    Ok(())
+}
+
+fn validate_transfer_grid_geometry(grid: &VolumeGrid<'_>) -> Result<(), DvrError> {
     if grid.dims.contains(&0)
         || grid
             .dims
@@ -415,9 +423,6 @@ fn validate_transfer_grid(grid: &VolumeGrid<'_>) -> Result<(), DvrError> {
         !upper.is_finite() || *upper <= lower || !(*upper - lower).is_finite()
     }) {
         return Err(DvrError::InvalidGrid);
-    }
-    if let Some(index) = grid.data.iter().position(|value| !value.is_finite()) {
-        return Err(DvrError::NonFiniteGridValue { index });
     }
     Ok(())
 }
