@@ -1,5 +1,8 @@
 //! Exact native energy exchange, using independent affine-capacity oracles.
 
+#[path = "pair.rs"]
+mod pair;
+
 use super::*;
 use crate::thermal::transport::{
     expansion::{
@@ -370,4 +373,5 @@ fn g1_native_cp_cv_source_exchange_retains_original_energy_and_time_mean() {
         assert_eq!(weak.heat_residual_j_kg, 0.0);
     }
 }
+
 

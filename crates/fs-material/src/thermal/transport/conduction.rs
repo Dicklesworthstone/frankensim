@@ -19,6 +19,10 @@ pub use boundary::{
 mod current;
 pub use current::{CurrentPlanarCaloricLink, CurrentRadialCaloricLink};
 
+/// Reciprocal finite-body exchange on the retained native caloric coordinates.
+#[path = "conduction/pair.rs"]
+pub mod pair;
+
 /// Exact fixed-bath exchange on the retained native caloric storage coordinate.
 #[path = "conduction/exchange.rs"]
 mod exchange;
@@ -656,3 +660,4 @@ impl ImplicitLinkLaw for IntegratedCaloricLink<'_, '_, '_> {
 #[cfg(test)]
 #[path = "conduction/tests.rs"]
 mod tests;
+
