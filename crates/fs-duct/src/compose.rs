@@ -188,7 +188,9 @@ impl TwoPort {
             ));
         }
         if (rout - rin).abs() < 1e-12 * rin {
-            return Self::from_cylinder_wave(wave, rin, length, reference);
+            return Self::uniform_wave(
+                wave, core::f64::consts::PI * rin * rin, length, reference,
+            );
         }
         let e = crate::exp_i(wave.wavenumber.scale(length));
         let slope = (rout - rin) / length;
@@ -241,18 +243,38 @@ impl TwoPort {
         }
         Self::new(s, reference)
     }
-    /// Exact homogeneous cylinder response without a nearly singular wave
+    /// Uniform plane-pressure propagation over an actual cross-sectional area.
+    /// The wave owner supplies its complete pressure/mean-velocity impedance;
+    /// no circular radius, transverse loss law or entrance correction is inferred.
+    /// The original bounded cylinder algebra also applies to rectangular and
+    /// equivalent-fluid sections, including opaque and short high-impedance lines.
+    pub fn from_uniform_wave(
+        wave: &SegmentWave,
+        area: f64,
+        length: f64,
+        reference: f64,
+    ) -> Result<Self, DuctError> {
+        Self::through(reference)?;
+        if !area.is_finite() || area <= 0.0 || !length.is_finite() || length <= 0.0
+            || !finite(wave.wavenumber) || wave.wavenumber.im < 0.0
+            || wave.wavenumber.abs() == 0.0 || !finite(wave.specific_impedance)
+            || wave.specific_impedance.abs() == 0.0
+        {
+            return Err(bad("uniform wave requires positive area/length and finite decaying wave"));
+        }
+        Self::uniform_wave(wave, area, length, reference)
+    }
+    /// Exact homogeneous response without a nearly singular wave
     /// basis or heap allocation. With e=exp(i k L), the common denominator is
     /// 4 Z R + (Z-R)^2 (1-e^2). Keeping both terms separately retains finite
     /// series loading when kL and R/Z tend to zero together (the Poiseuille
     /// limit, or a short high-impedance neck). No growing exponential occurs.
-    fn from_cylinder_wave(
+    fn uniform_wave(
         wave: &SegmentWave,
-        radius: f64,
+        area: f64,
         length: f64,
         reference: f64,
     ) -> Result<Self, DuctError> {
-        let area = core::f64::consts::PI * radius * radius;
         // Preserve the supplied constitutive pressure/velocity relation and
         // the actual geometry, as the endpoint wave bases do.
         let impedance = wave.specific_impedance / C64::from_re(area);

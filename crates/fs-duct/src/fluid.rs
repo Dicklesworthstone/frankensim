@@ -44,6 +44,8 @@ pub mod relaxation;
 pub mod regional;
 /// Homogeneous bulk viscous acoustic propagation with explicit traction ports.
 pub mod bulk;
+/// Actual rectangular cross-sections with resolved transverse shear and heat diffusion.
+pub mod rectangular;
 
 use crate::compose::{self, ChainResult, ComposeOptions, InputReflection, PreparedChain, TwoPort};
 use crate::network::NetworkLoad;

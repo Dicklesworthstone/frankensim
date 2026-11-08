@@ -114,6 +114,42 @@ independent Poiseuille/inertance/compliance limits. A gas with viscous shear
 above ten but thermal shear below ten must now refuse consistently through
 both public entry points; full Bessel remains available at that same state.
 
+### Actual rectangular and slit thermoviscous sections
+
+`fluid::rectangular::RectangularSection` retains the actual two side lengths
+and area. One original `ThermoviscousFluid` snapshot supplies momentum and
+heat diffusion, density, adiabatic modulus and Cp/Cv. No hydraulic/equal-area
+radius or substitute gas state is used. The uniform-pressure, fully developed
+Newtonian model has rigid, no-slip, isothermal walls; entrance fields, shape
+transitions, moving walls, mean flow, rarefaction, bulk viscosity and axial
+heat diffusion are outside this owner.
+
+The transverse solution of `(s-D Laplacian)h=s`, with zero wall values, uses
+the rectangular sine eigenfunctions. The longer-direction sum is analytic;
+the shorter-direction prefix contains an explicitly authored 1..=4096 terms.
+Preparation caches O(N) geometry, and each frequency uses O(N), allocation-free
+work with cancellation polling every 32 terms. Positive omitted-mode estimates
+bound both real and imaginary mean-diffusion components. Admission also bounds
+the error relative to the real wall fraction, retaining small boundary losses
+at high shear. These are analytic truncation bounds, not floating-point
+interval enclosures; unresolved work refuses rather than silently clipping.
+
+The +i omega telegraph pair is `Z'=i omega rho/(A H_nu)` and
+`Y'=i omega A/K_s [1+(Cp/Cv-1)(1-H_alpha)]`. The shared branch conversion
+produces native exp(-i omega t) waves; Cp==Cv skips thermal work exactly.
+An explicit ceiling below pi bounds `max(omega/c,|k|)` times the longer side.
+This excludes the first lossless transverse cutoff but is not a certified
+three-dimensional error estimate. `RectangularWave::two_port` supplies the
+actual area to `TwoPort::from_uniform_wave`, preserving the bounded cylinder
+scattering arithmetic and native pressure/volume-flow composition.
+
+`tests/rectangular_thermoviscous.rs` covers independent Poiseuille/isothermal,
+parallel-slit and thin-layer limits; three Fourier refinements against a
+double sine sum; side interchange, reciprocity, passivity, subdivision and
+matched propagation; unchanged cylindrical scattering; and material,
+resolution, phase-envelope and cancellation refusals. These are numerical
+checks of the declared model, not measured-material qualification.
+
 ### Homogeneous bulk viscosity with traction ports
 
 `fluid::bulk::BulkTractionCylinder` propagates the original
