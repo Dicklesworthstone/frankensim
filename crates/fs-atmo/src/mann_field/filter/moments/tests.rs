@@ -107,6 +107,118 @@ fn g1_quadratic_momentum_and_stress_match_independent_spatial_integration() {
 }
 
 #[test]
+fn g1_refined_footprints_recover_the_full_velocity_gradient_stress() {
+    let field = field(17);
+    let point = [0.13, -0.3, 0.72];
+    let gradient = field.sample(point).unwrap().grad;
+    for shape in [
+        [[1.0, 0.4, -0.2], [0.0; 3], [0.0; 3]],
+        [[0.8, 0.6, 0.0], [-0.6, 0.8, 0.0], [0.0; 3]],
+        [[1.0, 0.4, -0.2], [-0.3, 0.8, 0.1], [0.2, 0.1, 0.9]],
+    ] {
+        for scale in [1e-3, 1e-6, 1e-10] {
+            let edges = shape.map(|edge| edge.map(|x| x * scale));
+            // Taylor expansion of the physical velocity, with independent
+            // uniform coordinates s_j: E[s_j s_k] = delta_jk/3. This oracle
+            // uses the analytic velocity gradient, not modal filter gains.
+            let slopes: [[f64; 3]; 3] =
+                edges.map(|edge| core::array::from_fn(|i| super::super::dot(gradient[i], edge)));
+            let expected: [[f64; 3]; 3] = core::array::from_fn(|i| {
+                core::array::from_fn(|j| slopes.iter().map(|s| s[i] * s[j] / 3.0).sum())
+            });
+            let observation =
+                MannBoxMoments::prepare(field.model(), edges, 2304, 136, || false).unwrap();
+            let actual = field
+                .sample_filtered_moments(point, &observation, || false)
+                .unwrap();
+            let norm = (0..3).map(|i| expected[i][i]).sum::<f64>();
+            assert!(norm > 0.0);
+            for i in 0..3 {
+                for j in 0..3 {
+                    let error = (actual.subfilter_stress_m2_s2[i][j] - expected[i][j]).abs();
+                    assert!(
+                        error < (2e-12 + 20.0 * scale * scale) * norm,
+                        "scale={scale}, component={i},{j}: {} != {}",
+                        actual.subfilter_stress_m2_s2[i][j],
+                        expected[i][j],
+                    );
+                }
+            }
+            assert!(actual.subfilter_kinetic_energy() > 0.0);
+            for direction in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, -2.0, 3.0]] {
+                let energy = (0..3)
+                    .map(|i| {
+                        (0..3)
+                            .map(|j| {
+                                direction[i] * actual.subfilter_stress_m2_s2[i][j] * direction[j]
+                            })
+                            .sum::<f64>()
+                    })
+                    .sum::<f64>();
+                assert!(energy >= -2e-12 * norm, "scale={scale}: {energy}");
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_small_cosine_and_sine_moments_retain_their_distinct_physical_orders() {
+    for scale in [1e-3, 1e-6, 1e-9, 1e-40] {
+        let [cosine, sine, _] = edge_moments(scale, -2.0 * scale).unwrap();
+        // cos(a s) = 1-a²s²/2+..., sin(a s) = a s+...;
+        // Var(s²)=1/5-1/9=4/45 and E[s²]=1/3.
+        let expected_cosine = scale * scale * scale * scale * (4.0 / 45.0);
+        let expected_sine = scale * scale * (-2.0 / 3.0);
+        let tolerance = 2e-14 + 2.0 * scale * scale;
+        assert!((cosine / expected_cosine - 1.0).abs() < tolerance);
+        assert!((sine / expected_sine - 1.0).abs() < tolerance);
+    }
+    // Both sides of the series switch agree with an independent integral.
+    for (a, b) in [(0.5, -0.37), (0.500_000_000_000_000_1, -0.37)] {
+        let actual = edge_moments(a, b).unwrap();
+        let mean_a = GAUSS.iter().map(|&(s, w)| w * det::cos(a * s)).sum::<f64>();
+        let mean_b = GAUSS.iter().map(|&(s, w)| w * det::cos(b * s)).sum::<f64>();
+        let cosine = GAUSS
+            .iter()
+            .map(|&(s, w)| w * (det::cos(a * s) - mean_a) * (det::cos(b * s) - mean_b))
+            .sum::<f64>();
+        let sine = GAUSS
+            .iter()
+            .map(|&(s, w)| w * det::sin(a * s) * det::sin(b * s))
+            .sum::<f64>();
+        assert!((actual[0] - cosine).abs() < 4e-16);
+        assert!((actual[1] - sine).abs() < 4e-16);
+    }
+}
+
+#[test]
+fn g1_edge_order_and_orientation_do_not_change_a_refined_footprint() {
+    let field = field(17);
+    let point = [0.13, -0.3, 0.72];
+    let edges = [[1e-8, 4e-9, -2e-9], [-3e-9, 8e-9, 1e-9], [2e-9, 1e-9, 9e-9]];
+    let reordered = [edges[2].map(|x| -x), edges[0], edges[1].map(|x| -x)];
+    let observe = |footprint| {
+        let observation =
+            MannBoxMoments::prepare(field.model(), footprint, 2304, 136, || false).unwrap();
+        field
+            .sample_filtered_moments(point, &observation, || false)
+            .unwrap()
+    };
+    let a = observe(edges);
+    let b = observe(reordered);
+    let norm = 2.0 * a.subfilter_kinetic_energy();
+    assert!(norm > 0.0);
+    for i in 0..3 {
+        for j in 0..3 {
+            assert!(
+                (a.subfilter_stress_m2_s2[i][j] - b.subfilter_stress_m2_s2[i][j]).abs()
+                    < 2e-13 * norm
+            );
+        }
+    }
+}
+
+#[test]
 fn g0_point_limit_budgets_and_cancellation_are_explicit() {
     let field = field(17);
     let point = [1.0, 2.0, 3.0];

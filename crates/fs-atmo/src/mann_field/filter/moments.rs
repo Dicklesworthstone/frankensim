@@ -7,8 +7,9 @@
 //! B_mn = (G(k_m-k_n)-G(k_m+k_n))/2.
 //! Mixed sine/cosine terms vanish by symmetry. All mode pairs are retained;
 //! this is the instantaneous spatial stress, not an ensemble closure.
-//! The exact product-to-sum observation is limited by floating-point roundoff,
-//! especially when the footprint collapses and its stress approaches zero.
+//! Small-footprint coefficients are integrated as central moments directly,
+//! retaining the quadratic sine and quartic cosine terms without subtracting
+//! rounded unit gains. Sampling retains the same prepared pair coefficients.
 
 use super::{MannBoxFilter, error, poll, sinc};
 use crate::mann_field::{MannSpectralModel, finite_vector, sample_modes};
@@ -57,6 +58,90 @@ pub struct MannBoxMoments {
     pair_coefficients: Vec<[f64; 2]>,
 }
 
+// For s uniform on [-1,1], return Cov(cos(a s),cos(b s)), E[sin(a s)sin(b s)]
+// and E[cos(a s)] E[cos(b s)]. Keeping the first quantity CENTRAL is essential:
+// it is O(a² b²), below the rounding error of unit gains on small footprints.
+fn edge_moments(a: f64, b: f64) -> Result<[f64; 3], Refusal> {
+    if !a.is_finite() || !b.is_finite() {
+        return Err(error(
+            "mann-filter-invalid",
+            "quadratic filter phase is not representable",
+        ));
+    }
+    let product = sinc(a) * sinc(b);
+    if a == 0.0 || b == 0.0 {
+        return Ok([0.0, 0.0, product]);
+    }
+    if a.abs().max(b.abs()) <= 0.5 {
+        // Taylor coefficients times exact uniform moments. In particular,
+        // Cov(s^(2m),s^(2n)) = 4mn/[(2m+2n+1)(2m+1)(2n+1)].
+        // Eight terms per factor leave < 3e-20 absolute omitted sine terms
+        // at the branch boundary; small phases retain their own scale.
+        const TERMS: usize = 8;
+        let (a2, b2) = (a * a, b * b);
+        let mut cosine = [[0.0; 2]; TERMS];
+        let mut sine = [[0.0; 2]; TERMS];
+        let mut even = [-0.5 * a2, -0.5 * b2];
+        let mut odd = [a, b];
+        for n in 0..TERMS {
+            cosine[n] = even;
+            sine[n] = odd;
+            let degree = (2 * (n + 1)) as f64;
+            even[0] *= -a2 / ((degree + 1.0) * (degree + 2.0));
+            even[1] *= -b2 / ((degree + 1.0) * (degree + 2.0));
+            odd[0] *= -a2 / (degree * (degree + 1.0));
+            odd[1] *= -b2 / (degree * (degree + 1.0));
+        }
+        let mut central = 0.0;
+        let mut odd_product = 0.0;
+        for m in 0..TERMS {
+            for n in 0..TERMS {
+                let dm = (2 * (m + 1)) as f64;
+                let dn = (2 * (n + 1)) as f64;
+                central += cosine[m][0] * cosine[n][1] * (dm * dn)
+                    / ((dm + dn + 1.0) * (dm + 1.0) * (dn + 1.0));
+                odd_product += sine[m][0] * sine[n][1] / (dm + dn - 1.0);
+            }
+        }
+        Ok([central, odd_product, product])
+    } else {
+        let (minus, plus) = (a - b, a + b);
+        if !minus.is_finite() || !plus.is_finite() {
+            return Err(error(
+                "mann-filter-invalid",
+                "quadratic filter phase is not representable",
+            ));
+        }
+        let (minus, plus) = (sinc(minus), sinc(plus));
+        Ok([
+            0.5 * (minus + plus) - product,
+            0.5 * (minus - plus),
+            product,
+        ])
+    }
+}
+
+fn pair_moments(
+    first: [f64; 3],
+    second: [f64; 3],
+    half_edges: [[f64; 3]; 3],
+) -> Result<[f64; 2], Refusal> {
+    let mut central = 0.0;
+    let mut odd_product = 0.0;
+    let mut product = 1.0;
+    for edge in half_edges {
+        let [a, b, p] = edge_moments(super::dot(first, edge), super::dot(second, edge))?;
+        // Angle addition over independent symmetric box coordinates. Expand
+        // the central term before evaluating: (A+P)(a+p)+Bb-Pp would lose
+        // the very stress that this observation is supposed to retain.
+        let next_central = central * p + product * a + central * a + odd_product * b;
+        odd_product = odd_product * (a + p) + (central + product) * b;
+        central = next_central;
+        product *= p;
+    }
+    Ok([central, odd_product])
+}
+
 impl MannBoxMoments {
     /// Prepare mean plus quadratic observations with explicit storage and
     /// mode-pair work limits. A point observation stores no coefficients and
@@ -99,33 +184,14 @@ impl MannBoxMoments {
                 "allocated quadratic coefficient capacity exceeds the byte budget",
             ));
         }
-        let gain = |k: [f64; 3]| -> Result<f64, Refusal> {
-            let mut value = 1.0;
-            for edge in half_edges_m {
-                let phase = super::dot(k, edge);
-                if !phase.is_finite() {
-                    return Err(error(
-                        "mann-filter-invalid",
-                        "quadratic filter phase is not representable",
-                    ));
-                }
-                value *= sinc(phase);
-            }
-            Ok(value)
-        };
         for m in 0..n {
             for j in m..n {
                 poll(&mut cancelled)?;
-                let minus = gain(core::array::from_fn(|i| {
-                    model.modes[m].k[i] - model.modes[j].k[i]
-                }))?;
-                let plus = gain(core::array::from_fn(|i| {
-                    model.modes[m].k[i] + model.modes[j].k[i]
-                }))?;
-                coefficients.push([
-                    0.5 * (minus + plus) - filter.gains[m] * filter.gains[j],
-                    0.5 * (minus - plus),
-                ]);
+                coefficients.push(pair_moments(
+                    model.modes[m].k,
+                    model.modes[j].k,
+                    half_edges_m,
+                )?);
             }
         }
         poll(&mut cancelled)?;

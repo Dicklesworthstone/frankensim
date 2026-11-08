@@ -402,6 +402,14 @@ spatial stress of one accepted realization, without an isotropic approximation
 or an ensemble replacement. Boxes, skew parallelepipeds and collapsed faces and
 lines use the same observation; an exact point returns exactly zero stress.
 
+Preparation integrates small modal phases as central uniform moments and combines
+the independent box axes with angle-addition identities. It retains the quadratic
+sine and quartic cosine covariances without subtracting rounded unit gains. Under
+footprint refinement the stress therefore recovers
+`sum_edge (grad(u_i) dot edge)(grad(u_j) dot edge)/3`, including anisotropic and
+cross-component stresses. The series is confined to preparation: stored pair
+counts, storage budgets and the sampling arithmetic/cost remain unchanged.
+
 Preparation admits `n(n+1)/2` unordered pairs and their storage explicitly: two
 f64 coefficients per pair plus the original eight-byte gain per mode. Sampling
 allocates no heap storage, reuses the accepted OU amplitudes and polls
@@ -410,8 +418,12 @@ scratch. Prepared geometry remains bound to the complete original spectral
 model. Neither sampling nor cancellation advances or mutates either time owner.
 
 The stress is positive semidefinite in exact arithmetic; small floating-point
-eigenvalues are not clipped, and cancellation can limit relative accuracy for
-vanishingly small footprints. This observation does not add energy outside the
+eigenvalues are not clipped. Cross-mode cancellation and underflow can still
+limit accuracy when the physical stress itself is nearly singular or below the
+representable range. Tests cover the analytic refinement limit down to 1e-10
+footprints, the distinct quadratic/quartic modal limits, independent quadrature
+across the series boundary, and edge reordering/orientation invariance.
+This observation does not add energy outside the
 represented finite spectral band, provide a nonlinear time average, or include
 wall-blocking corrections, density fluctuations, pressure or a separate mean
 flow. The existing linear filters retain their original O(n) cost.
