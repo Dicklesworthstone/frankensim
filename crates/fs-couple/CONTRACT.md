@@ -1,3 +1,22 @@
+## Free-free cooling in reacting magnetized gas heating
+
+`MagnetizedIonizedGasHeating::advance_reacting_with_optically_thin_bremsstrahlung`
+adds an original electron-ion continuum source to the same held Maxwell work,
+atomic reaction and thermal-exchange solve used by `advance_reacting`. Both
+entry points share source binding, endpoint increment limits, cancellation and
+atomic refresh of original transport/background laws. The native gas result
+retains the cooling source and its separate escaped energy; continuum emission
+does not create bound-free photon counts or a second Maxwell heat debit.
+
+Both reacting entry points require coherent photon energy strictly below every
+supplied original atomic photoionization threshold, including absent stages.
+The prepared carrier-friction dielectric law has no direct bound-free
+absorption, so an ionizing coherent drive is outside this coupling closure.
+Selecting the new cooling entry explicitly assumes optically thin free-free
+escape. Source domains and native time/error/work controls remain authoritative;
+field evolution, radiation trapping and new frequency-resolved continuum data
+are not inferred from an integrated emissivity.
+
 ## Finite coherent gas films with reacting diffuse radiation
 
 `ionized_wave_heating::layers::LayeredIonizedGasHeating` binds every original

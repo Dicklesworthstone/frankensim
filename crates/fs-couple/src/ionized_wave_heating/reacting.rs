@@ -5,15 +5,18 @@ use fs_gas::chemistry::collisional_radiative::CollisionalRadiativeThermal;
 use fs_gas::chemistry::energy::ElectronHeavyCollisionSources;
 use fs_gas::chemistry::ionization_network::{
     IonizationNetworkError, IonizationNetworkResult, IonizationNetworkSolve,
+    advance_ionization_network_with_optically_thin_bremsstrahlung,
     advance_ionization_network_with_thermal,
 };
 use fs_matdb::MaterialCard;
 use fs_material::ionized_gas::{
-    IonizedGasConductivity, IonizedGasMomentumSource, IonizedGasRefreshError, IonizedGasTransportBank,
+    IonizedGasConductivity, IonizedGasMomentumSource, IonizedGasRefreshError,
+    IonizedGasTransportBank,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_qty::{Power, Time};
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
+use fs_thermochem::plasma_radiation::ElectronIonBremsstrahlungV1;
 
 /// Native reaction controls and explicit limits on one held-field interval.
 ///
@@ -56,9 +59,13 @@ impl<'w, 'a> MagnetizedIonizedGasHeating<'w, 'a> {
     /// in the held powers; the gas owner adds only baseline thermal exchange.
     ///
     /// The coherent wave is a collisional work source only. Its photons are
-    /// not separately counted as a photoionization beam. Optical recombination
-    /// transport, line/free-free radiation and continuous field feedback are
-    /// outside this interval model. Bound-charge background and ion momentum
+    /// not separately counted as a photoionization beam. Its photon energy must
+    /// lie strictly below every supplied atomic threshold, including absent
+    /// stages: its original dielectric law omits direct bound-free absorption.
+    /// This entry adds no free-free radiation; the explicit cooling entry below
+    /// retains that original source separately. Optical recombination transport,
+    /// line radiation and continuous field feedback are outside this interval
+    /// model. Bound-charge background and ion momentum
     /// cards must remain applicable to the resulting mixture, as authored;
     /// endpoint T/p refresh alone does not establish that physical validity.
     ///
@@ -73,6 +80,63 @@ impl<'w, 'a> MagnetizedIonizedGasHeating<'w, 'a> {
         transport_bank: &'h IonizedGasTransportBank,
         controls: IonizedGasReactingHeatControls,
         original_background_card: &MaterialCard,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MagnetizedIonizedGasReactingHeatStep<'h, 'w, 'a>, IonizedWaveHeatingError> {
+        self.advance_reacting_impl(
+            duration,
+            sources,
+            transport_bank,
+            None,
+            controls,
+            original_background_card,
+            cancelled,
+        )
+    }
+
+    /// Evolve the same held wave work and atomic network with explicit escaping
+    /// electron-ion free-free cooling from the original thermodynamic bank.
+    ///
+    /// The native source refreshes at actual populations and temperatures,
+    /// debits the electron pool, and feeds back into reactions and exchange.
+    /// Selecting this entry asserts optically thin free-free escape. It supplies
+    /// no free-free photon spectrum/count, inverse absorption or extra atomic
+    /// event. Source temperature, degeneracy, nonrelativistic and stationary-ion
+    /// limits remain binding at every attempted state. The same coherent-drive
+    /// threshold, held-field increment and atomic refresh checks apply.
+    ///
+    /// The original cooling source is retained by `chemistry()` in the result;
+    /// `free_free_escaped_energy_j` is distinct from bound-free photon energy.
+    /// Maxwell work is unchanged and is deposited once; both escaping radiation
+    /// channels remain separate energy losses.
+    pub fn advance_reacting_with_optically_thin_bremsstrahlung<'h>(
+        &'h self,
+        duration: Time,
+        sources: &[AtomicRadiativeRecombinationV1],
+        transport_bank: &'h IonizedGasTransportBank,
+        cooling: &ElectronIonBremsstrahlungV1,
+        controls: IonizedGasReactingHeatControls,
+        original_background_card: &MaterialCard,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MagnetizedIonizedGasReactingHeatStep<'h, 'w, 'a>, IonizedWaveHeatingError> {
+        self.advance_reacting_impl(
+            duration,
+            sources,
+            transport_bank,
+            Some(cooling),
+            controls,
+            original_background_card,
+            cancelled,
+        )
+    }
+
+    fn advance_reacting_impl<'h>(
+        &'h self,
+        duration: Time,
+        sources: &[AtomicRadiativeRecombinationV1],
+        transport_bank: &'h IonizedGasTransportBank,
+        cooling: Option<&ElectronIonBremsstrahlungV1>,
+        controls: IonizedGasReactingHeatControls,
+        original_background_card: &MaterialCard,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MagnetizedIonizedGasReactingHeatStep<'h, 'w, 'a>, IonizedWaveHeatingError> {
         use IonizedWaveHeatingError::Invalid;
@@ -81,7 +145,9 @@ impl<'w, 'a> MagnetizedIonizedGasHeating<'w, 'a> {
             || duration.value() <= 0.0
             || !controls.maximum_temperature_increment_k.is_finite()
             || controls.maximum_temperature_increment_k <= 0.0
-            || !controls.maximum_absolute_population_increment_mol.is_finite()
+            || !controls
+                .maximum_absolute_population_increment_mol
+                .is_finite()
             || controls.maximum_absolute_population_increment_mol < 0.0
             || !controls.maximum_relative_population_increment.is_finite()
             || controls.maximum_relative_population_increment <= 0.0
@@ -93,6 +159,21 @@ impl<'w, 'a> MagnetizedIonizedGasHeating<'w, 'a> {
         }
         let source = self.source();
         let initial = source.state();
+        let omega = self
+            .absorption()
+            .wave()
+            .interface()
+            .transport()
+            .omega_rad_s();
+        let drive_photon_j = (6.626_070_15e-34 / core::f64::consts::TAU) * omega;
+        for atomic in sources {
+            poll(&mut cancelled)?;
+            if drive_photon_j >= atomic.source().threshold().value() {
+                return Err(Invalid(
+                    "coherent drive must lie below every original photoionization threshold",
+                ));
+            }
+        }
         let background = self.absorption().wave().interface().background();
         if original_background_card.content_hash() != background.card_identity() {
             return Err(Invalid(
@@ -159,15 +240,27 @@ impl<'w, 'a> MagnetizedIonizedGasHeating<'w, 'a> {
             maximum_heavy_temperature_k: controls.maximum_heavy_temperature_k,
             maximum_iterations: controls.maximum_heavy_caloric_iterations,
         };
-        let chemistry = advance_ionization_network_with_thermal(
-            initial,
-            sources,
-            &[],
-            &thermal,
-            duration,
-            controls.network,
-            &mut cancelled,
-        )
+        let chemistry = match cooling {
+            None => advance_ionization_network_with_thermal(
+                initial,
+                sources,
+                &[],
+                &thermal,
+                duration,
+                controls.network,
+                &mut cancelled,
+            ),
+            Some(cooling) => advance_ionization_network_with_optically_thin_bremsstrahlung(
+                initial,
+                sources,
+                &[],
+                Some(&thermal),
+                cooling,
+                duration,
+                controls.network,
+                &mut cancelled,
+            ),
+        }
         .map_err(|error| match error {
             IonizationNetworkError::Cancelled => IonizedWaveHeatingError::Cancelled,
             error => IonizedWaveHeatingError::Reaction(error),

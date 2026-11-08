@@ -191,7 +191,11 @@ fn nonlocal_recycling_creates_receiver_electrons_and_refreshes_multiple_charge_s
     );
     let duration = 2e-8;
     let area = Area::new(100.0);
-    let solve = live_controls(duration);
+    let mut solve = live_controls(duration);
+    // Each full/two-half comparison samples the field six times across three
+    // channels in two cells. Keep the original per-query and accuracy bounds,
+    // and give this complete exposure its explicit aggregate work allowance.
+    solve.network.maximum_radiation_work = 500_000_000;
     let mut endpoints = Vec::new();
     for (stored_temperature, reverse) in [(1000.0, false), (45000.0, true)] {
         let receiver = mixture_state(&neutral, [1.0, 0.0, 0.7, 0.0, 0.0, 0.0], stored_temperature);

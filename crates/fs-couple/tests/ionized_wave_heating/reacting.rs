@@ -16,7 +16,25 @@ use fs_thermochem::kinetics::atomic_ionization::photoionization::{
 };
 use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
 use fs_thermochem::kinetics::atomic_ionization::{AtomicIonizationV1, AtomicStatisticalWeightsV1};
+use fs_thermochem::plasma_radiation::{
+    BremsstrahlungControlsV1, BremsstrahlungGauntFactorV1, ElectronIonBremsstrahlungV1,
+};
 use fs_thermochem::{ReactionId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
+
+fn cooling_source(heating: &MagnetizedIonizedGasHeating<'_, '_>) -> ElectronIonBremsstrahlungV1 {
+    ElectronIonBremsstrahlungV1::new(
+        heating.source().state().thermodynamics().clone(),
+        BremsstrahlungControlsV1 {
+            frequency_integrated_gaunt_factor: BremsstrahlungGauntFactorV1::Constant(1.2),
+            minimum_electron_temperature_k: 2000.0,
+            maximum_electron_temperature_k: 20000.0,
+            maximum_electron_thermal_rest_energy_ratio: 0.01,
+            maximum_ion_to_electron_thermal_variance_ratio: 0.01,
+            maximum_electron_thermal_phase_space_density: 0.01,
+        },
+    )
+    .unwrap()
+}
 
 fn source(heating: &MagnetizedIonizedGasHeating<'_, '_>) -> AtomicRadiativeRecombinationV1 {
     let bank = heating.source().state().thermodynamics();
@@ -47,7 +65,8 @@ fn source(heating: &MagnetizedIonizedGasHeating<'_, '_>) -> AtomicRadiativeRecom
         bank.clone(),
         ReactionId::new("wave-heated-H-ionization").unwrap(),
         fixture::id("H+"),
-        ElectronImpactRateV1::new(fixture::id("e-"), impact, controls().rate_controls, 0.1).unwrap(),
+        ElectronImpactRateV1::new(fixture::id("e-"), impact, controls().rate_controls, 0.1)
+            .unwrap(),
         AtomicStatisticalWeightsV1 { neutral: 2, ion: 1 },
         1e-12,
     )
@@ -134,6 +153,228 @@ fn reaction_controls() -> IonizedGasReactingHeatControls {
 }
 
 #[test]
+fn g3_optional_free_free_closes_wave_energy_and_retains_original_source() {
+    with_heating(
+        false,
+        8000.0,
+        8000.0,
+        true,
+        |heating, ion_card, background_card| {
+            let bank = transport_bank(heating, ion_card, 1.0);
+            let sources = [source(heating)];
+            let cooling = cooling_source(heating);
+            let duration = Time::new(1e-9);
+            let original = heating
+                .advance_reacting(
+                    duration,
+                    &sources,
+                    &bank,
+                    reaction_controls(),
+                    background_card,
+                    || false,
+                )
+                .unwrap();
+            let step = heating
+                .advance_reacting_with_optically_thin_bremsstrahlung(
+                    duration,
+                    &sources,
+                    &bank,
+                    &cooling,
+                    reaction_controls(),
+                    background_card,
+                    || false,
+                )
+                .unwrap();
+            let chemistry = step.chemistry();
+            let initial = heating.source().state();
+            let next = chemistry.state();
+            let b = chemistry.balance();
+            assert_eq!(chemistry.free_free_cooling_source(), Some(&cooling));
+            assert_eq!(original.chemistry().free_free_cooling_source(), None);
+            assert_eq!(
+                original.chemistry().balance().free_free_escaped_energy_j,
+                0.0
+            );
+            assert!(b.free_free_escaped_energy_j > 0.0);
+            assert!(b.free_free_evaluations > 0);
+            near(
+                b.free_free_escaped_energy_j,
+                cooling.evaluate(initial, || false).unwrap().total_power_w() * duration.value(),
+                2e-4,
+            );
+            assert!(
+                next.electron_temperature().value()
+                    < original.chemistry().state().electron_temperature().value()
+            );
+            assert_eq!(step.absorbed_energy_j(), original.absorbed_energy_j());
+            near(
+                b.electron_deposited_energy_j,
+                heating.absorption().electron_power_w() * duration.value(),
+                5e-13,
+            );
+            near(
+                b.heavy_deposited_energy_j,
+                heating.absorption().heavy_power_w() * duration.value(),
+                5e-13,
+            );
+            assert_eq!(b.absorbed_radiation_energy_j, 0.0);
+            // Only actual captures supply photons; integrated free-free power does
+            // not manufacture a photon count or another ionization event.
+            near(
+                b.emitted_photons,
+                chemistry.channel_balances()[0].radiative_recombination_extent_mol * fixture::NA,
+                5e-13,
+            );
+            let chemical = (next.amounts()[1].value() - initial.amounts()[1].value())
+                * 13.598_434_599_702
+                * fixture::E
+                * fixture::NA;
+            let electron = 1.5
+                * R
+                * (next.amounts()[2].value() * next.electron_temperature().value()
+                    - initial.amounts()[2].value() * initial.electron_temperature().value());
+            let heavy =
+                1.5 * R * (next.heavy_temperature().value() - initial.heavy_temperature().value());
+            assert!(
+                (chemical
+                    + electron
+                    + heavy
+                    + b.emitted_radiation_energy_j
+                    + b.free_free_escaped_energy_j
+                    - step.absorbed_energy_j())
+                .abs()
+                    < 1e-7
+            );
+            assert!(b.energy_residual_j.abs() < 1e-7);
+            assert_eq!(next.amounts()[1], next.amounts()[2]);
+            near(next.mass().value(), initial.mass().value(), 2e-14);
+            assert_eq!(step.refreshed_transport().unwrap().state(), next);
+            assert_eq!(
+                step.refreshed_background().state_coordinate("p"),
+                Some(next.pressure().value())
+            );
+
+            let mut unsupported = cooling.controls();
+            unsupported.minimum_electron_temperature_k = 15000.0;
+            let unsupported =
+                ElectronIonBremsstrahlungV1::new(initial.thermodynamics().clone(), unsupported)
+                    .unwrap();
+            assert!(matches!(
+                heating.advance_reacting_with_optically_thin_bremsstrahlung(
+                    duration,
+                    &sources,
+                    &bank,
+                    &unsupported,
+                    reaction_controls(),
+                    background_card,
+                    || false,
+                ),
+                Err(IonizedWaveHeatingError::Reaction(_))
+            ));
+            assert!(matches!(
+                heating.advance_reacting_with_optically_thin_bremsstrahlung(
+                    duration,
+                    &sources,
+                    &bank,
+                    &cooling,
+                    reaction_controls(),
+                    background_card,
+                    || true,
+                ),
+                Err(IonizedWaveHeatingError::Cancelled)
+            ));
+            let replay = heating
+                .advance_reacting_with_optically_thin_bremsstrahlung(
+                    duration,
+                    &sources,
+                    &bank,
+                    &cooling,
+                    reaction_controls(),
+                    background_card,
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(replay.chemistry(), chemistry);
+        },
+    );
+}
+
+#[test]
+fn g4_both_reacting_entries_refuse_directly_ionizing_coherent_drive() {
+    with_heating(
+        false,
+        8000.0,
+        8000.0,
+        true,
+        |original, ion_card, background_card| {
+            let sources = [source(original)];
+            let bank = transport_bank(original, ion_card, 1.0);
+            let cooling = cooling_source(original);
+            let harmonic = original.source().prepare_harmonic(|| false).unwrap();
+            let previous = original.absorption().wave().interface();
+            let omega = 1.01 * sources[0].source().threshold().value() * core::f64::consts::TAU
+                / 6.626_070_15e-34;
+            let transport = harmonic
+                .prepare_magnetized(
+                    omega,
+                    previous.transport().magnetic_field_t(),
+                    magnetic_limits(),
+                    || false,
+                )
+                .unwrap();
+            let interface = MagnetizedIonizedGasInterface::try_new(
+                previous.incident_response(),
+                &transport,
+                previous.background(),
+                previous.outgoing_normal(),
+                || false,
+            )
+            .unwrap();
+            let wave = interface
+                .prepare_wave([C64::from_re(0.01), C64::ZERO, C64::ZERO], || false)
+                .unwrap();
+            let absorption = wave.slab_absorption(10.0, 0.0, 0.1).unwrap();
+            let heating = MagnetizedIonizedGasHeating::try_new(absorption, || false).unwrap();
+            let duration = Time::new(1e-9);
+            assert!(matches!(
+                heating.advance_reacting(
+                    duration,
+                    &sources,
+                    &bank,
+                    reaction_controls(),
+                    background_card,
+                    || false,
+                ),
+                Err(IonizedWaveHeatingError::Invalid(
+                    "coherent drive must lie below every original photoionization threshold"
+                ))
+            ));
+            assert!(matches!(
+                heating.advance_reacting_with_optically_thin_bremsstrahlung(
+                    duration,
+                    &sources,
+                    &bank,
+                    &cooling,
+                    reaction_controls(),
+                    background_card,
+                    || false,
+                ),
+                Err(IonizedWaveHeatingError::Invalid(
+                    "coherent drive must lie below every original photoionization threshold"
+                ))
+            ));
+            assert_eq!(heating.source(), original.source());
+            assert_eq!(
+                bank.evaluate(heating.source().state(), || false)
+                    .unwrap()
+                    .unwrap(),
+                *original.source()
+            );
+        },
+    );
+}
+
+#[test]
 fn g1_wave_work_changes_atomic_storage_and_next_maxwell_response() {
     with_heating(
         false,
@@ -167,7 +408,11 @@ fn g1_wave_work_changes_atomic_storage_and_next_maxwell_response() {
             assert!(balance.chemical_storage_change_j > 0.0);
             assert!(next.amounts()[2].value() > initial.amounts()[2].value());
             assert_eq!(next.amounts()[1], next.amounts()[2]);
-            near(next.amounts()[0].value() + next.amounts()[1].value(), 1.0, 2e-14);
+            near(
+                next.amounts()[0].value() + next.amounts()[1].value(),
+                1.0,
+                2e-14,
+            );
             near(next.mass().value(), initial.mass().value(), 2e-14);
             near(
                 balance.electron_deposited_energy_j,
@@ -214,7 +459,10 @@ fn g1_wave_work_changes_atomic_storage_and_next_maxwell_response() {
             let refreshed = step.refreshed_transport().unwrap();
             assert_eq!(refreshed.state(), next);
             assert_eq!(step.transport_bank(), &bank);
-            assert_ne!(refreshed.conductivity_s_m(), heating.source().conductivity_s_m());
+            assert_ne!(
+                refreshed.conductivity_s_m(),
+                heating.source().conductivity_s_m()
+            );
             assert_eq!(
                 step.refreshed_background().card_identity(),
                 background_card.content_hash()
@@ -283,7 +531,10 @@ fn g3_reacting_coulomb_exchange_retains_the_signed_wave_work_once() {
                 thermal.collisions.as_ref().unwrap().momentum_sources,
                 heating.momentum_sources()
             );
-            assert_ne!(heating.absorption().exchange_correction_to_electrons_w(), 0.0);
+            assert_ne!(
+                heating.absorption().exchange_correction_to_electrons_w(),
+                0.0
+            );
             near(
                 balance.electron_deposited_energy_j,
                 duration.value()
@@ -346,13 +597,16 @@ fn g3_zero_wave_allows_chemical_evolution_without_adding_field_energy() {
             assert_eq!(step.absorbed_energy_j(), 0.0);
             assert_eq!(balance.electron_deposited_energy_j, 0.0);
             assert_eq!(balance.heavy_deposited_energy_j, 0.0);
-            assert_ne!(step.chemistry().state().amounts(), heating.source().state().amounts());
+            assert_ne!(
+                step.chemistry().state().amounts(),
+                heating.source().state().amounts()
+            );
             assert!(
                 (balance.chemical_storage_change_j
                     + balance.electron_sensible_energy_change_j
                     + balance.heavy_sensible_energy_change_j
                     + balance.emitted_radiation_energy_j)
-                .abs()
+                    .abs()
                     < 1e-7
             );
         },
