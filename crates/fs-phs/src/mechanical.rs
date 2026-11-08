@@ -5,6 +5,7 @@
 //! nonproportional resistance, gyroscopic coupling and material histories
 //! remain. No modal diagonalization, mass lumping or new integrator is used.
 
+use crate::interconnection::accumulation::Sum;
 use crate::linear_exact::positive_heat::factor_resistance;
 use crate::{
     PhsError, PortHamiltonian, QuadraticStorage, RelaxationBranch, ResistanceWitness,
@@ -12,6 +13,9 @@ use crate::{
 };
 use fs_la::factor::cholesky;
 use fs_math::det;
+
+mod impulse;
+pub use impulse::{MechanicalImpulse, MechanicalImpulseControls};
 
 /// Maximum complete state dimension of this bounded dense source adapter.
 /// Exact-propagation owners impose their own additional preparation budgets.
@@ -34,6 +38,7 @@ pub struct LinearMechanicalSystem {
     system: PortHamiltonian,
     coordinates: usize,
     mass: Vec<f64>,
+    inverse_mass: Vec<f64>,
     branches: Vec<RelaxationBranch>,
 }
 
@@ -101,6 +106,11 @@ impl LinearMechanicalSystem {
         }
         require_symmetric(mass, n, "mechanical mass")?;
         require_symmetric(relaxed_stiffness, n, "mechanical relaxed stiffness")?;
+        // Resolve each original elastic direction before unrelated kinetic or
+        // branch storage can enlarge the aggregate quadratic PSD allowance.
+        factor_resistance(relaxed_stiffness, n).map_err(|_| PhsError::Unadmitted {
+            what: "resolved positive semidefinite mechanical relaxed stiffness",
+        })?;
         let factor = cholesky(mass, n).map_err(|_| PhsError::Unadmitted {
             what: "positive definite mechanical mass",
         })?;
@@ -179,6 +189,7 @@ impl LinearMechanicalSystem {
             system,
             coordinates: n,
             mass: mass.to_vec(),
+            inverse_mass: inverse,
             branches,
         })
     }
@@ -240,15 +251,29 @@ impl LinearMechanicalSystem {
 
     /// Physical velocities on the original coordinates, with all memory retained.
     pub fn velocities(&self, state: &[f64]) -> Result<Vec<f64>, PhsError> {
+        let mut velocity = vec![0.0; self.coordinates];
+        self.velocities_into(state, &mut velocity)?;
+        Ok(velocity)
+    }
+
+    /// Allocation-free full-inertia observation; no elastic or memory effort
+    /// evaluation is needed. On refusal, output is scratch; state is unchanged.
+    pub fn velocities_into(&self, state: &[f64], velocity: &mut [f64]) -> Result<(), PhsError> {
         self.admit_state(state)?;
-        let effort = self.system.effort(state);
-        let velocity = effort[self.coordinates..2 * self.coordinates].to_vec();
-        if !finite(&velocity) {
-            return Err(PhsError::Unadmitted {
-                what: "finite mechanical velocity",
+        let n = self.coordinates;
+        if velocity.len() != n {
+            return Err(PhsError::Dimension {
+                what: "mechanical velocity output extent",
             });
         }
-        Ok(velocity)
+        for (i, value) in velocity.iter_mut().enumerate() {
+            *value = Sum::dot(&self.inverse_mass[i * n..(i + 1) * n], &state[n..2 * n])
+                .and_then(Sum::value)
+                .ok_or(PhsError::Unadmitted {
+                    what: "representable original mechanical velocity",
+                })?;
+        }
+        Ok(())
     }
 
     /// Physical stresses k_j*(b_j^T q-viscous_strain_j), in original arm order.
@@ -283,11 +308,11 @@ impl LinearMechanicalSystem {
         let mut state = vec![0.0; self.system.state_dim()];
         state[..n].copy_from_slice(displacement);
         for i in 0..n {
-            state[n + i] = self.mass[i * n..(i + 1) * n]
-                .iter()
-                .zip(velocity)
-                .map(|(m, v)| m * v)
-                .sum();
+            state[n + i] = Sum::dot(&self.mass[i * n..(i + 1) * n], velocity)
+                .and_then(Sum::value)
+                .ok_or(PhsError::Unadmitted {
+                    what: "representable original mechanical momentum",
+                })?;
         }
         Ok(state)
     }

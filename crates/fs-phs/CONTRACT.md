@@ -584,6 +584,8 @@ kinetic storage; no lumping, modal projection or proportional-damping fit is
 introduced. The symmetric PSD part of C is physical resistance, checked by
 the existing positive-factor owner and retained with its resistance witness.
 The skew part enters J and is gyroscopic, with exactly zero physical loss.
+Relaxed K independently passes the same positive-factor reconstruction gate
+before unrelated kinetic or Maxwell storage can enlarge its PSD allowance.
 
 State order is `[q, p=M*v, z]`. Each original displacement strain b retains
 one existing Maxwell memory `z=sqrt(k)*viscous_strain`, including zero strain
@@ -609,6 +611,26 @@ against an independent physical-variable ODE; exact time partition through
 warm caches; zero-loss free and gyroscopic trajectories; independently relaxing
 hidden memory; physical port work, and nonphysical/incomplete input refusal.
 
+
+Original-coordinate and force-port impulses use `apply_impulse` and
+`apply_port_impulse` with explicit componentwise momentum and absolute work
+allowances. They preserve q and every z bit, change only canonical p, and
+retain full consistent inertia without advancing a forcing phase or clock.
+All ports act simultaneously. Each port's signed work uses its own impulse
+and average conjugate velocity; compensated totals retain cancelling sources.
+The existing constitutive storage-change owner audits work without subtracting
+large endpoint energies. Actual stored momentum must resolve the supplied
+impulse independently of background momentum. Heat is exactly zero at this
+zero-duration event; finite viscosity, gyroscopic forces and Maxwell relaxation
+resume through the unchanged time owner afterward. No contact, restitution,
+constraint-reaction or event-localization law is inferred. The returned complete
+candidate can continue an already prepared propagator; refusal publishes none.
+`velocities_into` observes only the prepared full inverse-mass block without
+allocation or evaluating displacement/material efforts. Original M*v state
+initialization uses the shared compensated contraction.
+`tests/mechanical_impulse.rs` covers coupled inertia, braking, memory retention,
+simultaneous signed source work, weak cancellation, large fixed storage, analytic
+oscillator continuation, weak negative K, original momentum and refusal/zero events.
 
 ### Physical modal damping and rigid coordinates
 
