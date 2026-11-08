@@ -77,6 +77,7 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicWindingFrequency<'_, 's
         circuit_response(
             self.omega_rad_s(),
             self.impedance_ohm(),
+            None,
             graph,
             winding_branches,
             external_mutual,

@@ -3,8 +3,9 @@
 //! A positive reference resistor and a compensating current port replace each
 //! field-owned winding only while the native descriptor is factored. If H maps
 //! those injected currents to terminal voltages and G is the reference diagonal
-//! conductance, the physical currents solve `[(I-HG) Z + H] i = v_open`.
-//! Replaying `j = G Z i - i` cancels the reference termination exactly. Its heat
+//! conductance, the affine field law is `v = v_induced + Z i`. Physical currents
+//! solve `[(I-HG) Z + H] i = v_open - (I-HG) v_induced`.
+//! Replaying `j = G v - i` cancels the reference termination exactly. Its heat
 //! is excluded from every physical result. No circuit incidence, MNA solver,
 //! electromagnetic field operator or empirical loss law is reimplemented here.
 
@@ -157,9 +158,16 @@ pub struct HarmonicCircuitResponse<F = HarmonicWindingResponse> {
     /// Signed work delivered by the field to prescribed mechanical motion.
     /// Negative values return shaft/mechanical power to the electrical network.
     pub mean_field_mechanical_power_w: f64,
+    /// Supply from the original circuit's voltage/current source branches only.
+    pub circuit_supplied_power_va: C64,
+    /// Supply from independent impressed field excitation, separate from ports.
+    /// Zero for field owners driven entirely through the circuit's terminals.
+    pub impressed_supplied_power_va: C64,
+    /// Total original circuit and independent impressed-field supply.
     pub supplied_power_va: C64,
+    /// Physical network and complete field absorption, including signed motion.
     pub absorbed_power_va: C64,
-    /// Physical absorption minus original external source supply.
+    /// Physical absorption minus total original source supply.
     pub power_residual_va: C64,
     pub relative_terminal_residual: f64,
     pub relative_network_residual: f64,
@@ -175,7 +183,12 @@ pub(crate) trait HarmonicCircuitField {
     fn terminal_voltages_v(&self) -> &[C64];
     fn mean_dissipated_power_w(&self) -> f64;
     fn mean_mechanical_power_w(&self) -> f64;
+    /// Signed work entering the field through the circuit's physical ports.
     fn absorbed_power_va(&self) -> C64;
+    /// Independent volume-source work, recovered at the actual loaded field.
+    fn impressed_supplied_power_va(&self) -> C64 {
+        C64::ZERO
+    }
 }
 impl HarmonicCircuitField for HarmonicWindingResponse {
     fn currents_a(&self) -> &[C64] {
@@ -244,10 +257,10 @@ fn admit_native_budget(n: usize, ports: usize, budget: HarmonicBudget) -> Result
                 .and_then(|p| v.checked_add(p))
         })
         .and_then(|v| n.checked_mul(256).and_then(|p| v.checked_add(p)))
-        .and_then(|v| ports.checked_mul(64).and_then(|p| v.checked_add(p)))
+        .and_then(|v| ports.checked_mul(96).and_then(|p| v.checked_add(p)))
         .ok_or_else(|| invalid("native payload overflow"))?;
     let work = (square as u64)
-        .checked_mul(n as u64 + ports as u64 + 8)
+        .checked_mul((n as u64).max(16) + ports as u64 + 8)
         .ok_or_else(|| invalid("native work overflow"))?;
     if n == 0
         || n > MAX_HARMONIC_DIMENSION
@@ -361,6 +374,7 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
         circuit_response(
             self.omega_rad_s(),
             self.impedance_ohm(),
+            None,
             graph,
             winding_branches,
             external_mutual,
@@ -382,6 +396,7 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
 pub(crate) fn circuit_response<F, E, C>(
     omega_rad_s: f64,
     impedance_ohm: &[C64],
+    open_circuit_voltages_v: Option<&[C64]>,
     graph: &CircuitGraph,
     winding_branches: &[usize],
     external_mutual: &[MutualInductance],
@@ -401,6 +416,12 @@ where
         || count > MAX_HARMONIC_CIRCUIT_WINDINGS
         || !positive(omega_rad_s)
         || impedance_ohm.len() != count * count
+        || open_circuit_voltages_v.is_some_and(|values| {
+            values.len() != count
+                || values
+                    .iter()
+                    .any(|z| !z.re.is_finite() || !z.im.is_finite())
+        })
         || graph.branches.len() > MAX_HARMONIC_CIRCUIT_BRANCHES
         || graph.node_count < 2
         || graph.node_count > MAX_HARMONIC_DIMENSION
@@ -524,12 +545,13 @@ where
         + 24 * sources.len()
         + 8 * graph.node_count
         + 16 * count * count
-        + 32 * count
+        + 34 * count
         + 10 * graph.transformers.len()
         + 8 * external_mutual.len()
         + 16 * native_ports
         + 4 * ports
-        + MAX_HARMONIC_CIRCUIT_SOURCES;
+        + MAX_HARMONIC_CIRCUIT_SOURCES
+        + 4;
     if payload > controls.max_interface_scalars {
         return Err(invalid("harmonic circuit interface payload exceeds caller budget").into());
     }
@@ -583,6 +605,7 @@ where
     }
     let impedance = impedance_ohm;
     let mut schur = terminal.clone();
+    let mut terminal_rhs = open.output[sources.len()..].to_vec();
     for row in 0..count {
         poll(cancelled)?;
         for inner in 0..count {
@@ -591,6 +614,9 @@ where
                 C64::from_re(if row == inner { 1.0 } else { 0.0 })
                     - C64::new(value.re / reference[inner], value.im / reference[inner]),
             )?;
+            if let Some(induced) = open_circuit_voltages_v {
+                terminal_rhs[row] = phasor(terminal_rhs[row] - multiplier * induced[inner])?;
+            }
             for column in 0..count {
                 schur[row * count + column] = phasor(
                     schur[row * count + column] + multiplier * impedance[inner * count + column],
@@ -600,7 +626,7 @@ where
     }
     let (currents, relative_terminal_residual) = terminal_solve(
         &schur,
-        &open.output[sources.len()..],
+        &terminal_rhs,
         controls.relative_terminal_residual_tolerance,
         cancelled,
     )?;
@@ -795,15 +821,23 @@ where
     }
     let field_heat = finite(field.mean_dissipated_power_w())?;
     let field_mechanical = finite(field.mean_mechanical_power_w())?;
-    let field_absorption = phasor(field.absorbed_power_va())?;
+    let field_terminal = phasor(field.absorbed_power_va())?;
+    let impressed_supply = phasor(field.impressed_supplied_power_va())?;
+    let field_absorption = phasor(field_terminal + impressed_supply)?;
     let field_power_defect = finite(field_absorption.re - field_heat - field_mechanical)?;
+    // Audit the original circuit before adding independent field supply: a
+    // large impressed source must not hide a smaller terminal closure defect.
+    let circuit_residual = phasor(network_absorption + field_terminal - supplied)?;
+    let total_supply = phasor(supplied + impressed_supply)?;
     let absorbed = phasor(network_absorption + field_absorption)?;
-    let residual = phasor(absorbed - supplied)?;
+    let residual = phasor(absorbed - total_supply)?;
     let network_heat_defect = finite(response.dissipated_power_w - reference_heat - resistor_heat)?;
     if resistor_heat < 0.0
         || field_heat < 0.0
         || field_power_defect.abs() > controls.power_tolerance_w
         || response.mean_stored_energy_j < 0.0
+        || circuit_residual.re.abs() > controls.power_tolerance_w
+        || circuit_residual.im.abs() > controls.power_tolerance_w
         || residual.re.abs() > controls.power_tolerance_w
         || residual.im.abs() > controls.power_tolerance_w
         || network_heat_defect.abs() > controls.power_tolerance_w
@@ -826,7 +860,9 @@ where
         mean_resistor_power_w: resistor_heat,
         mean_field_power_w: field_heat,
         mean_field_mechanical_power_w: field_mechanical,
-        supplied_power_va: supplied,
+        circuit_supplied_power_va: supplied,
+        impressed_supplied_power_va: impressed_supply,
+        supplied_power_va: total_supply,
         absorbed_power_va: absorbed,
         power_residual_va: residual,
         relative_terminal_residual,

@@ -12,9 +12,12 @@
 //! physical heat is reported. A physical electrode has exactly one graph node,
 //! including references shared by several ports of a multi-electrode body.
 //!
-//! This is a homogeneous settled AC law V = Z I: independent impressed-current
-//! excitation is absent. Material state, geometry and steady Eulerian velocity
-//! are fixed. Neither transient history nor thermal/mechanical state advances.
+//! Independent impressed currents add the physical open-circuit voltage:
+//! V = V_induced + Z I. Homogeneous probes retain Z without subtracting large
+//! driven fields; an additional native trial retains the excitation cochain.
+//! Loaded recovery combines both before checking the original field equations.
+//! Material state, geometry and steady Eulerian velocity are fixed. Neither
+//! transient history nor thermal/mechanical state advances.
 
 use super::super::terminals::current::SpatialCurrentInduction;
 use super::{SpatialHarmonicInductionControls, SpatialHarmonicInductionResponse};
@@ -36,7 +39,7 @@ pub struct SpatialHarmonicTerminalControls {
     pub field: SpatialHarmonicInductionControls,
     /// Number of independent electrode-current coordinates, from 1 through 16.
     pub maximum_ports: usize,
-    /// Additional cached cochains, velocity, zero source and interface vectors
+    /// Additional cached cochains, velocity, impressed source and interface vectors
     /// in real scalar slots. Native field and circuit budgets apply separately.
     pub maximum_response_scalars: usize,
     /// Positive real current used for each physical unit-response trial [A].
@@ -119,9 +122,16 @@ pub struct SpatialHarmonicTerminalFrequency<
     controls: SpatialHarmonicTerminalControls,
     ports: Vec<SpatialHarmonicTerminalPort>,
     impedance_ohm: Vec<C64>,
+    open_circuit_voltages_v: Vec<C64>,
     solutions: Vec<Vec<f64>>,
     reports: Vec<SolveReport>,
-    zero_impressed: Vec<[C64; 3]>,
+    impressed_current_a_m2: Vec<[C64; 3]>,
+    excitation: Option<TerminalExcitation>,
+}
+
+struct TerminalExcitation {
+    solution: Vec<f64>,
+    report: SolveReport,
 }
 
 /// Accepted original field with independently recovered physical port values.
@@ -161,6 +171,13 @@ impl<C: SpatialConductorMaterial> HarmonicCircuitField
             balance.reactive_terminal_power_var,
         )
     }
+    fn impressed_supplied_power_va(&self) -> C64 {
+        let balance = self.field.balance();
+        C64::new(
+            balance.mean_impressed_power_w,
+            balance.reactive_impressed_power_var,
+        )
+    }
 }
 
 impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, 'm, C> {
@@ -170,6 +187,45 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
     /// No symmetry or positive-real assumption is imposed under motion.
     pub fn new(
         source: &'s SpatialCurrentInduction<'m, C>,
+        omega_rad_s: f64,
+        velocity_m_s: &[[f64; 3]],
+        controls: SpatialHarmonicTerminalControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::prepare(source, None, omega_rad_s, velocity_m_s, controls, cancelled)
+    }
+
+    /// Prepare physical electrodes under independent impressed-current AC
+    /// excitation. Inputs are one peak laboratory current-density phasor per
+    /// original tetrahedron, with the native exp(-i omega t) convention.
+    ///
+    /// One additional zero-terminal-current solve recovers induced open-circuit
+    /// voltages and a cached native cochain. Port probes still use ZERO impressed
+    /// excitation, so Z does not depend on subtraction of two driven fields.
+    /// Every loaded response recovers the original impressed and terminal work
+    /// separately. A connected passive load may receive power from the field.
+    /// An all-zero source uses the same preparation cost as new().
+    pub fn with_impressed_current(
+        source: &'s SpatialCurrentInduction<'m, C>,
+        impressed_current_a_m2: &[[C64; 3]],
+        omega_rad_s: f64,
+        velocity_m_s: &[[f64; 3]],
+        controls: SpatialHarmonicTerminalControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::prepare(
+            source,
+            Some(impressed_current_a_m2),
+            omega_rad_s,
+            velocity_m_s,
+            controls,
+            cancelled,
+        )
+    }
+
+    fn prepare(
+        source: &'s SpatialCurrentInduction<'m, C>,
+        impressed: Option<&[[C64; 3]]>,
         omega_rad_s: f64,
         velocity_m_s: &[[f64; 3]],
         controls: SpatialHarmonicTerminalControls,
@@ -196,10 +252,26 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
                 "bounded electrode ports, positive frequency/probe and complete motion required",
             ));
         }
+        let mut has_excitation = false;
+        if let Some(values) = impressed {
+            if values.len() != mesh.tets.len() {
+                return Err(invalid(
+                    "one impressed-current phasor per original cell required",
+                ));
+            }
+            for cell in values {
+                poll(cancelled)?;
+                for &value in cell {
+                    phasor(value)?;
+                    has_excitation |= value != C64::ZERO;
+                }
+            }
+        }
+        let trials = count + usize::from(has_excitation);
         let coordinates = source.harmonic_coordinate_count();
         let scalars = coordinates
             .checked_mul(2)
-            .and_then(|v| v.checked_mul(count + 1))
+            .and_then(|v| v.checked_mul(trials + 1))
             .and_then(|v| {
                 count
                     .checked_mul(count)
@@ -224,7 +296,7 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
                     .and_then(|n| v.checked_add(n))
             })
             .and_then(|v| {
-                count
+                trials
                     .checked_mul(32 + size_of::<SolveReport>().div_ceil(size_of::<f64>()))
                     .and_then(|n| v.checked_add(n))
             })
@@ -234,7 +306,7 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
                     .field
                     .maximum_cycles
                     .checked_mul(8)
-                    .and_then(|n| n.checked_mul(count))
+                    .and_then(|n| n.checked_mul(trials))
                     .and_then(|n| v.checked_add(n))
             });
         if scalars.is_none_or(|n| n > controls.maximum_response_scalars) {
@@ -252,8 +324,11 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
                 })
             })
             .collect();
-        let zero_impressed = vec![[C64::ZERO; 3]; mesh.tets.len()];
+        // Reuse this admitted source buffer after homogeneous preparation;
+        // retaining two complete impressed-current arrays is unnecessary.
+        let mut impressed_current_a_m2 = vec![[C64::ZERO; 3]; mesh.tets.len()];
         let mut impedance_ohm = vec![C64::ZERO; count * count];
+        let mut open_circuit_voltages_v = vec![C64::ZERO; count];
         let mut solutions = Vec::with_capacity(count);
         let mut reports = Vec::with_capacity(count);
         let probe = controls.current_probe_a;
@@ -264,7 +339,7 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
             currents[port.reference_terminal] = C64::from_re(-probe);
             let field = source.solve_harmonic_current(
                 &currents,
-                &zero_impressed,
+                &impressed_current_a_m2,
                 velocity_m_s,
                 omega_rad_s,
                 controls.field,
@@ -279,6 +354,32 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
             solutions.push(field.solution);
             reports.push(field.report);
         }
+        let excitation = if has_excitation {
+            for (target, &value) in impressed_current_a_m2.iter_mut().zip(impressed.unwrap()) {
+                poll(cancelled)?;
+                *target = value;
+            }
+            let currents = vec![C64::ZERO; references.len()];
+            let field = source.solve_harmonic_current(
+                &currents,
+                &impressed_current_a_m2,
+                velocity_m_s,
+                omega_rad_s,
+                controls.field,
+                cancelled,
+            )?;
+            for (row, port) in ports.iter().enumerate() {
+                poll(cancelled)?;
+                open_circuit_voltages_v[row] =
+                    phasor(field.terminals()[port.terminal].voltage_to_reference_v)?;
+            }
+            Some(TerminalExcitation {
+                solution: field.solution,
+                report: field.report,
+            })
+        } else {
+            None
+        };
         poll(cancelled)?;
         Ok(Self {
             source,
@@ -287,9 +388,11 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
             controls,
             ports,
             impedance_ohm,
+            open_circuit_voltages_v,
             solutions,
             reports,
-            zero_impressed,
+            impressed_current_a_m2,
+            excitation,
         })
     }
 
@@ -306,12 +409,25 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
     pub fn impedance_ohm(&self) -> &[C64] {
         &self.impedance_ohm
     }
+    /// Induced voltage at zero current through EVERY physical electrode [V].
+    /// In ports() order; it is added to Z I, never treated as extra impedance.
+    pub fn open_circuit_voltages_v(&self) -> &[C64] {
+        &self.open_circuit_voltages_v
+    }
+    pub fn impressed_current_a_m2(&self) -> &[[C64; 3]] {
+        &self.impressed_current_a_m2
+    }
+    /// Additional native excitation trial; absent for zero impressed current.
+    pub fn impressed_report(&self) -> Option<&SolveReport> {
+        self.excitation.as_ref().map(|value| &value.report)
+    }
     pub fn unit_reports(&self) -> &[SolveReport] {
         &self.reports
     }
 
     /// Recover one actual-amplitude native field. A linear combination of
-    /// cached cochains seeds its original solver, which can skip Krylov work
+    /// cached port cochains plus the impressed-excitation cochain seeds its
+    /// original solver, which can skip Krylov work
     /// when that seed already meets the requested residual. Full charge,
     /// Ampere, skin/motion and real/reactive-power checks always run.
     pub fn current_response(
@@ -330,7 +446,10 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
             ));
         }
         let dimension = self.solutions[0].len() / 2;
-        let mut seed = vec![0.0; 2 * dimension];
+        let mut seed = self.excitation.as_ref().map_or_else(
+            || vec![0.0; 2 * dimension],
+            |excitation| excitation.solution.clone(),
+        );
         let mut currents = vec![C64::ZERO; self.source.electrode_faces().len()];
         for (column, (port, &current)) in self.ports.iter().zip(currents_a).enumerate() {
             poll(cancelled)?;
@@ -356,7 +475,7 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
         }
         let field = self.source.solve_harmonic_current_seeded(
             &currents,
-            &self.zero_impressed,
+            &self.impressed_current_a_m2,
             &self.velocity_m_s,
             self.omega_rad_s,
             self.controls.field,
@@ -389,6 +508,8 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
     /// are shared with native harmonic windings. Only physical graph resistance
     /// and recovered conductor heat dissipate power; prescribed motion remains
     /// signed, and numerical reference terminations contribute no physical heat.
+    /// Independent impressed excitation enters as the affine open-circuit
+    /// voltage. Its actual loaded supply is separate from native circuit sources.
     #[allow(clippy::too_many_arguments)]
     pub fn circuit_response(
         &self,
@@ -429,6 +550,7 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicTerminalFrequency<'s, '
         circuit_response(
             self.omega_rad_s,
             &self.impedance_ohm,
+            Some(&self.open_circuit_voltages_v),
             graph,
             terminal_branches,
             external_mutual,

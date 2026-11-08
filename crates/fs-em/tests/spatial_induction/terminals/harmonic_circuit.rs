@@ -1,4 +1,7 @@
 //! Original AC networks drive physical electrodes and the resolved 3D current.
+#[path = "harmonic_circuit/impressed.rs"]
+mod impressed;
+
 use super::*;
 use crate::harmonic::{complex_near, harmonic_controls};
 use fs_em::spatial::vector_potential::induction::{

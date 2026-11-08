@@ -7287,15 +7287,27 @@ payload is admitted before allocation. One field trial per port prepares the
 frequency response. Cached cochains seed one original actual-amplitude solve
 per subsequent drive; all original residual and power checks still run.
 
-This owner solves homogeneous settled AC excitation through electrodes only.
-Independent impressed-field sources would require an affine terminal law and
-are not inferred. Material state, geometry and steady Eulerian motion remain
-fixed, and accepted transient histories are unchanged. The focused G1/G3/G4
+Independent impressed-current excitation is admitted through
+`SpatialHarmonicTerminalFrequency::with_impressed_current`. One additional
+zero-terminal-current native trial supplies the affine voltage in
+`V = V_induced + Z I`; homogeneous port probes prepare Z without subtracting
+large driven fields. Both cochain contributions seed actual loaded recovery.
+The shared descriptor closes the affine law on the original RLC/transformer
+graph, preserving negative terminal power when the field drives a passive load.
+Original circuit supply, independently recovered impressed supply and their
+total are reported separately; no numerical reference loss becomes heat.
+Additional cochain/history storage is admitted before allocation, while an
+all-zero impressed source retains homogeneous preparation cost.
+
+Material state, geometry and steady Eulerian motion remain fixed, and accepted
+transient histories are unchanged. The focused G1/G3/G4
 tests in `tests/spatial_induction/terminals/harmonic_circuit.rs` compare an
 independent diffusion/RLC reference, physical node/reference consistency,
 orientation and numerical-reference invariance, moving-field power splitting,
-and bounded cancellation/retry behavior. Synthetic fixtures are implementation
-evidence, not experimental device validation.
+and bounded cancellation/retry behavior. Its `harmonic_circuit/impressed.rs`
+child compares induced open-circuit voltage, passive loaded secondaries,
+simultaneous independent/terminal drive and their separately integrated work.
+Synthetic fixtures are implementation evidence, not experimental device validation.
 
 ### Original optical phase, group and attenuation dispersion
 
