@@ -2256,6 +2256,20 @@ Regressions cover an actual backward-Euler cooling endpoint, spectral ray and
 bundle agreement with an independent affine field, gradient-jump sensitivities,
 and contact/snapshot/source/work refusals.
 
+With `photometry` and `material-state`, the silica constructors on
+`NativeMaterialFieldBinding` bind these original fields to the existing native
+scene, molecular-ambient scene, camera and differentiated-bundle observers.
+Admission requires the complete released Corning glass at an explicit reference
+temperature and exactly the field's independent absorption; an equal index or
+provenance tag alone is insufficient. Actual local temperatures replace the
+reference medium during observation. First/second-order and wavelength-prepared
+bindings retain the same complete source/reference/snapshot identity. Geometry,
+medium ownership, source domains and native transport remain authoritative;
+no spatial reconstruction or contact smoothing is inferred. Three regressions
+cover analytic thermal focusing at visible/IR wavelengths, temperature-driven
+camera visibility/radiance, and source/reference/cancellation refusals. They are
+authored and formatted; execution remains blocked by the upstream build resources.
+
 With `material-state`, `MaterialThermoOpticField` binds the original reference
 glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
 thermal snapshot. Its usable wavelengths are the intersection of reference

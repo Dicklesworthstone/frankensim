@@ -157,6 +157,15 @@ pub enum NativeOpticalSceneError {
     WaterAbsorptionMismatch {
         medium: NativeOpticalMedium,
     },
+    /// Silica fields require the complete released CHARMS reference glass at
+    /// an explicitly supplied, supported reference temperature.
+    SilicaReferenceRequired {
+        medium: NativeOpticalMedium,
+    },
+    /// The field must retain the original independent silica absorption law.
+    SilicaAbsorptionMismatch {
+        medium: NativeOpticalMedium,
+    },
     /// A source-backed gas ambient requires its original material field.
     MissingGasAmbient,
     /// A different molecular material cannot replace the admitted ambient.

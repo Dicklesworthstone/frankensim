@@ -32,6 +32,8 @@ use crate::tracer::{Material, Scene};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 
+mod silica;
+
 #[derive(Clone, Copy)]
 enum Field<'a> {
     Gradient(&'a (dyn GradientIndexField + Sync)),

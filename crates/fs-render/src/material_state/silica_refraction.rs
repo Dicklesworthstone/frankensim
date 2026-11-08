@@ -124,6 +124,12 @@ pub struct PreparedMaterialSilicaRefractiveField<
 }
 
 impl<F: TemperatureGradientField + ?Sized> PreparedMaterialSilicaRefractiveField<'_, '_, F> {
+    /// Original source, absorption and accepted temperature snapshot retained
+    /// by this wavelength preparation.
+    pub const fn source_field(&self) -> &MaterialSilicaRefractiveField<'_, F> {
+        self.field
+    }
+
     pub const fn wavelength_nm(&self) -> f64 {
         self.wavelength_nm
     }
