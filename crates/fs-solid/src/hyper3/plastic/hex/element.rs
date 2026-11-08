@@ -1,10 +1,12 @@
-//! Original Hex8 geometry and variational finite mean dilatation.
+//! Original Hex8 geometry and the complete finite mean-dilatation pullback.
 //!
 //! `Fbar_q = (Jbar/J_q)^(1/3) F_q`, with `Jbar = sum(w_q J_q)/V`.
-//! The energy is the original point potential evaluated at these assumed
-//! gradients. This owner differentiates the WHOLE element energy: material,
-//! geometric and cross-quadrature terms. Full deviatoric quadrature remains;
-//! pressure/dilatation condensation does not become one-point stiffness.
+//! Original point stresses and their derivatives are pulled back through these
+//! assumed gradients, retaining material, geometric and cross-quadrature terms.
+//! Potential materials retain their original energy in the thermal wrapper;
+//! nonpotential laws need no invented scalar potential or symmetric derivative.
+//! Full deviatoric quadrature remains; pressure/dilatation condensation does not
+//! become one-point stiffness.
 //!
 //! Material domains apply to the assumed constitutive chart. Every physical
 //! corner, centre and quadrature Jacobian is independently admitted, so a
@@ -53,6 +55,18 @@ pub(super) struct EvaluatedHex {
     pub local_force_n: [f64; 24],
     pub tangent_n_m: Option<Matrix24>,
     pub incremental_potential_j: f64,
+}
+
+/// Native point response, without imposing a scalar potential or symmetry.
+pub(super) struct HexPointResponse {
+    pub first_piola_pa: [f64; 9],
+    pub tangent_pa: Option<[[f64; 9]; 9]>,
+}
+
+/// Complete force pullback through the original compatible or assumed chart.
+pub(super) struct HexResponse {
+    pub local_force_n: [f64; 24],
+    pub tangent_n_m: Option<Matrix24>,
 }
 
 fn invalid(what: impl Into<String>) -> SmallStrainTetError {
@@ -264,6 +278,69 @@ impl PreparedHex {
             minimum_mechanical_jacobian * theta * theta * theta,
             cx,
         )?;
+        let mut incremental_potential_j = 0.0;
+        let response = self.evaluate_response(
+            &state,
+            mean_dilatation,
+            need_tangent,
+            |q, deformation, need_tangent| {
+                let refused = |error| {
+                    invalid(format!(
+                        "finite hex {} point {q}: {error}",
+                        self.element_index
+                    ))
+                };
+                let (first_piola_pa, tangent_pa, potential) = if need_tangent {
+                    let response = frozen.response(deformation, &old[q]).map_err(refused)?;
+                    (
+                        response.first_piola_pa,
+                        Some(response.tangent_pa),
+                        response.incremental_potential_j_m3,
+                    )
+                } else {
+                    let (stress, potential) = frozen
+                        .stress_and_potential(deformation, &old[q])
+                        .map_err(refused)?;
+                    (stress, None, potential)
+                };
+                incremental_potential_j = self.points[q]
+                    .volume_m3
+                    .mul_add(potential, incremental_potential_j);
+                Ok(HexPointResponse {
+                    first_piola_pa,
+                    tangent_pa,
+                })
+            },
+            cx,
+        )?;
+        if !incremental_potential_j.is_finite() {
+            return Err(invalid(
+                "finite hex incremental potential is not representable",
+            ));
+        }
+        Ok(EvaluatedHex {
+            local_force_n: response.local_force_n,
+            tangent_n_m: response.tangent_n_m,
+            incremental_potential_j,
+        })
+    }
+
+    /// Shared work-conjugate H8 assembly for native potential and nonpotential
+    /// laws. Callers own the frozen history and material domain. The admitted
+    /// kinematics must be from this same original cell and formulation.
+    pub fn evaluate_response(
+        &self,
+        state: &HexKinematics,
+        mean_dilatation: bool,
+        need_tangent: bool,
+        mut material: impl FnMut(
+            usize,
+            &[f64; 9],
+            bool,
+        ) -> Result<HexPointResponse, SmallStrainTetError>,
+        cx: &Cx<'_>,
+    ) -> Result<HexResponse, SmallStrainTetError> {
+        checkpoint(cx)?;
         let mut log_gradients = [[0.0; 24]; 8];
         let mut mean_log_gradient = [0.0; 24];
         let mut mean_log_hessian = [[0.0; 24]; 24];
@@ -301,35 +378,15 @@ impl PreparedHex {
         }
         let mut local_force_n = [0.0; 24];
         let mut tangent_n_m = need_tangent.then_some([[0.0; 24]; 24]);
-        let mut incremental_potential_j = 0.0;
         for q in 0..8 {
             checkpoint(cx)?;
-            let full = if need_tangent {
-                Some(
-                    frozen
-                        .response(&state.assumed_deformation[q], &old[q])
-                        .map_err(|error| {
-                            invalid(format!(
-                                "finite hex {} point {q}: {error}",
-                                self.element_index
-                            ))
-                        })?,
-                )
-            } else {
-                None
-            };
-            let (piola, potential) = if let Some(response) = &full {
-                (response.first_piola_pa, response.incremental_potential_j_m3)
-            } else {
-                frozen
-                    .stress_and_potential(&state.assumed_deformation[q], &old[q])
-                    .map_err(|error| {
-                        invalid(format!(
-                            "finite hex {} point {q}: {error}",
-                            self.element_index
-                        ))
-                    })?
-            };
+            let response = material(q, &state.assumed_deformation[q], need_tangent)?;
+            if need_tangent && response.tangent_pa.is_none() {
+                return Err(invalid(
+                    "finite hex requested a complete native point derivative",
+                ));
+            }
+            let piola = response.first_piola_pa;
             let point = &self.points[q];
             let f = &state.physical_deformation[q];
             let scale = state.scales[q];
@@ -350,17 +407,18 @@ impl PreparedHex {
                     scale * b[i].mul_add(f[k], direct)
                 })
             });
-            incremental_potential_j = point.volume_m3.mul_add(potential, incremental_potential_j);
             for i in 0..24 {
                 local_force_n[i] = point
                     .volume_m3
                     .mul_add(dot(&piola, &columns[i]), local_force_n[i]);
             }
-            if let (Some(tangent), Some(response)) = (&mut tangent_n_m, &full) {
+            if let (Some(tangent), Some(material_tangent)) =
+                (&mut tangent_n_m, &response.tangent_pa)
+            {
                 // A-times-column once, then small dot products. No dense
                 // 72-point-DOF Hessian or per-point matrix allocation is needed.
                 let material_columns: [[f64; 9]; 24] = core::array::from_fn(|j| {
-                    core::array::from_fn(|k| dot(&response.tangent_pa[k], &columns[j]))
+                    core::array::from_fn(|k| dot(&material_tangent[k], &columns[j]))
                 });
                 let piola_f = dot(&piola, f);
                 let piola_b: [f64; 24] = core::array::from_fn(|i| {
@@ -385,21 +443,19 @@ impl PreparedHex {
                 }
             }
         }
-        if !incremental_potential_j.is_finite()
-            || local_force_n.iter().any(|x| !x.is_finite())
+        if local_force_n.iter().any(|x| !x.is_finite())
             || tangent_n_m
                 .as_ref()
                 .is_some_and(|matrix| matrix.iter().flatten().any(|x| !x.is_finite()))
         {
             return Err(invalid(
-                "finite hex potential, force or full tangent is not representable",
+                "finite hex force or full tangent is not representable",
             ));
         }
         checkpoint(cx)?;
-        Ok(EvaluatedHex {
+        Ok(HexResponse {
             local_force_n,
             tangent_n_m,
-            incremental_potential_j,
         })
     }
 }

@@ -1,5 +1,41 @@
 # fs-solid CONTRACT
 
+## Progressive ductility on original finite H8 cells
+
+`FiniteDuctileHexSolid` binds eight independent original `FiniteDuctileJ2`
+histories and explicit immutable characteristic lengths per cell. Standard and
+MeanDilatation formulations reuse the original PreparedHex reference geometry,
+compatible/Fbar kinematics, and complete material/geometric/cross-quadrature
+force pullback. The thermal wrapper retains its own scalar potential. The
+ductile owner exposes force and the complete nonsymmetric derivative, and uses
+the native stress-only residual path. Physical corner, centre and quadrature
+Jacobian checks remain independent of mean dilatation.
+
+One actual interval drives native overstress and initiation at every point.
+Uniform, per-point and per-cell held temperatures preserve coverage and material
+domain checks. Acceptance verifies original committed histories, stored energy,
+plastic dissipation, damage release, support/dead-load work, and separate native
+material and projection endpoint defects. The defect gate bounds the sum of
+absolute volume-weighted point material defects plus absolute cell projection
+defects; signed cancellation cannot hide an unresolved increment. A refusal
+preserves the original specimen.
+
+Characteristic lengths are authored model inputs bound to the original
+mesh/material assignment. Arbitrary-mesh fracture objectivity, topology/erosion,
+contact handoff, creep coupling, heat transport, arclength continuation and
+experimental qualification are outside this component. Physical Jacobian
+sampling does not prove global injectivity of a warped cell.
+
+Five focused source tests cover affine analytic finite response and viscous
+loading/holds in both formulations, the complete nonaffine 24-by-24 tangent,
+independent point calibration, physical/projection work and noncancelling
+refusal, coverage, point limits, corner folding and cancellation. Pinned
+rustfmt parsing/formatting, scoped diff checks and bounded static review passed.
+Cargo type checking and runtime tests remain unverified: earlier real builds
+were killed in asupersync, and the shared workspace now has exhausted storage
+and insufficient memory for another compile. No executed numerical claim is
+made for this extension.
+
 ## Progressive finite ductile sheet motion
 
 `hyper2d::plastic::ductile::dynamics::FiniteDuctileSheetMotion` advances the

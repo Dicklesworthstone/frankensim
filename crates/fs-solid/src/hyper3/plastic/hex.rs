@@ -42,6 +42,8 @@ use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
 /// Reference-mass momentum with complete thermal and inelastic history.
 pub mod dynamics;
+/// Nonpotential progressive ductility on the same full and mean-dilatation H8 chart.
+pub mod ductile;
 mod element;
 use element::PreparedHex;
 
