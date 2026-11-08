@@ -132,6 +132,11 @@ path = "examples/nonideal_donnan_swelling.rs"
 required-features = ["continuum"]
 
 [[example]]
+name = "finite_rate_ionic_swelling"
+path = "examples/finite_rate_ionic_swelling.rs"
+required-features = ["continuum"]
+
+[[example]]
 name = "shock_box"
 path = "examples/shock_box.rs"
 required-features = ["experimental-compressible"]

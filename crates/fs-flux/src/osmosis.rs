@@ -32,8 +32,9 @@
 //! Nonideal compartments use their shared free-energy pressure with fully
 //! retained solutes and bare membranes; leaky and film transport need matching
 //! chemical-potential laws. Separate owners provide finite-storage films in
-//! [`transient`] and ideal fast-ion water exchange in [`donnan`]. None supplies
-//! solvent inertia, a heat balance or mechanical inertia.
+//! [`transient`], ideal or nonideal fast-ion water exchange in [`donnan`], and
+//! finite-rate charged swelling in [`electrodiffusion`]. These isothermal owners
+//! supply neither solvent inertia nor mechanical inertia or heat evolution.
 //! Water transport and constant-data pairwise diffusion allocate no memory.
 //! Material-sourced solution diffusion allocates transient original queries and
 //! receipts; its prepared-storage estimate is not a peak-memory bound. Failed,
@@ -57,6 +58,9 @@ pub mod diffusion;
 
 /// Joint nonideal water and molecular transport with mechanical work accounted.
 pub mod coupled;
+
+/// Finite-rate ionic membrane permeation with coupled water and fixed charge.
+pub mod electrodiffusion;
 
 /// Finite-storage concentration films coupled to membrane water transport.
 pub mod transient;

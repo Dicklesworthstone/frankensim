@@ -6034,6 +6034,74 @@ uses this adaptive owner while retaining independent finite-bath equilibrium
 and energy oracles.
 
 
+## Finite-rate ionic osmosis and charged swelling
+
+`osmosis::electrodiffusion::IonicOsmoticPair` evolves two opposite-valence
+mobile ions, two finite solvent volumes, and the original mechanical response.
+Its constructor retains the supplied nonequilibrium ion partition. Each bath
+must satisfy the explicit absolute charge budget with its own retained fixed
+charge; no salt, charge compensation, or equilibrium reset is supplied.
+
+The shared material `ElectrodiffusiveMembrane` supports the original ordered
+ideal or virial solution model. Water-selective pores use the FULL original
+osmotic-pressure difference, including separately declared ideal trapped
+particles. Independent ion channels use exponentially fitted Nernst--Planck
+transport with their original permeances. For
+`a_i = ln(gamma_L,i)-ln(gamma_R,i)+z_i*F*(phi_L-phi_R)/(RT)`,
+
+```text
+J_i = P_i * [Bernoulli(-a_i)*c_L,i - Bernoulli(a_i)*c_R,i]
+Bernoulli(a) = a / (exp(a)-1)
+J_v = L_p * (DeltaP - DeltaPi)
+sum_i z_i*J_i = 0
+```
+
+The floating potential solves the last equation from the actual ion fluxes.
+Both concentration endpoints, their original activities, and the full solvent
+pressure remain attached to the same free energy. Fixed charge does not itself
+create an additional osmotic particle count. Positive fitted donor coefficients
+admit exact zero endpoints without artificial trace concentrations. Carrier-free
+and counterion-only limits retain their indeterminate or infinite potential
+semantics. A singular instantaneous entropy at a zero endpoint is unavailable,
+not a fabricated finite heat rate.
+
+This is an explicit effective-channel model: electrical and excess chemical
+potentials are reconstructed linearly through each channel, the channel
+permeances are constant caller inputs, and water and ion channels have no
+cross-drag coefficient. It does not solve a nonlinear membrane interior,
+Debye layers, capacitance, active pumps, ion binding, or electrode reactions.
+The floating voltage assumes electrical relaxation is fast; finite salt
+relaxation is still evolved. The pair is isothermal and does not turn its
+free-energy dissipation into thermal-state evolution. No calibration or
+experimental authority follows from numerical coefficients.
+
+One backward-Euler step solves a charge-preserving salt-transfer coordinate
+inside each trial water transfer. The accepted endpoint must satisfy BOTH
+original ion equations and the original water equation, every finite-inventory
+bound, original solution/mechanical support, and the full mixing-plus-mechanical
+potential budget. Root convergence alone cannot publish an endpoint that fails
+these physical equations. Nonlinear work and cancellation are explicitly
+bounded. The original mechanical pressure difference cancels a common pressure
+gauge before adding the actual restoring response; work uses the exact original
+pressure primitive.
+
+Prepared adaptive advancement compares a full step with two actual half steps
+on water and both ion inventories, retains the fine conservative endpoint, and
+checks the whole requested window before publication. This remains a first-order
+method with a local temporal estimate, not a certified accumulated error bound.
+Failure, exhaustion, and late cancellation restore inventories, diagnostics and
+clock. Workspace compatibility checks the original solution law. Mechanics,
+membrane, fixed charge and trapped particles remain attached to the active pair;
+snapshot restoration cannot substitute a different physical owner.
+
+The `finite_rate_ionic_swelling` example compares blocked, slow, and fast ion
+channels from the same actual initial volumes and ion inventories. It reports
+volume, ionic inventory, voltage, and full potential change against the original
+nonlinear Simo--Taylor material. Its coefficients are explicitly illustrative.
+Focused regression sources include an independent nested scalar backward-Euler
+oracle, nonlinear work and energy, common-pressure-gauge invariance, finite-rate
+and blocked limits, charge/conservation, and adaptive rollback/retry.
+
 ## Sourced contact-line friction and hysteresis
 
 `MaterialCapillaryTube::with_contact_line` opts the original tube owner into
