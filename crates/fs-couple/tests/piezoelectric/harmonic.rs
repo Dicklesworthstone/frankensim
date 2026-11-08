@@ -15,6 +15,8 @@ mod acoustic;
 #[path = "harmonic/operating_point.rs"]
 mod operating_point;
 
+pub(crate) use operating_point::relaxation::source as thermal_memory_source;
+
 const ZERO: C64 = C64::new(0.0, 0.0);
 
 fn hc() -> HControls {

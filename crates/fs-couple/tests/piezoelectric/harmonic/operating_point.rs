@@ -2,7 +2,7 @@
 //! Uniform axial fields give exact capacitor, strain-envelope and acoustic
 //! power oracles without inferring a measured ceramic or a continuum accuracy.
 #[path = "operating_point/relaxation.rs"]
-mod relaxation;
+pub(super) mod relaxation;
 
 use super::*;
 use fs_couple::piezoelectric::spatial::harmonic::acoustic::{

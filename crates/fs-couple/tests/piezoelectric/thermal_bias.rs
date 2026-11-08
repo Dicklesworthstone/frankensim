@@ -317,7 +317,7 @@ fn g1_biased_midpoint_oscillates_about_the_thermal_equilibrium() {
 }
 
 #[test]
-fn g3_zero_bias_is_exact_and_nonzero_bias_refuses_phasors_and_unreferenced_memories() {
+fn g3_zero_bias_is_exact_and_hot_bias_admits_fixed_temperature_memory() {
     use fs_couple::piezoelectric::spatial::harmonic::{
         HarmonicElectrode, HarmonicElectrodeCondition as HCondition, HarmonicPiezoelectricControls,
     };
@@ -448,11 +448,12 @@ fn g3_zero_bias_is_exact_and_nonzero_bias_refuses_phasors_and_unreferenced_memor
             cx,
         )
         .unwrap();
-        assert!(matches!(
-            body.with_relaxation(vec![no_memory], 0, controls(), cx),
-            Err(TetPiezoelectricError::Invalid(
-                "intrinsic memories require a declared thermal strain and polarization reference"
-            ))
-        ));
+        let stored = body.state().stored_energy_j();
+        let body = body
+            .with_relaxation(vec![no_memory], 0, controls(), cx)
+            .unwrap();
+        assert_eq!(body.state().material_memory_energy_j(), 0.0);
+        assert_eq!(body.state().stored_energy_j(), stored);
+        assert_eq!(body.state().displacement_m(), &zero);
     });
 }

@@ -39,6 +39,99 @@ impl Relaxation {
         maximum_internal_variables: usize,
         cx: &Cx<'_>,
     ) -> Result<Self> {
+        let materials = Self::prepare(model, materials, maximum_internal_variables, cx)?;
+        let mut memories = Vec::with_capacity(model.tetrahedra.len());
+        for cell in 0..model.tetrahedra.len() {
+            poll(cx)?;
+            memories.push(materials[if materials.len() == 1 { 0 } else { cell }].zero_memory()?);
+        }
+        Ok(Self {
+            materials,
+            memories,
+            steps: vec![CellRelaxationStep::default(); model.tetrahedra.len()],
+        })
+    }
+
+    /// Share the original DC field solve with harmonic bias initialization.
+    /// Prescribed displacements fix only this electrostatic solve; the parent's
+    /// retained boundary still governs subsequent mechanical motion.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn equilibrated(
+        model: &TetPiezoelectricModel<'_>,
+        materials: Vec<RelaxingTensorPiezoelectric>,
+        maximum_internal_variables: usize,
+        prescribed_displacements_m: &[(usize, f64)],
+        electrodes: &[PiezoelectricElectrode<'_>],
+        zero_force_n: &[[f64; 3]],
+        nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<(TetPiezoelectricSolution, Self, f64)> {
+        // Admission precedes both the solve and any per-cell history allocation.
+        let materials = Self::prepare(model, materials, maximum_internal_variables, cx)?;
+        let (field, _, solved_memory_energy_j) = model.solve_relaxed_with_state(
+            &materials,
+            prescribed_displacements_m,
+            electrodes,
+            zero_force_n,
+            nodal_free_charge_c,
+            controls,
+            cx,
+        )?;
+        let mut memories = Vec::with_capacity(model.tetrahedra.len());
+        let mut steps = Vec::with_capacity(model.tetrahedra.len());
+        let mut memory_energy_j = 0.0;
+        for (cell, fields) in field.cells.iter().enumerate() {
+            poll(cx)?;
+            let material = &materials[if materials.len() == 1 { 0 } else { cell }];
+            let memory = material.equilibrium_memory(fields.response.electric_field_v_m)?;
+            let response = material.memory_response(&memory)?;
+            let volume = model.dielectric.volumes_m3()[cell];
+            let energy = volume * response.memory_energy_j_m3;
+            if !energy.is_finite() || response.memory_energy_j_m3 != 0.0 && energy == 0.0 {
+                return Err(invalid(
+                    "initial material memory storage is not representable",
+                ));
+            }
+            // Match the original static and transient inventory reduction.
+            // Weak changes remain separate retained-precision step accounts.
+            memory_energy_j += energy;
+            memories.push(memory);
+            steps.push(CellRelaxationStep {
+                memory_energy_j: [energy; 2],
+                ..CellRelaxationStep::default()
+            });
+        }
+        if !memory_energy_j.is_finite() {
+            return Err(invalid(
+                "initial material memory inventory is not representable",
+            ));
+        }
+        if (memory_energy_j - solved_memory_energy_j).abs() > controls.energy_tolerance_j {
+            return Err(TetPiezoelectricError::Balance(
+                "relaxed electrostatics and retained material memory storage disagree",
+            ));
+        }
+        // The shared field recovery already includes physical polarization,
+        // conductor charge and memory storage. Enriching it again would double
+        // every one of those accounts. Only the retained subaccount is added.
+        Ok((
+            field,
+            Self {
+                materials,
+                memories,
+                steps,
+            },
+            memory_energy_j,
+        ))
+    }
+
+    fn prepare(
+        model: &TetPiezoelectricModel<'_>,
+        materials: Vec<RelaxingTensorPiezoelectric>,
+        maximum_internal_variables: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Arc<[RelaxingTensorPiezoelectric]>> {
         if materials.len() != 1 && materials.len() != model.tetrahedra.len() {
             return Err(invalid(
                 "intrinsic relaxation requires one uniform law or one per original cell",
@@ -70,16 +163,7 @@ impl Relaxation {
                 ));
             }
         }
-        let mut memories = Vec::with_capacity(model.tetrahedra.len());
-        for cell in 0..model.tetrahedra.len() {
-            poll(cx)?;
-            memories.push(materials[if materials.len() == 1 { 0 } else { cell }].zero_memory()?);
-        }
-        Ok(Self {
-            materials: materials.into(),
-            memories,
-            steps: vec![CellRelaxationStep::default(); model.tetrahedra.len()],
-        })
+        Ok(materials.into())
     }
 
     pub(super) fn steps(&self) -> &[CellRelaxationStep] {
@@ -367,7 +451,8 @@ pub(super) fn advance(
             memory_energy_change_j: volume * step.memory_energy_change_j_m3,
         };
         memory_energy_change.add(
-            Dd::from_f64(volume), Dd::from_f64(step.memory_energy_change_j_m3),
+            Dd::from_f64(volume),
+            Dd::from_f64(step.memory_energy_change_j_m3),
         );
         mechanical_heat_j += report.mechanical_heat_j;
         dielectric_heat_j += report.dielectric_heat_j;

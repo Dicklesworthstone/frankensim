@@ -7555,6 +7555,18 @@ actual factor coordinates. Zero initialization leaves the original base field
 unchanged. A finite source frequency band cannot authorize arbitrary transient
 histories. The scalar count is available before state allocation.
 
+`equilibrium_memory(E)` initializes relaxed Maxwell stress and each original
+Debye pole at its held-field polarization. It requires the full unrestricted
+transient band, preserves native coordinates/source/frame, and refuses
+unrepresentable polarization or storage. The enclosing field owner must first
+solve with the relaxed permittivity and retain the resulting physical charge.
+The static-only `equilibrium_response(E)` instead requires source support at DC
+and may accept a finite upper frequency bound. Both recover energy from the
+same represented pole coordinate, so static and retained-memory inventories
+agree exactly without changing the midpoint heat or residual. Focused
+regressions cover equilibrium holds, discharge heat, rotated identities,
+multiple poles and representable extreme fields; these are synthetic laws.
+
 For one coupled midpoint window, the material supplies allocation-free tangent
 tensors and old-memory right-hand-side corrections. Only proposed state vectors
 allocate. Endpoint memories remain transactional. Positive heat is recovered

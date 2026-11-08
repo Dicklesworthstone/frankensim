@@ -19,7 +19,7 @@ const FRACTION: f64 = 0.5;
 const TAU_P: f64 = 1e-6;
 const TAU_M: f64 = 2e-7;
 
-fn source(
+pub(crate) fn source(
     band: [f64; 2],
 ) -> (
     ResolvedThermalTensorPiezoelectric,

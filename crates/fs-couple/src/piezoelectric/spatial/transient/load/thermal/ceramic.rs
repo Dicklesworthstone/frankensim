@@ -5,6 +5,8 @@
 //! retains the same caloric card, density claim and non-temperature conditions.
 //! The material owner admits temperature changes only for coefficients that
 //! remain independent of temperature within their original source validity.
+//! Source-bound thermal samples additionally retain their exact cell temperature:
+//! this route cannot freeze evolving thermal strain or pyroelectric polarization.
 
 use super::{LoadThermalError, Result};
 use crate::circuit_enthalpy::{
@@ -296,6 +298,29 @@ impl CeramicPlan {
             check(cx)?;
             if phases.insert(cell.cell, cell.phase).is_some() {
                 return Err(invalid("duplicate thermal material phase sample"));
+            }
+        }
+        // A retained thermal sample owns its actual temperature even when
+        // its current expansion and pyroelectric offsets vanish at T_ref.
+        // This heat route advances only fixed constitutive references; changing
+        // their temperature requires reversible thermal work and memory-aware
+        // tensor evolution. Check every original cell, not only source groups.
+        if let Some(samples) = body.model.thermal_materials() {
+            for route in &self.destinations {
+                check(cx)?;
+                let original = &samples[if samples.len() == 1 {
+                    0
+                } else {
+                    route.piezoelectric_cell
+                }];
+                let phase = phases.get(&route.thermal_cell).ok_or_else(|| {
+                    invalid("ceramic receiver lacks its actual thermal phase sample")
+                })?;
+                if phase.temperature_k().to_bits() != original.temperature_k().to_bits() {
+                    return Err(invalid(
+                        "retained thermal strain and polarization require their original cell temperature",
+                    ));
+                }
             }
         }
         for group in &self.groups {

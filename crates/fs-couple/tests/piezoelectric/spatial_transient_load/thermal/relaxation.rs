@@ -1,14 +1,20 @@
 //! Source-bound ceramic heat, separate conductor destinations and atomic thermal steps.
-#[path = "relaxation/support_motion.rs"]
-mod support_motion;
 #[path = "relaxation/acoustic.rs"]
 mod acoustic;
+#[path = "relaxation/support_motion.rs"]
+mod support_motion;
 
 use super::*;
 use crate::harmonic::relaxation::fixture as memory_fixture;
 use fs_couple::piezoelectric::spatial::transient::load::thermal::ThermalCeramicCell;
-use fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric;
-use fs_qty::Time;
+use fs_material::piezoelectric::{
+    tensor::relaxation::RelaxingTensorPiezoelectric,
+    thermal::{ResolvedThermalTensorPiezoelectric, ThermalTensorPiezoelectric},
+};
+use fs_qty::{
+    Time,
+    semantic::{QuantityKind, SemanticType, ValueForm},
+};
 
 const CERAMIC_DENSITY_KG_M3: f64 = 7500.0;
 const CERAMIC_CP_J_KG_K: f64 = 1.0;
@@ -523,6 +529,227 @@ fn g4_bad_routes_and_temperature_dependent_ceramic_sources_leave_both_histories_
                 CELLS.map(|cell| thermal.temperature_k(cell).unwrap()),
                 [300.0; 2]
             );
+        }
+    });
+}
+
+fn retained_temperature_quantity() -> QuantitySpec {
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ))
+}
+
+fn retained_temperature_point(t: f64) -> QueryPoint {
+    QueryPoint::new()
+        .with_quantity("T", retained_temperature_quantity(), t)
+        .unwrap()
+}
+
+fn thermally_referenced_ceramic(
+    temperature_k: f64,
+    reference_k: f64,
+) -> (
+    MaterialCard,
+    ResolvedHeatCapacityCurve,
+    ResolvedThermalTensorPiezoelectric,
+    RelaxingTensorPiezoelectric,
+) {
+    let (original, _, _, memory) = ceramic(false);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in original.claims().claims_ordered() {
+        let mut claim = claim.clone();
+        claim.validity = ValidityDomain::unconstrained().with_quantity(
+            "T",
+            retained_temperature_quantity(),
+            280.0,
+            400.0,
+        );
+        claims.insert_claim(claim).unwrap();
+    }
+    for requirement in ThermalTensorPiezoelectric::thermal_bias_requirements().unwrap() {
+        let value = match requirement.name() {
+            "piezoelectric_thermal_expansion_mandel_3" => 1e-5,
+            "piezoelectric_pyroelectric_clamped_3" => 1e-4,
+            _ => 0.0,
+        };
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(requirement.name(), requirement.dims()),
+                value: PropertyValue::Scalar {
+                    value,
+                    dims: requirement.dims(),
+                },
+                validity: ValidityDomain::unconstrained().with_quantity(
+                    "T",
+                    retained_temperature_quantity(),
+                    280.0,
+                    400.0,
+                ),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "authored fixed-temperature ceramic reference fixture".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let card = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+    let curve = ResolvedHeatCapacityCurve::try_new(
+        &card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+            density: &PropertyKey::new("density", Density::DIMS),
+            temperature_axis: "T",
+            lower: &retained_temperature_point(280.0),
+            upper: &retained_temperature_point(400.0),
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        1e-8,
+    )
+    .unwrap();
+    let base = TensorPiezoelectric::resolve(
+        &card,
+        &retained_temperature_point(300.0),
+        MaterialPropertySelection::SingleClaimOnly,
+        FRAME,
+    )
+    .unwrap();
+    let sample = ThermalTensorPiezoelectric::new(&card, &base, "T", [280.0, 400.0])
+        .unwrap()
+        .with_thermal_bias(reference_k, MaterialPropertySelection::SingleClaimOnly)
+        .unwrap()
+        .at_temperature(temperature_k)
+        .unwrap();
+    let loss = RelaxingTensorPiezoelectric::resolve(
+        sample.material().clone(),
+        &card,
+        memory.mechanical_properties().to_vec(),
+        memory.dielectric_properties().to_vec(),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    (card, curve, sample, loss)
+}
+
+#[test]
+fn g4_retained_thermal_reference_admits_held_temperature_but_refuses_unaccounted_heating() {
+    with_cx(|cx, _| {
+        let message =
+            "retained thermal strain and polarization require their original cell temperature";
+        // Include zero offsets at T_ref, nonzero offsets at the actual thermal
+        // temperature, and an already mismatched accepted ceramic temperature.
+        for (temperature_k, reference_k) in [(300.0, 300.0), (300.0, 290.0), (301.0, 300.0)] {
+            let cube = cube(1);
+            let n = cube.nodes.len();
+            let (card, curve, sample, memory) =
+                thermally_referenced_ceramic(temperature_k, reference_k);
+            let model = Model::assemble_thermal_materials(
+                &cube.nodes,
+                &cube.tets,
+                vec![sample],
+                FRAME,
+                budget(),
+                cx,
+            )
+            .unwrap();
+            let fixed = (0..3 * n).map(|i| (i, 0.0)).collect::<Vec<_>>();
+            let zero = vec![[0.0; 3]; n];
+            let charge = vec![0.0; n];
+            let body = Body::new(
+                &model,
+                &fixed,
+                &electrodes(&cube, 0.0, Condition::Voltage(0.0)),
+                &zero,
+                &zero,
+                &charge,
+                field_controls(),
+                cx,
+            )
+            .unwrap()
+            .with_relaxation(vec![memory], MEMORY_BUDGET, field_controls(), cx)
+            .unwrap();
+            let initial_energy = body.state().stored_energy_j();
+            let initial_charge = body.state().electrodes()[1].charge_c;
+            let (load_card, load_curve) = thermal_material(2.0, 4.0, 0.0, 400.0);
+            let cards = [card, load_card];
+            let curves = [curve, load_curve];
+            let context = point(300.0);
+            let ceramic_context = retained_temperature_point(300.0);
+            let mut cells = caloric_cells(&cards, &curves, &context);
+            cells[0].point.context = &ceramic_context;
+            let network = MaterialNetwork {
+                cells: &cells,
+                resistors: &[],
+                links: &[],
+            };
+            let thermal = isolated_cells(&curves);
+            let prepared = network.prepare(&thermal, || false).unwrap();
+            let routes = ceramic_routes(cube.tets.len());
+            let dt = 0.4 * POLE_TIME_S;
+            let advance = |voltage| {
+                body.step_with_material_thermal_loads_candidate(
+                    &thermal,
+                    dt,
+                    &prepared,
+                    &[],
+                    &routes,
+                    "T",
+                    &[Drive::Voltage(0.0), Drive::Voltage(voltage)],
+                    &zero,
+                    &charge,
+                    field_controls(),
+                    thermal_controls(),
+                    &[0.0; 2],
+                    cx,
+                )
+            };
+            if temperature_k == 300.0 {
+                let held = advance(0.0).unwrap();
+                assert_eq!(held.thermal().temperature_k(CELLS[0]).unwrap(), 300.0);
+                assert_eq!(held.body().state().material_memory_energy_j(), 0.0);
+
+                // This electrical step is physically valid at held temperature
+                // and creates real Debye heat. A finite receiver cannot absorb
+                // it while silently retaining the old thermo-pyroelectric state.
+                let (electrical, _) = body
+                    .step_with_loads_candidate(
+                        dt,
+                        &[Drive::Voltage(0.0), Drive::Voltage(100.0)],
+                        &[],
+                        &zero,
+                        &charge,
+                        field_controls(),
+                        cx,
+                    )
+                    .unwrap();
+                assert!(electrical.step().dielectric_material_heat_j > 0.0);
+                assert!(matches!(
+                    advance(100.0),
+                    Err(CircuitEnthalpyError::Invalid(actual)) if actual == message
+                ));
+                let retry = advance(0.0).unwrap();
+                assert_eq!(retry.thermal().energy_j(), held.thermal().energy_j());
+                assert_eq!(
+                    retry.body().state().stored_energy_j(),
+                    held.body().state().stored_energy_j()
+                );
+            } else {
+                assert!(matches!(
+                    advance(0.0),
+                    Err(CircuitEnthalpyError::Invalid(actual)) if actual == message
+                ));
+            }
+            assert_eq!(body.state().time_s(), 0.0);
+            assert_eq!(body.state().stored_energy_j(), initial_energy);
+            assert_eq!(body.state().electrodes()[1].charge_c, initial_charge);
+            assert_eq!(thermal.time_s(), 0.0);
+            assert_eq!(thermal.temperature_k(CELLS[0]).unwrap(), 300.0);
         }
     });
 }

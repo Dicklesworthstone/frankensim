@@ -147,8 +147,7 @@ impl<'mesh> TetPiezoelectricModel<'mesh> {
         controls: TetPiezoelectricControls,
         cx: &Cx<'_>,
     ) -> Result<HarmonicOperatingPoint<'model, 'mesh>> {
-        let (state, full, memory_energy_j) = equilibrium::solve(
-            self,
+        let (state, full, memory_energy_j) = self.solve_relaxed_with_state(
             intrinsic_materials,
             prescribed_displacements_m,
             electrodes,

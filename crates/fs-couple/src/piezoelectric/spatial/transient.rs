@@ -238,6 +238,72 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         controls: TetPiezoelectricControls,
         cx: &Cx<'_>,
     ) -> Result<Self> {
+        Self::initialize(
+            model,
+            prescribed_displacements_m,
+            electrodes,
+            initial_displacement_m,
+            initial_velocity_m_s,
+            initial_nodal_free_charge_c,
+            None,
+            controls,
+            cx,
+        )
+    }
+
+    /// Initialize with fully relaxed intrinsic memories at the model's fixed
+    /// temperature, retaining the prescribed displacement and velocity.
+    /// Maxwell branches start with zero stress; Debye poles start at
+    /// p = delta_epsilon * (n.E). Their polarization and free energy are retained
+    /// once, separately from the source's fixed clamped pyroelectric offset.
+    ///
+    /// One electrostatic solve uses the relaxed permittivity, including for
+    /// charge-controlled electrodes. There is no intermediate instantaneous
+    /// dielectric solve or requirement that mechanics be in static equilibrium.
+    /// The original support/electrode topology governs subsequent motion.
+    ///
+    /// Supply one exact source/frame law or one per original cell. All source
+    /// bands must authorize unrestricted transients; the scalar memory budget
+    /// is checked before allocating histories or solving. Temperature, thermal
+    /// strain and clamped polarization remain fixed throughout this history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_equilibrium_relaxation(
+        model: &'model TetPiezoelectricModel<'mesh>,
+        prescribed_displacements_m: &[(usize, f64)],
+        electrodes: &[PiezoelectricElectrode<'_>],
+        initial_displacement_m: &[[f64; 3]],
+        initial_velocity_m_s: &[[f64; 3]],
+        initial_nodal_free_charge_c: &[f64],
+        materials: Vec<RelaxingTensorPiezoelectric>,
+        maximum_internal_variables: usize,
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        Self::initialize(
+            model,
+            prescribed_displacements_m,
+            electrodes,
+            initial_displacement_m,
+            initial_velocity_m_s,
+            initial_nodal_free_charge_c,
+            Some((materials, maximum_internal_variables)),
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn initialize(
+        model: &'model TetPiezoelectricModel<'mesh>,
+        prescribed_displacements_m: &[(usize, f64)],
+        electrodes: &[PiezoelectricElectrode<'_>],
+        initial_displacement_m: &[[f64; 3]],
+        initial_velocity_m_s: &[[f64; 3]],
+        initial_nodal_free_charge_c: &[f64],
+        equilibrium_materials: Option<(Vec<RelaxingTensorPiezoelectric>, usize)>,
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
         poll(cx)?;
         validate_controls(controls)?;
         let n = model.nodes_m.len();
@@ -289,16 +355,36 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 prescribed.push((3 * node + axis, value));
             }
         }
-        let field = model.solve(
-            &prescribed,
-            &normalized_electrodes,
-            &zero_force,
-            initial_nodal_free_charge_c,
-            controls,
-            cx,
-        )?;
+        let (field, intrinsic, memory_energy_j) = match equilibrium_materials {
+            Some((materials, maximum_internal_variables)) => {
+                let (field, memory, energy) = relaxation::Relaxation::equilibrated(
+                    model,
+                    materials,
+                    maximum_internal_variables,
+                    &prescribed,
+                    &normalized_electrodes,
+                    &zero_force,
+                    initial_nodal_free_charge_c,
+                    controls,
+                    cx,
+                )?;
+                (field, Some(memory), energy)
+            }
+            None => (
+                model.solve(
+                    &prescribed,
+                    &normalized_electrodes,
+                    &zero_force,
+                    initial_nodal_free_charge_c,
+                    controls,
+                    cx,
+                )?,
+                None,
+                0.0,
+            ),
+        };
         let kinetic_energy_j = kinetic_energy(model, initial_velocity_m_s, cx)?;
-        let state = make_state(
+        let mut state = make_state(
             field,
             initial_velocity_m_s.to_vec(),
             conditions,
@@ -309,11 +395,13 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             &boundary,
             cx,
         )?;
+        state.material_memory_energy_j = memory_energy_j;
+        poll(cx)?;
         Ok(Self {
             model,
             boundary,
             state,
-            intrinsic: None,
+            intrinsic,
         })
     }
 
@@ -324,8 +412,11 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     /// No history may be reset after time has advanced. `maximum_internal_variables`
     /// explicitly bounds all retained cell scalars before any state allocation.
     /// Frequency-limited source claims cannot authorize arbitrary transients.
-    /// Nonzero thermal bias requires a separately defined memory strain and
-    /// polarization reference and currently refuses.
+    /// At fixed temperature, Maxwell memories act on elastic strain S-alpha*dT:
+    /// its increment equals delta_S. Zero memory declares relaxed branch stress
+    /// at the supplied initial strain. Debye memory is additional to the fixed
+    /// clamped pyroelectric polarization and initially zero even at nonzero E.
+    /// For a settled DC polarization use `new_with_equilibrium_relaxation`.
     pub fn with_relaxation(
         mut self,
         materials: Vec<RelaxingTensorPiezoelectric>,
@@ -335,19 +426,16 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     ) -> Result<Self> {
         poll(cx)?;
         validate_controls(controls)?;
-        if self.model.has_thermal_bias() {
-            return Err(invalid(
-                "intrinsic memories require a declared thermal strain and polarization reference",
-            ));
-        }
         if self.intrinsic.is_some() || self.state.time_s != 0.0 {
             return Err(invalid(
                 "intrinsic memories can only be attached once at initialization",
             ));
         }
-        for cell in &self.state.field.cells {
+        for (id, cell) in self.state.field.cells.iter().enumerate() {
             poll(cx)?;
             if norm(&cell.strain_mandel) > controls.maximum_strain_norm
+                || norm(&self.model.elastic_strain(id, cell.strain_mandel))
+                    > controls.maximum_strain_norm
                 || norm(&cell.response.electric_field_v_m) > controls.maximum_electric_field_v_m
             {
                 return Err(invalid(
@@ -366,7 +454,9 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     }
 
     /// Latest intrinsic heat and memory-storage accounts, in original cell
-    /// order. Newly initialized memories report zeros; an unextended body is None.
+    /// order. Initial heat/change are zero; equilibrium initialization reports
+    /// the actual nonzero memory inventory at both endpoints. An unextended
+    /// body is None.
     pub fn material_relaxation_steps(&self) -> Option<&[relaxation::CellRelaxationStep]> {
         self.intrinsic.as_ref().map(|memory| memory.steps())
     }
@@ -848,7 +938,9 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let kinetic_energy_j = kinetic_energy(self.model, &velocity, cx)?;
         let kinetic_change = kinetic_change(self.model, &self.state.velocity_m_s, &velocity, cx)?;
         let stored_change = field_storage_change(self.model, &self.state.field, &field, cx)?
-            + material_update.as_ref().map_or(Dd::ZERO, |update| update.memory_energy_change);
+            + material_update
+                .as_ref()
+                .map_or(Dd::ZERO, |update| update.memory_energy_change);
         let energy_change = kinetic_change + stored_change;
         let kinetic_energy_change_j = kinetic_change.to_f64();
         let stored_energy_change_j = stored_change.to_f64();
@@ -856,7 +948,9 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             + Dd::from_f64(mechanical_material_heat_j)
             + Dd::from_f64(dielectric_material_heat_j)
             + Dd::from_f64(acoustic_outward_work_j)
-            - mechanical_work - electrical_work).to_f64();
+            - mechanical_work
+            - electrical_work)
+            .to_f64();
         if [
             mechanical_work_j,
             applied_force_work_j,
@@ -944,9 +1038,7 @@ fn prescribe_support_motion(
     let Some(endpoint) = endpoint else {
         for dof in 0..nu {
             poll(cx)?;
-            if boundary.index[dof].is_none()
-                && body.state.velocity_m_s[dof / 3][dof % 3] != 0.0
-            {
+            if boundary.index[dof].is_none() && body.state.velocity_m_s[dof / 3][dof % 3] != 0.0 {
                 return Err(invalid(
                     "moving supports require explicit endpoint support velocities",
                 ));
@@ -966,8 +1058,7 @@ fn prescribe_support_motion(
             ));
         }
         seen[dof] = true;
-        let midpoint_velocity =
-            0.5 * body.state.velocity_m_s[dof / 3][dof % 3] + 0.5 * velocity;
+        let midpoint_velocity = 0.5 * body.state.velocity_m_s[dof / 3][dof % 3] + 0.5 * velocity;
         let increment = 0.5 * dt_s * midpoint_velocity;
         if !increment.is_finite() || midpoint_velocity != 0.0 && increment == 0.0 {
             return Err(invalid("prescribed support increment is not representable"));
@@ -1066,10 +1157,13 @@ fn kinetic_change(
     cx: &Cx<'_>,
 ) -> Result<Dd> {
     quadratic::increment(
-        before.as_flattened(), after.as_flattened(),
+        before.as_flattened(),
+        after.as_flattened(),
         |values, applied, _| mass_action_into(model, values, applied, cx),
         &mut || cx.checkpoint().is_err(),
-    ).map(|increment| increment.change).map_err(|error| match error {
+    )
+    .map(|increment| increment.change)
+    .map_err(|error| match error {
         QuadraticError::Operator(error) => error,
         QuadraticError::Cancelled => TetPiezoelectricError::Cancelled,
         QuadraticError::Dimension => invalid("consistent-mass endpoint dimensions disagree"),
@@ -1092,19 +1186,27 @@ fn field_storage_change(
         let volume = Dd::from_f64(model.dielectric.volumes_m3()[cell]);
         let elastic_change = if model.has_thermal_bias() {
             energy::quadratic_change_shifted(
-                material.stiffness_mandel_pa(), &old.strain_mandel, &new.strain_mandel,
+                material.stiffness_mandel_pa(),
+                &old.strain_mandel,
+                &new.strain_mandel,
                 &model.thermal_strain(cell),
             )
         } else {
             energy::quadratic_change(
-                material.stiffness_mandel_pa(), &old.strain_mandel, &new.strain_mandel,
+                material.stiffness_mandel_pa(),
+                &old.strain_mandel,
+                &new.strain_mandel,
             )
         };
         change.add(volume, elastic_change);
-        change.add(volume, energy::quadratic_change(
-            material.permittivity_f_m(),
-            &old.response.electric_field_v_m, &new.response.electric_field_v_m,
-        ));
+        change.add(
+            volume,
+            energy::quadratic_change(
+                material.permittivity_f_m(),
+                &old.response.electric_field_v_m,
+                &new.response.electric_field_v_m,
+            ),
+        );
     }
     Ok(change.value())
 }

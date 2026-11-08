@@ -3171,8 +3171,10 @@ includes initial stress and removes initial polarization from transferred
 charge. Fixed-temperature midpoint storage uses the shifted elastic potential
 with retained-precision endpoint contractions. This reference datum is not
 heat or an extra external energy supply. Zero-offset models retain the original
-response path. Nonzero bias requires an explicit harmonic operating point;
-transient intrinsic memories still require an accounted thermal reference.
+response path. Nonzero bias requires an explicit harmonic operating point.
+Fixed-temperature transient memories retain the same thermal reference:
+Maxwell strain increments are increments of S-alpha*dT, equal to delta_S at
+held temperature; Debye polarization is additional to p_clamped*dT.
 
 The finite thermal body admits the matching source/reference identities,
 including at zero offsets, and uses these same bias-aware samples in every
@@ -3229,6 +3231,30 @@ No new material card, tensor identity, transient history or second physics
 trajectory is manufactured to represent this equilibrium.
 Focused analytic regressions cover hot open/short response, bias-plus-cycle
 limits, acoustic work, gauge-independent shunt work/storage and refusal.
+
+### Settled-polarization spatial transients
+
+`TetPiezoelectricTransient::new_with_equilibrium_relaxation` starts the
+original midpoint body with fully relaxed Maxwell branches and settled Debye
+polarization. One shared relaxed electrostatic solve retains the prescribed
+initial displacement/velocity and original mechanical boundary topology.
+Charge-controlled admission uses the actual relaxed field, with no intermediate
+instantaneous-permittivity solution. Exact source/frame and broadband claims
+and the complete cell scalar budget are checked before solving or allocating
+histories. Native conductor charge and memory free energy are recovered once;
+initial cell reports expose the retained inventory with zero heat/change.
+The ordinary `with_relaxation` path still declares zero initial memory,
+including under a fixed thermal preload.
+
+Subsequent motion, moving-support work, current/shunt/reaction loading and
+acoustic work retain the same coupled solve and independent energy accounts.
+Total and shifted elastic strains remain inside the requested envelope.
+A finite caloric receiver cannot change the temperature of a retained thermal
+sample while its expansion and clamped-pyroelectric offsets stay frozen,
+including a sample initially at its reference temperature. Such evolution
+needs an accounted thermal memory owner; this increment is fixed-temperature.
+Focused regressions exercise held hot bias, open-circuit voltage, relaxed-field
+admission, polarized resistor discharge and Maxwell motion under thermal preload.
 
 ## Moving stress histories on the pressure/PCM path
 
