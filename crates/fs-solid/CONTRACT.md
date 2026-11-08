@@ -1,5 +1,28 @@
 # fs-solid CONTRACT
 
+## Pointwise ductile initiation in layered plastic shells
+
+`ductile::shell` gates the native CST/DKT quasistatic and backward-Euler
+solvers at every facet, surface and thickness material point. Source-bound
+J2, Voce and Chaboche histories use read-only recovery of full physical stress
+and retain equivalent plastic accumulation through reversal. Admission requires
+the original material-card/state/context binding and the actual typed fixed
+source temperature. The physical step duration drives both native inertia
+and initiation-rate evaluation.
+
+All mechanical, velocity and initiation histories publish atomically.
+Membrane and bending resultants never replace local stress. Uniform fields
+admit each original physical layer once; heterogeneous fields check the
+calibration at each original point. The native element/material-point budgets
+and cancellation checks remain active. These adapters supply initiation gates;
+they do not add damage-softened stiffness, changing-temperature constitutive
+response, crack topology or finite-strain shell forming.
+
+G0/G1/G3 regressions in `ductile_shell` cover opposing plastic bending layers
+with cancelling membrane forces, all 18 material points of a layered facet,
+unload/reversal/restart, atomic refusal and refinement, heterogeneous source
+bindings, typed temperature mismatch and native backward-Euler identity/rate.
+
 ## Ductile initiation in finite plastic sheet forming
 
 `DuctileHistory::advance_finite_sheet` and `advance_thermoplastic_sheet` gate

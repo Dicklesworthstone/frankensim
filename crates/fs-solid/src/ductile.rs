@@ -36,6 +36,9 @@ pub mod finite;
 /// Progressive J2 softening with adaptive native tetrahedral continuation.
 pub mod evolution;
 
+/// Initiation at every original surface and thickness point of plastic shells.
+pub mod shell;
+
 /// Read original equivalent plastic history without re-running a law.
 /// Implementations must exclude creep and retain accumulated reverse flow.
 pub trait PlasticStrainHistory {
