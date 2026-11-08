@@ -15,6 +15,7 @@ use fs_solid::fiber::{Fiber, FiberLaw, FiberState, Section};
 use fs_solid::{
     ForceBasedElement, Formulation, Frame2d, Geometry, IncrementSettings, Mesh2,
     PlaneAssemblyBudget, PlaneKind, SectionModel, SmallStrainLawField, SmallStrainPlaneProblem,
+    SmallStrainTetError, SmallStrainTetProblem, TetAssemblyBudget,
 };
 
 fn metal() -> TabulatedJ2 {
@@ -172,6 +173,101 @@ fn p1_and_q1_form_and_release_at_the_measured_curve_without_losing_thickness_his
             "refused extrapolation must retain the accepted state"
         );
     }
+}
+
+#[test]
+fn tetrahedral_force_control_recovers_calibrated_equilibrium_after_domain_overshoot() {
+    // A nearly flat measured segment followed by strong hardening makes the
+    // full Newton proposal overshoot the final measurement. The physical
+    // equilibrium is in the interior: alpha=.004, sigma=3.002, eps=.007002.
+    let law = TabulatedJ2::new(
+        J2Plasticity::new(IsotropicElastic::new(1000.0, 0.3, 0.05).unwrap(), 1.0, 0.0).unwrap(),
+        TabulatedHardening::new(
+            [(0.0, 1.0), (0.002, 1.002), (0.006, 5.002), (0.008, 7.002)]
+                .map(|(plastic_strain, yield_stress_pa)| HardeningPoint {
+                    plastic_strain,
+                    yield_stress_pa,
+                })
+                .to_vec(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let nodes = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let tets = [[0, 1, 2, 3]];
+    // Three free diagonal strains, with zero transverse traction. The volume
+    // is 1/6, hence the nodal axial force is sigma/6 for a unit axial gradient.
+    let prescribed = [0, 1, 2, 4, 5, 6, 8, 9, 10].map(|dof| (dof, 0.0));
+    let forces = [(3, 3.002 / 6.0)];
+    let mut problem = SmallStrainTetProblem {
+        nodes_m: &nodes,
+        tetrahedra: &tets,
+        laws: SmallStrainLawField::Uniform(&law),
+        prescribed_m: &prescribed,
+        nodal_forces_n: &forces,
+        load_path: &[1.0],
+        budget: TetAssemblyBudget::standard(),
+        settings: IncrementSettings {
+            max_backtracks: 0,
+            ..IncrementSettings::default()
+        },
+    };
+    assert!(matches!(
+        with_cx(|cx| problem.solve(cx)),
+        Err(SmallStrainTetError::NewtonStalled { .. })
+    ));
+    problem.settings = IncrementSettings::default();
+    let loaded = with_cx(|cx| problem.solve(cx)).unwrap();
+    near(loaded.element_states[0].alpha, 0.004, 2e-10);
+    near(loaded.element_stress[0][0], 3.002, 2e-8);
+    near(loaded.element_strain[0][0], 0.007002, 2e-10);
+    for j in 1..3 {
+        near(loaded.element_states[0].plastic_strain[j], -0.002, 2e-10);
+        near(loaded.element_strain[0][j], -0.0029006, 2e-10);
+    }
+    for value in &loaded.element_stress[0][1..] {
+        near(*value, 0.0, 2e-8);
+    }
+
+    // Rejected trial steps must never accumulate plastic strain. Elastic
+    // release from the actual accepted state leaves exactly the permanent set.
+    problem.nodal_forces_n = &[];
+    let released = with_cx(|cx| {
+        problem.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.element_states,
+            cx,
+        )
+    })
+    .unwrap();
+    near(released.element_states[0].alpha, 0.004, 2e-10);
+    near(released.element_strain[0][0], 0.004, 2e-10);
+    for j in 1..3 {
+        near(released.element_strain[0][j], -0.002, 2e-10);
+    }
+    for value in &released.element_stress[0] {
+        near(*value, 0.0, 2e-8);
+    }
+
+    // The recovery does not extrapolate a material table or mutate history
+    // when no admissible equilibrium exists beyond its final measured yield.
+    let unsupported = [(3, 8.0 / 6.0)];
+    problem.nodal_forces_n = &unsupported;
+    let saved = released.clone();
+    assert!(
+        with_cx(|cx| problem.solve_from(
+            released.displacement_m.as_flattened(),
+            &released.element_states,
+            cx,
+        ))
+        .is_err()
+    );
+    assert_eq!(released, saved);
 }
 
 #[test]

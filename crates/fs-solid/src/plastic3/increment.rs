@@ -154,7 +154,8 @@ pub(crate) trait IncrementOperator {
 
     /// A geometry/law domain refusal on a proposal may be repairable by a
     /// shorter step. Initial and tangent refusals always propagate; cancellation
-    /// is never recoverable. Existing tetrahedral behavior remains the default.
+    /// is never recoverable. Element operators opt in explicitly; the default
+    /// propagates every refusal.
     fn recoverable_trial_error(&self, _error: &SmallStrainTetError) -> bool {
         false
     }

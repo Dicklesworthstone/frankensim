@@ -949,6 +949,14 @@ impl<L: SmallStrainLaw> increment::IncrementOperator for TetIncrement<'_, '_, L>
         }
         Ok(evolving)
     }
+
+    fn recoverable_trial_error(&self, error: &SmallStrainTetError) -> bool {
+        // A Newton proposal may leave a measured law's calibrated domain even
+        // when its equilibrium lies inside it. Only trial evaluations are
+        // retried: initial-state and tangent refusals still propagate, and the
+        // shared increment owner keeps the accepted history frozen throughout.
+        matches!(error, SmallStrainTetError::InvalidInput { .. })
+    }
 }
 
 /// Shared sparse linear correction for small-strain continuum increments.
