@@ -5,7 +5,7 @@ use super::{
     rheology::RheologyField,
 };
 use crate::ns::linearization::FluxViscosityTangent;
-use crate::ns::newton::FluxNewtonControls;
+use crate::ns::newton::{FluxNewtonControls, FluxNewtonError};
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
@@ -74,6 +74,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             boundary_velocity,
             initial_velocity,
             None,
+            None,
             convection,
             controls,
             resolve,
@@ -125,6 +126,83 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             boundary_velocity,
             previous_velocity,
             Some(timestep_s),
+            None,
+            true,
+            controls,
+            resolve,
+        )
+    }
+
+    /// Equal-step BDF2 with original material viscosities and analytic
+    /// tangents, evaluated at the fully implicit endpoint. `older_velocity`
+    /// is one interval before `previous_velocity`; `None` is exact BDF1
+    /// startup. Both histories remain unchanged on success or refusal.
+    ///
+    /// # Errors
+    /// Preserves the source, history and Newton refusals of
+    /// [`Self::bdf2_rheology_newton_variable_step`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_rheology_newton_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary_velocity: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        resolve: impl FnMut(
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+    ) -> Result<MaterialFluxNewtonStep<G>, MaterialFluxError> {
+        self.bdf2_rheology_newton_variable_step(
+            force_density,
+            boundary_velocity,
+            previous_velocity,
+            older_velocity.map(|older| (older, timestep_s)),
+            timestep_s,
+            controls,
+            resolve,
+        )
+    }
+
+    /// Unequal-step, fully implicit material BDF2 using the consistent sparse
+    /// Newton solver. `older_history` pairs the older velocity with the elapsed
+    /// time from it to `previous_velocity`. The current/previous step ratio
+    /// must lie in `(0, 2]`; absent older history selects exact BDF1 startup.
+    ///
+    /// Forces are N/m³, velocities m/s, intervals seconds and tangents Pa s².
+    /// The actual previous velocity initializes Newton; only the inertial load
+    /// uses the BDF2 history combination. Viscosity, its tangent, pressure and
+    /// `mu * gamma²` heat use the accepted source owners at the new endpoint.
+    /// This heat is an instantaneous rate, not a BDF2 integrated energy loss.
+    /// Temperature/composition are fixed endpoint inputs and density remains
+    /// the same reference value. A refused source is terminal even in a trial.
+    ///
+    /// # Errors
+    /// Preserves original material errors and refuses invalid histories,
+    /// intervals/ratios, density changes, tangents, boundaries or nonlinear
+    /// nonconvergence. No partial endpoint or mutated history is published.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_rheology_newton_variable_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary_velocity: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        resolve: impl FnMut(
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+    ) -> Result<MaterialFluxNewtonStep<G>, MaterialFluxError> {
+        self.rheology_newton_solve(
+            force_density,
+            boundary_velocity,
+            previous_velocity,
+            Some(timestep_s),
+            older_history,
             true,
             controls,
             resolve,
@@ -138,6 +216,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         boundary_velocity: &dyn Fn([f64; 2]) -> [f64; 2],
         initial_velocity: &[f64],
         timestep_s: Option<f64>,
+        older_history: Option<(&[f64], f64)>,
         convection: bool,
         controls: FluxNewtonControls,
         mut resolve: impl FnMut(
@@ -145,6 +224,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             &FluidTransportState,
         ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
     ) -> Result<MaterialFluxNewtonStep<G>, MaterialFluxError> {
+        // Admit and prepare the two-history mass load before with_inputs
+        // queries endpoint boundary data. Keep u_n as the constitutive/Newton
+        // initial state and reuse this single preparation for every iteration.
+        let bdf2 = if let (Some(timestep), Some(_)) = (timestep_s, older_history) {
+            Some(
+                self.system
+                    .mixed_bdf2_history(initial_velocity, older_history, timestep)
+                    .map_err(|error| MaterialFluxError::Newton(FluxNewtonError::History(error)))?,
+            )
+        } else {
+            None
+        };
         let density = self.transport.density_kg_m3();
         let derivatives = RefCell::new(vec![0.0; self.system.mesh.tris.len()]);
         let field = RheologyField::new(
@@ -184,7 +275,20 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                         },
                     }
                 };
-                if let Some(timestep) = timestep_s {
+                if let Some((history, effective_timestep)) = &bdf2 {
+                    self.system.rheology_newton_solve_checked(
+                        self.params,
+                        &tangent,
+                        acceleration,
+                        velocity,
+                        initial_velocity,
+                        true,
+                        effective_timestep.recip(),
+                        Some(history.as_deref().unwrap_or(initial_velocity)),
+                        controls,
+                        &|| field.is_valid(),
+                    )
+                } else if let Some(timestep) = timestep_s {
                     self.system.bdf1_rheology_newton_step_checked(
                         self.params,
                         &tangent,

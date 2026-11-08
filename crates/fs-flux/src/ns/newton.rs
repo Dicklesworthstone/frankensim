@@ -1,4 +1,4 @@
-//! Steady and fully implicit BDF1 flow with a consistent constitutive Jacobian
+//! Steady and fully implicit BDF1/BDF2 flow with a consistent constitutive Jacobian
 //! and line search.
 //!
 //! Every accepted endpoint solves the original nonlinear momentum equations.
@@ -53,6 +53,8 @@ pub enum FluxNewtonError {
     Invalid(&'static str),
     /// Existing boundary topology, value or net-flux admission refused.
     Boundary(StokesBoundaryError),
+    /// BDF2 history, step ratio or mass-history arithmetic refused.
+    History(StokesBoundaryError),
     /// The exact constitutive linearization refused its state or input.
     Linearization(FluxLinearizationError),
     /// Singular or unconverged Newton correction.
@@ -75,6 +77,7 @@ impl core::fmt::Display for FluxNewtonError {
         match self {
             Self::Invalid(reason) => write!(f, "Newton flow: {reason}"),
             Self::Boundary(error) => write!(f, "Newton flow boundary: {error}"),
+            Self::History(error) => write!(f, "Newton flow history: {error}"),
             Self::Linearization(error) => write!(f, "Newton flow: {error}"),
             Self::LinearSolve { iteration, error } => {
                 write!(f, "Newton flow correction {iteration}: {error}")
@@ -198,6 +201,132 @@ impl FluxSystem<'_> {
             timestep_s,
             controls,
             &|| true,
+        )
+    }
+
+    /// Advance equal-step, fully implicit generalized-Newtonian BDF2 with
+    /// consistent damped Newton iteration. `older_velocity` belongs one
+    /// timestep before `previous_velocity`; `None` is exactly BDF1 startup.
+    /// All constitutive, force and boundary callbacks belong to the new time.
+    ///
+    /// The derivative is `(3 u_new - 4 u_previous + u_older) / (2 dt)`.
+    /// Only the mass history is combined; the Newton initial iterate remains
+    /// the actual previous velocity, and viscosity and convection are solved
+    /// together at the returned endpoint. No law is frozen or extrapolated.
+    ///
+    /// # Errors
+    /// Uses the history, nonlinear and source admission of
+    /// [`Self::bdf2_rheology_newton_variable_step`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_rheology_newton_step(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        self.bdf2_rheology_newton_variable_step(
+            params,
+            law,
+            force,
+            boundary,
+            previous_velocity,
+            older_velocity.map(|older| (older, timestep_s)),
+            timestep_s,
+            controls,
+        )
+    }
+
+    /// Fully implicit BDF2 with unequal intervals and the exact constitutive
+    /// Jacobian. `older_history` pairs `u_(n-1)` with its interval to `u_n`;
+    /// `timestep_s` is the interval from `u_n` to the requested endpoint.
+    /// `None` calls the original BDF1 path, including its acceptance criteria.
+    ///
+    /// For `r = dt / previous_dt`, the mass derivative has coefficients
+    /// `[(1+2r)/(1+r), -(1+r), r*r/(1+r)] / dt`. The existing BDF2 history
+    /// owner forms the normalized mass load once, outside Newton iteration.
+    /// It admits `0 < r <= 2`, below the BDF2 zero-stability ratio limit;
+    /// neither steps nor history values are silently clipped. The starting
+    /// iterate is the actual `u_n`, not the mass-history extrapolation.
+    ///
+    /// Smooth resolved flows retain second-order temporal accuracy when the
+    /// histories, endpoint data and nonlinear tolerances resolve that error.
+    /// BDF2 is not a guarantee of monotone single-state kinetic energy, and
+    /// endpoint viscous heating remains an instantaneous physical rate.
+    /// Both original and equilibrated nonlinear endpoint residuals must pass.
+    ///
+    /// # Errors
+    /// Refuses invalid or unrepresentable histories/intervals, a step ratio
+    /// outside `(0, 2]`, and the same boundary, constitutive and nonlinear
+    /// failures as [`Self::bdf1_rheology_newton_step`]. Histories are immutable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_rheology_newton_variable_step(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        self.bdf2_rheology_newton_variable_step_checked(
+            params,
+            law,
+            force,
+            boundary,
+            previous_velocity,
+            older_history,
+            timestep_s,
+            controls,
+            &|| true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bdf2_rheology_newton_variable_step_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        previous_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: f64,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        if older_history.is_none() {
+            return self.bdf1_rheology_newton_step_checked(
+                params,
+                law,
+                force,
+                boundary,
+                previous_velocity,
+                timestep_s,
+                controls,
+                source_is_valid,
+            );
+        }
+        let (history, effective_timestep) = self
+            .mixed_bdf2_history(previous_velocity, older_history, timestep_s)
+            .map_err(FluxNewtonError::History)?;
+        self.rheology_newton_solve_checked(
+            params,
+            law,
+            force,
+            boundary,
+            previous_velocity,
+            true,
+            effective_timestep.recip(),
+            Some(history.as_deref().unwrap_or(previous_velocity)),
+            controls,
+            source_is_valid,
         )
     }
 

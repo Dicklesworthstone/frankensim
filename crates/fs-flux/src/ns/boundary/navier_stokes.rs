@@ -1209,9 +1209,9 @@ impl<'m> FluxSystem<'m> {
     }
 
     // One history owner for linear Stokes and frozen, scalar and gradient
-    // nonlinear constitutive closures.
+    // nonlinear constitutive closures, including the consistent Newton path.
     // This only forms the mass load; the physical initial iterate remains u_n.
-    pub(super) fn mixed_bdf2_history(
+    pub(crate) fn mixed_bdf2_history(
         &self,
         previous_velocity: &[f64],
         older_history: Option<(&[f64], f64)>,

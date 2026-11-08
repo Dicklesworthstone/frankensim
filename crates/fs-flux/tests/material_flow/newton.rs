@@ -9,6 +9,182 @@ use fs_material::fluid_transport::rheology::{
 };
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
+fn bdf2_couette_moments(mesh: &TriMesh, shear: f64) -> Vec<f64> {
+    mesh.edges
+        .iter()
+        .flat_map(|edge| {
+            let a = mesh.verts[edge.verts.0];
+            let b = mesh.verts[edge.verts.1];
+            // Exact mean and centered first moment of the affine normal trace.
+            [
+                shear * edge.normal[0] * (a[1] + b[1]) / 2.0,
+                shear * edge.normal[0] * (b[1] - a[1]) / 12.0,
+            ]
+        })
+        .collect()
+}
+
+#[test]
+fn bdf2_material_quadratic_shear_retains_endpoint_source_heat_and_tangents() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let amplitude = |t: f64| 1.0 + t + t * t;
+    let older = bdf2_couette_moments(&mesh, amplitude(0.1));
+    let previous = bdf2_couette_moments(&mesh, amplitude(0.3));
+    let saved_histories = (older.clone(), previous.clone());
+    let endpoint_time = 0.6;
+    let shear = amplitude(endpoint_time);
+    let velocity = |p: [f64; 2]| [shear * p[1], 0.0];
+    for density in [2.0, 7.0] {
+        let reference = transport(density, 0.2 * density);
+        let owner = MaterialFluxSystem::new(
+            &system,
+            &reference,
+            MaterialFluxNumerics {
+                penalty: 15.0,
+                linear_tolerance: 1e-12,
+                ..MaterialFluxNumerics::default()
+            },
+        )
+        .unwrap();
+        // Uniform shear makes div(tau)=0 and u.grad(u)=0. The physical
+        // force is exactly rho*u_t at the new endpoint, not at either history.
+        let force = |p: [f64; 2]| [density * (1.0 + 2.0 * endpoint_time) * p[1], 0.0];
+        let reads = Rc::new(Cell::new(0));
+        let mut queries = 0;
+        let mut first_rates = vec![None; mesh.tris.len()];
+        let result = owner
+            .bdf2_rheology_newton_variable_step(
+                &force,
+                &velocity,
+                &previous,
+                Some((&older, 0.2)),
+                0.3,
+                FluxNewtonControls {
+                    residual_tolerance: 1e-10,
+                    ..FluxNewtonControls::default()
+                },
+                |point, retained| {
+                    assert_eq!(retained, &reference);
+                    first_rates[point.cell].get_or_insert(point.shear_rate_per_s);
+                    queries += 1;
+                    let rate = point.shear_rate_per_s;
+                    Ok(MaterialFluxViscosityTangent {
+                        material: RheologyResponse {
+                            transport: transport(density, density * 0.2 * (1.0 + rate * rate)),
+                            point,
+                            temperature_k: 315.0,
+                            reads: Rc::clone(&reads),
+                        },
+                        derivative_pa_s2: density * 0.4 * rate,
+                    })
+                },
+            )
+            .unwrap();
+        // The material is first sampled at the actual previous velocity,
+        // never at BDF2's extrapolated inertial history.
+        for rate in first_rates {
+            near(rate.unwrap(), amplitude(0.3), 1e-10);
+        }
+        assert_eq!(reads.get(), queries);
+        let step = &result.step;
+        let (error, divergence) = system.velocity_error(&step.discrete().x, &velocity);
+        assert!(error < 2e-9 && divergence < 2e-9);
+        let mu = density * 0.2 * (1.0 + shear * shear);
+        let heating = mu * shear * shear;
+        near(
+            step.kinetic_energy_j_per_m(),
+            density * shear * shear / 6.0,
+            1e-8,
+        );
+        near(
+            step.viscous_dissipation().total_power_w_per_m(),
+            heating,
+            1e-6,
+        );
+        for (cell, sample) in step.samples().iter().enumerate() {
+            assert_eq!(sample.point(), sample.material().point);
+            assert_eq!(sample.material().temperature_k, 315.0);
+            near(sample.point().shear_rate_per_s, shear, 2e-8);
+            near(sample.transport().dynamic_viscosity_pa_s(), mu, 1e-7);
+            near(
+                result.viscosity_derivatives_pa_s2()[cell],
+                density * 0.4 * shear,
+                1e-7,
+            );
+            near(
+                step.viscous_dissipation().cell_heating_w_m3()[cell],
+                heating,
+                1e-6,
+            );
+            near(step.pressure_pa()[cell], 0.0, density * 1e-7);
+        }
+    }
+    assert_eq!((older, previous), saved_histories);
+}
+
+#[test]
+fn bdf2_material_invalid_history_precedes_callbacks_and_source_errors_stay_terminal() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let reference = transport(2.0, 0.4);
+    let owner =
+        MaterialFluxSystem::new(&system, &reference, MaterialFluxNumerics::default()).unwrap();
+    let previous = vec![0.0; system.n_u];
+    let older = previous.clone();
+    let controls = FluxNewtonControls::default();
+    for (history, previous_dt) in [(&older[..], 0.1), (&older[..system.n_u - 1], 0.3)] {
+        let result = owner.bdf2_rheology_newton_variable_step(
+            &|_| panic!("invalid BDF2 history queried force"),
+            &|_| panic!("invalid BDF2 history queried boundary"),
+            &previous,
+            Some((history, previous_dt)),
+            0.3,
+            controls,
+            |_, _| -> Result<MaterialFluxViscosityTangent<FluidTransportState>, MaterialError> {
+                panic!("invalid BDF2 history queried material")
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(MaterialFluxError::Newton(FluxNewtonError::History(_)))
+        ));
+    }
+
+    let refusal = MaterialError::State {
+        what: "source refused the BDF2 trial shear".into(),
+    };
+    let mut refused = false;
+    let mut queries = 0;
+    let force = |p: [f64; 2]| [4.0 * (p[1] - 0.5), -4.0 * (p[0] - 0.5)];
+    let result = owner.bdf2_rheology_newton_variable_step(
+        &force,
+        &no_slip,
+        &previous,
+        Some((&older, 0.1)),
+        0.15,
+        controls,
+        |point, _| {
+            assert!(!refused, "a refused trial must end material queries");
+            queries += 1;
+            if point.shear_rate_per_s > 0.0 {
+                refused = true;
+                return Err(refusal.clone());
+            }
+            Ok(MaterialFluxViscosityTangent {
+                material: reference,
+                derivative_pa_s2: 0.0,
+            })
+        },
+    );
+    assert!(matches!(result, Err(MaterialFluxError::Material(error)) if error == refusal));
+    assert!(
+        refused && queries > mesh.tris.len(),
+        "exercise a genuine trial refusal"
+    );
+    assert!(previous.iter().chain(&older).all(|value| *value == 0.0));
+}
+
 #[test]
 fn steady_material_couette_retains_physical_viscosity_heat_and_tangents() {
     let mesh = mesh();
