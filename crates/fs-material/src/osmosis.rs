@@ -5,8 +5,9 @@
 //! second time. The solvent is incompressible with an explicitly supplied
 //! partial molar volume. [`aqueous::AqueousSolution`] keeps finite inventories
 //! with either the ideal law or the consistent free energy in [`nonideal`].
-//! [`donnan`] separately supplies finite-bath, ideal ionic equilibrium; it must
-//! not be combined with a nonideal pressure correction alone. Solute partial
+//! [`donnan`] supplies matching ideal or virial finite-bath ion equilibrium;
+//! [`electrodiffusion`] instead retains finite ion-channel permeances beside
+//! selective water pores using the same original thermodynamics. Solute partial
 //! volumes, ion reactions and temperature differences are not modeled. Optional
 //! steady concentration polarization is provided by [`polarization`].
 //! Coefficients need their own measured
@@ -39,8 +40,10 @@ pub mod solubility;
 pub mod nonideal;
 /// Chemical-potential-driven Maxwell–Stefan transport relative to fixed solvent.
 pub mod diffusion;
+/// Finite-rate open-circuit ion channels and independent selective water pores.
+pub mod electrodiffusion;
 pub use aqueous::AqueousSolution;
-/// Finite-bath ideal ionic partition with fixed charge and explicit trapped particles.
+/// Finite-bath ideal or virial ionic partition with fixed charge and trapped particles.
 pub mod donnan;
 
 /// Bounded independent-solute layout; an empty layout represents pure solvent.
