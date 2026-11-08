@@ -319,6 +319,31 @@ fn narrow_gap_limit_and_original_source_ceiling_are_preserved() {
 }
 
 #[test]
+fn common_rotation_must_preserve_the_accepted_relative_wall_motion() {
+    let g = geometry();
+    let card = source(0.0, 2.0, 1.0);
+    let journal = YieldStressJournal::new(&card, conditions(), g, 1000.0).unwrap();
+    let torque = factor(g) * 2.0 * 7.13;
+    // The first common rotation erases relative motion entirely; the second
+    // retains a difference whose rounding error exceeds the declared accuracy.
+    for common in [1e20, 1e12] {
+        assert!(matches!(
+            journal.at_outer_torque(torque, common, Default::default()),
+            Err(YieldStressJournalError::Invalid(_))
+        ));
+    }
+    let resolved = journal
+        .at_outer_torque(torque, 10.0, Default::default())
+        .unwrap();
+    let walls = resolved.flow().accepted_wall_angular_velocities_rad_s;
+    close(
+        walls[1] - walls[0],
+        resolved.flow().relative_angular_velocity_rad_s,
+        2e-14,
+    );
+}
+
+#[test]
 fn cancellation_and_work_limits_refuse_without_mutating_the_source() {
     let card = source(10.0, 2.0, 0.7);
     let journal = YieldStressJournal::new(&card, conditions(), geometry(), 1000.0).unwrap();

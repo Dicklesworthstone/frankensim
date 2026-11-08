@@ -571,6 +571,16 @@ impl<'a> YieldStressJournal<'a> {
         let sign = stress.unwrap_or(0.0).signum();
         let relative = value.speed * sign;
         let walls = [inner_speed, finite(inner_speed + relative)?];
+        let represented_relative = finite(walls[1] - walls[0])?;
+        let wall_tolerance = controls.absolute_angular_tolerance_rad_s
+            + controls.relative_angular_tolerance * value.speed;
+        if (relative != 0.0 && represented_relative == 0.0)
+            || (represented_relative - relative).abs() > wall_tolerance
+        {
+            return Err(YieldStressJournalError::Invalid(
+                "common rotation cannot represent the accepted relative wall motion",
+            ));
+        }
         let torque = stress
             .map(|s| product_ratio(&[self.torque_factor, s.abs()], &[]).map(|t| t.copysign(s)))
             .transpose()?;

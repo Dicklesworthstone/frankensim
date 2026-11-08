@@ -12,9 +12,11 @@
 //! See ANSYS Polyflow, "Temperature Dependence of the Viscosity", equations
 //! 2-159/160: <https://ansyshelp.ansys.com/public/Views/Secured/corp/v261/en/flu_ug_workspaces/flu_ug_matpro_physics_equations.html>.
 //!
-//! This is generalized Newtonian shear thinning, not elastic memory, normal
+//! The Carreau law is generalized Newtonian shear thinning, not elastic memory, normal
 //! stress differences, a yield surface, freezing, or an extensional-flow fit.
 //! No calibration data, pressure dependence or experimental authority is added.
+//! The separate `yield_stress` owner consumes the original slurry card for
+//! exact Herschel–Bulkley yielded/unyielded planar pressure and wall flow.
 
 use super::{
     FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
@@ -28,6 +30,8 @@ pub mod annular;
 pub mod pipe;
 /// Fully developed planar films with simultaneous pressure and wall shear.
 pub mod slit;
+/// Original-card Herschel–Bulkley planar flow with exact rigid plugs.
+pub mod yield_stress;
 
 #[cfg(test)]
 mod tests;
