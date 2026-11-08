@@ -32,7 +32,7 @@ pub use caloric::{
 use coordinate::{CellCoordinate, KelvinCoordinate};
 use super::contact::{ContactHeat, PreparedSources, joint_heat};
 use local::{KirchhoffCell, KirchhoffRecovery};
-pub use material::{RotatedSolidConductivity, TensorConductivityLaw};
+pub use material::{RotatedSolidConductivity, RotatedSourceConductivity, TensorConductivityLaw};
 pub use sdirk::{TensorNonlinearSdirk2Step, advance_nonlinear_tensor_conduction_sdirk2};
 pub use transient::{TensorNonlinearStep, advance_nonlinear_tensor_conduction};
 

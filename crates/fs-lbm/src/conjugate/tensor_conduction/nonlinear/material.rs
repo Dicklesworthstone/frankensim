@@ -7,6 +7,9 @@
 use super::super::ConductivityTensor;
 use crate::conjugate::{ChtError, SolidMaterial};
 
+mod source;
+pub use source::RotatedSourceConductivity;
+
 /// Original conductivity in Cartesian grid coordinates, W/(m K).
 ///
 /// Implementations must be deterministic for one solve and must not advance

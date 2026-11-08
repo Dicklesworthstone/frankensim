@@ -133,6 +133,48 @@ impl ConductivityCurve {
         Ok(sign * positive(sum)?)
     }
 
+    /// Exact mean of the original piecewise-affine conductivity over a
+    /// supported temperature interval. Equal endpoints return the point law.
+    ///
+    /// Accumulate positive segment means by their temperature widths. Convex
+    /// updates avoid an overflowing or underflowing dimensional Kirchhoff
+    /// integral when its mean is still representable. No source knot is
+    /// skipped, no table is copied, and reversal uses identical arithmetic.
+    pub fn mean_conductivity_w_m_k(
+        &self,
+        initial: f64,
+        final_k: f64,
+    ) -> Result<f64, DepositionError> {
+        let first = self.segment(initial)?;
+        let last = self.segment(final_k)?;
+        if initial == final_k {
+            return self.on_segment(first, initial);
+        }
+        let (lo, hi, first, last) = if initial < final_k {
+            (initial, final_k, first, last)
+        } else {
+            (final_k, initial, last, first)
+        };
+        let mut mean: Option<f64> = None;
+        for i in first..=last {
+            let a = lo.max(self.knots[i][0]);
+            let b = hi.min(self.knots[i + 1][0]);
+            if a < b {
+                let ka = self.on_segment(i, a)?;
+                let kb = self.on_segment(i, b)?;
+                let segment_mean = 0.5_f64.mul_add(kb - ka, ka);
+                mean = Some(match mean {
+                    None => segment_mean,
+                    Some(previous) => {
+                        let fraction = (b - a) / (b - lo);
+                        (segment_mean - previous).mul_add(fraction, previous)
+                    }
+                });
+            }
+        }
+        positive(mean.ok_or(DepositionError::Arithmetic)?)
+    }
+
     /// Invert a signed Kirchhoff difference on this same conductivity chart.
     /// Positive integral raises temperature. Each crossed affine segment has
     /// a scaled quadratic inverse; no iterative solve or extrapolation occurs.
@@ -678,5 +720,37 @@ fn positive(value: f64) -> Result<f64, DepositionError> {
         Ok(value)
     } else {
         Err(DepositionError::Arithmetic)
+    }
+}
+
+#[cfg(test)]
+mod interval_mean_tests {
+    use super::ConductivityCurve;
+
+    #[test]
+    fn source_interval_mean_retains_knots_endpoints_and_original_support() {
+        let curve =
+            ConductivityCurve::new(vec![[300.0, 2.0], [350.0, 6.0], [400.0, 4.0], [500.0, 8.0]])
+                .unwrap();
+        // Independent segment areas: 125 + 250 + 412.5, over 150 kelvin.
+        let mean = curve.mean_conductivity_w_m_k(325.0, 475.0).unwrap();
+        assert!((mean - 5.25).abs() < 2e-15);
+        assert_eq!(mean, curve.mean_conductivity_w_m_k(475.0, 325.0).unwrap());
+        assert!((mean * 150.0 - curve.integral_w_m(325.0, 475.0).unwrap()).abs() < 2e-12);
+        assert_eq!(curve.mean_conductivity_w_m_k(350.0, 350.0).unwrap(), 6.0);
+        assert!(curve.mean_conductivity_w_m_k(299.0, 400.0).is_err());
+        assert!(curve.mean_conductivity_w_m_k(300.0, f64::NAN).is_err());
+    }
+
+    #[test]
+    fn representable_mean_survives_unrepresentable_dimensional_integral() {
+        let high = ConductivityCurve::new(vec![[1.0, 1e308], [2.0, 1e308], [4.0, 1e308]]).unwrap();
+        assert!(high.integral_w_m(1.0, 4.0).is_err());
+        assert_eq!(high.mean_conductivity_w_m_k(1.0, 4.0).unwrap(), 1e308);
+        let low =
+            ConductivityCurve::new(vec![[1e-100, 1e-300], [2e-100, 1e-300], [3e-100, 1e-300]])
+                .unwrap();
+        assert!(low.integral_w_m(1e-100, 3e-100).is_err());
+        assert_eq!(low.mean_conductivity_w_m_k(1e-100, 3e-100).unwrap(), 1e-300);
     }
 }

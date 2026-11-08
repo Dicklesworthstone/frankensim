@@ -200,7 +200,7 @@ pub use simple::{
     simple_flow_with_viscosity_and_force,
 };
 pub use tensor_conduction::{
-    ConductivityTensor, RotatedSolidConductivity, TENSOR_SDIRK2_GAMMA, TensorConductionReport,
+    ConductivityTensor, RotatedSolidConductivity, RotatedSourceConductivity, TENSOR_SDIRK2_GAMMA, TensorConductionReport,
     TensorConductionSdirk2Step, TensorConductionSolution, TensorConductionStep,
     TensorConductivityLaw, TensorNonlinearConfig, TensorNonlinearSdirk2Step,
     TensorNonlinearSolution, TensorNonlinearStep, advance_nonlinear_tensor_conduction,

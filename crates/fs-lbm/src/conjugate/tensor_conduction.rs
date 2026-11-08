@@ -27,7 +27,7 @@ mod sdirk;
 mod transient;
 use local::LocalOperator;
 pub use nonlinear::{
-    RotatedSolidConductivity, TensorConductivityLaw, TensorNonlinearConfig,
+    RotatedSolidConductivity, RotatedSourceConductivity, TensorConductivityLaw, TensorNonlinearConfig,
     TensorNonlinearSdirk2Step, TensorNonlinearSolution, TensorNonlinearStep,
     advance_nonlinear_tensor_conduction, advance_nonlinear_tensor_conduction_sdirk2,
     solve_nonlinear_tensor_conduction,
