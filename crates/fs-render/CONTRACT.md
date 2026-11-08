@@ -3171,6 +3171,31 @@ index-one observation component; it does not feed absorbed secondary light
 back to heat or solve fluorescence cascades, subcell pump structure, dipole
 anisotropy, surfaces or light-travel delay. Thermal emission remains separate.
 
+### Camera images of nonthermal luminescence
+
+`volumes::transport::luminescence::render_luminescence_camera` samples original
+physical pinhole or ideal thin-lens rays and the same native cell integral.
+A complete image retains original wavelengths and source/field identities,
+with per-node mean integrated radiance, transmission, thin opacity and effective
+negative-log survival. Constant-footprint backgrounds compose spectrally,
+including finite bright backgrounds behind underflowed unit transmission.
+Pixel and pupil samples average transported light independently at each node;
+they do not average density or optical depth before evaluating transmission.
+Shared image sampling limits and an actual cumulative DDA-cell allowance remain
+binding, including transparent emitting cells, with no partial output.
+
+`approximate_emission_xyz` uses the existing analytic visible observer fits and
+relative-renderer normalization without an inferred bin-width factor. Coarse
+supplied bins carry no spectral accuracy claim; UV/IR data remain available in
+the primary spectral image and refuse the visible-only projection. Dispersive,
+diffractive and sequential lenses retain native refusal. Thermal emission,
+scattering, surfaces and secondary fluorescence remain outside this observer.
+Eight focused regressions are in
+`volumes/transport/luminescence/camera/tests.rs`; native compilation and execution
+of this new adapter remain unverified because the execution environment became
+unavailable. The exact adapter and parent change received independent source
+review against the existing physical-camera, cell-traversal and spectral APIs.
+
 ### Finite-lifetime luminescence on the native heat clock
 
 `volumes::heating::luminescence::{LuminescenceSource, LuminescentOpticalHeating}`

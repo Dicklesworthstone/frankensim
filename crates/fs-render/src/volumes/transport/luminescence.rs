@@ -22,6 +22,12 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+mod camera;
+pub use camera::{
+    LuminescenceCameraError, LuminescenceCameraImage, LuminescenceCameraPixel,
+    LuminescenceCameraSettings, render_luminescence_camera,
+};
+
 const SOLID_ANGLE_SR: f64 = 4.0 * core::f64::consts::PI;
 
 /// Nonthermal foreground radiance and attenuation for the declared nodes.
@@ -31,6 +37,14 @@ pub struct LuminescenceTransport<const M: usize> {
     pub transmittance: [f64; M],
     /// Observed emitted line/bin radiance, W/(m² sr), NOT per nanometre.
     pub emitted_radiance_w_m2_sr: [f64; M],
+}
+
+// One native traversal supplies the public ray result and camera work/depth.
+// Finite depth is retained independently of underflowed unit transmission.
+struct LuminescenceRaySample<const M: usize> {
+    transport: LuminescenceTransport<M>,
+    optical_depth: [f64; M],
+    cell_visits: u32,
 }
 
 /// Sparse immutable emissivity bound to the original optical grid.
@@ -173,8 +187,31 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
         unit_direction: Vec3,
         max_distance_m: f64,
     ) -> Result<LuminescenceTransport<M>, VolumeTransportError> {
+        Ok(self
+            .transport_counted(
+                cx,
+                origin,
+                unit_direction,
+                max_distance_m,
+                u64::from(self.medium.max_steps),
+            )?
+            .transport)
+    }
+
+    fn transport_counted(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        max_distance_m: f64,
+        max_cell_visits: u64,
+    ) -> Result<LuminescenceRaySample<M>, VolumeTransportError> {
         checkpoint(cx)?;
         validate_ray(origin, unit_direction, max_distance_m)?;
+        let max_steps = self
+            .medium
+            .max_steps
+            .min(u32::try_from(max_cell_visits).unwrap_or(u32::MAX));
         let mut result = LuminescenceTransport {
             transmittance: [1.0; M],
             emitted_radiance_w_m2_sr: [0.0; M],
@@ -184,16 +221,24 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
             origin,
             unit_direction,
             max_distance_m,
-            self.medium.max_steps,
+            max_steps,
         )?
         else {
-            return Ok(result);
+            return Ok(LuminescenceRaySample {
+                transport: result,
+                optical_depth: [0.0; M],
+                cell_visits: 0,
+            });
         };
         let mut kappa = self.medium.coefficients_at_cell(0, &self.wavelengths_nm)?;
         let mut previous_model = None;
         let mut depth = [0.0; M];
         let mut radiance: [PositiveSum; M] = std::array::from_fn(|_| PositiveSum::default());
+        let mut cell_visits = 0;
         while let Some(segment) = ray.next(cx)? {
+            // CellRay already charged this bounded u32 visit, including
+            // zero-length face crossings and transparent emissive cells.
+            cell_visits += 1;
             if segment.length_m == 0.0 {
                 continue;
             }
@@ -236,7 +281,11 @@ impl<'m, 'g, const M: usize> LuminescenceGrid<'m, 'g, M> {
             result.emitted_radiance_w_m2_sr[lane] = value.finish()?;
         }
         checkpoint(cx)?;
-        Ok(result)
+        Ok(LuminescenceRaySample {
+            transport: result,
+            optical_depth: depth,
+            cell_visits,
+        })
     }
 }
 
