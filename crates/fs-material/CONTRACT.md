@@ -1,5 +1,22 @@
 # fs-material — CONTRACT
 
+## Progressive ductile plane-stress section work
+
+`DuctileJ2Law` audits accepted increments through the original
+`LayeredPlaneStressSection` reduction. Every thickness point retains its full
+tensor strain and exact immutable material owner. The audit replays the single
+old-to-candidate native update and verifies accepted history and transverse
+equilibrium without advancing candidate history again.
+
+Stored energy, plastic dissipation, damage release, endpoint numerical loss
+and signed transverse residual work remain separate. The integrated
+`Gp*delta_damage/h` diagnostic is nonadditive and is per original section area.
+Every layer represents the same actual interval. Characteristic length remains
+with the original material; shell thickness never replaces an in-plane band
+width. Four focused tests in `ductile_section` cover analytical twisting-bend
+states/work, unloading/reversal, nonsymmetric condensed tangent finite
+differences and owner/time/refusal semantics.
+
 ## Progressive ductile plane stress
 
 `plastic::finite::ductile::plane_stress` solves all three transverse Piola

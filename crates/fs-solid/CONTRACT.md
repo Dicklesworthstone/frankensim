@@ -1,5 +1,28 @@
 # fs-solid CONTRACT
 
+## Progressive ductile native shell endpoints
+
+The existing CST/DKT owner provides `solve_ductile_with_energy` and
+`advance_ductile_backward_euler_with_energy` for original `DuctileJ2Law`
+sections. Native surface/thickness quadrature, transverse equilibrium,
+nonsymmetric damaged tangents, support reactions, reference drilling stiffness
+and consistent mass are reused. One complete endpoint publishes only after
+separate material, drilling, external-work and kinetic balances pass.
+
+Prepared layers use the same physical duration; the dynamic duration matches
+inertia exactly. Rejected damage increments, owner/time/gauge mismatches, work
+defects and cancellation leave input checkpoints unchanged. Caller physical
+cutback refreshes prepared intervals while retaining material/history ownership
+and band length. Plastic loss, damage release, numerical material loss and
+drilling/inertial numerical losses remain distinct; no heat partition is inferred.
+
+Five focused cases in `ductile_shell_evolution` cover layer bending/softening,
+unloading/reversal/restart, backward-Euler work partitions, successful caller
+cutback and transactional refusal. This remains small-strain/small-rotation
+shell mechanics. Finite forming, delamination, fracture topology, erosion,
+generated contact, time-accuracy estimation and measured-alloy qualification
+are outside its claim.
+
 ## Progressive finite ductile sheets
 
 `hyper2d::plastic::ductile::FiniteDuctileSheet` advances the original P1/Q1

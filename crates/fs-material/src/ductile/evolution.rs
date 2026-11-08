@@ -53,6 +53,9 @@ use crate::{MaterialAdmissibility, SmallStrainLaw, Tangent6, Voigt};
 /// Original source-bound post-initiation work, not a toughness alias.
 pub mod source;
 
+/// Native plane-stress section work with separate plastic and damage losses.
+pub mod section;
+
 /// Endpoint-locus derivatives needed only while a trial crosses initiation.
 /// Derivatives use tensile-positive triaxiality, the normalized third
 /// deviatoric invariant xi and physical inverse seconds.

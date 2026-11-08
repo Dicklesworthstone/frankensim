@@ -33,6 +33,9 @@ use std::cell::RefCell;
 /// Native physical/numerical energy and drilling work for a single accepted step.
 pub mod energy;
 
+/// Progressive ductile sections with separate damage and native mechanical work.
+pub mod ductile;
+
 /// Retained reference inertia and native momentum evolution of plastic shells.
 pub mod dynamics;
 
