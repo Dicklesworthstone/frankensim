@@ -56,6 +56,8 @@ use crate::thermochemical_gas::ResolvedThermochemicalGasState;
 
 /// Exact positive time-domain compression realization of the same reservoirs.
 pub mod bulk;
+/// Analytic phase and attenuation slopes of the original molecular wave.
+pub mod frequency;
 /// Bounded native declarations of the same species/reservoir laws.
 pub mod input;
 /// Analytic causal continuation of the original molecular reservoirs.
