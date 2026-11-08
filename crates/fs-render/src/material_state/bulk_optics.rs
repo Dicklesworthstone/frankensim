@@ -145,6 +145,31 @@ pub(super) fn accepted_density_property<'a>(
     Some(property)
 }
 
+/// One positive absolute temperature at the original accepted material state.
+#[cfg(feature = "volumes")]
+pub(super) fn accepted_temperature_k(state: &ResolvedMaterialStatePoint) -> Option<f64> {
+    use fs_qty::semantic::{QuantityKind, ValueForm};
+    use fs_qty::{QuantitySpec, Temperature};
+
+    let mut found = None;
+    for (name, value) in state.query_point() {
+        let value = *value;
+        let quantity = state.axis_quantities().get(name);
+        let absolute = quantity.and_then(|q| q.semantic_type()).is_some_and(|q| {
+            q.kind() == QuantityKind::AbsoluteTemperature && q.form() == ValueForm::Static
+        });
+        let legacy = name == "T"
+            && quantity.is_none_or(|q| *q == QuantitySpec::dimensional(Temperature::DIMS));
+        if absolute || legacy {
+            if found.is_some() || !value.is_finite() || value <= 0.0 {
+                return None;
+            }
+            found = Some(value);
+        }
+    }
+    found
+}
+
 #[cfg(feature = "volumes")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum BulkOpticalLaw {

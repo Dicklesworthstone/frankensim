@@ -9876,6 +9876,73 @@ workspace. The separately executed lean volume tests do not cover this feature
 gate. This bridge adds no measured optical dataset and makes no scattering,
 interface-reflection, or emission inference from absorption alone.
 
+### Finite-band dielectric absorption sources
+
+`MaterialAbsorptionBinding` accepts the existing finite-band tabulated
+dielectric and Sellmeier state-point families directly, with a unified
+`try_spectral_optical` constructor for the existing explicit optical enum.
+The material owner's allocation-free `absorption_per_m_at` query evaluates
+original tabulated alpha; analytic dielectrics reuse their original alpha
+evaluator. Both divide intensity absorption directly by intrinsic material
+density. Conductor dispatch retains the original n/k binding and identity.
+
+Absorption-only Sellmeier observations use the independently declared absorption
+support without evaluating or truncating to the refractive-index fit. Refraction
+consumers still require that separate index domain. SI wavelength support must
+have a finite, positive, ordered nanometre representation. Closed-band admission
+precedes endpoint roundtrip correction, so no out-of-band input is extrapolated.
+Source identity, density receipts, complete state matching and refresh behavior
+remain those of the original accepted claims. This adds no new measured data.
+
+### Accepted material opacity in native transport
+
+`material_state::absorption::native::MaterialAbsorptionField` prepares one
+immutable packet of one through sixteen wavelength nodes per original material
+binding. It retains the original cell palette and borrows the existing admitted
+SI geometry/density carrier, following the native prepared-field convention.
+The carrier's previous absorption and temperature sources are explicitly not
+used. Coefficients evaluate the original material law at each exact node;
+there is no off-node query or interpolation of converted mass coefficients.
+
+Preparation storage is proportional to models times wavelengths, not cells
+times wavelengths. Tracing performs neither material-source evaluation nor
+Planck evaluation. Original material identities, cell mapping, exact nodes and
+explicit emission mode enter the prepared identity. The source-support
+intersection records scope without widening any supplied source.
+
+`MaterialAbsorptionEmission::None` needs no accepted temperature.
+`AcceptedLte` uses each absorbing material's own unique accepted Kelvin
+temperature and the native Planck law, linked to its same absorption
+coefficient. It introduces no averaged temperature or independent emissivity.
+The extracted temperature predicate is shared with particle optics without
+changing existing particle admission. Intrinsic density normalizes kappa;
+the borrowed grid still declares selected-material mass per bulk cubic metre.
+
+`transmittance`, `transport`, `render_camera` and
+`render_camera_with_background` reuse one original native cell integral and
+the original camera sampler. DDA crossings, compensated optical depth,
+emission arithmetic, opaque limits, finite endpoints, cell accounting and
+cancellation remain shared. Per-ray illumination is composed before pixel/pupil
+averaging. Only mapped positive-density cells determine vacuum or emission;
+an unused absorbing model cannot create haze.
+
+Preparation admits model/node budgets and map length before output allocation,
+checks every original source and polls cancellation. Source, temperature,
+arithmetic, traversal or camera refusal publishes no partial field/image.
+This is the existing non-scattering, index-one continuum model, without
+surface reflection, refraction, unresolved spatial coverage or thermal-state
+evolution inferred from absorption.
+
+Two material-owner tests, four finite-band renderer tests and five native-field
+tests cover source-law interpolation, IR alpha transport, independent Sellmeier
+support, refreshed state/density/wavelength coordinates, layered 300/400 K
+emission, reversed layer order, finite endpoints, temperature-free absorption,
+unused models, budgets and cancellation. Pinned Rust parsing and source/API/
+physics review passed, including independent review of the native extraction.
+These material-state/tracer tests were not compiled or executed because their
+complete dependency closure is unavailable. The separate 141-test lean volume
+run does not establish execution coverage of these feature configurations.
+
 ### Indexed material opacity
 
 `IndexedDensityAbsorptionSpectrum` borrows the original x-fastest density

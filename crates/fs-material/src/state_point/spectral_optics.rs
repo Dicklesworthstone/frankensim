@@ -277,6 +277,40 @@ impl SpectralTabulatedDielectricStatePoint {
         (self.samples[0].wavelength_m, self.samples[8].wavelength_m)
     }
 
+    /// Evaluate the original piecewise-linear intensity-absorption spectrum.
+    ///
+    /// This allocation-free bulk-loss query retains the closed source support,
+    /// including for transparent tables. It neither evaluates the phase index
+    /// nor converts alpha to a complex extinction index.
+    pub fn absorption_per_m_at(&self, wavelength_m: f64) -> Result<f64, MaterialStatePointError> {
+        let (minimum_m, maximum_m) = self.wavelength_bounds_m();
+        if !wavelength_m.is_finite() || wavelength_m < minimum_m || wavelength_m > maximum_m {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "wavelength outside the original tabulated absorption spectrum",
+            });
+        }
+        let upper = self
+            .samples
+            .partition_point(|sample| sample.wavelength_m < wavelength_m);
+        if self.samples[upper].wavelength_m == wavelength_m {
+            return Ok(self.samples[upper].absorption_per_m);
+        }
+        let [left, right] = [self.samples[upper - 1], self.samples[upper]];
+        let t = (wavelength_m - left.wavelength_m) / (right.wavelength_m - left.wavelength_m);
+        let [a, b] = [left.absorption_per_m, right.absorption_per_m];
+        let value = if t <= 0.5 {
+            a + t * (b - a)
+        } else {
+            b + (1.0 - t) * (a - b)
+        };
+        if !ScalarAdmissibility::NonNegative.admits(value) {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "unrepresentable tabulated-source absorption interpolation",
+            });
+        }
+        Ok(value)
+    }
+
     /// Continue the original source claims at one new complete physical state.
     /// This does not certify the path between endpoints or evolve the specimen.
     pub fn at_query_point(

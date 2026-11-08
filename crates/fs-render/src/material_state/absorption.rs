@@ -4,7 +4,7 @@
 //! It does not replace a complex-index law by interpolating converted mass
 //! coefficients, infer absorption from RGB, or evolve the material state.
 
-use super::bulk_optics::{BulkOpticalLaw, accepted_density_property};
+use super::bulk_optics::{BulkOpticalLaw, accepted_density_property, accepted_temperature_k};
 use super::{MaterialOpticalBinding, MaterialOpticalError};
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use crate::volumes::{DensityAbsorptionSpectrum, MAX_OPACITY_WAVELENGTHS};
@@ -12,14 +12,20 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::PropertyKey;
 use fs_material::state_point::{
     MaterialStatePointError, ResolvedMaterialStatePoint, ResolvedScalarProperty,
-    SpectralComplexIndexStatePoint, VisibleDielectricAbsorption, VisibleOpticalStatePoint,
+    SpectralComplexIndexStatePoint, SpectralOpticalStatePoint, SpectralSellmeierStatePoint,
+    SpectralTabulatedDielectricStatePoint, VisibleDielectricAbsorption, VisibleOpticalStatePoint,
 };
 use fs_math::det;
+
+/// Native transport and physical-camera observation at immutable wavelength nodes.
+pub mod native;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum AbsorptionLaw<'a> {
     Visible(BulkOpticalLaw),
     Spectral(&'a SpectralComplexIndexStatePoint),
+    TabulatedDielectric(&'a SpectralTabulatedDielectricStatePoint),
+    Sellmeier(&'a SpectralSellmeierStatePoint),
 }
 
 /// Bulk intensity absorption and intrinsic density at one accepted condition.
@@ -97,6 +103,72 @@ impl<'a> MaterialAbsorptionBinding<'a> {
         )
     }
 
+    /// Bind an original finite-band dielectric intensity-absorption table.
+    ///
+    /// The original SI wavelengths and alpha law remain owned by the material
+    /// source. No visible-band restriction, fitted index, or alpha-to-k
+    /// conversion is introduced for this absorption-only observation.
+    pub fn try_spectral_tabulated_dielectric(
+        accepted: &'a ResolvedMaterialStatePoint,
+        optical: &'a SpectralTabulatedDielectricStatePoint,
+        density_property: &PropertyKey,
+    ) -> Result<Self, MaterialAbsorptionError> {
+        MaterialOpticalBinding::validate_bulk_state(accepted, optical.resolved())?;
+        validate_si_absorption_band(optical.wavelength_bounds_m())?;
+        Self::bind(
+            accepted,
+            optical.resolved(),
+            optical.identity(),
+            AbsorptionLaw::TabulatedDielectric(optical),
+            density_property,
+        )
+    }
+
+    /// Bind the independently supported absorption of an analytic dielectric.
+    ///
+    /// Only its original alpha spectrum is queried. The Sellmeier dispersion
+    /// fit is neither evaluated nor extrapolated, and its distinct support
+    /// does not truncate this bulk-absorption observation. Consumers requiring
+    /// refraction must separately admit the original fitted-index domain.
+    pub fn try_spectral_sellmeier(
+        accepted: &'a ResolvedMaterialStatePoint,
+        optical: &'a SpectralSellmeierStatePoint,
+        density_property: &PropertyKey,
+    ) -> Result<Self, MaterialAbsorptionError> {
+        MaterialOpticalBinding::validate_bulk_state(accepted, optical.resolved())?;
+        let samples = optical.absorption_samples();
+        validate_si_absorption_band((samples[0].wavelength_m, samples[8].wavelength_m))?;
+        Self::bind(
+            accepted,
+            optical.resolved(),
+            optical.identity(),
+            AbsorptionLaw::Sellmeier(optical),
+            density_property,
+        )
+    }
+
+    /// Bind the caller-selected finite-band family without name-based dispatch.
+    ///
+    /// Conductors reuse their original n/k owner. Dielectrics use original
+    /// intensity absorption, including the independent Sellmeier alpha domain.
+    pub fn try_spectral_optical(
+        accepted: &'a ResolvedMaterialStatePoint,
+        optical: &'a SpectralOpticalStatePoint,
+        density_property: &PropertyKey,
+    ) -> Result<Self, MaterialAbsorptionError> {
+        match optical {
+            SpectralOpticalStatePoint::Conductor(source) => {
+                Self::try_spectral(accepted, source.complex_index(), density_property)
+            }
+            SpectralOpticalStatePoint::TabulatedDielectric(source) => {
+                Self::try_spectral_tabulated_dielectric(accepted, source, density_property)
+            }
+            SpectralOpticalStatePoint::DielectricSellmeier(source) => {
+                Self::try_spectral_sellmeier(accepted, source, density_property)
+            }
+        }
+    }
+
     fn bind(
         accepted: &'a ResolvedMaterialStatePoint,
         optical: &'a ResolvedMaterialStatePoint,
@@ -114,6 +186,8 @@ impl<'a> MaterialAbsorptionBinding<'a> {
             AbsorptionLaw::Visible(BulkOpticalLaw::Conductor(_)) => 0,
             AbsorptionLaw::Visible(BulkOpticalLaw::Dielectric(_)) => 1,
             AbsorptionLaw::Spectral(_) => 2,
+            AbsorptionLaw::TabulatedDielectric(_) => 3,
+            AbsorptionLaw::Sellmeier(_) => 4,
         }]);
         hash.update(density.answer().receipt.content_hash().as_bytes());
         hash.update(&density_kg_m3.to_bits().to_le_bytes());
@@ -152,6 +226,16 @@ impl<'a> MaterialAbsorptionBinding<'a> {
         self.density_kg_m3
     }
 
+    /// Unique positive absolute temperature [K] from the accepted condition.
+    ///
+    /// This shares the particle-optics admission of semantic absolute
+    /// temperature and the legacy Kelvin `T` coordinate. Missing, ambiguous,
+    /// nonpositive or nonfinite temperature is absent; no LTE is inferred.
+    #[must_use]
+    pub fn accepted_temperature_k(&self) -> Option<f64> {
+        accepted_temperature_k(self.accepted)
+    }
+
     /// Original optical state and wavelength/key interpretation identity.
     #[must_use]
     pub const fn source_identity(&self) -> ContentHash {
@@ -170,6 +254,17 @@ impl<'a> MaterialAbsorptionBinding<'a> {
         match self.law {
             AbsorptionLaw::Visible(_) => [LAMBDA_MIN, LAMBDA_MAX],
             AbsorptionLaw::Spectral(source) => source.wavelength_bounds_nm(),
+            AbsorptionLaw::TabulatedDielectric(source) => {
+                let (minimum, maximum) = source.wavelength_bounds_m();
+                [minimum * 1.0e9, maximum * 1.0e9]
+            }
+            AbsorptionLaw::Sellmeier(source) => {
+                let samples = source.absorption_samples();
+                [
+                    samples[0].wavelength_m * 1.0e9,
+                    samples[8].wavelength_m * 1.0e9,
+                ]
+            }
         }
     }
 
@@ -207,6 +302,26 @@ impl<'a> MaterialAbsorptionBinding<'a> {
                     .at_wavelength(wavelength_nm)
                     .map_err(MaterialAbsorptionError::Source)?;
                 complex_mass_absorption(index.k, wavelength_nm, self.density_kg_m3)
+            }
+            AbsorptionLaw::TabulatedDielectric(source) => {
+                let (minimum, maximum) = source.wavelength_bounds_m();
+                let wavelength_m = source_wavelength_m(wavelength_nm, minimum, maximum);
+                let alpha = source
+                    .absorption_per_m_at(wavelength_m)
+                    .map_err(MaterialAbsorptionError::Source)?;
+                checked_coefficient(alpha / self.density_kg_m3, alpha == 0.0)
+            }
+            AbsorptionLaw::Sellmeier(source) => {
+                let samples = source.absorption_samples();
+                let wavelength_m = source_wavelength_m(
+                    wavelength_nm,
+                    samples[0].wavelength_m,
+                    samples[8].wavelength_m,
+                );
+                let alpha = source
+                    .absorption_per_m_at(wavelength_m)
+                    .map_err(MaterialAbsorptionError::Source)?;
+                checked_coefficient(alpha / self.density_kg_m3, alpha == 0.0)
             }
         }
     }
@@ -327,6 +442,8 @@ pub enum MaterialAbsorptionError {
     SpectralAbsorptionRequired,
     /// Point sampling requires 1--16 finite positive increasing wavelengths.
     InvalidWavelengthSamples,
+    /// The original SI absorption band has no faithful finite nm representation.
+    UnrepresentableWavelengthBand,
     /// A requested wavelength falls outside the original closed source support.
     WavelengthOutsideSource {
         wavelength_nm: f64,
@@ -357,6 +474,9 @@ impl core::fmt::Display for MaterialAbsorptionError {
             Self::InvalidWavelengthSamples => {
                 f.write_str("bulk absorption requires 1--16 positive increasing wavelength samples")
             }
+            Self::UnrepresentableWavelengthBand => {
+                f.write_str("original absorption support cannot be represented in nanometres")
+            }
             Self::WavelengthOutsideSource {
                 wavelength_nm,
                 minimum_nm,
@@ -380,6 +500,22 @@ impl core::error::Error for MaterialAbsorptionError {
             _ => None,
         }
     }
+}
+
+fn validate_si_absorption_band(bounds_m: (f64, f64)) -> Result<(), MaterialAbsorptionError> {
+    let [minimum, maximum] = [bounds_m.0 * 1.0e9, bounds_m.1 * 1.0e9];
+    if minimum.is_finite() && minimum > 0.0 && maximum.is_finite() && maximum > minimum {
+        Ok(())
+    } else {
+        Err(MaterialAbsorptionError::UnrepresentableWavelengthBand)
+    }
+}
+
+fn source_wavelength_m(wavelength_nm: f64, minimum_m: f64, maximum_m: f64) -> f64 {
+    // The nm query has already passed the closed source-band check. Clamp only
+    // the SI roundtrip so a rounded endpoint cannot fall just outside its own
+    // original support; no out-of-band caller value reaches this conversion.
+    (wavelength_nm * 1.0e-9).clamp(minimum_m, maximum_m)
 }
 
 fn checked_coefficient(value: f64, lossless: bool) -> Result<f64, MaterialAbsorptionError> {

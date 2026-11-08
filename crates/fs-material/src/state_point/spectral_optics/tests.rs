@@ -480,3 +480,70 @@ fn g0_refresh_rechecks_adopted_passivity_without_publishing_partial_state() {
     assert!(source.at_query_point(&card, &point(601.0)).is_err());
     assert!(source.at_query_point(&card, &QueryPoint::new()).is_err());
 }
+
+#[test]
+fn g1_original_tabulated_absorption_evaluates_ir_knots_and_linear_segments() {
+    let card = card(true, Some);
+    let source = resolve_spectral_tabulated_dielectric_state_point(
+        &card,
+        &point(450.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    for sample in source.samples() {
+        assert_eq!(
+            source.absorption_per_m_at(sample.wavelength_m).unwrap(),
+            sample.absorption_per_m
+        );
+    }
+    let left = source.samples()[3];
+    let right = source.samples()[4];
+    let midpoint = 0.5 * (left.wavelength_m + right.wavelength_m);
+    assert!((source.absorption_per_m_at(midpoint).unwrap() - 3.5).abs() < 4e-14);
+    let hot = source.at_query_point(&card, &point(600.0)).unwrap();
+    assert!((hot.absorption_per_m_at(midpoint).unwrap() - 3.75).abs() < 4e-14);
+    let (minimum, maximum) = source.wavelength_bounds_m();
+    for wavelength in [
+        minimum.next_down(),
+        maximum.next_up(),
+        550e-9,
+        f64::NAN,
+        f64::INFINITY,
+    ] {
+        assert!(source.absorption_per_m_at(wavelength).is_err());
+    }
+}
+
+#[test]
+fn g1_tabulated_absorption_retains_lossless_support_and_large_positive_values() {
+    for peak in [0.0, f64::MAX] {
+        let card = card(true, |mut source| {
+            if SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.contains(&source.key.name()) {
+                let value = if source.key.name() == SPECTRAL_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[4]
+                {
+                    peak
+                } else {
+                    0.0
+                };
+                constant(&mut source, value);
+            }
+            Some(source)
+        });
+        let source = resolve_spectral_tabulated_dielectric_state_point(
+            &card,
+            &point(300.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let left = source.samples()[3].wavelength_m;
+        let right = source.samples()[4].wavelength_m;
+        let value = source.absorption_per_m_at(0.5 * (left + right)).unwrap();
+        assert!(value.is_finite());
+        if peak == 0.0 {
+            assert_eq!(value, 0.0);
+        } else {
+            assert!((value / peak - 0.5).abs() < 4e-14);
+        }
+        assert!(source.absorption_per_m_at(550e-9).is_err());
+    }
+}

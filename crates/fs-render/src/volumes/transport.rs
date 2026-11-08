@@ -713,40 +713,17 @@ impl<'a> AbsorbingGrid<'a> {
         for lane in 0..N {
             kappa[lane] = self.absorption.at(wavelengths[lane])?;
         }
-        let mut result = SegmentTransport {
-            transmittance: [1.0; N],
-            emission_w_m2_sr_nm: [0.0; N],
-        };
-        let mut optical_depth = [0.0; N];
-        let mut depth_correction = [0.0; N];
-        let mut cell_visits = 0;
-        if self.vacuum || distance == 0.0 {
-            return Ok(GridSegmentTransport {
-                transport: result,
-                optical_depth,
-                cell_visits,
-            });
-        }
-        let Some(mut ray) =
-            cells::CellRay::clip(&self.grid, origin, direction, distance, max_cells)?
-        else {
-            return Ok(GridSegmentTransport {
-                transport: result,
-                optical_depth,
-                cell_visits,
-            });
-        };
         let mut source_cache = [(f64::NAN, 0.0); N];
-        let emit = EMIT && self.has_thermal_emission();
         let mut previous_model = None;
-        while let Some(segment) = ray.next(cx)? {
-            if COUNTED {
-                cell_visits += 1; // CellRay has already charged this bounded u32 visit.
-            }
-            let length = segment.length_m;
-            let cell = segment.cell;
-            let density = self.grid.data[cell];
-            if length > 0.0 && density > 0.0 {
+        integrate_cells::<N, OBSERVED, COUNTED>(
+            cx,
+            &self.grid,
+            (origin, direction, distance),
+            max_cells,
+            kappa,
+            self.vacuum,
+            EMIT && self.has_thermal_emission(),
+            |cell, kappa| {
                 if let Some(palette) = &self.absorption_palette {
                     let model = palette.cell_indices()[cell];
                     if previous_model != Some(model) {
@@ -757,93 +734,174 @@ impl<'a> AbsorbingGrid<'a> {
                         previous_model = Some(model);
                     }
                 }
-                for lane in 0..N {
-                    if kappa[lane] == 0.0 {
-                        continue;
-                    }
-                    let tau = positive_product(density, kappa[lane], length);
-                    if OBSERVED && (!tau.is_finite() || tau <= 0.0) {
-                        return Err(VolumeTransportError::Unrepresentable);
-                    }
-                    if emit {
-                        let prefix = optical_depth[lane] + depth_correction[lane];
-                        let absorbed = decay::decayed_fraction(tau);
-                        let weight = det::exp(-prefix) * absorbed;
-                        if (OBSERVED || prefix.is_finite())
-                            && let Some(source) = self.source_radiance_at_cell(
-                                cell,
-                                wavelengths[lane],
-                                &mut source_cache[lane],
-                            )?
-                        {
-                            let direct = weight * source;
-                            // A bright source can survive a separately rounded
-                            // subnormal/zero weight. Keep normal-weight products
-                            // unchanged; otherwise attenuate the source before
-                            // multiplying by the cell's absorbed fraction.
-                            let contribution = if source > 0.0 && tau < f64::MIN_POSITIVE {
-                                // Here 1-exp(-tau) = tau to binary64 accuracy.
-                                // Retain the original positive factors rather
-                                // than magnifying a rounded subnormal tau (or
-                                // losing an underflowed tau in the public path).
-                                det::exp(
-                                    det::ln(source)
-                                        + det::ln(density)
-                                        + det::ln(kappa[lane])
-                                        + det::ln(length)
-                                        - prefix,
-                                )
-                            } else if source > 0.0 && weight < f64::MIN_POSITIVE {
-                                decay::attenuate(source, prefix) * absorbed
-                            } else {
-                                direct
-                            };
-                            if OBSERVED && source > 0.0 && contribution == 0.0 {
-                                return Err(VolumeTransportError::Unrepresentable);
-                            }
-                            result.emission_w_m2_sr_nm[lane] += contribution;
-                            if !result.emission_w_m2_sr_nm[lane].is_finite() {
-                                return Err(VolumeTransportError::Unrepresentable);
-                            }
-                        }
-                    }
-                    let previous = optical_depth[lane];
-                    let next = previous + tau;
-                    if !next.is_finite() {
-                        if OBSERVED {
-                            return Err(VolumeTransportError::Unrepresentable);
-                        }
-                        // The public path admits the opaque limit. Do not feed
-                        // infinity into compensation and create a NaN prefix.
-                        optical_depth[lane] = f64::INFINITY;
-                        depth_correction[lane] = 0.0;
-                    } else {
-                        depth_correction[lane] += if previous >= tau {
-                            (previous - next) + tau
-                        } else {
-                            (tau - next) + previous
-                        };
-                        optical_depth[lane] = next;
-                    }
-                }
-            }
-        }
-        for lane in 0..N {
-            optical_depth[lane] += depth_correction[lane];
-            if OBSERVED && !optical_depth[lane].is_finite() {
-                return Err(VolumeTransportError::Unrepresentable);
-            }
-            result.transmittance[lane] = det::exp(-optical_depth[lane]);
-        }
-        if COUNTED {
-            checkpoint(cx)?;
-        }
-        Ok(GridSegmentTransport {
+                Ok(())
+            },
+            |cell, lane| {
+                self.source_radiance_at_cell(cell, wavelengths[lane], &mut source_cache[lane])
+            },
+        )
+    }
+
+    /// Reuse the admitted SI cell geometry with independently prepared exact
+    /// wavelength packets. The caller admits all coefficients and sources;
+    /// this owner's absorption and thermal laws are deliberately not used.
+    /// The original per-segment traversal limit still bounds every call.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn integrate_prepared<const N: usize, const EMIT: bool, const COUNTED: bool>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        distance: f64,
+        max_cells: u32,
+        vacuum: bool,
+        has_emission: bool,
+        update_coefficients: impl FnMut(usize, &mut [f64; N]) -> Result<(), VolumeTransportError>,
+        source_radiance: impl FnMut(usize, usize) -> Result<Option<f64>, VolumeTransportError>,
+    ) -> Result<GridSegmentTransport<N>, VolumeTransportError> {
+        checkpoint(cx)?;
+        cells::validate_ray(origin, direction, distance)?;
+        integrate_cells::<N, false, COUNTED>(
+            cx,
+            &self.grid,
+            (origin, direction, distance),
+            max_cells.min(self.max_steps),
+            [0.0; N],
+            vacuum,
+            EMIT && has_emission,
+            update_coefficients,
+            source_radiance,
+        )
+    }
+}
+
+// One native integral serves admitted linear spectra and original material-law
+// point packets. Coefficient/source ownership changes; traversal, compensation,
+// opaque limits and finite bright-source attenuation remain identical.
+#[allow(clippy::too_many_arguments)]
+fn integrate_cells<const N: usize, const OBSERVED: bool, const COUNTED: bool>(
+    cx: &Cx<'_>,
+    grid: &VolumeGrid<'_>,
+    (origin, direction, distance): (Point3, Vec3, f64),
+    max_cells: u32,
+    mut kappa: [f64; N],
+    vacuum: bool,
+    emit: bool,
+    mut update_coefficients: impl FnMut(usize, &mut [f64; N]) -> Result<(), VolumeTransportError>,
+    mut source_radiance: impl FnMut(usize, usize) -> Result<Option<f64>, VolumeTransportError>,
+) -> Result<GridSegmentTransport<N>, VolumeTransportError> {
+    let mut result = SegmentTransport {
+        transmittance: [1.0; N],
+        emission_w_m2_sr_nm: [0.0; N],
+    };
+    let mut optical_depth = [0.0; N];
+    let mut depth_correction = [0.0; N];
+    let mut cell_visits = 0;
+    if vacuum || distance == 0.0 {
+        return Ok(GridSegmentTransport {
             transport: result,
             optical_depth,
             cell_visits,
-        })
+        });
     }
+    let Some(mut ray) = cells::CellRay::clip(grid, origin, direction, distance, max_cells)? else {
+        return Ok(GridSegmentTransport {
+            transport: result,
+            optical_depth,
+            cell_visits,
+        });
+    };
+    while let Some(segment) = ray.next(cx)? {
+        if COUNTED {
+            cell_visits += 1; // CellRay has already charged this bounded u32 visit.
+        }
+        let length = segment.length_m;
+        let cell = segment.cell;
+        let density = grid.data[cell];
+        if length > 0.0 && density > 0.0 {
+            update_coefficients(cell, &mut kappa)?;
+            for lane in 0..N {
+                if kappa[lane] == 0.0 {
+                    continue;
+                }
+                let tau = positive_product(density, kappa[lane], length);
+                if OBSERVED && (!tau.is_finite() || tau <= 0.0) {
+                    return Err(VolumeTransportError::Unrepresentable);
+                }
+                if emit {
+                    let prefix = optical_depth[lane] + depth_correction[lane];
+                    let absorbed = decay::decayed_fraction(tau);
+                    let weight = det::exp(-prefix) * absorbed;
+                    if (OBSERVED || prefix.is_finite())
+                        && let Some(source) = source_radiance(cell, lane)?
+                    {
+                        let direct = weight * source;
+                        // A bright source can survive a separately rounded
+                        // subnormal/zero weight. Keep normal-weight products
+                        // unchanged; otherwise attenuate the source before
+                        // multiplying by the cell's absorbed fraction.
+                        let contribution = if source > 0.0 && tau < f64::MIN_POSITIVE {
+                            // Here 1-exp(-tau) = tau to binary64 accuracy.
+                            // Retain the original positive factors rather
+                            // than magnifying a rounded subnormal tau (or
+                            // losing an underflowed tau in the public path).
+                            det::exp(
+                                det::ln(source)
+                                    + det::ln(density)
+                                    + det::ln(kappa[lane])
+                                    + det::ln(length)
+                                    - prefix,
+                            )
+                        } else if source > 0.0 && weight < f64::MIN_POSITIVE {
+                            decay::attenuate(source, prefix) * absorbed
+                        } else {
+                            direct
+                        };
+                        if OBSERVED && source > 0.0 && contribution == 0.0 {
+                            return Err(VolumeTransportError::Unrepresentable);
+                        }
+                        result.emission_w_m2_sr_nm[lane] += contribution;
+                        if !result.emission_w_m2_sr_nm[lane].is_finite() {
+                            return Err(VolumeTransportError::Unrepresentable);
+                        }
+                    }
+                }
+                let previous = optical_depth[lane];
+                let next = previous + tau;
+                if !next.is_finite() {
+                    if OBSERVED {
+                        return Err(VolumeTransportError::Unrepresentable);
+                    }
+                    // The public path admits the opaque limit. Do not feed
+                    // infinity into compensation and create a NaN prefix.
+                    optical_depth[lane] = f64::INFINITY;
+                    depth_correction[lane] = 0.0;
+                } else {
+                    depth_correction[lane] += if previous >= tau {
+                        (previous - next) + tau
+                    } else {
+                        (tau - next) + previous
+                    };
+                    optical_depth[lane] = next;
+                }
+            }
+        }
+    }
+    for lane in 0..N {
+        optical_depth[lane] += depth_correction[lane];
+        if OBSERVED && !optical_depth[lane].is_finite() {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        result.transmittance[lane] = det::exp(-optical_depth[lane]);
+    }
+    if COUNTED {
+        checkpoint(cx)?;
+    }
+    Ok(GridSegmentTransport {
+        transport: result,
+        optical_depth,
+        cell_visits,
+    })
 }
 
 fn update_absorption_identity(hash: &mut DomainHasher, spectrum: &MassAbsorptionSpectrum) {

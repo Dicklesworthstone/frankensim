@@ -14,6 +14,8 @@ use fs_material::state_point::*;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, QuantitySpec, Temperature};
 
+mod spectral;
+
 fn temperature_quantity() -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
@@ -21,7 +23,7 @@ fn temperature_quantity() -> QuantitySpec {
     ))
 }
 
-fn point(temperature: f64) -> QueryPoint {
+pub(super) fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity("thermal", temperature_quantity(), temperature)
         .unwrap()
@@ -72,11 +74,11 @@ fn card(claims: Vec<PropertyClaim>) -> MaterialCard {
     .unwrap()
 }
 
-fn density_key() -> PropertyKey {
+pub(super) fn density_key() -> PropertyKey {
     PropertyKey::new(DENSITY_PROPERTY, Density::DIMS)
 }
 
-fn complex_fixture(
+pub(super) fn complex_fixture(
     k: [f64; 2],
 ) -> (
     MaterialCard,

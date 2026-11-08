@@ -4,7 +4,7 @@
 //! discrete luminescence camera. Units remain explicit at the public owners:
 //! thermal radiance is per nanometre; luminescence powers are already integrated.
 
-use super::{AbsorbingGrid, VolumeTransportError, checkpoint};
+use super::{AbsorbingGrid, GridSegmentTransport, VolumeTransportError, checkpoint};
 use crate::camera::{CameraError, LensSample, PhysicalCamera};
 use crate::spectral::observer::{XyzAccumulator, XyzObserverError, XyzObserverLane};
 use crate::spectral::y_integral;
@@ -350,18 +350,50 @@ pub fn render_absorbing_camera<const M: usize>(
 ) -> Result<AbsorbingCameraImage<M>, VolumeCameraError> {
     checkpoint(cx)?;
     validate_camera_wavelengths(medium, &wavelengths_nm)?;
+    render_absorbing_field(
+        cx,
+        camera,
+        wavelengths_nm,
+        medium.content_identity(),
+        settings,
+        |origin, direction, distance, remaining_cells| {
+            medium.transport_counted(
+                cx,
+                origin,
+                direction,
+                distance,
+                &wavelengths_nm,
+                remaining_cells,
+            )
+        },
+    )
+}
+
+// Exact source-bound packet fields share the original camera's raster/pupil
+// stream, physical cell accounting, stable averages and public output owners.
+pub(crate) fn render_absorbing_field<const M: usize>(
+    cx: &Cx<'_>,
+    camera: &PhysicalCamera,
+    wavelengths_nm: [f64; M],
+    field_identity: ContentHash,
+    settings: VolumeCameraSettings,
+    mut trace: impl FnMut(
+        Point3,
+        Vec3,
+        f64,
+        u32,
+    ) -> Result<GridSegmentTransport<M>, VolumeTransportError>,
+) -> Result<AbsorbingCameraImage<M>, VolumeCameraError> {
     let pixels = render_camera(
         cx,
         camera,
         settings,
         0x6162_7363,
         |origin, direction, remaining_cells| {
-            let sample = medium.transport_counted(
-                cx,
+            let sample = trace(
                 origin,
                 direction,
                 f64::INFINITY,
-                &wavelengths_nm,
                 u32::try_from(remaining_cells).unwrap_or(u32::MAX),
             )?;
             Ok(CameraSample {
@@ -381,7 +413,7 @@ pub fn render_absorbing_camera<const M: usize>(
     Ok(AbsorbingCameraImage {
         resolution: settings.resolution,
         wavelengths_nm,
-        field_identity: medium.content_identity(),
+        field_identity,
         pixels,
     })
 }
@@ -408,7 +440,7 @@ pub fn render_absorbing_camera_with_background<const M: usize>(
     camera: &PhysicalCamera,
     wavelengths_nm: [f64; M],
     settings: VolumeCameraSettings,
-    mut background: impl FnMut(
+    background: impl FnMut(
         &Cx<'_>,
         Point3,
         Vec3,
@@ -417,6 +449,45 @@ pub fn render_absorbing_camera_with_background<const M: usize>(
 ) -> Result<AbsorbingCameraRadianceImage<M>, VolumeCameraError> {
     checkpoint(cx)?;
     validate_camera_wavelengths(medium, &wavelengths_nm)?;
+    render_absorbing_field_with_background(
+        cx,
+        camera,
+        wavelengths_nm,
+        medium.content_identity(),
+        settings,
+        |origin, direction, distance, remaining_cells| {
+            medium.transport_counted(
+                cx,
+                origin,
+                direction,
+                distance,
+                &wavelengths_nm,
+                remaining_cells,
+            )
+        },
+        background,
+    )
+}
+
+pub(crate) fn render_absorbing_field_with_background<const M: usize>(
+    cx: &Cx<'_>,
+    camera: &PhysicalCamera,
+    wavelengths_nm: [f64; M],
+    field_identity: ContentHash,
+    settings: VolumeCameraSettings,
+    mut trace: impl FnMut(
+        Point3,
+        Vec3,
+        f64,
+        u32,
+    ) -> Result<GridSegmentTransport<M>, VolumeTransportError>,
+    mut background: impl FnMut(
+        &Cx<'_>,
+        Point3,
+        Vec3,
+        &[f64; M],
+    ) -> Result<VolumeCameraBackground<M>, VolumeCameraError>,
+) -> Result<AbsorbingCameraRadianceImage<M>, VolumeCameraError> {
     let radiance = render_camera_radiance(
         cx,
         camera,
@@ -424,12 +495,10 @@ pub fn render_absorbing_camera_with_background<const M: usize>(
         0x6162_7363,
         |origin, direction, remaining_cells| {
             let background = background(cx, origin, direction, &wavelengths_nm)?;
-            let sample = medium.transport_counted(
-                cx,
+            let sample = trace(
                 origin,
                 direction,
                 background.distance_m,
-                &wavelengths_nm,
                 u32::try_from(remaining_cells).unwrap_or(u32::MAX),
             )?;
             Ok(CameraSample {
@@ -448,7 +517,7 @@ pub fn render_absorbing_camera_with_background<const M: usize>(
     Ok(AbsorbingCameraRadianceImage {
         resolution: settings.resolution,
         wavelengths_nm,
-        field_identity: medium.content_identity(),
+        field_identity,
         radiance,
     })
 }

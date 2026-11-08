@@ -9,7 +9,7 @@
 mod indexed;
 pub use indexed::MaterialParticleCellGrid;
 
-use super::bulk_optics::{BulkOpticalLaw, accepted_density_property};
+use super::bulk_optics::{BulkOpticalLaw, accepted_density_property, accepted_temperature_k};
 use super::{MaterialOpticalBinding, MaterialOpticalError};
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -19,9 +19,11 @@ use fs_material::state_point::{
     VisibleDielectricAbsorption, VisibleOpticalStatePoint,
 };
 use fs_math::c64::C64;
+#[cfg(test)]
 use fs_qty::semantic::{QuantityKind, ValueForm};
 #[cfg(test)]
 use fs_qty::Density;
+#[cfg(test)]
 use fs_qty::{QuantitySpec, Temperature};
 
 use crate::volumes::VolumeGrid;
@@ -138,7 +140,7 @@ impl MaterialParticleScattering {
         if !host_index_n.is_finite() || host_index_n <= 0.0 {
             return Err(ParticleScatteringError::HostIndex);
         }
-        let temperature_k = unique_temperature(accepted);
+        let temperature_k = accepted_temperature_k(accepted);
         let mut hash = DomainHasher::new("org.frankensim.render.material-particles.v1");
         hash.update(accepted.identity().as_bytes());
         hash.update(optical_identity.as_bytes());
@@ -465,26 +467,6 @@ impl<'a> MaterialParticleGrid<'a> {
     pub const fn maximum_volume_fraction(&self) -> f64 {
         self.maximum_observed_volume_fraction
     }
-}
-
-fn unique_temperature(state: &ResolvedMaterialStatePoint) -> Option<f64> {
-    let mut found = None;
-    for (name, value) in state.query_point() {
-        let value = *value;
-        let quantity = state.axis_quantities().get(name);
-        let absolute = quantity.and_then(|q| q.semantic_type()).is_some_and(|q| {
-            q.kind() == QuantityKind::AbsoluteTemperature && q.form() == ValueForm::Static
-        });
-        let legacy = name == "T"
-            && quantity.is_none_or(|q| *q == QuantitySpec::dimensional(Temperature::DIMS));
-        if absolute || legacy {
-            if found.is_some() || !value.is_finite() || value <= 0.0 {
-                return None;
-            }
-            found = Some(value);
-        }
-    }
-    found
 }
 
 /// Atomic refusal before an inconsistent optical material reaches transport.
