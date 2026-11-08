@@ -18,6 +18,9 @@ use fs_thermochem::eos::peng_robinson::phase_screen::{
     PengRobinsonPhaseScreenOptionsV1, PengRobinsonPhaseScreenV1,
 };
 
+/// Prepared original references for repeated conserved U,V queries.
+pub mod prepared;
+
 /// Maximum pressure inversions in one conserved-energy/volume solve.
 pub const MAX_ENERGY_VOLUME_PRESSURE_EVALUATIONS: usize = 128;
 /// Maximum original PT selections across all nested pressure inversions.
@@ -139,7 +142,8 @@ impl PhaseEnergyVolumeSolution {
     pub const fn pressure_evaluations(&self) -> usize {
         self.pressure_evaluations
     }
-    /// Actual original PT calls across all inversions, including the reference.
+    /// Actual original PT calls across all inversions. One-shot increment calls
+    /// include their reference; prepared queries report only new work.
     #[must_use]
     pub const fn pt_evaluations(&self) -> usize {
         self.pt_evaluations

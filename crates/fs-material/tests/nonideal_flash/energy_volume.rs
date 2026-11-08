@@ -353,3 +353,240 @@ fn g17_uv_final_publication_cancellation_is_atomic_and_replayable() {
         .unwrap();
     assert_eq!(solved, replay);
 }
+
+#[test]
+fn g18_prepared_uv_exact_rest_charges_preparation_once() {
+    let source = model([1e22, -3e21], [2e18, -7e17], [100.0, 450.0]);
+    let mut cap = controls();
+    cap.maximum_pt_evaluations = 1;
+    cap.maximum_pressure_evaluations = 1;
+    cap.phase.enthalpy.maximum_flash_evaluations = 1;
+    for temperature in [180.0, 220.0, 280.0] {
+        let start = pt(&source, temperature, 3e6);
+        let path = source
+            .prepare_phase_energy_volume_path(
+                Temperature::new(temperature),
+                Pressure::new(3e6),
+                cap,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(path.preparation_pt_evaluations(), 1);
+        assert_eq!(
+            path.preparation_eos_evaluation_upper_bound(),
+            start.phase().eos_evaluation_upper_bound()
+        );
+        assert_eq!(path.reference_specific_volume_m3_kg(), volume(&start));
+        let rested = path
+            .solve_increment(volume(&start), 0.0, 0, 0, || false)
+            .unwrap();
+        assert_eq!(rested.state(), &start);
+        assert_eq!(rested.accepted_increment_j_kg(), Some(0.0));
+        assert_eq!(rested.entropy_change_j_kg_k(), Some(0.0));
+        assert_eq!(rested.energy_residual_j_kg(), 0.0);
+        assert_eq!(rested.volume_residual_m3_kg(), 0.0);
+        assert_eq!(rested.pressure_evaluations(), 0);
+        assert_eq!(rested.pt_evaluations(), 0);
+        assert_eq!(rested.eos_evaluation_upper_bound(), 0);
+    }
+}
+
+#[test]
+fn g19_prepared_uv_queries_retain_original_reference_and_native_residuals() {
+    let source = source();
+    let start = pt(&source, 220.0, 3e6);
+    let target = pt(&source, 280.0, 3e6);
+    let path = source
+        .prepare_phase_energy_volume_path(
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let query = |v, du| {
+        path.solve_increment(
+            v,
+            du,
+            controls().maximum_pressure_evaluations,
+            controls().maximum_pt_evaluations,
+            || false,
+        )
+        .unwrap()
+    };
+    let initial_query = query(volume(&start), 1000.0);
+    for (v, du) in [
+        (volume(&start), 1000.0),
+        (
+            volume(&target),
+            target.specific_internal_energy_j_kg() - start.specific_internal_energy_j_kg(),
+        ),
+    ] {
+        let one_shot = heat(&source, &start, v, du);
+        let prepared = query(v, du);
+        assert_eq!(prepared.state(), one_shot.state());
+        assert_eq!(
+            prepared.accepted_increment_j_kg(),
+            one_shot.accepted_increment_j_kg()
+        );
+        assert_eq!(
+            prepared.entropy_change_j_kg_k(),
+            one_shot.entropy_change_j_kg_k()
+        );
+        assert_eq!(
+            prepared.energy_residual_j_kg(),
+            one_shot.energy_residual_j_kg()
+        );
+        assert_eq!(
+            prepared.volume_residual_m3_kg(),
+            one_shot.volume_residual_m3_kg()
+        );
+        assert_eq!(
+            prepared.pressure_evaluations(),
+            one_shot.pressure_evaluations()
+        );
+        assert_eq!(
+            prepared.pt_evaluations() + path.preparation_pt_evaluations(),
+            one_shot.pt_evaluations()
+        );
+        assert_eq!(
+            prepared.eos_evaluation_upper_bound() + path.preparation_eos_evaluation_upper_bound(),
+            one_shot.eos_evaluation_upper_bound()
+        );
+    }
+    // Intervening volume/phase changes never become a later query's reference.
+    assert_eq!(query(volume(&start), 1000.0), initial_query);
+}
+
+#[test]
+fn g20_prepared_uv_caps_new_nested_work_and_remains_reusable() {
+    let source = source();
+    let path = source
+        .prepare_phase_energy_volume_path(
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let v = path.reference_specific_volume_m3_kg();
+    assert!(matches!(
+        path.solve_increment(v, 1000.0, 0, 20, || false),
+        Err(E::PressureWorkLimit {
+            pressure_evaluations: 0
+        })
+    ));
+    assert!(matches!(
+        path.solve_increment(v, 1000.0, 20, 0, || false),
+        Err(E::WorkLimit {
+            flash_evaluations: 0
+        })
+    ));
+    assert!(matches!(
+        path.solve_increment(v, 1000.0, 20, 2, || false),
+        Err(E::WorkLimit {
+            flash_evaluations: 2
+        })
+    ));
+    assert!(matches!(
+        path.solve_increment(v, 1000.0, 1, 4096, || false),
+        Err(E::PressureWorkLimit {
+            pressure_evaluations: 1
+        })
+    ));
+    // Zero energy at a different volume cannot borrow the exact-rest shortcut.
+    assert!(matches!(
+        path.solve_increment(v * 1.01, 0.0, 0, 0, || false),
+        Err(E::PressureWorkLimit {
+            pressure_evaluations: 0
+        })
+    ));
+    assert!(path.solve_increment(v, 0.0, 0, 0, || false).is_ok());
+    assert!(matches!(
+        path.solve_increment(f64::NAN, 0.0, 0, 0, || false),
+        Err(E::Invalid(_))
+    ));
+    let limited = model([0.0; 2], [0.0; 2], [200.0, 260.0]);
+    assert!(matches!(
+        limited.prepare_phase_energy_volume_path(
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            controls(),
+            || false
+        ),
+        Err(E::Material(_))
+    ));
+}
+
+#[test]
+fn g21_prepared_uv_phase_conversion_is_independent_of_species_datums() {
+    let plain = source();
+    let shifted = model([1e22, -3e21], [2e18, -7e17], [100.0, 450.0]);
+    let target = pt(&plain, 280.0, 3e6);
+    let solve = |source: &ThermochemicalPengRobinsonModel| {
+        source
+            .prepare_phase_energy_volume_path(
+                Temperature::new(180.0),
+                Pressure::new(3e6),
+                controls(),
+                || false,
+            )
+            .unwrap()
+            .solve_increment(volume(&target), 473_969.987_719_206_8, 64, 4096, || false)
+            .unwrap()
+    };
+    let a = solve(&plain);
+    let b = solve(&shifted);
+    close(a.state().temperature_k(), 280.0, 3e-7);
+    close(a.state().pressure_pa(), 3e6, 0.02);
+    assert_eq!(
+        a.state().temperature_k().to_bits(),
+        b.state().temperature_k().to_bits()
+    );
+    assert_eq!(
+        a.state().pressure_pa().to_bits(),
+        b.state().pressure_pa().to_bits()
+    );
+    assert_eq!(a.accepted_increment_j_kg(), b.accepted_increment_j_kg());
+    assert_eq!(a.entropy_change_j_kg_k(), b.entropy_change_j_kg_k());
+    assert_eq!(a.pt_evaluations(), b.pt_evaluations());
+}
+
+#[test]
+fn g22_prepared_uv_final_cancellation_preserves_replay() {
+    let source = source();
+    let path = source
+        .prepare_phase_energy_volume_path(
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let v = path.reference_specific_volume_m3_kg();
+    let mut calls = 0;
+    let accepted = path
+        .solve_increment(v, 1000.0, 64, 4096, || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+    let mut seen = 0;
+    assert_eq!(
+        path.solve_increment(v, 1000.0, 64, 4096, || {
+            seen += 1;
+            seen == calls
+        })
+        .unwrap_err(),
+        E::Cancelled
+    );
+    assert_eq!(seen, calls);
+    assert_eq!(
+        path.solve_increment(v, 1000.0, 64, 4096, || false).unwrap(),
+        accepted
+    );
+    assert_eq!(
+        path.solve_increment(v, 0.0, 0, 0, || true).unwrap_err(),
+        E::Cancelled
+    );
+}
