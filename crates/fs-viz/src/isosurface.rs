@@ -114,6 +114,8 @@ pub enum IsoSurfaceError {
     VertexIndexOverflow,
     /// Interpolation or orientation produced non-finite geometry.
     NonFiniteGeometry,
+    /// The caller stopped extraction before a complete mesh was published.
+    Cancelled,
 }
 
 impl core::fmt::Display for IsoSurfaceError {
@@ -128,6 +130,7 @@ impl core::fmt::Display for IsoSurfaceError {
             Self::NonFiniteGeometry => {
                 write!(f, "isosurface interpolation produced non-finite geometry")
             }
+            Self::Cancelled => write!(f, "isosurface extraction cancelled"),
         }
     }
 }
@@ -269,11 +272,26 @@ impl Grid3 {
     /// [`IsoSurfaceError`] for an invalid level/budget, index exhaustion, or
     /// non-finite interpolated geometry.
     pub fn isosurface(&self, iso: f64, triangle_limit: usize) -> Result<IsoMesh3, IsoSurfaceError> {
+        self.isosurface_with_control(iso, triangle_limit, || true)
+    }
+
+    /// The same extraction with caller-owned bounded-work cancellation.
+    /// `control` is polled before allocation, once per grid cube (at most six
+    /// tetrahedra), and before publication. A refusal returns no partial mesh.
+    pub fn isosurface_with_control(
+        &self,
+        iso: f64,
+        triangle_limit: usize,
+        mut control: impl FnMut() -> bool,
+    ) -> Result<IsoMesh3, IsoSurfaceError> {
         if !iso.is_finite() {
             return Err(IsoSurfaceError::NonFiniteIso { iso });
         }
         if triangle_limit == 0 {
             return Err(IsoSurfaceError::ZeroTriangleLimit);
+        }
+        if !control() {
+            return Err(IsoSurfaceError::Cancelled);
         }
 
         let mut extractor = Extractor3 {
@@ -288,6 +306,9 @@ impl Grid3 {
         for k in 0..(nz - 1) {
             for j in 0..(ny - 1) {
                 for i in 0..(nx - 1) {
+                    if !control() {
+                        return Err(IsoSurfaceError::Cancelled);
+                    }
                     let cube = [
                         self.index_unchecked(i, j, k),
                         self.index_unchecked(i + 1, j, k),
@@ -308,6 +329,9 @@ impl Grid3 {
                     }
                 }
             }
+        }
+        if !control() {
+            return Err(IsoSurfaceError::Cancelled);
         }
         Ok(IsoMesh3 {
             vertices: extractor.vertices,

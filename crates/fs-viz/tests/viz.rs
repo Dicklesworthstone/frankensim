@@ -1508,6 +1508,24 @@ fn marching_tetrahedra_extracts_an_exact_oriented_plane() {
 }
 
 #[test]
+fn marching_tetrahedra_cancels_before_partial_publication() {
+    let grid = Grid3::from_fn([8; 3], [-1.0; 3], [1.0; 3], 512, |p| p[0]).unwrap();
+    let mut polls = 0;
+    assert_eq!(
+        grid.isosurface_with_control(0.0, 10_000, || {
+            polls += 1;
+            polls < 5
+        }),
+        Err(IsoSurfaceError::Cancelled)
+    );
+    assert_eq!(polls, 5);
+    assert_eq!(
+        grid.isosurface(0.0, 10_000).unwrap(),
+        grid.isosurface_with_control(0.0, 10_000, || true).unwrap()
+    );
+}
+
+#[test]
 fn sphere_isosurface_area_converges_under_refinement() {
     let radius = 0.7;
     let sphere = |resolution: usize| {

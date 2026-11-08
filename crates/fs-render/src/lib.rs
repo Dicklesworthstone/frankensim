@@ -56,6 +56,8 @@ pub mod coated_diffuse;
 pub mod dielectric;
 #[cfg(feature = "differentiable")]
 pub mod diff;
+#[cfg(feature = "free-surface")]
+pub mod free_surface;
 #[cfg(feature = "tracer")]
 pub mod gradient_index;
 #[cfg(feature = "tracer")]

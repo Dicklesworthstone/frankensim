@@ -12,6 +12,52 @@ use super::*;
 mod conservative;
 
 impl FreeSurface3 {
+    /// Original liquid volume fraction for a read-only physical reconstruction.
+    ///
+    /// Unlike [`Self::fill`], an interface's `mass / density` is not clamped.
+    /// Conversion hysteresis may leave a finite value outside `[0,1]`; the
+    /// observer must refuse that unresolved geometry rather than erase its
+    /// inventory. Full liquid and gas return exactly one and zero. Unallocated
+    /// in-domain nonsolid cells are gas, independent of tile maintenance.
+    /// `None` identifies a solid or an out-of-domain location, never empty gas.
+    /// No mass, populations, geometry or conversion state is changed.
+    pub fn volume_fraction_at(
+        &self,
+        coordinates: [usize; 3],
+    ) -> Result<Option<f64>, FreeSurfaceError3> {
+        if coordinates
+            .iter()
+            .zip(self.domain_cells())
+            .any(|(&p, n)| p >= n)
+        {
+            return Ok(None);
+        }
+        let [x, y, z] = coordinates;
+        let key = morton3((x / TILE) as u32, (y / TILE) as u32, (z / TILE) as u32);
+        if self.solid.contains(&key) || self.planar_piston_contains(coordinates.map(|p| p as i64)) {
+            return Ok(None);
+        }
+        let Some(tile) = self.tiles.get(&key) else {
+            return Ok(Some(0.0));
+        };
+        let lane = lane_of(x % TILE, y % TILE, z % TILE);
+        let fraction = match tile.cells[lane] {
+            Cell3::Fluid => 1.0,
+            Cell3::Gas => 0.0,
+            Cell3::Interface => {
+                let (mass, density) = self.interface_mass_and_density(key, lane)?;
+                let fraction = mass / density;
+                if !fraction.is_finite() {
+                    return Err(FreeSurfaceError3::Transport(
+                        "original interface volume fraction is unrepresentable",
+                    ));
+                }
+                fraction
+            }
+        };
+        Ok(Some(fraction))
+    }
+
     fn interface_mass_and_density(
         &self,
         key: u64,
@@ -265,6 +311,36 @@ impl FreeSurface3 {
 mod tests {
     use super::super::thermocapillary::HeightGraphSurface3;
     use super::*;
+
+    #[test]
+    fn g0_volume_fraction_observation_preserves_unresolved_mass_and_gas_identity() {
+        let (state, _, a, b) = FreeSurface3::fill_projection_fixture(1000);
+        let p = FreeSurface3::transport_coordinates(a)
+            .unwrap()
+            .map(|v| v as usize);
+        let q = FreeSurface3::transport_coordinates(b)
+            .unwrap()
+            .map(|v| v as usize);
+        let mass = state.ledger_mass();
+        assert!(state.volume_fraction_at(p).unwrap().unwrap() > 1.0);
+        assert!(state.volume_fraction_at(q).unwrap().unwrap() < 0.0);
+        assert_eq!(state.volume_fraction_at([11, 11, 11]).unwrap(), Some(0.0));
+        assert_eq!(state.volume_fraction_at([24, 0, 0]).unwrap(), None);
+        assert_eq!(state.ledger_mass(), mass);
+        let sparse = FreeSurface3::new(
+            24,
+            24,
+            24,
+            0.8,
+            [0.0; 3],
+            0.0,
+            ContactModel3::Neutral,
+            |x, y, z| (2..7).contains(&x) && (2..7).contains(&y) && (2..7).contains(&z),
+        )
+        .unwrap();
+        assert!(sparse.grid.resolve_source(23, 23, 23).is_none());
+        assert_eq!(sparse.volume_fraction_at([23; 3]).unwrap(), Some(0.0));
+    }
 
     fn assert_balance(trace: &MassTransport3) {
         let mut balance = trace.before.clone();

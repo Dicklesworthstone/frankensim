@@ -21,6 +21,7 @@ fs-fft = { path = "../fs-fft", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
 fs-img = { path = "../fs-img", optional = true }
 fs-ivl = { path = "../fs-ivl", optional = true }
+fs-lbm = { path = "../fs-lbm", optional = true }
 fs-matdb = { path = "../fs-matdb", optional = true }
 fs-material = { path = "../fs-material", optional = true }
 fs-math = { path = "../fs-math" }
@@ -32,6 +33,7 @@ fs-solid = { path = "../fs-solid", optional = true }
 fs-substrate = { path = "../fs-substrate", optional = true }
 fs-thermal = { path = "../fs-thermal", optional = true }
 fs-thermochem = { path = "../fs-thermochem", optional = true }
+fs-viz = { path = "../fs-viz", optional = true }
 
 [dev-dependencies]
 asupersync = { path = "../../../asupersync" }
@@ -71,6 +73,12 @@ material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conductio
 optical-heating = ["tracer", "volumes", "dep:fs-thermal"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.
 material-geometry = ["chart-backends", "dep:fs-mbd-material", "dep:fs-solid"]
+# Original detached-liquid fill snapshots through the shared isosurface owner.
+free-surface = ["tracer", "dep:fs-lbm", "dep:fs-viz"]
+
+[[test]]
+name = "free_surface"
+required-features = ["free-surface"]
 
 [[test]]
 name = "material_geometry"

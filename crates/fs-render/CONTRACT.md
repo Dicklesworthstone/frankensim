@@ -3593,14 +3593,40 @@ reduction, nonlinear stochastic trajectories and statistical/work refusal.
 - Progressive live tiles with ledger artifact pinning (frame-consistent
   snapshots of evolving fields) — staged with the vessel flagship's
   render lane; the smoke tier renders a paused simulation's buffer.
-- Refractive free-surface reconstruction from fill fractions and specialized
-  refractive volume-source connectors remain successors. The shared path tracer
+- Specialized refractive volume-source connectors remain successors. Detached
+  native liquid snapshots have the opt-in reconstruction described below. The shared path tracer
   implements borrowed absorption/emission/scattering in ambient and explicitly
   bound dielectric regions, with phase/source MIS; interface random walks
   supply paths that cross boundaries.
 - The zero-copy claim at smoke tier is BORROW SEMANTICS (the API takes
   `&[f64]`; the battery binds a live `FreeSurface` mass buffer); the
   FrankenNumpy membrane view protocol is the fuller deliverable.
+
+## Native free-surface optical geometry
+
+The opt-in `free-surface` feature observes immutable `FreeSurface3` snapshots
+through their actual unclamped interface mass/density ratios. Cell-center
+samples of `0.5 - fill` pass through the original `fs-viz` marching-tetrahedra
+owner, then the original renderer `TriMesh` BVH. Outward liquid/gas normals and
+physical metre coordinates let the ordinary dielectric owner apply spectral
+Snell/Fresnel transport, nested regions and Beer attenuation. The material-flow
+entry point takes its cell width from the original SI scaling; neither entry
+point infers refractive indices or absorption from numerical LBM density.
+
+The caller supplies dense-sample and triangle budgets. Sampling, extraction and
+facet admission poll cancellation; the existing BVH construction remains one
+synchronous section bounded by the triangle limit. Empty interior sparse tiles
+are gas. Nonzero unlocated carry, raw fills outside `[0,1]`, solids, wet domain
+boundaries, unresolved crossings, degenerate facets and nonclosed or inconsistently
+oriented edges refuse without changing accepted fluid state or returning a
+partial mesh. Detached liquid requires an empty domain collar.
+
+This is a piecewise-linear half-fill visualization model: no PLIC volume
+conservation, subcell droplet recovery, smooth-normal reconstruction, global
+vertex-link manifold certification, moving-exposure sampling or wet-wall closure
+is claimed. Focused regressions exercise fractional interface displacement,
+density-independent geometry, immutable state and deterministic replay, native
+mesh entry/exit with Snell and Beer laws, and budget/cancellation/geometry refusals.
 
 ## Motion-time foundation
 
