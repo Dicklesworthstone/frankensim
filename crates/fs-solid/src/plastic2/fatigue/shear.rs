@@ -54,7 +54,7 @@ pub struct PlaneShearFatigueBudget {
 #[derive(Debug, Clone)]
 pub(super) struct GaugeState {
     pub(super) element: usize,
-    point: usize,
+    pub(super) point: usize,
     pub(super) counter: FatemiSocieCycle,
 }
 

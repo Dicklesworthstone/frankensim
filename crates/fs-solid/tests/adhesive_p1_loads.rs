@@ -908,7 +908,7 @@ fn late_receiver_cancellation_and_erased_background_load_preserve_the_native_che
         native.advance(&a, &other, 2e-7, &gate(), cx).unwrap();
         reference.advance(&a, &other, 2e-7, &gate(), cx).unwrap();
         let state = native.native().state().clone();
-        let frame = native.last_step().cloned();
+        let last_step = native.last_step().cloned();
         let transfer = *native.current_transfer();
         let refused: Result<(), AdhesiveP1Error3> =
             native.advance_with_admission(&b, &other, 2e-7, &gate(), cx, |_, _| {
@@ -923,7 +923,7 @@ fn late_receiver_cancellation_and_erased_background_load_preserve_the_native_che
             });
         assert!(matches!(refused, Err(AdhesiveP1Error3::Cancelled)));
         assert_eq!(native.native().state(), &state);
-        assert_eq!(native.last_step(), frame.as_ref());
+        assert_eq!(native.last_step(), last_step.as_ref());
         assert_eq!(native.current_transfer(), &transfer);
         assert_eq!(
             native.advance(&b, &other, 2e-7, &gate(), cx).unwrap(),
