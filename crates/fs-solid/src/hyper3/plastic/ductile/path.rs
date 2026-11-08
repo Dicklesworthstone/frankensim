@@ -4,8 +4,8 @@
 //! the same immutable last accepted configuration, velocity and plastic/damage
 //! history. Supports interpolate from their actual accepted coordinates; the
 //! caller supplies both endpoints of dead nodal and referential body loads.
-//! The accepted fraction supplies the physical duration to BOTH initiation
-//! and native momentum. Temperatures stay held for the complete interval.
+//! The accepted fraction supplies the physical duration to initiation, selected
+//! native overstress and momentum. Temperatures stay held for the complete interval.
 //!
 //! Damage, summed absolute material work defects and kinetic numerical loss
 //! control subdivision with separate whole-interval budgets. These gates are
@@ -660,10 +660,13 @@ where
             DuctileTemperatures::PerPoint(values) => values[element],
             DuctileTemperatures::PerHexElement(_) => unreachable!("coverage admitted above"),
         };
-        point_conditions.push(DuctileJ2Conditions {
+        let at = DuctileJ2Conditions {
             duration_s: conditions.duration_s,
             temperature_k,
-        });
+        };
+        model.validate_conditions(at)
+            .map_err(|source| FiniteDuctileTetError::Material { element, source })?;
+        point_conditions.push(at);
         frozen.push(FrozenPoint {
             law: model.native(),
             accepted: state.native_state(),
@@ -699,11 +702,12 @@ where
         dofs: solid.state.displacement_m.as_flattened().len(),
         refusal: RefCell::new(None),
     };
-    let (mut residual, _) = operator
-        .internal(
+    let (mut residual, _, _) = operator
+        .assemble(
             &solid.state.element_states,
             solid.state.displacement_m.as_flattened(),
             None,
+            MaterialEvaluation::Accepted,
             cx,
         )
         .map_err(|error| operator.endpoint_refusal(error))?;

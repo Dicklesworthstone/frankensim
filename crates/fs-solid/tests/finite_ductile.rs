@@ -6,6 +6,8 @@
 mod dynamics;
 #[path = "finite_ductile/path.rs"]
 mod path;
+#[path = "finite_ductile/rate.rs"]
+mod rate;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

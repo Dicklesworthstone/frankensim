@@ -1,5 +1,29 @@
 # fs-material — CONTRACT
 
+## Rate-dependent progressive finite ductility
+
+`FiniteDuctileJ2::with_overstress` explicitly selects the original fixed-temperature
+finite Perzyna flow. Every trial uses its supplied physical duration for both
+implicit native flow and initiation; solver iterations never consume history.
+Linear, Voce and tabulated hardening retain their original metric and return.
+Held overstressed deformation can relax and continue accumulating damage. The
+full Piola tangent includes the inverse-rate modulus in plastic-accumulation
+and moving-onset derivatives.
+
+Attenuation retains the calibrated equilibrium-resistance work integral;
+viscous overstress joins physical plastic dissipation, without changing the
+supplied damage-work calibration. Storage, damage release and signed
+endpoint-work defects remain separate. `validate_committed` and accepted stress
+getters inspect history without another rate step or equilibrium-yield
+projection. Coefficients are explicit authored, fixed-temperature selections;
+no source-backed viscosity, evolving thermal coefficients, creep or fracture
+topology is inferred.
+
+G1/G3 regressions in `plastic_finite_ductile_rate` cover independent closed-form
+work and dissipation, physical-time relaxation/refinement, native hardening
+family parity, all 81 tangent entries and transactional refusals. These are
+numerical constitutive checks, not empirical qualification of a material.
+
 ## Timed thermal strain in original tensile fracture
 
 `brittle::source::expansion::rate` composes original integrated thermal expansion

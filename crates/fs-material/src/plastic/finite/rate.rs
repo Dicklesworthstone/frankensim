@@ -179,38 +179,7 @@ impl FiniteOverstressJ2 {
         state: &FiniteJ2State,
         yield_tolerance_pa: f64,
     ) -> Result<(), FiniteJ2Error> {
-        if self.backbone.maximum_creep_alpha.is_some() {
-            // An inspection backbone from the combined law still requires
-            // equilibrium plastic yield; wrapping it cannot relax that gate.
-            return self
-                .backbone
-                .validate_committed(f, state, yield_tolerance_pa);
-        }
-        if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
-            return Err(FiniteJ2Error::Parameters(
-                "yield tolerance must be finite and nonnegative",
-            ));
-        }
-        let endpoint = self.backbone.elastic_endpoint(f, state)?;
-        self.backbone
-            .check_elastic_domain(endpoint.log_j, &endpoint.deviator)?;
-        self.backbone
-            .energy(endpoint.log_j, &endpoint.deviator, state.alpha)?;
-        let p = self.backbone.parameters();
-        let mut tau = endpoint
-            .deviator
-            .map(|value| 2.0 * p.shear_modulus_pa * value);
-        for i in [0, 4, 8] {
-            tau[i] += p.bulk_modulus_pa * endpoint.log_j;
-        }
-        let inverse_transpose = super::transpose(&super::inverse(f, endpoint.jacobian)?);
-        let piola = super::multiply(&tau, &inverse_transpose);
-        if tau.iter().chain(&piola).any(|x| !x.is_finite()) {
-            return Err(FiniteJ2Error::Numerical(
-                "accepted viscous stress is not representable",
-            ));
-        }
-        Ok(())
+        validate_viscous_committed(&self.backbone, f, state, yield_tolerance_pa)
     }
 
     /// Native implicit return and full analytic derivative of its Piola stress.
@@ -410,6 +379,42 @@ impl FiniteOverstressJ2 {
             potential_fraction: 1.0 / (1.0 + inverse_n),
         })
     }
+}
+
+/// Shared no-advance inspection for native and progressively damaged viscous
+/// states. It needs no arbitrary inspection duration or cloned rate owner.
+pub(super) fn validate_viscous_committed(
+    backbone: &FiniteJ2,
+    f: &[f64; 9],
+    state: &FiniteJ2State,
+    yield_tolerance_pa: f64,
+) -> Result<(), FiniteJ2Error> {
+    if backbone.maximum_creep_alpha.is_some() {
+        // An inspection backbone from the combined law still requires
+        // equilibrium plastic yield; wrapping it cannot relax that gate.
+        return backbone.validate_committed(f, state, yield_tolerance_pa);
+    }
+    if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
+        return Err(FiniteJ2Error::Parameters(
+            "yield tolerance must be finite and nonnegative",
+        ));
+    }
+    let endpoint = backbone.elastic_endpoint(f, state)?;
+    backbone.check_elastic_domain(endpoint.log_j, &endpoint.deviator)?;
+    backbone.energy(endpoint.log_j, &endpoint.deviator, state.alpha)?;
+    let p = backbone.parameters();
+    let mut tau = endpoint.deviator.map(|value| 2.0 * p.shear_modulus_pa * value);
+    for i in [0, 4, 8] {
+        tau[i] += p.bulk_modulus_pa * endpoint.log_j;
+    }
+    let inverse_transpose = super::transpose(&super::inverse(f, endpoint.jacobian)?);
+    let piola = super::multiply(&tau, &inverse_transpose);
+    if tau.iter().chain(&piola).any(|x| !x.is_finite()) {
+        return Err(FiniteJ2Error::Numerical(
+            "accepted viscous stress is not representable",
+        ));
+    }
+    Ok(())
 }
 
 fn softplus(x: f64) -> f64 {

@@ -1,5 +1,22 @@
 # fs-solid CONTRACT
 
+## Rate-dependent progressive finite solid damage
+
+The finite ductile tetrahedral static, backward-Euler and adaptive path owners
+preserve the explicitly selected native Perzyna kinetics. Each trial receives
+its actual physical subinterval; retained overstressed states are validated
+through the complete ductile owner. Adaptive initial-equilibrium inspection
+uses the retained accepted Piola stress and consumes no relaxation interval.
+Held deformation can therefore continue plastic flow and ductile degradation.
+
+The existing finite ductile caloric coupling receives the same native physical
+plastic loss and damage release through its solid owner. Reference inertia,
+numerical kinetic loss and signed endpoint-work defects keep their separate
+accounts. `finite_ductile::rate` adds force-controlled hold/replay and dynamic
+continuation regressions, including exact replay of accepted physical
+subintervals. Source-calibrated viscosity, evolving thermal kinetics and
+post-failure component/contact transfer remain outside this selection.
+
 ## Pointwise ductile initiation in layered plastic shells
 
 `ductile::shell` gates the native CST/DKT quasistatic and backward-Euler

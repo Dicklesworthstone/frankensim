@@ -2,7 +2,7 @@
 //!
 //! The original plastic metric, Kirchhoff yield radius, spectral return and
 //! analytic derivatives remain with [`FiniteJ2`]. After initiation, integrity
-//! is `g=exp[-h/Gp integral R(alpha) d alpha]`, with the original linear/Voce
+//! is `g=exp[-h/Gp integral R(alpha) d alpha]`, with the original linear/Voce/tabulated
 //! energetic resistance R. h is a fixed REFERENCE band width and Gp is
 //! post-initiation equivalent Kirchhoff plastic work per reference area. Neither
 //! is current crack area or total fracture dissipation. The shared initiation
@@ -20,13 +20,18 @@
 //! prestressed body. Physical plastic loss and released damage storage stay
 //! nonnegative and separate. Callers bound/refine the absolute defect; it is
 //! never plastic heat. Damage-step limits likewise refuse without clipping.
-//! This is fixed-temperature, rate-independent native plasticity with an
-//! explicitly rate/temperature-dependent initiation law. Creep, caloric
-//! feedback, crack topology, contact and fragment transfer are not supplied.
+//! Fixed-temperature Perzyna overstress can be selected explicitly. The same
+//! physical interval then drives native flow and damage initiation, including
+//! stress relaxation and continued damage at held deformation. The attenuation
+//! coordinate retains the EQUILIBRIUM resistance R; viscous overstress contributes
+//! to native physical plastic dissipation, not an inferred work calibration.
+//! Creep, caloric feedback, crack topology, contact and fragment transfer are
+//! not supplied. Temperature dependence belongs only to the initiation locus.
 
 use super::{
     FiniteJ2, FiniteJ2Error, FiniteJ2State, RadialReturn, ReturnMap, ReturnSensitivities, dot, pack,
 };
+use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters, validate_viscous_committed};
 use crate::ductile::evolution::{
     DifferentiableDuctileInitiationLaw, DuctileEvolutionError, DuctileJ2Conditions,
     DuctileJ2Settings, locus_stress_gradient,
@@ -46,6 +51,7 @@ pub struct FiniteDuctileJ2<L> {
     initiation: L,
     settings: DuctileJ2Settings,
     work_scale: f64,
+    overstress: Option<FiniteOverstressParameters>,
 }
 
 /// Complete accepted history bound to this exact immutable owner.
@@ -123,6 +129,8 @@ impl From<DuctileError> for FiniteDuctileError {
 
 struct Returned {
     native: ReturnMap,
+    /// Derivative of the selected inverse-rate law at this returned increment.
+    viscous_modulus_pa: f64,
     initiation: DuctileState,
     onset_alpha: f64,
     onset: Option<(DuctileStressState, f64, f64)>,
@@ -169,9 +177,33 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
             initiation,
             settings,
             work_scale,
+            overstress: None,
         })
     }
 
+    /// Select fixed-temperature Perzyna flow on the same native backbone.
+    ///
+    /// The physical duration is supplied by each trial, never inferred from
+    /// solver iterations. This creates a distinct immutable owner: an accepted
+    /// history from another owner cannot be relabelled as a viscous specimen.
+    /// Viscous work does not change the supplied equilibrium-resistance damage
+    /// calibration. No rate coefficients or temperature law are inferred.
+    pub fn with_overstress(
+        mut self,
+        parameters: FiniteOverstressParameters,
+    ) -> Result<Self, FiniteDuctileError> {
+        parameters.validate()?;
+        self.overstress = Some(parameters);
+        Ok(self)
+    }
+
+    /// Explicit physical kinetics, or the original rate-independent selection.
+    pub const fn overstress_parameters(&self) -> Option<&FiniteOverstressParameters> {
+        self.overstress.as_ref()
+    }
+
+    /// Native storage and equilibrium resistance. If kinetics is selected this
+    /// backbone alone does not reproduce the complete constitutive response.
     pub const fn native(&self) -> &FiniteJ2 {
         &self.native
     }
@@ -184,6 +216,52 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
     pub fn owns_state(&self, state: &FiniteDuctileState<'_, L>) -> bool {
         core::ptr::eq(state.owner, self)
     }
+
+    /// Inspect retained history without advancing the physical clock. Selected
+    /// kinetics permits legitimate overstress; only the rate-independent owner
+    /// requires the accepted endpoint to lie inside the equilibrium yield surface.
+    pub fn validate_committed(
+        &self,
+        state: &FiniteDuctileState<'_, L>,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteDuctileError> {
+        if !self.owns_state(state) {
+            return Err(FiniteDuctileError::StateMismatch);
+        }
+        if !state.is_valid() {
+            return Err(FiniteDuctileError::Invalid("invalid accepted history"));
+        }
+        if self.overstress.is_some() {
+            validate_viscous_committed(
+                &self.native,
+                &state.deformation,
+                &state.native,
+                yield_tolerance_pa,
+            )?;
+        } else {
+            self.native.validate_committed(
+                &state.deformation,
+                &state.native,
+                yield_tolerance_pa,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Admit physical time and temperature without proposing a relaxation step.
+    /// Rate/stress-state support is checked on actual plastic flow in `trial`.
+    pub fn validate_conditions(
+        &self,
+        conditions: DuctileJ2Conditions,
+    ) -> Result<(), FiniteDuctileError> {
+        positive(conditions.duration_s)?;
+        positive(conditions.temperature_k)?;
+        self.initiation
+            .domain()
+            .check_temperature(conditions.temperature_k)?;
+        Ok(())
+    }
+
     pub fn initial_state(&self) -> FiniteDuctileState<'_, L> {
         FiniteDuctileState {
             owner: self,
@@ -214,12 +292,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         if !old.is_valid() {
             return Err(FiniteDuctileError::Invalid("invalid accepted history"));
         }
-        positive(conditions.duration_s)?;
-        positive(conditions.temperature_k)?;
-        self.initiation
-            .domain()
-            .check_temperature(conditions.temperature_k)?;
-        Ok(())
+        self.validate_conditions(conditions)
     }
 
     /// Residual/backtracking path: same return, source support and damage gates,
@@ -231,7 +304,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         conditions: DuctileJ2Conditions,
     ) -> Result<[f64; 9], FiniteDuctileError> {
         self.admit(old, conditions)?;
-        if f == &old.deformation {
+        if self.overstress.is_none() && f == &old.deformation {
             return Ok(old.first_piola);
         }
         Ok(self.return_map(f, old, conditions)?.first_piola)
@@ -246,7 +319,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         conditions: DuctileJ2Conditions,
     ) -> Result<FiniteDuctileStep<'a, L>, FiniteDuctileError> {
         self.admit(old, conditions)?;
-        if f == &old.deformation {
+        if self.overstress.is_none() && f == &old.deformation {
             return self.replay(old);
         }
         let returned = self.return_map(f, old, conditions)?;
@@ -262,7 +335,8 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         if returned.native.dgamma > 0.0 {
             let modulus = positive(
                 3.0 * self.native.parameters.shear_modulus_pa
-                    + self.native.hardening_tangent(alpha),
+                    + self.native.hardening_tangent(alpha)
+                    + returned.viscous_modulus_pa,
             )?;
             alpha_gradient = sensitivities.trial_equivalent.map(|dq| dq / modulus);
         }
@@ -391,7 +465,22 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         old: &FiniteDuctileState<'_, L>,
         conditions: DuctileJ2Conditions,
     ) -> Result<Returned, FiniteDuctileError> {
-        let native = self.native.return_map(f, &old.native)?;
+        // Native hardening tables are immutable Arc-backed arrays: preparing
+        // this interval neither allocates nor copies a measured curve. The
+        // existing rate owner retains its scalar root, metric and work semantics.
+        let kinetics = self.overstress.map(|parameters| {
+            FiniteOverstressJ2::new(self.native.clone(), parameters, conditions.duration_s)
+        }).transpose()?;
+        let native = self.native.return_map_with_rate(f, &old.native, kinetics.as_ref())?;
+        let viscous_modulus_pa = if native.dgamma > 0.0 {
+            kinetics.as_ref().map(|law| {
+                law.endpoint_overstress_pa(native.dgamma)
+                    .map(|stress| (stress / native.dgamma) * (1.0 / law.parameters().exponent))
+            }).transpose()?.unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        nonnegative(viscous_modulus_pa)?;
         let alpha = native.state.alpha;
         let delta_alpha = nonnegative(alpha - old.native.alpha)?;
         let mut initiation = old.initiation;
@@ -496,6 +585,7 @@ impl<L: DifferentiableDuctileInitiationLaw + Clone> FiniteDuctileJ2<L> {
         finite_tensor(&kirchhoff)?;
         Ok(Returned {
             native,
+            viscous_modulus_pa,
             initiation,
             onset_alpha,
             onset,
@@ -625,6 +715,15 @@ impl<L> FiniteDuctileState<'_, L> {
     }
     pub const fn native_state(&self) -> &FiniteJ2State {
         &self.native
+    }
+    /// Physical accepted Piola stress. Reading it advances neither rate flow
+    /// nor damage, even when the retained native stress is overstressed.
+    pub const fn first_piola_pa(&self) -> &[f64; 9] {
+        &self.first_piola
+    }
+    /// Physical accepted Kirchhoff stress with the same no-advance semantics.
+    pub const fn kirchhoff_pa(&self) -> &[f64; 9] {
+        &self.kirchhoff
     }
     pub const fn initiation(&self) -> &DuctileState {
         &self.initiation

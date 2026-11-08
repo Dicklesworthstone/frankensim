@@ -6,6 +6,8 @@
 //! as a `FiniteStrainPotential` or symmetrized to enter an energy minimizer.
 //! Reference geometry, directional band length and immutable material owners
 //! survive every step. Failed proposals publish no displacement or history.
+//! Explicit native overstress uses the same physical duration as initiation
+//! and attached inertia. Accepted stress inspection never advances that clock.
 //!
 //! Physical plastic dissipation and damage release remain separate from the
 //! signed endpoint work-integration defect. The work budget bounds the SUM of
@@ -203,6 +205,14 @@ where
     refusal: RefCell<Option<(usize, FiniteDuctileError)>>,
 }
 
+#[derive(Clone, Copy)]
+enum MaterialEvaluation {
+    Stress,
+    Tangent,
+    /// Retained physical stress, used only to inspect an initial equilibrium.
+    Accepted,
+}
+
 impl<'m, L> Operator<'_, 'm, L>
 where
     L: DifferentiableDuctileInitiationLaw + Clone + Debug + PartialEq,
@@ -228,7 +238,7 @@ where
         states: &[FiniteDuctileState<'m, L>],
         u: &[f64],
         prescribed: Option<&[bool]>,
-        tangent: bool,
+        evaluation: MaterialEvaluation,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, f64, Option<Csr>), SmallStrainTetError> {
         *self.refusal.borrow_mut() = None;
@@ -243,25 +253,36 @@ where
         }
         let mut force = vec![0.0; self.dofs];
         let mut scale = 0.0;
-        let mut matrix = tangent.then(|| Coo::new(self.dofs, self.dofs));
+        let mut matrix = matches!(evaluation, MaterialEvaluation::Tangent)
+            .then(|| Coo::new(self.dofs, self.dofs));
         for (e, element) in self.elements.iter().enumerate() {
             if e % 128 == 0 {
                 checkpoint(cx)?;
             }
             let f = HyperTetProblem::<FrozenPoint<'_>>::deformation_gradient(element, u);
             let refused = |error| self.material_refusal(e, error);
-            let (p, derivative) = if tangent {
-                let step = self.materials[e]
-                    .trial(&f, &states[e], self.conditions[e])
-                    .map_err(refused)?;
-                (step.first_piola_pa, Some(step.tangent_pa))
-            } else {
-                (
+            let (p, derivative) = match evaluation {
+                MaterialEvaluation::Tangent => {
+                    let step = self.materials[e]
+                        .trial(&f, &states[e], self.conditions[e])
+                        .map_err(refused)?;
+                    (step.first_piola_pa, Some(step.tangent_pa))
+                }
+                MaterialEvaluation::Stress => (
                     self.materials[e]
                         .stress(&f, &states[e], self.conditions[e])
                         .map_err(refused)?,
                     None,
-                )
+                ),
+                MaterialEvaluation::Accepted => {
+                    if !self.materials[e].owns_state(&states[e])
+                        || !states[e].is_valid()
+                        || &f != states[e].deformation()
+                    {
+                        return Err(invalid("retained stress requires its original accepted material and deformation"));
+                    }
+                    (*states[e].first_piola_pa(), None)
+                }
             };
             for a in 0..4 {
                 for i in 0..3 {
@@ -330,7 +351,7 @@ where
         prescribed: Option<&[bool]>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, f64), SmallStrainTetError> {
-        let (force, scale, _) = self.assemble(states, u, prescribed, false, cx)?;
+        let (force, scale, _) = self.assemble(states, u, prescribed, MaterialEvaluation::Stress, cx)?;
         Ok((force, scale))
     }
     fn tangent(
@@ -340,7 +361,7 @@ where
         cx: &Cx<'_>,
     ) -> Result<Csr, SmallStrainTetError> {
         Ok(self
-            .assemble(states, u, None, true, cx)?
+            .assemble(states, u, None, MaterialEvaluation::Tangent, cx)?
             .2
             .expect("requested full tangent"))
     }
@@ -573,16 +594,9 @@ where
             };
             let refused = |source| FiniteDuctileTetError::Material { element: e, source };
             model
-                .native()
-                .validate_committed(
-                    state.deformation(),
-                    state.native_state(),
-                    controls.yield_tolerance_pa,
-                )
-                .map_err(|error| refused(FiniteDuctileError::Native(error)))?;
-            model
-                .stress(state.deformation(), state, at)
+                .validate_committed(state, controls.yield_tolerance_pa)
                 .map_err(refused)?;
+            model.validate_conditions(at).map_err(refused)?;
             point_conditions.push(at);
         }
         let frozen: Vec<_> = self
@@ -673,9 +687,8 @@ where
                 return Err(invalid("native finite ductile committed history differs from its frozen-history proposal").into());
             }
             model
-                .native()
-                .validate_committed(&f, step.state.native_state(), controls.yield_tolerance_pa)
-                .map_err(|error| refused(FiniteDuctileError::Native(error)))?;
+                .validate_committed(&step.state, controls.yield_tolerance_pa)
+                .map_err(refused)?;
             for (sum, value) in totals.iter_mut().zip([
                 step.energy.final_stored_j_m3,
                 step.energy.plastic_dissipation_j_m3,
