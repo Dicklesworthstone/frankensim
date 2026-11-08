@@ -506,38 +506,57 @@ impl ThirdBodyLayerContact {
         let flow = input.dt_s / self.plastic_resistance_n_s_m;
         positive_finite(flow, "layer_plastic_step_compliance")?;
         let force_at = |plastic_compliance: f64| -> Result<[f64; 2], TriboError> {
-            let load = 0.5 * (input.compliance_m_per_n + plastic_compliance);
-            let matrix = add([[1.0, 0.0], [0.0, 1.0]], effective, load)?;
-            solve_spd(matrix, rhs)
+            let load = 0.5 * input.compliance_m_per_n + 0.5 * plastic_compliance;
+            let identity = [[1.0, 0.0], [0.0, 1.0]];
+            if load <= 1.0 {
+                solve_spd(add(identity, effective, load)?, rhs)
+            } else {
+                // Scale the same equation before forming K*load: the
+                // zero-yield Maxwell limit may have enormous compliance.
+                solve_spd(
+                    add(effective, identity, 1.0 / load)?,
+                    rhs.map(|v| v / load),
+                )
+            }
         };
         let elastic_trial = force_at(0.0)?;
         let yielding = det::hypot(elastic_trial[0], elastic_trial[1]) > self.yield_force_n;
         let mut force = elastic_trial;
+        let mut plastic_compliance = 0.0;
         let mut iterations = 0;
-        if yielding {
-            let (mut low, mut high) = (0.0, flow);
+        if yielding && self.yield_force_n == 0.0 {
+            // The Bingham slider reduces exactly to a Maxwell dashpot.
+            plastic_compliance = flow;
+            force = force_at(plastic_compliance)?;
+        } else if yielding {
+            // Writing H F + lambda F = h, H = 2*K^-1 + C_body*I,
+            // gives lambda*|F| <= |h| because H is positive definite.
+            // Since |F| >= Y on the plastic branch, |h|/Y bounds lambda
+            // independently of viscosity. A [0, flow] bracket alone can
+            // require hundreds of halvings in the stiff-flow limit.
+            let h = solve_spd(effective, rhs)?.map(|v| 2.0 * v);
+            let bound = det::hypot(h[0], h[1]) / self.yield_force_n;
+            let (mut low, mut high) = (0.0, flow.min(bound));
             let mut residual = f64::INFINITY;
             let mut tolerance = 0.0;
             for iteration in 1..=input.solve.max_iterations {
                 iterations = iteration;
-                let compliance = 0.5 * low + 0.5 * high;
-                force = force_at(compliance)?;
+                plastic_compliance = 0.5 * low + 0.5 * high;
+                force = force_at(plastic_compliance)?;
                 let norm = det::hypot(force[0], force[1]);
-                let physical = if norm > self.yield_force_n {
-                    flow * (1.0 - self.yield_force_n / norm)
-                } else {
-                    0.0
-                };
-                let mismatch = apply(effective, force).map(|v| 0.5 * (compliance - physical) * v);
-                residual = mismatch[0].abs().max(mismatch[1].abs());
-                tolerance = input.solve.tolerance(norm, norm)?;
+                // Force-unit Bingham residual, without multiplying a
+                // near-cancellation 1-Y/|F| by enormous flow compliance.
+                let yield_residual = norm - self.yield_force_n
+                    - (plastic_compliance / flow) * norm;
+                residual = yield_residual.abs();
+                tolerance = input.solve.tolerance(norm, self.yield_force_n)?;
                 if residual.is_finite() && residual <= tolerance {
                     break;
                 }
-                if compliance < physical {
-                    low = compliance;
+                if yield_residual > 0.0 {
+                    low = plastic_compliance;
                 } else {
-                    high = compliance;
+                    high = plastic_compliance;
                 }
             }
             if !residual.is_finite() || residual > tolerance {
@@ -558,11 +577,6 @@ impl ThirdBodyLayerContact {
                 maximum: input.solve.maximum_force_n,
             });
         }
-        let plastic_compliance = if yielding && magnitude > self.yield_force_n {
-            flow * (1.0 - self.yield_force_n / magnitude)
-        } else {
-            0.0
-        };
         let slip = [
             input.slip_increment_m[0] - input.compliance_m_per_n * force[0],
             input.slip_increment_m[1] - input.compliance_m_per_n * force[1],

@@ -417,8 +417,6 @@ impl TangentialLaw for ThirdBodyLayerContact {
         positive_finite(flow, "layer_plastic_step_compliance")?;
         let a = checked_add(1.0, checked_mul(half_k, input.compliance_m_per_n,
             "layer_load_line")?, "layer_load_line")?;
-        let b = checked_mul(half_k, flow, "layer_return_coefficient")?;
-        positive_finite(b, "layer_return_coefficient")?;
         let mut trial = [0.0; 2];
         for (i, value) in trial.iter_mut().enumerate() {
             *value = checked_add(history[i], checked_mul(half_k, input.slip_increment_m[i],
@@ -429,11 +427,21 @@ impl TangentialLaw for ThirdBodyLayerContact {
         let trial_magnitude = norm / a;
         finite(trial_magnitude, "layer_elastic_trial_force_n")?;
         let yielding = trial_magnitude > self.yield_force_n;
+        // Solve for plastic distance directly. Computing flow*(|F|-Y)
+        // loses all flow when a stiff return rounds |F| to Y. Normalizing
+        // by the elastic load line also avoids overflow in half_k*flow.
+        let plastic_distance = if yielding {
+            let excess = trial_magnitude - self.yield_force_n;
+            let step_stiffness = half_k / a;
+            if flow <= 1.0 {
+                flow * excess / (1.0 + step_stiffness * flow)
+            } else {
+                excess / (step_stiffness + 1.0 / flow)
+            }
+        } else { 0.0 };
+        nonnegative_finite(plastic_distance, "layer_plastic_increment_m")?;
         let magnitude = if yielding {
-            // Equivalent to (norm+b*Y)/(a+b), without a possibly enormous b*Y.
-            let excess = norm - a * self.yield_force_n;
-            checked_add(self.yield_force_n, excess / checked_add(a, b, "layer_return_denominator")?,
-                "layer_return_force_n")?
+            checked_add(self.yield_force_n, plastic_distance / flow, "layer_return_force_n")?
         } else { trial_magnitude };
         finite(magnitude, "layer_return_force_n")?;
         if magnitude > input.solve.maximum_force_n {
@@ -441,10 +449,6 @@ impl TangentialLaw for ThirdBodyLayerContact {
                 value: magnitude, minimum: 0.0, maximum: input.solve.maximum_force_n });
         }
         let direction = if norm == 0.0 { [0.0; 2] } else { [trial[0]/norm, trial[1]/norm] };
-        let plastic_distance = if yielding {
-            checked_mul(flow, magnitude - self.yield_force_n, "layer_plastic_increment_m")?
-        } else { 0.0 };
-        nonnegative_finite(plastic_distance, "layer_plastic_increment_m")?;
         let mut traction_n = [0.0; 2];
         let mut slip_increment_m = [0.0; 2];
         let mut candidate = state.clone();
