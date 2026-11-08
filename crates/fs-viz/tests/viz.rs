@@ -1646,6 +1646,107 @@ fn grid3_admission_fails_before_unbounded_or_nonfinite_work() {
     ));
 }
 
+#[test]
+fn sublevel_volume_matches_affine_planes_and_strict_plateaus() {
+    let grid = Grid3::from_fn([9, 10, 11], [-1.0, -2.0, -3.0], [2.0, 4.0, 5.0], 990, |p| {
+        p[0]
+    })
+    .unwrap();
+    for level in [-1.0_f64, -0.13, 0.0, 1.25, 2.0, 3.0] {
+        let expected = (level + 1.0).clamp(0.0, 3.0) * 48.0;
+        let actual = grid.sublevel_volume(level).unwrap();
+        assert!(
+            (actual - expected).abs() < 3e-13,
+            "{level}: {actual} != {expected}"
+        );
+    }
+    let flat = Grid3::from_values(
+        [3; 3],
+        [10.0, -20.0, 30.0],
+        [12.0, -17.0, 34.0],
+        27,
+        vec![42.0; 27],
+    )
+    .unwrap();
+    assert_eq!(flat.sublevel_volume(42.0).unwrap(), 0.0);
+    assert_eq!(flat.sublevel_volume(42.0_f64.next_up()).unwrap(), 24.0);
+}
+
+#[test]
+fn sublevel_volume_preserves_thin_layers_with_repeated_nodal_values() {
+    // Every native tetrahedron contains the 0--7 body diagonal. These three
+    // fixtures independently realize a corner, a two-corner wedge, and the
+    // complement of a corner in every tetrahedron, with exact volume polynomials.
+    for u in [0.25_f64, 2.0_f64.powi(-30), 2.0_f64.powi(-50)] {
+        for inside_count in 1..=3 {
+            let mut values = vec![1.0 - u; 8];
+            let expected = match inside_count {
+                1 => {
+                    values[0] = -u;
+                    u * u * u
+                }
+                2 => {
+                    values[0] = -u;
+                    values[7] = -u;
+                    u * u * (3.0 - 2.0 * u)
+                }
+                _ => {
+                    values.fill(-u);
+                    values[0] = 1.0 - u;
+                    u * (3.0 - u * (3.0 - u))
+                }
+            };
+            let complement: Vec<_> = values.iter().map(|value| -*value).collect();
+            let grid = Grid3::from_values([2; 3], [0.0; 3], [1.0; 3], 8, values).unwrap();
+            let actual = grid.sublevel_volume(0.0).unwrap();
+            assert!(
+                (actual - expected).abs() <= 8e-15 * expected,
+                "{inside_count} inside, {u}: {actual:.17e} != {expected:.17e}"
+            );
+            let opposite = Grid3::from_values([2; 3], [0.0; 3], [1.0; 3], 8, complement).unwrap();
+            assert!((actual + opposite.sublevel_volume(0.0).unwrap() - 1.0).abs() < 3e-15);
+        }
+    }
+}
+
+#[test]
+fn sublevel_volume_agrees_with_the_original_closed_mesh_and_cancels() {
+    let grid = Grid3::from_fn([13, 11, 9], [-1.0; 3], [1.0; 3], 1287, |p| {
+        p[0] * p[0] + p[1] * p[1] + p[2] * p[2] - 0.4
+    })
+    .unwrap();
+    let mut previous = 0.0;
+    for level in [-0.1, 0.0, 0.15] {
+        let expected = grid.sublevel_volume(level).unwrap();
+        let mesh = grid.isosurface(level, 20_000).unwrap();
+        let surface_volume: f64 = mesh
+            .triangles()
+            .iter()
+            .map(|triangle| {
+                let a = mesh.vertices()[triangle[0] as usize];
+                let b = mesh.vertices()[triangle[1] as usize];
+                let c = mesh.vertices()[triangle[2] as usize];
+                (a[0] * (b[1] * c[2] - b[2] * c[1])
+                    + a[1] * (b[2] * c[0] - b[0] * c[2])
+                    + a[2] * (b[0] * c[1] - b[1] * c[0]))
+                    / 6.0
+            })
+            .sum();
+        assert!((surface_volume - expected).abs() < 2e-12);
+        assert!(expected > previous);
+        previous = expected;
+    }
+    let mut polls = 0;
+    assert_eq!(
+        grid.sublevel_volume_with_control(0.0, || {
+            polls += 1;
+            polls < 5
+        }),
+        Err(IsoSurfaceError::Cancelled)
+    );
+    assert_eq!(polls, 5);
+}
+
 fn density_semantics() -> ScalarFieldSemantics {
     ScalarFieldSemantics {
         quantity: "density".to_string(),

@@ -3700,12 +3700,25 @@ boundaries, unresolved crossings, degenerate facets and nonclosed or inconsisten
 oriented edges refuse without changing accepted fluid state or returning a
 partial mesh. Detached liquid requires an empty domain collar.
 
-This is a piecewise-linear half-fill visualization model: no PLIC volume
-conservation, subcell droplet recovery, smooth-normal reconstruction, global
-vertex-link manifold certification, moving-exposure sampling or wet-wall closure
-is claimed. Focused regressions exercise fractional interface displacement,
-density-independent geometry, immutable state and deterministic replay, native
-mesh entry/exit with Snell and Beer laws, and budget/cancellation/geometry refusals.
+The default retains the half-fill geometry. The explicit
+`volume_matched_free_surface_mesh` and material-flow counterpart instead match
+the compensated original sum(fill) times SI cell volume. One global isovalue is
+solved using the native mesher's allocation-free clipped-tetrahedron volume,
+with an explicit pass ceiling and absolute/relative volume tolerance. Sampling
+occurs once, in cell coordinates; only the accepted level creates a mesh.
+After SI placement, translated compensated signed-tetrahedron volume checks the
+actual closed mesh against the same tolerance before its BVH is constructed.
+The returned report retains target and enclosed volumes, signed residual,
+selected fill threshold and actual volume-query count. Unattainable constant
+fill plateaus, exhausted passes and lost world-coordinate precision refuse.
+
+These are piecewise-linear visualization models: no PLIC, per-cell or
+per-component volume conservation, subcell shape recovery, smooth-normal
+reconstruction, global vertex-link manifold certification, moving-exposure
+sampling or wet-wall closure is claimed. The numerical volume tolerance is not
+a physical shape-error bound. Controls cover analytic single-cell drop volume,
+SI scaling/placement, immutable density-independent replay, actual native
+Snell/Beer paths and work/plateau/precision refusals.
 
 ## Motion-time foundation
 

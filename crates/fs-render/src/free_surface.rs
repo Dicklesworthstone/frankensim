@@ -13,15 +13,17 @@
 //! caller supplies water/glass optics and the physical observation time.
 //! Detached liquid with an empty domain collar is admitted; solid contacts,
 //! domain-cut surfaces, unlocated carry and unresolved conversion fills refuse.
-//! Subcell droplets, smooth-normal recovery and exact liquid-volume agreement
-//! need a different reconstruction and are not claimed by this adapter.
+//! The default keeps the half-fill geometry. An explicit volume-matched entry
+//! selects one global isovalue to reproduce the accepted total liquid volume
+//! within a caller tolerance, without per-cell or per-component conservation.
+//! Neither model recovers subcell shape or smooth normals.
 
 use std::collections::BTreeMap;
 
 use fs_exec::Cx;
 use fs_lbm::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
 use fs_lbm::material::free_surface::MaterialFreeSurface3;
-use fs_viz::{Grid3, Grid3Error, IsoSurfaceError};
+use fs_viz::{Grid3, Grid3Error, IsoMesh3, IsoSurfaceError};
 
 use crate::charts::TriMesh;
 
@@ -38,10 +40,56 @@ pub struct FreeSurfaceMeshOptions {
     pub max_triangles: usize,
 }
 
+/// Numerical volume agreement and total field-pass budget for one snapshot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceVolumeOptions {
+    /// Absolute tolerance in cubic metres; nonnegative.
+    pub absolute_tolerance_m3: f64,
+    /// Relative tolerance in [0,1). At least one tolerance must be positive.
+    pub relative_tolerance: f64,
+    /// Maximum allocation-free volume queries, each scanning the admitted grid.
+    pub max_volume_evaluations: usize,
+}
+
+/// Observed agreement of the final physical mesh with the original liquid fill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceVolumeReport {
+    pub target_volume_m3: f64,
+    pub enclosed_volume_m3: f64,
+    /// Signed enclosed-minus-target residual, evaluated before SI rescaling.
+    pub residual_m3: f64,
+    /// One global fill threshold in (0,1), rather than the default half fill.
+    pub fill_isovalue: f64,
+    pub volume_evaluations: usize,
+}
+
+/// A native mesh and its numerical total-volume readback.
+#[derive(Debug)]
+pub struct VolumeMatchedFreeSurfaceMesh {
+    pub mesh: TriMesh,
+    pub report: FreeSurfaceVolumeReport,
+}
+
 /// No mesh or scene mutation is published on refusal.
 #[derive(Debug)]
 pub enum FreeSurfaceMeshError {
     InvalidOptions,
+    InvalidVolumeOptions,
+    UnrepresentableVolume,
+    /// The requested tolerance was not attained within the pass budget or
+    /// the representable isovalue interval. Flat field plateaus can prevent
+    /// any single isovalue from representing a requested total volume.
+    VolumeMatchExhausted {
+        volume_evaluations: usize,
+        target_volume_m3: f64,
+        closest_volume_m3: f64,
+    },
+    /// The final closed world-coordinate mesh did not retain the requested
+    /// agreement after coordinate conversion and geometric extraction.
+    VolumeMismatch {
+        target_volume_m3: f64,
+        enclosed_volume_m3: f64,
+    },
     CellBudgetExceeded {
         required: usize,
         maximum: usize,
@@ -57,7 +105,7 @@ pub enum FreeSurfaceMeshError {
     WetDomainBoundary {
         coordinates: [usize; 3],
     },
-    /// No resolved half-fill crossing remains at the admitted grid resolution.
+    /// No resolved crossing remains at the admitted grid resolution.
     UnresolvedSurface,
     /// A degenerate facet or an edge lacking two opposite uses prevents a
     /// reliable liquid/gas boundary; no topology repair is inferred.
@@ -98,7 +146,17 @@ pub fn free_surface_mesh(
     options: FreeSurfaceMeshOptions,
     cx: &Cx<'_>,
 ) -> Result<TriMesh, FreeSurfaceMeshError> {
+    let (grid, _) = sample_grid(state, options, cx)?;
+    let surface = extract_surface(&grid, 0.0, options.max_triangles, cx)?;
+    drop(grid);
+    let (vertices, triangles) = surface.into_parts();
+    validate_surface(&vertices, &triangles, cx)?;
+    let mesh = TriMesh::new(vertices, triangles);
     poll(cx)?;
+    Ok(mesh)
+}
+
+fn validate_options(options: FreeSurfaceMeshOptions) -> Result<(), FreeSurfaceMeshError> {
     if options.origin_m.iter().any(|v| !v.is_finite())
         || !options.cell_size_m.is_finite()
         || options.cell_size_m <= 0.0
@@ -107,6 +165,16 @@ pub fn free_surface_mesh(
     {
         return Err(FreeSurfaceMeshError::InvalidOptions);
     }
+    Ok(())
+}
+
+fn sample_grid(
+    state: &FreeSurface3,
+    options: FreeSurfaceMeshOptions,
+    cx: &Cx<'_>,
+) -> Result<(Grid3, f64), FreeSurfaceMeshError> {
+    poll(cx)?;
+    validate_options(options)?;
     let dimensions = state.domain_cells();
     let count = dimensions
         .into_iter()
@@ -121,6 +189,7 @@ pub fn free_surface_mesh(
     if state.carry() != 0.0 {
         return Err(FreeSurfaceMeshError::UnlocatedMass);
     }
+    let (mut fill_sum, mut correction) = (0.0, 0.0);
     let mut values = Vec::new();
     values
         .try_reserve_exact(count)
@@ -147,6 +216,7 @@ pub fn free_surface_mesh(
                 {
                     return Err(FreeSurfaceMeshError::WetDomainBoundary { coordinates });
                 }
+                compensated_add(&mut fill_sum, &mut correction, fill);
                 values.push(0.5 - fill);
             }
         }
@@ -157,14 +227,31 @@ pub fn free_surface_mesh(
     });
     let grid = Grid3::from_values(dimensions, lower, upper, options.max_cells, values)
         .map_err(FreeSurfaceMeshError::Grid)?;
-    let surface = grid
-        .isosurface_with_control(0.0, options.max_triangles, || cx.checkpoint().is_ok())
-        .map_err(|error| match error {
-            IsoSurfaceError::Cancelled => FreeSurfaceMeshError::Cancelled,
-            error => FreeSurfaceMeshError::Isosurface(error),
-        })?;
-    drop(grid);
-    let (vertices, triangles) = surface.into_parts();
+    Ok((grid, fill_sum + correction))
+}
+
+fn isosurface_error(error: IsoSurfaceError) -> FreeSurfaceMeshError {
+    match error {
+        IsoSurfaceError::Cancelled => FreeSurfaceMeshError::Cancelled,
+        error => FreeSurfaceMeshError::Isosurface(error),
+    }
+}
+
+fn extract_surface(
+    grid: &Grid3,
+    iso: f64,
+    max_triangles: usize,
+    cx: &Cx<'_>,
+) -> Result<IsoMesh3, FreeSurfaceMeshError> {
+    grid.isosurface_with_control(iso, max_triangles, || cx.checkpoint().is_ok())
+        .map_err(isosurface_error)
+}
+
+fn validate_surface(
+    vertices: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    cx: &Cx<'_>,
+) -> Result<(), FreeSurfaceMeshError> {
     if triangles.is_empty() {
         return Err(FreeSurfaceMeshError::UnresolvedSurface);
     }
@@ -175,7 +262,7 @@ pub fn free_surface_mesh(
         .and_then(|count| u32::try_from(count).ok())
         .ok_or(FreeSurfaceMeshError::RendererCapacity)?;
     let mut edges = BTreeMap::<(u32, u32), (u8, i8)>::new();
-    for &[a, b, c] in &triangles {
+    for &[a, b, c] in triangles {
         poll(cx)?;
         let ab: [f64; 3] =
             core::array::from_fn(|i| vertices[b as usize][i] - vertices[a as usize][i]);
@@ -208,9 +295,17 @@ pub fn free_surface_mesh(
     }
     drop(edges);
     poll(cx)?;
-    let mesh = TriMesh::new(vertices, triangles);
-    poll(cx)?;
-    Ok(mesh)
+    Ok(())
+}
+
+fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) {
+    let next = *sum + value;
+    *correction += if sum.abs() >= value.abs() {
+        (*sum - next) + value
+    } else {
+        (value - next) + *sum
+    };
+    *sum = next;
 }
 
 /// Use the material flow's original SI cell width, with an explicit placement
@@ -231,6 +326,198 @@ pub fn material_free_surface_mesh(
             max_cells,
             max_triangles,
         },
+        cx,
+    )
+}
+
+/// Match one native liquid snapshot's total volume before building its optical mesh.
+///
+/// The target is the compensated sum of actual volume fractions times the SI
+/// cell volume. Bisection uses the original mesher's analytic, allocation-free
+/// tetrahedron volume query; only the accepted isovalue constructs a mesh and
+/// BVH. One dense sample buffer is retained across the bounded passes.
+///
+/// Clipping and matching use cell coordinates to avoid large world-origin
+/// cancellation. The final transformed mesh must independently meet
+/// `max(absolute_tolerance_m3, relative_tolerance * target_volume_m3)`.
+/// Coordinate roundoff, an unattainable plateau volume or exhausted work
+/// refuses; tolerances are never silently enlarged.
+///
+/// One global level can change shape and redistribute enclosed volume among
+/// disconnected drops. This is not PLIC, per-cell/per-component conservation,
+/// a subcell shape recovery, or a bound on physical reconstruction error.
+/// Existing solid-contact, empty-collar and topology limitations still apply.
+pub fn volume_matched_free_surface_mesh(
+    state: &FreeSurface3,
+    options: FreeSurfaceMeshOptions,
+    volume_options: FreeSurfaceVolumeOptions,
+    cx: &Cx<'_>,
+) -> Result<VolumeMatchedFreeSurfaceMesh, FreeSurfaceMeshError> {
+    poll(cx)?;
+    validate_options(options)?;
+    if !volume_options.absolute_tolerance_m3.is_finite()
+        || volume_options.absolute_tolerance_m3 < 0.0
+        || !volume_options.relative_tolerance.is_finite()
+        || !(0.0..1.0).contains(&volume_options.relative_tolerance)
+        || (volume_options.absolute_tolerance_m3 == 0.0 && volume_options.relative_tolerance == 0.0)
+        || volume_options.max_volume_evaluations == 0
+    {
+        return Err(FreeSurfaceMeshError::InvalidVolumeOptions);
+    }
+    let cell_volume_m3 = options.cell_size_m * options.cell_size_m * options.cell_size_m;
+    if !cell_volume_m3.is_finite() || cell_volume_m3 <= 0.0 {
+        return Err(FreeSurfaceMeshError::UnrepresentableVolume);
+    }
+    let (grid, target_cells) = sample_grid(
+        state,
+        FreeSurfaceMeshOptions {
+            origin_m: [0.0; 3],
+            cell_size_m: 1.0,
+            ..options
+        },
+        cx,
+    )?;
+    if target_cells <= 0.0 {
+        return Err(FreeSurfaceMeshError::UnresolvedSurface);
+    }
+    let target_volume_m3 = target_cells * cell_volume_m3;
+    if !target_volume_m3.is_finite() || target_volume_m3 <= 0.0 {
+        return Err(FreeSurfaceMeshError::UnrepresentableVolume);
+    }
+    let tolerance_m3 = volume_options
+        .absolute_tolerance_m3
+        .max(volume_options.relative_tolerance * target_volume_m3);
+    if !tolerance_m3.is_finite() || tolerance_m3 <= 0.0 {
+        return Err(FreeSurfaceMeshError::UnrepresentableVolume);
+    }
+    // The empty collar is at +0.5; only interior levels can be published.
+    let (mut lower, mut upper, mut iso) = (-0.5, 0.5, 0.0);
+    let (mut closest_cells, mut closest_error) = (0.0, f64::INFINITY);
+    let mut volume_evaluations = 0;
+    let mut accepted = false;
+    while volume_evaluations < volume_options.max_volume_evaluations {
+        let volume_cells = grid
+            .sublevel_volume_with_control(iso, || cx.checkpoint().is_ok())
+            .map_err(isosurface_error)?;
+        volume_evaluations += 1;
+        let difference = volume_cells - target_cells;
+        if difference.abs() < closest_error {
+            closest_error = difference.abs();
+            closest_cells = volume_cells;
+        }
+        if difference.abs() * cell_volume_m3 <= tolerance_m3 {
+            accepted = true;
+            break;
+        }
+        if difference < 0.0 {
+            lower = iso;
+        } else {
+            upper = iso;
+        }
+        let next = 0.5 * (lower + upper);
+        if next <= lower || next >= upper {
+            break;
+        }
+        iso = next;
+    }
+    if !accepted {
+        return Err(FreeSurfaceMeshError::VolumeMatchExhausted {
+            volume_evaluations,
+            target_volume_m3,
+            closest_volume_m3: closest_cells * cell_volume_m3,
+        });
+    }
+    let surface = extract_surface(&grid, iso, options.max_triangles, cx)?;
+    drop(grid);
+    let (mut vertices, triangles) = surface.into_parts();
+    for vertex in &mut vertices {
+        poll(cx)?;
+        for axis in 0..3 {
+            vertex[axis] = options
+                .cell_size_m
+                .mul_add(vertex[axis], options.origin_m[axis]);
+            if !vertex[axis].is_finite() {
+                return Err(FreeSurfaceMeshError::InvalidSurface);
+            }
+        }
+    }
+    validate_surface(&vertices, &triangles, cx)?;
+    let enclosed_cells = enclosed_volume_in_cells(&vertices, &triangles, options.cell_size_m, cx)?;
+    let enclosed_volume_m3 = enclosed_cells * cell_volume_m3;
+    let residual_m3 = (enclosed_cells - target_cells) * cell_volume_m3;
+    if !enclosed_volume_m3.is_finite() || !residual_m3.is_finite() {
+        return Err(FreeSurfaceMeshError::UnrepresentableVolume);
+    }
+    if residual_m3.abs() > tolerance_m3 {
+        return Err(FreeSurfaceMeshError::VolumeMismatch {
+            target_volume_m3,
+            enclosed_volume_m3,
+        });
+    }
+    poll(cx)?;
+    let mesh = TriMesh::new(vertices, triangles);
+    poll(cx)?;
+    Ok(VolumeMatchedFreeSurfaceMesh {
+        mesh,
+        report: FreeSurfaceVolumeReport {
+            target_volume_m3,
+            enclosed_volume_m3,
+            residual_m3,
+            fill_isovalue: 0.5 - iso,
+            volume_evaluations,
+        },
+    })
+}
+
+fn enclosed_volume_in_cells(
+    vertices: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    cell_size_m: f64,
+    cx: &Cx<'_>,
+) -> Result<f64, FreeSurfaceMeshError> {
+    let reference = vertices[0];
+    let (mut sum, mut correction) = (0.0, 0.0);
+    for triangle in triangles {
+        poll(cx)?;
+        let [a, b, c] = triangle.map(|index| {
+            core::array::from_fn::<_, 3, _>(|axis| {
+                (vertices[index as usize][axis] - reference[axis]) / cell_size_m
+            })
+        });
+        let volume = (a[0] * (b[1] * c[2] - b[2] * c[1])
+            + a[1] * (b[2] * c[0] - b[0] * c[2])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]))
+            / 6.0;
+        if !volume.is_finite() {
+            return Err(FreeSurfaceMeshError::UnrepresentableVolume);
+        }
+        compensated_add(&mut sum, &mut correction, volume);
+    }
+    let volume = sum + correction;
+    if !volume.is_finite() || volume <= 0.0 {
+        return Err(FreeSurfaceMeshError::UnrepresentableVolume);
+    }
+    Ok(volume)
+}
+
+/// Volume-matched geometry using the material trajectory's original SI cell width.
+pub fn volume_matched_material_free_surface_mesh(
+    state: &MaterialFreeSurface3<'_>,
+    origin_m: [f64; 3],
+    max_cells: usize,
+    max_triangles: usize,
+    volume_options: FreeSurfaceVolumeOptions,
+    cx: &Cx<'_>,
+) -> Result<VolumeMatchedFreeSurfaceMesh, FreeSurfaceMeshError> {
+    volume_matched_free_surface_mesh(
+        state.lattice(),
+        FreeSurfaceMeshOptions {
+            origin_m,
+            cell_size_m: state.scaling().cell_size_m(),
+            max_cells,
+            max_triangles,
+        },
+        volume_options,
         cx,
     )
 }

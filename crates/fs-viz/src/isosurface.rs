@@ -114,6 +114,8 @@ pub enum IsoSurfaceError {
     VertexIndexOverflow,
     /// Interpolation or orientation produced non-finite geometry.
     NonFiniteGeometry,
+    /// The requested clipped volume is not representable in binary64.
+    UnrepresentableVolume,
     /// The caller stopped extraction before a complete mesh was published.
     Cancelled,
 }
@@ -130,6 +132,7 @@ impl core::fmt::Display for IsoSurfaceError {
             Self::NonFiniteGeometry => {
                 write!(f, "isosurface interpolation produced non-finite geometry")
             }
+            Self::UnrepresentableVolume => write!(f, "sublevel volume is unrepresentable"),
             Self::Cancelled => write!(f, "isosurface extraction cancelled"),
         }
     }
@@ -261,6 +264,77 @@ impl Grid3 {
             .map(|_| grid3_point(self.lower, self.spacing, i, j, k))
     }
 
+    /// Volume of the piecewise-linear field's strict sublevel set inside the
+    /// grid box. This uses the same six tetrahedra and edge interpolation as
+    /// the surface extractor, including repeated nodal values.
+    ///
+    /// Cut tetrahedra are clipped analytically with positive volume terms.
+    /// No mesh, edge map or heap allocation is made. This includes domain-cut
+    /// regions; an extracted isosurface alone does not cap the grid boundary.
+    pub fn sublevel_volume(&self, iso: f64) -> Result<f64, IsoSurfaceError> {
+        self.sublevel_volume_with_control(iso, || true)
+    }
+
+    /// Cancellable sublevel volume, polled once per cube and before return.
+    /// The grid's admitted node count bounds each pass. Nonfinite levels,
+    /// unrepresentable cell/result volume and cancellation refuse.
+    pub fn sublevel_volume_with_control(
+        &self,
+        iso: f64,
+        mut control: impl FnMut() -> bool,
+    ) -> Result<f64, IsoSurfaceError> {
+        if !iso.is_finite() {
+            return Err(IsoSurfaceError::NonFiniteIso { iso });
+        }
+        if !control() {
+            return Err(IsoSurfaceError::Cancelled);
+        }
+        let mut widths = self.spacing;
+        widths.sort_unstable_by(f64::total_cmp);
+        let cell_volume = (widths[0] * widths[2]) * widths[1];
+        if !cell_volume.is_finite() || cell_volume <= 0.0 {
+            return Err(IsoSurfaceError::UnrepresentableVolume);
+        }
+        let (mut sum, mut correction) = (0.0, 0.0);
+        let [nx, ny, nz] = self.dimensions;
+        for k in 0..(nz - 1) {
+            for j in 0..(ny - 1) {
+                for i in 0..(nx - 1) {
+                    if !control() {
+                        return Err(IsoSurfaceError::Cancelled);
+                    }
+                    let values = self.cube_nodes(i, j, k).map(|node| self.values[node]);
+                    let fraction = if values.iter().all(|&value| value < iso) {
+                        1.0
+                    } else if values.iter().all(|&value| value >= iso) {
+                        continue;
+                    } else {
+                        let mut fraction = 0.0;
+                        for tetrahedron in TETRAHEDRA3 {
+                            fraction += clipped_tetrahedron_fraction3(
+                                tetrahedron.map(|node| values[node]),
+                                iso,
+                            )? / 6.0;
+                        }
+                        fraction
+                    };
+                    let adjusted = fraction - correction;
+                    let next = sum + adjusted;
+                    correction = (next - sum) - adjusted;
+                    sum = next;
+                }
+            }
+        }
+        if !control() {
+            return Err(IsoSurfaceError::Cancelled);
+        }
+        let volume = sum * cell_volume;
+        if !volume.is_finite() || (sum > 0.0 && volume == 0.0) {
+            return Err(IsoSurfaceError::UnrepresentableVolume);
+        }
+        Ok(volume)
+    }
+
     /// Extract an indexed isosurface with deterministic marching tetrahedra.
     ///
     /// Every cube is decomposed into the same six tetrahedra around its `0-7`
@@ -309,16 +383,7 @@ impl Grid3 {
                     if !control() {
                         return Err(IsoSurfaceError::Cancelled);
                     }
-                    let cube = [
-                        self.index_unchecked(i, j, k),
-                        self.index_unchecked(i + 1, j, k),
-                        self.index_unchecked(i, j + 1, k),
-                        self.index_unchecked(i + 1, j + 1, k),
-                        self.index_unchecked(i, j, k + 1),
-                        self.index_unchecked(i + 1, j, k + 1),
-                        self.index_unchecked(i, j + 1, k + 1),
-                        self.index_unchecked(i + 1, j + 1, k + 1),
-                    ];
+                    let cube = self.cube_nodes(i, j, k);
                     for tetrahedron in TETRAHEDRA3 {
                         extractor.polygonize([
                             cube[tetrahedron[0]],
@@ -337,6 +402,19 @@ impl Grid3 {
             vertices: extractor.vertices,
             triangles: extractor.triangles,
         })
+    }
+
+    fn cube_nodes(&self, i: usize, j: usize, k: usize) -> [usize; 8] {
+        [
+            self.index_unchecked(i, j, k),
+            self.index_unchecked(i + 1, j, k),
+            self.index_unchecked(i, j + 1, k),
+            self.index_unchecked(i + 1, j + 1, k),
+            self.index_unchecked(i, j, k + 1),
+            self.index_unchecked(i + 1, j, k + 1),
+            self.index_unchecked(i, j + 1, k + 1),
+            self.index_unchecked(i + 1, j + 1, k + 1),
+        ]
     }
 
     fn linear_index(&self, i: usize, j: usize, k: usize) -> Option<usize> {
@@ -544,18 +622,7 @@ impl Extractor3<'_> {
         } else if second_on_level {
             self.grid.point_from_index(second)
         } else {
-            let scale = first_value
-                .abs()
-                .max(second_value.abs())
-                .max(self.iso.abs())
-                .max(1.0);
-            let first_distance = first_value / scale - self.iso / scale;
-            let second_distance = second_value / scale - self.iso / scale;
-            let denominator = first_distance - second_distance;
-            if !denominator.is_finite() || denominator.abs() <= f64::MIN_POSITIVE {
-                return Err(IsoSurfaceError::NonFiniteGeometry);
-            }
-            let t = (first_distance / denominator).clamp(0.0, 1.0);
+            let t = edge_fraction3(first_value, second_value, self.iso)?;
             let a = self.grid.point_from_index(first);
             let b = self.grid.point_from_index(second);
             [
@@ -619,6 +686,67 @@ impl Extractor3<'_> {
         };
         subtract3(centroid(outside), centroid(inside))
     }
+}
+
+// The native mesher and volume query must cut each edge at the same point.
+fn edge_fraction3(first: f64, second: f64, iso: f64) -> Result<f64, IsoSurfaceError> {
+    if same_level3(first, iso) {
+        return Ok(0.0);
+    }
+    if same_level3(second, iso) {
+        return Ok(1.0);
+    }
+    let scale = first.abs().max(second.abs()).max(iso.abs()).max(1.0);
+    let first_distance = first / scale - iso / scale;
+    let second_distance = second / scale - iso / scale;
+    let denominator = first_distance - second_distance;
+    if !denominator.is_finite() || denominator.abs() <= f64::MIN_POSITIVE {
+        return Err(IsoSurfaceError::NonFiniteGeometry);
+    }
+    Ok((first_distance / denominator).clamp(0.0, 1.0))
+}
+
+fn clipped_tetrahedron_fraction3(values: [f64; 4], iso: f64) -> Result<f64, IsoSurfaceError> {
+    let (mut inside, mut outside) = ([0.0; 4], [0.0; 4]);
+    let (mut inside_count, mut outside_count) = (0, 0);
+    for value in values {
+        if value < iso {
+            inside[inside_count] = value;
+            inside_count += 1;
+        } else {
+            outside[outside_count] = value;
+            outside_count += 1;
+        }
+    }
+    let fraction = match inside_count {
+        0 => 0.0,
+        4 => 1.0,
+        1 => {
+            let a = inside[0];
+            edge_fraction3(a, outside[0], iso)?
+                * edge_fraction3(a, outside[1], iso)?
+                * edge_fraction3(a, outside[2], iso)?
+        }
+        3 => {
+            // Expanded complement of the outside corner. Directly subtracting
+            // its product from one loses thin occupied layers.
+            let a = edge_fraction3(inside[0], outside[0], iso)?;
+            let b = edge_fraction3(inside[1], outside[0], iso)?;
+            let c = edge_fraction3(inside[2], outside[0], iso)?;
+            a + (1.0 - a) * (b + (1.0 - b) * c)
+        }
+        2 => {
+            let ac = edge_fraction3(inside[0], outside[0], iso)?;
+            let ad = edge_fraction3(inside[0], outside[1], iso)?;
+            let bc = edge_fraction3(inside[1], outside[0], iso)?;
+            let bd = edge_fraction3(inside[1], outside[1], iso)?;
+            // Three nonoverlapping tetrahedra of the occupied wedge, using
+            // the surface owner's ac--bd diagonal. Every term is nonnegative.
+            ac * ad + ac * bd * (1.0 - ad) + bc * bd * (1.0 - ac)
+        }
+        _ => unreachable!("tetrahedron has four vertices"),
+    };
+    Ok(fraction.clamp(0.0, 1.0))
 }
 
 fn same_level3(value: f64, iso: f64) -> bool {

@@ -57,6 +57,15 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   edge/node vertex sharing, outward winding from `< iso` toward `>= iso`, and
   an explicit all-or-error triangle budget. `IsoMesh3::into_parts` yields the
   renderer-ready indexed arrays; `surface_area` measures the PL surface.
+- `Grid3::sublevel_volume` and `sublevel_volume_with_control` measure the
+  strict sublevel set inside the grid box using the same six tetrahedra and
+  edge interpolation as extraction. Positive corner/wedge decompositions
+  retain thin occupied layers and repeated nodal values; compensated reduction
+  uses constant auxiliary storage without constructing a mesh or edge map.
+  Each pass is bounded by the admitted node grid and polls cancellation per
+  cube. This includes domain-cut regions; an extracted open isosurface alone
+  does not cap their boundary or provide that volume. The result is a
+  binary64 geometric measurement, not a continuum-error certificate.
 - `ScalarField3` / `ScalarFieldSemantics` / `ScalarLayout3` — a versioned,
   dependency-free scalar-field artifact codec with explicit quantity, domain
   unit, value unit, node-vs-cell centering, x-fastest dimensions, origin, and
