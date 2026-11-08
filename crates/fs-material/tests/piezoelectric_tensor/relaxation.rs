@@ -3,6 +3,8 @@
 mod thermal;
 #[path = "relaxation/transient.rs"]
 mod transient;
+#[path = "relaxation/equilibrium.rs"]
+mod equilibrium;
 
 use super::*;
 use fs_material::piezoelectric::tensor::relaxation::{

@@ -41,6 +41,8 @@ use std::sync::Arc;
 /// Model-bound material memories and exact passive midpoint companion laws.
 pub mod transient;
 
+mod equilibrium;
+
 /// Original full Mandel stiffness increments; zero/rank-deficient branches are valid.
 pub const MAX_MECHANICAL_BRANCHES: usize = 64;
 /// Original directed polarization processes, independent of the mesh size.

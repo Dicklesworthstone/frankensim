@@ -12,6 +12,9 @@ pub(super) mod relaxation;
 #[path = "harmonic/acoustic.rs"]
 mod acoustic;
 
+#[path = "harmonic/operating_point.rs"]
+mod operating_point;
+
 const ZERO: C64 = C64::new(0.0, 0.0);
 
 fn hc() -> HControls {

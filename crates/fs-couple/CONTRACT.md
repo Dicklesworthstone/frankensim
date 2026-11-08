@@ -3140,8 +3140,8 @@ includes initial stress and removes initial polarization from transferred
 charge. Fixed-temperature midpoint storage uses the shifted elastic potential
 with retained-precision endpoint contractions. This reference datum is not
 heat or an extra external energy supply. Zero-offset models retain the original
-response path. Nonzero bias refuses harmonic/memory combinations until those
-interfaces explicitly represent their operating point or memory reference.
+response path. Nonzero bias requires an explicit harmonic operating point;
+transient intrinsic memories still require an accounted thermal reference.
 
 The finite thermal body admits the matching source/reference identities,
 including at zero offsets, and uses these same bias-aware samples in every
@@ -3160,6 +3160,33 @@ response, an independently solved shifted oscillator, reference/zero-bias
 behavior, finite heat-induced voltage, signed electrocaloric exchange, and
 secondary pyroelectric charge with moving-support/radiation work. Source,
 amplitude and cancellation failures preserve accepted field and thermal state.
+
+### Harmonic response about a steady piezoelectric bias
+
+`TetPiezoelectricModel::harmonic_operating_point` solves and retains the actual
+static boundary problem, including sourced thermal strain and polarization.
+The immutable `HarmonicOperatingPoint` keeps exact model ownership, original
+support/electrode topology and gauge-relative potentials. Its `solve_harmonic`
+reuses the original sparse tangent/inertia/coupling and reciprocal acoustic
+ports. Quadrature recovery is explicitly incremental: DC stress, charge and
+reference storage never become phasors. The body mean free energy is static
+free energy plus incremental mean storage, with no sinusoidal factor on DC.
+Total strain, shifted elastic strain and electric field are admitted over the
+entire offset elliptical cycle using a scaled two-dimensional dual bound;
+quadrature-only samples and a loose triangle bound are not acceptance oracles.
+
+R/RL steady current and external capacitor charge follow retained DC voltage
+differences and original branch sources. Required ideal DC electrode supplies,
+DC conductor heat, external storage and their AC averages are separate reports.
+An ideal inductor requires an explicit persistent current and zero DC voltage;
+its flux is not silently reset. This API holds the caller's DC bias rather than
+solving an autonomous bias circuit. Thermal state and reference geometry remain
+fixed; geometric stress stiffening, nonlinear DC tuning and temperature
+modulation are outside the affine model. Intrinsic DC polarization is exposed
+by the material owner's `equilibrium_response`, which requires source support
+at zero frequency without granting unrestricted transient authority.
+Focused analytic regressions cover hot open/short response, bias-plus-cycle
+limits, acoustic work, gauge-independent shunt work/storage and refusal.
 
 ## Moving stress histories on the pressure/PCM path
 

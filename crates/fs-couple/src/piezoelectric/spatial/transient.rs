@@ -753,7 +753,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             .map(|port| port.net_outward_work_j)
             .sum::<f64>();
         let midpoint_electrodes = electrode_views(&self.boundary, &midpoint_conditions);
-        let mut midpoint = self.model.recover(
+        let mut midpoint = self.model.recover::<false>(
             &full_midpoint,
             midpoint_displacement,
             full_midpoint[nu..].to_vec(),
@@ -771,7 +771,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let mut endpoint_boundary = boundary;
         endpoint_boundary.index[..nu].fill(None);
         let endpoint_electrodes = electrode_views(&self.boundary, &next_conditions);
-        let mut field = self.model.recover(
+        let mut field = self.model.recover::<false>(
             &full_endpoint,
             displacement,
             full_endpoint[nu..].to_vec(),

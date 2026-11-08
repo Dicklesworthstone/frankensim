@@ -17,8 +17,9 @@
 //! radiation and exterior fringing fields remain outside these operators.
 //! Source-bound thermal strain and clamped polarization can be retained at a
 //! fixed temperature through [`TetPiezoelectricModel::assemble_thermal_materials`].
-//! Their affine loads leave the reciprocal tangent unchanged; harmonic response
-//! and intrinsic memories currently require zero thermal offsets.
+//! Their affine loads leave the reciprocal tangent unchanged. Harmonic response
+//! about a biased state uses an explicitly prepared static operating point;
+//! transient intrinsic memories currently require zero thermal offsets.
 
 use fs_blake3::ContentHash;
 use fs_em::electrostatic::tetrahedral::{
@@ -413,6 +414,30 @@ impl<'a> TetPiezoelectricModel<'a> {
         controls: TetPiezoelectricControls,
         cx: &Cx<'_>,
     ) -> Result<TetPiezoelectricSolution> {
+        self.solve_with_state(
+            prescribed_displacements_m,
+            electrodes,
+            nodal_forces_n,
+            nodal_free_charge_c,
+            controls,
+            cx,
+        )
+        .map(|(response, _)| response)
+    }
+
+    // Keep the original gauge-relative coordinates for prepared operating
+    // points. Reconstructing them from large absolute potentials can erase
+    // small DC voltage differences before a conductor's work is evaluated.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_state(
+        &self,
+        prescribed_displacements_m: &[(usize, f64)],
+        electrodes: &[PiezoelectricElectrode<'_>],
+        nodal_forces_n: &[[f64; 3]],
+        nodal_free_charge_c: &[f64],
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<(TetPiezoelectricSolution, Vec<f64>)> {
         poll(cx)?;
         validate_controls(controls)?;
         let n = self.nodes_m.len();
@@ -474,7 +499,7 @@ impl<'a> TetPiezoelectricModel<'a> {
             .chunks_exact(3)
             .map(|u| [u[0], u[1], u[2]])
             .collect::<Vec<_>>();
-        self.recover(
+        let response = self.recover::<false>(
             &full,
             displacement_m,
             voltage_v,
@@ -486,7 +511,8 @@ impl<'a> TetPiezoelectricModel<'a> {
             iterations,
             relative_residual,
             cx,
-        )
+        )?;
+        Ok((response, full))
     }
 
     fn reduced_system(
@@ -548,7 +574,7 @@ impl<'a> TetPiezoelectricModel<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn recover(
+    fn recover<const INCREMENT: bool>(
         &self,
         full: &[f64],
         displacement_m: Vec<[f64; 3]>,
@@ -585,7 +611,7 @@ impl<'a> TetPiezoelectricModel<'a> {
                 }
             }
             if norm(&strain) > controls.maximum_strain_norm
-                || self.has_thermal_bias()
+                || !INCREMENT && self.has_thermal_bias()
                     && norm(&self.elastic_strain(cell, strain)) > controls.maximum_strain_norm
                 || norm(&electric[cell]) > controls.maximum_electric_field_v_m
             {
@@ -593,7 +619,12 @@ impl<'a> TetPiezoelectricModel<'a> {
                     "solved field leaves the declared small-signal envelope",
                 ));
             }
-            let response = self.cell_response(cell, strain, electric[cell])?;
+            let response = if INCREMENT {
+                self.materials[if self.materials.len() == 1 { 0 } else { cell }]
+                    .field_response(strain, electric[cell])?
+            } else {
+                self.cell_response(cell, strain, electric[cell])?
+            };
             let volume = self.dielectric.volumes_m3()[cell];
             let energy = response.stored_energy_j_m3 * volume;
             stored_energy_j += energy;
@@ -689,7 +720,8 @@ impl<'a> TetPiezoelectricModel<'a> {
         // polarization. Along S(lambda)=lambda*S, E(lambda)=lambda*E,
         // W_m = u.(f_final+f_reference)/2 and W_e = phi.(q_final-q_reference)/2.
         // These are physical work increments, not fictitious thermal sources.
-        let reference_energy_j = if let Some(reference) = &self.thermal_reference {
+        let reference = if INCREMENT { None } else { self.thermal_reference.as_ref() };
+        let reference_energy_j = if let Some(reference) = reference {
             for node in 0..n {
                 poll(cx)?;
                 for axis in 0..3 {

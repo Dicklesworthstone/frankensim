@@ -39,6 +39,13 @@ use fs_math::{c64::C64, det};
 use fs_sparse::Coo;
 
 mod relaxation;
+mod envelope;
+
+/// Static bias followed by perturbations on the same original operators.
+pub mod operating_point;
+pub use operating_point::{
+    BiasedHarmonicResponse, HarmonicBiasLoadResponse, HarmonicOperatingPoint,
+};
 
 /// Reciprocal material-backed plane-wave fluid loading and incident sensing.
 pub mod acoustic;
@@ -288,6 +295,7 @@ impl TetPiezoelectricModel<'_> {
         cx: &Cx<'_>,
     ) -> Result<HarmonicPiezoelectricResponse> {
         self.solve_harmonic_internal(
+            None,
             omega_rad_s,
             None,
             &[],
@@ -326,6 +334,7 @@ impl TetPiezoelectricModel<'_> {
         cx: &Cx<'_>,
     ) -> Result<HarmonicPiezoelectricResponse> {
         self.solve_harmonic_internal(
+            None,
             omega_rad_s,
             Some(intrinsic_materials),
             &[],
@@ -359,6 +368,7 @@ impl TetPiezoelectricModel<'_> {
         cx: &Cx<'_>,
     ) -> Result<HarmonicPiezoelectricResponse> {
         self.solve_harmonic_internal(
+            None,
             omega_rad_s,
             intrinsic_materials,
             acoustic_ports,
@@ -375,6 +385,7 @@ impl TetPiezoelectricModel<'_> {
     #[allow(clippy::too_many_arguments)]
     fn solve_harmonic_internal(
         &self,
+        operating_point: Option<&HarmonicOperatingPoint<'_, '_>>,
         omega_rad_s: f64,
         intrinsic_materials: Option<&[RelaxingTensorPiezoelectric]>,
         acoustic_ports: &[HarmonicAcousticPort<'_>],
@@ -387,10 +398,13 @@ impl TetPiezoelectricModel<'_> {
         cx: &Cx<'_>,
     ) -> Result<HarmonicPiezoelectricResponse> {
         poll(cx)?;
-        if self.has_thermal_bias() {
+        if self.has_thermal_bias() && operating_point.is_none() {
             return Err(invalid(
                 "harmonic thermal bias requires an explicit static operating point; constant offsets are not phasors",
             ));
+        }
+        if operating_point.is_some_and(|point| !std::ptr::eq(point.model(), self)) {
+            return Err(invalid("harmonic operating point belongs to another model"));
         }
         validate_controls(controls.field)?;
         let n = self.nodes_m.len();
@@ -746,7 +760,7 @@ impl TetPiezoelectricModel<'_> {
                 .iter()
                 .map(|&q| scalar(q))
                 .collect::<Vec<_>>();
-            parts.push(self.recover(
+            parts.push(self.recover::<true>(
                 &full,
                 u,
                 voltage,

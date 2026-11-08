@@ -28,7 +28,7 @@ fn point(t: f64) -> QueryPoint {
         .with_quantity("T", temperature(), t)
         .unwrap()
 }
-fn source() -> (MaterialCard, ThermalTensorPiezoelectric) {
+pub(super) fn source() -> (MaterialCard, ThermalTensorPiezoelectric) {
     let tensor = material([0.0, 0.0, COUPLING, 0.0, 0.0, 0.0]);
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims, value| {

@@ -361,10 +361,39 @@ separate accounts.
 
 The nominal plate example does not invent the missing expansion/pyroelectric
 source claims, so those effects remain disabled in its demonstration modes.
-Synthetic analytic regressions exercise the new paths. Nonzero thermal bias
-does not yet support harmonic perturbations or intrinsic material memories;
-finite thermal feedback remains generally first order and uses one uniform
-ceramic temperature.
+Synthetic analytic regressions exercise the new paths. Finite thermal feedback
+remains generally first order and uses one uniform ceramic temperature.
+Transient intrinsic memories with nonzero thermal bias still require an
+accounted memory reference.
+
+### Frequency response around a heated or DC-biased equilibrium
+
+Prepare `model.harmonic_operating_point(...)` with the actual static supports,
+electrode voltages/charges, mechanical forces and volume charge. The returned
+immutable owner retains its solved fields and the exact original model. Call
+its `solve_harmonic(...)` with angular frequency, acoustic ports, AC supports,
+electrodes, loads, forces, charges and the original harmonic controls. The
+support DOFs and electrode node sets/order stay fixed; DC and AC electrode
+source kinds may differ. Use empty port/load slices when none are attached.
+
+`point.state()` contains the DC fields. `response.harmonic` contains only the
+oscillating perturbation. `average_total_stored_energy_j` adds the steady body
+free energy once to the incremental mean storage. Each cell's total strain,
+thermal elastic strain and electric field are checked over the full combined
+cycle, including extrema between the real/imaginary quadrature samples.
+
+The response also exposes the DC source currents needed to maintain that bias
+against physical shunts, their DC Joule heat and external capacitor/inductor
+storage. Those accounts remain separate from AC power and ceramic storage.
+`solve_harmonic_with_inductor_bias(...)` requires `(load_index, current_a)` for
+every ideal lossless winding, including explicit zero; nonzero DC voltage
+across such a winding cannot be stationary and refuses. Finite-resistance RL
+currents instead follow the actual bias voltage and winding resistance.
+
+This is a held-temperature, small-strain affine material model. DC offsets do
+not create geometric stress stiffening or nonlinear voltage tuning. The original
+`model.solve_harmonic(...)` remains the zero-bias entry point and refuses a
+thermally biased model unless its equilibrium has been prepared explicitly.
 
 ## Verification and boundaries
 
