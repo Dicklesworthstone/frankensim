@@ -24,6 +24,7 @@ use fs_fft::harmonic_window::{HarmonicWindow, ProperHarmonicProduct};
 use fs_math::det;
 
 mod interferometer;
+pub use interferometer::CoherentInterferometerPixelExposure;
 pub use interferometer::{
     CoherentInterferometerExposureLimits, CoherentInterferometerExposureSample,
 };

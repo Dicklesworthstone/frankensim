@@ -4351,6 +4351,32 @@ leave preparation reusable. Six focused groups cover scalar equivalence,
 independent analytic beat washout, covariance identity, equal-line cancellation,
 weak dark ports, long-path/source-clock phase and exact work/admission behavior.
 
+### Spectral interferograms over finite relay pixels
+
+`PreparedCoherentDiffractionExposure::integrate_interferometer_pixel` collects
+both scalar ports, arm powers and complex mutual coherence over the original
+finite shutter and a common rectangular relay offset. `CoherentInterferometerPixelExposure`
+returns average watts, shutter-integrated joules and exact spatial/pupil/pair
+work. Source banks recombine as DD fields before analytic temporal contraction;
+the native positive spatial rule integrates those unrounded moments. Visibility
+is derived from the integrated complex coherence, preserving spatial and temporal
+fringe washout.
+
+The shared work admission covers every translated corner, the shortest pupil
+scale and all active cross-frequency/cross-arm sensor-phase gradients. A range
+of endpoint gradients and extreme optical frequencies bounds those pairings in
+O(N) preprocessing. Common gradient subtraction and center-plus-offset DD
+propagation retain close-tone beats even for offsets smaller than one binary64
+ULP of an arm center. All sample, pupil and contraction limits precede field
+work; closed/empty receivers do none. Queries allocate nothing and remain reusable
+after cancellation. Equal-area unit-magnification relays, nondispersive arm OPD,
+paraxial propagation and cycle-averaged detection remain the model boundaries;
+phase-span refinement is resolution control, not an error certificate.
+
+Five focused G1/G3/G4 groups cover independent square-pupil/shutter integrals,
+monochromatic parity and weak ports, covariance/partition additivity, large
+path/epoch invariance, sub-ULP offset beats and exact work/cancellation admission.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored

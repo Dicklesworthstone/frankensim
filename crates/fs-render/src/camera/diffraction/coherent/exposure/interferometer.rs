@@ -12,6 +12,9 @@ use super::{
 };
 use fs_math::{c64::C64, det};
 
+mod pixel;
+pub use pixel::CoherentInterferometerPixelExposure;
+
 type Fields = [[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES];
 
 /// Work limits for one allocation-free spectral receiver observation.
@@ -20,8 +23,9 @@ pub struct CoherentInterferometerExposureLimits {
     /// Original pupil-wave evaluations across active arms and all source banks.
     pub maximum_pupil_evaluations: usize,
     /// Each power diagonal, complex mutual diagonal, or cached real temporal
-    /// contraction counts once. With N frequencies and B source banks, two
-    /// active arms use B*N*(4*N+1); one active arm uses B*N*(N+1)/2.
+    /// contraction counts once. For scalar detection with N frequencies and B
+    /// source banks, two active arms use B*N*(4*N+1); one uses B*N*(N+1)/2.
+    /// Full Jones coherency uses the larger counts documented by that query.
     /// A closed receiver or a preparation with no waves uses zero contractions.
     pub maximum_pair_contractions: usize,
 }
@@ -76,19 +80,53 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         let amplitudes = receiver.arm_amplitudes();
         let active = amplitudes.iter().filter(|&&a| a != Dd::ZERO).count();
         let contractions = self.interferometer_work(active, limits.maximum_pair_contractions)?;
+        let moments = self.interferometer_moments(receiver, [0.0; 2], &mut cancelled)?;
+        let arms = [moments[0], moments[1]];
+        let outputs = [moments[2], moments[3]];
+        let mutual = [moments[4], moments[5]];
+        let duration = Dd::from_f64(self.shutter.duration_s());
+        let result = CoherentInterferometerExposureSample {
+            arm_power_density_w: [rounded(arms[0])?, rounded(arms[1])?],
+            output_power_density_w: [rounded(outputs[0])?, rounded(outputs[1])?],
+            mutual_coherence_density_w: C64::new(rounded(mutual[0])?, rounded(mutual[1])?),
+            fringe_visibility: visibility(arms, mutual)?,
+            arm_energy_density_j: [energy(arms[0], duration)?, energy(arms[1], duration)?],
+            output_energy_density_j: [energy(outputs[0], duration)?, energy(outputs[1], duration)?],
+            pupil_evaluations: evaluations,
+            pair_contractions: contractions,
+        };
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    // Original DD moments for point and finite-area receivers. Relay offsets
+    // stay separate until field evaluation; propagation retains their DD sum.
+    fn interferometer_moments(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        relay_offset: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[Dd; 6], CoherentDiffractionError> {
+        let amplitudes = receiver.arm_amplitudes();
+        let active = amplitudes.iter().filter(|&&a| a != Dd::ZERO).count();
         let mut arms = [Dd::ZERO; 2];
         let mut outputs = [Dd::ZERO; 2];
         let mut mutual = [Dd::ZERO; 2];
-        if evaluations != 0 {
-            let coordinates = receiver.coordinates();
-            let rotations = self.interferometer_rotations(receiver, &mut cancelled)?;
+        if self.waves != 0 && active != 0 {
+            let coordinates = receiver.coordinates().map(|center| {
+                std::array::from_fn(|axis| {
+                    (Dd::from_f64(center[axis]) + Dd::from_f64(relay_offset[axis])).to_f64()
+                })
+            });
+            let rotations =
+                self.interferometer_rotations_offset(receiver, relay_offset, cancelled)?;
             let identity = [[Dd::ONE, Dd::ZERO]; MAX_COHERENT_DIFFRACTION_TONES];
             let mixing_amplitude = Dd::from_f64(0.5).sqrt();
             for bank in 0..=self.factors {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
                 let mut fields = [[[Dd::ZERO; 2]; MAX_COHERENT_DIFFRACTION_TONES]; 2];
                 for (tone, &group) in self.tones.iter().zip(&self.tone_groups) {
-                    poll(&mut cancelled)?;
+                    poll(cancelled)?;
                     let waves = if bank == 0 {
                         tone.illumination.mean
                     } else {
@@ -96,7 +134,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
                     };
                     for arm in 0..2 {
                         if amplitudes[arm] != Dd::ZERO {
-                            let field = tone.field(waves, coordinates[arm], &mut cancelled)?;
+                            let field = tone.field(waves, coordinates[arm], cancelled)?;
                             for axis in 0..2 {
                                 fields[arm][group][axis] =
                                     fields[arm][group][axis] + field[axis] * amplitudes[arm];
@@ -108,12 +146,12 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
                 for arm in 0..2 {
                     if amplitudes[arm] != Dd::ZERO {
                         for i in 0..self.groups.len() {
-                            poll(&mut cancelled)?;
+                            poll(cancelled)?;
                             fields[arm][i] = mul(fields[arm][i], rotations[arm][i]);
                         }
                         let mut component = fields[arm];
                         bank_arms[arm] =
-                            self.contract_component(&mut component, &identity, &mut cancelled)?;
+                            self.contract_component(&mut component, &identity, cancelled)?;
                         arms[arm] = arms[arm] + bank_arms[arm];
                     }
                 }
@@ -134,9 +172,9 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
                         }
                     }
                     outputs[port] = outputs[port]
-                        + self.contract_component(&mut component, &identity, &mut cancelled)?;
+                        + self.contract_component(&mut component, &identity, cancelled)?;
                 }
-                let cross = self.interferometer_cross(&fields[0], &fields[1], &mut cancelled)?;
+                let cross = self.interferometer_cross(&fields[0], &fields[1], cancelled)?;
                 // Refuse a failed bank rather than hiding it under another
                 // independent source's positive power.
                 visibility(bank_arms, cross)?;
@@ -145,19 +183,9 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
                 }
             }
         }
-        let duration = Dd::from_f64(self.shutter.duration_s());
-        let result = CoherentInterferometerExposureSample {
-            arm_power_density_w: [rounded(arms[0])?, rounded(arms[1])?],
-            output_power_density_w: [rounded(outputs[0])?, rounded(outputs[1])?],
-            mutual_coherence_density_w: C64::new(rounded(mutual[0])?, rounded(mutual[1])?),
-            fringe_visibility: visibility(arms, mutual)?,
-            arm_energy_density_j: [energy(arms[0], duration)?, energy(arms[1], duration)?],
-            output_energy_density_j: [energy(outputs[0], duration)?, energy(outputs[1], duration)?],
-            pupil_evaluations: evaluations,
-            pair_contractions: contractions,
-        };
-        poll(&mut cancelled)?;
-        Ok(result)
+        Ok([
+            arms[0], arms[1], outputs[0], outputs[1], mutual[0], mutual[1],
+        ])
     }
 
     fn interferometer_work(
@@ -182,26 +210,51 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         Ok(work)
     }
 
-    fn interferometer_rotations(
+    pub(super) fn interferometer_rotations(
         &self,
         receiver: CoherentDiffractionInterferometer,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[Fields; 2], CoherentDiffractionError> {
-        let coordinates = receiver.coordinates();
+        self.interferometer_rotations_offset(receiver, [0.0; 2], cancelled)
+    }
+
+    pub(super) fn interferometer_rotations_offset(
+        &self,
+        receiver: CoherentDiffractionInterferometer,
+        relay_offset: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[Fields; 2], CoherentDiffractionError> {
+        let centers = receiver.coordinates();
+        let coordinates = centers.map(|center| {
+            std::array::from_fn::<_, 2, _>(|axis| {
+                Dd::from_f64(center[axis]) + Dd::from_f64(relay_offset[axis])
+            })
+        });
         // Drop only ONE common carrier/coordinate phase from both arms.
         // Independently dropping each arm's reference chirp would erase the
         // monochromatic spatial interference this receiver is measuring.
-        let first = self.rotations(coordinates[0], cancelled)?;
-        let radii = coordinates.map(|at| {
-            Dd::from_f64(at[0]) * Dd::from_f64(at[0]) + Dd::from_f64(at[1]) * Dd::from_f64(at[1])
+        let distance = Dd::from_f64(self.sensor_distance_m)
+            * (Dd::ONE
+                + (coordinates[0][0] * coordinates[0][0] + coordinates[0][1] * coordinates[0][1])
+                    * Dd::from_f64(0.5));
+        rounded(distance)?;
+        // The shared offset cancels from the coordinate difference. Factoring
+        // |c1+u|²-|c0+u|² avoids subtracting two independently rounded chirps.
+        let radius_difference = (0..2).fold(Dd::ZERO, |sum, axis| {
+            sum + (Dd::from_f64(centers[1][axis]) - Dd::from_f64(centers[0][axis]))
+                * (coordinates[1][axis] + coordinates[0][axis])
         });
-        let path = Dd::from_f64(self.sensor_distance_m) * (radii[1] - radii[0]) * Dd::from_f64(0.5);
+        let path = Dd::from_f64(self.sensor_distance_m) * radius_difference * Dd::from_f64(0.5);
         rounded(path)?;
         let (sine, cosine) = det::sin_cos_dd(Dd::from_f64(receiver.relative_phase_rad()));
         let interface = [cosine, sine];
+        let mut first = [[Dd::ZERO; 2]; MAX_COHERENT_DIFFRACTION_TONES];
         let mut second = [[Dd::ZERO; 2]; MAX_COHERENT_DIFFRACTION_TONES];
         for (i, group) in self.groups.iter().enumerate() {
             poll(cancelled)?;
+            let common = frequency_length_phase(group.relative_optical_frequency_hz, distance)?;
+            let (sine, cosine) = det::sin_cos_dd(common);
+            first[i] = [cosine, sine];
             let chirp = frequency_length_phase(group.optical_frequency_hz, path)?;
             let delay = frequency_length_phase(
                 Dd::from_f64(group.frequency_hz),
@@ -214,7 +267,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         Ok([first, second])
     }
 
-    fn interferometer_cross(
+    pub(super) fn interferometer_cross(
         &self,
         left: &Fields,
         right: &Fields,
@@ -272,7 +325,7 @@ pub(super) fn frequency_length_phase(
     Ok(phase)
 }
 
-fn energy(power: Dd, duration: Dd) -> Result<f64, CoherentDiffractionError> {
+pub(super) fn energy(power: Dd, duration: Dd) -> Result<f64, CoherentDiffractionError> {
     let value = power * duration;
     if power != Dd::ZERO && value == Dd::ZERO {
         return Err(CoherentDiffractionError::Unrepresentable);
