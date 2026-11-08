@@ -31,7 +31,9 @@ pub mod assembly;
 /// Graded original panel and reinforcement inventory in loaded vibration pencils.
 pub mod density;
 pub use density::{equilibrate_shell_materials_with_reference_density,
-    equilibrate_stiffened_shell_with_reference_density};
+    equilibrate_shell_materials_with_reference_density_and_body_acceleration,
+    equilibrate_stiffened_shell_with_reference_density,
+    equilibrate_stiffened_shell_with_reference_density_and_body_acceleration};
 mod beams;
 use beams::{BeamStretch, MAX_BONDED_BEAMS};
 use tethers::{PreparedTether, ShellTether, TetherResponse};
@@ -485,13 +487,41 @@ fn equilibrate_sections_with_assembly<S: Section>(
     solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize) -> Result<(Vec<f64>, usize), String>,
     assemble: impl FnOnce() -> Result<ShellModel, crate::PlateError>,
 ) -> Result<PreloadedShell, String> {
+    equilibrate_sections_with_load_assembly(mesh, sections, boundary, support, beams, loads,
+        tethers, options, solve, || assemble().map(|model| (model, Vec::new())))
+}
+
+// A body load is assembled before support elimination, together with the SAME
+// reference mass. Only this native path reduces the complete combined load.
+// The empty auxiliary vector keeps ordinary caller-owned dead loads unchanged.
+#[allow(clippy::too_many_arguments)]
+fn equilibrate_sections_with_load_assembly<S: Section>(
+    mesh: &ShellMesh, sections: &[S], boundary: &[usize], support: ShellSupport,
+    beams: &[ShellBeam], loads: &[f64], tethers: &[ShellTether], options: PreloadOptions,
+    solve: &mut impl FnMut(&PreloadProblem<'_>, Vec<f64>, usize) -> Result<(Vec<f64>, usize), String>,
+    assemble: impl FnOnce() -> Result<(ShellModel, Vec<f64>), crate::PlateError>,
+) -> Result<PreloadedShell, String> {
     if mesh.nodes.len()>10_000 || mesh.tris.len()>40_000 || loads.len()!=6*mesh.nodes.len()
         || tethers.len()>4096 || beams.len()>MAX_BONDED_BEAMS
         || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty() {
         return Err("invalid supported-shell preload, load cardinality or explicit budget".into());
     }
     validate_options(options)?;
-    let model=assemble().map_err(|e|e.to_string())?;
+    let (model, mut body_load)=assemble().map_err(|e|e.to_string())?;
+    let loads = if body_load.is_empty() {
+        loads
+    } else {
+        if body_load.len()!=loads.len() {
+            return Err("body acceleration load does not match the original shell".into());
+        }
+        for (body, &dead) in body_load.iter_mut().zip(loads) {
+            *body += dead;
+            if !body.is_finite() {
+                return Err("combined dead and body acceleration load overflows".into());
+            }
+        }
+        body_load.as_slice()
+    };
     let base=positive_factor(&model.k)?;
     let length=(0..3).map(|c| {
         let lo=mesh.nodes.iter().map(|p|p[c]).fold(f64::INFINITY,f64::min);

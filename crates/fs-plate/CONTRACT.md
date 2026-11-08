@@ -2500,3 +2500,22 @@ Focused regressions retain graded mass under nonzero preload, distinguish
 kinetic changes from fixed dead-load equilibrium, check mass-scaled loaded
 Rayleigh quotients with tethers and independent sections, and reject invalid
 inventory or an unsupported solver convergence claim.
+
+### Self-weight in loaded graded reinforced shells
+
+The graded preload `*_and_body_acceleration` entries accept an explicit uniform
+physical acceleration in the reference mesh's Cartesian axes. The same native
+panel/beam assembly prepares the supported mass and complete body-load response.
+The preload owner adds that response to additional caller dead loads BEFORE
+support restriction, including the force contributed by constrained mass columns
+and moments from eccentric reinforcement. The supplied acceleration is counted
+once; caller dead loads must not duplicate the same weight.
+
+Original work/support admission precedes the single assembly. Existing
+continuation, tether forces, complete equilibrium checks and stable-tangent
+acceptance own the solve; the original graded mass survives unchanged in the
+accepted vibration pencil. This remains a reference-frame dead-load model under
+native moderate-rotation kinematics, without finite-rotation follower gravity
+or centrifugal/angular-acceleration terms. Focused regressions compare the
+complete unrestricted mass projection, reciprocal density/acceleration scaling,
+zero-acceleration parity and refusal before solver publication.

@@ -300,3 +300,287 @@ fn invalid_inventory_and_false_solver_convergence_cannot_publish_a_loaded_pencil
     assert_eq!(mesh, saved);
     assert_eq!(good, inventory(&mesh, 1.0));
 }
+
+#[test]
+fn body_acceleration_preload_uses_complete_mass_columns_before_support_restriction() {
+    let (mesh, sections, fixed, beams) = fixture();
+    let density = inventory(&mesh, 1.0);
+    let beam_density = [[100.0, 900.0]];
+    let acceleration = [1.75, -2.5, -9.81];
+    let mut dead = vec![0.0; 6 * mesh.nodes.len()];
+    dead[26] = -1.5;
+    for mass in [BeamMass::Lumped, BeamMass::Consistent] {
+        // Independent native full-coordinate projection. In particular, retain
+        // fixed-node TRANSLATION columns when assembling force on free nodes.
+        let full = assemble_stiffened_shell_with_reference_density(
+            &mesh,
+            &sections,
+            &density,
+            &[],
+            ShellSupport::Free,
+            &beams,
+            &beam_density,
+            mass,
+        )
+        .unwrap();
+        let translation: Vec<_> = (0..full.free)
+            .map(|i| if i % 6 < 3 { acceleration[i % 6] } else { 0.0 })
+            .collect();
+        let mut body = vec![0.0; full.free];
+        full.m.spmv(&translation, &mut body);
+        assert!(fixed.iter().any(|&node| body[6 * node + 2].abs() > 1e-3));
+        let complete: Vec<_> = body.iter().zip(&dead).map(|(g, f)| g + f).collect();
+        let explicit = equilibrate_stiffened_shell_with_reference_density(
+            &mesh,
+            &sections,
+            &density,
+            &fixed,
+            ShellSupport::Clamped,
+            &beams,
+            &beam_density,
+            mass,
+            &complete,
+            &[],
+            PreloadOptions::default(),
+            &mut reference_newton,
+        )
+        .unwrap();
+        let actual = equilibrate_stiffened_shell_with_reference_density_and_body_acceleration(
+            &mesh,
+            &sections,
+            &density,
+            &fixed,
+            ShellSupport::Clamped,
+            &beams,
+            &beam_density,
+            mass,
+            acceleration,
+            &dead,
+            &[],
+            PreloadOptions::default(),
+            &mut reference_newton,
+        )
+        .unwrap();
+        for (&a, &b) in actual.displacement.iter().zip(&explicit.displacement) {
+            near(a, b, 3e-12);
+        }
+        same_matrix(&actual.model.m, &explicit.model.m);
+        for i in 0..actual.model.free {
+            for j in 0..actual.model.free {
+                near(actual.model.k.get(i, j), explicit.model.k.get(i, j), 3e-12);
+            }
+        }
+        near(actual.stored_energy_j, explicit.stored_energy_j, 3e-12);
+        assert!(actual.displacement[26] < 0.0);
+
+        // Demonstrate the lost support-column terms in the tempting shortcut.
+        let mut free_translation = vec![0.0; actual.model.free];
+        for (full, &reduced) in actual.model.dof_map.iter().enumerate() {
+            if let Some(reduced) = reduced {
+                free_translation[reduced] = translation[full];
+            }
+        }
+        let mut shortcut = vec![0.0; actual.model.free];
+        actual.model.m.spmv(&free_translation, &mut shortcut);
+        let z = actual.model.dof_map[26].unwrap();
+        assert!((shortcut[z] - body[26]).abs() > 1e-3);
+        assert_eq!(dead[26], -1.5);
+    }
+}
+
+#[test]
+fn source_inventory_and_acceleration_scale_together_in_tethered_loaded_modes() {
+    let (mesh, plates, fixed, beams) = fixture();
+    let sections: Vec<_> = plates
+        .into_iter()
+        .map(|plate| {
+            ShellSection::new(
+                plate,
+                SheetMatrix::orthotropic(80e6, 12e6, 2e6, 4e6).unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    let tethers = [ShellTether {
+        nodes: mesh.tris[0],
+        weights: [0.0, 0.0, 1.0],
+        arm_m: [0.0; 3],
+        anchor_m: [0.75, 0.25, -0.04],
+        reference_tension_n: 10.0,
+        axial_stiffness_n_per_m: 2000.0,
+    }];
+    let mut dead = vec![0.0; 6 * mesh.nodes.len()];
+    dead[26] = -1.0;
+    let mut results = Vec::new();
+    for scale in [1.0, 2.0] {
+        let density = inventory(&mesh, scale);
+        let beam_density = [[100.0 * scale, 900.0 * scale]];
+        let acceleration = [1.2 / scale, -0.5 / scale, -9.81 / scale];
+        let original = assemble_stiffened_shell_materials_with_reference_density(
+            &mesh,
+            &sections,
+            &density,
+            &fixed,
+            ShellSupport::Clamped,
+            &beams,
+            &beam_density,
+            BeamMass::Consistent,
+        )
+        .unwrap();
+        let loaded = equilibrate_shell_materials_with_reference_density_and_body_acceleration(
+            &mesh,
+            &sections,
+            &density,
+            &fixed,
+            ShellSupport::Clamped,
+            &beams,
+            &beam_density,
+            BeamMass::Consistent,
+            acceleration,
+            &dead,
+            &tethers,
+            PreloadOptions::default(),
+            &mut reference_newton,
+        )
+        .unwrap();
+        same_matrix(&loaded.model.m, &original.m);
+        assert!(loaded.tether_responses[0].tension_n > 0.0);
+        results.push(loaded);
+    }
+    let (a, b) = (&results[0], &results[1]);
+    // Twice the inventory and half the acceleration produce the SAME full
+    // body load, equilibrium and tangent, while modal inertia doubles.
+    for (&x, &y) in a.displacement.iter().zip(&b.displacement) {
+        near(x, y, 3e-12);
+    }
+    for i in 0..a.model.free {
+        for j in 0..a.model.free {
+            near(b.model.k.get(i, j), a.model.k.get(i, j), 3e-12);
+            near(b.model.m.get(i, j), 2.0 * a.model.m.get(i, j), 3e-14);
+        }
+    }
+    let v: Vec<_> = (0..a.model.free).map(|i| 0.3 + 0.1 * i as f64).collect();
+    near(
+        quadratic(&b.model.k, &v) / quadratic(&b.model.m, &v),
+        0.5 * quadratic(&a.model.k, &v) / quadratic(&a.model.m, &v),
+        3e-12,
+    );
+
+    let density = inventory(&mesh, 1.0);
+    let beam_density = [[100.0, 900.0]];
+    let ordinary = equilibrate_shell_materials_with_reference_density(
+        &mesh,
+        &sections,
+        &density,
+        &fixed,
+        ShellSupport::Clamped,
+        &beams,
+        &beam_density,
+        BeamMass::Consistent,
+        &dead,
+        &tethers,
+        PreloadOptions::default(),
+        &mut reference_newton,
+    )
+    .unwrap();
+    let zero = equilibrate_shell_materials_with_reference_density_and_body_acceleration(
+        &mesh,
+        &sections,
+        &density,
+        &fixed,
+        ShellSupport::Clamped,
+        &beams,
+        &beam_density,
+        BeamMass::Consistent,
+        [0.0; 3],
+        &dead,
+        &tethers,
+        PreloadOptions::default(),
+        &mut reference_newton,
+    )
+    .unwrap();
+    same_matrix(&zero.model.k, &ordinary.model.k);
+    same_matrix(&zero.model.m, &ordinary.model.m);
+    assert_eq!(zero.displacement, ordinary.displacement);
+}
+
+#[test]
+fn invalid_acceleration_and_combined_load_overflow_refuse_before_solving() {
+    let (mesh, sections, fixed, beams) = fixture();
+    let saved = mesh.clone();
+    let density = inventory(&mesh, 1.0);
+    let beam_density = [[100.0, 900.0]];
+    let dead = vec![0.0; 6 * mesh.nodes.len()];
+    let mut calls = 0;
+    for acceleration in [
+        [f64::NAN, 0.0, 0.0],
+        [0.0, f64::INFINITY, 0.0],
+        [0.0, 0.0, f64::NEG_INFINITY],
+    ] {
+        assert!(
+            equilibrate_stiffened_shell_with_reference_density_and_body_acceleration(
+                &mesh,
+                &sections,
+                &density,
+                &fixed,
+                ShellSupport::Clamped,
+                &beams,
+                &beam_density,
+                BeamMass::Consistent,
+                acceleration,
+                &dead,
+                &[],
+                PreloadOptions::default(),
+                &mut |_, _, _| {
+                    calls += 1;
+                    Err("invalid acceleration reached solver".into())
+                },
+            )
+            .is_err()
+        );
+    }
+    let enormous_dead = vec![f64::MAX; dead.len()];
+    assert!(
+        equilibrate_stiffened_shell_with_reference_density_and_body_acceleration(
+            &mesh,
+            &sections,
+            &density,
+            &fixed,
+            ShellSupport::Clamped,
+            &beams,
+            &beam_density,
+            BeamMass::Consistent,
+            [f64::MAX, 0.0, 0.0],
+            &enormous_dead,
+            &[],
+            PreloadOptions::default(),
+            &mut |_, _, _| {
+                calls += 1;
+                Err("overflowing load reached solver".into())
+            },
+        )
+        .is_err()
+    );
+    assert_eq!(calls, 0);
+    // The native full force-balance gate still rejects a callback's false claim.
+    assert!(
+        equilibrate_stiffened_shell_with_reference_density_and_body_acceleration(
+            &mesh,
+            &sections,
+            &density,
+            &fixed,
+            ShellSupport::Clamped,
+            &beams,
+            &beam_density,
+            BeamMass::Consistent,
+            [0.0, 0.0, -9.81],
+            &dead,
+            &[],
+            PreloadOptions::default(),
+            &mut |p, _, _| Ok((vec![0.0; p.dimension()], 0)),
+        )
+        .is_err()
+    );
+    assert_eq!(mesh, saved);
+    assert_eq!(density, inventory(&mesh, 1.0));
+}
