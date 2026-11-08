@@ -7,6 +7,7 @@ use fs_couple::phs_orbit::{
         PhsForcedParameterDirection, PhsPortSidebandControls, PhsPortSidebandError,
         PhsPortSidebandSource, PhsStorageParameterControls,
     },
+    solve_forced_feedback_harmonic_balance_scaled_seeded,
     solve_forced_harmonic_balance_scaled_seeded,
     spectrum::{PortSpectrumControls, observe_port_spectrum},
 };
@@ -608,6 +609,7 @@ fn complete_nonlinear_physical_direction_matches_independently_resolved_orbits()
                 },
                 storage: Some(&action),
                 input: Some(&input_derivative),
+                feedback: None,
             },
             &parameter_controls(2),
             || false,
@@ -884,4 +886,476 @@ fn feedback_sources_cannot_omit_their_direct_material_chain_rule() {
         Err(PhsPortSidebandError::Invalid(_))
     ));
     assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn forced_feedback_chain_is_explicit_and_its_unresolved_harmonics_cannot_disappear() {
+    let system = model(SosModalStorage {
+        omegas: vec![2.0],
+        channels: vec![],
+    });
+    let (input, base) = sinusoid(0.0, 0.4, 3);
+    let feedback = NoFeedback;
+    let jacobian = |_: &[f64], _: &[f64], out: &mut [f64]| {
+        out.fill(0.0);
+        true
+    };
+    let calls = Cell::new(0);
+    let fixed = |_: &[f64], _: &[f64], _: &[f64], out: &mut [f64]| {
+        calls.set(calls.get() + 1);
+        out.fill(0.0);
+        true
+    };
+    let mut source = PhsPortSidebandSource::forced_feedback(
+        &system,
+        &input,
+        &feedback,
+        &jacobian,
+        &base,
+        &controls(2, 2, 1, 3),
+    )
+    .unwrap();
+    let mut prepared = source.prepare(&scales(2), || false).unwrap();
+    assert!(matches!(
+        prepared.forced_parameter_tangent(
+            PhsForcedParameterDirection::default(),
+            &parameter_controls(2),
+            || false
+        ),
+        Err(PhsPortSidebandError::Invalid(_))
+    ));
+    assert_eq!(calls.get(), 0);
+    let result = prepared
+        .forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                feedback: Some(&fixed),
+                ..Default::default()
+            },
+            &parameter_controls(2),
+            || false,
+        )
+        .unwrap();
+    assert!(
+        result
+            .state_parameter_derivative
+            .coefficients
+            .iter()
+            .all(|z| *z == C64::ZERO)
+    );
+    assert_eq!(calls.get(), 64 + 128 + 256);
+    let cubic = |_: &[f64], y: &[f64], _: &[f64], out: &mut [f64]| {
+        out.copy_from_slice(&[0.0, y[0].powi(3)]);
+        true
+    };
+    let direction = PhsForcedParameterDirection {
+        feedback: Some(&cubic),
+        ..Default::default()
+    };
+    assert!(matches!(
+        prepared.forced_parameter_tangent(direction, &parameter_controls(2), || false),
+        Err(PhsPortSidebandError::ObservationUnresolved { .. })
+    ));
+    let mut loose = parameter_controls(2);
+    loose.forcing_rms_tolerances.fill(10.0);
+    assert!(matches!(
+        prepared.forced_parameter_tangent(direction, &loose, || false),
+        Err(PhsPortSidebandError::Sideband(
+            SidebandError::OmittedSidebands { .. }
+        ))
+    ));
+    let mut ordinary =
+        PhsPortSidebandSource::forced(&system, &input, &base, &controls(2, 2, 1, 3)).unwrap();
+    let mut ordinary = ordinary.prepare(&scales(2), || false).unwrap();
+    assert!(matches!(
+        ordinary.forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                feedback: Some(&fixed),
+                ..Default::default()
+            },
+            &parameter_controls(2),
+            || false,
+        ),
+        Err(PhsPortSidebandError::Invalid(_))
+    ));
+    assert_eq!(calls.get(), 64 + 128 + 256);
+}
+
+struct FlowFeedback {
+    linear: f64,
+    cubic: f64,
+    position: f64,
+}
+
+impl AutonomousPortFeedback for FlowFeedback {
+    fn port_count(&self) -> usize {
+        1
+    }
+
+    fn input(&self, state: &[f64], flow: &[f64], out: &mut [f64]) -> bool {
+        out[0] = self.position * state[0] - self.linear * flow[0] - self.cubic * flow[0].powi(3);
+        true
+    }
+}
+
+#[test]
+fn feedback_parameter_chain_retains_mass_gain_and_maxwell_history() {
+    let (mass, stiffness, damping, arm, tau, gain): (f64, f64, f64, f64, f64, f64) =
+        (1.2, 4.2, 0.07, 1.4, 0.23, 1.1);
+    let (linear, position) = (0.12, 0.06);
+    let (dm, dk, dc, dtau, dg, dl, da) = (0.2, -0.3, 0.02, -0.04, 0.13, -0.03, 0.04);
+    let system = PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, damping],
+        vec![0.0, gain],
+        Box::new(QuadraticStorage::new(vec![stiffness, 0.0, 0.0, 1.0 / mass], 2).unwrap()),
+    )
+    .unwrap()
+    .with_relaxation_branches(vec![RelaxationBranch {
+        projection: vec![1.0, 0.0],
+        stiffness: arm,
+        relaxation_time_s: tau,
+    }])
+    .unwrap();
+    let omega = 1.8;
+    let forces = [
+        C64::from_re(0.02),
+        C64::new(0.04, -0.02),
+        C64::new(-0.01, 0.03),
+        C64::ZERO,
+    ];
+    let force_slopes = [
+        C64::from_re(-0.01),
+        C64::new(-0.02, 0.01),
+        C64::new(0.01, 0.01),
+        C64::new(0.02, -0.03),
+    ];
+    let exact = |k: usize| {
+        let w = k as f64 * omega;
+        let s = C64::new(0.0, w);
+        let memory = C64::ONE + s.scale(tau);
+        let dynamic = C64::new(
+            stiffness - gain * position - mass * w * w,
+            w * (damping + linear * gain * gain),
+        ) + (s.scale(tau) / memory).scale(arm);
+        let dynamic_slope = C64::new(
+            dk - dg * position - gain * da - dm * w * w,
+            w * (dc + dl * gain * gain + 2.0 * linear * gain * dg),
+        ) + s.scale(arm * dtau) / (memory * memory);
+        let q = forces[k].scale(gain) / dynamic;
+        let dq = (forces[k].scale(dg) + force_slopes[k].scale(gain) - dynamic_slope * q) / dynamic;
+        (
+            [q, s * q.scale(mass), q.scale(arm.sqrt()) / memory],
+            [
+                dq,
+                s * (dq.scale(mass) + q.scale(dm)),
+                (dq / memory - q * s.scale(dtau) / (memory * memory)).scale(arm.sqrt()),
+            ],
+            s * (dq.scale(gain) + q.scale(dg)),
+        )
+    };
+    let mut states = vec![vec![C64::ZERO; 4]; 3];
+    for k in 0..=3 {
+        for j in 0..3 {
+            states[j][k] = exact(k).0[j];
+        }
+    }
+    let base = orbit(omega, states);
+    let input = PeriodicPortInput::new(omega, vec![forces.to_vec()]).unwrap();
+    let input_slope = PeriodicPortInput::new(omega, vec![force_slopes.to_vec()]).unwrap();
+    let feedback = FlowFeedback {
+        linear,
+        cubic: 0.0,
+        position,
+    };
+    let jacobian = |_: &[f64], _: &[f64], out: &mut [f64]| {
+        out.copy_from_slice(&[position, -linear * gain / mass, 0.0]);
+        true
+    };
+    let storage = |x: &[f64], out: &mut [f64]| {
+        out.copy_from_slice(&[dk * x[0], -dm * x[1] / (mass * mass), 0.0]);
+        true
+    };
+    let feedback_calls = Cell::new(0);
+    let parameter = |x: &[f64], y: &[f64], yp: &[f64], out: &mut [f64]| {
+        feedback_calls.set(feedback_calls.get() + 1);
+        assert!((y[0] - gain * x[1] / mass).abs() < 2e-14);
+        assert!((yp[0] - (dg / mass - gain * dm / (mass * mass)) * x[1]).abs() < 2e-14);
+        out[0] = da * x[0] - dl * y[0] - linear * yp[0];
+        true
+    };
+    let dr = [0.0, 0.0, 0.0, 0.0, dc, 0.0, 0.0, 0.0, -dtau / (tau * tau)];
+    let dg_map = [0.0, dg, 0.0];
+    let mut source = PhsPortSidebandSource::forced_feedback(
+        &system,
+        &input,
+        &feedback,
+        &jacobian,
+        &base,
+        &controls(3, 1, 3, 3),
+    )
+    .unwrap();
+    let mut prepared = source.prepare(&scales(3), || false).unwrap();
+    let mut factor = prepared.factor(0.0, || false).unwrap();
+    let direction = PhsForcedParameterDirection {
+        structure: PhsStructureParameterDirection {
+            dissipation: Some(&dr),
+            ports: Some(&dg_map),
+            ..Default::default()
+        },
+        storage: Some(&storage),
+        input: Some(&input_slope),
+        feedback: Some(&parameter),
+    };
+    let result = factor
+        .forced_parameter_tangent(direction, &parameter_controls(3), || false)
+        .unwrap();
+    for k in 0..=3 {
+        for j in 0..3 {
+            near(
+                result.state_parameter_derivative.coefficients[(3 + k) * 3 + j],
+                exact(k).1[j],
+                3e-11,
+            );
+            near(
+                result.state_parameter_derivative.coefficients[(3 - k) * 3 + j],
+                exact(k).1[j].conj(),
+                3e-11,
+            );
+        }
+        near(result.port_parameter_derivative[3 + k], exact(k).2, 3e-11);
+    }
+    assert_eq!(feedback_calls.get(), 64 + 128 + 256);
+    assert_eq!(result.parameter_actions, 2 * (64 + 128 + 256));
+    assert!(result.state_parameter_derivative.coefficients[6 * 3 + 2].abs() > 1e-5);
+
+    // Missing/failed/incomplete direct chains cannot borrow the state Jacobian
+    // or a previously evaluated callback's scratch. A refusal preserves the LU.
+    assert!(matches!(
+        factor.forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                feedback: None,
+                ..direction
+            },
+            &parameter_controls(3),
+            || false
+        ),
+        Err(PhsPortSidebandError::Invalid(_))
+    ));
+    for mode in 0..3 {
+        let bad = |_: &[f64], _: &[f64], _: &[f64], out: &mut [f64]| {
+            if mode == 2 {
+                out[0] = f64::INFINITY;
+            }
+            mode != 0
+        };
+        assert_eq!(
+            factor
+                .forced_parameter_tangent(
+                    PhsForcedParameterDirection {
+                        feedback: Some(&bad),
+                        ..direction
+                    },
+                    &parameter_controls(3),
+                    || false
+                )
+                .unwrap_err(),
+            PhsPortSidebandError::SourceRefused
+        );
+    }
+    let before = feedback_calls.get();
+    assert_eq!(
+        factor
+            .forced_parameter_tangent(direction, &parameter_controls(3), || feedback_calls.get()
+                > before + 10)
+            .unwrap_err(),
+        PhsPortSidebandError::Cancelled
+    );
+    let repeat = factor
+        .forced_parameter_tangent(direction, &parameter_controls(3), || false)
+        .unwrap();
+    assert_eq!(
+        result.state_parameter_derivative.coefficients,
+        repeat.state_parameter_derivative.coefficients
+    );
+    assert_eq!(
+        result.port_parameter_derivative,
+        repeat.port_parameter_derivative
+    );
+}
+
+fn nonlinear_feedback_model(parameter: f64) -> PortHamiltonian {
+    PortHamiltonian::new(
+        2,
+        1,
+        vec![0.0, 1.0, -1.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.3 + 0.02 * parameter],
+        vec![0.0, 1.1 + 0.13 * parameter],
+        Box::new(material(parameter)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn nonlinear_feedback_parameter_slope_matches_independently_resolved_original_orbits() {
+    let (omega, phase, amplitude): (f64, f64, f64) = (2.05, 0.37, 0.3);
+    let q = C64::new(phase.cos(), phase.sin()).scale(0.5 * amplitude);
+    let p = C64::new(0.0, omega) * q;
+    let mut states = vec![vec![C64::ZERO; 10]; 2];
+    states[0][1] = q;
+    states[1][1] = p;
+    let base = orbit(omega, states);
+    let law = |parameter: f64| FlowFeedback {
+        linear: 0.12 - 0.03 * parameter,
+        cubic: 0.2 + 0.06 * parameter,
+        position: 0.07 + 0.04 * parameter,
+    };
+    let (gain, linear, cubic, position): (f64, f64, f64, f64) = (1.1, 0.12, 0.2, 0.07);
+    let mut forces = vec![C64::ZERO; 10];
+    forces[1] = (q * C64::new(
+        4.0 - gain * position - omega * omega,
+        omega * (0.3 + linear * gain * gain),
+    ) + q.scale(6.0 * q.abs().powi(2))
+        + p.scale(3.0 * cubic * gain.powi(4) * p.abs().powi(2)))
+    .scale(1.0 / gain);
+    forces[3] =
+        ((q * q * q).scale(2.0) + (p * p * p).scale(cubic * gain.powi(4))).scale(1.0 / gain);
+    let mut slopes = vec![C64::ZERO; 10];
+    slopes[1] = C64::new(0.02, -0.01);
+    slopes[3] = C64::new(-0.003, 0.004);
+    let drive = |parameter: f64| {
+        PeriodicPortInput::new(
+            omega,
+            vec![
+                forces
+                    .iter()
+                    .zip(&slopes)
+                    .map(|(&u, &up)| u + up.scale(parameter))
+                    .collect(),
+            ],
+        )
+        .unwrap()
+    };
+    let input = drive(0.0);
+    let input_slope = PeriodicPortInput::new(omega, vec![slopes.clone()]).unwrap();
+    let system = nonlinear_feedback_model(0.0);
+    let feedback = law(0.0);
+    let jacobian = |_: &[f64], y: &[f64], out: &mut [f64]| {
+        out.copy_from_slice(&[position, -gain * (linear + 3.0 * cubic * y[0] * y[0])]);
+        true
+    };
+    let storage = material(0.0);
+    let channels = [StressChannelParameterDirection {
+        coefficient: 0.5,
+        coupling: Some(&[0.1]),
+    }];
+    let storage_direction = SosModalParameterDirection {
+        omegas: Some(&[0.15]),
+        channels: Some(&channels),
+    };
+    let action = |x: &[f64], out: &mut [f64]| {
+        storage
+            .gradient_parameter_derivative(x, storage_direction, out)
+            .is_ok()
+    };
+    let parameter = |x: &[f64], y: &[f64], yp: &[f64], out: &mut [f64]| {
+        out[0] = 0.04 * x[0] + 0.03 * y[0]
+            - 0.06 * y[0].powi(3)
+            - (linear + 3.0 * cubic * y[0] * y[0]) * yp[0];
+        true
+    };
+    let mut source = PhsPortSidebandSource::forced_feedback(
+        &system,
+        &input,
+        &feedback,
+        &jacobian,
+        &base,
+        &controls(2, 1, 9, 11),
+    )
+    .unwrap();
+    let mut prepared = source.prepare(&scales(2), || false).unwrap();
+    let derivative = prepared
+        .forced_parameter_tangent(
+            PhsForcedParameterDirection {
+                structure: PhsStructureParameterDirection {
+                    dissipation: Some(&[0.0, 0.0, 0.0, 0.02]),
+                    ports: Some(&[0.0, 0.13]),
+                    ..Default::default()
+                },
+                storage: Some(&action),
+                input: Some(&input_slope),
+                feedback: Some(&parameter),
+            },
+            &parameter_controls(2),
+            || false,
+        )
+        .unwrap();
+    let hb_budget = HbBudget {
+        harmonics: 9,
+        max_newton: 40,
+        tolerance: 2e-12,
+        deflate_equilibrium: false,
+    };
+    let hb_scales = HbScales {
+        states: vec![0.3, 0.6],
+        equations: vec![0.6, 1.2],
+        angular_frequency: omega,
+    };
+    let observation = PortSpectrumControls {
+        harmonics: 11,
+        initial_samples: 32,
+        max_samples: 128,
+        max_source_evaluations: 256,
+        max_workspace_bytes: 1 << 20,
+        rms_tolerances: vec![2e-12],
+    };
+    let solve = |value: f64| {
+        let system = nonlinear_feedback_model(value);
+        let feedback = law(value);
+        let jacobian = |_: &[f64], y: &[f64], out: &mut [f64]| {
+            out.copy_from_slice(&[
+                feedback.position,
+                -(1.1 + 0.13 * value) * (feedback.linear + 3.0 * feedback.cubic * y[0] * y[0]),
+            ]);
+            true
+        };
+        let result = solve_forced_feedback_harmonic_balance_scaled_seeded(
+            &system,
+            &drive(value),
+            &feedback,
+            &jacobian,
+            base.packed_seed(&HbAnchor::Forced { omega }),
+            &hb_budget,
+            &hb_scales,
+        )
+        .unwrap();
+        let output = observe_port_spectrum(&system, &result.orbit, &observation, || false).unwrap();
+        (result.orbit, output)
+    };
+    let mut errors = Vec::new();
+    for step in [0.002, 0.001, 0.0005] {
+        let (plus, yp) = solve(step);
+        let (minus, ym) = solve(-step);
+        let mut error = 0.0_f64;
+        for k in 0..=9 {
+            for j in 0..2 {
+                let finite = (plus.coeffs[j][k] - minus.coeffs[j][k]).scale(0.5 / step);
+                error = error.max(
+                    (finite - derivative.state_parameter_derivative.coefficients[(9 + k) * 2 + j])
+                        .abs(),
+                );
+            }
+        }
+        for k in 1..=11 {
+            let finite = (yp.peak_phasors[0][k - 1] - ym.peak_phasors[0][k - 1])
+                .conj()
+                .scale(0.25 / step);
+            error = error.max((finite - derivative.port_parameter_derivative[11 + k]).abs());
+        }
+        errors.push(error);
+    }
+    assert!(errors[0] > 3.5 * errors[1], "{errors:?}");
+    assert!(errors[1] > 3.5 * errors[2], "{errors:?}");
+    assert!(errors[2] < 3e-6, "{errors:?}");
 }

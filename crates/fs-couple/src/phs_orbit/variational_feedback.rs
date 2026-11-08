@@ -28,6 +28,24 @@ use fs_phs::PortHamiltonian;
 /// belong in explicit original states; there is no externally prescribed clock.
 pub type PhsFeedbackStateJacobian<'a> = dyn Fn(&[f64], &[f64], &mut [f64]) -> bool + 'a;
 
+/// Complete parameter derivative of the SAME original feedback at FIXED state.
+///
+/// Arguments are original state `x`, conjugate flows `y=G^T grad H`, and their
+/// direct parameter derivative `y_p|x=G^T partial_p grad H+G_p^T grad H`.
+/// Write every original port's TOTAL `partial_p u(x,y(x,p),p)|x`, including
+/// explicit parameter dependence and the flow chain through the supplied third
+/// argument exactly once. The state chain through `x_p` belongs to the separate
+/// [`PhsFeedbackStateJacobian`] and MUST NOT be included here. External periodic
+/// drive derivatives are supplied separately by their authored coefficients.
+///
+/// The callback must describe the same immutable, deterministic, read-only law
+/// and original physical chart. Return false for unsupported source states;
+/// incomplete/nonfinite writes refuse. An explicit callback writing zeros can
+/// declare a fixed feedback law only when its COMPLETE fixed-state derivative
+/// is zero. No missing constitutive/port/feedback chain rule is inferred.
+pub type PhsFeedbackParameterAction<'a> =
+    dyn Fn(&[f64], &[f64], &[f64], &mut [f64]) -> bool + 'a;
+
 pub(super) struct FeedbackVariationalProblem<'a> {
     pub(super) original: PhsOrbitProblem<'a>,
     pub(super) external: Option<&'a PeriodicPortInput>,

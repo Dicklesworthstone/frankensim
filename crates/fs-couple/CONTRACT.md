@@ -5254,18 +5254,34 @@ Both projections share work, payload and Hessian caps and one real parameter
 sample cap, including any original-gradient/storage callbacks. Input directions
 retain original clock/ports and must resolve their declared bandwidth.
 
-Feedback sources, changed coordinates/clock and missing chain rules refuse.
+Periodically driven feedback uses the SAME original total state Jacobian and
+zero-carrier factor. Its required `PhsFeedbackParameterAction` receives original
+state, `y=G^T*e` and the direct `y_p|x=G^T*h_p+G_p^T*e`. It supplies the COMPLETE
+fixed-state feedback-input derivative, including explicit parameter dependence
+and the flow chain exactly once. The imposed Fourier drive derivative remains
+separate. `G_p*u` uses both original feedback and imposed drive; `G*u_p` combines
+both direct derivatives before contraction. No state chain is added twice.
+An explicit zero callback declares zero complete feedback derivative; omission
+refuses even for a fixed feedback law. Feedback actions are inadmissible on an
+ordinary forced source. Every direct feedback harmonic shares the same measured
+forcing-grid/tail allowance and physical work/payload/parameter-sample caps.
+
+Autonomous clocks, changed coordinates/clock and missing chain rules refuse.
 Singular, unresolved, source-refused or cancelled operations publish no partial
 tangent and leave the factor reusable. There is no finite parameter interval,
 perturbed production solve, regularization or branch switch.
 
-Nineteen relevant native tests pass: three original fs-phs coefficient-direction
-tests, seven full parameter regressions, four existing forced-frequency tests
-and five existing State-only sideband tests. These include analytic resonant
+Ten full parameter regressions pass through the actual native production
+owners, extending the previously executed coefficient/frequency/sideband lane.
+These include analytic resonant
 damping, reciprocal gain, complex drive and newly excited harmonics; simultaneous
 nonlinear J/R/G/storage/input changes compared with independently re-solved
 original models; Maxwell time/damping with original memory; and admission,
-forcing tails, cancellation and retry. The actual source lane compiles the
+forcing tails, cancellation and retry. Added feedback oracles independently
+differentiate mass, stiffness, damping, gain, feedback, drive and Maxwell time;
+resolve nonlinear storage and cubic flow-feedback changes against separate
+original perturbed HB solves; and check explicit zero/missing chains, unresolved
+feedback harmonics, source refusal and reusable-factor cancellation. The lane uses the
 complete fs-phs owner and original coupled FFT/periodic numerical bodies with
 real numerical dependencies, without executor substitutes. This does not
 establish the blocked full Cargo workspace, continuum or stability qualification.
