@@ -523,6 +523,19 @@ impl EigenService {
         op: &dyn SymmetricOp,
         cx: &Cx<'_>,
     ) -> Result<EigenProgress, ServiceError> {
+        self.tick_cancellable(op, &|| cx.checkpoint().is_err())
+    }
+
+    /// Advance the same transactional tick with a caller-owned cancellation
+    /// callback. This is the adapter for domains with an existing cancellation
+    /// contract; it uses exactly the same native backend, admissions, rollback
+    /// and final publication poll as [`Self::tick`]. Each operator application
+    /// remains responsible for bounding its own work.
+    pub fn tick_cancellable(
+        &mut self,
+        op: &dyn SymmetricOp,
+        is_cancelled: &impl Fn() -> bool,
+    ) -> Result<EigenProgress, ServiceError> {
         let op_dim = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.dim()))
             .map_err(|_| ServiceError::OperatorFault)?;
         if op_dim != self.n {
@@ -531,7 +544,7 @@ impl EigenService {
                 got: op_dim,
             });
         }
-        if cx.checkpoint().is_err() {
+        if is_cancelled() {
             return Err(ServiceError::Cancelled);
         }
         if matches!(
@@ -546,7 +559,7 @@ impl EigenService {
         let operator_fault = Cell::new(false);
         let cancelled = Cell::new(false);
         let apply = |x: &[f64], y: &mut [f64]| {
-            if cx.checkpoint().is_err() {
+            if is_cancelled() {
                 cancelled.set(true);
                 y.fill(0.0);
                 return;
@@ -560,13 +573,13 @@ impl EigenService {
             if y.iter().any(|v| !v.is_finite()) {
                 nonfinite.set(true);
             }
-            if cx.checkpoint().is_err() {
+            if is_cancelled() {
                 cancelled.set(true);
             }
         };
         let mut pairs: Vec<EigenPair> = Vec::new();
         for _ in 0..self.query.steps_per_tick {
-            if cx.checkpoint().is_err() {
+            if is_cancelled() {
                 self.state = snapshot;
                 return Err(ServiceError::Cancelled);
             }
@@ -614,7 +627,7 @@ impl EigenService {
         // A request can arrive during the final backend application or Ritz
         // extraction. Poll once more immediately before committing the state;
         // otherwise a one-step tick could acknowledge success after a request.
-        if cx.checkpoint().is_err() {
+        if is_cancelled() {
             self.state = snapshot;
             return Err(ServiceError::Cancelled);
         }

@@ -447,3 +447,32 @@ default; the L1 core pulls no constellation crate unless opted in.
   dual-ISA execution, or the umbrella's full G5 sweep. The `32·EPSILON`
   margin is an absolute oracle-agreement bound for the fixture's five terms per row and
   `|a_ij|, |x_j| ≤ 1/2`; it is not a dimension-free tolerance for callers.
+
+## Bounded positive-factor spectral reduction
+
+`direct::DirectLimits`, `SymbolicLdlt::analyze_bounded` and
+`factor_bounded` add explicit symbolic-entry, graph-work, numeric-work and
+frontal-dimension limits to the existing native AMD/multifrontal algorithms.
+Numeric payload is separately limited by `LdltOptions::max_factor_bytes`.
+Fill and widened fronts are admitted before their allocations. Cancellation
+is polled during graph traversal, between fronts and numeric pivots, and
+before publication; no partial symbolic object or factor is returned.
+The legacy entry points retain their existing arithmetic and default limits.
+The bounded analysis entry supports AMD and natural ordering; nested
+dissection requires a future matching owner budget and currently refuses.
+
+`direct::positive::PositiveWhitening` admits a complete positive scalar-pivot
+factor and exposes transpose-consistent actions for
+S = Pᵀ L⁻ᵀ D⁻¹/². It refuses negative/non-finite pivots and every 2×2 D block;
+callers prepare this lane with `allow_2x2: false`. There is no diagonal
+regularization. The actions need caller-owned O(n) workspace and O(nnz(L))
+arithmetic, preserve original variable order at the physical boundary, and
+reuse the registered native-FMA dispatch. Cancellation/failure makes an action's
+output unspecified; it must not be published. The factor remains immutable.
+
+This is a bounded sparse-factor route, not a guarantee of cheap fill for
+arbitrary meshes. Work counters and payload estimates are local resource
+admission, not elapsed-time, process-RSS, interval-positivity or spectral
+completeness certificates. The native tests cover Sᵀ A S, full inverse parity,
+permutations, positive-block refusal, cancellation, work/fill refusal and
+portable/dispatched bit identity.

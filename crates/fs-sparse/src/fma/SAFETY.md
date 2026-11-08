@@ -1,7 +1,8 @@
 # SAFETY — fs-sparse x86 FMA-codegen capsule
 
 Scope: `crates/fs-sparse/src/fma/mod.rs` (`spmv_x86`, `spmm_x86` and
-the format/product dispatchers, and the direct LDLT solve dispatchers),
+the format/product dispatchers, the direct LDLT solve dispatchers,
+and the positive-factor whitening dispatchers),
 compiled only on `target_arch = "x86_64"`.
 
 ## Invariants the `unsafe` calls rely on
@@ -12,7 +13,8 @@ compiled only on `target_arch = "x86_64"`.
    verified the CPU supports it. No other call sites exist (the fns are
    private to this module).
 2. **The bodies are safe code.** the format/product bodies,
-   `LdltFactor::solve_body`, and `LdltFactor::solve_in_place_body` are
+   `LdltFactor::solve_body`, `LdltFactor::solve_in_place_body`, and
+   `PositiveWhitening::{apply_body,transpose_body}` are
    `#[inline(always)]` safe slice arithmetic; the `unsafe` here is ONLY
    the `target_feature` calling contract, never memory access.
 3. **Bit identity.** `mul_add` compiles to the native fused instruction
@@ -55,3 +57,13 @@ existing residual fixtures compare both solve entries bitwise, including
 indefinite and delayed-pivot factors. The factor stays immutable; each caller
 owns its output slice, and no mutable shared workspace is introduced.
 
+## Positive-factor whitening
+
+The two whitening actions reuse the same admitted feature check and the same
+safe slice arithmetic in both dispatch arms. Scalar positive pivots are
+admitted before construction; 2×2 blocks are explicitly refused. Permutation,
+triangular-column order, inverse square roots, callback order and failure
+semantics do not change at dispatch. No raw memory operation is introduced.
+The portable and dispatched actions are compared bitwise for both transpose
+directions and small, ordinary and large finite right-hand sides. Independent
+checks verify Sᵀ A S = I and S Sᵀ b = A⁻¹ b on a nontrivial AMD permutation.

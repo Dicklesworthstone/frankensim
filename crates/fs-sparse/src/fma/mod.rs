@@ -64,6 +64,7 @@ unsafe fn spmm_x86(csr: &Csr, x: &[f64], k: usize, y: &mut [f64]) {
 
 use crate::bsr::Bsr;
 use crate::direct::LdltFactor;
+use crate::direct::positive::{PositiveFactorError, PositiveWhitening};
 use crate::perf::CsrCompact;
 use crate::sell::Sell;
 
@@ -130,6 +131,8 @@ macro_rules! fma_dispatch {
     };
 }
 
+fma_dispatch!(positive_apply_dispatch, PositiveWhitening<'_>, apply_body, (x: &[f64], y: &mut [f64], scratch: &mut [f64], cancelled: &dyn Fn() -> bool) -> Result<(), PositiveFactorError>);
+fma_dispatch!(positive_transpose_dispatch, PositiveWhitening<'_>, transpose_body, (x: &[f64], y: &mut [f64], scratch: &mut [f64], cancelled: &dyn Fn() -> bool) -> Result<(), PositiveFactorError>);
 fma_dispatch!(direct_solve_dispatch, LdltFactor, solve_body, (b: &[f64]) -> Vec<f64>);
 fma_dispatch!(direct_solve_in_place_dispatch, LdltFactor, solve_in_place_body, (values: &mut [f64]));
 fma_dispatch!(bsr_spmv_dispatch, Bsr, spmv_body, (x: &[f64], y: &mut [f64]));
@@ -149,7 +152,7 @@ fma_dispatch!(spmm_blocked_dispatch, Csr, spmm_blocked_body, (b: &[f64], nrhs: u
 /// The `target_feature`-recompiled bodies (one per dispatcher above).
 #[cfg(target_arch = "x86_64")]
 mod paste_x86 {
-    use super::{Bsr, Csr, CsrCompact, LdltFactor, Sell};
+    use super::{Bsr, Csr, CsrCompact, LdltFactor, PositiveFactorError, PositiveWhitening, Sell};
 
     macro_rules! fma_body {
         ($name:ident, $ty:ty, $body:ident, ($($arg:ident: $t:ty),*) $(-> $ret:ty)?) => {
@@ -163,6 +166,8 @@ mod paste_x86 {
         };
     }
 
+    fma_body!(positive_apply_dispatch, PositiveWhitening<'_>, apply_body, (x: &[f64], y: &mut [f64], scratch: &mut [f64], cancelled: &dyn Fn() -> bool) -> Result<(), PositiveFactorError>);
+    fma_body!(positive_transpose_dispatch, PositiveWhitening<'_>, transpose_body, (x: &[f64], y: &mut [f64], scratch: &mut [f64], cancelled: &dyn Fn() -> bool) -> Result<(), PositiveFactorError>);
     fma_body!(direct_solve_dispatch, LdltFactor, solve_body, (b: &[f64]) -> Vec<f64>);
     fma_body!(direct_solve_in_place_dispatch, LdltFactor, solve_in_place_body, (values: &mut [f64]));
     fma_body!(bsr_spmv_dispatch, Bsr, spmv_body, (x: &[f64], y: &mut [f64]));

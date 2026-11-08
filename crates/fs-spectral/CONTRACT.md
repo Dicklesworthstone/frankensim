@@ -575,7 +575,9 @@ here).
   between backend steps, caps `steps_per_tick` at
   `MAX_STEPS_PER_TICK`, and ROLLS BACK the in-flight tick on
   cancellation or non-finite operator output so accepted state is
-  never corrupted.
+  never corrupted. `tick_cancellable(op, callback)` is the same transactional
+  implementation for domains with an existing cancellation callback;
+  `tick(op, cx)` delegates to it without changing numerical work or admission.
 - `CertifiedEigenvalue` carries the Ritz value, TRUE operator
   residual, and the Weyl containment interval
   `[value − residual, value + residual]`: an EXISTENCE certificate

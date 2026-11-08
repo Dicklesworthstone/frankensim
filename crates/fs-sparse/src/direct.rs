@@ -40,6 +40,12 @@
 
 use crate::Csr;
 
+mod budget;
+/// Positive scalar-pivot whitening of the native sparse factor.
+pub mod positive;
+pub use budget::DirectLimits;
+use budget::DirectWork;
+
 /// Fill-reducing ordering strategy for [`SymbolicLdlt::analyze`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectOrdering {
@@ -135,6 +141,18 @@ pub struct FactorStats {
 /// stable `FS-SPARSE-DIRECT-*` codes for log matching.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LdltError {
+    /// Cooperative cancellation; no factor or symbolic state is published.
+    Cancelled,
+    /// Symbolic storage was refused before extending the fill structure.
+    SymbolicBudget { entries: usize, cap: usize },
+    /// A dense front exceeded its explicitly admitted dimension.
+    FrontBudget { dimension: usize, cap: usize },
+    /// Cumulative owner work would exceed the caller's allowance.
+    WorkLimit {
+        stage: &'static str,
+        required: usize,
+        cap: usize,
+    },
     /// The matrix is not square.
     NotSquare {
         /// Rows of the offending matrix.
@@ -190,6 +208,23 @@ pub enum LdltError {
 impl core::fmt::Display for LdltError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            LdltError::Cancelled => f.write_str("FS-SPARSE-DIRECT-CANCELLED"),
+            LdltError::SymbolicBudget { entries, cap } => write!(
+                f,
+                "FS-SPARSE-DIRECT-SYMBOLIC-BUDGET: {entries} entries exceeds {cap}"
+            ),
+            LdltError::FrontBudget { dimension, cap } => write!(
+                f,
+                "FS-SPARSE-DIRECT-FRONT-BUDGET: dimension {dimension} exceeds {cap}"
+            ),
+            LdltError::WorkLimit {
+                stage,
+                required,
+                cap,
+            } => write!(
+                f,
+                "FS-SPARSE-DIRECT-WORK-LIMIT: {stage} work {required} exceeds {cap}"
+            ),
             LdltError::NotSquare { nrows, ncols } => {
                 write!(f, "FS-SPARSE-DIRECT-NOT-SQUARE: {nrows}x{ncols} matrix")
             }
@@ -256,15 +291,27 @@ impl std::error::Error for LdltError {}
 #[allow(clippy::needless_range_loop)] // index-parallel arrays throughout
 #[allow(clippy::too_many_lines)] // one quotient-graph elimination loop; splitting hides invariants
 pub fn amd_order(a: &Csr) -> Vec<usize> {
+    amd_order_controlled(
+        a,
+        &mut DirectWork::new(DirectLimits::UNLIMITED, &|| false, false),
+    )
+    .expect("unlimited AMD cannot exhaust its work allowance")
+}
+
+fn amd_order_controlled(a: &Csr, work: &mut DirectWork<'_>) -> Result<Vec<usize>, LdltError> {
     assert_eq!(a.nrows(), a.ncols(), "amd_order: matrix must be square");
+    work.poll()?;
+    work.symbolic(a.nrows().saturating_add(a.nnz()))?;
     let n = a.nrows();
     if n == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // Symmetrized adjacency without the diagonal.
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for r in 0..n {
+        work.poll()?;
         let (cols, _) = a.row(r);
+        work.charge(1 + cols.len().saturating_mul(usize::BITS as usize))?;
         for &c in cols {
             if c != r {
                 adj[r].push(c);
@@ -272,7 +319,9 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
         }
     }
     for r in 0..n {
+        work.poll()?;
         let (cols, _) = a.row(r);
+        work.charge(1 + cols.len().saturating_mul(usize::BITS as usize))?;
         for &c in cols {
             if c != r && !a_contains(a, c, r) {
                 adj[c].push(r);
@@ -280,6 +329,7 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
         }
     }
     for l in &mut adj {
+        work.charge(DirectWork::sort_work(l.len()))?;
         l.sort_unstable();
         l.dedup();
     }
@@ -300,9 +350,12 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
     let mut w_stamp = vec![usize::MAX; n]; // stamp array for |Le \ Lp| counters
     let mut w_val = vec![0usize; n];
 
+    let mut quotient_entries = a.nnz();
     for step in 0..n {
+        work.poll()?;
         // Pop until a live entry whose recorded degree is current.
         let p = loop {
+            work.charge(usize::BITS as usize)?;
             let core::cmp::Reverse((d, i)) = heap.pop().expect("amd: heap exhausted early");
             if var_alive[i] && degree[i] == d {
                 break i;
@@ -312,9 +365,17 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
         perm.push(p);
 
         // Lp = (adj[p] ∪ ⋃_{e ∈ E_p} Le) \ {p}, live variables only.
+        work.charge(adj[p].len())?;
         let mut lp: Vec<usize> = adj[p].iter().copied().filter(|&v| var_alive[v]).collect();
+        work.charge(elems_of[p].len())?;
         for &e in &elems_of[p] {
             if elem_alive[e] {
+                work.charge(elem_vars[e].len())?;
+                work.symbolic(
+                    quotient_entries
+                        .saturating_add(lp.len())
+                        .saturating_add(elem_vars[e].len()),
+                )?;
                 lp.extend(
                     elem_vars[e]
                         .iter()
@@ -323,8 +384,10 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
                 );
             }
         }
+        work.charge(DirectWork::sort_work(lp.len()))?;
         lp.sort_unstable();
         lp.dedup();
+        work.charge(elems_of[p].len())?;
         for &e in &elems_of[p] {
             elem_alive[e] = false; // absorbed into the new element p
         }
@@ -335,10 +398,12 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
         // |Le \ Lp| for every live element touching Lp, via the classic
         // decrement pass (i ∈ E_e ∩ Lp ⇔ e ∈ E_i for i ∈ Lp).
         for &i in &lp {
+            work.charge(elems_of[i].len())?;
             for &e in &elems_of[i] {
                 if elem_alive[e] {
                     if w_stamp[e] != step {
                         w_stamp[e] = step;
+                        work.charge(elem_vars[e].len())?;
                         w_val[e] = elem_vars[e].iter().filter(|&&v| var_alive[v]).count();
                     }
                     w_val[e] -= 1;
@@ -347,6 +412,7 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
         }
         // Absorb elements entirely contained in Lp.
         for &i in &lp {
+            work.charge(elems_of[i].len())?;
             for &e in &elems_of[i] {
                 if elem_alive[e] && w_stamp[e] == step && w_val[e] == 0 {
                     elem_alive[e] = false;
@@ -358,8 +424,21 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
         for &i in &lp {
             // Prune variable adjacency: members of Lp now reach i through
             // element p; dead variables drop.
+            work.charge(
+                adj[i]
+                    .len()
+                    .saturating_add(2 * elems_of[i].len())
+                    .saturating_add(usize::BITS as usize),
+            )?;
+            let old_len = adj[i].len() + elems_of[i].len();
             adj[i].retain(|&v| var_alive[v] && marked[v] != step);
             elems_of[i].retain(|&e| elem_alive[e]);
+            quotient_entries = quotient_entries
+                .saturating_sub(old_len)
+                .saturating_add(adj[i].len())
+                .saturating_add(elems_of[i].len())
+                .saturating_add(1);
+            work.symbolic(quotient_entries.saturating_add(lp.len()))?;
             elems_of[i].push(p);
             // Approximate external degree (ADD bound).
             let mut d = adj[i].len() + (lp.len() - 1);
@@ -372,11 +451,15 @@ pub fn amd_order(a: &Csr) -> Vec<usize> {
             degree[i] = d;
             heap.push(core::cmp::Reverse((d, i)));
         }
+        quotient_entries = quotient_entries.saturating_add(lp.len());
+        work.symbolic(quotient_entries)?;
         elem_vars[p] = lp;
         elem_alive[p] = true;
+        quotient_entries = quotient_entries.saturating_sub(elems_of[p].len());
         elems_of[p].clear();
     }
-    perm
+    work.poll()?;
+    Ok(perm)
 }
 
 fn a_contains(a: &Csr, r: usize, c: usize) -> bool {
@@ -443,6 +526,46 @@ impl SymbolicLdlt {
         ordering: DirectOrdering,
         coordinates: Option<&[[f64; 3]]>,
     ) -> Result<SymbolicLdlt, LdltError> {
+        Self::analyze_controlled(
+            a,
+            ordering,
+            coordinates,
+            &mut DirectWork::new(DirectLimits::UNLIMITED, &|| false, false),
+        )
+    }
+
+    /// Analyze with bounded fill, graph work and cooperative cancellation.
+    /// AMD and natural ordering use the same native algorithms as `analyze`.
+    /// Nested dissection is refused here until its owner supplies equivalent
+    /// internal resource accounting; the legacy entry remains available.
+    pub fn analyze_bounded(
+        a: &Csr,
+        ordering: DirectOrdering,
+        limits: &DirectLimits,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<SymbolicLdlt, LdltError> {
+        if matches!(ordering, DirectOrdering::NestedDissection(_)) {
+            return Err(LdltError::InvalidOptions {
+                field: "bounded analysis currently supports AMD or natural ordering",
+            });
+        }
+        Self::analyze_controlled(
+            a,
+            ordering,
+            None,
+            &mut DirectWork::new(*limits, cancelled, false),
+        )
+    }
+
+    fn analyze_controlled(
+        a: &Csr,
+        ordering: DirectOrdering,
+        coordinates: Option<&[[f64; 3]]>,
+        work: &mut DirectWork<'_>,
+    ) -> Result<SymbolicLdlt, LdltError> {
+        work.poll()?;
+        work.symbolic(a.nrows().saturating_add(a.nnz()))?;
+        work.charge(a.nrows().saturating_add(a.nnz()))?;
         if a.nrows() != a.ncols() {
             return Err(LdltError::NotSquare {
                 nrows: a.nrows(),
@@ -452,7 +575,9 @@ impl SymbolicLdlt {
         let n = a.nrows();
         // Structural symmetry: every (r,c) needs its mirror.
         for r in 0..n {
+            work.poll()?;
             let (cols, _) = a.row(r);
+            work.charge(1 + cols.len().saturating_mul(usize::BITS as usize))?;
             for &c in cols {
                 if !a_contains(a, c, r) {
                     return Err(LdltError::StructurallyAsymmetric { row: r, col: c });
@@ -461,8 +586,13 @@ impl SymbolicLdlt {
         }
         let base_perm = match ordering {
             DirectOrdering::Natural => (0..n).collect::<Vec<usize>>(),
-            DirectOrdering::Amd => amd_order(a),
+            DirectOrdering::Amd => amd_order_controlled(a, work)?,
             DirectOrdering::NestedDissection(opts) => {
+                if work.bounded() {
+                    return Err(LdltError::InvalidOptions {
+                        field: "bounded analysis currently supports AMD or natural ordering",
+                    });
+                }
                 crate::ordering_nd::nd_order_with_coordinates(a, &opts, coordinates)?.permutation
             }
         };
@@ -471,18 +601,18 @@ impl SymbolicLdlt {
             base_iperm[o] = k;
         }
         // Lower-triangular adjacency in base elimination order.
-        let ladj = build_lower_adj(a, &base_iperm);
-        let parent0 = etree(&ladj);
-        let post = postorder(&parent0);
+        let ladj = build_lower_adj(a, &base_iperm, work)?;
+        let parent0 = etree(&ladj, work)?;
+        let post = postorder(&parent0, work)?;
         // Compose: final elimination order.
         let perm: Vec<usize> = post.iter().map(|&k| base_perm[k]).collect();
         let mut iperm = vec![0usize; n];
         for (k, &o) in perm.iter().enumerate() {
             iperm[o] = k;
         }
-        let ladj = build_lower_adj(a, &iperm);
-        let parent = etree(&ladj); // relabeled tree, recomputed for simplicity
-        let colstruct = col_structs(&ladj, &parent);
+        let ladj = build_lower_adj(a, &iperm, work)?;
+        let parent = etree(&ladj, work)?; // relabeled tree, recomputed for simplicity
+        let colstruct = col_structs(&ladj, &parent, work)?;
 
         // Fundamental supernodes, certified by exact structure match:
         // col j may join col j+1's supernode iff struct(j) = {j+1} ∪ struct(j+1).
@@ -490,6 +620,8 @@ impl SymbolicLdlt {
         let mut snode_of = vec![NONE; n.max(1)];
         let mut j = 0usize;
         while j < n {
+            work.poll()?;
+            work.charge(1 + 2 * colstruct[j].len())?;
             let start = j;
             while j + 1 < n
                 && parent[j] == j + 1
@@ -498,6 +630,7 @@ impl SymbolicLdlt {
                 && colstruct[j][1..] == colstruct[j + 1][..]
             {
                 j += 1;
+                work.charge(1 + 2 * colstruct[j].len())?;
             }
             let width = j - start + 1;
             let panel: Vec<usize> = colstruct[start][width - 1..].to_vec();
@@ -515,6 +648,7 @@ impl SymbolicLdlt {
             j += 1;
         }
         for id in 0..snodes.len() {
+            work.charge(1)?;
             let last = snodes[id].col_start + snodes[id].width - 1;
             let p = parent[last];
             if p != NONE {
@@ -524,6 +658,7 @@ impl SymbolicLdlt {
             }
         }
         let nnz_l = n + colstruct.iter().map(Vec::len).sum::<usize>();
+        work.charge(n.saturating_add(a.nnz()))?;
         let (pat_row_ptr, pat_col_idx) = pattern_of(a);
         let mut symbolic = SymbolicLdlt {
             n,
@@ -535,7 +670,11 @@ impl SymbolicLdlt {
             pat_col_idx,
             factor_bytes: 0,
         };
+        for front in &symbolic.snodes {
+            work.front(front.width.saturating_add(front.panel.len()))?;
+        }
         symbolic.factor_bytes = symbolic.compute_factor_bytes();
+        work.poll()?;
         Ok(symbolic)
     }
 
@@ -660,6 +799,35 @@ impl SymbolicLdlt {
     /// 1×1/2×2 blocks. Refuses (never perturbs) on pivot breakdown.
     #[allow(clippy::too_many_lines)] // one coherent numeric pipeline; splitting obscures the data flow
     pub fn factor(&self, a: &Csr, opts: &LdltOptions) -> Result<LdltFactor, LdltError> {
+        self.factor_controlled(
+            a,
+            opts,
+            &mut DirectWork::new(DirectLimits::UNLIMITED, &|| false, true),
+        )
+    }
+
+    /// Factor with the existing native pivoting arithmetic under explicit
+    /// frontal/work limits and cancellation. Memory is additionally bounded by
+    /// `opts.max_factor_bytes`. No partial factor escapes an interrupted call.
+    pub fn factor_bounded(
+        &self,
+        a: &Csr,
+        opts: &LdltOptions,
+        limits: &DirectLimits,
+        cancelled: &impl Fn() -> bool,
+    ) -> Result<LdltFactor, LdltError> {
+        self.factor_controlled(a, opts, &mut DirectWork::new(*limits, cancelled, true))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn factor_controlled(
+        &self,
+        a: &Csr,
+        opts: &LdltOptions,
+        work: &mut DirectWork<'_>,
+    ) -> Result<LdltFactor, LdltError> {
+        work.poll()?;
+        work.charge(a.nrows().saturating_add(a.nnz()).saturating_mul(2))?;
         let estimate = self.estimated_factor_bytes();
         admit_factor_bytes(estimate, opts.max_factor_bytes)?;
         // NaN thresholds fail the finiteness test, so both gates fail closed.
@@ -683,6 +851,7 @@ impl SymbolicLdlt {
         let n = self.n;
         let mut max_abs = 0.0f64;
         for r in 0..n {
+            work.poll()?;
             let (cols, vals) = a.row(r);
             for (&c, &v) in cols.iter().zip(vals) {
                 if !v.is_finite() {
@@ -727,6 +896,7 @@ impl SymbolicLdlt {
         let mut pos = vec![usize::MAX; n];
 
         for (sid, sym) in self.snodes.iter().enumerate() {
+            work.poll()?;
             let w = sym.width;
             // DELAYED PIVOTS: fully-summed columns of this front are the
             // supernode's own block columns PLUS any columns a descendant
@@ -747,6 +917,19 @@ impl SymbolicLdlt {
             fs.extend(sym.col_start..sym.col_start + w);
             let wf = fs.len();
             let m = wf + sym.panel.len();
+            work.front(m)?;
+            // Bound scatter/extend-add, pivot scans and Schur updates before
+            // allocating this front. Two-pivot scans have an extra width factor.
+            let width_work = if opts.allow_2x2 {
+                wf.saturating_mul(wf)
+            } else {
+                wf
+            };
+            work.charge(
+                m.saturating_mul(m)
+                    .saturating_mul(width_work.saturating_add(1))
+                    .saturating_mul(32),
+            )?;
             // Delays may exceed the symbolic prediction. Bound all numeric
             // payloads that coexist while this front is harvested, BEFORE
             // allocating any of them. Saturation refuses finite caps.
@@ -775,6 +958,7 @@ impl SymbolicLdlt {
             // rescattered: their original entries already entered the
             // descendant front and travel here inside its update matrix.
             for j in sym.col_start..sym.col_start + w {
+                work.poll()?;
                 let c = pos[j];
                 let orig = self.perm[j];
                 let (cols, vals) = a.row(orig);
@@ -829,6 +1013,7 @@ impl SymbolicLdlt {
             let mut dblocks: Vec<DBlock> = Vec::new();
             let mut k = 0usize;
             while k < wf {
+                work.poll()?;
                 let choice = choose_pivot(&f, m, wf, k, opts, zero_tol);
                 match choice {
                     PivotChoice::One(q) => {
@@ -1010,6 +1195,7 @@ impl SymbolicLdlt {
                 }
             }
         }
+        work.poll()?;
         Ok(LdltFactor {
             n,
             perm: self.perm.clone(),
@@ -1048,11 +1234,17 @@ fn pattern_of(a: &Csr) -> (Vec<usize>, Vec<usize>) {
 
 /// Lower-triangular adjacency in elimination order: for permuted row `i`,
 /// the sorted permuted neighbors `j < i`.
-fn build_lower_adj(a: &Csr, iperm: &[usize]) -> Vec<Vec<usize>> {
+fn build_lower_adj(
+    a: &Csr,
+    iperm: &[usize],
+    work: &mut DirectWork<'_>,
+) -> Result<Vec<Vec<usize>>, LdltError> {
     let n = a.nrows();
     let mut ladj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for r in 0..n {
+        work.poll()?;
         let (cols, _) = a.row(r);
+        work.charge(1 + cols.len())?;
         let pi = iperm[r];
         for &c in cols {
             let pj = iperm[c];
@@ -1062,20 +1254,24 @@ fn build_lower_adj(a: &Csr, iperm: &[usize]) -> Vec<Vec<usize>> {
         }
     }
     for l in &mut ladj {
+        work.charge(DirectWork::sort_work(l.len()))?;
         l.sort_unstable();
     }
-    ladj
+    Ok(ladj)
 }
 
 /// Elimination tree (Liu's algorithm with path compression).
-fn etree(ladj: &[Vec<usize>]) -> Vec<usize> {
+fn etree(ladj: &[Vec<usize>], work: &mut DirectWork<'_>) -> Result<Vec<usize>, LdltError> {
     let n = ladj.len();
     let mut parent = vec![NONE; n];
     let mut ancestor = vec![NONE; n];
     for (i, lower) in ladj.iter().enumerate() {
+        work.poll()?;
+        work.charge(1 + lower.len())?;
         for &j in lower {
             let mut t = j;
             while ancestor[t] != NONE && ancestor[t] != i {
+                work.charge(1)?;
                 let next = ancestor[t];
                 ancestor[t] = i;
                 t = next;
@@ -1086,12 +1282,14 @@ fn etree(ladj: &[Vec<usize>]) -> Vec<usize> {
             }
         }
     }
-    parent
+    Ok(parent)
 }
 
 /// Iterative etree postorder with ascending-child determinism.
-fn postorder(parent: &[usize]) -> Vec<usize> {
+fn postorder(parent: &[usize], work: &mut DirectWork<'_>) -> Result<Vec<usize>, LdltError> {
     let n = parent.len();
+    work.poll()?;
+    work.charge(n.saturating_mul(4))?;
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut roots = Vec::new();
     for j in 0..n {
@@ -1106,6 +1304,7 @@ fn postorder(parent: &[usize]) -> Vec<usize> {
     for &r in &roots {
         stack.push((r, 0));
         while let Some(&(node, next)) = stack.last() {
+            work.charge(1)?;
             if next < children[node].len() {
                 stack.last_mut().expect("nonempty stack").1 += 1;
                 stack.push((children[node][next], 0));
@@ -1115,22 +1314,33 @@ fn postorder(parent: &[usize]) -> Vec<usize> {
             }
         }
     }
-    post
+    Ok(post)
 }
 
 /// Per-column below-diagonal L structure via the row-wise etree traversal
 /// (each row i is added to the structure of every column on the path from
 /// its lower neighbors up to i). Rows arrive in ascending order, so each
 /// structure vector is sorted.
-fn col_structs(ladj: &[Vec<usize>], parent: &[usize]) -> Vec<Vec<usize>> {
+fn col_structs(
+    ladj: &[Vec<usize>],
+    parent: &[usize],
+    work: &mut DirectWork<'_>,
+) -> Result<Vec<Vec<usize>>, LdltError> {
     let n = ladj.len();
     let mut cs: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut stamp = vec![NONE; n];
+    let mut entries = n;
+    work.symbolic(entries)?;
     for i in 0..n {
+        work.poll()?;
+        work.charge(1 + ladj[i].len())?;
         stamp[i] = i;
         for &j in &ladj[i] {
             let mut t = j;
             while t != i && stamp[t] != i {
+                work.charge(1)?;
+                entries = entries.saturating_add(1);
+                work.symbolic(entries)?;
                 cs[t].push(i);
                 stamp[t] = i;
                 let p = parent[t];
@@ -1141,7 +1351,7 @@ fn col_structs(ladj: &[Vec<usize>], parent: &[usize]) -> Vec<Vec<usize>> {
             }
         }
     }
-    cs
+    Ok(cs)
 }
 
 enum PivotChoice {
@@ -1658,8 +1868,9 @@ mod tests {
         }
         let a = coo.assemble();
         let iperm: Vec<usize> = (0..4).collect();
-        let ladj = build_lower_adj(&a, &iperm);
-        let parent = etree(&ladj);
+        let mut work = DirectWork::new(DirectLimits::UNLIMITED, &|| false, false);
+        let ladj = build_lower_adj(&a, &iperm, &mut work).unwrap();
+        let parent = etree(&ladj, &mut work).unwrap();
         // col 0: first lower neighbor is row 1 → parent 1; col 1 → 2; col 2 → 3.
         assert_eq!(parent, vec![1, 2, 3, NONE]);
     }
