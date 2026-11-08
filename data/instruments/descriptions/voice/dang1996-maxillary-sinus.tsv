@@ -1,0 +1,11 @@
+# J. Dang and K. Honda (1996). Acoustic characteristics of the human paranasal sinuses derived from transmission characteristic
+# measurement and morphological observation. J. Acoust. Soc. Am. 100(5):3374-3383, doi:10.1121/1.416978; read from ATR technical
+# report TR-H-0179 (1995-12-11). Table VI (pdf p.33, printed 32): maxillary sinus volume, ostium cross-sectional area and ostium
+# length from the subject's volumetric MRI, and the resonance the authors calculated from them (calc_resonance_hz, a calculation).
+# Table V (pdf p.32, printed 31): the maxillary anti-resonance measured acoustically. Table III (same page): distance from the
+# nostrils to the maxillary sinus opening (one value per sinus in the source, given on both rows; posterior nares 7.3 cm).
+# Subj.2 of TR-H-0179 is Sub.2 of Dang, Honda and Suzuki (1994), whose nasal passages are dang1994-fig6-nasal-areas.tsv.
+# Transcribed from the page images; no uncertainty is stated in the source.
+subject	side	volume_cm3	ostium_area_cm2	ostium_length_cm	opening_from_nostrils_cm	calc_resonance_hz	measured_antiresonance_hz
+Sub.2	left	16.1	0.076	0.45	4.3	575	630
+Sub.2	right	16.5	0.065	0.43	4.3	538	580
