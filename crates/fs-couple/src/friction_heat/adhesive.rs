@@ -23,6 +23,9 @@ pub mod snap;
 /// Native adhesive rolling/torsion, explicit loss conversion and finite-cell heat.
 pub mod moment;
 
+/// Original loaded JKR source feedback from actual finite-body temperatures.
+pub mod torsional_temperature;
+
 use super::FrictionHeatRoute;
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,

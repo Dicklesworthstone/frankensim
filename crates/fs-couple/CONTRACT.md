@@ -7183,3 +7183,68 @@ feedback from frozen-field heat, exercise temperature-dependent contact and
 closed radiation transport, and cover source/fixed-permeability refusal,
 transactional failure, budgets, cancellation and retry. Synthetic references
 qualify the discrete model; they do not establish experimental device accuracy.
+
+## Finite-temperature feedback on the loaded normal/twist JKR source
+
+`friction_heat::adhesive::torsional_temperature::propose_jkr_torsional_temperature_heat`
+connects the actual finite caloric cells to the original coupled I/III JKR
+material queries. The input native endpoint is staged first; its original
+coordinates, rates, bodies, full mobility, chronology and pending compatible
+geometry remain with the native owner. The thermal phase advances from its
+accepted time to exactly that native endpoint time. The incoming route must
+already describe this staged mechanical endpoint's original area and coincident
+ordered reaction plane. Stale normal approach, moving face centres or changed
+mechanical coverage need their existing geometry/coverage owners first.
+
+The bounded thermal Newton residual uses both actual receiving-cell Kelvin
+values and a separately solved massless interface-temperature node. Those three
+coordinates refresh their own original selected material/interface claims;
+neither body is replaced by the interface temperature or an arithmetic average.
+Each trial internally constructs the source-authenticated native continuation.
+Original material-card identities, registered caloric objects, body assignments,
+face geometry, source support and the complete loaded attached branch are
+admitted again. No caller-authored energy report or reconstructed initial twist
+can authorize a temperature successor.
+
+Incoming bulk source T coordinates must agree with the accepted receiving-cell
+temperatures, allowing only 64*epsilon relative representation roundoff. This
+also applies to constant property claims: their original query must still own
+T. Temperature-free source queries refuse. Thus an unrelated stale mechanical
+temperature cannot silently be repaired by a nominally zero-supply heat step.
+The massless interface node remains free to readjust under its physical flux
+balance; it is not an extra finite thermal store.
+
+The original source's relaxed contact area enters the existing variable-area
+thermal owner during the same residual. Actual k*A/d, optional retained contact
+resistance, ambient coverage and signed interbody heat therefore respond to
+the source-supported temperature change. The accepted thermal state and route
+retain the endpoint area and conductivity. This is backward-Euler endpoint
+coverage, not a swept footprint, integrated mean area or guarantee of stability
+on an unspecified intervening thermal path. Endpoint area change and signed
+coefficient work each have explicit finite bounds.
+
+JKR provides normal, torsional and surface mechanical storage and their signed
+parameter work. It does not provide a contact entropy/internal-energy law.
+Accordingly this adapter requires a named parameter-work source and keeps that
+work in an explicit external port. It never subtracts coefficient work from
+body enthalpy, invents reversible caloric exchange, or treats it as dissipation.
+This reversible contact generates exactly zero heat; the callback supplies
+original endpoint conductivity and OTHER thermal sources only. Optional entropy
+audit covers the existing caloric/transport problem, with no mechanical entropy
+or whole-system thermoelastic closure inferred.
+
+The combined phase audit is Delta U_contact + Delta H minus parameter work
+minus other thermal supply; native kinetic energy is unchanged. Independent
+source and thermal residual magnitudes are gated so opposite-sign defects
+cannot conceal each other. The private candidate owns the new source, sealed
+native state, unchanged A/B bodies, finite thermal state, route and report.
+Adopt them together and capture the next native pair from that source and the
+retained state; do not initialize a new twist or clock. Original-source refusal,
+thermal exhaustion, trial-budget failure or cancellation publishes no owner.
+
+`tests/adhesive_torsional_temperature_heat.rs` independently solves the coupled
+finite-cell heat equations and dimensional held-approach I/III radius equation,
+checks full loaded coefficient work without caloric charging, continues the
+original native preload through heating and cooling, and checks source/caloric,
+body/area/clock/work-port refusals plus final-trial cancellation and retry.
+The material and heat coefficients are manufactured qualification inputs.
