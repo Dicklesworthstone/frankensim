@@ -622,3 +622,629 @@ fn adaptive_late_cancellation_restores_the_full_state_and_retries_exactly() {
         accepted.pressure_work_into_solution_j.to_bits()
     );
 }
+
+#[derive(Clone)]
+struct MixtureCase {
+    amounts: [Vec<f64>; 2],
+    valences: Vec<i32>,
+    permeances: Vec<f64>,
+    matrix: Option<Vec<f64>>,
+    hydraulic: f64,
+    fixed: [f64; 2],
+    trapped: [f64; 2],
+}
+
+impl MixtureCase {
+    fn sodium_potassium_chloride() -> Self {
+        Self {
+            amounts: [vec![1.0, 0.2, 0.2], vec![0.2, 0.6, 0.8]],
+            valences: vec![1, 1, -1],
+            permeances: vec![0.3, 0.8, 0.2],
+            matrix: Some(vec![0.8, 0.15, 0.1, 0.15, 0.5, 0.12, 0.1, 0.12, 0.6]),
+            hydraulic: 1.0 / RT,
+            fixed: [-1.0, 0.0],
+            trapped: [0.1, 0.0],
+        }
+    }
+
+    fn build(&self) -> IonicOsmoticPair {
+        let count = self.valences.len();
+        let model = self.matrix.as_ref().map(|matrix| {
+            Arc::new(
+                VirialSolutionModel::new(T, 18e-6, 1.0, vec![128.0; count], matrix.clone())
+                    .unwrap(),
+            )
+        });
+        let cells = [0, 1].map(|side| {
+            let solution = match &model {
+                Some(model) => {
+                    AqueousSolution::nonideal(Arc::clone(model), 1.0, self.amounts[side].clone())
+                        .unwrap()
+                }
+                None => IdealDiluteSolution::new(T, 18e-6, 1.0, self.amounts[side].clone())
+                    .unwrap()
+                    .into(),
+            };
+            OsmoticCompartment::new(solution, pressure(0.0), 0.05).unwrap()
+        });
+        let membrane = ElectrodiffusiveMembrane::new(
+            HydraulicPermeance::new(self.hydraulic).unwrap(),
+            self.valences.clone(),
+            self.permeances
+                .iter()
+                .map(|&p| SolutePermeance::new(p).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        IonicOsmoticPair::new(
+            cells,
+            membrane,
+            self.fixed,
+            self.trapped,
+            1.0,
+            1e-11,
+            1 << 20,
+        )
+        .unwrap()
+    }
+
+    fn permuted(&self, order: &[usize]) -> Self {
+        let n = self.valences.len();
+        assert_eq!(order.len(), n);
+        let matrix = self.matrix.as_ref().map(|original| {
+            let mut permuted = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    permuted[i * n + j] = original[order[i] * n + order[j]];
+                }
+            }
+            permuted
+        });
+        Self {
+            amounts: self
+                .amounts
+                .each_ref()
+                .map(|ns| order.iter().map(|&i| ns[i]).collect()),
+            valences: order.iter().map(|&i| self.valences[i]).collect(),
+            permeances: order.iter().map(|&i| self.permeances[i]).collect(),
+            matrix,
+            hydraulic: self.hydraulic,
+            fixed: self.fixed,
+            trapped: self.trapped,
+        }
+    }
+}
+
+fn mixture_potential(pair: &IonicOsmoticPair, case: &MixtureCase) -> f64 {
+    let mut value = 0.0;
+    for (side, cell) in pair.compartments().iter().enumerate() {
+        let n = cell.solution().solute_moles();
+        let v = cell.solution().solvent_volume_m3();
+        for &amount in n {
+            if amount > 0.0 {
+                value += amount * ((amount / v).ln() - 1.0);
+            }
+        }
+        if let Some(matrix) = &case.matrix {
+            for (i, &a) in n.iter().enumerate() {
+                for (j, &b) in n.iter().enumerate() {
+                    value += 0.5 * matrix[i * n.len() + j] * a * b / v;
+                }
+            }
+        }
+        if case.trapped[side] > 0.0 {
+            value += case.trapped[side] * ((case.trapped[side] / v).ln() - 1.0);
+        }
+        value += 0.25 * (v * v - 1.0 - 2.0 * v.ln());
+    }
+    RT * value
+}
+
+fn independent_bernoulli(a: f64) -> f64 {
+    if a.abs() < 1e-4 {
+        let a2 = a * a;
+        1.0 - 0.5 * a + a2 / 12.0 - a2 * a2 / 720.0
+    } else {
+        a / a.exp_m1()
+    }
+}
+
+fn independent_mixture_fluxes(
+    pair: &IonicOsmoticPair,
+    case: &MixtureCase,
+    voltage: f64,
+) -> Vec<f64> {
+    let c: [Vec<f64>; 2] = pair.compartments().each_ref().map(|cell| {
+        cell.solution()
+            .solute_moles()
+            .iter()
+            .map(|n| n / cell.solution().solvent_volume_m3())
+            .collect()
+    });
+    let n = case.valences.len();
+    (0..n)
+        .map(|i| {
+            let excess = case.matrix.as_ref().map_or(0.0, |b| {
+                (0..n).map(|j| b[i * n + j] * (c[0][j] - c[1][j])).sum()
+            });
+            let a = excess + f64::from(case.valences[i]) * voltage;
+            case.permeances[i]
+                * (independent_bernoulli(-a) * c[0][i] - independent_bernoulli(a) * c[1][i])
+        })
+        .collect()
+}
+
+fn assert_mixture_conserved(pair: &IonicOsmoticPair, case: &MixtureCase) {
+    assert_eq!(pair.species_count(), case.valences.len());
+    assert_eq!(pair.mobile_totals_mol().len(), case.valences.len());
+    for i in 0..case.valences.len() {
+        let total: f64 = pair
+            .compartments()
+            .iter()
+            .map(|c| c.solution().solute_moles()[i])
+            .sum();
+        near(total, case.amounts[0][i] + case.amounts[1][i], 5e-13);
+    }
+    for (side, cell) in pair.compartments().iter().enumerate() {
+        let mobile_charge: f64 = cell
+            .solution()
+            .solute_moles()
+            .iter()
+            .zip(&case.valences)
+            .map(|(&n, &z)| n * f64::from(z))
+            .sum();
+        near(mobile_charge + case.fixed[side], 0.0, 2e-11);
+    }
+    near(
+        pair.compartments()
+            .iter()
+            .map(|c| c.solution().solvent_volume_m3())
+            .sum(),
+        2.0,
+        5e-13,
+    );
+}
+
+#[test]
+fn multicomponent_cross_interactions_preserve_independent_sodium_potassium_exchange() {
+    // Independent nested scalar roots eliminate charge exactly:
+    // nL=[r,1+t-r,t]. GHK current determines psi; sodium and chloride BE
+    // determine r,t; water BE closes x. No production Newton/Jacobian is used
+    // to obtain these constants. Equal valence does not imply equal transfer.
+    let case = MixtureCase::sodium_potassium_chloride();
+    let mut pair = case.build();
+    assert_eq!(
+        pair.compartments()[0].solution().solute_moles(),
+        case.amounts[0].as_slice()
+    );
+    assert!(pair.endpoint().volume_flux_m_s > 0.0);
+    let before = mixture_potential(&pair, &case);
+    let report = pair.step(0.2, controls(), || false).unwrap();
+    let expected = [
+        [
+            0.952_776_100_630_362_8,
+            0.269_505_027_614_002_97,
+            0.222_281_128_244_365_74,
+        ],
+        [
+            0.247_223_899_369_637_18,
+            0.530_494_972_385_997_1,
+            0.777_718_871_755_634_3,
+        ],
+    ];
+    for (side, cell) in pair.compartments().iter().enumerate() {
+        for (i, &n) in cell.solution().solute_moles().iter().enumerate() {
+            near(n, expected[side][i], 2e-9);
+        }
+    }
+    let x = report.solvent_transfer_m3;
+    near(x, -0.007_439_026_018_840_444_5, 2e-9);
+    near(psi(&report.endpoint), -0.311_836_303_951_942_73, 2e-9);
+    assert_eq!(report.solute_transfer_mol.len(), 3);
+    assert_eq!(report.solute_balance_residual_mol.len(), 3);
+    assert_eq!(report.solute_root_residual_mol.len(), 3);
+    assert_eq!(report.solute_transfer_mol.into_iter().count(), 3);
+    assert!(report.solute_transfer_mol[0] > 0.0);
+    assert!(report.solute_transfer_mol[1] < 0.0);
+    assert!(report.solute_transfer_mol[2] < 0.0);
+    let original_flux = independent_mixture_fluxes(&pair, &case, psi(&report.endpoint));
+    for (i, flux) in original_flux.into_iter().enumerate() {
+        near(report.solute_transfer_mol[i], 0.2 * flux, 2e-9);
+        near(report.solute_root_residual_mol[i], 0.0, 1e-9);
+    }
+    near(report.endpoint.charge_flux_residual_mol_m2_s, 0.0, 2e-13);
+    near(report.water_root_residual_m3, 0.0, 1e-9);
+    assert_mixture_conserved(&pair, &case);
+    let exact_work = -0.5 * RT * (x * x - (-(x * x)).ln_1p());
+    near(report.pressure_work_into_solution_j, exact_work, 3e-9);
+    near(
+        report.pressure_work_into_solution_j,
+        -0.137_185_169_028_683_77,
+        2e-6,
+    );
+    let change = mixture_potential(&pair, &case) - before;
+    near(report.total_potential_change_j, change, 3e-8);
+    near(change, -494.734_292_876_233_9, 2e-5);
+    let dissipation = report.endpoint.total_dissipation_w_m2.unwrap();
+    near(dissipation, 2166.492_754_339_36, 2e-4);
+    assert!(change <= -0.2 * dissipation + 1e-6);
+}
+
+#[test]
+fn multicomponent_species_permutation_and_side_reversal_preserve_the_physics() {
+    let case = MixtureCase::sodium_potassium_chloride();
+    let mut baseline = case.build();
+    let original = baseline.step(0.2, controls(), || false).unwrap();
+    let order = [2, 0, 1];
+    let reordered_case = case.permuted(&order);
+    let mut reordered = reordered_case.build();
+    let reordered_report = reordered.step(0.2, controls(), || false).unwrap();
+    near(
+        psi(&reordered_report.endpoint),
+        psi(&original.endpoint),
+        2e-9,
+    );
+    near(
+        reordered_report.solvent_transfer_m3,
+        original.solvent_transfer_m3,
+        2e-9,
+    );
+    for i in 0..3 {
+        near(
+            reordered_report.solute_transfer_mol[i],
+            original.solute_transfer_mol[order[i]],
+            2e-9,
+        );
+        for side in 0..2 {
+            near(
+                reordered.compartments()[side].solution().solute_moles()[i],
+                baseline.compartments()[side].solution().solute_moles()[order[i]],
+                2e-9,
+            );
+        }
+    }
+    near(
+        reordered_report.total_potential_change_j,
+        original.total_potential_change_j,
+        2e-5,
+    );
+    assert_mixture_conserved(&reordered, &reordered_case);
+
+    let mut reversed_case = case.clone();
+    reversed_case.amounts.swap(0, 1);
+    reversed_case.fixed.swap(0, 1);
+    reversed_case.trapped.swap(0, 1);
+    let mut reversed = reversed_case.build();
+    let reverse = reversed.step(0.2, controls(), || false).unwrap();
+    near(psi(&reverse.endpoint), -psi(&original.endpoint), 2e-9);
+    near(
+        reverse.solvent_transfer_m3,
+        -original.solvent_transfer_m3,
+        2e-9,
+    );
+    for i in 0..3 {
+        near(
+            reverse.solute_transfer_mol[i],
+            -original.solute_transfer_mol[i],
+            2e-9,
+        );
+        for side in 0..2 {
+            near(
+                reversed.compartments()[side].solution().solute_moles()[i],
+                baseline.compartments()[1 - side].solution().solute_moles()[i],
+                2e-9,
+            );
+        }
+    }
+    near(
+        reverse.pressure_work_into_solution_j,
+        original.pressure_work_into_solution_j,
+        2e-7,
+    );
+    near(
+        reverse.total_potential_change_j,
+        original.total_potential_change_j,
+        2e-5,
+    );
+    assert_mixture_conserved(&reversed, &reversed_case);
+}
+
+#[test]
+fn full_layout_keeps_neutral_blocked_and_absent_species_distinct() {
+    let base = MixtureCase::sodium_potassium_chloride();
+    let mut case = base.clone();
+    case.amounts[0].extend([0.25, 0.03, 0.0]);
+    case.amounts[1].extend([0.05, 0.01, 0.0]);
+    case.valences.extend([0, 1, -2]);
+    case.permeances.extend([0.25, 0.0, 0.4]);
+    case.fixed = [-1.03, -0.01]; // Explicitly neutralize the retained +1 pool.
+    for side in 0..2 {
+        case.amounts[side].resize(64, 0.0);
+    }
+    case.valences.resize(64, 0);
+    case.permeances.resize(64, 0.0);
+    let mut matrix = vec![0.0; 64 * 64];
+    for i in 0..3 {
+        for j in 0..3 {
+            matrix[i * 64 + j] = base.matrix.as_ref().unwrap()[i * 3 + j];
+        }
+    }
+    matrix[3 * 64 + 3] = 0.4;
+    matrix[4 * 64 + 4] = 0.25;
+    matrix[5 * 64 + 5] = 0.6;
+    case.matrix = Some(matrix);
+    let mut pair = case.build();
+    let before = mixture_potential(&pair, &case);
+    let report = pair.step(0.2, controls(), || false).unwrap();
+    assert_eq!(pair.species_count(), 64);
+    assert_eq!(report.solute_transfer_mol.len(), 64);
+    assert_eq!(report.solute_balance_residual_mol.len(), 64);
+    assert_eq!(report.solute_root_residual_mol.len(), 64);
+    assert_eq!(report.solute_transfer_mol.into_iter().count(), 64);
+    near(report.solvent_transfer_m3, -0.025_501_813_021_900_133, 2e-9);
+    near(psi(&report.endpoint), -0.278_692_947_477_789_33, 2e-9);
+    let expected_left = [
+        0.953_515_031_056_831,
+        0.270_309_506_093_384_9,
+        0.223_824_537_150_215_89,
+        0.240_780_913_573_174_66,
+        0.03,
+        0.0,
+    ];
+    for (i, &expected) in expected_left.iter().enumerate() {
+        near(
+            pair.compartments()[0].solution().solute_moles()[i],
+            expected,
+            2e-9,
+        );
+    }
+    assert!(report.solute_transfer_mol[3] > 0.0); // Neutral urea exchanges.
+    for side in 0..2 {
+        assert_eq!(
+            pair.compartments()[side].solution().solute_moles()[4],
+            case.amounts[side][4]
+        ); // Blocked charged pool stays exact.
+        for i in 5..64 {
+            assert_eq!(pair.compartments()[side].solution().solute_moles()[i], 0.0);
+        }
+    }
+    for i in 4..64 {
+        assert_eq!(report.solute_transfer_mol[i], 0.0);
+    }
+    let flux = independent_mixture_fluxes(&pair, &case, psi(&report.endpoint));
+    for (i, &j) in flux.iter().enumerate() {
+        near(report.solute_transfer_mol[i], 0.2 * j, 2e-9);
+    }
+    assert_mixture_conserved(&pair, &case);
+    near(report.total_potential_change_j, -547.573_113_690_522, 3e-5);
+    near(
+        report.total_potential_change_j,
+        mixture_potential(&pair, &case) - before,
+        5e-8,
+    );
+    near(
+        report.pressure_work_into_solution_j,
+        -1.612_433_260_740_403,
+        2e-6,
+    );
+    assert!(report.endpoint.total_dissipation_w_m2.unwrap() > 0.0);
+}
+
+#[test]
+fn all_sixty_four_active_neutral_species_match_independent_analytic_backward_euler() {
+    let left: Vec<f64> = (0..64).map(|i| 1.0 + 0.01 * f64::from(i)).collect();
+    let permeances: Vec<f64> = (0..64).map(|i| 0.1 + 0.01 * f64::from(i)).collect();
+    let case = MixtureCase {
+        amounts: [left, vec![0.2; 64]],
+        valences: vec![0; 64],
+        permeances,
+        matrix: None,
+        hydraulic: 0.0,
+        fixed: [0.0; 2],
+        trapped: [0.0; 2],
+    };
+    let mut pair = case.build();
+    let dt = 0.2;
+    let report = pair.step(dt, controls(), || false).unwrap();
+    assert_eq!(pair.species_count(), 64);
+    assert_eq!(report.solute_transfer_mol.len(), 64);
+    assert_eq!(report.solute_balance_residual_mol.len(), 64);
+    assert_eq!(report.solute_root_residual_mol.len(), 64);
+    assert_eq!(report.solute_transfer_mol.into_iter().count(), 64);
+    assert_eq!(report.endpoint.potential, DonnanPotential::Indeterminate);
+    assert_eq!(report.solvent_transfer_m3, 0.0);
+    for i in 0..64 {
+        let p = case.permeances[i];
+        let expected = dt * p * (case.amounts[0][i] - 0.2) / (1.0 + 2.0 * dt * p);
+        near(report.solute_transfer_mol[i], expected, 2e-10);
+        near(
+            pair.compartments()[0].solution().solute_moles()[i],
+            case.amounts[0][i] - expected,
+            2e-10,
+        );
+        near(
+            pair.compartments()[1].solution().solute_moles()[i],
+            0.2 + expected,
+            2e-10,
+        );
+        near(report.solute_root_residual_mol[i], 0.0, 1e-9);
+    }
+    assert_mixture_conserved(&pair, &case);
+    assert_eq!(report.pressure_work_into_solution_j, 0.0);
+    assert!(report.total_potential_change_j < 0.0);
+}
+
+#[test]
+fn adaptive_accuracy_includes_a_neutral_pool_after_the_charged_species() {
+    let mut case = MixtureCase::sodium_potassium_chloride();
+    case.amounts[0].push(0.9);
+    case.amounts[1].push(0.1);
+    case.valences.push(0);
+    case.permeances = vec![0.0, 0.0, 0.0, 3.0];
+    case.matrix = None;
+    case.hydraulic = 0.0;
+    case.trapped = [0.0; 2];
+    let mut pair = case.build();
+    let mut workspace = pair.adaptive_workspace(1 << 20).unwrap();
+    let temporal = IonicAdvanceControls {
+        maximum_step_s: 0.5,
+        relative_tolerance: 1e-4,
+        absolute_amount_tolerance_mol: 1e-10,
+        absolute_water_tolerance_m3: 1.0,
+        step: controls(),
+        ..IonicAdvanceControls::default()
+    };
+    let report = pair
+        .advance(0.5, temporal, &mut workspace, || false)
+        .unwrap();
+    // Neutral diffusion alone obeys nL=.5+.4 exp(-6t). The water and all
+    // charged pools are constant, so omitting the fourth error component
+    // would falsely accept one large step and miss this analytic trajectory.
+    let exact = 0.5 + 0.4 * (-3.0_f64).exp();
+    near(
+        pair.compartments()[0].solution().solute_moles()[3],
+        exact,
+        6e-4,
+    );
+    assert!(report.accepted_steps > 10);
+    assert!(report.maximum_scaled_error <= 1.0);
+    assert_eq!(report.solute_transfer_mol.len(), 4);
+    assert_eq!(
+        report.endpoint.endpoint.potential,
+        DonnanPotential::Indeterminate
+    );
+    for side in 0..2 {
+        assert_eq!(
+            pair.compartments()[side].solution().solvent_volume_m3(),
+            1.0
+        );
+        for i in 0..3 {
+            assert_eq!(
+                pair.compartments()[side].solution().solute_moles()[i],
+                case.amounts[side][i]
+            );
+        }
+    }
+    assert_mixture_conserved(&pair, &case);
+    assert_eq!(pair.time_s(), 0.5);
+}
+
+#[test]
+fn multicomponent_supported_water_seed_keeps_original_concentration_caps() {
+    // The third, exactly absent neutral selects the general path while leaving
+    // the independent capped binary problem unchanged. At zero water transfer,
+    // any finite salt entry exceeds the initially saturated cation cap.
+    let caps = [1.2, 1.0, 1.0];
+    let model = Arc::new(
+        VirialSolutionModel::new(
+            T,
+            18e-6,
+            1.0,
+            caps.to_vec(),
+            vec![0.8, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.4],
+        )
+        .unwrap(),
+    );
+    let amounts = [[1.2, 0.2, 0.0], [0.8, 0.8, 0.0]];
+    let cells = [0, 1].map(|side| {
+        OsmoticCompartment::new(
+            AqueousSolution::nonideal(Arc::clone(&model), 1.0, amounts[side].to_vec()).unwrap(),
+            OsmoticPressureVolume::new(1.0, [0.0, RT][side], 0.0).unwrap(),
+            0.01,
+        )
+        .unwrap()
+    });
+    let membrane = ElectrodiffusiveMembrane::new(
+        HydraulicPermeance::new(1.0 / RT).unwrap(),
+        vec![1, -1, 0],
+        [0.7, 0.2, 0.3]
+            .map(|p| SolutePermeance::new(p).unwrap())
+            .to_vec(),
+    )
+    .unwrap();
+    let mut pair =
+        IonicOsmoticPair::new(cells, membrane, [-1.0, 0.0], [0.0; 2], 1.0, 1e-11, 1 << 20).unwrap();
+    let report = pair.step(0.01, controls(), || false).unwrap();
+    near(report.solvent_transfer_m3, -0.008_417_969_072_558_327, 2e-9);
+    for i in 0..2 {
+        near(
+            report.solute_transfer_mol[i],
+            -0.000_880_660_644_880_319,
+            2e-9,
+        );
+        near(report.solute_root_residual_mol[i], 0.0, 1e-9);
+    }
+    assert_eq!(report.solute_transfer_mol.len(), 3);
+    assert_eq!(report.solute_transfer_mol[2], 0.0);
+    near(psi(&report.endpoint), -0.828_210_014_185_601_7, 2e-9);
+    for cell in pair.compartments() {
+        for (i, &n) in cell.solution().solute_moles().iter().enumerate() {
+            assert!(n / cell.solution().solvent_volume_m3() <= caps[i]);
+        }
+        assert_eq!(cell.solution().solute_moles()[2], 0.0);
+    }
+    near(
+        report.pressure_work_into_solution_j,
+        20.867_783_607_393_96,
+        2e-6,
+    );
+    near(
+        report.total_potential_change_j,
+        -20.503_347_687_013_104,
+        2e-6,
+    );
+}
+
+#[test]
+fn multicomponent_late_cancellation_restores_every_pool_and_retries_exactly() {
+    let case = MixtureCase::sodium_potassium_chloride();
+    let temporal = IonicAdvanceControls {
+        maximum_step_s: 0.1,
+        relative_tolerance: 5e-3,
+        absolute_amount_tolerance_mol: 1e-8,
+        absolute_water_tolerance_m3: 1e-8,
+        step: controls(),
+        ..IonicAdvanceControls::default()
+    };
+    let mut successful = case.build();
+    let mut successful_workspace = successful.adaptive_workspace(1 << 20).unwrap();
+    let mut successful_polls = 0usize;
+    let accepted = successful
+        .advance(0.3, temporal, &mut successful_workspace, || {
+            successful_polls += 1;
+            false
+        })
+        .unwrap();
+    assert!(accepted.accepted_steps >= 3);
+    assert!(accepted.maximum_scaled_error <= 1.0);
+    assert!(successful_polls > 10);
+    assert_mixture_conserved(&successful, &case);
+
+    let mut pair = case.build();
+    let original = snapshot(&pair);
+    let mut workspace = pair.adaptive_workspace(1 << 20).unwrap();
+    let mut polls = 0usize;
+    let mut cancellation_reached = false;
+    let refused = pair.advance(0.3, temporal, &mut workspace, || {
+        polls += 1;
+        cancellation_reached = polls >= successful_polls - 1;
+        cancellation_reached
+    });
+    assert!(cancellation_reached);
+    assert!(matches!(
+        refused,
+        Err(IonicOsmoticError::Network(OsmoticNetworkError::Cancelled))
+    ));
+    assert_eq!(snapshot(&pair), original);
+    let retry = pair
+        .advance(0.3, temporal, &mut workspace, || false)
+        .unwrap();
+    assert_eq!(snapshot(&pair), snapshot(&successful));
+    assert_eq!(retry.accepted_steps, accepted.accepted_steps);
+    assert_eq!(retry.rejected_steps, accepted.rejected_steps);
+    assert_eq!(retry.solute_transfer_mol, accepted.solute_transfer_mol);
+    assert_eq!(
+        retry.pressure_work_into_solution_j.to_bits(),
+        accepted.pressure_work_into_solution_j.to_bits()
+    );
+}

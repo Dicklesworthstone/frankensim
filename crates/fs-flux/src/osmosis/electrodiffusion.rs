@@ -1,15 +1,17 @@
 //! Finite-rate ionic membrane transport coupled to osmotic water and mechanics.
 //!
-//! Two opposite-valence mobile ions exchange along their charge-neutral salt
-//! coordinate. A nested scalar solve evaluates BOTH original ion equations and
-//! the water equation at the same backward-Euler endpoint. Initial inventories
-//! are retained; no instantaneous Donnan partition replaces finite kinetics.
+//! Every original mobile species retains its own finite-rate equation. Two
+//! opposite-valence ions use a scalar salt fast path; larger layouts use a
+//! prepared charge-constrained Newton solve. Both share the original scalar
+//! water solve and backward-Euler endpoint. Initial inventories are retained;
+//! no instantaneous Donnan partition replaces finite kinetics.
 //! Independent selective water pores and ion channels share the original
 //! solution potential. Fixed charges and separately declared trapped particles
 //! stay with their compartments. No solvent drag or electrical storage is inferred.
 
 pub mod adaptive;
 pub use adaptive::{IonicAdvanceControls, IonicAdvanceReport, IonicAdvanceWorkspace};
+mod multicomponent;
 
 use super::{AqueousSolution, OsmoticCompartment, OsmoticNetworkError, compensated_add};
 use fs_material::osmosis::{
@@ -61,6 +63,82 @@ impl From<ElectrodiffusionError> for IonicOsmoticError {
     }
 }
 type Result<T> = core::result::Result<T, IonicOsmoticError>;
+const CAPACITY: usize = super::MAX_OSMOTIC_SPECIES;
+
+/// Allocation-free values in the original species ordering. Indexing, slices
+/// and iteration expose exactly the active species, never unused capacity.
+#[derive(Clone, Copy, PartialEq)]
+pub struct IonicSpeciesValues {
+    values: [f64; CAPACITY],
+    count: usize,
+}
+impl core::fmt::Debug for IonicSpeciesValues {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        core::fmt::Debug::fmt(self.as_slice(), f)
+    }
+}
+impl IonicSpeciesValues {
+    fn zeroed(count: usize) -> Self {
+        Self {
+            values: [0.0; CAPACITY],
+            count,
+        }
+    }
+    fn from_fn(count: usize, mut value: impl FnMut(usize) -> f64) -> Self {
+        let mut result = Self::zeroed(count);
+        for i in 0..count {
+            result.values[i] = value(i);
+        }
+        result
+    }
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+    pub fn as_slice(&self) -> &[f64] {
+        &self.values[..self.count]
+    }
+    fn as_mut_slice(&mut self) -> &mut [f64] {
+        &mut self.values[..self.count]
+    }
+}
+impl core::ops::Deref for IonicSpeciesValues {
+    type Target = [f64];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+impl AsRef<[f64]> for IonicSpeciesValues {
+    fn as_ref(&self) -> &[f64] {
+        self.as_slice()
+    }
+}
+impl IntoIterator for IonicSpeciesValues {
+    type Item = f64;
+    type IntoIter = std::iter::Take<std::array::IntoIter<f64, CAPACITY>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.into_iter().take(self.count)
+    }
+}
+impl<'a> IntoIterator for &'a IonicSpeciesValues {
+    type Item = &'a f64;
+    type IntoIter = std::slice::Iter<'a, f64>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+impl<const N: usize> PartialEq<[f64; N]> for IonicSpeciesValues {
+    fn eq(&self, rhs: &[f64; N]) -> bool {
+        self.as_slice() == rhs.as_slice()
+    }
+}
+impl<const N: usize> PartialEq<IonicSpeciesValues> for [f64; N] {
+    fn eq(&self, rhs: &IonicSpeciesValues) -> bool {
+        self.as_slice() == rhs.as_slice()
+    }
+}
 
 /// Endpoint accuracy and finite nested work, independently of temporal error.
 #[derive(Clone, Copy, Debug)]
@@ -71,7 +149,8 @@ pub struct IonicStepControls {
     pub relative_transfer_tolerance: f64,
     /// Absolute original-to-final total-potential allowance [J].
     pub free_energy_tolerance_j: f64,
-    /// Per water solve and per nested salt solve, including refused trials.
+    /// Per water solve and per nested ion solve, including Newton damping,
+    /// analytic-response replays and refused candidates.
     pub maximum_root_evaluations: usize,
     /// COMPLETE requested step/window, including coarse and rejected attempts.
     pub maximum_potential_evaluations: usize,
@@ -118,16 +197,17 @@ pub struct IonicStepReport {
     pub interval_s: [f64; 2],
     pub solvent_transfer_m3: f64,
     /// Actual left-to-right transfer of EACH original ion [mol].
-    pub solute_transfer_mol: [f64; 2],
+    pub solute_transfer_mol: IonicSpeciesValues,
     pub endpoint: ElectrodiffusionReport,
     pub pressure_work_into_solution_j: f64,
     /// Mobile mixing + trapped-particle mixing + original mechanical potential.
     pub total_potential_change_j: f64,
     pub water_balance_residual_m3: f64,
-    pub solute_balance_residual_mol: [f64; 2],
+    pub solute_balance_residual_mol: IonicSpeciesValues,
     pub water_root_residual_m3: f64,
-    pub solute_root_residual_mol: [f64; 2],
+    pub solute_root_residual_mol: IonicSpeciesValues,
     pub water_evaluations: usize,
+    /// Original ion-state/response evaluations, including multicomponent work.
     pub salt_evaluations: usize,
     pub potential_evaluations: usize,
 }
@@ -141,8 +221,9 @@ pub struct IonicOsmoticPair {
     trapped_particles_mol: [f64; 2],
     area_m2: f64,
     maximum_charge_residual_mol: f64,
-    totals: [f64; 2],
+    totals: IonicSpeciesValues,
     stoichiometry: [f64; 2],
+    multicomponent: Option<Box<multicomponent::Workspace>>,
     endpoint: ElectrodiffusionReport,
     time_s: f64,
     workspace_bytes: usize,
@@ -165,11 +246,12 @@ struct Trial {
     water: f64,
     salt: f64,
     volumes: [f64; 2],
-    amounts: [[f64; 2]; 2],
+    amounts: [IonicSpeciesValues; 2],
+    flux: IonicSpeciesValues,
     transport: ElectrodiffusionReport,
     salt_residual: f64,
     water_residual: f64,
-    ion_residual: [f64; 2],
+    ion_residual: IonicSpeciesValues,
     water_error: f64,
     ion_error: f64,
 }
@@ -177,8 +259,9 @@ struct Trial {
 impl IonicOsmoticPair {
     /// Preserve supplied finite inventories and evaluate their initial flux.
     /// Both cells must use the same original ideal/virial law and solvent, with
-    /// exactly two declared opposite nonzero ion valences. The absolute charge
-    /// budget checks mobile PLUS fixed charge, without inventing counterions.
+    /// up to 64 explicitly ordered species; zero valence denotes a neutral
+    /// co-solute. The absolute charge budget checks mobile PLUS fixed charge,
+    /// without inventing counterions. Two opposite ions retain the scalar path.
     pub fn new(
         compartments: [OsmoticCompartment; 2],
         membrane: ElectrodiffusiveMembrane,
@@ -215,10 +298,8 @@ impl IonicOsmoticPair {
     ) -> Result<Self> {
         let z = membrane.valences();
         let reference = compartments[0].solution();
-        if z.len() != 2
-            || z[0] == 0
-            || z[1] == 0
-            || z[0].is_positive() == z[1].is_positive()
+        let count = z.len();
+        if count > CAPACITY
             || !positive(area_m2)
             || !positive(maximum_charge_residual_mol)
             || fixed_charge_mol.iter().any(|q| !q.is_finite())
@@ -226,7 +307,7 @@ impl IonicOsmoticPair {
             || compartments.iter().any(|cell| {
                 let s = cell.solution();
                 cell.has_phase_inventory()
-                    || s.solute_moles().len() != 2
+                    || s.solute_moles().len() != count
                     || s.temperature_k().to_bits() != reference.temperature_k().to_bits()
                     || s.solvent_molar_volume_m3_mol().to_bits()
                         != reference.solvent_molar_volume_m3_mol().to_bits()
@@ -234,7 +315,7 @@ impl IonicOsmoticPair {
             })
         {
             return Err(invalid(
-                "finite ionic pairs require two opposite ions, common original solution physics and explicit charge budgets",
+                "finite ionic pairs require bounded original species, common solution physics and explicit charge budgets",
             ));
         }
         for side in 0..2 {
@@ -246,16 +327,22 @@ impl IonicOsmoticPair {
                 maximum_charge_residual_mol,
             )?;
         }
-        let magnitudes = [
-            i64::from(z[0]).unsigned_abs(),
-            i64::from(z[1]).unsigned_abs(),
-        ];
-        let (mut a, mut b) = (magnitudes[0], magnitudes[1]);
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        let stoichiometry = [(magnitudes[1] / a) as f64, (magnitudes[0] / a) as f64];
-        let totals = [0, 1].map(|i| {
+        let binary =
+            count == 2 && z[0] != 0 && z[1] != 0 && z[0].is_positive() != z[1].is_positive();
+        let stoichiometry = if binary {
+            let magnitudes = [
+                i64::from(z[0]).unsigned_abs(),
+                i64::from(z[1]).unsigned_abs(),
+            ];
+            let (mut a, mut b) = (magnitudes[0], magnitudes[1]);
+            while b != 0 {
+                (a, b) = (b, a % b);
+            }
+            [(magnitudes[1] / a) as f64, (magnitudes[0] / a) as f64]
+        } else {
+            [0.0; 2]
+        };
+        let totals = IonicSpeciesValues::from_fn(count, |i| {
             compartments[0].solution().solute_moles()[i]
                 + compartments[1].solution().solute_moles()[i]
         });
@@ -266,7 +353,7 @@ impl IonicOsmoticPair {
             compartments[0].solution().solvent_volume_m3()
                 + compartments[1].solution().solvent_volume_m3(),
         )?;
-        let workspace_bytes = core::mem::size_of::<Self>()
+        let mut workspace_bytes = core::mem::size_of::<Self>()
             + membrane.heap_bytes()
             + 2 * compartments
                 .iter()
@@ -279,6 +366,18 @@ impl IonicOsmoticPair {
             }
             .into());
         }
+        let multicomponent = if binary {
+            None
+        } else {
+            let prepared = multicomponent::Workspace::new(
+                &membrane,
+                &totals,
+                workspace_bytes,
+                maximum_workspace_bytes,
+            )?;
+            workspace_bytes += prepared.storage_bytes();
+            Some(Box::new(prepared))
+        };
         let pressure_drop = compartments[0].pressure.pressure_difference_pa(
             compartments[0].solution().solvent_volume_m3(),
             compartments[1].pressure,
@@ -292,7 +391,7 @@ impl IonicOsmoticPair {
                 trapped_particles_mol,
             },
             initial_electrical,
-            &mut [0.0; 2],
+            &mut [0.0; CAPACITY][..count],
             || false,
         )?;
         Ok(Self {
@@ -305,6 +404,7 @@ impl IonicOsmoticPair {
             maximum_charge_residual_mol,
             totals,
             stoichiometry,
+            multicomponent,
             endpoint,
             time_s: 0.0,
             workspace_bytes,
@@ -322,8 +422,11 @@ impl IonicOsmoticPair {
     pub const fn workspace_bytes(&self) -> usize {
         self.workspace_bytes
     }
-    pub const fn mobile_totals_mol(&self) -> &[f64; 2] {
-        &self.totals
+    pub fn mobile_totals_mol(&self) -> &[f64] {
+        self.totals.as_slice()
+    }
+    pub const fn species_count(&self) -> usize {
+        self.totals.len()
     }
     pub const fn fixed_charge_mol(&self) -> [f64; 2] {
         self.fixed_charge_mol
@@ -373,15 +476,35 @@ impl IonicOsmoticPair {
         start: usize,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Trial> {
+        let transfers = IonicSpeciesValues::from_fn(2, |i| self.stoichiometry[i] * salt);
+        let mut trial =
+            self.sample_transfers(probe, &transfers, controls, work, start, cancelled)?;
+        let pivot = usize::from(self.stoichiometry[1] < self.stoichiometry[0]);
+        trial.salt = salt;
+        trial.salt_residual = salt
+            - integrated(probe.dt, self.area_m2, trial.flux[pivot]) / self.stoichiometry[pivot];
+        Ok(trial)
+    }
+
+    fn sample_transfers(
+        &mut self,
+        probe: Probe,
+        transfers: &IonicSpeciesValues,
+        controls: IonicStepControls,
+        work: &mut Work,
+        start: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Trial> {
         poll(cancelled)?;
         if work.salt - start >= controls.maximum_root_evaluations {
             return Err(OsmoticNetworkError::NonlinearConvergence.into());
         }
         bump(&mut work.salt)?;
+        let count = self.species_count();
         let amounts = [0, 1].map(|side| {
-            [0, 1].map(|i| {
+            IonicSpeciesValues::from_fn(count, |i| {
                 let old = self.compartments[side].solution().solute_moles()[i];
-                let transfer = self.stoichiometry[i] * salt;
+                let transfer = transfers[i];
                 if side == 0 {
                     old - transfer
                 } else {
@@ -400,7 +523,7 @@ impl IonicOsmoticPair {
         let mut electrical = controls.electrical;
         electrical.maximum_potential_evaluations =
             electrical.maximum_potential_evaluations.min(remaining);
-        let mut flux = [0.0; 2];
+        let mut flux = IonicSpeciesValues::zeroed(count);
         let result = self.membrane.flux_into_counted(
             ElectrodiffusionProblem {
                 left: &self.candidates[0],
@@ -409,7 +532,7 @@ impl IonicOsmoticPair {
                 trapped_particles_mol: self.trapped_particles_mol,
             },
             electrical,
-            &mut flux,
+            flux.as_mut_slice(),
             &mut work.potential,
             &mut *cancelled,
         );
@@ -422,12 +545,12 @@ impl IonicOsmoticPair {
             }
             other => other?,
         };
-        let (mut ion_error, mut ion_residual) = (0.0_f64, [0.0; 2]);
-        for i in 0..2 {
+        let (mut ion_error, mut ion_residual) = (0.0_f64, IonicSpeciesValues::zeroed(count));
+        for i in 0..count {
             let predicted = integrated(probe.dt, self.area_m2, flux[i]);
             let allowance = finite(
                 controls.absolute_amount_tolerance_mol
-                    + controls.relative_transfer_tolerance * (self.stoichiometry[i] * salt).abs(),
+                    + controls.relative_transfer_tolerance * transfers[i].abs(),
             )?;
             for side in 0..2 {
                 let actual = (amounts[side][i]
@@ -439,7 +562,7 @@ impl IonicOsmoticPair {
                 }
                 ion_error = ion_error.max(residual.abs() / allowance);
                 if side == 0 {
-                    ion_residual[i] = residual;
+                    ion_residual.values[i] = residual;
                 }
             }
         }
@@ -458,15 +581,14 @@ impl IonicOsmoticPair {
             }
             water_error = water_error.max((actual - predicted).abs() / allowance);
         }
-        let pivot = usize::from(self.stoichiometry[1] < self.stoichiometry[0]);
         Ok(Trial {
             water: probe.water,
-            salt,
+            salt: 0.0,
             volumes: probe.volumes,
             amounts,
+            flux,
             transport,
-            salt_residual: salt
-                - integrated(probe.dt, self.area_m2, flux[pivot]) / self.stoichiometry[pivot],
+            salt_residual: 0.0,
             water_residual: probe.water - predicted,
             ion_residual,
             water_error,
@@ -562,17 +684,21 @@ impl IonicOsmoticPair {
             self.compartments[1].pressure,
             volumes[1],
         )?;
-        self.solve_salt(
-            Probe {
-                dt,
-                water,
-                volumes,
-                pressure_drop,
-            },
-            controls,
-            work,
-            cancelled,
-        )
+        let probe = Probe {
+            dt,
+            water,
+            volumes,
+            pressure_drop,
+        };
+        if let Some(mut prepared) = self.multicomponent.take() {
+            // Numerical scratch has no physical history. Always restore its
+            // owner, including after cancellation or a refused Newton trial.
+            let result = prepared.solve(self, probe, controls, work, cancelled);
+            self.multicomponent = Some(prepared);
+            result
+        } else {
+            self.solve_salt(probe, controls, work, cancelled)
+        }
     }
 
     fn solve_water(
@@ -771,8 +897,9 @@ impl IonicOsmoticPair {
         let report = IonicStepReport {
             interval_s: [self.time_s, end],
             solvent_transfer_m3: before[0].solvent_volume_m3() - after[0].solvent_volume_m3(),
-            solute_transfer_mol: [0, 1]
-                .map(|i| before[0].solute_moles()[i] - after[0].solute_moles()[i]),
+            solute_transfer_mol: IonicSpeciesValues::from_fn(self.species_count(), |i| {
+                before[0].solute_moles()[i] - after[0].solute_moles()[i]
+            }),
             endpoint: trial.transport,
             pressure_work_into_solution_j: pressure_work,
             total_potential_change_j: potential_change,
@@ -807,7 +934,7 @@ impl IonicOsmoticPair {
         before: [&AqueousSolution; 2],
         after: [&AqueousSolution; 2],
         controls: IonicStepControls,
-    ) -> Result<(f64, [f64; 2])> {
+    ) -> Result<(f64, IonicSpeciesValues)> {
         let water = finite(
             (after[0].solvent_volume_m3() - before[0].solvent_volume_m3())
                 + (after[1].solvent_volume_m3() - before[1].solvent_volume_m3()),
@@ -822,9 +949,9 @@ impl IonicOsmoticPair {
             }
             .into());
         }
-        let mut solute = [0.0; 2];
-        for i in 0..2 {
-            solute[i] = finite(
+        let mut solute = IonicSpeciesValues::zeroed(self.species_count());
+        for i in 0..self.species_count() {
+            solute.values[i] = finite(
                 (after[0].solute_moles()[i] - before[0].solute_moles()[i])
                     + (after[1].solute_moles()[i] - before[1].solute_moles()[i]),
             )?;

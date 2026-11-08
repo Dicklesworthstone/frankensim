@@ -6036,16 +6036,19 @@ and energy oracles.
 
 ## Finite-rate ionic osmosis and charged swelling
 
-`osmosis::electrodiffusion::IonicOsmoticPair` evolves two opposite-valence
-mobile ions, two finite solvent volumes, and the original mechanical response.
-Its constructor retains the supplied nonequilibrium ion partition. Each bath
-must satisfy the explicit absolute charge budget with its own retained fixed
-charge; no salt, charge compensation, or equilibrium reset is supplied.
+`osmosis::electrodiffusion::IonicOsmoticPair` evolves an ordered mixture of
+up to 64 mobile species, two finite solvent volumes, and the original
+mechanical response. Charged and neutral permeants can have independent
+channel permeances; zero-permeance and globally absent species retain their
+exact inventories. Its constructor preserves the supplied nonequilibrium
+partition. Each bath must satisfy the explicit absolute charge budget with
+its own retained fixed charge; no salt, counterion, or equilibrium reset is
+supplied. A fixed charge does not itself create an osmotic particle count.
 
 The shared material `ElectrodiffusiveMembrane` supports the original ordered
-ideal or virial solution model. Water-selective pores use the FULL original
+ideal or virial solution model. Water-selective pores use the full original
 osmotic-pressure difference, including separately declared ideal trapped
-particles. Independent ion channels use exponentially fitted Nernst--Planck
+particles. Independent species channels use exponentially fitted Nernst--Planck
 transport with their original permeances. For
 `a_i = ln(gamma_L,i)-ln(gamma_R,i)+z_i*F*(phi_L-phi_R)/(RT)`,
 
@@ -6056,51 +6059,70 @@ J_v = L_p * (DeltaP - DeltaPi)
 sum_i z_i*J_i = 0
 ```
 
-The floating potential solves the last equation from the actual ion fluxes.
-Both concentration endpoints, their original activities, and the full solvent
-pressure remain attached to the same free energy. Fixed charge does not itself
-create an additional osmotic particle count. Positive fitted donor coefficients
-admit exact zero endpoints without artificial trace concentrations. Carrier-free
-and counterion-only limits retain their indeterminate or infinite potential
-semantics. A singular instantaneous entropy at a zero endpoint is unavailable,
-not a fabricated finite heat rate.
+The floating potential solves the last equation from the actual species
+fluxes. Both concentration endpoints, original activities, and full solvent
+pressure remain attached to the same free energy. Positive fitted donor
+coefficients admit exact zero endpoints without artificial trace
+concentrations. Carrier-free and counterion-only limits retain their
+indeterminate or infinite potential semantics. A singular instantaneous
+entropy at a zero endpoint is unavailable rather than a fabricated finite
+heat rate.
 
 This is an explicit effective-channel model: electrical and excess chemical
-potentials are reconstructed linearly through each channel, the channel
-permeances are constant caller inputs, and water and ion channels have no
-cross-drag coefficient. It does not solve a nonlinear membrane interior,
-Debye layers, capacitance, active pumps, ion binding, or electrode reactions.
-The floating voltage assumes electrical relaxation is fast; finite salt
-relaxation is still evolved. The pair is isothermal and does not turn its
-free-energy dissipation into thermal-state evolution. No calibration or
-experimental authority follows from numerical coefficients.
+potentials are reconstructed linearly through each channel, permeances are
+constant caller inputs, and water and ion channels have no cross-drag
+coefficient. It does not solve a nonlinear membrane interior, Debye layers,
+capacitance, active pumps, binding, or electrode reactions. The floating voltage
+assumes electrical relaxation is fast; finite species relaxation is evolved.
+The pair is isothermal and does not turn its free-energy dissipation into
+thermal-state evolution. No calibration or experimental authority follows
+from numerical coefficients.
 
-One backward-Euler step solves a charge-preserving salt-transfer coordinate
-inside each trial water transfer. The accepted endpoint must satisfy BOTH
-original ion equations and the original water equation, every finite-inventory
-bound, original solution/mechanical support, and the full mixing-plus-mechanical
-potential budget. Root convergence alone cannot publish an endpoint that fails
-these physical equations. Nonlinear work and cancellation are explicitly
-bounded. The original mechanical pressure difference cancels a common pressure
-gauge before adding the actual restoring response; work uses the exact original
-pressure primitive.
+One backward-Euler step solves the original finite-rate species equations
+inside each trial water transfer. The two-opposite-ion layout retains its
+scalar salt solver. Larger and neutral mixtures use independent transfer
+coordinates with one charged pivot eliminated by the exact charge constraint.
+A prepared dense native LU solve supplies damped Newton updates. Original
+inventory and concentration bounds constrain the private numerical trials;
+a charge-feasible box initializer does not impose Donnan equilibrium.
+
+The shared material response differentiates the same original membrane law
+analytically. It retains the fitted donor coefficients, channel slopes and
+original virial interactions after one potential solve, and eliminates the
+floating-potential derivative through the zero-current constraint. Jacobian
+columns require no repeated electrical root solves or concentration floors.
+Derivatives at singular electrical limits are restricted to their supported
+directions. Derivative output is atomic on failure.
+
+Every accepted endpoint must satisfy every original species equation on both
+sides, the original water equation, each finite-inventory bound, original
+solution/mechanical support, and the full mixing-plus-mechanical potential
+budget. The eliminated charged row is checked explicitly. Root convergence
+alone cannot publish a state that fails these physical equations. Nonlinear
+work and cancellation remain bounded. The original mechanical pressure
+difference cancels a common pressure gauge before adding the actual restoring
+response; work uses the exact original pressure primitive. Per-species reports
+use `IonicSpeciesValues`: indexing, `as_slice()` and iteration expose the actual
+active length without allocating a new numerical vector.
 
 Prepared adaptive advancement compares a full step with two actual half steps
-on water and both ion inventories, retains the fine conservative endpoint, and
-checks the whole requested window before publication. This remains a first-order
-method with a local temporal estimate, not a certified accumulated error bound.
-Failure, exhaustion, and late cancellation restore inventories, diagnostics and
-clock. Workspace compatibility checks the original solution law. Mechanics,
-membrane, fixed charge and trapped particles remain attached to the active pair;
-snapshot restoration cannot substitute a different physical owner.
+on water and every species inventory, retains the fine conservative endpoint,
+and checks the whole requested window before publication. This remains a
+first-order method with a local temporal estimate, not a certified accumulated
+error bound. Failure, exhaustion, and late cancellation restore inventories,
+diagnostics and clock. Workspace compatibility checks species shape and the
+original solution law. Mechanics, membrane, fixed charge and trapped particles
+remain attached to the active pair; snapshot restoration cannot substitute a
+different physical owner.
 
-The `finite_rate_ionic_swelling` example compares blocked, slow, and fast ion
-channels from the same actual initial volumes and ion inventories. It reports
-volume, ionic inventory, voltage, and full potential change against the original
-nonlinear Simo--Taylor material. Its coefficients are explicitly illustrative.
-Focused regression sources include an independent nested scalar backward-Euler
-oracle, nonlinear work and energy, common-pressure-gauge invariance, finite-rate
-and blocked limits, charge/conservation, and adaptive rollback/retry.
+The `finite_rate_ionic_swelling` example compares blocked, slow, and fast
+binary channels and then evolves separate sodium/potassium/chloride channels,
+a neutral permeant, and a retained tracer. All coefficients and species names
+are illustrative roles, not fitted electrolyte data. Focused regression
+sources retain the binary independent oracle and add a nonideal three-ion
+backward-Euler oracle with opposite sodium/potassium transfer, original
+mechanical work and energy, species permutation, exact blocked/absent pools,
+and adaptive rollback.
 
 ## Sourced contact-line friction and hysteresis
 

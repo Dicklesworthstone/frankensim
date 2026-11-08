@@ -80,12 +80,12 @@ pub struct IonicAdvanceReport {
     pub minimum_accepted_step_s: f64,
     pub maximum_accepted_step_s: f64,
     pub solvent_transfer_m3: f64,
-    pub solute_transfer_mol: [f64; 2],
+    pub solute_transfer_mol: IonicSpeciesValues,
     /// Exact original-to-final mechanical primitive, not a sum of trial work.
     pub pressure_work_into_solution_j: f64,
     pub total_potential_change_j: f64,
     pub water_balance_residual_m3: f64,
-    pub solute_balance_residual_mol: [f64; 2],
+    pub solute_balance_residual_mol: IonicSpeciesValues,
     pub endpoint: IonicStepReport,
 }
 
@@ -154,7 +154,8 @@ impl IonicAdvanceWorkspace {
             .zip(&pair.compartments)
             .all(|(a, cell)| {
                 let b = cell.solution();
-                a.temperature_k().to_bits() == b.temperature_k().to_bits()
+                a.solute_moles().len() == b.solute_moles().len()
+                    && a.temperature_k().to_bits() == b.temperature_k().to_bits()
                     && a.solvent_molar_volume_m3_mol().to_bits()
                         == b.solvent_molar_volume_m3_mol().to_bits()
                     && a.nonideal_model() == b.nonideal_model()
@@ -350,8 +351,9 @@ impl IonicOsmoticPair {
             minimum_accepted_step_s: minimum_step,
             maximum_accepted_step_s: maximum_step,
             solvent_transfer_m3: before[0].solvent_volume_m3() - after[0].solvent_volume_m3(),
-            solute_transfer_mol: [0, 1]
-                .map(|i| before[0].solute_moles()[i] - after[0].solute_moles()[i]),
+            solute_transfer_mol: IonicSpeciesValues::from_fn(self.species_count(), |i| {
+                before[0].solute_moles()[i] - after[0].solute_moles()[i]
+            }),
             pressure_work_into_solution_j: pressure_work,
             total_potential_change_j: potential_change,
             water_balance_residual_m3: water,
@@ -388,7 +390,7 @@ fn temporal_error(
             c.solvent_volume_m3(),
             controls.absolute_water_tolerance_m3,
         )?;
-        for i in 0..2 {
+        for i in 0..pair.species_count() {
             sample(
                 a.solute_moles()[i],
                 b.solute_moles()[i],

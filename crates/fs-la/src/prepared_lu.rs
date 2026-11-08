@@ -36,7 +36,7 @@ impl std::error::Error for LuWorkspaceError {}
 /// until both factorization and substitution succeed. Failed calls may overwrite
 /// scratch, but never change the caller's matrix, right-hand side or output.
 /// This is an unblocked algorithm; it does not promise a speed advantage at large n.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LuWorkspace {
     n: usize,
     factors: Vec<f64>,
