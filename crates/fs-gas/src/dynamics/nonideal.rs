@@ -24,6 +24,7 @@ pub use thermal::{
 };
 mod wall;
 pub use wall::RealGasWallControl;
+mod outlet;
 
 use super::{Conserved, Error, FaceFlux, Primitive, poll, positive};
 use fs_matdb::QueryPoint;

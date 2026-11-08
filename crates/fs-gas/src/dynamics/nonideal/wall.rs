@@ -14,7 +14,7 @@ use fs_material::thermochemical_gas::nonideal::ResolvedThermochemicalRealGasStat
 use fs_math::det;
 use fs_qty::{Density, Velocity};
 
-/// Bounded physical wall-wave controls on the owner's homogeneous branch.
+/// Bounded physical wall/outlet-wave controls on the owner's homogeneous branch.
 ///
 /// The compression bracket is a downstream/upstream density ratio. The
 /// rarefaction endpoint is an absolute density on the SAME isentrope as the
@@ -192,11 +192,11 @@ fn wall_flux(pressure: f64, signal_speed: f64) -> Result<FaceFlux, RealGasFlowEr
     })
 }
 
-struct Isentrope<'a> {
-    gas: &'a RealGas,
-    context: QueryPoint,
-    inside: Primitive,
-    control: RealGasWallControl,
+pub(super) struct Isentrope<'a> {
+    pub(super) gas: &'a RealGas,
+    pub(super) context: QueryPoint,
+    pub(super) inside: Primitive,
+    pub(super) control: RealGasWallControl,
 }
 
 impl Isentrope<'_> {
@@ -268,7 +268,7 @@ impl Isentrope<'_> {
         wall_flux(pressure, signal.max(state.sound_speed_m_s()))
     }
 
-    fn state(
+    pub(super) fn state(
         &self,
         expansion: f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -348,7 +348,7 @@ impl Isentrope<'_> {
         ))
     }
 
-    fn integral(
+    pub(super) fn integral(
         &self,
         end: f64,
         cancelled: &mut impl FnMut() -> bool,

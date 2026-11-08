@@ -26,7 +26,8 @@ use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_material::thermochemical_gas::nonideal::{
     ResolvedThermochemicalRealGasState, ThermochemicalPengRobinsonModel,
 };
-use fs_qty::{Density, Velocity};
+use fs_math::det;
+use fs_qty::{Density, Pressure, Velocity};
 
 /// Explicit source domain, compression branch, physical residuals and work.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -180,6 +181,7 @@ pub struct RealGasPistonCompression {
 enum Drive {
     UpstreamSpeed(f64),
     PistonIncrement(f64),
+    DownstreamPressure(f64),
 }
 
 struct ShockFrame {
@@ -239,9 +241,21 @@ impl Jump<'_> {
                     mass_flux: rho1 * upstream,
                 }
             }
+            Drive::DownstreamPressure(pressure) => {
+                let mass_flux = det::sqrt((pressure - self.upstream.pressure_pa()) / delta_volume);
+                ShockFrame {
+                    upstream: mass_flux / rho1,
+                    downstream: mass_flux / density,
+                    drop: mass_flux * delta_volume,
+                    mass_flux,
+                }
+            }
         };
         let pressure_jump = frame.mass_flux * frame.drop;
-        let rayleigh_pressure = self.upstream.pressure_pa() + pressure_jump;
+        let rayleigh_pressure = match self.drive {
+            Drive::DownstreamPressure(pressure) => pressure,
+            _ => self.upstream.pressure_pa() + pressure_jump,
+        };
         // j * Delta v = u1-u2, so both drives have the same stable Hugoniot
         // increment: p1 * Delta v + (u1-u2)^2 / 2. For a prescribed piston the
         // latter term uses the known laboratory velocity increment directly.
@@ -281,6 +295,10 @@ impl Jump<'_> {
             Drive::PistonIncrement(_) => (
                 frame.downstream.powi(2),
                 state.pressure_pa() - self.upstream.pressure_pa(),
+            ),
+            Drive::DownstreamPressure(pressure) => (
+                0.0,
+                state.pressure_pa() - (0.5 * self.upstream.pressure_pa() + 0.5 * pressure),
             ),
         };
         let slope = rho1
@@ -328,6 +346,37 @@ pub fn normal_shock(
         context,
         upstream_density,
         Drive::UpstreamSpeed(upstream_speed.value()),
+        controls,
+        &mut cancelled,
+    )
+}
+
+/// Resolve a homogeneous compression wave driven by downstream pressure.
+///
+/// The returned speeds are magnitudes in the shock frame. For a pressure wave
+/// entering an outlet whose outward fluid velocity is `u`, its front travels
+/// at `u - upstream_speed`, and the downstream fluid velocity is
+/// `u - (upstream_speed - downstream_speed)`. This allows a backpressure to
+/// drive a genuine incoming compression even when the interior is supersonic.
+///
+/// Momentum gives `j² = (p2-p1)/(v1-v2)` and the native energy inversion uses
+/// `e2-e1 = (p1+p2)(v1-v2)/2`. The safeguarded density solve and the full
+/// entropy/sonic/conservation admission are shared with [`normal_shock`].
+/// Pressure must exceed the original upstream EOS pressure; no fitted gamma
+/// or nested solve over prescribed piston velocities is used.
+pub fn pressure_compression(
+    model: &ThermochemicalPengRobinsonModel,
+    context: &QueryPoint,
+    upstream_density: Density,
+    downstream_pressure: Pressure,
+    controls: RealGasShockControl,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<RealGasNormalShock, RealGasShockError> {
+    solve_jump(
+        model,
+        context,
+        upstream_density,
+        Drive::DownstreamPressure(downstream_pressure.value()),
         controls,
         &mut cancelled,
     )
@@ -396,15 +445,22 @@ fn solve_jump(
     controls.validate()?;
     poll(cancelled)?;
     let rho1 = upstream_density.value();
-    let velocity = match drive {
-        Drive::UpstreamSpeed(speed) | Drive::PistonIncrement(speed) => speed,
+    let drive_value = match drive {
+        Drive::UpstreamSpeed(value)
+        | Drive::PistonIncrement(value)
+        | Drive::DownstreamPressure(value) => value,
     };
-    if !positive(rho1) || !positive(velocity) {
+    if !positive(rho1) || !positive(drive_value) {
         return Err(RealGasShockError::Invalid(
-            "positive finite upstream density and shock-relative speed required",
+            "positive finite upstream density and compression drive required",
         ));
     }
     let upstream = model.evaluate_density_temperature(context, rho1)?;
+    if matches!(drive, Drive::DownstreamPressure(pressure) if pressure <= upstream.pressure_pa()) {
+        return Err(RealGasShockError::Invalid(
+            "compression pressure must exceed original upstream pressure",
+        ));
+    }
     if matches!(drive, Drive::UpstreamSpeed(speed) if speed <= upstream.sound_speed_m_s()) {
         return Err(RealGasShockError::Invalid(
             "classical compression shock requires supersonic upstream flow",

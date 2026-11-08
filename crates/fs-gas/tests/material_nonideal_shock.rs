@@ -10,13 +10,13 @@ mod common;
 
 use fs_gas::material::nonideal_shock::{
     RealGasNormalShock, RealGasPistonCompression, RealGasShockControl, RealGasShockError as E,
-    normal_shock, piston_compression,
+    normal_shock, piston_compression, pressure_compression,
 };
 use fs_matdb::QueryPoint;
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_qty::{Density, QuantitySpec, Velocity};
+use fs_qty::{Density, Pressure, QuantitySpec, Velocity};
 
 fn original() -> ThermochemicalPengRobinsonModel {
     common::model([0.0; 2], [0.0; 2], [200.0, 2000.0])
@@ -567,5 +567,77 @@ fn piston_cancellation_is_transactional_through_final_laboratory_admission() {
     assert_eq!(
         piston(&model, 10.0, 0.0, 500.0, controls(), || false).unwrap(),
         expected
+    );
+}
+
+#[test]
+fn pressure_driven_jump_matches_the_independent_dense_original_eos_anchor() {
+    // Same independently evaluated 75-digit PR Hugoniot as the speed-driven
+    // test, but pressure now drives the solve; no production jump supplies p2.
+    for datum in [0.0, 1e12] {
+        let model = common::model([datum; 2], [datum; 2], [200.0, 2000.0]);
+        let result = pressure_compression(
+            &model,
+            &point(400.0),
+            Density::new(10.0),
+            Pressure::new(6_182_880.252_416_264),
+            controls(),
+            || false,
+        )
+        .unwrap();
+        near(
+            result.downstream().density_kg_m3(),
+            27.210_526_175_865_127,
+            3e-9,
+        );
+        near(
+            result.downstream().temperature_k(),
+            632.774_712_247_970_2,
+            5e-8,
+        );
+        near(result.upstream_speed.value(), 869.094_143_566_673, 5e-8);
+        near(result.downstream_speed.value(), 319.396_301_986_079_2, 5e-8);
+        near(result.entropy_change_j_kg_k, 118.500_402_140_820_74, 2e-7);
+        assert!(result.hugoniot_residual_j_kg.abs() <= controls().jump_energy_tolerance_j_kg);
+        assert!(
+            result.stagnation_enthalpy_residual_j_kg.abs() <= controls().jump_energy_tolerance_j_kg
+        );
+    }
+}
+
+#[test]
+fn pressure_driven_jump_rejects_noncompression_and_polls_during_the_source_solve() {
+    let model = original();
+    let p1 = model
+        .evaluate_density_temperature(&point(400.0), 10.0)
+        .unwrap()
+        .pressure_pa();
+    for pressure in [f64::NAN, 0.0, 0.5 * p1, p1] {
+        assert!(
+            pressure_compression(
+                &model,
+                &point(400.0),
+                Density::new(10.0),
+                Pressure::new(pressure),
+                controls(),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    let mut calls = 0;
+    assert_eq!(
+        pressure_compression(
+            &model,
+            &point(400.0),
+            Density::new(10.0),
+            Pressure::new(6_182_880.252_416_264),
+            controls(),
+            || {
+                calls += 1;
+                calls == 20
+            },
+        ),
+        Err(E::Cancelled)
     );
 }

@@ -26,6 +26,14 @@ pub enum RealGasBoundary {
     /// Physical original-EOS pressure traction: Rankine--Hugoniot compression
     /// or an isentropic expansion, with bounded caller-authored source paths.
     PhysicalReflecting(RealGasWallControl),
+    /// Original-EOS pressure-controlled discharge. Compression uses the
+    /// Rankine--Hugoniot relation, expansion follows the native isentrope,
+    /// and a fan crossing the face is sampled at sonic discharge. Backflow
+    /// is refused because pressure alone supplies no exterior thermal state.
+    PressureOutlet {
+        pressure_pa: f64,
+        control: RealGasWallControl,
+    },
     /// Prescribed exterior trace in this owner's SAME frozen composition and
     /// energy reference. This is a Riemann ghost state, not a reservoir law.
     Exterior(Conserved),
@@ -503,6 +511,17 @@ fn admit_boundaries(
                     primitive[i] = Some(gas.decode(state, cancelled)?);
                 }
                 RealGasBoundary::PhysicalReflecting(control) => control.validate(gas)?,
+                RealGasBoundary::PressureOutlet {
+                    pressure_pa,
+                    control,
+                } => {
+                    control.validate(gas)?;
+                    if !positive(pressure_pa) {
+                        return Err(RealGasFlowError::Invalid(
+                            "real-gas outlet pressure must be positive and finite",
+                        ));
+                    }
+                }
                 RealGasBoundary::Reflecting | RealGasBoundary::Transmissive => (),
             }
         }
@@ -653,6 +672,19 @@ fn operator(
                             faces[face] = gas.physical_wall_flux(
                                 interior.1,
                                 if face == 0 { -1.0 } else { 1.0 },
+                                control,
+                                cancelled,
+                            )?;
+                            continue;
+                        }
+                        RealGasBoundary::PressureOutlet {
+                            pressure_pa,
+                            control,
+                        } => {
+                            faces[face] = gas.outlet_flux(
+                                interior,
+                                if face == 0 { -1.0 } else { 1.0 },
+                                pressure_pa,
                                 control,
                                 cancelled,
                             )?;

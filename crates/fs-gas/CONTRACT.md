@@ -8555,3 +8555,46 @@ Cv and finite-body latent inventory under changing conductance; shifted enthalpy
 datums and exact terminal coefficients; constant/no-op compatibility; exact
 forcing-knot and global work limits; unrepresentable clocks; late cancellation,
 source refusal and deterministic replay.
+
+## Original real-gas pressure-controlled discharge
+
+With `material,experimental-euler`, `RealGas::pressure_outlet_flux` and
+`RealGasBoundary::PressureOutlet` supply downstream-pressure boundary physics
+on the retained NASA/Peng–Robinson source. A compression uses the source-owned
+`material::nonideal_shock::pressure_compression`: at each density ratio,
+`j² = (p2-p1)/(v1-v2)` and `e2-e1 = (p1+p2)(v1-v2)/2` close mass, momentum and
+energy. The density Newton tangent follows the same EOS derivatives; the
+existing bounded shock solver performs the full entropy, sonic and conservation
+admission. No outer piston-speed solve or fitted gamma is introduced.
+
+Expansion follows `s = constant` and integrates `du = -a d(rho)/rho` using the
+same bounded logarithmic-density quadrature as physical wall waves. The pressure
+root uses the original `dp/dln(rho)|s = rho*a²`. A fan spanning the face is
+sampled at `u=a`; reducing backpressure beyond that point does not increase
+discharge. The bracket grows locally and stops when pressure or sonic discharge
+is reached, rather than requiring an arbitrarily cold remote tail. Fully
+outgoing waves retain the interior flux, while sufficiently strong backpressure
+can drive a compression shock into an initially supersonic outlet.
+
+`RealGasWallControl` supplies the explicit homogeneous source paths and work
+bounds; its compression momentum tolerance also gates the outlet pressure
+residual. A weak compression below the shock resolution uses the native acoustic
+tangent, checks the actual isentropic source path and admits its pressure error
+against that tolerance. Its front uses the mean native incoming-family speeds,
+retaining first-order nonlinear shock motion at sonic and slightly supersonic
+discharge. Pressure-only backflow is refused because the entering
+entropy/thermal state is unspecified. Positive source pressure, density and
+temperature bounds are retained throughout; no clipping, phase flash or global
+classical-branch certificate is implied. This outlet is stationary; the existing
+moving-domain entry continues to require impermeable end walls.
+
+Fluxes transport the owner's common-reference energy and pressure work exactly
+once, and enter both SSP-RK2 stages and the existing extensive boundary balance.
+Late cancellation or source refusal publishes no partial field. Regressions
+include the independent 75-digit dense PR shock anchor, dilute ideal expansion
+and sonic limits, large formation-datum shifts, reversal, weak acoustic response,
+two-stage field conservation and mid-step cancellation. The general shock
+equations follow NASA TN D-8274, *Flow Through Normal Shocks*,
+<https://ntrs.nasa.gov/citations/19770008402>; its nitrogen data do not calibrate
+this authored binary PR model.
+

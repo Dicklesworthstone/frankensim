@@ -5,6 +5,9 @@
 #[path = "../../fs-material/tests/common/nonideal_flash.rs"]
 mod common;
 
+#[path = "material_nonideal_wall/outlet.rs"]
+mod outlet;
+
 use fs_gas::dynamics::nonideal::{
     RealGas, RealGasBoundaries, RealGasBoundary, RealGasDomain, RealGasEuler1d, RealGasFlowError,
     RealGasWallControl,
