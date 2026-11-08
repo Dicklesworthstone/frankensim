@@ -83,6 +83,7 @@ pub fn advance_nonlinear_tensor_conduction(
         previous_temperature_k,
         config,
         Some(&step),
+        None,
         gate,
     )?;
     poll(gate)?;

@@ -282,3 +282,28 @@ with the existing second-order Hermite stress projection of Latt and Chopard,
 Focused `pressure_driven2` regressions cover both signs of hydrostatic gravity,
 the plane Poiseuille pressure/viscosity law, local Guo/stress recovery,
 uniform-profile replay, native wall receipts, scratch reuse and atomic refusal.
+
+## Original-law nonlinear tensor SDIRK2
+
+`advance_nonlinear_tensor_conduction_sdirk2` advances the existing full-tensor
+voxel conduction equations with two physical SDIRK2 stages. Every nonlinear
+trial reevaluates the original conductivity interval integrals and endpoint
+Newton tensors. Both stages retain the physical starting temperature in
+storage; stage two uses the accepted first-stage temperature only as its seed.
+Full anisotropy, finite-contact traces, sinks and independently authored
+stage source/boundary samples retain their original spatial treatment.
+
+The shared interval ledger integrates actual external heat with the tableau
+weights. Internal stage heat is excluded from generated power, and prescribed
+reservoir storage is counted once, including changing prescribed masks.
+Krylov iterations, Newton corrections and rejected line-search candidates
+each have one budget shared across the complete interval. Refusal or
+cancellation returns no partial interval and leaves inputs unchanged.
+
+Each cell has a fixed, complete sensible capacity C in J/K, without a second
+volume factor. This entry does not supply temperature-dependent caloric
+storage or latent heat. Second-order time accuracy requires smooth laws and
+correctly sampled smooth forcing with fixed constraints; forcing jumps must
+bound intervals. The L-stable tableau does not establish unconditional
+nonlinear convergence, arbitrary-step positivity or a discrete maximum
+principle for general rotated anisotropy.

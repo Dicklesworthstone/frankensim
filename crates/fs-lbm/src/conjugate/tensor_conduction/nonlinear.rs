@@ -11,17 +11,20 @@ use fs_sparse::Coo;
 use super::{
     ChtError, ConductivityTensor, EnergyConfig, Prepared, PseudoStep, SolidMaterial,
     TensorConductionSolution, ThermalFace, ThermalSetup, VoxelDomain, audit_endpoint,
-    bicgstab_ilu0, finite_positive, invalid, poll, prepare, residual_norms, scale_rows,
+    bicgstab_ilu0, finite, finite_positive, invalid, poll, prepare, residual_norms, scale_rows,
 };
 
 mod local;
 mod material;
+mod sdirk;
 mod transient;
 use local::{KirchhoffCell, KirchhoffRecovery};
 pub use material::{RotatedSolidConductivity, TensorConductivityLaw};
+pub use sdirk::{TensorNonlinearSdirk2Step, advance_nonlinear_tensor_conduction_sdirk2};
 pub use transient::{TensorNonlinearStep, advance_nonlinear_tensor_conduction};
 
-/// Bounded nonlinear and algebraic work for one original-law spatial endpoint.
+/// Bounded nonlinear and algebraic work for one original-law spatial endpoint,
+/// or shared over both stages of a physical SDIRK2 interval.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TensorNonlinearConfig {
     /// Native linear tolerance and total Krylov budget over ALL Newton solves.
@@ -118,6 +121,7 @@ pub fn solve_nonlinear_tensor_conduction(
         initial_temperature_k,
         config,
         None,
+        None,
         gate,
     )
 }
@@ -147,6 +151,7 @@ fn solve_inner(
     initial_temperature_k: &[f64],
     config: &TensorNonlinearConfig,
     step: Option<&PseudoStep<'_>>,
+    carried_power_w: Option<&[f64]>,
     gate: &CancelGate,
 ) -> Result<TensorNonlinearSolution, ChtError> {
     poll(gate)?;
@@ -155,6 +160,19 @@ fn solve_inner(
         return Err(invalid(
             "nonlinear tensor conduction needs one original law and seed per cell",
         ));
+    }
+    if let Some(carry) = carried_power_w {
+        if step.is_none() || carry.len() != cells {
+            return Err(invalid(
+                "stage heat carry needs original storage and one value per cell",
+            ));
+        }
+        for (cell, &value) in carry.iter().enumerate() {
+            if cell.is_multiple_of(4096) {
+                poll(gate)?;
+            }
+            finite("thermal.tensor_conduction.carried_power_w", value)?;
+        }
     }
     let mut temperature = initial_temperature_k.to_vec();
     for (cell, &t) in temperature.iter().enumerate() {
@@ -194,6 +212,7 @@ fn solve_inner(
         &geometry,
         &data,
         step,
+        carried_power_w,
         temperature,
         trace,
         gate,
@@ -270,6 +289,7 @@ fn solve_inner(
                 &geometry,
                 &data,
                 step,
+                carried_power_w,
                 temperature,
                 trace,
                 gate,
@@ -364,6 +384,7 @@ fn evaluate(
     geometry: &[KirchhoffCell],
     data: &Prepared,
     step: Option<&PseudoStep<'_>>,
+    carried_power_w: Option<&[f64]>,
     temperature: Vec<f64>,
     trace: Vec<f64>,
     gate: &CancelGate,
@@ -399,7 +420,8 @@ fn evaluate(
             cell_residual[c] = actual.outward_w.iter().sum::<f64>()
                 + sink.conductance * (t - data.reference)
                 - sink.relative_load
-                - setup.power_w.get(c).copied().unwrap_or(0.0);
+                - setup.power_w.get(c).copied().unwrap_or(0.0)
+                - carried_power_w.map_or(0.0, |carry| carry[c]);
             if let Some(step) = step {
                 cell_residual[c] += step.coefficient_w_k[c] * (t - step.previous[c]);
             }
@@ -449,7 +471,7 @@ fn evaluate(
         setup,
         data,
         step,
-        None,
+        carried_power_w,
         temperature,
         faces,
         heat,

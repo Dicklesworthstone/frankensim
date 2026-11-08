@@ -21,19 +21,20 @@ use super::{
 };
 
 mod local;
-mod transient;
-mod sdirk;
 mod nonlinear;
+mod sdirk;
+mod transient;
+use local::LocalOperator;
 pub use nonlinear::{
     RotatedSolidConductivity, TensorConductivityLaw, TensorNonlinearConfig,
-    TensorNonlinearSolution, TensorNonlinearStep, advance_nonlinear_tensor_conduction,
+    TensorNonlinearSdirk2Step, TensorNonlinearSolution, TensorNonlinearStep,
+    advance_nonlinear_tensor_conduction, advance_nonlinear_tensor_conduction_sdirk2,
     solve_nonlinear_tensor_conduction,
 };
-pub use transient::{TensorConductionStep, advance_tensor_conduction};
 pub use sdirk::{
     TENSOR_SDIRK2_GAMMA, TensorConductionSdirk2Step, advance_tensor_conduction_sdirk2,
 };
-use local::LocalOperator;
+pub use transient::{TensorConductionStep, advance_tensor_conduction};
 
 /// Frozen physical conductivity in grid Cartesian coordinates, W/(m K).
 /// All six independent components are retained. The constructor refuses

@@ -95,49 +95,15 @@ pub fn advance_tensor_conduction_sdirk2(
         config,
         gate,
     )?;
-    let cells = domain.cell_count();
-    // The first stage has admitted all field sizes, capacities and old
-    // temperatures. Retain just two additional cell fields for stage 2.
-    let mut coefficient_w_k = storage(cells)?;
-    let mut carried_power_w = storage(cells)?;
-    for cell in 0..cells {
-        if cell.is_multiple_of(4096) {
-            poll(gate)?;
-        }
-        let coefficient = heat_capacity_j_k[cell] / stage_interval_s;
-        finite_positive("tensor.sdirk2.storage_w_k", coefficient)?;
-        coefficient_w_k.push(coefficient);
-        let power = setups[0].power_w.get(cell).copied().unwrap_or(0.0);
-        let rate = first.solution.outward_heat_w[cell]
-            .iter()
-            .fold(power, |inward, outward| inward - outward);
-        carried_power_w.push(rate);
-    }
-    for (index, sink) in setups[0].cell_sinks.iter().enumerate() {
-        if index.is_multiple_of(4096) {
-            poll(gate)?;
-        }
-        let temperature_difference = first.solution.temperature[sink.cell] - sink.temperature_k;
-        carried_power_w[sink.cell] =
-            (-sink.conductance_w_k).mul_add(temperature_difference, carried_power_w[sink.cell]);
-    }
-    // A fixed cell's total rate includes its thermostat. Native source
-    // powers at fixed cells are not counted a second time.
-    for (index, &(cell, _)) in setups[0].fixed_temperature.iter().enumerate() {
-        if index.is_multiple_of(4096) {
-            poll(gate)?;
-        }
-        carried_power_w[cell] = coefficient_w_k[cell]
-            * (first.solution.temperature[cell] - previous_temperature_k[cell]);
-    }
-    let carry_weight = (1.0 - TENSOR_SDIRK2_GAMMA) / TENSOR_SDIRK2_GAMMA;
-    for (cell, carried) in carried_power_w.iter_mut().enumerate() {
-        if cell.is_multiple_of(4096) {
-            poll(gate)?;
-        }
-        *carried *= carry_weight;
-        finite("tensor.sdirk2.carried_power_w", *carried)?;
-    }
+    let (coefficient_w_k, carried_power_w) = stage_carry(
+        domain,
+        setups[0],
+        &first.solution,
+        heat_capacity_j_k,
+        previous_temperature_k,
+        stage_interval_s,
+        gate,
+    )?;
     let remaining = config
         .max_iterations
         .checked_sub(first.solution.report.iterations)
@@ -169,24 +135,119 @@ pub fn advance_tensor_conduction_sdirk2(
         .checked_add(second.report.iterations)
         .filter(|&count| count <= config.max_iterations)
         .ok_or_else(|| invalid("stages exceeded the shared Krylov iteration budget"))?;
-    let solids_present = (0..cells).any(|cell| !domain.is_fluid(cell));
+    let record = interval_record(
+        domain,
+        setups[1],
+        &first.record,
+        &second,
+        heat_capacity_j_k,
+        previous_temperature_k,
+        &carried_power_w,
+        stage_time_s[1],
+        stage_interval_s,
+        iterations,
+        gate,
+    )?;
+    poll(gate)?;
+    Ok(TensorConductionSdirk2Step {
+        stage_time_s,
+        stages: [first.solution, second],
+        record,
+    })
+}
+
+/// Use accepted physical stage-1 heat, including prescribed-cell reservoir
+/// storage. Frozen and original-law stages share the same tableau arithmetic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stage_carry(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    first: &TensorConductionSolution,
+    heat_capacity_j_k: &[f64],
+    previous_temperature_k: &[f64],
+    stage_interval_s: f64,
+    gate: &CancelGate,
+) -> Result<(Vec<f64>, Vec<f64>), ChtError> {
+    let cells = domain.cell_count();
+    // The first stage has admitted all field sizes, capacities and old
+    // temperatures. Retain just two additional cell fields for stage 2.
+    let mut coefficient_w_k = storage(cells)?;
+    let mut carried_power_w = storage(cells)?;
+    for cell in 0..cells {
+        if cell.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        let coefficient = heat_capacity_j_k[cell] / stage_interval_s;
+        finite_positive("tensor.sdirk2.storage_w_k", coefficient)?;
+        coefficient_w_k.push(coefficient);
+        let power = setup.power_w.get(cell).copied().unwrap_or(0.0);
+        let rate = first.outward_heat_w[cell]
+            .iter()
+            .fold(power, |inward, outward| inward - outward);
+        carried_power_w.push(rate);
+    }
+    for (index, sink) in setup.cell_sinks.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        let temperature_difference = first.temperature[sink.cell] - sink.temperature_k;
+        carried_power_w[sink.cell] =
+            (-sink.conductance_w_k).mul_add(temperature_difference, carried_power_w[sink.cell]);
+    }
+    // A fixed cell's total rate includes its thermostat. Native source
+    // powers at fixed cells are not counted a second time.
+    for (index, &(cell, _)) in setup.fixed_temperature.iter().enumerate() {
+        if index.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        carried_power_w[cell] =
+            coefficient_w_k[cell] * (first.temperature[cell] - previous_temperature_k[cell]);
+    }
+    let carry_weight = (1.0 - TENSOR_SDIRK2_GAMMA) / TENSOR_SDIRK2_GAMMA;
+    for (cell, carried) in carried_power_w.iter_mut().enumerate() {
+        if cell.is_multiple_of(4096) {
+            poll(gate)?;
+        }
+        *carried *= carry_weight;
+        finite("tensor.sdirk2.carried_power_w", *carried)?;
+    }
+    Ok((coefficient_w_k, carried_power_w))
+}
+
+/// Integrate physical heat from both accepted stages without counting carried
+/// rate as an external source or duplicating prescribed-cell stored energy.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn interval_record(
+    domain: &VoxelDomain,
+    second_setup: &ThermalSetup,
+    first_record: &TransientRecord,
+    second: &TensorConductionSolution,
+    heat_capacity_j_k: &[f64],
+    previous_temperature_k: &[f64],
+    carried_power_w: &[f64],
+    end_time_s: f64,
+    stage_interval_s: f64,
+    iterations: usize,
+    gate: &CancelGate,
+) -> Result<TransientRecord, ChtError> {
+    let solids_present = (0..domain.cell_count()).any(|cell| !domain.is_fluid(cell));
     // Reuse the physical ledger owner to account for actual stage-2 face
     // heat, sinks and constrained storage. This is an internal accounting
     // record, not a second backward-Euler interval.
     let mut record = record_conduction_step(
         domain,
-        setups[1],
+        second_setup,
         &second.temperature,
         second.report.balance,
         iterations,
         |cell| heat_capacity_j_k[cell] * (second.temperature[cell] - previous_temperature_k[cell]),
-        (stage_time_s[1], stage_interval_s, solids_present),
+        (end_time_s, stage_interval_s, solids_present),
         0.0,
         0.0,
     )?;
     let mut fixed_carried_power_w = 0.0;
     // The second native solve has admitted unique, in-range fixed cells.
-    for (index, &(cell, _)) in setups[1].fixed_temperature.iter().enumerate() {
+    for (index, &(cell, _)) in second_setup.fixed_temperature.iter().enumerate() {
         if index.is_multiple_of(4096) {
             poll(gate)?;
         }
@@ -194,8 +255,8 @@ pub fn advance_tensor_conduction_sdirk2(
         finite("tensor.sdirk2.fixed_carried_power_w", fixed_carried_power_w)?;
     }
     (record.source_j, record.boundary_outflow_j) = integrated_heat(
-        first.record.source_j,
-        first.record.boundary_outflow_j,
+        first_record.source_j,
+        first_record.boundary_outflow_j,
         record.source_j,
         record.boundary_outflow_j,
         stage_interval_s,
@@ -206,12 +267,7 @@ pub fn advance_tensor_conduction_sdirk2(
     for value in [record.source_j, record.boundary_outflow_j, record.closure_j] {
         finite("tensor.sdirk2.energy_record", value)?;
     }
-    poll(gate)?;
-    Ok(TensorConductionSdirk2Step {
-        stage_time_s,
-        stages: [first.solution, second],
-        record,
-    })
+    Ok(record)
 }
 
 fn invalid(reason: &str) -> ChtError {
@@ -235,7 +291,7 @@ fn storage(cells: usize) -> Result<Vec<f64>, ChtError> {
 
 // Pure temporal arithmetic shared by the production step and direct numerical
 // tests. Spatial heat remains owned by the native face solve.
-fn stage_clock(start: f64, dt: f64) -> Option<(f64, [f64; 2])> {
+pub(super) fn stage_clock(start: f64, dt: f64) -> Option<(f64, [f64; 2])> {
     let a = TENSOR_SDIRK2_GAMMA * dt;
     let times = [start + a, start + dt];
     (start.is_finite()
@@ -376,6 +432,42 @@ mod tests {
         close(stored, -outflow, 1e-12);
         let omitted_correction = r * first_outflow + second_outflow;
         assert!((stored + omitted_correction).abs() > 20.0);
+    }
+
+    #[test]
+    fn nonlinear_kirchhoff_cooling_uses_second_order_heat_quadrature() {
+        // One unit-area half cell with k(T)=T/300 and a 300 K boundary:
+        // Q=(T²-300²)/300, C=2 J/K. Solve each nonlinear stage analytically,
+        // then exercise the production stage clock and physical heat ledger.
+        let march = |steps: usize| {
+            let dt = 1.0 / steps as f64;
+            let (a, _) = stage_clock(0.0, dt).unwrap();
+            let carry_weight = (1.0 - TENSOR_SDIRK2_GAMMA) / TENSOR_SDIRK2_GAMMA;
+            let mut old = 400.0;
+            for _ in 0..steps {
+                let temperature = |carry: f64| {
+                    let linear = 600.0 / a;
+                    let constant = linear * old + 90_000.0 + 300.0 * carry;
+                    2.0 * constant / (linear + (linear * linear + 4.0 * constant).sqrt())
+                };
+                let heat = |t: f64| (t * t - 90_000.0) / 300.0;
+                let first = temperature(0.0);
+                let second = temperature(-carry_weight * heat(first));
+                let (source, outflow) =
+                    integrated_heat(0.0, a * heat(first), 0.0, a * heat(second), a, 0.0);
+                assert_eq!(source, 0.0);
+                close(2.0 * (second - old), -outflow, 2e-10);
+                old = second;
+            }
+            old
+        };
+        // Exact nonlinear cooling: (T-300)/(T+300) = exp(-t)/7.
+        let ratio = (-1.0_f64).exp() / 7.0;
+        let exact = 300.0 * (1.0 + ratio) / (1.0 - ratio);
+        let coarse = (march(20) - exact).abs();
+        let fine = (march(40) - exact).abs();
+        assert!((3.9..4.15).contains(&(coarse / fine)), "{coarse} {fine}");
+        assert!(fine < 0.01);
     }
 
     #[test]
