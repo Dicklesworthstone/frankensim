@@ -4314,6 +4314,29 @@ original source-bank limits. Focused regressions cover polarization/analyzer
 laws, circular phase, independent factors, scalar parity, weak populations,
 finite bright outputs and refusal/cancellation reuse.
 
+### Spectral interferometry on the original finite shutter
+
+`PreparedCoherentDiffractionExposure::observe_interferometer` recombines both
+arms at every original frequency before the analytic temporal Gram contraction.
+Equal-frequency entries coalesce, and each covariance column retains its shared
+identity across frequencies and arms. Results include shutter-averaged arm/port
+power densities, complex mutual coherence, visibility and exposure-energy
+densities. Visibility refers to an achromatic combiner-phase scan. The authored
+OPD is one nondispersive optical length; additional arm dispersion is not inferred.
+
+Propagation retains authored Hz and the original phase index. Frequency-length
+products reduce modulo exact c before division and conversion to radians;
+relative optical frequencies form before propagation. This preserves close-tone
+beats across large source epochs and optical paths without inverting a rounded
+pupil wavelength. Spatial pupil admission still uses its original wavelength.
+No optical carrier or shutter raster is introduced. Fixed observation scratch,
+active-arm pupil limits and explicit frequency-contraction limits bound work:
+B*N*(4*N+1) for two arms, or the original B*N*(N+1)/2 for one active arm.
+Closed/empty observations perform no pupil or pair work. Failure and cancellation
+leave preparation reusable. Six focused groups cover scalar equivalence,
+independent analytic beat washout, covariance identity, equal-line cancellation,
+weak dark ports, long-path/source-clock phase and exact work/admission behavior.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored

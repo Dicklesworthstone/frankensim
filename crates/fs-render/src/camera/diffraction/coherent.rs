@@ -40,6 +40,7 @@ pub use polarization::{
     PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
     PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
 };
+pub use exposure::{CoherentInterferometerExposureLimits, CoherentInterferometerExposureSample};
 pub use exposure::{
     CoherentDiffractionExposureLimits, CoherentDiffractionExposurePixelLimits,
     CoherentDiffractionExposureSample, CoherentDiffractionPixelExposure,

@@ -1623,3 +1623,6 @@ mod interferometer_pixel;
 
 #[path = "coherent_diffraction/interferometer_polarization.rs"]
 mod interferometer_polarization;
+
+#[path = "coherent_diffraction/interferometer_exposure.rs"]
+mod interferometer_exposure;

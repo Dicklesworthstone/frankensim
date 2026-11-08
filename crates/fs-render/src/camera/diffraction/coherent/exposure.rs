@@ -23,6 +23,11 @@ use super::{
 use fs_fft::harmonic_window::{HarmonicWindow, ProperHarmonicProduct};
 use fs_math::det;
 
+mod interferometer;
+pub use interferometer::{
+    CoherentInterferometerExposureLimits, CoherentInterferometerExposureSample,
+};
+
 mod jones;
 pub use jones::{
     CoherentJonesDetector, CoherentJonesDiffractionTone, CoherentJonesPupilIllumination,
@@ -116,8 +121,10 @@ pub struct CoherentDiffractionPixelExposure {
 
 struct FrequencyGroup {
     frequency_hz: f64,
-    // Subtract the reference BEFORE multiplication by a physical distance.
-    relative_wavenumber: Dd,
+    // Keep the authored frequency and the original phase index through
+    // propagation. A rounded c/f wavelength cannot preserve long-path beats.
+    optical_frequency_hz: Dd,
+    relative_optical_frequency_hz: Dd,
 }
 
 /// Cached original pupil transfers and analytic shutter kernels.
@@ -222,7 +229,7 @@ impl PhysicalCamera {
         let mut prepared = Vec::with_capacity(tones.len());
         let mut groups = Vec::with_capacity(group_count);
         let mut minimum_scale = f64::INFINITY;
-        let mut reference_k = Dd::ZERO;
+        let mut reference_frequency = Dd::ZERO;
         let mut minimum_k = 0.0_f64;
         let mut maximum_k = 0.0_f64;
         for (index, tone) in tones.iter().enumerate() {
@@ -248,19 +255,24 @@ impl PhysicalCamera {
                     .map_or(Ok(1.0), |lens| lens.exterior_phase_index(wavelength_nm))?;
                 #[cfg(not(feature = "tracer"))]
                 let phase_index = 1.0;
-                let k = TAU * Dd::from_f64(tone.frequency_hz) * Dd::from_f64(phase_index)
-                    / Dd::from_f64(C_M_S);
-                rounded(k)?;
+                let optical_frequency_hz =
+                    Dd::from_f64(tone.frequency_hz) * Dd::from_f64(phase_index);
+                rounded(optical_frequency_hz)?;
                 if groups.is_empty() {
-                    reference_k = k;
+                    reference_frequency = optical_frequency_hz;
                 }
-                let relative_wavenumber = k - reference_k;
+                let relative_optical_frequency_hz = optical_frequency_hz - reference_frequency;
+                // Radian conversion follows the frequency subtraction. This
+                // wavenumber is only the spatial quadrature bandwidth; physical
+                // phases reduce frequency-length cycles before multiplying TAU.
+                let relative_wavenumber = TAU * relative_optical_frequency_hz / Dd::from_f64(C_M_S);
                 let relative = rounded(relative_wavenumber)?;
                 minimum_k = minimum_k.min(relative);
                 maximum_k = maximum_k.max(relative);
                 groups.push(FrequencyGroup {
                     frequency_hz: tone.frequency_hz,
-                    relative_wavenumber,
+                    optical_frequency_hz,
+                    relative_optical_frequency_hz,
                 });
             }
             prepared.push(pupil);
@@ -413,8 +425,10 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
         let mut rotations = [[Dd::ZERO; 2]; MAX_COHERENT_DIFFRACTION_TONES];
         for (i, group) in self.groups.iter().enumerate() {
             poll(cancelled)?;
-            let phase = group.relative_wavenumber * distance;
-            rounded(phase)?;
+            let phase = interferometer::frequency_length_phase(
+                group.relative_optical_frequency_hz,
+                distance,
+            )?;
             let (sine, cosine) = det::sin_cos_dd(phase);
             rotations[i] = [cosine, sine];
         }
@@ -485,7 +499,10 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
     }
 }
 
-pub(super) fn admit_sensor(camera: &PhysicalCamera, distance: f64) -> Result<(), CoherentDiffractionError> {
+pub(super) fn admit_sensor(
+    camera: &PhysicalCamera,
+    distance: f64,
+) -> Result<(), CoherentDiffractionError> {
     if !distance.is_finite() || distance <= 0.0 {
         return Err(CoherentDiffractionError::InvalidSensorPlane);
     }
