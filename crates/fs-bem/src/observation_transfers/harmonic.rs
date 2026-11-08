@@ -545,5 +545,7 @@ pub use exposure::{
     WindowedHarmonicReadout,
 };
 
+pub use exposure::{HarmonicPressureSampleLimits, PreparedHarmonicPressureSignal};
+
 #[cfg(test)]
 mod tests;

@@ -74,6 +74,46 @@ struct PressureBank {
     statistics: HarmonicExposureFactorStatistics,
 }
 
+// Borrowed original fields for either an ensemble or one already fixed draw.
+// The same microphone projection, delay phases, admission and channel sums
+// serve both paths; no second directional or propagation model is introduced.
+pub(super) struct PressureInput<'a, 'b> {
+    pub(super) reference: &'a PreparedHarmonicObservation,
+    pub(super) source_clock: &'a str,
+    pub(super) mean: &'b [Line],
+    pub(super) factors: &'b [Bank],
+}
+
+struct PressureBankInput<'a> {
+    lines: &'a [Line],
+    statistics: HarmonicExposureFactorStatistics,
+}
+
+impl<'a, 'b> PressureInput<'a, 'b> {
+    fn from_exposure(exposure: &'b PreparedHarmonicExposure<'a>) -> Self {
+        Self {
+            reference: exposure.reference,
+            source_clock: exposure.source_clock,
+            mean: &exposure.mean.lines,
+            factors: &exposure.factors,
+        }
+    }
+
+    fn banks(&self) -> impl Iterator<Item = PressureBankInput<'_>> {
+        core::iter::once(PressureBankInput {
+            lines: self.mean,
+            statistics: HarmonicExposureFactorStatistics::Real,
+        })
+        .chain(self.factors.iter().map(|bank| PressureBankInput {
+            lines: &bank.lines,
+            statistics: bank.statistics,
+        }))
+    }
+}
+
+mod signal;
+pub use signal::{HarmonicPressureSampleLimits, PreparedHarmonicPressureSignal};
+
 /// Prepared channel phasors, retaining original physical receiver provenance.
 ///
 /// The deterministic mean and authored real/proper factors come from the
@@ -168,7 +208,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         limits: HarmonicPressureArrayLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
-        Self::prepare(exposure, channels, None, limits, cancelled)
+        Self::prepare(PressureInput::from_exposure(exposure), channels, None, limits, cancelled)
     }
 
     /// Prepare causal channels of the existing ideal first-order microphones.
@@ -202,11 +242,11 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         limits: HarmonicPressureArrayLimits,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
-        Self::prepare(exposure, channels, Some(patterns), limits, cancelled)
+        Self::prepare(PressureInput::from_exposure(exposure), channels, Some(patterns), limits, cancelled)
     }
 
     fn prepare(
-        exposure: &PreparedHarmonicExposure<'a>,
+        source: PressureInput<'a, '_>,
         channels: &[HarmonicPressureChannel],
         patterns: Option<&[FirstOrder]>,
         limits: HarmonicPressureArrayLimits,
@@ -214,7 +254,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
     ) -> Result<Self, TransferError> {
         poll(&mut cancelled)?;
         let microphones = match patterns {
-            Some(patterns) if patterns.len() == exposure.reference.receivers.len() => {
+            Some(patterns) if patterns.len() == source.reference.receivers.len() => {
                 patterns.len()
             }
             Some(_) => {
@@ -249,7 +289,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             admit(taps, limits.maximum_taps)?;
             for tap in &channel.taps {
                 poll(&mut cancelled)?;
-                if tap.receiver >= exposure.reference.receivers.len()
+                if tap.receiver >= source.reference.receivers.len()
                     || !tap.weight.is_finite()
                     || !tap.delay_s.is_finite()
                     || tap.delay_s < 0.0
@@ -261,10 +301,10 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                 tapped_receivers[tap.receiver] = true;
             }
         }
-        let bank_count = exposure.factors.len() + 1;
+        let bank_count = source.factors.len() + 1;
         let mut lines = 0usize;
         let mut frequency_pairs = 0usize;
-        for bank in core::iter::once(&exposure.mean).chain(exposure.factors.iter()) {
+        for bank in source.banks() {
             lines = lines.checked_add(bank.lines.len()).ok_or_else(overflow)?;
             frequency_pairs = bank
                 .lines
@@ -287,7 +327,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
             .checked_mul(n)
             .and_then(|p| p.checked_mul(2))
             .and_then(|p| p.checked_add(frequency_pairs.checked_mul(n)?))
-            .and_then(|p| p.checked_add(n.checked_mul(n)?.checked_mul(exposure.factors.len())?))
+            .and_then(|p| p.checked_add(n.checked_mul(n)?.checked_mul(source.factors.len())?))
             .ok_or_else(overflow)?;
         admit(prepare_products, MAX_PRODUCTS)?;
         admit(prepare_products, limits.maximum_prepare_products)?;
@@ -345,7 +385,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         let mut projected = storage(microphones)?;
         projected.resize(microphones, [Dd::ZERO; 2]);
         if let Some(patterns) = patterns {
-            let medium = exposure.reference.medium;
+            let medium = source.reference.medium;
             let impedance = Dd::from_f64(medium.density) * Dd::from_f64(medium.sound_speed);
             for pattern in patterns {
                 poll(&mut cancelled)?;
@@ -376,10 +416,10 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         }
         let mut frequencies = storage(lines)?;
         let mut banks = storage(bank_count)?;
-        for bank in core::iter::once(&exposure.mean).chain(exposure.factors.iter()) {
+        for bank in source.banks() {
             poll(&mut cancelled)?;
             let mut prepared = storage(bank.lines.len())?;
-            for line in &bank.lines {
+            for line in bank.lines {
                 poll(&mut cancelled)?;
                 frequencies.push(line.omega);
                 let mut amplitudes = storage(n)?;
@@ -408,9 +448,7 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
                     index += 1;
                 }
             }
-            for (bank_index, bank) in core::iter::once(&exposure.mean)
-                .chain(exposure.factors.iter())
-                .enumerate()
+            for (bank_index, bank) in source.banks().enumerate()
             {
                 poll(&mut cancelled)?;
                 let Ok(line_index) = bank
@@ -471,8 +509,8 @@ impl<'a> PreparedHarmonicPressureArray<'a> {
         }
         poll(&mut cancelled)?;
         Ok(Self {
-            reference: exposure.reference,
-            source_clock: exposure.source_clock,
+            reference: source.reference,
+            source_clock: source.source_clock,
             channels: owned_channels,
             microphone_patterns,
             banks,

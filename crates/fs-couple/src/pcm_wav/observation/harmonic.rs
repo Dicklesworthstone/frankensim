@@ -7,6 +7,9 @@ use super::PressureRenderer;
 use crate::render::RenderError;
 use fs_aeroac::observation::{HarmonicSampleBudget, HarmonicSampleClock, PreparedHarmonicField};
 
+mod bem;
+pub use bem::BemHarmonicPressureFrameRenderer;
+
 mod channels;
 pub use channels::{HarmonicOutputChannel, HarmonicOutputSource, HarmonicPressureFrameRenderer};
 

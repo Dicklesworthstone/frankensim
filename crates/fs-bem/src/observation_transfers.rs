@@ -58,6 +58,8 @@ pub use harmonic::{
     PreparedMicrophoneArray, PreparedWelchSurfaceMomentum, WindowedHarmonicExposure,
     WindowedHarmonicPressureArray, WindowedHarmonicPressureCorrelations, WindowedHarmonicReadout,
 };
+pub use harmonic::{HarmonicPressureSampleLimits, PreparedHarmonicPressureSignal};
+
 mod radiation;
 pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, RadiatedPowerMoments};
 mod wall;

@@ -3672,3 +3672,23 @@ receivers and scalar agreement, and check exact payload boundaries, cancellation
 and source mismatches. Independent source review and exact GitHub blob readback
 completed. Native tests and Rust formatting remain unexecuted while the
 workspace is unavailable.
+
+## Directional harmonic pressure waveforms through the original array owner
+
+`PreparedHarmonicPressureSignal` prepares audible pressure channels from one
+`PreparedHarmonicRealization`. It reuses the existing pressure-array projection,
+signed taps, causal delays and resource admission through a borrowed field view.
+No field is rounded to scalar p/u before directional cancellation. Ideal
+first-order microphones retain actual near-field/standing-wave velocity; exact
+native-frequency delay phases retain fractional-sample delays without temporal
+interpolation. One fixed source draw spans every channel and frequency.
+
+Repeated sampling shares each DD phase across all channels, allocates nothing,
+and retains the original integer/DD clock and strict whole-source Nyquist
+admission even for dark taps and nulls. Output is frame-interleaved Pa-equivalent
+signal, with explicit frame/channel-line budgets and cancellation. Its retained
+pressure-array window moments describe this deterministic realization, including
+zero centered covariance; they do not claim the original ensemble variance.
+The source identity, original receivers, patterns and authored output-channel
+mapping remain accessible. These signals do not infer a finite source onset,
+frequency-dependent diaphragm response, electronic noise or new propagation.

@@ -1312,6 +1312,8 @@ pub struct ControlRecord {
 pub enum RenderError {
     /// The original physical acoustic observer refused a pressure sample.
     Acoustic(fs_aeroac::AeroacError),
+    /// An original retained BEM field or pressure-channel observation refused.
+    BemObservation(fs_bem::observation_transfers::TransferError),
     /// The implicit friction/network owner refused its physical sample.
     Friction(ModalFrictionError),
     /// A previous render refusal left partial state; construct a new context.
@@ -1356,6 +1358,7 @@ impl core::fmt::Display for RenderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Acoustic(e) => write!(f, "acoustic observation refusal: {e}"),
+            Self::BemObservation(e) => write!(f, "BEM observation refusal: {e}"),
             Self::Friction(e) => write!(f, "friction voice refusal: {e}"),
             Self::Poisoned => write!(
                 f,

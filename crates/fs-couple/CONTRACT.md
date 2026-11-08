@@ -7248,3 +7248,22 @@ checks full loaded coefficient work without caloric charging, continues the
 original native preload through heating and cooling, and checks source/caloric,
 body/area/clock/work-port refusals plus final-trial cancellation and retry.
 The material and heat coefficients are manufactured qualification inputs.
+
+## Original BEM harmonic microphone channels in the PCM stream
+
+`pcm_wav::observation::harmonic::BemHarmonicPressureFrameRenderer` connects
+`fs_bem::observation_transfers::PreparedHarmonicPressureSignal` to the existing
+`PressureFrameRenderer`
+and `render_pressure_frames_pcm16` owner. Original pressure/velocity microphone
+projection, signed delayed taps, fixed source draws and relative channel phases
+are retained. Native BEM angular frequencies never round-trip through Hz, and
+the sink must use the declared sample clock and explicit pressure full-scale.
+There is no additional WAV encoder, propagation, normalization or source onset.
+
+Construction admits every original frequency and the complete callback work
+before allocating one bounded scratch buffer. Whole-stream clock admission
+precedes source/sink advancement. Successful callbacks allocate nothing; any
+physical refusal or cancellation leaves the caller's entire channel block and
+frame count unchanged, permitting retry. BEM refusals retain their original
+`TransferError` in `RenderError::BemObservation`. Channel identities and patterns
+remain available beside WAV bytes. Original producer accuracy remains unresolved.

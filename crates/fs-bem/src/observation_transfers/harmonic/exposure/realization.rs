@@ -261,6 +261,15 @@ impl<'a> PreparedHarmonicExposure<'a> {
 }
 
 impl PreparedHarmonicRealization<'_> {
+    pub(super) fn pressure_input(&self) -> super::array::PressureInput<'_, '_> {
+        super::array::PressureInput {
+            reference: self.reference,
+            source_clock: self.source_clock,
+            mean: &self.lines,
+            factors: &[],
+        }
+    }
+
     pub fn receivers(&self) -> &[ReceiverSpec] {
         &self.reference.receivers
     }
@@ -405,7 +414,7 @@ impl PreparedHarmonicRealization<'_> {
     }
 }
 
-fn phase(omega: f64, time: Dd) -> Result<[Dd; 2], TransferError> {
+pub(super) fn phase(omega: f64, time: Dd) -> Result<[Dd; 2], TransferError> {
     // Keep the original rad/s clock, never a rounded round-trip through Hz.
     // This is the same DD transcendental owner as fs-fft harmonic windows.
     let angle = Dd::from_f64(omega) * time;

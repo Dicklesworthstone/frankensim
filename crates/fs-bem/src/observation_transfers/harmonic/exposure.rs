@@ -24,6 +24,8 @@ pub use array::{
     WindowedHarmonicPressureCorrelations,
 };
 
+pub use array::{HarmonicPressureSampleLimits, PreparedHarmonicPressureSignal};
+
 mod readout;
 pub use readout::{
     HarmonicAveragedField, HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
