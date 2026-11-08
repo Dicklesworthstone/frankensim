@@ -32,6 +32,8 @@ mod kernel;
 pub use absorption::AbsorbingSlabVolumeAbsorption;
 mod illumination;
 pub use illumination::{AbsorbingSlabCoherentIllumination, AbsorbingSlabIllumination};
+mod polarization;
+pub use polarization::PreparedAbsorbingSlabPolarization;
 const C0: f64 = 299_792_458.0;
 type Result<T> = core::result::Result<T, ReflectionError>;
 type Vector = [C64; 3];
