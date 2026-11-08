@@ -894,6 +894,9 @@ fn update_tau_prepared<'a>(
     law_at: impl Fn(usize) -> &'a PreparedRheology,
 ) -> RheologyStats {
     let central_bulk_tau = grid.collision.central_moment_bulk_tau();
+    assert!(grid.central_moment_bulk_valid(), "invalid central-moment trace relaxation field");
+    let bulk_field = grid.central_moment_bulk_tau.as_deref()
+        .filter(|_| central_bulk_tau.is_some());
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -907,8 +910,9 @@ fn update_tau_prepared<'a>(
         let law = law_at(i);
         let mm = grid.moments(i);
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
+        let bulk_tau = bulk_field.map_or(central_bulk_tau, |field| Some(field[i]));
         let [numerator, dilation] =
-            strain_components2(&grid.f[i], mm.rho, mm.u, force, central_bulk_tau);
+            strain_components2(&grid.f[i], mm.rho, mm.u, force, bulk_tau);
         let local = law.solve_with_fixed_strain(numerator, dilation, grid.tau[i]);
         grid.tau[i] = local.tau;
         stats.floored += u32::from(local.floored);

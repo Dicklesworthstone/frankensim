@@ -2,6 +2,9 @@
 //! These explicitly declared synthetic laws are analytical fixtures, not
 //! empirical claims about a named liquid or gas.
 
+#[path = "material_bulk_viscous_heating/two_dimensional.rs"]
+mod two_dimensional;
+
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{CollisionModel3, E3, W3, equilibrium3, update_tau3};
 use fs_lbm::material::transport::MaterialTransportError;

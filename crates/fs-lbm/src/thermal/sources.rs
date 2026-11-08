@@ -416,6 +416,8 @@ impl Slab<2, 5> for ThermalLbm {
         match self.grid.collision {
             CollisionModel2::Bgk => true,
             CollisionModel2::Trt { magic } => trt_rates_valid(tau, magic),
+            CollisionModel2::CentralMoment | CollisionModel2::CentralMomentBulk { .. } =>
+                self.grid.central_moment_bulk_valid(),
             _ => false,
         }
     }

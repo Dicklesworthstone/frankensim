@@ -118,9 +118,19 @@ impl Grid {
                 ));
             }
         }
+        let bulk_field = self.central_moment_bulk_tau.as_deref().filter(|_| {
+            matches!(self.collision,
+                CollisionModel2::CentralMoment | CollisionModel2::CentralMomentBulk { .. })
+        });
+        if bulk_field.is_some_and(|field| field.len() != count) {
+            return Err(ForceStepError2::Invalid("invalid central-moment trace relaxation field"));
+        }
         for (cell, next_external) in external.iter().enumerate() {
             if cell % FORCE_STEP_CHUNK == 0 {
                 checkpoint()?;
+            }
+            if bulk_field.is_some_and(|field| !field[cell].is_finite() || field[cell] <= 0.5) {
+                return Err(ForceStepError2::Invalid("invalid central-moment trace relaxation field"));
             }
             if !self.fext[cell]
                 .iter()

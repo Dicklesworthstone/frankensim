@@ -90,8 +90,9 @@ fn source_inputs<S, F, const D: usize>(
         // This multiplication order avoids overflowing rate^2 before a small
         // viscosity can scale it. Both values come from the cached query.
         let shear_power = (viscosity * rate) * rate;
+        let bulk_viscosity = bulk_viscosity_pa_s(&value.material);
         let (dilation, bulk_power) = match (
-            bulk_viscosity_pa_s(&value.material), value.material.dilation_rate_per_s,
+            bulk_viscosity, value.material.dilation_rate_per_s,
         ) {
             (None, None) => (0.0, 0.0),
             (None, Some(DilationRate::Tied(dilation))) => {
@@ -104,7 +105,11 @@ fn source_inputs<S, F, const D: usize>(
                 "independent bulk relaxation requires explicitly sourced bulk heating",
             )),
         };
-        if (rate != 0.0 && shear_power == 0.0) || (dilation != 0.0 && bulk_power == 0.0) {
+        // Explicit zero physical bulk viscosity has zero volumetric heat even
+        // when theta is nonzero. Positive-coefficient underflow still refuses.
+        if (rate != 0.0 && shear_power == 0.0)
+            || (dilation != 0.0 && bulk_viscosity != Some(0.0) && bulk_power == 0.0)
+        {
             return Err(MaterialTransportError::Invalid("physical viscous heating is unrepresentable"));
         }
         let power = shear_power + bulk_power;

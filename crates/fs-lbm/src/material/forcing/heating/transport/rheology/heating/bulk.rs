@@ -1,5 +1,7 @@
 //! Local physical shear/bulk viscosity from one actual material query.
 
+mod two_dimensional;
+
 use super::super::{LocalRheologyError, sample_temperatures_with, solve_local, temperatures};
 use super::{
     DilationRate, FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
@@ -22,12 +24,14 @@ pub struct BulkViscousMaterial<F> {
 }
 impl<F: FluidTransport> BulkViscousMaterial<F> {
     /// Read the original transport owner once and retain that exact snapshot.
-    /// Positive finite bulk viscosity is required by the receiving collision
-    /// family; its SI-to-lattice representability is checked at the actual query.
+    /// Nonnegative finite physical bulk viscosity is admitted here. The
+    /// receiving collision checks its own representability: planar flow can
+    /// retain zeta_3=0 through mu/3, while the 3-D trace collision requires
+    /// strictly positive bulk relaxation excess.
     pub fn try_new(source: F, bulk_viscosity_pa_s: f64) -> Result<Self, MaterialError> {
-        if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s <= 0.0 {
+        if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s < 0.0 {
             return Err(MaterialError::Parameters {
-                what: "local physical bulk viscosity must be positive and finite".into(),
+                what: "local physical bulk viscosity must be nonnegative and finite".into(),
             });
         }
         let transport = source.transport_state()?;

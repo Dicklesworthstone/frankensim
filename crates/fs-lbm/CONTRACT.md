@@ -438,3 +438,32 @@ actual native math dependencies. The full fs-lbm grid/material adapters were
 source-reviewed but not compiled in the constrained environment. This adds no
 adaptive scalar memory, backscatter-energy equation, calibrated theta, DNS
 qualification or higher-order pathline integration.
+
+## Source-local planar bulk viscosity
+
+The D2Q9 thermal material owner now admits separately authored physical
+`mu(T,gamma)` and `zeta_3(T,gamma)` through the existing `BulkViscousMaterial`.
+Planar reduction uses `zeta_2=zeta_3+mu/3`, so even constant physical bulk
+viscosity requires a local trace relaxation when shear viscosity varies.
+The original central collision reads an optional prepared per-cell trace-tau
+field; default/native scalar selections retain their original arithmetic.
+
+The bounded material solve uses the original Guo-corrected stress numerators
+`A=gamma_dev2*tau_s`, `B=sqrt(2/3)|div u|*tau_trace`, and
+`N=hypot(A,B/sqrt(2))`. Its auxiliary relaxation satisfies
+`gamma=N/(lambda*dt)` and
+`1/lambda=hypot((A/N)/tau_s,(B/(sqrt(2)*N))/tau_trace)`.
+Normalized weights avoid squared-component overflow/underflow; zero stress
+queries the zero-rate source. The report's relaxation defect is in lambda.
+Collision receives the actual shear and trace taus from that same source,
+never lambda. Shear-only and trace-only inputs recover their respective taus.
+
+The unchanged thermal transaction converts `mu*gamma²+zeta_3*(div u)²` once,
+retains original material receipts, checks the endpoint, and publishes the
+applied trace field with the accepted state. Explicit `zeta_3=0` is allowed
+in planar flow through the positive `mu/3` trace coefficient. The 3-D trace
+collision retains its strict positive-relaxation admission; negative bulk
+viscosity and unrepresentable positive losses refuse. This remains explicit,
+fixed-density/Cp low-Mach sensible-heat transport, without a total-energy claim.
+Manufactured tests cover the physical tensor/heat identity, source-dependent
+coefficients, zero bulk, original native collision, and full rollback.

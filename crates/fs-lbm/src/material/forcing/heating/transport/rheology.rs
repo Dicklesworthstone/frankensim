@@ -256,7 +256,9 @@ impl<F> RheologyMaterial<F> {
     pub const fn iterations(&self) -> usize {
         self.iterations
     }
-    /// Absolute fixed-point residual in tau at the accepted query.
+    /// Absolute fixed-point residual in dimensionless relaxation at the accepted
+    /// query. The planar local-bulk method uses its documented equivalent
+    /// relaxation; the installed shear tau remains the source-derived value.
     pub const fn relaxation_defect(&self) -> f64 {
         self.relaxation_defect
     }
@@ -278,7 +280,7 @@ impl StressSlab<2, 5> for ThermalLbm {
         let force = std::array::from_fn(|d| self.grid.g[d].mul_add(m.rho, self.grid.fext[cell][d]));
         crate::core2::material_strain_components2(
             &self.grid.f[cell], m.rho, m.u, force,
-            self.grid.collision.central_moment_bulk_tau(),
+            self.grid.central_moment_bulk_tau_at(cell),
         )
     }
     fn independent_bulk(&self) -> bool { self.grid.collision.central_moment_bulk_tau().is_some() }

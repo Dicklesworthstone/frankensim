@@ -176,6 +176,11 @@ pub struct Grid {
     /// Collision operator (default [`CollisionModel2::Bgk`], the
     /// byte-identical historical path).
     pub collision: CollisionModel2,
+    /// Optional per-cell trace relaxation times, used only by central-moment
+    /// collision. Other collision selections leave this field dormant.
+    /// Entries cover the complete grid and must be finite and greater than 1/2.
+    /// For planar physical material, tau_bulk corresponds to zeta_3 + mu / 3.
+    pub central_moment_bulk_tau: Option<Vec<f64>>,
 }
 
 /// Macroscopic moments of one cell.
@@ -988,7 +993,52 @@ impl Grid {
             periodic_x: true,
             periodic_y: true,
             collision: CollisionModel2::default(),
+            central_moment_bulk_tau: None,
         }
+    }
+
+    /// Select the existing central collision with one trace tau per cell.
+    /// Shear keeps its original per-cell tau; higher moments still equilibrate.
+    /// Invalid shape or values preserve the complete grid and old selection.
+    pub fn set_central_moment_bulk_field(&mut self, taus: &[f64]) -> Result<(), ForceStepError2> {
+        if self.nx.checked_mul(self.ny) != Some(taus.len())
+            || taus.is_empty()
+            || taus.len() != self.f.len()
+            || taus.iter().any(|tau| !tau.is_finite() || *tau <= 0.5)
+        {
+            return Err(ForceStepError2::Invalid(
+                "central-moment trace field requires one finite tau greater than one half per cell",
+            ));
+        }
+        self.central_moment_bulk_tau = Some(taus.to_vec());
+        self.collision = CollisionModel2::CentralMomentBulk { bulk_tau: 1.0 };
+        Ok(())
+    }
+
+    /// Actual trace relaxation for a central-moment cell, or None otherwise.
+    /// As with moments(), the caller supplies an admitted cell index and grid.
+    pub fn central_moment_bulk_tau_at(&self, cell: usize) -> Option<f64> {
+        let uniform = self.collision.central_moment_bulk_tau()?;
+        Some(
+            self.central_moment_bulk_tau
+                .as_ref()
+                .map_or(uniform, |field| field[cell]),
+        )
+    }
+
+    pub(crate) fn central_moment_bulk_valid(&self) -> bool {
+        match self.collision {
+            CollisionModel2::CentralMoment => {}
+            CollisionModel2::CentralMomentBulk { bulk_tau } => {
+                if !bulk_tau.is_finite() || bulk_tau <= 0.5 {
+                    return false;
+                }
+            }
+            _ => return true,
+        }
+        self.central_moment_bulk_tau.as_ref().is_none_or(|field| {
+            field.len() == self.f.len() && field.iter().all(|tau| tau.is_finite() && *tau > 0.5)
+        })
     }
 
     /// Row-major index.
@@ -1283,6 +1333,10 @@ impl Grid {
     fn collide_cells_into(&self, start: usize, post: &mut [[f64; Q]]) {
         let model = self.collision;
         let central_bulk_omega = model.central_moment_bulk_tau().map(|tau| 1.0 / tau);
+        let bulk_field = self.central_moment_bulk_tau.as_deref()
+            .filter(|_| central_bulk_omega.is_some());
+        assert!(bulk_field.is_none_or(|field| field.len() == self.f.len()),
+            "central-moment trace field must cover the complete grid");
         if let CollisionModel2::Trt { magic } = model {
             assert!(
                 magic.is_finite() && magic > 0.0,
@@ -1308,7 +1362,13 @@ impl Grid {
                 self.g[0].mul_add(rho, self.fext[i][0]),
                 self.g[1].mul_add(rho, self.fext[i][1]),
             );
-            if let Some(bulk_omega) = central_bulk_omega {
+            if let Some(mut bulk_omega) = central_bulk_omega {
+                if let Some(field) = bulk_field {
+                    let bulk_tau = field[i];
+                    assert!(bulk_tau.is_finite() && bulk_tau > 0.5,
+                        "cell trace relaxation must be finite and greater than one half");
+                    bulk_omega = 1.0 / bulk_tau;
+                }
                 // Collide the physical populations f + S/2, then publish
                 // f_post = C(f + S/2) + S/2. At frozen u this is the MRT
                 // forcing rule (I - Lambda/2)S in EACH central mode,
