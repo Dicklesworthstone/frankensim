@@ -141,6 +141,44 @@ claim is inferred. Focused `tests/circuit_synchronous_inverter.rs` checks physic
 bridge states, power/neutral/current signs, successive modulation and witness
 refresh, refusals, and an independent changing-duty d/q/finite-bus ODE refinement.
 
+## Finite battery synchronous inverter
+
+`circuit::synchronous::inverter::battery` composes the original finite SOC/OCV
+battery, polarization and bus capacitor, a positive physical lead resistance,
+the separate inverter capacitor, and the complete saturated-or-linear
+synchronous machine into one nine-state native solve. The original chemical
+charge, capacitor charges, winding fluxes, relative angle and absolute shaft
+momenta all evolve together. Finite lead resistance produces inrush and voltage
+drop; signed current supports motoring, cell depletion and regenerative charging.
+
+Held physical high-side fractions may change each interval. Updates preserve
+every stored coordinate and the Hamiltonian while refreshing reciprocal bridge
+coupling and the matching checked source-loss witness in fixed scratch.
+Preparation owns the reusable workspace; successful warm steps allocate nothing
+and rebuild no interconnection. Original OCV-knot integration and saturated
+magnetic storage remain the constitutive owners.
+
+`BatteryInverterStep` owns one nine-state native record, the original
+`BatteryInterval`, a shared physical `InverterInterval`, independent inverter
+storage change and lead current/heat. The standalone `InverterStep` retains its
+six-state native record and public physical fields. Signed battery terminal,
+lead, bridge, winding and shaft work remain independently visible, with eleven
+physical heat owners. Battery, lead, inverter, native-storage/dissipation and
+total-work gates use interval changes/work rather than absolute background
+stored energy. Only the two shaft torques supply external work to this complete
+drive; finite-bus transfer is internal.
+
+SOC exhaustion/overcharge, negative inverter bus, invalid duty, energy refusal
+or cancellation publish no state and restore the previous complete modulation
+stamp. This remains an averaged bridge and reversible equivalent-circuit
+battery lane: PWM ripple, switching heat, protection and thermal drift require
+their own laws. Endpoint support does not certify bounds between endpoints.
+
+Focused tests specify an independent plateau-OCV polarization/two-bus circuit
+oracle, changing-duty motoring and regenerative braking, original saturation
+plus an OCV-knot crossing, and late-cancellation rollback/retry. These added
+native tests have not been executed in the current resource-limited environment.
+
 ## Synchronous PM and reluctance electromechanics
 
 `circuit::synchronous::SynchronousMotor` retains two stator-frame flux linkages,

@@ -35,6 +35,8 @@ use crate::{
 };
 use fs_math::det;
 
+pub mod battery;
+
 /// Original finite bus and per-phase high/low channel resistances in SI units.
 /// Winding resistance and machine data stay in the supplied SynchronousMotor.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +80,61 @@ pub struct InverterStep {
     /// Internal bearing impulse ON rotor [N m s]; stator gets its negative.
     pub bearing_angular_impulse_nm_s: f64,
     pub shaft_angle_increment_rad: [f64; 2],
+}
+
+/// Physical bridge/machine account independent of the size of the enclosing
+/// native solve. A finite battery drive uses this SAME constitutive account.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InverterInterval {
+    /// Signed work entering the inverter DC bus [J].
+    pub source_work_j: f64,
+    pub shaft_work_j: [f64; 2],
+    pub machine_electrical_work_j: f64,
+    pub bridge_work_j: f64,
+    pub phase_current_a: [f64; 3],
+    pub phase_voltage_v: [f64; 3],
+    pub dc_bridge_current_a: f64,
+    pub copper_heat_j: f64,
+    pub bearing_heat_j: f64,
+    pub channel_heat_j: [[f64; 2]; 3],
+    pub electromagnetic_angular_impulse_nm_s: f64,
+    pub bearing_angular_impulse_nm_s: f64,
+    pub shaft_angle_increment_rad: [f64; 2],
+}
+
+impl InverterInterval {
+    /// Winding, bearing, then a/b/c high/low conduction heat [J].
+    pub fn heat_joules(&self) -> [f64; 8] {
+        [
+            self.copper_heat_j,
+            self.bearing_heat_j,
+            self.channel_heat_j[0][0],
+            self.channel_heat_j[0][1],
+            self.channel_heat_j[1][0],
+            self.channel_heat_j[1][1],
+            self.channel_heat_j[2][0],
+            self.channel_heat_j[2][1],
+        ]
+    }
+
+    fn with_native(self, native: PreparedStepRecord) -> InverterStep {
+        InverterStep {
+            native,
+            source_work_j: self.source_work_j,
+            shaft_work_j: self.shaft_work_j,
+            machine_electrical_work_j: self.machine_electrical_work_j,
+            bridge_work_j: self.bridge_work_j,
+            phase_current_a: self.phase_current_a,
+            phase_voltage_v: self.phase_voltage_v,
+            dc_bridge_current_a: self.dc_bridge_current_a,
+            copper_heat_j: self.copper_heat_j,
+            bearing_heat_j: self.bearing_heat_j,
+            channel_heat_j: self.channel_heat_j,
+            electromagnetic_angular_impulse_nm_s: self.electromagnetic_angular_impulse_nm_s,
+            bearing_angular_impulse_nm_s: self.bearing_angular_impulse_nm_s,
+            shaft_angle_increment_rad: self.shaft_angle_increment_rad,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -326,6 +383,97 @@ impl AveragedSynchronousInverter {
         witness.root.copy_from_slice(&stamp.root);
     }
 
+    fn interval(
+        &self,
+        stamp: &BridgeStamp,
+        e: &[f64; 6],
+        inputs: &[f64; 3],
+        duration_s: f64,
+    ) -> Result<InverterInterval, PhsError> {
+        let phase_a = self.scales[0] * e[1];
+        let quadrature = self.scales[1] * e[2];
+        let phase_current_a = [
+            phase_a,
+            -0.5 * phase_a + quadrature,
+            -0.5 * phase_a - quadrature,
+        ];
+        let dc_bridge_current_a = stamp.modulation[0] * e[1] + stamp.modulation[1] * e[2];
+        let drop: [f64; 3] =
+            std::array::from_fn(|j| stamp.phase_resistance[j] * phase_current_a[j]);
+        let mean_drop = drop.iter().map(|v| v / 3.0).sum::<f64>();
+        let mean_duty = stamp.high_fraction.iter().map(|d| d / 3.0).sum::<f64>();
+        let phase_voltage_v: [f64; 3] = std::array::from_fn(|j| {
+            (stamp.high_fraction[j] - mean_duty) * e[0] - drop[j] + mean_drop
+        });
+        let machine_electrical_work_j = duration_s
+            * phase_voltage_v
+                .iter()
+                .zip(phase_current_a)
+                .map(|(v, i)| v * i)
+                .sum::<f64>();
+        let bridge_work_j = duration_s * e[0] * dc_bridge_current_a;
+        let channel_heat_j: [[f64; 2]; 3] = std::array::from_fn(|j| {
+            std::array::from_fn(|k| {
+                duration_s
+                    * phase_current_a[j]
+                    * stamp.channel_resistance[j][k]
+                    * phase_current_a[j]
+            })
+        });
+        let p = self.machine_parameters;
+        let relative_speed = e[4] - e[5];
+        let copper_heat_j = duration_s
+            * (e[1] * p.winding_resistance_ohm * e[1] + e[2] * p.winding_resistance_ohm * e[2]);
+        let bearing_heat_j =
+            duration_s * relative_speed * p.bearing_drag_nm_s_per_rad * relative_speed;
+        let electromagnetic_angular_impulse_nm_s = -duration_s * e[3];
+        let bearing_angular_impulse_nm_s =
+            -duration_s * p.bearing_drag_nm_s_per_rad * relative_speed;
+        let source_work_j = duration_s * inputs[0] * e[0];
+        let shaft_angle_increment_rad = [duration_s * e[4], duration_s * e[5]];
+        let shaft_work_j = [
+            shaft_angle_increment_rad[0] * inputs[1],
+            shaft_angle_increment_rad[1] * inputs[2],
+        ];
+        if [
+            source_work_j,
+            machine_electrical_work_j,
+            bridge_work_j,
+            dc_bridge_current_a,
+            copper_heat_j,
+            bearing_heat_j,
+            electromagnetic_angular_impulse_nm_s,
+            bearing_angular_impulse_nm_s,
+        ]
+        .iter()
+        .chain(&shaft_work_j)
+        .chain(&shaft_angle_increment_rad)
+        .chain(&phase_current_a)
+        .chain(&phase_voltage_v)
+        .chain(channel_heat_j.iter().flatten())
+        .any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "inverter signed work, current or physical heat is unrepresentable",
+            ));
+        }
+        Ok(InverterInterval {
+            source_work_j,
+            shaft_work_j,
+            machine_electrical_work_j,
+            bridge_work_j,
+            phase_current_a,
+            phase_voltage_v,
+            dc_bridge_current_a,
+            copper_heat_j,
+            bearing_heat_j,
+            channel_heat_j,
+            electromagnetic_angular_impulse_nm_s,
+            bearing_angular_impulse_nm_s,
+            shaft_angle_increment_rad,
+        })
+    }
+
     /// Prepare native six-state scratch once. Existing explicit residual/update
     /// and 0..16 backtracking limits apply unchanged at every modulation sample.
     pub fn prepare_controlled(
@@ -448,91 +596,14 @@ impl PreparedSynchronousInverter {
                 .workspace
                 .last_step_discrete_effort()
                 .ok_or_else(|| invalid("inverter accepted constitutive effort is unavailable"))?;
-            let phase_a = self.model.scales[0] * e[1];
-            let quadrature = self.model.scales[1] * e[2];
-            let phase_current_a = [
-                phase_a,
-                -0.5 * phase_a + quadrature,
-                -0.5 * phase_a - quadrature,
-            ];
-            let dc_bridge_current_a = stamp.modulation[0] * e[1] + stamp.modulation[1] * e[2];
-            let drop: [f64; 3] =
-                std::array::from_fn(|j| stamp.phase_resistance[j] * phase_current_a[j]);
-            let mean_drop = drop.iter().map(|v| v / 3.0).sum::<f64>();
-            let mean_duty = high_fraction.iter().map(|d| d / 3.0).sum::<f64>();
-            let phase_voltage_v: [f64; 3] = std::array::from_fn(|j| {
-                (high_fraction[j] - mean_duty) * e[0] - drop[j] + mean_drop
-            });
-            let machine_electrical_work_j = duration_s
-                * phase_voltage_v
-                    .iter()
-                    .zip(phase_current_a)
-                    .map(|(v, i)| v * i)
-                    .sum::<f64>();
-            let bridge_work_j = duration_s * e[0] * dc_bridge_current_a;
-            let channel_heat_j: [[f64; 2]; 3] = std::array::from_fn(|j| {
-                std::array::from_fn(|k| {
-                    duration_s
-                        * phase_current_a[j]
-                        * stamp.channel_resistance[j][k]
-                        * phase_current_a[j]
-                })
-            });
-            let p = self.model.machine_parameters;
-            let relative_speed = e[4] - e[5];
-            let copper_heat_j = duration_s
-                * (e[1] * p.winding_resistance_ohm * e[1] + e[2] * p.winding_resistance_ohm * e[2]);
-            let bearing_heat_j =
-                duration_s * relative_speed * p.bearing_drag_nm_s_per_rad * relative_speed;
-            let electromagnetic_angular_impulse_nm_s = -duration_s * e[3];
-            let bearing_angular_impulse_nm_s =
-                -duration_s * p.bearing_drag_nm_s_per_rad * relative_speed;
-            let source_work_j = duration_s * inputs[0] * output[0];
-            let shaft_angle_increment_rad = [duration_s * output[1], duration_s * output[2]];
-            let shaft_work_j = [
-                shaft_angle_increment_rad[0] * inputs[1],
-                shaft_angle_increment_rad[1] * inputs[2],
-            ];
-            if [
-                source_work_j,
-                machine_electrical_work_j,
-                bridge_work_j,
-                dc_bridge_current_a,
-                copper_heat_j,
-                bearing_heat_j,
-                electromagnetic_angular_impulse_nm_s,
-                bearing_angular_impulse_nm_s,
-            ]
-            .iter()
-            .chain(&shaft_work_j)
-            .chain(&shaft_angle_increment_rad)
-            .chain(&phase_current_a)
-            .chain(&phase_voltage_v)
-            .chain(channel_heat_j.iter().flatten())
-            .any(|v| !v.is_finite())
-            {
-                return Err(invalid(
-                    "inverter signed work, current or physical heat is unrepresentable",
-                )
-                .into());
-            }
+            let interval = self.model.interval(
+                &stamp,
+                &[e[0], e[1], e[2], e[3], e[4], e[5]],
+                inputs,
+                duration_s,
+            )?;
             poll(&mut cancelled)?;
-            Ok(InverterStep {
-                native,
-                source_work_j,
-                shaft_work_j,
-                machine_electrical_work_j,
-                bridge_work_j,
-                phase_current_a,
-                phase_voltage_v,
-                dc_bridge_current_a,
-                copper_heat_j,
-                bearing_heat_j,
-                channel_heat_j,
-                electromagnetic_angular_impulse_nm_s,
-                bearing_angular_impulse_nm_s,
-                shaft_angle_increment_rad,
-            })
+            Ok(interval.with_native(native))
         })();
         match result {
             Ok(record) => {

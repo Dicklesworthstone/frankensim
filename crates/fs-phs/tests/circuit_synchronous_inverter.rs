@@ -5,6 +5,8 @@ use fs_phs::circuit::synchronous::{
 };
 use fs_phs::{PreparedStepError, SolveBudget};
 
+#[path = "circuit_synchronous_inverter/battery.rs"]
+mod battery;
 #[path = "circuit_synchronous_inverter/trajectory.rs"]
 mod trajectory;
 
