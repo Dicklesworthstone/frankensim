@@ -43,9 +43,10 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     /// The uniform thermal-capillarity owner can evolve sigma(T), provided all
     /// actual wet cells agree exactly at every admitted stage. A height graph
     /// instead admits one planar SIDE wall: every occupied interface cell in
-    /// a wall column must give the same angle. Other columns may differ; the
-    /// two end columns meeting another side wall must remain exactly neutral
-    /// because a nonneutral two-wall corner law is not resolved. Its
+    /// a wall column must give the same angle. Other columns may differ. At
+    /// the two end columns, the sourced angle and the explicitly neutral
+    /// transverse wall jointly determine the corner normal. The pressure ghost
+    /// uses the same neutral reflection, including diagonal corner samples. Its
     /// angle supplies the shared graph normal/area and tangential-stress metric;
     /// native pressure retains its original same-angle VOF ghost curvature.
     /// This first-cell boundary approximation needs spatial refinement. Changing
@@ -92,6 +93,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let temperatures = temperatures(states, self.law.temperature_axis(), gate)?;
         let binding = binding.at_temperatures(self.law.temperature_axis(), &temperatures, gate)?;
         binding.install(&mut self.flow.lattice, gate)?;
+        if let Some(graph) = self.height_graph_thermocapillary_surface() {
+            self.flow.lattice.enable_planar_neutral_corners(graph.normal_axis, gate)?;
+        }
         poll(gate)?;
         self.wetting = Some(binding);
         if let Some(mut resolved) = graph_materials.take() {

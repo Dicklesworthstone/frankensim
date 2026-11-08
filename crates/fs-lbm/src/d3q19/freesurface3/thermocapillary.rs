@@ -1023,6 +1023,69 @@ mod tests {
     }
 
     #[test]
+    fn g1_neutral_transverse_corner_angle_area_and_traction_share_one_normal() {
+        let gate = CancelGate::new_clock_free();
+        for axis in 0..3 {
+            let tangent = match axis { 0 => [1, 2], 1 => [0, 2], _ => [0, 1] };
+            for sign in [-1, 1] {
+                for wall in [PlanarWall3::XMin, PlanarWall3::XMax, PlanarWall3::YMin,
+                    PlanarWall3::YMax, PlanarWall3::ZMin, PlanarWall3::ZMax]
+                    .into_iter().filter(|wall| wall.axis() != axis)
+                {
+                    let neutral = 3 - axis - wall.axis();
+                    let inward = if wall.upper() { -1.0 } else { 1.0 };
+                    for angle in [1.2_f64, 1.9] {
+                        let mut surface = graph_surface(axis, sign, |_, _| 3.5);
+                        let mut angles = sidewall_angles(&surface, wall, axis, angle);
+                        for value in angles.values_mut() { *value = angle; }
+                        surface.set_planar_contact_field(wall, angles.clone(), &gate).unwrap();
+                        surface.enable_planar_neutral_corners(axis, &gate).unwrap();
+                        // A thermal refresh replaces angles without losing the
+                        // independently admitted transverse boundary condition.
+                        surface.set_planar_contact_field(wall, angles, &gate).unwrap();
+                        let graph = HeightGraphSurface3 {
+                            axis, outward_sign: sign, maximum_slope: 0.6, minimum_fill: 0.01,
+                        };
+                        let patches = surface.height_graph_geometry(graph, &gate).unwrap();
+                        for patch in patches.iter().filter(|patch| {
+                            [0, 7].contains(&patch.liquid[neutral])
+                        }) {
+                            assert_eq!(patch.outward_normal[neutral], 0.0);
+                        }
+                        let mut sigma = field(&surface, |p| 0.01
+                            + 0.0002*(p[tangent[0]] as f64 + 0.5)
+                            - 0.0001*(p[tangent[1]] as f64 + 0.5));
+                        let forces = surface.height_graph_marangoni_forces(graph, &mut sigma, &gate).unwrap();
+                        let impulses = column_impulses(&surface, axis, &forces);
+                        let mut normal = [0.0; 3];
+                        normal[wall.axis()] = inward * angle.cos();
+                        normal[axis] = f64::from(sign) * angle.sin();
+                        let area = 1.0 / angle.sin();
+                        let mut ambient = [0.0; 3];
+                        ambient[tangent[0]] = 0.0002;
+                        ambient[tangent[1]] = -0.0001;
+                        let dot = (0..3).map(|d| ambient[d]*normal[d]).sum::<f64>();
+                        let corners: Vec<_> = patches.iter().filter(|patch| {
+                            patch.liquid[wall.axis()] == if wall.upper() { 7 } else { 0 }
+                                && [0, 7].contains(&patch.liquid[neutral])
+                        }).collect();
+                        assert_eq!(corners.len(), 2);
+                        for patch in corners {
+                            assert_eq!(patch.outward_normal[neutral], 0.0);
+                            assert!((patch.area - area).abs() < 2e-14);
+                            for d in 0..3 {
+                                assert!((patch.outward_normal[d]-normal[d]).abs() < 2e-14);
+                                let expected = (ambient[d]-dot*normal[d])*area;
+                                assert!((impulses[&patch.column][d]-expected).abs() < 5e-15);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn g0_height_graph_sidewall_refuses_missing_bands_corners_and_wrong_wall() {
         let gate = CancelGate::new_clock_free();
         let original = graph_surface(2, 1, |u, _| 4.0 + 0.3*(u-4.0));

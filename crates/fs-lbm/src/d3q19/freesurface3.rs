@@ -1072,16 +1072,40 @@ impl FreeSurface3 {
 
     fn planar_angle_ghost_in(
         &self,
-        position: [i64; 3],
+        mut position: [i64; 3],
         fill: &BTreeMap<u64, [f64; TILE_CELLS]>,
     ) -> Option<f64> {
-        let contact = self.planar_contact_at(position)?;
-        if contact.cotangent == 0.0 {
+        let dims = self.grid.tile_dims();
+        let extents = [dims.0 * TILE, dims.1 * TILE, dims.2 * TILE];
+        let sample = |p: [i64; 3]| -> Option<f64> {
+            let (slot, lane) = self.grid.resolve_source(p[0], p[1], p[2])?;
+            Some(fill[&self.grid.active_keys()[slot]][lane])
+        };
+        let neutral_axis = self.planar_neutral_transverse_axis();
+        let mut reflected = false;
+        if let Some(axis) = neutral_axis {
+            let extent = extents[axis] as i64;
+            // Even reflection across the physical wall at a cell face gives
+            // zero normal derivative. Apply it before looking up the sourced
+            // angle, so diagonal corner ghosts retain the same original claim.
+            if position[axis] < 0 {
+                position[axis] = position[axis].checked_neg()?.checked_sub(1)?;
+                reflected = true;
+            } else if position[axis] >= extent {
+                position[axis] = (2 * extent - 1).checked_sub(position[axis])?;
+                reflected = true;
+            }
+            if !(0..extent).contains(&position[axis]) {
+                return None;
+            }
+        }
+        let Some(contact) = self.planar_contact_at(position) else {
+            return if reflected { sample(position) } else { None };
+        };
+        if contact.cotangent == 0.0 && neutral_axis.is_none() {
             return None;
         }
         let axis = contact.wall.axis();
-        let dims = self.grid.tile_dims();
-        let extents = [dims.0 * TILE, dims.1 * TILE, dims.2 * TILE];
         let edge = if contact.wall.upper() {
             extents[axis] as i64 - 1
         } else {
@@ -1093,18 +1117,22 @@ impl FreeSurface3 {
             -position[axis]
         };
         if distance <= 0 {
-            return None;
+            return if reflected { sample(position) } else { None };
         }
         let mut base = position;
         base[axis] = edge;
-        let sample = |p: [i64; 3]| -> Option<f64> {
-            let (slot, lane) = self.grid.resolve_source(p[0], p[1], p[2])?;
-            Some(fill[&self.grid.active_keys()[slot]][lane])
-        };
         let value = sample(base)?;
         let mut tangent_squared = 0.0;
         for tangent in 0..3 {
             if tangent == axis {
+                continue;
+            }
+            if neutral_axis == Some(tangent)
+                && (base[tangent] == 0 || base[tangent] + 1 == extents[tangent] as i64)
+            {
+                // The corner normal satisfies BOTH wall conditions. A
+                // one-sided tangent estimate here would contradict the
+                // independent neutral wall and the height-graph patch metric.
                 continue;
             }
             let mut plus = base;

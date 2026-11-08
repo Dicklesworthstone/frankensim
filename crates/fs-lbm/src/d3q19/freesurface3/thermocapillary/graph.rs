@@ -1,4 +1,10 @@
 //! Shared resolved column geometry for capillary traction and heat patches.
+//!
+//! The 3-D height/contact-angle condition follows Afkhami and Bussmann,
+//! IJNMF 61 (2009), section 2.5, <https://doi.org/10.1002/fld.1974>.
+//! At an explicitly neutral perpendicular wall, the additional independent
+//! constraint n.n_transverse=0 fixes the along-wall height slope to zero.
+//! This is a bounded Cartesian corner closure, not a corner-film or pinning law.
 use super::*;
 
 /// One physical surface patch in lattice length/area units.
@@ -188,6 +194,14 @@ impl FreeSurface3 {
                     graph_derivative([a, b], 0, shape, height),
                     graph_derivative([a, b], 1, shape, height),
                 ];
+                if let Some(neutral) = self.planar_neutral_transverse_axis() {
+                    let across = if tangent[0] == neutral { 0 } else { 1 };
+                    if [a, b][across] == 0 || [a, b][across] + 1 == shape[across] {
+                        // The native even reflection closes this entire
+                        // transverse face, including its sourced-wall corner.
+                        slope[across] = 0.0;
+                    }
+                }
                 let contact = wall_column.and_then(|(wall, normal)| {
                     if [a, b][normal] == if wall.upper() { shape[normal] - 1 } else { 0 } {
                         wall_angles[[a, b][1 - normal]]
@@ -197,12 +211,16 @@ impl FreeSurface3 {
                     let normal = if tangent[0] == contact.wall.axis() { 0 } else { 1 };
                     let along = 1 - normal;
                     if ([a, b][along] == 0 || [a, b][along] + 1 == shape[along])
+                        && self.planar_neutral_transverse_axis() != Some(tangent[along])
                         && contact.angle_radians != core::f64::consts::FRAC_PI_2
                     {
                         return Err(invalid(
                             "nonneutral height-graph contact angles need a resolved two-wall corner law",
                         ));
                     }
+                    // At the corner n.n_transverse=0 has fixed h_along=0;
+                    // n.n_wall=cos(theta) now fixes h_normal. The independent
+                    // constraints avoid order-dependent normal rotations.
                     slope[normal] = curvature::contact_angle_graph_slope(
                         contact.cotangent,
                         if contact.wall.upper() { -1 } else { 1 },

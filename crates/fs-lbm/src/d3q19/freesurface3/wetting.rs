@@ -6,6 +6,10 @@ use super::*;
 pub(super) struct PlanarContactField3 {
     wall: PlanarWall3,
     angles: BTreeMap<[usize; 3], PlanarContactAngle3>,
+    // A height graph can explicitly close the two perpendicular end walls
+    // with the existing neutral boundary condition. Ordinary planar wetting
+    // retains its original ghost stencil unless that owner enables this.
+    neutral_transverse_axis: Option<usize>,
 }
 
 /// Tangentially smoothed physical VOF geometry, independent of angle ghosts.
@@ -199,11 +203,45 @@ impl FreeSurface3 {
             );
         }
         check_cancel(gate)?;
+        let neutral_transverse_axis = self.planar_contact_field.as_ref()
+            .filter(|field| field.wall == wall)
+            .and_then(|field| field.neutral_transverse_axis);
         self.planar_contact_field = Some(PlanarContactField3 {
             wall,
             angles: admitted,
+            neutral_transverse_axis,
         });
         Ok(())
+    }
+
+    /// Couple one sourced side wall to the tank's explicitly neutral transverse
+    /// walls. Their angle is fixed by ContactModel3::Neutral, not inferred from
+    /// the sourced substrate. The graph axis remains free of wall reflection.
+    pub(crate) fn enable_planar_neutral_corners(
+        &mut self,
+        graph_axis: usize,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        check_cancel(gate)?;
+        let field = self.planar_contact_field.as_mut().ok_or(
+            FreeSurfaceError3::Transport("graph corners require an original planar angle field"),
+        )?;
+        if graph_axis >= 3 || graph_axis == field.wall.axis()
+            || self.contact != ContactModel3::Neutral
+            || self.planar_contact.is_some() || self.planar_piston.is_some()
+            || !self.solid.is_empty()
+        {
+            return Err(FreeSurfaceError3::Transport(
+                "graph corners require one side wall and stationary neutral transverse walls",
+            ));
+        }
+        field.neutral_transverse_axis = Some(3 - graph_axis - field.wall.axis());
+        Ok(())
+    }
+
+    pub(super) fn planar_neutral_transverse_axis(&self) -> Option<usize> {
+        self.planar_contact_field.as_ref()
+            .and_then(|field| field.neutral_transverse_axis)
     }
 
     pub(super) fn planar_contact_at(&self, mut position: [i64; 3]) -> Option<PlanarContactAngle3> {

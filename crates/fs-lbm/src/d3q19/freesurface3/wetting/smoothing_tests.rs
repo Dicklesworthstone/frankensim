@@ -131,3 +131,74 @@ fn g3_per_cell_contact_angles_share_the_uniform_raw_smoothing_operator() {
         }
     }
 }
+
+#[test]
+fn g1_neutral_transverse_corner_preserves_raw_plane_and_laplace_pressure() {
+    let gate = CancelGate::new_clock_free();
+    for wall in WALLS {
+        let axis = wall.axis();
+        for graph_axis in (0..3).filter(|&d| d != axis) {
+            let neutral = 3 - axis - graph_axis;
+            for outward in [-1.0, 1.0] {
+                for angle in [1.2_f64, core::f64::consts::FRAC_PI_2, 1.9] {
+                    let cotangent = if angle == core::f64::consts::FRAC_PI_2 {
+                        0.0
+                    } else {
+                        angle.cos() / angle.sin()
+                    };
+                    // Independent affine volume field with n.n_wall=cos(theta),
+                    // n.n_transverse=0 and the prescribed graph orientation.
+                    let plane = |p: [i64; 3]| {
+                        let inward = if wall.upper() { 7 - p[axis] } else { p[axis] };
+                        0.5 - 0.02 * outward * (p[graph_axis] as f64 - 3.0)
+                            - 0.02 * cotangent * inward as f64
+                    };
+                    let mut surface = FreeSurface3::new(
+                        8, 8, 8, 0.8, [0.0; 3], 0.001,
+                        ContactModel3::Neutral, |_, _, _| true,
+                    ).unwrap();
+                    let mut angles = BTreeMap::new();
+                    for (&key, tile) in &mut surface.tiles {
+                        let slot = surface.grid.slot_of(key).unwrap();
+                        for lane in 0..TILE_CELLS {
+                            let (x, y, z) = FreeSurface3::global_of(key, lane);
+                            let p = [x, y, z];
+                            let density: f64 = surface.grid.populations(slot, lane).iter().sum();
+                            tile.cells[lane] = Cell3::Interface;
+                            tile.mass[lane] = density * plane(p);
+                            if p[axis] == if wall.upper() { 7 } else { 0 } {
+                                angles.insert(p.map(|v| v as usize), angle);
+                            }
+                        }
+                    }
+                    surface.set_planar_contact_field(wall, angles, &gate).unwrap();
+                    surface.enable_planar_neutral_corners(graph_axis, &gate).unwrap();
+                    let masses = surface.mass_snapshot();
+                    let populations = surface.grid().state_bits();
+                    let raw = surface.refresh_fill(&gate).unwrap();
+                    for edge in [0, 7] {
+                        let mut ghost = [3_i64; 3];
+                        ghost[axis] = if wall.upper() { 8 } else { -1 };
+                        ghost[neutral] = if edge == 0 { -1 } else { 8 };
+                        let value = surface.planar_angle_ghost_in(ghost, &raw).unwrap();
+                        assert!((value - plane(ghost)).abs() < 2e-14);
+                        for inward in [0, 1] {
+                            let mut p = [3_i64; 3];
+                            p[axis] = if wall.upper() { 7 - inward } else { inward };
+                            p[neutral] = edge;
+                            let (slot, lane) = surface.grid.resolve_source(p[0], p[1], p[2]).unwrap();
+                            let key = surface.grid.active_keys()[slot];
+                            assert!((surface.fill_smooth[&key][lane] - plane(p)).abs() < 2e-14,
+                                "{wall:?}, graph={graph_axis}, edge={edge}, depth={inward}");
+                            assert!(surface.curvature(key, lane).abs() < 2e-12,
+                                "corner smoothing must not manufacture Laplace pressure");
+                            assert!((surface.reference_density(key, lane) - 1.0).abs() < 2e-14);
+                        }
+                    }
+                    assert_eq!(surface.mass_snapshot(), masses);
+                    assert_eq!(surface.grid().state_bits(), populations);
+                }
+            }
+        }
+    }
+}

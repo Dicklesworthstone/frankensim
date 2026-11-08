@@ -29,6 +29,28 @@ measure, a global surface-energy balance or heat deposition. G1/G3 unit cases
 check independent forward kinetics, low-speed friction and constant-model limits;
 the existing thermal integration case also exercises activated rates and rollback.
 
+## Heated wetting at neutral transverse corners
+
+The height-graph equilibrium-wetting owner now closes the two ends of its
+sourced side wall against the explicitly selected neutral Cartesian transverse
+walls. The simultaneous conditions `n.n_wall=cos(theta)` and
+`n.n_transverse=0` give zero transverse height slope and the existing sourced
+normal slope. Graph normals, area, Marangoni projection and public heat patches
+share this metric. The original raw/smoothed VOF pressure ghost uses even
+reflection at that same neutral wall, including diagonal corner samples.
+The internal boundary selection survives thermal angle-field replacement;
+ordinary planar wetting retains its original stencil.
+
+This closure requires one sourced stationary wall, no internal solids or piston,
+complete monotone liquid/gas columns, one angle through each occupied interface
+band, and the original graph-slope envelope. It does not supply an angle for a
+second substrate, arbitrary wedges, corner films, corner pinning, capillary heat
+or a closed surface-energy balance. Invalid source work, geometry and cancellation
+still refuse the complete thermal/momentum candidate. G1 tests cover both
+graph orientations on all Cartesian wall pairs, raw affine-plane preservation,
+zero artificial Laplace pressure, independent corner traction and an actual
+heated Young--Dupre corner response through the public material owner.
+
 ## Material-flow enthalpy reconstruction
 
 `MaterialFlowAdvection::with_reconstruction` attaches the original thermal owner's shared `LimitedEnthalpyReconstruction` to solved material face fluxes. Selected contiguous axial cells reconstruct total specific enthalpy, including a declared passive equal-density latent inventory; paired face transfers, source-law inversion, accepted history and the combined conduction/advection timestep restriction remain with `fs-thermal`. Unselected cells and external streams retain donor enthalpy. Empty plans retain the donor-cell arithmetic. This is an explicit first-order-in-time stationary-control-volume model; it does not infer multidimensional junction slopes, phase mobility, density-change flow, pressure work or moving interfaces. The `advection()` accessor exposes the underlying graph and actual transport audit; implicit clients must attach the same `reconstruction()` plan to their own native implicit transport owner.

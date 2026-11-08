@@ -287,10 +287,77 @@ fn g1_graph_wetting_uses_current_work_and_tension_before_the_same_native_impulse
 }
 
 #[test]
-fn g3_graph_thermal_corner_band_and_slope_refusals_leave_every_owner_unchanged() {
+fn g1_heated_neutral_transverse_corners_use_sourced_adhesion_in_native_momentum() {
+    let initial = graph_cells(0.0);
+    let run = |hot_work| {
+        let (liquid, interface) = graph_sources(hot_work);
+        with_graph(&liquid, &interface, &initial, false, |thermal, gate| {
+            let source = thermal.wetting_source().unwrap()
+                .property(EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY).unwrap()
+                .answer().receipt.selected;
+            let before_h = thermal.total_enthalpy_j().unwrap();
+            let before_mass = thermal.flow().ledger_mass_kg().unwrap();
+            // Heat the complete sourced side wall, including BOTH junctions
+            // with the independently neutral Cartesian transverse walls.
+            let heat = heat_cells(thermal, &initial, |p| p[0] == 0);
+            let supplied = heat.iter().map(|entry| entry.energy_j).sum::<f64>();
+            let report = thermal.step_with_heat(&heat, gate).unwrap();
+            near(report.external_heat_j, supplied, 2e-12);
+            near(thermal.total_enthalpy_j().unwrap() - before_h, supplied, 2e-10);
+            near(thermal.flow().ledger_mass_kg().unwrap(), before_mass, 2e-12);
+            assert_eq!(report.viscous_heat_j, 0.0);
+            let patches = thermal.height_graph_interface_patches(gate).unwrap();
+            for edge in [0, 7] {
+                let patch = patches.iter().find(|patch| {
+                    patch.liquid[0] == 0 && patch.liquid[1] == edge
+                }).unwrap();
+                let sample = &thermal.wetting_samples().unwrap()[&patch.liquid];
+                let material = thermal.material_at(patch.liquid).unwrap();
+                let sigma = material.material().property(SURFACE_TENSION_PROPERTY).unwrap();
+                let work = sample.material.property(EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY).unwrap();
+                assert_eq!(work.answer().receipt.selected, source);
+                assert_eq!(sample.material.state_coordinate("T"), Some(temperature(material)));
+                assert!(temperature(material) > 409.0);
+                near(work.value_si(), hot_work, 2e-14);
+                near(sigma.value_si(), 0.0044, 2e-14);
+                // Independent Young--Dupre and orthogonal-wall normal
+                // constraints determine the metric, not the source sampler.
+                let cosine = hot_work / 0.0044 - 1.0;
+                let sine = (1.0 - cosine * cosine).sqrt();
+                near(sample.applied_angle_radians, cosine.acos(), 2e-13);
+                near(patch.outward_normal[0], cosine, 2e-13);
+                assert_eq!(patch.outward_normal[1], 0.0);
+                near(patch.outward_normal[2], sine, 2e-13);
+                near(patch.area_m2, 1e-6 / sine, 2e-13);
+                let [x, y, z] = patch.liquid;
+                let force = thermal.flow().lattice().force_density_at(x, y, z).unwrap();
+                assert!(force.iter().any(|component| component.abs() > 1e-12));
+                assert!((0..3).map(|d| force[d] * patch.outward_normal[d])
+                    .sum::<f64>().abs() < 2e-13);
+            }
+            thermal.flow().lattice().grid().state_bits()
+        })
+    };
+    let neutral = run(0.0044);
+    let adhesive = run(0.0048);
+    assert_eq!(neutral.len(), adhesive.len());
+    let difference = neutral.iter().zip(&adhesive)
+        .map(|(&a, &b)| (f64::from_bits(a) - f64::from_bits(b)).abs())
+        .fold(0.0_f64, f64::max);
+    assert!(difference > 1e-12, "corner adhesion must reach the actual native populations");
+}
+
+#[test]
+fn g3_graph_thermal_corner_source_band_and_slope_refusals_leave_every_owner_unchanged() {
     for case in 0..3 {
         let initial = graph_cells(if case == 1 { 0.3 } else { 0.0 });
-        let (liquid, interface) = graph_sources(if case == 2 { 0.0075 } else { 0.0048 });
+        let (liquid, interface) = graph_sources(match case {
+            // A supported corner must still refuse loss of finite-angle
+            // partial wetting: W > 2*sigma cannot be replaced by a clamped angle.
+            0 => 0.009,
+            2 => 0.0075,
+            _ => 0.0048,
+        });
         with_graph(&liquid, &interface, &initial, false, |thermal, gate| {
             let before = thermal.flow().lattice().grid().state_bits();
             let samples = thermal.wetting_samples().unwrap().clone();
@@ -315,7 +382,7 @@ fn g3_graph_thermal_corner_band_and_slope_refusals_leave_every_owner_unchanged()
             });
             let error = thermal.step_with_heat(&heat, gate).unwrap_err().to_string();
             let reason = match case {
-                0 => "two-wall corner",
+                0 => "partial-wetting equilibrium",
                 1 => "occupied interface band",
                 _ => "slope envelope",
             };

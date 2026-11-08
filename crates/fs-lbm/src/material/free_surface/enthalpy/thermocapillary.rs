@@ -56,8 +56,11 @@ pub struct PlanarThermocapillarity {
 /// Internal solid walls and a nonzero mass carry refuse. An explicitly attached
 /// equilibrium angle can close one planar side wall: its complete interface
 /// band must share one angle per column, and its slope obeys the same envelope.
-/// End columns meeting a second side wall must have exactly neutral pi/2
-/// angles; nonneutral two-wall corners need a separate resolved boundary law.
+/// At the two end columns the independent transverse wall retains its explicit
+/// neutral pi/2 condition: its normal slope is zero, while the sourced wall
+/// angle fixes the remaining slope. Both the graph and native pressure ghosts
+/// impose these conditions together. This does not infer a second substrate's
+/// angle or resolve arbitrary wedges, corner films or corner pinning.
 /// Raw interface fractions must remain in [0,1] and monotone along each column.
 /// Before endpoint reconstruction, native over/underfill is resolved through
 /// local conservative mass routes and the same enthalpy transport solve.
