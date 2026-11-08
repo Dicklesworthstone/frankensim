@@ -408,6 +408,52 @@ fn g3_both_thermal_shift_modes_retain_the_original_coupled_constitutive_identity
 }
 
 #[test]
+fn g0_supported_constant_law_endpoint_is_admitted_without_source_extrapolation() {
+    let a = 0.001;
+    let b = 0.013;
+    let ceiling = 3.0;
+    let owner = LaminarCarreauAnnulus::new(
+        law(true, ViscosityShiftMode::Vertical),
+        300.0,
+        a,
+        b,
+        LENGTH,
+        ceiling,
+    )
+    .unwrap();
+    let span = ((b - a) / b) * (1.0 + a / b);
+    let speed = 0.5 * span * ceiling;
+    // Analytic inversion of this supported speed rounds one ULP above the
+    // original stress ceiling on binary64; it must not widen source support.
+    for sign in [-1.0, 1.0] {
+        let profile = owner
+            .helical_at_pressure_and_walls(0.0, [0.0; 2], [0.0, sign * speed], controls())
+            .unwrap();
+        assert!(profile.flow().maximum_shear_rate_per_s <= ceiling);
+        near(
+            profile.flow().relative_angular_velocity_rad_s,
+            sign * speed,
+            1e-10,
+        );
+        near(
+            profile.sample_gap_fraction(0.0).unwrap().shear_rate_per_s,
+            ceiling,
+            1e-12,
+        );
+        assert!(
+            owner
+                .helical_at_pressure_and_walls(
+                    0.0,
+                    [0.0; 2],
+                    [0.0, sign * speed * 1.01],
+                    controls()
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn g1_thin_gap_uses_vector_shear_and_g0_budgets_refuse_transactionally() {
     let a = 1.0;
     let b = a + 1e-8;

@@ -290,9 +290,33 @@ impl LaminarCarreauAnnulus {
             stress = [inner_axial, inner_rotation];
         }
         if !self.helical_admitted(stress, pressure_stress) {
-            return Err(state_error(
-                "helical constant-law wall stress leaves source support",
-            ));
+            // Even an exactly supported constant-law wall speed can invert a
+            // rounding unit beyond the source stress ceiling. Start at the
+            // admitted boundary of the convex stress domain instead of either
+            // rejecting that endpoint or evaluating outside the source. The
+            // ordinary velocity/stress residual checks below still decide
+            // whether the requested motion has a supported solution.
+            let direction = [stress[0] - pressure_stress, stress[1]];
+            let (mut low, mut high) = (0.0_f64, 1.0_f64);
+            let mut admitted = [pressure_stress, 0.0];
+            for _ in 0..64 {
+                check()?;
+                let fraction = 0.5 * low + 0.5 * high;
+                if fraction == low || fraction == high {
+                    break;
+                }
+                let candidate = [
+                    fraction.mul_add(direction[0], pressure_stress),
+                    fraction * direction[1],
+                ];
+                if self.helical_admitted(candidate, pressure_stress) {
+                    low = fraction;
+                    admitted = candidate;
+                } else {
+                    high = fraction;
+                }
+            }
+            stress = admitted;
         }
         let mut budget = Budget {
             used: 0,
