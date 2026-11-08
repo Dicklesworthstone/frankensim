@@ -3,6 +3,9 @@
 #[path = "heating/reservoir.rs"]
 mod reservoir;
 
+#[path = "heating/plane_stress.rs"]
+mod plane_stress;
+
 use super::*;
 use fs_couple::finite_solid::thermal::thermodynamics::heating::{
     FiniteSolidCaloricState, FiniteThermoelasticHeatError, FiniteThermoelasticHeatSolve,

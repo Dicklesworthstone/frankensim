@@ -22,12 +22,18 @@ use super::{
 use fs_material::phase::PhaseStateError;
 use fs_thermal::enthalpy::ThermalStorageBasis;
 use fs_thermochem::solution::caloric::BinaryCaloricErrorV1;
-use fs_thermochem::solution::caloric::temperature::{self, TemperatureControl, TemperatureSample};
+use fs_thermochem::solution::caloric::temperature::TemperatureControl;
 use std::sync::Arc;
 
 #[path = "heating/reservoir.rs"]
 mod reservoir;
 pub use reservoir::FiniteThermoelasticReservoirBalance;
+
+#[path = "heating/kernel.rs"]
+mod kernel;
+/// Heat-induced transverse deformation under exact elastic-volume plane stress.
+#[path = "heating/plane_stress.rs"]
+pub mod plane_stress;
 
 /// Shared inverse controls plus whole-call bounded temperature-path admission.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +114,15 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum Deformation {
+    Full([f64; 9]),
+    ExactPlane {
+        in_plane: [f64; 4],
+        settings: fs_material::hyper::plane_stress::PlaneStressSettings,
+    },
+}
+
 #[derive(Clone, Debug)]
 struct Source {
     material: FiniteSolidMaterial,
@@ -115,7 +130,7 @@ struct Source {
     caloric: ResolvedHeatCapacityCurve,
     caloric_reference: CaloricReference,
     before_thermal: ReferenceDeformation,
-    total_f: [f64; 9],
+    deformation: Deformation,
     mass_kg: f64,
     volume_m3: f64,
 }
@@ -162,6 +177,33 @@ impl FiniteSolidMaterial {
         caloric_reference: CaloricReference,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<FiniteSolidCaloricState> {
+        let source = self.prepare_heat_source(
+            Deformation::Full(total_f),
+            before_thermal,
+            reference_mass_kg,
+            coefficients,
+            caloric,
+            caloric_reference,
+            &mut cancelled,
+        )?;
+        let state = evaluate(&source, coefficients.temperature_k())?;
+        poll(&mut cancelled)?;
+        Ok(state)
+    }
+
+    // Same material, datum, mass and original source-path admission for both
+    // mechanical constraints. Preparation never evaluates a substitute F.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_heat_source(
+        &self,
+        deformation: Deformation,
+        before_thermal: ReferenceDeformation,
+        reference_mass_kg: f64,
+        coefficients: &ResolvedNeoHookeanThermalCoefficients,
+        caloric: &ResolvedHeatCapacityCurve,
+        caloric_reference: CaloricReference,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Arc<Source>> {
         poll(&mut cancelled)?;
         let Some(ThermalReference::Expansion(expansion)) = self.thermal_reference() else {
             return Err(invalid(
@@ -225,13 +267,11 @@ impl FiniteSolidMaterial {
             caloric: caloric.clone(),
             caloric_reference,
             before_thermal,
-            total_f,
+            deformation,
             mass_kg: reference_mass_kg,
             volume_m3,
         });
-        let state = evaluate(&source, temperature)?;
-        poll(&mut cancelled)?;
-        Ok(state)
+        Ok(source)
     }
 }
 
@@ -239,29 +279,46 @@ fn evaluate(source: &Arc<Source>, temperature: f64) -> Result<FiniteSolidCaloric
     let Some(ThermalReference::Expansion(expansion)) = source.material.thermal_reference() else {
         unreachable!("prepared thermal source remains immutable")
     };
+    let Deformation::Full(total_f) = source.deformation else {
+        return Err(invalid(
+            "full-deformation response requires its original full-F inventory",
+        ));
+    };
     let jet = expansion_jet_at_temperature(expansion, source.before_thermal, temperature, false)?;
     let potential = source
         .coefficients
-        .thermoelastic_state_at_temperature(temperature, &source.total_f, jet)
+        .thermoelastic_state_at_temperature(temperature, &total_f, jet)
         .map_err(FiniteThermoelasticSourceError::Coefficients)?;
-    let base_specific_capacity_j_kg_k = source
-        .caloric
-        .secant_heat_capacity(temperature, temperature)?;
-    let heat_capacity_j_per_k = finite(source.volume_m3.mul_add(
+    let (base_specific_capacity_j_kg_k, heat_capacity_j_per_k) = combined_capacity(
+        source,
+        temperature,
         potential.mechanical_heat_capacity_j_m3_k(),
-        source.mass_kg * base_specific_capacity_j_kg_k,
-    ))?;
-    if heat_capacity_j_per_k <= 0.0 {
-        return Err(invalid(
-            "combined fixed-deformation capacity must be positive",
-        ));
-    }
+    )?;
     Ok(FiniteSolidCaloricState {
         source: Arc::clone(source),
         potential,
         base_specific_capacity_j_kg_k,
         heat_capacity_j_per_k,
     })
+}
+
+fn combined_capacity(
+    source: &Source,
+    temperature: f64,
+    mechanical_capacity_j_m3_k: f64,
+) -> Result<(f64, f64)> {
+    let base = source
+        .caloric
+        .secant_heat_capacity(temperature, temperature)?;
+    let total = finite(
+        source
+            .volume_m3
+            .mul_add(mechanical_capacity_j_m3_k, source.mass_kg * base),
+    )?;
+    if total <= 0.0 {
+        return Err(invalid("combined constrained capacity must be positive"));
+    }
+    Ok((base, total))
 }
 
 impl FiniteSolidCaloricState {
@@ -390,126 +447,29 @@ impl FiniteSolidCaloricState {
         self.solve_heat(controls, |_| finite(heat_j), 0.0, cancelled)
     }
 
-    // One original source continuation/inverse/closure path. The two callers
-    // supply either fixed joules or a passive affine endpoint boundary input.
+    // The native material state remains the owner of every sampled response.
     fn solve_heat(
         &self,
         controls: FiniteThermoelasticHeatSolve,
         heat_at_temperature: impl Fn(f64) -> Result<f64>,
         heat_temperature_derivative_j_per_k: f64,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<FiniteThermoelasticHeatBalance> {
-        poll(&mut cancelled)?;
-        controls.thermal.validate()?;
-        let heat_j = heat_at_temperature(self.temperature_k())?;
-        let [lo, hi] = controls.thermal.bracket;
-        let range = self.source.coefficients.temperature_range_k();
-        if !heat_j.is_finite()
-            || !heat_temperature_derivative_j_per_k.is_finite()
-            || heat_temperature_derivative_j_per_k > 0.0
-            || lo < range[0]
-            || hi > range[1]
-            || self.temperature_k() < lo
-            || self.temperature_k() > hi
-            || !controls.maximum_temperature_step_k.is_finite()
-            || controls.maximum_temperature_step_k <= 0.0
-            || !(1..=4096).contains(&controls.maximum_state_evaluations)
-            || !controls.entropy_tolerance_j_per_k.is_finite()
-            || controls.entropy_tolerance_j_per_k < 0.0
-        {
-            return Err(invalid(
-                "finite heat needs an original bracket, temperature spacing and finite work/tolerance budgets",
-            ));
-        }
-        if heat_j == 0.0 {
-            return Ok(FiniteThermoelasticHeatBalance {
-                final_state: self.clone(),
-                heat_j,
-                energy_change_j: 0.0,
-                entropy_change_j_per_k: 0.0,
-                temperature_bracket_k: [self.temperature_k(); 2],
-                iterations: 0,
-                state_evaluations: 0,
-            });
-        }
-        let divisions = ((hi - lo) / controls.maximum_temperature_step_k)
-            .ceil()
-            .max(1.0);
-        if divisions + 1.0 > controls.maximum_state_evaluations as f64 {
-            return Err(FiniteThermoelasticHeatError::StateBudget { completed: 0 });
-        }
-        let divisions = divisions as usize;
-        let mut states = vec![self.clone()];
-        let mut evaluations = 0;
-        for index in 0..=divisions {
-            let t = if index == divisions {
-                hi
-            } else {
-                (hi - lo).mul_add(index as f64 / divisions as f64, lo)
-            };
-            sample(
-                self,
-                t,
-                &mut states,
-                &mut evaluations,
-                controls.maximum_state_evaluations,
-                &mut cancelled,
-            )?;
-        }
-        let root = temperature::solve(
-            controls.thermal,
-            |t| -> Result<_> {
-                let state = sample(
-                    self,
-                    t,
-                    &mut states,
-                    &mut evaluations,
-                    controls.maximum_state_evaluations,
-                    &mut cancelled,
-                )?;
-                let change_j = self.internal_energy_change_to(&state)?;
-                Ok(TemperatureSample {
-                    state,
-                    change_j,
-                    residual_j: finite(change_j - heat_at_temperature(t)?)?,
-                })
-            },
-            |state| Some(state.heat_capacity_j_per_k - heat_temperature_derivative_j_per_k),
+        let result = kernel::solve(
+            self,
+            controls,
+            heat_at_temperature,
+            heat_temperature_derivative_j_per_k,
+            cancelled,
         )?;
-        let final_state = root.sample.state;
-        let heat_j = heat_at_temperature(final_state.temperature_k())?;
-        let change = self.internal_energy_change_to(&final_state)?;
-        let entropy = self.entropy_change_to(&final_state)?;
-        if final_state.temperature_k() == self.temperature_k()
-            || (change - heat_j).abs() > controls.thermal.energy_tolerance_j
-        {
-            return Err(invalid(
-                "nonzero heat must resolve a changed temperature and close actual internal energy",
-            ));
-        }
-        let a = change / self.temperature_k();
-        let b = change / final_state.temperature_k();
-        let bounds = [a.min(b), a.max(b)];
-        let allowance =
-            self.entropy_allowance(&final_state, controls, bounds[0].abs().max(bounds[1].abs()));
-        if !allowance.is_finite()
-            || entropy < bounds[0] - allowance
-            || entropy > bounds[1] + allowance
-        {
-            return Err(FiniteThermoelasticHeatError::ClausiusBounds {
-                entropy_change_j_per_k: entropy,
-                bounds_j_per_k: bounds,
-            });
-        }
-        poll(&mut cancelled)?;
         Ok(FiniteThermoelasticHeatBalance {
-            final_state,
-            heat_j,
-            energy_change_j: change,
-            entropy_change_j_per_k: entropy,
-            temperature_bracket_k: root.bracket,
-            iterations: root.iterations,
-            state_evaluations: evaluations,
+            final_state: result.final_state,
+            heat_j: result.heat_j,
+            energy_change_j: result.energy_change_j,
+            entropy_change_j_per_k: result.entropy_change_j_per_k,
+            temperature_bracket_k: result.temperature_bracket_k,
+            iterations: result.iterations,
+            state_evaluations: result.state_evaluations,
         })
     }
 
@@ -519,56 +479,33 @@ impl FiniteSolidCaloricState {
         controls: FiniteThermoelasticHeatSolve,
         thermal_entropy_scale_j_per_k: f64,
     ) -> f64 {
-        controls.entropy_tolerance_j_per_k
-            + controls.thermal.energy_tolerance_j
-                / self.temperature_k().min(final_state.temperature_k())
-            + 64.0
-                * f64::EPSILON
-                * (thermal_entropy_scale_j_per_k
-                    + self.source.volume_m3
-                        * (self.potential.entropy_j_m3_k().abs()
-                            + final_state.potential.entropy_j_m3_k().abs()))
+        kernel::entropy_allowance(self, final_state, controls, thermal_entropy_scale_j_per_k)
     }
 }
 
-fn sample(
-    initial: &FiniteSolidCaloricState,
-    temperature: f64,
-    states: &mut Vec<FiniteSolidCaloricState>,
-    evaluations: &mut usize,
-    maximum: usize,
-    cancelled: &mut impl FnMut() -> bool,
-) -> Result<FiniteSolidCaloricState> {
-    poll(cancelled)?;
-    let index = match states.binary_search_by(|state| state.temperature_k().total_cmp(&temperature))
-    {
-        Ok(index) => return Ok(states[index].clone()),
-        Err(index) => index,
-    };
-    if *evaluations >= maximum {
-        return Err(FiniteThermoelasticHeatError::StateBudget {
-            completed: *evaluations,
-        });
+impl kernel::Endpoint for FiniteSolidCaloricState {
+    fn temperature_k(&self) -> f64 {
+        self.temperature_k()
     }
-    let state = evaluate(&initial.source, temperature)?;
-    *evaluations += 1;
-    for (left, right) in index
-        .checked_sub(1)
-        .map(|i| (&states[i], &state))
-        .into_iter()
-        .chain(states.get(index).map(|next| (&state, next)))
-    {
-        let change = left.internal_energy_change_to(right)?;
-        if change <= 0.0 {
-            return Err(FiniteThermoelasticHeatError::NonMonotone {
-                temperatures_k: [left.temperature_k(), right.temperature_k()],
-                energy_change_j: change,
-            });
-        }
+    fn temperature_range_k(&self) -> [f64; 2] {
+        self.source.coefficients.temperature_range_k()
     }
-    poll(cancelled)?;
-    states.insert(index, state.clone());
-    Ok(state)
+    fn heat_capacity_j_per_k(&self) -> f64 {
+        self.heat_capacity_j_per_k()
+    }
+    fn at_sample_temperature(&self, temperature: f64) -> Result<Self> {
+        evaluate(&self.source, temperature)
+    }
+    fn internal_energy_change_to(&self, other: &Self) -> Result<f64> {
+        self.internal_energy_change_to(other)
+    }
+    fn entropy_change_to(&self, other: &Self) -> Result<f64> {
+        self.entropy_change_to(other)
+    }
+    fn mechanical_entropy_scale(&self, other: &Self) -> f64 {
+        self.source.volume_m3
+            * (self.potential.entropy_j_m3_k().abs() + other.potential.entropy_j_m3_k().abs())
+    }
 }
 
 impl FiniteThermoelasticHeatBalance {
