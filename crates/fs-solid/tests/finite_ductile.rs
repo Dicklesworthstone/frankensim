@@ -2,6 +2,8 @@
 //! Synthetic constants exercise the numerical law; no alloy is qualified here.
 #![deny(unsafe_code)]
 
+#[path = "finite_ductile/contact.rs"]
+mod contact;
 #[path = "finite_ductile/dynamics.rs"]
 mod dynamics;
 #[path = "finite_ductile/path.rs"]

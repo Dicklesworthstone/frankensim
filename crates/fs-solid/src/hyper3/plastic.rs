@@ -45,6 +45,8 @@ pub mod ductile;
 pub mod dynamics;
 /// Fully integrated finite Hex8 plasticity with optional mean dilatation.
 pub mod hex;
+/// Shared frictionless plane tooling on retained native tetrahedral responses.
+pub mod plane_contact;
 /// Retained pressure-sensitive finite compaction on the same tetrahedral owner.
 pub mod porous;
 /// Retained finite plastic history with evolving thermal coefficients and stretch.
@@ -732,12 +734,12 @@ impl<'a, L: FiniteInelasticMaterial> FinitePlasticTetSolid<'a, L> {
                 response.plastic_dissipation_j_m3,
                 energy.plastic_dissipation_j,
             );
-            energy.creep_dissipation_j = element.volume.mul_add(
-                response.creep_dissipation_j_m3,
-                energy.creep_dissipation_j,
-            );
-            energy.flow_potential_j =
-                element.volume.mul_add(response.flow_potential_j_m3, energy.flow_potential_j);
+            energy.creep_dissipation_j = element
+                .volume
+                .mul_add(response.creep_dissipation_j_m3, energy.creep_dissipation_j);
+            energy.flow_potential_j = element
+                .volume
+                .mul_add(response.flow_potential_j_m3, energy.flow_potential_j);
             energy.incremental_potential_j = element.volume.mul_add(
                 response.incremental_potential_j_m3,
                 energy.incremental_potential_j,

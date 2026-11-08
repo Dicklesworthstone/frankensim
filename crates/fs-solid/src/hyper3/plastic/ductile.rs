@@ -41,6 +41,8 @@ use crate::loads3::TetLoadGeometry3;
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
+/// Frictionless translating tools on the same progressive material and momentum.
+pub mod contact;
 /// Consistent reference inertia on the same nonpotential finite ductile solve.
 pub mod dynamics;
 /// Bounded physical-interval continuation through native finite softening.
@@ -279,7 +281,9 @@ where
                         || !states[e].is_valid()
                         || &f != states[e].deformation()
                     {
-                        return Err(invalid("retained stress requires its original accepted material and deformation"));
+                        return Err(invalid(
+                            "retained stress requires its original accepted material and deformation",
+                        ));
                     }
                     (*states[e].first_piola_pa(), None)
                 }
@@ -351,7 +355,8 @@ where
         prescribed: Option<&[bool]>,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, f64), SmallStrainTetError> {
-        let (force, scale, _) = self.assemble(states, u, prescribed, MaterialEvaluation::Stress, cx)?;
+        let (force, scale, _) =
+            self.assemble(states, u, prescribed, MaterialEvaluation::Stress, cx)?;
         Ok((force, scale))
     }
     fn tangent(

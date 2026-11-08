@@ -1,5 +1,45 @@
 # fs-solid CONTRACT
 
+## Progressive ductile rigid-plane tooling
+
+Static and moving `FiniteDuctileTetSolid` / `FiniteDuctileTetMotion` endpoints
+now expose `advance_with_plane_contact`. The shared
+`hyper3::plastic::plane_contact` owner reuses native sustained normal
+complementarity, original force probes, all-vertex plane gaps and the original
+tetrahedron orientation sweep. Thermal plastic tooling delegates to the same
+owner while retaining its existing public names and complete energy arithmetic.
+
+Every force probe starts from the same accepted deformation, velocity,
+plastic/damage histories and physical duration. The actual native nonsymmetric
+equilibrium or momentum solve supplies its response. Only the final response
+matching the original contact receipt can be published. Original reference mass,
+material identities and quadrature remain unchanged. Explicit candidates are
+bounded by the native contact solver; every original vertex must remain outside
+every tool, so omitted candidates cannot silently permit penetration.
+
+The native material accounts retain storage, plastic loss, damage release and
+signed endpoint-work defects. Moving specimens additionally retain physical
+kinetic change and backward-Euler numerical loss. Tool work, body contact work,
+original dead-load work and the signed normal endpoint defect are separate;
+the sum of absolute contact defects has its own gate and never becomes heat.
+A rejected material/contact/geometry/work/cancellation proposal publishes no
+partial specimen or reaction state.
+
+Three focused source tests cover independent compressive finite stress and
+damage, rotation, holds and tool release; analytical rate-dependent loading and
+held relaxation with original consistent mass; distinct contact-arrival,
+material and kinetic accounts; omitted penetrating vertices; and transactional
+refusals. Parsing/formatting and bounded compatibility review passed. Runtime
+and type-check execution remain unverified in the exhausted shared workspace.
+Virgin native histories have no previously stored damage energy to release;
+subsequent damage growth releases the separately retained active storage.
+
+This is frictionless fixed-normal translating-plane tooling, not self-contact,
+arbitrary curved tools, an impact/impulse law, crack creation, erosion or ductile
+fragment transfer. Straight-path gap/orientation admission is not an exact-flow
+CCD or temporal-error estimate. Unstable force-controlled branches can still
+require physical refinement, inertia or another continuation formulation.
+
 ## Progressive ductility on original finite H8 cells
 
 `FiniteDuctileHexSolid` binds eight independent original `FiniteDuctileJ2`
