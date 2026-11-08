@@ -14,6 +14,9 @@
 //! storage. The fluid supplies nu and thermal diffusivity separately; no
 //! hydraulic radius, loss fit, gas surrogate or geometric series truncation
 //! replaces the annulus. The native TwoPort supplies stable axial propagation.
+//! [`molecular`] uses the original gas's complex heat capacity in that SAME
+//! radial thermal solve. Its wall diffusion and molecular storage share one
+//! energy equation; no separately added attenuation replaces their coupling.
 //!
 //! This is fixed-geometry, linear, fully developed, Newtonian continuum
 //! acoustics. End fields, eccentricity, slip, mean flow, moving walls, bulk
@@ -27,6 +30,9 @@ use fs_la::eigen_complex::solve_tridiagonal_complex;
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Molecular heat storage solved together with the original annular wall diffusion.
+pub mod molecular;
+
 /// Bounds the geometry, each native linear-solve tile and all frequency work.
 pub const MAX_ANNULAR_ELEMENTS: usize = 4096;
 
@@ -37,7 +43,8 @@ pub struct AnnularAdmission {
     /// The first nonaxisymmetric Neumann eigenvalue is at least 1/outer_radius
     /// by its Rayleigh quotient; this is a conservative transverse envelope.
     pub maximum_transverse_phase: f64,
-    /// max radial cell width times sqrt(omega/D), for each active diffusivity.
+    /// max radial cell width times sqrt(|z|), for each active diffusion argument
+    /// z [1/m2]. For a constant heat capacity, |z| = omega/D.
     /// In (0,1]; a resolution ceiling, not a discretization-error certificate.
     pub maximum_cell_diffusion_phase: f64,
     /// Componentwise solve backward error and relative diffusion-work defect,
@@ -56,8 +63,10 @@ pub struct AnnularDiffusion {
     pub mean: C64,
     /// Mean 1-h, calculated through the well-scaled member of the two fields.
     pub wall: C64,
-    /// Mean |grad h|² * D/omega, independently integrated from the P1 field.
-    /// Equals Im(mean) for the discrete diffusion equations.
+    /// Mean |grad h|² * Im(z)/|z|², independently integrated from the P1 field.
+    /// Equals Im(mean) for the discrete diffusion equations. For constant
+    /// diffusivity z=i*omega/D this is mean |grad h|² * D/omega. With molecular
+    /// heat storage it remains a radial diffusion identity, not total absorbed heat.
     pub gradient_work: f64,
     pub maximum_cell_diffusion_phase: f64,
     pub relative_backward_residual: f64,
@@ -229,6 +238,23 @@ impl AnnularSection {
             .map(|x| self.inner_m + self.gap_m * x)
     }
 
+    fn admit(&self, omega: f64, admission: AnnularAdmission) -> Result<(), DuctError> {
+        if !positive(omega)
+            || !positive(admission.maximum_transverse_phase)
+            || admission.maximum_transverse_phase >= 1.0
+            || !positive(admission.maximum_cell_diffusion_phase)
+            || admission.maximum_cell_diffusion_phase > 1.0
+            || !positive(admission.maximum_relative_residual)
+            || admission.maximum_relative_residual >= 1.0
+            || 192 * (self.elements() + 1) + 4096 > admission.maximum_payload_bytes
+        {
+            return Err(bad(
+                "annular frequency, numerical limits or payload budget is invalid",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn evaluate<M: ThermoviscousFluid + ?Sized>(
         &self,
         material: &M,
@@ -249,19 +275,7 @@ impl AnnularSection {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AnnularWave, FluidDuctError> {
         poll(&mut cancelled, 0)?;
-        if !positive(omega)
-            || !positive(admission.maximum_transverse_phase)
-            || admission.maximum_transverse_phase >= 1.0
-            || !positive(admission.maximum_cell_diffusion_phase)
-            || admission.maximum_cell_diffusion_phase > 1.0
-            || !positive(admission.maximum_relative_residual)
-            || admission.maximum_relative_residual >= 1.0
-            || 192 * (self.elements() + 1) + 4096 > admission.maximum_payload_bytes
-        {
-            return Err(
-                bad("annular frequency, numerical limits or payload budget is invalid").into(),
-            );
-        }
+        self.admit(omega, admission)?;
         let state = material.thermoviscous_state()?;
         let acoustic = state.acoustic();
         let transport = state.transport();
@@ -332,12 +346,38 @@ impl AnnularSection {
         admission: AnnularAdmission,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AnnularDiffusion, DuctError> {
-        poll(cancelled, 0)?;
         let phase = self.gap_m / det::sqrt(diffusivity / omega);
         let alpha = phase * phase;
+        self.diffusion_scaled(
+            C64::new(0.0, alpha),
+            phase,
+            1.0 / phase,
+            admission,
+            cancelled,
+        )
+    }
+
+    // One original radial solve for real transport and complex caloric storage.
+    // z is dimensionless (physical argument * gap²); phase=sqrt(|z|).
+    // Im(<h>) = Im(z)/|z|² * <|grad_x h|²>, x=(r-inner)/gap,
+    // follows by taking the imaginary part of h* (K/z + M) h = h* b.
+    fn diffusion_scaled(
+        &self,
+        argument: C64,
+        phase: f64,
+        gradient_scale: f64,
+        admission: AnnularAdmission,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AnnularDiffusion, DuctError> {
+        poll(cancelled, 0)?;
+        let magnitude = argument.abs();
         let maximum_cell_diffusion_phase = phase * self.maximum_cell_fraction;
-        if !positive(alpha)
+        if !finite(argument)
+            || argument.re < 0.0
+            || !positive(argument.im)
+            || !positive(magnitude)
             || !positive(phase)
+            || !positive(gradient_scale)
             || !maximum_cell_diffusion_phase.is_finite()
             || maximum_cell_diffusion_phase > admission.maximum_cell_diffusion_phase
         {
@@ -348,11 +388,14 @@ impl AnnularSection {
         // Solve h in a narrow/low-frequency gap, and w=1-h in a wide/high-
         // frequency gap. The latter retains small wall fractions without
         // subtracting a nearly uniform interior h from one after averaging.
-        let solve_wall = alpha > 1.0;
+        let solve_wall = magnitude > 1.0;
         let (k_scale, m_scale) = if solve_wall {
-            (1.0 / alpha, 1.0)
+            (
+                1.0 / magnitude,
+                C64::new(argument.re / magnitude, argument.im / magnitude),
+            )
         } else {
-            (1.0, alpha)
+            (1.0, argument)
         };
         let n = self.load.len();
         let mut diagonal = filled(n, C64::ZERO)?;
@@ -360,8 +403,8 @@ impl AnnularSection {
         let mut rhs = filled(n, C64::ZERO)?;
         let boundary = [0, self.elements() - 1].map(|i| {
             C64::new(
-                -k_scale * self.stiffness_edges[i],
-                m_scale * self.mass_edges[i],
+                -k_scale * self.stiffness_edges[i] + m_scale.re * self.mass_edges[i],
+                m_scale.im * self.mass_edges[i],
             )
         });
         for i in 0..n {
@@ -369,17 +412,18 @@ impl AnnularSection {
                 poll(cancelled, i)?;
             }
             diagonal[i] = C64::new(
-                k_scale * (self.stiffness_edges[i] + self.stiffness_edges[i + 1]),
-                m_scale * self.mass_diagonal[i],
+                k_scale * (self.stiffness_edges[i] + self.stiffness_edges[i + 1])
+                    + m_scale.re * self.mass_diagonal[i],
+                m_scale.im * self.mass_diagonal[i],
             );
             if i + 1 < n {
                 off[i] = C64::new(
-                    -k_scale * self.stiffness_edges[i + 1],
-                    m_scale * self.mass_edges[i + 1],
+                    -k_scale * self.stiffness_edges[i + 1] + m_scale.re * self.mass_edges[i + 1],
+                    m_scale.im * self.mass_edges[i + 1],
                 );
             }
             if !solve_wall {
-                rhs[i] = C64::new(0.0, m_scale * self.load[i]);
+                rhs[i] = m_scale.scale(self.load[i]);
             }
         }
         if solve_wall {
@@ -407,7 +451,7 @@ impl AnnularSection {
             let mut drive = if solve_wall {
                 C64::ZERO
             } else {
-                C64::new(0.0, m_scale * self.load[i])
+                m_scale.scale(self.load[i])
             };
             if solve_wall && i == 0 {
                 drive = drive - boundary[0];
@@ -450,7 +494,7 @@ impl AnnularSection {
             let next = if i < n { rhs[i] } else { boundary_value };
             // Scale before squaring: weak diffusion work must not disappear
             // solely because the unscaled gradient square underflows.
-            let scaled = (next - previous).scale(1.0 / phase);
+            let scaled = (next - previous).scale(gradient_scale);
             work = work + Dd::from_f64(self.stiffness_edges[i]) * Dd::from_f64(scaled.norm_sq());
             previous = next;
         }
