@@ -663,6 +663,9 @@ fn require_psd(r: &[f64], n: usize, what: &'static str) -> Result<(), PhsError> 
     let (values, _vectors) = fs_la::eigen::jacobi_eigh(r, n);
     let scale = matrix_scale(r);
     for &lam in &values {
+        if !lam.is_finite() {
+            return Err(PhsError::Eigen);
+        }
         if lam < -PSD_TOL * scale {
             return Err(PhsError::NotPsd { what });
         }

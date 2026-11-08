@@ -584,8 +584,19 @@ kinetic storage; no lumping, modal projection or proportional-damping fit is
 introduced. The symmetric PSD part of C is physical resistance, checked by
 the existing positive-factor owner and retained with its resistance witness.
 The skew part enters J and is gyroscopic, with exactly zero physical loss.
-Relaxed K independently passes the same positive-factor reconstruction gate
-before unrelated kinetic or Maxwell storage can enlarge its PSD allowance.
+Relaxed K independently passes the existing storage PSD admission after a
+diagonal congruence, before unrelated kinetic or Maxwell scales can hide an
+elastic direction. Negative original diagonals, including subnormal values,
+and zero diagonals with nonzero coupling refuse exactly. The normalized
+matrix must retain symmetry and satisfy the native storage PSD tolerance
+(1e-10 relative to its matrix scale). This numerical admission accommodates
+rigid/gauge roundoff from positive finite-element quadrature; it is not an
+exact-arithmetic positivity proof or a source-authenticated Gram witness.
+Necessary normalized two-coordinate bounds use that same PSD allowance before
+the eigensolve; nonfinite eigenvalues refuse. Symmetric damping uses midpoint
+arithmetic so a negative subnormal still reaches the strict physical-heat gate.
+The original K remains unchanged in storage and dynamics. Heat resistance
+keeps its separate strict positive-factor reconstruction gate.
 
 State order is `[q, p=M*v, z]`. Each original displacement strain b retains
 one existing Maxwell memory `z=sqrt(k)*viscous_strain`, including zero strain
@@ -610,6 +621,15 @@ consistent-mass, nonproportional, gyroscopic and two-time Maxwell dynamics
 against an independent physical-variable ODE; exact time partition through
 warm caches; zero-loss free and gyroscopic trajectories; independently relaxing
 hidden memory; physical port work, and nonphysical/incomplete input refusal.
+
+`tests/mechanical_storage.rs` additionally pins actual P1 acoustic quadrature
+coefficient images whose rounded constant-potential ground is slightly negative,
+checks unchanged original stiffness after admission, and retains weak/subnormal
+negative-diagonal, coupled-zero, normalized-symmetry and scale-separated
+indefinite refusals. Valid extreme coordinate scales and free coordinates remain
+admitted. A stiffness admission does not authorize that same rounded matrix as
+a positive heat resistance. These source-specific checks supplement the existing
+mechanical, impulse and full coupled Maxwell transient regressions.
 
 
 Original-coordinate and force-port impulses use `apply_impulse` and

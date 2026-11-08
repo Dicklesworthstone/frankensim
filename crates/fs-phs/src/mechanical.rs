@@ -8,7 +8,7 @@
 use crate::interconnection::accumulation::Sum;
 use crate::linear_exact::positive_heat::factor_resistance;
 use crate::{
-    PhsError, PortHamiltonian, QuadraticStorage, RelaxationBranch, ResistanceWitness,
+    PhsError, PortHamiltonian, QuadraticStorage, RelaxationBranch, ResistanceWitness, require_psd,
     require_symmetric,
 };
 use fs_la::factor::cholesky;
@@ -55,6 +55,12 @@ impl LinearMechanicalSystem {
     /// State and port counts are bounded by `MAX_MECHANICAL_STATES`. Native
     /// floating-point structural/factor admission applies; this is not an
     /// interval conditioning certificate or a material-validity claim.
+    /// Stiffness uses the existing storage PSD tolerance after an independent
+    /// diagonal congruence, allowing assembled rigid/gauge roundoff without
+    /// kinetic or branch scales hiding a negative elastic direction. Negative
+    /// original diagonals and coupled zero diagonals refuse exactly. The
+    /// original stiffness is never clipped or reconstructed; physical heat
+    /// retains its separate strict positive-factor admission.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mass: &[f64],
@@ -106,11 +112,7 @@ impl LinearMechanicalSystem {
         }
         require_symmetric(mass, n, "mechanical mass")?;
         require_symmetric(relaxed_stiffness, n, "mechanical relaxed stiffness")?;
-        // Resolve each original elastic direction before unrelated kinetic or
-        // branch storage can enlarge the aggregate quadratic PSD allowance.
-        factor_resistance(relaxed_stiffness, n).map_err(|_| PhsError::Unadmitted {
-            what: "resolved positive semidefinite mechanical relaxed stiffness",
-        })?;
+        admit_relaxed_stiffness(relaxed_stiffness, n)?;
         let factor = cholesky(mass, n).map_err(|_| PhsError::Unadmitted {
             what: "positive definite mechanical mass",
         })?;
@@ -140,7 +142,7 @@ impl LinearMechanicalSystem {
         let symmetric: Vec<_> = (0..square)
             .map(|index| {
                 let (a, b) = (index / n, index % n);
-                0.5 * damping[a * n + b] + 0.5 * damping[b * n + a]
+                damping[a * n + b].midpoint(damping[b * n + a])
             })
             .collect();
         // Reuse native positive-factor admission: no clipping or fitting C.
@@ -327,4 +329,65 @@ impl LinearMechanicalSystem {
 }
 fn finite(values: &[f64]) -> bool {
     values.iter().all(|v| v.is_finite())
+}
+
+// Storage and heat have different native admission contracts. Rounded FE
+// stiffness can retain a rigid/gauge eigenvalue just below zero even when its
+// source is an integral of positive gradient squares. Requiring an exact heat
+// factor rejects that source. Check storage at its own coordinate scales,
+// before inverse mass or Maxwell arms enter Q; retain every ORIGINAL entry in
+// the physical storage and dynamics. This is numerical PSD admission, not a
+// source-authenticated Gram witness or an exact-arithmetic positivity proof.
+fn admit_relaxed_stiffness(matrix: &[f64], n: usize) -> Result<(), PhsError> {
+    let mut scales = Vec::with_capacity(n);
+    for i in 0..n {
+        let diagonal = matrix[i * n + i];
+        if diagonal < 0.0
+            || (diagonal == 0.0
+                && (0..n).any(|j| matrix[i * n + j] != 0.0 || matrix[j * n + i] != 0.0))
+        {
+            return Err(PhsError::NotPsd {
+                what: "mechanical relaxed stiffness",
+            });
+        }
+        scales.push(if diagonal == 0.0 {
+            1.0
+        } else {
+            det::sqrt(diagonal)
+        });
+    }
+    // For the largest off-diagonal a, the corresponding 2x2 principal
+    // block has lambda_min <= max_diagonal-|a|. The existing storage rule
+    // lambda_min >= -PSD_TOL*max_entry therefore requires this bound.
+    // Besides rejecting resolved indefiniteness, it keeps every normalized
+    // entry O(1) before Jacobi can overflow on an invalid correlation.
+    let maximum_diagonal = (0..n)
+        .map(|i| matrix[i * n + i] / scales[i] / scales[i])
+        .fold(0.0, f64::max);
+    let correlation_bound = maximum_diagonal / (1.0 - crate::PSD_TOL);
+    let mut normalized = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            // Smaller scale first avoids an intermediate underflow between
+            // a very stiff coordinate and a physically weak one. For PSD
+            // sources |Kij| <= sqrt(Kii)*sqrt(Kjj), so this order also cannot
+            // overflow an intermediate quotient of an admissible entry.
+            let small = scales[i].min(scales[j]);
+            let large = scales[i].max(scales[j]);
+            let value = matrix[i * n + j] / small / large;
+            if !value.is_finite() {
+                return Err(PhsError::Unadmitted {
+                    what: "representable normalized mechanical stiffness",
+                });
+            }
+            if value.abs() > correlation_bound {
+                return Err(PhsError::NotPsd {
+                    what: "normalized mechanical relaxed stiffness",
+                });
+            }
+            normalized[i * n + j] = value;
+        }
+    }
+    require_symmetric(&normalized, n, "normalized mechanical relaxed stiffness")?;
+    require_psd(&normalized, n, "normalized mechanical relaxed stiffness")
 }

@@ -6731,6 +6731,53 @@ also authored; the missing frankenscipy/fsci-special manifest prevents their
 Cargo compilation in this environment. Native evidence is not a claim that
 the complete adapter or workspace has compiled.
 
+### Exact full-field cavity evolution with original relaxation memory
+
+`StructuralInterior::prepare_relaxation_exact_time` passes the complete original
+M/C/K and explicit Maxwell channels to `fs-phs::mechanical::LinearMechanicalSystem`,
+then caches the native `PreparedQuadraticFlow` for held original generalized
+forces and projected inward-flow loads. K is relaxed. Original [u,psi], velocity
+[v,p], full consistent mass, gyroscopic/nonproportional damping, reciprocal
+interface coupling and all native viscous-strain histories survive. Initial
+stresses are supplied explicitly, or initialized at zero by `relaxed_state`;
+a nonzero history that cannot survive the native coordinate conversion refuses.
+Constant acoustic potential and pure dark material histories remain, including
+the latter's independent relaxation heat.
+
+Native mechanical stiffness admission uses its own diagonal-congruence scales
+and the existing storage PSD tolerance. This retains original acoustic gauge
+roundoff without kinetic or Maxwell scales concealing a resolved negative
+elastic direction. Exact negative diagonals and coupled zero diagonals refuse;
+the original stiffness entries and strict physical-heat admission are retained.
+
+The same exact trajectory supplies original structural/fluid storage, separate
+structural and memoryless-wall loss, signed B/B^T interface work, and each
+branch's sigma^2/(2*k) storage, integral sigma^2/(k*tau) heat, and separately
+integrated work drawn from structure and acoustic field. No heat is inferred
+from a deficit. Original structural, acoustic, per-branch memory, aggregate
+memory and complete-system balances gate publication. The original input
+convention and pressure p=psi_dot are unchanged.
+
+Preparation admits every 2*n+b state and the native doubled augmented bound
+2*(3*n+b+1)<=256. Explicit adapter payload/work-score and native cache
+byte/multiply budgets precede allocation. Warm `step_into` uses fixed scratch,
+cached contractions and no allocation, mass solve or exponential. Source and
+branch-array binding, numerical refusal and cancellation preserve the complete
+accepted field, histories and clock; no truncation or positive-frequency floor
+is introduced. Exactness concerns the frozen semidiscrete held-input model up
+to numerical propagation error, not changing materials, continuum accuracy or
+output antialiasing.
+
+Seven actual production numerical-kernel regressions pass, covering all three
+analytic affine-cavity cubic modes and independently integrated heat; forced
+partial fractions; dark histories; mixed and wall channels against the original
+physical ODE; zero-memory compression dynamics; late cancellation/invalid
+inputs/clock rollback; and native passive/resource refusal. The real mechanical
+and exact propagation owners are executed. The additional full FE/Cx zero-memory
+and source-binding regression is authored but unexecuted while the canonical
+dependency closure remains unavailable. Independent source review found no
+blocker; the numerical evidence does not establish outer-adapter compilation.
+
 ### Adaptive physical time for retained porous gas/wall compression
 
 `ThermalPorousGasSystem::advance_adaptive` resolves a complete physical stroke
