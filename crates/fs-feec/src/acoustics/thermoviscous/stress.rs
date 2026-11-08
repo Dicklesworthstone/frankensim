@@ -14,6 +14,9 @@
 use super::time::ThermoviscousTimeState;
 use super::{C64, ThermoviscousError, ThermoviscousFe, ThermoviscousField, finite, poll};
 
+/// Original pressure, velocity and temperature fields and their energy flux.
+pub mod field;
+
 /// Physical stress with tensor shear in `[xx, yy, zz, xy, yz, zx]` order.
 /// `C64` denotes peak phasors with exp(+i omega t); `f64` denotes an instant.
 #[derive(Clone, Copy, Debug, PartialEq)]

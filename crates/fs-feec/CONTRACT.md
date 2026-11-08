@@ -1488,6 +1488,27 @@ stress traces are unsmoothed and inherit spatial discretization error; these
 point observations do not replace the original weak moving-wall reactions or
 constitute an equilibrated interface stress or mesh-accuracy certificate.
 
+`ThermoviscousFe::prepare_field_at` additionally retains the original P2 basis
+values and thermal gradients. Harmonic and instantaneous point observations
+return pressure, velocity, temperature perturbation, stress and Fourier heat
+current without allocation, another solve, or a plane-wave impedance assumption.
+The material-bound `ThermoviscousInterior` exposes the same preparation. Signed
+disturbance-energy flux separates pressure work, viscous work and conductive
+available-energy transport: `J=p*v-tau*v+(T'/T0)*q`, `q=-kappa*grad(T')`, with
+`Re(a*conj(b))/2` for peak harmonic fields. This is a uniform-background linear
+fluid energy corollary, not first-order heat flux or a streaming calculation.
+These selected-element traces retain the original spatial error and are not
+substitutes for the weak terminal or moving-wall work coordinates.
+
+Six focused point-field tests and six retained stress tests pass in a native
+exact-source leaf: hierarchical field/gradient interpolation, harmonic versus
+instantaneous period averaging, Couette and conduction dissipation identities,
+standing-wave quadrature, signed flux projection, and input/cancellation refusal.
+Parent FE assembly carriers in that leaf are compile-only nominal types; no FE
+factory or solve is claimed executed there. Existing full-FE harmonic loss and
+manufactured curved-geometry fixtures also exercise the new factory, but those
+two augmented regressions await the full dependency build.
+
 Four focused native tests cover traction-work closure and all live loss
 channels, reciprocity, simultaneous drives, direct power scattering, replay,
 boundary/material/budget/cancellation refusals, and independent continuum

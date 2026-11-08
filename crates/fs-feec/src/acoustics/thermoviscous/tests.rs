@@ -21,17 +21,23 @@ fn g1_local_stress_observation_integrates_to_original_viscous_power() {
         .response(&[C64::new(1.0, 0.2), C64::new(-0.3, 0.1)], &mut || false).unwrap();
     let mut shear = 0.0;
     let mut bulk = 0.0;
+    let mut conduction = 0.0;
     for element in 0..mesh.tets.len() {
         for (bary, weight) in duffy_quadrature(model.volume_quadrature_order()) {
-            let point = model.prepare_stress_at(element, bary, &mut || false).unwrap();
-            let stress = point.harmonic(&field, &mut || false).unwrap();
+            let point = model.prepare_field_at(element, bary, &mut || false).unwrap();
+            let sample = point.harmonic(&field, &mut || false).unwrap();
+            let stress = sample.stress;
             let volume_weight = model.volume_geometry(element, bary).unwrap().0 * weight;
             shear += volume_weight * stress.mean_shear_heating_w_m3();
             bulk += volume_weight * stress.mean_bulk_heating_w_m3();
+            conduction += volume_weight * 0.5 * gas.thermal_conductivity_w_m_k
+                / gas.temperature_k * sample.temperature_gradient_k_m.iter().map(|g| g.norm_sq()).sum::<f64>();
+            sample.mean_energy_flux().unwrap().total_w_m2().unwrap();
         }
     }
     assert!((shear / field.power.viscous_w - 1.0).abs() < 5e-13);
     assert!((bulk / field.power.bulk_w - 1.0).abs() < 5e-13);
+    assert!((conduction / field.power.conductive_w - 1.0).abs() < 5e-13);
     assert!(model.prepare_stress_at(mesh.tets.len(), [0.25; 4], &mut || false).is_err());
     assert!(model.prepare_stress_at(0, [-0.1, 0.3, 0.4, 0.4], &mut || false).is_err());
     assert!(matches!(model.prepare_stress_at(0, [0.25; 4], &mut || true), Err(ThermoviscousError::Cancelled)));

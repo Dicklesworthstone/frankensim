@@ -152,6 +152,45 @@ fn mapped_physical_linear_fields_recover_exact_mixed_stress_storage_and_divergen
         let thermal = coefficients(&mesh, &positions, &midpoints, |[x, y, z]| {
             1.0 + 2.0 * x - 3.0 * y + z
         });
+        // Observe an independently manufactured physical field through the
+        // production curved-point factory, without solving a constrained state.
+        let point_state = crate::acoustics::thermoviscous::time::ThermoviscousTimeState {
+            pressure_pa: vec![2.0; mesh.vertex_count],
+            velocity_m_s: (0..model.space.ndof)
+                .map(|i| std::array::from_fn(|axis| velocity[axis][i]))
+                .collect(),
+            temperature_k: thermal.clone(),
+            molecular_temperature_k: vec![],
+            conductive_wall_temperature_k: vec![],
+            wall_displacement_m_sqrt_kg: vec![],
+            wall_velocity_m_sqrt_kg_per_s: vec![],
+        };
+        let bary = [0.1, 0.2, 0.3, 0.4];
+        let sample = model
+            .prepare_field_at(0, bary, &mut || false)
+            .unwrap()
+            .instantaneous(&point_state, &mut || false)
+            .unwrap();
+        let [x, y, z] = [bary[1], bary[2], bary[3] * (1.0 + a * bary[1])];
+        for (actual, expected) in
+            sample
+                .velocity_m_s
+                .into_iter()
+                .zip([2.0 * x - y, 3.0 * y + z, -x + 4.0 * z])
+        {
+            relative(actual, expected, 3e-12);
+        }
+        relative(sample.temperature_k, 1.0 + 2.0 * x - 3.0 * y + z, 3e-12);
+        for (j, expected) in [2.0, -3.0, 1.0].into_iter().enumerate() {
+            relative(sample.temperature_gradient_k_m[j], expected, 3e-12);
+            relative(
+                sample.heat_flux_w_m2[j],
+                -gas.thermal_conductivity_w_m_k * expected,
+                3e-12,
+            );
+        }
+        relative(sample.stress.bulk_pa, 9.0 * gas.bulk_viscosity_pa_s, 3e-12);
+        sample.energy_flux().unwrap().total_w_m2().unwrap();
         let mut v = vec![0.0; model.n];
         let mut theta = vec![0.0; model.n];
         let mut constant_theta = vec![0.0; model.n];

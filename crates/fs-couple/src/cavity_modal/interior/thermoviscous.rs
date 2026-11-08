@@ -294,6 +294,21 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     pub fn inner(&self) -> &ThermoviscousFe<'c> {
         &self.fe
     }
+
+    /// Prepare a physical point readout on the original resolved fluid mesh.
+    /// Pressure, velocity, temperature, stress and energy flux retain the same
+    /// material transport and affine/curved geometry as the coupled solve.
+    pub fn prepare_field_at(
+        &self,
+        element: usize,
+        barycentric: [f64; 4],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<
+        fs_feec::acoustics::thermoviscous::stress::field::PreparedThermoviscousPoint,
+        ThermoviscousSourceError,
+    > {
+        Ok(self.fe.prepare_field_at(element, barycentric, cancelled)?)
+    }
     /// Original material/source owner; the immutable numerical snapshot lives
     /// in `inner()`. A source change requires an explicit new assembly.
     pub fn material_source(&self) -> &S {
