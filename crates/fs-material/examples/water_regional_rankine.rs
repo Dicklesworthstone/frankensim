@@ -13,8 +13,14 @@
 //! They are not extra heat sources, an artificial phase plateau or machine
 //! entropy production. Reservoir temperatures and equipment calibration are not
 //! supplied; the efficiencies below describe these illustrative cycles only.
+//!
+//! The final case adds a 1 MPa open feedwater heater. Original steam and liquid
+//! enthalpies determine the turbine bleed fraction; the conservative stream
+//! mixer resolves its outlet. Boiler throughput is 1 kg/s, and the condenser,
+//! condensate pump and low-pressure turbine carry only the unextracted flow.
 
 use fs_material::phase::water::WaterEntropySolve;
+use fs_material::phase::water::flow::across::mixing::WaterMixingInlet;
 use fs_material::phase::water::flow::across::{WaterFlowChart, WaterFlowState};
 use fs_material::phase::water::flow::{WaterFlowSolve, WaterShaftDevice, WaterShaftSolve};
 use fs_material::phase::water::regional::{
@@ -255,9 +261,152 @@ fn run_cycle(
     Ok(())
 }
 
+fn run_regenerative_cycle() -> Result<(), Box<dyn std::error::Error>> {
+    let low = chart(CONDENSER_PA, 873.15)?;
+    let heater = chart(1e6, 873.15)?;
+    let high = chart(20e6, 873.15)?;
+    let low_chart = WaterFlowChart::from(low);
+    let heater_chart = WaterFlowChart::from(heater);
+    let high_chart = WaterFlowChart::from(high);
+    let liquid = low.state_at_quality(0.0, || false)?;
+    let condensate_pump = WaterFlowState::from(liquid).adiabatic_shaft_to(
+        &heater_chart,
+        WaterShaftDevice::Compressor,
+        shaft(PUMP_EFFICIENCY),
+        || false,
+    )?;
+    let steam = high.state_at_temperature(Temperature::new(823.15), || false)?;
+    let high_turbine = WaterFlowState::from(steam).adiabatic_shaft_to(
+        &heater_chart,
+        WaterShaftDevice::Expander,
+        shaft(TURBINE_EFFICIENCY),
+        || false,
+    )?;
+    let saturated_feed = heater.state_at_quality(0.0, || false)?;
+    let cold_h = condensate_pump.outlet.specific_enthalpy_j_kg();
+    let bleed_h = high_turbine.outlet.specific_enthalpy_j_kg();
+    let bleed_fraction = (saturated_feed.specific_enthalpy_j_kg() - cold_h) / (bleed_h - cold_h);
+    if !bleed_fraction.is_finite() || bleed_fraction <= 0.0 || bleed_fraction >= 1.0 {
+        return Err("open feedwater heater needs a physical positive steam bleed fraction".into());
+    }
+    let remaining = 1.0 - bleed_fraction;
+    let mixing = heater_chart.mix_streams(
+        &[
+            WaterMixingInlet {
+                state: condensate_pump.outlet,
+                mass_flow_kg_per_s: remaining,
+            },
+            WaterMixingInlet {
+                state: high_turbine.outlet,
+                mass_flow_kg_per_s: bleed_fraction,
+            },
+        ],
+        shaft(PUMP_EFFICIENCY).balance,
+        || false,
+    )?;
+    if (mixing.outlet.specific_enthalpy_j_kg() - saturated_feed.specific_enthalpy_j_kg()).abs()
+        > ENERGY_TOLERANCE_J_KG
+    {
+        return Err("computed heater outlet missed its saturated-liquid enthalpy".into());
+    }
+    let feed_pump = mixing.outlet.adiabatic_shaft_to(
+        &high_chart,
+        WaterShaftDevice::Compressor,
+        shaft(PUMP_EFFICIENCY),
+        || false,
+    )?;
+    let low_turbine = high_turbine.outlet.adiabatic_shaft_to(
+        &low_chart,
+        WaterShaftDevice::Expander,
+        shaft(TURBINE_EFFICIENCY),
+        || false,
+    )?;
+    // All following energies are per kg of boiler throughput. Heat exchange
+    // connects original equilibrium endpoints, with no finite-rate claim.
+    let heat_in = steam.specific_enthalpy_j_kg() - feed_pump.outlet.specific_enthalpy_j_kg();
+    let heat_out =
+        remaining * (liquid.specific_enthalpy_j_kg() - low_turbine.outlet.specific_enthalpy_j_kg());
+    let pump_work =
+        feed_pump.balance.shaft_work_j_kg + remaining * condensate_pump.balance.shaft_work_j_kg;
+    let turbine_work =
+        high_turbine.balance.shaft_work_j_kg + remaining * low_turbine.balance.shaft_work_j_kg;
+    let net_work = pump_work + turbine_work;
+    let efficiency = net_work / heat_in;
+    if !(heat_in > 0.0 && heat_out < 0.0 && net_work > 0.0 && efficiency > 0.0 && efficiency < 1.0)
+    {
+        return Err("regenerative cycle heat, work or efficiency admission failed".into());
+    }
+    // Independent u+p*v and raw-s closure includes the actual mixing node.
+    // Its reported rates equal per-throughput amounts at this 1 kg/s scale.
+    let mut cycle_u = mixing.internal_energy_change_rate_w;
+    let mut cycle_pv = mixing.pressure_flow_work_change_rate_w;
+    let mut cycle_s = mixing.entropy_generation_w_per_k;
+    for (before, after, flow) in [
+        (
+            WaterFlowState::from(liquid),
+            condensate_pump.outlet,
+            remaining,
+        ),
+        (mixing.outlet, feed_pump.outlet, 1.0),
+        (feed_pump.outlet, WaterFlowState::from(steam), 1.0),
+        (WaterFlowState::from(steam), high_turbine.outlet, 1.0),
+        (high_turbine.outlet, low_turbine.outlet, remaining),
+        (low_turbine.outlet, WaterFlowState::from(liquid), remaining),
+    ] {
+        cycle_u +=
+            flow * (after.specific_internal_energy_j_kg() - before.specific_internal_energy_j_kg());
+        cycle_pv += flow
+            * (after.pressure_pa() * after.specific_volume_m3_kg()
+                - before.pressure_pa() * before.specific_volume_m3_kg());
+        cycle_s += flow * (after.specific_entropy_j_kg_k() - before.specific_entropy_j_kg_k());
+    }
+    let energy_residual = heat_in + heat_out - net_work;
+    let first_law_residual = cycle_u + cycle_pv - energy_residual;
+    for residual in [cycle_u, cycle_pv, energy_residual, first_law_residual] {
+        if !residual.is_finite() || residual.abs() > 8.0 * ENERGY_TOLERANCE_J_KG {
+            return Err(format!("regenerative cycle energy residual {residual} J/kg").into());
+        }
+    }
+    if !cycle_s.is_finite() || cycle_s.abs() > 1e-7 {
+        return Err("regenerative cycle fluid entropy failed to close".into());
+    }
+    println!(
+        "# Regenerative Rankine: 20 MPa / 823.15 K boiler, 1 MPa open feedwater heater, boiler_flow=1 kg/s"
+    );
+    println!(
+        "# Each turbine stage uses eta={TURBINE_EFFICIENCY}; pressure losses and stream momentum are omitted."
+    );
+    println!("# steam_bleed={bleed_fraction:.9} kg/s; condenser_flow={remaining:.9} kg/s");
+    row(
+        "regenerative_condensate_pump_outlet",
+        regional(condensate_pump.outlet)?,
+    );
+    row("regenerative_turbine_bleed", regional(high_turbine.outlet)?);
+    row("open_feedwater_heater_outlet", regional(mixing.outlet)?);
+    row("regenerative_feed_pump_outlet", regional(feed_pump.outlet)?);
+    row("regenerative_boiler_outlet", steam);
+    row(
+        "regenerative_turbine_exhaust",
+        regional(low_turbine.outlet)?,
+    );
+    println!(
+        "# mixing_h_residual={:.9e} W; mixing_first_law_residual={:.9e} W; mixing_entropy_generation={:.9} W/K",
+        mixing.enthalpy_residual_w, mixing.first_law_residual_w, mixing.entropy_generation_w_per_k
+    );
+    println!(
+        "# regenerative_heat_in={heat_in:.9} J/kg; heat_out={heat_out:.9} J/kg; net_work={net_work:.9} J/kg; efficiency={efficiency:.9}"
+    );
+    println!(
+        "# regenerative_energy_residual={energy_residual:.9e} J/kg; first_law_residual={first_law_residual:.9e} J/kg; fluid_entropy_cycle_change={cycle_s:.9e} J/(kg*K)"
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("# {SOURCE_RELEASE}: {SOURCE_URL}");
-    println!("# Heat positive into water; shaft work positive outward; all amounts per kg.");
+    println!(
+        "# Heat positive into water; shaft work positive outward; cycle energies per kg of boiler throughput."
+    );
     println!("# eta_pump={PUMP_EFFICIENCY}; eta_turbine={TURBINE_EFFICIENCY}.");
     println!(
         "# Regional matching defects remain source-fit diagnostics; no reservoir entropy claim."
@@ -265,5 +414,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (pressure, outlet) in [(20e6, 823.15), (25e6, 823.15), (30e6, 1500.0)] {
         run_cycle(pressure, outlet)?;
     }
+    run_regenerative_cycle()?;
     Ok(())
 }

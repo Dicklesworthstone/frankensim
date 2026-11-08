@@ -22,6 +22,9 @@ use crate::phase::water::regional::{RegionalWater, RegionalWaterError, RegionalW
 use crate::phase::water::{IsobaricWater, WaterEntropySolve, WaterState};
 use core::fmt;
 
+/// Adiabatic stream junctions on one original water/steam pressure chart.
+pub mod mixing;
+
 /// One prepared outlet pressure, retaining the original regional source owner.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WaterFlowChart {

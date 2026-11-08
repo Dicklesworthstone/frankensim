@@ -11817,6 +11817,39 @@ Independent evaluations of the original Gibbs equations verify high-temperature
 throttling and ideal/inefficient expansion from 30 MPa/1500 K to 1 MPa, including
 the original h, u+p*v and s balances.
 
+## Adiabatic water and steam stream junctions
+
+`phase::water::flow::across::mixing` adds `WaterFlowChart::mix_streams` for
+prescribed positive water/steam mass flows on the same exact prepared pressure
+chart. One original p,h inverse closes the conserved mass and enthalpy fluxes.
+The resulting liquid, two-phase, vapor or supercritical state retains the
+original IF97 caloric reference, with latent heat included once. Regional gaps,
+ambiguous inverses and unsupported source states remain refusals. A single
+inlet retains its exact original state without an inverse.
+
+The steady adiabatic junction has no storage, shaft work, modeled pressure loss,
+kinetic/potential energy or momentum balance. Its independent internal-energy
+and pressure-flow-work fluxes close the same first law; flow work is already
+inside enthalpy. Raw-source entropy flux supplies the signed entropy production,
+without a thermal entropy-seam correction or clipping. Existing per-throughput
+energy/entropy tolerances and endpoint pressure-closure gates apply before any
+result is returned. The operation allocates no memory and polls cancellation
+through its inlet reduction, original inverse and final acceptance.
+
+Focused source regressions check cold-water/steam condensation against the
+original saturation lever rule, nonlinear liquid temperature against a direct
+Gibbs enthalpy inverse, flow scaling and port subdivision, dense supercritical
+mixing without a vapor inventory, original-chart binding and transactional
+early/late cancellation.
+
+The `water_regional_rankine` example also composes a regenerative 20 MPa /
+823.15 K cycle with a 1 MPa open feedwater heater. Original steam and condensate
+enthalpies determine the bleed fraction needed for a saturated-liquid heater
+outlet. The actual mixer, two feed pumps and two turbine stages retain their
+original source states. Condenser-side flow and work carry the unextracted
+mass fraction, and the complete cycle checks independent h and u+p*v balances
+and closed fluid entropy at an explicit 1 kg/s boiler-throughput scale.
+
 ## Coherent thermal-fluid transport view
 
 `fluid_transport::ThermalFluidTransport` extends the existing transport view
