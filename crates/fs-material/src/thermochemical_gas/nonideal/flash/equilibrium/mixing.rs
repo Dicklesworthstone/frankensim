@@ -347,7 +347,8 @@ pub fn mix_phase_equilibrium_at_pressure(
     })
 }
 
-fn ideal_composition_entropy(
+// Composition only; each process accounts its own temperature/pressure changes.
+pub(in crate::thermochemical_gas::nonideal::flash) fn ideal_composition_entropy(
     feeds: &[PhaseMixingFeed<'_>; 2],
     weights: [f64; 2],
     mixed: &ThermochemicalPengRobinsonModel,

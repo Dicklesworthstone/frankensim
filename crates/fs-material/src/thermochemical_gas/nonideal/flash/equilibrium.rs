@@ -82,6 +82,10 @@ pub struct ResolvedThermochemicalPhaseState {
     sample: CaloricSample<PengRobinsonPhaseScreenV1>,
 }
 impl ResolvedThermochemicalPhaseState {
+    /// Original retained caloric sample for source-bound process owners.
+    pub(super) const fn caloric_sample(&self) -> &CaloricSample<PengRobinsonPhaseScreenV1> {
+        &self.sample
+    }
     /// Exact retained source critical parameters, interactions and feed inventory.
     #[must_use]
     pub const fn constitutive_law(&self) -> &PengRobinsonMixtureV1 {

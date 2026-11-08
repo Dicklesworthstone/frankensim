@@ -25,6 +25,9 @@ pub mod driven;
 /// Adiabatic bulk-composition withdrawal with integrated original enthalpy.
 pub mod discharge;
 
+/// Prescribed source-stream inflow with conserved original U and transported H.
+pub mod transfer;
+
 /// One accepted closed-vessel heat increment and its independent source balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureEquilibriumHeatStep {
