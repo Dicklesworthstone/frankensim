@@ -106,11 +106,36 @@ fn pinning_force(young: f64, branch: f64, sigma: f64) -> f64 {
 }
 
 impl WettingPhysics<'_> {
+    pub(in crate::material::free_surface) fn with_fixed_equilibrium_hysteresis(
+        self,
+        selection: MaterialPropertySelection,
+        pinning_speed_m_s: f64,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        self.with_equilibrium_hysteresis_at_context(
+            selection, pinning_speed_m_s, None, scaling, gate,
+        )
+    }
+
     pub(super) fn with_equilibrium_hysteresis(
-        mut self,
+        self,
         selection: MaterialPropertySelection,
         pinning_speed_m_s: f64,
         temperature_axis: &str,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        self.with_equilibrium_hysteresis_at_context(
+            selection, pinning_speed_m_s, Some(temperature_axis), scaling, gate,
+        )
+    }
+
+    fn with_equilibrium_hysteresis_at_context(
+        mut self,
+        selection: MaterialPropertySelection,
+        pinning_speed_m_s: f64,
+        temperature_axis: Option<&str>,
         scaling: &MaterialFreeSurfaceScaling<'_>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
@@ -151,7 +176,7 @@ impl WettingPhysics<'_> {
             selection,
         )?;
         if source.properties().iter().any(|property| {
-            !property.has_only_fixed_external_conditions(Some(temperature_axis), false)
+            !property.has_only_fixed_external_conditions(temperature_axis, false)
         }) {
             return Err(Error::Invalid(
                 "pinning thresholds require static claims with owned temperature and fixed external conditions",
@@ -272,6 +297,30 @@ impl EquilibriumHysteresisBinding {
 }
 
 impl WettingBinding<'_> {
+    pub(super) fn with_fixed_equilibrium_hysteresis(
+        mut self,
+        selection: MaterialPropertySelection,
+        pinning_speed_m_s: f64,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        for physics in self.physics_mut() {
+            *physics = physics.clone().with_fixed_equilibrium_hysteresis(
+                selection.clone(), pinning_speed_m_s, scaling, gate,
+            )?;
+        }
+        let mut samples = BTreeMap::new();
+        for (&position, current) in &self.geometry {
+            checkpoint(gate)?;
+            let speed = self.samples[&position].signed_speed_m_s;
+            samples.insert(position, self.physics_at(position).sample(
+                current.angle_radians, current.tangent_gradient > 0.0, speed, None, gate,
+            )?);
+        }
+        self.samples = samples;
+        Ok(self)
+    }
+
     pub(in crate::material::free_surface) fn with_equilibrium_hysteresis(
         mut self,
         selection: MaterialPropertySelection,

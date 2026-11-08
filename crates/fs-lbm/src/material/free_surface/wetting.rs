@@ -7,8 +7,8 @@
 //! In the deadband, the measured angle is projected onto the sourced interval.
 //! That is a bounded hysteresis closure, not a proof of exact pinning, calibrated
 //! dynamic wetting, or closed surface/mechanical/thermal energy conservation.
-//! The thermal owner can instead select local equilibrium explicitly, updating
-//! its original angle or reversible adhesion work. An explicit rate-law selector
+//! Frozen and thermal owners can instead select equilibrium explicitly, using
+//! the original angle or reversible adhesion work. An explicit rate-law selector
 //! can drive Cox or molecular kinetics from that same original equilibrium
 //! source. Independently sourced static thresholds may explicitly add pinning
 //! while that original equilibrium potential and its receipt remain separate.
@@ -182,7 +182,8 @@ type Error = FreeSurfaceWettingError;
 /// Bulk density, viscosity and sigma remain the original liquid's coefficients.
 /// Surface A is the assigned stationary substrate, surface B must be this exact
 /// liquid phase/process/revision. The original full liquid query is retained;
-/// only the explicit physical contact-line speed coordinate evolves. Named gas
+/// a measured rate law owns its explicit physical contact-line speed coordinate,
+/// while equilibrium sources never acquire an invented speed query. Named gas
 /// and surface/history context belongs to the interface card, not a guessed EOS.
 pub struct MaterialFreeSurfaceWetting3<'s, 'm> {
     flow: MaterialFreeSurface3<'s>,
@@ -215,6 +216,31 @@ pub(super) struct WettingPhysics<'m> {
 }
 
 impl<'s> MaterialFreeSurface3<'s> {
+    /// Attach one original equilibrium angle or reversible Young--Dupre work
+    /// to the actual sparse wall at this liquid's fixed external conditions.
+    ///
+    /// No advancing/receding measurements or contact-speed query are invented.
+    /// The pure equilibrium boundary needs no resolved contact-line speed;
+    /// explicit kinetics or independently sourced pinning may be added to the
+    /// returned owner. The same frozen liquid tension drives Young--Dupre and
+    /// native capillary pressure, including a source sampled at held temperature.
+    pub fn with_equilibrium_planar_wetting<'m>(
+        mut self,
+        wall: PlanarWall3,
+        card: &'m InterfaceSystemCard,
+        origin: EquilibriumAngleOrigin,
+        selection: MaterialPropertySelection,
+        maximum_wall_cells: usize,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceWetting3<'s, 'm>, Error> {
+        let binding = WettingBinding::try_fixed_equilibrium(
+            &mut self, wall, card, origin, selection, maximum_wall_cells, gate,
+        )?;
+        binding.install(&mut self.lattice, gate)?;
+        checkpoint(gate)?;
+        Ok(MaterialFreeSurfaceWetting3 { flow: self, binding })
+    }
+
     /// Bind a rate-dependent advancing/receding interface to one planar wall.
     /// Initial history is stationary: both source claims must support speed zero.
     /// The caller assigns substrate and named environment to the scene. Existing
@@ -349,6 +375,45 @@ impl<'m> WettingPhysics<'m> {
 }
 
 impl MaterialFreeSurfaceWetting3<'_, '_> {
+    /// Drive the original equilibrium angle/work with explicit Cox or molecular
+    /// kinetics. The source remains at its original held query; actual observed
+    /// speed and model response are separate samples, without inferred hysteresis.
+    /// `temperature_axis` names the liquid's absolute temperature for molecular
+    /// kinetics; Cox uses its original liquid viscosity and tension.
+    pub fn with_dynamic_equilibrium_wetting(
+        mut self,
+        law: EquilibriumWettingRateLaw,
+        temperature_axis: &str,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let binding = self.binding.with_equilibrium_rate_law(
+            law, temperature_axis, &self.flow.scaling, gate,
+        )?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        checkpoint(gate)?;
+        self.binding = binding;
+        Ok(self)
+    }
+
+    /// Add independently sourced static advancing/receding thresholds around
+    /// the original equilibrium potential. Their receipt stays separate from
+    /// reversible work. Pinning and rate-law losses are per-length diagnostics;
+    /// this first-cell closure does not deposit heat or prove exact immobilization.
+    pub fn with_equilibrium_wetting_hysteresis(
+        mut self,
+        selection: MaterialPropertySelection,
+        pinning_speed_m_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let binding = self.binding.with_fixed_equilibrium_hysteresis(
+            selection, pinning_speed_m_s, &self.flow.scaling, gate,
+        )?;
+        binding.install(&mut self.flow.lattice, gate)?;
+        checkpoint(gate)?;
+        self.binding = binding;
+        Ok(self)
+    }
+
     /// Add the full-angle Cox law to STATIC advancing/receding endpoints.
     /// Any finite outer/liquid viscosity ratio is an explicit fixed model input;
     /// this boundary does not evolve a second-fluid momentum field.
@@ -378,7 +443,7 @@ impl MaterialFreeSurfaceWetting3<'_, '_> {
         &self.flow
     }
 
-    /// Original two-claim binding at stationary initialization.
+    /// Original equilibrium or advancing/receding source binding.
     #[must_use]
     pub const fn source(&self) -> &ResolvedInterfaceStatePoint {
         &self.binding.physics.source
@@ -640,23 +705,9 @@ impl WettingBinding<'_> {
                 map.get(&position).map_or(0.0, |g| g.fill)
             });
             let physics = self.physics_at(position);
-            let speed = if physics
-                .equilibrium
-                .as_ref()
-                .is_some_and(|binding| !binding.dynamic)
-                && physics.equilibrium_hysteresis.is_none()
-            {
-                // Equilibrium contact angles need no resolved speed. In
-                // particular a filling, locally flat wall stencil is valid.
-                0.0
-            } else {
-                contact_speed(
-                    current.fill - old_fill,
-                    current.tangent_gradient,
-                    scaling.cell_size_m(),
-                    scaling.timestep_s(),
-                )?
-            };
+            let speed = physics.contact_speed(
+                current.fill - old_fill, current.tangent_gradient, scaling,
+            )?;
             let temperature = temperatures
                 .and_then(|(axis, field)| field.get(&position).map(|&t| (axis, t)));
             result.insert(position, physics.sample(current.angle_radians, current.tangent_gradient > 0.0, speed, temperature, gate)?);
@@ -667,6 +718,23 @@ impl WettingBinding<'_> {
 }
 
 impl WettingPhysics<'_> {
+    pub(super) fn contact_speed(
+        &self,
+        delta_fill: f64,
+        tangent_gradient: f64,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+    ) -> Result<f64, Error> {
+        if self.equilibrium.as_ref().is_some_and(|binding| !binding.dynamic)
+            && self.equilibrium_hysteresis.is_none()
+        {
+            // A purely equilibrium angle needs no line-velocity closure. A
+            // changing locally flat fill stencil is therefore still admissible.
+            Ok(0.0)
+        } else {
+            contact_speed(delta_fill, tangent_gradient, scaling.cell_size_m(), scaling.timestep_s())
+        }
+    }
+
     pub(super) fn sample(
         &self,
         geometric_angle_radians: f64,

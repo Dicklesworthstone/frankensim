@@ -4,6 +4,9 @@ use fs_material::liquid::surface::adhesion::{
     EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY, EquilibriumAngleOrigin, resolve_young_dupre_wetting,
 };
 
+#[path = "adhesion/equilibrium_dynamics.rs"]
+mod equilibrium_dynamics;
+
 fn adhesion_card(
     liquid: &ResolvedLiquidSurfaceState,
     work: Option<PropertyClaim>,

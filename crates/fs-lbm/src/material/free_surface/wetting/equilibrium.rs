@@ -1,7 +1,8 @@
-//! Local thermal equilibrium uses the original wall and source transaction.
+//! Equilibrium adhesion uses the original wall and source transaction.
 //!
 //! The native thermal owner retains and checks the actual liquid/gas tension.
 //! It is constant or admitted by a compatible thermal-capillarity owner.
+//! Isothermal owners instead hold the complete admitted external source context.
 //! The same local source temperature supplies work and tension; reversible
 //! work is not reinterpreted as a measured angle,
 //! contact-line friction, hysteresis or heat.
@@ -23,6 +24,21 @@ pub(super) struct EquilibriumWetting {
 }
 
 impl<'m> WettingBinding<'m> {
+    pub(super) fn try_fixed_equilibrium(
+        flow: &mut MaterialFreeSurface3<'_>,
+        wall: PlanarWall3,
+        card: &'m InterfaceSystemCard,
+        origin: EquilibriumAngleOrigin,
+        selection: MaterialPropertySelection,
+        maximum_wall_cells: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let physics = WettingPhysics::try_fixed_equilibrium(
+            &flow.scaling, card, origin, selection, maximum_wall_cells, gate,
+        )?;
+        Self::with_physics(flow, wall, physics, gate)
+    }
+
     pub(in crate::material::free_surface) fn try_equilibrium(
         flow: &mut MaterialFreeSurface3<'_>,
         wall: PlanarWall3,
@@ -71,26 +87,48 @@ impl<'m> WettingBinding<'m> {
     fn select_equilibrium_rate_law(&mut self, gate: &CancelGate) -> Result<(), Error> {
         checkpoint(gate)?;
         for physics in self.physics_mut() {
-            checkpoint(gate)?;
-            let equilibrium = physics.equilibrium.as_mut().ok_or(Error::Invalid(
-                "an equilibrium rate law requires an original equilibrium wetting source",
-            ))?;
-            if equilibrium.dynamic {
-                return Err(Error::Invalid("equilibrium wetting already owns a rate law"));
-            }
-            equilibrium.dynamic = true;
+            physics.select_equilibrium_rate_law(gate)?;
         }
         Ok(())
     }
 }
 
 impl<'m> WettingPhysics<'m> {
+    pub(in crate::material::free_surface) fn try_fixed_equilibrium(
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        card: &'m InterfaceSystemCard,
+        origin: EquilibriumAngleOrigin,
+        selection: MaterialPropertySelection,
+        maximum_wall_cells: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        Self::try_equilibrium_at_context(
+            scaling, card, origin, selection, None, false, maximum_wall_cells, gate,
+        )
+    }
+
     pub(super) fn try_equilibrium(
         scaling: &MaterialFreeSurfaceScaling<'_>,
         card: &'m InterfaceSystemCard,
         origin: EquilibriumAngleOrigin,
         selection: MaterialPropertySelection,
         temperature_axis: &str,
+        evolving_surface_tension: bool,
+        maximum_wall_cells: usize,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        Self::try_equilibrium_at_context(
+            scaling, card, origin, selection, Some(temperature_axis),
+            evolving_surface_tension, maximum_wall_cells, gate,
+        )
+    }
+
+    fn try_equilibrium_at_context(
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        card: &'m InterfaceSystemCard,
+        origin: EquilibriumAngleOrigin,
+        selection: MaterialPropertySelection,
+        temperature_axis: Option<&str>,
         evolving_surface_tension: bool,
         maximum_wall_cells: usize,
         gate: &CancelGate,
@@ -113,7 +151,7 @@ impl<'m> WettingPhysics<'m> {
         // still needs an owner for that coordinate. Initialization must not
         // silently turn those applicability restrictions into constants.
         if wetting.resolved().properties().iter().any(|property| {
-            !property.has_only_fixed_external_conditions(Some(temperature_axis), false)
+            !property.has_only_fixed_external_conditions(temperature_axis, false)
         }) {
             return Err(Error::Invalid(
                 "equilibrium wetting requires its owned temperature and fixed external conditions",
@@ -130,7 +168,12 @@ impl<'m> WettingPhysics<'m> {
             // The thermal owner has already pinned and admitted the SAME
             // source's temperature axis. Only its uniform or sidewall graph
             // mode can evolve it with the admitted contact-angle geometry.
-            if !evolving_surface_tension
+            if temperature_axis.is_none() && !tension.is_static_at_fixed_external_conditions() {
+                return Err(Error::Invalid(
+                    "isothermal adhesion requires tension at fixed external conditions",
+                ));
+            }
+            if temperature_axis.is_some() && !evolving_surface_tension
                 && (!tension.source_axes().is_empty()
                     || tension.answer().receipt.decision
                         != fs_matdb::EvaluationDecision::ConstantWithinValidity)
@@ -156,6 +199,34 @@ impl<'m> WettingPhysics<'m> {
                 dynamic: false,
             }),
         })
+    }
+
+    fn select_equilibrium_rate_law(&mut self, gate: &CancelGate) -> Result<(), Error> {
+        checkpoint(gate)?;
+        let equilibrium = self.equilibrium.as_mut().ok_or(Error::Invalid(
+            "an equilibrium rate law requires an original equilibrium wetting source",
+        ))?;
+        if equilibrium.dynamic {
+            return Err(Error::Invalid("equilibrium wetting already owns a rate law"));
+        }
+        equilibrium.dynamic = true;
+        Ok(())
+    }
+
+    pub(in crate::material::free_surface) fn with_equilibrium_rate_law(
+        mut self,
+        law: EquilibriumWettingRateLaw,
+        temperature_axis: &str,
+        scaling: &MaterialFreeSurfaceScaling<'_>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        self.select_equilibrium_rate_law(gate)?;
+        match law {
+            EquilibriumWettingRateLaw::CoxVoinov(law) => self.with_cox_voinov(law, scaling, gate),
+            EquilibriumWettingRateLaw::MolecularKinetic(law) => {
+                self.with_molecular_kinetic(law, temperature_axis, scaling, gate)
+            }
+        }
     }
 
     pub(super) fn equilibrium_sample(

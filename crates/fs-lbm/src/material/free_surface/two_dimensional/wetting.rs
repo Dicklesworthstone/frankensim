@@ -1,8 +1,9 @@
-//! Dense contact-line history using the same source and Cox law as sparse VOF.
+//! Dense contact-line history using the same adhesion and rate laws as sparse VOF.
 
 use super::super::wetting::{
-    CoxVoinovLaw, FreeSurfaceWettingControls, FreeSurfaceWettingError as Error,
-    FreeSurfaceWettingSample, MolecularKineticLaw, WettingPhysics, checkpoint, contact_speed,
+    CoxVoinovLaw, EquilibriumAngleOrigin, EquilibriumWettingRateLaw, FreeSurfaceWettingControls,
+    FreeSurfaceWettingError as Error, FreeSurfaceWettingSample, MolecularKineticLaw, WettingPhysics,
+    checkpoint,
 };
 use super::{
     FreeSurface, MaterialFreeSurface2, MaterialFreeSurfaceMomentumError2,
@@ -15,7 +16,7 @@ use fs_matdb::InterfaceSystemCard;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint};
 use std::collections::BTreeMap;
 
-/// Source-pinned advancing/receding adhesion on the actual dense D2Q9 wall.
+/// Source-pinned equilibrium or advancing/receding adhesion on the dense D2Q9 wall.
 ///
 /// Accepted wall-adjacent fill changes determine signed speed in m/s. The
 /// first-cell/backward-time estimate drives the next step's capillary ghosts.
@@ -31,16 +32,46 @@ pub struct MaterialFreeSurfaceWetting2<'s, 'm> {
 }
 
 impl<'s> MaterialFreeSurface2<'s> {
+    /// Attach one original equilibrium angle or reversible Young--Dupre work
+    /// at the actual liquid's fixed external conditions. No advancing/receding
+    /// claims or speed coordinate are inferred. The returned native owner may
+    /// explicitly add kinetics and separately sourced pinning. Pure equilibrium
+    /// remains admissible when a changing wall stencil has no resolved speed.
+    pub fn with_equilibrium_planar_wetting<'m>(
+        self,
+        wall: PlanarWall2,
+        card: &'m InterfaceSystemCard,
+        origin: EquilibriumAngleOrigin,
+        selection: MaterialPropertySelection,
+        maximum_wall_cells: usize,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceWetting2<'s, 'm>, Error> {
+        let physics = WettingPhysics::try_fixed_equilibrium(
+            &self.scaling, card, origin, selection, maximum_wall_cells, gate,
+        )?;
+        self.with_wetting_physics(wall, physics, gate)
+    }
+
     /// Attach one named solid/liquid interface and its original endpoint claims
     /// to a complete stationary wall. Existing equilibrium/legacy wetting refuses.
     /// The substrate is surface A; surface B must be this exact liquid identity.
     /// Other source coordinates stay at the original liquid query point.
     pub fn with_dynamic_planar_wetting<'m>(
-        mut self,
+        self,
         wall: PlanarWall2,
         card: &'m InterfaceSystemCard,
         selection: MaterialPropertySelection,
         controls: FreeSurfaceWettingControls,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceWetting2<'s, 'm>, Error> {
+        let physics = WettingPhysics::try_new(&self.scaling, card, selection, controls, gate)?;
+        self.with_wetting_physics(wall, physics, gate)
+    }
+
+    fn with_wetting_physics<'m>(
+        mut self,
+        wall: PlanarWall2,
+        physics: WettingPhysics<'m>,
         gate: &CancelGate,
     ) -> Result<MaterialFreeSurfaceWetting2<'s, 'm>, Error> {
         checkpoint(gate)?;
@@ -49,10 +80,9 @@ impl<'s> MaterialFreeSurface2<'s> {
                 "dynamic planar wetting requires otherwise neutral walls",
             ));
         }
-        let physics = WettingPhysics::try_new(&self.scaling, card, selection, controls, gate)?;
         let geometry = self
             .lattice
-            .planar_wall_fill(wall, controls.maximum_wall_cells, gate)?;
+            .planar_wall_fill(wall, physics.controls.maximum_wall_cells, gate)?;
         let mut samples = BTreeMap::new();
         for (&p, current) in &geometry {
             checkpoint(gate)?;
@@ -70,34 +100,48 @@ impl<'s> MaterialFreeSurface2<'s> {
     }
 }
 
-impl MaterialFreeSurfaceWetting2<'_, '_> {
+impl<'s, 'm> MaterialFreeSurfaceWetting2<'s, 'm> {
+    /// Apply explicit Cox or molecular kinetics to the original equilibrium
+    /// angle/work, retaining its held source query and separate modeled speed.
+    /// Molecular kinetics uses the named positive absolute-temperature liquid
+    /// coordinate; no advancing/receding measurements are invented.
+    pub fn with_dynamic_equilibrium_wetting(
+        self,
+        law: EquilibriumWettingRateLaw,
+        temperature_axis: &str,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let physics = self.physics.clone().with_equilibrium_rate_law(
+            law, temperature_axis, &self.flow.scaling, gate,
+        )?;
+        self.with_physics(physics, gate)
+    }
+
+    /// Add separately sourced static pinning thresholds around the original
+    /// equilibrium potential. Their receipt and per-length resistance remain
+    /// separate from reversible adhesion and optional kinetic dissipation.
+    pub fn with_equilibrium_wetting_hysteresis(
+        self,
+        selection: MaterialPropertySelection,
+        pinning_speed_m_s: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        let physics = self.physics.clone().with_fixed_equilibrium_hysteresis(
+            selection, pinning_speed_m_s, &self.flow.scaling, gate,
+        )?;
+        self.with_physics(physics, gate)
+    }
+
     /// Apply the existing full-angle Cox hydrodynamic prediction to STATIC
     /// source endpoints. Explicit microscopic/observation lengths, phase
     /// viscosity ratio, low-Ca and angular bounds belong to `law`.
     /// A measured speed-dependent endpoint curve refuses double rate counting.
-    pub fn with_cox_voinov(mut self, law: CoxVoinovLaw, gate: &CancelGate) -> Result<Self, Error> {
+    pub fn with_cox_voinov(self, law: CoxVoinovLaw, gate: &CancelGate) -> Result<Self, Error> {
         let physics = self
             .physics
+            .clone()
             .with_cox_voinov(law, &self.flow.scaling, gate)?;
-        let mut samples = BTreeMap::new();
-        for (&p, current) in &self.geometry {
-            checkpoint(gate)?;
-            samples.insert(
-                p,
-                physics.sample(
-                    current.angle_radians,
-                    current.tangent_gradient > 0.0,
-                    self.samples[&p].signed_speed_m_s,
-                    None,
-                    gate,
-                )?,
-            );
-        }
-        install(&mut self.flow.lattice, self.wall, &samples, gate)?;
-        checkpoint(gate)?;
-        self.physics = physics;
-        self.samples = samples;
-        Ok(self)
+        self.with_physics(physics, gate)
     }
 
     /// Apply molecular jump kinetics using this liquid's named temperature.
@@ -106,7 +150,7 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
     /// drives the original capillary ghosts; its per-length dissipation remains
     /// a diagnostic. Existing Cox, molecular or measured rate laws refuse.
     pub fn with_molecular_kinetic(
-        mut self,
+        self,
         law: MolecularKineticLaw,
         temperature_axis: &str,
         gate: &CancelGate,
@@ -117,6 +161,10 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
             &self.flow.scaling,
             gate,
         )?;
+        self.with_physics(physics, gate)
+    }
+
+    fn with_physics(mut self, physics: WettingPhysics<'m>, gate: &CancelGate) -> Result<Self, Error> {
         let mut samples = BTreeMap::new();
         for (&position, current) in &self.geometry {
             checkpoint(gate)?;
@@ -150,7 +198,7 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
         &self.flow
     }
 
-    /// Original stationary endpoint binding; selected claims never reselect.
+    /// Original equilibrium or endpoint binding; selected claims never reselect.
     #[must_use]
     pub const fn source(&self) -> &ResolvedInterfaceStatePoint {
         &self.physics.source
@@ -269,11 +317,10 @@ impl MaterialFreeSurfaceWetting2<'_, '_> {
             let previous = self.geometry.get(&p).ok_or(Error::Invalid(
                 "dense contact-line history topology changed",
             ))?;
-            let speed = contact_speed(
+            let speed = self.physics.contact_speed(
                 current.fill - previous.fill,
                 current.tangent_gradient,
-                self.flow.scaling.cell_size_m(),
-                self.flow.scaling.timestep_s(),
+                &self.flow.scaling,
             )?;
             samples.insert(
                 p,

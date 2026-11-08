@@ -29,6 +29,29 @@ measure, a global surface-energy balance or heat deposition. G1/G3 unit cases
 check independent forward kinetics, low-speed friction and constant-model limits;
 the existing thermal integration case also exercises activated rates and rollback.
 
+## Isothermal kinetics from reversible equilibrium adhesion
+
+The dense D2Q9 and sparse D3Q19 material owners can attach an original equilibrium
+angle or Young--Dupre work with `with_equilibrium_planar_wetting`, then explicitly
+select Cox or molecular kinetics with `with_dynamic_equilibrium_wetting`. The
+same frozen liquid tension feeds both adhesion and native pressure. Static
+coefficients sampled at fixed external conditions retain their source axes and
+receipts; time, loading and rate restrictions cannot be silently frozen. No
+advancing/receding measurements or contact-speed query are fabricated from work.
+
+`with_equilibrium_wetting_hysteresis` optionally binds independent static pinning
+thresholds from that interface, preserving the equilibrium potential and separate
+resistance receipt. The existing full-angle rate domains, geometric speed history
+and transactional native publication still apply. Pure equilibrium alone bypasses
+the velocity quotient when fill changes on a locally flat wall stencil; adding
+kinetics or pinning retains the unresolved-speed refusal. The backward geometric
+speed drives the next step's capillary ghosts. Line losses remain diagnostics;
+these owners do not infer a line measure, heat deposition or closed energy balance.
+
+Four public integration groups exercise both source origins and rate laws in
+both dimensions, independent forward equations and native response, separately
+sourced pinning, domain rollback, and the pressure-loaded flat-fill distinction.
+
 ## Heated wetting at neutral transverse corners
 
 The height-graph equilibrium-wetting owner now closes the two ends of its
