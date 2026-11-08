@@ -27,6 +27,8 @@
 //! creep, rupture, damage and empirical calibration remain outside this law.
 
 pub(super) mod primary;
+/// Independent primary resistance recovery on the original finite creep history.
+pub mod recovery;
 
 use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{

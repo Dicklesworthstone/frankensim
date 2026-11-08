@@ -115,6 +115,23 @@ pub(in crate::plastic::finite) fn standalone(
     f: &[f64; 9],
     old: &FiniteJ2State,
 ) -> Result<ReturnMap, FiniteJ2Error> {
+    standalone_with_memory(law, primary, f, old, old.alpha)
+}
+
+// Recovery may use a distinct kinetic memory. The original permanent metric
+// and accumulated path remain the history supplied to the finite return owner.
+pub(in crate::plastic::finite) fn standalone_with_memory(
+    law: &FiniteOverstressJ2,
+    primary: StrainHardeningCreep,
+    f: &[f64; 9],
+    old: &FiniteJ2State,
+    kinetic_memory: f64,
+) -> Result<ReturnMap, FiniteJ2Error> {
+    if !kinetic_memory.is_finite() || kinetic_memory < 0.0 {
+        return Err(FiniteJ2Error::State(
+            "finite nonnegative primary kinetic memory required",
+        ));
+    }
     let backbone = law.backbone();
     if backbone.maximum_creep_alpha.is_some() {
         return Err(FiniteJ2Error::Parameters(
@@ -131,9 +148,9 @@ pub(in crate::plastic::finite) fn standalone(
             "primary trial stress is not finite",
         ));
     }
-    let (creep, q, scale, correction) = relaxation(law, primary, q_trial, old.alpha)?;
+    let (creep, q, scale, correction) = relaxation(law, primary, q_trial, kinetic_memory)?;
     let heat = q * creep;
-    let potential = rate_potential(law, primary, old.alpha, creep, q)?;
+    let potential = rate_potential(law, primary, kinetic_memory, creep, q)?;
     backbone.finish_return(
         f,
         old,

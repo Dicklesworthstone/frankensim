@@ -105,9 +105,9 @@ pub struct FiniteJ2State {
 
 /// An immutable candidate: the caller commits `state` only after step acceptance.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FiniteJ2Response {
+pub struct FiniteJ2Response<S = FiniteJ2State> {
     /// Complete candidate history, committed only when the surrounding step succeeds.
-    pub state: FiniteJ2State,
+    pub state: S,
     /// Work conjugate to F, row-major tensor components, per reference area.
     pub first_piola_pa: [f64; 9],
     /// Kirchhoff stress `tau = J sigma`, in row-major tensor components.
@@ -140,10 +140,30 @@ pub struct FiniteJ2Response {
     pub jacobian: f64,
 }
 
-impl FiniteJ2Response {
+impl<S> FiniteJ2Response<S> {
     /// Complete physical inelastic heat, excluding stored energy and numerical loss.
     pub fn inelastic_dissipation_j_m3(&self) -> f64 {
         self.plastic_dissipation_j_m3 + self.creep_dissipation_j_m3
+    }
+
+    // A native extension retains its complete history on the same response.
+    // Stress, tangent, potentials and physical heat are never reconstructed.
+    pub(super) fn map_state<T>(self, map: impl FnOnce(S) -> T) -> FiniteJ2Response<T> {
+        FiniteJ2Response {
+            state: map(self.state),
+            first_piola_pa: self.first_piola_pa,
+            kirchhoff_pa: self.kirchhoff_pa,
+            tangent_pa: self.tangent_pa,
+            incremental_potential_j_m3: self.incremental_potential_j_m3,
+            flow_potential_j_m3: self.flow_potential_j_m3,
+            stored_energy_j_m3: self.stored_energy_j_m3,
+            plastic_dissipation_j_m3: self.plastic_dissipation_j_m3,
+            plastic_increment: self.plastic_increment,
+            creep_dissipation_j_m3: self.creep_dissipation_j_m3,
+            creep_increment: self.creep_increment,
+            equivalent_kirchhoff_pa: self.equivalent_kirchhoff_pa,
+            jacobian: self.jacobian,
+        }
     }
 }
 

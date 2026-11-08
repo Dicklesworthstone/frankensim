@@ -21497,3 +21497,38 @@ and partition/inventory/source-domain/work/cancellation refusals.
 Phase index, group index, wavelength derivative, and first/second temperature derivatives all come from the same original law, including the temperature dependence of resonance wavelengths. These are derivatives of the global index fit, not the separately processed Table-6 thermo-optic estimates; their discrepancy near the temperature endpoints is explicit. Source applicability and condition-dependent measurement uncertainty remain unchanged. Absorption, scattering, pressure response, stress optics, thermal expansion, and other silica grades are not inferred.
 
 The NASA primary source and public-use record are retained in the module. Four focused G0/G1/G3 tests compare 21 independently printed indices, independent high-precision numerical derivative controls, temperature/wavelength finite differences, frozen coefficients, identities, and domain refusals. These tests and strict Clippy passed in a narrow Cargo build of the exact source and original fs-math/fs-blake3 dependencies; no full-workspace or experimental validation is claimed.
+
+## Finite primary creep with independent resistance recovery
+
+`plastic::finite::creep::recovery::FiniteRecoveringNortonCreep` extends the
+original authored finite Norton interval with an explicit nonnegative recovery
+rate at the same fixed temperature. Its complete `FiniteRecoveringCreepState`
+retains the original isochoric creep metric and cumulative `native.alpha`, plus
+independent `resistance_strain`. Backward Euler solves
+`r_new = (r_old + delta_alpha)/(1+k*dt)` alongside the same primary flow law.
+The private prepared scale `a*(1+k*dt)` and old resistance enter the shared
+logarithmic primary root and inverse-rate potential; permanent-history bounds,
+finite metric reconstruction and analytic `dP/dF` stay with the native owner.
+Each trial uses one scalar constitutive return, and line searches omit tangent
+assembly. Original coefficients remain inspectable without exposing the
+duration-transformed scale as a material parameter.
+
+Recovery neither resets finite permanent deformation nor reduces cumulative
+creep. Resistance stores no energy in this phenomenological model; physical
+creep heat remains `q*delta_alpha`, with q the equivalent Kirchhoff stress.
+The original standalone finite `plastic_*` field names retain their creep
+meaning. `FiniteJ2Response` accepts a complete typed history while defaulting
+to its original state, so recovery candidates carry one authoritative history.
+Inspection performs no flow or recovery. Invalid, unreachable or unrepresentable
+states refuse without modifying accepted history. Zero recovery with r=alpha
+reduces exactly to the original primary law, and disabled primary resistance
+preserves the original secondary mechanical return.
+
+`tests/plastic_finite_creep_recovery.rs` covers G0 positive heat, history and
+tangent invariants; G1 independent quadratic returns, cubic kinetic potentials,
+stationary constant-stress flow and unloaded dwell; and G3 rotations, hydrostatic
+stretch and exact disabled reductions. Reload after a dwell resumes faster creep
+without recovering the finite permanent set. These are authored numerical
+verification cases. Automatic temperature shifting, source-card selection,
+simultaneous yielding, thermal feedback, tertiary damage, rupture and measured
+service-life qualification are not supplied by this native material-point owner.
