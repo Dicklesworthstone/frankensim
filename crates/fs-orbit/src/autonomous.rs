@@ -150,21 +150,21 @@ impl Chart {
         let count = b.steps as u128 + 2;
         let size = nz as u128;
         let bytes = 8 * (3 * size * size + 64 * size
-            + 4 * finest * (d + b.harmonics) as u128
+            + 4 * finest * (d + 1) as u128
             + count * (2 * d as u128 * (b.harmonics + 1) as u128
                 + 3 * d as u128 + b.max_newton as u128 + 32));
         if bytes > b.maximum_payload_bytes as u128 {
             return Err(invalid("complete continuation payload exceeds its allowance"));
         }
         // An optional exact tangent can become available after a parameter
-        // change. Admit its complete workspace before allocating it, including
-        // both old and replacement phase tables during quadrature refinement.
+        // change. Admit its complete workspace before allocating it. The
+        // tangent borrows the residual's phase grid already counted above.
         // Families without this callback retain their original payload bound.
         let square = (d as u128) * (d as u128);
         let orders = 2 * b.harmonics as u128 + 1;
         let analytic_bytes = 8 * (4 * square * orders
             + 2 * square * (b.harmonics as u128 + 1) + 2 * orders
-            + 2 * square + 4 * finest * orders);
+            + 2 * square);
         let analytic_payload_admitted = bytes + analytic_bytes <= b.maximum_payload_bytes as u128;
         let pack = Packing { d, n_harm: b.harmonics, omega_slot: Some(nc) };
         let mut state_units = vec![0.0; nz];

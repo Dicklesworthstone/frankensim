@@ -12,7 +12,9 @@ use super::{
     AftSum, AftWorkspace, IslandStateJacobian, OrbitError, OrbitProblem, Packing, TAU,
     normalized_difference,
 };
-use fs_math::{c64::C64, det};
+use fs_math::c64::C64;
+#[cfg(test)]
+use fs_math::det;
 
 fn invalid(what: &'static str) -> OrbitError {
     OrbitError::BadParameter { what }
@@ -37,8 +39,6 @@ pub(super) struct Workspace {
     square: usize,
     orders: usize,
     samples: usize,
-    cosine: Vec<f64>,
-    sine: Vec<f64>,
     basis_means: Vec<C64>,
     local: Vec<f64>,
     reference: Vec<f64>,
@@ -75,8 +75,6 @@ impl Workspace {
             square,
             orders,
             samples: 0,
-            cosine: Vec::new(),
-            sine: Vec::new(),
             basis_means: zeros(orders, C64::ZERO)?,
             local: zeros(square, 0.0)?,
             reference: zeros(square, 0.0)?,
@@ -86,38 +84,23 @@ impl Workspace {
         })
     }
 
-    fn prepare_basis(&mut self, samples: usize) -> Result<(), OrbitError> {
+    fn prepare_basis(&mut self, aft: &AftWorkspace) -> Result<(), OrbitError> {
+        let samples = aft.samples;
         if self.samples == samples {
             return Ok(());
         }
-        let count = product(samples, self.orders)?;
-        let bytes = product(count, 2 * core::mem::size_of::<f64>())?;
-        if bytes > isize::MAX as usize {
-            return Err(invalid("analytic AFT phase-table payload overflows"));
-        }
-        let mut cosine = zeros(count, 0.0)?;
-        let mut sine = zeros(count, 0.0)?;
-        for sample in 0..samples {
-            let theta = TAU * sample as f64 / samples as f64;
-            cosine[sample * self.orders] = 1.0;
-            for order in 1..self.orders {
-                let (s, c) = det::sin_cos(order as f64 * theta);
-                sine[sample * self.orders + order] = s;
-                cosine[sample * self.orders + order] = c;
-            }
+        if self.orders > samples {
+            return Err(invalid("analytic AFT grid must resolve the tangent harmonics"));
         }
         for (order, mean) in self.basis_means.iter_mut().enumerate() {
             let mut re = AftSum::new(0.0);
             let mut im = AftSum::new(0.0);
-            for sample in 0..samples {
-                let index = sample * self.orders + order;
-                re.add(cosine[index] / samples as f64);
-                im.add(-sine[index] / samples as f64);
+            for phase in aft.basis.cycle(order).take(samples) {
+                re.add(phase.re / samples as f64);
+                im.add(-phase.im / samples as f64);
             }
             *mean = C64::new(re.total(), im.total());
         }
-        self.cosine = cosine;
-        self.sine = sine;
         self.samples = samples;
         Ok(())
     }
@@ -131,7 +114,7 @@ impl Workspace {
         omega: f64,
         aft: &AftWorkspace,
     ) -> Result<(), OrbitError> {
-        self.prepare_basis(aft.samples)?;
+        self.prepare_basis(aft)?;
         self.coefficients.fill(C64::ZERO);
         self.correction.fill(C64::ZERO);
         let period = TAU / omega;
@@ -155,10 +138,9 @@ impl Workspace {
             }
             // Project normalized deviations. The constant reference is restored
             // analytically with the actual finite-grid means in coefficient_entry.
-            for order in 0..self.orders {
-                let index = sample * self.orders + order;
-                let c = self.cosine[index];
-                let s = -self.sine[index];
+            for (order, phase) in aft.basis.cycle(sample).take(self.orders).enumerate() {
+                let c = phase.re;
+                let s = -phase.im;
                 for entry in 0..self.square {
                     let index = order * self.square + entry;
                     let term = C64::new(c * self.local[entry], s * self.local[entry]);

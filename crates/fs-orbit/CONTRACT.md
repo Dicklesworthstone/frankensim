@@ -156,9 +156,23 @@ exact numerical orthogonality of the trigonometric tables.
 
 Fourier accumulation costs O(samples * N * d^2), followed by O(N^2 * d^2)
 coefficient-block assembly. Tangent callbacks run once per sample and Newton
-iterate, not once per Fourier unknown. Checked tangent buffers and phase
-tables are reused across Newton; quadrature refinement rebuilds the phase
-tables. These are algorithmic counts, not measured throughput claims.
+iterate, not once per Fourier unknown. Checked tangent buffers are reused
+across Newton. Reconstruction, projection, omitted-band checks and the tangent
+share one grid of M complex roots of unity. Integer modular indexing evaluates
+harmonic n at sample j as root `(n*j) mod M`; the hot traversal uses modular
+addition without division or floating oscillator recurrence. Conjugate roots
+and cardinal phases are shared exactly, and every trigonometric argument is
+bounded by pi. This avoids order-dependent argument reduction and accumulated
+phase drift. Finer odd grids retain their actual sample count.
+
+Phase storage is 16*M bytes and preparation uses at most floor(M/2)
+deterministic sin/cos calls, independent of harmonic order N. Previously the
+residual and analytic tangent together held 16*M*(3*N+1) bytes of phase tables.
+Continuation payload admission counts the new shared allocation, including
+coexisting coarse/fine grids. Projection and tangent summation work otherwise
+retain the counts above, along with measured discrete basis means and the
+constant-preserving projection. These are algorithmic/storage counts, not
+whole-solver throughput or cross-ISA bit-equality claims.
 
 Physical row/column conditioning, phase masks, the analytic backbone-amplitude
 row, and the full product rule for equilibrium deflation remain in the same
@@ -722,3 +736,22 @@ it does not establish Floquet stability, startup decay or finite-probe accuracy.
   exactly, but does not supply an adaptive, hybrid or matrix-free flow tangent,
   a continuous-time error bound, or the rest of the I09 capability lattice.
 - Grazing/hybrid (non-smooth) islands are out of scope in v1.
+
+## Shared phase-grid verification
+
+The high-order regression in `tests/analytic_harmonics.rs` checks physical
+oscillator phase and amplitude through the 64th harmonic, including a drive
+near resonance and an independently sampled odd verification grid. Root-grid
+tests cover odd/even quadratures, conjugate symmetry and repeated periods
+without phase drift. Existing nonlinear convolution, finite-difference tangent,
+adaptive alias-refusal and continuation tests remain the integration checks.
+
+A pinned-nightly native benchmark compiled the actual `basis.rs` and complete
+`fs-math` source. For 512/1025 samples at order 64 and 2048/4097 samples at
+order 256, its compensated reconstruction/projection comparisons against the
+former tables had maximum round-trip error 6.25e-17 and maximum projection
+difference 4.94e-15. Preparation and high-order projection improved locally;
+some smaller warmed kernels were slower. Those shared-host measurements are
+not stable release throughput guarantees. Full Cargo integration was attempted
+but blocked by shared disk exhaustion and subsequent environment loss; the
+new integration tests have not yet run in that environment.

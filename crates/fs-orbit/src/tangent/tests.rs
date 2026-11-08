@@ -224,8 +224,10 @@ fn centered_nonlinear_tangent_matches_sample_products_and_finite_differences() {
     }).collect();
     let basis = |j: usize, n: usize, imaginary: bool| {
         if n == 0 { 1.0 }
-        else if imaginary { -2.0 * aft.sine[j * pack.n_harm + n - 1] }
-        else { 2.0 * aft.cosine[j * pack.n_harm + n - 1] }
+        else {
+            let phase = aft.basis.cycle(j).nth(n).unwrap();
+            if imaginary { -2.0 * phase.im } else { 2.0 * phase.re }
+        }
     };
     for col in 0..pack.coeff_len() {
         let (k, input, imaginary_col) = coordinate(col, pack.d);
@@ -236,7 +238,7 @@ fn centered_nonlinear_tangent_matches_sample_products_and_finite_differences() {
             let mut sampled = C64::from_re(if n == 0 { reference } else { 0.0 });
             for (j, jacobian) in jacobians.iter().enumerate().skip(1) {
                 let weight = if n == 0 { C64::from_re(1.0) }
-                    else { C64::new(aft.cosine[j * pack.n_harm + n - 1], -aft.sine[j * pack.n_harm + n - 1]) };
+                    else { aft.basis.cycle(j).nth(n).unwrap().conj() };
                 sampled = sampled + weight.scale((jacobian[entry] * basis(j, k, imaginary_col) - reference) / aft.samples as f64);
             }
             let mut linear = if n == k { Coupled.port(C64::new(0.0, n as f64))[entry] } else { C64::ZERO };

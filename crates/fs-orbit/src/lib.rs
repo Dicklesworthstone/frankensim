@@ -56,6 +56,8 @@ mod forced;
 pub use forced::{ContinuationScales, ScaledContinuationPoint, continue_branch_scaled_seeded};
 
 mod tangent;
+mod basis;
+use basis::PhaseBasis;
 
 /// Consistent discrete shooting tangents, physical scaling and Floquet maps.
 pub mod shooting;
@@ -492,8 +494,7 @@ fn normalized_difference(value: f64, reference: f64, samples: usize) -> f64 {
 struct AftWorkspace {
     samples: usize,
     refinement: usize,
-    cosine: Vec<f64>,
-    sine: Vec<f64>,
+    basis: PhaseBasis,
     xs: Vec<f64>,
     gs: Vec<f64>,
     island: Vec<f64>,
@@ -513,31 +514,21 @@ impl AftWorkspace {
     }
 
     fn with_samples(pack: &Packing, samples: usize, refinement: usize) -> Result<Self, OrbitError> {
-        let basis_len = samples
-            .checked_mul(pack.n_harm)
-            .ok_or(OrbitError::BadParameter {
-                what: "AFT basis size overflows",
-            })?;
+        if samples == 0 || pack.n_harm > (samples - 1) / 2 {
+            return Err(OrbitError::BadParameter {
+                what: "AFT sample grid must resolve the retained harmonics",
+            });
+        }
         let state_len = samples
             .checked_mul(pack.d)
             .ok_or(OrbitError::BadParameter {
                 what: "AFT state size overflows",
             })?;
-        let mut cosine = Vec::with_capacity(basis_len);
-        let mut sine = Vec::with_capacity(basis_len);
-        for j in 0..samples {
-            let theta = TAU * j as f64 / samples as f64;
-            for n in 1..=pack.n_harm {
-                let (s, c) = det::sin_cos(n as f64 * theta);
-                cosine.push(c);
-                sine.push(s);
-            }
-        }
+        let basis = PhaseBasis::new(samples)?;
         Ok(Self {
             samples,
             refinement,
-            cosine,
-            sine,
+            basis,
             xs: vec![0.0; state_len],
             gs: vec![0.0; state_len],
             island: vec![0.0; pack.d],
@@ -575,14 +566,13 @@ impl AftWorkspace {
     fn island_coefficient(&self, pack: &Packing, n: usize, k: usize) -> C64 {
         let mut re = AftSum::new(if n == 0 { self.gs[k] } else { 0.0 });
         let mut im = AftSum::new(0.0);
-        for sample in 1..self.samples {
+        for (sample, phase) in (1..self.samples).zip(self.basis.cycle(n).skip(1)) {
             let value = self.gs[sample * pack.d + k];
             if n == 0 {
                 re.add(value);
             } else {
-                let i = sample * pack.n_harm + n - 1;
-                re.add(value * self.cosine[i]);
-                im.add(-value * self.sine[i]);
+                re.add(value * phase.re);
+                im.add(-value * phase.im);
             }
         }
         C64::new(re.total(), im.total())
@@ -606,11 +596,10 @@ fn hb_residual<P: OrbitProblem>(
     for j in 0..m {
         for k in 0..d {
             let mut ac = AftSum::new(0.0);
-            for n in 1..=n_harm {
-                let i = j * n_harm + n - 1;
+            for (n, phase) in (1..=n_harm).zip(aft.basis.cycle(j).skip(1)) {
                 ac.add(
-                    2.0 * (u[pack.re_index(n, k)] * aft.cosine[i]
-                        - u[pack.im_index(n, k)] * aft.sine[i]),
+                    2.0 * (u[pack.re_index(n, k)] * phase.re
+                        - u[pack.im_index(n, k)] * phase.im),
                 );
             }
             aft.xs[j * d + k] = u[pack.re_index(0, k)] + ac.total();

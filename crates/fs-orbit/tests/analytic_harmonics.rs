@@ -214,3 +214,79 @@ fn exact_backbone_tangent_preserves_physical_scales_frequency_and_deflation() {
         }
     }
 }
+
+#[test]
+fn high_order_forcing_preserves_resonant_phasors_on_independent_odd_grid() {
+    struct LoadedMode;
+    const OMEGA: f64 = 1.3;
+    const STIFFNESS: f64 = 3600.0;
+    const DRAG: f64 = 0.2;
+    const TONES: [(usize, C64); 3] = [
+        (1, C64::new(0.2, -0.1)),
+        (47, C64::new(0.1, 0.07)),
+        (64, C64::new(0.03, -0.06)),
+    ];
+    impl OrbitProblem for LoadedMode {
+        fn dim(&self) -> usize {
+            1
+        }
+        fn island(&self, time: f64, _: &[f64], out: &mut [f64]) {
+            // Independently evaluated continuous loading, including a partial
+            // near the physical resonance and one at the retained band edge.
+            out[0] = 2.0;
+            for (order, force) in TONES {
+                let angle = order as f64 * OMEGA * time;
+                out[0] += 2.0 * (force.re * angle.cos() - force.im * angle.sin());
+            }
+        }
+        fn port(&self, s: C64) -> Vec<C64> {
+            vec![s * s + s.scale(DRAG) + C64::from_re(STIFFNESS)]
+        }
+        fn autonomous(&self) -> bool {
+            false
+        }
+        fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>> {
+            Some(|_, _, _, out| {
+                out[0] = 0.0;
+                true
+            })
+        }
+    }
+    let result = solve_hb_scaled_seeded(
+        &LoadedMode,
+        HbAnchor::Forced { omega: OMEGA },
+        vec![0.0; 129],
+        &HbBudget {
+            harmonics: 64,
+            tolerance: 1.0e-12,
+            ..HbBudget::default()
+        },
+        &HbScales {
+            states: vec![1.0e-3],
+            equations: vec![1.0],
+            angular_frequency: 1.0,
+        },
+    )
+    .unwrap();
+    assert!(result.orbit.aft_samples > 512);
+    assert_eq!(result.orbit.aft_samples % 2, 1);
+    for order in 0..=64 {
+        let force = if order == 0 {
+            C64::from_re(2.0)
+        } else {
+            TONES
+                .iter()
+                .find(|(n, _)| *n == order)
+                .map_or(C64::ZERO, |(_, f)| *f)
+        };
+        let w = order as f64 * OMEGA;
+        let expected = force / C64::new(STIFFNESS - w * w, DRAG * w);
+        assert!(
+            (result.orbit.coeffs[0][order] - expected).abs() < 2.0e-15,
+            "harmonic {order}: {:?} vs {expected:?}",
+            result.orbit.coeffs[0][order]
+        );
+    }
+    assert!(result.scaled_residual < 1.0e-12);
+    assert!(result.scaled_sampling_defect < 1.0e-12);
+}

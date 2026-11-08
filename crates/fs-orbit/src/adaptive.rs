@@ -300,10 +300,9 @@ fn projected_residual<P: OrbitProblem>(
     for j in 0..aft.samples {
         for k in 0..pack.d {
             let mut ac = AftSum::new(0.0);
-            for n in 1..=retained {
+            for (n, phase) in (1..=retained).zip(aft.basis.cycle(j).skip(1)) {
                 let c = orbit.coeffs[k][n];
-                let i = j * pack.n_harm + n - 1;
-                ac.add(2.0 * (c.re * aft.cosine[i] - c.im * aft.sine[i]));
+                ac.add(2.0 * (c.re * phase.re - c.im * phase.im));
             }
             aft.xs[j * pack.d + k] = orbit.coeffs[k][0].re + ac.total();
         }
@@ -333,10 +332,9 @@ fn projected_residual<P: OrbitProblem>(
     for j in 0..aft.samples {
         for k in 0..pack.d {
             let mut ac = AftSum::new(0.0);
-            for n in 1..=retained {
-                let i = j * pack.n_harm + n - 1;
+            for (n, phase) in (1..=retained).zip(aft.basis.cycle(j).skip(1)) {
                 let z = linear[n * pack.d + k];
-                ac.add(2.0 * (z.re * aft.cosine[i] - z.im * aft.sine[i]));
+                ac.add(2.0 * (z.re * phase.re - z.im * phase.im));
             }
             aft.xs[j * pack.d + k] = (linear[k].re - aft.gs[j * pack.d + k]) + ac.total();
         }
@@ -369,12 +367,10 @@ fn projected_residual<P: OrbitProblem>(
     for j in 0..aft.samples {
         for k in 0..pack.d {
             let mut retained_ac = AftSum::new(0.0);
-            for n in 1..=retained {
-                let i = j * pack.n_harm + n - 1;
-                let c = aft.cosine[i];
-                let s = aft.sine[i];
+            for (n, phase) in (1..=retained).zip(aft.basis.cycle(j).skip(1)) {
                 retained_ac.add(
-                    2.0 * (residual[pack.re_index(n, k)] * c - residual[pack.im_index(n, k)] * s),
+                    2.0 * (residual[pack.re_index(n, k)] * phase.re
+                        - residual[pack.im_index(n, k)] * phase.im),
                 );
             }
             let defect = aft.xs[j * pack.d + k];
