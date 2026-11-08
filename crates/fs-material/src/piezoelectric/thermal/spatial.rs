@@ -1,13 +1,16 @@
 //! Full source-bound three-dimensional piezoelectric thermal storage.
 //!
-//! At fixed Mandel strain S and Cartesian electric displacement D,
-//! psi/V = S:C:S/2 + (D-eS).epsilonS^-1.(D-eS)/2. For affine ORIGINAL
-//! stress-charge C(T), e(T), epsilonS(T), and E=epsilonS^-1(D-eS):
-//! entropy/V = -S:C':S/2 + E.e'S + E.epsilonS'.E/2,
-//! capacity/V = -T*(e'S+epsilonS'E).epsilonS^-1.(e'S+epsilonS'E).
-//! Thus affine elastic stiffness contributes entropy, but no fixed-(S,D)
-//! capacity. This is the complete local strain/charge potential, without
-//! longitudinal projection, relaxed coordinates or an electrode assumption.
+//! At fixed Mandel strain S and Cartesian electric displacement D, the optional
+//! sourced thermal expansion alpha and CLAMPED pyroelectric coefficient p give
+//! A=alpha*(T-Tref), P=p*(T-Tref), x=S-A, and
+//! psi/V = x:C:x/2 + (D-eS-P).epsilonS^-1.(D-eS-P)/2.
+//! With affine ORIGINAL stress-charge C(T), e(T), epsilonS(T), constant alpha,p,
+//! and w=e'S+p+epsilonS'E, entropy/V is
+//! alpha.C.x-x.C'.x/2+E.(e'S+p)+E.epsilonS'.E/2, while capacity/V is
+//! -T*(alpha.C.alpha-2*alpha.C'.x+w.epsilonS^-1.w).
+//! Without explicit bias sources alpha=p=0, recovering the original law.
+//! This is the complete local strain/charge potential, without longitudinal
+//! projection, relaxed coordinates or an electrode assumption.
 //!
 //! The native tensor owner retains the source/frame and supplies both field
 //! recovery and inverse dielectric factor actions. A response uses fixed-size
@@ -18,6 +21,8 @@
 //! interval arithmetic. The consuming thermal owner adds its actual caloric
 //! capacity and enforces the supplied coordinate bounds. Field entropy/capacity
 //! describe reversible exchange; they are not dissipative Joule heat.
+//! The caloric chart is the stress-free, zero-field reference: psi=0 at S=A,E=0.
+//! A measured clamped heat capacity requires conversion before use as that chart.
 //!
 //! Stress-charge conventions:
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.043.html>.
@@ -34,6 +39,10 @@ use crate::state_point::{DENSITY_PROPERTY, ResolvedMaterialStatePoint};
 use crate::tensor::{mandel_rotation, rotate_mandel};
 use fs_matdb::MaterialCard;
 
+mod bias;
+pub use bias::PYROELECTRIC_CLAMPED_DIMS;
+use bias::{ResolvedThermalBias, ThermalBiasSource};
+
 type Result<T> = core::result::Result<T, PiezoelectricError>;
 const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
@@ -46,8 +55,9 @@ struct TensorTemperatureSlopes {
 
 /// Full affine stress-charge source trajectory in the ORIGINAL tensor's fixed
 /// current frame. Density, reference volume and all nonthermal coordinates are
-/// held. No pyroelectric offset, thermal expansion, hysteresis, depoling, phase
-/// change, strain/field amplitude envelope or measured-material accuracy is
+/// held. Explicit thermal expansion and clamped pyroelectric sources can be
+/// attached with [`Self::with_thermal_bias`]. Hysteresis, depoling, phase change,
+/// strain/field amplitude envelopes and measured-material accuracy are not
 /// inferred. The spatial consumer owns fields, dynamics and caloric storage.
 #[derive(Clone, Debug)]
 pub struct ThermalTensorPiezoelectric {
@@ -60,6 +70,7 @@ pub struct ThermalTensorPiezoelectric {
     maximum_coupling_norm_c_m2: f64,
     coupling_slope_norm: f64,
     permittivity_slope_norm: f64,
+    bias: Option<ThermalBiasSource>,
 }
 
 /// Native full tensor and exact thermal derivatives at one pinned temperature.
@@ -68,6 +79,7 @@ pub struct ResolvedThermalTensorPiezoelectric {
     material: TensorPiezoelectric,
     temperature_k: f64,
     slopes: TensorTemperatureSlopes,
+    bias: Option<ResolvedThermalBias>,
 }
 
 fn dot<const N: usize>(a: &[f64; N], b: &[f64; N]) -> f64 {
@@ -213,7 +225,7 @@ impl ThermalTensorPiezoelectric {
             temperature_axis: temperature_axis.to_owned(), temperature_range_k,
             slopes, minimum_permittivity_f_m: f64::INFINITY,
             maximum_coupling_norm_c_m2: 0.0,
-            coupling_slope_norm, permittivity_slope_norm,
+            coupling_slope_norm, permittivity_slope_norm, bias: None,
         };
         for temperature in temperature_range_k {
             let at = law.at_temperature(temperature)?;
@@ -272,8 +284,11 @@ impl ThermalTensorPiezoelectric {
         if material.density_kg_m3().to_bits() != self.original.density_kg_m3().to_bits() {
             return Err(PiezoelectricError::Invalid("full piezoelectric reference density changed"));
         }
+        let bias = self.bias.as_ref().map(|bias| {
+            bias.at_temperature(&self.card, &material, temperature_k)
+        }).transpose()?;
         Ok(ResolvedThermalTensorPiezoelectric {
-            material, temperature_k, slopes: self.slopes,
+            material, temperature_k, slopes: self.slopes, bias,
         })
     }
 
@@ -313,10 +328,13 @@ impl ThermalTensorPiezoelectric {
     /// the physical symmetric tensor's Frobenius norm, including shear.
     ///
     /// With epsilon >= epsilon_min I and ||e|| <= e_max throughout,
-    /// ||E|| <= (D_max+e_max S_max)/epsilon_min. Therefore capacity is no
-    /// smaller than -Tmax V (||e'|| S_max+||epsilon'|| E_max)^2/epsilon_min.
-    /// Affine C' contributes no fixed-full-strain capacity. The caller enforces
-    /// both coordinate limits and adds the actual caloric heat capacity.
+    /// ||E|| <= (D_max+e_max S_max+||p|| max|T-Tref|)/epsilon_min.
+    /// Thermal bias adds the directional bounds max(alpha.C.alpha),
+    /// 2||C'alpha|| (S_max+||alpha|| max|T-Tref|), and the inverse-dielectric
+    /// norm of p. These endpoint directional bounds retain anisotropy without
+    /// replacing every thermal direction by the stiffest material direction.
+    /// The caller enforces both coordinate limits and adds the actual
+    /// stress-free, zero-field caloric heat capacity.
     /// This bound alone neither advances heat nor proves a relaxed field solve.
     pub fn minimum_heat_capacity_j_k(
         &self,
@@ -342,7 +360,10 @@ impl ThermalTensorPiezoelectric {
             if self.maximum_coupling_norm_c_m2 != 0.0 && maximum_strain_mandel_norm != 0.0 && polarization == 0.0 {
                 return Err(PiezoelectricError::Invalid("full piezoelectric polarization bound underflows"));
             }
-            let charge = finite(maximum_displacement_norm_c_m2+polarization)?;
+            let pyroelectric = self.bias.as_ref().map_or(0.0, |bias| {
+                bias.polarization_norm * bias.maximum_temperature_change_k
+            });
+            let charge = finite(maximum_displacement_norm_c_m2+polarization+pyroelectric)?;
             let field = finite(charge/self.minimum_permittivity_f_m)?;
             let derivative = finite(self.permittivity_slope_norm*field)?;
             if charge != 0.0 && (field == 0.0 || derivative == 0.0) {
@@ -351,10 +372,24 @@ impl ThermalTensorPiezoelectric {
             derivative
         };
         let derivative = finite(mechanical+dielectric)?;
-        if derivative == 0.0 { return Ok(0.0); }
         let action = finite(derivative/fs_math::det::sqrt(self.minimum_permittivity_f_m))?;
-        let magnitude = finite(self.temperature_range_k[1]*volume_m3*action*action)?;
-        if action == 0.0 || magnitude == 0.0 {
+        if derivative != 0.0 && action == 0.0 {
+            return Err(PiezoelectricError::Invalid("full piezoelectric capacity bound underflows"));
+        }
+        let (action, elastic_curvature) = if let Some(bias) = &self.bias {
+            let strain = finite(maximum_strain_mandel_norm
+                + bias.expansion_norm*bias.maximum_temperature_change_k)?;
+            (finite(action+bias.maximum_pyroelectric_inverse_norm)?,
+                finite(bias.maximum_expansion_curvature
+                    + 2.0*bias.expansion_slope_norm*strain)?)
+        } else { (action, 0.0) };
+        let curvature = finite(action*action+elastic_curvature)?;
+        if curvature == 0.0 {
+            return if action == 0.0 { Ok(0.0) }
+            else { Err(PiezoelectricError::Invalid("full piezoelectric capacity bound underflows")) };
+        }
+        let magnitude = finite(self.temperature_range_k[1]*volume_m3*curvature)?;
+        if magnitude == 0.0 {
             return Err(PiezoelectricError::Invalid("full piezoelectric capacity bound underflows"));
         }
         finite(-magnitude*(1.0+4096.0*f64::EPSILON))
@@ -367,8 +402,10 @@ impl ResolvedThermalTensorPiezoelectric {
 
     /// Integrated Helmholtz energy, entropy, internal energy and heat capacity
     /// at fixed complete strain/displacement and fixed positive reference volume.
-    /// The native material supplies psi and E. C_field is nonpositive for this
-    /// affine stress-charge source; finite caloric storage belongs to the caller.
+    /// The native material factors supply psi and E with the sourced offsets.
+    /// With changing C(T) and thermal expansion the field capacity can have
+    /// either sign. Finite caloric storage uses the stress-free zero-field chart;
+    /// reversible field entropy is never counted as dissipative ceramic heat.
     pub fn state(
         &self,
         strain_mandel: [f64; 6],
@@ -378,27 +415,37 @@ impl ResolvedThermalTensorPiezoelectric {
         if !volume_m3.is_finite() || volume_m3 <= 0.0 {
             return Err(PiezoelectricError::Invalid("full piezoelectric thermal volume must be finite positive"));
         }
-        let response = self.material.charge_response(strain_mandel, displacement_c_m2)?;
+        let response = self.charge_response(strain_mandel, displacement_c_m2)?;
         let field = response.electric_field_v_m;
-        let elastic_slope = apply(&self.slopes.stiffness, &strain_mandel);
-        let polarization_slope = apply(&self.slopes.coupling, &strain_mandel);
+        let thermal_strain = self.thermal_strain_mandel();
+        let elastic_strain = core::array::from_fn(|i| strain_mandel[i]-thermal_strain[i]);
+        let elastic_slope = apply(&self.slopes.stiffness, &elastic_strain);
+        let mut polarization_slope = apply(&self.slopes.coupling, &strain_mandel);
+        let (expansion_entropy, expansion_curvature) = if let Some(bias) = &self.bias {
+            for (value, p) in polarization_slope.iter_mut().zip(bias.pyroelectric) { *value += p; }
+            (dot(&bias.expansion, &apply(self.material.stiffness_mandel_pa(), &elastic_strain)),
+                bias.expansion_curvature-2.0*dot(&bias.expansion, &elastic_slope))
+        } else { (0.0, 0.0) };
         let dielectric_slope = apply(&self.slopes.permittivity, &field);
         let entropy_density = finite(
-            (-0.5_f64).mul_add(dot(&strain_mandel, &elastic_slope),
-                0.5_f64.mul_add(dot(&field, &dielectric_slope), dot(&field, &polarization_slope))),
+            (-0.5_f64).mul_add(dot(&elastic_strain, &elastic_slope),
+                0.5_f64.mul_add(dot(&field, &dielectric_slope),
+                    dot(&field, &polarization_slope)+expansion_entropy)),
         )?;
         let drive = core::array::from_fn(|i| polarization_slope[i]+dielectric_slope[i]);
         let action = self.material.dielectric_inverse_factor_action(drive)?;
-        // A squared native inverse factor action preserves the negative
-        // capacity sign without subtracting two large tensor contractions.
-        let curvature = finite(dot(&action, &action))?;
+        // The dielectric curvature remains a nonnegative squared native factor
+        // action; the thermoelastic cross term can change the complete sign.
+        let dielectric_curvature = finite(dot(&action, &action))?;
+        let curvature = finite(dielectric_curvature+expansion_curvature)?;
         let free_energy_j = finite(volume_m3*response.stored_energy_j_m3)?;
         let entropy_j_k = finite(volume_m3*entropy_density)?;
         let heat_capacity_j_k = finite(-self.temperature_k*volume_m3*curvature)?;
         let internal_energy_j = finite(self.temperature_k.mul_add(entropy_j_k, free_energy_j))?;
         if response.stored_energy_j_m3 != 0.0 && free_energy_j == 0.0
             || entropy_density != 0.0 && entropy_j_k == 0.0
-            || action.iter().any(|&value| value != 0.0) && (curvature == 0.0 || heat_capacity_j_k == 0.0) {
+            || action.iter().any(|&value| value != 0.0) && dielectric_curvature == 0.0
+            || curvature != 0.0 && heat_capacity_j_k == 0.0 {
             return Err(PiezoelectricError::Invalid("full piezoelectric thermal contribution underflows"));
         }
         Ok(FieldThermalState { free_energy_j, entropy_j_k, internal_energy_j, heat_capacity_j_k })

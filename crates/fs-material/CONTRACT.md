@@ -20236,7 +20236,32 @@ material chart, foreign references and final publication cancellation.
 
 ### Full three-dimensional piezoelectric thermal storage
 
-`piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, exact entropy, internal energy and nonpositive field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant norm bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners must add their actual capacity and enforce those bounds. Reversible thermal exchange is separate from material loss. No pyroelectric offset, expansion, hysteresis, phase transition, depoling or measured-material validation is implied. Focused synthetic G0/G1/G3 regression sources cover independent diagonal/dense potentials, co-rotation and domain refusal; native execution remains a separate verification obligation.
+`piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, entropy, internal energy and field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners add their actual capacity and enforce those bounds. Reversible thermal exchange remains separate from material loss.
+
+`with_thermal_bias` optionally binds six explicit Mandel thermal-expansion
+coefficients and three explicit **clamped** pyroelectric coefficients from the
+same original card, query and source frame. Every component, including zeros,
+must be sourced and constant throughout the admitted temperature interval.
+The caller declares the in-range reference temperature at which thermal strain
+and polarization vanish. Source refreshes retain the selections and reference;
+second-rank thermal strain and vector polarization co-rotate with the tensor.
+For `A=alpha*(T-Tref)` and `P=p*(T-Tref)`, the shared potential is
+`psi/V=(S-A):C:(S-A)/2+(D-e*S-P).epsilonS^-1.(D-e*S-P)/2`.
+The constitutive stress, field and displacement, thermal entropy and curvature
+all derive from that potential. Coupling acts on total strain: the free shorted
+pyroelectric response includes `p+e*alpha`, so a measured total coefficient must
+be converted before entering a clamped source role.
+
+The caloric chart is the stress-free, zero-field reference inventory;
+an unconverted clamped heat capacity is not interchangeable with it. With
+thermal expansion and temperature-dependent stiffness, field heat capacity
+can have either sign. Directional endpoint bounds include expansion curvature,
+stiffness-slope cross terms and pyroelectric inverse-dielectric response, while
+the consuming thermal owner enforces positive combined caloric/field capacity.
+No spontaneous polarization, hysteresis, phase transition, depoling or
+measured-material validation is inferred. Synthetic regression definitions
+cover full potentials and derivatives, source/refusal boundaries and frame
+rotation; native execution remains a separate verification obligation.
 
 ## Directional tensile strength in orthotropic material axes
 

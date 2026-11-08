@@ -1,5 +1,8 @@
 //! G0/G1/G3 full fixed-(S,D) thermal source tests. Synthetic coefficients;
 //! closed independent potentials and tensor elimination are the references.
+#[path = "thermal_spatial/bias.rs"]
+mod bias;
+
 use super::*;
 use fs_material::piezoelectric::thermal::ThermalTensorPiezoelectric;
 use fs_qty::{
