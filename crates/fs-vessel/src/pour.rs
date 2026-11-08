@@ -18,7 +18,7 @@ use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR, update_tau};
 use fs_lbm::{Cell, Grid};
 use fs_render::volumes::{
     AbsorptionImageSettings, DensityAbsorption, DvrError, VolumeGrid,
-    render_absorption_transmittance, render_density_transmittance,
+    render_absorption_transmittance, render_density_transmittance_box,
 };
 
 /// The pour fixture: a tank with an interior weir (the lip) the fluid
@@ -128,7 +128,7 @@ pub struct PourOutcome {
 ///
 /// The view explicitly extrudes this two-dimensional field through
 /// `slab_depth_m`. Interface cells use a homogeneous density along that ray;
-/// the mass map does not determine a sharp interface or pixel-area coverage.
+/// the mass map does not determine a sharp interface or subcell coverage.
 /// This computes liquid absorption only. It does not infer wall occlusion,
 /// surface reflection/refraction, scattering, thermal emission or a spectrum.
 /// The caller supplies the coefficient at the stated wavelength; changing only
@@ -178,10 +178,13 @@ impl std::error::Error for PourOpticalError {}
 impl PourOpticalView {
     /// Render a borrowed accepted mass field with explicit work/memory limits.
     ///
-    /// Each pixel returns the direct intensity transmittance
+    /// Each original column transmits
     /// `exp(-mass * density_unit_kg_m3 * mass_absorption_m2_kg * slab_depth_m)`.
+    /// Each output pixel averages that transmission over its complete rectangular
+    /// footprint. Narrow liquid features retain their actual projected coverage;
+    /// density or optical depth is never averaged before exponentiation.
     /// The original mass buffer is borrowed without allocating a converted
-    /// density/extinction field. Pixel-centre sampling has no area filter.
+    /// density/extinction field or a supersampling image.
     ///
     /// Invalid geometry, samples, conversion or budget returns no partial image.
     pub fn render_mass_field(
@@ -212,7 +215,7 @@ impl PourOpticalView {
                 self.slab_depth_m,
             ],
         };
-        render_density_transmittance(
+        render_density_transmittance_box(
             &grid,
             settings,
             DensityAbsorption {
@@ -872,7 +875,7 @@ mod physical_opacity_tests {
             resolution: [2; 2],
             max_pixels: 4,
             max_grid_cells: cells,
-            max_cell_visits: 4,
+            max_cell_visits: cells as u64,
         }
     }
 
@@ -948,6 +951,51 @@ mod physical_opacity_tests {
         .render_mass_field(&coarse.map(|mass| 2.0 * mass), [2, 2], settings(4))
         .unwrap();
         assert_eq!(rescaled, reference);
+    }
+
+    /// G1: a subpixel stream contributes its area even when the centre misses it.
+    #[test]
+    fn physical_pour_filters_transmission_before_downsampling() {
+        let optics = PourOpticalView {
+            mass_absorption_m2_kg: 1000.0,
+            density_unit_kg_m3: 1.0,
+            slab_depth_m: 1.0,
+            ..view()
+        };
+        let mass = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let limits = AbsorptionImageSettings {
+            resolution: [1, 1], max_pixels: 1,
+            max_grid_cells: 8, max_cell_visits: 8,
+        };
+        assert_eq!(optics.render_mass_field(&mass, [4, 2], limits).unwrap(), vec![0.75]);
+        let refined: Vec<_> = (0..4)
+            .flat_map(|y| (0..8).map(move |x| mass[x / 2 + 4 * (y / 2)]))
+            .collect();
+        let refined_limits = AbsorptionImageSettings {
+            max_grid_cells: 32, max_cell_visits: 32, ..limits
+        };
+        assert_eq!(
+            PourOpticalView { lattice_spacing_m: 0.5 * optics.lattice_spacing_m, ..optics }
+                .render_mass_field(&refined, [8, 4], refined_limits).unwrap(),
+            vec![0.75]
+        );
+        assert!(optics.render_mass_field(
+            &mass, [4, 2], AbsorptionImageSettings { max_cell_visits: 7, ..limits },
+        ).is_err());
+    }
+
+    /// G1: a coarse pixel preserves separate transparent and absorbing columns.
+    #[test]
+    fn physical_pour_coarse_pixels_do_not_use_the_mean_density() {
+        let mass = [0.0, 0.25, 0.5, 1.0];
+        let limits = AbsorptionImageSettings {
+            resolution: [1, 1], max_pixels: 1,
+            max_grid_cells: 4, max_cell_visits: 4,
+        };
+        let actual = view().render_mass_field(&mass, [2, 2], limits).unwrap()[0];
+        let expected = mass.iter().map(|rho| (-0.8_f64 * rho).exp()).sum::<f64>() / 4.0;
+        close(actual, expected);
+        assert!((actual - (-0.8_f64 * 0.4375).exp()).abs() > 0.02);
     }
 
     /// G0: invalid source/view input and bounded work never return an image.

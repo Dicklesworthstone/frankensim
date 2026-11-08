@@ -982,11 +982,15 @@ fn render_thin_slab(mass: &[f64], nx: usize, ny: usize, res: usize) -> Vec<f64> 
 /// independent `slab_depth_m` is the optical path length perpendicular to
 /// the simulated plane. Density is `mass_field[i] * density_unit_kg_m3`.
 /// Interface cells use the native view's homogeneous along-ray approximation.
+/// Pixels average each original column's transmitted light over their exact
+/// rectangular footprints, so downsampling preserves thin-stream coverage.
 /// Surface reflection/refraction, wall occlusion and scattering are excluded.
 ///
 /// Reuses captured frames without running the pour again or making an
 /// intermediate extinction buffer. Refuses images or fields larger than
-/// 1,048,576 samples and returns an empty vector for any invalid input/budget.
+/// 1,048,576 samples or column-cell visits, and returns an empty vector for
+/// any invalid input or exhausted budget. Nondivisible pixel footprints can
+/// visit more columns than there are output pixels.
 /// Physical parameters are validated, never clamped into a different material.
 #[allow(clippy::too_many_arguments)]
 pub fn render_vessel_transmittance(
@@ -1910,6 +1914,21 @@ mod tests {
             &mass, 2, 2, 2, 700.0, 0.1, 1000.0, 1e-3, 2e-3,
         );
         assert!((red[3] - (-0.2_f64).exp()).abs() < 8e-15);
+    }
+
+    #[test]
+    fn browser_physical_pour_keeps_subpixel_liquid_coverage() {
+        let mass = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        assert_eq!(
+            render_vessel_transmittance(&mass, 4, 2, 1, 550.0, 1000.0, 1.0, 1e-3, 1.0),
+            vec![0.75]
+        );
+        let transmission = render_vessel_transmittance(
+            &[0.0, 0.25, 0.5, 1.0], 2, 2, 1, 550.0, 0.4, 1000.0, 1e-3, 2e-3,
+        );
+        let expected = [0.0, 0.25, 0.5, 1.0].iter()
+            .map(|rho| (-0.8_f64 * rho).exp()).sum::<f64>() / 4.0;
+        assert!((transmission[0] - expected).abs() < 8e-15);
     }
 
     #[test]

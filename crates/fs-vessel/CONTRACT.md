@@ -374,17 +374,27 @@ shared fs-render density-opacity integrator. The view explicitly supplies
 vacuum wavelength, mass absorption in m²/kg, kg/m³ per lattice mass unit,
 in-plane lattice spacing and an independent viewing depth in metres. Field
 storage is borrowed; no converted extinction image or new simulation is
-needed. Doubling depth squares direct-beam transmittance, and changing the
-lateral resolution or density units without changing the physical column
-preserves opacity. The fs-wasm render_vessel_transmittance export exposes
+needed. Every pixel now integrates its complete rectangular footprint by
+averaging original-column transmission, so a thin stream cannot disappear
+because its pixel centre lands in gas. Doubling depth squares each column's
+direct transmittance before filtering; a mixed pixel's mean transmission is
+not squared. Refining the representation or changing density units without
+changing the physical field preserves the filtered result. The fs-wasm render_vessel_transmittance export exposes
 the same computation for captured browser frames with fixed work limits.
 
 An interface cell's liquid mass is treated as homogeneous along the viewing
 ray. This is a declared cell-average slab model: it does not reconstruct
-free-surface geometry, area coverage, wall occlusion, refraction, scattering,
+free-surface geometry or subcell coverage, wall occlusion, refraction, scattering,
 or a liquid's measured spectrum. The coefficient must be supplied at the
 declared wavelength and material state. The older render_pour visualization
 retains its explicitly authored lattice-opacity convention.
+
+The original cell-work budget now covers every overlapping source column.
+Native/browser regressions specify subpixel opaque-stream coverage, analytic
+mixed-column transmission, lateral refinement and one-short work refusal.
+The shared renderer's exact footprint kernel passed native tests; these
+downstream integration tests were added after the execution environment became
+unavailable and remain unexecuted.
 
 ## Cylindrical free-jet capillary screen
 
