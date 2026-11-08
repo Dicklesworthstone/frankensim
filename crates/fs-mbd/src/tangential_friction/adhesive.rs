@@ -38,6 +38,9 @@ pub mod jkr_mixed_mode;
 /// Coupled radius-relaxed JKR normal/torsion on the actual finite body pair.
 pub mod jkr_torsional;
 
+/// One radius-relaxed JKR disk under normal, two shear and twist motion.
+pub mod jkr_combined;
+
 /// Fixed-axis JKR rolling spring and yield on the actual finite body pair.
 pub mod rolling;
 

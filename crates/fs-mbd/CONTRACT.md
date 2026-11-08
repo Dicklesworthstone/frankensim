@@ -8663,3 +8663,41 @@ integrated force/torque/heat equations, quadratic refinement, common rigid and
 isolated free modes, distant origins and common velocity boosts, inactive
 sources, explicit resource boundaries, late physical refusal, and cancellation
 with unchanged-input retry.
+
+## Native simultaneous full-stick normal, shear and twist adhesion
+
+`adhesive::jkr_combined` consumes the original four-coordinate circular JKR
+source on one actual pair of finite bodies. Its coordinates are normal approach,
+two elastic tangential displacements and elastic twist in radians. One relaxed
+contact area supplies all four conjugate efforts and normal, shear, torsional
+and surface storage; independent normal/shear/twist disks, Coulomb caps and
+radius-scaled twist histories are not substituted.
+
+The complete mixed-unit `J M^-1 J^T` comes from actual masses, full inertia
+tensors, the original frame and coincident reaction arms. Source efforts act as
+opposite point forces and opposite free normal couples. External held COM forces
+and body torques enter the same coupled solve through their actual accelerations.
+Existing native impulse owners apply the combined resultant once to each body;
+independent point/angular rates, integrated travel, actual kinetic change,
+external work, source storage and body/pair linear/angular momentum must agree
+before both momenta and sealed constitutive history can be published atomically.
+Returning reversible contact energy is assisting mechanical work, never heat.
+
+Only elastic shear/twist preload is declared at initialization: material-marker
+geometry supplies approach and actual body momenta supply all four rates.
+History retains original source, mobility and numerical-policy identity together
+with body indices, mass properties, poses, momenta, frame and material datum.
+The phase holds geometry and retains accumulated COM and body-rate travel; those
+integrals are not finite attitudes. A changed normal approach refuses subsequent
+use against stale marker geometry. This owner supplies no generalized pose
+continuation, slip, rolling elasticity, radial snap or detached trajectory.
+Relative transverse rolling is bounded at both endpoints and therefore throughout
+the affine held-resultant phase. Common transverse spin is allowed and contributes
+its actual contact-point velocity; facing equal-inertia bodies can consequently
+recoil under both shear directions without discarding their point-force torques.
+
+Five focused regressions exercise simultaneous four-coordinate recoil and external
+work with changing area, all sixteen full-inertia mobility entries against actual
+unit body impulses, off-axis loaded equilibrium, elastic energy return and world
+rotation covariance, original torsional/normal limits, and atomic original-source,
+body, stale-geometry, rolling and cancellation refusal with deterministic retry.
