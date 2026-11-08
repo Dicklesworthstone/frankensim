@@ -14,6 +14,7 @@ pub mod gas_scattering;
 
 mod bulk_optics;
 mod spectral_optics;
+pub use spectral_optics::MaterialSlabEmissionError;
 /// Thermal lensing from original absolute dispersion and a frozen temperature field.
 pub mod thermo_optic;
 /// Original temperature/density-dependent ordinary-water phase and group optics.

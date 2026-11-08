@@ -10,7 +10,8 @@
 //! Local Kirchhoff Law*, Phys. Rev. X 8, 021008 (2018), equations (5)--(6):
 //! <https://doi.org/10.1103/PhysRevX.8.021008>.
 //!
-//! The optical fields remain coherent; statistically independent thermal
+//! Finite films retain coherent optical fields. An explicitly incoherent bulk
+//! slab instead reuses its native Fresnel/Beer power sum. Independent thermal
 //! sources add radiances. A single averaged temperature generally gives the
 //! wrong spectrum. Both direction and polarization must match the reciprocal
 //! absorption problem. Isotropic reciprocal local constitutive laws, planar
@@ -24,14 +25,17 @@ use crate::conductor::{
     ConductorError, ConductorOptics, MAX_COHERENT_STACK_LAYERS,
 };
 use crate::dielectric::{
-    DielectricCoatingStack, DielectricError, DielectricIor, MAX_DIELECTRIC_KNOT_SPAN_NM,
+    DielectricCoatingStack, DielectricError, DielectricGlass, DielectricIor, DielectricSurface,
+    MAX_DIELECTRIC_KNOT_SPAN_NM,
 };
 use crate::polarization::{Mueller, Stokes};
+use crate::tracer::Material;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
 use std::sync::Arc;
 
-/// Owned finite-band emitter with one temperature per original physical film.
+/// Owned finite-band emitter with one temperature per original physical film
+/// or one uniform temperature for an explicitly incoherent bulk glass slab.
 ///
 /// The selected outgoing half space is exactly vacuum (`eta = 1`), consistent
 /// with the existing thermal renderer's exterior-air approximation. Radiance
@@ -84,6 +88,12 @@ enum Exit {
     Transmitting {
         opposite_ior: DielectricIor,
         reverse: bool,
+    },
+    IncoherentSlab {
+        glass: DielectricGlass,
+        thickness_m: f64,
+        temperature_k: f64,
+        opposite_ior: DielectricIor,
     },
 }
 
@@ -150,6 +160,44 @@ impl CoatingThermalEmission {
         )
     }
 
+    /// Prepare directional emission from one homogeneous, isothermal glass
+    /// slab into its selected vacuum half space. The opposite real-index law
+    /// may differ and retains its original wavelength support.
+    ///
+    /// The slab's positive absorptance, including both smooth bare interfaces
+    /// and every incoherent internal reflection, is the directional emissivity
+    /// for the same wavelength and polarization. Transmitted radiation is not
+    /// heat: an exactly transparent slab emits zero. Thickness is positive and
+    /// normal to its faces. The original weak-absorption real-interface / Beer
+    /// model applies; no coherent film, roughness or broadband tail is inferred.
+    ///
+    /// Existing exchange consumers see exactly one thermal film channel, with
+    /// no opaque substrate. Two vacuum half spaces admit both reciprocal ports;
+    /// emission into a nonvacuum opposite medium requires its own radiance
+    /// convention and is not supplied by this vacuum-facing owner.
+    pub fn try_incoherent_slab(
+        glass: DielectricGlass,
+        thickness_m: f64,
+        temperature_k: f64,
+        opposite_ior: DielectricIor,
+        source_identity: ContentHash,
+    ) -> Result<Self, CoatingEmissionError> {
+        if !thickness_m.is_finite() || thickness_m <= 0.0 {
+            return Err(DielectricError::InvalidAbsorption.into());
+        }
+        Self::prepare(
+            &[],
+            &[],
+            Exit::IncoherentSlab {
+                glass,
+                thickness_m,
+                temperature_k,
+                opposite_ior,
+            },
+            source_identity,
+        )
+    }
+
     fn prepare(
         layers: &[CoatingLayer<'_>],
         temperatures: &[f64],
@@ -169,6 +217,18 @@ impl CoatingThermalEmission {
         let mut wavelength_bounds_nm = match exit {
             Exit::Opaque { substrate, .. } => substrate.wavelength_bounds_nm(),
             Exit::Transmitting { opposite_ior, .. } => opposite_ior.wavelength_bounds_nm(),
+            Exit::IncoherentSlab {
+                glass,
+                opposite_ior,
+                ..
+            } => {
+                let glass_bounds = glass.wavelength_bounds_nm()?;
+                let opposite_bounds = opposite_ior.wavelength_bounds_nm();
+                (
+                    glass_bounds.0.max(opposite_bounds.0),
+                    glass_bounds.1.min(opposite_bounds.1),
+                )
+            }
         };
         for layer in layers {
             let bounds = layer.wavelength_bounds_nm();
@@ -181,7 +241,9 @@ impl CoatingThermalEmission {
         for &temperature in temperatures {
             validate_temperature(temperature, wavelength_bounds_nm.0)?;
         }
-        if let Exit::Opaque { temperature_k, .. } = exit {
+        if let Exit::Opaque { temperature_k, .. } | Exit::IncoherentSlab { temperature_k, .. } =
+            exit
+        {
             validate_temperature(temperature_k, wavelength_bounds_nm.0)?;
         }
         // A temperature change with fixed optical laws does not invalidate an
@@ -202,6 +264,15 @@ impl CoatingThermalEmission {
             } => {
                 optical_hash.update(&[1, u8::from(reverse)]);
                 hash_ior(&mut optical_hash, opposite_ior);
+            }
+            Exit::IncoherentSlab {
+                glass,
+                thickness_m,
+                opposite_ior,
+                ..
+            } => {
+                optical_hash.update(&[2]);
+                hash_slab(&mut optical_hash, glass, thickness_m, opposite_ior);
             }
         }
         let mut hash = DomainHasher::new("org.frankensim.render.coating-thermal-emission.v1");
@@ -225,6 +296,16 @@ impl CoatingThermalEmission {
             } => {
                 hash.update(&[1, u8::from(reverse)]);
                 hash_ior(&mut hash, opposite_ior);
+            }
+            Exit::IncoherentSlab {
+                glass,
+                thickness_m,
+                temperature_k,
+                opposite_ior,
+            } => {
+                hash.update(&[2]);
+                hash_slab(&mut hash, glass, thickness_m, opposite_ior);
+                hash.update(&temperature_k.to_bits().to_le_bytes());
             }
         }
         let films = layers
@@ -307,7 +388,7 @@ impl CoatingThermalEmission {
     /// phase-averaged transmitting-pair exchange.
     pub(super) fn is_vacuum_transmitting(&self) -> bool {
         match self.exit {
-            Exit::Transmitting { opposite_ior, .. } => {
+            Exit::Transmitting { opposite_ior, .. } | Exit::IncoherentSlab { opposite_ior, .. } => {
                 !opposite_ior.is_dispersive()
                     && opposite_ior.eval(self.wavelength_bounds_nm.0) == Ok(1.0)
             }
@@ -325,12 +406,30 @@ impl CoatingThermalEmission {
         cosine: f64,
         opposite: bool,
     ) -> Result<Option<ReciprocalPortPower>, CoatingEmissionError> {
-        let Exit::Transmitting { reverse, .. } = self.exit else {
-            return Ok(None);
-        };
         if !self.is_vacuum_transmitting() {
             return Ok(None);
         }
+        if let Exit::IncoherentSlab {
+            glass,
+            thickness_m,
+            opposite_ior,
+            ..
+        } = self.exit
+        {
+            // A homogeneous slab between two vacuum half spaces has identical
+            // reciprocal powers at either port; its one thermal channel stays
+            // associated with the same physical body under reverse incidence.
+            return Ok(Some(slab_power(
+                glass,
+                thickness_m,
+                opposite_ior,
+                wavelength_nm,
+                cosine,
+            )?));
+        }
+        let Exit::Transmitting { reverse, .. } = self.exit else {
+            return Ok(None);
+        };
         self.with_layers(|layers| {
             let work =
                 DielectricCoatingStack::try_mixed_in_band(layers, self.wavelength_bounds_nm)?
@@ -397,6 +496,17 @@ impl CoatingThermalEmission {
                 result.total = work.absorbed;
                 Ok(result)
             }
+            Exit::IncoherentSlab {
+                glass,
+                thickness_m,
+                opposite_ior,
+                ..
+            } => {
+                let work = slab_power(glass, thickness_m, opposite_ior, wavelength_nm, cosine)?;
+                result.films[0] = work.absorbed;
+                result.total = work.absorbed;
+                Ok(result)
+            }
         })
     }
 
@@ -410,7 +520,7 @@ impl CoatingThermalEmission {
             stokes: Stokes::unpolarized(0.0),
             polarized_radiance: [0.0; 2],
             films: [[0.0; 2]; MAX_COHERENT_STACK_LAYERS],
-            film_count: layers.len(),
+            film_count: self.film_count(),
             substrate: None,
             reflected: [0.0; 2],
             transmitted: [0.0; 2],
@@ -453,6 +563,18 @@ impl CoatingThermalEmission {
                 sample.transmitted = polarized_powers(work.fresnel.transmission);
                 sample.absorbed = work.absorbed;
                 self.emit_films(&mut sample, work.layer_absorbed(), wavelength_nm)?;
+            }
+            Exit::IncoherentSlab {
+                glass,
+                thickness_m,
+                temperature_k,
+                opposite_ior,
+            } => {
+                let work = slab_power(glass, thickness_m, opposite_ior, wavelength_nm, cosine)?;
+                sample.reflected = work.reflected;
+                sample.transmitted = work.transmitted;
+                sample.absorbed = work.absorbed;
+                sample.films[0] = emission(temperature_k, wavelength_nm, work.absorbed)?;
             }
         }
         // Positive compensated sums retain smaller emitting layers without
@@ -506,16 +628,23 @@ impl CoatingThermalEmission {
         self.wavelength_bounds_nm
     }
 
-    /// Number of original films, including explicit lossless/zero-thickness ones.
+    /// Number of original thermal film channels, including lossless films.
+    /// An incoherent homogeneous slab retains one channel even when transparent.
     #[must_use]
     pub fn film_count(&self) -> usize {
-        self.films.len()
+        match self.exit {
+            Exit::IncoherentSlab { .. } => 1,
+            _ => self.films.len(),
+        }
     }
 
     /// Uniform temperature of one physical film in authored order, K.
     #[must_use]
     pub fn film_temperature_k(&self, index: usize) -> Option<f64> {
-        self.films.get(index).map(|film| film.temperature_k)
+        match self.exit {
+            Exit::IncoherentSlab { temperature_k, .. } => (index == 0).then_some(temperature_k),
+            _ => self.films.get(index).map(|film| film.temperature_k),
+        }
     }
 
     /// Uniform opaque half-space temperature; absent for transmitting stacks.
@@ -523,7 +652,7 @@ impl CoatingThermalEmission {
     pub fn substrate_temperature_k(&self) -> Option<f64> {
         match self.exit {
             Exit::Opaque { temperature_k, .. } => Some(temperature_k),
-            Exit::Transmitting { .. } => None,
+            Exit::Transmitting { .. } | Exit::IncoherentSlab { .. } => None,
         }
     }
 
@@ -571,12 +700,18 @@ impl CoatingThermalEmission {
         }
         match self.films.as_ref() {
             [] => optics.coating().is_none() && optics.absorbing_coating().is_none(),
-            [Film { optics: OwnedLayer::Lossless(film), .. }] => {
-                optics.coating() == Some(*film)
-            }
-            [Film { optics: OwnedLayer::Absorbing(film), .. }] => {
-                optics.absorbing_coating() == Some(*film)
-            }
+            [
+                Film {
+                    optics: OwnedLayer::Lossless(film),
+                    ..
+                },
+            ] => optics.coating() == Some(*film),
+            [
+                Film {
+                    optics: OwnedLayer::Absorbing(film),
+                    ..
+                },
+            ] => optics.absorbing_coating() == Some(*film),
             _ => false,
         }
     }
@@ -747,6 +882,48 @@ fn emission(
     } else {
         Err(ThermalSurfaceError::Unrepresentable)
     }
+}
+
+fn slab_power(
+    glass: DielectricGlass,
+    thickness_m: f64,
+    opposite_ior: DielectricIor,
+    wavelength_nm: f64,
+    cosine: f64,
+) -> Result<ReciprocalPortPower, CoatingEmissionError> {
+    let work = glass.incoherent_slab_response_between(
+        wavelength_nm,
+        thickness_m,
+        cosine,
+        1.0,
+        opposite_ior.eval(wavelength_nm)?,
+    )?;
+    let powers = [work.perpendicular, work.parallel];
+    Ok(ReciprocalPortPower {
+        reflected: powers.map(|power| power.reflectance),
+        transmitted: powers.map(|power| power.transmittance),
+        absorbed: powers.map(|power| power.absorptance),
+    })
+}
+
+fn hash_slab(
+    hash: &mut DomainHasher,
+    glass: DielectricGlass,
+    thickness_m: f64,
+    opposite_ior: DielectricIor,
+) {
+    // Reuse the native complete glass identity, including original n/alpha or
+    // k parameterization and support. No spectral samples are reconstructed.
+    hash.update(
+        Material::Dielectric {
+            glass,
+            surface: DielectricSurface::SMOOTH,
+        }
+        .content_identity()
+        .as_bytes(),
+    );
+    hash.update(&thickness_m.to_bits().to_le_bytes());
+    hash_ior(hash, opposite_ior);
 }
 
 fn polarized_powers(matrix: Mueller) -> [f64; 2] {

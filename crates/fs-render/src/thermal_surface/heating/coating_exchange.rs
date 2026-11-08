@@ -23,7 +23,7 @@ use super::{
     SubstrateOpticsModel, SurfaceHeatingError, SurfaceHeatingReceiver,
 };
 use crate::conductor::MAX_COHERENT_STACK_LAYERS;
-use crate::dielectric::DielectricIor;
+use crate::dielectric::{DielectricGlass, DielectricIor};
 use crate::thermal_surface::CoatingThermalEmission;
 use crate::thermal_surface::coating_exchange::{
     CoatingExchangeBudget, CoatingExchangeError, CoatingExchangeQuadrature, CoatingExchangeResponse,
@@ -60,11 +60,20 @@ pub enum IsothermalCoatingStack {
         opposite_ior: DielectricIor,
         reverse: bool,
     },
+    /// One homogeneous incoherent slab with explicitly frozen optical laws.
+    /// Its complete bulk absorption heats/cools the same native receiver.
+    /// The selected observed port is vacuum; the other port retains its law.
+    IncoherentSlab {
+        glass: DielectricGlass,
+        thickness_m: f64,
+        opposite_ior: DielectricIor,
+    },
 }
 impl IsothermalCoatingStack {
     fn films(&self) -> &[CoatingOpticsModel] {
         match self {
             Self::Opaque { films, .. } | Self::Transmitting { films, .. } => films,
+            Self::IncoherentSlab { .. } => &[],
         }
     }
 }
@@ -724,6 +733,19 @@ fn resolve_stack_emitter(
             maximum_rows,
             check,
         )?,
+        IsothermalCoatingStack::IncoherentSlab {
+            glass,
+            thickness_m,
+            opposite_ior,
+        } => NativeCoatingEmission::try_incoherent_slab(
+            thermal,
+            receiver,
+            *glass,
+            *thickness_m,
+            *opposite_ior,
+            source_identity,
+            check,
+        )?,
     };
     Ok(snapshot.emitter().clone())
 }
@@ -738,7 +760,8 @@ fn admit_law_rows(
         stack.films().iter(),
         match stack {
             IsothermalCoatingStack::Opaque { substrate, .. } => Some(substrate),
-            IsothermalCoatingStack::Transmitting { .. } => None,
+            IsothermalCoatingStack::Transmitting { .. }
+            | IsothermalCoatingStack::IncoherentSlab { .. } => None,
         },
         laws,
         rows,

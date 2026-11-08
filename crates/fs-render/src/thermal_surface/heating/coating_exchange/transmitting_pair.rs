@@ -187,7 +187,11 @@ impl NativeCoatingTransmittingExchange {
                         "each transmitting body requires a nonzero source identity",
                     ));
                 }
-                if !matches!(side.stack, IsothermalCoatingStack::Transmitting { .. }) {
+                if !matches!(
+                    side.stack,
+                    IsothermalCoatingStack::Transmitting { .. }
+                        | IsothermalCoatingStack::IncoherentSlab { .. }
+                ) {
                     return Err(CoatingExchangeError::VacuumTransmittingRequired.into());
                 }
                 let id = side.receiver.thermal_cell;

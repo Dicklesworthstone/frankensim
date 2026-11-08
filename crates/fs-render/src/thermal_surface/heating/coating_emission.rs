@@ -11,7 +11,7 @@ use super::*;
 use crate::conductor::{
     CoatingLayer, CoherentAbsorbingCoating, CoherentDielectricCoating, MAX_COHERENT_STACK_LAYERS,
 };
-use crate::dielectric::DielectricIor;
+use crate::dielectric::{DielectricGlass, DielectricIor};
 use crate::thermal_surface::{CoatingEmissionError, CoatingThermalEmission};
 use std::collections::BTreeSet;
 
@@ -211,6 +211,34 @@ impl Resolver {
 }
 
 impl NativeCoatingEmission {
+    /// Observe one incoherent bulk slab at its original native cell temperature.
+    /// The supplied glass and opposite-medium laws are explicitly frozen over
+    /// the receiver's admitted temperature interval. This does not infer a
+    /// temperature-dependent absorption law or silently refresh source claims.
+    /// One receiver owns the whole isothermal slab; the selected port is vacuum.
+    pub fn try_incoherent_slab(
+        thermal: &DepositionSimulation<'_>,
+        receiver: SurfaceHeatingReceiver,
+        glass: DielectricGlass,
+        thickness_m: f64,
+        opposite_ior: DielectricIor,
+        source_identity: ContentHash,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, NativeCoatingEmissionError> {
+        checkpoint()?;
+        let mut resolver = Resolver::new(thermal.time_s(), 0, source_identity);
+        resolver.hash.update(&[2]);
+        let temperature = resolver.receiver(thermal, receiver)?;
+        let emitter = CoatingThermalEmission::try_incoherent_slab(
+            glass,
+            thickness_m,
+            temperature,
+            opposite_ior,
+            source_identity,
+        )?;
+        Self::finish(thermal.time_s(), emitter, resolver, &mut checkpoint)
+    }
+
     /// Prepare independently emitting films and their opaque substrate from
     /// original native states. The explicit films replace any substrate coating.
     /// Unique optical-law rows or original material property queries share one

@@ -395,6 +395,113 @@ fn g0_binding_refuses_state_surface_interpolation_and_si_conversion_mismatches()
 }
 
 #[test]
+fn g1_typed_material_temperature_and_original_ir_absorption_drive_slab_emission() {
+    let absolute = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let original_card = card(1.0, None);
+    let mut claims = ClaimSet::new();
+    for (_, original) in original_card.claims().claims_ordered() {
+        let mut claim = original.clone();
+        claim.validity = ValidityDomain::unconstrained().with_quantity("T", absolute, 300.0, 600.0);
+        claims.insert_claim(claim).unwrap();
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic IR thermal glass".into(),
+            phase: "solid".into(),
+            process: "explicit spectral source".into(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .unwrap();
+    let point = |t| QueryPoint::new().with_quantity("T", absolute, t).unwrap();
+    let optical = resolve_spectral_tabulated_dielectric_state_point(
+        &card,
+        &point(300.0),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let cold = optical.resolved();
+    let binding = MaterialOpticalBinding::try_spectral_tabulated_dielectric(
+        cold, &optical, MAX_GAP_NM, None, SURFACE,
+    )
+    .unwrap();
+    let vacuum: DielectricIor =
+        SellmeierIor::try_new_in_band([0.0; 3], [0.0; 3], (8000.0, 14_000.0))
+            .unwrap()
+            .into();
+    let before = binding
+        .incoherent_slab_emission(cold, "T", 0.04, vacuum)
+        .unwrap();
+    let hot = cold.at_query_point(&card, &point(600.0)).unwrap();
+    let (heated, _) = binding
+        .at_spectral_material_state(
+            &SpectralOpticalStatePoint::TabulatedDielectric(optical.clone()),
+            &card,
+            &hot,
+        )
+        .unwrap();
+    let after = heated
+        .incoherent_slab_emission(&hot, "T", 0.04, vacuum)
+        .unwrap();
+    for (bound, emitter, temperature) in [(binding, &before, 300.0), (heated, &after, 600.0)] {
+        let Material::Dielectric { glass, .. } = bound.material() else {
+            panic!("glass");
+        };
+        let expected = glass
+            .incoherent_slab_thermal_response_between(10_125.0, 0.04, 0.7, 1.0, 1.0, temperature)
+            .unwrap();
+        let sample = emitter.evaluate(10_125.0, 0.7).unwrap();
+        for pol in 0..2 {
+            assert!(
+                (sample.polarized_radiance_w_m2_sr_nm()[pol]
+                    / expected.polarized_radiance_w_m2_sr_nm[pol]
+                    - 1.0)
+                    .abs()
+                    < 2.0e-13
+            );
+        }
+        assert_eq!(emitter.film_temperature_k(0), Some(temperature));
+        assert!(emitter.evaluate(550.0, 1.0).is_err());
+    }
+    assert!(
+        after.radiance_w_m2_sr_nm(10_125.0, 0.7).unwrap()
+            > before.radiance_w_m2_sr_nm(10_125.0, 0.7).unwrap()
+    );
+    assert_ne!(after.optical_identity(), before.optical_identity());
+    assert_eq!(
+        binding
+            .incoherent_slab_emission(&hot, "T", 0.04, vacuum)
+            .unwrap_err(),
+        MaterialSlabEmissionError::StateMismatch
+    );
+    assert_eq!(
+        binding
+            .incoherent_slab_emission(cold, "missing", 0.04, vacuum)
+            .unwrap_err(),
+        MaterialSlabEmissionError::TemperatureAxis
+    );
+    let rough = MaterialOpticalBinding::try_spectral_tabulated_dielectric(
+        cold,
+        &optical,
+        MAX_GAP_NM,
+        Some(0.1),
+        SURFACE,
+    )
+    .unwrap();
+    assert_eq!(
+        rough
+            .incoherent_slab_emission(cold, "T", 0.04, vacuum)
+            .unwrap_err(),
+        MaterialSlabEmissionError::Surface
+    );
+}
+
+#[test]
 fn g0_refresh_keeps_original_interpolation_limit_and_is_atomic_on_a_wider_gap() {
     let card = card(1.0, Some(16e-6));
     let cold = state(&card, 300.0);

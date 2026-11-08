@@ -5,7 +5,9 @@ use fs_render::conductor::{
     CoatingIorSample, CoatingLayer, CoherentAbsorbingCoating, CoherentCoatingStack,
     ConductorDataStatus, ConductorIorSample, ConductorOptics, ConductorSource,
 };
-use fs_render::dielectric::{CauchyIor, DielectricIor};
+use fs_render::dielectric::{
+    BeerLambertAbsorption, CauchyIor, DielectricGlass, DielectricIor, GlassProvenance,
+};
 use fs_render::thermal_surface::CoatingExchangeQuadrature;
 use fs_render::thermal_surface::heating::coating_exchange::*;
 use fs_render::thermal_surface::heating::{
@@ -194,6 +196,82 @@ fn cooling_warming_equilibrium_and_vacuum_use_native_storage_without_bath_oversh
         );
         assert_eq!(observed.emitter(10).unwrap().film_temperature_k(0), Some(t));
         assert_eq!(advanced.cells()[&CellId(11)].mass_kg, 0.001);
+        assert_eq!(native.time_s(), 0.0);
+    }
+}
+
+#[test]
+fn incoherent_glass_cools_one_native_store_through_both_ports_without_heating_from_transmission() {
+    for (alpha, bath_temperature) in [(0.0, 1800.0), (40.0, 3100.0), (40.0, 1800.0)] {
+        let native = thermal(vec![specimen(3100.0, 0.001)], &HOT, vec![]);
+        let glass = DielectricGlass::new(
+            CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::try_constant(alpha).unwrap(),
+            GlassProvenance::Custom,
+        );
+        let mut front = source(
+            0.0005,
+            CoatingExchangeBath::Blackbody {
+                temperature_k: bath_temperature,
+            },
+            false,
+        );
+        front.stack = IsothermalCoatingStack::IncoherentSlab {
+            glass,
+            thickness_m: 0.02,
+            opposite_ior: CauchyIor::try_constant(1.0).unwrap().into(),
+        };
+        // Two separately authored exposed faces of the same isothermal body;
+        // no second caloric store or unphysical heat from transmitted light.
+        let mut rear = front.clone();
+        rear.source_id = 20;
+        let initial = exchange(&native, &[front, rear]);
+        let old_optics = initial.emitter(10).unwrap().optical_identity();
+        let old_emission = initial.emitter(10).unwrap().identity();
+        let (advanced, observed, audit) = native
+            .advance_observed(&initial, 0.05, config(0.01), || Ok(()))
+            .unwrap();
+        let temperature = advanced.temperature_k(CellId(11)).unwrap();
+        if alpha == 0.0 || bath_temperature == 3100.0 {
+            assert_eq!(temperature, 3100.0);
+            assert_eq!(observed.energy().outward_j, 0.0);
+            assert_eq!(audit.external_heat_j, 0.0);
+        } else {
+            assert!(temperature < 3100.0 && temperature > bath_temperature);
+            assert!(observed.energy().outward_j > 0.0);
+            assert_ne!(observed.emitter(10).unwrap().identity(), old_emission);
+        }
+        near(
+            advanced.energy_j() - native.energy_j(),
+            observed.energy().thermal_external_j,
+            1.0e-11,
+        );
+        near(audit.external_heat_j, -observed.energy().outward_j, 1.0e-11);
+        near(
+            observed.energy().by_source_outward_j[&10],
+            observed.energy().by_source_outward_j[&20],
+            1.0e-13,
+        );
+        assert_eq!(observed.work().optical_evaluations, 0);
+        let emitter = observed.emitter(10).unwrap();
+        assert_eq!(emitter.optical_identity(), old_optics);
+        assert_eq!(emitter.film_count(), 1);
+        assert_eq!(emitter.film_temperature_k(0), Some(temperature));
+        assert_eq!(emitter.substrate_temperature_k(), None);
+        let direct = glass
+            .incoherent_slab_thermal_response_between(550.0, 0.02, 0.7, 1.0, 1.0, temperature)
+            .unwrap();
+        let emitted = emitter
+            .evaluate(550.0, 0.7)
+            .unwrap()
+            .polarized_radiance_w_m2_sr_nm();
+        for pol in 0..2 {
+            near(
+                emitted[pol],
+                direct.polarized_radiance_w_m2_sr_nm[pol],
+                1.0e-13,
+            );
+        }
         assert_eq!(native.time_s(), 0.0);
     }
 }

@@ -205,7 +205,11 @@ impl NativeCoatingRadiativeStack {
                         "each radiative body requires a nonzero source identity",
                     ));
                 }
-                if !matches!(body.stack, IsothermalCoatingStack::Transmitting { .. }) {
+                if !matches!(
+                    body.stack,
+                    IsothermalCoatingStack::Transmitting { .. }
+                        | IsothermalCoatingStack::IncoherentSlab { .. }
+                ) {
                     return Err(CoatingExchangeError::VacuumTransmittingRequired.into());
                 }
                 let id = body.receiver.thermal_cell;

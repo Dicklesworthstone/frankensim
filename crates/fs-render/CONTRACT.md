@@ -2233,6 +2233,31 @@ scattering, coatings, lateral exit location or traversal delay. See
 [SCHOTT TIE-35, section 1](https://media.schott.com/api/public/content/110b56518128431b9f3134627d7f4c4e?v=012d3e7e)
 for the distinction between internal and external transmittance.
 
+### Slab emission and native thermal exchange
+
+`CoatingThermalEmission::try_incoherent_slab` retains one uniform-temperature
+bulk-glass receiver and the original finite-band phase/absorption laws. Native
+slab s/p absorptance supplies reciprocal emissivity; transmitted power remains
+radiation, and transparent slabs retain a thermal channel with zero emission.
+The selected shared exchange port remains vacuum. The separate
+`DielectricGlass::incoherent_slab_thermal_response_between` observation supports
+either lossless exterior with that medium's index-squared radiance convention
+([CIE S 017:2020, 17-24-005 note 2](https://cie.co.at/eilvterm/17-24-005)).
+Existing one-port, layer-channel and two-vacuum-port exchange owners reuse the
+same reflection, transmission and absorption.
+
+`MaterialOpticalBinding::incoherent_slab_emission` requires the exact accepted
+state, an existing typed absolute-temperature axis, and smooth uncoated glass.
+`IsothermalCoatingStack::IncoherentSlab` and
+`NativeCoatingEmission::try_incoherent_slab` connect the same opacity to native
+caloric storage, step restrictions, cached quadrature and signed energy
+accounting. Native observer optical laws are explicitly frozen over their
+admitted temperature interval; material-dependent optical changes require a
+refreshed binding. No bolometric continuation, coherent/strongly absorbing
+interface model, rough face or geometry-derived thickness is inferred. Focused
+regressions exercise directional emission, transparent/thin/black limits,
+material-state refresh, two exposed faces, equilibrium and native energy closure.
+
 ## High-index transparent dielectric transport
 
 Explicit finite-band Sellmeier and tabulated phase laws admit ordinary real

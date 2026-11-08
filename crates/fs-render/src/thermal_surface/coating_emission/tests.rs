@@ -2,7 +2,7 @@ use super::*;
 use crate::conductor::{
     CoatingIorSample, ConductorDataStatus, ConductorIorSample, ConductorSource,
 };
-use crate::dielectric::CauchyIor;
+use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
 use core::f64::consts::PI;
 
 mod infrared;
@@ -53,6 +53,194 @@ fn planck_si(temperature_k: f64, wavelength_nm: f64) -> f64 {
     let k = 1.380_649e-23;
     2.0 * h * c * c / (wavelength_m.powi(5) * (h * c / (wavelength_m * k * temperature_k)).exp_m1())
         * 1.0e-9
+}
+
+#[test]
+fn incoherent_slab_retains_one_physical_receiver_and_directional_kirchhoff_emission() {
+    let glass = DielectricGlass::new(
+        CauchyIor::try_constant(1.5).unwrap(),
+        BeerLambertAbsorption::try_constant(40.0).unwrap(),
+        GlassProvenance::Custom,
+    );
+    let temperature = 1500.0;
+    let emitter = CoatingThermalEmission::try_incoherent_slab(
+        glass,
+        0.02,
+        temperature,
+        CauchyIor::try_constant(1.33).unwrap().into(),
+        ContentHash([91; 32]),
+    )
+    .unwrap();
+    assert_eq!(emitter.film_count(), 1);
+    assert_eq!(emitter.film_temperature_k(0), Some(temperature));
+    assert_eq!(emitter.film_temperature_k(1), None);
+    assert_eq!(emitter.substrate_temperature_k(), None);
+    assert!(!emitter.is_vacuum_transmitting());
+    for cosine in [1.0, 0.6, 0.1] {
+        let sample = emitter.evaluate(550.0, cosine).unwrap();
+        let optical = glass
+            .incoherent_slab_response_between(550.0, 0.02, cosine, 1.0, 1.33)
+            .unwrap();
+        let powers = [optical.perpendicular, optical.parallel];
+        assert_eq!(
+            sample.reciprocal_absorbed_fraction(),
+            powers.map(|p| p.absorptance)
+        );
+        assert_eq!(
+            sample.reciprocal_transmitted_fraction(),
+            powers.map(|p| p.transmittance)
+        );
+        for pol in 0..2 {
+            close(
+                sample.polarized_radiance_w_m2_sr_nm()[pol],
+                0.5 * powers[pol].absorptance * planck_si(temperature, 550.0),
+            );
+        }
+        assert_eq!(
+            sample.film_radiance_w_m2_sr_nm(),
+            &[sample.polarized_radiance_w_m2_sr_nm()]
+        );
+        for opposite in [false, true] {
+            assert!(
+                emitter
+                    .reciprocal_vacuum_port_power(550.0, cosine, opposite)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+    let clone = emitter.clone();
+    assert_eq!(clone.identity(), emitter.identity());
+    assert_eq!(
+        clone.evaluate(550.0, 0.6).unwrap(),
+        emitter.evaluate(550.0, 0.6).unwrap()
+    );
+    let warmer = CoatingThermalEmission::try_incoherent_slab(
+        glass,
+        0.02,
+        1700.0,
+        CauchyIor::try_constant(1.33).unwrap().into(),
+        ContentHash([91; 32]),
+    )
+    .unwrap();
+    assert_eq!(warmer.optical_identity(), emitter.optical_identity());
+    assert_ne!(warmer.identity(), emitter.identity());
+    assert!(
+        warmer.radiance_w_m2_sr_nm(550.0, 0.6).unwrap()
+            > emitter.radiance_w_m2_sr_nm(550.0, 0.6).unwrap()
+    );
+}
+
+#[test]
+fn slab_emission_keeps_transparent_thin_and_black_limits_and_two_vacuum_ports() {
+    use crate::thermal_surface::{
+        CoatingExchangeQuadrature, CoatingTransmittingPairBudget, CoatingTransmittingPairResponse,
+    };
+    for alpha in [0.0, 1.0e-20, 1.0e5] {
+        let glass = DielectricGlass::new(
+            CauchyIor::try_constant(1.0).unwrap(),
+            BeerLambertAbsorption::try_constant(alpha).unwrap(),
+            GlassProvenance::Custom,
+        );
+        let emitter = CoatingThermalEmission::try_incoherent_slab(
+            glass,
+            0.02,
+            1500.0,
+            vacuum(),
+            ContentHash([92; 32]),
+        )
+        .unwrap();
+        let sample = emitter.evaluate(550.0, 0.6).unwrap();
+        let absorption = -(-alpha * 0.02 / 0.6_f64).exp_m1();
+        close(sample.stokes().i, absorption * planck_si(1500.0, 550.0));
+        assert_eq!(sample.film_radiance_w_m2_sr_nm().len(), 1);
+        if alpha == 0.0 {
+            assert_eq!(sample.stokes().i, 0.0);
+        } else {
+            assert!(sample.stokes().i > 0.0);
+        }
+        let front = emitter
+            .reciprocal_vacuum_port_power(550.0, 0.6, false)
+            .unwrap()
+            .unwrap();
+        let rear = emitter
+            .reciprocal_vacuum_port_power(550.0, 0.6, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(front.absorbed, rear.absorbed);
+        assert_eq!(front.transmitted, rear.transmitted);
+        let response = CoatingTransmittingPairResponse::from_emitters(
+            &emitter,
+            &emitter,
+            0.1,
+            CoatingExchangeQuadrature {
+                wavelength_bins: 4,
+                cosine_bins: 4,
+            },
+            CoatingTransmittingPairBudget {
+                max_channel_spectral_nodes: 24,
+                max_optical_evaluations: 64,
+            },
+            || Ok(()),
+        )
+        .unwrap();
+        let equilibrium = response
+            .evaluate(1500.0, 1500.0, Some(1500.0), Some(1500.0), || Ok(()))
+            .unwrap();
+        assert_eq!(equilibrium.body_outward_power_w(), [0.0; 2]);
+        assert_eq!(equilibrium.bath_outward_power_w(), [0.0; 2]);
+        if alpha == 0.0 {
+            let dark = response
+                .evaluate(1200.0, 1800.0, Some(900.0), Some(1900.0), || Ok(()))
+                .unwrap();
+            assert_eq!(dark.body_outward_power_w(), [0.0; 2]);
+        }
+    }
+}
+
+#[test]
+fn unequal_exterior_media_use_their_own_reciprocal_absorption_and_radiance_measure() {
+    let glass = DielectricGlass::new(
+        CauchyIor::try_constant(1.5).unwrap(),
+        BeerLambertAbsorption::try_constant(40.0).unwrap(),
+        GlassProvenance::Custom,
+    );
+    let temperature = 1500.0;
+    let front_cosine = 0.6_f64;
+    let rear_cosine = (1.0 - (1.0 - front_cosine.powi(2)) / 1.33_f64.powi(2)).sqrt();
+    let front = glass
+        .incoherent_slab_thermal_response_between(550.0, 0.02, front_cosine, 1.0, 1.33, temperature)
+        .unwrap();
+    let rear = glass
+        .incoherent_slab_thermal_response_between(550.0, 0.02, rear_cosine, 1.33, 1.0, temperature)
+        .unwrap();
+    for (response, index) in [(front, 1.0_f64), (rear, 1.33_f64)] {
+        for (pol, power) in [response.optical.perpendicular, response.optical.parallel]
+            .into_iter()
+            .enumerate()
+        {
+            close(
+                response.polarized_radiance_w_m2_sr_nm[pol],
+                0.5 * index.powi(2) * power.absorptance * planck_si(temperature, 550.0),
+            );
+            // In equal-temperature surroundings, each mode remains its local
+            // blackbody radiance after reflection, reciprocal transmission and emission.
+            close(
+                index.powi(2)
+                    * planck_si(temperature, 550.0)
+                    * (power.reflectance + power.transmittance + power.absorptance),
+                index.powi(2) * planck_si(temperature, 550.0),
+            );
+        }
+    }
+    close(
+        front.optical.perpendicular.transmittance,
+        rear.optical.perpendicular.transmittance,
+    );
+    assert_ne!(
+        front.polarized_radiance_w_m2_sr_nm,
+        rear.polarized_radiance_w_m2_sr_nm
+    );
 }
 
 #[test]

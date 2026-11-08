@@ -1,12 +1,86 @@
 //! Finite-band material-card optics routed to the original native transport.
 
 use super::*;
+use crate::thermal_surface::{CoatingEmissionError, CoatingThermalEmission};
 use fs_material::state_point::{
     SpectralConductorStatePoint, SpectralOpticalStatePoint, SpectralSellmeierStatePoint,
     SpectralTabulatedDielectricStatePoint,
 };
+use fs_qty::QuantitySpec;
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+
+/// Refusal before a material state becomes a slab's physical thermal source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaterialSlabEmissionError {
+    /// The supplied state is not the exact accepted state of this binding.
+    StateMismatch,
+    /// Incoherent slab emission requires a smooth, uncoated dielectric.
+    Surface,
+    /// An existing typed absolute-temperature coordinate is required.
+    TemperatureAxis,
+    /// Original bulk optics, source support or thermal emission refused.
+    Emission(CoatingEmissionError),
+}
+
+impl core::fmt::Display for MaterialSlabEmissionError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "material slab emission refused: {self:?}")
+    }
+}
+
+impl core::error::Error for MaterialSlabEmissionError {}
 
 impl MaterialOpticalBinding {
+    /// Observe finite glass thickness using the same accepted material optics
+    /// and its explicitly typed absolute-temperature coordinate. No emissivity
+    /// is fitted: the original directional slab absorptance supplies Kirchhoff
+    /// emission into the selected vacuum port, per wavelength and polarization.
+    ///
+    /// `thickness_m` and the opposite medium's original phase-index law declare
+    /// the physical slab geometry. The binding must have smooth uncoated faces.
+    /// The immutable result feeds native spectral observation and exchange;
+    /// observing it does not debit heat. A changed material state requires the
+    /// existing state refresh and a new emission binding. The original support
+    /// and incoherent weak-absorption approximation remain binding.
+    pub fn incoherent_slab_emission(
+        &self,
+        accepted: &ResolvedMaterialStatePoint,
+        temperature_axis: &str,
+        thickness_m: f64,
+        opposite_ior: DielectricIor,
+    ) -> Result<CoatingThermalEmission, MaterialSlabEmissionError> {
+        if accepted.identity() != self.accepted_state_identity() {
+            return Err(MaterialSlabEmissionError::StateMismatch);
+        }
+        let OpticalAppearance::Dielectric { glass, surface } = self.appearance else {
+            return Err(MaterialSlabEmissionError::Surface);
+        };
+        if !surface.is_delta() || surface.coating().is_some() {
+            return Err(MaterialSlabEmissionError::Surface);
+        }
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let point = accepted.query();
+        if point.axis_quantities().get(temperature_axis) != Some(&absolute) {
+            return Err(MaterialSlabEmissionError::TemperatureAxis);
+        }
+        let temperature = point
+            .axes()
+            .get(temperature_axis)
+            .copied()
+            .ok_or(MaterialSlabEmissionError::TemperatureAxis)?;
+        CoatingThermalEmission::try_incoherent_slab(
+            glass,
+            thickness_m,
+            temperature,
+            opposite_ior,
+            self.identity(),
+        )
+        .map_err(MaterialSlabEmissionError::Emission)
+    }
+
     /// Bind an original analytic Sellmeier fit on its own source wavelength
     /// domain. Its independent intensity-absorption spectrum is retained, and
     /// only their common support is available to native transport. Exact phase

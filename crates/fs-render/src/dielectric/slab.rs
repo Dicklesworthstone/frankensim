@@ -12,6 +12,9 @@ use super::{
     AbsorptionModel, BeerLambertAbsorption, DielectricError, DielectricGlass, DielectricIor,
     SpectralAbsorption, dielectric_power_coefficients, fresnel_dielectric,
 };
+use crate::thermal_surface::{
+    CoatingEmissionError, ThermalSurfaceError, planck_radiance_w_m2_sr_nm,
+};
 use fs_math::det;
 
 /// Fractions of incident normal power, including every internal reflection.
@@ -40,6 +43,16 @@ pub struct IncoherentSlabResponse {
     pub optical_depth: f64,
 }
 
+/// Directional isothermal slab emission and its reciprocal optical powers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IncoherentSlabThermalResponse {
+    /// R/T/A for incidence from the observed side along the reversed mode.
+    pub optical: IncoherentSlabResponse,
+    /// Emitted `[s, p]` radiance in W/(m² sr nm), per vacuum wavelength.
+    /// Each mode is `n_observed² * A_mode * B_lambda(T) / 2`.
+    pub polarized_radiance_w_m2_sr_nm: [f64; 2],
+}
+
 impl IncoherentSlabResponse {
     /// Unpolarized power; averaging interface Fresnel values before summing
     /// internal bounces would give a different, incorrect oblique response.
@@ -55,6 +68,57 @@ impl IncoherentSlabResponse {
 }
 
 impl DielectricGlass {
+    /// Observe a uniform-temperature slab from either lossless exterior medium.
+    /// The outgoing cosine is relative to that side's outward normal. Its
+    /// time-reversed incoming mode supplies the same directional absorptance.
+    /// Switch the exterior indices and use the actual outgoing angle to observe
+    /// the other side; unequal media need not have equal emitted radiance.
+    ///
+    /// Wavelengths remain vacuum nm. Radiance in the observed medium includes
+    /// its phase-index-squared factor, following CIE S 017:2020, 17-24-005,
+    /// note 2: <https://cie.co.at/eilvterm/17-24-005>. This is a local far-field
+    /// observation, not a thermal debit or a vacuum exchange adapter. The same
+    /// incoherent, weak-absorption slab assumptions and source support apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn incoherent_slab_thermal_response_between(
+        &self,
+        wavelength_nm: f64,
+        thickness_m: f64,
+        outgoing_cosine: f64,
+        observed_index: f64,
+        opposite_index: f64,
+        temperature_k: f64,
+    ) -> Result<IncoherentSlabThermalResponse, CoatingEmissionError> {
+        let optical = self.incoherent_slab_response_between(
+            wavelength_nm,
+            thickness_m,
+            outgoing_cosine,
+            observed_index,
+            opposite_index,
+        )?;
+        let blackbody = planck_radiance_w_m2_sr_nm(temperature_k, wavelength_nm)?;
+        let index_weight = 0.5 * (observed_index * observed_index);
+        let mut radiance = [0.0; 2];
+        for (value, power) in radiance
+            .iter_mut()
+            .zip([optical.perpendicular, optical.parallel])
+        {
+            *value = (power.absorptance * blackbody) * index_weight;
+            if power.absorptance > 0.0 && blackbody > 0.0 && (*value == 0.0 || !value.is_finite()) {
+                *value = det::exp(
+                    det::ln(power.absorptance) + det::ln(blackbody) + det::ln(index_weight),
+                );
+            }
+            if !value.is_finite() || *value < 0.0 {
+                return Err(ThermalSurfaceError::Unrepresentable.into());
+            }
+        }
+        Ok(IncoherentSlabThermalResponse {
+            optical,
+            polarized_radiance_w_m2_sr_nm: radiance,
+        })
+    }
+
     /// Evaluate wavelength-, angle- and thickness-dependent slab opacity.
     ///
     /// `thickness_m` is positive normal thickness, not distance along the ray.
