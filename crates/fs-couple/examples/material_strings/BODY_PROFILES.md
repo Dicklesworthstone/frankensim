@@ -717,8 +717,9 @@ bridge-triangle COMPONENT TRIANGLE W0 W1 W2 DX DY DZ RX_M RY_M RZ_M
 The point belongs only to that component; the existing mortar assembly carries
 its loads to connected parts. Nodal and triangle bridge records can be mixed in
 one `bridges` block. The assembly-table converter's legacy x/y `bridge` option
-continues to report its nearest-node snap distance; subelement attachment must
-be declared explicitly in the resulting body profile.
+continues to report its nearest-node snap distance. Its `bridge-triangle`
+option (below) declares a subelement attachment and is copied into the
+resulting body profile as written, never snapped.
 
 ### Shell resource bounds
 
@@ -1547,13 +1548,21 @@ pack TABLE_PACK PROFILE_PACK          (one per table pack; @body is the performa
 bridge-component NAME
 bridge-direction X Y Z
 bridge X Y                            (one per string, in string order, table coordinates [m])
+bridge-triangle COMPONENT TRIANGLE W0 W1 W2 DX DY DZ RX_M RY_M RZ_M
+                                      (in place of `bridge X Y` for a string)
 ```
 
-Each record except `pack` and `bridge` appears exactly once, and a line that
-starts with `#` is a comment. The command prints:
+Each record except `pack`, `bridge` and `bridge-triangle` appears exactly once,
+and a line that starts with `#` is a comment. A string's bridge is either form,
+and the two can be mixed. `bridge X Y` becomes the node of `bridge-component`
+nearest (X, Y), driven along `bridge-direction`. `bridge-triangle` names one
+triangle of COMPONENT, numbered as that part's `tri` rows in the table. Its
+weights, direction and rigid arm are the profile's own (above). The converter
+checks that the component and the triangle exist and writes the row unchanged.
+The command prints:
 - the body length and width [m] and the reference thickness, for the
   performance's body record;
-- each bridge's snap distance;
+- each bridge's snap distance (0 for a `bridge-triangle` row);
 - the table's cavity row (volume, neck radius, neck length), for the cavity
   record.
 

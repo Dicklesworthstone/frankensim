@@ -53,8 +53,9 @@ pub(crate) struct TableOptions<'a> {
 /// `TableOptions` as a `frankensim-shell-assembly-options-v1` text, so a table converts from the command line
 /// (`material_strings assemble-shell`, BODY_PROFILES.md). One record per line, `#` starts a comment line:
 /// `window-hz LO HI`, `projection-work N`, `reference-thickness-m T`, `bridge-component NAME` and
-/// `bridge-direction X Y Z` once each; `pack TABLE_PACK PROFILE_PACK` per table pack and `bridge X Y` per string, in
-/// string order. Optional `coating COMPONENT PACK SIDE THICKNESS_M REFERENCE_HZ
+/// `bridge-direction X Y Z` once each; `pack TABLE_PACK PROFILE_PACK` per table pack and, per string in string order,
+/// `bridge X Y` or `bridge-triangle COMPONENT TRIANGLE W0 W1 W2 DX DY DZ RX_M RY_M RZ_M` (`OptionBridge`; the two
+/// can be mixed). Optional `coating COMPONENT PACK SIDE THICKNESS_M REFERENCE_HZ
 /// NU STRAIN_LIMIT RH STORAGE_TOL` records select every region of a component;
 /// `@exterior` selects only parts explicitly marked exterior in the table.
 pub(crate) struct OptionsFile {
@@ -63,10 +64,22 @@ pub(crate) struct OptionsFile {
     packs: Vec<(String, String)>,
     reference_thickness_m: f64,
     bridge_component: String,
-    bridges: Vec<(f64, f64)>,
+    bridges: Vec<OptionBridge>,
     bridge_direction: [f64; 3],
     coatings: Vec<TableCoating>,
     coating_memory: Option<MemoryInput>,
+}
+
+/// One string's bridge in an options file.
+enum OptionBridge {
+    /// `bridge X Y`: the node of `bridge-component` nearest (x, y) [m] in table coordinates, along `bridge-direction`.
+    Snap(f64, f64),
+    /// `bridge-triangle COMPONENT TRIANGLE W0 W1 W2 DX DY DZ RX_M RY_M RZ_M`: a point inside one original triangle of
+    /// COMPONENT, numbered as that part's `tri` rows in the table (the profile keeps their order), with its own unit
+    /// direction and its rigid arm [m] from the weighted midsurface point (BODY_PROFILES.md, "Interior and offset
+    /// bridge attachment points"). It is copied into the profile as written and never snapped; the profile admits the
+    /// weights, the direction and the arm.
+    Triangle { component: String, triangle: usize, fields: [f64; 9] },
 }
 
 struct TableCoating {
@@ -96,7 +109,10 @@ impl OptionsFile {
                 ["bridge-direction", rest @ ..] if bridge_direction.is_none() => bridge_direction = Some(floats::<3>(rest)?),
                 ["pack", table, profile] if !packs.iter().any(|(t, _): &(String, String)| t == table) =>
                     packs.push((table.to_string(), profile.to_string())),
-                ["bridge", rest @ ..] => bridges.push(floats::<2>(rest).map(|[x, y]| (x, y))?),
+                ["bridge", rest @ ..] => bridges.push(floats::<2>(rest).map(|[x, y]| OptionBridge::Snap(x, y))?),
+                ["bridge-triangle", component, triangle, rest @ ..] => bridges.push(OptionBridge::Triangle {
+                    component: component.to_string(), triangle: triangle.parse()?, fields: floats::<9>(rest)?,
+                }),
                 ["coating", component, rest @ ..] if coatings.len() < MAX_COATINGS => {
                     if component.chars().any(char::is_control) || component.starts_with('@') && *component != "@exterior" {
                         return Err("shell-assembly coating needs a component name or @exterior".into());
@@ -142,21 +158,22 @@ impl OptionsFile {
     pub(crate) fn convert(&self, table: &str) -> Result<ConvertedTable> {
         let two_pi = 2.0 * core::f64::consts::PI;
         let packs: Vec<(&str, &str)> = self.packs.iter().map(|(t, p)| (t.as_str(), p.as_str())).collect();
+        // The file's bridges, triangle rows among them, pass on their own in string order.
         convert_with_coatings(table, &TableOptions {
             window: ((two_pi * self.window_hz.0).powi(2), (two_pi * self.window_hz.1).powi(2)),
             projection_work: self.projection_work,
             packs: &packs,
             reference_thickness_m: self.reference_thickness_m,
             bridge_component: &self.bridge_component,
-            bridges: &self.bridges,
+            bridges: &[],
             bridge_direction: self.bridge_direction,
-        }, &self.coatings, self.coating_memory.as_ref())
+        }, &self.bridges, &self.coatings, self.coating_memory.as_ref())
     }
 }
 
 /// A converted table: the v4 profile, the body length and width [m] its x/y fractions refer to, how far each bridge point
-/// was from the node it became [m], and the table's cavity row (volume [m^3], neck radius [m], neck length [m]) for the
-/// performance's cavity record.
+/// was from the node it became [m] (0 for a `bridge-triangle` row, which is written as declared), and the table's cavity
+/// row (volume [m^3], neck radius [m], neck length [m]) for the performance's cavity record.
 pub(crate) struct ConvertedTable {
     pub profile: String,
     pub length_m: f64,
@@ -205,10 +222,12 @@ fn floats<const N: usize>(fields: &[&str]) -> Result<[f64; N]> {
 
 /// Read the table and write it as a v4 assembled body profile (see the module documentation).
 pub(crate) fn convert(table: &str, options: &TableOptions<'_>) -> Result<ConvertedTable> {
-    convert_with_coatings(table, options, &[], None)
+    let bridges: Vec<OptionBridge> = options.bridges.iter().map(|&(x, y)| OptionBridge::Snap(x, y)).collect();
+    convert_with_coatings(table, options, &bridges, &[], None)
 }
 
-fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[TableCoating],
+/// `options.bridges` is not read here: `bridges` carries every string's bridge.
+fn convert_with_coatings(table: &str, options: &TableOptions<'_>, bridges: &[OptionBridge], coatings: &[TableCoating],
     coating_memory: Option<&MemoryInput>) -> Result<ConvertedTable> {
     let mut lines = table.lines();
     if lines.next() != Some("frankensim.shell-assembly.v1") {
@@ -344,14 +363,104 @@ fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[Ta
     }
     let carrier = &parts[index(options.bridge_component)?];
     let d = unit(options.bridge_direction)?;
-    writeln!(out, "face-ties 0\nbridges {}", options.bridges.len())?;
-    let mut bridge_snaps_m = Vec::with_capacity(options.bridges.len());
-    for &(x, y) in options.bridges {
-        let distance = |n: &[f64; 6]| ((n[0] - x).powi(2) + (n[1] - y).powi(2)).sqrt();
-        let (node, snap) = carrier.nodes.iter().enumerate().map(|(i, n)| (i, distance(n)))
-            .min_by(|a, b| a.1.total_cmp(&b.1)).ok_or("bridge component has no node")?;
-        writeln!(out, "bridge {} {node} {} {} {}", options.bridge_component, d[0], d[1], d[2])?;
-        bridge_snaps_m.push(snap);
+    writeln!(out, "face-ties 0\nbridges {}", bridges.len())?;
+    let mut bridge_snaps_m = Vec::with_capacity(bridges.len());
+    for bridge in bridges {
+        match bridge {
+            &OptionBridge::Snap(x, y) => {
+                let distance = |n: &[f64; 6]| ((n[0] - x).powi(2) + (n[1] - y).powi(2)).sqrt();
+                let (node, snap) = carrier.nodes.iter().enumerate().map(|(i, n)| (i, distance(n)))
+                    .min_by(|a, b| a.1.total_cmp(&b.1)).ok_or("bridge component has no node")?;
+                writeln!(out, "bridge {} {node} {} {} {}", options.bridge_component, d[0], d[1], d[2])?;
+                bridge_snaps_m.push(snap);
+            }
+            OptionBridge::Triangle { component, triangle, fields } => {
+                if *triangle >= parts[index(component)?].triangles.len() {
+                    return Err(format!("bridge-triangle names a missing triangle of {component}").into());
+                }
+                write!(out, "bridge-triangle {component} {triangle}")?;
+                for v in fields { write!(out, " {v}")?; }
+                writeln!(out)?;
+                bridge_snaps_m.push(0.0);
+            }
+        }
     }
     Ok(ConvertedTable { profile: out, length_m, width_m, bridge_snaps_m, cavity })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A flat 20 mm plate at z = 0 (3 x 3 nodes, directors +z) and a wall standing on its positive skin along x = 10 mm
+    /// (3 x 2 nodes over y = 0, 10, 20 mm and z = 1, 9 mm, directors +x), tied along that line: the table text and the
+    /// wall's nodes [m] and triangles as written.
+    fn fixture() -> (String, Vec<[f64; 3]>, Vec<[usize; 3]>) {
+        let plate: Vec<[f64; 3]> = (0..9).map(|k| [0.01 * (k % 3) as f64, 0.01 * (k / 3) as f64, 0.0]).collect();
+        let wall: Vec<[f64; 3]> =
+            (0..6).map(|k| [0.01, 0.01 * (k % 3) as f64, if k < 3 { 0.001 } else { 0.009 }]).collect();
+        let plate_tris: Vec<[usize; 3]> =
+            [0, 1, 3, 4].iter().flat_map(|&a| [[a, a + 1, a + 4], [a, a + 4, a + 3]]).collect();
+        let wall_tris: Vec<[usize; 3]> = (0..2).flat_map(|i| [[i, i + 1, i + 3], [i + 1, i + 4, i + 3]]).collect();
+        let mut t = String::from("frankensim.shell-assembly.v1\nmeta\tfixture\ttwo parts\n");
+        let parts = [("plate", &plate, &plate_tris, [0.0, 0.0, 1.0]), ("wall", &wall, &wall_tris, [1.0, 0.0, 0.0])];
+        for (name, nodes, tris, d) in parts {
+            let (n, m) = (nodes.len(), tris.len());
+            t += &format!("component\t{name}\twood\t0.002\t1\t{n}\t{m}\t0\t0\nregion\t0\t1\t0\n");
+            for n in nodes.iter() {
+                t += &format!("node\t{}\t{}\t{}\t{}\t{}\t{}\n", n[0], n[1], n[2], d[0], d[1], d[2]);
+            }
+            for c in tris.iter() { t += &format!("tri\t{}\t{}\t{}\t0\n", c[0], c[1], c[2]); }
+        }
+        t += "tie\tplate\twall\t1\t3\t3\nmaster\t1 4 7\nslave\t0 1 2\ndrive\tignored\tplate\t0\t0\t0\t0\t0\t1\n";
+        (t, wall, wall_tris)
+    }
+
+    const OPTIONS: &str = "frankensim-shell-assembly-options-v1\nwindow-hz 15 2000\nprojection-work 67108864\n\
+        reference-thickness-m 0.002\npack wood @body\nbridge-component plate\nbridge-direction 0 0 1\n";
+
+    /// A `bridge-triangle` row reaches the profile as written, in string order beside a snapped `bridge`, on the
+    /// table's own triangle numbering of its component. Its force port is the hand rows of a unit +z force on a
+    /// -9.67 mm arm along x (the guitar saddle's neck-ward offset from its bridge wall): the z weights, and a y moment
+    /// of 0.00967 N m per newton shared by the same weights.
+    #[test]
+    fn options_bridge_triangle_is_copied_unsnapped_and_keeps_its_component_triangle_and_moment() {
+        let (table, wall, wall_tris) = fixture();
+        let text = format!("{OPTIONS}bridge 0.004 0.006\nbridge-triangle wall 2 0.2 0.3 0.5 0 0 1 -0.00967 0 0\n");
+        let converted = OptionsFile::parse(&text).unwrap().convert(&table).unwrap();
+        // The nearest plate node to (4, 6) mm is node 3 at (0, 10) mm.
+        assert!(converted.profile.ends_with(
+            "face-ties 0\nbridges 2\nbridge plate 3 0 0 1\nbridge-triangle wall 2 0.2 0.3 0.5 0 0 1 -0.00967 0 0\n"),
+            "{}", &converted.profile[converted.profile.len().saturating_sub(200)..]);
+        assert_eq!(converted.bridge_snaps_m.len(), 2);
+        assert!((converted.bridge_snaps_m[0] - 0.004 * 2f64.sqrt()).abs() <= 1e-15, "{:?}", converted.bridge_snaps_m);
+        assert_eq!(converted.bridge_snaps_m[1], 0.0);
+        let body = super::super::Spec::parse(converted.profile.as_bytes()).unwrap();
+        let bridge = &body.bridges[1];
+        assert_eq!(body.components[bridge.component].name, "wall");
+        let mesh = ShellMesh::new(wall.clone(), wall_tris.clone()).unwrap();
+        let directors = NodalDirectors::new(&mesh, vec![[1.0, 0.0, 0.0]; wall.len()], 0.9).unwrap();
+        let port = bridge.footprint.force_port(&mesh, &directors, &[]).unwrap();
+        let mut hand = vec![0.0; 6 * wall.len()];
+        for (node, weight) in [(1, 0.2), (2, 0.3), (4, 0.5)] {
+            hand[6 * node + 2] = weight;
+            hand[6 * node + 4] = 0.00967 * weight;
+        }
+        for (k, (got, want)) in port.iter().zip(&hand).enumerate() {
+            assert!((got - want).abs() <= 1e-15, "row {k}: {got} against the hand row {want}");
+        }
+    }
+
+    /// A triangle row names an existing component and one of its triangles, with exactly nine numbers.
+    #[test]
+    fn options_bridge_triangle_refuses_an_unknown_component_a_missing_triangle_and_a_short_row() {
+        let (table, _, _) = fixture();
+        let converted = |row: &str| OptionsFile::parse(&format!("{OPTIONS}{row}\n")).and_then(|o| o.convert(&table));
+        let refused = |row: &str| converted(row).err().expect("must refuse").to_string();
+        assert!(converted("bridge-triangle wall 3 0.2 0.3 0.5 0 0 1 -0.00967 0 0").is_ok());
+        assert!(refused("bridge-triangle post 0 0.2 0.3 0.5 0 0 1 -0.00967 0 0").contains("unknown part post"));
+        assert!(refused("bridge-triangle wall 4 0.2 0.3 0.5 0 0 1 -0.00967 0 0").contains("missing triangle of wall"));
+        assert!(refused("bridge-triangle wall 2 0.2 0.3 0.5 0 0 1 -0.00967 0").contains("needs 9 numbers"));
+        assert!(refused("bridge-triangle wall -1 0.2 0.3 0.5 0 0 1 -0.00967 0 0").contains("invalid digit"));
+    }
 }
