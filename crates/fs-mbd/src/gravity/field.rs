@@ -9,6 +9,8 @@ use super::{CentralGravity, GravityError, UniformGravity, finite, same_frame};
 use crate::Vec3;
 use fs_ga::Mat3;
 
+mod radial;
+pub use radial::{RadialGravity, RadialGravityLayer};
 mod source;
 pub use source::{QuadrupoleSourceExtent, QuadrupoleSourceGravity};
 mod sphere;

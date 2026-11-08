@@ -840,6 +840,33 @@ and stationary, with no source recoil, deformation or inferred material profile.
 tangent consistency and Poisson trace, surface behavior, retained work and native
 harmonic motion through the source center.
 
+`gravity::RadialGravity` generalizes the prescribed source to concentric layers
+of uniform density, each declared by its outer radius and shell mass. Positive,
+increasing radii and nonnegative masses admit dense cores, lighter envelopes and
+vacuum cavities; all-zero masses define a zero source. The explicit layer-count
+budget is checked before allocation. Construction prepares compensated enclosed
+gravitational parameters and exterior-shell potentials in O(layer count) work
+and storage. Point samples locate their layer by binary search, allocate nothing
+and evaluate the exact shell-theorem force, potential and analytic tangent.
+Thin-shell arithmetic factors radius differences before forming ratios.
+
+The field is nonsingular at the center, zero in force inside a hollow shell,
+and reduces to the original central source outside the declared support. Density
+interfaces preserve force and potential; tangents select the exterior-side local
+density. Scalar acceleration/potential queries do not require a representable
+tangent. Unrepresentable layer/total G M or central potential refuses construction.
+
+Direct work uses the original enclosed mass and positive shell-volume terms,
+splitting radial motion at crossed interfaces. Compensated endpoint displacement
+retains small transverse work even when rounded radii and absolute potentials
+are identical. Point work traverses only crossed layers, bounded by the admitted
+profile; rigid work multiplies the same increment by the original target mass.
+The COM-target, prescribed-source and continuum-quadrature semantics match the
+uniform sphere. `tests/gravity_radial.rs` checks uniform-profile recovery, hollow
+and dense-core analytical fields, Poisson/interface tangents, independent
+potential derivatives, dominant outer-shell potential cancellation, cross-layer
+work and reversal, thin layers, zero sources and input/frame/budget admission.
+
 `gravity::QuadrupoleSourceGravity` exposes a native extended source's original
 mass, full inertia and COM pose through the same potential/force correction and
 its analytic spatial derivative. A declared inertia-compatible source radius

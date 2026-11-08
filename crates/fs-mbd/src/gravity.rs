@@ -10,7 +10,7 @@
 pub mod field;
 pub use field::{
     PointGravityField, PointGravitySample, QuadrupoleSourceExtent, QuadrupoleSourceGravity,
-    UniformSphereGravity,
+    RadialGravity, RadialGravityLayer, UniformSphereGravity,
 };
 
 use crate::{
