@@ -97,7 +97,7 @@ impl SpectralOpacityImage {
     }
 }
 
-fn observer_error(error: XyzObserverError, lane: usize) -> DvrError {
+pub(super) fn observer_error(error: XyzObserverError, lane: usize) -> DvrError {
     match error {
         XyzObserverError::Wavelength => DvrError::InvalidObserverWavelength { lane },
         XyzObserverError::Weight => DvrError::InvalidSpectralWeights,

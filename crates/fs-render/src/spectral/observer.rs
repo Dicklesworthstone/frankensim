@@ -59,26 +59,42 @@ impl XyzObserverLane {
         })
     }
 
-    fn project(self, value: f64, channel: usize) -> f64 {
-        if value == 0.0 || self.weight == 0.0 || self.cmf[channel] == 0.0 {
+    fn project(self, value: f64, channel: usize, spatial_weight: f64) -> f64 {
+        if value == 0.0 || self.weight == 0.0 || self.cmf[channel] == 0.0 || spatial_weight == 0.0 {
             return 0.0;
         }
         let weighted = self.weighted[channel];
-        let product = value * weighted;
+        let product = value * weighted * spatial_weight;
         if weighted.is_normal() && product.is_normal() {
             product
         } else {
-            det::exp(det::ln(value) + det::ln(self.cmf[channel]) + det::ln(self.weight))
+            det::exp(
+                det::ln(value)
+                    + det::ln(self.cmf[channel])
+                    + det::ln(self.weight)
+                    + det::ln(spatial_weight),
+            )
         }
     }
 
-    fn transmit(self, background: f64, transmission: f64, depth: f64, channel: usize) -> f64 {
-        if background == 0.0 || self.weight == 0.0 || self.cmf[channel] == 0.0 {
+    fn transmit(
+        self,
+        background: f64,
+        transmission: f64,
+        depth: f64,
+        channel: usize,
+        spatial_weight: f64,
+    ) -> f64 {
+        if background == 0.0
+            || self.weight == 0.0
+            || self.cmf[channel] == 0.0
+            || spatial_weight == 0.0
+        {
             return 0.0;
         }
         let weighted = self.weighted[channel];
         let attenuated = background * transmission;
-        let product = attenuated * weighted;
+        let product = attenuated * weighted * spatial_weight;
         if transmission.is_normal()
             && attenuated.is_normal()
             && weighted.is_normal()
@@ -97,7 +113,8 @@ impl XyzObserverLane {
                 det::ln(background)
                     + log_transmission
                     + det::ln(self.cmf[channel])
-                    + det::ln(self.weight),
+                    + det::ln(self.weight)
+                    + det::ln(spatial_weight),
             )
         }
     }
@@ -120,6 +137,24 @@ impl XyzAccumulator {
         depth: f64,
         background: f64,
     ) -> Result<(), XyzObserverError> {
+        self.add_scaled(observer, emission, transmission, depth, background, 1.0)
+    }
+
+    /// Include a nonnegative spatial quadrature weight before rounding any
+    /// spectral contribution. This preserves finite pixel integrals when an
+    /// unweighted column overflows or an intermediate radiance underflows.
+    pub(crate) fn add_scaled(
+        &mut self,
+        observer: &XyzObserverLane,
+        emission: f64,
+        transmission: f64,
+        depth: f64,
+        background: f64,
+        spatial_weight: f64,
+    ) -> Result<(), XyzObserverError> {
+        if !spatial_weight.is_finite() || spatial_weight < 0.0 {
+            return Err(XyzObserverError::Weight);
+        }
         if !emission.is_finite()
             || emission < 0.0
             || !background.is_finite()
@@ -133,8 +168,8 @@ impl XyzAccumulator {
         }
         for channel in 0..3 {
             for term in [
-                observer.project(emission, channel),
-                observer.transmit(background, transmission, depth, channel),
+                observer.project(emission, channel, spatial_weight),
+                observer.transmit(background, transmission, depth, channel, spatial_weight),
             ] {
                 if term == 0.0 {
                     continue;

@@ -9958,6 +9958,47 @@ the visible band. Seven lean/common regressions are typechecked by the targeted
 native volumes-enabled metadata build; five additional physical-camera
 regressions have parser and independent source review but have not run.
 
+### Direct illuminated density observations
+
+`SpectralIllumination` supplies either one explicit spectral radiance or one
+spectrum per original XY density column, with X fastest and wavelength innermost.
+The column layout is independent of output resolution. Light comes from behind
+the minimum-Z face; each supplied spectrum is constant over its original column
+footprint. Inputs are finite nonnegative W/(m² sr nm). No source, exposure,
+emission, scattering or subcolumn geometry is inferred.
+
+`render_density_spectral_radiance_box` and its indexed-material counterpart
+integrate each original column, apply that column's incident spectrum, then
+average transported intensity over the exact integer pixel footprint. The
+result is pixel-major, wavelength-fastest radiance. This retains illumination
+and opacity correlation that separately averaged backgrounds and transmission
+would lose. Uniform material spectra retain one shared density reduction per
+column; indexed spectra retain the original ordered per-cell coefficient sums.
+
+The corresponding `render_density_spectral_xyz_box` functions project directly
+to one XYZ triple per pixel, using explicit nonnegative nanometre quadrature
+weights, the existing analytic 380--780 nm CIE fits and relative
+`1 / integral(y_bar)` normalization. Spatial weights enter the shared observer
+before range-losing intermediate rounding. A representable pixel result can
+therefore survive both an overflowing unweighted column and underflowed
+intermediate transmitted radiance. Raw spectral output retains UV/IR support;
+XYZ is an approximate visible observation, without display or luminance claims.
+
+A single statically dispatched column traversal owns admission, exact footprint
+geometry and absorption for the full-statistics, transmission-only, radiance
+and XYZ paths. Only the selected final image is allocated. Radiance uses
+compensated online means; XYZ uses compensated weighted sums. All original
+geometry/spectral budgets apply before background scans and output allocation;
+invalid illumination, palettes, observer weights or arithmetic return no partial
+image. The original scalar/opacity arithmetic and traversal order are retained.
+
+Seven analytic tests cover correlated backgrounds, layered indexed media,
+nondivisible footprints, uniform-observer parity, extreme optical ranges,
+spatial refinement and refusals. The targeted native `volumes` configuration
+was compiled against the real fs-math/fs-rand libraries and executed:
+141 tests passed, zero failed. This lean configuration does not execute the
+material-state, native tracer camera or browser consumer feature tests.
+
 ### Correlated spectral camera illumination
 
 `render_absorbing_camera_with_background` and

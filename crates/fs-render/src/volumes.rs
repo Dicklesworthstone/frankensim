@@ -23,8 +23,11 @@ pub use opacity::{
     IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
     MAX_OPACITY_WAVELENGTHS, SpectralAbsorptionImageSettings, SpectralOpacityImage,
     SpectralOpacitySample, TransferTransportPixel, prepare_density_absorption_mixtures,
+    SpectralIllumination,
     render_density_spectral_box, render_density_spectral_indexed_box,
     render_density_spectral_indexed_transmittance_box, render_density_spectral_transmittance_box,
+    render_density_spectral_radiance_box, render_density_spectral_xyz_box,
+    render_density_spectral_indexed_radiance_box, render_density_spectral_indexed_xyz_box,
     render_density_transmittance, render_density_transmittance_box, render_density_transport_box,
     render_transfer_transport, render_transfer_transport_box,
 };

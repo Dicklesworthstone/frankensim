@@ -5,7 +5,7 @@
 //! layers before the shared finite-pixel footprint averages transmission.
 
 use super::{
-    ColumnAbsorption, ColumnAverage, DensityAbsorptionSpectrum, DvrError, MAX_OPACITY_WAVELENGTHS,
+    ColumnAbsorption, DensityAbsorptionSpectrum, DvrError, MAX_OPACITY_WAVELENGTHS,
     SpectralAbsorptionImageSettings, SpectralOpacityImage, Sum, TransmissionAverage,
     TransportAverage, VolumeGrid, optical_product, render,
 };
@@ -100,9 +100,9 @@ pub fn render_density_spectral_indexed_transmittance_box(
     )
 }
 
-struct IndexedColumns<'a> {
-    spectrum: IndexedDensityAbsorptionSpectrum<'a>,
-    max_materials: usize,
+pub(super) struct IndexedColumns<'a> {
+    pub(super) spectrum: IndexedDensityAbsorptionSpectrum<'a>,
+    pub(super) max_materials: usize,
 }
 
 impl ColumnAbsorption for IndexedColumns<'_> {
@@ -173,14 +173,13 @@ impl ColumnAbsorption for IndexedColumns<'_> {
         depth_cells
     }
 
-    fn add_column<A: ColumnAverage>(
+    fn visit_column(
         &self,
         grid: &VolumeGrid<'_>,
         column: usize,
         plane: usize,
-        average: &mut [A],
-        weight: u64,
-    ) {
+        mut visit: impl FnMut(usize, f64) -> Result<(), DvrError>,
+    ) -> Result<(), DvrError> {
         let lanes = self.spectrum.wavelengths_nm.len();
         let mut depths = [Sum::default(); MAX_OPACITY_WAVELENGTHS];
         for iz in (0..grid.dims[2]).rev() {
@@ -197,9 +196,10 @@ impl ColumnAbsorption for IndexedColumns<'_> {
                 ]));
             }
         }
-        for (average, depth) in average.iter_mut().zip(depths) {
-            average.add(depth.value, weight);
+        for (lane, depth) in depths.into_iter().take(lanes).enumerate() {
+            visit(lane, depth.value)?;
         }
+        Ok(())
     }
 }
 

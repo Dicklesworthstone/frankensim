@@ -10,9 +10,15 @@ use super::{
 };
 use fs_math::det;
 
+mod illumination;
 mod indexed;
 mod mixture;
 mod observer;
+pub use illumination::{
+    SpectralIllumination, render_density_spectral_indexed_radiance_box,
+    render_density_spectral_indexed_xyz_box, render_density_spectral_radiance_box,
+    render_density_spectral_xyz_box,
+};
 pub use indexed::{
     IndexedDensityAbsorptionSpectrum, IndexedSpectralAbsorptionImageSettings,
     render_density_spectral_indexed_box, render_density_spectral_indexed_transmittance_box,
@@ -236,49 +242,105 @@ fn render<A: ColumnAverage, S: ColumnAbsorption>(
     settings: SpectralAbsorptionImageSettings,
     spectrum: S,
 ) -> Result<Vec<A::Output>, DvrError> {
-    spectrum.admit(grid)?;
-    let pixels = area::admit_work(grid, settings.image)?;
-    let [width, height] = settings.image.resolution;
-    let [nx, ny, nz] = grid.dims;
     let lanes = spectrum.wavelengths().len();
-    let evaluations = area::overlap_count(nx, width)
-        .checked_mul(area::overlap_count(ny, height))
-        .and_then(|columns| columns.checked_mul(spectrum.spectral_steps(nz) as u128))
-        .and_then(|steps| steps.checked_mul(lanes as u128))
-        .and_then(|work| u64::try_from(work).ok())
-        .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
-    if evaluations > settings.max_spectral_evaluations {
-        return Err(DvrError::SpectralEvaluationBudgetExceeded {
-            requested: evaluations,
-            limit: settings.max_spectral_evaluations,
-        });
-    }
-    let output_samples = pixels
-        .checked_mul(lanes)
-        .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
-    spectrum.validate_values()?;
-    validate_transfer_grid(grid)?;
-    if let Some(index) = grid.data.iter().position(|value| *value < 0.0) {
-        return Err(DvrError::NegativeGridAbsorption { index });
-    }
-    let mut image = reserve_image(output_samples)?;
-    let plane = nx * ny;
-    for py in 0..height {
-        for px in 0..width {
-            let mut average: [A; MAX_OPACITY_WAVELENGTHS] = std::array::from_fn(|_| A::default());
-            for (iy, wy) in area::overlaps(py, height, ny) {
-                for (ix, wx) in area::overlaps(px, width, nx) {
-                    let weight = (wx * wy) as u64;
-                    let column = ix + nx * iy;
-                    spectrum.add_column(grid, column, plane, &mut average[..lanes], weight);
-                }
-            }
+    ColumnRender::new(grid, settings, spectrum)?.render(
+        lanes,
+        || std::array::from_fn::<_, MAX_OPACITY_WAVELENGTHS, _>(|_| A::default()),
+        |average, _, lane, depth, weight| {
+            average[lane].add(depth, weight);
+            Ok(())
+        },
+        |average, image| {
             for value in average.into_iter().take(lanes) {
                 image.push(value.finish()?);
             }
+            Ok(())
+        },
+    )
+}
+
+// One admitted traversal serves opacity, direct radiance, and visible
+// observation. Observers select only their own accumulator/output storage;
+// transport does not construct a full-statistics intermediate image.
+struct ColumnRender<'g, 'd, S> {
+    grid: &'g VolumeGrid<'d>,
+    settings: SpectralAbsorptionImageSettings,
+    spectrum: S,
+    pixels: usize,
+}
+
+impl<'g, 'd, S: ColumnAbsorption> ColumnRender<'g, 'd, S> {
+    fn new(
+        grid: &'g VolumeGrid<'d>,
+        settings: SpectralAbsorptionImageSettings,
+        spectrum: S,
+    ) -> Result<Self, DvrError> {
+        spectrum.admit(grid)?;
+        let pixels = area::admit_work(grid, settings.image)?;
+        let [width, height] = settings.image.resolution;
+        let [nx, ny, nz] = grid.dims;
+        let lanes = spectrum.wavelengths().len();
+        let evaluations = area::overlap_count(nx, width)
+            .checked_mul(area::overlap_count(ny, height))
+            .and_then(|columns| columns.checked_mul(spectrum.spectral_steps(nz) as u128))
+            .and_then(|steps| steps.checked_mul(lanes as u128))
+            .and_then(|work| u64::try_from(work).ok())
+            .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
+        if evaluations > settings.max_spectral_evaluations {
+            return Err(DvrError::SpectralEvaluationBudgetExceeded {
+                requested: evaluations,
+                limit: settings.max_spectral_evaluations,
+            });
         }
+        pixels
+            .checked_mul(lanes)
+            .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
+        spectrum.validate_values()?;
+        validate_transfer_grid(grid)?;
+        if let Some(index) = grid.data.iter().position(|value| *value < 0.0) {
+            return Err(DvrError::NegativeGridAbsorption { index });
+        }
+        Ok(Self {
+            grid,
+            settings,
+            spectrum,
+            pixels,
+        })
     }
-    Ok(image)
+
+    fn render<A, O>(
+        self,
+        outputs_per_pixel: usize,
+        mut initialize: impl FnMut() -> A,
+        mut observe: impl FnMut(&mut A, usize, usize, f64, u64) -> Result<(), DvrError>,
+        mut finish: impl FnMut(A, &mut Vec<O>) -> Result<(), DvrError>,
+    ) -> Result<Vec<O>, DvrError> {
+        let count = self
+            .pixels
+            .checked_mul(outputs_per_pixel)
+            .ok_or(DvrError::SpectralEvaluationCountOverflow)?;
+        let mut image = reserve_image(count)?;
+        let [width, height] = self.settings.image.resolution;
+        let [nx, ny, _] = self.grid.dims;
+        let plane = nx * ny;
+        for py in 0..height {
+            for px in 0..width {
+                let mut average = initialize();
+                for (iy, wy) in area::overlaps(py, height, ny) {
+                    for (ix, wx) in area::overlaps(px, width, nx) {
+                        let weight = (wx * wy) as u64;
+                        let column = ix + nx * iy;
+                        self.spectrum
+                            .visit_column(self.grid, column, plane, |lane, depth| {
+                                observe(&mut average, column, lane, depth, weight)
+                            })?;
+                    }
+                }
+                finish(average, &mut image)?;
+            }
+        }
+        Ok(image)
+    }
 }
 
 // The footprint traversal, work admission and averaging are shared. Static
@@ -291,14 +353,13 @@ trait ColumnAbsorption {
         Ok(())
     }
     fn spectral_steps(&self, depth_cells: usize) -> usize;
-    fn add_column<A: ColumnAverage>(
+    fn visit_column(
         &self,
         grid: &VolumeGrid<'_>,
         column: usize,
         plane: usize,
-        average: &mut [A],
-        weight: u64,
-    );
+        visit: impl FnMut(usize, f64) -> Result<(), DvrError>,
+    ) -> Result<(), DvrError>;
 }
 
 impl ColumnAbsorption for DensityAbsorptionSpectrum<'_> {
@@ -314,14 +375,13 @@ impl ColumnAbsorption for DensityAbsorptionSpectrum<'_> {
         1
     }
 
-    fn add_column<A: ColumnAverage>(
+    fn visit_column(
         &self,
         grid: &VolumeGrid<'_>,
         column: usize,
         plane: usize,
-        average: &mut [A],
-        weight: u64,
-    ) {
+        mut visit: impl FnMut(usize, f64) -> Result<(), DvrError>,
+    ) -> Result<(), DvrError> {
         let mut density = ColumnDensity::default();
         for iz in (0..grid.dims[2]).rev() {
             density.add(grid.data[column + plane * iz]);
@@ -335,8 +395,9 @@ impl ColumnAbsorption for DensityAbsorptionSpectrum<'_> {
                 grid.cell[2],
                 self.length_unit_m,
             ]);
-            average[lane].add(depth, weight);
+            visit(lane, depth)?;
         }
+        Ok(())
     }
 }
 

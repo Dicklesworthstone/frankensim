@@ -21,9 +21,12 @@ pub use spectral::{
     AbsorptionMixtureSettings, DensityAbsorptionSpectrum, IndexedDensityAbsorptionSpectrum,
     IndexedSpectralAbsorptionImageSettings, MAX_OPACITY_WAVELENGTHS,
     SpectralAbsorptionImageSettings, SpectralOpacityImage, SpectralOpacitySample,
+    SpectralIllumination,
     prepare_density_absorption_mixtures, render_density_spectral_box,
     render_density_spectral_indexed_box, render_density_spectral_indexed_transmittance_box,
     render_density_spectral_transmittance_box,
+    render_density_spectral_radiance_box, render_density_spectral_xyz_box,
+    render_density_spectral_indexed_radiance_box, render_density_spectral_indexed_xyz_box,
 };
 
 #[cfg(feature = "tracer")]
