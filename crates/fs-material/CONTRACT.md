@@ -5667,6 +5667,21 @@ all-stress/all-strain parity, partition switching and atomic refusals.
 Coefficients and the component partition are fixed within each prepared
 controller; no Kelvin, thermal or finite-strain extension is inferred.
 
+Both tensor stress and mixed controllers expose `ramp_tangent` for exact
+endpoint strain/stress derivatives with respect to the six prescribed endpoint
+controls. The initial history, material and duration stay fixed. Analytical
+Prony responses and the retained compliance factors supply this six-column map
+without perturbed advances or numerical differentiation. Reconstructing stress
+derivatives from original equilibrium and branch coordinates retains weak
+equilibrium stiffness after stiff relaxation; no cancellation of full stiffness
+and nearly equal relaxed corrections is required. Public matrices use physical
+tensor-shear input/output conventions, including the mixed reaction rows.
+Four checks cover preloaded-history finite differences, native all-strain and
+analytical creep limits, independent zero-time constraint elimination, weak
+equilibrium springs and cancellation/refusal. This is a load tangent for
+implicit coupling, not an incoming-memory, material, time or complete-history
+adjoint; a finite load still requires the primal domain and balance admission.
+
 `visco_tensor::kelvin_control::PreparedTensorKelvinStressControl` advances
 original tensor histories under stress ramps when the Kelvin viscosity is
 positive definite. Its complete passive operator includes all equilibrium and

@@ -28,6 +28,8 @@ use std::sync::Arc;
 mod mixed;
 mod prepare;
 pub use mixed::PreparedTensorMixedControl;
+mod tangent;
+pub use tangent::TensorControlTangent;
 
 type Result<T> = core::result::Result<T, TensorPronyError>;
 

@@ -1,8 +1,8 @@
 //! Componentwise stress/strain control on the same original tensor history.
 
 use super::{
-    PreparedTensorStressControl, Result, TensorPronyHistory, TensorStressControlBudget,
-    TensorStressRampStep, Voigt,
+    PreparedTensorStressControl, Result, TensorControlTangent, TensorPronyHistory,
+    TensorStressControlBudget, TensorStressRampStep, Voigt,
 };
 
 /// Exact mixed loading of a full three-dimensional generalized Maxwell law.
@@ -63,6 +63,23 @@ impl PreparedTensorMixedControl {
     #[must_use]
     pub fn memory_coordinates(&self) -> usize {
         self.inner.memory_coordinates()
+    }
+
+    /// Exact endpoint load tangent at fixed initial history and material.
+    ///
+    /// Rows and columns use the same physical tensor-shear convention as
+    /// [`Self::advance`]. This is suitable for an implicit loading constraint;
+    /// it does not differentiate model parameters or the incoming memory.
+    ///
+    /// # Errors
+    /// Invalid duration, unrepresentable response, unresolved original-source
+    /// reconstruction, or cancellation. No history is advanced.
+    pub fn ramp_tangent(
+        &self,
+        duration_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TensorControlTangent> {
+        self.inner.ramp_tangent(duration_s, cancelled)
     }
 
     /// Advance a linear ramp from the history's current control values.
