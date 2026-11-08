@@ -41,6 +41,12 @@ ASSUMPTION. `specimen.tsv` gives the identity and the source ids of
 - **`cello-{C,G,D,A}.assembly`**: the `assemble-shell` options, one bridge per
   string. Their comments name the table by its earlier file name,
   `cello-h12.5-s8-v5.tsv`.
+- **`cello-{C,G,D,A}-bar-r24.assembly`**: the `assemble-shell` options the live
+  pages' four profiles were made with, on `shell-assembly-h12.5-bar-r24.tsv`.
+  Each is `cello-X.assembly` with one row changed, `projection-work
+  17592186044416` (2^44) in place of 2^41, which `assemble-shell` refuses for
+  this table. The comment above that row still gives the 2^41 reasoning: the
+  files are kept byte for byte as run.
 - **`assemble-shell-D.txt`**: what `assemble-shell` prints for the D assembly.
 - **`cello-shell-D3.material-strings`**: the bowed D3 played on this body. Its
   body and cavity records are the values in `assemble-shell-D.txt`.
