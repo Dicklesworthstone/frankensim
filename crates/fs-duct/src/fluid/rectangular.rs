@@ -22,6 +22,9 @@ use core::f64::consts::PI;
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_math::{c64::C64, dd::Dd, det};
 
+/// Molecular reservoirs and wall heat diffusion in the same energy equation.
+pub mod molecular;
+
 /// Hard bound on the one-dimensional Fourier work and cached geometry.
 pub const MAX_RECTANGULAR_TERMS: usize = 4096;
 
@@ -234,12 +237,28 @@ impl RectangularSection {
         if !positive(frequency) {
             return Err(bad("rectangular diffusion frequency is unrepresentable"));
         }
+        self.diffusion_argument(C64::new(0.0, frequency), cancelled)
+    }
+
+    // H(z) = sum w_mn z/(z+lambda_mn). A relaxing heat capacity makes
+    // z = s*rho*cp(s)/conductivity genuinely complex with Re(z)>=0.
+    // The original pure-imaginary path retains its summation arithmetic.
+    fn diffusion_argument(
+        &self,
+        argument: C64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<RectangularDiffusion, DuctError> {
+        if !finite(argument) || argument.re < 0.0 || argument.im <= 0.0 {
+            return Err(bad(
+                "rectangular diffusion needs a finite first-quadrant argument",
+            ));
+        }
         let (mut re, mut im) = (Dd::ZERO, Dd::ZERO);
         for (index, mode) in self.modes.iter().enumerate() {
             if index % 32 == 0 {
                 poll(cancelled, index)?;
             }
-            let denominator = C64::new(mode.eigenvalue, frequency);
+            let denominator = C64::new(mode.eigenvalue + argument.re, argument.im);
             let z = denominator.sqrt().scale(0.5 * self.long_m);
             if !finite(z) {
                 return Err(bad(
@@ -256,28 +275,33 @@ impl RectangularSection {
                 let e = C64::new(cosine, sine).scale(decay);
                 (C64::ONE - e) / (C64::ONE + e)
             };
-            let value = (C64::ONE - tanh / z) * (C64::new(0.0, frequency) / denominator);
+            let value = (C64::ONE - tanh / z) * (argument / denominator);
             re = re + Dd::from_f64(value.re) * Dd::from_f64(mode.weight);
             im = im + Dd::from_f64(value.im) * Dd::from_f64(mode.weight);
         }
-        // Omitted modes have positive weights. With r=omega/(D*(pi/a)^2),
-        // Re[s/(s+lambda)]<=min(1,(omega/lambda)^2),
-        // Im[s/(s+lambda)]<=min(1/2,omega/lambda). The midpoint integral
+        // Omitted modes have positive weights. For z=x+iy, x>=0, y>0:
+        // Re[z/(z+lambda)]<=min(1,x/lambda+(y/lambda)^2),
+        // Im[z/(z+lambda)]<=min(1/2,y/lambda). The midpoint integral
         // bounds the remaining odd sums: sum_(m>=2N+1) m^-p <=
         // (2N)^(1-p)/(2(p-1)). The other transverse weights sum to one.
         let n = self.modes.len() as f64;
-        let ratio = frequency / self.modes[0].eigenvalue;
+        let ratio = argument.im / self.modes[0].eigenvalue;
+        let real_ratio = argument.re / self.modes[0].eigenvalue;
         let mass = 2.0 / (PI * PI * n);
         let reduced = ratio / (n * n);
         let response = RectangularDiffusion {
             mean: C64::new(re.to_f64(), im.to_f64()),
             wall: C64::new((Dd::ONE - re).to_f64(), -im.to_f64()),
-            tail_real: mass.min(reduced * reduced / (40.0 * PI * PI * n)),
+            tail_real: mass.min(
+                reduced * reduced / (40.0 * PI * PI * n)
+                    + (real_ratio / (n * n)) / (6.0 * PI * PI * n),
+            ),
             tail_imaginary: (0.5 * mass).min(reduced / (6.0 * PI * PI * n)),
         };
         if !finite(response.mean)
             || !finite(response.wall)
             || !ratio.is_finite()
+            || !real_ratio.is_finite()
             || response.mean.re <= 0.0
             || response.mean.im <= 0.0
             || response.wall.re <= 0.0

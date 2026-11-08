@@ -185,6 +185,32 @@ matched propagation; unchanged cylindrical scattering; and material,
 resolution, phase-envelope and cancellation refusals. These are numerical
 checks of the declared model, not measured-material qualification.
 
+### Molecular heat storage in rectangular and slit passages
+
+`RectangularSection::evaluate_molecular` binds the original `RelaxationState`
+caloric response to the same rectangular diffusion operator. The linear
+energy equation uses `z=s*rho*cp(s)/conductivity` and
+`kappa(s)=[1-R*H(z)/cp(s)]/(rho*R*T)`; wall and molecular heat capacities
+therefore share one compression law. No separate SK attenuation, equilibrium
+thermal shunt or fitted molecular loss is added. A gas declaring no reservoirs
+uses the unchanged equilibrium path exactly. Transport, density, pressure,
+temperature and reservoir rates retain their original material source.
+
+The diffusion argument now has a nonnegative real part. Its real omitted
+tail includes the additional `Re(z)/N^3` term; the former pure-imaginary
+`Im(z)^2/N^5` bound alone is insufficient. Both bounds also propagate through
+the joint compliance to admit storage and real loss. Frequency work remains
+O(N + reservoirs), with no allocation and the original bounded cancellation.
+Native wave convention, actual area, stable scattering and the declared
+plane-pressure envelope remain unchanged. This is frozen-background linear
+acoustics with rigid no-slip isothermal walls, not species/thermal evolution.
+
+`tests/rectangular_molecular.rs` supplies a three-rung independent double
+Fourier energy-equation reference, exact zero-reservoir parity, isothermal
+storage, equilibrated/frozen caloric endpoints, pressure/rate/geometry scaling,
+passive reciprocal scattering and resolution/cancellation refusals. Its
+reservoir fixtures are manufactured constitutive checks, not measured data.
+
 ### Homogeneous bulk viscosity with traction ports
 
 `fluid::bulk::BulkTractionCylinder` propagates the original
