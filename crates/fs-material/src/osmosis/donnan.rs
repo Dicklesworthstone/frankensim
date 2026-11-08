@@ -1,4 +1,4 @@
-//! Closed, finite-bath ideal Gibbs--Donnan equilibrium for mobile ions.
+//! Closed, finite-bath Gibbs--Donnan equilibrium for mobile ions.
 //!
 //! Every declared ion permeates and reaches electrochemical equilibrium. The
 //! two volumes and EACH species' total inventory remain finite. Fixed charge
@@ -7,22 +7,28 @@
 //! supplied separately. No counterions, salt dissociation, or membrane charge
 //! are invented; both compartments must admit electroneutrality.
 //!
-//! With `psi=F*(phi_left-phi_right)/(RT)`, equilibrium gives
+//! For [`IdealDonnan`], with `psi=F*(phi_left-phi_right)/(RT)`, equilibrium gives
 //! `n_left_i=N_i*logistic(ln(V_left/V_right)-z_i*psi)`. The left charge residual
 //! decreases monotonically with psi. Equal-valence ions share one evaluation
 //! during the bounded scalar solve, while their individual amounts remain
 //! conserved. Solvent force uses the FULL ionic plus trapped osmolarity.
 //!
-//! This owner assumes ideal dilute ions with negligible solute partial volume,
+//! The ideal owner assumes dilute ions with negligible solute partial volume,
 //! no association, binding, imposed voltage/current, or double-layer storage.
 //! It is a fast-ion equilibrium limit, not transient Nernst--Planck transport.
 //! Nonideal solvent pressure must not be combined with this ideal ion closure.
+//! [`VirialDonnan`] separately retains the original nonideal solution potential
+//! for both ionic activities and solvent pressure. Its prepared constrained
+//! solve preserves the same finite inventory and fixed-charge semantics.
 //!
 //! Primary finite-bath balance and electrochemical-equilibrium formulation:
 //! Waniewski et al. (2021), equations 7--9 and 34--37,
 //! <https://doi.org/10.1038/s41598-021-00899-y>. The more general partial-volume
-//! and activity corrections intentionally excluded here are described by
+//! and activity formulation beyond the ideal owner is described by
 //! Waniewski (2023), <https://doi.org/10.1038/s41598-023-47592-w>.
+
+pub mod nonideal;
+pub use nonideal::VirialDonnan;
 
 use fs_math::det;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
