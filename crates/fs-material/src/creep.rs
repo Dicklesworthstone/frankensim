@@ -646,6 +646,27 @@ impl NortonCreep {
         )?;
         self.validate_history(old_strain, old_state)?;
         let next = self.update_with_memory(strain, old_state, kinetic_memory)?;
+        self.audit_update(old_strain, old_state, strain, next, tolerances)
+    }
+
+    // The original work/heat owner also admits the internally solved exact
+    // axial restriction. It must not repeat a nonlinear return merely to
+    // reconstruct the same physical endpoint. This is deliberately private:
+    // callers cannot supply an arbitrary candidate or bypass kinetic solving.
+    fn audit_update(
+        &self,
+        old_strain: &Voigt,
+        old_state: &CreepState,
+        strain: &Voigt,
+        next: Update,
+        tolerances: CreepTolerances,
+    ) -> Result<(CreepIncrement, f64)> {
+        require(
+            positive(tolerances.stress_pa) && positive(tolerances.energy_j_m3),
+            "stress and energy tolerances must be positive and finite",
+        )?;
+        self.validate_history(old_strain, old_state)?;
+        self.validate_history(strain, &next.state)?;
         let old_e = difference(old_strain, &old_state.creep_strain);
         let new_e = difference(strain, &next.state.creep_strain);
         let stored_stress = self.elastic.stress(&new_e, &());

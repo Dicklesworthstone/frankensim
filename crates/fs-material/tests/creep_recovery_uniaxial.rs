@@ -5,7 +5,7 @@ use fs_material::creep::recovery::uniaxial::UniaxialRecoveringNorton;
 use fs_material::creep::recovery::{CreepRecoveryParameters, RecoveringNortonCreep};
 use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::creep::{
-    CreepTolerances, NortonCreep, NortonCreepParameters, StrainHardeningCreep,
+    CreepEnergy, CreepTolerances, NortonCreep, NortonCreepParameters, StrainHardeningCreep,
 };
 use fs_material::{IsotropicElastic, SmallStrainLaw, Uniaxial};
 
@@ -16,8 +16,12 @@ const RATE: f64 = 2e-3;
 const A: f64 = 8e-4;
 
 fn primary(n: f64, dt: f64) -> NortonCreep {
+    primary_at_poisson(n, dt, NU)
+}
+
+fn primary_at_poisson(n: f64, dt: f64, poisson: f64) -> NortonCreep {
     NortonCreep::new(
-        IsotropicElastic::new(E, NU, 0.05).unwrap(),
+        IsotropicElastic::new(E, poisson, 0.05).unwrap(),
         NortonCreepParameters {
             reference_stress_pa: STRESS,
             reference_rate_s: RATE,
@@ -64,6 +68,23 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         (actual - expected).abs() <= tolerance,
         "actual={actual:.16e}, expected={expected:.16e}, tolerance={tolerance:.3e}"
     );
+}
+
+fn close_energy(actual: CreepEnergy, expected: CreepEnergy) {
+    for (actual, expected) in [
+        (actual.initial_stored_j_m3, expected.initial_stored_j_m3),
+        (actual.final_stored_j_m3, expected.final_stored_j_m3),
+        (actual.mechanical_work_j_m3, expected.mechanical_work_j_m3),
+        (actual.physical_dissipation_j_m3, expected.physical_dissipation_j_m3),
+        (actual.creep_dissipation_j_m3, expected.creep_dissipation_j_m3),
+        (actual.plastic_dissipation_j_m3, expected.plastic_dissipation_j_m3),
+        (actual.numerical_dissipation_j_m3, expected.numerical_dissipation_j_m3),
+        (actual.thermoelastic_storage_change_j_m3, expected.thermoelastic_storage_change_j_m3),
+        (actual.reversible_heat_j_m3, expected.reversible_heat_j_m3),
+        (actual.residual_j_m3, expected.residual_j_m3),
+    ] {
+        close(actual, expected, tolerances().energy_j_m3);
+    }
 }
 
 #[test]
@@ -136,8 +157,13 @@ fn free_sided_recovery_matches_quadratic_flow_tangent_and_native_tensor_heat() {
                 tolerances(),
             )
             .unwrap();
-        assert_eq!(checked.energy, native.energy);
-        assert_eq!(checked.stress_pa, native.stress_pa);
+        // The axial and tensor returns solve different scalar equations for
+        // the same endpoint. Their rounding need not be bit-identical; compare
+        // stress and the complete work/heat account within numerical budgets.
+        close_energy(checked.energy, native.energy);
+        for (actual, expected) in checked.stress_pa.into_iter().zip(native.stress_pa) {
+            close(actual, expected, tolerances().stress_pa);
+        }
         for transverse in &checked.stress_pa[1..] {
             close(*transverse, 0.0, 3e-8);
         }
@@ -190,6 +216,99 @@ fn nonlinear_recovery_tangent_is_the_native_free_sided_schur_complement() {
             assert_eq!(response, law.response(strain, &old).unwrap());
         }
         assert_eq!(old, frozen);
+    }
+}
+
+#[test]
+fn checked_recovery_trajectory_preserves_the_independent_tensor_return() {
+    let recovery_rate = 1.3;
+    for poisson in [-0.8, 0.2, 0.49] {
+        for exponent in [1.0, 3.0] {
+            for duration in [1e-3, 0.2, 5.0] {
+                let native = primary_at_poisson(exponent, duration, poisson)
+                    .with_strain_hardening(StrainHardeningCreep {
+                        reference_strain: A,
+                        exponent: 0.8,
+                        residual_rate_fraction: 0.06,
+                    })
+                    .unwrap();
+                let tensor_law = RecoveringNortonCreep::new(
+                    native,
+                    CreepRecoveryParameters {
+                        reference_rate_s: recovery_rate,
+                        activation_energy_j_mol: 0.0,
+                        reference_temperature_k: 500.0,
+                    },
+                )
+                .unwrap();
+                let axial = UniaxialRecoveringNorton::new(tensor_law.clone());
+                let mut axial_state = axial.initial_state();
+                let mut tensor_state = tensor_law.initial_state();
+                let mut old_axial_strain = 0.0;
+                let mut old_tensor_strain = [0.0; 6];
+                // Numerical equivalence, not identical roots or a constitutive
+                // accuracy claim: scale history by E, tangent by elasticity.
+                let strain_tolerance = tolerances().stress_pa / E;
+                let tangent_tolerance =
+                    1e-11 * E / (1.0 - 2.0 * poisson).min(1.0 + poisson);
+                for target in [Some(0.004), Some(0.004), Some(-0.003), None, None, Some(0.005)] {
+                    let strain = target.unwrap_or(axial_state.creep_strain());
+                    let response = axial.response(strain, &axial_state).unwrap();
+                    let checked = axial
+                        .advance_with_energy(old_axial_strain, &axial_state, strain, tolerances())
+                        .unwrap();
+                    let tensor = tensor_law
+                        .advance_with_energy(
+                            &old_tensor_strain,
+                            &tensor_state,
+                            &response.strain,
+                            tolerances(),
+                        )
+                        .unwrap();
+                    let history = checked.state.tensor_history();
+                    for i in 0..6 {
+                        close(checked.stress_pa[i], tensor.stress_pa[i], tolerances().stress_pa);
+                        close(
+                            history.native.creep_strain[i],
+                            tensor.state.native.creep_strain[i],
+                            strain_tolerance,
+                        );
+                        for j in 0..6 {
+                            close(
+                                checked.tangent_pa[i][j],
+                                tensor.tangent_pa[i][j],
+                                tangent_tolerance,
+                            );
+                        }
+                    }
+                    close(
+                        history.native.equivalent_creep_strain,
+                        tensor.state.native.equivalent_creep_strain,
+                        strain_tolerance,
+                    );
+                    close(
+                        history.resistance_strain,
+                        tensor.state.resistance_strain,
+                        strain_tolerance,
+                    );
+                    close_energy(checked.energy, tensor.energy);
+                    if target.is_none() {
+                        assert_eq!(response.stress_pa, 0.0);
+                        assert_eq!(checked.state.native(), axial_state.native());
+                        close(
+                            checked.state.resistance_strain(),
+                            axial_state.resistance_strain() / (1.0 + recovery_rate * duration),
+                            strain_tolerance,
+                        );
+                        assert_eq!(checked.energy.physical_dissipation_j_m3, 0.0);
+                    }
+                    old_axial_strain = strain;
+                    old_tensor_strain = tensor.strain;
+                    axial_state = checked.state;
+                    tensor_state = tensor.state;
+                }
+            }
+        }
     }
 }
 

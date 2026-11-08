@@ -6,7 +6,9 @@ use fs_matdb::{
 };
 use fs_material::creep::source::{NortonCreepSource, NortonSourceQuery, norton_requirements};
 use fs_material::creep::uniaxial::UniaxialNorton;
-use fs_material::creep::{CreepTolerances, NortonCreep, NortonCreepParameters};
+use fs_material::creep::{
+    CreepEnergy, CreepTolerances, NortonCreep, NortonCreepParameters, StrainHardeningCreep,
+};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_material::{IsotropicElastic, SmallStrainLaw, Uniaxial};
 
@@ -15,22 +17,23 @@ const NU: f64 = 0.2;
 const REFERENCE_STRESS: f64 = 3e6;
 const REFERENCE_RATE: f64 = 2e-3;
 fn law(n: f64, dt: f64) -> UniaxialNorton {
-    UniaxialNorton::new(
-        NortonCreep::new(
-            IsotropicElastic::new(E, NU, 0.05).unwrap(),
-            NortonCreepParameters {
-                reference_stress_pa: REFERENCE_STRESS,
-                reference_rate_s: REFERENCE_RATE,
-                stress_exponent: n,
-                activation_energy_j_mol: 0.0,
-                reference_temperature_k: 500.0,
-                temperature_range_k: [300.0, 900.0],
-            },
-            500.0,
-            dt,
-        )
-        .unwrap(),
+    UniaxialNorton::new(native(n, dt, NU))
+}
+fn native(n: f64, dt: f64, poisson: f64) -> NortonCreep {
+    NortonCreep::new(
+        IsotropicElastic::new(E, poisson, 0.05).unwrap(),
+        NortonCreepParameters {
+            reference_stress_pa: REFERENCE_STRESS,
+            reference_rate_s: REFERENCE_RATE,
+            stress_exponent: n,
+            activation_energy_j_mol: 0.0,
+            reference_temperature_k: 500.0,
+            temperature_range_k: [300.0, 900.0],
+        },
+        500.0,
+        dt,
     )
+    .unwrap()
 }
 fn tolerances() -> CreepTolerances {
     CreepTolerances {
@@ -43,6 +46,23 @@ fn close(a: f64, b: f64, tolerance: f64) {
         (a - b).abs() <= tolerance,
         "{a} != {b}; tolerance={tolerance}"
     );
+}
+
+fn close_energy(actual: CreepEnergy, expected: CreepEnergy) {
+    for (actual, expected) in [
+        (actual.initial_stored_j_m3, expected.initial_stored_j_m3),
+        (actual.final_stored_j_m3, expected.final_stored_j_m3),
+        (actual.mechanical_work_j_m3, expected.mechanical_work_j_m3),
+        (actual.physical_dissipation_j_m3, expected.physical_dissipation_j_m3),
+        (actual.creep_dissipation_j_m3, expected.creep_dissipation_j_m3),
+        (actual.plastic_dissipation_j_m3, expected.plastic_dissipation_j_m3),
+        (actual.numerical_dissipation_j_m3, expected.numerical_dissipation_j_m3),
+        (actual.thermoelastic_storage_change_j_m3, expected.thermoelastic_storage_change_j_m3),
+        (actual.reversible_heat_j_m3, expected.reversible_heat_j_m3),
+        (actual.residual_j_m3, expected.residual_j_m3),
+    ] {
+        close(actual, expected, tolerances().energy_j_m3);
+    }
 }
 
 #[test]
@@ -189,6 +209,81 @@ fn g0_axial_tangent_matches_finite_differences_and_native_schur_complement() {
             close(response.stress_pa, tensor_stress[0], 3e-8);
             for transverse in &tensor_stress[1..] {
                 close(*transverse, 0.0, 3e-8);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_checked_primary_trajectory_preserves_the_independent_tensor_return() {
+    for poisson in [-0.8, 0.2, 0.49] {
+        for exponent in [1.0, 3.0] {
+            for duration in [1e-3, 0.2, 5.0] {
+                let tensor_law = native(exponent, duration, poisson)
+                    .with_strain_hardening(StrainHardeningCreep {
+                        reference_strain: 8e-4,
+                        exponent: 0.8,
+                        residual_rate_fraction: 0.06,
+                    })
+                    .unwrap();
+                let axial = UniaxialNorton::new(tensor_law.clone());
+                let mut axial_state = axial.initial_state();
+                let mut tensor_state = tensor_law.initial_state();
+                let mut old_axial_strain = 0.0;
+                let mut old_tensor_strain = [0.0; 6];
+                // Stress and history use the material's admission budget.
+                // Tangent comparison allows 1e-11 of the elastic stiffness,
+                // including the larger shear/bulk scale near nu's endpoints.
+                let strain_tolerance = tolerances().stress_pa / E;
+                let tangent_tolerance =
+                    1e-11 * E / (1.0 - 2.0 * poisson).min(1.0 + poisson);
+                // Load, hold, reverse, unload, stress-free dwell, then reload.
+                // Both histories continue independently after each full return.
+                for target in [Some(0.004), Some(0.004), Some(-0.003), None, None, Some(0.005)] {
+                    let strain = target.unwrap_or(axial_state.creep_strain());
+                    let response = axial.response(strain, &axial_state).unwrap();
+                    let checked = axial
+                        .advance_with_energy(old_axial_strain, &axial_state, strain, tolerances())
+                        .unwrap();
+                    let tensor = tensor_law
+                        .advance_with_energy(
+                            &old_tensor_strain,
+                            &tensor_state,
+                            &response.strain,
+                            tolerances(),
+                        )
+                        .unwrap();
+                    for i in 0..6 {
+                        close(checked.stress_pa[i], tensor.stress_pa[i], tolerances().stress_pa);
+                        close(
+                            checked.state.creep_strain[i],
+                            tensor.state.creep_strain[i],
+                            strain_tolerance,
+                        );
+                        for j in 0..6 {
+                            close(
+                                checked.tangent_pa[i][j],
+                                tensor.tangent_pa[i][j],
+                                tangent_tolerance,
+                            );
+                        }
+                    }
+                    close(
+                        checked.state.equivalent_creep_strain,
+                        tensor.state.equivalent_creep_strain,
+                        strain_tolerance,
+                    );
+                    close_energy(checked.energy, tensor.energy);
+                    if target.is_none() {
+                        assert_eq!(response.stress_pa, 0.0);
+                        assert_eq!(response.state, axial_state);
+                        assert_eq!(checked.energy.physical_dissipation_j_m3, 0.0);
+                    }
+                    old_axial_strain = strain;
+                    old_tensor_strain = tensor.strain;
+                    axial_state = response.state;
+                    tensor_state = tensor.state;
+                }
             }
         }
     }

@@ -10,7 +10,8 @@
 
 use super::source::ResolvedNortonCreep;
 use super::{
-    CreepError, CreepIncrement, CreepState, CreepTolerances, NortonCreep, Result, require,
+    CreepError, CreepIncrement, CreepState, CreepTolerances, NortonCreep, Result, Update,
+    difference, require,
 };
 use crate::fiber::Uniaxial;
 use crate::state_point::ResolvedMaterialStatePoint;
@@ -160,7 +161,8 @@ impl UniaxialNorton {
         ))
     }
 
-    /// Audit the candidate through the original full-tensor work/heat owner.
+    /// Audit the single solved candidate through the original tensor work/heat
+    /// owner, without solving a second nonlinear constitutive return.
     /// Returned tangent remains the full 3-D tangent; `response` supplies the
     /// condensed axial tangent used by fiber equilibrium. All energy densities
     /// are per original material volume, including physical and numerical loss.
@@ -171,12 +173,57 @@ impl UniaxialNorton {
         strain: f64,
         tolerances: CreepTolerances,
     ) -> Result<CreepIncrement> {
+        self.advance_with_memory(
+            old_strain,
+            old_state,
+            strain,
+            tolerances,
+            old_state.equivalent_creep_strain,
+        )
+        .map(|(increment, _, _)| increment)
+    }
+
+    // Recovery uses its own resistance as kinetic memory, while this exact
+    // restriction retains the original permanent strain and accumulated path.
+    pub(super) fn advance_with_memory(
+        &self,
+        old_strain: f64,
+        old_state: &UniaxialNortonState,
+        strain: f64,
+        tolerances: CreepTolerances,
+        kinetic_memory: f64,
+    ) -> Result<(CreepIncrement, UniaxialNortonState, f64)> {
         let old_tensor = self.tensor_strain(old_strain, old_state)?;
-        let response = self.response(strain, old_state)?;
-        let increment = self.backbone.advance_with_energy(
+        let (response, delta_alpha) = self.response_with_memory(strain, old_state, kinetic_memory)?;
+        let old_history = old_state.tensor_history();
+        let trial = self
+            .backbone
+            .predictor(&difference(&response.strain, &old_history.creep_strain))?;
+        // For rate derivative A=d(delta_alpha)/dq, the axial return has
+        // r_E=1/(1+E*A). Restore the tensor radial derivative
+        // r_3G=r_E/(r_E+(3G/E)*(1-r_E)) without another kinetic root.
+        // This includes primary resistance, recovery and the zero-stress
+        // linear-creep limit because r_E is the solved algorithmic derivative.
+        let axial_radial = response.tangent_pa / self.backbone.elastic.youngs;
+        let modulus_ratio = 3.0 / (2.0 * (1.0 + self.backbone.elastic.poisson));
+        let radial = axial_radial
+            / (axial_radial + modulus_ratio * (1.0 - axial_radial));
+        let q = response.stress_pa.abs();
+        let ratio = if trial.q > 0.0 { q / trial.q } else { radial };
+        let (stress, tangent) = self.backbone.radial_response(&trial, ratio, radial)?;
+        let next = Update {
+            stress,
+            tangent,
+            state: response.state.tensor_history(),
+            q_trial: trial.q,
+            q,
+            delta_alpha,
+        };
+        let (increment, delta_alpha) = self.backbone.audit_update(
             &old_tensor,
-            &old_state.tensor_history(),
+            &old_history,
             &response.strain,
+            next,
             tolerances,
         )?;
         let mut residual = (increment.stress_pa[0] - response.stress_pa).abs();
@@ -203,7 +250,7 @@ impl UniaxialNorton {
                 tolerance_pa: tolerances.stress_pa,
             });
         }
-        Ok(increment)
+        Ok((increment, response.state, delta_alpha))
     }
 }
 

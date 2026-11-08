@@ -10,7 +10,7 @@ use super::source::{RecoveringNortonSource, ResolvedRecoveringNorton};
 use super::{RecoveringCreepState, RecoveringNortonCreep};
 use crate::creep::source::CreepSourceError;
 use crate::creep::uniaxial::{UniaxialNorton, UniaxialNortonState};
-use crate::creep::{CreepError, CreepIncrement, CreepTolerances, NortonCreep, Result};
+use crate::creep::{CreepIncrement, CreepTolerances, NortonCreep, Result};
 use crate::fiber::Uniaxial;
 use crate::state_point::ResolvedMaterialStatePoint;
 use crate::{MaterialAdmissibility, SmallStrainLaw, Voigt};
@@ -138,7 +138,8 @@ impl UniaxialRecoveringNorton {
         })
     }
 
-    /// Audit through the original tensor recovery owner. The returned tangent
+    /// Audit the single solved axial return through the original tensor work
+    /// owner and the native resistance update. The returned tangent
     /// is the full tensor tangent; [`Self::response`] returns its free-sided
     /// axial restriction. Resistance recovery creates neither heat nor storage.
     pub fn advance_with_energy(
@@ -148,47 +149,27 @@ impl UniaxialRecoveringNorton {
         strain: f64,
         tolerances: CreepTolerances,
     ) -> Result<CreepIncrement<UniaxialRecoveringNortonState>> {
-        let old_tensor = self.tensor_strain(old_strain, old)?;
-        let response = self.response(strain, old)?;
-        let increment = self.backbone.advance_with_energy(
-            &old_tensor,
-            &old.tensor_history(),
-            &response.strain,
+        self.tensor_strain(old_strain, old)?;
+        let (increment, native, delta) = self.prepared.advance_with_memory(
+            old_strain,
+            &old.native,
+            strain,
             tolerances,
+            old.resistance_strain,
         )?;
-        let expected = response.state.tensor_history();
-        let mut residual = (increment.stress_pa[0] - response.stress_pa).abs();
-        for stress in &increment.stress_pa[1..] {
-            residual = residual.max(stress.abs());
-        }
-        let e = self.kinetics().elastic().youngs;
-        for (actual, expected) in increment
-            .state
-            .native
-            .creep_strain
-            .iter()
-            .zip(expected.native.creep_strain)
-        {
-            residual = residual.max(e * (actual - expected).abs());
-        }
-        residual = residual
-            .max(
-                e * (increment.state.native.equivalent_creep_strain
-                    - expected.native.equivalent_creep_strain)
-                    .abs(),
-            )
-            .max(e * (increment.state.resistance_strain - expected.resistance_strain).abs());
-        if !residual.is_finite() || residual > tolerances.stress_pa {
-            return Err(CreepError::StressResidual {
-                residual_pa: residual,
-                tolerance_pa: tolerances.stress_pa,
-            });
-        }
+        let resistance_strain = self.backbone.next_resistance(
+            old.resistance_strain,
+            delta,
+            native.equivalent_creep_strain(),
+        )?;
         Ok(CreepIncrement {
-            strain: response.strain,
+            strain: increment.strain,
             stress_pa: increment.stress_pa,
             tangent_pa: increment.tangent_pa,
-            state: response.state,
+            state: UniaxialRecoveringNortonState {
+                native,
+                resistance_strain,
+            },
             energy: increment.energy,
         })
     }
