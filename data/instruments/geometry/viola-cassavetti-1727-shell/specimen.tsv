@@ -1,7 +1,7 @@
 frankensim.specimen.v1
 key	value
 specimen_id	viola-cassavetti-1727-shell
-maker	no single maker: a composite viola body. The back length, the three bout widths and the f-hole placement are printed for the viola by Antonio Stradivari, Cremona, 1727, 'Cassavetti' (Library of Congress); the thicknesses, arching heights, ribs, bass bar section, soundpost and bridge size are a violin maker's typical Medium values (Hans Johannsson's viola table); the shapes are il Cannone's (Guarneri del Gesu 1743, ESRF CT); PROVENANCE.tsv states each mapping
+maker	no single maker: a composite viola body. The back length, the three bout widths and the f-hole placement are printed for the viola by Antonio Stradivari, Cremona, 1727, 'Cassavetti' (Library of Congress); the arching heights, the back's interior thickness, the bass bar section, the soundpost and the bridge size are a violin maker's typical Medium values (Hans Johannsson's viola table); the top plate's interior thickness, the rib height and wall and the back's edge thickness are printed measurements of Stradivari's 'Gibson' viola, c.1734 (Hargrave, The Strad, 1986); the shapes are il Cannone's (Guarneri del Gesu 1743, ESRF CT); PROVENANCE.tsv states each mapping
 model	the 'Cassavetti' viola's printed proportions on the il Cannone violin tables
 serial	unstated
 year	1727 for the printed outline and f-hole values (title of the LOC record); the shapes are those of a 1743 violin
@@ -9,5 +9,5 @@ system	viola body for the material_strings shell route: top, back, ribs, bass ba
 holder	Library of Congress, Music Division, Washington DC, holds the Cassavetti viola; not accessible to FrankenSim. No physical instrument has these tables
 reference_state	unstated
 environment	unstated
-source_ids	loc-stradivari-family-bouts;loc-cassavetti-viola-1727-fhole-drawing;johannsson-viola-medium;esrf-il-cannone-ct-2026;sonderegger-2013-sycamore-maple
-target_relation	population-grade stand-in for a medium viola body. NOT a scan or a measurement of the Cassavetti viola, nor of the viola of any reference recording: only its back length, three bout widths and printed f-hole values are that viola's; every other value is a maker's typical value or an il Cannone shape, and each mapping and ASSUMPTION is a row of PROVENANCE.tsv
+source_ids	loc-stradivari-family-bouts;loc-cassavetti-viola-1727-fhole-drawing;johannsson-viola-medium;hargrave-strad-1986-09-gibson-viola;hargrave-strad-1986-09-gibson-viola-belly-thickness;esrf-il-cannone-ct-2026;sonderegger-2013-sycamore-maple
+target_relation	population-grade stand-in for a medium viola body. NOT a scan or a measurement of the Cassavetti viola, nor of the viola of any reference recording: only its back length, three bout widths and printed f-hole values are that viola's; every other value is a maker's typical value, a printed measurement of another Stradivari viola (the Gibson) or an il Cannone shape, and each mapping and ASSUMPTION is a row of PROVENANCE.tsv

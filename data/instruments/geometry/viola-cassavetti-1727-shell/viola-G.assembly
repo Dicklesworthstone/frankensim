@@ -1,16 +1,17 @@
 frankensim-shell-assembly-options-v1
-# A VIOLA body for the material_strings shell route, table shell-assembly-h6.5.tsv (25 parts, 11796 nodes, 19002 triangles,
-# 48 ties): published values (LOC Cassavetti back length and bouts, the caliper f-hole drawing of the same viola, Johannsson's
-# viola table, Medium column) mapped onto the il Cannone specimen tables; every mapped value and every ASSUMPTION is in the
-# specimen's PROVENANCE.tsv. Not a scanned viola.
+# A VIOLA body for the material_strings shell route, table shell-assembly-h6.5.tsv (37 parts, 12087 nodes, 18971 triangles,
+# 75 ties): published values (LOC Cassavetti back length and bouts, the caliper f-hole drawing of the same viola, Johannsson's
+# viola table, Medium column, with the top plate's interior thickness, the rib height and wall and the back's edge thickness from the printed
+# measurements of Stradivari's Gibson viola, Hargrave 1986) mapped onto the il Cannone specimen tables; every mapped value and every
+# ASSUMPTION is in the specimen's PROVENANCE.tsv. Not a scanned viola.
 # Every choice is cannone-h6.assembly's except the projection work and the one bridge: the window is the same 15 Hz-5 kHz
-# (the spruce pack's source band ends at 5 kHz), the same two violin shell packs.
+# (the spruce pack's source band ends at 5 kHz), the same spruce pack and, in place of the registered maple, the audio-band maple pack (violin-maple-sycamore-sonderegger2013-shell-laemmlein).
 window-hz 15 5000
-# The v4 maximum, 2^41 terms; the documented count for 11796 nodes, 19002 triangles, 256 modes and one bridge is about 1.7e12.
+# The v4 maximum, 2^41 terms; the documented count for the earlier table's 11796 nodes, 19002 triangles, 256 modes and one bridge was about 1.7e12 (not recomputed for this table, 12087 nodes and 18971 triangles, on whose 279-mode renders the check passes).
 projection-work 2199023255552
 reference-thickness-m 0.003
 pack spruce @body
-pack maple violin-maple-sycamore-sonderegger2013-shell.fsmatpk
+pack maple violin-maple-sycamore-sonderegger2013-shell-laemmlein.fsmatpk
 # One string per card (a 1-string card needs a 1-bridge profile). The string meets the bridge at this point (x, y) [m] of the
 # table (string-contacts.tsv of the specimen: spacing 36 mm C to A, Johannsson); it drives its bridge node along x.
 bridge-component bridge

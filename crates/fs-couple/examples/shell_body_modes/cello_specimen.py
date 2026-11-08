@@ -78,7 +78,7 @@ import numpy as np
 
 SRC = sys.argv[1].rstrip("/") + "/"
 OUT = sys.argv[2].rstrip("/") + "/"
-TRACE, VIOLA, BAR_SLIDE, OUTLINE, FHSTOP = None, False, None, None, None
+TRACE, VIOLA, BAR_SLIDE, OUTLINE, FHSTOP, GIB = None, False, None, None, None, None
 for arg in sys.argv[3:]:
     key, eq, value = arg.partition("=")
     if key == "fholes" and eq and value and TRACE is None:
@@ -96,8 +96,12 @@ for arg in sys.argv[3:]:
             raise SystemExit("refusing: bar_slide_mm=%r: the slide is toward the neck, more than 0 and less than 50 mm" % value)
     elif arg == "instrument=viola" and not VIOLA:
         VIOLA = True
+    elif key == "gibson" and eq and value and GIB is None:
+        GIB = value
     else:
-        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM, one outline=MEASURED_OUTLINE.tsv, one fhstop=print|photo and instrument=viola" % arg)
+        raise SystemExit("refusing: %r; the options are one fholes=RASTER_RUNS.tsv, one bar_slide_mm=MM, one outline=MEASURED_OUTLINE.tsv, one fhstop=print|photo instrument=viola and (viola only) gibson=POINTS.tsv" % arg)
+if GIB and not VIOLA:
+    raise SystemExit("refusing: gibson=POINTS.tsv is the viola's (Stradivari 'Gibson' viola, Hargrave 1986)")
 if TRACE and VIOLA:
     raise SystemExit("refusing: the fholes trace is the Castelbarco cello's (image 0021); the viola places its holes from image 0015")
 if BAR_SLIDE is not None and VIOLA:
@@ -155,6 +159,14 @@ if VIOLA:  # the viola's printed values (docstring); the f-holes again come from
     POST_D = 6.5  # JOH
     BR_FEET, BR_T_FOOT, BR_H = 46.0, 5.0, 39.0  # JOH
     STR_SPAN = 36.0  # JOH
+GIB_PTS = None
+if GIB:  # measured Stradivari viola (the 'Gibson', Hargrave, The Strad 1986-09 pp. 113-117) in place of Johannsson's values for the rib and the top interior; the back edge only
+    RIB_H, RIB_T = 36.3125, 1.0  # Hargrave p. 116 rib heights 35.5 35.5 35.75 36.75 36.5 37 36.5 36.5 (mean 36.3125); p. 115 rib thickness about 1 mm
+    T_BACK = dict(T_BACK, edge=4.75)  # Hargrave p. 116 edge thickness 'taken from the back only': upper and lower bouts 4.75
+    _gl = [l.rstrip("\n").split("\t") for l in open(GIB, encoding="utf-8") if l.strip() and not l.startswith("#")]
+    assert _gl[0][:3] == ["thickness_mm", "u", "v"], _gl[0]
+    GIB_PTS = np.array([[float(x) for x in r[:3]] for r in _gl[1:]])
+    assert GIB_PTS.shape == (47, 3), GIB_PTS.shape
 NAME = "viola" if VIOLA else "cello"
 
 # ------------------------------------------------------------------ the Cannone references
@@ -742,7 +754,40 @@ def edge_w(d):
     return np.clip((LINING_W - d) / (LINING_W - PURF), 0.0, 1.0)
 
 
+def gib_top_interior(xp, zp):
+    """The 47 printed belly thicknesses as a map: Delaunay triangulation (triangle, no quality or area switches) of the points' (u, v), barycentric linear inside, the nearest printed point's value outside the hull. (u, v) of a plate point: u = (z_top - z)/(z_top - z_bottom) of the mapped top outline, v = (x - outline centre)/(half the outline width) on its row."""
+    import triangle
+    zt, zb = top_rows[:, 0].max(), top_rows[:, 0].min()
+    order = np.argsort(top_rows[:, 0])
+    zs, xl, xr = top_rows[order, 0], top_rows[order, 1], top_rows[order, 2]
+    xp, zp = np.asarray(xp, float), np.asarray(zp, float)
+    u = (zt - zp) / (zt - zb)
+    v = (xp - 0.5 * (np.interp(zp, zs, xl) + np.interp(zp, zs, xr))) / (0.5 * (np.interp(zp, zs, xr) - np.interp(zp, zs, xl)))
+    P = GIB_PTS[:, [1, 2]]
+    T = triangle.triangulate({"vertices": P}, "")["triangles"]
+    out = np.full(len(u), np.nan)
+    A = P[T[:, 0]]
+    B = P[T[:, 1]] - A
+    C = P[T[:, 2]] - A
+    den = B[:, 0] * C[:, 1] - B[:, 1] * C[:, 0]
+    for k in range(len(u)):
+        q = np.array([u[k], v[k]]) - A
+        l1 = (q[:, 0] * C[:, 1] - q[:, 1] * C[:, 0]) / den
+        l2 = (B[:, 0] * q[:, 1] - B[:, 1] * q[:, 0]) / den
+        l0 = 1.0 - l1 - l2
+        ok = np.nonzero((l0 >= -1e-12) & (l1 >= -1e-12) & (l2 >= -1e-12))[0]
+        if len(ok):
+            i = ok[0]
+            out[k] = l0[i] * GIB_PTS[T[i, 0], 0] + l1[i] * GIB_PTS[T[i, 1], 0] + l2[i] * GIB_PTS[T[i, 2], 0]
+        else:
+            out[k] = GIB_PTS[np.argmin(((P - np.array([u[k], v[k]])) ** 2).sum(axis=1)), 0]
+    return out
+
+
 def t_top(xp, zp, d):
+    if GIB:
+        we = edge_w(d)
+        return we * T_TOP["edge"] + (1 - we) * gib_top_interior(xp, zp)
     di = dist_to_poly(ISLAND, np.c_[xp, zp])
     ins = inside_many(ISLAND, np.c_[xp, zp])
     w_isl = np.where(ins, 1.0, np.clip(1.0 - di / 20.0, 0.0, 1.0))
@@ -1135,6 +1180,21 @@ if OUTLINE:
         "below" if P2z < ZC2 else "above", abs(_post_old[0] - _post_old[1]), float(ZF(zbr_c)), float(ZF(zbr_c)) - ZC2), "check",
          "expected against placed, computed; not fitted. Items placed from a printed or photographed distance (f-hole trace, bridge plane = the notch line, bar length 580 and its place relative to the bridge) are listed beside the one-map warped value, so none moves by accident")
     prov("ring_overhang_check", "stretched ring on the measured outlines: mean %.2f mm, min %.2f mm; after pulling in: min %.2f mm; %d of %d angles moved, by up to %.2f mm" % (oh0.mean(), oh0.min(), oh1.min(), int((moved > 1e-9).sum()), len(moved), moved.max()), "check", "the rib_ring_overhang row above, repeated here so the byte check can compare it with the uniform stretch's (mean 5.27, min -3.57 mm, 48 of 180 angles moved by up to 24.55 mm)")
+if GIB:
+    for _i, _r in enumerate(PROV):
+        if _r[0] in ("thickness_top", "rib_height", "ribs", "thickness_back"):
+            _v = _r[1]
+            if _r[0] == "thickness_top":
+                _v = "edge %.1f to %.0f mm from the outline, linear to the interior by %.0f mm; interior = the Gibson belly map of the gibson_top_interior row" % (T_TOP["edge"], PURF, LINING_W)
+            elif _r[0] == "thickness_back":
+                _v = _v.replace("edge %.1f to" % T_BACK["edge"], "edge %.2f to" % T_BACK["edge"])
+            PROV[_i] = (_r[0], _v, _r[2] + " -> GIBSON where noted in the gibson_* rows", _r[3])
+    PROV += [
+        ("gibson_top_interior", "47 printed belly thicknesses 2.0-3.1 mm (mean %.3f), as a piecewise-linear map" % GIB_PTS[:, 0].mean(), "hargrave-strad-1986-09-gibson-viola p. 117",
+         "REPLACES Johannsson's flank 2.6 / island 3.2 as the top interior; each point at its printed position on the Gibson belly outline, (u, v) = (distance from the top of the printed outline over its height, offset from the outline's centre over half its width on that row), bass side on the viewer's left; the map is the Delaunay triangulation (triangle, default switches) of the points' (u, v) with barycentric linear interpolation, the nearest printed point outside their hull; a plate point's (u, v) is read the same way on the mapped viola top outline; no smoothing, no weight, nothing fitted; the top edge stays 4.0 (Hargrave prints edge thickness from the back only)"),
+        ("gibson_rib_height", "36.3125 mm", "hargrave-strad-1986-09-gibson-viola p. 116", "REPLACES Johannsson's 38.0: the mean of the eight printed rib heights (neck root 35.5/35.5, upper corner 35.75/36.75, lower corner 36.5/37, endpin 36.5/36.5)"),
+        ("gibson_rib_wall", "1.0 mm", "hargrave-strad-1986-09-gibson-viola p. 115", "REPLACES Johannsson's 1.2: measured in the C bout through the f hole, 'approximately 1 mm'"),
+        ("gibson_back_edge", "4.75 mm", "hargrave-strad-1986-09-gibson-viola p. 116", "REPLACES Johannsson's 4.0 as the back's edge thickness: the printed value at the upper and lower bouts (corners 4.75-5, centre bouts 4.8-5, button 4.5-5); the back interior stays Johannsson/Cannone")]
 with open(OUT + "PROVENANCE.tsv", "x", encoding="utf-8") as f:
     f.write("item\tvalue\tsource\tnote\n")
     for r in PROV:
