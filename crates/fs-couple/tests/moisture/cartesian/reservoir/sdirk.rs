@@ -16,6 +16,75 @@ fn vapor_capacity(volume_m3: f64) -> f64 {
 }
 
 #[test]
+fn g1_kirchhoff_finite_vapor_retains_the_first_stage_source_envelope() {
+    with_cx(|cx| {
+        let diffusion = 1e-4;
+        let geometry = grid_geometry([0.1; 3], [1; 3]);
+        let initial_moisture = 0.04;
+        let slope = 0.25;
+        let initial_rh = 0.8;
+        let initial = grid(
+            card([diffusion; 2], 0.3),
+            geometry,
+            vec![initial_moisture],
+            cx,
+        )
+        .with_kirchhoff_diffusivity();
+        let atmosphere = air::atmosphere(initial_rh, 1.0);
+        let faces = std::array::from_fn(|_| Some(air::sorption(slope)));
+        let dry = initial.dry_mass_kg();
+        let capacity = vapor_capacity(1.0);
+        let rate = 12.0 * diffusion / geometry.lengths_m[0].powi(2);
+        let total_water = dry * initial_moisture + capacity * initial_rh;
+        let equilibrium = slope * total_water / (capacity + slope * dry);
+        let lambda = rate * (1.0 + slope * dry / capacity);
+        let dt = 0.25;
+        let first = equilibrium
+            + (initial_moisture - equilibrium) / (1.0 + GAMMA * lambda * dt);
+        let first_rh = (total_water - dry * first) / capacity;
+        let known = (1.0 - GAMMA) * dt * rate * (slope * first_rh - first);
+        // The reservoir root visits RH=0 in stage two. The physical first-stage
+        // influx persists at that dry probe, so its field exceeds the old/current
+        // boundary envelope while remaining inside the admitted stage envelope.
+        let dry_probe = (initial_moisture + known) / (1.0 + GAMMA * dt * rate);
+        assert!(dry_probe > initial_moisture && dry_probe < slope * first_rh);
+        let expected = equilibrium + (initial_moisture - equilibrium) * decay(lambda * dt);
+        let candidate = atmosphere
+            .advance_cartesian_sdirk2(
+                &initial,
+                dt,
+                &faces,
+                config(),
+                nonlinear(),
+                air::controls(),
+                cx,
+            )
+            .unwrap();
+        let report = &candidate.step().transport;
+        near(candidate.moisture().moisture()[0], expected, 3e-12);
+        near(report.first_stage.stored_water_kg[1] / dry, first, 3e-12);
+        near(
+            candidate.atmosphere().relative_humidity().unwrap(),
+            (total_water - dry * expected) / capacity,
+            4e-11,
+        );
+        assert!(report.first_stage.kirchhoff_sources.is_some());
+        assert!(report.endpoint.kirchhoff_sources.is_some());
+        let exchange = dry * (expected - initial_moisture);
+        near(report.endpoint.boundary_water_kg.iter().sum(), exchange, 2e-12);
+        near(candidate.step().water_to_solid_kg, exchange, 2e-12);
+        near(
+            candidate.atmosphere().vapor_mass_kg().unwrap() + candidate.moisture().water_mass_kg(),
+            total_water,
+            2e-12,
+        );
+        assert_eq!(initial.moisture(), &[initial_moisture]);
+        assert_eq!(initial.time_s(), 0.0);
+        near(atmosphere.relative_humidity().unwrap(), initial_rh, 2e-15);
+    });
+}
+
+#[test]
 fn g1_finite_cartesian_sdirk_has_second_order_adsorption_and_desorption() {
     with_cx(|cx| {
         let diffusion = 0.01;

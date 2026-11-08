@@ -353,6 +353,7 @@ impl MoistureCartesian {
     fn kirchhoff_profiles(
         &self,
         reservoir: [Option<f64>; 6],
+        stage_bounds: Option<[f64; 2]>,
         cx: &Cx<'_>,
     ) -> Result<[KirchhoffMoistureDiffusivity; 3], MoistureError> {
         let mut lower = f64::INFINITY;
@@ -362,6 +363,7 @@ impl MoistureCartesian {
             .iter()
             .copied()
             .chain(reservoir.into_iter().flatten())
+            .chain(stage_bounds.into_iter().flatten())
             .enumerate()
         {
             if i % 128 == 0 {
@@ -456,7 +458,16 @@ impl MoistureCartesian {
             self.transport_state_at(m)?;
         }
         let profiles = if self.kirchhoff_diffusivity {
-            Some(self.kirchhoff_profiles(reservoir, cx)?)
+            // A finite reservoir changes between stages. The retained first-
+            // stage flux can put a valid trial beyond the old/current reservoir
+            // range, so retain its already admitted source envelope as well.
+            // This widens source support only; the physical stage-range check
+            // and the original storage/reference shift remain authoritative.
+            Some(self.kirchhoff_profiles(
+                reservoir,
+                known.map(|load| load.source_bounds()),
+                cx,
+            )?)
         } else {
             None
         };

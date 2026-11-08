@@ -101,7 +101,7 @@ impl MoistureCartesian {
     ) -> Result<StageLoad<6>, MoistureError> {
         let reservoir = std::array::from_fn(|k| boundaries[k].equilibrium);
         let profiles = if self.kirchhoff_diffusivity {
-            Some(self.kirchhoff_profiles(reservoir, cx)?)
+            Some(self.kirchhoff_profiles(reservoir, None, cx)?)
         } else {
             None
         };

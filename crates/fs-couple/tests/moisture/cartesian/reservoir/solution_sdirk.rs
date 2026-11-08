@@ -51,6 +51,79 @@ fn solubility_law(saturation: f64) -> IdealSolubilityV1 {
 }
 
 #[test]
+fn g1_kirchhoff_finite_solution_retains_the_first_stage_source_envelope() {
+    with_cx(|cx| {
+        let volume = 1e-4;
+        let reservoir = bath::reservoir(volume, vec![1.2, 0.8]);
+        let before = reservoir.solution().clone();
+        let initial = grid(
+            card([0.01; 2], 0.3),
+            grid_geometry([0.1; 3], [1; 3]),
+            vec![0.04],
+            cx,
+        );
+        let faces = std::array::from_fn(|_| Some(air::sorption(0.25)));
+        let dt = 0.15;
+        // With constant D the potential-integrated and ordinary face laws
+        // coincide. The lower-volume root probe has a lower activity than the
+        // first stage, but must retain the water delivered by that stage.
+        let ordinary = reservoir
+            .advance_cartesian_sdirk2(
+                &initial,
+                dt,
+                &faces,
+                config(),
+                nonlinear(),
+                bath::controls(volume),
+                cx,
+            )
+            .unwrap();
+        let integrated = initial.clone().with_kirchhoff_diffusivity();
+        let candidate = reservoir
+            .advance_cartesian_sdirk2(
+                &integrated,
+                dt,
+                &faces,
+                config(),
+                nonlinear(),
+                bath::controls(volume),
+                cx,
+            )
+            .unwrap();
+        near(
+            candidate.moisture().moisture()[0],
+            ordinary.moisture().moisture()[0],
+            3e-12,
+        );
+        near(
+            candidate.reservoir().solution().solvent_volume_m3(),
+            ordinary.reservoir().solution().solvent_volume_m3(),
+            3e-15,
+        );
+        near(
+            candidate.reservoir().solvent_mass_kg() + candidate.moisture().water_mass_kg(),
+            reservoir.solvent_mass_kg() + initial.water_mass_kg(),
+            2e-12,
+        );
+        assert!(
+            candidate
+                .step()
+                .transport
+                .endpoint
+                .kirchhoff_sources
+                .is_some()
+        );
+        assert_eq!(
+            candidate.reservoir().solution().solute_moles(),
+            before.solute_moles()
+        );
+        assert_eq!(reservoir.solution(), &before);
+        assert_eq!(integrated.moisture(), &[0.04]);
+        assert_eq!(integrated.time_s(), 0.0);
+    });
+}
+
+#[test]
 fn g1_solution_sdirk_tracks_finite_activity_feedback_with_second_order_accuracy() {
     with_cx(|cx| {
         let volume = 1e-4;

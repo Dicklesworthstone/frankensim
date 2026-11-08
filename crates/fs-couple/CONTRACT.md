@@ -2339,8 +2339,12 @@ changes describe only the original-to-final physical interval.
 Sorption and optional surface emission refresh at each trial RH. The accepted
 stage envelope includes original field extrema and only equilibria connected
 by nonzero first-stage or current second-stage physical face coefficients.
-Both pre-source and final admission use that envelope. Inadmissible stages
-refuse without clipping or committing a partial atmosphere/specimen state.
+Both pre-source and final admission use that envelope. Kirchhoff source charts
+also retain the admitted first-stage envelope during second-stage finite-vapor
+and finite-solution probes. The carried first-stage flux can legitimately move
+a trial outside its current reservoir envelope; it does not authorize source
+extrapolation or relax physical stage bounds. Inadmissible stages refuse
+without clipping or committing a partial atmosphere/specimen state.
 Every scalar-bracket trial must remain inside admitted source support; an
 inadmissible extreme trial may require a shorter timestep.
 
