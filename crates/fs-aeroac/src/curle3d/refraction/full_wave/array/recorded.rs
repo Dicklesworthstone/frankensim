@@ -59,30 +59,10 @@ impl PreparedFullWaveCompactSourceObserver {
         spectrum: &WelchCrossSpectrum,
         bin: usize,
         budget: CoherenceBudget,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<CompactFieldStatistics, AeroacError> {
-        poll(&mut cancelled)?;
-        let channels = self
-            .source_count()
-            .checked_mul(4)
-            .ok_or_else(|| invalid("refracting recorded compact channel count overflow"))?;
-        let measured = admit_record(
-            spectrum,
-            bin,
-            self.frequency_hz(),
-            self.source_count(),
-            channels,
-            budget,
-        )?;
-        let mut statistics = StatisticsSum::default();
-        for factor in measured.factors() {
-            poll(&mut cancelled)?;
-            let mut sums = [ComplexSum::default(); 4];
-            self.accumulate_welch_factor(factor, measured, &mut sums, &mut cancelled)?;
-            statistics.add(sums.map(ComplexSum::value))?;
-        }
-        poll(&mut cancelled)?;
-        statistics.finish(self.scope())
+        self.view()
+            .evaluate_welch_bin(spectrum, bin, budget, cancelled)
     }
 
     /// Coherently observe original recorded compact AND volume-stress sources.
@@ -192,6 +172,53 @@ impl PreparedFullWaveCompactSourceObserver {
         sums: &mut [ComplexSum; 4],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), AeroacError> {
+        self.view()
+            .accumulate_welch_factor(factor, measured, sums, cancelled)
+    }
+}
+
+impl<D> ArrayField<'_, D> {
+    /// Reuse original compact-source factors with any admitted propagation map.
+    pub(in crate::curle3d::refraction::full_wave) fn evaluate_welch_bin(
+        &self,
+        spectrum: &WelchCrossSpectrum,
+        bin: usize,
+        budget: CoherenceBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CompactFieldStatistics, AeroacError> {
+        poll(&mut cancelled)?;
+        let sources = self.transfers.len();
+        let channels = sources
+            .checked_mul(4)
+            .ok_or_else(|| invalid("refracting recorded compact channel count overflow"))?;
+        let measured = admit_record(
+            spectrum,
+            bin,
+            self.frequency_hz,
+            sources,
+            channels,
+            budget,
+        )?;
+        let mut statistics = StatisticsSum::default();
+        for factor in measured.factors() {
+            poll(&mut cancelled)?;
+            let mut sums = [ComplexSum::default(); 4];
+            self.accumulate_welch_factor(factor, measured, &mut sums, &mut cancelled)?;
+            statistics.add(sums.map(ComplexSum::value))?;
+        }
+        poll(&mut cancelled)?;
+        statistics.finish(self.scope)
+    }
+
+    /// Add one admitted original factor to a common pressure/velocity sum.
+    /// The caller binds its channel count, ordering and combined work budget.
+    pub(in crate::curle3d::refraction::full_wave) fn accumulate_welch_factor(
+        &self,
+        factor: &[fs_fft::C64],
+        measured: WelchPeakBin<'_>,
+        sums: &mut [ComplexSum; 4],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
         for (index, (transfer, channels)) in self
             .transfers
             .iter()
@@ -220,7 +247,7 @@ impl PreparedFullWaveCompactSourceObserver {
     }
 }
 
-fn admit_record(
+pub(in crate::curle3d::refraction::full_wave) fn admit_record(
     spectrum: &WelchCrossSpectrum,
     bin: usize,
     frequency_hz: f64,

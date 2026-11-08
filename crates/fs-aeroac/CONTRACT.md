@@ -2078,6 +2078,26 @@ limits, actual finite-layer Q/F composition and all moments, path/source coheren
 global work exhaustion, equal-speed density-layer work, finite versus singular
 self-fields, original clocks, explicit domains, empty arrays and cancellation.
 
+`PreparedLayeredFullWaveCompactSourceObserver::evaluate_welch_bin` now
+propagates original source-major Q/F records through its native layer maps.
+The companion `evaluate_welch_bin_with_quadrupoles` consumes one synchronized
+record containing compact `[Q,Fx,Fy,Fz]` blocks followed by physical stress
+`[xx,yy,zz,xy,xz,yz]` blocks. Both banks must share all three original fluid
+states, first-face point and oriented normal, thickness, receiver, exact bin
+frequency and transmitted/reflected/incident-total field. Interior stress
+observations cannot be paired with these exterior compact-source views.
+One common DD pressure/velocity sum per original factor retains Q/F/stress,
+cell, tensor, direct/returned and internal-layer interference before moments.
+The original peak-bin conversion occurs once. The existing compact factor loop
+is shared unchanged with the fluid-interface observer; warm application adds
+no FFT, quadrature, covariance expansion, delay or waveform reconstruction.
+Combined source/segment work and cancellation are checked before reduction.
+Original channel ordering, disjoint-source responsibility, window/aliasing
+limitations and the nontrapping lossless-layer scope remain explicit.
+`full_wave_layer_mixed_welch` specifies native finite-layer moments in all
+three views, absent/homogeneous limits, measured phase cancellation with
+surviving velocity, and material/frame/thickness/clock/work refusals.
+
 ## Full spherical-wave transmission through a finite fluid layer
 
 `curle3d::refraction::full_wave::layer::PreparedLayeredFullWaveMonopole`

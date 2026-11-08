@@ -20,6 +20,7 @@ use crate::observation::HarmonicFieldLine;
 use fs_math::c64::C64;
 
 mod recorded;
+pub(super) use recorded::admit_record;
 
 /// Applicability of both the linear field and its explicitly supplied statistics.
 pub const FULL_WAVE_COMPACT_ARRAY_SCOPE: &str = "Prescribed stationary compact 3D volume \

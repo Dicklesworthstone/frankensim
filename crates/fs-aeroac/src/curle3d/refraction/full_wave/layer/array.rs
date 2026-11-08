@@ -27,6 +27,8 @@ use crate::curle3d::{
 use crate::observation::HarmonicFieldLine;
 use fs_math::{c64::C64, dd::Dd};
 
+mod recorded;
+
 /// All source statistics are explicit, and every original layer limit remains.
 pub const FULL_WAVE_LAYER_ARRAY_SCOPE: &str = "Prescribed stationary compact 3D volume \
 flows [m³/s] and forces on fluid [N]; coherent full-wave transmission through one \

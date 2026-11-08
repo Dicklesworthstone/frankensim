@@ -17,10 +17,10 @@ use super::{
 };
 use crate::AeroacError;
 use crate::curle3d::quadrupole::QuadrupolePhasor;
-use crate::curle3d::statistics::invalid;
+use crate::curle3d::statistics::{ComplexSum, invalid};
 use crate::curle3d::{CoherenceBudget, CoherentCompactField, CompactFieldStatistics};
 use crate::observation::HarmonicFieldLine;
-use fs_fft::welch::WelchCrossSpectrum;
+use fs_fft::welch::{WelchCrossSpectrum, WelchPeakBin};
 use fs_math::{c64::C64, dd::Dd};
 
 mod recorded;
@@ -288,6 +288,18 @@ impl PreparedLayeredFullWaveQuadrupoleObserver {
     ) -> Result<CompactFieldStatistics, AeroacError> {
         self.view()
             .evaluate_welch_bin(spectrum, bin, budget, cancelled)
+    }
+
+    /// Preserve original stress factors in a mixed-source layer reduction.
+    pub(in crate::curle3d::refraction::full_wave::layer) fn accumulate_welch_factor(
+        &self,
+        factor: &[fs_fft::C64],
+        measured: WelchPeakBin<'_>,
+        sums: &mut [ComplexSum; 4],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), AeroacError> {
+        self.view()
+            .accumulate_welch_factor(factor, measured, sums, cancelled)
     }
 
     fn view(&self) -> ArrayField<'_, FullWaveLayerQuadrupoleDiagnostics> {
