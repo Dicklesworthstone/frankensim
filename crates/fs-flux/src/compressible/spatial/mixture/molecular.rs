@@ -1318,9 +1318,9 @@ fn spatial<'a, L: TransportLaw>(
                     &gradient[cell],
                 )?;
                 // The original source uses bath enthalpies and velocity for
-                // the physical boundary energy effort. Modeled SGS flux is
-                // not extrapolated across this externally maintained bath.
-                source.reservoir_face_from_primitives(
+                // the physical boundary energy effort. Explicit local SGS
+                // exchange retains this same effort and admitted bath trace.
+                let receipt = source.reservoir_face_from_primitives(
                     left,
                     right,
                     0.5 * grid.spacing[axis],
@@ -1329,7 +1329,37 @@ fn spatial<'a, L: TransportLaw>(
                     controls.diffusion,
                     output,
                     &mut *cancelled,
-                )?
+                )?;
+                #[cfg(feature = "experimental-sgs")]
+                let receipt = if let Some(sgs) = sgs.as_ref()
+                    && sgs.local_reservoir_exchange_enabled()
+                {
+                    let bath = reservoirs
+                        .primitive_face(side, face)
+                        .ok_or(DissipationError::Invalid("unbound subgrid reservoir"))?;
+                    let traces = if sign < 0.0 {
+                        [bath, primitive[cell]]
+                    } else {
+                        [primitive[cell], bath]
+                    };
+                    sgs.add_reservoir_face(
+                        source.gas(),
+                        cell,
+                        traces,
+                        [left.partial_densities, right.partial_densities],
+                        axis,
+                        0.5 * grid.spacing[axis],
+                        tangential,
+                        sign < 0.0,
+                        receipt,
+                        controls.diffusion,
+                        output,
+                        cancelled,
+                    )?
+                } else {
+                    receipt
+                };
+                receipt
             }
             cartesian::FaceKind::Boundary {
                 condition: BoundaryCondition::PressureOutlet { .. },

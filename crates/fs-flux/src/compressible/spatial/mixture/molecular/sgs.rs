@@ -26,6 +26,11 @@
 //! chemistry owner. Isotropic SGS energy, backscatter, pressure dilatation,
 //! flame wrinkling and shock/turbulence interaction are not represented.
 //!
+//! Complete prescribed reservoirs retain molecular exchange by default.
+//! [`MolecularTransport3d::with_local_sgs_reservoir_exchange`] explicitly adds
+//! local modeled stress, heat and common-species mixing using the same physical
+//! bath traces and source energy effort. No exterior dynamic fit is inferred.
+//!
 //! The heat/species energy split follows CFX Theory Guide 2025 R1, §1.5.7,
 //! equations (1-165)--(1-173):
 //! https://ansyshelp.ansys.com/public/Views/Secured/corp/v251/en/cfx_thry/BGBHJAGD.html
@@ -39,8 +44,8 @@ use crate::compressible::spatial::molecular::sgs::wall::EquilibriumWallModel;
 pub use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicScalarReport,
     DynamicSgsConfig, DynamicSgsReport, DynamicSubgridConfig, DynamicThermalSubgridConfig,
-    EquilibriumThermalWallConfig, EquilibriumWallConfig, WallHeatConfig,
-    LagrangianSgsConfig, LagrangianSubgridConfig, SgsModel, SgsUse, SubgridConfig,
+    EquilibriumThermalWallConfig, EquilibriumWallConfig, LagrangianSgsConfig,
+    LagrangianSubgridConfig, SgsModel, SgsUse, SubgridConfig, WallHeatConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
@@ -49,7 +54,9 @@ use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
+mod flux;
 pub(in crate::compressible::spatial::mixture) mod lagrangian;
+mod reservoir;
 pub use lagrangian::{
     LagrangianComponentsConfig, LagrangianScalarConfig, MixtureLagrangianSpeciesSubgridConfig,
     MixtureLagrangianSubgridConfig,
@@ -146,6 +153,7 @@ enum ViscosityClosure {
         config: MixtureSubgridConfig,
         widths: [f64; 3],
         filter_width: f64,
+        reservoir_exchange: bool,
     },
     Dynamic(dynamic::DynamicTransport),
     Lagrangian(lagrangian::LagrangianTransport),
@@ -179,6 +187,7 @@ impl SubgridTransport {
                 config,
                 widths,
                 filter_width,
+                reservoir_exchange: false,
             },
             dynamic_coefficient_squared: allocated(grid.len(), 0.0)?,
             heat_capacity_v_density: allocated(grid.len(), 0.0)?,
@@ -345,7 +354,7 @@ impl SubgridTransport {
         right: usize,
         axis: usize,
         distance: f64,
-        mut receipt: TransportFaceReport,
+        receipt: TransportFaceReport,
         controls: MaxwellStefanSolveV1,
         out: &mut [f64],
         cancelled: &mut impl FnMut() -> bool,
@@ -511,147 +520,35 @@ impl SubgridTransport {
         }
         let n = gas.species_count();
         let width = n + 4;
-        let pl = primitive[left];
-        let pr = primitive[right];
-        let temperature = receipt.enthalpy_temperature_k;
-        let mut y = [0.0; MAX_SPECIES];
-        let mut species_flux = [0.0; MAX_SPECIES];
-        let mass_diffusion =
-            dynamic_species.unwrap_or_else(|| mu / schmidt.expect("fixed-Schmidt species closure"));
-        for k in 0..n {
-            let yl = states[left * width + k] / pl.density;
-            let yr = states[right * width + k] / pr.density;
-            y[k] = 0.5 * yl + 0.5 * yr;
-            species_flux[k] = -mass_diffusion * ((yr - yl) / distance);
-        }
-        let pivot = (0..n)
-            .max_by(|&a, &b| y[a].total_cmp(&y[b]))
-            .expect("admitted species bank");
-        // Close a present species, so exactly absent species stay absent. With
-        // common Schmidt this changes only summation roundoff, not the model.
-        y[pivot] = 1.0 - sum((0..n).filter(|&k| k != pivot).map(|k| y[k]));
-        species_flux[pivot] = -sum((0..n).filter(|&k| k != pivot).map(|k| species_flux[k]));
-        let mut cp = [0.0; MAX_SPECIES];
-        let mut enthalpy = [0.0; MAX_SPECIES];
-        for (k, model) in gas.source().models().iter().enumerate() {
-            if k % 16 == 0 {
-                poll(cancelled)?;
-            }
-            if y[k] == 0.0 {
-                continue;
-            }
-            let inverse_mass = model.molar_mass().value().recip();
-            cp[k] = y[k]
-                * inverse_mass
-                * model
-                    .evaluate_properties(Temperature::new(temperature))
-                    .map_err(FlowError::from)?
-                    .cp()
-                    .value();
-            // Evaluate changes within each original caloric source. Subtracting
-            // two large formation enthalpies would destroy gauge invariance.
-            if mass_diffusion != 0.0 {
-                enthalpy[k] = inverse_mass
-                    * (model
-                        .molar_internal_energy_change(
-                            Temperature::new(gas.domain().minimum_temperature),
-                            Temperature::new(temperature),
-                        )
-                        .map_err(FlowError::from)?
-                        .value()
-                        + R * temperature);
-            }
-        }
-        let cp = sum(cp[..n].iter().copied());
-        let conductivity = if let Some((weight, maximum_ratio)) = dynamic_heat {
-            let conductivity = weight * cp;
-            if conductivity != 0.0 {
-                // The original face reports the same source evaluation that
-                // supplied its Fourier law; stateful laws are not queried twice.
-                let ratio = conductivity / receipt.thermal_conductivity_w_m_k;
-                if !ratio.is_finite() || ratio > maximum_ratio {
-                    return Err(DissipationError::Invalid(
-                        "mixture subgrid heat/molecular conductivity ratio exceeded",
-                    ));
-                }
-            }
-            conductivity
-        } else {
-            mu * (cp / prandtl.expect("fixed-Prandtl heat closure"))
-        };
-        let heat = -conductivity * ((pr.temperature - pl.temperature) / distance);
-        let mut energy = heat + sum((0..n).map(|k| enthalpy[k] * species_flux[k]));
-        if mass_diffusion != 0.0 {
-            for k in 0..n {
-                out[k] += species_flux[k];
-            }
-        }
-        if mu != 0.0 {
-            let [a, b] = tangents(axis);
-            let divergence = (pr.velocity[axis] - pl.velocity[axis]) / distance
-                + 0.5 * gradient[left][a][a]
-                + 0.5 * gradient[right][a][a]
-                + 0.5 * gradient[left][b][b]
-                + 0.5 * gradient[right][b][b];
-            for (frame, component) in [axis, a, b].into_iter().enumerate() {
-                let normal = (pr.velocity[component] - pl.velocity[component]) / distance;
-                let transpose = if component == axis {
-                    normal - (2.0 / 3.0) * divergence
-                } else {
-                    0.5 * gradient[left][component][axis] + 0.5 * gradient[right][component][axis]
-                };
-                let stress = mu * (normal + transpose);
-                out[n + frame] -= stress;
-                energy -= (0.5 * pl.velocity[component] + 0.5 * pr.velocity[component]) * stress;
-            }
-        }
-        out[n + 3] += energy;
-        receipt.reduced_heat_flux_w_m2 += heat;
-        receipt.mass_frame_residual_kg_m2_s = sum(out[..n].iter().copied());
-        let frame_scale = sum(out[..n].iter().map(|j| j.abs()));
-        if receipt.mass_frame_residual_kg_m2_s.abs()
-            > controls.absolute_mass_flux_tolerance_kg_m2_s
-                + controls.relative_tolerance * frame_scale
-        {
-            return Err(DissipationError::Invalid(
-                "mixture subgrid total mass-frame residual",
-            ));
-        }
-        let cv_min = self.heat_capacity_v_density[left].min(self.heat_capacity_v_density[right]);
-        let rho_min = pl.density.min(pr.density);
-        let gamma = 1.0
-            + (pl.pressure / (pl.temperature * self.heat_capacity_v_density[left]))
-                .max(pr.pressure / (pr.temperature * self.heat_capacity_v_density[right]));
-        let enthalpy_span = (0..n)
-            .filter(|&k| y[k] > 0.0)
-            .map(|k| (enthalpy[k] - enthalpy[pivot]).abs())
-            .fold(0.0, f64::max);
-        let species_scale = (mass_diffusion / rho_min)
-            * gamma
-            * (1.0 + (enthalpy_span / temperature) * (pl.density.max(pr.density) / cv_min));
-        // Sum molecular and modeled bounds: max(D_m,D_t) alone underestimates
-        // their combined diffusion. Include enthalpy/species coupling and the
-        // full 3-D stress row sum, then let the owner apply all inverse lengths.
-        receipt.diffusivity_m2_s +=
-            ((20.0 / 3.0) * mu / rho_min).max(conductivity / cv_min + species_scale);
-        if !positive(cp)
-            || !conductivity.is_finite()
-            || !mass_diffusion.is_finite()
-            || !out.iter().all(|v| v.is_finite())
-            || !receipt.reduced_heat_flux_w_m2.is_finite()
-            || !receipt.diffusivity_m2_s.is_finite()
-            || !receipt.mass_frame_residual_kg_m2_s.is_finite()
-            || !frame_scale.is_finite()
-            || !gamma.is_finite()
-            || !enthalpy_span.is_finite()
-            || !species_scale.is_finite()
-        {
-            return Err(DissipationError::Invalid(
-                "unrepresentable mixture subgrid face transport",
-            ));
-        }
-        poll(cancelled)?;
-        Ok(receipt)
+        flux::add(
+            gas,
+            flux::Face {
+                partial_densities: [
+                    &states[left * width..left * width + n],
+                    &states[right * width..right * width + n],
+                ],
+                primitive: [primitive[left], primitive[right]],
+                cv_density: [
+                    self.heat_capacity_v_density[left],
+                    self.heat_capacity_v_density[right],
+                ],
+                gradient: g,
+                axis,
+                distance,
+                work_velocity: std::array::from_fn(|d| {
+                    0.5 * primitive[left].velocity[d] + 0.5 * primitive[right].velocity[d]
+                }),
+            },
+            mu,
+            dynamic_heat,
+            dynamic_species,
+            prandtl,
+            schmidt,
+            receipt,
+            controls,
+            out,
+            cancelled,
+        )
     }
 }
 

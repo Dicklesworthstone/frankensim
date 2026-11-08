@@ -19,7 +19,7 @@ impl<'a> From<&'a Reservoirs> for View<'a> {
 }
 
 impl<'a> View<'a> {
-    fn primitive_face(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
+    pub(super) fn primitive_face(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
         self.reservoirs.primitive_face_at(side, face, self.trial)
     }
 

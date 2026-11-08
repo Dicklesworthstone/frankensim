@@ -9,6 +9,7 @@ use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
 mod channel;
 mod dynamic;
+mod reservoir;
 mod wall;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
@@ -102,7 +103,7 @@ fn operator(
     }
 }
 
-fn faces(op: &mut MolecularTransport3d<ConstantTransport>, flow: &MixtureEuler3d) -> Stage {
+fn faces<L: TransportLaw>(op: &mut MolecularTransport3d<L>, flow: &MixtureEuler3d) -> Stage {
     super::super::spatial(
         &mut op.source,
         &op.grid,

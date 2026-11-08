@@ -8785,3 +8785,48 @@ flow, physical density scaling, the exact zero-model limit against the original
 material BDF2 control owner, and temporal, source, datum and nonlinear refusals.
 Source parsing and bounded review passed; native compilation and execution
 remain pending in the constrained environment.
+
+### Opt-in local SGS exchange with evolving-mixture reservoirs
+
+With `experimental-sgs`,
+`spatial::mixture::molecular::MolecularTransport3d::with_local_sgs_reservoir_exchange`
+explicitly extends an already authored local Smagorinsky, WALE or Vreman
+closure to complete source-owned reservoirs. The default keeps molecular
+bath exchange. Dynamic and Lagrangian variants refuse this selection because
+an exterior test-filter field or pathline history has not been authored.
+Pressure-only outlets retain their declared zero diffusive flux.
+
+The modeled face uses the native half-cell normal derivative, midpoint
+interior/profile tangential derivatives, and directional Vreman cell widths.
+Midpoint density supplies `mu_t = rho_bar nu_t`; midpoint mass fractions and
+original species Cp at midpoint temperature supply `k_t = mu_t Cp/Pr_t`.
+Common-Schmidt species flux `j_i = -(mu_t/Sc_t) d_n Y_i` closes on a present
+species, preserving zero summed modeled mass flux and exact absent species.
+The original molecular transport law is evaluated once per physical face;
+its constitutive samples and Maxwell--Stefan/Soret/Dufour terms remain intact.
+
+The shared conservative interior/bath kernel retains source-referenced
+species enthalpies. At the bath, their temperature and mechanical work
+velocity are the prescribed boundary values: energy exchange is conductive
+heat plus `sum_i h_i(T_b) j_i - u_b dot tau_n`. No separate heating source
+or reservoir inventory is introduced. Molecular and modeled diffusion scales
+are added, including stress, heat and species/enthalpy coupling with both
+trace densities and heat capacities, before the native three-axis half-cell
+stage bound.
+
+The same native spatial callback serves SSP, RKL, coupled advection and
+stage-selected reservoir traces. Existing acceptance, boundary-load
+publication, cancellation and retry transactions remain the owners of the
+complete update. No additional numerical heap workspace is required; an
+exactly zero model returns the original molecular face and receipt.
+
+Five focused regression groups are authored for all six boundary
+orientations and three local models, nonlinear calorics and prescribed bath
+work, original source-call counts, zero-model native equivalence and
+nonlocal-filter refusal, low-Schmidt SSP/RKL admission with atomic refusal,
+and coupled species/energy conservation, formation-offset invariance and
+late-cancellation replay. Pinned rustfmt parsing and bounded source review
+were completed; runtime execution of these new regressions remains
+unverified in the disk-constrained implementation environment. This closure
+retains the existing exploratory SGS and engineering-bound qualifications;
+it adds no experimental-validation, positivity or entropy theorem.
