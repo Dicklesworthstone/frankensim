@@ -4,6 +4,8 @@
 
 /// Finite capacitor supplies, their series losses and all original thermal bodies.
 pub mod capacitor;
+/// Finite chemical battery, regulated load and all eight material heat paths.
+pub mod battery;
 /// Finite voltage sources/loads and all seven material heat paths.
 pub mod voltage;
 

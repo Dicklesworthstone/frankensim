@@ -6172,3 +6172,49 @@ byte (both quadratures are converged where the note has energy, and its 9.6 to 1
 one 16-bit step).
 This is a quadrature resolution of a prescribed uniform-velocity piston in an infinite rigid baffle; it adds no cross-mode
 physics of the real mouth above the bell's first cutoff (about 5.3 kHz for 19 mm).
+
+## Finite battery work and material self-heating
+
+`circuit_enthalpy::battery::BatteryThermalNetwork` couples the original finite
+battery's chemical charge, polarization RC pair and bus capacitor to the existing
+material/enthalpy residual. Series and polarization heat have separate explicit
+receivers; a common receiver is allowed as declared thermal homogenization.
+Native discrete-gradient OCV work integrates across crossed SOC knots, and the
+original two nonnegative branch heat integrals enter storage exactly once.
+
+Resistances are explicitly fixed or selected positive scalar-ohm properties from
+the receivers' original material cards. Selected claims refresh at actual trial
+T/phase while retaining source identity and fixed external context. Each trial
+starts from the same accepted charges. Battery and thermal clocks, finite SOC
+support, thermal events, numerical budgets and cancellation admit both histories
+together or publish neither. OCV and both capacitances remain fixed: no OCV(T),
+reversible entropic heat, aging, chemistry fit or protection control is inferred.
+Coupled temporal accuracy is generally first order and still requires refinement.
+Focused `tests/battery_enthalpy.rs` cases cover crossed-knot work, independent
+calorimetry, R(T) feedback, charging/discharging, shared receivers and refusals.
+
+## Finite battery, converter, regulated load and heat
+
+`circuit_enthalpy::converter::battery::BatteryFedConverterThermalNetwork` advances
+the original six electrical coordinates and finite material enthalpy together.
+Battery chemical/polarization/bus storage, converter flux/input/output storage,
+the positive physical lead resistance, and optional current-limited/foldback
+regulated demand share the native electrical solve at each thermal trial.
+Modulation and demand may change between accepted intervals without resetting
+any charge or flux. The same path supports reverse current and regeneration.
+
+All eight physical heat channels have explicit receivers: the converter's five
+conduction channels, battery series/polarization losses, and lead Joule heat.
+Shared receivers sum those joules before one deposition. Exported load work
+remains a separate electrical boundary and is never deposited as converter heat.
+Independent battery, lead, converter and whole-system balances retain numerical
+closure defects separately. Every trial resolves the original material sources
+at its actual T/phase and restarts the same accepted electrical state; identical
+resolved resistance tuples can reuse one bounded cached electrical result.
+
+This is averaged conversion with fixed OCV/C/L and endpoint resistance feedback,
+not an inferred PWM, entropic battery heat, aging or protection-control model.
+Source support, exhaustion, thermal events, budgets and cancellation refuse
+without publishing either state. `tests/converter_enthalpy/battery.rs` covers an
+independently calculated steady power path, eight-channel calorimetry, nonlinear
+load export, temperature feedback and transactional refusal/retry.

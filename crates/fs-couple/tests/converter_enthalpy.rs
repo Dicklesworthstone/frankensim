@@ -3,6 +3,8 @@
 mod common;
 #[path = "converter_enthalpy/voltage.rs"]
 mod voltage;
+#[path = "converter_enthalpy/battery.rs"]
+mod battery;
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve, converter::*, material::MaterialCell,
 };

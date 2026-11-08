@@ -16,6 +16,8 @@ pub mod conductivity;
 pub mod conduction;
 /// Native averaged/switched converter loss and material-temperature feedback.
 pub mod converter;
+/// Finite battery charge, polarization loss and material-temperature feedback.
+pub mod battery;
 /// Data-only caloric/card, resistor and conductive-link bindings.
 pub mod material;
 /// Two-sided deposition of source-backed electrical contact heat.
