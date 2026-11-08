@@ -6,6 +6,9 @@ mod source;
 #[path = "steady_material_gas/network.rs"]
 mod network;
 
+#[path = "steady_material_gas/gravity.rs"]
+mod gravity;
+
 use fs_airflow::graph::thermal::medium::convection::ForcedConvectionSettings;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
 use fs_airflow::graph::thermal::medium::steady_gas::*;

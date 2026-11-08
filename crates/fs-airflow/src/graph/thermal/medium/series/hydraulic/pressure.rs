@@ -102,6 +102,9 @@ impl SeriesGravity {
     pub fn vertices_m(&self) -> &[[f64; 3]] { &self.vertices_m }
     /// Number of adjacent vertex pairs, each requiring one material state.
     pub fn section_count(&self) -> usize { self.specific_work_j_kg.len() }
+    /// Original per-section g·(end-start) [J/kg], in path order.
+    /// Its negative is the corresponding change in specific potential energy.
+    pub fn section_specific_work_j_kg(&self) -> &[f64] { &self.specific_work_j_kg }
 
     /// Evaluate source-sampled densities without querying a material again.
     /// The pressure gain can drive natural circulation even though net gravity

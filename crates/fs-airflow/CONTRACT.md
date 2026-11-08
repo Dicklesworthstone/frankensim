@@ -5466,3 +5466,40 @@ fan closure, original Reynolds endpoints/refusals, coefficient-only owner
 refusal and nonlinear thermal-response confirmation. The touched Rust sources
 were parsed with the pinned formatter; native Cargo test execution was not
 available during this batch.
+
+## Source-density stack and circulation head on native gas flow
+
+`solve_pressure_gravity_driven_material_gas` uses the same pressure iteration,
+conservative thermochemical transport, source convection and retained velocity
+profile factors as `solve_pressure_driven_material_gas`. The original entry
+still requires positive imposed pressure; gravity explicitly admits signed or
+zero imposed pressure with the same positive-flow bracket.
+
+One authored `SeriesGravity` segment maps to each native axial cell. Segment
+endpoint displacement cannot exceed the cell path length. The original gravity
+owner evaluates `sum(rho_cell * g dot dr)` using accepted local bulk source
+densities, with no reference-density buoyancy approximation. Pressure closure is
+loss plus thermal acceleration equals imposed pressure plus hydrostatic gain.
+A chimney's outside-column pressure difference is supplied explicitly; no ambient
+density, vertical axis, gravity magnitude or inlet/outlet pressure is invented.
+
+The common-pressure envelope adds absolute regional hydrostatic gains, preventing
+nearly cancelling stack or loop heads from hiding large local pressure changes.
+The retained original hydrostatic result reports conservative endpoint gravity
+work. Potential-energy flow is its negative; an independent explicit watt
+allowance bounds the sum of absolute regional potential-flow changes. Gravity
+work is never added as heat. A closed geometric path has exactly zero net gravity
+work but can have source-density buoyant head and nonzero regional omission.
+The new read-only `section_specific_work_j_kg` accessor exposes the gravity
+owner's original prepared regional work without repeating geometry arithmetic.
+
+All native low-Mach, common-pressure, caloric/source, Reynolds and work limits
+remain active. Every pressure trial must meet the gravity/energy allowances;
+refusals and cancellation leave inputs unchanged. This remains a prescribed-inlet
+reduced steady path, including on closed geometry; it does not enforce periodic
+thermal state, evolve a finite inventory, resolve a continuous hydrostatic EOS
+profile or close the omitted mechanical terms in total enthalpy. Refine the
+native cells for density gradients. The existing gas battery adds zero-gravity
+parity, independent downhill Poiseuille/density/signed-drive oracles, a sourced
+heated stack and neutral-column refusal, plus closed-loop buoyancy, regional
+energy/pressure admission, geometry and cancellation checks.

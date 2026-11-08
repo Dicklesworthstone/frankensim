@@ -4,11 +4,16 @@
 //! and hydraulic solve. Only the inlet mass rate changes. A constant-area path
 //! without side injections has dp = sum(dp_loss) + beta*(mdot/A)*(u_out - u_in).
 //! Thermodynamic pressure remains the source's common reference; the mechanical
-//! pressure envelope and omitted kinetic/dissipative powers are explicitly bounded.
+//! pressure envelope and omitted mechanical-energy powers are explicitly bounded.
+//! Opt-in gravity reuses the same source-density head and conservative work owner.
 
 use fs_exec::Cx;
 use fs_material::gas_field::steady::{MAX_STEADY_GAS_CELLS, SteadyAxialGas, SteadyGasSolve};
 use fs_qty::Pressure;
+
+use crate::graph::thermal::medium::series::hydraulic::pressure::{
+    HydrostaticPressure, SeriesGravity, SeriesPressureError,
+};
 
 use super::{
     GasCellTransport, GasTransportFeedback, MaterialSteadyGasError, MaterialSteadyGasSolution,
@@ -36,6 +41,28 @@ pub struct GasPressureBudget {
     pub maximum_neglected_kinetic_power_w: f64,
 }
 
+/// Original gas-flow controls plus the explicit omission bound for gravitational energy.
+#[derive(Clone, Copy, Debug)]
+pub struct GasGravityBudget {
+    pub flow: GasPressureBudget,
+    /// Sum of absolute regional potential-energy flow changes [W], not just
+    /// the net endpoint change. Finite and nonnegative; no energy becomes heat.
+    pub maximum_neglected_potential_power_w: f64,
+}
+
+/// Original geometry, source-density head and separate conservative gravity work.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GasGravityState {
+    pub geometry: SeriesGravity,
+    pub hydrostatic: HydrostaticPressure,
+    /// -mdot * g·(outlet-inlet) [W]; exactly zero on a closed geometric path.
+    pub potential_power_change_w: f64,
+    /// Sum of absolute regional potential-energy flow changes [W].
+    pub neglected_potential_power_bound_w: f64,
+    /// Sum of absolute regional hydrostatic pressure gains [Pa].
+    pub hydrostatic_pressure_bound_pa: f64,
+}
+
 /// One pressure-closed native solution, without a second publication solve.
 #[derive(Debug)]
 pub struct PressureDrivenGasSolution {
@@ -48,15 +75,17 @@ pub struct PressureDrivenGasSolution {
     pub kinetic_energy_flux_factor: f64,
     /// Signed source-density momentum contribution beta*G*(u_out-u_in) [Pa].
     pub acceleration_pressure_pa: f64,
-    /// sum(dp_loss) + acceleration - drive [Pa].
+    /// sum(dp_loss) + acceleration - drive - hydrostatic gain [Pa].
     pub pressure_residual_pa: f64,
-    /// sum(dp_loss) + max_cell |beta*G*(u_cell-u_in)| [Pa].
-    /// Bounds mechanical pressure departures without cancellation.
+    /// sum(dp_loss) + max_cell |beta*G*(u_cell-u_in)|, plus any absolute
+    /// regional hydrostatic gains [Pa]. No head cancellation hides a departure.
     pub common_pressure_bound_pa: f64,
     /// Signed total outlet-minus-inlet kinetic-energy flow [W].
     pub kinetic_power_change_w: f64,
     /// Sum of absolute regional kinetic-energy flow changes [W].
     pub neglected_kinetic_power_bound_w: f64,
+    /// Source-density gravity response when explicitly requested.
+    pub gravity: Option<GasGravityState>,
     /// Full native material-transport solves, including bracket endpoints.
     pub flow_evaluations: usize,
     /// Actual native thermal substeps across every pressure/feedback trial.
@@ -68,6 +97,7 @@ pub struct PressureDrivenGasSolution {
 pub enum GasPressureError {
     Invalid(&'static str),
     Transport(MaterialSteadyGasError),
+    Gravity(SeriesPressureError),
     NotBracketed {
         lower_residual_pa: f64,
         upper_residual_pa: f64,
@@ -89,6 +119,10 @@ pub enum GasPressureError {
         allowance_w: f64,
     },
     NeglectedKineticPower {
+        bound_w: f64,
+        allowance_w: f64,
+    },
+    NeglectedPotentialPower {
         bound_w: f64,
         allowance_w: f64,
     },
@@ -133,13 +167,70 @@ pub fn solve_pressure_driven_material_gas(
     feedback: GasTransportFeedback,
     budget: GasPressureBudget,
 ) -> Result<PressureDrivenGasSolution, GasPressureError> {
+    solve_pressure_inner(
+        cx, problem, transport, drive, controls, feedback, budget, None,
+    )
+}
+
+/// Select the same native gas flow with explicit source-density hydrostatic head.
+///
+/// The imposed pressure may be signed or zero. Each connected gravity segment
+/// maps to one native cell, using its accepted well-mixed bulk density. Its
+/// endpoint displacement cannot exceed that cell's physical axial path length.
+/// Geometry and uniform acceleration are authored; no ambient density or axis
+/// is inferred. For a chimney, supply the outside column's pressure difference
+/// explicitly, for example from original material states and `SeriesGravity`.
+///
+/// Pressure closure is loss + acceleration = imposed pressure + sum(rho*g·dr).
+/// Gravity adds no heat: the native enthalpy solve omits potential-energy flow,
+/// whose absolute regional changes must fit the declared watt allowance.
+/// A closed geometric path has zero net gravity work but can have buoyant head;
+/// it retains the original prescribed inlet reservoir, not a periodic thermal
+/// closure or a closed-inventory thermosiphon. Refine cells to resolve density.
+///
+/// # Errors
+/// Original flow/source refusals, incompatible geometry, excessive pressure or
+/// omitted potential power, missing positive-flow bracket or cancellation.
+pub fn solve_pressure_gravity_driven_material_gas(
+    cx: &Cx<'_>,
+    problem: &SteadyAxialGas,
+    transport: &[GasCellTransport],
+    drive: Pressure,
+    gravity: &SeriesGravity,
+    controls: SteadyGasSolve,
+    feedback: GasTransportFeedback,
+    budget: GasGravityBudget,
+) -> Result<PressureDrivenGasSolution, GasPressureError> {
+    solve_pressure_inner(
+        cx,
+        problem,
+        transport,
+        drive,
+        controls,
+        feedback,
+        budget.flow,
+        Some((gravity, budget.maximum_neglected_potential_power_w)),
+    )
+}
+
+fn solve_pressure_inner(
+    cx: &Cx<'_>,
+    problem: &SteadyAxialGas,
+    transport: &[GasCellTransport],
+    drive: Pressure,
+    controls: SteadyGasSolve,
+    feedback: GasTransportFeedback,
+    budget: GasPressureBudget,
+    gravity: Option<(&SeriesGravity, f64)>,
+) -> Result<PressureDrivenGasSolution, GasPressureError> {
     check(cx)?;
     let pressure = budget.pressure;
     let (mut low, mut high) = pressure.mass_flow_bracket_kg_per_s;
     let nonnegative = |value: f64| value.is_finite() && value >= 0.0;
     let beta_squared = budget.momentum_flux_factor * budget.momentum_flux_factor;
     let alpha = budget.kinetic_energy_flux_factor;
-    if !positive(drive.value())
+    if !drive.value().is_finite()
+        || (gravity.is_none() && !positive(drive.value()))
         || !positive(low)
         || !positive(high)
         || low >= high
@@ -173,6 +264,33 @@ pub fn solve_pressure_driven_material_gas(
             "pressure selection needs a nonempty axial path without side injections",
         ));
     }
+    if let Some((path, allowance)) = gravity {
+        if path.section_count() != problem.cells.len() || !nonnegative(allowance) {
+            return Err(GasPressureError::Invalid(
+                "one gravity segment per cell and finite nonnegative potential-power allowance required",
+            ));
+        }
+        let mut previous = 0.0;
+        for (cell, pair) in problem.cells.iter().zip(path.vertices_m().windows(2)) {
+            check(cx)?;
+            let length = cell.end_m - previous;
+            let chord_squared: f64 = (0..3)
+                .map(|axis| {
+                    let ratio = (pair[1][axis] - pair[0][axis]) / length;
+                    ratio * ratio
+                })
+                .sum();
+            if !positive(length)
+                || !chord_squared.is_finite()
+                || chord_squared > 1.0 + 128.0 * f64::EPSILON
+            {
+                return Err(GasPressureError::Invalid(
+                    "gravity endpoint displacement exceeds the native axial cell length",
+                ));
+            }
+            previous = cell.end_m;
+        }
+    }
     let area = transport[0].resistance.flow_area().value();
     if transport.iter().any(|law| {
         (law.resistance.flow_area().value() - area).abs()
@@ -183,9 +301,9 @@ pub fn solve_pressure_driven_material_gas(
         ));
     }
     let pressure_allowance = problem.static_pressure_pa * feedback.maximum_pressure_drop_fraction;
-    if !positive(pressure_allowance) || drive.value() > pressure_allowance {
+    if !positive(pressure_allowance) || drive.value().abs() > pressure_allowance {
         return Err(GasPressureError::PressureVariation {
-            bound_pa: drive.value(),
+            bound_pa: drive.value().abs(),
             allowance_pa: pressure_allowance,
         });
     }
@@ -239,9 +357,17 @@ pub fn solve_pressure_driven_material_gas(
             neglected_kinetic_power_bound_w += kinetic.abs();
             previous_speed = speed;
         }
-        let common_pressure_bound_pa = gas.total_pressure_drop_pa + maximum_acceleration;
+        let gravity_state = gravity
+            .map(|(path, allowance)| observe_gravity(cx, path, &gas, mass, allowance))
+            .transpose()?;
+        let mut common_pressure_bound_pa = gas.total_pressure_drop_pa + maximum_acceleration;
+        let mut effective_drive = drive.value();
+        if let Some(state) = &gravity_state {
+            common_pressure_bound_pa += state.hydrostatic_pressure_bound_pa;
+            effective_drive += state.hydrostatic.pressure_gain_pa();
+        }
         let pressure_residual_pa =
-            gas.total_pressure_drop_pa + acceleration_pressure_pa - drive.value();
+            gas.total_pressure_drop_pa + acceleration_pressure_pa - effective_drive;
         if ![
             inlet_speed,
             mass_flux,
@@ -288,15 +414,21 @@ pub fn solve_pressure_driven_material_gas(
             common_pressure_bound_pa,
             kinetic_power_change_w,
             neglected_kinetic_power_bound_w,
+            gravity: gravity_state,
             flow_evaluations: evaluations,
             substeps: total_substeps,
         })
     };
     let closed = |value: &PressureDrivenGasSolution| {
         let predicted = value.gas.total_pressure_drop_pa + value.acceleration_pressure_pa;
+        let effective_drive = drive.value()
+            + value
+                .gravity
+                .as_ref()
+                .map_or(0.0, |state| state.hydrostatic.pressure_gain_pa());
         value.pressure_residual_pa.abs()
             <= pressure.pressure_absolute_tolerance_pa.max(
-                pressure.pressure_relative_tolerance * drive.value().abs().max(predicted.abs()),
+                pressure.pressure_relative_tolerance * effective_drive.abs().max(predicted.abs()),
             )
     };
     let a = probe(low)?;
@@ -339,5 +471,59 @@ pub fn solve_pressure_driven_material_gas(
     Err(GasPressureError::NotConverged {
         evaluations: performed,
         last_residual_pa: last_residual,
+    })
+}
+
+fn observe_gravity(
+    cx: &Cx<'_>,
+    path: &SeriesGravity,
+    gas: &MaterialSteadyGasSolution,
+    mass: f64,
+    maximum_neglected_potential_power_w: f64,
+) -> Result<GasGravityState, GasPressureError> {
+    let hydrostatic = path
+        .evaluate_densities(
+            gas.cells.iter().map(|cell| cell.gas.state().density),
+            mass,
+            || cx.checkpoint().map_err(|_| SeriesPressureError::Cancelled),
+        )
+        .map_err(GasPressureError::Gravity)?;
+    let potential_power_change_w = -hydrostatic.gravitational_power_w();
+    let mut hydrostatic_pressure_bound_pa = 0.0;
+    let mut neglected_potential_power_bound_w = 0.0;
+    for (&head, &work) in hydrostatic
+        .section_pressure_gains_pa()
+        .iter()
+        .zip(path.section_specific_work_j_kg())
+    {
+        check(cx)?;
+        hydrostatic_pressure_bound_pa += head.abs();
+        neglected_potential_power_bound_w += (mass * work).abs();
+    }
+    if !hydrostatic_pressure_bound_pa.is_finite() || !neglected_potential_power_bound_w.is_finite()
+    {
+        return Err(GasPressureError::Invalid(
+            "regional gravity pressure or potential power overflows",
+        ));
+    }
+    // Endpoint work and the stable total head can differ from rounded section
+    // sums by an ulp; the reported bounds must also cover those retained totals.
+    hydrostatic_pressure_bound_pa =
+        hydrostatic_pressure_bound_pa.max(hydrostatic.pressure_gain_pa().abs());
+    neglected_potential_power_bound_w =
+        neglected_potential_power_bound_w.max(potential_power_change_w.abs());
+    if neglected_potential_power_bound_w > maximum_neglected_potential_power_w {
+        return Err(GasPressureError::NeglectedPotentialPower {
+            bound_w: neglected_potential_power_bound_w,
+            allowance_w: maximum_neglected_potential_power_w,
+        });
+    }
+    check(cx)?;
+    Ok(GasGravityState {
+        geometry: path.clone(),
+        hydrostatic,
+        potential_power_change_w,
+        neglected_potential_power_bound_w,
+        hydrostatic_pressure_bound_pa,
     })
 }
