@@ -18,7 +18,7 @@ use fs_geom::{Point3, Vec3};
 use fs_math::{decay, det};
 
 mod cells;
-pub(super) use cells::{CellRay, validate_ray};
+pub(super) use cells::{CellRay, CellRayGeometry, validate_ray};
 pub(crate) use cells::{grid_forward_interval, grid_scattering_optical_depth};
 /// Exact per-cell beam absorption and the separate scattered-power balance.
 pub mod deposition;

@@ -16,6 +16,14 @@
 use super::{DvrError, TransferFunction, TransferSample};
 use fs_math::det;
 
+#[cfg(feature = "tracer")]
+mod ray;
+#[cfg(feature = "tracer")]
+pub use ray::{
+    NodeRayBudget, PreintegratedRayError, PreintegratedRayGrid, PreintegratedRayPixel,
+    PreintegratedRaySettings,
+};
+
 /// Accuracy and hard work limits for one preintegration call.
 ///
 /// For image rendering the work limits apply to the complete image, rather
@@ -141,6 +149,8 @@ pub enum PreintegrationError {
     QuadratureBudgetExceeded,
     /// Adaptive integration exhausted its bounded binary subdivision depth.
     QuadratureResolutionLimit,
+    /// A cancellable continuous-ray operation was stopped at a work boundary.
+    Cancelled,
 }
 
 impl From<DvrError> for PreintegrationError {
@@ -294,13 +304,14 @@ fn pixel_node_coordinate(pixel: usize, resolution: usize, nodes: usize) -> (usiz
     )
 }
 
-struct Work {
+struct Work<'a> {
     settings: PreintegrationSettings,
     intervals: usize,
     evaluations: u64,
+    checkpoint: Option<&'a mut dyn FnMut() -> Result<(), PreintegrationError>>,
 }
 
-impl Work {
+impl<'a> Work<'a> {
     fn new(settings: PreintegrationSettings) -> Result<Self, PreintegrationError> {
         if !settings.source_tolerance.is_finite()
             || !(64.0 * f64::EPSILON..=1.0).contains(&settings.source_tolerance)
@@ -311,10 +322,24 @@ impl Work {
             settings,
             intervals: 0,
             evaluations: 0,
+            checkpoint: None,
         })
     }
 
+    #[cfg(feature = "tracer")]
+    fn with_checkpoint(
+        settings: PreintegrationSettings,
+        checkpoint: &'a mut dyn FnMut() -> Result<(), PreintegrationError>,
+    ) -> Result<Self, PreintegrationError> {
+        let mut work = Self::new(settings)?;
+        work.checkpoint = Some(checkpoint);
+        Ok(work)
+    }
+
     fn interval(&mut self) -> Result<(), PreintegrationError> {
+        if let Some(check) = self.checkpoint.as_mut() {
+            check()?;
+        }
         if self.intervals >= self.settings.max_intervals {
             return Err(PreintegrationError::TransferIntervalBudgetExceeded);
         }
@@ -323,6 +348,9 @@ impl Work {
     }
 
     fn quadrature(&mut self) -> Result<(), PreintegrationError> {
+        if let Some(check) = self.checkpoint.as_mut() {
+            check()?;
+        }
         if self.settings.max_quadrature_evaluations - self.evaluations < 24 {
             return Err(PreintegrationError::QuadratureBudgetExceeded);
         }
@@ -336,7 +364,7 @@ fn integrate_segment(
     front: f64,
     back: f64,
     length: f64,
-    work: &mut Work,
+    work: &mut Work<'_>,
     ray: &mut RayIntegral,
 ) -> Result<(), PreintegrationError> {
     let span = back - front;
@@ -430,7 +458,7 @@ impl RayIntegral {
         front: TransferSample,
         back: TransferSample,
         length: f64,
-        work: &mut Work,
+        work: &mut Work<'_>,
     ) -> Result<(), PreintegrationError> {
         let low = front.extinction.min(back.extinction);
         let high = front.extinction.max(back.extinction);
@@ -604,7 +632,7 @@ fn integrate_mean(
     right: f64,
     tolerance: f64,
     depth: u32,
-    work: &mut Work,
+    work: &mut Work<'_>,
 ) -> Result<(f64, f64), PreintegrationError> {
     work.quadrature()?;
     let half = 0.5 * (right - left);

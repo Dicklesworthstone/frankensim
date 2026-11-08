@@ -1,9 +1,12 @@
-//! Camera images of exact scalar-volume transfer, with radiance/transmission
+//! Camera images of scalar-volume transfer, with radiance/transmission
 //! filtering across the original physical camera's pixel and pupil samples.
 
 use super::{DvrError, Sum, TransferRayError, TransferRayGrid, TransferTransportPixel};
 use crate::camera::{CameraError, LensSample, PhysicalCamera};
 use crate::volumes::Ray;
+use crate::volumes::preintegrated::{
+    PreintegratedRayError, PreintegratedRayGrid, PreintegratedRaySettings,
+};
 use crate::volumes::transport::VolumeTransportError;
 use fs_exec::Cx;
 use fs_math::det;
@@ -39,6 +42,8 @@ pub enum TransferCameraError {
     /// The original volume ray refused, including cancellation and either the
     /// per-ray or remaining whole-image cell-crossing budget.
     Ray(TransferRayError),
+    /// Continuous-field reconstruction or preintegration refused its work/accuracy.
+    Continuous(PreintegratedRayError),
 }
 
 impl From<DvrError> for TransferCameraError {
@@ -54,6 +59,11 @@ impl From<CameraError> for TransferCameraError {
 impl From<TransferRayError> for TransferCameraError {
     fn from(error: TransferRayError) -> Self {
         Self::Ray(error)
+    }
+}
+impl From<PreintegratedRayError> for TransferCameraError {
+    fn from(error: PreintegratedRayError) -> Self {
+        Self::Continuous(error)
     }
 }
 impl core::fmt::Display for TransferCameraError {
@@ -88,6 +98,98 @@ pub fn render_transfer_camera(
     camera: &PhysicalCamera,
     settings: TransferCameraSettings,
 ) -> Result<Vec<TransferTransportPixel>, TransferCameraError> {
+    render_camera_with(
+        cx,
+        camera,
+        settings,
+        |ray, remaining_cells| {
+            let (pixel, visits) = medium.transport_counted(cx, ray, remaining_cells)?;
+            Ok(CameraSample {
+                pixel,
+                visits,
+                errors: None,
+            })
+        },
+        |pixel, _| pixel,
+    )
+}
+
+/// A continuous-field camera pixel with reconstruction and source quadrature
+/// diagnostics. Pixel/pupil sampling error, floating-point error and original
+/// field/transfer uncertainty are not included; these are not interval proofs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreintegratedCameraPixel {
+    /// Original camera's mean emitted radiance, transmission and opacity.
+    pub transport: TransferTransportPixel,
+    /// Maximum sample depth-error bound, which also bounds the finite effective
+    /// `-ln(mean transmission)` error. Averaging depth errors would not suffice.
+    pub optical_depth_error: f64,
+    /// Mean emitted-radiance reconstruction bound, including foreground effects.
+    pub source_reconstruction_error_rgb: [f64; 3],
+    /// Mean existing Gauss source-error estimate, kept separate from reconstruction.
+    pub quadrature_source_error_rgb: [f64; 3],
+}
+
+/// Render the original trilinear node field with controlled cubic-ray transport.
+///
+/// Projection, pupil sampling, normalized radiance averaging and camera refusal
+/// semantics are identical to [`render_transfer_camera`]. Reconstruction targets
+/// apply to each ray; transfer-interval, quadrature and cubic-subdivision budgets
+/// apply to the complete image, alongside the camera's total cell/sample limits.
+/// Accuracy is never silently relaxed to fit a work budget. Error diagnostics
+/// describe numerical integration conditional on the sampled camera rays, not
+/// Monte Carlo pixel/pupil error or measured accuracy of the supplied field.
+pub fn render_preintegrated_camera(
+    cx: &Cx<'_>,
+    medium: &PreintegratedRayGrid<'_, '_>,
+    camera: &PhysicalCamera,
+    settings: TransferCameraSettings,
+    integration: PreintegratedRaySettings,
+) -> Result<Vec<PreintegratedCameraPixel>, TransferCameraError> {
+    let mut remaining = integration;
+    render_camera_with(
+        cx,
+        camera,
+        settings,
+        |ray, remaining_cells| {
+            let (sample, work) = medium.transport_counted(cx, ray, remaining, remaining_cells)?;
+            remaining.integration.max_intervals -= work.intervals;
+            remaining.integration.max_quadrature_evaluations -= work.quadrature_evaluations;
+            remaining.max_curve_subdivisions -= work.subdivisions;
+            let integrated = sample.transport;
+            Ok(CameraSample {
+                pixel: TransferTransportPixel {
+                    emission_rgb: integrated.emission_rgb(),
+                    optical_depth: integrated.optical_depth(),
+                    transmittance: integrated.transmittance(),
+                    opacity: integrated.opacity(),
+                },
+                visits: work.cells,
+                errors: Some(SampleErrors {
+                    depth: sample.optical_depth_error,
+                    source: sample.source_reconstruction_error_rgb,
+                    quadrature: integrated.source_error_rgb(),
+                }),
+            })
+        },
+        |transport, errors| PreintegratedCameraPixel {
+            transport,
+            optical_depth_error: errors.depth,
+            source_reconstruction_error_rgb: errors.source,
+            quadrature_source_error_rgb: errors.quadrature,
+        },
+    )
+}
+
+// One raster/pupil sampler serves both physical field representations. The
+// exact-cell path has no error payload; its ray sequence/arithmetic is retained.
+fn render_camera_with<P>(
+    cx: &Cx<'_>,
+    camera: &PhysicalCamera,
+    settings: TransferCameraSettings,
+    mut trace: impl FnMut(Ray, u64) -> Result<CameraSample, TransferCameraError>,
+    finish: impl Fn(TransferTransportPixel, SampleErrors) -> P,
+) -> Result<Vec<P>, TransferCameraError> {
     checkpoint(cx)?;
     let [width, height] = settings.resolution;
     let pixels = width
@@ -143,6 +245,7 @@ pub fn render_transfer_camera(
             }
             .stream();
             let mut average = PixelAverage::default();
+            let mut errors = ErrorAverage::default();
             for _ in 0..settings.samples_per_pixel {
                 checkpoint(cx)?;
                 let (jx, jy, lens) = if settings.samples_per_pixel == 1 {
@@ -157,8 +260,7 @@ pub fn render_transfer_camera(
                 let x_tan = (2.0 * (px as f64 + jx) / width as f64 - 1.0) * half_x;
                 let y_tan = (1.0 - 2.0 * (py as f64 + jy) / height as f64) * half_y;
                 let primary = camera.generate_ray_from_tangent_offsets(cx, x_tan, y_tan, lens)?;
-                let (sample, visits) = medium.transport_counted(
-                    cx,
+                let sample = trace(
                     Ray {
                         origin: [primary.origin.x, primary.origin.y, primary.origin.z],
                         dir: [primary.dir.x, primary.dir.y, primary.dir.z],
@@ -167,14 +269,60 @@ pub fn render_transfer_camera(
                     },
                     remaining_cells,
                 )?;
-                remaining_cells -= u64::from(visits);
-                average.add(sample);
+                remaining_cells -= u64::from(sample.visits);
+                average.add(sample.pixel);
+                if let Some(error) = sample.errors {
+                    errors.add(error, average.samples);
+                }
             }
-            image.push(average.finish()?);
+            image.push(finish(average.finish()?, errors.finish()));
         }
     }
     checkpoint(cx)?;
     Ok(image)
+}
+
+struct CameraSample {
+    pixel: TransferTransportPixel,
+    visits: u32,
+    errors: Option<SampleErrors>,
+}
+
+#[derive(Default)]
+struct SampleErrors {
+    depth: f64,
+    source: [f64; 3],
+    quadrature: [f64; 3],
+}
+
+#[derive(Default)]
+struct ErrorAverage {
+    depth: f64,
+    source: [Sum; 3],
+    quadrature: [Sum; 3],
+}
+
+impl ErrorAverage {
+    fn add(&mut self, error: SampleErrors, count: u32) {
+        // A common multiplicative transmission enclosure survives averaging:
+        // exp(-max_error)*mean(T) <= mean(true_T) <= exp(max_error)*mean(T).
+        self.depth = self.depth.max(error.depth);
+        let count = f64::from(count);
+        for c in 0..3 {
+            let source = &mut self.source[c];
+            source.add((error.source[c] - source.value) / count);
+            let quadrature = &mut self.quadrature[c];
+            quadrature.add((error.quadrature[c] - quadrature.value) / count);
+        }
+    }
+
+    fn finish(self) -> SampleErrors {
+        SampleErrors {
+            depth: self.depth,
+            source: self.source.map(|s| s.value),
+            quadrature: self.quadrature.map(|s| s.value),
+        }
+    }
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), TransferCameraError> {

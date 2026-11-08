@@ -1,9 +1,14 @@
 //! End-to-end perspective, coverage and finite-aperture volume images.
 
 use crate::camera::{Aperture, CameraError, CameraProjection, FocusedDiffraction, PhysicalCamera};
+use crate::volumes::opacity::render_preintegrated_camera;
 use crate::volumes::opacity::{
     TransferCameraError, TransferCameraSettings, TransferRayBudget, TransferRayError,
     TransferRayGrid, render_transfer_camera,
+};
+use crate::volumes::preintegrated::{
+    NodeRayBudget, NodeVolumeGrid, PreintegratedRayError, PreintegratedRayGrid,
+    PreintegratedRaySettings, PreintegrationError, PreintegrationSettings,
 };
 use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::{DvrError, TransferFunction, TransferPoint, VolumeGrid};
@@ -367,6 +372,177 @@ fn g4_image_limits_misses_camera_refusals_and_cancellation_are_transactional() {
             Err(TransferCameraError::Ray(TransferRayError::Traversal(
                 VolumeTransportError::Cancelled
             )))
+        );
+    });
+}
+
+fn continuous_settings() -> PreintegratedRaySettings {
+    PreintegratedRaySettings {
+        optical_depth_tolerance: 2e-5,
+        source_reconstruction_tolerance_rgb: [1e-3; 3],
+        max_curve_subdivisions: 100_000,
+        integration: PreintegrationSettings {
+            source_tolerance: 1e-8,
+            max_intervals: 500_000,
+            max_quadrature_evaluations: 1_000_000,
+        },
+    }
+}
+
+#[test]
+fn g1_continuous_camera_resolves_cubic_nodes_with_reported_reconstruction_error() {
+    with_cx(|cx, _| {
+        // Trilinear f(x,y,z)=xyz restricts to t^3 on the diagonal, not t.
+        let values = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let grid = NodeVolumeGrid {
+            dims: [2; 3],
+            data: &values,
+            origin: [0.0; 3],
+            spacing: [1.0; 3],
+        };
+        let source = [2.0, 4.0, 6.0];
+        let transfer = TransferFunction::new(vec![
+            TransferPoint {
+                scalar: 0.0,
+                extinction: 0.0,
+                source_rgb: source,
+            },
+            TransferPoint {
+                scalar: 1.0,
+                extinction: 1.0,
+                source_rgb: source,
+            },
+        ])
+        .unwrap();
+        let medium = PreintegratedRayGrid::try_new(
+            cx,
+            &grid,
+            &transfer,
+            NodeRayBudget {
+                max_grid_nodes: 8,
+                max_steps_per_ray: 16,
+            },
+        )
+        .unwrap();
+        let view = PhysicalCamera::try_look_at(
+            Point3::new(-1.0, -1.0, -1.0),
+            Point3::new(1.0, 1.0, 1.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            CameraProjection::try_half_tangent(0.1).unwrap(),
+            3.0,
+            Aperture::try_circular(0.0).unwrap(),
+        )
+        .unwrap();
+        let accuracy = continuous_settings();
+        let pixel = render_preintegrated_camera(cx, &medium, &view, settings([1, 1], 1), accuracy)
+            .unwrap()[0];
+        let depth = 3.0_f64.sqrt() / 4.0;
+        let opacity = -(-depth).exp_m1();
+        assert!(
+            pixel.optical_depth_error > 0.0
+                && pixel.optical_depth_error <= accuracy.optical_depth_tolerance
+        );
+        assert!(
+            (pixel.transport.optical_depth() - depth).abs() <= pixel.optical_depth_error + 1e-11
+        );
+        for c in 0..3 {
+            let error =
+                pixel.source_reconstruction_error_rgb[c] + pixel.quadrature_source_error_rgb[c];
+            assert!(
+                (pixel.transport.emission_rgb()[c] - source[c] * opacity).abs() <= error + 1e-11
+            );
+            assert!(
+                pixel.source_reconstruction_error_rgb[c]
+                    <= accuracy.source_reconstruction_tolerance_rgb[c]
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_continuous_constant_limit_reuses_the_original_pupil_samples_and_averages() {
+    with_cx(|cx, _| {
+        let node_values = [0.0; 8];
+        let cell_values = [0.0];
+        let nodes = NodeVolumeGrid {
+            dims: [2; 3],
+            data: &node_values,
+            origin: [-1.0, -1.0, 0.0],
+            spacing: [2.0, 2.0, 1.0],
+        };
+        let cells = VolumeGrid::new([1; 3], &cell_values, nodes.origin, nodes.spacing);
+        let transfer = constant(1.7, [2.0, 4.0, 7.0]);
+        let continuous = PreintegratedRayGrid::try_new(
+            cx,
+            &nodes,
+            &transfer,
+            NodeRayBudget {
+                max_grid_nodes: 8,
+                max_steps_per_ray: 16,
+            },
+        )
+        .unwrap();
+        let discrete = TransferRayGrid::try_new(cx, &cells, &transfer, field_budget()).unwrap();
+        let view = camera(-1.0, 0.0, 0.2, 2.0, 0.2);
+        let sampling = settings([2, 2], 16);
+        let mut accuracy = continuous_settings();
+        accuracy.optical_depth_tolerance = 0.0;
+        accuracy.source_reconstruction_tolerance_rgb = [0.0; 3];
+        accuracy.max_curve_subdivisions = 0;
+        accuracy.integration.max_quadrature_evaluations = 0;
+        let actual =
+            render_preintegrated_camera(cx, &continuous, &view, sampling, accuracy).unwrap();
+        let reference = render_transfer_camera(cx, &discrete, &view, sampling).unwrap();
+        for (actual, reference) in actual.into_iter().zip(reference) {
+            assert_eq!(actual.transport, reference);
+            assert_eq!(actual.optical_depth_error, 0.0);
+            assert_eq!(actual.source_reconstruction_error_rgb, [0.0; 3]);
+            assert_eq!(actual.quadrature_source_error_rgb, [0.0; 3]);
+        }
+    });
+}
+
+#[test]
+fn g4_continuous_camera_shares_preintegration_work_across_pixels() {
+    with_cx(|cx, _| {
+        let values = [0.0; 8];
+        let nodes = NodeVolumeGrid {
+            dims: [2; 3],
+            data: &values,
+            origin: [-1.0, -1.0, 0.0],
+            spacing: [2.0, 2.0, 1.0],
+        };
+        let transfer = constant(1.0, [3.0; 3]);
+        let medium = PreintegratedRayGrid::try_new(
+            cx,
+            &nodes,
+            &transfer,
+            NodeRayBudget {
+                max_grid_nodes: 8,
+                max_steps_per_ray: 16,
+            },
+        )
+        .unwrap();
+        let view = camera(-1.0, 0.0, 0.1, 2.0, 0.0);
+        let sampling = settings([2, 1], 1);
+        let mut accuracy = continuous_settings();
+        accuracy.integration.max_intervals = 1;
+        accuracy.integration.max_quadrature_evaluations = 0;
+        accuracy.max_curve_subdivisions = 0;
+        assert_eq!(
+            render_preintegrated_camera(cx, &medium, &view, sampling, accuracy),
+            Err(TransferCameraError::Continuous(
+                PreintegratedRayError::Integration(
+                    PreintegrationError::TransferIntervalBudgetExceeded
+                )
+            ))
+        );
+        accuracy.integration.max_intervals = 2;
+        assert_eq!(
+            render_preintegrated_camera(cx, &medium, &view, sampling, accuracy)
+                .unwrap()
+                .len(),
+            2
         );
     });
 }

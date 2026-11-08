@@ -9516,11 +9516,39 @@ G1/G3 controls cover analytic Beer-Lambert slabs, source gradients, thin layers,
 narrow peaks, thick-ramp asymptotics, an independent physical-distance Simpson
 integral, endpoint reversal and node-grid refinement. Returned source-error
 values are quadrature estimates and exclude roundoff, reconstruction and
-transfer-data errors. The path does not claim arbitrary-ray reconstruction,
-lateral antialiasing, scattering, refraction, measured optical authority, or a
-per-call cancellation hook. The source convention remains `j = sigma * S`.
+transfer-data errors. This original orthographic entry point does not claim arbitrary-ray
+reconstruction, lateral antialiasing, scattering, refraction, measured optical
+authority, or a per-call cancellation hook. The separate continuous-ray and
+camera entry points below add their own bounded reconstruction and cancellation. The source convention remains `j = sigma * S`.
 See [Engel, Kraus and Ertl (2001)](https://doi.org/10.1145/383507.383515)
 for preintegration and interpolation-before-classification.
+
+With `tracer,volumes`, `PreintegratedRayGrid` transports the original
+node-centered trilinear field along clipped physical rays. Each native cell
+crossing becomes a cubic Bezier scalar profile; its convex hull and all
+intersected transfer intervals bound classification error, so endpoint or
+midpoint agreement cannot conceal an interior opacity feature. Bounded adaptive
+subdivision admits linear chords for the existing knot-resolving preintegrator.
+
+Returned depth and source reconstruction bounds exclude floating-point and
+source-data uncertainty and remain separate from Gauss source-error estimates.
+The emitted-source bound includes changed foreground attenuation via maximum
+source-profile deviation plus maximum source radiance times integrated
+extinction-error bound. This is controlled cubic reconstruction, not an exact
+integral or a certified floating-point enclosure.
+
+`opacity::render_preintegrated_camera` reuses the original pupil/raster sampler
+and radiance/transmission averages. Maximum sample depth error bounds effective
+pixel depth; source bounds and estimates average. These do not bound pixel or
+pupil sampling error. Cell, subdivision, transfer-interval and quadrature
+budgets are shared across the complete image; cancellation or refusal exposes
+no partial output. The model supplies continuous prescribed RGB source and
+extinction, without inferred LTE, in-scattering or refraction.
+
+Focused physical controls include analytic cubic depth, narrow interior opacity
+peaks, independently integrated varying source radiance, grid/unit refinement,
+clipping, finite-aperture camera parity, and complete-image work limits.
+
 
 ## Vacuum Doppler observations of thermal emission
 

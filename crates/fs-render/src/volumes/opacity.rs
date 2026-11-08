@@ -14,9 +14,14 @@ use fs_math::det;
 #[cfg(feature = "tracer")]
 mod camera;
 #[cfg(feature = "tracer")]
-pub use camera::{TransferCameraError, TransferCameraSettings, render_transfer_camera};
+pub use camera::{
+    PreintegratedCameraPixel, TransferCameraError, TransferCameraSettings,
+    render_preintegrated_camera, render_transfer_camera,
+};
 #[cfg(feature = "tracer")]
 mod ray;
+#[cfg(feature = "tracer")]
+pub(in crate::volumes) use ray::physical_ray;
 #[cfg(feature = "tracer")]
 pub use ray::{TransferRayBudget, TransferRayError, TransferRayGrid};
 

@@ -33,7 +33,11 @@ pub(crate) fn grid_scattering_optical_depth(
     max_cells: u32,
 ) -> Result<(f64, u32), VolumeTransportError> {
     grid_column_with_checkpoint(
-        grid, origin, direction, mass_scattering_m2_kg, max_cells,
+        grid,
+        origin,
+        direction,
+        mass_scattering_m2_kg,
+        max_cells,
         &mut || checkpoint(cx),
     )
 }
@@ -65,7 +69,9 @@ fn grid_column_with_checkpoint(
         visits = visits.checked_add(1).ok_or(VolumeTransportError::Budget)?;
         let density = grid.data[segment.cell];
         if !density.is_finite() || density < 0.0 {
-            return Err(VolumeTransportError::Density { index: segment.cell });
+            return Err(VolumeTransportError::Density {
+                index: segment.cell,
+            });
         }
         if density == 0.0 || segment.length_m == 0.0 {
             continue;
@@ -126,8 +132,26 @@ pub(in crate::volumes) struct CellSegment {
     pub length_m: f64,
 }
 
-pub(in crate::volumes) struct CellRay<'g, 'a> {
-    grid: &'g VolumeGrid<'a>,
+/// Geometry only: node-centered fields reuse crossings without pretending that
+/// their node buffer is a cell-centered density buffer.
+#[derive(Clone, Copy)]
+pub(in crate::volumes) struct CellRayGeometry {
+    pub dims: [usize; 3],
+    pub origin: [f64; 3],
+    pub cell: [f64; 3],
+}
+
+impl CellRayGeometry {
+    fn bounds(self) -> ([f64; 3], [f64; 3]) {
+        (
+            self.origin,
+            std::array::from_fn(|a| (self.dims[a] as f64).mul_add(self.cell[a], self.origin[a])),
+        )
+    }
+}
+
+pub(in crate::volumes) struct CellRay {
+    grid: CellRayGeometry,
     start: [f64; 3],
     direction: [f64; 3],
     entry_m: f64,
@@ -139,10 +163,31 @@ pub(in crate::volumes) struct CellRay<'g, 'a> {
     done: bool,
 }
 
-impl<'g, 'a> CellRay<'g, 'a> {
+impl CellRay {
     /// The caller has validated the ray and immutable grid once already.
     pub fn clip(
-        grid: &'g VolumeGrid<'a>,
+        grid: &VolumeGrid<'_>,
+        origin: Point3,
+        direction: Vec3,
+        distance: f64,
+        max_steps: u32,
+    ) -> Result<Option<Self>, VolumeTransportError> {
+        Self::clip_geometry(
+            CellRayGeometry {
+                dims: grid.dims,
+                origin: grid.origin,
+                cell: grid.cell,
+            },
+            origin,
+            direction,
+            distance,
+            max_steps,
+        )
+    }
+
+    /// The caller has validated the ray and representable cell geometry.
+    pub fn clip_geometry(
+        grid: CellRayGeometry,
         origin: Point3,
         direction: Vec3,
         distance: f64,
@@ -318,6 +363,10 @@ impl<'g, 'a> CellRay<'g, 'a> {
 
     pub fn distance_from_origin(&self, rebased_distance_m: f64) -> f64 {
         self.entry_m + rebased_distance_m
+    }
+
+    pub fn clipped_length(&self) -> f64 {
+        self.end
     }
 }
 

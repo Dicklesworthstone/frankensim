@@ -157,7 +157,9 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), VolumeTransportError> {
     cx.checkpoint().map_err(|_| VolumeTransportError::Cancelled)
 }
 
-fn physical_ray(ray: Ray) -> Result<(Point3, Vec3, f64), VolumeTransportError> {
+pub(in crate::volumes) fn physical_ray(
+    ray: Ray,
+) -> Result<(Point3, Vec3, f64), VolumeTransportError> {
     if ray
         .origin
         .iter()
