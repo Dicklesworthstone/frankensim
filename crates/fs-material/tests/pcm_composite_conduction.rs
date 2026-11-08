@@ -222,6 +222,81 @@ fn source_transport_uses_volume_fractions_and_complete_latent_tangents() {
 }
 
 #[test]
+fn exact_cp_composite_endpoint_keeps_the_original_left_conductivity_tangent() {
+    let (mc, pc) = (matrix_card(), pcm_card());
+    for capacities in [[1.0, 3.0], [3.0, 1.0]] {
+        let (_, pcm) = constituents(mc.content_hash(), pc.content_hash(), [0.0; 2]);
+        let matrix = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity_exact(
+            mc.content_hash(),
+            SolidLiquidPhase::Solid,
+            0.0,
+            &[
+                HeatCapacityKnot {
+                    temperature_k: 300.0,
+                    specific_heat_capacity_j_kg_k: capacities[0],
+                    bulk_density_kg_m3: 8000.0,
+                },
+                HeatCapacityKnot {
+                    temperature_k: 500.0,
+                    specific_heat_capacity_j_kg_k: capacities[1],
+                    bulk_density_kg_m3: 8000.0,
+                },
+                HeatCapacityKnot {
+                    temperature_k: 600.0,
+                    specific_heat_capacity_j_kg_k: capacities[1],
+                    bulk_density_kg_m3: 8000.0,
+                },
+            ],
+        )
+        .unwrap();
+        let caloric = PcmComposite::try_new(&matrix, &pcm, 0.25, 0.0).unwrap();
+        let (mk, pk) = (prepare(&mc, &matrix), prepare(&pc, &pcm));
+        let end_h = caloric.enthalpy_range_j_kg()[1];
+        let matrix_h = caloric.values_at_specific_enthalpy(end_h)
+            .unwrap().matrix.specific_enthalpy_j_kg;
+        // The full matrix still selects the hotter/right conductivity slope.
+        // The composite ends at 500 K and must use the 400--500 K source slope.
+        near(
+            mk.state_at_specific_enthalpy(matrix_h).unwrap()
+                .conductivity_enthalpy_derivative_kg_w_m_k_j(),
+            1.0 / capacities[1],
+            1e-14,
+        );
+        for morphology in [Morphology::Parallel, Morphology::Series] {
+            let law = PreparedPcmConductivity::new(&caloric, &mk, &pk, morphology, || Ok(()))
+                .unwrap();
+            let end = law.state_at_specific_enthalpy(end_h).unwrap();
+            // Independent mixture derivative: both phase densities are constant,
+            // Cp_PCM=2.5, d(k_matrix)/dT=0.2, and d(k_PCM)/dT=0 here.
+            // Using a chord in h instead gives Cp averaged over 400--500 K.
+            let phi = (0.25 / 800.0) / (0.75 / 8000.0 + 0.25 / 800.0);
+            let cp = 0.75 * capacities[1] + 0.25 * 2.5;
+            let (k, dk) = match morphology {
+                Morphology::Parallel => (
+                    (1.0 - phi) * 50.0 + phi * 3.0,
+                    (1.0 - phi) * 0.2 / cp,
+                ),
+                Morphology::Series => {
+                    let k: f64 = 1.0 / ((1.0 - phi) / 50.0 + phi / 3.0);
+                    (k, (1.0 - phi) * (k / 50.0).powi(2) * 0.2 / cp)
+                }
+            };
+            near(end.conductivity_w_m_k, k, 1e-13);
+            near(end.conductivity_slope_kg_w_m_k_j, dk, 1e-14);
+            let delta = 0.01;
+            let left = law.state_at_specific_enthalpy(end_h - delta).unwrap();
+            let twice_left = law.state_at_specific_enthalpy(end_h - 2.0 * delta).unwrap();
+            near(
+                end.conductivity_slope_kg_w_m_k_j,
+                (3.0 * end.conductivity_w_m_k - 4.0 * left.conductivity_w_m_k
+                    + twice_left.conductivity_w_m_k) / (2.0 * delta),
+                1e-9,
+            );
+        }
+    }
+}
+
+#[test]
 fn affine_density_sources_keep_the_original_volume_derivative() {
     let (_, pcm) = constituents(ContentHash([1; 32]), ContentHash([2; 32]), [0.0; 2]);
     let matrix = EquilibriumEnthalpyPhaseCurve::try_from_heat_capacity(

@@ -455,6 +455,30 @@ impl<'a> PreparedPhaseConductivity<'a> {
         &self,
         h: f64,
     ) -> Result<PhaseConductivitySample, PhaseConductivityError> {
+        let sample = self.state_on_selected_side(h, false)?;
+        if sample.conductivity == 0.0 && sample.conductivity_slope != 0.0 {
+            return Err(PhaseConductivityError::Unrepresentable(
+                "conductivity and its native implicit tangent are not representable",
+            ));
+        }
+        Ok(sample)
+    }
+
+    /// Original inward limit for a composite ending inside this wider source.
+    /// A constituent may reach zero k with a nonzero inward derivative while
+    /// its mixture remains conducting. The composite owns that final gate.
+    pub(super) fn state_at_specific_enthalpy_from_left(
+        &self,
+        h: f64,
+    ) -> Result<PhaseConductivitySample, PhaseConductivityError> {
+        self.state_on_selected_side(h, true)
+    }
+
+    fn state_on_selected_side(
+        &self,
+        h: f64,
+        from_left: bool,
+    ) -> Result<PhaseConductivitySample, PhaseConductivityError> {
         let bounds = self.enthalpy_bounds_j_kg();
         if !h.is_finite() || !(bounds[0]..=bounds[1]).contains(&h) {
             return Err(PhaseConductivityError::OutsideEnthalpyDomain {
@@ -464,7 +488,8 @@ impl<'a> PreparedPhaseConductivity<'a> {
         }
         let index = self
             .knots
-            .partition_point(|knot| knot[0] <= h)
+            .partition_point(|knot| if from_left { knot[0] < h } else { knot[0] <= h })
+            .max(1)
             .min(self.knots.len() - 1)
             - 1;
         let [a, ka] = self.knots[index];
@@ -502,8 +527,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
         };
         if !k.is_finite() || k < 0.0 || !conductivity_slope.is_finite()
             || !temperature_slope.is_finite()
-            || (interval.sensible_heat_capacities.is_some() && temperature_slope <= 0.0)
-            || (k == 0.0 && conductivity_slope != 0.0) {
+            || (interval.sensible_heat_capacities.is_some() && temperature_slope <= 0.0) {
             return Err(PhaseConductivityError::Unrepresentable(
                 "conductivity and its native implicit tangent are not representable",
             ));

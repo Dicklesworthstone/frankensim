@@ -122,9 +122,16 @@ impl<'a, 'm> PreparedPcmConductivity<'a, 'm> {
         h: f64,
     ) -> Result<PcmConductivitySample, PhaseConductivityError> {
         let caloric = self.caloric.response_at_specific_enthalpy(h)?;
-        let matrix = self
-            .matrix
-            .state_at_specific_enthalpy(caloric.state.matrix.specific_enthalpy_j_kg)?;
+        let matrix_h = caloric.state.matrix.specific_enthalpy_j_kg;
+        let matrix = if h == self.caloric.enthalpy_range_j_kg()[1]
+            && caloric.matrix_enthalpy_derivative != 0.0
+        {
+            // Retain both the admitted left conductivity source and its exact
+            // Cp(T) conversion to dk/dh, including an interior source kink.
+            self.matrix.state_at_specific_enthalpy_from_left(matrix_h)?
+        } else {
+            self.matrix.state_at_specific_enthalpy(matrix_h)?
+        };
         let pcm = self
             .pcm
             .state_at_specific_enthalpy(caloric.state.pcm.specific_enthalpy_j_kg)?;
@@ -137,21 +144,8 @@ impl<'a, 'm> PreparedPcmConductivity<'a, 'm> {
         }
         let km = matrix.conductivity_w_m_k();
         let kp = pcm.conductivity_w_m_k();
-        let matrix_k_slope = if h == self.caloric.enthalpy_range_j_kg()[1]
-            && caloric.matrix_enthalpy_derivative != 0.0
-        {
-            // The composite may end at an interior matrix-source kink. Its
-            // admitted left derivative must not use the unused hotter branch.
-            let knots = self.matrix.knots();
-            let upper = knots
-                .partition_point(|k| k[0] < caloric.state.matrix.specific_enthalpy_j_kg)
-                .max(1)
-                .min(knots.len() - 1);
-            (knots[upper][1] - knots[upper - 1][1]) / (knots[upper][0] - knots[upper - 1][0])
-        } else {
-            matrix.conductivity_enthalpy_derivative_kg_w_m_k_j()
-        };
-        let dkm = matrix_k_slope * caloric.matrix_enthalpy_derivative;
+        let dkm = matrix.conductivity_enthalpy_derivative_kg_w_m_k_j()
+            * caloric.matrix_enthalpy_derivative;
         let dkp =
             pcm.conductivity_enthalpy_derivative_kg_w_m_k_j() * caloric.pcm_enthalpy_derivative;
         let (k, dk) = match self.morphology {
