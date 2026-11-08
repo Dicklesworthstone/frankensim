@@ -190,7 +190,7 @@ impl PreparedCoherentJonesDiffractionExposure<'_, '_> {
         Ok(result)
     }
 
-    fn contract_coherency(
+    pub(super) fn contract_coherency(
         &self,
         fields: &mut JonesFields,
         rotations: &[[Dd; 2]; MAX_COHERENT_DIFFRACTION_TONES],
@@ -242,7 +242,7 @@ fn is_zero(value: Dd) -> bool {
     value.hi == 0.0 && value.lo == 0.0
 }
 
-fn energy(
+pub(super) fn energy(
     moment: Moments,
     duration: Dd,
 ) -> Result<PolarizedDiffractionCoherency, CoherentDiffractionError> {
@@ -255,7 +255,9 @@ fn energy(
     physical(energy)
 }
 
-fn physical(moment: Moments) -> Result<PolarizedDiffractionCoherency, CoherentDiffractionError> {
+pub(super) fn physical(
+    moment: Moments,
+) -> Result<PolarizedDiffractionCoherency, CoherentDiffractionError> {
     let result = coherency(moment)?;
     let [x, y] = result.axis_powers();
     let cross = result.cross();
@@ -275,3 +277,4 @@ fn physical(moment: Moments) -> Result<PolarizedDiffractionCoherency, CoherentDi
     }
     Ok(result)
 }
+

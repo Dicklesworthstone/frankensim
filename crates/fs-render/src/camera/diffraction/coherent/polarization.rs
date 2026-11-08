@@ -28,7 +28,7 @@ use super::{
 use crate::polarization::Stokes;
 use fs_math::{c64::C64, dd::Dd};
 
-mod interferometer;
+pub(super) mod interferometer;
 pub use interferometer::{
     CoherentJonesArm, MAX_COHERENT_JONES_ARM_LAYERS, PolarizedCoherentInterferometerSample,
 };
@@ -348,3 +348,4 @@ pub(super) fn coherency(
     ).ok_or(CoherentDiffractionError::Unrepresentable)?;
     Ok(PolarizedDiffractionCoherency { axis_powers, cross, stokes })
 }
+

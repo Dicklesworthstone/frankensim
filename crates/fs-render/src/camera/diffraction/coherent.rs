@@ -30,6 +30,7 @@ use super::{CameraError, PhysicalCamera, PreparedDiffractionAmplitude};
 use fs_math::{c64::C64, dd::Dd};
 
 mod exposure;
+pub use exposure::PolarizedCoherentInterferometerExposureSample;
 pub use exposure::CoherentInterferometerPixelExposure;
 mod interferometer;
 mod pixel;

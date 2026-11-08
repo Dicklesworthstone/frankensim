@@ -65,7 +65,10 @@ impl CoherentJonesArm {
         Ok(result)
     }
 
-    fn apply(&self, mut field: JonesField) -> Result<JonesField, CoherentDiffractionError> {
+    pub(in super::super) fn apply(
+        &self,
+        mut field: JonesField,
+    ) -> Result<JonesField, CoherentDiffractionError> {
         for matrix in &self.layers[..self.count] {
             let mut transformed = [[Dd::ZERO; 2]; 2];
             for row in 0..2 {
@@ -196,7 +199,10 @@ impl PreparedPolarizedCoherentDiffraction<'_, '_> {
     }
 }
 
-fn product(a: [Dd; 2], b: [Dd; 2]) -> Result<[Dd; 2], CoherentDiffractionError> {
+pub(in super::super) fn product(
+    a: [Dd; 2],
+    b: [Dd; 2],
+) -> Result<[Dd; 2], CoherentDiffractionError> {
     let result = mul(a, b);
     for value in result {
         rounded(value)?;
@@ -209,3 +215,4 @@ fn product(a: [Dd; 2], b: [Dd; 2]) -> Result<[Dd; 2], CoherentDiffractionError> 
     }
     Ok(result)
 }
+

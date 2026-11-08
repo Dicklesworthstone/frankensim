@@ -36,6 +36,10 @@ pub use coherency::{
     PolarizedCoherentDiffractionExposureSample, PolarizedCoherentDiffractionPixelExposure,
 };
 
+
+mod interferometer;
+pub use interferometer::PolarizedCoherentInterferometerExposureSample;
+
 type JonesFields = [[[Dd; 2]; 2]; MAX_COHERENT_DIFFRACTION_TONES];
 
 /// One tilted Jones field in the camera's common paraxial pupil x/y basis.

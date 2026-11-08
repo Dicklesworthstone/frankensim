@@ -4377,6 +4377,31 @@ Five focused G1/G3/G4 groups cover independent square-pupil/shutter integrals,
 monochromatic parity and weak ports, covariance/partition additivity, large
 path/epoch invariance, sub-ULP offset beats and exact work/cancellation admission.
 
+### Polarized spectral interference at both output ports
+
+`PreparedCoherentJonesDiffractionExposure::observe_interferometer` retains both
+Jones components through passive arm optics and recombines each original
+frequency before the native full-coherency shutter contraction. Both output
+coherencies and native Stokes, arm powers, complex trace mutual coherence,
+visibility and energy densities remain available. Original covariance-column
+identities span frequencies, polarization and arms; equal-frequency source
+entries share one pupil response and combine before products. Independent banks
+add afterward, so an analyzer reveals existing coherence without creating it.
+
+Native patterned chromatic pupils, authored-Hz propagation, strict Jones-arm
+products and physical coherency admission are reused. Uniform arm sequences are
+explicitly frequency-independent. DD fields preserve weak aligned populations
+and nearly dark ports; no arbitrary-null relative certificate is implied.
+Observation allocates nothing and borrows the cached arm sequences internally.
+For N frequencies and B source banks, exact contraction work is
+B*2*N*(6*N+1) with two active arms, B*N*(3*N+1) with one, and zero when closed
+or empty. Explicit receiver limits preflight work independently of preparation's
+single-detector limit. Cancellation/refusal preserves the preparation.
+
+Seven focused groups cover monochromatic parity, analytic polarization beats
+and analyzers, source independence, equal-line and weak-channel cancellation,
+patterned-pupil work, exact limits/cancellation and finite bright-port range.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored
