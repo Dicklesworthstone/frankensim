@@ -16,6 +16,9 @@ pub mod ensemble;
 pub mod frame_decimation;
 pub use frame_decimation::DecimatedFrameRenderer;
 
+/// Fractional-rate, causal observation of original interval-mean channels.
+pub mod resample;
+
 /// Settled coherent acoustic fields on an explicit, alias-free output clock.
 pub mod harmonic;
 
