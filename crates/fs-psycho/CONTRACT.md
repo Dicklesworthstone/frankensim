@@ -128,6 +128,28 @@ test).
   phase, gain, even-deficit and unmodeled-partial checks. This supplies only the
   measurement primitive for X-Pp1 (`frankensim-irp-v5-instrument-realism-pexfp.342`),
   not its resolved-jet, specimen, Fletcher-comparison or listening obligations.
+- `partials::track_partials` — full-record physical partial trajectories over
+  the shared independent-tone and damped-pole refiners. Fixed, caller-authored
+  search intervals/rectangles preserve partial identities; successful frames
+  warm-start the next frame without changing those bounds. Stationary models
+  estimate independent frequencies, while ringdown models also estimate each
+  amplitude decay and can separate equal-frequency, different-decay components.
+  Each frame retains the original DC, residual and first-sample peak phasors;
+  its exact integer source sample index distinguishes changing phase origins.
+  Decay is absent for stationary fits, rather than silently measured as zero.
+  A terminal overlapping full frame covers the last sample without padding,
+  attack skips or tail truncation. Unidentifiable, ill-conditioned and
+  unconverged frames retain typed refusals and leave warm seeds unchanged.
+  Results stream one frame at a time; frame count and candidate work are
+  admitted explicitly, seed storage is charged to the fit's numeric budget,
+  and callbacks may stop between frames. No mode discovery, noise-floor rule,
+  uncertainty, calibrated level or instrument verdict is inferred. Within-frame
+  chirps/growth require a local-model/frame-length check. `tests/partials.rs`
+  covers inharmonic motion, coherent double decay, unresolved recovery, exact
+  clock indices, bounded work/storage, deterministic replay and a three-rung
+  continuous pitch-glide residual ladder. This supplies native trajectory
+  observations for instrument-plan §7.1/7.2; it does not replace the Python
+  grader or establish the struck/plucked Q2 decay gate.
 - `fluctuation::fluctuation_strength_frame` — fluctuation strength
   [vacil] per 131072-sample frame, implemented from the PUBLISHED
   equations of Osses/Garcia/Kohlrausch (ICA2016-113; NO code ported —
