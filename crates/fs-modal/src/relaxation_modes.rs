@@ -32,7 +32,10 @@ use fs_la::{
 use fs_math::{c64::C64, dd::Dd, det};
 
 mod shapes;
-pub use shapes::{MaxwellMode, MaxwellModeError, PoleOptions, PreparedMaxwellModes};
+pub use shapes::{
+    MaxwellBranchDirection, MaxwellForceResidue, MaxwellMode, MaxwellModeError, MaxwellModeResidue,
+    MaxwellPoleDirection, PoleOptions, PreparedMaxwellModes,
+};
 
 /// One physical scalar strain channel of a generalized Maxwell material.
 /// Multiple channels may share a relaxation time; their mutual modal coupling

@@ -6,8 +6,9 @@
 //! every original branch stress, then audits the original first-order source
 //! equations independently of the Newton matrices.
 //!
-//! This is a nearby simple mechanical mode, not a complete spectrum, a decay
-//! or shape-error certificate, left/right force residues or a time stepper.
+//! `refine` returns a nearby simple mechanical right mode. `refine_residue`
+//! additionally resolves its transpose mode and physical force residue. Neither
+//! is a complete spectrum, a decay/shape-error certificate or a time stepper.
 //! The rational domain excludes every s=-1/tau, even for a dark strain channel.
 //! Pure material modes with zero mechanical displacement cannot be normalized
 //! here; use the full-state spectrum owner to retain their pole values.
@@ -22,6 +23,11 @@ use fs_math::{c64::C64, dd::Dd, det};
 
 /// Shared local accuracy/resource controls; spectral_scale is physical [1/s].
 pub use fs_la::nonlinear_eig::PoleOptions;
+
+mod residues;
+pub use residues::{
+    MaxwellBranchDirection, MaxwellForceResidue, MaxwellModeResidue, MaxwellPoleDirection,
+};
 
 /// A locally refined mechanical right mode, using exp(s*t).
 #[derive(Clone, Debug)]
@@ -83,6 +89,16 @@ pub enum MaxwellModeError {
         /// Caller ceiling for both residuals.
         limit: f64,
     },
+    /// Left/right derivative normalization is insufficiently resolved for a
+    /// force residue. Both ratios must meet the caller's positive floor.
+    ResidueNormalization {
+        /// |ell^T T' q| / (||ell|| ||T'||_F ||q||) after binary equilibration.
+        alignment: f64,
+        /// Original-source derivative sum divided by its absolute-term sum.
+        cancellation_ratio: f64,
+        /// Caller-authored minimum for both dimensionless ratios.
+        minimum: f64,
+    },
     /// Cancellation observed before publication.
     Cancelled,
 }
@@ -130,6 +146,10 @@ pub struct PreparedMaxwellModes<'a> {
     time_exponent: i32,
     coefficient_norms: [f64; 3],
     options: PoleOptions,
+    // Preserve the original ceilings for operations requiring two local
+    // refinements. `options` reserves the preparation/evaluation payload.
+    resource_limits: (usize, u64),
+    preparation_bounds: (usize, u64),
 }
 
 impl<'a> PreparedMaxwellModes<'a> {
@@ -187,8 +207,10 @@ impl<'a> PreparedMaxwellModes<'a> {
         budget(
             "arithmetic work",
             work.saturating_add(d * d * (d + 16) * iterations),
-            options.max_work as u128,
+            u128::from(options.max_work),
         )?;
+        let resource_limits = (options.max_dense_bytes, options.max_work);
+        let preparation_bounds = (bytes as usize, work as u64);
         options.max_dense_bytes -= bytes as usize;
         options.max_work -= work as u64;
         let source = [mass, damping, stiffness];
@@ -311,6 +333,8 @@ impl<'a> PreparedMaxwellModes<'a> {
             time_exponent,
             coefficient_norms,
             options,
+            resource_limits,
+            preparation_bounds,
         })
     }
 
@@ -327,6 +351,23 @@ impl<'a> PreparedMaxwellModes<'a> {
         &self,
         laplace_seed_per_s: C64,
         displacement_seed: &[C64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaxwellMode, MaxwellModeError> {
+        self.refine_orientation(
+            laplace_seed_per_s,
+            displacement_seed,
+            false,
+            &self.options,
+            cancelled,
+        )
+    }
+
+    fn refine_orientation(
+        &self,
+        laplace_seed_per_s: C64,
+        displacement_seed: &[C64],
+        transpose: bool,
+        options: &PoleOptions,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaxwellMode, MaxwellModeError> {
         poll(&mut cancelled)?;
@@ -337,49 +378,36 @@ impl<'a> PreparedMaxwellModes<'a> {
             self.n,
             value,
             &seed,
-            &self.options,
+            options,
             |s, cancel| {
-                self.evaluate(s, cancel).map_err(|error| {
-                    let mapped = if error == MaxwellModeError::Cancelled {
-                        NonlinearEigError::Cancelled
-                    } else {
-                        NonlinearEigError::FunctionRefused { at: s }
-                    };
-                    evaluation_error = Some(error);
-                    mapped
-                })
+                self.evaluate_oriented(s, transpose, cancel)
+                    .map_err(|error| {
+                        let mapped = if error == MaxwellModeError::Cancelled {
+                            NonlinearEigError::Cancelled
+                        } else {
+                            NonlinearEigError::FunctionRefused { at: s }
+                        };
+                        evaluation_error = Some(error);
+                        mapped
+                    })
             },
             &mut cancelled,
         );
         let pole = solved.map_err(|error| evaluation_error.unwrap_or_else(|| error.into()))?;
         let displacement = self.physical_displacement(&pole.vector, &mut cancelled)?;
         let laplace_frequency_per_s = scale_complex(pole.value, self.time_exponent)?;
-        let velocity: Vec<_> = displacement
-            .iter()
-            .map(|&q| laplace_frequency_per_s * q)
-            .collect();
-        if velocity.iter().any(|&v| !finite(v))
-            || velocity.iter().zip(&displacement).any(|(&v, &q)| {
-                laplace_frequency_per_s != C64::ZERO && q != C64::ZERO && v == C64::ZERO
-            })
-        {
-            return Err(invalid("physical velocity must be representable"));
-        }
-        let mut branch_stress = Vec::with_capacity(self.branches.len());
-        for (index, branch) in self.branches.iter().enumerate() {
-            poll(&mut cancelled)?;
-            let (weight, _) = self.weights(pole.value, index)?;
-            let mut stress = SourceSum::default();
-            for (&strain, &q) in branch.strain.iter().zip(&displacement) {
-                stress.add(q, weight, &[branch.stiffness, strain])?;
-            }
-            branch_stress.push(stress.value()?);
-        }
+        let (velocity, branch_stress) = self.recover_response(
+            pole.value,
+            laplace_frequency_per_s,
+            &displacement,
+            &mut cancelled,
+        )?;
         let (mechanical, relaxation) = self.original_residual(
             laplace_frequency_per_s,
             &displacement,
             &velocity,
             &branch_stress,
+            transpose,
             &mut cancelled,
         )?;
         if mechanical.max(relaxation) > self.options.residual_tolerance {
@@ -401,6 +429,37 @@ impl<'a> PreparedMaxwellModes<'a> {
             relative_correction: pole.relative_step,
             iterations: pole.iterations,
         })
+    }
+
+    fn recover_response(
+        &self,
+        scaled_pole: C64,
+        laplace_frequency_per_s: C64,
+        displacement: &[C64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Vec<C64>, Vec<C64>), MaxwellModeError> {
+        let velocity: Vec<_> = displacement
+            .iter()
+            .map(|&q| laplace_frequency_per_s * q)
+            .collect();
+        if velocity.iter().any(|&v| !finite(v))
+            || velocity.iter().zip(displacement).any(|(&v, &q)| {
+                laplace_frequency_per_s != C64::ZERO && q != C64::ZERO && v == C64::ZERO
+            })
+        {
+            return Err(invalid("physical velocity must be representable"));
+        }
+        let mut branch_stress = Vec::with_capacity(self.branches.len());
+        for (index, branch) in self.branches.iter().enumerate() {
+            poll(cancelled)?;
+            let (weight, _) = self.weights(scaled_pole, index)?;
+            let mut stress = SourceSum::default();
+            for (&strain, &q) in branch.strain.iter().zip(displacement) {
+                stress.add(q, weight, &[branch.stiffness, strain])?;
+            }
+            branch_stress.push(stress.value()?);
+        }
+        Ok((velocity, branch_stress))
     }
 
     fn weights(&self, s: C64, index: usize) -> Result<(C64, C64), MaxwellModeError> {
@@ -476,6 +535,25 @@ impl<'a> PreparedMaxwellModes<'a> {
             derivative,
             residual_scale,
         })
+    }
+
+    fn evaluate_oriented(
+        &self,
+        s: C64,
+        transpose: bool,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<PoleEvaluation, MaxwellModeError> {
+        let mut evaluation = self.evaluate(s, cancel)?;
+        if transpose {
+            for i in 0..self.n {
+                poll(cancel)?;
+                for j in 0..i {
+                    evaluation.matrix.swap(i * self.n + j, j * self.n + i);
+                    evaluation.derivative.swap(i * self.n + j, j * self.n + i);
+                }
+            }
+        }
+        Ok(evaluation)
     }
 
     fn equilibrate_vector(&self, vector: &[C64]) -> Result<Vec<C64>, MaxwellModeError> {
@@ -555,6 +633,7 @@ impl<'a> PreparedMaxwellModes<'a> {
         q: &[C64],
         v: &[C64],
         stress: &[C64],
+        transpose: bool,
         cancel: &mut impl FnMut() -> bool,
     ) -> Result<(f64, f64), MaxwellModeError> {
         let mut mechanical = 0.0_f64;
@@ -562,9 +641,14 @@ impl<'a> PreparedMaxwellModes<'a> {
             poll(cancel)?;
             let mut row = SourceSum::default();
             for j in 0..self.n {
-                row.add(s, v[j], &[self.source[0][i * self.n + j]])?;
-                row.add(C64::ONE, v[j], &[self.source[1][i * self.n + j]])?;
-                row.add(C64::ONE, q[j], &[self.source[2][i * self.n + j]])?;
+                let index = if transpose {
+                    j * self.n + i
+                } else {
+                    i * self.n + j
+                };
+                row.add(s, v[j], &[self.source[0][index]])?;
+                row.add(C64::ONE, v[j], &[self.source[1][index]])?;
+                row.add(C64::ONE, q[j], &[self.source[2][index]])?;
             }
             for (branch, &sigma) in self.branches.iter().zip(stress) {
                 poll(cancel)?;
@@ -604,7 +688,18 @@ struct SourceSum {
 }
 impl SourceSum {
     fn add(&mut self, left: C64, right: C64, factors: &[f64]) -> Result<(), MaxwellModeError> {
-        if left == C64::ZERO || right == C64::ZERO || factors.contains(&0.0) {
+        self.add_weighted(left, right, C64::ONE, factors, 0)
+    }
+    fn add_weighted(
+        &mut self,
+        left: C64,
+        right: C64,
+        weight: C64,
+        factors: &[f64],
+        power: i32,
+    ) -> Result<(), MaxwellModeError> {
+        if left == C64::ZERO || right == C64::ZERO || weight == C64::ZERO || factors.contains(&0.0)
+        {
             return Ok(());
         }
         let parts = |z: C64| -> Result<(C64, i32), MaxwellModeError> {
@@ -614,7 +709,12 @@ impl SourceSum {
         let (left, le) = parts(left)?;
         let (right, re) = parts(right)?;
         let mut value = left * right;
-        let mut exponent = le + re;
+        let mut exponent = le + re + power;
+        if weight != C64::ONE {
+            let (weight, we) = parts(weight)?;
+            value = value * weight;
+            exponent += we;
+        }
         for &factor in factors {
             let (fraction, power) = quadratic_fraction(factor);
             value = value.scale(fraction.copysign(factor));
@@ -653,10 +753,10 @@ impl SourceSum {
         } else {
             det::hypot(self.re.to_f64(), self.im.to_f64()) / self.envelope
         };
-        if !value.is_finite() {
-            Err(invalid("finite original source-row residual required"))
-        } else {
+        if value.is_finite() {
             Ok(value)
+        } else {
+            Err(invalid("finite original source-row residual required"))
         }
     }
 }

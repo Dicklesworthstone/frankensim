@@ -200,12 +200,32 @@ material singularity `s=-1/tau_j` is excluded, and nonzero mechanical
 displacement is required. Pure material dark modes therefore remain outside
 this API; the complete state-spectrum owner retains their pole values.
 Multiple/defective modes can refuse. No arbitrary-seed convergence, spectral
-completeness, relative weak-decay accuracy, eigenvalue/shape enclosure,
-left/right force residue or time-domain realization is claimed. Eight focused
+completeness, relative weak-decay accuracy, eigenvalue/shape enclosure or
+time-domain realization is claimed. Eight focused
 actual-source native checks cover analytic material modes and stresses, coupled
 gyroscopic shapes, full mutual mass, extreme binary source scaling, a nearby
 weak decay, active-viscosity growth, and admission/resource/cancellation
 refusals. These checks do not establish a full workspace Cargo/DSR gate.
+
+`PreparedMaxwellModes::refine_residue` resolves a mechanical right mode and its
+bilinear transpose mode through the same bordered Newton owner. The transpose
+source equations are independently checked at the right pole. Original-unit
+factored products and DD sums retain `ell^T T'(s) q`; authored lower bounds on
+equilibrated derivative alignment and source cancellation reject unresolved
+normalization. Original resource ceilings admit both solves and retained
+responses together. `force_residue` applies `q*(ell^T f)/(ell^T T' q)` to an
+original complex force and returns displacement, velocity and every branch
+stress residue with linear work/storage and no further eigensolve.
+`pole_derivative` applies the implicit simple-pole derivative to full M/C/K,
+branch stiffness, log relaxation time and strain directions without
+differentiating solver iterations. Gyroscopic and active coefficients remain.
+These are local Laurent coefficients and infinitesimal derivatives, without a
+complete forced response, complete expansion, spectral enclosure, time
+realization or finite-parameter-step bound. Material singularities, dark modes
+and unresolved multiplicity still refuse. Eight new focused source checks cover
+independent partial fractions/adjugate response, scaling, weak decay,
+normalization, cancellation and analytic/finite-difference derivatives; the
+eight existing mode tests also pass.
 
 ### `harmonic::resonance`: actual driven peaks, notches and linewidths
 
