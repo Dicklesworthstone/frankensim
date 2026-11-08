@@ -5424,8 +5424,10 @@ The signed duty bracket must contain zero. The passive initial-flux bound
 further restricts it, and both resulting endpoints must lie within the original
 source domains. Native PH tolerances are tightened against the power allowance
 and each stream's mass flow. A shared duty-query limit and total PT allowance
-cover both streams, repeated references and all bracket/root trials; each source
-receives only the remaining work allowance. Native source/domain refusal,
+cover both streams, the once-prepared inlets and all bracket/root trials; each
+query receives only the remaining work allowance. An immutable prepared PH path
+reuses each inlet's original phase selection without changing its source or
+phase policy; its one-time work is included in the exchanger totals. Native source/domain refusal,
 failed balances, exhausted work or final cancellation returns no outlet pair.
 The accepted trial is retained without another flash. Zero conductance or equal
 inlet temperatures returns exact zero duty after one original PT selection per

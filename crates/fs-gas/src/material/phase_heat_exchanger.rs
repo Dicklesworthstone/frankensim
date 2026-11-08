@@ -9,7 +9,9 @@ use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
 use fs_material::thermochemical_gas::nonideal::flash::{
     ThermochemicalFlashError,
     enthalpy::MAX_ENTHALPY_FLASH_EVALUATIONS,
-    equilibrium::{PhaseEnthalpyControls, PhaseEnthalpySolution},
+    equilibrium::{
+        PhaseEnthalpyControls, PhaseEnthalpySolution, prepared::PreparedPhaseEnthalpyPath,
+    },
 };
 use fs_qty::{MassFlowRate, Power, Pressure, Temperature};
 
@@ -51,7 +53,7 @@ pub struct MixtureHeatExchangerControl {
     pub entropy_tolerance_w_k: f64,
     /// Whole-call paired duty queries, including bracket endpoints.
     pub maximum_duty_evaluations: usize,
-    /// Whole-call original PT queries, including repeated reference states.
+    /// Whole-call original PT queries, including each inlet prepared once.
     pub maximum_pt_evaluations: usize,
 }
 impl MixtureHeatExchangerControl {
@@ -76,18 +78,29 @@ impl MixtureHeatExchangerControl {
 
     /// Admit both source policies and finite physical/work limits before work.
     pub fn validate(self) -> Result<(), MixtureHeatExchangerError> {
-        self.left_equilibrium.validate().map_err(|e| phase_error(0, 0, e))?;
-        self.right_equilibrium.validate().map_err(|e| phase_error(1, 0, e))?;
+        self.left_equilibrium
+            .validate()
+            .map_err(|e| phase_error(0, 0, e))?;
+        self.right_equilibrium
+            .validate()
+            .map_err(|e| phase_error(1, 0, e))?;
         let [lo, hi] = self.duty_bracket_w;
-        if !lo.is_finite() || !hi.is_finite() || lo > 0.0 || hi < 0.0 || lo >= hi
+        if !lo.is_finite()
+            || !hi.is_finite()
+            || lo > 0.0
+            || hi < 0.0
+            || lo >= hi
             || !positive(self.absolute_power_tolerance_w)
             || !self.relative_power_tolerance.is_finite()
             || !(0.0..1.0).contains(&self.relative_power_tolerance)
-            || !self.entropy_tolerance_w_k.is_finite() || self.entropy_tolerance_w_k < 0.0
+            || !self.entropy_tolerance_w_k.is_finite()
+            || self.entropy_tolerance_w_k < 0.0
             || !(1..=MAX_HEAT_EXCHANGER_DUTY_EVALUATIONS).contains(&self.maximum_duty_evaluations)
             || !(1..=MAX_HEAT_EXCHANGER_PT_EVALUATIONS).contains(&self.maximum_pt_evaluations)
         {
-            return Err(MixtureHeatExchangerError::Invalid("heat-exchanger controls"));
+            return Err(MixtureHeatExchangerError::Invalid(
+                "heat-exchanger controls",
+            ));
         }
         Ok(())
     }
@@ -193,7 +206,8 @@ pub struct MixtureHeatExchangerStep {
 /// not counterflow/parallel-flow plug-flow geometry, and adds no phase kinetics
 /// or global phase-stability proof. Conductance and mass flows are supplied.
 /// Zero conductance or equal inlet temperatures returns exact zero duty after
-/// one original PT selection per stream. No accepted endpoint is recomputed.
+/// one original PT selection per stream. Every duty trial reuses those prepared
+/// inlets; no accepted endpoint is recomputed.
 pub fn exchange_steady_mixture_heat(
     left: MixtureHeatExchangerInlet<'_>,
     right: MixtureHeatExchangerInlet<'_>,
@@ -203,34 +217,72 @@ pub fn exchange_steady_mixture_heat(
 ) -> Result<MixtureHeatExchangerStep, Error> {
     poll(&mut cancelled)?;
     controls.validate()?;
-    if [left, right].iter().any(|s| !positive(s.temperature.value())
-        || !positive(s.pressure.value()) || !positive(s.mass_flow.value()))
-        || !conductance.value().is_finite() || conductance.value() < 0.0
+    if [left, right].iter().any(|s| {
+        !positive(s.temperature.value())
+            || !positive(s.pressure.value())
+            || !positive(s.mass_flow.value())
+    }) || !conductance.value().is_finite()
+        || conductance.value() < 0.0
     {
-        return Err(Error::Invalid("positive inlet states/flows and nonnegative conductance required"));
+        return Err(Error::Invalid(
+            "positive inlet states/flows and nonnegative conductance required",
+        ));
     }
     let initial_gap = right.temperature.value() - left.temperature.value();
     let initial_flux = conductance.value() * initial_gap;
     if !initial_flux.is_finite()
         || initial_flux == 0.0 && conductance.value() != 0.0 && initial_gap != 0.0
     {
-        return Err(Error::Invalid("unrepresentable initial heat-transfer power"));
+        return Err(Error::Invalid(
+            "unrepresentable initial heat-transfer power",
+        ));
     }
     if initial_flux != 0.0 {
-        controls.absolute_power_tolerance_w = controls.absolute_power_tolerance_w
+        controls.absolute_power_tolerance_w = controls
+            .absolute_power_tolerance_w
             .min(0.125 * initial_flux.abs());
         // Independent source errors get only an eighth of the absolute power
         // allowance each, including for unequal stream mass flows.
-        for (source, flow) in [(&mut controls.left_equilibrium, left.mass_flow),
-            (&mut controls.right_equilibrium, right.mass_flow)] {
-            source.enthalpy.enthalpy_tolerance_j_kg = source.enthalpy.enthalpy_tolerance_j_kg
+        for (source, flow) in [
+            (&mut controls.left_equilibrium, left.mass_flow),
+            (&mut controls.right_equilibrium, right.mass_flow),
+        ] {
+            source.enthalpy.enthalpy_tolerance_j_kg = source
+                .enthalpy
+                .enthalpy_tolerance_j_kg
                 .min(0.125 * controls.absolute_power_tolerance_w / flow.value());
         }
         controls.validate()?;
     }
     let mut work = Work::default();
+    let paths = [
+        prepare(
+            left,
+            0,
+            controls.left_equilibrium,
+            controls,
+            &mut work,
+            &mut cancelled,
+        )?,
+        prepare(
+            right,
+            1,
+            controls.right_equilibrium,
+            controls,
+            &mut work,
+            &mut cancelled,
+        )?,
+    ];
     let evaluate = |q, work: &mut Work, cancel: &mut _| {
-        trial([left, right], conductance.value(), q, controls, work, cancel)
+        trial(
+            [left, right],
+            &paths,
+            conductance.value(),
+            q,
+            controls,
+            work,
+            cancel,
+        )
     };
     let initial = evaluate(0.0, &mut work, &mut cancelled)?;
     let accepted = if initial_flux == 0.0 {
@@ -241,7 +293,11 @@ pub fn exchange_steady_mixture_heat(
         if lo >= hi {
             return Err(Error::Invalid("empty passive heat-exchanger duty bracket"));
         }
-        let endpoint = evaluate(if initial_flux > 0.0 { hi } else { lo }, &mut work, &mut cancelled)?;
+        let endpoint = evaluate(
+            if initial_flux > 0.0 { hi } else { lo },
+            &mut work,
+            &mut cancelled,
+        )?;
         let (mut lower, mut upper) = if initial_flux > 0.0 {
             ([lo, initial.residual()], [hi, endpoint.residual()])
         } else {
@@ -249,107 +305,222 @@ pub fn exchange_steady_mixture_heat(
         };
         let mut candidate = endpoint;
         loop {
-            let tolerance = 0.5 * controls.tolerance(candidate.duty.abs().max(candidate.flux.abs()));
-            if !positive(tolerance) { return Err(Error::Invalid("unrepresentable power tolerance")); }
-            if candidate.residual().abs() <= tolerance { break candidate; }
+            let tolerance =
+                0.5 * controls.tolerance(candidate.duty.abs().max(candidate.flux.abs()));
+            if !positive(tolerance) {
+                return Err(Error::Invalid("unrepresentable power tolerance"));
+            }
+            if candidate.residual().abs() <= tolerance {
+                break candidate;
+            }
             if lower[1] > 0.0 || upper[1] < 0.0 {
                 return Err(Error::NotBracketed {
-                    duty_bracket_w: [lower[0], upper[0]], residual_w: [lower[1], upper[1]],
+                    duty_bracket_w: [lower[0], upper[0]],
+                    residual_w: [lower[1], upper[1]],
                 });
             }
             let fraction = -lower[1] / (upper[1] - lower[1]);
-            let fraction = if (0.05..0.95).contains(&fraction) { fraction } else { 0.5 };
+            let fraction = if (0.05..0.95).contains(&fraction) {
+                fraction
+            } else {
+                0.5
+            };
             let q = lower[0] + fraction * (upper[0] - lower[0]);
-            if q == lower[0] || q == upper[0] { return Err(Error::NoConvergence); }
+            if q == lower[0] || q == upper[0] {
+                return Err(Error::NoConvergence);
+            }
             candidate = evaluate(q, &mut work, &mut cancelled)?;
-            if candidate.residual() < 0.0 { lower = [q, candidate.residual()]; }
-            else { upper = [q, candidate.residual()]; }
+            if candidate.residual() < 0.0 {
+                lower = [q, candidate.residual()];
+            } else {
+                upper = [q, candidate.residual()];
+            }
         }
     };
     finish(accepted, [left, right], controls, work, &mut cancelled)
 }
 
 #[derive(Default)]
-struct Work { duty: usize, pt: usize, eos: usize }
+struct Work {
+    duty: usize,
+    pt: usize,
+    eos: usize,
+}
 impl Work {
     fn exhausted(&self) -> Error {
-        Error::WorkLimit { duty_evaluations: self.duty, pt_evaluations: self.pt }
+        Error::WorkLimit {
+            duty_evaluations: self.duty,
+            pt_evaluations: self.pt,
+        }
     }
 }
-struct Trial { duty: f64, flux: f64, outlets: [PhaseEnthalpySolution; 2] }
-impl Trial {
-    fn residual(&self) -> f64 { self.duty - self.flux }
+struct Trial {
+    duty: f64,
+    flux: f64,
+    outlets: [PhaseEnthalpySolution; 2],
 }
+impl Trial {
+    fn residual(&self) -> f64 {
+        self.duty - self.flux
+    }
+}
+fn prepare<'m>(
+    inlet: MixtureHeatExchangerInlet<'m>,
+    side: usize,
+    mut source: PhaseEnthalpyControls,
+    controls: MixtureHeatExchangerControl,
+    work: &mut Work,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<PreparedPhaseEnthalpyPath<'m>, Error> {
+    let remaining = controls.maximum_pt_evaluations - work.pt;
+    if remaining == 0 {
+        return Err(work.exhausted());
+    }
+    source.enthalpy.maximum_flash_evaluations =
+        source.enthalpy.maximum_flash_evaluations.min(remaining);
+    let path = inlet
+        .model
+        .prepare_phase_enthalpy_path(
+            inlet.temperature,
+            inlet.pressure,
+            inlet.pressure,
+            source,
+            &mut *cancelled,
+        )
+        .map_err(|e| phase_error(side, work.pt, e))?;
+    work.pt += path.preparation_pt_evaluations();
+    work.eos += path.preparation_eos_evaluation_upper_bound();
+    Ok(path)
+}
+
 fn trial(
-    inlets: [MixtureHeatExchangerInlet<'_>; 2], ua: f64, duty: f64,
-    controls: MixtureHeatExchangerControl, work: &mut Work,
+    inlets: [MixtureHeatExchangerInlet<'_>; 2],
+    paths: &[PreparedPhaseEnthalpyPath<'_>; 2],
+    ua: f64,
+    duty: f64,
+    controls: MixtureHeatExchangerControl,
+    work: &mut Work,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Trial, Error> {
     poll(cancelled)?;
-    if work.duty == controls.maximum_duty_evaluations { return Err(work.exhausted()); }
+    if work.duty == controls.maximum_duty_evaluations {
+        return Err(work.exhausted());
+    }
     work.duty += 1;
-    let mut resolve = |side: usize, power: f64, mut source: PhaseEnthalpyControls| {
+    let mut resolve = |side: usize, power: f64| {
         let remaining = controls.maximum_pt_evaluations - work.pt;
-        if remaining == 0 { return Err(work.exhausted()); }
-        source.enthalpy.maximum_flash_evaluations = source.enthalpy.maximum_flash_evaluations.min(remaining);
+        if remaining == 0 && power != 0.0 {
+            return Err(work.exhausted());
+        }
         let stream = inlets[side];
         let increment = power / stream.mass_flow.value();
         if !increment.is_finite() || power != 0.0 && increment == 0.0 {
             return Err(Error::Invalid("unrepresentable stream enthalpy increment"));
         }
-        let outlet = stream.model.phase_equilibrium_pressure_enthalpy_increment(
-            stream.temperature, stream.pressure, stream.pressure, increment, source, &mut *cancelled,
-        ).map_err(|e| phase_error(side, work.pt, e))?;
+        let outlet = paths[side]
+            .solve_increment(increment, remaining, &mut *cancelled)
+            .map_err(|e| phase_error(side, work.pt, e))?;
         work.pt += outlet.pt_evaluations();
         work.eos += outlet.eos_evaluation_upper_bound();
         Ok(outlet)
     };
-    let outlets = [resolve(0, duty, controls.left_equilibrium)?,
-        resolve(1, if duty == 0.0 { 0.0 } else { -duty }, controls.right_equilibrium)?];
+    let outlets = [
+        resolve(0, duty)?,
+        resolve(1, if duty == 0.0 { 0.0 } else { -duty })?,
+    ];
     let flux = ua * (outlets[1].state().temperature_k() - outlets[0].state().temperature_k());
     if !flux.is_finite() || !(duty - flux).is_finite() {
         return Err(Error::Invalid("unrepresentable outlet heat-transfer power"));
     }
-    Ok(Trial { duty, flux, outlets })
+    Ok(Trial {
+        duty,
+        flux,
+        outlets,
+    })
 }
 
 fn finish(
-    trial: Trial, inlets: [MixtureHeatExchangerInlet<'_>; 2],
-    controls: MixtureHeatExchangerControl, work: Work, cancelled: &mut impl FnMut() -> bool,
+    trial: Trial,
+    inlets: [MixtureHeatExchangerInlet<'_>; 2],
+    controls: MixtureHeatExchangerControl,
+    work: Work,
+    cancelled: &mut impl FnMut() -> bool,
 ) -> Result<MixtureHeatExchangerStep, Error> {
     let mut enthalpy = [0.0; 2];
     let mut entropy = [0.0; 2];
     for side in 0..2 {
-        enthalpy[side] = inlets[side].mass_flow.value() * trial.outlets[side]
-            .accepted_increment_j_kg().ok_or(Error::Invalid("missing source enthalpy increment"))?;
-        entropy[side] = inlets[side].mass_flow.value() * trial.outlets[side]
-            .entropy_change_j_kg_k().ok_or(Error::Invalid("missing source entropy increment"))?;
+        enthalpy[side] = inlets[side].mass_flow.value()
+            * trial.outlets[side]
+                .accepted_increment_j_kg()
+                .ok_or(Error::Invalid("missing source enthalpy increment"))?;
+        entropy[side] = inlets[side].mass_flow.value()
+            * trial.outlets[side]
+                .entropy_change_j_kg_k()
+                .ok_or(Error::Invalid("missing source entropy increment"))?;
     }
     let energy = enthalpy[0] + enthalpy[1];
     let thermal = [enthalpy[0] - trial.flux, enthalpy[1] + trial.flux];
-    let tolerance = controls.tolerance(enthalpy[0].abs().max(enthalpy[1].abs()).max(trial.flux.abs()));
-    if !positive(tolerance) || [energy, thermal[0], thermal[1]].iter()
-        .any(|r| !r.is_finite() || r.abs() > tolerance) {
-        return Err(Error::Balance { energy_residual_w: energy, thermal_residual_w: thermal });
+    let tolerance = controls.tolerance(
+        enthalpy[0]
+            .abs()
+            .max(enthalpy[1].abs())
+            .max(trial.flux.abs()),
+    );
+    if !positive(tolerance)
+        || [energy, thermal[0], thermal[1]]
+            .iter()
+            .any(|r| !r.is_finite() || r.abs() > tolerance)
+    {
+        return Err(Error::Balance {
+            energy_residual_w: energy,
+            thermal_residual_w: thermal,
+        });
     }
     let production = entropy[0] + entropy[1];
     if !production.is_finite() || production < -controls.entropy_tolerance_w_k {
-        return Err(Error::Entropy { production_w_k: production, tolerance_w_k: controls.entropy_tolerance_w_k });
+        return Err(Error::Entropy {
+            production_w_k: production,
+            tolerance_w_k: controls.entropy_tolerance_w_k,
+        });
     }
     poll(cancelled)?;
     let [left_equilibrium, right_equilibrium] = trial.outlets;
     Ok(MixtureHeatExchangerStep {
-        left_equilibrium, right_equilibrium, duty_to_left: Power::new(trial.duty),
-        enthalpy_flow_change_w: enthalpy, energy_residual_w: energy, thermal_residual_w: thermal,
-        entropy_flow_change_w_k: entropy, entropy_production_w_k: production,
-        duty_evaluations: work.duty, pt_evaluations: work.pt, eos_evaluation_upper_bound: work.eos,
+        left_equilibrium,
+        right_equilibrium,
+        duty_to_left: Power::new(trial.duty),
+        enthalpy_flow_change_w: enthalpy,
+        energy_residual_w: energy,
+        thermal_residual_w: thermal,
+        entropy_flow_change_w_k: entropy,
+        entropy_production_w_k: production,
+        duty_evaluations: work.duty,
+        pt_evaluations: work.pt,
+        eos_evaluation_upper_bound: work.eos,
     })
 }
-fn positive(value: f64) -> bool { value.is_finite() && value > 0.0 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
-    if cancelled() { Err(Error::Cancelled) } else { Ok(()) }
+fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
 }
-fn phase_error(side: usize, completed_pt_evaluations: usize, source: ThermochemicalFlashError) -> Error {
-    if source == ThermochemicalFlashError::Cancelled { Error::Cancelled }
-    else { Error::Equilibrium { side, completed_pt_evaluations, source } }
+fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+    if cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+fn phase_error(
+    side: usize,
+    completed_pt_evaluations: usize,
+    source: ThermochemicalFlashError,
+) -> Error {
+    if source == ThermochemicalFlashError::Cancelled {
+        Error::Cancelled
+    } else {
+        Error::Equilibrium {
+            side,
+            completed_pt_evaluations,
+            source,
+        }
+    }
 }

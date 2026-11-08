@@ -21,6 +21,8 @@ use fs_thermochem::eos::peng_robinson::{
 pub mod acoustics;
 /// Entropy-constrained pressure changes through the same original phase owner.
 pub mod entropy;
+/// Reusable original inlet for bounded repeated pressure/enthalpy increments.
+pub mod prepared;
 /// Conserved internal-energy and volume closure over the same phase owner.
 pub mod volume;
 
@@ -187,7 +189,9 @@ impl PhaseEnthalpySolution {
     pub const fn entropy_change_j_kg_k(&self) -> Option<f64> {
         self.entropy_change_j_kg_k
     }
-    /// Actual attempted PT selections, including the reference and endpoints.
+    /// Actual attempted PT selections performed for this solve.
+    /// One-shot increment solves include the inlet; prepared paths report their
+    /// one-time inlet selection through separate preparation counters.
     #[must_use]
     pub const fn pt_evaluations(&self) -> usize {
         self.pt_evaluations

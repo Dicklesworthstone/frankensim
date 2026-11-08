@@ -333,3 +333,160 @@ fn g11_crossing_respects_total_work_source_support_and_final_cancellation() {
     );
     assert_eq!(seen, checkpoints);
 }
+
+#[test]
+fn g12_prepared_phase_paths_reuse_original_inlet_without_changing_latent_outlets() {
+    let source = source();
+    let policy = controls();
+    let path = source
+        .prepare_phase_enthalpy_path(
+            Temperature::new(180.0),
+            Pressure::new(3e6),
+            Pressure::new(3e6),
+            policy,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(path.preparation_pt_evaluations(), 1);
+    let mut direct_work = 0;
+    let mut prepared_work = path.preparation_pt_evaluations();
+    for (increment, expected_t, split) in [
+        (187_300.169_452_381_1, 220.0, true),
+        (550_185.794_810_218_8, 280.0, false),
+    ] {
+        let direct = heat(&source, 180.0, increment);
+        let cached = path
+            .solve_increment(
+                increment,
+                policy.enthalpy.maximum_flash_evaluations - 1,
+                || false,
+            )
+            .unwrap();
+        close(cached.state().temperature_k(), expected_t, 3e-7);
+        assert_eq!(cached.state().phase().two_phase().is_some(), split);
+        assert_eq!(cached.state(), direct.state());
+        assert_eq!(
+            cached.accepted_increment_j_kg(),
+            direct.accepted_increment_j_kg()
+        );
+        assert_eq!(
+            cached.entropy_change_j_kg_k(),
+            direct.entropy_change_j_kg_k()
+        );
+        assert_eq!(cached.residual_j_kg(), direct.residual_j_kg());
+        assert_eq!(cached.pt_evaluations() + 1, direct.pt_evaluations());
+        assert_eq!(
+            cached.eos_evaluation_upper_bound() + path.preparation_eos_evaluation_upper_bound(),
+            direct.eos_evaluation_upper_bound(),
+        );
+        direct_work += direct.pt_evaluations();
+        prepared_work += cached.pt_evaluations();
+    }
+    // Two identical inlet phase selections become one; all endpoint work remains.
+    assert_eq!(direct_work, prepared_work + 1);
+}
+
+#[test]
+fn g13_prepared_zero_heat_uses_no_new_pt_but_pressure_changes_still_require_work() {
+    let source = source();
+    let path = source
+        .prepare_phase_enthalpy_path(
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            Pressure::new(3e6),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let rest = path.solve_increment(0.0, 0, || false).unwrap();
+    assert_eq!(rest.state().temperature_k(), 220.0);
+    assert_eq!(rest.accepted_increment_j_kg(), Some(0.0));
+    assert_eq!(rest.entropy_change_j_kg_k(), Some(0.0));
+    assert_eq!(rest.pt_evaluations(), 0);
+    assert_eq!(rest.eos_evaluation_upper_bound(), 0);
+    assert_eq!(
+        path.solve_increment(1.0, 0, || false).unwrap_err(),
+        E::WorkLimit {
+            flash_evaluations: 0
+        }
+    );
+    assert_eq!(
+        path.solve_increment(1.0, 1, || false).unwrap_err(),
+        E::WorkLimit {
+            flash_evaluations: 1
+        }
+    );
+    for increment in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(
+            path.solve_increment(increment, 64, || false),
+            Err(E::Invalid(_))
+        ));
+    }
+
+    let pressure_change = source
+        .prepare_phase_enthalpy_path(
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            Pressure::new(2e6),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(
+        pressure_change
+            .solve_increment(0.0, 0, || false)
+            .unwrap_err(),
+        E::WorkLimit {
+            flash_evaluations: 0
+        }
+    );
+    let changed = pressure_change.solve_increment(0.0, 63, || false).unwrap();
+    assert_eq!(changed.state().pressure_pa(), 2e6);
+    assert!(changed.pt_evaluations() > 0);
+    close(changed.accepted_increment_j_kg().unwrap(), 0.0, 1e-5);
+}
+
+#[test]
+fn g14_prepared_phase_path_cancellation_never_invalidates_its_original_reference() {
+    let source = source();
+    assert!(matches!(
+        source.prepare_phase_enthalpy_path(
+            Temperature::new(180.0),
+            Pressure::new(3e6),
+            Pressure::new(3e6),
+            controls(),
+            || true,
+        ),
+        Err(E::Cancelled)
+    ));
+    let path = source
+        .prepare_phase_enthalpy_path(
+            Temperature::new(180.0),
+            Pressure::new(3e6),
+            Pressure::new(3e6),
+            controls(),
+            || false,
+        )
+        .unwrap();
+    let mut polls = 0;
+    let accepted = path
+        .solve_increment(187_300.169_452_381_1, 63, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut seen = 0;
+    let cancelled = path
+        .solve_increment(187_300.169_452_381_1, 63, || {
+            seen += 1;
+            seen == polls
+        })
+        .unwrap_err();
+    assert_eq!(cancelled, E::Cancelled);
+    assert_eq!(seen, polls);
+    assert_eq!(
+        path.solve_increment(187_300.169_452_381_1, 63, || false)
+            .unwrap(),
+        accepted
+    );
+}
