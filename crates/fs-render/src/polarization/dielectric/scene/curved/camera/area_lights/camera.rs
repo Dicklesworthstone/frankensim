@@ -641,6 +641,7 @@ pub(super) fn validate_source_binding(
     }
     let expected_medium = match camera.scene.bindings[source_slot].interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::RoughDiffuse { medium, .. }
         | Interaction::DepolarizingLiftedDiffuse { medium, .. }
         | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::SmoothConductor { medium, .. }

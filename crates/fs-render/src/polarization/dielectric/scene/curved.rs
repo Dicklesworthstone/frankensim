@@ -878,6 +878,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                     break;
                 }
                 interaction @ (Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::RoughDiffuse { medium, .. }
                 | Interaction::DepolarizingLiftedDiffuse { medium, .. }) => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
@@ -895,9 +896,11 @@ impl<'a> CurvedPolarizedScene<'a> {
                         break;
                     }
                     let draw = samples(event);
-                    let next = result
-                        .beam
-                        .sample_depolarizing_diffuse(witness.normal, rho, [draw[0], draw[1]])?;
+                    let next = match interaction {
+                        Interaction::RoughDiffuse { surface, .. } => result.beam
+                            .sample_rough_diffuse(witness.normal, surface, rho, [draw[0], draw[1]])?,
+                        _ => result.beam.sample_depolarizing_diffuse(witness.normal, rho, [draw[0], draw[1]])?,
+                    };
                     result.beam = next.beam;
                     (DielectricEvent::Reflection, next.pdf_solid_angle, false)
                 }

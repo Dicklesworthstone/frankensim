@@ -10,6 +10,9 @@ use super::{BeamError, PolarizationFrame, PolarizedBeam, cross, unit};
 use crate::polarization::Stokes;
 use fs_geom::Vec3;
 use fs_math::det;
+use crate::rough_diffuse::RoughDiffuseSurface;
+use crate::dielectric::DielectricEvent;
+use super::connection::{SurfaceConnectionResponse, checked_product, normalized_camera};
 
 /// A continuous reflection proposal with density in inverse steradians.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -21,6 +24,51 @@ pub struct DiffuseBeamSample {
 }
 
 impl PolarizedBeam {
+    /// Sample reciprocal EON reflection with a depolarizing diffuse-facet law.
+    /// The original cosine proposal remains normalized and allocation-free.
+    /// Throughput is pi times the angular BRDF, which can exceed one for an
+    /// individual sample; its hemispherical mean remains passive. No index
+    /// change, coating, surface displacement or hidden material fit is added.
+    pub fn sample_rough_diffuse(
+        self, normal: Vec3, surface: RoughDiffuseSurface,
+        facet_albedo: f64, samples: [f64; 2],
+    ) -> Result<DiffuseBeamSample, BeamError> {
+        if !(0.0..=1.0).contains(&facet_albedo) { return Err(BeamError::InvalidDiffuseSample); }
+        if surface.roughness() == 0.0 {
+            return self.sample_depolarizing_diffuse(normal, facet_albedo, samples);
+        }
+        let normal = self.incident_normal(normal)?;
+        let wo = self.frame.direction.scale(-1.0);
+        let mut sample = self.sample_depolarizing_diffuse(normal, 1.0, samples)?;
+        let wi = sample.beam.frame.direction;
+        let mu_o = normal.dot(wo).clamp(0.0, 1.0);
+        let mu_i = normal.dot(wi).clamp(0.0, 1.0);
+        let projected = (-mu_o).mul_add(mu_i, wo.dot(wi));
+        let factor = core::f64::consts::PI * surface.eval_admitted(mu_i, mu_o, projected, facet_albedo);
+        sample.beam.power = Stokes::unpolarized(checked_product(self.power.i, factor)?);
+        Ok(sample)
+    }
+
+    /// Evaluate the same depolarizing EON law for an original source-arrival
+    /// direction and reciprocal camera prefix. A unit physical source Stokes
+    /// state is required; complete depolarization makes only its I relevant.
+    pub fn evaluate_rough_diffuse_connection(
+        self, normal: Vec3, surface: RoughDiffuseSurface, facet_albedo: f64,
+        source_frame: PolarizationFrame, normalized_source: Stokes,
+    ) -> Result<SurfaceConnectionResponse, BeamError> {
+        if !(0.0..=1.0).contains(&facet_albedo) { return Err(BeamError::InvalidDiffuseSample); }
+        let camera = normalized_camera(self, normalized_source)?;
+        let normal = camera.incident_normal(normal)?;
+        let wo = camera.frame.direction.scale(-1.0);
+        let wi = source_frame.direction().scale(-1.0);
+        let mu_i = normal.dot(wi);
+        if mu_i <= 0.0 { return Ok(SurfaceConnectionResponse::zero(DielectricEvent::Reflection)); }
+        let mu_o = normal.dot(wo).clamp(0.0, 1.0);
+        let projected = (-mu_o).mul_add(mu_i, wo.dot(wi));
+        let factor = surface.eval_admitted(mu_i.min(1.0), mu_o, projected, facet_albedo);
+        SurfaceConnectionResponse::checked(factor, mu_i / core::f64::consts::PI, DielectricEvent::Reflection)
+    }
+
     /// Sample a two-sided ideal depolarizing Lambertian reflector.
     ///
     /// `normal` is the geometric normal; its sign does not select a different

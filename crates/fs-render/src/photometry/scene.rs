@@ -307,7 +307,8 @@ impl NativeOpticalScene {
                     Material::Conductor { .. } | Material::BrushedConductor { .. } => {
                         conductor_count += 1
                     }
-                    Material::SpectralDiffuse { .. } | Material::CoatedDiffuse { .. } => {
+                    Material::SpectralDiffuse { .. } | Material::RoughDiffuse { .. }
+                    | Material::CoatedDiffuse { .. } => {
                         reflectance_count += 1
                     }
                     Material::GrayDiffuseThermal { .. }
@@ -452,6 +453,11 @@ impl NativeOpticalScene {
                                 medium,
                                 reflectance: index,
                             }
+                        }
+                        Material::RoughDiffuse { reflectance, surface } => {
+                            let index = reflectances.len();
+                            reflectances.push(reflectance);
+                            Interaction::RoughDiffuse { medium, reflectance: index, surface }
                         }
                         Material::CoatedDiffuse {
                             coating,

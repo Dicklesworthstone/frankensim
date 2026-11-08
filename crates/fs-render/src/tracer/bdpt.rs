@@ -276,6 +276,7 @@ impl<'scene> Vertex<'scene> {
             }
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
+            | Material::RoughDiffuse { .. }
             | Material::CoatedDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
@@ -321,6 +322,7 @@ impl<'scene> Vertex<'scene> {
                     Material::Conductor { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
                     | Material::SpectralDiffuse { .. }
+                    | Material::RoughDiffuse { .. }
                     | Material::CoatedDiffuse { .. }
                     | Material::GrayDiffuseThermal { .. }
                     | Material::SpectralDiffuseThermal { .. }
@@ -535,6 +537,7 @@ fn surface_scattering(
     match material {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::CoatedDiffuse { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. } => {
@@ -614,6 +617,7 @@ fn surface_pdf_solid_angle(
     match material {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::CoatedDiffuse { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. } => Ok(bsdf_pdf(
@@ -716,6 +720,7 @@ fn sample_surface(
         }
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. } => {
             let Some((wi, pdf_fwd)) = bsdf_sample(material, normal, wo, random[0], random[1], None)

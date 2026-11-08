@@ -82,6 +82,9 @@ pub enum Interaction {
     /// surrounding medium. `reflectance` indexes the original borrowed
     /// spectral reflectance table; no emission or subsurface law is inferred.
     DepolarizingDiffuse { medium: usize, reflectance: usize },
+    /// Reciprocal EON rough diffuse reflection. The original spectral table
+    /// supplies diffuse-facet albedo, with wavelength-dependent interreflection.
+    RoughDiffuse { medium: usize, reflectance: usize, surface: crate::rough_diffuse::RoughDiffuseSurface },
     /// The original tracer's lifted Lambertian spectrum, evaluated directly
     /// over its native visible band. No knot fitting or RGB conversion occurs.
     /// Reflection uses the same depolarizing cosine law as tabulated diffuse.
@@ -414,6 +417,7 @@ impl<'a> PolarizedScene<'a> {
                     return finish(cx, result);
                 }
                 interaction @ (Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::RoughDiffuse { medium, .. }
                 | Interaction::DepolarizingLiftedDiffuse { medium, .. }) => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
@@ -429,9 +433,11 @@ impl<'a> PolarizedScene<'a> {
                     }
                     let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
                     let draw = samples(event);
-                    result.beam = result.beam.sample_depolarizing_diffuse(
-                        normal, rho, [draw[0], draw[1]],
-                    )?.beam;
+                    result.beam = match interaction {
+                        Interaction::RoughDiffuse { surface, .. } => result.beam
+                            .sample_rough_diffuse(normal, surface, rho, [draw[0], draw[1]])?,
+                        _ => result.beam.sample_depolarizing_diffuse(normal, rho, [draw[0], draw[1]])?,
+                    }.beam;
                     offset = settings.query_offset_m;
                 }
                 Interaction::CoatedDiffuse { medium, reflectance, coating } => {
@@ -576,6 +582,7 @@ fn admit_bindings(
                 }
             }
             Interaction::DepolarizingDiffuse { medium, reflectance }
+            | Interaction::RoughDiffuse { medium, reflectance, .. }
             | Interaction::CoatedDiffuse { medium, reflectance, .. } => {
                 if medium >= media_count || reflectance >= reflectance_count {
                     return Err(SceneError::InvalidBindings);
@@ -614,7 +621,8 @@ pub(crate) fn depolarizing_reflectance(
 ) -> Result<f64, BeamError> {
     let invalid_wavelength = || BeamError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength);
     let rho = match interaction {
-        Interaction::DepolarizingDiffuse { reflectance, .. } => reflectances
+        Interaction::DepolarizingDiffuse { reflectance, .. }
+        | Interaction::RoughDiffuse { reflectance, .. } => reflectances
             .get(reflectance).ok_or(BeamError::InvalidDiffuseSample)?
             .at(wavelength_nm).map_err(|_| invalid_wavelength())?,
         Interaction::DepolarizingLiftedDiffuse { reflectance, .. } => {

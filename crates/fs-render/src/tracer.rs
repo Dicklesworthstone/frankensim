@@ -1012,6 +1012,13 @@ pub enum Material {
         /// black and white. Wavelengths and interpolation remain explicit.
         reflectance: crate::spectral::SpectralReflectance,
     },
+    /// Energy-preserving Oren--Nayar reflection from isotropic diffuse facets.
+    /// The spectrum is their single-scattering albedo; repeated facet returns
+    /// retain its wavelength dependence and the model's reciprocal energy law.
+    RoughDiffuse {
+        reflectance: crate::spectral::SpectralReflectance,
+        surface: crate::rough_diffuse::RoughDiffuseSurface,
+    },
     /// Smooth dielectric coat over a spectral depolarizing diffuse substrate.
     /// The collapsed layer retains entry/exit Fresnel, Snell etendue, optional
     /// homogeneous gray Beer absorption and every internal diffuse return.
@@ -1139,6 +1146,16 @@ impl Material {
             Self::GrayDiffuseThermal { surface } => {
                 hasher.update(&[6]);
                 hasher.update(surface.identity().as_bytes());
+            }
+            Self::RoughDiffuse { reflectance, surface } => {
+                hasher.update(&[12]);
+                hasher.update(b"energy-preserving-oren-nayar.v1");
+                update_material_scalar(&mut hasher, surface.roughness());
+                hasher.update(&[reflectance.knots().len() as u8]);
+                for &(wavelength_nm, value) in reflectance.knots() {
+                    update_material_scalar(&mut hasher, wavelength_nm);
+                    update_material_scalar(&mut hasher, value);
+                }
             }
             Self::SpectralDiffuseThermal { surface } => {
                 hasher.update(&[7]);
@@ -9560,7 +9577,8 @@ impl AovAlbedoCache {
             .ok_or(CinematicAovError::InvalidPrimary)?;
         match *slot.get_or_init(|| match material {
             Material::GrayDiffuseThermal { surface } => Ok(Some([surface.reflectance(); 3])),
-            Material::SpectralDiffuse { reflectance } => {
+            Material::SpectralDiffuse { reflectance }
+            | Material::RoughDiffuse { reflectance, .. } => {
                 // Display/AOV projection only; physical paths retain rho(lambda).
                 let xyz = crate::spectral::xyz_of_spectrum(|lambda| {
                     reflectance.at(lambda).unwrap_or(f64::NAN)
@@ -10864,6 +10882,7 @@ fn discover_parallel_slab_with_probe(
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::CoatedDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
@@ -11763,6 +11782,7 @@ fn discover_planar_manifold_boundary(
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::CoatedDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
@@ -14743,6 +14763,7 @@ fn trace_path_with_regions<'scene>(
             )?),
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
+            | Material::RoughDiffuse { .. }
             | Material::CoatedDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
@@ -15099,6 +15120,7 @@ fn trace_path_with_regions<'scene>(
                 }
                 Material::Lambertian { .. }
                 | Material::SpectralDiffuse { .. }
+                | Material::RoughDiffuse { .. }
                 | Material::CoatedDiffuse { .. }
                 | Material::GrayDiffuseThermal { .. }
                 | Material::SpectralDiffuseThermal { .. }
@@ -16016,6 +16038,7 @@ fn trace_path_with_regions<'scene>(
             }
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
+            | Material::RoughDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
@@ -17559,6 +17582,43 @@ mod aspheric_lens_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rough_diffuse_native_bsdf_sampling_spectra_and_identity() {
+        use super::*;
+        use crate::rough_diffuse::RoughDiffuseSurface;
+        use crate::spectral::SpectralReflectance;
+        let reflectance = SpectralReflectance::table(&[(380.0, 0.1), (780.0, 0.9)]).unwrap();
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = Vec3::new(0.8, 0.0, 0.6);
+        let smooth = Material::SpectralDiffuse { reflectance };
+        for roughness in [0.0, 0.5, 1.0] {
+            let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+            let material = Material::RoughDiffuse { reflectance, surface };
+            assert_ne!(material.content_identity(), smooth.content_identity());
+            for draw in [[0.0, 0.2], [0.2, 0.1], [0.8, 0.7], [0.999, 0.3]] {
+                let (wi, pdf) = bsdf_sample(&material, normal, wo, draw[0], draw[1], None).unwrap();
+                assert!((pdf - bsdf_pdf(&material, normal, wo, wi, None)).abs() < 2e-14);
+                for lambda in [400.0, 550.0, 750.0] {
+                    let f = opaque_bsdf_eval(&material, normal, wo, wi, lambda, None, None).unwrap();
+                    let reverse = opaque_bsdf_eval(&material, normal, wi, wo, lambda, None, None).unwrap();
+                    assert!((f-reverse).abs() < 2e-14);
+                    let rho = reflectance.at(lambda).unwrap();
+                    let expected = surface.brdf(normal.dot(wi), normal.dot(wo),
+                        wi.dot(wo)-normal.dot(wi)*normal.dot(wo), rho).unwrap();
+                    assert!((f-expected).abs() < 2e-14);
+                    if roughness == 0.0 {
+                        assert_eq!(f, opaque_bsdf_eval(&smooth, normal, wo, wi, lambda, None, None).unwrap());
+                    }
+                }
+            }
+            assert!(opaque_bsdf_eval(&material, normal, wo, normal, 900.0, None, None).is_err());
+        }
+        assert_ne!(Material::RoughDiffuse { reflectance,
+            surface: RoughDiffuseSurface::try_new(0.4).unwrap() }.content_identity(),
+            Material::RoughDiffuse { reflectance,
+            surface: RoughDiffuseSurface::try_new(0.5).unwrap() }.content_identity());
+    }
+
     use super::*;
     use crate::aov::{CinematicAovLimits, CinematicAovProfile, CinematicAovProvenance};
     use crate::camera::Aperture;
@@ -22911,6 +22971,7 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
         }
         // These families use fallible wavelength admission in opaque_bsdf_eval.
         Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::SpectralDiffuseThermal { .. }
         | Material::CoatedDiffuse { .. }
         | Material::Conductor { .. }
@@ -22946,6 +23007,13 @@ fn opaque_bsdf_eval(
     incident_medium: Option<DielectricGlass>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Result<f64, TracerError> {
+    if let Material::RoughDiffuse { reflectance, surface } = mat {
+        let rho = reflectance.at(lambda).map_err(|_| TracerError::InvalidInput)?;
+        let (cos_o, cos_i) = (n.dot(wo), n.dot(wi));
+        if cos_o <= 0.0 || cos_i <= 0.0 { return Ok(0.0); }
+        let projected = (-cos_o).mul_add(cos_i, wo.dot(wi));
+        return Ok(surface.eval_admitted(cos_i.min(1.0), cos_o.min(1.0), projected, rho));
+    }
     if let Material::CoatedDiffuse { coating, reflectance } = mat {
         coated_diffuse::admit_medium(*coating, incident_medium, lambda)?;
         let rho = reflectance.at(lambda).map_err(|_| TracerError::InvalidInput)?;
@@ -23069,6 +23137,7 @@ fn bsdf_pdf(
     match mat {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => cos_i / PI,
         Material::CoatedDiffuse { coating, .. } => coated_diffuse::pdf(*coating, n, wo, wi),
@@ -23148,6 +23217,7 @@ fn bsdf_sample(
     match mat {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::RoughDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => {
             let (wi, pdf) = cosine_sample(n, u1, u2);

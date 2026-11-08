@@ -28,6 +28,7 @@ mod anisotropic_tests;
 pub(in super::super::super) fn receiver_media(interaction: Interaction) -> Option<[usize; 2]> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::RoughDiffuse { medium, .. }
         | Interaction::DepolarizingLiftedDiffuse { medium, .. }
         | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::BrushedConductor { medium, .. } => Some([medium, medium]),
@@ -195,6 +196,13 @@ impl SurfaceReceiver {
         let incoming = camera.scene.launch_beam(position, self.incoming.frame(), wavelength,
             self.medium, self.incoming.power()).map_err(CameraRadianceError::from)?;
         match native.interaction {
+            Interaction::RoughDiffuse { reflectance, surface, .. } => {
+                let rho = camera.scene.reflectances[reflectance].at(wavelength)
+                    .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
+                incoming.evaluate_rough_diffuse_connection(contact.witness.normal,
+                    surface, rho, source_frame, source_stokes)
+                    .map_err(CurvedSceneError::from).map_err(CameraRadianceError::from).map_err(Into::into)
+            }
             Interaction::CoatedDiffuse { reflectance, coating, .. } => {
                 let rho = camera.scene.reflectances[reflectance].at(wavelength)
                     .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
@@ -272,6 +280,7 @@ fn arrival_medium(interaction: Interaction, contact: CurvedContact, direction: V
     -> Result<usize, AreaLightCameraError> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::RoughDiffuse { medium, .. }
         | Interaction::DepolarizingLiftedDiffuse { medium, .. }
         | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::RoughConductor { medium, .. }

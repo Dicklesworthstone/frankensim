@@ -20,6 +20,38 @@ fn beam(direction: Vec3, intensity: f64) -> PolarizedBeam {
 }
 
 #[test]
+fn g1_rough_diffuse_native_beam_and_reciprocal_connection_share_angular_response() {
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let input = beam(Vec3::new(-0.8, 0.0, -0.6), 2.0);
+    for roughness in [0.0, 0.4, 1.0] {
+        let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+        for rho in [0.0, 0.6, 1.0] {
+            for draw in [[0.0, 0.0], [0.2, 0.1], [0.8, 0.7], [0.999, 0.3]] {
+                let sample = input.sample_rough_diffuse(normal, surface, rho, draw).unwrap();
+                if roughness == 0.0 {
+                    assert_eq!(sample, input.sample_depolarizing_diffuse(normal, rho, draw).unwrap());
+                }
+                let wi = sample.beam.ray().dir;
+                let source = PolarizationFrame::try_new(wi.scale(-1.0), reference_axis(wi)).unwrap();
+                let response = input.evaluate_rough_diffuse_connection(normal, surface, rho,
+                    source, Stokes::try_new(1.0, 0.0, 1.0, 0.0).unwrap()).unwrap();
+                assert!((sample.beam.power().i - 2.0*core::f64::consts::PI*response.factor).abs() < 2e-13);
+                assert!((sample.pdf_solid_angle-response.pdf).abs() < 2e-14);
+                assert_eq!(sample.beam.power().q, 0.0);
+                assert_eq!(sample.beam.power().u, 0.0);
+                assert_eq!(sample.beam.power().v, 0.0);
+                assert_eq!(sample.beam.medium(), input.medium());
+                assert_eq!(sample.beam.ray().origin, input.ray().origin);
+                let reversed = beam(wi.scale(-1.0), 1.0)
+                    .evaluate_rough_diffuse_connection(normal, surface, rho, input.frame(),
+                        Stokes::unpolarized(1.0)).unwrap();
+                assert!((response.factor-reversed.factor).abs() < 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
 fn g1_cosine_proposals_conserve_hemispherical_power_and_depolarize_at_both_poles() {
     for normal in [
         Vec3::new(0.0, 0.0, 1.0),

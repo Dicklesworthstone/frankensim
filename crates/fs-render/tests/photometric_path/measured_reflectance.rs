@@ -13,6 +13,35 @@ use fs_render::spectral::SpectralReflectance;
 use super::spectral_reference::cie_reference_xyz;
 
 #[test]
+fn g1_rough_diffuse_point_source_image_consumes_native_angular_reflection() {
+    use fs_render::rough_diffuse::RoughDiffuseSurface;
+    with_cx(|cx, _| {
+        let sources = [isotropic([0.0, 0.0, 3.0], 90.0, SourceSpectrum::equal_energy())];
+        let camera = PhysicalCamera::try_look_at(
+            Point3::new(0.0, 0.0, 2.0), Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0), CameraProjection::try_vertical_fov(PI/3.0).unwrap(),
+            2.0, Aperture::try_circular(0.0).unwrap(),
+        ).unwrap();
+        for roughness in [0.0, 0.5, 1.0] {
+            let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+            let rho = 0.6;
+            let mut scene = receiver_scene();
+            scene.primitives[0].material = Material::RoughDiffuse {
+                reflectance: SpectralReflectance::constant(rho).unwrap(), surface,
+            };
+            let direct = PhotometricScene::try_new(&scene.primitives, &sources,
+                HomogeneousMedium::vacuum(), TransportOptions::default(), cx).unwrap();
+            let mut image = LuminanceJob::new(&direct, &camera, 1, 1, 8.0,
+                ScatterSettings::default()).unwrap();
+            image.advance(cx, 1).unwrap();
+            let expected = 10.0*surface.brdf(1.0, 1.0, 0.0, rho).unwrap();
+            close(image.results()[0].surface_cd_m2, expected, 3e-12,
+                "calibrated EON response must not fall back to Lambertian rho/pi");
+        }
+    });
+}
+
+#[test]
 fn g1_measured_diffuse_direct_image_matches_independent_photopic_reflection() {
     with_cx(|cx, _| {
         let mut bins = [0.0; SPECTRAL_BINS];

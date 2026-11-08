@@ -77,6 +77,24 @@ differentiable lift). Pure Rust throughout.
   evaluates `rho(lambda)/pi` at every wavelength, including exact black/white,
   without assigning a temperature or an emission source. See the calibrated
   diffuse-material contract below for table admission and accuracy limits.
+- `rough_diffuse::RoughDiffuseSurface` and `Material::RoughDiffuse` provide
+  isotropic, depolarizing energy-preserving Oren--Nayar (EON) reflection.
+  The normalized roughness in `[0,1]` is a model parameter, not a measured
+  height or slope angle; spectral table values are diffuse-facet
+  single-scattering albedos. The reciprocal multiple-return closure uses the
+  exact analytic projected albedo, with a factored smooth limit and stable
+  grazing deficit. White facets conserve integrated reflected power, colored
+  facets absorb on additional returns, and zero roughness is exactly the
+  existing Lambertian law. Scalar camera/BDPT, calibrated photometric and
+  native polarized camera/connection paths evaluate the same angular law at
+  the original wavelength. Cosine sampling and its matched PDF retain full
+  support; a single path weight above one is not an integrated energy gain.
+  G0/G1/G3 checks cover admission, reciprocity, exact limits, independent
+  projected-angle white/colored furnace quadrature and native consumers.
+  This is the analytic approximation of Portsmouth, Kutz and Hill,
+  <https://jcgt.org/published/0014/01/06/>; it does not infer specimen
+  calibration, subsurface transport, coherent diffraction, polarization
+  retention or a thermal emission law.
 - `balance_heuristic` / `power_heuristic` — MIS weights; `mis_weight_sum(pf,
   pg)` — the weight-sum audit (nominally `1`). Finite nonnegative active
   densities retain complementary weights even when count products, sums or

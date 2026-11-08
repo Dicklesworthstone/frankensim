@@ -131,6 +131,41 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_rough_diffuse_native_scene_camera_uses_the_same_spectral_angular_law() {
+    use crate::rough_diffuse::RoughDiffuseSurface;
+    with_cx(|cx, _| {
+        for roughness in [0.0, 0.6, 1.0] {
+            let surface = RoughDiffuseSurface::try_new(roughness).unwrap();
+            let rho = 0.7;
+            let mut receiver = panel(0.0, rho, 0.0);
+            receiver.emission = None;
+            receiver.material = Material::RoughDiffuse {
+                reflectance: SpectralReflectance::constant(rho).unwrap(), surface,
+            };
+            let mut original = scene(vec![receiver]);
+            original.environment = Some(EnvironmentMap::try_from_linear_srgb(
+                1, 1, vec![[0.7; 3]], 0.0).unwrap());
+            let owner = admit(cx, original, glass(1.0, 0.0));
+            let background = owner.render_scene().environment.as_ref().unwrap()
+                .evaluate(Vec3::new(0.0, 0.0, -1.0)).unwrap().emission;
+            let factor = core::f64::consts::PI * surface.brdf(1.0, 0.6, 0.0, rho).unwrap();
+            owner.with_curved_camera(cx, 100_000,
+                NativeRadianceCalibration::try_new(1.0, 3.0).unwrap(), |native, _| {
+                    for side in [-1.0, 1.0] {
+                        let sample = native.sample_ray_with_samples(cx, Ray {
+                            origin: Point3::new(0.25, -0.25, side*3.0),
+                            dir: Vec3::new(0.0, 0.0, -side),
+                        }, 550.0, 0, settings(), |_| [0.64, 0.23, 0.0]).unwrap();
+                        close(sample.radiance_w_m2_sr_nm(),
+                            factor*background.0.eval(550.0)*background.1*3.0, 2e-12);
+                        assert_eq!(sample.endpoint(), RadianceEndpoint::Environment);
+                    }
+                }).unwrap();
+        }
+    });
+}
+
+#[test]
 fn g1_original_source_through_glass_retains_beer_and_immersed_camera_index() {
     with_cx(|cx, _| {
         let mut emitter = panel(2.0, 0.0, 2.0);
