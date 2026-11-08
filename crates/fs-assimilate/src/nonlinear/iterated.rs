@@ -6,13 +6,20 @@
 //! normal prior. Iteration never assimilates the measurements a second time.
 //! This is the iterated Kalman/Gauss–Newton relationship of Bell and Cathey,
 //! IEEE TAC 38(2), 1993, DOI: 10.1109/9.250476, with an Armijo line search.
+//! Correlated Gaussian measurements instead use `C^-1(y-h(x))` and `C^-1 H L`,
+//! where the retained observation covariance is `R = C C^T`.
 //!
 //! The existing UD measurement and square-root affine prediction owners solve
 //! the linearized problem and transport its covariance. Singular prior factors
-//! retain their null directions without jitter. Only a stationary result
-//! publishes a Gaussian approximation, whose covariance is the Gauss–Newton
+//! retain their null directions without jitter. Only a stationary Gaussian
+//! update publishes an approximation, whose covariance is the Gauss–Newton
 //! curvature approximation at the accepted state, not an exact nonlinear
 //! posterior, a certified minimum, or a validated physical-model claim.
+//!
+//! [`fit_huber_iterated`] replaces the independent quadratic residual loss with
+//! a declared [`HuberLoss`]. Root-weighted IRLS supplies proposals while the
+//! actual loss and score govern descent and stationarity. This robust fit
+//! reports the accepted state and downweighted rows, with no posterior covariance.
 
 use fs_blake3::DomainHasher;
 use fs_exec::Cx;
@@ -25,6 +32,9 @@ use crate::{
     AssimError, Belief, Observation, WorkPlan, WorkProgress, canonicalize_zero,
     validate_leaf_identity, validate_noise,
 };
+
+mod huber;
+pub use huber::HuberLoss;
 
 const MAX_ROWS: usize = 256;
 const MAX_ITERATIONS: usize = 256;
@@ -87,10 +97,12 @@ impl MeasurementRows {
     }
 }
 
-/// A fixed set of scalar readings with explicitly independent Gaussian noise.
+/// A fixed set of scalar readings with explicitly independent residual scales.
 /// Rows and model outputs use declaration order; independence is a caller
 /// assumption. Shared calibration must be represented in the state or handled
 /// by [`CorrelatedMeasurements`], never silently discarded here.
+/// [`assimilate_iterated`] interprets variances as Gaussian noise variances;
+/// [`fit_huber_iterated`] uses them as nominal squared residual scales.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndependentMeasurements {
     rows: MeasurementRows,
@@ -219,6 +231,7 @@ enum Noise<'a> {
 struct MeasurementModel<'a> {
     rows: &'a MeasurementRows,
     noise: Noise<'a>,
+    huber_loss: Option<HuberLoss>,
 }
 
 /// One model evaluation. The caller may use analytic derivatives, `fs-ad`, or
@@ -270,7 +283,8 @@ impl IteratedSettings {
     }
 }
 
-/// The measured stopping condition; only `Stationary` carries a posterior.
+/// The measured stopping condition. Gaussian updates publish a posterior only
+/// at `Stationary`; Huber fits never publish a Gaussian posterior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IteratedOutcome {
     /// The accepted state's whitened gradient met the declared threshold.
@@ -288,7 +302,7 @@ pub enum IteratedOutcome {
 /// One accepted state; the first row is the original prior at step fraction zero.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IteratedRecord {
-    /// Gaussian-prior plus measurement negative log likelihood, up to constants.
+    /// Gaussian prior penalty plus the declared Gaussian or Huber residual loss.
     pub objective: f64,
     /// Infinity norm of the gradient in prior-whitened coordinates.
     pub gradient_norm: f64,
@@ -307,6 +321,8 @@ pub struct IteratedAssimilation {
     evaluations: usize,
     rejected: usize,
     receipt_id: String,
+    huber_loss: Option<HuberLoss>,
+    downweighted_rows: Vec<usize>,
 }
 
 impl IteratedAssimilation {
@@ -320,10 +336,23 @@ impl IteratedAssimilation {
     pub fn state(&self) -> &[f64] {
         &self.state
     }
-    /// Local Gaussian approximation only when the stationarity check passed.
+    /// Local Gaussian approximation only for a Gaussian measurement model at
+    /// stationarity. Huber fits never publish a posterior or surrogate covariance.
     #[must_use]
     pub fn posterior(&self) -> Option<&Belief> {
         self.posterior.as_ref()
+    }
+    /// Declared robust objective, or `None` for the Gaussian measurement model.
+    #[must_use]
+    pub const fn huber_loss(&self) -> Option<HuberLoss> {
+        self.huber_loss
+    }
+    /// Original measurement-row indices outside the Huber quadratic region at
+    /// the last accepted state. Empty for Gaussian updates. These are influence
+    /// diagnostics, not a certificate that the corresponding sensors failed.
+    #[must_use]
+    pub fn downweighted_rows(&self) -> &[usize] {
+        &self.downweighted_rows
     }
     /// Objective/stationarity evidence at every accepted state.
     #[must_use]
@@ -353,6 +382,7 @@ struct Point {
     jacobian: Vec<Vec<f64>>,
     gradient: Vec<f64>,
     objective: f64,
+    downweighted_rows: Vec<usize>,
 }
 
 /// Assimilate one independent nonlinear measurement batch by damped iteration.
@@ -379,6 +409,7 @@ where
         MeasurementModel {
             rows: &measurements.rows,
             noise: Noise::Independent,
+            huber_loss: None,
         },
         settings,
         model,
@@ -412,6 +443,43 @@ where
                 covariance: &measurements.covariance,
                 cholesky: &measurements.cholesky,
             },
+            huber_loss: None,
+        },
+        settings,
+        model,
+        cx,
+    )
+}
+
+/// Fit independent nonlinear measurements with an explicit Huber residual loss.
+///
+/// The input variances provide nominal squared residual scales. The objective
+/// is `0.5 z'z + sum rho_delta((y-h(m+Lz))/sigma)`; the original prior remains
+/// fixed. IRLS supplies proposals, but line search and stationarity use the
+/// actual Huber loss and bounded score. Outlying rows are downweighted, not
+/// deleted, and their last accepted indices are exposed in the result.
+///
+/// This is a robust regularized fit, not a Gaussian measurement update. Even
+/// `Stationary` returns no posterior: an inverse IRLS matrix is neither the
+/// true Huber-objective Hessian inverse nor a calibrated covariance. Correlated
+/// noise is intentionally not accepted by this componentwise loss model.
+pub fn fit_huber_iterated<F>(
+    prior: &Belief,
+    measurements: &IndependentMeasurements,
+    loss: HuberLoss,
+    settings: IteratedSettings,
+    model: F,
+    cx: &Cx<'_>,
+) -> Result<IteratedAssimilation, AssimError>
+where
+    F: FnMut(&[f64], &Cx<'_>) -> Result<ModelEvaluation, AssimError>,
+{
+    assimilate_model(
+        prior,
+        MeasurementModel {
+            rows: &measurements.rows,
+            noise: Noise::Independent,
+            huber_loss: Some(loss),
         },
         settings,
         model,
@@ -434,6 +502,7 @@ where
     let m = measurements.rows.readings.len();
     let (nu, mu, ev) = (n as u128, m as u128, settings.max_model_evaluations as u128);
     let correlated = matches!(measurements.noise, Noise::Correlated { .. });
+    let huber_loss = measurements.huber_loss;
     // Charge each reused factor kernel's conservative envelope to this ONE
     // accountant before calling it. Its own local admission must not reissue
     // the workflow's remaining cost/poll allowance at every nonlinear iterate.
@@ -441,16 +510,19 @@ where
     let construction = scalar_factor_work_estimate(n)?.construction + 64;
     let publication = 64 * nu * nu * nu + 128 * nu * nu + 128 * nu + 2048;
     let kernels = 2 * construction
-        + publication
-        + (settings.max_iterations as u128 + 1) * sequence_work(n, m)?;
+        + if huber_loss.is_none() { publication } else { 0 }
+        + (settings.max_iterations as u128 + u128::from(huber_loss.is_none()))
+            * sequence_work(n, m)?;
     let work = ev * (8 * mu * nu * nu + 64 * mu * nu + 64 * nu + 256)
         + (settings.max_iterations as u128 + 2) * (32 * mu * nu + 64 * nu + 256)
         + kernels
-        + u128::from(correlated) * ev * (8 * mu * mu * (nu + 1) + 32 * mu + 128);
+        + u128::from(correlated) * ev * (8 * mu * mu * (nu + 1) + 32 * mu + 128)
+        + u128::from(huber_loss.is_some()) * ev * (16 * mu * nu + 32 * mu + 64);
     let bytes = ev * (32 * mu * nu + 32 * mu + 32 * nu + 64)
         + 32 * nu * nu
         + 4096
         + u128::from(correlated) * (8 * mu * mu + 128)
+        + u128::from(huber_loss.is_some()) * (8 * mu + 128)
         + measurements
             .rows
             .instruments
@@ -479,7 +551,12 @@ where
     }
     progress.scalar("nonlinear standard prior allowance", construction)?;
     let standard = FactorBelief::diagonal(vec![0.0; n], &vec![1.0; n], cx)?;
-    let (domain, receipt_prefix) = if correlated {
+    let (domain, receipt_prefix) = if huber_loss.is_some() {
+        (
+            "org.frankensim.fs-assimilate.iterated-huber.v1",
+            "iterated-huber:v1:",
+        )
+    } else if correlated {
         (
             "org.frankensim.fs-assimilate.iterated-correlated.v1",
             "iterated-correlated:v1:",
@@ -517,6 +594,14 @@ where
             }
         }
     }
+    if let Some(loss) = huber_loss {
+        hash_bytes(
+            &mut hash,
+            b"independent-huber:no-posterior-v1",
+            &mut progress,
+        )?;
+        hash_f64(&mut hash, loss.transition(), &mut progress)?;
+    }
     for count in [
         settings.max_iterations,
         settings.max_model_evaluations,
@@ -547,6 +632,9 @@ where
         progress.checkpoint("iterated nonlinear stationarity")?;
         let gradient_norm = norm(&point.gradient);
         if gradient_norm <= settings.gradient_tolerance {
+            if huber_loss.is_some() {
+                break IteratedOutcome::Stationary;
+            }
             // Recompute the covariance at the accepted Jacobian with the
             // ORIGINAL standard prior, then transport with the existing root owner.
             let local = affine_posterior(&standard, &z, &point, &measurements, cx, &mut progress)?;
@@ -636,6 +724,16 @@ where
     if let Some(belief) = &posterior {
         hash_belief(&mut hash, belief, &mut progress)?;
     }
+    if huber_loss.is_some() {
+        hash_u64(
+            &mut hash,
+            point.downweighted_rows.len() as u64,
+            &mut progress,
+        )?;
+        for &row in &point.downweighted_rows {
+            hash_u64(&mut hash, row as u64, &mut progress)?;
+        }
+    }
     hash_u64(&mut hash, trace.len() as u64, &mut progress)?;
     for row in &trace {
         for value in [row.objective, row.gradient_norm, row.step_fraction] {
@@ -651,6 +749,8 @@ where
         evaluations,
         rejected,
         receipt_id: format!("{receipt_prefix}{}", hash.finalize()),
+        huber_loss,
+        downweighted_rows: point.downweighted_rows,
     })
 }
 
@@ -731,11 +831,33 @@ where
     whiten(measurements, &mut residual, &mut transformed, progress)?;
     let mut gradient = z.to_vec();
     let mut objective = 0.5 * dot(z, z, progress)?;
-    for (&r, row) in residual.iter().zip(&transformed) {
-        objective = finite(objective + 0.5 * r * r, "nonlinear objective")?;
-        for (component, &entry) in row.iter().enumerate() {
-            gradient[component] = finite(gradient[component] - entry * r, "nonlinear gradient")?;
+    let mut downweighted_rows = Vec::new();
+    for (index, row) in transformed.iter_mut().enumerate() {
+        let r = residual[index];
+        let (loss_value, influence, root_weight) = if let Some(loss) = measurements.huber_loss {
+            if r.abs() > loss.transition() {
+                downweighted_rows.push(index);
+            }
+            progress.scalar("nonlinear Huber loss", 16)?;
+            loss.terms(r)?
+        } else {
+            (0.5 * r * r, r, 1.0)
+        };
+        objective = finite(objective + loss_value, "nonlinear objective")?;
+        for (component, entry) in row.iter_mut().enumerate() {
+            gradient[component] = finite(
+                gradient[component] - *entry * influence,
+                "nonlinear gradient",
+            )?;
             progress.scalar("nonlinear gradient", 2)?;
+            if measurements.huber_loss.is_some() {
+                *entry = finite(*entry * root_weight, "nonlinear Huber weighted Jacobian")?;
+                progress.scalar("nonlinear Huber proposal", 1)?;
+            }
+        }
+        if measurements.huber_loss.is_some() {
+            residual[index] = finite(r * root_weight, "nonlinear Huber weighted residual")?;
+            progress.scalar("nonlinear Huber proposal", 1)?;
         }
     }
     Ok(Some(Point {
@@ -744,6 +866,7 @@ where
         jacobian: transformed,
         gradient,
         objective,
+        downweighted_rows,
     }))
 }
 

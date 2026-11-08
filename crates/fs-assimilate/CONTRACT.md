@@ -103,12 +103,13 @@ linear-Gaussian core of weak-constraint assimilation.
   the borrowed child owns deadline and cancellation polling through final
   publication. Demotion uses the admitted envelope but publishes no posterior.
 - `nonlinear::iterated::IndependentMeasurements` — one fixed batch of up to
-  256 readings with explicitly independent positive Gaussian noise variances,
+  256 readings with explicitly independent positive squared residual scales,
   unique instruments, and a caller-declared model identity. A model callback
   returns the predictions and physical-coordinate Jacobian together, or an
   explicit `OutsideDomain` trial refusal. Analytic, AD, and adjoint Jacobians
   are accepted through the same callback; their correctness remains the
-  model owner's responsibility.
+  model owner's responsibility. Gaussian assimilation interprets the scales
+  as observation-noise variances; Huber fitting uses nominal residual scales.
 - `nonlinear::iterated::CorrelatedMeasurements` — the same bounded, uniquely
   identified nonlinear rows with a fixed full Gaussian observation covariance.
   Construction reuses robust linear assimilation's exact-symmetry,
@@ -128,6 +129,19 @@ linear-Gaussian core of weak-constraint assimilation.
   every Jacobian column are solved through the retained noise factor on every
   model evaluation. Shared calibration covariance therefore participates in
   the proposal, actual objective, gradient, and final local covariance.
+- `nonlinear::iterated::HuberLoss::new(transition)` — an explicit finite,
+  positive transition in standardized residual units. The loss is quadratic
+  inside that threshold and linear beyond it; the caller owns the transition
+  and residual scales.
+- `nonlinear::iterated::fit_huber_iterated` — a robust regularized fit of
+  `IndependentMeasurements` using the original Gaussian prior. Root-weighted
+  IRLS proposals use the existing factor solver; actual Huber loss and score
+  control line search and stationarity. `IteratedAssimilation::huber_loss()`
+  retains the declared loss, and `downweighted_rows()` identifies original
+  measurement indices outside the quadratic region at the last accepted state.
+  These are influence diagnostics, not sensor-failure certificates. Every
+  outcome, including `Stationary`, has `posterior() == None` because the IRLS
+  proposal curvature is not a calibrated posterior covariance.
 - `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
@@ -374,7 +388,8 @@ linear-Gaussian core of weak-constraint assimilation.
   difference and gate settings, prediction, innovation and variance, Jacobian,
   every actual probe value, and disposition. The arbitrary callback itself
   cannot be authenticated by this crate.
-- Iterated updates minimize `0.5 z^T z + 0.5 sum_i ((y_i-h_i(m+Lz))/sigma_i)^2`
+- Iterated Gaussian updates minimize
+  `0.5 z^T z + 0.5 sum_i ((y_i-h_i(m+Lz))/sigma_i)^2`
   with the original prior factor `P=L L^T`. Exact null directions stay fixed;
   no jitter is introduced. Accepted trials satisfy Armijo sufficient decrease
   against this original objective. Stationarity means the infinity norm of
@@ -390,6 +405,20 @@ linear-Gaussian core of weak-constraint assimilation.
   transformed Jacobian is `C^-1 H L`. The same original `R` and prior are used
   throughout. `iterated-correlated:v1:<64 lowercase hex>` additionally binds
   the full declared covariance and whitening policy in a separate domain.
+- Huber fitting minimizes `0.5 z^T z + sum_i rho_delta(r_i)` for independently
+  standardized residuals `r_i=(y_i-h_i(m+Lz))/sigma_i`, where
+  `rho_delta(r)=r^2/2` inside `|r|<=delta` and
+  `delta*(|r|-delta/2)` outside. The actual gradient is
+  `z - J^T psi_delta(r)`, with `J=H L / sigma` and
+  `psi_delta(r)=clamp(r,-delta,delta)`. Each proposal scales residuals and
+  Jacobian rows by `sqrt(min(1,delta/|r|))`, with weight one at zero, before
+  solving against the original standard prior. The root weight is formed
+  before physical scaling so its square need not be representable. The
+  surrogate quadratic is not used as the accepted objective, stationarity
+  criterion, or covariance authority. `iterated-huber:v1:<64 lowercase hex>`
+  binds the transition, explicit independent/no-posterior policy, inputs,
+  model evaluation trace, stopping outcome, accepted state/trace, and final
+  downweighted indices in a separate receipt domain.
 - The candidate's `Color::Estimated.estimator` is
   `assimilation-candidate:v4:<64 lowercase hex>`. Its BLAKE3 input uses typed
   length framing and binds the full prior, canonical observation multiset
@@ -593,6 +622,15 @@ linear update; diagonal-noise agreement; common-mode uncertainty retention;
 measurement/covariance permutation; nonlinear estimation; constant-reference
 channels; covariance refusal; and atomic cancellation/stopping boundaries.
 
+`tests/iterated_huber.rs`: contaminated affine-location fit against an analytic
+optimum; nonlinear fit against an independently solved score equation; actual
+objective descent; downweighted-row diagnostics; quadratic-region agreement
+with Gaussian fitted states; loss-bound replay identity; no-posterior behavior
+at stationarity and numerical limits; and atomic cancellation. Private Huber
+unit tests cover the piecewise loss/score, both transition signs, non-finite
+refusals, representable losses despite overflowing intermediate squares, and
+root weights whose squared values underflow.
+
 `tests/factor.rs` (bead `sj31i.37`, G0/G1/G2/G3/G4/G5): hand-computed one- and
 two-component goldens; dense-Joseph oracle differential across deterministic
 priors up to dimension 17 with independent-checker verification; exact
@@ -629,9 +667,17 @@ and clean pre-cancellation.
   moment formulas for one Gaussian-prior threshold event, and labeled
   sequential Gaussian approximations for multiple events. Neither path claims
   an exact non-Gaussian posterior distribution. Temporal augmentation for
-  delayed sensors, robust M-estimation, and sparse/shared-factor covariance
+  delayed sensors and sparse/shared-factor covariance
   beyond the dense cap remain separate work. A time constant is retained as
   metadata but is not a delay correction.
+- The independent Huber fitter does not estimate residual scale or contamination
+  probability, authenticate outlier labels, or publish a Gaussian posterior.
+  Its IRLS matrix is a proposal device, not the true Huber Hessian or a
+  calibrated covariance. Correlated robust likelihoods, scale estimation,
+  and calibrated uncertainty for robust fits remain separate work. Applying
+  a componentwise Huber loss after arbitrary correlated whitening would make
+  the model depend on the whitening basis, so the Huber entry point accepts
+  only explicitly independent measurements.
 - The finite-difference observation v1 seam is one local linearization,
   not `fs-ad` automatic differentiation, a derivative
   certificate, or a nonlinear-posterior accuracy guarantee. It does not select
