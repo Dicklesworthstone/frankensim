@@ -41,6 +41,10 @@ use super::{
 
 pub mod bundle;
 
+/// Sourced Corning 7980 differential stress refraction on original beam segments.
+#[cfg(feature = "material-state")]
+pub mod stress_optic;
+
 /// Cosine-sampled diffuse power transport in the retained local medium.
 pub mod diffuse;
 
