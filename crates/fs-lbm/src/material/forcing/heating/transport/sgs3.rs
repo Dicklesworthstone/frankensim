@@ -24,6 +24,7 @@ use fs_exec::CancelGate;
 
 mod endpoint;
 pub use endpoint::MaterialSgsEndpointStep;
+mod lagrangian;
 
 /// Original molecular material records and SI heat balance, together with the
 /// closure actually applied to this step. Material records never contain SGS.
@@ -34,7 +35,7 @@ pub struct MaterialSgsTransportStep<F, R> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance<F: FluidTransport, R: Default>(
+fn advance<F: FluidTransport, R>(
     slab: &mut MaterialSlab<ThermalLbm3>,
     power: &[f64],
     forces: &[[f64; 3]],
@@ -51,7 +52,7 @@ fn advance<F: FluidTransport, R: Default>(
 ) -> Result<MaterialSgsTransportStep<F, R>, MaterialTransportError> {
     let depth = slab.force_units.cell_size_m;
     let background = slab.lattice.gbeta;
-    let mut report = R::default();
+    let mut report = None;
     let (material, ()) = advance_with_sampler_sources_and_candidate::<ThermalLbm3, F, (), 3, 7>(
         slab, power, forces, depth, limits, gate,
         |mapping, state, cells, plane| {
@@ -76,7 +77,7 @@ fn advance<F: FluidTransport, R: Default>(
                     // that force-centered velocity before the source kernel
                     // applies this step's newly prepared external/buoyant load.
                     let (heat, applied_report) = step(candidate, input, molecular)?;
-                    report = applied_report;
+                    report = Some(applied_report);
                     Ok(heat)
                 },
             )?;
@@ -84,11 +85,14 @@ fn advance<F: FluidTransport, R: Default>(
             Ok((trial, heat))
         },
     )?;
-    Ok(MaterialSgsTransportStep { material, sgs: report })
+    Ok(MaterialSgsTransportStep {
+        material,
+        sgs: report.expect("accepted material candidate produced its SGS receipt"),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn advance_boussinesq<F: FluidTransport, R: Default>(
+fn advance_boussinesq<F: FluidTransport, R>(
     slab: &mut MaterialSlab<ThermalLbm3>,
     power: &[f64],
     forces: &[[f64; 3]],

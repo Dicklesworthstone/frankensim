@@ -19,6 +19,8 @@ use fs_exec::CancelGate;
 
 /// Plane-averaged dynamic momentum and heat on the original halfway slab.
 pub mod channel;
+/// Joint pathline histories for native momentum and sensible heat transport.
+pub mod lagrangian;
 
 /// Explicit exploration controls; no turbulent Prandtl number is defaulted.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -467,3 +467,55 @@ viscosity and unrepresentable positive losses refuse. This remains explicit,
 fixed-density/Cp low-Mach sensible-heat transport, without a total-energy claim.
 Manufactured tests cover the physical tensor/heat identity, source-dependent
 coefficients, zero bulk, original native collision, and full rollback.
+
+## Lagrangian turbulent heat with original material sources
+
+`thermal::sources::sgs3::lagrangian` composes the shared joint Favre/Germano
+momentum and scalar histories with the original D3Q19/D3Q7 source transaction.
+The resolved slab retains periodic tangent directions and its actual rigid
+halfway walls. Current prescribed-temperature, insulating, flux, film and
+spatial wall derivative policies are shared with the instantaneous channel
+closure; the native thermal owner alone imposes and measures their wall heat.
+
+Stress and heat keep independent signed contractions, memory times, coefficient
+limits and molecular-ratio limits. A zero momentum fit cannot disable a
+positive heat fit. The existing optional invariant momentum memory is exposed
+without altering scalar memory. Sampling reads one accepted Guo-centered
+density/velocity/temperature state before replacement forces. The caller
+supplies actual sampling time in lattice timesteps; ThermalLbm3 has no separate
+authoritative clock. Elapsed sample time controls bounded pathline departures.
+
+One prepared token borrows only the reusable workspace and retains both
+candidate histories plus admitted total relaxation fields. Native source, heat
+balance, temperature range, endpoint Mach and cancellation checks precede
+publication. Material wrappers additionally retain that token through every
+original source epoch and outer publication check. Only successful completion
+is followed by infallible joint history commit. Dropped, cancelled and refused
+steps preserve both histories, including their last sample time for retry.
+
+Material APIs cover ordinary source-resolved transport, source-density
+Boussinesq forcing and endpoint-averaged source-density forcing. The last keeps
+all three original material epochs: initial transport, thermal-predictor force
+quadrature and the actual accepted endpoint. Original SI source samples, fixed
+reference inertia/sensible storage, density/Cp bounds and force conversions
+remain intact. Fresh molecular mu/rho0 and k/(rho0 Cp0) own their ratio limits;
+augmented rates never feed back into a later molecular source query.
+
+Field arrays are prepared once under an explicit numerical byte budget and
+reused by sampling and history publication. Original native snapshots retain
+their independent cell budget. The instantaneous and Lagrangian adapters share
+the same rate augmentation and shear-power arithmetic. No alternate collision,
+wall solver or material law is introduced. This remains explicit, low-Mach
+sensible-temperature transport; modeled kinetic transfer is diagnostic rather
+than heat deposition, and no total-energy or turbulent-DNS claim is added.
+
+Five new native regressions compare multiple evolving steps against the
+independent shared history owner and original transport, including fixed and
+adaptive momentum memory, independently positive heat, actual wall policies,
+Guo frames, exact zero controls and late refusal/replay. Three material groups
+cover all wrappers, fresh source epochs and endpoint buoyancy, then warmed
+history rollback after late source refusal and cancellation. All changed Rust
+files passed pinned parser checks and bounded source review. These eight new
+integration regressions have not been compiled or executed because required
+dependency artifacts and build storage are unavailable; earlier shared-kernel
+and atmospheric test results do not establish this native integration gate.

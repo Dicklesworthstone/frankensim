@@ -105,6 +105,113 @@ fn admit_bytes(required: usize, maximum: usize) -> Result<(), ThermalSgsError> {
     }
 }
 
+// Both instantaneous and pathline fits use the same actual thermal wall law.
+pub(super) fn scalar_walls(
+    state: &ThermalLbm3,
+    plane: usize,
+) -> Result<[ScalarWall; 2], ThermalSgsError> {
+    let mut walls = [ScalarWall::ZeroGradient; 2];
+    for (scalar, field) in walls.iter_mut().zip(state.thermal_wall_fields()) {
+        field.validate(plane)
+            .map_err(|_| ThermalSgsError::Invalid("invalid thermal wall for channel SGS"))?;
+        *scalar = match field.uniform() {
+            Some(ThermalWall::Temperature(value)) => ScalarWall::Value(value),
+            Some(ThermalWall::Adiabatic) => ScalarWall::ZeroGradient,
+            Some(ThermalWall::HeatFlux(flux)) if flux == 0.0 => ScalarWall::ZeroGradient,
+            Some(ThermalWall::Convective { transfer, .. }) if transfer == 0.0 => {
+                ScalarWall::ZeroGradient
+            }
+            _ => ScalarWall::Interior,
+        };
+    }
+    Ok(walls)
+}
+
+// Admitted full-slab molecular rates are augmented independently by the two
+// fluid-only fields. Shared by both dynamic owners so zero controls, ratio
+// refusal, source units and physical shear accounting cannot drift apart.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn augment_transport(
+    state: &ThermalLbm3,
+    density: &[f64],
+    velocity: &[[f64; 3]],
+    momentum: &mut [f64],
+    thermal: &mut [f64],
+    eddies: &[f64],
+    diffusivities: &[f64],
+    maximum_eddy_to_molecular: f64,
+    maximum_diffusivity_to_molecular: f64,
+    gate: &CancelGate,
+) -> Result<ThermalSgsReport, ThermalSgsError> {
+    let (cells, plane) = state.layout()?;
+    let mut transport = ThermalSgsReport::default();
+    for active in 0..cells - 2 * plane {
+        if active % 64 == 0 {
+            poll(gate)?;
+        }
+        let cell = active + plane;
+        let nu = (momentum[cell] - 0.5) / 3.0;
+        let alpha = (thermal[cell] - 0.5) / 4.0;
+        let eddy = eddies[active];
+        let diffusivity = diffusivities[active];
+        let ratio = eddy / nu;
+        if !ratio.is_finite() || ratio > maximum_eddy_to_molecular {
+            return Err(SgsError::ViscosityRatioExceeded {
+                cell,
+                ratio,
+                maximum: maximum_eddy_to_molecular,
+            }
+            .into());
+        }
+        let heat_ratio = diffusivity / alpha;
+        if !heat_ratio.is_finite() || heat_ratio > maximum_diffusivity_to_molecular {
+            return Err(ThermalSgsError::DiffusivityRatio {
+                cell,
+                ratio: heat_ratio,
+                maximum: maximum_diffusivity_to_molecular,
+            });
+        }
+        if eddy != 0.0 {
+            momentum[cell] = 0.5 + 3.0 * (nu + eddy);
+        }
+        if diffusivity != 0.0 {
+            thermal[cell] = 0.5 + 4.0 * (alpha + diffusivity);
+        }
+        if !momentum[cell].is_finite() || !thermal[cell].is_finite() {
+            return Err(ThermalSgsError::Invalid(
+                "total channel SGS transport is not representable",
+            ));
+        }
+        let gradient = state.thermal_sgs_gradient(cell, |i| velocity[i - plane]);
+        let dilation_third = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
+        let mut strain2 = 0.0;
+        for i in 0..3 {
+            for j in 0..3 {
+                let s = 0.5 * (gradient[i][j] + gradient[j][i])
+                    - if i == j { dilation_third } else { 0.0 };
+                strain2 += s * s;
+            }
+        }
+        let factor = 2.0 * density[active] * strain2;
+        transport.momentum.fluid_cells += 1;
+        transport.momentum.resolved_dissipation_lu += factor * nu;
+        transport.momentum.sgs_dissipation_lu += factor * eddy;
+        transport.momentum.maximum_eddy_viscosity_lu =
+            transport.momentum.maximum_eddy_viscosity_lu.max(eddy);
+        transport.momentum.maximum_eddy_to_molecular =
+            transport.momentum.maximum_eddy_to_molecular.max(ratio);
+        transport.maximum_eddy_diffusivity_lu =
+            transport.maximum_eddy_diffusivity_lu.max(diffusivity);
+    }
+    poll(gate)?;
+    if !transport.momentum.resolved_dissipation_lu.is_finite()
+        || !transport.momentum.sgs_dissipation_lu.is_finite()
+    {
+        return Err(SgsError::NonFiniteViscosity.into());
+    }
+    Ok(transport)
+}
+
 impl ThermalLbm3 {
     /// Numerical payload for the two nonlocal filters, current rho/u/T and
     /// full step-local rates. Fixed metadata and the source snapshot are separate.
@@ -187,20 +294,7 @@ impl ThermalLbm3 {
         poll(gate)?;
         config.validate()?;
         let (cells, plane) = self.layout()?;
-        let mut scalar_walls = [ScalarWall::ZeroGradient; 2];
-        for (scalar, field) in scalar_walls.iter_mut().zip(self.thermal_wall_fields()) {
-            field.validate(plane)
-                .map_err(|_| ThermalSgsError::Invalid("invalid thermal wall for channel SGS"))?;
-            *scalar = match field.uniform() {
-                Some(ThermalWall::Temperature(value)) => ScalarWall::Value(value),
-                Some(ThermalWall::Adiabatic) => ScalarWall::ZeroGradient,
-                Some(ThermalWall::HeatFlux(flux)) if flux == 0.0 => ScalarWall::ZeroGradient,
-                Some(ThermalWall::Convective { transfer, .. }) if transfer == 0.0 => {
-                    ScalarWall::ZeroGradient
-                }
-                _ => ScalarWall::Interior,
-            };
-        }
+        let scalar_walls = scalar_walls(self, plane)?;
         let fluid = cells - 2 * plane;
         if workspace.filter.shape() != [self.grid.nx, self.grid.ny, self.grid.nz - 2]
             || workspace.velocity.len() != fluid
@@ -246,72 +340,18 @@ impl ThermalLbm3 {
             &mut workspace.scalar,
             || gate.is_requested(),
         )?;
-        let mut transport = ThermalSgsReport::default();
-        for active in 0..fluid {
-            if active % 64 == 0 {
-                poll(gate)?;
-            }
-            let cell = active + plane;
-            let nu = (workspace.momentum[cell] - 0.5) / 3.0;
-            let alpha = (workspace.thermal[cell] - 0.5) / 4.0;
-            let eddy = workspace.filter.viscosities()[active];
-            let diffusivity = workspace.scalar.diffusivities()[active];
-            let ratio = eddy / nu;
-            if !ratio.is_finite() || ratio > config.momentum.maximum_eddy_to_molecular {
-                return Err(SgsError::ViscosityRatioExceeded {
-                    cell,
-                    ratio,
-                    maximum: config.momentum.maximum_eddy_to_molecular,
-                }
-                .into());
-            }
-            let heat_ratio = diffusivity / alpha;
-            if !heat_ratio.is_finite() || heat_ratio > config.heat.maximum_diffusivity_to_molecular
-            {
-                return Err(ThermalSgsError::DiffusivityRatio {
-                    cell,
-                    ratio: heat_ratio,
-                    maximum: config.heat.maximum_diffusivity_to_molecular,
-                });
-            }
-            if eddy != 0.0 {
-                workspace.momentum[cell] = 0.5 + 3.0 * (nu + eddy);
-            }
-            if diffusivity != 0.0 {
-                workspace.thermal[cell] = 0.5 + 4.0 * (alpha + diffusivity);
-            }
-            if !workspace.momentum[cell].is_finite() || !workspace.thermal[cell].is_finite() {
-                return Err(ThermalSgsError::Invalid(
-                    "total channel SGS transport is not representable",
-                ));
-            }
-            let gradient = self.thermal_sgs_gradient(cell, |i| workspace.velocity[i - plane]);
-            let dilation_third = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
-            let mut strain2 = 0.0;
-            for i in 0..3 {
-                for j in 0..3 {
-                    let s = 0.5 * (gradient[i][j] + gradient[j][i])
-                        - if i == j { dilation_third } else { 0.0 };
-                    strain2 += s * s;
-                }
-            }
-            let factor = 2.0 * workspace.density[active] * strain2;
-            transport.momentum.fluid_cells += 1;
-            transport.momentum.resolved_dissipation_lu += factor * nu;
-            transport.momentum.sgs_dissipation_lu += factor * eddy;
-            transport.momentum.maximum_eddy_viscosity_lu =
-                transport.momentum.maximum_eddy_viscosity_lu.max(eddy);
-            transport.momentum.maximum_eddy_to_molecular =
-                transport.momentum.maximum_eddy_to_molecular.max(ratio);
-            transport.maximum_eddy_diffusivity_lu =
-                transport.maximum_eddy_diffusivity_lu.max(diffusivity);
-        }
-        poll(gate)?;
-        if !transport.momentum.resolved_dissipation_lu.is_finite()
-            || !transport.momentum.sgs_dissipation_lu.is_finite()
-        {
-            return Err(SgsError::NonFiniteViscosity.into());
-        }
+        let transport = augment_transport(
+            self,
+            &workspace.density,
+            &workspace.velocity,
+            &mut workspace.momentum,
+            &mut workspace.thermal,
+            workspace.filter.viscosities(),
+            workspace.scalar.diffusivities(),
+            config.momentum.maximum_eddy_to_molecular,
+            config.heat.maximum_diffusivity_to_molecular,
+            gate,
+        )?;
         Ok(ThermalChannelSgsReport {
             momentum_fit,
             heat_fit,

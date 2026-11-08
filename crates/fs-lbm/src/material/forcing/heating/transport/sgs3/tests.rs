@@ -7,6 +7,8 @@ use crate::sgs3::{SgsConfig, SgsError, SgsModel, SgsUse};
 use std::cell::Cell;
 use std::rc::Rc;
 
+mod lagrangian;
+
 const PLANE: usize = 20;
 const FLUID: usize = 100;
 const CELLS: usize = FLUID + 2 * PLANE;

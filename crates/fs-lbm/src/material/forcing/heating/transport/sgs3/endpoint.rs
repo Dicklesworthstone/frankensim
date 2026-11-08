@@ -14,7 +14,7 @@ pub struct MaterialSgsEndpointStep<F, R> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn advance<F: FluidTransport, R: Default>(
+pub(super) fn advance<F: FluidTransport, R>(
     slab: &mut MaterialSlab<ThermalLbm3>,
     power: &[f64], forces: &[[f64; 3]], limits: HeatSourceLimits,
     buoyancy: BoussinesqConfig<3>, gate: &CancelGate,
@@ -25,7 +25,7 @@ fn advance<F: FluidTransport, R: Default>(
     ) -> Result<(HeatBalance, R), MaterialTransportError>,
 ) -> Result<MaterialSgsEndpointStep<F, R>, MaterialTransportError> {
     let depth = slab.force_units.cell_size_m;
-    let mut sgs = R::default();
+    let mut sgs = None;
     let material = boussinesq::advance_with_candidate::<ThermalLbm3, F, 3, 7>(
         slab, power, forces, depth, limits, buoyancy, gate, resolve,
         |mapping, input, applied, mut bounded| {
@@ -34,13 +34,16 @@ fn advance<F: FluidTransport, R: Default>(
                 buoyancy, gate, &mut bounded,
                 |candidate, input, molecular, force| {
                     let (heat, report) = step(candidate, input, molecular, force)?;
-                    sgs = report;
+                    sgs = Some(report);
                     Ok(heat)
                 },
             )
         },
     )?;
-    Ok(MaterialSgsEndpointStep { material, sgs })
+    Ok(MaterialSgsEndpointStep {
+        material,
+        sgs: sgs.expect("accepted material endpoint produced its SGS receipt"),
+    })
 }
 
 impl MaterialSlab<ThermalLbm3> {
