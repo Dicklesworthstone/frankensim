@@ -4,6 +4,10 @@ mod circuit;
 #[path = "harmonic/terminals.rs"]
 mod terminals;
 
+#[cfg(feature = "harmonic-winding-heating")]
+#[path = "harmonic/coherent.rs"]
+mod coherent;
+
 use super::*;
 #[path = "../../../fs-conduction/tests/radiation_material/common.rs"]
 mod radiative;
@@ -55,10 +59,14 @@ fn absolute_temperature() -> QuantitySpec {
 }
 
 fn card(variable_mu: bool, rho: f64, emissivity: f64) -> MaterialCard {
+    card_with_alpha(variable_mu, rho, emissivity, ALPHA)
+}
+
+fn card_with_alpha(variable_mu: bool, rho: f64, emissivity: f64, alpha: f64) -> MaterialCard {
     let original = if variable_mu {
         source::magnetic_curve_card(rho, 1.0, BASIS)
     } else {
-        source::card(rho, ALPHA, 1.0, BASIS)
+        source::card(rho, alpha, 1.0, BASIS)
     };
     let mut claims = ClaimSet::new();
     for (_, source) in original.claims().claims_ordered() {
@@ -107,9 +115,24 @@ fn with_case<R>(
         &MaterialCard,
     ) -> R,
 ) -> R {
+    with_case_with_alpha(variable_mu, resistance, ALPHA, run)
+}
+
+fn with_case_with_alpha<R>(
+    variable_mu: bool,
+    resistance: f64,
+    alpha: f64,
+    run: impl FnOnce(
+        &Cx<'_>,
+        &CancelGate,
+        &MaterialHeatNetwork<'_>,
+        DepositionSimulation<'_>,
+        &MaterialCard,
+    ) -> R,
+) -> R {
     let cards = [
-        card(variable_mu, RHO, EMISSIVITY[0]),
-        card(false, RHO, EMISSIVITY[1]),
+        card_with_alpha(variable_mu, RHO, EMISSIVITY[0], alpha),
+        card_with_alpha(false, RHO, EMISSIVITY[1], alpha),
     ];
     let curves = cards.iter().map(curve).collect::<Vec<_>>();
     let context = source::absolute_point(300.0);

@@ -335,6 +335,12 @@ impl<'s, 'm, C: SpatialConductorMaterial> SpatialHarmonicInductionExposure<'s, '
     pub fn source(&self) -> &'s SpatialInduction<'m, C> {
         self.source
     }
+
+    /// Original prescribed nodal velocity, retained when this bank was prepared.
+    /// A fixed caloric receiver must admit this motion before reusing its heat.
+    pub fn prescribed_velocity_m_s(&self) -> &[[f64; 3]] {
+        &self.velocity_m_s
+    }
     pub fn distinct_frequencies(&self) -> usize {
         self.lines.len()
     }

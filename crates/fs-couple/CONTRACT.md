@@ -8282,3 +8282,34 @@ Liouville's identity; and check physical-port conversion into both signed
 sidebands against weak-pump perturbation coefficients. Admission regressions
 cover Fourier symmetry/DC, clock mismatch, tiny high-harmonic bandwidth,
 explicit sideband payload limits and declared-Hessian refusal.
+
+## Coherent three-dimensional induction heat in finite caloric cells
+
+With `harmonic-winding-heating`,
+`circuit_enthalpy::spatial_induction::harmonic::coherent::heat_assembly_candidate`
+connects the original `SpatialHarmonicInductionExposure` bank to the existing
+finite-cell enthalpy/Newton owner and complete `HeatAssembly`. One native
+observation integrates the actual thermal interval on the authored source clock.
+Spatial P1 Joule heat, carrier terms and inter-frequency beats survive; the
+observation and cell routes are reused throughout thermal trials. Original
+cycle means, magnetic storage and mechanical work are not deposited again.
+
+Every conductor requires an original whole-volume solid caloric receiver.
+Prescribed conductor motion refuses. Original scalar/oriented electrical
+sources and induced-linear magnetic laws must be independent of the evolving
+temperature, preserve their selected sources and resolve to the same prepared
+coefficients at every proposal. Coincident endpoint values or zero heating do
+not bypass the source-law admission. Material identity, nonthermal conditions,
+fixed density/volume and caloric domain remain checked by the existing owners.
+Source-temperature-dependent heat transport, contacts, layers, closed radiation
+and finite coolant continue to resolve at each actual candidate temperature.
+
+The public report retains the original exposure and accepted material payload,
+plus deposited heat, other external heat and a corrected caloric residual.
+It closes only thermal storage against these transfers; it does not infer
+electrical supply, electromagnetic storage changes, entropy, startup or feedback.
+The original backward-Euler thermal discretization still needs time refinement.
+Refusal/cancellation returns no endpoint and leaves accepted field and caloric
+histories reusable. Tests compare two consecutive beat-heated intervals against
+independent physical-time integration and nonlinear contact/radiation balances,
+and cover evolving-source refusal, late heat failure, cancellation and retry.

@@ -12,6 +12,10 @@
 //! independent. Use retained transient induction for startup, rapid modulation,
 //! magnetic entropy, moving material, saturation or hysteretic losses.
 
+/// Exact coherent field heat on the original finite-cell thermal residual.
+#[cfg(feature = "harmonic-winding-heating")]
+pub mod coherent;
+
 /// Source-bound loaded circuits and conductor/resistor thermal feedback.
 pub mod circuit;
 /// Physical voltage/current electrodes on the same settled thermal residual.
