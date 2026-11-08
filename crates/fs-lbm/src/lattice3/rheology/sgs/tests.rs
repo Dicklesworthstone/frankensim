@@ -1,5 +1,7 @@
 //! Source/SGS composition on the original collision and force-history owners.
 
+mod lagrangian;
+
 use super::super::tests::{bits, collision, fluid, grid27, storage_addresses, with_cx, with_gate};
 use super::*;
 use crate::d3q27::{CollisionConfig27, CollisionModel27, D3q27, Equilibrium27, equilibrium27};

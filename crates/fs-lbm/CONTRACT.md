@@ -206,3 +206,29 @@ All support/work failures and cancellation refuse without a partial film.
 Focused regressions compare the exact constant-source Nusselt limit at shifted
 temperature, an independently integrated nonlinear profile, gravity/heat balance,
 source limits and cancellation.
+
+## Lagrangian turbulence with source-resolved rheology
+
+`RheologySgs3::Lagrangian` composes the original source-resolved molecular
+viscosity with pathline-averaged dynamic SGS on periodic or stationary channel
+grids. `ChannelRheologySgs3::Lagrangian` uses the same history with prescribed
+moving channel walls. Source shear, turbulence fitting and pathline departures
+use the same incoming Guo force frame and physical wall velocities. Material
+queries retain SI shear and time; the authored SGS memory time remains in
+lattice timesteps. Each step samples molecular transport afresh, without
+feeding an earlier augmented viscosity back into the source law.
+
+The original source and filter workspaces own all numerical storage. The
+history trial remains unpublished through collision, streaming, endpoint-force
+admission and moving-wall work measurement. Only a successful native step
+commits its populations, force/clock, source report and turbulence memory;
+rejected candidates preserve the elapsed history interval for a retry. The
+`Lagrangian` report variant distinguishes this model from instantaneous fits.
+
+Focused G0/G3/G4 regressions compare several evolving periodic/channel steps
+with the independently composed native operators, serial/pooled results,
+source/force refusal and retry, and thermal Carreau--Yasuda moving channels
+in all three orientations. This retains the exploratory closure's topology,
+coefficient, molecular-ratio and departure bounds. It does not supply
+unresolved non-Newtonian stress correlations, an adaptive memory timescale,
+a thermal energy equation or turbulent-DNS validation.

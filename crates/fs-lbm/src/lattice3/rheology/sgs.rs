@@ -6,17 +6,20 @@
 //! the same accepted Guo force frame. A next-time force enters only the native
 //! transaction, never the incoming material query or turbulence fit.
 //!
-//! The existing source and SGS workspaces own all scratch. Source epochs and
-//! the applied collision field publish only after the original step succeeds.
+//! The existing source and SGS workspaces own all scratch. Source epochs,
+//! Lagrangian turbulence memory and the applied collision field publish only
+//! after the original step succeeds. A rejected source, fit or native step
+//! cannot age the turbulence history or change its retry interval.
 //! This explicit resolved-shear closure does not model correlations between
 //! unresolved strain and nonlinear molecular viscosity, or add a heat equation.
 
 use super::*;
 use crate::sgs3::dynamic::DynamicSgsConfig;
 use crate::sgs3::dynamic::channel::ChannelDynamicSgsConfig;
+use crate::sgs3::dynamic::lagrangian::{LagrangianSgsConfig, LagrangianSgsTrial};
 use crate::sgs3::{
-    ChannelDynamicSgsWorkspace3, DynamicSgsStepReport, DynamicSgsWorkspace3, SgsConfig,
-    SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3,
+    ChannelDynamicSgsWorkspace3, DynamicSgsStepReport, DynamicSgsWorkspace3,
+    LagrangianSgsWorkspace3, SgsConfig, SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3,
 };
 
 mod moving_walls;
@@ -38,6 +41,13 @@ pub enum RheologySgs3<'a, C> {
         config: ChannelDynamicSgsConfig,
         workspace: &'a mut ChannelDynamicSgsWorkspace3<C>,
     },
+    /// Pathline-averaged dynamic fit on the workspace's periodic or stationary
+    /// channel geometry. Memory time is in lattice timesteps. Keep this same
+    /// workspace with the evolving flow; history commits with the native step.
+    Lagrangian {
+        config: LagrangianSgsConfig,
+        workspace: &'a mut LagrangianSgsWorkspace3<C>,
+    },
 }
 
 /// Diagnostics from the same incoming source/velocity epoch.
@@ -45,6 +55,7 @@ pub enum RheologySgs3<'a, C> {
 pub enum RheologySgsReport3 {
     Local(SgsReport),
     Dynamic(DynamicSgsStepReport),
+    Lagrangian(DynamicSgsStepReport),
 }
 
 /// Published source epoch and turbulence diagnostics from one accepted step.
@@ -85,13 +96,32 @@ impl<E: core::fmt::Debug> core::fmt::Display for RheologySgsError3<E> {
 }
 impl<E: core::fmt::Debug> std::error::Error for RheologySgsError3<E> {}
 
+// An uncommitted history must live across collision/streaming, including
+// native endpoint-force and moving-wall admission. Dropping this preparation
+// rejects only scratch; publication below is infallible and allocation-free.
+struct PreparedSgs<'a, C> {
+    report: RheologySgsReport3,
+    applied: &'a [C],
+    history: Option<LagrangianSgsTrial<'a>>,
+}
+
+impl<C> PreparedSgs<'_, C> {
+    fn commit(self) -> RheologySgsReport3 {
+        if let Some(history) = self.history {
+            history.commit();
+        }
+        self.report
+    }
+}
+
 fn prepare_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
     grid: &Grid3<L, Q>,
     forces: Option<&[[f64; 3]]>,
     collisions: &mut [L::Collision],
     sgs: RheologySgs3<'a, L::Collision>,
     mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
-) -> Result<(RheologySgsReport3, &'a [L::Collision]), SgsStepError<L::Error>> {
+) -> Result<PreparedSgs<'a, L::Collision>, SgsStepError<L::Error>> {
+    let mut history = None;
     let (report, applied) = match sgs {
         RheologySgs3::Local { config, workspace } => {
             let report = grid.prepare_sgs_with_forces(
@@ -123,6 +153,26 @@ fn prepare_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
             )?;
             (RheologySgsReport3::Dynamic(report), workspace.collisions())
         }
+        RheologySgs3::Lagrangian { config, workspace } => {
+            let (trial, dissipation) = grid.prepare_lagrangian_sgs_with_motion(
+                config,
+                Some(&*collisions),
+                &mut workspace.local,
+                &mut workspace.filter,
+                forces,
+                None,
+                &mut checkpoint,
+            )?;
+            let report = DynamicSgsStepReport {
+                fit: trial.report(),
+                dissipation,
+            };
+            history = Some(trial);
+            (
+                RheologySgsReport3::Lagrangian(report),
+                workspace.local.collisions(),
+            )
+        }
     };
     // Both preparations admit exactly the native cell count. Retain the
     // applied field in trial scratch BEFORE native publication, with bounded
@@ -132,7 +182,11 @@ fn prepare_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
         trial.copy_from_slice(field);
     }
     checkpoint()?;
-    Ok((report, applied))
+    Ok(PreparedSgs {
+        report,
+        applied,
+        history,
+    })
 }
 
 // No fallible or O(N) work follows native population/clock publication.
@@ -176,12 +230,11 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         prepare_workspace(self, reference, None, workspace, resolve, || {
             cx.checkpoint().map_err(|_| GridError3::Cancelled)
         })?;
-        let (report, applied) =
-            prepare_sgs(self, None, &mut workspace.trial.collisions, sgs, || {
-                cx.checkpoint().map_err(|_| GridError3::Cancelled)
-            })?;
-        self.step_serial_with_collisions(cx, applied)?;
-        Ok(publish(workspace, report))
+        let prepared = prepare_sgs(self, None, &mut workspace.trial.collisions, sgs, || {
+            cx.checkpoint().map_err(|_| GridError3::Cancelled)
+        })?;
+        self.step_serial_with_collisions(cx, prepared.applied)?;
+        Ok(publish(workspace, prepared.commit()))
     }
 
     /// The same source and SGS preparation followed by the original pooled
@@ -203,12 +256,11 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         prepare_workspace(self, reference, None, workspace, resolve, || {
             gate_poll(gate)
         })?;
-        let (report, applied) =
-            prepare_sgs(self, None, &mut workspace.trial.collisions, sgs, || {
-                gate_poll(gate)
-            })?;
-        self.step_pooled_with_collisions(pool, gate, applied)?;
-        Ok(publish(workspace, report))
+        let prepared = prepare_sgs(self, None, &mut workspace.trial.collisions, sgs, || {
+            gate_poll(gate)
+        })?;
+        self.step_pooled_with_collisions(pool, gate, prepared.applied)?;
+        Ok(publish(workspace, prepared.commit()))
     }
 }
 
@@ -235,15 +287,15 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             resolve,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
-        let (report, applied) = prepare_sgs(
+        let prepared = prepare_sgs(
             &self.grid,
             Some(self.forces()),
             &mut workspace.trial.collisions,
             sgs,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
-        self.step_serial(cx, applied)?;
-        Ok(publish(workspace, report))
+        self.step_serial(cx, prepared.applied)?;
+        Ok(publish(workspace, prepared.commit()))
     }
 
     /// Resolve both molecular and modeled viscosity at F_n, then pass F_(n+1)
@@ -270,15 +322,15 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             resolve,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
-        let (report, applied) = prepare_sgs(
+        let prepared = prepare_sgs(
             &self.grid,
             Some(self.forces()),
             &mut workspace.trial.collisions,
             sgs,
             || cx.checkpoint().map_err(|_| GridError3::Cancelled),
         )?;
-        self.advance_serial(cx, applied, forces_at_end)?;
-        Ok(publish(workspace, report))
+        self.advance_serial(cx, prepared.applied, forces_at_end)?;
+        Ok(publish(workspace, prepared.commit()))
     }
 
     /// Pooled composition retaining the actual incoming spatial force frame.
@@ -304,15 +356,15 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             resolve,
             || gate_poll(gate),
         )?;
-        let (report, applied) = prepare_sgs(
+        let prepared = prepare_sgs(
             &self.grid,
             Some(self.forces()),
             &mut workspace.trial.collisions,
             sgs,
             || gate_poll(gate),
         )?;
-        self.step_pooled(pool, gate, applied)?;
-        Ok(publish(workspace, report))
+        self.step_pooled(pool, gate, prepared.applied)?;
+        Ok(publish(workspace, prepared.commit()))
     }
 
     /// Pooled source/SGS composition with one original force-history advance.
@@ -340,15 +392,15 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             resolve,
             || gate_poll(gate),
         )?;
-        let (report, applied) = prepare_sgs(
+        let prepared = prepare_sgs(
             &self.grid,
             Some(self.forces()),
             &mut workspace.trial.collisions,
             sgs,
             || gate_poll(gate),
         )?;
-        self.advance_pooled(pool, gate, applied, forces_at_end)?;
-        Ok(publish(workspace, report))
+        self.advance_pooled(pool, gate, prepared.applied, forces_at_end)?;
+        Ok(publish(workspace, prepared.commit()))
     }
 }
 

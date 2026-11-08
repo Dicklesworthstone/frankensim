@@ -6,6 +6,8 @@
 //! Finally one original native collision/stream applies the resulting rates and
 //! returns the actual moving-wall momentum/work receipt. No second collision,
 //! duplicate population buffer or persistent eddy viscosity is introduced.
+//! A Lagrangian selection retains its wall-aware pathline memory until that
+//! entire native transaction succeeds; refusals discard the candidate history.
 
 use super::super::moving_walls::channel_walls;
 use super::*;
@@ -26,6 +28,12 @@ pub enum ChannelRheologySgs3<'a, C> {
         config: ChannelDynamicSgsConfig,
         workspace: &'a mut ChannelDynamicSgsWorkspace3<C>,
     },
+    /// The workspace must be a channel with this same wall-normal axis.
+    /// Current wall velocities drive both source rheology and history fitting.
+    Lagrangian {
+        config: LagrangianSgsConfig,
+        workspace: &'a mut LagrangianSgsWorkspace3<C>,
+    },
 }
 
 fn prepare_channel_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
@@ -35,7 +43,8 @@ fn prepare_channel_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
     sgs: ChannelRheologySgs3<'a, L::Collision>,
     motion: WallMotion3<'_, L, Q>,
     mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
-) -> Result<(RheologySgsReport3, &'a [L::Collision]), SgsStepError<L::Error>> {
+) -> Result<PreparedSgs<'a, L::Collision>, SgsStepError<L::Error>> {
+    let mut history = None;
     let (report, applied) = match sgs {
         ChannelRheologySgs3::Local { config, workspace } => {
             let report = grid.prepare_channel_sgs_with_motion(
@@ -59,13 +68,37 @@ fn prepare_channel_sgs<'a, L: SgsLattice3<Q>, const Q: usize>(
             )?;
             (RheologySgsReport3::Dynamic(report), workspace.collisions())
         }
+        ChannelRheologySgs3::Lagrangian { config, workspace } => {
+            let (trial, dissipation) = grid.prepare_lagrangian_sgs_with_motion(
+                config,
+                Some(&*collisions),
+                &mut workspace.local,
+                &mut workspace.filter,
+                forces,
+                Some(motion),
+                &mut checkpoint,
+            )?;
+            let report = DynamicSgsStepReport {
+                fit: trial.report(),
+                dissipation,
+            };
+            history = Some(trial);
+            (
+                RheologySgsReport3::Lagrangian(report),
+                workspace.local.collisions(),
+            )
+        }
     };
     for (trial, field) in collisions.chunks_mut(64).zip(applied.chunks(64)) {
         checkpoint()?;
         trial.copy_from_slice(field);
     }
     checkpoint()?;
-    Ok((report, applied))
+    Ok(PreparedSgs {
+        report,
+        applied,
+        history,
+    })
 }
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
@@ -91,14 +124,29 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         let mut checkpoint = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
         let walls = channel_walls(self, &motion, &mut checkpoint)?;
         prepare_workspace_with_walls(
-            self, reference, None, Some(walls), workspace, resolve, &mut checkpoint,
+            self,
+            reference,
+            None,
+            Some(walls),
+            workspace,
+            resolve,
+            &mut checkpoint,
         )?;
-        let (report, applied) = prepare_channel_sgs(
-            self, None, &mut workspace.trial.collisions, sgs, motion, &mut checkpoint,
+        let prepared = prepare_channel_sgs(
+            self,
+            None,
+            &mut workspace.trial.collisions,
+            sgs,
+            motion,
+            &mut checkpoint,
         )?;
-        let wall =
-            self.step_serial_with_moving_wall_momentum(cx, probe, velocities, Some(applied))?;
-        Ok((publish(workspace, report), wall))
+        let wall = self.step_serial_with_moving_wall_momentum(
+            cx,
+            probe,
+            velocities,
+            Some(prepared.applied),
+        )?;
+        Ok((publish(workspace, prepared.commit()), wall))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -125,15 +173,30 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         let mut checkpoint = || gate_poll(gate);
         let walls = channel_walls(self, &motion, &mut checkpoint)?;
         prepare_workspace_with_walls(
-            self, reference, None, Some(walls), workspace, resolve, &mut checkpoint,
+            self,
+            reference,
+            None,
+            Some(walls),
+            workspace,
+            resolve,
+            &mut checkpoint,
         )?;
-        let (report, applied) = prepare_channel_sgs(
-            self, None, &mut workspace.trial.collisions, sgs, motion, &mut checkpoint,
+        let prepared = prepare_channel_sgs(
+            self,
+            None,
+            &mut workspace.trial.collisions,
+            sgs,
+            motion,
+            &mut checkpoint,
         )?;
         let wall = self.step_pooled_with_moving_wall_momentum(
-            pool, gate, probe, velocities, Some(applied),
+            pool,
+            gate,
+            probe,
+            velocities,
+            Some(prepared.applied),
         )?;
-        Ok((publish(workspace, report), wall))
+        Ok((publish(workspace, prepared.commit()), wall))
     }
 }
 
@@ -160,15 +223,25 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         let mut checkpoint = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
         let walls = channel_walls(&self.grid, &motion, &mut checkpoint)?;
         prepare_workspace_with_walls(
-            &self.grid, reference, Some(self.forces()), Some(walls), workspace, resolve,
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            Some(walls),
+            workspace,
+            resolve,
             &mut checkpoint,
         )?;
-        let (report, applied) = prepare_channel_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs, motion,
+        let prepared = prepare_channel_sgs(
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
+            motion,
             &mut checkpoint,
         )?;
-        let wall = self.step_serial_with_moving_wall_momentum(cx, probe, velocities, applied)?;
-        Ok((publish(workspace, report), wall))
+        let wall =
+            self.step_serial_with_moving_wall_momentum(cx, probe, velocities, prepared.applied)?;
+        Ok((publish(workspace, prepared.commit()), wall))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -194,17 +267,30 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         let mut checkpoint = || cx.checkpoint().map_err(|_| GridError3::Cancelled);
         let walls = channel_walls(&self.grid, &motion, &mut checkpoint)?;
         prepare_workspace_with_walls(
-            &self.grid, reference, Some(self.forces()), Some(walls), workspace, resolve,
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            Some(walls),
+            workspace,
+            resolve,
             &mut checkpoint,
         )?;
-        let (report, applied) = prepare_channel_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs, motion,
+        let prepared = prepare_channel_sgs(
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
+            motion,
             &mut checkpoint,
         )?;
         let wall = self.advance_serial_with_moving_wall_momentum(
-            cx, probe, velocities, applied, forces_at_end,
+            cx,
+            probe,
+            velocities,
+            prepared.applied,
+            forces_at_end,
         )?;
-        Ok((publish(workspace, report), wall))
+        Ok((publish(workspace, prepared.commit()), wall))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -231,16 +317,30 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         let mut checkpoint = || gate_poll(gate);
         let walls = channel_walls(&self.grid, &motion, &mut checkpoint)?;
         prepare_workspace_with_walls(
-            &self.grid, reference, Some(self.forces()), Some(walls), workspace, resolve,
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            Some(walls),
+            workspace,
+            resolve,
             &mut checkpoint,
         )?;
-        let (report, applied) = prepare_channel_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs, motion,
+        let prepared = prepare_channel_sgs(
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
+            motion,
             &mut checkpoint,
         )?;
-        let wall =
-            self.step_pooled_with_moving_wall_momentum(pool, gate, probe, velocities, applied)?;
-        Ok((publish(workspace, report), wall))
+        let wall = self.step_pooled_with_moving_wall_momentum(
+            pool,
+            gate,
+            probe,
+            velocities,
+            prepared.applied,
+        )?;
+        Ok((publish(workspace, prepared.commit()), wall))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -268,16 +368,30 @@ impl<L: SgsLattice3<Q> + ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
         let mut checkpoint = || gate_poll(gate);
         let walls = channel_walls(&self.grid, &motion, &mut checkpoint)?;
         prepare_workspace_with_walls(
-            &self.grid, reference, Some(self.forces()), Some(walls), workspace, resolve,
+            &self.grid,
+            reference,
+            Some(self.forces()),
+            Some(walls),
+            workspace,
+            resolve,
             &mut checkpoint,
         )?;
-        let (report, applied) = prepare_channel_sgs(
-            &self.grid, Some(self.forces()), &mut workspace.trial.collisions, sgs, motion,
+        let prepared = prepare_channel_sgs(
+            &self.grid,
+            Some(self.forces()),
+            &mut workspace.trial.collisions,
+            sgs,
+            motion,
             &mut checkpoint,
         )?;
         let wall = self.advance_pooled_with_moving_wall_momentum(
-            pool, gate, probe, velocities, applied, forces_at_end,
+            pool,
+            gate,
+            probe,
+            velocities,
+            prepared.applied,
+            forces_at_end,
         )?;
-        Ok((publish(workspace, report), wall))
+        Ok((publish(workspace, prepared.commit()), wall))
     }
 }
