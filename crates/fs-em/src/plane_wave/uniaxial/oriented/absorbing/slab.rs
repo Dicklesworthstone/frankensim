@@ -5,6 +5,9 @@
 //! dielectric heating uses the total field, including counterpropagating
 //! interference. Modes are anchored at their incoming face so attenuation
 //! never requires an exponentially growing transfer matrix.
+//! Either exterior port can supply a coherent incident wave. The two drives
+//! share frequency and transverse wavevector; their relative phase is authored
+//! at their respective crystal faces, including any external optical path.
 //!
 //! The source is the existing finite-slab owner. The surrounding half-spaces
 //! must be lossless and isotropic; the crystal is homogeneous and uniaxial,
@@ -22,7 +25,7 @@ use super::super::{
 };
 use super::{AbsorbingCrystalField, kernel as crystal};
 use fs_material::field_storage::linear_magnetic_permeability;
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 
 mod absorption;
 mod kernel;
@@ -50,6 +53,9 @@ pub struct AbsorbingSlabResponse {
     pub exit_normal_wavenumber_rad_m: C64,
     pub incident_electric_v_m: Vector,
     pub incident_magnetic_a_m: Vector,
+    /// Incoming exit-side amplitudes anchored at z=thickness_m, with kz<0.
+    pub right_incident_electric_v_m: Vector,
+    pub right_incident_magnetic_a_m: Vector,
     pub reflected_electric_v_m: Vector,
     pub reflected_magnetic_a_m: Vector,
     /// Exit-face amplitudes, with no vacuum-phase removal.
@@ -59,10 +65,16 @@ pub struct AbsorbingSlabResponse {
     pub forward: [AbsorbingSlabWave; 2],
     /// Ordinary then extraordinary, anchored at z=thickness_m.
     pub backward: [AbsorbingSlabWave; 2],
+    /// Positive inward power at the entrance port; zero for right-only driving.
     pub incident_normal_power_w_m2: f64,
+    /// Positive inward power at the exit port; zero for entrance-only driving.
+    pub right_incident_normal_power_w_m2: f64,
+    /// Outgoing entrance-port power divided by the sum of both incident powers.
     pub reflected_power_fraction: f64,
+    /// Outgoing exit-port power divided by the sum of both incident powers.
     pub transmitted_power_fraction: f64,
-    /// Net power dissipated in the crystal, from exterior Poynting balance.
+    /// Net power dissipated in the crystal, divided by the sum of incident powers.
+    /// Evaluated from exterior Poynting balance.
     /// Like a difference of measured fluxes, this can round to zero for losses
     /// below floating-point resolution; local tensor heating remains available.
     pub absorbed_power_fraction: f64,
@@ -83,6 +95,13 @@ impl AbsorbingSlabResponse {
         self.loss_f_m
     }
 
+    /// Sum of the positive incoming powers at the two exterior ports [W/m²].
+    pub fn total_incident_normal_power_w_m2(&self) -> f64 {
+        (Dd::from_f64(self.incident_normal_power_w_m2)
+            + Dd::from_f64(self.right_incident_normal_power_w_m2))
+        .to_f64()
+    }
+
     /// Coherent peak-phasor fields, Poynting flux and nonnegative local tensor
     /// work at a physical point. Repeated observations reuse the solved modes.
     pub fn field_at(&self, region: SlabRegion, point: [f64; 3]) -> Result<AbsorbingCrystalField> {
@@ -90,6 +109,54 @@ impl AbsorbingSlabResponse {
         let mut sum = FieldSum::at_point(point).map_err(ReflectionError::Invalid)?;
         self.add_waves(region, &mut sum)?;
         self.with_heating(region, sum.finish().map_err(ReflectionError::Invalid)?)
+    }
+
+    /// Incoming exit-side field for z>=thickness_m, with negative normal flux.
+    /// A dark exit input returns a zero field, including an evanescent exit.
+    pub fn exit_incident_field_at(&self, point: [f64; 3]) -> Result<AbsorbingCrystalField> {
+        self.exit_field_at(point, false)
+    }
+
+    /// Coherent sum of the incoming and outgoing exit-side waves. The existing
+    /// `field_at(SlabRegion::Transmitted, ...)` continues to return outgoing
+    /// light only. This total field matches the crystal at the exit face.
+    pub fn total_exit_field_at(&self, point: [f64; 3]) -> Result<AbsorbingCrystalField> {
+        self.exit_field_at(point, true)
+    }
+
+    fn exit_field_at(
+        &self,
+        point: [f64; 3],
+        include_outgoing: bool,
+    ) -> Result<AbsorbingCrystalField> {
+        admit_point(SlabRegion::Transmitted, point, self.thickness_m)?;
+        let mut sum = FieldSum::at_point(point).map_err(ReflectionError::Invalid)?;
+        if include_outgoing {
+            self.add_waves(SlabRegion::Transmitted, &mut sum)?;
+        }
+        // An undriven evanescent exit has no incoming wave. Do not evaluate a
+        // growing evanescent propagation factor merely to multiply it by zero.
+        if self
+            .right_incident_electric_v_m
+            .iter()
+            .any(|&v| v != C64::ZERO)
+        {
+            sum.add_wave(
+                &self.right_incident_electric_v_m,
+                &self.right_incident_magnetic_a_m,
+                WaveGeometry {
+                    tangential_wavenumber_rad_m: self.tangential_wavenumber_rad_m,
+                    incidence_plane_axis: self.plane,
+                    normal_wavenumber_rad_m: -self.exit_normal_wavenumber_rad_m,
+                    anchor_z_m: self.thickness_m,
+                },
+            )
+            .map_err(ReflectionError::Invalid)?;
+        }
+        self.with_heating(
+            SlabRegion::Transmitted,
+            sum.finish().map_err(ReflectionError::Invalid)?,
+        )
     }
 
     // Single fields and coherent groups share the original anchored waves.
@@ -204,6 +271,12 @@ impl<'f, 's, 'm> PreparedAbsorbingSlabField<'f, 's, 'm> {
     pub fn field_at(&self, region: SlabRegion, point: [f64; 3]) -> Result<AbsorbingCrystalField> {
         self.response.field_at(region, point)
     }
+    pub fn exit_incident_field_at(&self, point: [f64; 3]) -> Result<AbsorbingCrystalField> {
+        self.response.exit_incident_field_at(point)
+    }
+    pub fn total_exit_field_at(&self, point: [f64; 3]) -> Result<AbsorbingCrystalField> {
+        self.response.total_exit_field_at(point)
+    }
 }
 
 impl<'s, 'm> OrientedUniaxialSlab<'s, 'm> {
@@ -256,12 +329,91 @@ impl<'s, 'm> OrientedUniaxialSlab<'s, 'm> {
         )
     }
 
+    /// Coherent illumination from both faces, sharing the transverse wavevector
+    /// set by the entrance-side incidence cosine. Both arrays are global
+    /// Cartesian Ex/Ey peak phasors: the entrance input is anchored at z=0 and
+    /// the exit input at z=thickness_m. Either input may be dark; both dark
+    /// inputs refuse because power fractions would be undefined. The entrance
+    /// incidence must remain a propagating channel even when its input is dark;
+    /// a nonzero exit input also requires a propagating exit channel. Thus this
+    /// two-port drive uses the shared propagating transverse-wavevector range.
+    pub fn prepare_absorbing_field_from_both_sides(
+        &self,
+        omega_rad_s: f64,
+        incidence_cosine: f64,
+        electric_v_m: [C64; 2],
+        right_electric_v_m: [C64; 2],
+    ) -> Result<PreparedAbsorbingSlabField<'_, 's, 'm>> {
+        self.prepare_absorbing_from_both_sides(
+            omega_rad_s,
+            Incidence::Cosine(incidence_cosine),
+            [1.0, 0.0],
+            electric_v_m,
+            right_electric_v_m,
+        )
+    }
+
+    /// Two-face coherent drive with a signed conserved transverse phase index.
+    /// Port amplitudes and dark-input admission match
+    /// [`Self::prepare_absorbing_field_from_both_sides`].
+    pub fn prepare_absorbing_field_from_both_sides_at_tangential_index(
+        &self,
+        omega_rad_s: f64,
+        index: f64,
+        electric_v_m: [C64; 2],
+        right_electric_v_m: [C64; 2],
+    ) -> Result<PreparedAbsorbingSlabField<'_, 's, 'm>> {
+        self.prepare_absorbing_from_both_sides(
+            omega_rad_s,
+            Incidence::TangentialIndex(index),
+            [1.0, 0.0],
+            electric_v_m,
+            right_electric_v_m,
+        )
+    }
+
+    /// Two-face coherent drive in an arbitrary transverse incidence direction.
+    /// Both Cartesian Jones inputs rotate with the same original crystal axis.
+    pub fn prepare_absorbing_field_from_both_sides_at_tangential_index_in_plane(
+        &self,
+        omega_rad_s: f64,
+        index: f64,
+        plane_axis: [f64; 2],
+        electric_v_m: [C64; 2],
+        right_electric_v_m: [C64; 2],
+    ) -> Result<PreparedAbsorbingSlabField<'_, 's, 'm>> {
+        self.prepare_absorbing_from_both_sides(
+            omega_rad_s,
+            Incidence::TangentialIndex(index),
+            plane_axis,
+            electric_v_m,
+            right_electric_v_m,
+        )
+    }
+
     fn prepare_absorbing(
         &self,
         omega: f64,
         incidence: Incidence,
         plane_axis: [f64; 2],
         electric: [C64; 2],
+    ) -> Result<PreparedAbsorbingSlabField<'_, 's, 'm>> {
+        self.prepare_absorbing_from_both_sides(
+            omega,
+            incidence,
+            plane_axis,
+            electric,
+            [C64::ZERO; 2],
+        )
+    }
+
+    fn prepare_absorbing_from_both_sides(
+        &self,
+        omega: f64,
+        incidence: Incidence,
+        plane_axis: [f64; 2],
+        electric: [C64; 2],
+        right_electric: [C64; 2],
     ) -> Result<PreparedAbsorbingSlabField<'_, 's, 'm>> {
         let omega = positive(omega)?;
         let source = self.entrance_interface();
@@ -281,11 +433,13 @@ impl<'s, 'm> OrientedUniaxialSlab<'s, 'm> {
             axis[1] * plane[0] - axis[0] * plane[1],
             axis[2],
         ];
-        let local_e = [
-            electric[0].scale(plane[0]) + electric[1].scale(plane[1]),
-            electric[1].scale(plane[0]) - electric[0].scale(plane[1]),
-        ];
-        let mut response = kernel::solve(
+        let local = |e: [C64; 2]| {
+            [
+                e[0].scale(plane[0]) + e[1].scale(plane[1]),
+                e[1].scale(plane[0]) - e[0].scale(plane[1]),
+            ]
+        };
+        let mut response = kernel::solve_from_both_sides(
             crystal::Input {
                 omega,
                 ni,
@@ -294,7 +448,7 @@ impl<'s, 'm> OrientedUniaxialSlab<'s, 'm> {
                 mut_: source.crystal.permeability_h_m(),
                 axis: local_axis,
                 incidence,
-                electric: local_e,
+                electric: local(electric),
                 loss_f_m: source
                     .crystal
                     .principal_permittivities_f_m(omega)?
@@ -303,6 +457,7 @@ impl<'s, 'm> OrientedUniaxialSlab<'s, 'm> {
             exit_index,
             exit_mu,
             self.thickness_m(),
+            local(right_electric),
         )
         .map_err(ReflectionError::Invalid)?;
         response

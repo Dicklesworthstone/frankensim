@@ -135,6 +135,9 @@ pub struct SubstrateCellPower {
 /// owner excludes the preceding films; a crystal-film owner includes only its
 /// represented film cells. Residual includes floating-point evaluation;
 /// it is reported, never redistributed into cell heat.
+/// Entering and leaving power are nonnegative sums of inward and outward net
+/// flow across both faces. Each face uses the total field's normal Poynting
+/// flux, including coherent interference between its incident and scattered waves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SubstrateWavePower {
     pub entering_w: f64,

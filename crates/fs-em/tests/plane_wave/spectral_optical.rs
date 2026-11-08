@@ -624,6 +624,87 @@ fn absorbing_crystal_slab_retains_original_sources_and_both_faces() {
             near(a.field.poynting_w_m2[2], b.field.poynting_w_m2[2], 3e-14);
         }
     }
+    // Opposite-face drives retain the same material snapshots and use authored
+    // global Cartesian phasors at each physical face, including a rotated plane.
+    let right_electric = [C64::new(0.2, 0.1), C64::new(-0.3, 0.4)];
+    let both_sides = [
+        slab.prepare_absorbing_field_from_both_sides(omega, 0.8, electric, right_electric)
+            .unwrap(),
+        slab.prepare_absorbing_field_from_both_sides_at_tangential_index(
+            omega,
+            0.4,
+            electric,
+            right_electric,
+        )
+        .unwrap(),
+        slab.prepare_absorbing_field_from_both_sides_at_tangential_index_in_plane(
+            omega,
+            0.4,
+            [3.0, 4.0],
+            electric,
+            right_electric,
+        )
+        .unwrap(),
+    ];
+    for prepared in &both_sides {
+        assert!(core::ptr::eq(prepared.source(), &slab));
+        assert!(core::ptr::eq(
+            prepared.source().entrance_interface(),
+            &entrance
+        ));
+        assert_eq!(
+            prepared.response().principal_loss_permittivities_f_m(),
+            expected_loss
+        );
+        assert!(prepared.response().incident_normal_power_w_m2 > 0.0);
+        assert!(prepared.response().right_incident_normal_power_w_m2 > 0.0);
+        let depth = slab.thickness_m();
+        let incoming = prepared.exit_incident_field_at([0.0, 0.0, depth]).unwrap();
+        for j in 0..2 {
+            complex_near(
+                prepared.response().incident_electric_v_m[j],
+                electric[j],
+                3e-14,
+            );
+            complex_near(incoming.field.electric_v_m[j], right_electric[j], 3e-14);
+        }
+        assert!(incoming.field.poynting_w_m2[2] < 0.0);
+        let inside = prepared
+            .field_at(SlabRegion::Crystal, [0.0, 0.0, depth])
+            .unwrap();
+        let outside = prepared.total_exit_field_at([0.0, 0.0, depth]).unwrap();
+        for j in 0..2 {
+            complex_near(
+                inside.field.electric_v_m[j],
+                outside.field.electric_v_m[j],
+                3e-12,
+            );
+            complex_near(
+                inside.field.magnetic_a_m[j],
+                outside.field.magnetic_a_m[j],
+                3e-14,
+            );
+        }
+        let heat = prepared.slab_absorption(0.025, 0.0, depth).unwrap();
+        assert!(core::ptr::eq(heat.prepared_field(), prepared));
+        near(
+            heat.absorbed_power_w(),
+            0.025
+                * prepared.response().total_incident_normal_power_w_m2()
+                * prepared.response().absorbed_power_fraction,
+            5e-10 * heat.absorbed_power_w(),
+        );
+    }
+    let right_only = slab
+        .prepare_absorbing_field_from_both_sides(omega, 0.8, [C64::ZERO; 2], right_electric)
+        .unwrap();
+    assert_eq!(right_only.response().incident_normal_power_w_m2, 0.0);
+    assert!(right_only.response().right_incident_normal_power_w_m2 > 0.0);
+    assert!(
+        slab.prepare_absorbing_field_from_both_sides(omega, 0.8, [C64::ZERO; 2], [C64::ZERO; 2],)
+            .is_err()
+    );
+
     // Preparing a film must still obey the original finite spectral support.
     assert!(
         slab.prepare_absorbing_field(WL_FREQUENCY_NM / 7000.0, 0.8, electric)
@@ -908,14 +989,16 @@ fn check_absorbing_film_illumination(
     }
 }
 
-
 #[test]
 fn g1_bulk_spectral_complex_index_and_si_sources_keep_original_wavelength_derivatives() {
     let (_, generic) = generic_source(true, true);
     let conductor_card = si_grid_card(false);
-    let conductor = SpectralConductorStatePoint::try_from_material(resolve(&conductor_card)).unwrap();
+    let conductor =
+        SpectralConductorStatePoint::try_from_material(resolve(&conductor_card)).unwrap();
     let dielectric_card = si_grid_card(true);
-    let dielectric = SpectralTabulatedDielectricStatePoint::try_from_material(resolve(&dielectric_card)).unwrap();
+    let dielectric =
+        SpectralTabulatedDielectricStatePoint::try_from_material(resolve(&dielectric_card))
+            .unwrap();
     for source in [
         SpectralOpticalSource::ComplexIndex(&generic),
         SpectralOpticalSource::Conductor(&conductor),
@@ -928,7 +1011,11 @@ fn g1_bulk_spectral_complex_index_and_si_sources_keep_original_wavelength_deriva
             let jet = wave.bulk_dispersion(omega).unwrap();
             assert!(core::ptr::eq(jet.source().material(), law.material()));
             assert_eq!(jet.permittivity_f_m(), law.permittivity_f_m(omega).unwrap());
-            let group = if matches!(source, SpectralOpticalSource::ComplexIndex(_)) { 1.32 } else { 1.42 };
+            let group = if matches!(source, SpectralOpticalSource::ComplexIndex(_)) {
+                1.32
+            } else {
+                1.42
+            };
             assert!((jet.group_slowness_s_m() / (group / C0) - 1.0).abs() < 8e-15);
             assert_eq!(jet.group_velocity_dispersion_s2_m(), 0.0);
             if matches!(source, SpectralOpticalSource::TabulatedDielectric(_)) {

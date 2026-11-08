@@ -25,9 +25,9 @@ const ZERO: Complex = [Dd::ZERO; 2];
 type Result<T> = core::result::Result<T, &'static str>;
 
 /// Dielectric heat deposited in a finite prism inside the original film.
-/// The area is measured parallel to the two faces. A single incident plane
-/// wave makes the cycle-mean heat uniform in that transverse plane; all four
-/// internal waves still interfere through depth. Material and illumination
+/// The area is measured parallel to the two faces. Both incident ports share
+/// one transverse wavevector, so cycle-mean heat is uniform in that plane;
+/// all four internal waves still interfere through depth. Material and illumination
 /// are frozen at the prepared source snapshot, not evolved thermally here.
 pub struct AbsorbingSlabVolumeAbsorption<'w, 'f, 's, 'm> {
     prepared_field: &'w PreparedAbsorbingSlabField<'f, 's, 'm>,

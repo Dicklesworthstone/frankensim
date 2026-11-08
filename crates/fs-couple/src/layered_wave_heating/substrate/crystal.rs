@@ -273,16 +273,26 @@ fn prepare_column<'b, 'a>(
     let mut boundary_power = |depth| -> Result<f64, LayeredWaveHeatingError> {
         let flux = source.transmitted_flux(depth, &mut cancelled)?;
         let watts = area * flux;
-        if !watts.is_finite() || watts < 0.0 || (flux > 0.0 && watts == 0.0) {
+        if !watts.is_finite() || (flux != 0.0 && watts == 0.0) {
             return Err(invalid("crystal boundary watts are unrepresentable"));
         }
         Ok(watts)
     };
-    let entering_w = boundary_power(depth_start_m)?;
-    let leaving_w = boundary_power(left)?;
+    // Positive z points into the top face and out of the bottom face. A
+    // coherently driven face contributes its total net Poynting flux.
+    let top_w = boundary_power(depth_start_m)?;
+    let bottom_w = boundary_power(left)?;
+    let entering = Dd::from_f64(top_w.max(0.0)) + Dd::from_f64((-bottom_w).max(0.0));
+    let leaving = Dd::from_f64((-top_w).max(0.0)) + Dd::from_f64(bottom_w.max(0.0));
+    let entering_w = entering.to_f64();
+    let leaving_w = leaving.to_f64();
     let absorbed_w = absorbed.to_f64();
-    let residual_w = (Dd::from_f64(entering_w) - Dd::from_f64(leaving_w) - absorbed).to_f64();
-    if !absorbed_w.is_finite() || !residual_w.is_finite() {
+    let residual_w = (entering - leaving - absorbed).to_f64();
+    if !entering_w.is_finite()
+        || !leaving_w.is_finite()
+        || !absorbed_w.is_finite()
+        || !residual_w.is_finite()
+    {
         return Err(invalid("crystal power account is unrepresentable"));
     }
     poll(&mut cancelled)?;

@@ -119,6 +119,109 @@ fn finite_crystal_cell_integrals_drive_native_temperature_once() {
 }
 
 #[test]
+fn coherent_two_face_crystal_heat_and_reverse_entry_drive_native_energy_once() {
+    let exterior = state(&card("two-face exterior", 1.0, 0.0), false, 100_000.0);
+    let material = crystal_card("two-face heated film", [0.12, 0.42]);
+    let [o, e] = axes(&material, 100_000.0);
+    let entrance = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&exterior),
+        UniaxialOpticalResponse::try_new(&o, &e, 410e-9).unwrap(),
+        [1.0, 0.0, 0.0],
+    )
+    .unwrap();
+    let width = 0.125 * WAVELENGTH_M;
+    let film =
+        OrientedUniaxialSlab::try_new(&entrance, DielectricResponse::Lossless(&exterior), width)
+            .unwrap();
+    let native = body(&[&material], &[width], &[4], AREA);
+    let laws = native.thermal_laws(false).unwrap();
+    let bound = native.bind(&laws, ids()).unwrap();
+    let initial = initial(&bound, &[0.0; 4]);
+    let original = initial.cells().clone();
+    let drive = [C64::ZERO, C64::new(5e4, 0.0)];
+    let opposite = [C64::ZERO, C64::new(-5e4, 0.0)];
+    let dark = [C64::ZERO; 2];
+    let mut total_heat = Vec::new();
+    for (left, right, both_faces) in [
+        (drive, drive, true),
+        (drive, opposite, true),
+        (dark, drive, false),
+    ] {
+        let field = film
+            .prepare_absorbing_field_from_both_sides(
+                core::f64::consts::TAU * C0 / WAVELENGTH_M,
+                1.0,
+                left,
+                right,
+            )
+            .unwrap();
+        let heat =
+            PreparedCrystalSlabHeating::try_new(&bound, &field, 0.0, limits(), || false).unwrap();
+        assert_eq!(heat.preparation_mode_cell_pairs(), 16 * (4 + 2));
+        let top_w = AREA
+            * field
+                .field_at(SlabRegion::Crystal, [0.0, 0.0, 0.0])
+                .unwrap()
+                .field
+                .poynting_w_m2[2];
+        let bottom_w = AREA
+            * field
+                .field_at(SlabRegion::Crystal, [0.0, 0.0, width])
+                .unwrap()
+                .field
+                .poynting_w_m2[2];
+        assert!(bottom_w < 0.0);
+        if both_faces {
+            assert!(top_w > 0.0);
+            near(heat.power().entering_w, top_w - bottom_w, 1e-9);
+            assert_eq!(heat.power().leaving_w, 0.0);
+        } else {
+            assert!(top_w < 0.0);
+            assert_eq!(heat.power().entering_w, -bottom_w);
+            assert_eq!(heat.power().leaving_w, -top_w);
+        }
+        assert!(heat.power().absorbed_w > 0.0);
+        assert!(heat.power().residual_w.abs() < 3e-11 * heat.power().entering_w);
+        total_heat.push(heat.power().absorbed_w);
+        for cell in heat.cells() {
+            let expected = film_density_integral(&field, cell.depth_m[0], cell.depth_m[1]);
+            near(cell.absorbed_w, expected, 2e-9 * expected);
+        }
+        let dt = 2e-9;
+        let step = heat
+            .advance_to(
+                &initial,
+                dt,
+                conduction(),
+                LayeredThermalSolveControls::default(),
+                &mut LayeredThermalWorkspace::new(4).unwrap(),
+                || false,
+            )
+            .unwrap();
+        for (i, cell) in heat.cells().iter().enumerate() {
+            near(step.cell_energy_j[i].1, cell.absorbed_w * dt, 1e-14);
+        }
+        near(step.optical.entering_j, heat.power().entering_w * dt, 1e-14);
+        near(step.optical.leaving_j, heat.power().leaving_w * dt, 1e-14);
+        near(
+            step.heat_report.energy.external_heat_j,
+            step.optical.absorbed_j,
+            1e-9,
+        );
+        near(
+            step.heat_report.energy.stored_energy_change_j,
+            step.optical.absorbed_j,
+            2e-9,
+        );
+    }
+    // G1: equal input powers with different relative phase produce different
+    // coherent dielectric work, which survives the native thermal coupling.
+    assert!((total_heat[0] - total_heat[1]).abs() > 0.1 * (total_heat[0] + total_heat[1]));
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.cells(), &original);
+}
+
+#[test]
 fn finite_crystal_refinement_preserves_heat_and_transparent_films_do_not_heat() {
     let incident = state(
         &card("film refinement incidence", 1.0, 0.0),
