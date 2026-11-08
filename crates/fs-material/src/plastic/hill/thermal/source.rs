@@ -3,7 +3,8 @@
 use super::*;
 use crate::plastic::hill::source::{
     HILL_COEFFICIENT_PROPERTIES, HILL_HARDENING_MODULUS_PROPERTY, HILL_KINEMATIC_MODULUS_PROPERTY,
-    HILL_REFERENCE_YIELD_STRESS_PROPERTY, hill48_requirements,
+    HILL_REFERENCE_YIELD_STRESS_PROPERTY, HILL_VOCE_SATURATION_INCREMENT_PROPERTY,
+    HILL_VOCE_SATURATION_RATE_PROPERTY, hill48_requirements, voce_requirements,
 };
 use crate::state_point::{
     INVERSE_TEMPERATURE_DIMS, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
@@ -305,6 +306,7 @@ impl<'a> ThermalHillSource<'a> {
             youngs_slope_pa_k: youngs_slope,
             hardening_slope_pa_k: hardening_slope,
             kinematic_slope_pa_k: None,
+            voce_slope_pa_k: None,
         };
         // The native owner checks elasticity and the return-map denominator at
         // both affine extrema. Convex combinations keep the fixed Hill metric.
@@ -400,15 +402,128 @@ impl<'a> ThermalHillSource<'a> {
             &self.requirements,
             self.selection.clone(),
         )?;
-        self.reference = ResolvedHill48::try_from_material(
+        self.kinematic_slope_pa_k = Some(slope);
+        self.reference = self.apply_selected_hardening(ResolvedHill48::try_from_material(
             bundle,
             self.reference.local_law().elastic().strain_limit,
             *self.reference.law().material_to_spatial(),
-        )?
-        .with_linear_kinematic_hardening()?;
-        self.kinematic_slope_pa_k = Some(slope);
+        )?)?;
         // Endpoint checks use the original scalar return denominator. Affine
         // C and E cannot hide an interior maximum or minimum between them.
+        self.resolve_temperature(knots[0].temperature_k)?;
+        self.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
+        Ok(self)
+    }
+
+    /// Select independent Hill Q(T) and b before retaining specimen history.
+    /// Q is nonnegative and globally affine over the complete caloric span;
+    /// b is positive and fixed per Hill work-conjugate alpha. Every source-line
+    /// knot and surface crossing is admitted, with the original claims pinned.
+    /// The extra free energy Q(T)*g(alpha) contributes entropy -Q'*g(alpha),
+    /// but no frozen-history heat-capacity correction for affine Q and fixed b.
+    pub fn with_voce_isotropic_hardening(
+        mut self,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, ThermalHillError> {
+        let invalid = ThermalHillError::Invalid;
+        if self.voce_slope_pa_k.is_some()
+            || self.requirements.iter().any(|r| {
+                r.name() == HILL_VOCE_SATURATION_INCREMENT_PROPERTY
+                    || r.name() == HILL_VOCE_SATURATION_RATE_PROPERTY
+            })
+        {
+            return Err(invalid(
+                "Hill Voce hardening must be selected once as independent material roles",
+            ));
+        }
+        let requirements = voce_requirements()?;
+        let resolved =
+            resolve_material_state_point(self.card, &self.context, &requirements, selection)?;
+        let saturation = resolved
+            .property(HILL_VOCE_SATURATION_INCREMENT_PROPERTY)
+            .expect("resolved Hill Voce requirements retain Q")
+            .value_si();
+        let rate = resolved
+            .property(HILL_VOCE_SATURATION_RATE_PROPERTY)
+            .expect("resolved Hill Voce requirements retain b")
+            .value_si();
+        let knots = self.caloric.curve().knots();
+        let lower = point_at(
+            &self.context,
+            &self.temperature_axis,
+            knots[0].temperature_k,
+        )?;
+        let upper = point_at(
+            &self.context,
+            &self.temperature_axis,
+            knots[knots.len() - 1].temperature_k,
+        )?;
+        let mut saturation_path = Vec::new();
+        let mut additional_pins = Vec::with_capacity(2);
+        for property in resolved.properties() {
+            self.thermal_material_point().admit_static(property)?;
+            if !property.has_only_fixed_external_conditions(Some(&self.temperature_axis), false)
+                || property.angular_frequency_band_rad_s()?.is_some()
+            {
+                return Err(invalid(
+                    "Hill Voce coefficients require the owned temperature and fixed external conditions, without rate or frequency dependence",
+                ));
+            }
+            let name = property.requirement().name();
+            let selected = property.answer().receipt.selected;
+            let claim = self.card.claims().claim(selected).ok_or(invalid(
+                "selected Hill Voce source is absent from its original material card",
+            ))?;
+            let path = pinned_temperature_line(
+                self.card,
+                &claim.key,
+                &self.temperature_axis,
+                &lower,
+                &upper,
+                selected,
+            )?;
+            if name == HILL_VOCE_SATURATION_INCREMENT_PROPERTY {
+                if path
+                    .iter()
+                    .any(|(_, value)| !value.is_finite() || *value < 0.0)
+                {
+                    return Err(invalid(
+                        "Hill Voce Q must remain finite and nonnegative on every source-line cell",
+                    ));
+                }
+                saturation_path = path;
+            } else if path
+                .iter()
+                .any(|(_, value)| !value.is_finite() || *value <= 0.0 || *value != rate)
+            {
+                return Err(invalid(
+                    "Hill Voce b must remain positive and constant on every source-line cell",
+                ));
+            }
+            additional_pins.push((name.to_owned(), selected));
+        }
+        let slope =
+            affine_temperature_slope(&saturation_path, self.reference_temperature_k, saturation)
+                .map_err(invalid)?;
+        let MaterialPropertySelection::PinnedByProperty(pins) = &mut self.selection else {
+            return Err(invalid("thermal Hill source lost its original claim pins"));
+        };
+        pins.extend(additional_pins);
+        self.requirements.extend(requirements);
+        self.voce_slope_pa_k = Some(slope);
+        let bundle = resolve_material_state_point(
+            self.card,
+            &self.context,
+            &self.requirements,
+            self.selection.clone(),
+        )?;
+        self.reference = self.apply_selected_hardening(ResolvedHill48::try_from_material(
+            bundle,
+            self.reference.local_law().elastic().strain_limit,
+            *self.reference.law().material_to_spatial(),
+        )?)?;
+        // E, H, C and Q are affine; the native owner checks representable
+        // combined return moduli at both extrema, including exactly Q=0.
         self.resolve_temperature(knots[0].temperature_k)?;
         self.resolve_temperature(knots[knots.len() - 1].temperature_k)?;
         Ok(self)
@@ -447,11 +562,22 @@ impl<'a> ThermalHillSource<'a> {
             self.reference.local_law().elastic().strain_limit,
             *self.reference.law().material_to_spatial(),
         )?;
-        Ok(if self.kinematic_slope_pa_k.is_some() {
-            resolved.with_linear_kinematic_hardening()?
-        } else {
-            resolved
-        })
+        self.apply_selected_hardening(resolved)
+    }
+
+    // Rebuild both explicitly selected owners after every source refresh.
+    // Selection order cannot drop previously admitted Q/b or Prager C.
+    fn apply_selected_hardening(
+        &self,
+        mut resolved: ResolvedHill48,
+    ) -> Result<ResolvedHill48, ThermalHillError> {
+        if self.kinematic_slope_pa_k.is_some() {
+            resolved = resolved.with_linear_kinematic_hardening()?;
+        }
+        if self.voce_slope_pa_k.is_some() {
+            resolved = resolved.with_voce_isotropic_hardening()?;
+        }
+        Ok(resolved)
     }
 }
 

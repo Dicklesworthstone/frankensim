@@ -20740,6 +20740,35 @@ independent tensor storage/entropy through C=0, original claim pins and corrupt
 history refusal. These authored conformance cases do not establish nonlinear
 recovery, texture evolution, rate dependence or measured-alloy calibration.
 
+### Source-bound thermal Hill saturation
+
+`hill48_voce_requirements`, `resolve_hill48_voce` and
+`ResolvedHill48::with_voce_isotropic_hardening` select independent
+`hill_voce_saturation_increment` Q [Pa] and `hill_voce_saturation_rate` b.
+The rate is per Hill work-conjugate alpha; J2-equivalent-strain coefficients
+cannot substitute for directional data. Native material axes, optional Prager
+hardening and the complete original source bundle remain intact.
+
+`ThermalHillSource::with_voce_isotropic_hardening` admits nonnegative globally
+affine Q(T) and positive constant b over every original source-line cell.
+Pinned claims survive endpoint refresh and either Prager/Voce selection order.
+The original Hill return, consistent tangent and full local history serve
+thermal plane-stress sections and their existing shell consumers.
+
+With g(alpha)=alpha-(1-exp(-b*alpha))/b, extra free energy is Q*g,
+mechanical entropy is -Q'*g, and frozen-history coefficient work is delta_Q*g.
+The shared stable primitive evaluates signed coefficients directly, preserving
+representable thermal work even when the unit-Q shape underflows. A selected
+Q=0 endpoint or reference retains nonzero Q' entropy. Affine Q and fixed b add
+no frozen-history heat-capacity derivative; physical yield heat and numerical
+loss keep their native, separate accounts. Unselected/identically zero-Q paths
+retain the original arithmetic. Missing or aliased roles, negative/kinked Q,
+varying b and incomplete source support refuse. Focused regressions in
+`tests/plastic_hill_thermal/voce.rs` cover source/native parity, thermal section
+history, rotated first-law accounts and these limits. This is fixed-axis
+small-strain constitutive verification, not empirical alloy calibration,
+anisotropic texture evolution, melting or thermal annealing.
+
 ## Source-bound phosphorescence kinetics
 
 `phosphorescence::PhosphorescenceStatePoint` resolves the original singlet and triplet excitation energies and six independent first-order rates into the existing `fs_thermal::luminescence::transfer::SingletTripletDecay`. Energies use joules per excitation relative to the same ground state, with `E_s >= E_t > 0`; radiative, nonradiative and forward/reverse crossing rates use inverse seconds. An explicitly zero rate is admitted, including a stable store. Missing rates never receive defaults, and lifetimes or branching yields are not independently invented. The native kinetics owner retains positive evolution, integrated events, crossing heat and reverse-crossing thermal withdrawal.

@@ -1,6 +1,8 @@
 //! Scalar energetic Voce terms shared by the isotropic and Hill return maps.
 //!
-//! Callers admit Q >= 0 and b > 0, and retain their own tensor flow/history.
+//! Constitutive callers admit Q >= 0 and b > 0 and retain their own tensor
+//! flow/history. The storage primitive also accepts signed coefficients for
+//! thermal entropy and coefficient work; those are not physical stored energy.
 //! The series are needed when b*alpha or b*delta is too small for subtraction
 //! of the hardening work and stored energy to retain their convex remainder.
 
@@ -25,7 +27,8 @@ pub(crate) fn secant(
     saturation_pa * rate_per_strain * det::exp(-rate_per_strain * alpha) * ratio
 }
 
-/// Integral_0^alpha Q (1-exp(-b p)) dp.
+/// Integral_0^alpha Q (1-exp(-b p)) dp. Signed Q supplies the same stable
+/// primitive for temperature derivatives and finite coefficient differences.
 pub(crate) fn storage(saturation_pa: f64, rate_per_strain: f64, alpha: f64) -> f64 {
     let x = rate_per_strain * alpha;
     if x < 0.1 {

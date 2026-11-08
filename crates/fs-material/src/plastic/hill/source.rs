@@ -7,7 +7,9 @@
 //! source. A J2 hardening slope, hardness or elongation cannot supply missing
 //! directional data. The caller explicitly binds fixed material axes.
 //! Mixed hardening additionally selects its own Prager coefficient C in
-//! X=C*eps_p; the J2 uniaxial H_k convention is never substituted.
+//! X=C*eps_p; the J2 uniaxial H_k convention is never substituted. Optional
+//! Voce Q and b are also Hill-specific: b is per Hill work-conjugate alpha,
+//! which generally differs from the J2 equivalent plastic strain.
 //!
 //! Original claims, conditions, units, uncertainty and usage receipts remain
 //! in the complete material bundle. This adapter freezes supported external
@@ -36,12 +38,17 @@ use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voig
 /// Reference radius Y [Pa] of the declared dimensionless Hill quadratic.
 /// This is not a direction-free uniaxial tensile yield observation.
 pub const HILL_REFERENCE_YIELD_STRESS_PROPERTY: &str = "hill_reference_yield_stress";
-/// Energetic dY/dalpha [Pa] for Hill's work-conjugate accumulated flow.
+/// Energetic linear hardening H [Pa] for Hill's work-conjugate accumulated flow.
 /// An isotropic J2 equivalent-strain modulus is not substituted.
 pub const HILL_HARDENING_MODULUS_PROPERTY: &str = "hill_hardening_modulus";
 /// Energetic Prager coefficient C [Pa] in `X=C*eps_p`, with storage
 /// `C*eps_p:eps_p/2`. This is not the J2 uniaxial hardening modulus H_k.
 pub const HILL_KINEMATIC_MODULUS_PROPERTY: &str = "hill_kinematic_hardening_modulus";
+/// Added isotropic saturation strength Q [Pa] of the Hill yield radius.
+pub const HILL_VOCE_SATURATION_INCREMENT_PROPERTY: &str = "hill_voce_saturation_increment";
+/// Saturation rate b per Hill work-conjugate alpha [dimensionless].
+/// A J2-equivalent-strain rate is not interchangeable for an anisotropic metric.
+pub const HILL_VOCE_SATURATION_RATE_PROPERTY: &str = "hill_voce_saturation_rate";
 /// Dimensionless coefficients in the exact order F, G, H, L, M, N.
 /// Normal stress differences use F/G/H; shear yz/zx/xy uses 2L/2M/2N.
 pub const HILL_COEFFICIENT_PROPERTIES: [&str; 6] = [
@@ -106,6 +113,32 @@ pub fn hill48_mixed_requirements() -> Result<Vec<ScalarPropertyRequirement>, Mat
         ScalarAdmissibility::NonNegative,
     )?);
     Ok(requirements)
+}
+
+/// Elasticity, Hill metric and linear hardening plus independently sourced Q/b.
+/// Q=0 is an explicit measured/model selection; absent Q or b is not zero.
+/// Add the separate C requirement when selecting Prager hardening as well.
+pub fn hill48_voce_requirements() -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError>
+{
+    let mut requirements = hill48_requirements()?;
+    requirements.extend(voce_requirements()?);
+    Ok(requirements)
+}
+
+pub(super) fn voce_requirements() -> Result<[ScalarPropertyRequirement; 2], MaterialStatePointError>
+{
+    Ok([
+        ScalarPropertyRequirement::try_new(
+            HILL_VOCE_SATURATION_INCREMENT_PROPERTY,
+            Pressure::DIMS,
+            ScalarAdmissibility::NonNegative,
+        )?,
+        ScalarPropertyRequirement::try_new(
+            HILL_VOCE_SATURATION_RATE_PROPERTY,
+            Dims([0; 6]),
+            ScalarAdmissibility::StrictlyPositive,
+        )?,
+    ])
 }
 
 /// Original source bundle, immutable orientation and one native constitutive law.
@@ -174,6 +207,32 @@ impl ResolvedHill48 {
             .law()
             .clone()
             .with_linear_kinematic_hardening(modulus)?;
+        self.law = OrientedHill48::new(local, *self.law.material_to_spatial())?;
+        Ok(self)
+    }
+
+    /// Select the independently sourced Hill Q/b already retained in this
+    /// bundle. The original axes, Prager coefficient and all receipts survive.
+    /// Select before loading; resolving a new external temperature alone does
+    /// not transport history or account for temperature-dependent free energy.
+    pub fn with_voce_isotropic_hardening(mut self) -> Result<Self, HillSourceError> {
+        let saturation = coefficient(
+            &self.material,
+            HILL_VOCE_SATURATION_INCREMENT_PROPERTY,
+            Pressure::DIMS,
+        )?
+        .value_si();
+        let rate = coefficient(
+            &self.material,
+            HILL_VOCE_SATURATION_RATE_PROPERTY,
+            Dims([0; 6]),
+        )?
+        .value_si();
+        let local = self
+            .law
+            .law()
+            .clone()
+            .with_voce_isotropic_hardening(saturation, rate)?;
         self.law = OrientedHill48::new(local, *self.law.material_to_spatial())?;
         Ok(self)
     }
@@ -260,6 +319,20 @@ pub fn resolve_hill48_mixed(
         resolve_material_state_point(card, point, &hill48_mixed_requirements()?, selection)?;
     ResolvedHill48::try_from_material(material, strain_limit, material_to_spatial)?
         .with_linear_kinematic_hardening()
+}
+
+/// Resolve an explicitly selected Hill saturation law at one fixed source point.
+pub fn resolve_hill48_voce(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+    strain_limit: f64,
+    material_to_spatial: [[f64; 3]; 3],
+) -> Result<ResolvedHill48, HillSourceError> {
+    let material =
+        resolve_material_state_point(card, point, &hill48_voce_requirements()?, selection)?;
+    ResolvedHill48::try_from_material(material, strain_limit, material_to_spatial)?
+        .with_voce_isotropic_hardening()
 }
 
 /// Original source, elasticity, orientation or native Hill refusal.

@@ -3,13 +3,17 @@
 //! The anisotropic metric and material frame stay fixed. The reference yield
 //! radius may vary with temperature; elastic and energetic isotropic/Prager
 //! hardening moduli are affine, with fixed Poisson ratio and reference density.
+//! Explicitly selected Hill Voce saturation has affine Q(T) and fixed b, with
+//! g(alpha)=alpha-(1-exp(-b*alpha))/b. Its additional free energy is Q*g,
+//! entropy is -Q'*g, and no frozen-history heat-capacity term is introduced.
 //! Optional sourced isotropic expansion is constant. These restrictions keep the retained Hill
 //! multiplier meaningful and the mechanical entropy differentiable.
 //!
 //! With e = eps - eps_p - a(T-T_ref)I, the free energy is
-//! psi = e:C_el(T):e/2 + H(T)alpha²/2 + C_k(T)eps_p:eps_p/2.
+//! psi = e:C_el(T):e/2 + H(T)alpha²/2 + C_k(T)eps_p:eps_p/2 + Q(T)g(alpha).
 //! Its mechanical entropy is
-//! s = a tr(sigma) - (E'/E)psi_elastic - H'alpha²/2 - C_k'eps_p:eps_p/2.
+//! s = a tr(sigma) - (E'/E)psi_elastic - H'alpha²/2
+//!     - C_k'eps_p:eps_p/2 - Q'g(alpha).
 //! Prager hardening requires an explicit independent source selection. Its
 //! retained coordinate is plastic strain, so changing C_k, including reaching
 //! zero, never divides by the modulus or discards a backstress history.
@@ -25,6 +29,7 @@ use super::source::{HillSourceError, ResolvedHill48};
 use super::{HillError, HillState};
 use crate::phase::{EquilibriumPhaseState, PhaseStateError, ResolvedHeatCapacityCurve};
 use crate::plastic::energy::EnergyTolerances;
+use crate::plastic::voce::hardening;
 use crate::plastic::section::thermal::source::{
     ThermalSectionIncrement, ThermalSectionSourceError, ThermalSectionSourceFamily,
     ThermalSectionStep,
@@ -104,6 +109,9 @@ pub struct ThermalHillSource<'a> {
     /// None means no kinematic source was selected; Some(0) is an explicitly
     /// selected constant modulus. The original source bundle owns its value.
     kinematic_slope_pa_k: Option<f64>,
+    /// Explicit saturation selection, including Q=0 and Q'=0. The reference
+    /// law retains b per Hill work-conjugate alpha and its original source.
+    voce_slope_pa_k: Option<f64>,
 }
 
 /// The original oriented Hill law at one endpoint, with stress-free expansion.
@@ -266,6 +274,26 @@ impl ThermalHillSource<'_> {
                     )?,
             )?;
         }
+        let voce_slope = self.voce_slope_pa_k.unwrap_or(0.0);
+        if voce_slope != 0.0 {
+            let rate = law.voce_rate_per_strain();
+            // Evaluate the signed coefficient inside the shared stable
+            // primitive. A unit-Q shape could underflow for tiny b while
+            // Q'*g or delta_Q*g remains representable. Q=0 does not erase
+            // entropy from a nonzero admitted temperature derivative.
+            old_entropy = finite(old_entropy + hardening::storage(-voce_slope, rate, old.alpha))?;
+            new_entropy = finite(
+                new_entropy + hardening::storage(-voce_slope, rate, native.response.state.alpha),
+            )?;
+            coefficient_storage_change_j_m3 = finite(
+                coefficient_storage_change_j_m3
+                    + hardening::storage(
+                        law.voce_saturation_pa() - old_law.voce_saturation_pa(),
+                        rate,
+                        old.alpha,
+                    ),
+            )?;
+        }
         let thermoelastic_storage_change_j_m3 = finite(
             product(phase.temperature_k(), new_entropy)?
                 - product(old_phase.temperature_k(), old_entropy)?,
@@ -273,6 +301,7 @@ impl ThermalHillSource<'_> {
         let reversible_heat_j_m3 = if self.youngs_slope_pa_k == 0.0
             && self.hardening_slope_pa_k == 0.0
             && kinematic_slope == 0.0
+            && voce_slope == 0.0
         {
             // Exact constant-modulus reduction avoids subtracting large T*s terms.
             product(
