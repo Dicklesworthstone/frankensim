@@ -11,6 +11,9 @@
 //! Ohmic heat, Lorentz load and terminal-work checks. No dense electrode
 //! response sampling or imposed uniform current-density approximation is used.
 
+/// Source-refreshed settled AC views retaining total-current electrode rows.
+pub mod thermal;
+
 use super::*;
 
 /// Accepted native magnetic history with equipotential total-current terminals.

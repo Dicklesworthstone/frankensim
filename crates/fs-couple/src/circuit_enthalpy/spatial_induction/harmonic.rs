@@ -12,6 +12,9 @@
 //! independent. Use retained transient induction for startup, rapid modulation,
 //! magnetic entropy, moving material, saturation or hysteretic losses.
 
+/// Physical voltage/current electrodes on the same settled thermal residual.
+pub mod terminals;
+
 use super::{
     SpatialMagneticMaterialSample, SpatialMagneticRegion, SpatialMagneticThermalNetwork,
     heat::{HeatError, heat_error},
@@ -30,7 +33,10 @@ use fs_em::spatial::{
     SpatialMagneticMaterial,
     vector_potential::induction::{
         SpatialInduction,
-        harmonic::{SpatialHarmonicInductionBalance, SpatialHarmonicInductionControls},
+        harmonic::{
+            SpatialHarmonicInductionBalance, SpatialHarmonicInductionControls,
+            SpatialHarmonicInductionTerminalTransfer,
+        },
     },
 };
 use fs_exec::Cx;
@@ -42,6 +48,7 @@ use fs_math::{c64::C64, dd::Dd};
 use fs_solver::SolveReport;
 use fs_thermal::enthalpy::{CellId, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
+use terminals::HarmonicHeatingDrive;
 
 /// Original tetrahedron's actual cycle-mean Joule heat and caloric destination.
 #[derive(Clone, Debug)]
@@ -63,6 +70,9 @@ pub struct SpatialHarmonicHeatingStep {
     pub omega_rad_s: f64,
     pub duration_s: f64,
     pub cells: Vec<SpatialHarmonicHeatingCell>,
+    /// Actual reactions in original electrode order; empty for isolated drive.
+    /// Currents are positive into the conductor and voltages use its reference.
+    pub terminals: Vec<SpatialHarmonicInductionTerminalTransfer>,
     pub balance: SpatialHarmonicInductionBalance,
     pub field: SolveReport,
     pub maximum_ampere_residual_a: f64,
@@ -152,6 +162,42 @@ pub fn heat_assembly_candidate<'t, A: HeatAssembly + ?Sized, C: SpatialConductor
     thermal: &DepositionSimulation<'t>,
     target_s: f64,
     template: &SpatialInduction<'_, C>,
+    impressed_current_a_m2: &[[C64; 3]],
+    omega_rad_s: f64,
+    regions: &[SpatialMagneticRegion],
+    volume_tolerance_m3: f64,
+    controls: CircuitEnthalpySolve,
+    field_controls: SpatialHarmonicInductionControls,
+    assembly: WeightedAssemblyLimits,
+    initial_energy_increments_j: &[f64],
+) -> Result<SpatialHarmonicThermalCandidate<'t, A::Sample>, HeatError<A::Error>> {
+    heat_assembly_with_drive(
+        provider,
+        cx,
+        thermal,
+        target_s,
+        HarmonicHeatingDrive::Isolated(template),
+        impressed_current_a_m2,
+        omega_rad_s,
+        regions,
+        volume_tolerance_m3,
+        controls,
+        field_controls,
+        assembly,
+        initial_energy_increments_j,
+    )
+}
+
+// Electrode causality changes only native field preparation and excitation.
+// Material admission, physical cell heat, the complete heat assembly, nonlinear
+// thermal residual and acceptance all remain in this one original owner.
+#[allow(clippy::too_many_arguments)]
+fn heat_assembly_with_drive<'t, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    template: HarmonicHeatingDrive<'_, '_, C>,
     impressed_current_a_m2: &[[C64; 3]],
     omega_rad_s: f64,
     regions: &[SpatialMagneticRegion],
@@ -289,69 +335,63 @@ pub fn heat_assembly_candidate<'t, A: HeatAssembly + ?Sized, C: SpatialConductor
             for (cell, source) in sources {
                 refreshed[cell] = Some(source);
             }
-            let field = template
-                .prepare_materials_trial(
+            let step = template
+                .with_materials(
                     magnetic
                         .iter()
                         .map(|s| SpatialMagneticMaterial::Linear(s.material.clone()))
                         .collect(),
                     refreshed,
-                    assembly,
-                    &mut || (*cancel.borrow_mut())(),
-                )
-                .map_err(induction)
-                .map_err(native_error)?
-                .into_harmonic(&mut || (*cancel.borrow_mut())())
-                .map_err(induction)
-                .map_err(native_error)?;
-            let response = field
-                .solve_harmonic(
                     impressed_current_a_m2,
                     &velocity,
                     omega_rad_s,
                     field_controls,
+                    assembly,
                     &mut || (*cancel.borrow_mut())(),
+                    |response| {
+                        if response.cells().len() != routes.conductors.len() {
+                            return Err(native_error(invalid(
+                                "AC heat omitted original conducting cells",
+                            )));
+                        }
+                        let mut cells = Vec::with_capacity(response.cells().len());
+                        for loss in response.cells() {
+                            check(&cancel).map_err(native_error)?;
+                            let cell = *routes.conductors.get(&loss.cell).ok_or_else(|| {
+                                native_error(invalid("AC heat lost its original caloric receiver"))
+                            })?;
+                            let heat_j = finite(dt * loss.mean_ohmic_power_w)?;
+                            if heat_j < 0.0 || loss.mean_ohmic_power_w != 0.0 && heat_j == 0.0 {
+                                return Err(native_error(invalid(
+                                    "AC cell heat is negative or unrepresentable",
+                                )));
+                            }
+                            cells.push(SpatialHarmonicHeatingCell {
+                                tetrahedron: loss.cell,
+                                cell,
+                                volume_m3: loss.volume_m3,
+                                mean_ohmic_power_w: loss.mean_ohmic_power_w,
+                                heat_j,
+                            });
+                        }
+                        let balance = *response.balance();
+                        Ok(SpatialHarmonicHeatingStep {
+                            omega_rad_s,
+                            duration_s: dt,
+                            cells,
+                            terminals: response.terminals().to_vec(),
+                            balance,
+                            field: response.report().clone(),
+                            maximum_ampere_residual_a: response.maximum_ampere_residual_a(),
+                            maximum_charge_residual_a: response.maximum_charge_residual_a(),
+                            maximum_cell_skin_ratio: response.maximum_cell_skin_ratio(),
+                            heat_j: finite(dt * balance.mean_ohmic_power_w)?,
+                            supplied_work_j: finite(dt * balance.mean_supplied_power_w)?,
+                        })
+                    },
                 )
                 .map_err(induction)
-                .map_err(native_error)?;
-            if response.cells().len() != routes.conductors.len() {
-                return Err(native_error(invalid(
-                    "AC heat omitted original conducting cells",
-                )));
-            }
-            let mut cells = Vec::with_capacity(response.cells().len());
-            for loss in response.cells() {
-                check(&cancel).map_err(native_error)?;
-                let cell = *routes.conductors.get(&loss.cell).ok_or_else(|| {
-                    native_error(invalid("AC heat lost its original caloric receiver"))
-                })?;
-                let heat_j = finite(dt * loss.mean_ohmic_power_w)?;
-                if heat_j < 0.0 || loss.mean_ohmic_power_w != 0.0 && heat_j == 0.0 {
-                    return Err(native_error(invalid(
-                        "AC cell heat is negative or unrepresentable",
-                    )));
-                }
-                cells.push(SpatialHarmonicHeatingCell {
-                    tetrahedron: loss.cell,
-                    cell,
-                    volume_m3: loss.volume_m3,
-                    mean_ohmic_power_w: loss.mean_ohmic_power_w,
-                    heat_j,
-                });
-            }
-            let balance = *response.balance();
-            let step = SpatialHarmonicHeatingStep {
-                omega_rad_s,
-                duration_s: dt,
-                cells,
-                balance,
-                field: response.report().clone(),
-                maximum_ampere_residual_a: response.maximum_ampere_residual_a(),
-                maximum_charge_residual_a: response.maximum_charge_residual_a(),
-                maximum_cell_skin_ratio: response.maximum_cell_skin_ratio(),
-                heat_j: finite(dt * balance.mean_ohmic_power_w)?,
-                supplied_work_j: finite(dt * balance.mean_supplied_power_w)?,
-            };
+                .map_err(native_error)??;
             Ok(DrivenCoefficients {
                 circuit: CycleMeanDriver(step),
                 sources_w: coefficients.sources_w,

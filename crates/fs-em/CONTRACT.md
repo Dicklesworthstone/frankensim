@@ -7370,3 +7370,21 @@ consumer must declare its settled-carrier approximation or provide a separate
 transient/thermodynamic account. The source-temperature AC heating consumer in
 `fs-couple` checks fixed permeability and independently authored caloric/heat
 transport before using these responses in its thermal residual.
+
+### Source-temperature AC views of physical electrodes
+
+`SpatialTerminalInduction::prepare_harmonic_materials_trial` and
+`SpatialCurrentInduction::prepare_harmonic_materials_trial` refresh the original
+source-bound coefficients while retaining their physical voltage or grouped
+total-current electrode spaces. Each dedicated harmonic view shares the native
+geometry and uses one material preparation. Original electrode references,
+charge constraints, source identities and accepted transient histories remain
+intact. The view exposes settled AC recovery, including simultaneous impressed
+excitation and actual terminal reactions, without publishing a transient
+material endpoint or accounting for magnetic parameter work.
+
+The physical-electrode thermal consumers in `fs-couple` retain the same fixed
+permeability and slow-thermal restrictions as isolated AC heating. Their focused
+regression definitions compare independent current/voltage diffusion and source
+work at the accepted temperature, coherent Joule heat, common-mode invariance
+and transactional material/thermal refusal.

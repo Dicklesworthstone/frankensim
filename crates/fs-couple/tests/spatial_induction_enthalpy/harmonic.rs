@@ -1,4 +1,7 @@
 //! Independent AC diffusion and two-body caloric balance, with source feedback.
+#[path = "harmonic/terminals.rs"]
+mod terminals;
+
 use super::*;
 #[path = "../../../fs-conduction/tests/radiation_material/common.rs"]
 mod radiative;

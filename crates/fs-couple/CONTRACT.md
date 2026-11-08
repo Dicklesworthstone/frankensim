@@ -7469,3 +7469,29 @@ remain authoritative and can refuse unrepresentable intervals. Immutable exact
 plans reuse matching mobility and duration across candidates; one caller-owned
 workspace serves all arms without warm per-arm allocations, and original
 strain-covector scratch remains bounded on the stack.
+
+## Physical-electrode settled AC heating
+
+`circuit_enthalpy::spatial_induction::harmonic::terminals` adds
+`voltage_heat_assembly_candidate` and `current_heat_assembly_candidate` to the
+same material admission, complete `HeatAssembly`, cellwise heat routing and
+enthalpy Newton residual. Every temperature proposal and final acceptance
+refreshes the original electrode owner and solves impressed and electrode
+excitation coherently in one native A-phi field. Total-current drive retains
+the solved spatial current distribution and scalar electrode unknowns; it does
+not freeze terminal impedance or impose uniform current density.
+
+Actual original-order terminal reactions and separate signed impressed/terminal
+real and reactive supplies remain in the accepted report. Only native conductor
+Joule heat is deposited, exactly once. Fixed permeability, stationary geometry,
+whole-volume solid caloric correspondence, original source identity and the
+settled-carrier/slow-thermal approximation retain their existing admission.
+Neither the original magnetic history nor its clock advances. Electrode contact
+impedance, lead fields, loaded circuit heat, startup and envelope magnetic-energy
+exchange require separate physical owners.
+
+Two focused regression definitions in
+`tests/spatial_induction_enthalpy/harmonic/terminals.rs` compare independent AC
+voltage/current and two-body caloric references over consecutive accepted
+intervals, conductivity feedback versus frozen heat, coherent cross heat,
+separate source work, common-mode invariance, typed refusal and cancellation.

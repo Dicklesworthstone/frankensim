@@ -31,6 +31,8 @@ use std::collections::BTreeSet;
 pub mod circuit;
 /// Total-current control with solved equipotential electrode voltages.
 pub mod current;
+/// Source-refreshed settled AC views retaining voltage electrode causality.
+pub mod thermal;
 
 /// Native stage reaction of one physical equipotential electrode.
 #[derive(Clone, Copy, Debug, PartialEq)]
