@@ -220,6 +220,17 @@ a material-domain refusal cannot publish a partial evaluation. Existing scale
 rollback contracts remain in force. Admission adds no equilibrium solve and
 does not allocate a retained stress-point family.
 
+SQP response fitting, projected displacement/reaction fitting, minimum-material
+response limits and joint response/strength optimization distinguish retained
+material strain-domain refusal from numerical breakdown. Only trial callbacks
+convert that typed refusal into an unavailable sample for the existing native
+backtracking search. Standalone evaluations, initial designs and freshly
+restored accepted/best-feasible endpoints remain strict. Rejected trials retain
+their optimization-attempt and physical-work costs, restore incoming scales and
+cannot publish fields. Cancellation, solver/setup/point budgets,
+arithmetic/model failures and stress-branch admission still terminate with
+their original errors.
+
 Adjoint vectors, virtual modes, residuals and DWR difference fields are
 algebraic quantities, not physical experiments, and do not inherit physical
 strain ceilings. The same native tensor and hanging-node/strong-clamp maps

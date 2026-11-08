@@ -252,7 +252,11 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> ResponseStressDesignStudy3<'a, 'c
                 let cases = self.cases;
                 let options = self.options;
                 self.state.try_run(remaining.min(1),
-                    &mut |r| sample(study, cases, r, options, &mut last, &mut **ledger.borrow_mut()),
+                    &mut |r| match sample(study, cases, r, options, &mut last, &mut **ledger.borrow_mut()) {
+                        Err(ResponseStressError3::Response(ResponseError3::MaterialDomain(_))
+                            | ResponseStressError3::Stress(StressError3::MaterialDomain(_))) => Ok(None),
+                        result => result,
+                    },
                     |_| if ledger.borrow_mut().checkpoint("response-stress-design-control").is_ok() {
                         ControlFlow::Continue(())
                     } else { ControlFlow::Break(()) })

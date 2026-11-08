@@ -199,7 +199,10 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
                 let ledger = RefCell::new(&mut *self.control);
                 let study = &mut *self.study; let cases = self.cases; let options = self.options;
                 self.state.try_run(remaining.min(1),
-                    &mut |x| sample(study, cases, x, options, &mut last, &mut **ledger.borrow_mut()),
+                    &mut |x| match sample(study, cases, x, options, &mut last, &mut **ledger.borrow_mut()) {
+                        Err(ResponseError3::MaterialDomain(_)) => Ok(None),
+                        result => result,
+                    },
                     |_| if ledger.borrow_mut().checkpoint("response-limit-design-control").is_ok() {
                         ControlFlow::Continue(()) } else { ControlFlow::Break(()) })
             };

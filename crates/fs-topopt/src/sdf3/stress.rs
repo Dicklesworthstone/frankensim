@@ -92,14 +92,22 @@ impl From<EvaluationStop> for StressError3 {
         Self::Evaluation(e)
     }
 }
+// Keep the native material-domain classification shared with response drivers.
+// Other Invalid reasons (including arithmetic and model failures) remain fatal.
+pub(crate) fn material_domain_reason(error: &ElasticityError3) -> Option<&'static str> {
+    match error {
+        ElasticityError3::Invalid(reason @ ("bulk strain exceeds retained material domain"
+            | "projected bulk strain exceeds retained material domain"
+            | "affine bulk strain ball exceeds retained material domain")) => Some(*reason),
+        _ => None,
+    }
+}
 impl From<ElasticityError3> for StressError3 {
     fn from(e: ElasticityError3) -> Self {
+        if let Some(reason) = material_domain_reason(&e) { return Self::MaterialDomain(reason); }
         match e {
             ElasticityError3::Cancelled => Self::Evaluation(EvaluationStop::Cancelled),
             ElasticityError3::Invalid("bulk stress point allowance exhausted") => Self::PointBudget,
-            ElasticityError3::Invalid(reason @ ("bulk strain exceeds retained material domain"
-                | "projected bulk strain exceeds retained material domain"
-                | "affine bulk strain ball exceeds retained material domain")) => Self::MaterialDomain(reason),
             e => Self::Physics(e),
         }
     }

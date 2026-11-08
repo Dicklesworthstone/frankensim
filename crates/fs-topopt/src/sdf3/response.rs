@@ -65,12 +65,19 @@ pub enum ResponseError3 {
     Invalid(&'static str),
     Evaluation(EvaluationStop),
     Physics(ElasticityError3),
+    /// A physical displacement exceeds the original elastic strain domain.
+    /// Standalone evaluations and retained restart endpoints refuse this state;
+    /// an optimizer can backtrack an unavailable trial without widening the law.
+    MaterialDomain(&'static str),
 }
 impl From<EvaluationStop> for ResponseError3 {
     fn from(e: EvaluationStop) -> Self { Self::Evaluation(e) }
 }
 impl From<ElasticityError3> for ResponseError3 {
     fn from(e: ElasticityError3) -> Self {
+        if let Some(reason) = crate::sdf3::stress::material_domain_reason(&e) {
+            return Self::MaterialDomain(reason);
+        }
         if matches!(e, ElasticityError3::Cancelled) { Self::Evaluation(EvaluationStop::Cancelled) }
         else { Self::Physics(e) }
     }
@@ -110,6 +117,23 @@ pub struct ResponseEvaluation3 {
 fn poll(control: &mut SolveControl<'_>) -> ControlFlow<()> {
     if control.checkpoint("sdf3-response-physics").is_ok() { ControlFlow::Continue(()) }
     else { ControlFlow::Break(()) }
+}
+// Preserve the native material refusal instead of collapsing it into a generic
+// Breakdown. Only the run callbacks below may reject that typed trial. Keep
+// the original control stop authoritative if a native poll was interrupted.
+fn admit_response_material_domain(operator: &impl Sdf3Elasticity, displacement: &[f64],
+    control: &mut SolveControl<'_>) -> Result<(), ResponseError3> {
+    let stage = "sdf3-material-domain";
+    control.checkpoint(stage)?;
+    let mut stopped = None;
+    let result = operator.admit_material_domain(displacement, || {
+        match control.checkpoint(stage) {
+            Ok(()) => ControlFlow::Continue(()),
+            Err(stop) => { stopped = Some(stop); ControlFlow::Break(()) }
+        }
+    });
+    if let Some(stop) = stopped { return Err(stop.into()); }
+    result.map_err(ResponseError3::from)
 }
 fn finite(x: f64) -> Result<f64, ResponseError3> {
     if x.is_finite() { Ok(x) } else { Err(ResponseError3::Invalid("nonfinite response arithmetic")) }
@@ -227,7 +251,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     for (r, b) in rhs.iter_mut().zip(lifting) { *r = finite(*r+b)?; }
                 }
                 let u = checked_solve_preconditioned(&self.operator, &prepared, &rhs, 1e-11, "sdf3-response-primal", control)?;
-                crate::sdf3::admit_material_domain(&self.operator, &u, control)?;
+                admit_response_material_domain(&self.operator, &u, control)?;
                 let mut observed = Vec::with_capacity(case.targets.len());
                 let mut adjoint_rhs = vec![0.0; op.n()];
                 for target in case.targets {

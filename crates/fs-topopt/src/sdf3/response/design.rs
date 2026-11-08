@@ -47,8 +47,8 @@ fn evaluate<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>, cases: &
     options: ResponseDesignOptions3, rho: &[f64], last: &mut Option<ResponseEvaluation3>,
     control: &mut SolveControl<'_>) -> Result<Option<SqpSample>, ResponseError3> {
     control.checkpoint("response-sqp-evaluate")?;
-    // Only physically unavailable density-box probes become line-search
-    // rejections. Original physics, preconditioner and budget failures propagate.
+    // Density-box probes are unavailable. Preserve typed physical refusals here
+    // so initialization stays strict; only run may backtrack material exits.
     if rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r)) { return Ok(None); }
     let evaluation = study.evaluate_responses(rho, cases, options.response, control)?;
     let sample = row(&evaluation, options);
@@ -125,7 +125,10 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> ResponseDesignStudy3<'a, 'callbac
             let outcome = {
                 let study = &mut *self.study; let control = &mut *self.control;
                 let cases = self.cases; let options = self.options;
-                self.state.try_run(&mut |rho| evaluate(study, cases, options, rho, &mut last, control),
+                self.state.try_run(&mut |rho| match evaluate(study, cases, options, rho, &mut last, control) {
+                    Err(ResponseError3::MaterialDomain(_)) => Ok(None),
+                    result => result,
+                },
                     options.tolerance, remaining.min(1), options.max_evaluations, None)
             };
             if self.state.iterations() > before {

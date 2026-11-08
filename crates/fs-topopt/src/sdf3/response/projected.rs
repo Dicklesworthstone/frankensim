@@ -145,7 +145,10 @@ impl<'a,'callback,O: AdaptiveSdf3Elasticity> ProjectedResponseStudy3<'a,'callbac
                 let study = &mut *self.study; let cases = self.cases; let options = self.options;
                 let reactions = self.reactions;
                 self.state.try_run(remaining.min(1),
-                    &mut |x| sample(study,cases,reactions,x,options,&mut last,&mut **ledger.borrow_mut()),
+                    &mut |x| match sample(study,cases,reactions,x,options,&mut last,&mut **ledger.borrow_mut()) {
+                        Err(ResponseError3::MaterialDomain(_)) => Ok(None),
+                        result => result,
+                    },
                     |_| if ledger.borrow_mut().checkpoint("response-projected-control").is_ok() {ControlFlow::Continue(())} else {ControlFlow::Break(())})
             };
             if self.state.work().iterations > before {

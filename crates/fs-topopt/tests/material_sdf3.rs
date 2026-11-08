@@ -668,9 +668,7 @@ fn source_domain_applies_to_response_primals_and_never_to_adjoint_vectors() {
     );
     assert!(matches!(
         refused,
-        Err(ResponseError3::Evaluation(EvaluationStop::Breakdown {
-            stage: "sdf3-material-domain"
-        }))
+        Err(ResponseError3::MaterialDomain(_))
     ));
     assert_eq!(study.operator().scales(), incoming);
     assert!(!saw_adjoint);
