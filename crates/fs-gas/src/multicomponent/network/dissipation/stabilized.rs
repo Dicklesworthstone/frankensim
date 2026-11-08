@@ -398,7 +398,7 @@ pub(super) struct Step {
 // `stage`, endpoint transfers and the fully admitted endpoint RHS are output.
 // Keeping this one kernel lets accuracy probes share the constitutive physics
 // and the exact same fixed-stage integration formula with the original path.
-pub(super) fn macrostep<L: TransportLaw>(
+pub(super) fn macrostep<const ENTROPY_FACES: bool, L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     trial: Step,
     controls: StabilizedDissipationControl,
@@ -406,7 +406,9 @@ pub(super) fn macrostep<L: TransportLaw>(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Stage, DissipationError> {
-    macrostep_with_scheme::<false, L>(owner, trial, controls, reservoirs, evaluations, cancelled)
+    macrostep_with_scheme::<ENTROPY_FACES, L>(
+        owner, trial, controls, reservoirs, evaluations, cancelled,
+    )
 }
 
 fn macrostep_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(

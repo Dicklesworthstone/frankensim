@@ -436,14 +436,14 @@ pub(super) fn finish<L: TransportLaw>(
     Ok(report)
 }
 
-pub(super) fn spatial<L: TransportLaw>(
+pub(super) fn spatial<const ENTROPY_FACES: bool, L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     input: Input,
     controls: DissipationControl,
     reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<molecular::Stage, DissipationError> {
-    spatial_with_scheme::<false, L>(owner, input, controls, reservoirs, cancelled)
+    spatial_with_scheme::<ENTROPY_FACES, L>(owner, input, controls, reservoirs, cancelled)
 }
 
 pub(super) fn spatial_with_scheme<const ENTROPY_FACES: bool, L: TransportLaw>(

@@ -3368,6 +3368,34 @@ exponentials, affine three-storage bath evolution and port quadrature against a
 matrix-exponential reference, formation-gauge/orientation invariance, and late
 work/cancellation rollback with reuse. Test execution is reported separately.
 
+### Adaptive source-conjugate molecular entropy
+
+`NetworkDissipationOperator::advance_adaptive_entropy_consistent_for` combines
+the original full/two-half RKL2 accuracy controller with source-conjugate faces
+throughout every branch and finite-plenum port. Species density, temperature,
+velocity and signed port-transfer errors retain their existing componentwise
+norms, original caloric inversions and fixed-stage comparison. The accepted
+two-half state and conservative transfers must also pass the original entropy
+and individual-species continuity gate from the complete probe's unchanged
+anchor. The discarded coarse estimate and internal midpoint/stage states do not
+constitute separately admitted physical entropy intervals.
+
+Temporal refusals use the native error controller; entropy refusals halve the
+complete probe. All discarded work consumes the same RHS budget, while native
+endpoint temperatures and the retained adaptive anchor supply entropy without
+another EOS inverse, constitutive RHS or per-probe allocation. The direct
+original-to-final entropy check precedes the shared atomic publication, so late
+refusal preserves accepted fields, clocks and receipts. Reports retain both
+local-accuracy diagnostics and measured source entropy.
+
+This entry admits stationary closed constant-area networks and common species
+support at each active face. Baths, moving geometry, reactions and advection
+remain separate. Its estimated local molecular error and measured finite-step
+entropy do not certify global temporal error or an invariant domain. Focused
+regressions cover Fourier tolerance refinement, repair of conservative
+negative-entropy engineering mixing, unequal molecular masses and variable Cp,
+finite-port balances, formation-reference invariance and late rollback/reuse.
+
 ### Exterior molecular baths through complete network transactions
 
 `NetworkDissipationOperator::advance_with_reservoirs_for` supplies one optional

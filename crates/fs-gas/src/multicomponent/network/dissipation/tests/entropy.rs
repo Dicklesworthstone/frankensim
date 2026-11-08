@@ -2,6 +2,7 @@
 use super::*;
 use crate::multicomponent::dissipation::MolecularEntropyControl;
 
+mod adaptive;
 mod stabilized;
 
 // Independently integrate Cp/R=a+b*T and ideal-mixture partial pressure.

@@ -1,8 +1,9 @@
 //! Original-source entropy over every finite molecular storage owner.
 
 use super::{
-    DissipationControl, DissipationError, MixtureNetwork1d, NetworkDissipationOperator,
-    NetworkDissipationReport, Time, TransportLaw,
+    AdaptiveNetworkDissipationControl, AdaptiveNetworkDissipationReport, DissipationControl,
+    DissipationError, MixtureNetwork1d, NetworkDissipationOperator, NetworkDissipationReport,
+    Time, TransportLaw,
 };
 use crate::multicomponent::cell;
 use crate::multicomponent::dissipation::entropy::EntropyTracker;
@@ -11,6 +12,56 @@ use crate::multicomponent::dissipation::{MolecularEntropyControl, MolecularEntro
 mod stabilized;
 
 impl<L: TransportLaw> NetworkDissipationOperator<L> {
+    /// Advance a closed molecular network to declared local accuracy with
+    /// source-conjugate diffusion and finite-interval entropy admission.
+    ///
+    /// The original adaptive RKL2 full/two-half estimator controls every species,
+    /// temperature, velocity and signed port transfer. Every probe uses the same
+    /// source-conjugate Maxwell--Stefan, divided enthalpy, Fourier, reciprocal
+    /// cross-effect and viscous-work laws at branch interiors and finite ports.
+    ///
+    /// Each accepted paired-half endpoint and the direct original-to-final
+    /// interval must satisfy the original entropy and species-continuity bounds.
+    /// The discarded full-step estimate and internal half/stage states are not
+    /// separately admitted physical entropy intervals. Entropy refusals halve
+    /// the complete probe from its unchanged anchor; temporal refusals retain
+    /// the native local-error controller. All probes share one actual RHS budget.
+    /// Native endpoint temperatures supply entropy without another EOS inverse,
+    /// constitutive RHS or per-probe allocation.
+    ///
+    /// Geometry is stationary, closed and constant-area. Every active face
+    /// requires common species support. Baths, moving volumes, reactions and
+    /// advection are outside this entry. Measured entropy and estimated molecular
+    /// local accuracy do not certify a nonlinear invariant domain or global
+    /// temporal error. Refusal preserves all accepted fields, clocks and reports.
+    pub fn advance_adaptive_entropy_consistent_for(
+        &mut self,
+        network: &mut MixtureNetwork1d,
+        duration: Time,
+        controls: AdaptiveNetworkDissipationControl,
+        entropy: MolecularEntropyControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(AdaptiveNetworkDissipationReport, MolecularEntropyReport), DissipationError>
+    {
+        controls.validate()?;
+        self.admit_plenum_volumes(network, &mut cancelled)?;
+        let mut account = initial_account(network, entropy, &mut cancelled)?;
+        self.trial_report = None;
+        let report = super::adaptive::advance::<true, L>(
+            self,
+            network,
+            duration,
+            controls,
+            None,
+            &mut 0,
+            Some(&mut account),
+            &mut cancelled,
+        )?;
+        self.trial_report = Some(report.stabilized.transport);
+        self.publish_trial_report();
+        Ok((report, account.report()))
+    }
+
     /// Advance source-conjugate molecular transport through finite plenums.
     ///
     /// Interior branch faces and branch/plenum ports use the SAME original

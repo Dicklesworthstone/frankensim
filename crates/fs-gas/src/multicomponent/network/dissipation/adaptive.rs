@@ -7,6 +7,7 @@ use super::{
     StabilizedNetworkDissipationReport, Time, TransportLaw, allocated, poll, positive,
 };
 use crate::multicomponent::dissipation::StabilizedDissipationControl;
+use crate::multicomponent::dissipation::entropy::EntropyTracker;
 use crate::multicomponent::dissipation::stabilized::{extent, reserve_evaluation};
 
 /// Accuracy and bounded work for full/two-half RKL2 molecular intervals.
@@ -164,13 +165,14 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AdaptiveNetworkDissipationReport, DissipationError> {
         self.trial_report = None;
-        let report = advance(
+        let report = advance::<false, L>(
             self,
             network,
             duration,
             controls,
             reservoirs,
             evaluations,
+            None,
             cancelled,
         )?;
         self.trial_report = Some(report.stabilized.transport);
@@ -178,13 +180,15 @@ impl<L: TransportLaw> NetworkDissipationOperator<L> {
     }
 }
 
-fn advance<L: TransportLaw>(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance<const ENTROPY_FACES: bool, L: TransportLaw>(
     owner: &mut NetworkDissipationOperator<L>,
     network: &mut MixtureNetwork1d,
     duration: Time,
     controls: AdaptiveNetworkDissipationControl,
     reservoirs: Option<&[[Option<Cell<'_>>; 2]]>,
     evaluations: &mut usize,
+    mut entropy: Option<&mut EntropyTracker>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<AdaptiveNetworkDissipationReport, DissipationError> {
     controls.validate()?;
@@ -225,7 +229,16 @@ fn advance<L: TransportLaw>(
                 stabilized.maximum_operator_evaluations,
                 elapsed,
             )?;
-            let anchor = spatial(owner, Input::Current, base, reservoirs, cancelled)?;
+            let anchor = spatial::<ENTROPY_FACES, L>(
+                owner,
+                Input::Current,
+                base,
+                reservoirs,
+                cancelled,
+            )?;
+            if let Some(account) = entropy.as_deref_mut() {
+                account.begin_attempt(&owner.work.primitive);
+            }
             if anchor.rate > 0.0 {
                 step =
                     step.min(base.parabolic_cfl * extent(stabilized.maximum_stages) / anchor.rate);
@@ -246,7 +259,7 @@ fn advance<L: TransportLaw>(
             let half = 0.5 * step;
             stabilized::cache_anchor(owner);
             let attempt = (|| {
-                let coarse = macrostep(
+                let coarse = macrostep::<ENTROPY_FACES, L>(
                     owner,
                     Step {
                         step_s: step,
@@ -271,7 +284,7 @@ fn advance<L: TransportLaw>(
                 )?;
                 // The unchanged cached original RHS serves the full and first
                 // half probe. The admitted midpoint RHS serves the second half.
-                let first = macrostep(
+                let first = macrostep::<ENTROPY_FACES, L>(
                     owner,
                     Step {
                         step_s: half,
@@ -291,7 +304,7 @@ fn advance<L: TransportLaw>(
                 )?;
                 core::mem::swap(&mut owner.work.current, &mut owner.work.stage);
                 stabilized::cache_anchor(owner);
-                let second = macrostep(
+                let second = macrostep::<ENTROPY_FACES, L>(
                     owner,
                     Step {
                         step_s: half,
@@ -311,10 +324,35 @@ fn advance<L: TransportLaw>(
                         maximum: 1.0,
                     });
                 }
+                if let Some(account) = entropy.as_deref_mut() {
+                    let volumes = owner
+                        .branches
+                        .iter()
+                        .flat_map(|branch| branch.mesh.volumes().iter())
+                        .chain(owner.plenum_volumes.iter());
+                    // The accepted physical interval is the paired-half result.
+                    // `current` now holds its midpoint, so entropy must use the
+                    // retained original anchor, not that internal probe state.
+                    account.check_stabilized_candidate(
+                        &owner.gas,
+                        volumes,
+                        &owner.work.adaptive.anchor,
+                        &owner.work.stage,
+                        &owner.work.primitive,
+                        &[[0.0; super::MAX_COMPONENTS]; 2],
+                        cancelled,
+                    )?;
+                }
                 Ok((coarse, first, second, error))
             })();
             match attempt {
                 Ok((coarse, first, second, error)) => {
+                    if let Some(account) = entropy.as_deref_mut() {
+                        account.accept_stabilized_candidate(
+                            owner.gas.species_count(),
+                            &owner.work.primitive,
+                        )?;
+                    }
                     for k in 0..owner.work.endpoint_changes.len() {
                         if k % 1024 == 0 {
                             poll(cancelled)?;
@@ -391,6 +429,9 @@ fn advance<L: TransportLaw>(
                 last: Box::new(last),
             });
         }
+    }
+    if let Some(account) = entropy {
+        super::entropy::finish(owner, network, account, cancelled)?;
     }
     let transport = evolve::finish(owner, network, duration, before, progress, cancelled)?;
     Ok(AdaptiveNetworkDissipationReport {
