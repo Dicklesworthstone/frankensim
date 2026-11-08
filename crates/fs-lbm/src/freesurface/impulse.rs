@@ -64,6 +64,20 @@ impl FreeSurface {
         controls: WrenchImpulseControls2,
         gate: &CancelGate,
     ) -> Result<WrenchImpulseReport2, ImpulseError> {
+        self.apply_wrench_impulse_with_receipt(indices, wrench, controls, gate, Ok)
+    }
+
+    /// Admit a dependent wrench receipt before publishing any populations.
+    /// Physical owners use this to check the original SI origin and balances
+    /// without cloning the liquid or failing after native state acceptance.
+    pub(crate) fn apply_wrench_impulse_with_receipt<R>(
+        &mut self,
+        indices: &[usize],
+        wrench: WrenchImpulse2,
+        controls: WrenchImpulseControls2,
+        gate: &CancelGate,
+        admit: impl FnOnce(WrenchImpulseReport2) -> Result<R, ImpulseError>,
+    ) -> Result<R, ImpulseError> {
         poll(gate)?;
         let count = self
             .grid
@@ -134,7 +148,7 @@ impl FreeSurface {
                 }
             },
             |report, before, after| {
-                plan.finish(&cells, report, controls, gate, |index| {
+                let report = plan.finish(&cells, report, controls, gate, |index| {
                     let mass = if before.grid.flags[index] == Cell::Fluid {
                         before.grid.f[index].iter().sum()
                     } else {
@@ -147,7 +161,8 @@ impl FreeSurface {
                         before.grid.fext[index],
                         Some(mass),
                     )
-                })
+                })?;
+                admit(report)
             },
         )
     }
@@ -283,6 +298,49 @@ mod tests {
         assert!(
             liquid
                 .apply_impulse_density(&[[0.001, 0.0]; 4], controls, &gate)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn dependent_wrench_receipt_refusal_does_not_publish_native_populations() {
+        let mut grid = Grid::uniform(2, 2, 0.9);
+        grid.periodic_x = false;
+        grid.periodic_y = false;
+        let mut liquid = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+        let before = liquid.clone();
+        let controls = WrenchImpulseControls2 {
+            impulse: ImpulseControls {
+                max_cells: 4,
+                maximum_speed: 0.1,
+                maximum_momentum_defect: 1e-12,
+                maximum_work_defect: 1e-12,
+            },
+            maximum_angular_momentum_defect: 1e-12,
+        };
+        let wrench = WrenchImpulse2 {
+            origin: [0.0; 2],
+            linear: [0.002, -0.001],
+            angular: 0.0003,
+        };
+        let gate = CancelGate::new_clock_free();
+        let result =
+            liquid.apply_wrench_impulse_with_receipt(&[0, 3], wrench, controls, &gate, |report| {
+                assert_eq!(report.impulse.affected_cells, 2);
+                assert!(report.impulse.work > 0.0);
+                Err::<(), _>(ImpulseError::Invalid("dependent SI wrench refused"))
+            });
+        assert_eq!(
+            result,
+            Err(ImpulseError::Invalid("dependent SI wrench refused"))
+        );
+        assert_eq!(liquid.grid.f, before.grid.f);
+        assert_eq!(liquid.mass, before.mass);
+        assert_eq!(liquid.grid.flags, before.grid.flags);
+        assert_eq!(liquid.carry, before.carry);
+        assert!(
+            liquid
+                .apply_wrench_impulse(&[0, 3], wrench, controls, &gate)
                 .is_ok()
         );
     }

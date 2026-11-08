@@ -527,3 +527,30 @@ files passed pinned parser checks and bounded source review. These eight new
 integration regressions have not been compiled or executed because required
 dependency artifacts and build storage are unavailable; earlier shared-kernel
 and atmospheric test results do not establish this native integration gate.
+
+## Physical planar liquid wrench impulses
+
+`MaterialFreeSurface2::apply_wrench_impulse` applies an explicitly authored
+linear impulse and independent out-of-plane couple to retained liquid cells.
+Inputs and receipts use the existing per-unit-depth convention: linear
+impulse in kg/s, angular impulse in kg m/s, liquid mass in kg/m, and signed
+work in J/m. Positive angular impulse is counterclockwise. No thickness or
+extra timestep is inferred. The original source density, cell length and
+actual interface fill determine the selected mass, centroid and inertia;
+the native minimum-mass-weighted translation plus rotation realizes the wrench.
+
+Conversion transports the requested moment to the representable native
+origin and transports actual deposited and observed moments back to the
+original authored SI origin. Separate physical linear, angular and work
+budgets admit the complete SI receipt before native population publication.
+Scenario speed, topology, singular-couple and cancellation gates retain the
+original transaction; a late unit or balance refusal also leaves the accepted
+liquid unchanged. Held Guo forcing, viscous stress, density, fill and material
+identity remain with their original owners. No collision, thermal advance or
+reciprocal body reaction is implicit.
+
+Focused regressions cover independent physical impulse/inertia/work sums for
+bulk and half-filled cells across distinct length/time scales, covariance
+under a shifted SI origin, signed braking work and state-preserving native
+and physical refusals. Dependent-receipt rejection is checked at the native
+publication boundary.

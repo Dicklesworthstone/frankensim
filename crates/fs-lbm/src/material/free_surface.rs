@@ -30,8 +30,9 @@ pub use impulse::{
     MaterialFreeSurfaceImpulseControls2, MaterialFreeSurfaceImpulseControls3,
     MaterialFreeSurfaceImpulseError, MaterialFreeSurfaceImpulseReport2,
     MaterialFreeSurfaceImpulseReport3,
-    MaterialFreeSurfaceWrenchImpulse3, MaterialFreeSurfaceWrenchImpulseControls3,
-    MaterialFreeSurfaceWrenchImpulseReport3,
+    MaterialFreeSurfaceWrenchImpulse2, MaterialFreeSurfaceWrenchImpulse3,
+    MaterialFreeSurfaceWrenchImpulseControls2, MaterialFreeSurfaceWrenchImpulseControls3,
+    MaterialFreeSurfaceWrenchImpulseReport2, MaterialFreeSurfaceWrenchImpulseReport3,
 };
 
 mod initial;

@@ -10,6 +10,12 @@ use super::{
 use crate::impulse::{ImpulseControls, ImpulseError, ImpulseReport, poll};
 use fs_exec::CancelGate;
 
+mod planar_wrench;
+pub use planar_wrench::{
+    MaterialFreeSurfaceWrenchImpulse2, MaterialFreeSurfaceWrenchImpulseControls2,
+    MaterialFreeSurfaceWrenchImpulseReport2,
+};
+
 mod wrench;
 pub use wrench::{
     MaterialFreeSurfaceWrenchImpulse3, MaterialFreeSurfaceWrenchImpulseControls3,
