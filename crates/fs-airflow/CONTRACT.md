@@ -1808,9 +1808,9 @@ material receipts remain bound to the returned local states.
 Cells must represent the declared bulk-flow sections and correlations; junction
 or nozzle geometry is not inferred. Per-cell hydraulic losses are observations
 of prescribed flows, not a graph pressure solution. Their sum is a conservative
-common-pressure admission bound; only an axial series path identifies that sum
-with its end-to-end drop. No pump or flow-feasibility claim is added. The new
-network regressions independently reconstruct cell and external enthalpy
+common-pressure admission bound; on an axial series path it is the hydraulic
+loss contribution, excluding density-driven acceleration. These prescribed-flow
+APIs add no pump or flow-feasibility claim. The network regressions reconstruct cell and external enthalpy
 balances, check recirculating species, exercise material/pressure substitutions,
 and compare the original axial API with the same graph and wall laws.
 
@@ -5390,3 +5390,37 @@ original Cp and datum changes, unequal mass rates, multiple port ownership,
 shared-solid use, reverse transfer and transactional refusal. Changed Rust
 sources were parsed with the pinned formatter; native Cargo compilation and
 test execution were unavailable in this resource-exhausted session.
+
+## Pressure-selected heated gas with source density
+
+`medium::steady_gas::pressure::solve_pressure_driven_material_gas` selects a
+positive mass rate on a constant-area axial path without side injections.
+Every flow trial reuses the original stationary species/NASA9 enthalpy,
+convection and resistance solve. Its retained local EOS density determines
+velocity and the momentum term `beta * (mdot/A) * (u_out - u_in)`; this joins
+the actual hydraulic loss sum in the imposed static-pressure balance.
+The returned native gas field and transport observations are the accepted trial,
+with no extra solve or material reconstruction after pressure convergence.
+
+The caller authors one constant velocity-profile shape through its momentum
+factor beta and kinetic-energy factor alpha. Both must be finite and at least
+one, with `alpha >= beta²` up to 64-epsilon relative roundoff for unidirectional
+profiles. Uniform flow uses (1, 1); a parabolic circular profile uses (4/3, 2).
+Heat-transfer correlation names never select these factors. The declared factors
+are retained in the result and apply to momentum and kinetic power consistently.
+
+The existing `PressureDrivenBudget` supplies the positive bracket, pressure
+tolerances, solve limit and hydraulic-omission allowance. A separate total
+native-substep cap covers all flow and material-feedback trials. The source's
+common thermodynamic pressure and native low-Mach bounds remain active;
+`sum(dp_loss) + max |beta*G*(u_cell-u_in)|` limits pressure excursions without
+cancellation. The sum of absolute regional kinetic-power changes has its own
+omission allowance, so heating/cooling cancellation cannot hide omitted energy.
+Every evaluated trial must be admitted; failures and cancellation preserve inputs.
+
+Bisection selects an admitted sign-changing bracket without claiming monotonicity,
+uniqueness or stability. This is a reduced common-pressure operating point, not
+a compressible pressure profile, choking model, resolved velocity/thermal boundary
+layer or complete energy solve. Existing tests add independent Poiseuille density
+scaling, heated/cooled mass/enthalpy/momentum balances, retained profile factors,
+and bracket, profile, shared-work, pressure, power and cancellation refusals.

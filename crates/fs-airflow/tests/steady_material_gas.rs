@@ -9,6 +9,10 @@ mod network;
 use fs_airflow::graph::thermal::medium::convection::ForcedConvectionSettings;
 use fs_airflow::graph::thermal::medium::series::hydraulic::MaterialFlowResistance;
 use fs_airflow::graph::thermal::medium::steady_gas::*;
+use fs_airflow::graph::thermal::medium::steady_gas::pressure::{
+    GasPressureBudget, GasPressureError, solve_pressure_driven_material_gas,
+};
+use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::PressureDrivenBudget;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_convection::CorrelationId;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
@@ -18,7 +22,7 @@ use fs_material::gas_field::steady::{AxialGasCell, GasInjection, SteadyAxialGas,
 use fs_material::gas_species::input::ThermochemicalPhase;
 use fs_material::thermochemical_gas::energy::GasEnergySolve;
 use fs_qty::semantic::{Composition, CompositionBasis};
-use fs_qty::{Area, Length, MassFlowRate};
+use fs_qty::{Area, Length, MassFlowRate, Pressure};
 
 const LENGTH: f64 = 1.0;
 const DIAMETER: f64 = 0.01;
@@ -356,5 +360,396 @@ fn duplicate_owners_geometry_work_pressure_and_cancellation_refuse_transactional
             Err(MaterialSteadyGasError::Cancelled)
         ));
         assert_eq!(p, saved);
+    });
+}
+
+fn pressure_budget() -> GasPressureBudget {
+    GasPressureBudget {
+        pressure: PressureDrivenBudget {
+            mass_flow_bracket_kg_per_s: (0.2 * FLOW, 2.75 * FLOW),
+            pressure_absolute_tolerance_pa: 1e-7,
+            pressure_relative_tolerance: 1e-8,
+            max_flow_evaluations: 48,
+            maximum_neglected_hydraulic_power_w: 1.0,
+        },
+        momentum_flux_factor: 4.0 / 3.0,
+        kinetic_energy_flux_factor: 2.0,
+        maximum_substeps: 1_000_000,
+        maximum_neglected_kinetic_power_w: 1.0,
+    }
+}
+
+#[test]
+fn pressure_selected_isothermal_flow_uses_eos_density_and_the_supplied_drive() {
+    with_cx(|cx, _| {
+        let mut p = problem(false);
+        for cell in &mut p.cells {
+            cell.wall_temperature_k = 400.0;
+        }
+        let reference = p
+            .source
+            .evaluate(&source::point(400.0, p.static_pressure_pa))
+            .unwrap();
+        // Independent two-cell Poiseuille oracle; zero thermal acceleration.
+        let drive = 64.0 * LENGTH * reference.state().dynamic_viscosity * FLOW
+            / (reference.state().density * area() * DIAMETER * DIAMETER);
+        p.inlet_mass_flow_kg_s = 0.3 * FLOW; // A template value, not the answer.
+        for multiplier in [1.0, 2.0] {
+            p.static_pressure_pa = 100000.0 * multiplier;
+            let saved = p.clone();
+            let solved = solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                GasPressureBudget {
+                    momentum_flux_factor: 1.0,
+                    kinetic_energy_flux_factor: 1.0,
+                    ..pressure_budget()
+                },
+            )
+            .unwrap();
+            near(
+                solved.mass_flow_kg_per_s,
+                multiplier * FLOW,
+                1e-6 * multiplier * FLOW,
+            );
+            near(solved.acceleration_pressure_pa, 0.0, 1e-10);
+            assert!(
+                solved.pressure_residual_pa.abs()
+                    <= pressure_budget().pressure.pressure_absolute_tolerance_pa
+            );
+            for cell in &solved.gas.cells {
+                near(
+                    cell.gas.state().density,
+                    multiplier * reference.state().density,
+                    1e-11,
+                );
+                near(
+                    cell.velocity_m_s,
+                    FLOW / (reference.state().density * area()),
+                    1e-6,
+                );
+                assert_eq!(cell.gas.source_packs(), p.source.source_packs());
+            }
+            assert!(solved.flow_evaluations <= pressure_budget().pressure.max_flow_evaluations);
+            assert!(solved.substeps <= pressure_budget().maximum_substeps);
+            assert_eq!(p, saved);
+        }
+    });
+}
+
+#[test]
+fn pressure_selected_heating_and_cooling_close_density_momentum_and_enthalpy() {
+    with_cx(|cx, _| {
+        let p = problem(true);
+        let given = solve_material_gas_transport(cx, &p, &laws(), controls(), feedback()).unwrap();
+        let inlet = given.thermal.field().state_at(0.0).unwrap();
+        let inlet_speed = FLOW / (inlet.state().density * area());
+        let outlet_speed = FLOW / (given.cells.last().unwrap().gas.state().density * area());
+        let drive = given.total_pressure_drop_pa
+            + pressure_budget().momentum_flux_factor
+                * (FLOW / area())
+                * (outlet_speed - inlet_speed);
+        let mut previous_mass = 0.0;
+        for wall in [300.0, 480.0] {
+            let mut trial = p.clone();
+            for cell in &mut trial.cells {
+                cell.wall_temperature_k = wall;
+            }
+            let solved = solve_pressure_driven_material_gas(
+                cx,
+                &trial,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                pressure_budget(),
+            )
+            .unwrap();
+            let mass = solved.mass_flow_kg_per_s;
+            let inlet = solved.gas.thermal.field().state_at(0.0).unwrap();
+            let cp = inlet.state().specific_heat_cp;
+            let mut previous_temperature = inlet.state().temperature;
+            let mut previous_speed = mass / (inlet.state().density * area());
+            let initial_speed = previous_speed;
+            let mut pressure_loss = 0.0;
+            let mut kinetic = 0.0;
+            let mut kinetic_bound = 0.0;
+            for cell in &solved.gas.cells {
+                let gas = cell.gas.state();
+                let speed = mass / (gas.density * area());
+                near(gas.density * area() * cell.velocity_m_s, mass, 1e-14);
+                near(
+                    cell.wall_heat_w,
+                    mass * cp * (gas.temperature - previous_temperature),
+                    3e-7,
+                );
+                pressure_loss +=
+                    32.0 * gas.dynamic_viscosity * LENGTH * speed / (DIAMETER * DIAMETER);
+                let change = pressure_budget().kinetic_energy_flux_factor
+                    * 0.5
+                    * mass
+                    * (speed * speed - previous_speed * previous_speed);
+                kinetic += change;
+                kinetic_bound += change.abs();
+                previous_speed = speed;
+                previous_temperature = gas.temperature;
+                assert_eq!(
+                    cell.gas,
+                    solved
+                        .gas
+                        .thermal
+                        .field()
+                        .state_at(trial.cells[cell.cell].end_m)
+                        .unwrap()
+                );
+            }
+            let acceleration = pressure_budget().momentum_flux_factor
+                * (mass / area())
+                * (previous_speed - initial_speed);
+            assert_eq!(
+                solved.momentum_flux_factor,
+                pressure_budget().momentum_flux_factor
+            );
+            assert_eq!(
+                solved.kinetic_energy_flux_factor,
+                pressure_budget().kinetic_energy_flux_factor
+            );
+            near(solved.acceleration_pressure_pa, acceleration, 1e-12);
+            near(pressure_loss + acceleration, drive, 2e-7);
+            near(solved.kinetic_power_change_w, kinetic, 1e-15);
+            near(solved.neglected_kinetic_power_bound_w, kinetic_bound, 1e-15);
+            assert!(
+                solved.substeps > solved.gas.substeps,
+                "all pressure trials share one work account"
+            );
+            if wall == 300.0 {
+                near(mass, FLOW, 1e-6 * FLOW);
+                assert!(acceleration < 0.0);
+                previous_mass = mass;
+            } else {
+                assert!(acceleration > 0.0);
+                assert!(
+                    mass < previous_mass,
+                    "heating reduces density and increases required pressure"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn pressure_gas_shared_work_energy_and_pressure_bounds_refuse_without_mutation() {
+    with_cx(|cx, gate| {
+        let p = problem(true);
+        let saved = p.clone();
+        let base = solve_material_gas_transport(cx, &p, &laws(), controls(), feedback()).unwrap();
+        let inlet = base.thermal.field().state_at(0.0).unwrap();
+        let acceleration = pressure_budget().momentum_flux_factor
+            * (FLOW / area())
+            * (FLOW / (base.cells[1].gas.state().density * area())
+                - FLOW / (inlet.state().density * area()));
+        let drive = base.total_pressure_drop_pa + acceleration;
+        let mut budget = pressure_budget();
+        budget.pressure.mass_flow_bracket_kg_per_s = (FLOW, 2.0 * FLOW);
+        // The known solution is the first endpoint, making each refusal local.
+        let mut no_hydraulic_heat = budget;
+        no_hydraulic_heat
+            .pressure
+            .maximum_neglected_hydraulic_power_w = 0.0;
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                no_hydraulic_heat
+            ),
+            Err(GasPressureError::NeglectedHydraulicPower { .. })
+        ));
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                GasPressureBudget {
+                    maximum_neglected_kinetic_power_w: 0.0,
+                    ..budget
+                }
+            ),
+            Err(GasPressureError::NeglectedKineticPower { .. })
+        ));
+        // Friction alone fits, but the same source density's momentum term does not.
+        let fraction =
+            (base.total_pressure_drop_pa + 0.5 * acceleration.abs()) / p.static_pressure_pa;
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                GasTransportFeedback {
+                    maximum_pressure_drop_fraction: fraction,
+                    ..feedback()
+                },
+                budget
+            ),
+            Err(GasPressureError::PressureVariation { .. })
+        ));
+        assert!(base.substeps > 0);
+        // The first trial has its original work plus one spare substep;
+        // the second full thermal solve cannot reset the shared allowance.
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(1.1 * drive),
+                controls(),
+                feedback(),
+                GasPressureBudget {
+                    maximum_substeps: base.substeps + 1,
+                    ..budget
+                }
+            ),
+            Err(GasPressureError::SubstepBudget { .. })
+                | Err(GasPressureError::Transport(
+                    MaterialSteadyGasError::NotConverged { .. }
+                ))
+                | Err(GasPressureError::Transport(
+                    MaterialSteadyGasError::Thermal(_)
+                ))
+        ));
+        assert_eq!(p, saved);
+        gate.request();
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                budget
+            ),
+            Err(GasPressureError::Transport(
+                MaterialSteadyGasError::Cancelled
+            ))
+        ));
+        assert_eq!(p, saved);
+    });
+}
+
+#[test]
+fn pressure_gas_requires_an_admitted_constant_area_sign_bracket() {
+    with_cx(|cx, _| {
+        let mut p = problem(false);
+        for cell in &mut p.cells {
+            cell.wall_temperature_k = 400.0;
+        }
+        let material = p
+            .source
+            .evaluate(&source::point(400.0, p.static_pressure_pa))
+            .unwrap();
+        let drive = 64.0 * LENGTH * material.state().dynamic_viscosity * FLOW
+            / (material.state().density * area() * DIAMETER * DIAMETER);
+        let mut budget = pressure_budget();
+        budget.pressure.mass_flow_bracket_kg_per_s = (2.0 * FLOW, 2.75 * FLOW);
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                budget
+            ),
+            Err(GasPressureError::NotBracketed { .. })
+        ));
+        budget = pressure_budget();
+        budget.pressure.max_flow_evaluations = 2;
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                budget
+            ),
+            Err(GasPressureError::NotConverged { evaluations: 2, .. })
+        ));
+        for (beta, alpha) in [
+            (0.5, 1.0),
+            (2.0, 2.0),
+            (f64::NAN, 2.0),
+            (1.0, f64::INFINITY),
+        ] {
+            assert!(matches!(
+                solve_pressure_driven_material_gas(
+                    cx,
+                    &p,
+                    &laws(),
+                    Pressure::new(drive),
+                    controls(),
+                    feedback(),
+                    GasPressureBudget {
+                        momentum_flux_factor: beta,
+                        kinetic_energy_flux_factor: alpha,
+                        ..pressure_budget()
+                    }
+                ),
+                Err(GasPressureError::Invalid(_))
+            ));
+        }
+        let mut varying_area = laws();
+        varying_area[1].resistance = MaterialFlowResistance::try_new(
+            1.0,
+            0.0,
+            Area::new(2.0 * area()),
+            Length::new(DIAMETER),
+            (0.0, 2300.0),
+        )
+        .unwrap();
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &varying_area,
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                pressure_budget()
+            ),
+            Err(GasPressureError::Invalid(_))
+        ));
+        p.injections.push(GasInjection {
+            cell: 1,
+            mass_flow_kg_s: FLOW,
+            state: primitive(400.0, 0.75),
+        });
+        assert!(matches!(
+            solve_pressure_driven_material_gas(
+                cx,
+                &p,
+                &laws(),
+                Pressure::new(drive),
+                controls(),
+                feedback(),
+                pressure_budget()
+            ),
+            Err(GasPressureError::Invalid(_))
+        ));
     });
 }

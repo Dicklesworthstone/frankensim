@@ -3,8 +3,12 @@
 //! NASA-9 enthalpy, species mixing and thermal transport remain owned by
 //! `SteadyGasNetwork`, also used by `SteadyAxialGas`. This adapter closes wall conductances against
 //! the actual local mixture and temperature, then evaluates pressure losses
-//! from those same states. Flow is prescribed mass flow, never frozen volume
-//! flow. Local pressure losses must be small relative to the common EOS pressure.
+//! from those same states. Base solvers prescribe mass flow, never frozen volume
+//! flow; [`pressure`] selects positive flow from an imposed pressure difference.
+//! Local pressure losses must be small relative to the common EOS pressure.
+
+/// Pressure-selected axial flow with actual density-dependent momentum.
+pub mod pressure;
 
 use fs_convection::{CorrelationId, HeatTransferCoefficient, NusseltEvaluation, ThermalDirection};
 use fs_evidence::Evidence;
@@ -85,10 +89,10 @@ pub struct MaterialSteadyGasSolution<T = SteadyGasSolution> {
     pub substeps: usize,
     /// Native caloric/steady residual bound plus the accepted wall-law defect [W].
     pub maximum_power_residual_bound_w: f64,
-    /// Sum of the nonnegative cell pressure-loss estimates [Pa]. This is the
-    /// series pressure drop for an axial path. On a branched network it is a
-    /// conservative sum over all cells, NOT a solved inlet/outlet pressure
-    /// difference or a proof that the prescribed flows satisfy momentum balance.
+    /// Sum of the nonnegative cell hydraulic losses [Pa], excluding acceleration.
+    /// This is the frictional contribution on an axial series path. On a branched
+    /// network it is a conservative sum over all cells, not a solved inlet/outlet
+    /// pressure difference or proof of momentum balance.
     pub total_pressure_drop_pa: f64,
     /// Hydraulic dp*Q [W], reported once and NOT added to wall heat or enthalpy.
     /// This reduced thermal model neglects mechanical dissipation heating.
