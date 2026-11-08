@@ -17,8 +17,10 @@ use fs_lbm::freesurface::{ContactModel, FreeSurface};
 use fs_lbm::rheology::{Rheology, TAU_CAP, TAU_FLOOR, update_tau};
 use fs_lbm::{Cell, Grid};
 use fs_render::volumes::{
-    AbsorptionImageSettings, DensityAbsorption, DvrError, VolumeGrid,
-    render_absorption_transmittance, render_density_transmittance_box,
+    AbsorptionImageSettings, DensityAbsorption, DensityAbsorptionSpectrum, DvrError,
+    SpectralAbsorptionImageSettings, SpectralOpacityImage, VolumeGrid,
+    render_absorption_transmittance, render_density_spectral_box,
+    render_density_spectral_transmittance_box, render_density_transmittance_box,
 };
 
 /// The pour fixture: a tank with an interior weir (the lip) the fluid
@@ -148,6 +150,33 @@ pub struct PourOpticalView {
     pub slab_depth_m: f64,
 }
 
+/// Wavelength-resolved SI absorption of the same accepted pour mass field.
+///
+/// The caller supplies one to sixteen positive, strictly increasing vacuum
+/// wavelengths and their nonnegative mass absorption coefficients at the
+/// material state being observed. These are monochromatic samples: no spectral
+/// interpolation, wavelength-bin widths, illumination or detector response is
+/// inferred. The spectrum and the original mass field are borrowed.
+///
+/// As for [`PourOpticalView`], the two-dimensional mass field is extruded
+/// through an explicit slab depth. Each wavelength's transmitted intensity is
+/// averaged over the exact pixel footprint, preserving partial liquid coverage
+/// independently of its absorption strength. This includes bulk absorption,
+/// not surface reflection/refraction, wall occlusion, scattering or emission.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PourSpectralOpticalView<'a> {
+    /// Positive strictly increasing vacuum wavelength samples [nm].
+    pub wavelengths_nm: &'a [f64],
+    /// Intensity mass absorption at each corresponding wavelength [m²/kg].
+    pub mass_absorption_m2_kg: &'a [f64],
+    /// Physical density represented by one unit of cell-average mass [kg/m³].
+    pub density_unit_kg_m3: f64,
+    /// Positive physical spacing of the square in-plane lattice cells [m].
+    pub lattice_spacing_m: f64,
+    /// Positive out-of-plane path length [m], independent of grid resolution.
+    pub slab_depth_m: f64,
+}
+
 /// A physical pour view that cannot produce an admitted transmittance image.
 #[derive(Debug)]
 pub enum PourOpticalError {
@@ -228,6 +257,77 @@ impl PourOpticalView {
     }
 }
 
+impl<'a> PourSpectralOpticalView<'a> {
+    /// Render per-wavelength transmission, opacity and effective optical depth.
+    ///
+    /// The image retains the supplied wavelengths. Samples are pixel-major,
+    /// with wavelengths varying fastest: `(y * width + x) * bands + band`.
+    /// Geometry and density traversal are shared across wavelengths; no
+    /// converted density field or per-wavelength simulation copy is allocated.
+    /// Invalid input or exhausted image/spectral work budgets returns no image.
+    pub fn render_mass_field(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: SpectralAbsorptionImageSettings,
+    ) -> Result<SpectralOpacityImage, PourOpticalError> {
+        let grid = self.grid(mass_field, dimensions)?;
+        render_density_spectral_box(&grid, settings, self.absorption())
+            .map_err(PourOpticalError::Transport)
+    }
+
+    /// Render only direct intensity transmittance in pixel-major spectral order.
+    ///
+    /// This writes the final `pixels * bands` values without allocating the
+    /// full opacity/depth image first. Each wavelength is filtered after
+    /// exponentiation; neither density nor optical depth is spatially averaged.
+    pub fn render_transmittance(
+        self,
+        mass_field: &[f64],
+        dimensions: [usize; 2],
+        settings: SpectralAbsorptionImageSettings,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        let grid = self.grid(mass_field, dimensions)?;
+        render_density_spectral_transmittance_box(&grid, settings, self.absorption())
+            .map_err(PourOpticalError::Transport)
+    }
+
+    fn absorption(self) -> DensityAbsorptionSpectrum<'a> {
+        DensityAbsorptionSpectrum {
+            wavelengths_nm: self.wavelengths_nm,
+            mass_absorption_m2_kg: self.mass_absorption_m2_kg,
+            density_unit_kg_m3: self.density_unit_kg_m3,
+            length_unit_m: 1.0,
+        }
+    }
+
+    fn grid<'m>(
+        self,
+        mass_field: &'m [f64],
+        dimensions: [usize; 2],
+    ) -> Result<VolumeGrid<'m>, PourOpticalError> {
+        if !self.lattice_spacing_m.is_finite()
+            || self.lattice_spacing_m <= 0.0
+            || !self.slab_depth_m.is_finite()
+            || self.slab_depth_m <= 0.0
+        {
+            return Err(PourOpticalError::InvalidGeometry);
+        }
+        // Shared transport admission checks the original shape and samples
+        // without VolumeGrid::new's panic on invalid dimensions.
+        Ok(VolumeGrid {
+            dims: [dimensions[0], dimensions[1], 1],
+            data: mass_field,
+            origin: [0.0; 3],
+            cell: [
+                self.lattice_spacing_m,
+                self.lattice_spacing_m,
+                self.slab_depth_m,
+            ],
+        })
+    }
+}
+
 impl PourOutcome {
     /// Render this accepted pour using explicit SI material/view parameters.
     ///
@@ -241,6 +341,19 @@ impl PourOutcome {
         settings: AbsorptionImageSettings,
     ) -> Result<Vec<f64>, PourOpticalError> {
         view.render_mass_field(&self.mass_field, dimensions, settings)
+    }
+
+    /// Observe this accepted mass field at explicitly supplied wavelengths.
+    ///
+    /// The original simulation dimensions, SI calibration and spectral work
+    /// limit remain explicit. Output is pixel-major with wavelengths fastest.
+    pub fn render_spectral_transmittance(
+        &self,
+        dimensions: [usize; 2],
+        view: PourSpectralOpticalView<'_>,
+        settings: SpectralAbsorptionImageSettings,
+    ) -> Result<Vec<f64>, PourOpticalError> {
+        view.render_transmittance(&self.mass_field, dimensions, settings)
     }
 }
 
@@ -1018,5 +1131,141 @@ mod physical_opacity_tests {
         assert!(optics.render_mass_field(&[-0.1, 0.0, 0.0, 0.0], [2, 2], settings(4)).is_err());
         let limited = AbsorptionImageSettings { max_pixels: 3, ..settings(4) };
         assert!(optics.render_mass_field(&mass, [2, 2], limited).is_err());
+    }
+
+    /// G1/G3: each wavelength keeps the filament's area and the SI slab law.
+    #[test]
+    fn spectral_pour_filters_each_wavelength_and_matches_the_monochromatic_view() {
+        let mass = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        let wavelengths = [450.0, 550.0, 650.0];
+        let coefficients = [0.0, 0.4, 1000.0];
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 2e-3,
+        };
+        let limits = SpectralAbsorptionImageSettings {
+            image: AbsorptionImageSettings {
+                resolution: [1, 1],
+                max_pixels: 1,
+                max_grid_cells: 8,
+                max_cell_visits: 8,
+            },
+            max_spectral_evaluations: 24,
+        };
+        let image = optics.render_mass_field(&mass, [4, 2], limits).unwrap();
+        assert_eq!(image.resolution(), [1, 1]);
+        assert_eq!(image.wavelengths_nm(), &wavelengths);
+        assert_eq!(image.samples().len(), 3);
+        let expected = [1.0, 0.75 + 0.25 * (-0.8_f64).exp(), 0.75];
+        for (sample, expected) in image.samples().iter().zip(expected) {
+            close(sample.transmittance(), expected);
+            close(sample.opacity(), 1.0 - expected);
+            close(sample.optical_depth(), -expected.ln());
+        }
+        let direct = optics.render_transmittance(&mass, [4, 2], limits).unwrap();
+        assert_eq!(
+            direct,
+            image
+                .samples()
+                .iter()
+                .map(|sample| sample.transmittance())
+                .collect::<Vec<_>>()
+        );
+        for (band, &wavelength_nm) in wavelengths.iter().enumerate() {
+            let single = PourSpectralOpticalView {
+                wavelengths_nm: &wavelengths[band..=band],
+                mass_absorption_m2_kg: &coefficients[band..=band],
+                ..optics
+            }
+            .render_transmittance(&mass, [4, 2], limits)
+            .unwrap();
+            let monochromatic = PourOpticalView {
+                wavelength_nm,
+                mass_absorption_m2_kg: coefficients[band],
+                density_unit_kg_m3: optics.density_unit_kg_m3,
+                lattice_spacing_m: optics.lattice_spacing_m,
+                slab_depth_m: optics.slab_depth_m,
+            }
+            .render_mass_field(&mass, [4, 2], limits.image)
+            .unwrap();
+            close(single[0], monochromatic[0]);
+            close(single[0], direct[band]);
+        }
+        let outcome = PourOutcome {
+            mass_drift: 0.0,
+            fragments: 1,
+            poured_mass: 0.0,
+            dribble_cells: 0,
+            mass_field: mass.to_vec(),
+        };
+        assert_eq!(
+            outcome
+                .render_spectral_transmittance([4, 2], optics, limits)
+                .unwrap(),
+            direct
+        );
+    }
+
+    /// G0: the complete spectrum and all wavelengths' work must be admitted.
+    #[test]
+    fn spectral_pour_refuses_invalid_spectra_geometry_and_total_work() {
+        let mass = [0.0, 0.25, 0.5, 1.0];
+        let optics = PourSpectralOpticalView {
+            wavelengths_nm: &[450.0, 650.0],
+            mass_absorption_m2_kg: &[0.4, 0.1],
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 2e-3,
+        };
+        let limits = SpectralAbsorptionImageSettings {
+            image: settings(4),
+            max_spectral_evaluations: 8,
+        };
+        let insufficient = SpectralAbsorptionImageSettings {
+            max_spectral_evaluations: 7,
+            ..limits
+        };
+        assert!(matches!(
+            optics.render_transmittance(&mass, [2, 2], insufficient),
+            Err(PourOpticalError::Transport(
+                DvrError::SpectralEvaluationBudgetExceeded {
+                    requested: 8,
+                    limit: 7
+                }
+            ))
+        ));
+        assert!(
+            optics
+                .render_mass_field(&mass, [2, 2], insufficient)
+                .is_err()
+        );
+        let invalid: [(&[f64], &[f64]); 6] = [
+            (&[], &[]),
+            (&[450.0], &[0.4, 0.1]),
+            (&[650.0, 450.0], &[0.4, 0.1]),
+            (&[450.0, 450.0], &[0.4, 0.1]),
+            (&[450.0, f64::NAN], &[0.4, 0.1]),
+            (&[450.0, 650.0], &[0.4, -0.1]),
+        ];
+        for (wavelengths_nm, mass_absorption_m2_kg) in invalid {
+            let invalid = PourSpectralOpticalView {
+                wavelengths_nm,
+                mass_absorption_m2_kg,
+                ..optics
+            };
+            assert!(invalid.render_transmittance(&mass, [2, 2], limits).is_err());
+        }
+        assert!(matches!(
+            PourSpectralOpticalView {
+                slab_depth_m: 0.0,
+                ..optics
+            }
+            .render_mass_field(&mass, [2, 2], limits),
+            Err(PourOpticalError::InvalidGeometry)
+        ));
+        assert!(optics.render_transmittance(&mass, [3, 2], limits).is_err());
     }
 }

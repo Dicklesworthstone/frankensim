@@ -40,7 +40,10 @@ use fs_ornith::screen::{PANELS, lift_to_drag};
 use fs_qty::{Dims, QtyAny};
 use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
-use fs_render::volumes::{AbsorptionImageSettings, VolumeGrid, render_absorption_transmittance};
+use fs_render::volumes::{
+    AbsorptionImageSettings, SpectralAbsorptionImageSettings, VolumeGrid,
+    render_absorption_transmittance,
+};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 use fs_sos::lyapunov_certifies_stability;
 use fs_sparse::{Coo, Csr};
@@ -1031,6 +1034,66 @@ pub fn render_vessel_transmittance(
     .unwrap_or_default()
 }
 
+/// Re-render a captured mass frame at explicitly supplied vacuum wavelengths.
+///
+/// Supply one to sixteen positive, strictly increasing `wavelengths_nm` and
+/// equally many nonnegative `mass_absorption_m2_kg` coefficients at the observed
+/// material state. They are monochromatic samples, with no interpolation,
+/// wavelength-bin widths, illumination spectrum or detector response inferred.
+///
+/// Output contains `resolution² * wavelengths_nm.len()` direct transmittances,
+/// indexed by `(py * resolution + px) * wavelengths_nm.len() + band`. Each
+/// wavelength is averaged over the exact pixel footprint after attenuation.
+/// The original mass cells, SI density conversion and explicit slab depth have
+/// the same meaning as in [`render_vessel_transmittance`].
+///
+/// Reuses the captured frame and shares geometry/density traversal across all
+/// wavelengths, without an intermediate extinction or full opacity/depth image.
+/// Limits are 1,048,576 pixels, original cells and column-cell visits, and
+/// 1,048,576 total spectral evaluations across all pixel/column overlaps.
+/// Invalid inputs or exhausted budgets return an empty vector.
+#[allow(clippy::too_many_arguments)]
+pub fn render_vessel_spectral_transmittance(
+    mass_field: &[f64],
+    nx: u32,
+    ny: u32,
+    resolution: u32,
+    wavelengths_nm: &[f64],
+    mass_absorption_m2_kg: &[f64],
+    density_unit_kg_m3: f64,
+    lattice_spacing_m: f64,
+    slab_depth_m: f64,
+) -> Vec<f64> {
+    let (Ok(nx), Ok(ny), Ok(resolution)) = (
+        usize::try_from(nx),
+        usize::try_from(ny),
+        usize::try_from(resolution),
+    ) else {
+        return Vec::new();
+    };
+    fs_vessel::pour::PourSpectralOpticalView {
+        wavelengths_nm,
+        mass_absorption_m2_kg,
+        density_unit_kg_m3,
+        lattice_spacing_m,
+        slab_depth_m,
+    }
+    .render_transmittance(
+        mass_field,
+        [nx, ny],
+        SpectralAbsorptionImageSettings {
+            image: AbsorptionImageSettings {
+                resolution: [resolution; 2],
+                max_pixels: 1_048_576,
+                max_grid_cells: 1_048_576,
+                max_cell_visits: 1_048_576,
+            },
+            max_spectral_evaluations: 1_048_576,
+        },
+    )
+    .unwrap_or_default()
+}
+
 /* ======================================================================= */
 /*  3 · FRAME  (fs-frame) — fnx-free LAYOUT; real fs-frame stages 3–5        */
 /* ======================================================================= */
@@ -1855,6 +1918,33 @@ mod wasm {
         )
     }
 
+    /// Spectral SI absorption of an existing captured mass frame.
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_vessel_spectral_transmittance(
+        mass_field: &[f64],
+        nx: u32,
+        ny: u32,
+        resolution: u32,
+        wavelengths_nm: &[f64],
+        mass_absorption_m2_kg: &[f64],
+        density_unit_kg_m3: f64,
+        lattice_spacing_m: f64,
+        slab_depth_m: f64,
+    ) -> Vec<f64> {
+        super::render_vessel_spectral_transmittance(
+            mass_field,
+            nx,
+            ny,
+            resolution,
+            wavelengths_nm,
+            mass_absorption_m2_kg,
+            density_unit_kg_m3,
+            lattice_spacing_m,
+            slab_depth_m,
+        )
+    }
+
     #[wasm_bindgen]
     pub fn run_frame(seed: u32) -> Vec<f64> {
         super::run_frame(seed)
@@ -1948,6 +2038,135 @@ mod tests {
                 .is_empty()
             );
         }
+    }
+
+    /// G1/G3: the browser consumes the native spectrum in pixel-major order.
+    #[test]
+    fn browser_spectral_pour_matches_native_and_preserves_pixel_band_layout() {
+        let mass = [0.0, 0.25, 0.5, 1.0];
+        let wavelengths = [450.0, 550.0, 650.0];
+        let coefficients = [0.0, 0.4, 1000.0];
+        let optics = fs_vessel::pour::PourSpectralOpticalView {
+            wavelengths_nm: &wavelengths,
+            mass_absorption_m2_kg: &coefficients,
+            density_unit_kg_m3: 1000.0,
+            lattice_spacing_m: 1e-3,
+            slab_depth_m: 2e-3,
+        };
+        let native = optics
+            .render_transmittance(
+                &mass,
+                [2, 2],
+                SpectralAbsorptionImageSettings {
+                    image: AbsorptionImageSettings {
+                        resolution: [2; 2],
+                        max_pixels: 4,
+                        max_grid_cells: 4,
+                        max_cell_visits: 4,
+                    },
+                    max_spectral_evaluations: 12,
+                },
+            )
+            .unwrap();
+        let browser = render_vessel_spectral_transmittance(
+            &mass,
+            2,
+            2,
+            2,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            1e-3,
+            2e-3,
+        );
+        assert_eq!(browser, native);
+        assert_eq!(browser.len(), 12);
+        for (pixel, &density) in browser.chunks_exact(3).zip(&mass) {
+            for (&actual, &coefficient) in pixel.iter().zip(&coefficients) {
+                let expected = (-density * 2.0 * coefficient).exp();
+                assert!((actual - expected).abs() < 8e-15);
+            }
+        }
+        let coarse = render_vessel_spectral_transmittance(
+            &mass,
+            2,
+            2,
+            1,
+            &wavelengths,
+            &coefficients,
+            1000.0,
+            1e-3,
+            2e-3,
+        );
+        for (band, &actual) in coarse.iter().enumerate() {
+            let expected = mass
+                .iter()
+                .map(|density| (-density * 2.0 * coefficients[band]).exp())
+                .sum::<f64>()
+                / 4.0;
+            assert!((actual - expected).abs() < 8e-15);
+        }
+        assert_eq!(coarse[0], 1.0);
+        assert_eq!(coarse[2], 0.25);
+        let single = render_vessel_spectral_transmittance(
+            &mass,
+            2,
+            2,
+            2,
+            &[550.0],
+            &[0.4],
+            1000.0,
+            1e-3,
+            2e-3,
+        );
+        let monochromatic =
+            render_vessel_transmittance(&mass, 2, 2, 2, 550.0, 0.4, 1000.0, 1e-3, 2e-3);
+        assert_eq!(single.len(), 4);
+        for (&spectral, &monochromatic) in single.iter().zip(&monochromatic) {
+            assert!((spectral - monochromatic).abs() < 8e-15);
+        }
+    }
+
+    /// G0: the browser limit applies to all wavelengths together.
+    #[test]
+    fn browser_spectral_pour_refuses_invalid_spectra_and_total_work() {
+        for (wavelengths, coefficients) in [
+            (&[][..], &[][..]),
+            (&[450.0][..], &[0.4, 0.1][..]),
+            (&[650.0, 450.0][..], &[0.4, 0.1][..]),
+            (&[450.0, 650.0][..], &[0.4, -0.1][..]),
+        ] {
+            assert!(
+                render_vessel_spectral_transmittance(
+                    &[1.0],
+                    1,
+                    1,
+                    1,
+                    wavelengths,
+                    coefficients,
+                    1000.0,
+                    1e-3,
+                    2e-3,
+                )
+                .is_empty()
+            );
+        }
+        // Pixel and cell-visit counts alone admit this image, but two bands
+        // require 2,097,152 spectral evaluations. Refuse before allocation.
+        assert!(
+            render_vessel_spectral_transmittance(
+                &[1.0],
+                1,
+                1,
+                1024,
+                &[450.0, 650.0],
+                &[0.4, 0.1],
+                1000.0,
+                1e-3,
+                2e-3,
+            )
+            .is_empty()
+        );
     }
 
     #[test]

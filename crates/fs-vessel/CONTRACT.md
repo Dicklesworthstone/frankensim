@@ -396,6 +396,33 @@ The shared renderer's exact footprint kernel passed native tests; these
 downstream integration tests were added after the execution environment became
 unavailable and remain unexecuted.
 
+### Spectral pour observation
+
+`PourSpectralOpticalView` borrows 1–16 explicitly supplied increasing vacuum
+wavelengths and their mass absorption coefficients at the observed material
+state. It uses the same accepted mass field, SI density conversion, lattice
+spacing and independently supplied slab depth as `PourOpticalView`. Its full
+image retains wavelength labels, transmission, thin opacity and effective log
+attenuation. `render_transmittance` and the `PourOutcome` convenience method
+write the direct pixel-major, wavelength-fastest buffer without constructing
+the full-statistics image. Every wavelength is attenuated before exact spatial
+filtering, and original geometry/density traversal is shared across wavelengths.
+No spectral interpolation, bin widths, illumination or detector response is
+inferred from the supplied samples.
+
+The existing fs-wasm flagship bindings now expose
+`render_vessel_spectral_transmittance` with the same original mass bytes and SI
+parameters. The browser retains its 1,048,576 pixel/grid/cell-work ceilings and
+adds a 1,048,576 column/wavelength-evaluation ceiling across the complete
+spectrum. Invalid inputs or exhausted budgets return an empty vector before
+publishing partial output. This remains bulk absorption without refraction,
+wall occlusion, scattering, emission or an inferred subcell free surface.
+Four native/browser regressions specify spectral filament coverage, one-band
+parity, original-output forwarding, sample layout and total-work refusal.
+The shared renderer passed its 117-test targeted native suite; these four
+consumer tests received parser/API/physics review but remain unexecuted because
+the actual fs-vessel/fs-wasm dependency closure is unavailable here.
+
 ## Cylindrical free-jet capillary screen
 
 `jet::FreeJetStudy<J>` composes an original `fs_lbm::jet::JetDispersion`
