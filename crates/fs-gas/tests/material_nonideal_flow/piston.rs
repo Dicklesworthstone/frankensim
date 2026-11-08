@@ -7,6 +7,8 @@ use fs_gas::material::nonideal_shock::RealGasShockControl;
 
 #[path = "piston/forcing.rs"]
 mod forcing;
+#[path = "piston/two_chambers.rs"]
+mod two_chambers;
 
 fn mechanical_controls() -> PistonControl {
     PistonControl {

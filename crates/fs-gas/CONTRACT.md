@@ -8360,6 +8360,35 @@ work oracles, same-step pressure feedback, finite wall/suspension balances,
 late source refusal/retry and zero-force parity. These added tests have not
 been executed in the current resource-limited environment.
 
+### Two original real-gas chambers sharing a finite piston
+
+`RealGasEuler1d::step_with_shared_piston` evolves two independent
+NASA/Peng--Robinson wave fields through one finite inertial piston;
+`step_with_shared_suspended_piston` adds the original stationary spring/damper.
+Each midpoint-speed proposal calls the native moving-volume RK2 operator with
+`[0,w]` on the left and `[w,0]` on the right. Both actual interface pressure
+impulses and their conjugate gas works feed the existing scalar mechanical
+solve. Both gas energies plus piston kinetic change balance the authored
+external-force displacement work. The suspended entry also retains spring
+storage and nonnegative damping, without heating either gas. Fixed outer
+supports carry their original reactions and zero work.
+
+The two fields retain independent source models, frozen compositions, energy
+references and grids. Interface coordinate, constant area and accepted clock
+must match exactly. A common acoustic/contraction limit covers both chambers
+and the whole speed bracket. Refusal restarts both native fields; gas states,
+cached primitives, meshes, clocks and piston publish atomically after the final
+cancellation poll. Candidate buffers are reused without field/source cloning
+per proposal. Thermal walls, body forcing, chemistry, phase flash and leakage
+remain outside this adiabatic shared-piston entry; original source and near-wall
+accuracy limits remain.
+
+Five focused test groups cover unequal-grid equilibrium, bidirectional pressure
+work and initial Newton acceleration, bilateral native moving-wall replay,
+independent source-datum invariance with suspension, and late refusal/retry.
+These added native tests have not been executed in the current resource-limited
+environment.
+
 ## Physical-time thermal forcing during reacting compression
 
 `material::compression::thermal::schedule` adds immutable `HeatBathSchedule`

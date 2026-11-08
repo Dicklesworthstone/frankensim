@@ -10,6 +10,7 @@ use crate::dynamics::piston::{
 
 mod sources;
 mod thermal;
+mod two_chambers;
 
 impl RealGasEuler1d {
     /// Advance the original real-gas wave field and a finite-mass right piston.
