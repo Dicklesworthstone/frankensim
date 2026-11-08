@@ -2243,6 +2243,19 @@ stage. Bounded fields keep their original domain refusals. These derivatives
 come from the published global index fit, not the source's separately processed
 thermal derivative estimates; their endpoint discrepancy remains explicit.
 
+`P1ConductionMesh::propagate_silica` and `propagate_silica_bundle` carry that
+same source law through the original accepted transient conduction mesh. The
+launch binding must borrow the exact mesh and nodal temperature slice. Shared
+nodes preserve continuous phase index; element gradient jumps retain the native
+crossing-time and bundle corrections without adding artificial Fresnel events.
+The original mesh walker owns face adjacency, transition collars, full-path
+budgets, cancellation, phase/group distance and absorption. Propagation adds no
+heap workspace. Exterior or duplicated contact-node faces remain native
+boundaries, and the CHARMS temperature/wavelength support is not extended.
+Regressions cover an actual backward-Euler cooling endpoint, spectral ray and
+bundle agreement with an independent affine field, gradient-jump sensitivities,
+and contact/snapshot/source/work refusals.
+
 With `material-state`, `MaterialThermoOpticField` binds the original reference
 glass and `fs-material::thermo_optic::SchottThermoOpticLaw` to one immutable
 thermal snapshot. Its usable wavelengths are the intersection of reference

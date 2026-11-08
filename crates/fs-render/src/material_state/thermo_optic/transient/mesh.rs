@@ -44,6 +44,8 @@ use transition::{MeshBoundary, Transition};
 pub mod bundle;
 /// Original IF97/IAPWS water transport on the same thermal mesh.
 pub mod water;
+/// Original NASA CHARMS silica refraction on the same thermal mesh.
+pub mod silica;
 /// Original molecular gas refraction on the same thermal or joint p/T mesh.
 #[cfg(feature = "volumes")]
 pub mod gas;
