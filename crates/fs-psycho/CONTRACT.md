@@ -106,6 +106,28 @@ test).
   this gate), and the screening left walk clamps at the band edge
   where numpy index-wraps (review-executed usize-underflow panic
   before the fix).
+- `harmonic::HarmonicAnalysisPlan` — physical, known-frequency harmonic
+  measurements over the existing `fs_fft::harmonic::HarmonicFitPlan`. Joint
+  DC/sine/cosine fitting retains noninteger-period records, physical Hz, peak
+  phasors referenced to the first sample, and the original sampled residual.
+  The prepared front adds no heap allocation: callers reuse N scratch scalars
+  and K phasors, and the returned view keeps those coefficients paired with
+  their plan. It inherits the numerical owner's clock, workspace, conditioning,
+  and transactional output admission; fixed-block analysis is synchronous.
+  Fundamental-relative levels, THD, even/odd contributions and adjacent-odd
+  even-harmonic deficits use period-averaged fitted harmonic amplitudes.
+  Missing orders/categories are absent, exact zero levels have explicit
+  infinite/undefined states, and an explicit minimum fundamental peak in input
+  units withholds normalization when the reference is unresolved. Scaled norms
+  preserve weak/large signals without squaring physical amplitudes directly;
+  nonzero linear ratios outside finite f64 range refuse. Sparse-order THD is
+  labelled incomplete through its highest retained order. DC and residual are
+  never counted as harmonic distortion, and no finite-record energy partition,
+  noise/alias certificate, frequency estimate, SPL calibration or listening
+  verdict is inferred. `tests/harmonic.rs` supplies G1/G3 analytic amplitude,
+  phase, gain, even-deficit and unmodeled-partial checks. This supplies only the
+  measurement primitive for X-Pp1 (`frankensim-irp-v5-instrument-realism-pexfp.342`),
+  not its resolved-jet, specimen, Fletcher-comparison or listening obligations.
 - `fluctuation::fluctuation_strength_frame` — fluctuation strength
   [vacil] per 131072-sample frame, implemented from the PUBLISHED
   equations of Osses/Garcia/Kohlrausch (ICA2016-113; NO code ported —

@@ -34,6 +34,7 @@
 pub mod dw_tables;
 pub mod filter_tables;
 pub mod fluctuation;
+pub mod harmonic;
 pub mod receipt;
 pub mod roughness;
 pub mod signal;
