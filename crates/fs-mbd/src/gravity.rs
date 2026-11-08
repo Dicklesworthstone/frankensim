@@ -25,9 +25,11 @@ mod superposition;
 pub use superposition::SuperposedGravity;
 
 mod adaptive;
+mod adaptive_field;
 pub use adaptive::{
     GravityAdvanceError, GravityAdvanceOptions, GravityAdvanceReceipt, GravityAdvanceStats,
 };
+pub use adaptive_field::advance_in_field;
 
 /// Invalid field/frame, inadmissible finite-body approximation, or native failure.
 #[derive(Clone, Debug, PartialEq)]
@@ -369,8 +371,7 @@ fn inverse_radius_potential_increment(
     // transverse displacement can change potential while those norms are equal.
     let before_scaled = Dd::from_f64(radii[0] / scale);
     let after_scaled = Dd::from_f64(radii[1] / scale);
-    let relative_change =
-        radius_squared_change / ((before_scaled + after_scaled) * after_scaled);
+    let relative_change = radius_squared_change / ((before_scaled + after_scaled) * after_scaled);
     Dd::from_f64(magnitude_before) * relative_change
 }
 

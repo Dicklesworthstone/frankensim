@@ -985,6 +985,19 @@ equivalence between differently partitioned interval requests is claimed.
 `tests/adaptive_gravity.rs` exercises physical orbit accuracy/refinement, native
 rotational dynamics, momentum/work accounting and bounded atomic refusals.
 
+`gravity::advance_in_field` applies the same controller to the original
+`step_in_field_with_loads` map for uniform, central, quadrupole, superposed and
+custom stationary fields. The single state is retained in a fixed-size array,
+so the adapter and controller allocate no heap storage for this path. Held
+external world forces/body torques keep their original substep semantics;
+their work is excluded from conservative potential changes. Source callbacks
+must be repeatable and side-effect-free. Invalid options are refused before
+source evaluation, and original frame/domain/arithmetic errors propagate.
+Initial and endpoint samples do not certify the intervening trajectory.
+`tests/adaptive_gravity_field.rs` checks analytic combined-source ballistics,
+small direct work under a large potential datum, eccentric-orbit convergence,
+deterministic replay and atomic late source/cancellation refusals.
+
 ## Configuration-dependent loads on the original rigid integrator
 
 `RigidBodyIntegrator::step_verlet_with` composes two endpoint force/torque
