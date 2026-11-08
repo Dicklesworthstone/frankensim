@@ -116,6 +116,38 @@ liquid-only carriage. Reconstruction can be selected before the first advance;
 accepted feedback preserves it with the original material pins, physical history
 and transactional candidate. Empty selection preserves donor arithmetic and CFL.
 
+## Adaptive implicit thermoviscous flow
+
+`MaterialFlowFeedback::advance_implicit_adaptive_to` controls time error in the
+existing quasisteady Stokes/material/enthalpy endpoint solve. Each comparison
+uses one original backward-Euler interval and two fine intervals; only the fine
+thermal states and their actual endpoint flow, source and physical work are
+accepted. The original `ViscousHeating` owner integrates both accepted intervals,
+retaining wall/pressure/body supply and molecular/Darcy/Forchheimer heat without
+turning momentum residuals or temporal error into heat. All coarse, fine,
+rejected and finite-difference evaluations share the blueprint's one
+`max_solves` budget. Individual one-step reports retain per-interval work counts.
+
+Mandatory enthalpy error scales changes from the comparison's starting state,
+so latent inventory remains resolved at fixed temperature and absolute
+formation-enthalpy datums do not inflate the allowance. Optional temperature
+error queries the original caloric laws. First-order step-doubling uses the
+actual representable fine spans and accepts no extrapolated state. The caller's
+whole-advance joule allowance bounds cumulative absolute accepted algebraic
+residuals and the final compensated, datum-relative storage/heat balance;
+native actuator/physical-loss power tolerance remains separate. Reports retain
+the final original coupled endpoint and accumulated accepted physical accounts.
+
+This entry retains fixed topology, stateless `()` material feedback, and the
+original stationary-heating restrictions. Interior or unprocessed native events
+refuse before momentum work; target-time events remain pending. The native
+accepted-substeps budget counts both fine intervals. Minimum timestep, trial
+budget, source/work/nonlinear refusal and cancellation publish no partial
+thermal or flow prefix. The estimate controls local time error on admitted
+smooth solutions, not spatial/model error or a certified global bound. Focused
+integration cases compare continuous source-viscosity heating, latent mushy
+mobility under shifted h datums, and shared speculative-work/transaction gates.
+
 ## Hydrostatic rest under material density-dependent gravity
 
 `MaterialFreeSurfaceScaling::free_surface3_hydrostatic` initializes a planar

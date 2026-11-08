@@ -21,6 +21,13 @@ use std::cell::{Cell, RefCell};
 mod unsteady;
 pub use unsteady::{ImplicitUnsteadyFlowControls, ImplicitUnsteadyFlowReport};
 
+/// Time-error control on the same original quasisteady coupled endpoint solve.
+pub mod adaptive;
+pub use adaptive::{
+    AdaptiveImplicitFlowControls, AdaptiveImplicitFlowError, AdaptiveImplicitFlowReport,
+    ImplicitFlowTimeError,
+};
+
 /// Numerical work and independent physical acceptance for one implicit interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImplicitFlowControls {
@@ -249,6 +256,29 @@ where
         initial_energy_increments_j: &[f64],
         checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(DepositionSimulation<'t>, ImplicitFlowReport<F, T>), ImplicitFlowError> {
+        self.step_implicit_with_work(
+            thermal,
+            target_s,
+            controls,
+            initial_energy_increments_j,
+            &Cell::new(0),
+            checkpoint,
+        )
+    }
+
+    // Candidate physical states remain independent, but every speculative
+    // endpoint/Jacobian solve charges this one caller-owned work counter.
+    #[allow(clippy::too_many_arguments)]
+    fn step_implicit_with_work<'t>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        controls: ImplicitFlowControls,
+        initial_energy_increments_j: &[f64],
+        work: &Cell<usize>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'t>, ImplicitFlowReport<F, T>), ImplicitFlowError> {
+        let work_before = work.get();
         let checkpoint = RefCell::new(checkpoint);
         let check = || check_gate(self.gate, &mut *checkpoint.borrow_mut());
         check()?;
@@ -260,7 +290,6 @@ where
         }
         self.check_map(thermal, &mut || check())?;
         let step = BackwardEulerStep::new(thermal, target_s, || check())?;
-        let work = Cell::new(0usize);
         let evaluate = |x: &[f64]| {
             let energies = step.resolvable_increments_j(x);
             step.evaluate_with_transport(
@@ -274,11 +303,8 @@ where
                     let (epoch, reference) = resolved?;
                     let active = proposal.momentum_domain(&epoch.samples, &mut || check())?;
                     let domain = active.as_ref().unwrap_or(proposal.domain);
-                    let (flows, boundaries) = proposal.mass_graph(
-                        domain,
-                        &epoch.flow.field,
-                        &mut || check(),
-                    )?;
+                    let (flows, boundaries) =
+                        proposal.mass_graph(domain, &epoch.flow.field, &mut || check())?;
                     let graph = proposal.bind_liquid_carrier(
                         Advected::new((), flows, proposal.input.max_connections)?
                             .with_boundaries(boundaries, proposal.input.max_connections)?,
@@ -384,7 +410,7 @@ where
                 thermal: thermal_audit,
                 nonlinear,
                 maximum_cell_residual_j,
-                momentum_solves: work.get(),
+                momentum_solves: work.get() - work_before,
                 endpoint: endpoint.flow,
                 solved_shear_rate_per_s: endpoint.solved_rates,
                 rheology: endpoint.rheology,
