@@ -4144,3 +4144,46 @@ elimination, torque quadrature and reversible work, radius expansion on
 reversal, the distinct opening edge and zero-approach case, tiny work, budget
 and identity refusals, cancellation and exact retry. Native Cargo execution
 remains unverified in the resource-constrained shared environment.
+
+## Permanent normal indentation with retained cell shear layers
+
+`normal_patch::FiniteGapPlasticLayerContact` composes the original pressure-saturation
+normal owner with fixed cell registrations of `ThirdBodyLayerContact` and the
+existing `PreparedTangentialContacts` full mechanical response. Each layer uses
+extensive coefficients for one complete grid cell. Its actual normal load is the
+accepted local pressure times cell area; unmapped cells have no layer shear in
+this composition. Scalar and tensor layer laws retain their original elastic,
+plastic, Maxwell and Kelvin histories.
+
+Normal approach, prescribed-force and finite-spring updates use the original
+normal solvers and keep every shear history. A held-normal shear interval uses
+the complete two-axis/cross-cell compliance, original layer temperatures and one
+shared physical duration. Every solver trial starts from the accepted state;
+iterative sweeps do not accumulate fictitious strain, elapsed time or heat.
+Normal state and immutable owner/matrix data are shared between shear candidates,
+and ordinary same-owner admission uses pointer identity before deep comparison.
+
+The resulting checkpoint owns permanent normal indentation and signed permanent
+shear together. Native normal storage/plastic work, reversible layer storage and
+plastic/Maxwell/Kelvin shear loss remain separate. Per-cell forces and actual
+resolved motion retain the original full-matrix work audit. The summed shear
+force and `sum(x F_y-y F_x)` spin moment are work conjugate to rigid patch
+translation and rotation in the fixed grid frame.
+
+All registered layers must be compressed during shear. A normal update that
+opens a layer with recoverable shear storage refuses without changing the
+accepted checkpoint; a separate physical release/transfer owner is required.
+Opening with zero shear storage preserves permanent slip. Normal and shear
+updates are explicitly split at fixed registration and layer geometry. The
+half-space owner supplies normal indentation while the independent thin layers
+supply shear; this does not establish combined bulk J2 yielding, pressure-driven
+shear strength, moving contact registration, wear removal or a thermal evolution
+law. Normal endpoint receipts still do not infer work along an unspecified load
+path.
+
+`tests/finite_gap_plastic_layer.rs` specifies a complete elastic matrix oracle
+that distinguishes cross-cell recoil from diagonalized coupling, patch
+force/spin work, indentation/unloading plus tensor plastic reversal with
+independent normal and shear work, force/spring boundary continuity, and atomic
+opening, registration, late-cell and cancellation refusals. These are numerical
+integration regressions, not measured material calibration.

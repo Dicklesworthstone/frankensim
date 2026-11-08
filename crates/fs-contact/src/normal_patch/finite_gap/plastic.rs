@@ -20,6 +20,8 @@ mod drive;
 pub use drive::*;
 mod load;
 pub use load::*;
+mod layer;
+pub use layer::*;
 mod linear;
 pub use linear::FiniteGapPlasticLinearSolver;
 mod fft;
