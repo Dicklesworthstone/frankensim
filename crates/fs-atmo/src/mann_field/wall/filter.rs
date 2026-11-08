@@ -19,6 +19,9 @@ use crate::mann_field::{
     finite_vector, refuse,
 };
 
+/// Exact represented momentum and subfilter stress of the wall-blocked field.
+pub mod moments;
+
 /// Source-bound gains for one fixed footprint and slip plane. Sampling and
 /// covariance read the existing realization without allocations or new draws.
 #[derive(Clone, Debug, PartialEq)]

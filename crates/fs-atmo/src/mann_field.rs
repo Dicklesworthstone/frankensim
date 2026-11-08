@@ -500,6 +500,26 @@ impl HomogeneousMannField {
         )
     }
 
+    /// Instantaneous quadratic spatial observation of the same wall-blocked
+    /// realization. Retains bulk/wall cross products, including stresses lost
+    /// when a coupling squares the filtered velocity. The entire footprint
+    /// must remain above the plane. No temporal advance or random draw occurs.
+    pub fn sample_wall_blocked_filtered_moments(
+        &self,
+        point_m: [f64; 3],
+        observation: &wall::filter::moments::MannWallBoxMoments,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<filter::moments::MannFilteredMoments, Refusal> {
+        wall::filter::moments::sample(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            observation,
+            cancelled,
+        )
+    }
+
     /// Exact average of velocity and its analytic gradient over a prepared
     /// box, face or line centered at `point_m`. The same scalar gain acts on
     /// both transverse polarizations, preserving solenoidality. This filters

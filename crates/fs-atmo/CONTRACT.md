@@ -448,3 +448,48 @@ closure, turbulent density fluctuations or a momentum/energy solution. The
 existing fetch battery checks independent finite-difference mass continuity for
 both roughness-gradient signs, nonzero velocity divergence, constant/weak-density
 limits, impermeability, density-scale invariance and domain/overflow refusals.
+
+## Exact represented wall-blocked momentum and subfilter stress
+
+`mann_field::wall::filter::moments::MannWallBoxMoments` extends the same
+instantaneous quadratic observation to the harmonic slip-plane field. Both
+temporal owners expose `sample_wall_blocked_filtered_moments`, returning the
+existing exact filtered velocity and gradient together with the complete
+spatial central stress, convective momentum flux per unit density and subfilter
+kinetic energy. Every bulk/bulk, bulk/wall and wall/wall cross-mode product is
+retained. The whole footprint must remain above the authored plane; skew
+volumes, faces, lines and exact points share this observation.
+
+The Fourier and evanescent wall functions have analytically integrated complex
+exponential products on each independent uniform footprint coordinate. Wall
+functions are normalized at the footprint's lowest point, so neither growing
+exponentials nor underflow of a center correction destroys a deep wall-touching
+average. Small exponents use centered polynomial moments directly; independent
+axes are combined in central form. Tangential footprints combine each mode's
+bulk and wall vector coefficients before quadratic accumulation, preserving
+exact normal impermeability on the plane and tiny normal stress above it.
+The original linear filter's mean and analytic-gradient arithmetic is retained.
+
+Preparation accepts explicit retained-byte and unordered-function-pair budgets.
+A nonpoint tangential footprint needs `n` functions, and a footprint with vertical
+extent needs `2n`; `N(N+1)/2` pairs each retain four f64 covariance coefficients.
+Storage also includes the existing linear filter's gains (8 or 32 bytes per
+mode respectively). An exact point uses zero numerical storage and returns
+exactly zero central stress. Preparation and sampling each use at most 24 KiB of
+bounded modal stack scratch, in addition to small fixed intermediates. Sampling
+allocates no heap storage, polls cancellation throughout the quadratic work,
+draws no randomness and changes neither accepted amplitudes nor either clock.
+
+Tests compare independent point quadrature and positive semidefinite directional
+energies on wall-touching lines, faces and skew volumes; verify conservation of
+momentum flux under footprint subdivision; and recover the analytic gradient
+limit down to 1e-10 footprint scales. Manufactured-mode regressions retain a
+deep wall layer after its center amplitude underflows and a near-wall quartic
+normal stress around 2e-58. Both temporal owners, replay, geometry orientation,
+exact point control, source binding, storage/work refusal and cancellation are
+covered. All eight new tests and the complete current 62-test fs-atmo unit suite
+passed using the pinned compiler and actual native dependencies. This integrates
+the represented outer slip-plane field; it adds no unresolved spectral energy,
+no-slip viscous layer, wall-generated turbulence, density fluctuations, pressure
+or separate mean flow. Positive semidefiniteness holds in exact arithmetic;
+roundoff eigenvalues are not clipped.

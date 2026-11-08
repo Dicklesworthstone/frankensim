@@ -327,6 +327,25 @@ impl FixedStepMannField {
         )
     }
 
+    /// Instantaneous wall-blocked momentum and subfilter stress over the
+    /// prepared spatial footprint. Reads the current accepted quadratures;
+    /// this is not a nonlinear time average or a turbulence time advance.
+    pub fn sample_wall_blocked_filtered_moments(
+        &self,
+        point_m: [f64; 3],
+        observation: &wall::filter::moments::MannWallBoxMoments,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<filter::moments::MannFilteredMoments, Refusal> {
+        wall::filter::moments::sample(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            point_m,
+            observation,
+            cancelled,
+        )
+    }
+
     pub fn sample_filtered(
         &self,
         point_m: [f64; 3],
