@@ -7,6 +7,7 @@
 
 use super::{GearedPropulsion, GearedState, PropulsionInputs, PropulsionStep};
 use crate::Refusal;
+use crate::spine::rotors::geared;
 use fs_airscrew::drive::{DriveOperatingPoint, DriveWork};
 use fs_math::dd::Dd;
 
@@ -58,6 +59,32 @@ pub struct DrivenStep<const N: usize> {
     /// transform can introduce roundoff; it must not become another loss term.
     pub drive_work_residual_j: f64,
 }
+
+/// Explicit allowances for a source solved against accepted shaft motion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DriveSolveControls {
+    /// At most this many mechanical trials, including the original staged
+    /// result. Must be in `1..=64`; there are still two aerodynamic stages.
+    pub maximum_iterations: usize,
+    /// Absolute source-speed/accepted-mean-speed mismatch allowed [rad/s].
+    pub speed_tolerance_rad_s: f64,
+    /// Absolute allowance for each work/power contraction and for engine work
+    /// above `command * rated_power * duration` [J]. Zero requests exact closure.
+    pub energy_tolerance_j: f64,
+}
+
+/// Accepted interval-power-limited source and its bounded mechanical solve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PowerLimitedDrivenStep<const N: usize> {
+    /// Original motion, separate work channels and unchanged finite-supply rules.
+    pub driven: DrivenStep<N>,
+    /// Number of mechanical source trials; no additional aerodynamic stages.
+    pub source_iterations: usize,
+    /// Actual mean output speed minus the source evaluation speed [rad/s].
+    pub mean_speed_residual_rad_s: f64,
+}
+
+type DriveStage = (f64, f64, DriveOperatingPoint);
 
 /// A configured design source bound to a native propeller/airframe model.
 pub struct DrivenPropulsion<'model, 'design, const N: usize> {
@@ -141,9 +168,189 @@ impl<'model, 'design, const N: usize> DrivenPropulsion<'model, 'design, N> {
         dt_s: f64,
         angular_origin_world: [f64; 3],
         warm: Option<[f64; 2]>,
-        mut inputs: C,
+        inputs: C,
         wind_world: W,
     ) -> Result<DrivenStep<N>, Refusal>
+    where
+        C: FnMut(f64, &GearedState) -> Result<DriveInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        let (propulsion, stages) = self.stages(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            warm,
+            inputs,
+            wind_world,
+        )?;
+        self.account(state, propulsion, stages, dt_s)
+    }
+
+    /// Solve the accepted source against its work-conjugate relative rate,
+    /// `output_per_gear_ratio * (speed_before + speed_after) / 2`.
+    ///
+    /// The original start/predicted-midpoint aerodynamic stages and runtime
+    /// commands are evaluated once each. Their midpoint aerodynamic loads stay
+    /// fixed while a bounded scalar bracket/secant solve repeatedly calls the
+    /// ORIGINAL native `geared::step_held`. Only source torque and its physical
+    /// carrier recoil change in those trials; no returned motion is rescaled.
+    ///
+    /// Engine work cannot exceed the midpoint command's rated power times the
+    /// interval beyond the explicit energy allowance. Bearing heat is paired
+    /// with the same accepted mean rate. This is an interval work limit, not a
+    /// bound on unresolved instantaneous peaks, exact nonlinear trajectories,
+    /// arbitrary-step stability or root uniqueness. Smooth loads retain the
+    /// original midpoint order; the explicit predictor's domain still applies.
+    ///
+    /// The returned `midpoint_drive` is the converged source at the accepted
+    /// mean speed, while aerodynamic midpoint data retain their original
+    /// predicted state. Finite-reserve debit and depletion refusals are exactly
+    /// those of [`Self::step`]; failed trials consume no supply.
+    ///
+    /// # Errors
+    /// Native/source refusals propagate. Invalid controls refuse before either
+    /// callback. `shaft-drive-not-converged` refuses exhausted iterations,
+    /// unrepresentable bracketing or unsatisfied source speed/work allowances.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_power_limited<C, W>(
+        &self,
+        state: &DrivenState,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        warm: Option<[f64; 2]>,
+        controls: DriveSolveControls,
+        inputs: C,
+        wind_world: W,
+    ) -> Result<PowerLimitedDrivenStep<N>, Refusal>
+    where
+        C: FnMut(f64, &GearedState) -> Result<DriveInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        if !(1..=64).contains(&controls.maximum_iterations)
+            || !controls.speed_tolerance_rad_s.is_finite()
+            || controls.speed_tolerance_rad_s < 0.0
+            || !controls.energy_tolerance_j.is_finite()
+            || controls.energy_tolerance_j < 0.0
+        {
+            return Err(refuse(
+                "driven-propulsion-invalid",
+                "source solve requires 1..=64 trials and finite nonnegative speed/work allowances",
+                "declare a bounded mechanical iteration count and physical numerical tolerances",
+            ));
+        }
+        let (mut propulsion, mut stages) = self.stages(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            warm,
+            inputs,
+            wind_world,
+        )?;
+        let drive = self.propulsion.design.shaft_drive;
+        let ratio = self.output_per_gear_ratio;
+        let speed_before = self.propulsion.assembly.speed(&state.motion)?;
+        let (mut guess, command, mut point) = stages[1];
+        let rated_energy = (command * drive.rated_power_w()) * dt_s;
+        let held = propulsion.midpoint.loads;
+        let mut motion = propulsion.motion;
+        let (mut lower, mut upper) = (None::<(f64, f64)>, None::<(f64, f64)>);
+        let failed = || {
+            refuse(
+                "shaft-drive-not-converged",
+                "shaft source did not close its accepted mean speed and work within the bounded solve",
+                "reduce the interval or use a sufficient iteration budget and representable work allowance",
+            )
+        };
+        for iteration in 1..=controls.maximum_iterations {
+            let mean_gear_speed = 0.5 * speed_before + 0.5 * motion.speed_rad_s;
+            let mean_speed = ratio * mean_gear_speed;
+            let residual = mean_speed - guess;
+            if !mean_speed.is_finite() || !residual.is_finite() {
+                return Err(failed());
+            }
+            if mean_speed >= 0.0 && residual.abs() <= controls.speed_tolerance_rad_s {
+                let work = drive
+                    .work_over_angle(guess, command, ratio * (dt_s * mean_gear_speed))
+                    .map_err(source_error)?;
+                let contractions = [
+                    work.engine_work_j - dt_s * point.engine_power_w,
+                    work.prop_work_j - dt_s * point.prop_power_w,
+                    work.transmission_heat_j - dt_s * point.transmission_heat_w,
+                    work.bearing_heat_j - dt_s * point.bearing_heat_w,
+                ];
+                if work.engine_work_j - rated_energy <= controls.energy_tolerance_j
+                    && contractions
+                        .iter()
+                        .all(|e| e.is_finite() && e.abs() <= controls.energy_tolerance_j)
+                {
+                    propulsion.motion = motion;
+                    propulsion.midpoint.loads.motor_nm = ratio * point.prop_torque_nm;
+                    stages[1] = (guess, command, point);
+                    return Ok(PowerLimitedDrivenStep {
+                        driven: self.account(state, propulsion, stages, dt_s)?,
+                        source_iterations: iteration,
+                        mean_speed_residual_rad_s: residual,
+                    });
+                }
+            }
+            if iteration == controls.maximum_iterations || residual == 0.0 {
+                return Err(failed());
+            }
+            if residual > 0.0 {
+                lower = Some((guess, residual));
+            } else {
+                if guess == 0.0 {
+                    return Err(failed());
+                }
+                upper = Some((guess, residual));
+            }
+            let next = match (lower, upper) {
+                (Some((lo, f_lo)), Some((hi, f_hi))) => {
+                    let secant = lo + (hi - lo) * (f_lo / (f_lo - f_hi));
+                    if secant.is_finite() && secant > lo && secant < hi {
+                        secant
+                    } else {
+                        f64::midpoint(lo, hi)
+                    }
+                }
+                (Some((lo, f_lo)), None) => (2.0 * lo).max(lo + f_lo),
+                (None, Some(_)) => 0.0,
+                (None, None) => return Err(failed()),
+            };
+            if !next.is_finite() || next < 0.0 || next == guess {
+                return Err(failed());
+            }
+            guess = next;
+            point = drive.evaluate(guess, command).map_err(source_error)?;
+            let motor_nm = ratio * point.prop_torque_nm;
+            if !motor_nm.is_finite() || (point.prop_torque_nm != 0.0 && motor_nm == 0.0) {
+                return Err(failed());
+            }
+            motion = geared::step_held(
+                self.propulsion.assembly,
+                &state.motion,
+                geared::GearedLoads { motor_nm, ..held },
+                angular_origin_world,
+                dt_s,
+            )?;
+        }
+        Err(failed())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stages<C, W>(
+        &self,
+        state: &DrivenState,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        warm: Option<[f64; 2]>,
+        mut inputs: C,
+        wind_world: W,
+    ) -> Result<(PropulsionStep<N>, [DriveStage; 2]), Refusal>
     where
         C: FnMut(f64, &GearedState) -> Result<DriveInputs, Refusal>,
         W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
@@ -202,6 +409,21 @@ impl<'model, 'design, const N: usize> DrivenPropulsion<'model, 'design, N> {
             },
             wind_world,
         )?;
+        Ok((
+            propulsion,
+            stages.map(|stage| stage.expect("native propulsion evaluates two stages")),
+        ))
+    }
+
+    fn account(
+        &self,
+        state: &DrivenState,
+        propulsion: PropulsionStep<N>,
+        stages: [DriveStage; 2],
+        dt_s: f64,
+    ) -> Result<DrivenStep<N>, Refusal> {
+        let drive = self.propulsion.design.shaft_drive;
+        let ratio = self.output_per_gear_ratio;
         let speed_before = self.propulsion.assembly.speed(&state.motion)?;
         let speed_after = propulsion.motion.speed_rad_s;
         if speed_after < 0.0 {
@@ -215,9 +437,8 @@ impl<'model, 'design, const N: usize> DrivenPropulsion<'model, 'design, N> {
         // the unwrapped phase. Subtracting large accumulated phases loses work.
         let gear_travel = dt_s * (0.5 * speed_before + 0.5 * speed_after);
         let drive_output_travel_rad = ratio * gear_travel;
-        let initial_drive = stages[0].expect("native propulsion evaluates two stages").2;
-        let (midpoint_speed, midpoint_command, midpoint_drive) =
-            stages[1].expect("native propulsion evaluates two stages");
+        let initial_drive = stages[0].2;
+        let (midpoint_speed, midpoint_command, midpoint_drive) = stages[1];
         let work = drive
             .work_over_angle(midpoint_speed, midpoint_command, drive_output_travel_rad)
             .map_err(source_error)?;

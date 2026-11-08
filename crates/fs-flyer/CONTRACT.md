@@ -2577,3 +2577,10 @@ Regression cases cover developed nonzero-gust trim, repeated evaluation
 without aging, real force and trajectory changes, exactly two stage callbacks,
 explicit gust response in the same total wind, an independent midpoint
 separation exponential, dynamic physical-span couples and refused updates.
+
+
+## Shaft power bounded on accepted motion
+
+`DrivenPropulsion::step_power_limited` optionally solves source torque against the accepted endpoint-average relative output speed. It reuses the original two aerodynamic stages and native `geared::step_held`; only the scalar source/mechanical closure iterates. Explicit `DriveSolveControls` bound trials, speed mismatch and energy error. Every accepted source/loss work agrees with its conjugate mean-power contraction within that allowance, and engine work is bounded by the midpoint command's rated power times duration. Failed trials withdraw no reserve; the original empty-source and depletion-refusal rules remain.
+
+This bounds interval work, not unresolved instantaneous peaks, arbitrary-step stability, root uniqueness or exhaustion-event timing. The original staged `step` retains its declared approximation. The geared-drive regressions cover real-motion power limits, bearing heat, coordinate invariance, the torque/power knee and atomic refusal.

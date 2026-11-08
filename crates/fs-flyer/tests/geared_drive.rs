@@ -4,7 +4,9 @@ use fs_flyer::aircraft::{OpenLoopDesign, wright_openloop_v1};
 use fs_flyer::propcoupling::CANDIDATE_B;
 use fs_flyer::spine::SixDofState;
 use fs_flyer::spine::rotors::geared::{GearedAssembly, GearedRotor};
-use fs_flyer::spine::rotors::propulsion::drive::{DriveInputs, DrivenPropulsion, DrivenState};
+use fs_flyer::spine::rotors::propulsion::drive::{
+    DriveInputs, DriveSolveControls, DrivenPropulsion, DrivenState,
+};
 use fs_flyer::spine::rotors::propulsion::{GearedPropulsion, PropellerHandedness, PropellerMount};
 use fs_ga::Mat3;
 
@@ -371,4 +373,248 @@ fn g0_invalid_supply_or_late_command_refuses_without_publishing_partial_state() 
         assert_eq!(calls, 2);
         assert_eq!(initial, before);
     }
+}
+
+fn source_controls() -> DriveSolveControls {
+    DriveSolveControls {
+        maximum_iterations: 64,
+        speed_tolerance_rad_s: 1e-11,
+        energy_tolerance_j: 1e-9,
+    }
+}
+
+fn braking_design(knee_rad_s: f64) -> OpenLoopDesign {
+    let mut design = design(20.0)
+        .with_shaft_drive(
+            ShaftDrive::new(100.0, 4.0 * knee_rad_s, 4.0, 0.8, 20.0).unwrap(),
+            1.0,
+        )
+        .unwrap();
+    // Keep the aerodynamic residual below the independent shaft-source check.
+    design.coupling.tol = 1e-10;
+    design.coupling.cap = 64;
+    design
+}
+
+#[test]
+fn g1_accepted_source_work_respects_power_while_braking_and_changes_real_motion() {
+    let design = braking_design(5.0);
+    let assembly = assembly(design.gross_mass_kg, 1.0);
+    let aero = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let model = DrivenPropulsion::new(&aero, 1.0).unwrap();
+    let initial = state(&assembly, 1.0, Some(3.0));
+    let before = initial;
+    let dt = 0.02;
+    let command = |time| 1.0 - 10.0 * time;
+    let empirical = model
+        .step(
+            &initial,
+            0.0,
+            dt,
+            ZERO,
+            None,
+            |time, _| Ok(input(command(time))),
+            |_, _| Ok(ZERO),
+        )
+        .unwrap();
+    let rated_work = command(0.5 * dt) * 100.0 * dt;
+    // Explicit midpoint samples a slower predictor, then performs more angle:
+    // the old source's power cap therefore does not bound its accepted work.
+    assert!(empirical.work.engine_work_j > rated_work + 1e-7);
+    let mut calls = Vec::new();
+    let solved = model
+        .step_power_limited(
+            &initial,
+            0.0,
+            dt,
+            ZERO,
+            None,
+            source_controls(),
+            |time, _| {
+                calls.push(time);
+                Ok(input(command(time)))
+            },
+            |_, _| Ok(ZERO),
+        )
+        .unwrap();
+    assert_eq!(calls, [0.0, dt / 2.0]);
+    assert!(solved.source_iterations > 1 && solved.source_iterations <= 64);
+    assert!(solved.mean_speed_residual_rad_s.abs() <= source_controls().speed_tolerance_rad_s);
+    let result = solved.driven;
+    assert_eq!(initial, before);
+    assert_eq!(
+        result.propulsion.initial.coupled,
+        empirical.propulsion.initial.coupled
+    );
+    assert_eq!(
+        result.propulsion.midpoint.coupled,
+        empirical.propulsion.midpoint.coupled
+    );
+    assert_ne!(
+        result.state.motion.momentum,
+        empirical.state.motion.momentum
+    );
+    close(result.work.engine_work_j, rated_work, 1e-9);
+    close(
+        result.state.remaining_engine_energy_j.unwrap(),
+        3.0 - rated_work,
+        1e-9,
+    );
+    let actual_mean =
+        0.5 * assembly.speed(&initial.motion).unwrap() + 0.5 * result.propulsion.motion.speed_rad_s;
+    close(
+        result.midpoint_drive.engine_speed_rad_s / 4.0,
+        actual_mean,
+        1e-11,
+    );
+    close(result.work.transmission_heat_j, 0.2 * rated_work, 1e-9);
+    close(
+        result.work.bearing_heat_j,
+        20.0 * actual_mean * actual_mean * dt,
+        1e-9,
+    );
+    close(
+        result.work.prop_work_j,
+        result.propulsion.motion.motor_work_j,
+        1e-10,
+    );
+    assert!(result.work.prop_work_j < 0.0);
+    let loads = result.propulsion.midpoint.loads;
+    close(
+        result.state.motion.momentum,
+        initial.motion.momentum
+            + dt * (loads.motor_nm + loads.aerodynamic_nm[0] - loads.aerodynamic_nm[1]),
+        1e-12,
+    );
+}
+
+#[test]
+fn g3_power_solve_preserves_gear_coordinates_and_crosses_the_rating_knee() {
+    for knee in [5.0, 34.0] {
+        let design = braking_design(knee);
+        let mut reference = None;
+        for ratio in [1.0, 2.0] {
+            let assembly = assembly(design.gross_mass_kg, ratio);
+            let aero = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+            let model = DrivenPropulsion::new(&aero, ratio).unwrap();
+            let initial = state(&assembly, ratio, Some(10.0));
+            let dt = 0.02;
+            let result = model
+                .step_power_limited(
+                    &initial,
+                    0.0,
+                    dt,
+                    ZERO,
+                    None,
+                    source_controls(),
+                    |_, _| Ok(input(1.0)),
+                    |_, _| Ok(ZERO),
+                )
+                .unwrap()
+                .driven;
+            let mean = ratio
+                * (0.5 * assembly.speed(&initial.motion).unwrap()
+                    + 0.5 * result.propulsion.motion.speed_rad_s);
+            if knee == 34.0 {
+                assert!(35.0 > knee && mean < knee);
+                close(result.work.engine_work_j, (100.0 / knee) * mean * dt, 1e-9);
+                assert!(result.work.engine_work_j < 100.0 * dt);
+            } else {
+                assert!(mean > knee);
+                close(result.work.engine_work_j, 100.0 * dt, 1e-9);
+            }
+            let values = (
+                result.state.motion.rigid,
+                mean,
+                result.work.engine_work_j,
+                result.work.bearing_heat_j,
+            );
+            if let Some((rigid, rate, engine, heat)) = reference {
+                assert_eq!(values.0, rigid);
+                close(values.1, rate, 1e-11);
+                close(values.2, engine, 1e-9);
+                close(values.3, heat, 1e-9);
+            } else {
+                reference = Some(values);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_power_solve_keeps_empty_coasting_and_refuses_trial_budget_or_energy_overdraw() {
+    let design = braking_design(5.0);
+    let assembly = assembly(design.gross_mass_kg, 1.0);
+    let aero = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let model = DrivenPropulsion::new(&aero, 1.0).unwrap();
+    let dt = 0.02;
+    let empty = state(&assembly, 1.0, Some(0.0));
+    let coast = model
+        .step_power_limited(
+            &empty,
+            0.0,
+            dt,
+            ZERO,
+            None,
+            source_controls(),
+            |_, _| Ok(input(1.0)),
+            |_, _| Ok(ZERO),
+        )
+        .unwrap()
+        .driven;
+    assert_eq!(coast.work.engine_work_j, 0.0);
+    assert_eq!(coast.state.remaining_engine_energy_j, Some(0.0));
+    assert!(coast.work.bearing_heat_j > 0.0 && coast.work.prop_work_j < 0.0);
+    close(
+        coast.work.bearing_heat_j + coast.propulsion.motion.motor_work_j,
+        0.0,
+        1e-10,
+    );
+
+    for (remaining, iterations, code) in [
+        (3.0, 1, "shaft-drive-not-converged"),
+        (0.5, 64, "shaft-energy-exhausted"),
+    ] {
+        let initial = state(&assembly, 1.0, Some(remaining));
+        let before = initial;
+        let mut calls = 0;
+        let result = model.step_power_limited(
+            &initial,
+            0.0,
+            dt,
+            ZERO,
+            None,
+            DriveSolveControls {
+                maximum_iterations: iterations,
+                ..source_controls()
+            },
+            |_, _| {
+                calls += 1;
+                Ok(input(1.0))
+            },
+            |_, _| Ok(ZERO),
+        );
+        assert_eq!(result.unwrap_err().code, code);
+        assert_eq!(calls, 2);
+        assert_eq!(initial, before);
+    }
+    let mut calls = 0;
+    let invalid = model.step_power_limited(
+        &empty,
+        0.0,
+        dt,
+        ZERO,
+        None,
+        DriveSolveControls {
+            maximum_iterations: 65,
+            ..source_controls()
+        },
+        |_, _| {
+            calls += 1;
+            Ok(input(1.0))
+        },
+        |_, _| Ok(ZERO),
+    );
+    assert_eq!(invalid.unwrap_err().code, "driven-propulsion-invalid");
+    assert_eq!(calls, 0);
 }
