@@ -22,7 +22,68 @@ use super::{
 use fs_em::plane_wave::uniaxial::oriented::{
     OrientedCrystalFieldSide, absorbing::PreparedAbsorbingCrystalField,
 };
+use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_math::dd::Dd;
+
+/// Independent polarization and spectral factors on the same thermal owner.
+pub mod illumination;
+pub use illumination::PreparedCrystalIlluminationHeating;
+
+// Only native electromagnetic owners implement this internal source seam.
+// Geometry, material admission, cell integration and thermal accounting stay
+// identical for a coherent field and an explicitly uncorrelated illumination.
+trait CrystalHeatingSource {
+    fn material(&self) -> &ResolvedMaterialStatePoint;
+    fn factor_count(&self) -> usize;
+    fn absorbed_w(
+        &self,
+        area: f64,
+        start: f64,
+        end: f64,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<f64, LayeredWaveHeatingError>;
+    fn transmitted_flux(
+        &self,
+        depth: f64,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<f64, LayeredWaveHeatingError>;
+}
+
+impl CrystalHeatingSource for PreparedAbsorbingCrystalField<'_, '_> {
+    fn material(&self) -> &ResolvedMaterialStatePoint {
+        self.source().crystal_response().material()
+    }
+    fn factor_count(&self) -> usize {
+        1
+    }
+    fn absorbed_w(
+        &self,
+        area: f64,
+        start: f64,
+        end: f64,
+        _: &mut dyn FnMut() -> bool,
+    ) -> Result<f64, LayeredWaveHeatingError> {
+        Ok(self.slab_absorption(area, start, end)?.absorbed_power_w())
+    }
+    fn transmitted_flux(
+        &self,
+        depth: f64,
+        _: &mut dyn FnMut() -> bool,
+    ) -> Result<f64, LayeredWaveHeatingError> {
+        Ok(self
+            .field(OrientedCrystalFieldSide::Transmitted, [0.0, 0.0, depth])?
+            .field
+            .poynting_w_m2[2])
+    }
+}
+
+struct CrystalColumn<'b, 'a> {
+    thermal: &'b BoundLayeredThermalBody<'a>,
+    cells: Vec<SubstrateCellPower>,
+    power: SubstrateWavePower,
+    mode_cell_pairs: usize,
+    workspace_bytes: usize,
+}
 
 /// Cached coherent crystal watts in the original thermal-cell order.
 /// Preparation is O(cells) with four modal-pair terms per interval. Accepted
@@ -50,132 +111,23 @@ impl<'p, 's, 'm, 'b, 'a> PreparedCrystalWaveHeating<'p, 's, 'm, 'b, 'a> {
         field: &'p PreparedAbsorbingCrystalField<'s, 'm>,
         depth_start_m: f64,
         limits: SubstrateWaveHeatingLimits,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self, LayeredWaveHeatingError> {
-        poll(&mut cancelled)?;
-        let body = thermal.prepared_body();
-        let count = body.cell_count();
-        if !depth_start_m.is_finite()
-            || depth_start_m < 0.0
-            || !body.conduction().geometry().is_planar()
-            || count == 0
-            || count > limits.maximum_cells
-        {
-            return Err(invalid(
-                "crystal heat requires finite nonnegative depth and admitted planar thermal cells",
-            ));
-        }
-        let mode_cell_pairs = count
-            .checked_add(2)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or(invalid("crystal cell-mode work overflows"))?;
-        let per_cell = core::mem::size_of::<SubstrateCellPower>()
-            + core::mem::size_of::<CellId>()
-            + core::mem::size_of::<f64>()
-            + core::mem::size_of::<(CellId, f64)>();
-        let workspace_bytes = count
-            .checked_mul(per_cell)
-            .and_then(|n| n.checked_add(core::mem::size_of::<Self>()))
-            .and_then(|n| n.checked_add(core::mem::size_of::<SubstrateWaveStep<'_>>()))
-            .ok_or(invalid("crystal heat storage overflows"))?;
-        if mode_cell_pairs > limits.maximum_mode_cell_pairs
-            || workspace_bytes > limits.maximum_workspace_bytes
-        {
-            return Err(invalid("crystal heat exceeds its work or storage budget"));
-        }
-        let original = field.source().crystal_response().material();
-        for (layer, storage) in body.conduction().layers().iter().zip(body.storages()) {
-            poll(&mut cancelled)?;
-            if original.card_identity() != layer.material_card_identity() {
-                return Err(invalid(
-                    "crystal conductivity must retain the original optical material card",
-                ));
-            }
-            admit_context(
-                original,
-                &layer.query_endpoints()[0],
-                layer.temperature_axis(),
-            )?;
-            for component in storage.components() {
-                poll(&mut cancelled)?;
-                if original.card_identity() != component.material_card_identity() {
-                    return Err(invalid(
-                        "crystal capacity must retain the original optical material card",
-                    ));
-                }
-                admit_context(
-                    original,
-                    &component.query_endpoints()[0],
-                    component.temperature_axis(),
-                )?;
-            }
-        }
-        let area = body.conduction().area_m2();
-        let ids = thermal.cell_ids();
-        let mut cells = reserve(count)?;
-        let mut layer_start = Dd::from_f64(depth_start_m);
-        let mut left = depth_start_m;
-        let mut absorbed = Dd::ZERO;
-        for (layer, &n) in body
-            .conduction()
-            .layers()
-            .iter()
-            .zip(body.layer_cell_counts())
-        {
-            let width = Dd::from_f64(layer.thickness_m());
-            for local in 0..n {
-                poll(&mut cancelled)?;
-                let right = (layer_start
-                    + width * Dd::from_f64((local + 1) as f64) / Dd::from_f64(n as f64))
-                .to_f64();
-                if !right.is_finite() || right <= left {
-                    return Err(invalid("crystal cell depth interval is unrepresentable"));
-                }
-                let watts = field.slab_absorption(area, left, right)?.absorbed_power_w();
-                if !watts.is_finite() || watts < 0.0 {
-                    return Err(invalid("crystal cell watts are unrepresentable"));
-                }
-                cells.push(SubstrateCellPower {
-                    cell_id: ids[cells.len()],
-                    depth_m: [left, right],
-                    absorbed_w: watts,
-                });
-                absorbed = absorbed + Dd::from_f64(watts);
-                left = right;
-            }
-            layer_start = layer_start + width;
-        }
-        let boundary_power = |depth| -> Result<f64, LayeredWaveHeatingError> {
-            let flux = field
-                .field(OrientedCrystalFieldSide::Transmitted, [0.0, 0.0, depth])?
-                .field
-                .poynting_w_m2[2];
-            let watts = area * flux;
-            if !watts.is_finite() || watts < 0.0 || (flux > 0.0 && watts == 0.0) {
-                return Err(invalid("crystal boundary watts are unrepresentable"));
-            }
-            Ok(watts)
-        };
-        let entering_w = boundary_power(depth_start_m)?;
-        let leaving_w = boundary_power(left)?;
-        let absorbed_w = absorbed.to_f64();
-        let residual_w = (Dd::from_f64(entering_w) - Dd::from_f64(leaving_w) - absorbed).to_f64();
-        if !absorbed_w.is_finite() || !residual_w.is_finite() {
-            return Err(invalid("crystal power account is unrepresentable"));
-        }
-        poll(&mut cancelled)?;
+        let column = prepare_column(
+            thermal,
+            field,
+            depth_start_m,
+            limits,
+            core::mem::size_of::<Self>(),
+            cancelled,
+        )?;
         Ok(Self {
             field,
             thermal,
-            cells,
-            power: SubstrateWavePower {
-                entering_w,
-                leaving_w,
-                absorbed_w,
-                residual_w,
-            },
-            mode_cell_pairs,
-            workspace_bytes,
+            cells: column.cells,
+            power: column.power,
+            mode_cell_pairs: column.mode_cell_pairs,
+            workspace_bytes: column.workspace_bytes,
         })
     }
 
@@ -223,4 +175,136 @@ impl<'p, 's, 'm, 'b, 'a> PreparedCrystalWaveHeating<'p, 's, 'm, 'b, 'a> {
             cancelled,
         )
     }
+}
+
+fn prepare_column<'b, 'a>(
+    thermal: &'b BoundLayeredThermalBody<'a>,
+    source: &impl CrystalHeatingSource,
+    depth_start_m: f64,
+    limits: SubstrateWaveHeatingLimits,
+    owner_bytes: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<CrystalColumn<'b, 'a>, LayeredWaveHeatingError> {
+    poll(&mut cancelled)?;
+    let body = thermal.prepared_body();
+    let count = body.cell_count();
+    if !depth_start_m.is_finite()
+        || depth_start_m < 0.0
+        || !body.conduction().geometry().is_planar()
+        || count == 0
+        || count > limits.maximum_cells
+    {
+        return Err(invalid(
+            "crystal heat requires finite nonnegative depth and admitted planar thermal cells",
+        ));
+    }
+    let mode_cell_pairs = count
+        .checked_add(2)
+        .and_then(|n| n.checked_mul(4))
+        .and_then(|n| n.checked_mul(source.factor_count()))
+        .ok_or(invalid("crystal cell-mode work overflows"))?;
+    let per_cell = core::mem::size_of::<SubstrateCellPower>()
+        + core::mem::size_of::<CellId>()
+        + core::mem::size_of::<f64>()
+        + core::mem::size_of::<(CellId, f64)>();
+    let workspace_bytes = count
+        .checked_mul(per_cell)
+        .and_then(|n| n.checked_add(owner_bytes))
+        .and_then(|n| n.checked_add(core::mem::size_of::<SubstrateWaveStep<'_>>()))
+        .ok_or(invalid("crystal heat storage overflows"))?;
+    if mode_cell_pairs > limits.maximum_mode_cell_pairs
+        || workspace_bytes > limits.maximum_workspace_bytes
+    {
+        return Err(invalid("crystal heat exceeds its work or storage budget"));
+    }
+    let original = source.material();
+    for (layer, storage) in body.conduction().layers().iter().zip(body.storages()) {
+        poll(&mut cancelled)?;
+        if original.card_identity() != layer.material_card_identity() {
+            return Err(invalid(
+                "crystal conductivity must retain the original optical material card",
+            ));
+        }
+        admit_context(
+            original,
+            &layer.query_endpoints()[0],
+            layer.temperature_axis(),
+        )?;
+        for component in storage.components() {
+            poll(&mut cancelled)?;
+            if original.card_identity() != component.material_card_identity() {
+                return Err(invalid(
+                    "crystal capacity must retain the original optical material card",
+                ));
+            }
+            admit_context(
+                original,
+                &component.query_endpoints()[0],
+                component.temperature_axis(),
+            )?;
+        }
+    }
+    let area = body.conduction().area_m2();
+    let ids = thermal.cell_ids();
+    let mut cells = reserve(count)?;
+    let mut layer_start = Dd::from_f64(depth_start_m);
+    let mut left = depth_start_m;
+    let mut absorbed = Dd::ZERO;
+    for (layer, &n) in body
+        .conduction()
+        .layers()
+        .iter()
+        .zip(body.layer_cell_counts())
+    {
+        let width = Dd::from_f64(layer.thickness_m());
+        for local in 0..n {
+            poll(&mut cancelled)?;
+            let right = (layer_start
+                + width * Dd::from_f64((local + 1) as f64) / Dd::from_f64(n as f64))
+            .to_f64();
+            if !right.is_finite() || right <= left {
+                return Err(invalid("crystal cell depth interval is unrepresentable"));
+            }
+            let watts = source.absorbed_w(area, left, right, &mut cancelled)?;
+            if !watts.is_finite() || watts < 0.0 {
+                return Err(invalid("crystal cell watts are unrepresentable"));
+            }
+            cells.push(SubstrateCellPower {
+                cell_id: ids[cells.len()],
+                depth_m: [left, right],
+                absorbed_w: watts,
+            });
+            absorbed = absorbed + Dd::from_f64(watts);
+            left = right;
+        }
+        layer_start = layer_start + width;
+    }
+    let mut boundary_power = |depth| -> Result<f64, LayeredWaveHeatingError> {
+        let flux = source.transmitted_flux(depth, &mut cancelled)?;
+        let watts = area * flux;
+        if !watts.is_finite() || watts < 0.0 || (flux > 0.0 && watts == 0.0) {
+            return Err(invalid("crystal boundary watts are unrepresentable"));
+        }
+        Ok(watts)
+    };
+    let entering_w = boundary_power(depth_start_m)?;
+    let leaving_w = boundary_power(left)?;
+    let absorbed_w = absorbed.to_f64();
+    let residual_w = (Dd::from_f64(entering_w) - Dd::from_f64(leaving_w) - absorbed).to_f64();
+    if !absorbed_w.is_finite() || !residual_w.is_finite() {
+        return Err(invalid("crystal power account is unrepresentable"));
+    }
+    poll(&mut cancelled)?;
+    Ok(CrystalColumn {
+        thermal,
+        cells,
+        power: SubstrateWavePower {
+            entering_w,
+            leaving_w,
+            absorbed_w,
+            residual_w,
+        },
+        mode_cell_pairs,
+        workspace_bytes,
+    })
 }

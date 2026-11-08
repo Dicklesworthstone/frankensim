@@ -103,6 +103,24 @@ extraordinary interference and subdivision invariance, advance actual cell
 temperatures against an independent Fourier/caloric reference, and cover
 lossless illumination, source identity, budgets and cancellation.
 
+`PreparedCrystalIlluminationHeating` extends the same native column to an
+explicitly uncorrelated bank of prepared crystal fields. Each factor retains
+its own coherent ordinary/extraordinary interference; expected heat adds across
+factors, including distinct frequencies and incidence directions. Physical
+peak V/m amplitudes contain any square-root statistical weights. No spectral
+bin width, hidden normalization or inter-factor coherence is invented.
+
+The original electromagnetic illumination and original thermal body are
+borrowed. Preparation costs O(cells × factors), with four modal-pair work terms
+per factor for every cell and boundary query; accepted thermal steps reuse
+one cached power per cell. An empty bank supplies darkness and preserves
+authored thermal heat. Typed cancellation propagates from inner optical queries.
+This is a held cycle-mean source: nonlinear temperatures are driven by expected
+heat, rather than asserted to be the ensemble mean temperature. Focused native
+regressions compare mixed-frequency cell heat with independent depth quadrature
+and a Fourier/caloric temperature reference, rotate an unpolarized factor basis,
+and exercise darkness, work admission and interruption inside factor queries.
+
 ## Full-coordinate material shells with two-sided open radiation
 
 `tensor_shell_radiation::open::OpenTensorShellRadiation` binds the original

@@ -2,13 +2,14 @@
 //! Authored constitutive controls establish wiring, not measured material data.
 use super::*;
 use fs_couple::layered_wave_heating::substrate::{
-    SubstrateWaveHeatingLimits, crystal::PreparedCrystalWaveHeating,
+    SubstrateWaveHeatingLimits,
+    crystal::{PreparedCrystalIlluminationHeating, PreparedCrystalWaveHeating},
 };
 use fs_em::plane_wave::{
     optical::UniaxialOpticalResponse,
     uniaxial::oriented::{
         OrientedCrystalFieldSide, OrientedUniaxialInterface,
-        absorbing::PreparedAbsorbingCrystalField,
+        absorbing::{AbsorbingCrystalIllumination, PreparedAbsorbingCrystalField},
     },
 };
 use fs_material::state_point::{SpectralComplexIndexKnot, SpectralComplexIndexStatePoint};
@@ -361,6 +362,284 @@ fn crystal_heat_refuses_changed_material_context_budget_and_cancellation() {
             LayeredThermalSolveControls::default(),
             &mut workspace,
             || true
+        ),
+        Err(LayeredWaveHeatingError::Cancelled)
+    ));
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.cells(), &original);
+}
+
+#[test]
+fn crystal_illumination_spectral_heat_drives_one_native_thermal_solve() {
+    let incident = state(
+        &card("spectral crystal incidence", 1.0, 0.0),
+        false,
+        100_000.0,
+    );
+    let card = crystal_card("spectrally heated crystal", [0.12, 0.42]);
+    let [o, e] = axes(&card, 100_000.0);
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&incident),
+        UniaxialOpticalResponse::try_new(&o, &e, 410e-9).unwrap(),
+        [1.0, 2.0, -0.6],
+    )
+    .unwrap();
+    let factors = [
+        interface
+            .prepare_absorbing_field(
+                core::f64::consts::TAU * C0 / 450e-9,
+                0.6,
+                [C64::new(8e4, 2e4), C64::new(-3e4, 7e4)],
+            )
+            .unwrap(),
+        interface
+            .prepare_absorbing_field(
+                core::f64::consts::TAU * C0 / 700e-9,
+                0.9,
+                [C64::new(2e4, -4e4), C64::new(6e4, 3e4)],
+            )
+            .unwrap(),
+    ];
+    let illumination =
+        AbsorbingCrystalIllumination::try_new(&interface, &factors, 2, || false).unwrap();
+    let width = 1.4e-6;
+    let start = 0.15e-6;
+    let native = body(&[&card], &[width], &[3], AREA);
+    let laws = native.thermal_laws(false).unwrap();
+    let bound = native.bind(&laws, ids()).unwrap();
+    let authored = [1.0, 2.0, 3.0];
+    let initial = initial(&bound, &authored);
+    let original = initial.cells().clone();
+    let heat =
+        PreparedCrystalIlluminationHeating::try_new(&bound, &illumination, start, limits(), || {
+            false
+        })
+        .unwrap();
+    assert!(std::ptr::eq(heat.source(), &illumination));
+    assert!(std::ptr::eq(heat.thermal_body(), &bound));
+    assert_eq!(heat.preparation_mode_cell_pairs(), 4 * 2 * (3 + 2));
+    let mut powers = Vec::new();
+    for (i, cell) in heat.cells().iter().enumerate() {
+        assert_eq!(cell.cell_id, bound.cell_ids()[i]);
+        let [a, b] = cell.depth_m;
+        let expected: f64 = factors
+            .iter()
+            .map(|field| integrated_density(field, OrientedCrystalFieldSide::Transmitted, a, b))
+            .sum();
+        near(cell.absorbed_w, expected, 3e-10 * expected);
+        powers.push(expected + authored[i]);
+    }
+    assert!(heat.power().residual_w.abs() < 4e-11 * heat.power().entering_w);
+    let dt = 2e-9;
+    let step = heat
+        .advance_to(
+            &initial,
+            dt,
+            conduction(),
+            LayeredThermalSolveControls::default(),
+            &mut LayeredThermalWorkspace::new(3).unwrap(),
+            || false,
+        )
+        .unwrap();
+    let temperatures = thermal_reference(&powers, width, AREA, dt);
+    for (i, cell) in heat.cells().iter().enumerate() {
+        near(
+            step.thermal.temperature_k(cell.cell_id).unwrap(),
+            temperatures[i],
+            3e-8,
+        );
+        near(step.cell_energy_j[i].1, cell.absorbed_w * dt, 1e-14);
+    }
+    near(
+        step.heat_report.energy.external_heat_j,
+        step.optical.absorbed_j + authored.iter().sum::<f64>() * dt,
+        1e-9,
+    );
+    near(
+        step.heat_report.energy.stored_energy_change_j,
+        step.heat_report.energy.external_heat_j,
+        2e-9,
+    );
+    assert_eq!(initial.time_s(), 0.0);
+    assert_eq!(initial.cells(), &original);
+}
+
+#[test]
+fn crystal_illumination_unpolarized_heat_is_basis_independent() {
+    let incident = state(
+        &card("unpolarized crystal incidence", 1.0, 0.0),
+        false,
+        100_000.0,
+    );
+    let card = crystal_card("unpolarized heated crystal", [0.12, 0.42]);
+    let [o, e] = axes(&card, 100_000.0);
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&incident),
+        UniaxialOpticalResponse::try_new(&o, &e, 410e-9).unwrap(),
+        [1.0, 2.0, -0.6],
+    )
+    .unwrap();
+    let omega = core::f64::consts::TAU * C0 / WAVELENGTH_M;
+    // At normal incidence these equal physical transverse amplitudes form
+    // an unpolarized coherency matrix. Rotate its orthonormal factor basis.
+    let amplitude = 8e4;
+    let diagonal = amplitude * core::f64::consts::FRAC_1_SQRT_2;
+    let aligned = [
+        interface
+            .prepare_absorbing_field(omega, 1.0, [C64::new(amplitude, 0.0), C64::ZERO])
+            .unwrap(),
+        interface
+            .prepare_absorbing_field(omega, 1.0, [C64::ZERO, C64::new(amplitude, 0.0)])
+            .unwrap(),
+    ];
+    let rotated = [
+        interface
+            .prepare_absorbing_field(
+                omega,
+                1.0,
+                [C64::new(diagonal, 0.0), C64::new(diagonal, 0.0)],
+            )
+            .unwrap(),
+        interface
+            .prepare_absorbing_field(
+                omega,
+                1.0,
+                [C64::new(-diagonal, 0.0), C64::new(diagonal, 0.0)],
+            )
+            .unwrap(),
+    ];
+    let a = AbsorbingCrystalIllumination::try_new(&interface, &aligned, 2, || false).unwrap();
+    let b = AbsorbingCrystalIllumination::try_new(&interface, &rotated, 2, || false).unwrap();
+    let native = body(&[&card], &[1e-6], &[4], AREA);
+    let laws = native.thermal_laws(false).unwrap();
+    let bound = native.bind(&laws, ids()).unwrap();
+    let a_heat =
+        PreparedCrystalIlluminationHeating::try_new(&bound, &a, 0.0, limits(), || false).unwrap();
+    let b_heat =
+        PreparedCrystalIlluminationHeating::try_new(&bound, &b, 0.0, limits(), || false).unwrap();
+    for (a_cell, b_cell) in a_heat.cells().iter().zip(b_heat.cells()) {
+        near(
+            a_cell.absorbed_w,
+            b_cell.absorbed_w,
+            2e-12 * a_cell.absorbed_w,
+        );
+    }
+    near(
+        a_heat.power().absorbed_w,
+        b_heat.power().absorbed_w,
+        2e-12 * a_heat.power().absorbed_w,
+    );
+}
+
+#[test]
+fn crystal_illumination_darkness_budgets_and_typed_cancellation() {
+    let incident = state(
+        &card("illumination admission incidence", 1.0, 0.0),
+        false,
+        100_000.0,
+    );
+    let card = crystal_card("illumination admission crystal", [0.12, 0.42]);
+    let [o, e] = axes(&card, 100_000.0);
+    let interface = OrientedUniaxialInterface::try_new(
+        DielectricResponse::Lossless(&incident),
+        UniaxialOpticalResponse::try_new(&o, &e, 410e-9).unwrap(),
+        [1.0, 2.0, -0.6],
+    )
+    .unwrap();
+    let factors = [interface
+        .prepare_absorbing_field(
+            core::f64::consts::TAU * C0 / WAVELENGTH_M,
+            0.6,
+            [C64::ONE, C64::ZERO],
+        )
+        .unwrap()];
+    let illumination =
+        AbsorbingCrystalIllumination::try_new(&interface, &factors, 1, || false).unwrap();
+    let native = body(&[&card], &[WAVELENGTH_M], &[3], AREA);
+    let laws = native.thermal_laws(false).unwrap();
+    let bound = native.bind(&laws, ids()).unwrap();
+    let mut polls = 0;
+    let heat =
+        PreparedCrystalIlluminationHeating::try_new(&bound, &illumination, 0.0, limits(), || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    // Every possible interruption, including inner factor queries and late
+    // boundary evaluation, remains the typed public cancellation outcome.
+    for stop in 1..=polls {
+        let mut calls = 0;
+        assert!(matches!(
+            PreparedCrystalIlluminationHeating::try_new(
+                &bound,
+                &illumination,
+                0.0,
+                limits(),
+                || {
+                    calls += 1;
+                    calls == stop
+                },
+            ),
+            Err(LayeredWaveHeatingError::Cancelled)
+        ));
+    }
+    let exact = SubstrateWaveHeatingLimits {
+        maximum_cells: 3,
+        maximum_mode_cell_pairs: heat.preparation_mode_cell_pairs(),
+        maximum_workspace_bytes: heat.workspace_bytes(),
+    };
+    assert!(
+        PreparedCrystalIlluminationHeating::try_new(&bound, &illumination, 0.0, exact, || false,)
+            .is_ok()
+    );
+    let short = SubstrateWaveHeatingLimits {
+        maximum_mode_cell_pairs: exact.maximum_mode_cell_pairs - 1,
+        ..exact
+    };
+    assert!(
+        PreparedCrystalIlluminationHeating::try_new(&bound, &illumination, 0.0, short, || false,)
+            .is_err()
+    );
+    let dark = AbsorbingCrystalIllumination::try_new(&interface, &[], 0, || false).unwrap();
+    let dark_limits = SubstrateWaveHeatingLimits {
+        maximum_mode_cell_pairs: 0,
+        ..limits()
+    };
+    let dark_heat =
+        PreparedCrystalIlluminationHeating::try_new(&bound, &dark, 0.0, dark_limits, || false)
+            .unwrap();
+    assert_eq!(dark_heat.preparation_mode_cell_pairs(), 0);
+    assert_eq!(dark_heat.power().entering_w, 0.0);
+    assert_eq!(dark_heat.power().leaving_w, 0.0);
+    assert_eq!(dark_heat.power().absorbed_w, 0.0);
+    let authored = [1.0, 2.0, 3.0];
+    let initial = initial(&bound, &authored);
+    let original = initial.cells().clone();
+    let dt = 2e-9;
+    let step = dark_heat
+        .advance_to(
+            &initial,
+            dt,
+            conduction(),
+            LayeredThermalSolveControls::default(),
+            &mut LayeredThermalWorkspace::new(3).unwrap(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(step.optical.absorbed_j, 0.0);
+    near(
+        step.heat_report.energy.external_heat_j,
+        authored.iter().sum::<f64>() * dt,
+        1e-18,
+    );
+    assert!(matches!(
+        heat.advance_to(
+            &initial,
+            dt,
+            conduction(),
+            LayeredThermalSolveControls::default(),
+            &mut LayeredThermalWorkspace::new(3).unwrap(),
+            || true,
         ),
         Err(LayeredWaveHeatingError::Cancelled)
     ));
