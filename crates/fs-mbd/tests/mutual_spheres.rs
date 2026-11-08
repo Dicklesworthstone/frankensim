@@ -257,6 +257,57 @@ fn source_order_translation_and_orientation_preserve_the_same_pair_law() {
 }
 
 #[test]
+fn overlap_loads_preserve_physical_scaling_when_naive_mass_products_leave_f64() {
+    for (radii, distance) in [([1.5, 0.4], 0.4), ([1.0, 1.0], 1.0)] {
+        let properties = [
+            sphere_mass(MASSES[0], radii[0]),
+            sphere_mass(MASSES[1], radii[1]),
+        ];
+        let reference = MutualGravity::new(FRAME, 1.0, 0.0, 1)
+            .unwrap()
+            .uniform_spheres(&radii)
+            .unwrap()
+            .load(FRAME, &bodies(distance), &properties, || false)
+            .unwrap();
+        // U scales as G*m^2/R, F as G*m^2/R^2. These scales and the native
+        // moments 2*m*R^2/5 are representable even though G*m*m is not.
+        for (g, mass_scale, radius_scale, energy_scale, force_scale) in [
+            (1e200, 1e100, 1e100, 1e300, 1e200),
+            (1e-150, 1e-100, 1e-100, 1e-250, 1e-150),
+        ] {
+            let scaled_radii = radii.map(|radius| radius * radius_scale);
+            let scaled_properties = [
+                sphere_mass(MASSES[0] * mass_scale, scaled_radii[0]),
+                sphere_mass(MASSES[1] * mass_scale, scaled_radii[1]),
+            ];
+            let scaled = MutualGravity::new(FRAME, g, 0.0, 1)
+                .unwrap()
+                .uniform_spheres(&scaled_radii)
+                .unwrap()
+                .load(
+                    FRAME,
+                    &bodies(distance * radius_scale),
+                    &scaled_properties,
+                    || false,
+                )
+                .unwrap();
+            close(
+                scaled.potential_energy_j / energy_scale,
+                reference.potential_energy_j,
+                3e-13,
+            );
+            for i in 0..2 {
+                vector_close(
+                    scaled.forces_world[i].scale(1.0 / force_scale),
+                    reference.forces_world[i],
+                    3e-13,
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn source_mass_inertia_frame_budget_cutoff_and_cancellation_remain_binding() {
     let radii = [1.0, 0.5];
     let properties = [

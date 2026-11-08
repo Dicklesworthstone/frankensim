@@ -8,6 +8,8 @@
 //! full-inertia rotation is retained but receives no monopole gravity torque.
 //! The explicitly selected quadrupole extension adds conservative spin/orbital
 //! exchange between bounded extended bodies without changing this monopole lane.
+//! The uniform-sphere extension instead integrates exact finite-source gravity,
+//! including overlapping mass distributions, on the same native central map.
 
 /// Opt-in mutual second-mass-moment gravity with finite-source recoil.
 pub mod quadrupole;
@@ -64,9 +66,9 @@ pub struct MutualGravityStepReceipt {
     /// Direct sum of pair-potential changes, U_after - U_before [J]. Its negative
     /// is conservative gravity work; small work need not survive subtracting
     /// the two absolute binding-energy diagnostics. It includes both recoils
-    /// and, when selected, both bodies' quadrupole corrections exactly once.
+    /// and the selected finite-body pair potential exactly once.
     pub potential_energy_change_j: f64,
-    /// Interactions per pass: two force samples and one drift-domain check.
+    /// Interactions per pass: two force samples and one direct-work/domain pass.
     pub pair_count: usize,
 }
 
@@ -195,34 +197,14 @@ impl MutualGravity {
         states: &[RigidBodyState],
         properties: &[MassProperties],
         duration_seconds: f64,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MutualGravityStepReceipt, GravityError> {
-        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
-            return Err(DynamicsError::InvalidStepDuration.into());
-        }
-        let before = self.load(frame, states, properties, &mut cancelled)?;
-        let diagnostics_before = diagnostics(
+        step_central(
             states,
             properties,
-            before.potential_energy_j,
-            &mut cancelled,
-        )?;
-        let native = RigidBodyIntegrator::new(Gravity::ZERO);
-        let half = 0.5 * duration_seconds;
-        let mut candidates = storage(states.len())?;
-        for ((&state, &mass), &force) in states.iter().zip(properties).zip(&before.forces_world) {
-            poll(&mut cancelled)?;
-            let kicked = kick(state, force, half)?;
-            candidates.push(
-                native
-                    .step_symplectic(kicked, mass, Wrench::ZERO, duration_seconds)?
-                    .state_after,
-            );
-        }
-        let potential_energy_change_j = drift_potential_change(
-            states,
-            &candidates,
-            |_, _, radius| self.admit_radius(radius).map(|_| ()),
+            duration_seconds,
+            |states, cancelled| self.load(frame, states, properties, cancelled),
+            Some(|_, _, radius| self.admit_radius(radius).map(|_| ())),
             |i, j, before, after| {
                 self.pair_potential_change(
                     before,
@@ -230,28 +212,8 @@ impl MutualGravity {
                     [properties[i].mass(), properties[j].mass()],
                 )
             },
-            &mut cancelled,
-        )?;
-        let after = self.load(frame, &candidates, properties, &mut cancelled)?;
-        for (state, &force) in candidates.iter_mut().zip(&after.forces_world) {
-            poll(&mut cancelled)?;
-            *state = kick(*state, force, half)?;
-        }
-        let diagnostics_after = diagnostics(
-            &candidates,
-            properties,
-            after.potential_energy_j,
-            &mut cancelled,
-        )?;
-        poll(&mut cancelled)?;
-        Ok(MutualGravityStepReceipt {
-            duration_seconds,
-            states_after: candidates,
-            diagnostics_before,
-            diagnostics_after,
-            potential_energy_change_j,
-            pair_count: before.pair_count,
-        })
+            cancelled,
+        )
     }
 
     /// Advance a complete interval with bounded native step-doubling trials.
@@ -357,12 +319,75 @@ impl MutualGravity {
     }
 }
 
+// Both central models use exactly the same native kick/free-drift/kick stages.
+// The selected pair law owns only simultaneous loads, direct potential work,
+// and any separation exclusion; it does not own another state or integrator.
+fn step_central<C: FnMut() -> bool>(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    duration_seconds: f64,
+    mut load: impl FnMut(&[RigidBodyState], &mut C) -> Result<MutualGravityLoad, GravityError>,
+    admit_radius: Option<impl FnMut(usize, usize, f64) -> Result<(), GravityError>>,
+    pair_change: impl FnMut(usize, usize, [Vec3; 2], [Vec3; 2]) -> Result<Dd, GravityError>,
+    mut cancelled: C,
+) -> Result<MutualGravityStepReceipt, GravityError> {
+    if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+        return Err(DynamicsError::InvalidStepDuration.into());
+    }
+    let before = load(states, &mut cancelled)?;
+    let diagnostics_before = diagnostics(
+        states,
+        properties,
+        before.potential_energy_j,
+        &mut cancelled,
+    )?;
+    let native = RigidBodyIntegrator::new(Gravity::ZERO);
+    let half = 0.5 * duration_seconds;
+    let mut candidates = storage(states.len())?;
+    for ((&state, &mass), &force) in states.iter().zip(properties).zip(&before.forces_world) {
+        poll(&mut cancelled)?;
+        let kicked = kick(state, force, half)?;
+        candidates.push(
+            native
+                .step_symplectic(kicked, mass, Wrench::ZERO, duration_seconds)?
+                .state_after,
+        );
+    }
+    let potential_energy_change_j = drift_potential_change(
+        states,
+        &candidates,
+        admit_radius,
+        pair_change,
+        &mut cancelled,
+    )?;
+    let after = load(&candidates, &mut cancelled)?;
+    for (state, &force) in candidates.iter_mut().zip(&after.forces_world) {
+        poll(&mut cancelled)?;
+        *state = kick(*state, force, half)?;
+    }
+    let diagnostics_after = diagnostics(
+        &candidates,
+        properties,
+        after.potential_energy_j,
+        &mut cancelled,
+    )?;
+    poll(&mut cancelled)?;
+    Ok(MutualGravityStepReceipt {
+        duration_seconds,
+        states_after: candidates,
+        diagnostics_before,
+        diagnostics_after,
+        potential_energy_change_j,
+        pair_count: before.pair_count,
+    })
+}
+
 // Fuse direct pair work into the existing drift-domain pass, with no additional
 // pair traversal or per-pair storage. Endpoint loads retain their own admission.
 fn drift_potential_change(
     states: &[RigidBodyState],
     candidates: &[RigidBodyState],
-    mut admit_radius: impl FnMut(usize, usize, f64) -> Result<(), GravityError>,
+    mut admit_radius: Option<impl FnMut(usize, usize, f64) -> Result<(), GravityError>>,
     mut pair_change: impl FnMut(usize, usize, [Vec3; 2], [Vec3; 2]) -> Result<Dd, GravityError>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, GravityError> {
@@ -378,17 +403,20 @@ fn drift_potential_change(
                 candidates[i].pose().position_world(),
                 candidates[j].pose().position_world(),
             ];
-            let start = before[1].sub(before[0]);
-            let end = after[1].sub(after[0]);
-            let change = end.sub(start);
-            let length = change.stable_norm("mutual gravity drift displacement")?;
-            if length > 0.0 {
-                let direction = Vec3::new(change.x / length, change.y / length, change.z / length);
-                let fraction = (-finite(start.dot(direction))? / length).clamp(0.0, 1.0);
-                if fraction > 0.0 && fraction < 1.0 {
-                    // Equal opposite endpoints must detect an exact crossing;
-                    // interpolating them can instead leave a rounding residual.
-                    admit_radius(i, j, segment_line_distance(start, end, length)?)?;
+            if let Some(admit_radius) = admit_radius.as_mut() {
+                let start = before[1].sub(before[0]);
+                let end = after[1].sub(after[0]);
+                let change = end.sub(start);
+                let length = change.stable_norm("mutual gravity drift displacement")?;
+                if length > 0.0 {
+                    let direction =
+                        Vec3::new(change.x / length, change.y / length, change.z / length);
+                    let fraction = (-finite(start.dot(direction))? / length).clamp(0.0, 1.0);
+                    if fraction > 0.0 && fraction < 1.0 {
+                        // Equal opposite endpoints must detect an exact crossing;
+                        // interpolating them can instead leave a rounding residual.
+                        admit_radius(i, j, segment_line_distance(start, end, length)?)?;
+                    }
                 }
             }
             potential_change = potential_change + pair_change(i, j, before, after)?;

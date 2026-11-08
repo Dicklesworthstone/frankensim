@@ -259,7 +259,7 @@ impl MutualQuadrupoleGravity<'_> {
         let potential_energy_change_j = drift_potential_change(
             states,
             &candidates,
-            |i, j, radius| self.admit_pair_radius(i, j, radius),
+            Some(|i, j, radius| self.admit_pair_radius(i, j, radius)),
             |i, j, before, after| {
                 let monopole_change = self.monopole.pair_potential_change(
                     before,

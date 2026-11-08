@@ -7,9 +7,11 @@
 
 mod pair;
 
+use super::super::adaptive::{NativeStep, advance_native};
+use super::super::{GravityAdvanceError, GravityAdvanceOptions, GravityAdvanceReceipt};
 use super::{
-    GravityError, MutualGravity, MutualGravityLoad, Sum, VectorSum, binary_parts, poll, same_frame,
-    scaled_positive, storage,
+    GravityError, MutualGravity, MutualGravityLoad, MutualGravityStepReceipt, Sum, VectorSum,
+    binary_parts, poll, same_frame, scaled_positive, step_central, storage,
 };
 use crate::{MassProperties, RigidBodyState};
 
@@ -97,7 +99,9 @@ impl MutualSphericalGravity<'_> {
                     .pose()
                     .position_world()
                     .sub(states[i].pose().position_world());
-                self.admit_radius(displacement.stable_norm("mutual sphere separation")?)?;
+                if self.monopole.minimum_separation_m > 0.0 {
+                    self.admit_radius(displacement.stable_norm("mutual sphere separation")?)?;
+                }
                 let (force, energy) = pair::load(
                     self.monopole.gravitational_constant,
                     [properties[i].mass(), properties[j].mass()],
@@ -121,6 +125,98 @@ impl MutualSphericalGravity<'_> {
             potential_energy_j,
             pair_count,
         })
+    }
+
+    /// Advance all finite sources with the original native central-gravity map.
+    ///
+    /// Simultaneous exact pair forces drive common half-kicks around the native
+    /// free translation/rotation drift. Both sources recoil; their original
+    /// isotropic spin has no gravity torque. No energy or momentum is projected.
+    /// The fixed resolved map is second order and symmetric; its finite-step
+    /// energy defect is not zero. Linear and orbital-plus-spin angular momenta
+    /// are conserved to roundoff.
+    ///
+    /// Zero cutoff admits overlap, containment and center crossing without a
+    /// point singularity. A positive cutoff still excludes both endpoints and
+    /// every straight relative drift segment; it does not certify the true
+    /// curved trajectory. Direct pair work retains both native displacements
+    /// and avoids subtracting the absolute binding-energy diagnostics. Inputs
+    /// are immutable and any refusal or cancellation returns no partial state.
+    pub fn step(
+        self,
+        frame: u64,
+        states: &[RigidBodyState],
+        properties: &[MassProperties],
+        duration_seconds: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MutualGravityStepReceipt, GravityError> {
+        let admission = (self.monopole.minimum_separation_m > 0.0)
+            .then_some(|_, _, radius| self.admit_radius(radius));
+        step_central(
+            states,
+            properties,
+            duration_seconds,
+            |states, cancelled| self.load(frame, states, properties, cancelled),
+            admission,
+            |i, j, before, after| {
+                if self.monopole.minimum_separation_m > 0.0 {
+                    // Preserve the typed, refinable domain refusal before any
+                    // work arithmetic at an excluded endpoint. Initial loads
+                    // already admitted the original configuration.
+                    self.admit_radius(
+                        after[1]
+                            .sub(after[0])
+                            .stable_norm("mutual sphere separation")?,
+                    )?;
+                }
+                pair::potential_change(
+                    self.monopole.gravitational_constant,
+                    [properties[i].mass(), properties[j].mass()],
+                    [self.body_radii_m[i], self.body_radii_m[j]],
+                    before,
+                    after,
+                )
+            },
+            cancelled,
+        )
+    }
+
+    /// Advance a bounded interval using the existing native adaptive driver.
+    ///
+    /// Accepted states use two native half steps, with finite-sphere forces and
+    /// direct work in every trial. The original pair budget bounds each pass;
+    /// `maximum_trials` bounds timestep refinement. Invalid inputs, arithmetic
+    /// refusal, budget exhaustion and cancellation publish no partial interval.
+    /// A later typed positive-cutoff refusal may trigger bounded refinement.
+    /// Local-error estimates do not certify the true path or its global error,
+    /// and the variable-step sequence is not claimed symplectic or reversible.
+    pub fn advance(
+        self,
+        frame: u64,
+        states: &[RigidBodyState],
+        properties: &[MassProperties],
+        duration_seconds: f64,
+        options: GravityAdvanceOptions,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GravityAdvanceReceipt, GravityAdvanceError> {
+        options.validate(duration_seconds)?;
+        self.load(frame, states, properties, &mut cancelled)?;
+        let mut initial = storage(states.len())?;
+        for &state in states {
+            poll(&mut cancelled)?;
+            initial.push(state);
+        }
+        advance_native(
+            initial,
+            properties,
+            duration_seconds,
+            options,
+            |states, duration, cancelled| {
+                self.step(frame, states, properties, duration, cancelled)
+                    .map(NativeStep::from)
+            },
+            cancelled,
+        )
     }
 
     fn admit_radius(self, radius: f64) -> Result<(), GravityError> {

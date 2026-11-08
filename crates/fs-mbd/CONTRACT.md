@@ -1088,20 +1088,45 @@ finite interaction energy and zero force. The pair law uses bounded dimensionles
 overlap factors and scaled coefficients, rather than radius cubes or runtime
 volume quadrature. Compensated sums retain deterministic input order.
 
+`MutualSphericalGravity::step` uses the same native half-kick/free-drift/half-kick
+stages as point mutual gravity. Both finite sources recoil under simultaneous
+pair forces, while each original isotropic spin follows the native rotational
+map with zero gravity torque. The resolved fixed-step map is second order and
+symmetric, with a finite timestep energy defect; linear and orbital-plus-spin
+angular momenta are conserved to roundoff. Direct pair-potential increments
+retain both source displacements, including transverse work below the rounding
+of either absolute binding energy. No extra pair traversal, per-pair storage,
+replacement integrator, or energy/momentum projection is introduced.
+
+`MutualSphericalGravity::advance` applies the original bounded step-doubling
+driver to that fixed-step map. Accepted states and accumulated work come from
+the two native half steps. Body-pair and trial budgets both remain binding;
+invalid inputs, arithmetic refusal, exhausted budgets and cancellation publish
+no partial state or interval. Local error control does not certify global error
+or the continuous path, and variable-step advancement is not claimed symplectic
+or time reversible.
+
 In this finite-source model, a zero cutoff admits coincidence. A positive cutoff
-retains the original strict exclusion. Source/radius/inertia/count/budget errors
-and cancellation return no partial load. Overlapping density distributions are
+retains the original strict exclusion at endpoints and throughout each straight
+relative drift. Zero cutoff skips that unnecessary point-singularity guard and
+allows center crossing. Source/radius/inertia/count/budget errors and cancellation
+return no partial load. Overlapping density distributions are
 mathematically admitted by gravity; contact and deformation remain with their
 separate physical owners. The pair diagnostic excludes each body's constant
 internal self-energy. `tests/mutual_spheres.rs` compares against independent
 shell-volume quadrature, analytic containment/exterior/equal-radius limits,
 potential derivatives, coordinate/body-order covariance and native admission.
+`tests/mutual_spheres_dynamics.rs` checks center crossing, analytic containment
+orbits and second-order refinement, direct small work and regime transitions,
+native spin, reaction/momentum balance, reversibility, adaptive accuracy and
+bounded atomic refusals.
 
 ### Adaptive gravitational encounters on native states
 
-`MutualGravity::advance` and `MutualQuadrupoleGravity::advance` advance a requested
-interval using the existing force, recoil, full-inertia drift and potential-work
-owners. Each trial compares one full step with two half-steps. The accepted state
+`MutualGravity::advance`, `MutualQuadrupoleGravity::advance` and
+`MutualSphericalGravity::advance` advance a requested interval using the existing
+force, recoil, full-inertia drift and potential-work owners. Each trial compares
+one full step with two half-steps. The accepted state
 is the actual two-half-step result; it is never Richardson-extrapolated or
 projected onto an energy/momentum constraint. The second-order local estimate is
 one third of their difference. Position, velocity, relative attitude and world
