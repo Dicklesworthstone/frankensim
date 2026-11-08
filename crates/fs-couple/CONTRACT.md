@@ -7683,3 +7683,47 @@ weak-rate extreme scales, underflow refusal, bitwise idle behavior and
 cancellation/work limits. Native liquid/body and original-material regressions
 cover the actual partial-liquid inertia, physical unit bindings, reciprocal
 accepted momentum and kinetic receipts, and state-preserving refusal.
+
+## Original material-shell modes in resolved thermoviscous fluid
+
+`cavity_modal::interior::thermoviscous::shell::ShellWallAssembly` transfers a
+`MaterialShellImage` into the existing mixed pressure/velocity/temperature
+owner. The source's complete signed, mass-normalized global P1 translations
+become hierarchical P2 vertex coefficients; edge bubbles remain zero.
+Rotations retain their original structural influence and are not mistaken for
+midsurface translations. The native no-slip congruence supplies reciprocal
+pressure and shear reaction, so zero compact volume participation does not
+remove a mode's spatial fluid loading.
+
+An explicit injective node map covers exactly the source's oriented cavity
+facets. Coordinates must coincide, each mapped facet must be an actual exterior
+no-slip face with the correct outward side, and an independently accumulated
+signed volume-work witness must agree with the original source projection.
+Incomplete maps, stale geometry, implicit welding, offset skins and nonmatching
+meshes refuse. All original modes and frequencies survive; native silent-trace
+and stationary-intersection refusals remain. Material passive channels and
+original interface dashpots enter the full damping operator once. Interface
+stiffness already belongs to the original eigenbasis and is not reapplied.
+
+The assembly binds the existing gas, molecular-relaxation or generic material
+fluid owner. The requested band must fit the original shell material and
+interface support; sampling metadata is caller-declared without advancing a
+source clock. The initial structural law envelope is instantaneous Kelvin--Voigt
+material and linear interfaces. Frequency-local coating/constant-loss slices
+and separate substrate/coating memories refuse because their original causal
+storage/loss is not supplied by this attachment.
+
+`ShellFluidInterior` retains the original image/map, offers allocation-free DD
+projection of physical force-port amplitudes, and exposes the native harmonic,
+causal, field and duct operations. Its consuming `into_interior` permits further
+existing native source attachments. Explicit source, mapping/work, byte, mode,
+channel and native FE budgets bound setup; cancellation publishes no partial
+source or force projection. No new eigensolver, material fit or warm assembly
+is introduced.
+
+Four regression groups specify a genuinely reduced material shell's tangential
+loading with zero compact volume, full material/interface damping, force-work
+reciprocity, native harmonic/time parity, vertex relabeling, source binding and
+geometry/law/resource refusals. Source/API and independent physical review,
+pinned formatting and whitespace checks passed. Native Rust execution remains
+unverified under the known real-dependency build memory limitation.

@@ -45,6 +45,9 @@ pub mod volume_source;
 
 mod viscosity;
 
+/// Original material shell modes on a conforming resolved fluid boundary.
+pub mod shell;
+
 /// Retains the original material, finite-element and duct-composition refusals.
 #[derive(Debug)]
 pub enum ThermoviscousSourceError {
