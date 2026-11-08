@@ -582,7 +582,7 @@ mod sigfix {
             .collect()
     }
 
-    /// Tonality fixture length (power of two for fs-fft).
+    /// Legacy tonality reference fixture length.
     pub const TONAL_LEN: usize = 65_536;
 
     /// Tonal fixture A: 1 kHz 60 dB tone + 3 kHz at half amplitude +
@@ -654,6 +654,25 @@ mod sigfix {
             .collect()
     }
 
+    /// A pair inside one critical band but just outside ECMA's proximity
+    /// bandwidth: 35.15625 Hz apart versus a 33.5293 Hz limit at the
+    /// dominant 500.244140625 Hz line. Putting 1.2 inside the 1.8 power
+    /// incorrectly widens the limit to 36.0856 Hz and merges the tones.
+    pub fn proximity_f() -> Vec<f64> {
+        let a = amp(60.0);
+        let noise = lcg_noise(TONAL_LEN, 123_456);
+        (0..TONAL_LEN)
+            .map(|i| {
+                let t = i as f64 / SR;
+                a * fs_math::det::sin(2.0 * core::f64::consts::PI * 500.244_140_625 * t)
+                    + 0.15
+                        * a
+                        * fs_math::det::sin(2.0 * core::f64::consts::PI * 535.400_390_625 * t)
+                    + 0.0007 * noise[i]
+            })
+            .collect()
+    }
+
     /// 1 kHz 70 dB tone pulse, on during 0.25..0.75 s.
     pub fn pulse() -> Vec<f64> {
         let a = amp(70.0);
@@ -691,6 +710,7 @@ fn dump_reference_signals() {
     write("lowsnr_c", &sigfix::lowsnr_c());
     write("close_d", &sigfix::close_d());
     write("far_e", &sigfix::far_e());
+    write("proximity_f", &sigfix::proximity_f());
 }
 
 /// Stationary loudness through the 48 kHz PCM filterbank path,
@@ -968,9 +988,10 @@ fn pareto_batch_is_aggregation_exact() {
     println!("{{\"suite\":\"fs-psycho\",\"case\":\"pareto-batch\",\"verdict\":\"pass\"}}");
 }
 
-/// ECMA tonality (TNR + PR), EXACTNESS-pinned against the extracted
-/// Apache-2.0 MoSQITo reference run on bit-identical fixture PCM
-/// (dump_reference_signals + tnrref/drive_tnr.py, full precision).
+/// ECMA tonality (TNR + PR), pinned against the independent Apache-2.0
+/// MoSQITo d990c33 routines on bit-identical fixture PCM from
+/// `dump_reference_signals`. Only the reference's FFT frequency axis
+/// is corrected to k*fs/N before its unchanged TNR/PR routines run.
 #[test]
 // float_cmp: the zero totals are the reference's EXACT no-prominent
 // convention, not a computed value near zero.
@@ -983,8 +1004,8 @@ fn tonality_matches_reference() {
     let tnr = tone_to_noise_ecma(&a, sr).expect("tnr");
     assert_eq!(tnr.tones.len(), 2, "{:?}", tnr.tones);
     let pins_tnr: [(f64, f64); 2] = [
-        (1_000.488_281_25, 12.434_966_853_609_048),
-        (3_000.732_421_875, 51.331_313_916_320_724),
+        (999.755_859_375, 12.437_132_814_666_15),
+        (3_000.0, 51.332_598_674_618_204),
     ];
     for (tone, (f_ref, v_ref)) in tnr.tones.iter().zip(pins_tnr) {
         assert_eq!(tone.frequency_hz.to_bits(), f_ref.to_bits(), "tone freq");
@@ -995,7 +1016,7 @@ fn tonality_matches_reference() {
         );
         assert!(tone.prominent);
     }
-    let t_tnr_ref = 51.331_873_83;
+    let t_tnr_ref = 51.333_158_702_595_526;
     assert!(
         (tnr.total_db - t_tnr_ref).abs() < 1.0e-6,
         "{}",
@@ -1004,8 +1025,8 @@ fn tonality_matches_reference() {
     let pr = prominence_ratio_ecma(&a, sr).expect("pr");
     assert_eq!(pr.tones.len(), 2);
     let pins_pr: [(f64, f64); 2] = [
-        (1_000.488_281_25, 61.485_567_666_731_83),
-        (3_000.732_421_875, 50.696_977_402_016_664),
+        (999.755_859_375, 61.485_567_666_731_83),
+        (3_000.0, 50.696_977_402_016_664),
     ];
     for (tone, (f_ref, v_ref)) in pr.tones.iter().zip(pins_pr) {
         assert_eq!(tone.frequency_hz.to_bits(), f_ref.to_bits());
@@ -1017,7 +1038,7 @@ fn tonality_matches_reference() {
         assert!(tone.prominent);
     }
     assert!(
-        (pr.total_db - 61.833_436_68).abs() < 1.0e-6,
+        (pr.total_db - 61.833_436_675_429_94).abs() < 1.0e-6,
         "{}",
         pr.total_db
     );
@@ -1029,16 +1050,16 @@ fn tonality_matches_reference() {
     assert_eq!(tnr_b.total_db, 0.0);
     let pr_b = prominence_ratio_ecma(&b, sr).expect("pr");
     let expected_freqs: [f64; 10] = [
-        596.923_828_125,
-        836.425_781_25,
-        953.613_281_25,
-        1_141.113_281_25,
-        1_468.505_859_375,
-        1_898.437_5,
-        2_994.873_046_875,
-        5_064.697_265_625,
-        9_139.892_578_125,
-        10_453.857_421_875,
+        596.191_406_25,
+        835.693_359_375,
+        952.880_859_375,
+        1_140.380_859_375,
+        1_467.773_437_5,
+        1_897.705_078_125,
+        2_994.140_625,
+        5_063.964_843_75,
+        9_139.160_156_25,
+        10_453.125,
     ];
     assert_eq!(pr_b.tones.len(), 10, "{:?}", pr_b.tones);
     for (tone, want) in pr_b.tones.iter().zip(expected_freqs) {
@@ -1046,9 +1067,9 @@ fn tonality_matches_reference() {
     }
     assert!(pr_b.tones.iter().all(|t| !t.prominent));
     assert_eq!(pr_b.total_db, 0.0);
-    // One PR candidate pinned mid-list (953.6 Hz, 0.5146 dB).
+    // One PR candidate pinned mid-list (952.9 Hz, 0.5146 dB).
     let probe = &pr_b.tones[2];
-    assert_eq!(probe.frequency_hz.to_bits(), 953.613_281_25_f64.to_bits());
+    assert_eq!(probe.frequency_hz.to_bits(), 952.880_859_375_f64.to_bits());
     assert!(
         ((probe.ratio_db - 0.514_649_934_651_174_6) / 0.514_649_934_651_174_6).abs() < 1.0e-6,
         "{:.17}",
@@ -1060,21 +1081,63 @@ fn tonality_matches_reference() {
     assert_eq!(tnr_c.tones.len(), 1);
     assert_eq!(
         tnr_c.tones[0].frequency_hz.to_bits(),
-        500.976_562_5_f64.to_bits()
+        500.244_140_625_f64.to_bits()
     );
     assert!(
-        ((tnr_c.tones[0].ratio_db - 12.384_273_273_044_364) / 12.384_273_273_044_364).abs()
-            < 1.0e-9
+        ((tnr_c.tones[0].ratio_db - 12.386_065_294_191_44) / 12.386_065_294_191_44).abs() < 1.0e-9
     );
     assert!(tnr_c.tones[0].prominent);
     let pr_c = prominence_ratio_ecma(&c, sr).expect("pr");
     assert_eq!(pr_c.tones.len(), 6, "{:?}", pr_c.tones);
     assert!(
-        ((pr_c.tones[0].ratio_db - 32.775_056_728_327_13) / 32.775_056_728_327_13).abs() < 1.0e-9
+        ((pr_c.tones[0].ratio_db - 32.775_056_728_327_144) / 32.775_056_728_327_144).abs() < 1.0e-9
     );
     assert!(pr_c.tones[0].prominent);
     assert!(pr_c.tones[1..].iter().all(|t| !t.prominent));
     println!("{{\"suite\":\"fs-psycho\",\"case\":\"tonality\",\"verdict\":\"pass\"}}");
+}
+
+/// A record containing exactly 1000 cycles has physical frequency
+/// 1000*sample_rate/N, at every admitted clock and native record length.
+#[test]
+fn tonality_reports_physical_frequency_at_native_lengths_and_rates() {
+    use fs_psycho::tonality::{prominence_ratio_ecma, tone_to_noise_ecma};
+    // At 96 kHz, keep enough samples to resolve the lowest 1/24-octave
+    // bands; an admissible FFT length alone does not guarantee that resolution.
+    for (n, sample_rate) in [
+        (48_000, 44_100.0),
+        (48_000, 48_000.0),
+        (48_001, 44_100.0),
+        (48_001, 48_000.0),
+        (65_536, 44_100.0),
+        (65_536, 48_000.0),
+        (65_536, 96_000.0),
+        (96_000, 96_000.0),
+        (96_001, 96_000.0),
+    ] {
+        let mut pcm = sigfix::lcg_noise(n, 12_345);
+        for (j, value) in pcm.iter_mut().enumerate() {
+            let phase = core::f64::consts::TAU * 1_000.0 * j as f64 / n as f64;
+            *value = 0.02 * fs_math::det::sin(phase) + 0.0001 * *value;
+        }
+        let frequency_hz = 1_000.0 * sample_rate / n as f64;
+        for metric in [tone_to_noise_ecma, prominence_ratio_ecma] {
+            let out = metric(&pcm, sample_rate).expect("resolved physical tone");
+            assert_eq!(
+                out.tones.len(),
+                1,
+                "N={n}, fs={sample_rate}: {:?}",
+                out.tones
+            );
+            let tone = &out.tones[0];
+            assert!(tone.prominent);
+            assert_eq!(
+                tone.frequency_hz.to_bits(),
+                frequency_hz.to_bits(),
+                "N={n}, fs={sample_rate}"
+            );
+        }
+    }
 }
 
 /// G1/G3: native-length spectra retain late tones and replay bitwise.
@@ -1090,7 +1153,11 @@ fn tonality_native_lengths_keep_late_tones_and_the_original_clock() {
             // tone is a deterministic spectrum test, not a stationarity claim.
             if j >= 32_768 {
                 let phase = core::f64::consts::TAU * 1_000.0 * j as f64 / sigfix::SR;
-                *value += 0.02 * fs_math::det::sin(phase);
+                // A smooth attack avoids switch-generated broadband energy:
+                // the hard-switched fixture has TNR below the 8 dB threshold.
+                let attack = ((j - 32_768) as f64 / 4_096.0).min(1.0);
+                let envelope = 0.5 - 0.5 * fs_math::det::cos(core::f64::consts::PI * attack);
+                *value += 0.02 * envelope * fs_math::det::sin(phase);
             }
         }
         for metric in [tone_to_noise_ecma, prominence_ratio_ecma] {
@@ -1160,7 +1227,7 @@ fn tonality_refusals_are_typed() {
 /// tones in one critical band exercise the proximity MERGE branch
 /// (peak levels energy-summed, delta_ft doubled); two far tones in
 /// one band exercise the far-apart branch (RAW line level vs the
-/// band total) through its ACCEPT path. Reference-exact pins.
+/// band total) through its ACCEPT path. Independent corrected-axis pins.
 #[test]
 #[allow(clippy::excessive_precision, clippy::float_cmp)]
 fn tonality_multitone_branches_match_reference() {
@@ -1172,9 +1239,9 @@ fn tonality_multitone_branches_match_reference() {
     assert_eq!(tnr_d.tones.len(), 1, "{:?}", tnr_d.tones);
     assert_eq!(
         tnr_d.tones[0].frequency_hz.to_bits(),
-        990.966_796_875_f64.to_bits()
+        990.234_375_f64.to_bits()
     );
-    let v = 14.491_516_282_600_855;
+    let v = 14.473_806_898_089_109;
     assert!(
         ((tnr_d.tones[0].ratio_db - v) / v).abs() < 1.0e-9,
         "{:.17}",
@@ -1183,7 +1250,7 @@ fn tonality_multitone_branches_match_reference() {
     assert!(tnr_d.tones[0].prominent);
     let pr_d = prominence_ratio_ecma(&d, sr).expect("pr");
     assert_eq!(pr_d.tones.len(), 1);
-    let v = 63.713_183_911_372_86;
+    let v = 63.710_132_299_048_006;
     assert!(((pr_d.tones[0].ratio_db - v) / v).abs() < 1.0e-9);
     // Far pair: the far-apart branch accepts ONE weak tone (raw line
     // vs band total), below the prominence threshold — so the total
@@ -1194,9 +1261,9 @@ fn tonality_multitone_branches_match_reference() {
     assert_eq!(tnr_e.tones.len(), 1, "{:?}", tnr_e.tones);
     assert_eq!(
         tnr_e.tones[0].frequency_hz.to_bits(),
-        213.134_765_625_f64.to_bits()
+        212.402_343_75_f64.to_bits()
     );
-    let v = 2.664_949_568_215_725;
+    let v = 2.665_881_457_764_364;
     assert!(
         ((tnr_e.tones[0].ratio_db - v) / v).abs() < 1.0e-9,
         "{:.17}",
@@ -1206,8 +1273,42 @@ fn tonality_multitone_branches_match_reference() {
     assert_eq!(tnr_e.total_db, 0.0);
     let pr_e = prominence_ratio_ecma(&e, sr).expect("pr");
     assert_eq!(pr_e.tones.len(), 1);
-    let v = 63.938_143_912_935_13;
+    let v = 63.949_912_809_885_68;
     assert!(((pr_e.tones[0].ratio_db - v) / v).abs() < 1.0e-9);
     assert!(pr_e.tones[0].prominent);
     println!("{{\"suite\":\"fs-psycho\",\"case\":\"tonality-multitone\",\"verdict\":\"pass\"}}");
+}
+
+/// Independent corrected-axis MoSQITo fixture at the proximity boundary.
+/// A widened merge band would turn this weak, separate-tone TNR into a
+/// prominent merged tone, although both tones remain inside one critical band.
+#[test]
+#[allow(clippy::excessive_precision)]
+fn tonality_proximity_limit_matches_reference() {
+    use fs_psycho::tonality::{prominence_ratio_ecma, tone_to_noise_ecma};
+    let pcm = sigfix::proximity_f();
+    let tnr = tone_to_noise_ecma(&pcm, sigfix::SR).expect("boundary-pair TNR");
+    assert_eq!(tnr.tones.len(), 1, "{:?}", tnr.tones);
+    assert_eq!(
+        tnr.tones[0].frequency_hz.to_bits(),
+        500.244_140_625_f64.to_bits()
+    );
+    let tnr_ref = 2.695_715_805_843_839_5;
+    assert!(
+        ((tnr.tones[0].ratio_db - tnr_ref) / tnr_ref).abs() < 1.0e-9,
+        "{:?}",
+        tnr.tones
+    );
+    assert!(!tnr.tones[0].prominent);
+    assert_eq!(tnr.total_db.to_bits(), 0.0_f64.to_bits());
+
+    let pr = prominence_ratio_ecma(&pcm, sigfix::SR).expect("boundary-pair PR");
+    assert_eq!(pr.tones.len(), 1, "{:?}", pr.tones);
+    assert_eq!(
+        pr.tones[0].frequency_hz.to_bits(),
+        500.244_140_625_f64.to_bits()
+    );
+    let pr_ref = 62.997_499_489_025_934;
+    assert!(((pr.tones[0].ratio_db - pr_ref) / pr_ref).abs() < 1.0e-9);
+    assert!(pr.tones[0].prominent);
 }

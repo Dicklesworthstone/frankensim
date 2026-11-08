@@ -1,6 +1,6 @@
 //! ECMA-74 annex D tonality: tone-to-noise ratio (TNR) and prominence
-//! ratio (PR) with prominence classification, ported
-//! statement-for-statement from the Apache-2.0 MoSQITo reference
+//! ratio (PR) with prominence classification, ported from the
+//! Apache-2.0 MoSQITo reference with a corrected physical frequency axis
 //! implementation (github.com/Eomys/MoSQITo, commit d990c33:
 //! `sq_metrics/tonality/{tone_to_noise_ecma,prominence_ratio_ecma}`,
 //! Bray screening with 1/24-octave smoothed-spectrum criteria; totals
@@ -12,12 +12,16 @@
 //!   without truncation, resampling or padding the physical frequency grid.
 //! - The spectrum front end is the reference's `comp_spectrum`:
 //!   sum-normalized Hann window, one-sided spectrum scaled by the
-//!   empirical 1.42, frequency axis labeled `(k+1) fs/n` (the
-//!   reference's own one-bin offset, kept), dB re 2e-5 Pa.
+//!   empirical 1.42, dB re 2e-5 Pa. Coefficient `k` is located at
+//!   `k fs/n` Hz, correcting the reference's one-bin offset. The
+//!   corrected axis also places screening and critical bands at their
+//!   physical frequencies; reference comparisons apply this correction.
+//!   Even records omit the Nyquist bin, as in the reference; odd
+//!   records retain their final positive-frequency bin.
 //! - Detection band is the reference's (89.1, 11200) Hz.
-//! - Disclosed deviations from the reference, all on paths its own
-//!   fixtures never exercise: (a) the reference paints the smoothed
-//!   spectrum into a numpy `empty` array and can leave the LAST bin
+//! - Other disclosed deviations from the reference: (a) the reference
+//!   paints the smoothed spectrum into a numpy `empty` array and can leave
+//!   the LAST bin
 //!   uninitialized memory — here the tail is painted with the last
 //!   band's value (deterministic completion, head and tail); (b) a
 //!   zero spectrum magnitude reads -140 dB, matching the reference's
@@ -37,7 +41,8 @@ use fs_math::det;
 /// One detected tonal component.
 #[derive(Debug, Clone)]
 pub struct Tone {
-    /// Tone frequency [Hz] (the spectral-line label of the peak).
+    /// Physical frequency [Hz] of the peak DFT coefficient.
+    /// This is a bin center, with spacing sample_rate/N, not a sub-bin pitch estimate.
     pub frequency_hz: f64,
     /// TNR or PR value [dB].
     pub ratio_db: f64,
@@ -100,7 +105,7 @@ fn argmin_abs(xs: &[f64], target: f64) -> usize {
 }
 
 /// The reference's `comp_spectrum` (db=True): sum-normalized Hann,
-/// one-sided x1.42, axis (k+1)fs/n, dB re 2e-5.
+/// one-sided x1.42, dB re 2e-5, with the physical axis k*fs/n.
 fn spectrum_db(pcm_pa: &[f64], sample_rate: f64) -> Result<(Vec<f64>, Vec<f64>), PsychoError> {
     let n = pcm_pa.len();
     // This API already owns the complete record. Size arithmetic is checked
@@ -144,7 +149,7 @@ fn spectrum_db(pcm_pa: &[f64], sample_rate: f64) -> Result<(Vec<f64>, Vec<f64>),
         })
         .collect();
     let freq: Vec<f64> = (0..half)
-        .map(|k| usize_f64(k + 1) * sample_rate / usize_f64(n))
+        .map(|k| usize_f64(k) * sample_rate / usize_f64(n))
         .collect();
     Ok((db, freq))
 }
@@ -542,10 +547,27 @@ impl ToneAccum {
 /// [`PsychoError::NonFinite`] on bad samples/rate;
 /// [`PsychoError::DegenerateSignal`] when the detection band is
 /// unresolvable at this rate/length.
-#[allow(clippy::too_many_lines)] // one reference routine, told in its order
 pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, PsychoError> {
     let (fr, spec) = detection_band(pcm_pa, sample_rate)?;
-    let mut peaks = screening_for_tones(&fr, &spec)?;
+    let peaks = screening_for_tones(&fr, &spec)?;
+    Ok(tone_to_noise_from_spectrum(&fr, &spec, peaks))
+}
+
+/// Both ECMA metrics from one native-length FFT and one candidate screening.
+/// Each method still owns its critical-band grouping and prominence decision.
+pub(crate) fn ecma_tonality(
+    pcm_pa: &[f64],
+    sample_rate: f64,
+) -> Result<(Tonality, Tonality), PsychoError> {
+    let (fr, spec) = detection_band(pcm_pa, sample_rate)?;
+    let peaks = screening_for_tones(&fr, &spec)?;
+    let tnr = tone_to_noise_from_spectrum(&fr, &spec, peaks.clone());
+    let pr = prominence_ratio_from_spectrum(&fr, &spec, peaks);
+    Ok((tnr, pr))
+}
+
+#[allow(clippy::too_many_lines)] // one reference routine, told in its order
+fn tone_to_noise_from_spectrum(fr: &[f64], spec: &[f64], mut peaks: Vec<usize>) -> Tonality {
     let mut acc = ToneAccum {
         tones: Vec::new(),
         prominent_pow: 0.0,
@@ -558,29 +580,30 @@ pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, 
     while !peaks.is_empty() {
         let ind = peaks[0];
         let (ind_p, ind_s) = if peaks.len() > 1 {
-            find_highest_tone(&fr, &spec, &mut peaks, ind)
+            find_highest_tone(fr, spec, &mut peaks, ind)
         } else {
             (ind, None)
         };
         let (lt, low_limit_idx, high_limit_idx, delta_fc, delta_ft) = if let Some(ind_s) = ind_s {
             let fp = fr[ind_p];
             let fs_ = fr[ind_s];
-            // Proximity criterion.
+            // Proximity criterion: 1.2 scales the logarithm's 1.8 power,
+            // not its argument. Moving it inside widens the merge band.
             let delta_f = 21.0
                 * det::pow(
                     10.0,
-                    det::pow(1.2 * det::ln(fp / 212.0).abs() / det::ln(10.0), 1.8),
+                    1.2 * det::pow(det::ln(fp / 212.0).abs() / det::ln(10.0), 1.8),
                 );
             if (fs_ - fp).abs() < delta_f {
-                let lp = peak_level(&spec, ind_p);
-                let ls = peak_level(&spec, ind_s);
+                let lp = peak_level(spec, ind_p);
+                let ls = peak_level(spec, ind_s);
                 let lt = pow_to_db(db_to_pow(lp) + db_to_pow(ls));
                 let (f1, f2) = critical_band(fp);
                 peaks.retain(|&i| i != ind_s);
                 (
                     lt,
-                    argmin_abs(&fr, f1),
-                    argmin_abs(&fr, f2),
+                    argmin_abs(fr, f1),
+                    argmin_abs(fr, f2),
                     f2 - f1,
                     2.0 * df,
                 )
@@ -588,8 +611,8 @@ pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, 
                 let (f1, f2) = critical_band(fr[ind_p]);
                 (
                     spec[ind_p],
-                    argmin_abs(&fr, f1),
-                    argmin_abs(&fr, f2),
+                    argmin_abs(fr, f1),
+                    argmin_abs(fr, f2),
                     f2 - f1,
                     df,
                 )
@@ -597,9 +620,9 @@ pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, 
         } else {
             let (f1, f2) = critical_band(fr[ind_p]);
             (
-                peak_level(&spec, ind_p),
-                argmin_abs(&fr, f1),
-                argmin_abs(&fr, f2),
+                peak_level(spec, ind_p),
+                argmin_abs(fr, f1),
+                argmin_abs(fr, f2),
                 f2 - f1,
                 df,
             )
@@ -624,7 +647,7 @@ pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, 
         }
         peaks.retain(|&i| i != ind_p);
     }
-    Ok(acc.finish())
+    acc.finish()
 }
 
 /// Prominence ratio per ECMA-74 annex D (reference `_pr_main_calc`,
@@ -634,7 +657,11 @@ pub fn tone_to_noise_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, 
 /// Same refusal set as [`tone_to_noise_ecma`].
 pub fn prominence_ratio_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonality, PsychoError> {
     let (fr, spec) = detection_band(pcm_pa, sample_rate)?;
-    let mut peaks = screening_for_tones(&fr, &spec)?;
+    let peaks = screening_for_tones(&fr, &spec)?;
+    Ok(prominence_ratio_from_spectrum(&fr, &spec, peaks))
+}
+
+fn prominence_ratio_from_spectrum(fr: &[f64], spec: &[f64], mut peaks: Vec<usize>) -> Tonality {
     let mut acc = ToneAccum {
         tones: Vec::new(),
         prominent_pow: 0.0,
@@ -646,23 +673,23 @@ pub fn prominence_ratio_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonalit
     while !peaks.is_empty() {
         let ind = peaks[0];
         let ind = if peaks.len() > 1 {
-            find_highest_tone(&fr, &spec, &mut peaks, ind).0
+            find_highest_tone(fr, spec, &mut peaks, ind).0
         } else {
             ind
         };
         let ft = fr[ind];
         // Middle critical band.
         let (f1, f2) = critical_band(ft);
-        let low_limit_idx = argmin_abs(&fr, f1);
-        let high_limit_idx = argmin_abs(&fr, f2);
+        let low_limit_idx = argmin_abs(fr, f1);
+        let high_limit_idx = argmin_abs(fr, f2);
         let lm = band_level(low_limit_idx, high_limit_idx);
         // Lower contiguous band.
         let (f1, f2) = lower_critical_band(ft);
-        let ll = band_level(argmin_abs(&fr, f1), argmin_abs(&fr, f2));
+        let ll = band_level(argmin_abs(fr, f1), argmin_abs(fr, f2));
         let delta_f = f2 - f1;
         // Upper contiguous band.
         let (f1, f2) = upper_critical_band(ft);
-        let lu = band_level(argmin_abs(&fr, f1), argmin_abs(&fr, f2));
+        let lu = band_level(argmin_abs(fr, f1), argmin_abs(fr, f2));
         let delta = if ft <= 171.4 {
             pow_to_db(db_to_pow(lm))
                 - pow_to_db(f64::midpoint(
@@ -683,5 +710,41 @@ pub fn prominence_ratio_ecma(pcm_pa: &[f64], sample_rate: f64) -> Result<Tonalit
         // Remove every candidate inside the middle critical band.
         peaks.retain(|&i| i < low_limit_idx || i > high_limit_idx);
     }
-    Ok(acc.finish())
+    acc.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spectrum_labels_dc_and_the_last_positive_frequency() {
+        let (db, frequencies) = spectrum_db(&[1.0; 9], 9_000.0).expect("DC spectrum");
+        let peak = db
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .expect("DC peak")
+            .0;
+        assert_eq!(frequencies[peak].to_bits(), 0.0_f64.to_bits());
+
+        for (n, sample_rate, tone_hz, bins) in
+            [(32, 32_000.0, 15_000.0, 16), (33, 33_000.0, 16_000.0, 17)]
+        {
+            let pcm: Vec<f64> = (0..n)
+                .map(|j| det::sin(core::f64::consts::TAU * tone_hz * usize_f64(j) / sample_rate))
+                .collect();
+            let (db, frequencies) = spectrum_db(&pcm, sample_rate).expect("upper positive tone");
+            assert_eq!(frequencies.len(), bins);
+            assert!(frequencies.iter().all(|&f| f < 0.5 * sample_rate));
+            let peak = db
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .expect("positive peak")
+                .0;
+            assert_eq!(peak, bins - 1);
+            assert_eq!(frequencies[peak].to_bits(), tone_hz.to_bits());
+        }
+    }
 }

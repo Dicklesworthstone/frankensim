@@ -84,18 +84,27 @@ test).
   sample count disclosed) from one 48 kHz Pa block. AGGREGATION-EXACT by contract: every field is
   bitwise the standalone call's value (pinned by test); any
   component's typed refusal propagates — no partial results.
+  TNR and PR share one windowed FFT and one candidate-screening pass;
+  each method retains its own critical-band grouping and prominence rule.
 - `tonality::{tone_to_noise_ecma, prominence_ratio_ecma}` — ECMA-74
   annex D tonality (TNR and PR with prominence classification, totals
-  over prominent tones per ECMA TR/108), ported
-  statement-for-statement from the Apache-2.0 MoSQITo reference
+  over prominent tones per ECMA TR/108), ported from the Apache-2.0
+  MoSQITo reference with a corrected physical FFT frequency axis
   (Bray smoothed-spectrum screening, 1/24-octave criteria, annex
   D.8/D.10 critical bands, D.7.1 hearing threshold). Detection band
   (89.1, 11200) Hz; exact native-length block, including odd and
   non-power-of-two counts through `fs-fft::GeneralFft`. Bluestein's internal
   convolution padding does not change the record, sample clock or frequency
-  spacing. Power-of-two records retain the original Stockham route and
-  reference pins. Focused G1/G3 tests exercise 48000/48001-sample records,
-  tones arriving after the former truncated prefix, and bitwise replay.
+  spacing. Power-of-two records retain the original Stockham numerical route.
+  Coefficient k is located at k*fs/N Hz: the reference's former one-bin
+  offset is corrected before screening, critical-band placement and reported
+  tone frequencies. These are spectral-bin centers, not sub-bin pitch
+  estimates. Even records exclude Nyquist; odd records include their last
+  positive-frequency coefficient. Independent reference pins apply the same
+  axis correction to the upstream Python routines. Focused G1/G3 tests
+  exercise 48000/48001-sample records, tones arriving after the former
+  truncated prefix, physical frequencies across 44.1/48/96 kHz clocks,
+  DC and the upper positive-frequency bins, and bitwise replay.
   Disclosed deviations in the module doc, all
   on paths the reference cannot execute deterministically or
   correctly: uninitialized smoothed-spectrum head/tail
@@ -252,7 +261,8 @@ test).
     read Ok(inf/NaN) — review-caught, now a typed refusal) all
     refuse typed.
 12. Tonality fidelity: on bit-identical fixture PCM the extracted
-    reference reproduces — two-tone fixture: TNR 12.43/51.33 dB and
+    reference with its FFT axis corrected reproduces — two-tone fixture:
+    TNR 12.44/51.33 dB and
     PR 61.49/50.70 dB at the exact bin frequencies, all prominent,
     ratios pinned at 1e-9 relative; noise-only fixture: TNR finds NO
     tones and PR finds EXACTLY the reference's 10 weak candidates,
@@ -263,7 +273,12 @@ test).
     fixture exercises the TNR proximity-MERGE branch (990+1010 Hz in
     one band -> one merged tone, pinned); far-pair fixture exercises
     the far-apart branch's ACCEPT path (bin-exact tones; a weak
-    non-prominent tone with total exactly 0). Tonality refusals
+    non-prominent tone with total exactly 0). A boundary pair at
+    500.244140625/535.400390625 Hz is separated by 35.15625 Hz,
+    outside the reference's 33.5293 Hz proximity limit. The factor 1.2
+    multiplies the logarithm's 1.8 power; putting it inside that power
+    incorrectly widens the limit to 36.0856 Hz and merges this pair.
+    Tonality refusals
     (short, NaN, bad rate, unresolvable detection
     band, too-coarse resolution for 1/24-octave smoothing incl. the
     review's panic configuration) typed and executed.
@@ -329,7 +344,7 @@ audible two-tone beats at known component RMS levels. Two private stage tests
 also check known-RMS FFT coefficients across phase and physical-pressure
 reconstruction through ear/spreading gains and an inverse FFT.
 
-`tests/psycho.rs` (20 + 1 ignored provenance tool): ISO signal-1
+`tests/psycho.rs` (plus an ignored provenance tool): ISO signal-1
 exactness; cross-path tone
 references; anchor + monotonicity; sharpness behavior + silence
 refusal; low-band mutation; calibration refusal + calibrated value;
@@ -342,8 +357,21 @@ temporal-asymmetry behavior; phon conversion + signal refusals;
 `dump_reference_signals` (ignored) regenerates the bit-identical PCM
 the reference binary consumed to mint every signal-path pin; batch
 aggregation-exactness (bitwise) + refusal propagation; tonality
-exactness on five fixtures (incl. both multi-tone branches) + typed
-tonality refusals; native-length tail-tone coverage and bitwise replay.
+exactness on six fixtures (including the proximity-boundary pair and both
+multi-tone branches) + typed tonality refusals; native-length tail-tone
+coverage, physical-frequency/sample-rate covariance and bitwise replay.
+The private spectrum test also checks DC and the final odd/even positive bin.
+
+Tonality oracle provenance: Apache-2.0 MoSQITo 1.2.1,
+commit `d990c33f94f1b2050b2d811dea492219ebe97b30`.
+The unchanged `comp_spectrum`, `_tnr_main_calc`, `_pr_main_calc` and their
+upstream helpers run on the raw little-endian f64 fixture PCM generated by
+`dump_reference_signals`. The uncorrected run first reproduces the former
+pins; the corrected run replaces only the frequency axis with
+`numpy.arange(len(spectrum)) * fs / len(pcm)` before the TNR/PR routines run.
+Updated pins retain the existing 1e-9 relative ratio tolerances (and the
+existing 1e-6 weak-candidate/total tolerances). Python is a development oracle,
+not a production dependency.
 
 `examples/psycho_descriptors.rs` (4 unit tests + IRP M7.5-W1 Python
 bridge `test_psycho_bridge.py`): bitwise equality between parsed
@@ -369,8 +397,10 @@ independent of the stationary loudness filterbank's skip interval.
 - Tonality: TNR/PR are the ECMA-74 discrete-tone metrics; Aures/
   Sottek psychoacoustic tonality (sharpness-of-hearing model) is a
   different metric and is NOT implemented.
-- Sampling rates other than 48 kHz: refused, not resampled (no
-  claim); wav parsing is the caller's job in library APIs (inputs are
+- The ISO 532-1 PCM filterbank and Pareto batch require 48 kHz, without
+  resampling. Standalone ECMA tonality honors the declared sample rate,
+  subject to its detection-band and resolution admission. WAV parsing is
+  the caller's job in library APIs (inputs are
   Pa slices; the `psycho_descriptors` CLI example parses mono 48 kHz
   PCM16/float32 WAVs for grader integration).
 - Per-frame specific loudness is computed internally but not

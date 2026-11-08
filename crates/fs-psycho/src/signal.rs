@@ -473,6 +473,8 @@ pub struct ParetoMetrics {
 /// block (Pa, 48 kHz). Refusals from any component metric propagate
 /// unchanged — a batch call never papers over a member's typed
 /// refusal with a partial result.
+/// Both ECMA tonality metrics share one complete-record FFT and candidate
+/// screening, retaining bitwise equality with their standalone calls.
 ///
 /// # Errors
 /// Any error of the component metrics
@@ -509,8 +511,7 @@ pub fn pareto_metrics(
     let roughness_mean = r_sum / n_blocks as f64;
     let lat = crate::log_attack_time(pcm_pa, sample_rate, lat_env_window)?;
     let tonality_block = pcm_pa.len();
-    let tnr = crate::tonality::tone_to_noise_ecma(pcm_pa, sample_rate)?;
-    let pr = crate::tonality::prominence_ratio_ecma(pcm_pa, sample_rate)?;
+    let (tnr, pr) = crate::tonality::ecma_tonality(pcm_pa, sample_rate)?;
     Ok(ParetoMetrics {
         sones_stationary: stationary.sones,
         phon_stationary: phon_from_sone(stationary.sones)?,
