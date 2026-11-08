@@ -32,6 +32,9 @@ use fs_fft::welch::{WelchConfig, WelchCrossSpectrum};
 use fs_material::relaxation::RelaxationState;
 use fs_math::dd::Dd;
 
+/// Accepted real source histories for complete causal molecular observation.
+pub mod history;
+
 /// Independent, explicit caps for both samplers and their joint spectrum.
 /// Peak numerical storage is bounded by the SUM of these three byte caps;
 /// gas/species metadata, caller flow storage and allocator overhead are excluded.
@@ -103,7 +106,9 @@ impl ExteriorSurfaceWelchStream {
             control_box,
             exterior_cells,
             source_config,
-            budget,
+            budget.recording.maximum_compact_sources,
+            budget.recording.maximum_quadrupole_sources,
+            budget.maximum_volume_workspace_bytes,
             &mut cancelled,
         )?;
         let surface = PreparedPermeableSurface3::from_frozen(
@@ -154,7 +159,9 @@ impl ExteriorSurfaceWelchStream {
             control_box,
             exterior_cells,
             source_config,
-            budget,
+            budget.recording.maximum_compact_sources,
+            budget.recording.maximum_quadrupole_sources,
+            budget.maximum_volume_workspace_bytes,
             &mut cancelled,
         )?;
         let surface = PreparedPermeableSurface3::from_mixture(
@@ -328,17 +335,20 @@ impl ExteriorSurfaceWelchStream {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn admit_exterior(
     grid: &CartesianGrid,
     control_box: PermeableBox3,
     cells: &[usize],
     config: CompressibleVolumeConfig3,
-    budget: ExteriorSurfaceRecordingBudget,
+    maximum_compact_sources: usize,
+    maximum_quadrupole_sources: usize,
+    maximum_volume_workspace_bytes: usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), CompressibleVolumeError3> {
     poll(cancelled)?;
-    if control_box.face_count(grid)? > budget.recording.maximum_compact_sources
-        || cells.len() > budget.recording.maximum_quadrupole_sources
+    if control_box.face_count(grid)? > maximum_compact_sources
+        || cells.len() > maximum_quadrupole_sources
     {
         return Err(invalid("joint FW-H source counts exceed recording budget"));
     }
@@ -347,7 +357,7 @@ fn admit_exterior(
         grid,
         cells,
         config,
-        budget.maximum_volume_workspace_bytes,
+        maximum_volume_workspace_bytes,
         cancelled,
     )?;
     let [nx, ny, _] = grid.shape();
@@ -462,56 +472,63 @@ impl RecordedExteriorSurfaceSpectrum {
     }
 
     fn admit_receiver(&self, point: [f64; 3]) -> Result<(), AeroacError> {
-        let invalid = || AeroacError::InvalidParameter {
-            what: "FW-H pressure receiver must lie outside the closed control box",
-        };
-        if point.iter().any(|x| !x.is_finite()) {
+        admit_exterior_receiver(&self.grid, self.control_box, self.source_config, point)
+    }
+}
+
+// The same closed-box receiver domain applies to spectral and transient paths.
+fn admit_exterior_receiver(
+    grid: &CartesianGrid,
+    control_box: PermeableBox3,
+    source_config: CompressibleVolumeConfig3,
+    point: [f64; 3],
+) -> Result<(), AeroacError> {
+    let invalid = || AeroacError::InvalidParameter {
+        what: "FW-H pressure receiver must lie outside the closed control box",
+    };
+    if point.iter().any(|x| !x.is_finite()) {
+        return Err(invalid());
+    }
+    let delta: [Dd; 3] =
+        core::array::from_fn(|a| Dd::from_f64(point[a]) - Dd::from_f64(source_config.origin_m[a]));
+    let columns: [[Dd; 3]; 3] = core::array::from_fn(|a| {
+        core::array::from_fn(|b| Dd::from_f64(source_config.grid_to_acoustic[b][a]))
+    });
+    let spacing = grid.spacing();
+    let scale = point
+        .iter()
+        .chain(&source_config.origin_m)
+        .map(|x| x.abs())
+        .fold(0.0, f64::max)
+        .max(
+            (0..3)
+                .map(|a| spacing[a] * control_box.upper[a] as f64)
+                .fold(0.0, f64::max),
+        );
+    // Conservatively refuse roundoff-near surface points. This is a
+    // numerical domain guard, not added physical surface thickness.
+    let guard = Dd::from_f64(64.0 * f64::EPSILON * scale);
+    let dot = |a: [Dd; 3], b: [Dd; 3]| (0..3).fold(Dd::ZERO, |s, i| s + a[i] * b[i]);
+    for axis in 0..3 {
+        let a = columns[(axis + 1) % 3];
+        let b = columns[(axis + 2) % 3];
+        let normal = [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ];
+        let determinant = dot(normal, columns[axis]);
+        let coordinate = dot(normal, delta) / determinant;
+        let low = Dd::from_f64(spacing[axis]) * Dd::from_f64(control_box.lower[axis] as f64);
+        let high = Dd::from_f64(spacing[axis]) * Dd::from_f64(control_box.upper[axis] as f64);
+        if !coordinate.hi.is_finite() || !coordinate.lo.is_finite() {
             return Err(invalid());
         }
-        let delta: [Dd; 3] = core::array::from_fn(|a| {
-            Dd::from_f64(point[a]) - Dd::from_f64(self.source_config.origin_m[a])
-        });
-        let columns: [[Dd; 3]; 3] = core::array::from_fn(|a| {
-            core::array::from_fn(|b| Dd::from_f64(self.source_config.grid_to_acoustic[b][a]))
-        });
-        let spacing = self.grid.spacing();
-        let scale = point
-            .iter()
-            .chain(&self.source_config.origin_m)
-            .map(|x| x.abs())
-            .fold(0.0, f64::max)
-            .max(
-                (0..3)
-                    .map(|a| spacing[a] * self.control_box.upper[a] as f64)
-                    .fold(0.0, f64::max),
-            );
-        // Conservatively refuse roundoff-near surface points. This is a
-        // numerical domain guard, not added physical surface thickness.
-        let guard = Dd::from_f64(64.0 * f64::EPSILON * scale);
-        let dot = |a: [Dd; 3], b: [Dd; 3]| (0..3).fold(Dd::ZERO, |s, i| s + a[i] * b[i]);
-        for axis in 0..3 {
-            let a = columns[(axis + 1) % 3];
-            let b = columns[(axis + 2) % 3];
-            let normal = [
-                a[1] * b[2] - a[2] * b[1],
-                a[2] * b[0] - a[0] * b[2],
-                a[0] * b[1] - a[1] * b[0],
-            ];
-            let determinant = dot(normal, columns[axis]);
-            let coordinate = dot(normal, delta) / determinant;
-            let low =
-                Dd::from_f64(spacing[axis]) * Dd::from_f64(self.control_box.lower[axis] as f64);
-            let high =
-                Dd::from_f64(spacing[axis]) * Dd::from_f64(self.control_box.upper[axis] as f64);
-            if !coordinate.hi.is_finite() || !coordinate.lo.is_finite() {
-                return Err(invalid());
-            }
-            if coordinate.lt(low - guard) || (high + guard).lt(coordinate) {
-                return Ok(());
-            }
+        if coordinate.lt(low - guard) || (high + guard).lt(coordinate) {
+            return Ok(());
         }
-        Err(invalid())
     }
+    Err(invalid())
 }
 
 #[cfg(test)]

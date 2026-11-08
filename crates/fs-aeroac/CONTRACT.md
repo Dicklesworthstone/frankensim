@@ -3717,3 +3717,32 @@ overlapping-window derivative Parseval, odd/even endpoint treatment, and bounded
 cancellation/retry. SIMD dispatch used the original scalar kernels. Unrelated
 CFD, molecular and receiver adapters were omitted from this leaf; full-workspace
 and native CFD extraction integration are not claimed executed.
+
+## Coherent accepted-flow histories for transient sound
+
+`ExteriorSurfaceHistoryRecorder` retains the accepted real FW-H surface Q/F
+and disjoint exterior Lighthill volume T histories from one immutable native
+Euler or mixture-flow borrow. The original gas, composition, grid, ambient
+reference, source order and uniform clock remain authoritative. Sampling uses
+admitted buffers; a refused extraction or recording restores the preceding
+accepted source caches and prefix. Flow is never advanced or resampled here.
+
+`AcousticSourceHistoryRecorder::prepare_clamped_cubic` explicitly selects an
+offline C2 reconstruction with authored endpoint rates and force/stress integral
+constants. A source-band declaration must lie strictly below the original
+Nyquist frequency; it does not certify bandwidth or derivative accuracy. One
+private const-generic implementation preserves the original stress-history API
+and its scaled tridiagonal solve, analytic derivatives and DD primitives.
+Preparation borrows the completed record and can be retried after cancellation.
+
+The prepared history binds the same source positions, clock and equilibrium
+reference to the existing molecular Q/F/T propagator. Explicit initially-resting
+observation retains original frozen-speed fronts, material memory, coherent
+pressure and full particle velocity. The exact authored epoch supplies onset
+conditions; incompatible zero-past data are refused. RecordedExteriorSurfaceHistory
+retains the FW-H exterior receiver guard for both binding and observation.
+
+Source reconstruction, finite exterior-volume selection, inviscid stationary
+source assumptions and propagation convergence remain separate obligations.
+This finite recorded prefix does not reconstruct Welch phases, infer unrecorded
+prehistory, supply a later material tail or claim a calibrated live audio stream.

@@ -29,6 +29,9 @@ pub use super::{
 };
 pub use crate::curle3d::quadrupole::recorded::QuadrupoleSampleClock as MolecularSampleClock;
 
+/// Original accepted samples with explicit finite C2 history reconstruction.
+pub mod history;
+
 const SCOPE: &str = "Initially resting prescribed stationary compact 3D volume, force and \
 stress sources in one homogeneous molecularly relaxing gas. Complete coherent pressure \
 and vector velocity retain exact ideal-image paths and explicit frozen-speed fronts. \
