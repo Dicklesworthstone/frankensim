@@ -113,7 +113,7 @@ pub(super) fn validate_frequency(k: f64, medium: Medium) -> Result<(), Helmholtz
 }
 
 impl IncidentField<'_> {
-    pub(in crate::helmholtz) fn validate(self) -> Result<(), HelmholtzError> {
+    pub(crate) fn validate(self) -> Result<(), HelmholtzError> {
         match self {
             Self::PlaneWave(plane) => {
                 if plane.direction.iter().any(|v| !v.is_finite())
@@ -205,7 +205,7 @@ impl IncidentField<'_> {
     /// Momentum uses the caller's physical rho*omega, independently of k.
     /// The optional real impedance preserves the lossless plane-wave operation
     /// graph; dispersive media use k/(rho*omega) instead.
-    pub(in crate::helmholtz) fn sample_wave<K: WaveNumber>(
+    pub(crate) fn sample_wave<K: WaveNumber>(
         self,
         k: K,
         omega_rho: f64,
@@ -346,7 +346,7 @@ impl IncidentField<'_> {
         Ok(out)
     }
 
-    pub(in crate::helmholtz) fn source_count(self) -> usize {
+    pub(crate) fn source_count(self) -> usize {
         match self {
             Self::PlaneWave(_) => 1,
             Self::Monopoles(sources) => sources.len(),
@@ -356,7 +356,7 @@ impl IncidentField<'_> {
     }
 
     /// Only finite source positions need body-interior/clearance admission.
-    pub(in crate::helmholtz) fn source_positions(self) -> Vec<[f64; 3]> {
+    pub(crate) fn source_positions(self) -> Vec<[f64; 3]> {
         match self {
             Self::PlaneWave(_) => Vec::new(),
             Self::Monopoles(sources) => sources.iter().map(|s| s.position_m).collect(),

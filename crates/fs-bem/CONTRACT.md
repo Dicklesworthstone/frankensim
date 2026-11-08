@@ -1562,6 +1562,33 @@ discrepancies do not establish convergence of the screen mesh or materials.
 step sizes, pressure-node directional pickup, coherent ports, the lossless
 molecular limit, resource refusals and cancellation/replay.
 
+`PreparedScreen::solve_scattering` and `solve_scattering_many` illuminate the
+same stationary rigid or admittance screen with coherent plane waves, finite
+volume sources, force dipoles and physical stress quadrupoles. Incident
+pressure is continuous across the sheet. The weak drive is therefore the
+quadrature integral of `-u_incident.n`, and the total boundary condition is
+`u_total.n = -Y*[p]`; the closed-wall `-Y*p_incident` term does not belong to
+this single pressure-jump sheet. One original H/LU serves every complete
+incident case, retaining the existing source kernels, sheet law, residual and
+passive-work checks. Finite sources on either side must clear actual triangle
+faces/edges. Source-point work, full retained jumps and case limits are
+admitted before the solve; cancellation returns no partial bank.
+
+`ScreenScattering::prepare_receivers` shares one original P1 quadrature bank
+across the cases and caches their analytic incident fields. Evaluation adds
+incident plus scattered pressure and Euler velocity exactly once, including
+reactive velocity and interference; it repeats neither quadrature nor source
+sampling. The original jump also gives net fluid force `-integral([p] n dS)`.
+The scattered solution's driving work refers to blocked incident forcing,
+not applied mechanical work on the stationary sheet. Its absorption and
+outgoing scattered power retain their original meanings. Source/mesh/
+quadrature refinement remains necessary; no additional continuum error bound,
+independent face coating, mean-flow or finite-emitter-size claim is made.
+`open_screen_scattering.rs` checks total Robin normal-velocity balance against
+the unmodified H and independent P1 work, incident/scattered energy balance,
+grazing transparency, source reciprocity, coherent mixed-source receivers and
+whole-bank source/resource/cancellation boundaries.
+
 Three focused tests authored in `open_screen_many.rs` compare work with
 independent degree-two triangle quadrature, coherent fields with an original
 combined-drive solve, folded-facet traces with an independently projected

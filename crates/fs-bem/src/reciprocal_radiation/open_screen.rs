@@ -17,6 +17,10 @@ mod ports;
 pub use ports::{ScreenPortLimits, ScreenVelocityPortSolution};
 mod receivers;
 pub use receivers::{PreparedScreenPortReceivers, PreparedScreenReceivers};
+mod scattering;
+pub use scattering::{
+    PreparedScreenScatteringReceivers, ScreenScattering, ScreenScatteringLimits,
+};
 mod complex;
 pub use complex::{ScreenComplexLimits, ScreenComplexOperator, ScreenComplexValueLimits};
 mod molecular;

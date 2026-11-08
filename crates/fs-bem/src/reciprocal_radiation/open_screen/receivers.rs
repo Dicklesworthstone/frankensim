@@ -168,7 +168,7 @@ impl PreparedScreenReceivers<'_, '_, '_> {
         self.evaluate_jump(&self.source.jump, cancelled)
     }
 
-    fn evaluate_jump(
+    pub(super) fn evaluate_jump(
         &self,
         jump: &[C64],
         mut cancelled: impl FnMut() -> bool,
