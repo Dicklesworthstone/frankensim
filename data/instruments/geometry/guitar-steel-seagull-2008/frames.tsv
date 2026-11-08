@@ -1,0 +1,4 @@
+frankensim.specimen-frames.v1
+part	origin	axis_x	axis_y	axis_z	note
+body	none: only scalar widths, lengths and depths are printed, no coordinate	along the body centre line, neck end toward the tail (the printed body length)	across the centre line (the printed bout and waist widths)	through the body, top toward back (the printed depth)	no point is placed in this frame until an outline is read (S1b)
+neck	none: only scalar values are printed	along the strings, nut toward saddle (the printed scale length)	across the fingerboard at the nut (the printed nut width)	normal to the fingerboard surface (the printed fingerboard radius)	scale length, nut width and fingerboard radius only

@@ -1,0 +1,15 @@
+frankensim.specimen.v1
+key	value
+specimen_id	guitar-steel-seagull-2008
+maker	Seagull (Godin group, LaSiDo, La Patrie, Quebec): maker prints read from web.archive.org captures of seagullguitars.com; one guitar of the same body measured by a repairer (Jake Wildwood) is kept beside them
+model	NOT NAMED for the recordings: the FreePats FSS Steel String Guitar page and readme and the FlameStudios pages say only Seagull. The body here is the one printed for 18 of the 24 steel-string columns of the 2008 spec table; by owner ruling (MB 15090) the card plays the S6 Cedar Original's printed woods, a choice: The recording's model is not named; 18 of 24 Seagull 2008 models share this body, and the woods are those of the largest set among them (7 of 18, S6 Cedar Original), a choice.
+serial	not applicable to the maker print; the 2002 S6 Cedar measured by Jake Wildwood: unstated
+year	2008 print (specs.htm, capture 20080702190840); the recordings were public from 17 August 2008 (FlameStudios download counter) and the recorded guitar's build year is not stated; the 2020 print and a 2002 guitar are kept beside the 2008 print, each stated
+system	six-string steel-string flat-top acoustic guitar, the full-size Seagull body (the shape used in the original Seagull S6, 2005 catalogue p.8); scale 24.84 in by the 2005 to 2011 prints (25.5 in on the 2020 page, stated beside); S6 Cedar Original woods (2008): solid cedar top, three-layer wild cherry back and sides, silver leaf maple neck, Indian rosewood fingerboard and bridge, Tusq nut and compensated saddle; x-braced per the repairer of a 2002 S6 (Seagull prints no bracing pattern)
+holder	none: the values are the maker's printed specification; the 2002 S6 Cedar values are a repairer's spec list (Jake Wildwood, blog post 2020-05-17, method not stated)
+reference_state	assembled
+environment	unstated
+source_ids	seagull-2008-spec-table;seagull-2020-s6-original-page;wildwood-2020-seagull-s6-2002-body;seagull-2005-catalogue;seagull-2008-s6-cedar-original-page
+target_relation	the FreePats FSS Seagull steel-string bank (Gary Campion, FlameStudios, 2008) names no model, so no value here is a measurement of the recorded guitar: these are the printed numbers of the body that 18 of 24 2008 columns share, with one measured 2002 S6 beside them; a page or card using them must say so
+outline	NOT PRINTED by Seagull. The outline photo read (S1b, MB 15090) is pending; the only maker photograph of a qualifying size found so far (2017 capture of uploads/products/041831/cover.jpg) was rejected by the declared angle rule (one rib and the preamp visible beside the top). No outline point is authored
+licence	facts only: numbers printed by the maker (seagullguitars.com, read via web.archive.org) and by a repairer's blog (content (C) Jake Wildwood), kept as facts with attribution; nothing downloaded is committed
