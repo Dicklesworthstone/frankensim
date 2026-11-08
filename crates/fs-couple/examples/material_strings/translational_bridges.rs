@@ -1,4 +1,5 @@
-//! Project physical nodal translations on the body's original material basis.
+//! Project physical nodal translations, or the motion of one original triangle
+//! point with its rigid arm, on the body's original material basis.
 //! The same signed row measures displacement and applies the reaction force;
 //! a lateral bridge never borrows a normal-force row or a separately solved basis.
 use super::*;
@@ -26,17 +27,41 @@ pub(super) fn bind(
         } else {
             return Err("translational bridge geometry requires a shell or assembled-shell --body-profile".into());
         };
-        let offset = joint.node.checked_mul(6).ok_or("shell node offset overflow")?;
-        let end = offset.checked_add(3).ok_or("shell translation extent overflow")?;
         let norm2 = joint.body_direction.iter().map(|x| x*x).sum::<f64>();
         if !norm2.is_finite() || (norm2 - 1.0).abs() > 1e-12 {
             return Err("translational bridge body direction must remain a finite unit vector".into());
         }
-        let shapes = modes.iter().map(|mode| -> Result<f64> {
-            let translation = mode.get(offset..end)
-                .ok_or("translational bridge names an absent physical shell node")?;
-            Ok(translation.iter().zip(joint.body_direction).map(|(x, d)| x*d).sum())
-        }).collect::<Result<Vec<_>>>()?;
+        let shapes = match &joint.attachment {
+            input::TranslationalAttachment::Node(node) => {
+                let offset = node.checked_mul(6).ok_or("shell node offset overflow")?;
+                let end = offset.checked_add(3).ok_or("shell translation extent overflow")?;
+                modes.iter().map(|mode| -> Result<f64> {
+                    let translation = mode.get(offset..end)
+                        .ok_or("translational bridge names an absent physical shell node")?;
+                    Ok(translation.iter().zip(joint.body_direction).map(|(x, d)| x*d).sum())
+                }).collect::<Result<Vec<_>>>()?
+            }
+            input::TranslationalAttachment::Triangle { triangle, barycentric, arm_m } => {
+                // The part's original mesh, directors and supports, the ones its bridge ports were built on.
+                let (mesh, directors, supports) = if let Some(body) = source.material_shell_assembly() {
+                    let part = body.specimen.components.get(joint.shell_component)
+                        .ok_or("translational bridge names an absent shell component")?;
+                    (part.specimen.mesh(), &part.directors, part.constraints.as_slice())
+                } else if let Some(body) = source.material_shell() {
+                    (body.specimen.mesh(), &body.directors, body.constraints.as_slice())
+                } else {
+                    return Err("translational bridge geometry requires a shell or assembled-shell --body-profile".into());
+                };
+                let port = body::shell_triangle_point_port(*triangle, *barycentric, joint.body_direction, *arm_m,
+                    mesh, directors, supports)?;
+                modes.iter().map(|mode| -> Result<f64> {
+                    if mode.len() != port.len() {
+                        return Err("translational bridge footprint and shell basis differ in extent".into());
+                    }
+                    Ok(port.iter().zip(mode).filter(|(p, _)| **p != 0.0).map(|(p, q)| p*q).sum())
+                }).collect::<Result<Vec<_>>>()?
+            }
+        };
         joints.push(StringBodyTranslationConnection {
             string: joint.string, station_fraction: joint.station_fraction,
             direction: joint.direction,

@@ -329,6 +329,137 @@ fn independent_bridge_axes_require_real_shell_geometry_and_physical_directions()
     });
 }
 
+/// The node form of `translational-bridge`, as every committed card writes it.
+const NODE_AXIS: &str = "translational-bridge 0 0.8 0 1 0 11 1 0 0 1500 0.02 0";
+fn axis_card(row: &str) -> String {
+    include_str!("../../cylinder-flow.material-strings")
+        .replace("48000 4096 0.01 128", "48000 96 0.01 128")
+        .replace("cylinder-gas-loading 0.001 30 12",
+            &format!("translational-bridges 1\n{row}\ncylinder-gas-loading 0.001 30 4"))
+}
+fn axis_ready(cx: &Cx<'_>, gate: &CancelGate, row: &str) -> Result<Ready> {
+    input::Spec::parse(axis_card(row).as_bytes())?.compile_with_body(cx, gate, Some(shell_profile()),
+        |name| Ok(if name == "body.fsmatpk" { pack_with_shear(name, 1.0, 1.0, None) } else { pack(name, 1.0, None) }))
+}
+fn triangle_axis(triangle: usize, w: [f64; 3], arm: [f64; 3]) -> String {
+    format!("translational-bridge 0 0.8 0 1 0 triangle {triangle} {:?} {:?} {:?} 1 0 0 {:?} {:?} {:?} 1500 0.02 0",
+        w[0], w[1], w[2], arm[0], arm[1], arm[2])
+}
+
+/// A card without the triangle form reads, prints and projects as before it existed: the node attachment, the
+/// derived diagnostic line field for field, and the node's own global x translation in every retained mode.
+#[test]
+fn a_node_translational_bridge_reads_prints_and_projects_as_before_the_triangle_form() {
+    let spec = input::Spec::parse(axis_card(NODE_AXIS).as_bytes()).unwrap();
+    let joint = &spec.translational_bridges[0];
+    assert_eq!(joint.attachment, input::TranslationalAttachment::Node(11));
+    assert_eq!(format!("{joint:?}"), format!("TranslationalBridge {{ string: 0, station_fraction: 0.8, direction: {:?}, \
+        shell_component: 0, node: 11, body_direction: [1.0, 0.0, 0.0], stiffness_n_m: 1500.0, damping_n_s_m: 0.02, \
+        rest_extension_m: 0.0 }}", joint.direction));
+    scoped(|cx, gate| {
+        let ready = axis_ready(cx, gate, NODE_AXIS).unwrap();
+        let source = ready.performance.bank().source().bank();
+        let expected: Vec<_> = source.material_shell_image().unwrap().physical_modes().iter()
+            .map(|mode| mode[6*11]).collect();
+        assert_eq!(joints_for(&ready), expected);
+    });
+}
+
+/// A triangle-form row whose point sits on node 11 (weight one at that vertex, no arm) is the node row: the same
+/// modal shapes on every incident triangle and the same pressure, sample for sample.
+#[test]
+fn a_triangle_translational_bridge_on_a_node_equals_the_node_row() {
+    scoped(|cx, gate| {
+        let mut node = axis_ready(cx, gate, NODE_AXIS).unwrap();
+        let shapes = joints_for(&node);
+        let samples = pressure(&mut node, 7);
+        let tris = node.performance.bank().source().bank().material_shell().unwrap().specimen.mesh().tris.clone();
+        let incident: Vec<_> = tris.iter().enumerate().filter(|(_, t)| t.contains(&11)).collect();
+        assert!(incident.len() >= 2);
+        for (k, t) in incident {
+            let mut w = [0.0; 3];
+            w[t.iter().position(|&n| n == 11).unwrap()] = 1.0;
+            let mut on = axis_ready(cx, gate, &triangle_axis(k, w, [0.0; 3])).unwrap();
+            assert!(matches!(on.spec.translational_bridges[0].attachment,
+                input::TranslationalAttachment::Triangle { triangle, .. } if triangle == k));
+            assert_eq!(joints_for(&on), shapes, "triangle {k} at its vertex must be node 11's row");
+            assert_eq!(pressure(&mut on, 7), samples);
+        }
+    });
+}
+
+/// An interior point weights its triangle's three nodes; a rigid arm adds the conjugate moment through the
+/// triangle's physical orientation, the footprint a profile's `bridge-triangle` row uses, and reaches pressure.
+#[test]
+fn a_triangle_translational_bridge_weights_its_nodes_and_carries_its_arm_to_pressure() {
+    scoped(|cx, gate| {
+        let w = [0.2, 0.3, 0.5];
+        let plain = axis_ready(cx, gate, &triangle_axis(10, w, [0.0; 3])).unwrap();
+        let source = plain.performance.bank().source().bank();
+        let body = source.material_shell().unwrap();
+        let image = source.material_shell_image().unwrap();
+        let t = body.specimen.mesh().tris[10];
+        for (mode, shape) in image.physical_modes().iter().zip(joints_for(&plain)) {
+            let weighted: f64 = (0..3).map(|a| w[a]*mode[6*t[a]]).sum();
+            assert!((shape - weighted).abs() <= 1e-12*weighted.abs().max(1e-30));
+        }
+        let arm = [0.0, 0.0, 0.02];
+        let mut armed = axis_ready(cx, gate, &triangle_axis(10, w, arm)).unwrap();
+        let facet = body.specimen.mesh().facet(10).unwrap();
+        let rows = fs_plate::shell::point::triangle_offset_point_rows(w, [1.0, 0.0, 0.0], arm, facet.frame,
+            facet.gradient, t.map(|node| body.directors.vectors()[node])).unwrap();
+        assert!(rows.iter().any(|row| row[3..].iter().any(|v| *v != 0.0)), "the arm must carry a moment");
+        for (mode, shape) in image.physical_modes().iter().zip(joints_for(&armed)) {
+            let direct: f64 = (0..3).flat_map(|a| (0..6).map(move |dof| (a, dof)))
+                .map(|(a, dof)| rows[a][dof]*mode[6*t[a] + dof]).sum();
+            assert!((shape - direct).abs() <= 1e-12*direct.abs().max(1e-30));
+        }
+        assert_ne!(joints_for(&plain), joints_for(&armed));
+        let samples = pressure(&mut armed, 7);
+        assert!(samples.iter().all(|v| v.is_finite()) && samples.iter().any(|v| v.abs() > 1e-14));
+        let mut node = axis_ready(cx, gate, NODE_AXIS).unwrap();
+        assert_ne!(samples, pressure(&mut node, 7));
+        let frame = armed.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+/// Weights, axis and arm refuse at input exactly as the profile's `bridge-triangle` row does; an absent triangle,
+/// another component of a single shell, a triangle with every node fully supported and a plate body refuse on the
+/// body.
+#[test]
+fn a_triangle_translational_bridge_refuses_invalid_points_and_unsupported_geometry() {
+    for bad in [
+        "translational-bridge 0 0.8 0 1 0 triangle 10 -0.2 0.7 0.5 1 0 0 0 0 0 1500 0.02 0",
+        "translational-bridge 0 0.8 0 1 0 triangle 10 0.2 0.3 0.4 1 0 0 0 0 0 1500 0.02 0",
+        "translational-bridge 0 0.8 0 1 0 triangle 10 0.2 0.3 0.5 2 0 0 0 0 0 1500 0.02 0",
+        "translational-bridge 0 0.8 0 1 0 triangle 10 0.2 0.3 0.5 1 0 0 inf 0 0 1500 0.02 0",
+        "translational-bridge 0 0.8 0 1 0 triangle 10 0.2 0.3 0.5 1 0 0 1500 0.02 0",
+        "translational-bridge 0 0.8 0 1 0 triangle 10 0.2 0.3 0.5 1 0 0 0 0 0 1500 0.02 0 0",
+        "translational-bridge 0 0.8 0 1 0 triangle 18432 0.2 0.3 0.5 1 0 0 0 0 0 1500 0.02 0",
+    ] {
+        assert!(input::Spec::parse(axis_card(bad).as_bytes()).is_err(), "accepted {bad}");
+    }
+    scoped(|cx, gate| {
+        // Triangle 6 of the arched shell joins three nodes held in all six directions.
+        let node = axis_ready(cx, gate, NODE_AXIS).unwrap();
+        let body = node.performance.bank().source().bank().material_shell().unwrap();
+        let held = body.specimen.mesh().tris[6];
+        assert!(held.iter().all(|&n| body.constraints.iter().any(|s| s.node == n && s.mask == [true; 6])));
+        assert_eq!(body.specimen.mesh().tris.len(), 32);
+        for row in [
+            triangle_axis(32, [0.2, 0.3, 0.5], [0.0; 3]),
+            "translational-bridge 0 0.8 0 1 1 triangle 10 0.2 0.3 0.5 1 0 0 0 0 0 1500 0.02 0".to_string(),
+            triangle_axis(6, [0.2, 0.3, 0.5], [0.0; 3]),
+        ] {
+            assert!(axis_ready(cx, gate, &row).is_err(), "compiled {row}");
+        }
+        let plate = input::Spec::parse(axis_card(&triangle_axis(10, [0.2, 0.3, 0.5], [0.0; 3])).as_bytes()).unwrap()
+            .compile(cx, gate, |name| Ok(pack(name, 1.0, None)));
+        assert!(plate.is_err(), "a plate profile has no original shell triangle");
+    });
+}
+
 #[test]
 fn curved_material_body_keeps_layers_planes_torsion_cavity_and_gas_in_actual_pressure() {
     scoped(|cx, gate| {

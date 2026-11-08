@@ -225,13 +225,38 @@ pub struct WireLayer { pub pack: String, pub outer_radius_m: f64 }
 const MAX_LAYERS: usize = 16;
 const MAX_ROTATIONAL_BRIDGES: usize = 16;
 const MAX_TRANSLATIONAL_BRIDGES: usize = 16;
-/// An additional physical displacement axis at a node of the retained shell.
-/// String directions use its transverse frame; body directions use global XYZ.
+/// Where a translational bridge meets the retained shell: an original node, or a
+/// weighted point of one original triangle carried by a rigid massless arm, the
+/// footprint a body profile's `bridge-triangle` row uses (body/shell/bridge.rs).
 #[derive(Clone, Debug, PartialEq)]
+pub enum TranslationalAttachment {
+    Node(usize),
+    Triangle { triangle: usize, barycentric: [f64; 3], arm_m: [f64; 3] },
+}
+/// An additional physical displacement axis at a point of the retained shell.
+/// String directions use its transverse frame; body directions use global XYZ.
+#[derive(Clone, PartialEq)]
 pub struct TranslationalBridge {
     pub string: usize, pub station_fraction: f64, pub direction: TransverseDirection,
-    pub shell_component: usize, pub node: usize, pub body_direction: [f64; 3],
+    pub shell_component: usize, pub attachment: TranslationalAttachment, pub body_direction: [f64; 3],
     pub stiffness_n_m: f64, pub damping_n_s_m: f64, pub rest_extension_m: f64,
+}
+impl std::fmt::Debug for TranslationalBridge {
+    /// A node row prints exactly as the derived form printed it before the triangle form existed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("TranslationalBridge");
+        s.field("string", &self.string).field("station_fraction", &self.station_fraction)
+            .field("direction", &self.direction).field("shell_component", &self.shell_component);
+        match &self.attachment {
+            TranslationalAttachment::Node(node) => { s.field("node", node); }
+            TranslationalAttachment::Triangle { triangle, barycentric, arm_m } => {
+                s.field("triangle", triangle).field("barycentric", barycentric).field("arm_m", arm_m);
+            }
+        }
+        s.field("body_direction", &self.body_direction).field("stiffness_n_m", &self.stiffness_n_m)
+            .field("damping_n_s_m", &self.damping_n_s_m).field("rest_extension_m", &self.rest_extension_m)
+            .finish()
+    }
 }
 /// One physical rotation coordinate on the original body.
 #[derive(Clone, Debug, PartialEq)]
@@ -675,15 +700,32 @@ impl Spec {
             let joints = row.count(MAX_TRANSLATIONAL_BRIDGES)?; row.end()?;
             for _ in 0..joints {
                 let mut row = r.row("translational-bridge")?;
+                let string = row.count(count - 1)?;
+                let station_fraction = row.scalar()?;
+                let direction = TransverseDirection::try_new([row.scalar()?, row.scalar()?])?;
+                let shell_component = row.count(63)?;
+                // `triangle TRIANGLE W0 W1 W2` in place of NODE, and the arm `RX RY RZ` after the body axis.
+                let triangle = if row.next_is("triangle") {
+                    Some((row.count(18431)?, [row.scalar()?, row.scalar()?, row.scalar()?]))
+                } else { None };
+                let node = if triangle.is_none() { row.count(3071)? } else { 0 };
+                let body_direction = [row.scalar()?, row.scalar()?, row.scalar()?];
+                let attachment = match triangle {
+                    Some((triangle, barycentric)) => TranslationalAttachment::Triangle { triangle, barycentric,
+                        arm_m: [row.scalar()?, row.scalar()?, row.scalar()?] },
+                    None => TranslationalAttachment::Node(node),
+                };
                 let joint = TranslationalBridge {
-                    string: row.count(count - 1)?, station_fraction: row.scalar()?,
-                    direction: TransverseDirection::try_new([row.scalar()?, row.scalar()?])?,
-                    shell_component: row.count(63)?, node: row.count(3071)?,
-                    body_direction: [row.scalar()?, row.scalar()?, row.scalar()?],
+                    string, station_fraction, direction, shell_component, attachment, body_direction,
                     stiffness_n_m: row.scalar()?, damping_n_s_m: row.scalar()?,
                     rest_extension_m: row.scalar()?,
                 };
                 row.end()?;
+                if let TranslationalAttachment::Triangle { barycentric, arm_m, .. } = &joint.attachment {
+                    // The profile's `bridge-triangle` admission: finite nonnegative weights summing to one, a unit
+                    // axis and a finite arm. The triangle, its facet and its supports are checked on the body.
+                    fs_plate::shell::point::triangle_point_rows(*barycentric, joint.body_direction, [*arm_m; 3])?;
+                }
                 let norm2 = joint.body_direction.iter().map(|x| x*x).sum::<f64>();
                 if !(0.0 < joint.station_fraction && joint.station_fraction < 1.0)
                     || !norm2.is_finite() || (norm2 - 1.0).abs() > 1e-12

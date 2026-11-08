@@ -32,6 +32,7 @@ mod skin;
 use relaxation::PlateLoss;
 /// The choices `material_strings assemble-shell` reads for a shell-assembly table.
 pub(crate) use shell::assembly::table::OptionsFile as ShellTableOptions;
+pub(crate) use shell::triangle_point_port as shell_triangle_point_port;
 
 /// An optional complete body-model selection; the performance still owns its
 /// material pack, physical dimensions, thickness, mode count and listener.

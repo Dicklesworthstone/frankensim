@@ -2030,6 +2030,7 @@ polarization records, optional `thermal-supports` and optional
 ```text
 translational-bridges COUNT
 translational-bridge STRING STATION SX SY SHELL_COMPONENT NODE GX GY GZ K_N_PER_M C_NS_PER_M REST_M
+translational-bridge STRING STATION SX SY SHELL_COMPONENT triangle TRIANGLE W0 W1 W2 GX GY GZ RX_M RY_M RZ_M K_N_PER_M C_NS_PER_M REST_M
 ```
 
 Each row adds a centreline spring/dashpot between one interior string station
@@ -2049,6 +2050,19 @@ eigenbasis: `SHELL_COMPONENT` selects physical geometry, while the modal
 attachment addresses the combined body at index zero. Input never substitutes
 authored modal coefficients, a normal-force footprint or a separately solved
 lateral basis for these translations.
+
+The second form attaches the spring to a point of one original triangle of
+`SHELL_COMPONENT` instead of a node, with the footprint a body profile's
+`bridge-triangle` row uses: nonnegative weights `W0 W1 W2` summing to one on
+the triangle's own node order, and a rigid massless arm `[RX, RY, RZ]` in
+global metres from that point to where the spring acts. The point moves as
+`sum w (u + theta cross r)` through the triangle's physical orientation, so an
+arm's moment loads membrane spin and bending, never the numerical drilling
+coordinate. The row is built on the part's original mesh, directors and
+supports and projected on the same `physical_modes`; it refuses an absent
+triangle, invalid weights, axis or arm, and a point whose three nodes are held
+in every direction its row loads. The arm adds no mass or compliance. Weight
+one at a vertex with no arm gives exactly that node's row.
 
 The two directions declare the same physical signed axis in different frames.
 The file currently supplies no string-to-world frame, so the geometry author

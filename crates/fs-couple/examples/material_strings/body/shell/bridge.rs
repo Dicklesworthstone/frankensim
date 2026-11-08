@@ -95,6 +95,19 @@ impl Bridge {
     }
 }
 
+/// The footprint of a profile's `bridge-triangle` row for a card's triangle-form
+/// `translational-bridge`: the same weights, unit axis, rigid arm, original facet,
+/// directors and support admission, as one row over the part's six-DOF nodes.
+pub(crate) fn triangle_point_port(triangle: usize, barycentric: [f64; 3], direction: [f64; 3],
+    offset_m: [f64; 3], mesh: &ShellMesh, directors: &NodalDirectors, supports: &[ShellConstraint])
+    -> Result<Vec<f64>>
+{
+    let nodes = *mesh.tris.get(triangle).ok_or("shell point names an absent original triangle")?;
+    triangle_point_rows(barycentric,direction,[offset_m;3])?;
+    Bridge { triangle: Some(triangle), nodes, barycentric, direction, offset_m }
+        .force_port(mesh,directors,supports)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

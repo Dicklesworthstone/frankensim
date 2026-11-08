@@ -23,6 +23,7 @@ mod coating;
 #[path = "shell/bridge.rs"]
 mod bridge;
 use bridge::Bridge;
+pub(crate) use bridge::triangle_point_port;
 #[path = "shell/assembly.rs"]
 pub(super) mod assembly;
 
