@@ -1219,9 +1219,10 @@ impl TensionFlutterCard {
         if !(self.bandwidth_hz > 0.0 && self.bandwidth_hz < 2.0 * self.centre_hz) {
             return Err("tension_flutter bandwidth must be positive and below twice the centre".into());
         }
-        // 0.05 puts the island's admitted tension range (1/4..=4) 15 standard deviations away.
-        if !(0.0..=0.05).contains(&self.sd_rel) {
-            return Err("tension_flutter sd must be in 0..=0.05".into());
+        // A margin, not a measurement: 0.1 keeps the island's admitted tension range (1/4..=4)
+        // 7.5 standard deviations away.
+        if !(0.0..=0.1).contains(&self.sd_rel) {
+            return Err("tension_flutter sd must be in 0..=0.1".into());
         }
         Ok(())
     }
@@ -2161,6 +2162,9 @@ mod tests {
         assert_eq!(ok.tension_flutter, Some(card));
         let none = VoiceDescription::from_bytes(modulation_text("").as_bytes()).expect("parses");
         assert_eq!(none.tension_flutter, None);
+        let wide = modulation_text("tension_flutter 7 4 1.3 0.1\n");
+        let wide = VoiceDescription::from_bytes(wide.as_bytes()).expect("0.1 is admitted");
+        assert_eq!(wide.tension_flutter.map(|card| card.sd_rel), Some(0.1));
         for (extra, needle) in [
             ("tension_flutter 7 4 1.3\n", "takes 4 fields"),
             ("tension_flutter x 4 1.3 0.02\n", "seed"),
@@ -2170,7 +2174,7 @@ mod tests {
             ("tension_flutter 7 4 0 0.02\n", "bandwidth"),
             ("tension_flutter 7 4 8 0.02\n", "bandwidth"),
             ("tension_flutter 7 4 1.3 -0.01\n", "sd"),
-            ("tension_flutter 7 4 1.3 0.06\n", "sd"),
+            ("tension_flutter 7 4 1.3 0.1001\n", "sd"),
             ("tension_flutter 7 4 1.3 0.02\ntension_flutter 8 4 1.3 0.02\n", "only appear once"),
         ] {
             let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
@@ -2192,7 +2196,7 @@ mod tests {
             ("tension_flutter_second 7 x 20 0.005\n", "not a number"),
             ("tension_flutter_second 7 31 20 0.005\n", "centre"),
             ("tension_flutter_second 7 20 40 0.005\n", "bandwidth"),
-            ("tension_flutter_second 7 20 20 0.06\n", "sd"),
+            ("tension_flutter_second 7 20 20 0.1001\n", "sd"),
             ("tension_flutter_second 7 20 20 0.005\ntension_flutter_second 8 20 20 0.005\n", "only appear once"),
         ] {
             let error = parse(&format!("{first}{row}")).expect_err(row);
