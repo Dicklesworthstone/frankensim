@@ -1,4 +1,6 @@
 use super::*;
+#[path = "tests/density.rs"]
+mod density;
 use crate::thermal::transport::{SPECIFIC_HEAT, isobaric::IsobaricHeatCapacityQuery};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -575,3 +577,4 @@ fn g1_prepared_phase_integrals_cross_source_knots_and_preserve_clipped_endpoints
         );
     }
 }
+

@@ -16,21 +16,29 @@
 //! Cp and one enthalpy difference do not establish a relative phase entropy,
 //! Gibbs stability, melting temperature, density or pressure-work law. Kinetic
 //! applicability and the melting limit remain explicit on the original owner.
+//! Explicit phase-specific free-expansion sources can additionally supply
+//! density. The existing isobaric parcel then owns conserved mass, additive
+//! phase volumes and pressure work; Cp and latent enthalpy remain unchanged.
 
 use super::super::{
     ThermalTransportError, admit_temperature_point,
     capacity::{CapacityCurve, CapacityInverse},
+    expansion::PreparedFreeExpansionDensity,
     positive,
 };
 use super::IsobaricHeatCapacityLaw;
+use super::expansion::IsobaricFreeExpansion;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MaterialAnswer, MaterialCard, PropertyKey, PropertySupportError, QueryPoint,
 };
 use fs_qty::{Dims, QuantitySpec};
+use fs_thermal::crystallization::pressure::{
+    IsobaricCrystallizationControls, parcel::IsobaricCrystallizationParcel,
+};
 use fs_thermal::crystallization::{
     CrystallizationCaloric, CrystallizationConfig, CrystallizationError, CrystallizationLaw,
-    CrystallizationRate,
+    CrystallizationRate, CrystallizationState,
 };
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw, ThermalStorageBasis};
 
@@ -59,6 +67,7 @@ pub struct IsobaricCrystallizationQuery<'a> {
 #[derive(Clone, Debug)]
 pub struct IsobaricCrystallizationBranch<'a> {
     source: &'a IsobaricHeatCapacityLaw,
+    expansion: Option<IsobaricFreeExpansion<'a>>,
     reference_k: f64,
     offset_j_kg: f64,
     range_k: [f64; 2],
@@ -113,6 +122,7 @@ impl<'a> IsobaricCrystallizationBranch<'a> {
         }
         Ok(Self {
             source,
+            expansion: None,
             reference_k,
             offset_j_kg,
             range_k,
@@ -128,6 +138,10 @@ impl<'a> IsobaricCrystallizationBranch<'a> {
     pub const fn source(&self) -> &'a IsobaricHeatCapacityLaw {
         self.source
     }
+    /// Optional original free-expansion and density sources for this phase.
+    pub const fn free_expansion(&self) -> Option<&IsobaricFreeExpansion<'a>> {
+        self.expansion.as_ref()
+    }
     pub const fn identity(&self) -> ContentHash {
         self.identity
     }
@@ -136,6 +150,22 @@ impl<'a> IsobaricCrystallizationBranch<'a> {
     }
     pub const fn specific_enthalpy_span_j_kg(&self) -> [f64; 2] {
         self.span_j_kg
+    }
+
+    /// Original phase density on the pair's admitted temperature interval.
+    /// Absence remains explicit; density is never inferred from Cp or latent heat.
+    pub fn density_at_temperature(
+        &self,
+        temperature_k: f64,
+    ) -> Result<Option<f64>, ThermalTransportError> {
+        let Some(expansion) = &self.expansion else {
+            return Ok(None);
+        };
+        admit_temperature(temperature_k, self.range_k)?;
+        expansion
+            .density()
+            .at_temperature(temperature_k)
+            .map(|state| Some(state.density_kg_m3()))
     }
 
     pub fn enthalpy_at_temperature(
@@ -188,7 +218,11 @@ impl CrystallizationCaloric for IsobaricCrystallizationBranch<'_> {
             CrystallizationError::Invalid("temperature outside the original exact-Cp phase branch")
         })
     }
-    // The trait's default None deliberately leaves density/pressure work unavailable.
+    fn density_kg_m3(&self, temperature_k: f64) -> Result<Option<f64>, CrystallizationError> {
+        self.density_at_temperature(temperature_k).map_err(|_| {
+            CrystallizationError::Invalid("density outside the original exact-Cp phase branch")
+        })
+    }
 }
 
 impl ThermalLaw for IsobaricCrystallizationBranch<'_> {
@@ -197,6 +231,14 @@ impl ThermalLaw for IsobaricCrystallizationBranch<'_> {
     }
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity.as_bytes())
+    }
+    fn bulk_density_kg_m3(&self, h: f64) -> Result<Option<f64>, DepositionError> {
+        if self.expansion.is_none() {
+            return Ok(None);
+        }
+        let temperature = self.temperature_k(h)?;
+        self.density_at_temperature(temperature)
+            .map_err(|_| DepositionError::MaterialDomain)
     }
     fn maximum_temperature_slope(&self) -> f64 {
         self.maximum_slope
@@ -374,6 +416,46 @@ impl<'a> IsobaricCrystallizationPair<'a> {
         Ok(pair)
     }
 
+    /// Bind original density and free expansion to each exact Cp phase branch.
+    ///
+    /// Each density path must match its Cp source's immutable card, full typed
+    /// context and temperature endpoints, and explicitly support the original
+    /// pressure. Parent/crystal roles and matched-specimen applicability are
+    /// caller declarations. Their distinct reference densities and expansion
+    /// paths are retained; no density interpolation across phases is invented.
+    ///
+    /// The common enthalpy chart is unchanged. New phase identities include
+    /// the corresponding density sources, so a previously prepared caloric or
+    /// kinetic owner cannot silently acquire different volumes. This supplies
+    /// stress-free phase volumes, not confinement or a pressure-dependent EOS.
+    pub fn try_new_with_free_expansion(
+        card: &MaterialCard,
+        query: IsobaricCrystallizationQuery<'a>,
+        parent_density: &'a PreparedFreeExpansionDensity,
+        crystal_density: &'a PreparedFreeExpansionDensity,
+    ) -> Result<Self, ThermalTransportError> {
+        let mut pair = Self::try_new(card, query)?;
+        for (branch, density) in [
+            (&mut pair.parent, parent_density),
+            (&mut pair.crystal, crystal_density),
+        ] {
+            let expansion = IsobaricFreeExpansion::try_new(card, branch.source, density)?;
+            let mut hash =
+                DomainHasher::new("org.frankensim.fs-material.exact-cp-expanding-phase-branch.v1");
+            hash.update(branch.identity.as_bytes());
+            hash.update(expansion.identity().as_bytes());
+            branch.identity = hash.finalize();
+            branch.expansion = Some(expansion);
+        }
+        let mut hash =
+            DomainHasher::new("org.frankensim.fs-material.exact-cp-expanding-phase-pair.v1");
+        hash.update(pair.identity.as_bytes());
+        hash.update(pair.parent.identity.as_bytes());
+        hash.update(pair.crystal.identity.as_bytes());
+        pair.identity = hash.finalize();
+        Ok(pair)
+    }
+
     pub const fn parent(&self) -> &IsobaricCrystallizationBranch<'a> {
         &self.parent
     }
@@ -382,6 +464,10 @@ impl<'a> IsobaricCrystallizationPair<'a> {
     }
     pub const fn identity(&self) -> ContentHash {
         self.identity
+    }
+    /// The actual static pressure supported by both original Cp sources.
+    pub const fn pressure_pa(&self) -> f64 {
+        self.parent.source.pressure_pa()
     }
     pub const fn enthalpy_gap_source(&self) -> &MaterialAnswer {
         &self.gap_source
@@ -438,6 +524,44 @@ impl<'a> IsobaricCrystallizationPair<'a> {
                 temperature_range_k: self.temperature_range_k(),
                 melting_temperature_k,
             },
+        )
+    }
+
+    /// Adopt an accepted phase state on the existing conserved-mass parcel.
+    ///
+    /// The native kinetic, density-volume and pressure-work owners receive
+    /// this pair's actual source pressure. Both phase identities must match;
+    /// heat advances retain their one enthalpy account and do not add latent
+    /// heat or pressure work a second time. The reference volume is solely the
+    /// caller's mechanical quadrature convention; actual volume comes from
+    /// conserved mass and the two original phase densities.
+    pub fn isobaric_parcel<'law, 'source>(
+        &self,
+        law: &'law CrystallizationLaw<'source>,
+        state: CrystallizationState,
+        mass_kg: f64,
+        reference_volume_m3: f64,
+        controls: IsobaricCrystallizationControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<IsobaricCrystallizationParcel<'law, 'source>, CrystallizationError> {
+        if cancelled() {
+            return Err(CrystallizationError::Cancelled);
+        }
+        if law.parent_caloric_identity() != Some(*self.parent.identity.as_bytes())
+            || law.crystalline_caloric_identity() != Some(*self.crystal.identity.as_bytes())
+        {
+            return Err(CrystallizationError::Invalid(
+                "isobaric parcel requires this pair's original caloric and density branches",
+            ));
+        }
+        IsobaricCrystallizationParcel::new(
+            law,
+            state,
+            mass_kg,
+            reference_volume_m3,
+            self.pressure_pa(),
+            controls,
+            &mut cancelled,
         )
     }
 

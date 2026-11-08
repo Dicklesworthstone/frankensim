@@ -22138,3 +22138,33 @@ varying kinetics and duration, rotated Voce/Prager thermodynamics and source
 pins, n=1 parity, and original-source/duplicate-selection refusal. Coefficients
 are authored fixtures, not empirical material validation. Fixed axes and
 small strain remain the native model boundaries.
+
+### Source-bound density for exact-Cp kinetic crystallization
+
+`IsobaricCrystallizationPair::try_new_with_free_expansion` binds each original
+exact-Cp phase branch to an explicitly selected `PreparedFreeExpansionDensity`.
+Existing `IsobaricFreeExpansion` admission requires the same immutable material
+card, typed context and temperature endpoints, with explicit density/strain
+source support for the original caloric pressure. Phase roles and
+matched-specimen applicability remain caller declarations. Reference density
+and engineering-length sources are retained directly; no sampled density or
+enthalpy chart is introduced.
+
+Common-reference enthalpy and original Cp integrals remain unchanged.
+`CrystallizationCaloric` and `ThermalLaw` expose the bound density;
+`ThermalLaw` first inverts the rebased phase enthalpy. Branch/pair identities
+include expansion binding. The pair's `isobaric_parcel` verifies phase identities
+and supplies retained pressure to the existing conserved-mass kinetic parcel.
+At crystalline mass fraction X,
+`V=m[(1-X)/rho_parent(T)+X/rho_crystal(T)]`. Mechanical reference volume does not
+replace current volume. `Delta H=Q` and `Delta U+p Delta V=Q`; latent enthalpy
+and pressure work occur once.
+
+Unbound caloric pairs retain their existing thermal behavior and still refuse
+isobaric volume construction without phase density. Source-domain failures,
+incompatible pressure/history and cancellation publish no replacement parcel.
+This is declared free phase geometry at maintained pressure, with no inferred
+confinement, pressure-dependent EOS, Gibbs stability, melting support or melt
+flow. Regressions cover different original caloric datums, unequal density and
+expansion, adiabatic phase shrinkage, subsequent heat, resumed kinetics,
+explicit pressure support, phase identity and late cancellation.
