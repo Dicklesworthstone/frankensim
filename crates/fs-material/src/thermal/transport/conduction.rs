@@ -41,7 +41,7 @@ use super::{
 };
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerConductionResponse, LayerGeometry,
-    ResolvedConductionLayer,
+    source::ResolvedConductionLayer,
 };
 use fs_blake3::ContentHash;
 use fs_matdb::PropertyLineSlice;
