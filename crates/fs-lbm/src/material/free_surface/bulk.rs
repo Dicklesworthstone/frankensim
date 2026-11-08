@@ -31,8 +31,9 @@ impl<'a> MaterialFreeSurfaceScaling<'a> {
     /// compressible thermodynamics. Higher moments use the authored numerical
     /// rate; their damping is not deposited as heat. The native strict `(0,2)`
     /// window requires positive representable zeta; zero refuses without a
-    /// viscosity floor. The 2-D owner refuses this collision family. Native
-    /// free-surface SGS retains this molecular bulk response while augmenting
+    /// viscosity floor. The frozen 2-D constructor refuses this collision
+    /// family; evolving dense rheology uses its physical planar trace mapping.
+    /// Native free-surface SGS retains this molecular bulk response while augmenting
     /// only deviatoric shear relaxation.
     pub fn with_bulk_viscosity(
         mut self,

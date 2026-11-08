@@ -1,5 +1,7 @@
 //! Dense source-rheology regressions reuse the existing original-source fixture.
 
+mod bulk;
+
 use super::{DT, DX, card, law, near, solve};
 use fs_exec::CancelGate;
 use fs_lbm::core2::CollisionModel2;
@@ -103,7 +105,7 @@ fn g1_constant_source_keeps_native_vof_bits_and_sourced_capillarity() {
                 };
             }
         }
-        grid.rebind_gravity([1e-6, -2e-6]).unwrap();
+        grid.rebind_gravity([1e-6, -2e-6], &mut Vec::new()).unwrap();
         let mut actual = FreeSurface::new(grid, sigma, contact);
         let mut direct = actual.clone();
         for _ in 0..4 {

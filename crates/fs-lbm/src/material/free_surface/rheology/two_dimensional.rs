@@ -1,8 +1,9 @@
 //! Source-pinned shear rheology for the original dense D2Q9 free surface.
 //!
 //! The incoming Guo-corrected stress closes the same bounded constitutive root
-//! as sparse material flow. Only the resulting molecular tau is installed in
-//! the native conservative candidate; collision, streaming and VOF conversion
+//! as sparse material flow. The actual molecular shear and explicitly bound
+//! physical trace taus are installed in the native conservative candidate;
+//! collision, streaming and VOF conversion
 //! remain owned by FreeSurface. Receipt epochs describe collision input, not
 //! the subsequently streamed or converted cells.
 //! Material shear uses the original physical three-dimensional invariant with
@@ -18,15 +19,18 @@ use super::{
 use crate::core2::{Cell, CollisionModel2, Grid, material_strain_components2};
 use crate::freesurface::{ConversionMomentumReport2, FreeSurface, FreeSurfaceMomentumError2};
 use crate::material::free_surface::MaterialFreeSurfaceScaling;
+use crate::material::planar::{self, PlanarStrain};
 use crate::material::transport::rheology::solve_local_with_fixed_strain;
 use crate::rheology::{TAU_CAP, TAU_FLOOR};
 
 /// Reusable source/collision epochs for an existing dense native liquid.
 ///
 /// This is fixed-temperature generalized-Newtonian BGK or central-moment flow.
-/// Central collision retains its authored scalar or per-cell trace relaxation;
-/// the physical shear query includes the resulting planar trace contribution
-/// `|div u|/sqrt(3)`. This does not infer a physical bulk-viscosity source.
+/// Without a physical bulk binding, central collision retains its authored
+/// scalar or per-cell trace relaxation. The physical shear query includes
+/// the resulting planar trace contribution `|div u|/sqrt(3)`.
+/// An explicit bulk source instead closes both physical viscosities at the
+/// SAME rate and installs `zeta_2=zeta_3+mu/3` in the native trace mode.
 /// Pressure-dependent sources and other collision models refuse. No material
 /// fit, viscosity clipping, heat evolution or second integration path is added.
 /// The caller retains the actual FreeSurface, including its geometry/contact
@@ -85,6 +89,57 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
         })
     }
 
+    /// Bind a positive authored physical bulk viscosity zeta_3 [Pa s].
+    ///
+    /// Subsequent steps resolve source shear and the physical planar trace
+    /// together; even constant zeta_3 gives a local trace tau when mu varies.
+    /// The existing bulk scaling owner supplies its strict positive and
+    /// representability admission. This is not a heat or total-energy model.
+    pub fn with_bulk_viscosity(mut self, bulk_viscosity_pa_s: f64) -> Result<Self, Error> {
+        self.scaling = self.scaling.with_bulk_viscosity(bulk_viscosity_pa_s, 1.0)?;
+        self.physical_trace_tau(self.law.material(), self.scaling.flow().tau)?;
+        Ok(self)
+    }
+
+    /// Bind an already selected positive Pa s claim in the ORIGINAL source bundle.
+    ///
+    /// Every trial queries mu(gamma) and zeta_3(gamma) from that same bundle,
+    /// retaining its card, exact requirements, selections and fixed coordinates.
+    /// With D_zz=0, the actual trace coefficient is zeta_2=zeta_3+mu/3.
+    /// The normalized original stress closes one bounded scalar root:
+    /// gamma=N/(lambda*dt), with N=hypot(A,B/sqrt(2)) and
+    /// 1/lambda=hypot((A/N)/tau_s,(B/(sqrt(2)*N))/tau_trace).
+    /// The report's defect is in auxiliary lambda; collision receives only
+    /// actual source shear/trace taus. Higher moments keep native equilibration.
+    ///
+    /// Binding changes how incoming stress is interpreted on the next step;
+    /// it does not alter supplied populations or advance heat/history. Without
+    /// this opt-in the original numerical trace selection remains unchanged.
+    pub fn with_bulk_viscosity_source(mut self, property: &str) -> Result<Self, Error> {
+        self.scaling = self.scaling.with_bulk_viscosity_source(property, 1.0)?;
+        self.physical_trace_tau(self.law.material(), self.scaling.flow().tau)?;
+        Ok(self)
+    }
+
+    fn physical_trace_tau(
+        &self,
+        material: &ResolvedMaterialStatePoint,
+        shear_tau: f64,
+    ) -> Result<f64, Error> {
+        let bulk = self
+            .scaling
+            .bulk_viscosity_at(material)?
+            .ok_or(Error::Invalid("missing physical planar bulk binding"))?;
+        planar::trace_tau(
+            self.scaling.material().density_kg_m3(),
+            self.scaling.velocity_scale,
+            self.scaling.cell_size_m(),
+            shear_tau,
+            bulk,
+        )
+        .map_err(Error::Invalid)
+    }
+
     /// Shared units and actual sourced capillary coefficient. As in the sparse
     /// owner, the reference liquid carries density/viscosity and the complete
     /// original bundle; the law separately owns its active surface tension.
@@ -104,6 +159,8 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
     }
 
     /// Physical rate and coefficient used by that same collision-input epoch.
+    /// With a physical bulk binding, the reported defect is in equivalent
+    /// lambda; collision_tau always remains the actual source shear tau.
     pub fn rheology_at(&self, coordinates: [usize; 2]) -> Option<&IsothermalRheologySample> {
         self.cell_at(coordinates).map(|cell| &cell.sample)
     }
@@ -173,6 +230,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
                 "dense trace field must cover the complete grid",
             ));
         }
+        let reference_trace_tau = if self.scaling.bulk_viscosity_pa_s().is_some() {
+            Some(self.physical_trace_tau(self.law.material(), self.scaling.flow().tau)?)
+        } else {
+            None
+        };
         if self.scratch.len() < n {
             self.scratch
                 .try_reserve_exact(n - self.scratch.len())
@@ -197,17 +259,29 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
                 return Err(Error::Invalid("invalid incoming dense relaxation time"));
             }
             let force = std::array::from_fn(|d| grid.g[d].mul_add(moments.rho, grid.fext[cell][d]));
-            let [numerator, dilation] = material_strain_components2(
+            let components = material_strain_components2(
                 &grid.f[cell],
                 moments.rho,
                 moments.u,
                 force,
-                grid.central_moment_bulk_tau_at(cell),
+                if reference_trace_tau.is_some() {
+                    // Retain both original stress numerators before either
+                    // physical coefficient is known at the trial shear rate.
+                    Some(1.0)
+                } else {
+                    grid.central_moment_bulk_tau_at(cell)
+                },
             );
+            let physical_strain = if reference_trace_tau.is_some() {
+                Some(PlanarStrain::new(components).map_err(Error::Invalid)?)
+            } else {
+                None
+            };
+            let numerator = physical_strain.map_or(components[0], |strain| strain.numerator);
             let root = solve_local_with_fixed_strain(
                 numerator,
-                if central_bulk_tau.is_some() {
-                    dilation * core::f64::consts::FRAC_1_SQRT_2
+                if physical_strain.is_none() && central_bulk_tau.is_some() {
+                    components[1] * core::f64::consts::FRAC_1_SQRT_2
                 } else {
                     0.0
                 },
@@ -216,6 +290,11 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
                 self.solve,
                 || poll(gate),
                 |rate| {
+                    if physical_strain.is_some() && numerator != 0.0 && rate == 0.0 {
+                        return Err(Error::Invalid(
+                            "physical planar shear rate is unrepresentable",
+                        ));
+                    }
                     let material = self.law.resolve(rate, None)?;
                     let (plan, _) = plan_momentum_scaling(
                         material.kinematic_viscosity_m2_s(),
@@ -224,7 +303,15 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
                         0.0,
                     )?;
                     admit_tau(plan.tau)?;
-                    Ok(((material, plan.tau), plan.tau))
+                    let next = if let Some(strain) = physical_strain {
+                        let trace = self.physical_trace_tau(material.material(), plan.tau)?;
+                        strain
+                            .equivalent_tau(plan.tau, trace)
+                            .map_err(Error::Invalid)?
+                    } else {
+                        plan.tau
+                    };
+                    Ok(((material, plan.tau), next))
                 },
             )
             .map_err(|error| match error {
@@ -250,12 +337,36 @@ impl<'s, 'm> MaterialFreeSurfaceRheology2<'s, 'm> {
             });
         }
         let (candidate, report) = liquid.momentum_candidate_with_preparation(gate, |grid| {
+            if let Some(reference) = reference_trace_tau {
+                grid.collision = CollisionModel2::CentralMomentBulk {
+                    bulk_tau: reference,
+                };
+                let field = grid.central_moment_bulk_tau.get_or_insert_with(Vec::new);
+                if field.len() < n {
+                    field.try_reserve_exact(n - field.len()).map_err(|_| {
+                        Error::Invalid("dense physical trace buffer allocation failed")
+                    })?;
+                }
+                field.resize(n, reference);
+            }
             for (cell, sample) in self.scratch.iter().enumerate() {
                 if cell % 256 == 0 {
                     poll(gate)?;
                 }
                 if let Some(sample) = sample {
                     grid.tau[cell] = sample.sample.collision_tau;
+                }
+                if let Some(reference) = reference_trace_tau {
+                    let trace = match sample {
+                        Some(sample) => self.physical_trace_tau(
+                            sample.material.material(),
+                            sample.sample.collision_tau,
+                        )?,
+                        None => reference,
+                    };
+                    grid.central_moment_bulk_tau
+                        .as_mut()
+                        .expect("prepared trace field")[cell] = trace;
                 }
             }
             Ok::<(), Error>(())

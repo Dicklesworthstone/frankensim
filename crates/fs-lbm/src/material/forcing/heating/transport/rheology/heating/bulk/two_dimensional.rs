@@ -18,6 +18,7 @@ use super::super::{
 };
 use super::BulkViscousMaterial;
 use crate::core2::{CollisionModel2, material_strain_components2};
+use crate::material::planar::PlanarStrain;
 use crate::material::{MaterialLbmError, plan_scaling_from_material};
 use fs_exec::CancelGate;
 
@@ -27,34 +28,13 @@ fn trace_tau(
     bulk_viscosity_pa_s: f64,
 ) -> Result<f64, &'static str> {
     let units = mapping.force_units;
-    let bulk_lattice = ((bulk_viscosity_pa_s / units.transport.density_kg_m3())
-        / units.velocity_scale)
-        / units.cell_size_m;
-    let bulk_excess = 3.0 * bulk_lattice;
-    let tau = 0.5 + ((shear_tau - 0.5) / 3.0 + bulk_excess);
-    if !bulk_viscosity_pa_s.is_finite()
-        || bulk_viscosity_pa_s < 0.0
-        || !bulk_excess.is_finite()
-        || (bulk_viscosity_pa_s > 0.0 && 0.5 + bulk_excess <= 0.5)
-        || !shear_tau.is_finite()
-        || shear_tau <= 0.5
-        || !tau.is_finite()
-        || tau <= 0.5
-    {
-        return Err("physical planar bulk viscosity or trace relaxation is unrepresentable");
-    }
-    Ok(tau)
-}
-
-fn norm(a: f64, b: f64) -> f64 {
-    let scale = a.max(b);
-    if scale == 0.0 {
-        0.0
-    } else {
-        let x = a / scale;
-        let y = b / scale;
-        scale * (x * x + y * y).sqrt()
-    }
+    crate::material::planar::trace_tau(
+        units.transport.density_kg_m3(),
+        units.velocity_scale,
+        units.cell_size_m,
+        shear_tau,
+        bulk_viscosity_pa_s,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -98,23 +78,10 @@ fn sample<F: FluidTransport>(
         range,
         gate,
         &mut |cell, temperature_k, retained| {
-            let [a, b] = stresses[cell];
-            // Normalize before forming N or inverse relaxation, avoiding N/g
-            // overflow and squared-component underflow at tiny physical stress.
-            let scale = a.max(b);
-            let (numerator, weights) = if scale == 0.0 {
-                (0.0, [1.0, 0.0])
-            } else {
-                let x = a / scale;
-                let y = (b / scale) * core::f64::consts::FRAC_1_SQRT_2;
-                let n = norm(x, y);
-                (scale * n, [x / n, y / n])
-            };
-            if !numerator.is_finite() || (scale != 0.0 && numerator == 0.0) {
-                return Err(MaterialTransportError::Invalid(
-                    "unrepresentable planar strain invariant",
-                ));
-            }
+            let strain =
+                PlanarStrain::new(stresses[cell]).map_err(MaterialTransportError::Invalid)?;
+            let numerator = strain.numerator;
+            let b = stresses[cell][1];
             let error = |source| MaterialTransportError::State {
                 cell,
                 temperature_k,
@@ -151,16 +118,9 @@ fn sample<F: FluidTransport>(
                     // gamma*dt = N/lambda. Re-evaluating the same source gives
                     // 1/lambda_next = hypot(w_s/tau_s, w_b/tau_trace).
                     // Trace-only and shear-only flow reduce to their own tau.
-                    let equivalent_tau = if numerator == 0.0 {
-                        shear_tau
-                    } else {
-                        1.0 / norm(weights[0] / shear_tau, weights[1] / bulk_tau)
-                    };
-                    if !equivalent_tau.is_finite() || equivalent_tau <= 0.5 {
-                        return Err(MaterialTransportError::Invalid(
-                            "unrepresentable equivalent planar relaxation",
-                        ));
-                    }
+                    let equivalent_tau = strain
+                        .equivalent_tau(shear_tau, bulk_tau)
+                        .map_err(MaterialTransportError::Invalid)?;
                     Ok(((source, bulk_tau), equivalent_tau))
                 },
             )
