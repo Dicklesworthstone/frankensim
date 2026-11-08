@@ -54,7 +54,7 @@ audio_rate	all	48000	Hz	numerical	frankensim-baseline-numerics	audio record	48 k
 pcm_full_scale	all	0.01	Pa	numerical	frankensim-baseline-numerics	audio record and render.sh --full-scale-pa	chosen as a round number putting the loudest string of a 1 Pa probe render near half of 16-bit full scale; it scales PCM only and is not an acoustic gain
 render_samples	all	144000	1	numerical	frankensim-baseline-numerics	audio record	3.0 s
 ambient	all	293.15 K, 101325 Pa, 0 % RH	SI	placeholder-unknown	frankensim-baseline-numerics	ambient record	enters only the observer air density; the reference room conditions are UNKNOWN
-listener_distance	all	1	m	placeholder-unknown	frankensim-baseline-numerics	listener_m record	reference microphone distance: UNKNOWN
+listener_distance	all	1	m	placeholder-unknown	frankensim-baseline-numerics	listener_m record	reference microphone distance: 5 feet = 1.524 m, a Neumann KM 84 in an anechoic chamber (UIowa MIS violin page, https://theremin.music.uiowa.edu/MISviolin.html); the card's 1 m is not that distance
 bending_stiffness	all	0	N m^2	placeholder-unknown	-	string record field 4	EI=0 switches dispersion off (an omission, not a measurement); true EI of wound strings: UNKNOWN
 viscous_bending_loss	all	0	N m^2 s	placeholder-unknown	-	string record field 5	UNKNOWN
 friction_mu_static	all	0.8	1	published-assumed	schoonderwaldt2008	sec. 3.3: K = 8 cm/s, mu_d = 0.4, z0 = 20 cm/s => mu_s = 0.8	values quoted there as commonly used in violin bowed-string simulations (Guettler; Woodhouse); not a measurement of this rosin
