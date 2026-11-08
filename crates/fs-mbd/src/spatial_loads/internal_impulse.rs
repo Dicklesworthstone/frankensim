@@ -18,6 +18,10 @@ use fs_math::dd::Dd;
 #[path = "internal_impulse/network.rs"]
 pub mod network;
 
+/// Exact passive six-coordinate relaxation at fixed attachment geometry.
+#[path = "internal_impulse/viscous.rs"]
+pub mod viscous;
+
 /// Force/couple impulse applied to the second attachment by an internal connector.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InternalWrenchImpulse {

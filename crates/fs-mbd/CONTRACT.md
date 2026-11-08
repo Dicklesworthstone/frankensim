@@ -8532,3 +8532,48 @@ continuous thermal-path stability, time increment, slip or reattachment.
 Focused native regressions cover unequal bulk/interface temperatures, warming
 and cooling work, changed subsequent recoil, no-op chronology, actual geometry
 handoff, retained pending attitude drift and atomic refusal with exact retry.
+
+## Passive full spatial-wrench relaxation between finite native bodies
+
+`spatial_loads::internal_impulse::viscous::PreparedViscousConnector`
+prepares the original full six-coordinate passive damping matrix at two fixed
+native poses, material attachments, full inertias and one interval. The relative
+twist is evaluated at attachment B in A's material axes, transporting A's rigid
+velocity to B before subtraction. Common rigid translation and rotation are
+therefore physical null motions even at separated attachment points. The
+original internal-wrench owner transports the opposite free couple, so
+transverse shear cannot supply an unaccounted orbital torque.
+
+The complete relative mobility includes both finite masses, all off-center
+rotational recoil and translation/rotation cross terms. Original physical
+coordinate scaling and native Jacobi modes integrate the constant-geometry
+passive linear source exponentially. Only the original passive matrix's nonzero
+Gram-factor columns enter the at-most-six-dimensional eigenproblem; impulses
+remain in that physical damping range. Stiff intervals cannot turn an exactly
+absent damping direction into a numerically invented decay mode. No damping
+floor, rank threshold or matrix projection is introduced.
+Preparation uses one bounded native eigenproblem; retained state is fixed-size and
+each relaxation allocates nothing, factors nothing and evaluates no exponential.
+Actual pose changes require re-preparation.
+
+One simultaneous original internal impulse updates both bodies. Original
+per-body and total linear/angular momentum and work gates remain active.
+An independent modal integral supplies nonnegative physical dissipation;
+accepted kinetic change, connector work and recovered endpoint relative twist
+must agree with that source to explicit dimensional tolerances. Numerical
+defects are reported separately and never become heat. Source errors, stale
+poses, numerical refusal and cancellation publish neither endpoint.
+
+This is a composable frozen-geometry source step. It does not move poses,
+impose a joint, add spring storage or allocate heat to a thermal reservoir.
+Changing-geometry trajectories require composition with the original native
+motion and temporal refinement. The material thermal axial dashpot and the
+rotation-only viscous pair retain their existing source and lifecycle owners.
+
+Focused tests in `tests/internal_viscous_connector.rs` cover analytic weak/stiff
+axial recoil and heat, transverse shear with its necessary transported couple,
+all six coupled modes against independent continuous Newton/Euler integration,
+full inertia, physical coordinate rescaling, common-rigid-motion nullity,
+cross-coupled rank-one free modes under extremely stiff exposure,
+distant origins and common boosts, zero damping, stale geometry, cancellation
+and undeliverable native momentum transfers.

@@ -203,6 +203,32 @@ impl PassiveBushingMatrix {
         (3..6).any(|i| self.native[i][i] != 0.0)
     }
 
+    // Original physical factor; exact zero columns retain undamped modes.
+    pub(crate) fn gram_factor(&self) -> Result<[[f64; 6]; 6], BushingMatrixError> {
+        let mut result = [[0.0; 6]; 6];
+        for i in 0..6 {
+            for j in 0..6 {
+                let value = if self.diagonal {
+                    if i == j {
+                        fs_math::det::sqrt(self.native[i][i])
+                    } else {
+                        0.0
+                    }
+                } else {
+                    self.gram[i][j] / self.scales[i]
+                };
+                if !value.is_finite() || (!self.diagonal && self.gram[i][j] != 0.0 && value == 0.0)
+                {
+                    return Err(BushingMatrixError(
+                        "physical passive factor is unrepresentable",
+                    ));
+                }
+                result[i][j] = value;
+            }
+        }
+        Ok(result)
+    }
+
     /// Original-coordinate conjugate effort and nonnegative quadratic form.
     pub(super) fn evaluate(&self, value: [f64; 6]) -> Result<([f64; 6], f64), BushingMatrixError> {
         if value.iter().any(|x| !x.is_finite()) {
