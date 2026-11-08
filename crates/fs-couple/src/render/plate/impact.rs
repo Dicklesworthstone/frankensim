@@ -38,6 +38,9 @@ pub mod relaxation;
 pub mod radiation;
 /// Prepared modal/contact image for explicitly linear bodies.
 pub mod linear;
+/// Original nonlinear string/contact storage with exact coupled linear propagation.
+pub mod exponential;
+pub use exponential::ExponentialImpactSystem;
 /// Statically relaxed geometric stretching of prestressed films.
 pub mod membrane;
 /// Force-driven uniform edge strain, coupled to the original nonlinear head.
@@ -263,6 +266,14 @@ impl ImpactSystem {
     pub fn new_with_dampers(bodies:Vec<ImpactBody>,contacts:Vec<Obstacle>,pads:Vec<FeltPad>,
         volumes:Vec<VolumeSpring>,dampers:Vec<damping::ViscousDamper>,
         config:ImpactConfig)->Result<Self,ImpactError> {
+        Self::assemble_with_dampers(bodies,contacts,pads,volumes,dampers,config,true)
+    }
+
+    // The exponential entry point publishes only its prepared owner. A clock
+    // admitted without the midpoint bound cannot escape as a midpoint runtime.
+    fn assemble_with_dampers(bodies:Vec<ImpactBody>,contacts:Vec<Obstacle>,pads:Vec<FeltPad>,
+        volumes:Vec<VolumeSpring>,dampers:Vec<damping::ViscousDamper>,
+        config:ImpactConfig,midpoint_clock:bool)->Result<Self,ImpactError> {
         let modes=bodies.iter().try_fold(0usize,|n,b|n.checked_add(b.potential.count()))
             .ok_or_else(||invalid("mode count overflow"))?;
         // A distributed cavity supplies one spring per retained pressure mode, up to its own basis limit.
@@ -359,12 +370,19 @@ impl ImpactSystem {
         for (_,offset,support) in &supports {support.add_resistance(*offset,dim,&mut r)?;}
         let resistance_bound=r.chunks_exact(dim).map(|row|row.iter().map(|x|x.abs()).sum::<f64>())
             .fold(0.0_f64,f64::max);
-        fs_phs::linear_exact::admit_midpoint_band(stiffness_bound.sqrt()+resistance_bound,config.dt_s)
-            .map_err(ImpactError::TimeResolution)?;
+        if midpoint_clock {
+            fs_phs::linear_exact::admit_midpoint_band(stiffness_bound.sqrt()+resistance_bound,config.dt_s)
+                .map_err(ImpactError::TimeResolution)?;
+        }
         let histories=Rc::new(RefCell::new(histories));
         let mechanical=Rc::new(MechanicalStorage{bodies:potentials,modes,pads:retained.clone(),volumes,histories:Rc::clone(&histories)});
         mechanical.validate_rigid_motion(&x)?;
-        let contact=Rc::new(ContactStorage::new(Box::new(tangent::SharedStorage(Rc::clone(&mechanical))),modes,admitted)
+        let storage:Box<dyn Storage>=if midpoint_clock {
+            Box::new(tangent::SharedStorage(Rc::clone(&mechanical)))
+        } else {
+            Box::new(exponential::MechanicalSplit::new(Rc::clone(&mechanical))?)
+        };
+        let contact=Rc::new(ContactStorage::new(storage,modes,admitted)
             .map_err(|e|ImpactError::Owner(e.to_string()))?);
         let system=PortHamiltonian::new(dim,modes,j,r,g,Box::new(tangent::SharedStorage(Rc::clone(&contact))))
             .map_err(|e|ImpactError::Owner(e.to_string()))?;

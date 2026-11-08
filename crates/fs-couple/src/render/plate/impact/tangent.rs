@@ -12,6 +12,12 @@ pub(super) struct SharedStorage<T>(pub Rc<T>);
 impl<T: Storage> Storage for SharedStorage<T> {
     fn hamiltonian(&self,x:&[f64])->f64 { self.0.hamiltonian(x) }
     fn gradient(&self,x:&[f64],out:&mut[f64]) { self.0.gradient(x,out); }
+    fn quadratic_part(&self)->Option<fs_phs::linear_exact::QuadraticPart> {
+        self.0.quadratic_part()
+    }
+    fn midpoint_energy_remainder(&self,a:&[f64],b:&[f64],mid:&[f64])->Option<f64> {
+        self.0.midpoint_energy_remainder(a,b,mid)
+    }
 }
 impl BodyPotential {
     fn hessian_vector(&self,q:&[f64],d:&[f64],out:&mut[f64]) {

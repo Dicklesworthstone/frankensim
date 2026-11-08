@@ -44,6 +44,12 @@ impl LiveContactStorage {
 impl Storage for LiveContactStorage {
     fn hamiltonian(&self,x:&[f64])->f64 {self.0.borrow().hamiltonian(x)}
     fn gradient(&self,x:&[f64],out:&mut[f64]) {self.0.borrow().gradient(x,out);}
+    fn quadratic_part(&self)->Option<fs_phs::linear_exact::QuadraticPart> {
+        self.0.borrow().quadratic_part()
+    }
+    fn midpoint_energy_remainder(&self,a:&[f64],b:&[f64],mid:&[f64])->Option<f64> {
+        self.0.borrow().midpoint_energy_remainder(a,b,mid)
+    }
 }
 
 pub(crate) struct ContactRefresh {

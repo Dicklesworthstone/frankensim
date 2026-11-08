@@ -180,6 +180,10 @@ impl StringPotential {
         Ok(Self { storage: Arc::new(storage), ..self.clone() })
     }
 
+    pub(super) fn is_quadratic(&self) -> bool {
+        self.storage.channels.iter().all(|channel| channel.coefficient == 0.0)
+    }
+
     pub fn mode_count(&self) -> usize { self.storage.omegas.len() }
     pub fn omegas(&self) -> &[f64] { &self.storage.omegas }
     pub fn slope_limit(&self) -> f64 { self.stretching.maximum_slope }

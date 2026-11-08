@@ -148,3 +148,38 @@ fn invalid_dimension_clock_gas_slope_station_and_cancellation_do_not_make_partia
         assert!(source(7800.0,200e9,3).into_nonlinear(cx,gas(),48_000,0.2,initial(3,0.0),&stop).is_err());
     });
 }
+
+
+#[test]
+fn material_torsion_and_bending_run_on_the_source_audio_clock_with_exponential_mechanics() {
+    use fs_couple::render::plate::impact::audio::ImpactSource;
+    with_cx(|cx, gate| {
+        // The existing torsional source needs heavy oversampling on midpoint.
+        // The same declared material and complete state fit the 48 kHz band.
+        let src = source(7800.0, 200e9, 3).with_torsion("G", "eta_s", 2).unwrap();
+        let mut state = initial(5, 0.0002);
+        state[3].velocity_m_sqrt_kg_per_s = 1e-5;
+        let image = src.into_nonlinear(cx, gas(), 48_000, 0.2, state, gate).unwrap();
+        let normal = image.transverse_shape(0.27).unwrap();
+        let surface = image.surface_shape(0.27).unwrap();
+        assert!(matches!(ImpactSystem::new(image.bodies().to_vec(), vec![], vec![], vec![], config()),
+            Err(fs_couple::render::plate::impact::ImpactError::TimeResolution(_))));
+        let initial_bodies = image.bodies().to_vec();
+        let mut run = image.prepare_exponential(vec![], vec![], vec![], vec![], config(), gate).unwrap();
+        assert_eq!(run.mode_count(), 5);
+        assert_eq!(run.sample_period_s(), 1.0 / 48_000.0);
+        assert_eq!(run.source().bodies()[0].initial, initial_bodies[0].initial);
+        assert_eq!(run.source().transverse_shape(0.27).unwrap(), normal);
+        assert_eq!(run.source().surface_shape(0.27).unwrap(), surface);
+        let initial_energy = run.system().stored_energy_j();
+        let mut dissipated = 0.0;
+        for _ in 0..96 {
+            let frame = run.advance(&[0.0; 5], gate).unwrap();
+            dissipated += frame.dissipated_energy_j;
+            assert!((frame.stored_energy_j + dissipated - initial_energy).abs() < 1e-9);
+        }
+        assert_eq!(run.samples_rendered(), 96);
+        assert!(run.state()[6..].iter().any(|value| *value != 0.0));
+        assert!(run.system().string_observation(0).unwrap().tension_n >= 20.0);
+    });
+}
