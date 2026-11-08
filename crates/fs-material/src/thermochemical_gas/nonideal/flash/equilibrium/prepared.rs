@@ -1,9 +1,10 @@
 //! Repeated original-source PH increments with one immutable inlet selection.
 //!
-//! A prepared path borrows its original mixture and fixes both pressures, the
-//! source bracket and phase policy. Reusing the inlet avoids repeating its
-//! bounded phase-stability searches; every new endpoint still uses the native
-//! caloric root and source-integrated enthalpy/entropy increments.
+//! A prepared path borrows its original mixture and fixes the inlet, source
+//! bracket and phase policy. It retains a default outlet pressure; individual
+//! queries may supply another positive pressure without preparing the inlet
+//! again. Every endpoint uses the native caloric root and source-integrated
+//! enthalpy/entropy increments.
 
 use super::{
     CaloricSample, E, EnthalpyWork, PengRobinsonPhaseScreenV1, PhaseEnthalpyControls,
@@ -11,7 +12,7 @@ use super::{
 };
 use fs_qty::{Pressure, Temperature};
 
-/// Immutable original inlet and policy for repeated fixed-pressure PH queries.
+/// Immutable original inlet and policy for repeated PH queries.
 ///
 /// Construction performs one PT selection. Charge its preparation counters once
 /// to a surrounding operation; each returned solution counts only new work.
@@ -101,16 +102,40 @@ impl PreparedPhaseEnthalpyPath<'_> {
         &self,
         change_j_kg: f64,
         remaining_pt_evaluations: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PhaseEnthalpySolution, E> {
+        self.solve_increment_at_pressure(
+            self.final_pressure, change_j_kg, remaining_pt_evaluations, cancelled,
+        )
+    }
+
+    /// Resolve an original-inlet enthalpy increment at a new positive pressure.
+    ///
+    /// Pressure changes do not replace or chain the reference state. This lets
+    /// Rayleigh/Hugoniot and other pressure paths reuse one original phase
+    /// selection. The immutable caloric interval was admitted at preparation;
+    /// the native PT owner admits every new pressure/temperature endpoint.
+    /// Counters and the remaining-work allowance cover only new PT work.
+    ///
+    /// Zero heat still requires a solve if pressure differs from the inlet.
+    /// Neither a process entropy law nor pressure-flow work is added here.
+    pub fn solve_increment_at_pressure(
+        &self,
+        final_pressure: Pressure,
+        change_j_kg: f64,
+        remaining_pt_evaluations: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PhaseEnthalpySolution, E> {
         poll(&mut cancelled)?;
-        if !change_j_kg.is_finite() {
-            return Err(E::Invalid("finite prepared PH enthalpy increment required"));
+        if !positive(final_pressure.value()) || !change_j_kg.is_finite() {
+            return Err(E::Invalid(
+                "positive prepared PH pressure and finite enthalpy increment required",
+            ));
         }
         let temperature = self.initial.temperature.value();
         let bracket = self.controls.enthalpy.temperature_bracket;
         let exact_rest = change_j_kg == 0.0
-            && self.initial.pressure == self.final_pressure
+            && self.initial.pressure == final_pressure
             && temperature >= bracket[0].value()
             && temperature <= bracket[1].value();
         if remaining_pt_evaluations == 0 && !exact_rest {
@@ -125,7 +150,7 @@ impl PreparedPhaseEnthalpyPath<'_> {
             .maximum_flash_evaluations
             .min(remaining_pt_evaluations.max(1));
         let outcome = self.model.solve_flash_enthalpy(
-            self.final_pressure,
+            final_pressure,
             Target::Increment {
                 initial: self.initial.clone(),
                 requested: change_j_kg,

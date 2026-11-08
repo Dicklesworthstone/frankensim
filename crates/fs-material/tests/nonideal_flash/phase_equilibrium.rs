@@ -490,3 +490,58 @@ fn g14_prepared_phase_path_cancellation_never_invalidates_its_original_reference
         accepted
     );
 }
+
+#[test]
+fn g15_prepared_ph_pressure_queries_keep_one_reference_and_native_phase_outlets() {
+    let original = source();
+    let policy = controls();
+    let path = original.prepare_phase_enthalpy_path(
+        Temperature::new(220.0), Pressure::new(3e6), Pressure::new(3e6),
+        policy, || false,
+    ).unwrap();
+    // Pressure changes and enthalpy changes are independent. Returning to an
+    // earlier query must never use the last outlet as the caloric reference.
+    let mut first = None;
+    for (pressure, heat) in [(2e6, 0.0), (4e6, 50_000.0), (2e6, 0.0)] {
+        let cached = path.solve_increment_at_pressure(
+            Pressure::new(pressure), heat, 63, || false,
+        ).unwrap();
+        let direct = original.phase_equilibrium_pressure_enthalpy_increment(
+            Temperature::new(220.0), Pressure::new(3e6), Pressure::new(pressure),
+            heat, policy, || false,
+        ).unwrap();
+        assert_eq!(cached.state(), direct.state());
+        assert_eq!(cached.accepted_increment_j_kg(), direct.accepted_increment_j_kg());
+        assert_eq!(cached.entropy_change_j_kg_k(), direct.entropy_change_j_kg_k());
+        assert_eq!(cached.pt_evaluations() + 1, direct.pt_evaluations());
+        assert_eq!(
+            cached.eos_evaluation_upper_bound() + path.preparation_eos_evaluation_upper_bound(),
+            direct.eos_evaluation_upper_bound(),
+        );
+        if pressure == 2e6 {
+            if let Some(prior) = &first { assert_eq!(&cached, prior); }
+            else { first = Some(cached); }
+        }
+    }
+    let rest = path.solve_increment_at_pressure(Pressure::new(3e6), 0.0, 0, || false).unwrap();
+    assert_eq!(rest, path.solve_increment(0.0, 0, || false).unwrap());
+    assert_eq!(rest.pt_evaluations(), 0);
+    assert_eq!(
+        path.solve_increment_at_pressure(Pressure::new(2e6), 0.0, 0, || false).unwrap_err(),
+        E::WorkLimit { flash_evaluations: 0 },
+    );
+    for pressure in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            path.solve_increment_at_pressure(Pressure::new(pressure), 0.0, 63, || false),
+            Err(E::Invalid(_)),
+        ));
+    }
+    assert_eq!(
+        path.solve_increment_at_pressure(Pressure::new(2e6), 0.0, 63, || true).unwrap_err(),
+        E::Cancelled,
+    );
+    assert_eq!(
+        path.solve_increment_at_pressure(Pressure::new(2e6), 0.0, 63, || false).unwrap(),
+        first.unwrap(),
+    );
+}
