@@ -5,6 +5,9 @@
 
 mod support;
 
+#[path = "lumped_caloric_exchange/forced.rs"]
+mod forced;
+
 use fs_conduction::ConductionError;
 use fs_conduction::lumped::{
     BiotGate,
@@ -672,7 +675,7 @@ fn g1_weak_heat_is_retained_separately_from_native_energy_rounding() {
 }
 
 #[test]
-fn g0_rounded_bath_equilibrium_cannot_erase_original_boundary_power() {
+fn g1_rounded_bath_equilibrium_retains_original_boundary_heat() {
     let source = Fixture::new(true);
     // Use the original source with its datum at an interior temperature.
     // Small signed heat is representable in native energy on both sides of
@@ -708,10 +711,33 @@ fn g0_rounded_bath_equilibrium_cannot_erase_original_boundary_power() {
             assert_eq!(0.5 * (initial_k + support_k), initial_k);
             let original_power_w = support_k - initial_k;
             assert_ne!(original_power_w, 0.0);
-            assert!(solve(cx, &body, &layer, GATE, config(1.0)).is_err());
+            let duration = 1.0;
+            let attenuation = 2.0 * duration / (body.mass_kg * 450.0);
+            let retained_fraction = -(-attenuation).exp_m1() / attenuation;
+            let expected_heat = original_power_w * duration * retained_fraction;
+            let result = solve(cx, &body, &layer, GATE, config(duration)).unwrap();
+            assert_eq!(result.caloric.temperature_k, initial_k);
+            assert_ne!(result.caloric.final_specific_energy_j_kg, 0.0);
+            assert_eq!(
+                result.heat_into_body_j.is_sign_positive(),
+                original_power_w.is_sign_positive()
+            );
+            near(
+                result.heat_into_body_j,
+                expected_heat,
+                256.0 * f64::EPSILON * expected_heat.abs(),
+            );
+            near(
+                result.caloric.final_specific_energy_j_kg,
+                expected_heat / body.mass_kg,
+                256.0 * f64::EPSILON * (expected_heat / body.mass_kg).abs(),
+            );
+            near(
+                result.heat_duration_derivative_w,
+                original_power_w * (-attenuation).exp(),
+                256.0 * f64::EPSILON * original_power_w.abs(),
+            );
 
-            // No evolution is requested at zero duration, so preserving the
-            // original state is valid without claiming that the baths balance.
             let stopped = solve(cx, &body, &layer, GATE, config(0.0)).unwrap();
             assert_eq!(stopped.total_conductance_w_k, 2.0);
             assert_eq!(stopped.heat_duration_derivative_w, original_power_w);

@@ -6,6 +6,11 @@
 //! power has one conductance-weighted temperature and one exact caloric solve.
 //! This is an isolated uniform-body proposal, not a second timeline integrator.
 
+/// Exact held source power and linear baths in the original energy coordinate.
+#[path = "caloric/driven.rs"]
+mod driven;
+pub use driven::{LumpedCaloricDrivenExchange, solve_lumped_caloric_driven_exchange};
+
 use crate::ConductionError;
 use crate::lumped::{BiotGate, lumped_error};
 use fs_exec::Cx;
@@ -33,7 +38,8 @@ pub struct LumpedCaloricExchange {
     pub duration_s: f64,
     pub maximum_biot: f64,
     pub total_conductance_w_k: f64,
-    /// A reduction of the two held linear baths, not a new material state.
+    /// Rounded conductance-weighted bath temperature. Actual forcing is retained
+    /// relatively and need not equal the difference of rounded temperatures.
     pub effective_reservoir_temperature_k: f64,
     pub caloric: CaloricHeatExchange,
     pub heat_into_body_j: f64,
@@ -71,9 +77,9 @@ pub struct LumpedCaloricExchange {
 /// Each bath keeps its own signed heat, including steady heat flowing between
 /// unequal baths when the body stores no net energy. Absolute energy and bath
 /// partition residuals must satisfy the caller's declared tolerance before a
-/// proposal is returned. A combined bath that rounds nonzero original forcing
-/// to equilibrium refuses instead of silently erasing heat. Zero duration or
-/// zero total conductance preserves the
+/// proposal is returned. Relative forcing retains heat when the combined
+/// absolute bath temperature rounds to the body's temperature. Zero duration
+/// or zero total conductance preserves the
 /// native state, without excusing invalid geometry or source context.
 pub fn solve_lumped_caloric_exchange(
     cx: &Cx<'_>,
@@ -83,39 +89,97 @@ pub fn solve_lumped_caloric_exchange(
     config: LumpedCaloricExchangeConfig,
 ) -> Result<LumpedCaloricExchange, ConductionError> {
     checkpoint(cx)?;
+    if !cell.boundary.source_w.is_finite() || cell.boundary.source_w != 0.0 {
+        return Err(invalid("exact reservoir exchange requires zero applied cell source".into()));
+    }
+    let Some(result) = driven::try_solve_driven_exchange(cx, cell, layer, gate, config)? else {
+        // A finite passive exposure can saturate at finite heat even when
+        // initial_power*dt/m overflows. Retain the original parameterization.
+        return solve_passive_finite_exposure(cx, cell, layer, gate, config);
+    };
     let boundary = boundary_conductances(cell, config)?;
-    let law = layer.caloric_law();
-    law.validate_cell(cell).map_err(|error| invalid(format!(
-        "original caloric inventory refuses the initial cell: {error:?}"
-    )))?;
-    let initial_state = layer.state_at_specific_energy(cell.specific_h_j_kg)
-        .map_err(|error| invalid(format!("initial caloric/conductivity support: {error:?}")))?;
-    let caloric_identity = law.caloric_identity().ok_or_else(|| invalid(
-        "the original caloric law has no identity".into()
-    ))?;
-
-    let mut minimum_k = f64::INFINITY;
-    for (index, knot) in layer.conductivity_curve().knots().iter().enumerate() {
-        if index % 64 == 0 {
-            checkpoint(cx)?;
-        }
-        minimum_k = minimum_k.min(knot[1]);
-    }
-    let maximum_biot =
-        (boundary.maximum_coefficient_w_m2_k / minimum_k) * config.characteristic_length_m;
-    if !maximum_biot.is_finite()
-        || maximum_biot > gate.ceiling()
-        || (boundary.maximum_coefficient_w_m2_k > 0.0 && maximum_biot == 0.0)
+    let conductance = result.total_conductance_w_k;
+    let effective_temperature = if conductance == 0.0 || boundary.reservoir_w_k == 0.0 {
+        cell.boundary.ambient_k
+    } else if boundary.ambient_w_k == 0.0 {
+        boundary.reservoir_temperature_k
+    } else if cell.boundary.ambient_k <= boundary.reservoir_temperature_k {
+        (boundary.reservoir_w_k / conductance).mul_add(
+            boundary.reservoir_temperature_k - cell.boundary.ambient_k,
+            cell.boundary.ambient_k,
+        )
+    } else {
+        (boundary.ambient_w_k / conductance).mul_add(
+            cell.boundary.ambient_k - boundary.reservoir_temperature_k,
+            boundary.reservoir_temperature_k,
+        )
+    };
+    let c = result.caloric;
+    let exposure = result.exposure_j_kg_k;
+    let remaining_difference = if exposure > 0.0 {
+        c.remaining_drive_j_kg / exposure
+    } else if conductance > 0.0 {
+        result.heat_duration_derivative_w / conductance
+    } else {
+        cell.boundary.ambient_k - c.temperature_k
+    };
+    let reservoir_derivative = exposure * c.source_heat_gain;
+    let mean_reservoir_derivative = exposure * c.mean_source_derivative_kg_k_j;
+    if !remaining_difference.is_finite() || !reservoir_derivative.is_finite()
+        || !mean_reservoir_derivative.is_finite()
     {
-        return Err(invalid(format!(
-            "source-complete Biot {maximum_biot} exceeds ceiling {} or is not representable; use spatial caloric transport",
-            gate.ceiling()
-        )));
+        return Err(invalid("passive caloric response is not representable".into()));
     }
-    let conductance = boundary.ambient_w_k + boundary.reservoir_w_k;
-    if !conductance.is_finite() {
-        return Err(invalid("combined boundary conductance is not representable".into()));
-    }
+    Ok(LumpedCaloricExchange {
+        cell_id: result.cell_id,
+        caloric_identity: result.caloric_identity,
+        duration_s: result.duration_s,
+        maximum_biot: result.maximum_biot,
+        total_conductance_w_k: conductance,
+        effective_reservoir_temperature_k: effective_temperature,
+        caloric: CaloricHeatExchange {
+            storage_basis: c.storage_basis,
+            initial_specific_energy_j_kg: c.initial_specific_energy_j_kg,
+            final_specific_energy_j_kg: c.final_specific_energy_j_kg,
+            temperature_k: c.temperature_k,
+            mean_temperature_k: c.mean_temperature_k,
+            specific_heat_j_kg: c.specific_heat_j_kg,
+            represented_energy_change_j_kg: c.represented_energy_change_j_kg,
+            heat_residual_j_kg: c.heat_residual_j_kg,
+            inlet_energy_gain: c.inlet_energy_gain,
+            inlet_energy_loss: c.inlet_energy_loss,
+            reservoir_energy_derivative_j_kg_k: reservoir_derivative,
+            mean_reservoir_derivative,
+            remaining_temperature_difference_k: remaining_difference,
+            mean_log_exposure_derivative_k: c.mean_log_duration_derivative_k,
+        },
+        heat_into_body_j: result.heat_into_body_j,
+        stored_energy_change_j: result.stored_energy_change_j,
+        heat_residual_j: result.heat_residual_j,
+        ambient_heat_j: result.ambient_heat_j,
+        reservoir_heat_j: result.reservoir_heat_j,
+        heat_partition_residual_j: result.heat_partition_residual_j,
+        heat_initial_energy_derivative_kg: result.heat_initial_energy_derivative_kg,
+        heat_ambient_temperature_derivative_j_k: result.heat_ambient_temperature_derivative_j_k,
+        heat_reservoir_temperature_derivative_j_k: result.heat_reservoir_temperature_derivative_j_k,
+        heat_duration_derivative_w: result.heat_duration_derivative_w,
+    })
+}
+
+// Preserve the original finite-exposure range for passive saturated windows.
+fn solve_passive_finite_exposure(
+    cx: &Cx<'_>,
+    cell: &DepositedCell,
+    layer: &CaloricConductionLayer<'_, '_>,
+    gate: BiotGate,
+    config: LumpedCaloricExchangeConfig,
+) -> Result<LumpedCaloricExchange, ConductionError> {
+    let prepared = prepare_caloric_exchange(cx, cell, layer, gate, config)?;
+    let boundary = prepared.boundary;
+    let initial_temperature_k = prepared.initial_temperature_k;
+    let caloric_identity = prepared.caloric_identity;
+    let maximum_biot = prepared.maximum_biot;
+    let conductance = prepared.total_conductance_w_k;
     let (ambient_weight, reservoir_weight, effective_temperature) = if conductance == 0.0 {
         (0.0, 0.0, cell.boundary.ambient_k)
     } else if boundary.reservoir_w_k == 0.0 {
@@ -153,24 +217,24 @@ pub fn solve_lumped_caloric_exchange(
     if config.duration_s > 0.0
         && boundary.ambient_w_k > 0.0
         && boundary.reservoir_w_k > 0.0
-        && effective_temperature == initial_state.temperature_k
+        && effective_temperature == initial_temperature_k
     {
         let ambient_power = boundary.ambient_w_k
-            * (cell.boundary.ambient_k - initial_state.temperature_k);
+            * (cell.boundary.ambient_k - initial_temperature_k);
         let reservoir_power = boundary.reservoir_w_k
-            * (boundary.reservoir_temperature_k - initial_state.temperature_k);
+            * (boundary.reservoir_temperature_k - initial_temperature_k);
         let ambient_roundoff = boundary.ambient_w_k.mul_add(
-            cell.boundary.ambient_k - initial_state.temperature_k, -ambient_power,
+            cell.boundary.ambient_k - initial_temperature_k, -ambient_power,
         );
         let reservoir_roundoff = boundary.reservoir_w_k.mul_add(
-            boundary.reservoir_temperature_k - initial_state.temperature_k, -reservoir_power,
+            boundary.reservoir_temperature_k - initial_temperature_k, -reservoir_power,
         );
         if !ambient_power.is_finite() || !reservoir_power.is_finite()
             || ambient_power + reservoir_power != 0.0
             || ambient_roundoff + reservoir_roundoff != 0.0
-            || (ambient_power == 0.0 && cell.boundary.ambient_k != initial_state.temperature_k)
+            || (ambient_power == 0.0 && cell.boundary.ambient_k != initial_temperature_k)
             || (reservoir_power == 0.0
-                && boundary.reservoir_temperature_k != initial_state.temperature_k)
+                && boundary.reservoir_temperature_k != initial_temperature_k)
         {
             return Err(invalid(
                 "combined bath rounds nonzero original boundary forcing to equilibrium".into()
@@ -189,28 +253,14 @@ pub fn solve_lumped_caloric_exchange(
         exposure,
     ).map_err(|error| invalid(format!("original caloric exchange: {error:?}")))?;
 
-    let mut endpoint = cell.clone();
-    endpoint.specific_h_j_kg = caloric.final_specific_energy_j_kg;
-    law.validate_cell(&endpoint).map_err(|error| invalid(format!(
-        "original caloric inventory refuses the proposed cell: {error:?}"
-    )))?;
-    layer.state_at_specific_energy(endpoint.specific_h_j_kg)
-        .map_err(|error| invalid(format!("final caloric/conductivity support: {error:?}")))?;
-
-    let heat = cell.mass_kg * caloric.specific_heat_j_kg;
-    let stored = cell.mass_kg * caloric.represented_energy_change_j_kg;
-    let residual = cell.mass_kg * caloric.heat_residual_j_kg;
-    if !heat.is_finite() || !stored.is_finite() || !residual.is_finite()
-        || (caloric.specific_heat_j_kg != 0.0 && heat == 0.0)
-        || (caloric.represented_energy_change_j_kg != 0.0 && stored == 0.0)
-        || residual.abs() > config.energy_tolerance_j
-        || (heat - stored).abs() > config.energy_tolerance_j
-    {
-        return Err(invalid(format!(
-            "stored-energy residual {residual} J exceeds the admitted representation or {} J tolerance",
-            config.energy_tolerance_j
-        )));
-    }
+    let [heat, stored, residual] = stored_heat_account(
+        cell, layer,
+        caloric.final_specific_energy_j_kg,
+        caloric.specific_heat_j_kg,
+        caloric.represented_energy_change_j_kg,
+        caloric.heat_residual_j_kg,
+        config.energy_tolerance_j,
+    )?;
 
     // Separate the net stored heat from the bath-to-bath through-flow. This
     // avoids subtracting a rounded mean temperature in weak exchanges.
@@ -246,9 +296,9 @@ pub fn solve_lumped_caloric_exchange(
         // still the ORIGINAL nonzero boundary power, even if a combined bath
         // temperature rounds to the body's temperature.
         boundary.ambient_w_k.mul_add(
-            cell.boundary.ambient_k - initial_state.temperature_k,
+            cell.boundary.ambient_k - initial_temperature_k,
             boundary.reservoir_w_k
-                * (boundary.reservoir_temperature_k - initial_state.temperature_k),
+                * (boundary.reservoir_temperature_k - initial_temperature_k),
         )
     } else {
         conductance * caloric.remaining_temperature_difference_k
@@ -280,6 +330,102 @@ pub fn solve_lumped_caloric_exchange(
     })
 }
 
+#[derive(Clone, Copy)]
+struct PreparedCaloricBoundary {
+    boundary: BoundaryConductances,
+    initial_temperature_k: f64,
+    caloric_identity: [u8; 32],
+    maximum_biot: f64,
+    total_conductance_w_k: f64,
+}
+
+fn prepare_caloric_exchange(
+    cx: &Cx<'_>,
+    cell: &DepositedCell,
+    layer: &CaloricConductionLayer<'_, '_>,
+    gate: BiotGate,
+    config: LumpedCaloricExchangeConfig,
+) -> Result<PreparedCaloricBoundary, ConductionError> {
+    checkpoint(cx)?;
+    let boundary = boundary_conductances(cell, config)?;
+    let law = layer.caloric_law();
+    law.validate_cell(cell).map_err(|error| invalid(format!(
+        "original caloric inventory refuses the initial cell: {error:?}"
+    )))?;
+    let initial_state = layer.state_at_specific_energy(cell.specific_h_j_kg)
+        .map_err(|error| invalid(format!("initial caloric/conductivity support: {error:?}")))?;
+    let caloric_identity = law.caloric_identity().ok_or_else(|| invalid(
+        "the original caloric law has no identity".into()
+    ))?;
+
+    let mut minimum_k = f64::INFINITY;
+    for (index, knot) in layer.conductivity_curve().knots().iter().enumerate() {
+        if index % 64 == 0 {
+            checkpoint(cx)?;
+        }
+        minimum_k = minimum_k.min(knot[1]);
+    }
+    let maximum_biot =
+        (boundary.maximum_coefficient_w_m2_k / minimum_k) * config.characteristic_length_m;
+    if !maximum_biot.is_finite()
+        || maximum_biot > gate.ceiling()
+        || (boundary.maximum_coefficient_w_m2_k > 0.0 && maximum_biot == 0.0)
+    {
+        return Err(invalid(format!(
+            "source-complete Biot {maximum_biot} exceeds ceiling {} or is not representable; use spatial caloric transport",
+            gate.ceiling()
+        )));
+    }
+    let conductance = boundary.ambient_w_k + boundary.reservoir_w_k;
+    if !conductance.is_finite() {
+        return Err(invalid("combined boundary conductance is not representable".into()));
+    }
+    Ok(PreparedCaloricBoundary {
+        boundary,
+        initial_temperature_k: initial_state.temperature_k,
+        caloric_identity,
+        maximum_biot,
+        total_conductance_w_k: conductance,
+    })
+}
+
+fn stored_heat_account(
+    cell: &DepositedCell,
+    layer: &CaloricConductionLayer<'_, '_>,
+    final_energy: f64,
+    specific_heat: f64,
+    represented_change: f64,
+    specific_residual: f64,
+    energy_tolerance_j: f64,
+) -> Result<[f64; 3], ConductionError> {
+    let law = layer.caloric_law();
+    let mut endpoint = cell.clone();
+    endpoint.specific_h_j_kg = final_energy;
+    law.validate_cell(&endpoint).map_err(|error| invalid(format!(
+        "original caloric inventory refuses the proposed cell: {error:?}"
+    )))?;
+    layer.state_at_specific_energy(endpoint.specific_h_j_kg)
+        .map_err(|error| invalid(format!("final caloric/conductivity support: {error:?}")))?;
+
+    let heat = cell.mass_kg * specific_heat;
+    let stored = cell.mass_kg * represented_change;
+    let residual = cell.mass_kg * specific_residual;
+    if !heat.is_finite() || !stored.is_finite() || !residual.is_finite()
+        || (specific_heat != 0.0 && heat == 0.0)
+        || (represented_change != 0.0 && stored == 0.0)
+        || residual.abs() > energy_tolerance_j
+        || (heat - stored).abs() > energy_tolerance_j
+    {
+        return Err(invalid(format!(
+            "stored-energy residual {residual} J exceeds the admitted representation or {} J tolerance",
+            energy_tolerance_j
+        )));
+    }
+
+    Ok([heat, stored, residual])
+}
+
+#[derive(Clone, Copy)]
 struct BoundaryConductances {
     ambient_w_k: f64,
     reservoir_w_k: f64,
@@ -307,8 +453,8 @@ fn boundary_conductances(
     {
         return Err(invalid("invalid cell, held boundary, duration, length or tolerance".into()));
     }
-    if !cell.boundary.source_w.is_finite() || cell.boundary.source_w != 0.0 {
-        return Err(invalid("exact reservoir exchange requires zero applied cell source".into()));
+    if !cell.boundary.source_w.is_finite() {
+        return Err(invalid("applied cell source power must be finite".into()));
     }
     let (reservoir_area, reservoir_w_k, reservoir_temperature_k, reservoir_coefficient) =
         if let Some(reservoir) = cell.boundary.reservoir {
