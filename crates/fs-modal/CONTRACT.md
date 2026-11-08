@@ -183,6 +183,30 @@ of very slow poles or tiny real parts of oscillatory poles across widely
 separated rates. The zero-count guards detect only some such failures and
 do not certify the remaining decay rates.
 
+`PreparedMaxwellModes` retains the original full M/C/relaxed-K matrices and
+Maxwell strain channels for repeated local mechanical mode refinement. Its
+`refine` method supplies the complete rational operator
+`T(s)=s²M+sC+K+sum(k_j*s*tau_j/(1+s*tau_j)*b_j*b_j^T)` and analytic derivative
+to the existing fs-la bordered Newton owner. Binary congruence/rate scaling
+and a cached mass Cholesky preserve the source units. `MaxwellMode` publishes
+canonical physical displacement with `q^H M q=1`, velocity `s*q`, and every
+original branch stress. Independent original-unit mechanical and branch-history
+residuals gate publication using factored source products and DD accumulation.
+Shared `PoleOptions` ceilings include cached branch storage and preparation/
+refinement work; cancellation returns no partial mode.
+
+This API refines one nearby simple mechanical right mode. Every rational
+material singularity `s=-1/tau_j` is excluded, and nonzero mechanical
+displacement is required. Pure material dark modes therefore remain outside
+this API; the complete state-spectrum owner retains their pole values.
+Multiple/defective modes can refuse. No arbitrary-seed convergence, spectral
+completeness, relative weak-decay accuracy, eigenvalue/shape enclosure,
+left/right force residue or time-domain realization is claimed. Eight focused
+actual-source native checks cover analytic material modes and stresses, coupled
+gyroscopic shapes, full mutual mass, extreme binary source scaling, a nearby
+weak decay, active-viscosity growth, and admission/resource/cancellation
+refusals. These checks do not establish a full workspace Cargo/DSR gate.
+
 ### `harmonic::resonance`: actual driven peaks, notches and linewidths
 
 `refine_transfer_extremum` accepts the actual complex transfer `H(omega)` and
