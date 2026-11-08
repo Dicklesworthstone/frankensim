@@ -108,13 +108,40 @@ fn apply(c: &Tangent6, strain: &Voigt) -> Voigt {
     s
 }
 
+// Evaluate the spherical and deviatoric modes independently. Multiplying the
+// assembled stiffness cancels O(K) terms in trace-free loading near nu=1/2,
+// and O(G) terms in hydrostatic loading near nu=-1. Retain K from E/nu rather
+// than reconstructing it as lambda + 2G/3, which has the latter cancellation.
+fn isotropic_stress(youngs: f64, poisson: f64, strain: &Voigt) -> Voigt {
+    let bulk = youngs / (3.0 * (1.0 - 2.0 * poisson));
+    let twice_shear = youngs / (1.0 + poisson);
+    let (normal_sum, normal_error) = fs_math::eft::two_sum(strain[0], strain[1]);
+    let (trace, trace_error) = fs_math::eft::two_sum(normal_sum, strain[2]);
+    let trace_low = normal_error + trace_error;
+    let pressure = bulk * (trace + trace_low);
+    // Retain the division residual as well as the summation residual: merely
+    // subtracting a rounded mean creates spurious O(G) stress under uniform
+    // expansion when the true bulk mode is much softer than the shear mode.
+    let mean = trace / 3.0;
+    let mean_low = ((-3.0_f64).mul_add(mean, trace) + trace_low) / 3.0;
+    let mut stress = [0.0; 6];
+    for i in 0..3 {
+        let deviator = (strain[i] - mean) - mean_low;
+        stress[i] = twice_shear.mul_add(deviator, pressure);
+    }
+    for i in 3..6 {
+        stress[i] = twice_shear * strain[i];
+    }
+    stress
+}
+
 impl SmallStrainLaw for IsotropicElastic {
     type State = ();
 
     fn initial_state(&self) {}
 
     fn stress(&self, strain: &Voigt, (): &Self::State) -> Voigt {
-        apply(&self.stiffness(), strain)
+        isotropic_stress(self.youngs, self.poisson, strain)
     }
 
     fn tangent(&self, _strain: &Voigt, (): &Self::State) -> Tangent6 {
@@ -331,6 +358,101 @@ impl SmallStrainLaw for OrthotropicElastic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn g0_isotropic_hydrostatic_response_retains_the_bulk_mode() {
+        for youngs in [1e-240, 3.0, 1e240] {
+            for poisson in [(-1.0_f64).next_up(), -0.9, 0.0, 0.3, 0.5_f64.next_down()] {
+                for dilatation in [1e-6, 0.001, -0.007] {
+                    let strain = [dilatation, dilatation, dilatation, 0.0, 0.0, 0.0];
+                    let stress = isotropic_stress(youngs, poisson, &strain);
+                    let expected = youngs * dilatation / (1.0 - 2.0 * poisson);
+                    for actual in &stress[..3] {
+                        close(*actual, expected, 4e-15);
+                    }
+                    assert_eq!(&stress[3..], &[0.0; 3]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g0_isotropic_distortion_retains_the_shear_mode() {
+        let strain = [0.001, -0.001, 0.0, 0.002, -0.003, 0.001];
+        for youngs in [1e-240, 3.0, 1e240] {
+            for poisson in [(-1.0_f64).next_up(), -0.9, 0.0, 0.3, 0.5_f64.next_down()] {
+                let stress = isotropic_stress(youngs, poisson, &strain);
+                let twice_shear = youngs / (1.0 + poisson);
+                for i in 0..6 {
+                    close(stress[i], twice_shear * strain[i], 4e-15);
+                }
+                let energy = 0.5
+                    * (strain[0] * stress[0]
+                        + strain[1] * stress[1]
+                        + strain[2] * stress[2]
+                        + 2.0
+                            * (strain[3] * stress[3]
+                                + strain[4] * stress[4]
+                                + strain[5] * stress[5]));
+                // epsilon:epsilon = 2e-6 + 2*(4e-6 + 9e-6 + 1e-6).
+                close(energy, 0.5 * twice_shear * 30e-6, 4e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn g3_isotropic_pressure_retains_cancelled_trace_in_every_axis_order() {
+        let tiny = 2.0_f64.powi(-80);
+        let youngs = 3.0;
+        for poisson in [(-1.0_f64).next_up(), 0.3, 0.5_f64.next_down()] {
+            let pressure = youngs * tiny / (3.0 * (1.0 - 2.0 * poisson));
+            let small_deviator = (2.0 / 3.0) * tiny;
+            let expected = (youngs / (1.0 + poisson)).mul_add(small_deviator, pressure);
+            for normals in [
+                [tiny, 0.001, -0.001],
+                [tiny, -0.001, 0.001],
+                [0.001, tiny, -0.001],
+                [-0.001, tiny, 0.001],
+                [0.001, -0.001, tiny],
+                [-0.001, 0.001, tiny],
+            ] {
+                let strain = [normals[0], normals[1], normals[2], 0.0, 0.0, 0.0];
+                let stress = isotropic_stress(youngs, poisson, &strain);
+                let small_axis = normals.iter().position(|x| *x == tiny).unwrap();
+                close(stress[small_axis], expected, 4e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_isotropic_stress_is_the_work_conjugate_energy_derivative() {
+        let youngs = 123.0;
+        let strain = [0.003, -0.0005, 0.001, 0.002, -0.001, 0.0003];
+        for poisson in [-0.9, 0.0, 0.3, 0.49] {
+            let shear = youngs / (2.0 * (1.0 + poisson));
+            let lambda = youngs * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson));
+            let energy = |e: &[f64; 6]| {
+                let trace = e[0] + e[1] + e[2];
+                shear
+                    * (e[0] * e[0]
+                        + e[1] * e[1]
+                        + e[2] * e[2]
+                        + 2.0 * (e[3] * e[3] + e[4] * e[4] + e[5] * e[5]))
+                    + 0.5 * lambda * trace * trace
+            };
+            let stress = isotropic_stress(youngs, poisson, &strain);
+            for i in 0..6 {
+                let mut plus = strain;
+                let mut minus = strain;
+                let step = 1e-7;
+                plus[i] += step;
+                minus[i] -= step;
+                let weight = if i < 3 { 1.0 } else { 2.0 };
+                let energy_derivative = (energy(&plus) - energy(&minus)) / (2.0 * step);
+                close(weight * stress[i], energy_derivative, 2e-8);
+            }
+        }
+    }
 
     fn close(actual: f64, expected: f64, tolerance: f64) {
         assert!(actual.is_finite() && expected.is_finite());

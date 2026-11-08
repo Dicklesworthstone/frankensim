@@ -8187,6 +8187,18 @@ establish measured thermal mixed-mode calibration.
 
 ## Explicit independent isotropic elastic parameters
 
+The native `IsotropicElastic` stress evaluation resolves the bulk and shear
+modes directly from the original E/nu pair. A compensated trace and compensated
+mean preserve weak volumetric strain among cancelling normal components and
+avoid spurious deviatoric stress under uniform expansion. This retains both
+hydrostatic response near the auxetic limit and trace-free response near
+incompressibility without multiplying a dense stiffness matrix. Tensor shear
+remains `sigma_xy = 2 G epsilon_xy`; the constant tangent retains its existing
+representation. G0/G1/G3 tests in `elastic.rs` cover both admitted Poisson-ratio
+limits, stress-unit scaling, axis permutations and the work-conjugate energy
+derivative. This improves constitutive evaluation; it does not remove volumetric
+locking or conditioning limits from displacement-only element formulations.
+
 `state_point::resolve_isotropic_elastic_state_point_from_parameters` admits a
 caller-selected Young/Poisson, Young/shear, or bulk/shear pair with density.
 Arbitrary source property names and complete typed query conditions are retained.
