@@ -10,7 +10,8 @@
 //! coordinates are [-world_x, world_y, ground_down - world_z]; the prescribed
 //! log-law headwind points along negative world x. Rotation of the aircraft is
 //! already owned by the native propulsion sampler. This neutral, finite-band
-//! source adds neither resolved eddy dynamics nor unsteady airfoil memory.
+//! source adds no resolved eddy dynamics. Explicit unsteady methods compose
+//! its total/reference wind with the original two-channel section memory.
 
 use super::wind_refusal;
 use crate::Refusal;
@@ -22,6 +23,8 @@ use crate::spine::rotors::propulsion::dynamic::{DynamicPropulsion, DynamicState,
 use fs_atmo::mann_field::fixed_step::{FixedStepMannCheckpoint, FixedStepMannField};
 use fs_atmo::mann_field::wall::MannPlaneWall;
 use fs_atmo::{FlatSiteLogLaw, FlowSample};
+
+mod unsteady;
 
 /// Explicit applicability of the underlying complete Mann spectrum.
 #[derive(Clone, Copy, Debug, PartialEq)]

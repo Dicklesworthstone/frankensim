@@ -6,11 +6,11 @@
 //! histories. Nonlinear wing iterations sample copies of section history;
 //! only the two real midpoint stages advance wake and section state.
 
-use super::{DynamicAerodynamics, DynamicPropulsion, DynamicState};
 use super::super::{
     AerodynamicFields, AerodynamicSolution, AerodynamicStage, GearedLoads, GearedStep,
     PropulsionInputs, Refusal, geared, reject, wing_error,
 };
+use super::{DynamicAerodynamics, DynamicPropulsion, DynamicState};
 use fs_airfoil::unsteady::{
     DuhamelState, SectionChannels, SectionMidpointInputs, SeparationLagState, UnsteadySectionSpec,
     UnsteadySectionState,
@@ -20,6 +20,7 @@ use fs_wing::nonlinear::{SectionFrame, StripRegime};
 use std::cell::RefCell;
 
 use super::super::unsteady::MAX_EFFECTIVE_ALPHA_RAD;
+use super::super::unsteady::gust::GustInput;
 
 /// Joint accepted state for body/shaft, dynamic inflow, and wing-section memory.
 #[derive(Clone, Debug, PartialEq)]
@@ -191,16 +192,20 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
         self.sections.len()
     }
 
-    fn admit_inputs(&self, gust: &[f64]) -> Result<(), Refusal> {
-        if gust.len() != self.sections.len() || !gust.iter().all(|a| a.is_finite()) {
-            return Err(invalid("one finite explicit gust angle per strip is required"));
+    fn admit_inputs(&self, gust: GustInput<'_>) -> Result<(), Refusal> {
+        if gust.invalid_angles(self.sections.len()) {
+            return Err(invalid(
+                "one finite explicit gust angle per strip is required",
+            ));
         }
         Ok(())
     }
 
     fn admit_history(&self, history: &[UnsteadySectionState]) -> Result<(), Refusal> {
         if history.len() != self.sections.len() {
-            return Err(invalid("one complete physical history per strip is required"));
+            return Err(invalid(
+                "one complete physical history per strip is required",
+            ));
         }
         for (state, model) in history.iter().zip(&self.sections) {
             state
@@ -218,7 +223,40 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
         wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
         gust_angle_rad: &[f64],
     ) -> Result<DynamicUnsteadyState, Refusal> {
-        self.admit_inputs(gust_angle_rad)?;
+        self.trimmed_state_with_gust(
+            dynamic,
+            inputs,
+            wind_world,
+            GustInput::Angles(gust_angle_rad),
+        )
+    }
+
+    /// Initialize developed section memory from same-point total/reference
+    /// incidence with the actual stored disk induction. Reference air supplies
+    /// the gust/motion partition; the total field alone supplies physical loads.
+    pub fn trimmed_state_with_reference_wind(
+        &self,
+        dynamic: DynamicState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        reference_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<DynamicUnsteadyState, Refusal> {
+        self.trimmed_state_with_gust(
+            dynamic,
+            inputs,
+            wind_world,
+            GustInput::Reference(reference_world),
+        )
+    }
+
+    fn trimmed_state_with_gust(
+        &self,
+        dynamic: DynamicState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        gust: GustInput<'_>,
+    ) -> Result<DynamicUnsteadyState, Refusal> {
+        self.admit_inputs(gust)?;
         self.dynamic
             .wake
             .admit_state(inputs.density_kg_m3, dynamic.induced_mps)?;
@@ -226,7 +264,10 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
             &dynamic.motion,
             inputs,
             wind_world,
-            |stage| self.solve(stage, dynamic.induced_mps, None, gust_angle_rad),
+            |stage| {
+                let gust = gust.resolve(&stage, self.sections.len(), |s| self.sections[s].frame)?;
+                self.solve(stage, dynamic.induced_mps, None, &gust)
+            },
         )?;
         let history = result
             .aerodynamics
@@ -234,7 +275,9 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
             .strip_alpha_eff_rad
             .iter()
             .enumerate()
-            .map(|(s, &alpha)| self.sections[s].developed(alpha, gust_angle_rad[s]))
+            .map(|(s, &alpha)| {
+                self.sections[s].developed(alpha, result.aerodynamics.gust_angle_rad[s])
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(DynamicUnsteadyState {
             dynamic,
@@ -316,7 +359,7 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
         history: &[UnsteadySectionState],
         inputs: PropulsionInputs,
         wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
-        gust: &[f64],
+        gust: GustInput<'_>,
     ) -> Result<DynamicUnsteadyEvaluation<N>, Refusal> {
         self.admit_inputs(gust)?;
         self.admit_history(history)?;
@@ -327,7 +370,10 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
             &dynamic.motion,
             inputs,
             wind_world,
-            |stage| self.solve(stage, dynamic.induced_mps, Some(history), gust),
+            |stage| {
+                let gust = gust.resolve(&stage, self.sections.len(), |s| self.sections[s].frame)?;
+                self.solve(stage, dynamic.induced_mps, Some(history), &gust)
+            },
         )?;
         Ok(DynamicUnsteadyEvaluation {
             loads: result.loads,
@@ -350,7 +396,26 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
             &state.sections,
             inputs,
             wind_world,
-            gust_angle_rad,
+            GustInput::Angles(gust_angle_rad),
+        )
+    }
+
+    /// Sample joint accepted motion/wake/section memory with a declared
+    /// reference field. One reference visit per strip precedes nonlinear wing
+    /// iteration; the same local forward-flow admission applies to both fields.
+    pub fn evaluate_with_reference_wind(
+        &self,
+        state: &DynamicUnsteadyState,
+        inputs: PropulsionInputs,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+        reference_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<DynamicUnsteadyEvaluation<N>, Refusal> {
+        self.evaluate_history(
+            &state.dynamic,
+            &state.sections,
+            inputs,
+            wind_world,
+            GustInput::Reference(reference_world),
         )
     }
 
@@ -394,7 +459,7 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
         t_s: f64,
         dt_s: f64,
         angular_origin_world: [f64; 3],
-        mut inputs: C,
+        inputs: C,
         wind_world: W,
         mut gust_angle: G,
     ) -> Result<DynamicUnsteadyStep<N>, Refusal>
@@ -402,6 +467,82 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
         C: FnMut(f64, &DynamicUnsteadyState) -> Result<PropulsionInputs, Refusal>,
         W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
         G: FnMut(f64, &DynamicUnsteadyState, usize) -> Result<f64, Refusal>,
+    {
+        self.step_with_evaluation(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            inputs,
+            |time, stage, controls| {
+                let gust = (0..self.sections.len())
+                    .map(|s| gust_angle(time, stage, s))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.evaluate_history(
+                    &stage.dynamic,
+                    &stage.sections,
+                    controls,
+                    &|point| wind_world(time, point),
+                    GustInput::Angles(&gust),
+                )
+            },
+        )
+    }
+
+    /// Advance actual carrier/shaft, disk induction and both section channels
+    /// using a shared total/reference wind pair at each mechanical stage. Gust
+    /// incidence uses that stage's controlled geometry and rigid-point motion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_reference_wind<C, W, R>(
+        &self,
+        state: &DynamicUnsteadyState,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        inputs: C,
+        wind_world: W,
+        reference_world: R,
+    ) -> Result<DynamicUnsteadyStep<N>, Refusal>
+    where
+        C: FnMut(f64, &DynamicUnsteadyState) -> Result<PropulsionInputs, Refusal>,
+        W: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+        R: Fn(f64, [f64; 3]) -> Result<[f64; 3], Refusal>,
+    {
+        self.step_with_evaluation(
+            state,
+            t_s,
+            dt_s,
+            angular_origin_world,
+            inputs,
+            |time, stage, controls| {
+                self.evaluate_history(
+                    &stage.dynamic,
+                    &stage.sections,
+                    controls,
+                    &|point| wind_world(time, point),
+                    GustInput::Reference(&|point| reference_world(time, point)),
+                )
+            },
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_with_evaluation<C, E>(
+        &self,
+        state: &DynamicUnsteadyState,
+        t_s: f64,
+        dt_s: f64,
+        angular_origin_world: [f64; 3],
+        mut inputs: C,
+        mut evaluate: E,
+    ) -> Result<DynamicUnsteadyStep<N>, Refusal>
+    where
+        C: FnMut(f64, &DynamicUnsteadyState) -> Result<PropulsionInputs, Refusal>,
+        E: FnMut(
+            f64,
+            &DynamicUnsteadyState,
+            PropulsionInputs,
+        ) -> Result<DynamicUnsteadyEvaluation<N>, Refusal>,
     {
         self.admit_history(&state.sections)?;
         let mut initial = None;
@@ -423,16 +564,7 @@ impl<'d, 'p, 'a, const N: usize> DynamicUnsteadyPropulsion<'d, 'p, 'a, N> {
                     sections: stage_history.clone(),
                 };
                 let controls = inputs(time, &stage_state)?;
-                let gust = (0..self.sections.len())
-                    .map(|s| gust_angle(time, &stage_state, s))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let evaluation = self.evaluate_history(
-                    &stage_state.dynamic,
-                    &stage_history,
-                    controls,
-                    &|point| wind_world(time, point),
-                    &gust,
-                )?;
+                let evaluation = evaluate(time, &stage_state, controls)?;
                 let loads = evaluation.loads;
                 if initial.is_none() {
                     stage_induction = self

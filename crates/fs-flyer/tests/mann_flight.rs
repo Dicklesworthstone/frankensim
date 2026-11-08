@@ -20,6 +20,9 @@ use fs_flyer::spine::rotors::propulsion::{
 use fs_ga::Mat3;
 use std::cell::Cell;
 
+#[path = "mann_flight/unsteady.rs"]
+mod unsteady;
+
 const MODES: usize = 16;
 const BUDGET: usize = 3 * 88 * MODES;
 const WORK: usize = 8 * MODES;

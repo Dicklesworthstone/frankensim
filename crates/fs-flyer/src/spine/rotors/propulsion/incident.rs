@@ -44,7 +44,11 @@ impl<'a> StageIncidentAir<'a> {
         }
     }
 
-    fn wind_at_arm(&self, arm: Vec3) -> Result<Vec3, Refusal> {
+    fn wind_at_arm_from(
+        &self,
+        arm: Vec3,
+        wind_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<Vec3, Refusal> {
         let point_world = self.position_world
             + self.body_to_world.rotate(arm).map_err(|_| {
                 reject("propulsion-state-invalid", "world sample position overflow")
@@ -55,7 +59,7 @@ impl<'a> StageIncidentAir<'a> {
                 "world sample position overflow",
             ));
         }
-        let wind = vec((self.wind_world)(array(point_world))?);
+        let wind = vec(wind_world(array(point_world))?);
         if !finite(wind) {
             return Err(reject(
                 "propulsion-state-invalid",
@@ -66,8 +70,18 @@ impl<'a> StageIncidentAir<'a> {
     }
 
     pub(super) fn sample(&self, point_body_m: [f64; 3]) -> Result<AirSample, Refusal> {
+        self.sample_reference(point_body_m, self.wind_world)
+    }
+
+    /// A declared reference field at the IDENTICAL material point, pose and
+    /// rigid-point velocity. The reference does not add a second wind to loads.
+    pub(super) fn sample_reference(
+        &self,
+        point_body_m: [f64; 3],
+        reference_world: &dyn Fn([f64; 3]) -> Result<[f64; 3], Refusal>,
+    ) -> Result<AirSample, Refusal> {
         let arm = vec(point_body_m) - self.cg_body;
-        let wind = self.wind_at_arm(arm)?;
+        let wind = self.wind_at_arm_from(arm, reference_world)?;
         // Keep the original hub/strip arithmetic, including its operation order.
         let relative = self
             .world_to_body
@@ -93,7 +107,7 @@ impl<'a> StageIncidentAir<'a> {
         point_body_m: [f64; 3],
         hub_wind_world_mps: [f64; 3],
     ) -> Result<[f64; 3], Refusal> {
-        let wind = self.wind_at_arm(vec(point_body_m) - self.cg_body)?;
+        let wind = self.wind_at_arm_from(vec(point_body_m) - self.cg_body, self.wind_world)?;
         let variation = self
             .world_to_body
             .rotate(vec(hub_wind_world_mps) - wind)

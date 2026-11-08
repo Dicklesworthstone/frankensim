@@ -2631,3 +2631,40 @@ clock/storage/work refusals and matching mean/wall semantics. These six newly
 added regression groups passed pinned parser checks and bounded source review
 but have not compiled or executed in this environment: the complete native
 dependency closure and build storage remain unavailable.
+
+### Mann turbulence in native unsteady aerodynamic loads
+
+`UnsteadyPropulsion` and `DynamicUnsteadyPropulsion` admit an explicit
+total/reference wind pair for initialization, force evaluation and physical
+stepping. At each actual force stage, both fields use the same controlled strip
+geometry, bound-row midpoint, rigid pose, angular velocity and native
+normal-section frame. The difference of their geometric incidence angles drives
+the existing Küssner gust channel; total solved effective incidence minus that
+gust drives the existing Wagner motion channel. Only total wind enters physical
+velocities, dynamic pressure, propeller loads and drag. Existing explicit-angle
+APIs retain their behavior. Identical total/reference fields produce exactly
+zero gust even during rigid or control motion. Both fields retain the native
+finite, positive forward-chord flow gate; zero or reversed reference flow
+refuses, without a speed floor or branch-wrapped incidence. Reference sampling
+is once per strip before the nonlinear solve.
+
+`MannFlightWind::{trimmed_unsteady_state,step_unsteady,trimmed_dynamic_unsteady_state,step_dynamic_unsteady}`
+compose these native owners with the original spatially coherent start/midpoint
+OU fields and stationary log-law reference. No independent point draws or extra
+gust force are introduced. The original normal-section convective clocks,
+attachment/separation memory, dynamic induction, blade sampling and mechanical
+integration remain authoritative. The accepted atmospheric endpoint publishes
+only after all native histories, endpoint admission and final cancellation
+checks succeed; any refusal leaves accepted wind and caller-owned
+motion/wake/section state unchanged. This coupling retains the original
+attached-flow/stall-onset applicability and finite-band synthetic turbulence
+limits; it adds no chord-resolved gust model, deep-stall closure, or nonlinear
+force correction from subfilter covariance.
+
+Six native integration groups check independent material-point kinematics and
+changed lift/moments, both owners' zero-gust limits under changing pose/controls,
+zero/reversed reference refusal, coherent OU half-stage loads and shaft torques
+against direct native and frozen-field runs, reproducibility, and late
+reference/material/cancellation rollback. Exact-file formatting and source
+checks passed; native compilation and execution remain pending in the
+constrained environment.
