@@ -8,6 +8,7 @@
 //! Positive source values do not guarantee convergence or uniqueness.
 
 use super::*;
+pub use crate::conduction::response::AdaptiveConductionRelaxation;
 use crate::conduction::response::contact::{
     self, ContactResponseControls, ContactResponseError, ContactResponseSample,
     ContactResponseSources,
@@ -112,6 +113,7 @@ pub struct SpatialConductionResponse {
     native: SpatialConduction,
     sources: Arc<[ScalarConductorResponse]>,
     relaxation: f64,
+    adaptive_relaxation: Option<AdaptiveConductionRelaxation>,
     contact_sources: Option<ContactResponseSources>,
 }
 
@@ -302,6 +304,7 @@ impl SpatialConductionResponse {
             native,
             sources: sources.into(),
             relaxation: 1.0,
+            adaptive_relaxation: None,
             contact_sources,
         })
     }
@@ -319,10 +322,34 @@ impl SpatialConductionResponse {
             ));
         }
         self.relaxation = weight;
+        self.adaptive_relaxation = None;
         Ok(self)
     }
 
-    /// Numerical weight retained across accepted source-response candidates.
+    /// Adapt the weight from successive owned source-coordinate defects using
+    /// the shared bounded Aitken kernel. Original bulk/contact laws are requeried
+    /// at each trial and all actual-field current/power gates remain binding.
+    /// History is local to one solve and is discarded on refusal or cancellation.
+    /// Calling `with_relaxation` again selects a fixed weight.
+    pub fn with_adaptive_relaxation(
+        mut self,
+        controls: AdaptiveConductionRelaxation,
+    ) -> Result<Self> {
+        controls.prepare().map_err(|_| {
+            SpatialConductionResponseError::Invalid(
+                "adaptive source relaxation requires 0 < minimum <= initial <= maximum <= 1",
+            )
+        })?;
+        self.relaxation = controls.initial_weight;
+        self.adaptive_relaxation = Some(controls);
+        Ok(self)
+    }
+
+    pub fn adaptive_relaxation(&self) -> Option<AdaptiveConductionRelaxation> {
+        self.adaptive_relaxation
+    }
+
+    /// Fixed weight, or the initial adaptive weight, retained across candidates.
     pub fn relaxation(&self) -> f64 {
         self.relaxation
     }
@@ -477,6 +504,14 @@ impl SpatialConductionResponse {
         let mut applied = seeds.clone();
         let mut applied_contacts = contacts.clone();
         let mut field_solves = 0usize;
+        let mut adaptive = self
+            .adaptive_relaxation
+            .map(AdaptiveConductionRelaxation::prepare)
+            .transpose()
+            .map_err(|_| {
+                SpatialConductionResponseError::Invalid("invalid adaptive source relaxation")
+            })?;
+        let mut operating_coordinates = Vec::new();
         let mut relaxation_queries = 0usize;
         let mut contact_queries = 0usize;
         let (mut maximum_contact_resistance, mut maximum_contact_voltage) = (0.0_f64, 0.0_f64);
@@ -682,19 +717,72 @@ impl SpatialConductionResponse {
                         native,
                         sources: self.sources.clone(),
                         relaxation: self.relaxation,
+                        adaptive_relaxation: self.adaptive_relaxation,
                         contact_sources: self.contact_sources.clone(),
                     },
                     report,
                 });
             }
-            if iteration < controls.maximum_iterations && self.relaxation < 1.0 {
+            let relaxation = if iteration < controls.maximum_iterations {
+                if let Some(adaptive) = &mut adaptive {
+                    operating_coordinates.clear();
+                    for ((law, current), following) in
+                        self.sources.iter().zip(native.conductors()).zip(&next)
+                    {
+                        check(cancelled)?;
+                        for (axis, _) in law.axes() {
+                            operating_coordinates.push(
+                                current
+                                    .material()
+                                    .state_coordinate(axis)
+                                    .zip(following.material().state_coordinate(axis))
+                                    .ok_or(SpatialConductionResponseError::Invalid(
+                                        "missing owned source coordinate",
+                                    ))?,
+                            );
+                        }
+                    }
+                    if let Some(bindings) = &self.contact_sources {
+                        for (index, law) in bindings.laws().iter().enumerate() {
+                            check(cancelled)?;
+                            for (axis, _) in law.axes() {
+                                operating_coordinates.push(
+                                    native.contacts()[index]
+                                        .source
+                                        .resolved()
+                                        .state_coordinate(axis)
+                                        .zip(
+                                            next_contacts[index]
+                                                .source
+                                                .resolved()
+                                                .state_coordinate(axis),
+                                        )
+                                        .ok_or(SpatialConductionResponseError::Invalid(
+                                            "missing owned contact coordinate",
+                                        ))?,
+                                );
+                            }
+                        }
+                    }
+                    adaptive.next_weight(&operating_coordinates).map_err(|_| {
+                        SpatialConductionResponseError::Invalid(
+                            "invalid adaptive source-coordinate history",
+                        )
+                    })?
+                } else {
+                    self.relaxation
+                }
+            } else {
+                1.0
+            };
+            if iteration < controls.maximum_iterations && relaxation < 1.0 {
                 for ((source, current), following) in
                     self.sources.iter().zip(native.conductors()).zip(&mut next)
                 {
                     check(cancelled)?;
                     if !source.axes().is_empty() {
                         *following =
-                            source.relax_operating_point(current, following, self.relaxation)?;
+                            source.relax_operating_point(current, following, relaxation)?;
                         relaxation_queries = relaxation_queries.checked_add(1).ok_or(
                             SpatialConductionResponseError::Invalid(
                                 "source evaluation count overflows",
@@ -710,7 +798,7 @@ impl SpatialConductionResponse {
                                 .relax_operating_point(
                                     &native.contacts()[index].source,
                                     &next_contacts[index].source,
-                                    self.relaxation,
+                                    relaxation,
                                 )
                                 .map_err(ContactResponseError::from)?;
                             relaxation_queries = relaxation_queries.checked_add(1).ok_or(

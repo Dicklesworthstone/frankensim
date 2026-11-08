@@ -41,7 +41,12 @@ fn specimen() -> SpatialConductionResponse {
 
 #[test]
 fn tetrahedral_contact_current_voltage_and_heat_follow_actual_original_source_states() {
-    let model = specimen();
+    let adaptation = AdaptiveConductionRelaxation {
+        initial_weight: 0.5,
+        minimum_weight: 0.02,
+        maximum_weight: 1.0,
+    };
+    let model = specimen().with_adaptive_relaxation(adaptation).unwrap();
     let faces = face_sets(&model, &[0., 2.]);
     for temperature in [300., 350.] {
         let mut contacts = model.contacts().to_vec();
@@ -133,6 +138,7 @@ fn tetrahedral_contact_current_voltage_and_heat_follow_actual_original_source_st
                     );
                 }
                 assert_eq!(solved.problem().relaxation(), 0.5);
+                assert_eq!(solved.problem().adaptive_relaxation(), Some(adaptation));
                 assert_eq!(
                     solved
                         .problem()

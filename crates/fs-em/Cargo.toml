@@ -29,6 +29,7 @@ fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb", optional = true }
 fs-phs = { path = "../fs-phs" }
+fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }

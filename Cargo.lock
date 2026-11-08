@@ -1522,6 +1522,7 @@ dependencies = [
  "fs-math",
  "fs-mbd",
  "fs-phs",
+ "fs-ports",
  "fs-qty",
  "fs-rep-mesh",
  "fs-solver",

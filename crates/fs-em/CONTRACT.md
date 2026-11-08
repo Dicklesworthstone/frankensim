@@ -3411,6 +3411,20 @@ Independent regressions demonstrate unique passive resistance/conductivity
 roots that fail the undamped budget but converge with weight one-half, and
 preserve signed drive, local heat, source-domain refusal and cancellation/retry.
 
+Both planar and tetrahedral owners also expose `with_adaptive_relaxation`.
+`AdaptiveConductionRelaxation` bounds the initial/minimum/maximum weights in
+`(0,1]`; the shared `fs-ports::BoundedAitkenRelaxation` kernel selects subsequent
+weights from the original bulk and contact operating-coordinate defects. Each
+coordinate has its own scale, shared by both residuals in the secant calculation.
+Trials still requery the complete original sources; no resistance/conductivity
+blending, support clipping or numerical heat is introduced. Adaptive history is
+local to one solve. Accepted candidates and planar frozen handoffs retain the
+configured policy, while `with_relaxation` explicitly restores fixed relaxation.
+Added analytical regressions specify steep positive table laws whose fixed
+half-relaxation is unstable, both drive polarities, 2D/3D current and heat
+balances, original contact-source refresh, budget/domain refusal and replay.
+These new native regressions have not been executed in the current environment.
+
 This fixed-geometry scalar memoryless rung accepts prescribed native voltage and
 current-density traces. A nonlinear equipotential total-current terminal needs
 its own constraint; tensor, Hall, moving-conductor, field-storage and hysteretic

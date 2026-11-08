@@ -1,6 +1,8 @@
 //! Native spatial solutions against independently reduced nonlinear specimens.
 use super::*;
 
+#[path = "response/adaptive.rs"]
+mod adaptive;
 #[path = "response/contacts.rs"]
 mod contacts;
 #[path = "response/current.rs"]
@@ -8,7 +10,8 @@ mod current;
 #[path = "response/power.rs"]
 mod power;
 use fs_em::conduction::response::{
-    ConductionResponseControls, ConductionResponseError, PlanarConductionResponse,
+    AdaptiveConductionRelaxation, ConductionResponseControls, ConductionResponseError,
+    PlanarConductionResponse,
 };
 use fs_material::conductor::response::{ConductorMagnitude, ScalarConductorResponse};
 

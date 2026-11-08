@@ -47,7 +47,12 @@ fn specimen() -> PlanarConductionResponse {
 
 #[test]
 fn nonlinear_contact_refreshes_actual_current_and_temperature_with_one_surface_heat_account() {
-    let model = specimen();
+    let adaptation = AdaptiveConductionRelaxation {
+        initial_weight: 0.5,
+        minimum_weight: 0.02,
+        maximum_weight: 1.0,
+    };
+    let model = specimen().with_adaptive_relaxation(adaptation).unwrap();
     for temperature in [300., 350.] {
         let law = &model.contact_response_sources().unwrap().laws()[0];
         let mut contacts = model.contacts().to_vec();
@@ -124,10 +129,12 @@ fn nonlinear_contact_refreshes_actual_current_and_temperature_with_one_surface_h
             let expected_power = r.power_w;
             let (native, sources) = solved.into_parts().0.into_frozen_parts();
             assert_eq!(sources.relaxation(), 0.5);
+            assert_eq!(sources.adaptive_relaxation(), Some(adaptation));
             assert_eq!(sources.contacts().unwrap().laws().len(), 1);
             let resumed =
                 PlanarConductionResponse::from_frozen_parts(native, sources, &mut || false)
                     .unwrap();
+            assert_eq!(resumed.adaptive_relaxation(), Some(adaptation));
             let again = resumed
                 .solve_candidate(&boundary, &[], limits(), controls(), policy(), &mut || {
                     false

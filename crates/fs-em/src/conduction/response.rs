@@ -22,6 +22,32 @@ use contact::{
 
 pub const MAX_RESPONSE_ITERATIONS: usize = 128;
 
+/// Safeguarded adaptive relaxation of original electrical source coordinates.
+/// Every trial weight lies in `[minimum_weight, maximum_weight]` within
+/// `(0, 1]`. Trials requery the source at interpolated E/J or contact coordinates;
+/// they never interpolate conductivity, resistance, temperature or source pins.
+/// Positive resistance alone does not guarantee convergence or uniqueness.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdaptiveConductionRelaxation {
+    /// Weight used before a secant history is available.
+    pub initial_weight: f64,
+    /// Strictly positive lower bound for the numerical weight.
+    pub minimum_weight: f64,
+    /// Upper bound, at most one, for convex source-coordinate trials.
+    pub maximum_weight: f64,
+}
+impl AdaptiveConductionRelaxation {
+    pub(crate) fn prepare(
+        self,
+    ) -> Result<fs_ports::BoundedAitkenRelaxation, fs_ports::AitkenRelaxationError> {
+        fs_ports::BoundedAitkenRelaxation::new(
+            self.initial_weight,
+            self.minimum_weight,
+            self.maximum_weight,
+        )
+    }
+}
+
 /// Constitutive gates in addition to the native algebraic/current/work gates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ConductionResponseControls {
@@ -97,6 +123,7 @@ impl From<ContactResponseError> for ConductionResponseError {
 pub struct ConductionResponseSources {
     bulk: Arc<[ScalarConductorResponse]>,
     relaxation: f64,
+    adaptive_relaxation: Option<AdaptiveConductionRelaxation>,
     contacts: Option<ContactResponseSources>,
 }
 impl ConductionResponseSources {
@@ -105,6 +132,9 @@ impl ConductionResponseSources {
     }
     pub fn relaxation(&self) -> f64 {
         self.relaxation
+    }
+    pub fn adaptive_relaxation(&self) -> Option<AdaptiveConductionRelaxation> {
+        self.adaptive_relaxation
     }
     pub fn contacts(&self) -> Option<&ContactResponseSources> {
         self.contacts.as_ref()
@@ -115,6 +145,7 @@ impl From<Vec<ScalarConductorResponse>> for ConductionResponseSources {
         Self {
             bulk: bulk.into(),
             relaxation: 1.0,
+            adaptive_relaxation: None,
             contacts: None,
         }
     }
@@ -124,6 +155,7 @@ impl From<Arc<[ScalarConductorResponse]>> for ConductionResponseSources {
         Self {
             bulk,
             relaxation: 1.0,
+            adaptive_relaxation: None,
             contacts: None,
         }
     }
@@ -139,6 +171,7 @@ pub struct PlanarConductionResponse {
     native: PlanarConduction,
     sources: Arc<[ScalarConductorResponse]>,
     relaxation: f64,
+    adaptive_relaxation: Option<AdaptiveConductionRelaxation>,
     contact_sources: Option<ContactResponseSources>,
 }
 
@@ -339,6 +372,7 @@ impl PlanarConductionResponse {
             native,
             sources: sources.into(),
             relaxation: 1.0,
+            adaptive_relaxation: None,
             contact_sources,
         })
     }
@@ -358,10 +392,34 @@ impl PlanarConductionResponse {
             ));
         }
         self.relaxation = weight;
+        self.adaptive_relaxation = None;
         Ok(self)
     }
 
-    /// Numerical weight retained across accepted source-response candidates.
+    /// Adapt the weight from successive owned source-coordinate defects using
+    /// the shared bounded Aitken kernel. Original bulk/contact laws are requeried
+    /// at each trial and all actual-field current/power gates remain binding.
+    /// History is local to one solve and is discarded on refusal or cancellation.
+    /// Calling `with_relaxation` again selects a fixed weight.
+    pub fn with_adaptive_relaxation(
+        mut self,
+        controls: AdaptiveConductionRelaxation,
+    ) -> Result<Self, ConductionResponseError> {
+        controls.prepare().map_err(|_| {
+            ConductionResponseError::Invalid(
+                "adaptive source relaxation requires 0 < minimum <= initial <= maximum <= 1",
+            )
+        })?;
+        self.relaxation = controls.initial_weight;
+        self.adaptive_relaxation = Some(controls);
+        Ok(self)
+    }
+
+    pub fn adaptive_relaxation(&self) -> Option<AdaptiveConductionRelaxation> {
+        self.adaptive_relaxation
+    }
+
+    /// Fixed weight, or the initial adaptive weight, retained across candidates.
     pub fn relaxation(&self) -> f64 {
         self.relaxation
     }
@@ -441,6 +499,7 @@ impl PlanarConductionResponse {
             ConductionResponseSources {
                 bulk: self.sources,
                 relaxation: self.relaxation,
+                adaptive_relaxation: self.adaptive_relaxation,
                 contacts: self.contact_sources,
             },
         )
@@ -483,6 +542,7 @@ impl PlanarConductionResponse {
             native,
             sources: sources.bulk,
             relaxation: sources.relaxation,
+            adaptive_relaxation: sources.adaptive_relaxation,
             contact_sources: sources.contacts,
         })
     }
@@ -775,6 +835,14 @@ impl PlanarConductionResponse {
         }
         let mut applied = seeds.clone();
         let mut applied_contacts = contacts.clone();
+        let mut adaptive = self
+            .adaptive_relaxation
+            .map(AdaptiveConductionRelaxation::prepare)
+            .transpose()
+            .map_err(|_| {
+                ConductionResponseError::Invalid("invalid adaptive source relaxation")
+            })?;
+        let mut operating_coordinates = Vec::new();
         let mut relaxation_queries = 0usize;
         let mut contact_queries = 0usize;
         let (mut maximum_contact_resistance, mut maximum_contact_voltage) = (0.0_f64, 0.0_f64);
@@ -938,6 +1006,7 @@ impl PlanarConductionResponse {
                             native,
                             sources: self.sources.clone(),
                             relaxation: self.relaxation,
+                            adaptive_relaxation: self.adaptive_relaxation,
                             contact_sources: self.contact_sources.clone(),
                         },
                         report,
@@ -945,14 +1014,66 @@ impl PlanarConductionResponse {
                     driver,
                 ));
             }
-            if iteration < controls.maximum_iterations && self.relaxation < 1.0 {
+            let relaxation = if iteration < controls.maximum_iterations {
+                if let Some(adaptive) = &mut adaptive {
+                    operating_coordinates.clear();
+                    for ((law, current), following) in
+                        self.sources.iter().zip(native.conductors()).zip(&next)
+                    {
+                        poll(cancelled).map_err(ConductionResponseError::from)?;
+                        for (axis, _) in law.axes() {
+                            operating_coordinates.push(
+                                current
+                                    .material()
+                                    .state_coordinate(axis)
+                                    .zip(following.material().state_coordinate(axis))
+                                    .ok_or(ConductionResponseError::Invalid(
+                                        "missing owned source coordinate",
+                                    ))?,
+                            );
+                        }
+                    }
+                    if let Some(bindings) = &self.contact_sources {
+                        for (index, law) in bindings.laws().iter().enumerate() {
+                            poll(cancelled).map_err(ConductionResponseError::from)?;
+                            for (axis, _) in law.axes() {
+                                operating_coordinates.push(
+                                    native.contacts()[index]
+                                        .source
+                                        .resolved()
+                                        .state_coordinate(axis)
+                                        .zip(
+                                            next_contacts[index]
+                                                .source
+                                                .resolved()
+                                                .state_coordinate(axis),
+                                        )
+                                        .ok_or(ConductionResponseError::Invalid(
+                                            "missing owned contact coordinate",
+                                        ))?,
+                                );
+                            }
+                        }
+                    }
+                    adaptive.next_weight(&operating_coordinates).map_err(|_| {
+                        ConductionResponseError::Invalid(
+                            "invalid adaptive source-coordinate history",
+                        )
+                    })?
+                } else {
+                    self.relaxation
+                }
+            } else {
+                1.0
+            };
+            if iteration < controls.maximum_iterations && relaxation < 1.0 {
                 for ((source, current), following) in
                     self.sources.iter().zip(native.conductors()).zip(&mut next)
                 {
                     poll(cancelled).map_err(ConductionResponseError::from)?;
                     if !source.axes().is_empty() {
                         *following = source
-                            .relax_operating_point(current, following, self.relaxation)
+                            .relax_operating_point(current, following, relaxation)
                             .map_err(ConductionResponseError::from)?;
                         relaxation_queries = relaxation_queries.checked_add(1).ok_or(
                             ConductionResponseError::Invalid("source evaluation count overflows"),
@@ -967,7 +1088,7 @@ impl PlanarConductionResponse {
                                 .relax_operating_point(
                                     &native.contacts()[index].source,
                                     &next_contacts[index].source,
-                                    self.relaxation,
+                                    relaxation,
                                 )
                                 .map_err(ContactResponseError::from)
                                 .map_err(ConductionResponseError::from)?;
