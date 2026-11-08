@@ -1,10 +1,13 @@
 //! Receiver-clock reconstruction of finite dry stems on subsonic linear tracks.
 //!
 //! This is a kinematic observation of a supplied digital waveform. The source
-//! clock follows t = tau + |x_receiver(t) - x_source(tau)| / c, hence
-//! d tau / dt = (1 - n.v_receiver/c) / (1 - n.v_source/c). No second pitch or
-//! amplitude factor is applied. A moving monopole's radiation coefficients
-//! belong to fs-aeroac; they cannot be inferred from a dry modal stem.
+//! clock follows |x_receiver(t) - x_source(tau) - U*(t-tau)| = c*(t-tau), hence
+//! d tau / dt = (1 - n.(v_receiver-U)/c) / (1 - n.(v_source-U)/c). U is the
+//! uniform medium velocity; n is the acoustic ray direction in that medium's
+//! rest frame. Only event differences are transformed, avoiding subtraction of
+//! separately translated absolute positions. No second pitch or amplitude
+//! factor is applied. A moving monopole's radiation coefficients belong to
+//! fs-aeroac; they cannot be inferred from a dry modal stem.
 
 use super::*;
 
@@ -19,6 +22,7 @@ fn envelope(
     frames: usize,
     position: impl Fn(usize) -> [f64; 3],
     sound_step: f64,
+    flow_step: [f64; 3],
     checkpoint_fn: &mut impl FnMut() -> Result<(), SpatialAudioError>,
 ) -> Result<VelocityEnvelope, SpatialAudioError> {
     let mut result = VelocityEnvelope {
@@ -32,11 +36,11 @@ fn envelope(
         }
         let a = position(i - 1);
         let b = position(i);
-        let velocity = core::array::from_fn(|j| (b[j] - a[j]) / sound_step);
+        let velocity = core::array::from_fn(|j| (b[j] - a[j] - flow_step[j]) / sound_step);
         let speed = norm(velocity);
         if !speed.is_finite() || speed >= 1.0 {
             return Err(invalid(
-                "strictly subsonic continuous source and receiver tracks",
+                "strictly subsonic source and receiver tracks relative to the medium",
             ));
         }
         result.speed = result.speed.max(speed);
@@ -46,8 +50,15 @@ fn envelope(
         }
     }
     if frames < 2 {
-        result.low = [0.0; 3];
-        result.high = [0.0; 3];
+        let velocity = flow_step.map(|v| -v / sound_step);
+        result.speed = norm(velocity);
+        if !result.speed.is_finite() || result.speed >= 1.0 {
+            return Err(invalid(
+                "strictly subsonic source and receiver tracks relative to the medium",
+            ));
+        }
+        result.low = velocity;
+        result.high = velocity;
     }
     Ok(result)
 }
@@ -63,14 +74,15 @@ pub(super) fn admit(
             "retarded source history with representable sample clocks",
         ));
     }
-    let SpatialDelayPolicy::RetardedSinc {
-        source_bandwidth_hz,
-        receiver_bandwidth_hz,
-    } = config.delay_policy
-    else {
-        return Err(invalid("retarded delay policy"));
-    };
+    let (source_bandwidth_hz, receiver_bandwidth_hz) = config
+        .delay_policy
+        .retarded_bands()
+        .ok_or_else(|| invalid("retarded delay policy"))?;
     let sound_step = config.speed_of_sound_m_per_s / f64::from(config.sample_rate_hz);
+    let flow_step = config
+        .delay_policy
+        .medium_velocity_m_per_s()
+        .map(|v| v / f64::from(config.sample_rate_hz));
     if !sound_step.is_finite() || sound_step <= 0.0 {
         return Err(invalid("representable sound travel per sample"));
     }
@@ -82,6 +94,7 @@ pub(super) fn admit(
         receiver_frames,
         |i| input.listener.pose(i).position_m,
         sound_step,
+        flow_step,
         checkpoint_fn,
     )?;
     let mut last_arrival = (frames - 1) as f64;
@@ -96,6 +109,7 @@ pub(super) fn admit(
             source_frames,
             |i| source.positions.position(i),
             sound_step,
+            flow_step,
             checkpoint_fn,
         )?;
         // Both envelopes cover complete linear interpolants, not just endpoint
@@ -128,6 +142,7 @@ pub(super) fn admit(
             (frames - 1) as f64,
             input.listener,
             sound_step,
+            flow_step,
         )?;
         last_arrival = last_arrival.max(arrival);
     }
@@ -142,14 +157,18 @@ fn last_reception(
     emission: f64,
     listener: ListenerPoseTrack<'_>,
     sound_step: f64,
+    flow_step: [f64; 3],
 ) -> Result<f64, SpatialAudioError> {
     let ListenerPoseTrack::PerFrame(poses) = listener else {
-        let arrival = emission + distance(source, listener.pose(0).position_m) / sound_step;
+        let arrival = emission
+            + static_flight_time(source, listener.pose(0).position_m, sound_step, flow_step)?;
         validate_finite(arrival, "final retarded arrival", emission as usize)?;
         return Ok(arrival);
     };
     let residual = |i: usize| {
-        let value = i as f64 - emission - distance(source, poses[i].position_m) / sound_step;
+        let elapsed = i as f64 - emission;
+        let ray = fluid_separation(source, poses[i].position_m, elapsed, flow_step);
+        let value = elapsed - norm(ray) / sound_step;
         validate_finite(value, "retarded receiver-history residual", i)?;
         Ok::<_, SpatialAudioError>(value)
     };
@@ -174,11 +193,12 @@ fn last_reception(
     if residual(high)? == 0.0 {
         return Ok(high as f64);
     }
-    let q = core::array::from_fn(|j| (poses[low].position_m[j] - source[j]) / sound_step);
-    let beta = core::array::from_fn(|j| {
-        (poses[high].position_m[j] - poses[low].position_m[j]) / sound_step
-    });
     let elapsed = low as f64 - emission;
+    let q =
+        fluid_separation(source, poses[low].position_m, elapsed, flow_step).map(|v| v / sound_step);
+    let beta = core::array::from_fn(|j| {
+        (poses[high].position_m[j] - poses[low].position_m[j] - flow_step[j]) / sound_step
+    });
     let a = 1.0 - dot(beta, beta);
     let b = elapsed - dot(q, beta);
     let radius = norm(q);
@@ -204,6 +224,10 @@ pub(super) fn render(
     checkpoint_fn: &mut impl FnMut() -> Result<(), SpatialAudioError>,
 ) -> Result<(), SpatialAudioError> {
     let sound_step = config.speed_of_sound_m_per_s / f64::from(config.sample_rate_hz);
+    let flow_step = config
+        .delay_policy
+        .medium_velocity_m_per_s()
+        .map(|v| v / f64::from(config.sample_rate_hz));
     for source in input.sources.iter().copied() {
         let mut span = 0;
         for (frame, accumulator) in output.iter_mut().enumerate() {
@@ -211,12 +235,13 @@ pub(super) fn render(
                 checkpoint_fn()?;
             }
             let listener = input.listener.pose(frame);
-            let Some((emission, source_position)) = emission_at(
+            let Some((emission, source_displacement)) = emission_at(
                 source.positions,
                 source.signal.len(),
                 listener.position_m,
                 frame as f64,
                 sound_step,
+                flow_step,
                 &mut span,
                 checkpoint_fn,
             )?
@@ -224,8 +249,11 @@ pub(super) fn render(
                 continue;
             };
             let geometry = geometry(
-                source_position,
-                listener,
+                source_displacement,
+                ListenerPose {
+                    position_m: [0.0; 3],
+                    ..listener
+                },
                 config.minimum_distance_m,
                 config.speed_of_sound_m_per_s,
                 config.sample_rate_hz,
@@ -257,18 +285,23 @@ fn emission_at(
     receiver: [f64; 3],
     reception: f64,
     sound_step: f64,
+    flow_step: [f64; 3],
     span: &mut usize,
     checkpoint_fn: &mut impl FnMut() -> Result<(), SpatialAudioError>,
 ) -> Result<Option<(f64, [f64; 3])>, SpatialAudioError> {
     if let SourcePositionTrack::Static(position) = positions {
-        let emission = reception - distance(position, receiver) / sound_step;
+        let delay = static_flight_time(position, receiver, sound_step, flow_step)?;
+        let emission = reception - delay;
         validate_finite(emission, "retarded emission time", reception as usize)?;
+        let direction = fluid_separation(position, receiver, delay, flow_step).map(|v| -v);
         return Ok(
-            (emission >= 0.0 && emission <= (frames - 1) as f64).then_some((emission, position))
+            (emission >= 0.0 && emission <= (frames - 1) as f64).then_some((emission, direction))
         );
     }
     let residual = |i: usize| {
-        let value = i as f64 + distance(positions.position(i), receiver) / sound_step - reception;
+        let elapsed = reception - i as f64;
+        let ray = fluid_separation(positions.position(i), receiver, elapsed, flow_step);
+        let value = norm(ray) / sound_step - elapsed;
         validate_finite(value, "retarded source-history residual", i)?;
         Ok::<_, SpatialAudioError>(value)
     };
@@ -287,16 +320,23 @@ fn emission_at(
         }
     }
     if residual(*span)? == 0.0 {
-        return Ok(Some((*span as f64, positions.position(*span))));
+        let direction = fluid_separation(
+            positions.position(*span),
+            receiver,
+            reception - *span as f64,
+            flow_step,
+        )
+        .map(|v| -v);
+        return Ok(Some((*span as f64, direction)));
     }
     if *span + 1 == frames {
         return Ok(None);
     }
     let start = positions.position(*span);
     let end = positions.position(*span + 1);
-    let q = core::array::from_fn(|j| (receiver[j] - start[j]) / sound_step);
-    let beta = core::array::from_fn(|j| (end[j] - start[j]) / sound_step);
     let elapsed = reception - *span as f64;
+    let q = fluid_separation(start, receiver, elapsed, flow_step).map(|v| v / sound_step);
+    let beta = core::array::from_fn(|j| (end[j] - start[j] - flow_step[j]) / sound_step);
     let a = 1.0 - dot(beta, beta);
     let b = elapsed - dot(q, beta);
     let radius = norm(q);
@@ -307,10 +347,51 @@ fn emission_at(
     let fraction = refine_root(fraction, |x| {
         x + norm(core::array::from_fn(|j| q[j] - beta[j] * x)) - elapsed
     })?;
-    Ok(Some((
-        *span as f64 + fraction,
-        core::array::from_fn(|j| start[j] + (end[j] - start[j]) * fraction),
-    )))
+    // Reconstruct the ray from relative segment geometry. Do not add a large
+    // common laboratory translation only to subtract it again for directivity.
+    let direction = core::array::from_fn(|j| -(q[j] - beta[j] * fraction) * sound_step);
+    Ok(Some((*span as f64 + fraction, direction)))
+}
+
+/// Propagation time between fixed laboratory events' spatial endpoints. The
+/// relative endpoint in the fluid frame moves with velocity -U while the wave
+/// travels. Rationalizing the downstream root avoids near-sonic cancellation.
+fn static_flight_time(
+    source: [f64; 3],
+    receiver: [f64; 3],
+    sound_step: f64,
+    flow_step: [f64; 3],
+) -> Result<f64, SpatialAudioError> {
+    let separation = core::array::from_fn(|j| receiver[j] - source[j]);
+    let radius = norm(separation) / sound_step;
+    validate_finite(radius, "uniform-flow source-listener separation", 0)?;
+    if radius == 0.0 || flow_step == [0.0; 3] {
+        return Ok(radius);
+    }
+    let direction = separation.map(|v| v / (radius * sound_step));
+    let mach = flow_step.map(|v| v / sound_step);
+    let margin = 1.0 - dot(mach, mach);
+    let along = dot(direction, mach);
+    let root = det::sqrt(along * along + margin);
+    let delay = if along >= 0.0 {
+        radius / (root + along)
+    } else {
+        radius * (root - along) / margin
+    };
+    let residual = delay - norm(fluid_separation(source, receiver, delay, flow_step)) / sound_step;
+    if !delay.is_finite() || delay < 0.0 || !residual.is_finite() || residual.abs() > 1.0e-9 {
+        return Err(invalid("representable uniform-flow propagation delay"));
+    }
+    Ok(delay)
+}
+
+fn fluid_separation(
+    source: [f64; 3],
+    receiver: [f64; 3],
+    elapsed: f64,
+    flow_step: [f64; 3],
+) -> [f64; 3] {
+    core::array::from_fn(|j| receiver[j] - source[j] - flow_step[j] * elapsed)
 }
 
 // Ordinary paths use one analytical root. A rounded root outside its actual
@@ -399,9 +480,6 @@ fn sinc_sample(signal: SpatialMonoSignal<'_>, emission: f64) -> Result<f64, Spat
 
 fn norm(vector: [f64; 3]) -> f64 {
     det::sqrt(dot(vector, vector))
-}
-fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
-    norm(core::array::from_fn(|j| a[j] - b[j]))
 }
 
 #[cfg(test)]

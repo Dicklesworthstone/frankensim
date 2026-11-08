@@ -1442,7 +1442,7 @@ artifact is a model-derived modal drive, not calibrated pressure, radiated
 acoustic energy, absolute SPL, room response, structural/acoustic coupling, or
 physical validation.
 
-`spatial_audio` v2 is the deterministic offline stereo transform between dry
+`spatial_audio` v3 is the deterministic offline stereo transform between dry
 modal/source frames and `audio_artifact`. It accepts an ordered, bounded set of
 identified mono point sources. A source may borrow generic mono samples or one
 disc/glass/base field directly from `ModalStemFrame`, so the cinematic path does
@@ -1455,7 +1455,8 @@ position tracks share one nonzero frame horizon. The deposition policies
 require the same listener horizon; retarded reconstruction additionally admits
 the supplied receiver tail needed to observe the final source sample.
 
-Propagation uses the declared sample rate and positive finite speed of sound.
+Propagation uses the declared sample rate and positive finite speed of sound
+relative to the medium.
 For distance `d`, the frozen attenuation law is
 `d_min / max(d,d_min)` with positive finite `d_min`; it cannot boost above one.
 At exact source/listener coincidence, the observer uses zero delay, centred pan,
@@ -1479,6 +1480,21 @@ the declared received band, including common translation, before publication.
 They constrain the Doppler clock rate; arbitrary geometric/amplitude modulation
 remains part of the producer's explicit receiver-band declaration.
 
+`RetardedSincUniformFlow` extends the same reconstruction with one finite
+laboratory medium velocity `U [m/s]`. All supplied positions remain in the
+laboratory frame. It solves
+`|x_receiver(t) - x_source(tau) - U*(t-tau)| = c*(t-tau)`, and admits both
+endpoint velocities relative to that medium. Laboratory speeds above `c` are
+therefore admissible when the relative speeds are subsonic; a stationary
+laboratory endpoint in a sonic flow refuses. Only event differences are
+transformed, avoiding separately advected absolute-coordinate histories.
+Directivity, stereo pan and the existing kinematic inverse-distance gain use
+the medium-frame wave normal and distance `c*(t-tau)`. Two stationary laboratory
+endpoints retain frequency ratio one even though their wind-dependent delay
+and arrival direction change. This does not add the convective Green-function
+pressure or moving-monopole coefficients owned by `fs-aeroac`, nonuniform-flow
+refraction, or a model for how wind changes a supplied room response.
+
 A normalized 32-tap Lanczos kernel reconstructs source samples. Source bandwidth
 must be at most `fs/4`, and receiver bandwidth strictly below Nyquist. G1 tests
 sample 129 frequencies and 33 fractional phases against independent complex
@@ -1490,9 +1506,13 @@ history through the final arrival even if output publication is clamped; no
 held receiver tail or source prehistory is synthesized. G1/G3/G4 regressions
 cover approach/recession, common translation, unchanged sample amplitude,
 reception-time directivity, static delay, room response, bandwidth/speed/history
-refusals, budgets, cancellation and replay. `CinematicFixtureConfig` exposes
-the policy to the existing production fixture; its legacy default does not
-invent a source-band declaration. This dry-stem transform does not claim
+refusals, budgets, cancellation and replay. Uniform-flow G1/G3 cases cover the
+longitudinal two-motion law, stationary endpoints with upstream/downstream
+wind, crosswind wave-normal directivity, common Galilean boosts, and
+medium-relative Mach/bandwidth refusals. `CinematicFixtureConfig` exposes
+these policies to its dry-stem spatialization path; its legacy default does not
+invent a source-band declaration, and its independent physical-pressure path
+retains its own radiation owner. This dry-stem transform does not claim
 moving-boundary/FW-H pressure, exact Doppler radiation amplitude, supersonic
 propagation, experimental calibration, or an ideal antialias filter.
 
@@ -1527,7 +1547,8 @@ makes the output `Artistic`; otherwise authority is the conservative
 combination of configuration, every source, and the optional response.
 
 Configuration identity binds the algorithm version, exact sample rate, speed
-of sound, minimum distance, delay and output-horizon policies, microphone law,
+of sound, minimum distance, delay and output-horizon policies, uniform medium
+velocity and both bandwidths for retarded policies, microphone law,
 parameter authority, and all resource/amplitude ceilings. Input identity binds
 that configuration, ordered upstream identities, selected modal fields, source
 gains, every sample bit, every resolved source/listener pose, and optional room

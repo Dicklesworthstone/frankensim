@@ -10,8 +10,9 @@
 //! This is a parameterized production sound transform, not calibrated
 //! acoustics.  It does not claim BEM, HRTF, head shadowing, diffraction,
 //! occlusion, radiated pressure, absolute SPL, or a measured room response.
-//! The opt-in `RetardedSinc` delay policy reconstructs the Doppler source clock
-//! for admitted subsonic tracks; the two deposition policies do not.
+//! The opt-in retarded policies reconstruct the Doppler source clock for tracks
+//! subsonic relative to the declared medium, including uniform ambient flow;
+//! the two deposition policies do not.
 //! `PhysicallyParameterized` identifies parameter
 //! provenance; it does not promote any of those no-claims.
 
@@ -26,7 +27,7 @@ use crate::{audio_artifact::StereoSample, modal_synthesis::ModalStemFrame};
 mod retarded;
 
 /// Version of the geometry, delay, pan, directivity, and convolution semantics.
-pub const SPATIAL_AUDIO_ALGORITHM_VERSION: u32 = 2;
+pub const SPATIAL_AUDIO_ALGORITHM_VERSION: u32 = 3;
 /// Maximum frames between execution-scope cancellation polls.
 pub const SPATIAL_AUDIO_CANCELLATION_POLL_FRAMES: usize = 256;
 /// Hard source-count ceiling above caller-controlled budgets.
@@ -113,6 +114,24 @@ pub enum SpatialDelayPolicy {
         /// Must cover admitted Doppler expansion and geometric modulation.
         receiver_bandwidth_hz: f64,
     },
+    /// Receiver-clock reconstruction in a homogeneous, uniformly moving medium.
+    ///
+    /// Source and listener tracks remain laboratory positions. The causal ray
+    /// satisfies `|x_receiver(t) - x_source(tau) - U * (t-tau)| = c * (t-tau)`;
+    /// both endpoint velocities must be subsonic relative to `U`. Panning,
+    /// directivity, and the declared inverse-distance gain use this medium-frame
+    /// ray, not the laboratory displacement. The same finite-kernel and source
+    /// bandwidth requirements as [`Self::RetardedSinc`] apply. This adds no
+    /// convective pressure coefficient, shear/refraction, or moving-room model.
+    RetardedSincUniformFlow {
+        /// Declared dry-source bandwidth [Hz], at most one quarter sample rate.
+        source_bandwidth_hz: f64,
+        /// Declared received bandwidth [Hz], strictly below output Nyquist.
+        /// Must cover admitted Doppler expansion and geometric modulation.
+        receiver_bandwidth_hz: f64,
+        /// Constant medium velocity in the laboratory coordinate system [m/s].
+        medium_velocity_m_per_s: [f64; 3],
+    },
 }
 
 impl SpatialDelayPolicy {
@@ -121,11 +140,37 @@ impl SpatialDelayPolicy {
             Self::IntegerCeiling => 1,
             Self::LinearFloorCeil => 2,
             Self::RetardedSinc { .. } => 3,
+            Self::RetardedSincUniformFlow { .. } => 4,
         }
     }
 
     const fn is_retarded(self) -> bool {
-        matches!(self, Self::RetardedSinc { .. })
+        self.retarded_bands().is_some()
+    }
+
+    const fn retarded_bands(self) -> Option<(f64, f64)> {
+        match self {
+            Self::RetardedSinc {
+                source_bandwidth_hz,
+                receiver_bandwidth_hz,
+            }
+            | Self::RetardedSincUniformFlow {
+                source_bandwidth_hz,
+                receiver_bandwidth_hz,
+                ..
+            } => Some((source_bandwidth_hz, receiver_bandwidth_hz)),
+            Self::IntegerCeiling | Self::LinearFloorCeil => None,
+        }
+    }
+
+    const fn medium_velocity_m_per_s(self) -> [f64; 3] {
+        match self {
+            Self::RetardedSincUniformFlow {
+                medium_velocity_m_per_s,
+                ..
+            } => medium_velocity_m_per_s,
+            _ => [0.0; 3],
+        }
     }
 }
 
@@ -295,7 +340,7 @@ pub enum ListenerPoseTrack<'a> {
     /// One listener pose at every physical sample time.
     ///
     /// Deposition policies read emission-time poses and require the source
-    /// frame count. `RetardedSinc` reads reception-time poses; include enough
+    /// frame count. Retarded policies read reception-time poses; include enough
     /// poses to receive the final source sample, even when publication is clamped.
     PerFrame(&'a [ListenerPose]),
 }
@@ -370,7 +415,7 @@ impl SpatialAudioBudget {
 pub struct SpatialAudioConfig {
     /// Explicit output and input sample rate [Hz].
     pub sample_rate_hz: u32,
-    /// Declared propagation speed [m/s].
+    /// Declared propagation speed relative to the medium [m/s].
     pub speed_of_sound_m_per_s: f64,
     /// Clamp distance for the inverse-distance amplitude law [m].
     ///
@@ -512,7 +557,8 @@ pub struct SpatialAudioDiagnostics {
     pub natural_final_output_frames: u64,
     /// Natural tail frames intentionally omitted from publication.
     pub discarded_tail_frames: u64,
-    /// Largest actual source-listener distance encountered [m].
+    /// Largest propagation distance encountered [m]. In uniform flow this is
+    /// the acoustic path length in the medium frame, not laboratory separation.
     pub maximum_distance_m: f64,
     /// Largest sampled propagation delay encountered [frames].
     pub maximum_delay_frames: f64,
@@ -1309,7 +1355,8 @@ fn delay_tail_offset(
                 floor + 1.0
             }
         }
-        SpatialDelayPolicy::RetardedSinc { .. } => {
+        SpatialDelayPolicy::RetardedSinc { .. }
+        | SpatialDelayPolicy::RetardedSincUniformFlow { .. } => {
             return Err(invalid("retarded delays use receiver-clock reconstruction"));
         }
     };
@@ -1390,7 +1437,8 @@ fn deposit(
                 upper_accumulator.add(left * fraction, right * fraction);
             }
         }
-        SpatialDelayPolicy::RetardedSinc { .. } => {
+        SpatialDelayPolicy::RetardedSinc { .. }
+        | SpatialDelayPolicy::RetardedSincUniformFlow { .. } => {
             return Err(invalid("retarded signals cannot be deposited"));
         }
     }
@@ -1501,10 +1549,7 @@ fn validate_config(config: SpatialAudioConfig) -> Result<(), SpatialAudioError> 
     if !config.minimum_distance_m.is_finite() || config.minimum_distance_m <= 0.0 {
         return Err(invalid("positive finite minimum distance [m]"));
     }
-    if let SpatialDelayPolicy::RetardedSinc {
-        source_bandwidth_hz,
-        receiver_bandwidth_hz,
-    } = config.delay_policy
+    if let Some((source_bandwidth_hz, receiver_bandwidth_hz)) = config.delay_policy.retarded_bands()
     {
         let nyquist = 0.5 * f64::from(config.sample_rate_hz);
         if !source_bandwidth_hz.is_finite()
@@ -1518,6 +1563,11 @@ fn validate_config(config: SpatialAudioConfig) -> Result<(), SpatialAudioError> 
                 "retarded source band at most fs/4 and receiver band below Nyquist",
             ));
         }
+        validate_vec3(
+            config.delay_policy.medium_velocity_m_per_s(),
+            "uniform medium velocity [m/s]",
+            0,
+        )?;
     }
     if let MicrophoneDirectivity::Cardioid { rear_floor_gain } = config.microphone_directivity
         && (!rear_floor_gain.is_finite() || !(0.0..=1.0).contains(&rear_floor_gain))
@@ -1677,13 +1727,11 @@ fn config_identity(config: SpatialAudioConfig) -> ContentHash {
     hash_f64(&mut hasher, config.speed_of_sound_m_per_s);
     hash_f64(&mut hasher, config.minimum_distance_m);
     hasher.update(&[config.delay_policy.tag()]);
-    if let SpatialDelayPolicy::RetardedSinc {
-        source_bandwidth_hz,
-        receiver_bandwidth_hz,
-    } = config.delay_policy
+    if let Some((source_bandwidth_hz, receiver_bandwidth_hz)) = config.delay_policy.retarded_bands()
     {
         hash_f64(&mut hasher, source_bandwidth_hz);
         hash_f64(&mut hasher, receiver_bandwidth_hz);
+        hash_vec3(&mut hasher, config.delay_policy.medium_velocity_m_per_s());
     }
     hasher.update(&[config.output_horizon.tag()]);
     config.microphone_directivity.hash_into(&mut hasher);
@@ -2352,17 +2400,33 @@ mod tests {
         let signal: Vec<f64> = (0..count)
             .map(|i| (core::f64::consts::TAU * frequency * i as f64 / fs).sin())
             .collect();
-        for (source_velocity, receiver_velocity) in
-            [(64.0, -32.0), (-64.0, 32.0), (192.0, 192.0), (0.0, -32.0)]
-        {
+        for (source_velocity, receiver_velocity, flow_velocity) in [
+            (64.0, -32.0, 0.0),
+            (-64.0, 32.0, 0.0),
+            (192.0, 192.0, 0.0),
+            (0.0, -32.0, 0.0),
+            (0.0, 0.0, 128.0),
+            (0.0, 0.0, -128.0),
+            (64.0, -32.0, 32.0),
+            // Laboratory speeds exceed c, but both are subsonic in this air.
+            (320.0, 352.0, 384.0),
+        ] {
             let positions: Vec<[f64; 3]> = (0..count)
                 .map(|i| [0.0, 0.0, source_velocity * i as f64 / fs])
                 .collect();
             let listeners: Vec<ListenerPose> = (0..16_384)
                 .map(|i| listener_at([0.0, 0.0, separation + receiver_velocity * i as f64 / fs]))
                 .collect();
+            let mut cfg = retarded_config();
+            if flow_velocity != 0.0 {
+                cfg.delay_policy = SpatialDelayPolicy::RetardedSincUniformFlow {
+                    source_bandwidth_hz: 256.0,
+                    receiver_bandwidth_hz: 1_024.0,
+                    medium_velocity_m_per_s: [0.0, 0.0, flow_velocity],
+                };
+            }
             let output = render_single(
-                retarded_config(),
+                cfg,
                 &signal,
                 SourcePositionTrack::PerFrame(&positions),
                 ListenerPoseTrack::PerFrame(&listeners),
@@ -2372,8 +2436,9 @@ mod tests {
             let mut checked = 0;
             for (frame, sample) in output.samples().iter().enumerate() {
                 let reception = frame as f64 / fs;
-                let emission = (reception * (1.0 - receiver_velocity / c) - separation / c)
-                    / (1.0 - source_velocity / c);
+                let downstream_speed = c + flow_velocity;
+                let emission = (reception * (downstream_speed - receiver_velocity) - separation)
+                    / (downstream_speed - source_velocity);
                 if emission * fs < 32.0 || emission * fs > (count - 33) as f64 {
                     continue;
                 }
@@ -2381,7 +2446,7 @@ mod tests {
                     (core::f64::consts::TAU * frequency * emission).sin() * det::sqrt(0.5);
                 assert!(
                     (sample.left_fs - expected).abs() < 1.0e-4,
-                    "vs={source_velocity}, vr={receiver_velocity}, frame={frame}, got={}, expected={expected}",
+                    "vs={source_velocity}, vr={receiver_velocity}, U={flow_velocity}, frame={frame}, got={}, expected={expected}",
                     sample.left_fs
                 );
                 assert_eq!(sample.left_fs.to_bits(), sample.right_fs.to_bits());
@@ -2389,6 +2454,166 @@ mod tests {
             }
             assert!(checked > 1_000, "complete causal test window");
         }
+    }
+
+    /// G1: fixed laboratory endpoints retain their source frequency. Wind
+    /// changes transit time and the acoustic wave normal, including crosswind.
+    #[test]
+    fn uniform_flow_static_delay_and_direction_follow_the_acoustic_ray() {
+        let signal: Vec<f64> = (0..128).map(|i| (f64::from(i) * 0.1).sin()).collect();
+        let mut previous_identity = None;
+        for (wind, delay) in [(0.0, 768), (128.0, 512), (-128.0, 1_536)] {
+            let mut cfg = retarded_config();
+            cfg.delay_policy = SpatialDelayPolicy::RetardedSincUniformFlow {
+                source_bandwidth_hz: 256.0,
+                // Equal source and receiver bands admit stationary endpoints
+                // even when the wind is large: their Doppler ratio is one.
+                receiver_bandwidth_hz: 256.0,
+                medium_velocity_m_per_s: [0.0, 0.0, wind],
+            };
+            let output = render_single(
+                cfg,
+                &signal,
+                SourcePositionTrack::Static([0.0; 3]),
+                ListenerPoseTrack::Static(listener_at([0.0, 0.0, 24.0])),
+                None,
+            )
+            .unwrap();
+            assert_eq!(output.samples().len(), signal.len() + delay);
+            for (i, value) in signal.iter().copied().enumerate() {
+                assert_eq!(
+                    output.samples()[i + delay].left_fs.to_bits(),
+                    (value * det::sqrt(0.5)).to_bits()
+                );
+            }
+            assert_eq!(output.diagnostics().maximum_delay_frames, delay as f64);
+            if let Some(previous) = previous_identity {
+                assert_ne!(output.config_identity(), previous);
+            }
+            previous_identity = Some(output.config_identity());
+        }
+
+        let mut cfg = retarded_config();
+        cfg.delay_policy = SpatialDelayPolicy::RetardedSincUniformFlow {
+            source_bandwidth_hz: 0.0,
+            receiver_bandwidth_hz: 0.0,
+            medium_velocity_m_per_s: [192.0, 0.0, 0.0],
+        };
+        cfg.microphone_directivity = MicrophoneDirectivity::Cardioid {
+            rear_floor_gain: 0.0,
+        };
+        let listener = ListenerPose {
+            forward_unit: [0.0, 0.0, -1.0],
+            ..listener_at([0.0, 0.0, 2.0])
+        };
+        let output = render_single(
+            cfg,
+            &[1.0; 256],
+            SourcePositionTrack::Static([0.0; 3]),
+            ListenerPoseTrack::Static(listener),
+            None,
+        )
+        .unwrap();
+        // n = (-M, 0, sqrt(1-M^2)), not the laboratory +z direction.
+        let longitudinal = (1.0_f64 - 0.75_f64.powi(2)).sqrt();
+        let delay = 64.0 / longitudinal;
+        let sample = output.samples()[delay.ceil() as usize + 64];
+        let cardioid = 0.5 * (1.0 + longitudinal);
+        assert!((sample.left_fs - cardioid * 0.125_f64.sqrt()).abs() < 1.0e-12);
+        assert!((sample.right_fs - cardioid * 0.875_f64.sqrt()).abs() < 1.0e-12);
+        assert!((output.diagnostics().maximum_distance_m - 2.0 / longitudinal).abs() < 1.0e-12);
+    }
+
+    /// G3: a common Galilean boost changes neither clock nor observation ray.
+    #[test]
+    fn uniform_flow_common_boost_preserves_the_complete_waveform() {
+        let signal: Vec<f64> = (0..2_048).map(|i| (f64::from(i) * 0.0625).sin()).collect();
+        let source: Vec<[f64; 3]> = (0..signal.len())
+            .map(|i| [-4.0, 1.0, 64.0 * i as f64 / 8_192.0])
+            .collect();
+        let receiver: Vec<ListenerPose> = (0..16_384)
+            .map(|i| listener_at([1.0, 2.0, 64.0 - 32.0 * f64::from(i) / 8_192.0]))
+            .collect();
+        let original = render_single(
+            retarded_config(),
+            &signal,
+            SourcePositionTrack::PerFrame(&source),
+            ListenerPoseTrack::PerFrame(&receiver),
+            None,
+        )
+        .unwrap();
+        let boost = [512.0, -256.0, 128.0];
+        let boosted_source: Vec<[f64; 3]> = source
+            .iter()
+            .enumerate()
+            .map(|(i, p)| core::array::from_fn(|j| p[j] + boost[j] * i as f64 / 8_192.0))
+            .collect();
+        let boosted_receiver: Vec<ListenerPose> = receiver
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ListenerPose {
+                position_m: core::array::from_fn(|j| {
+                    p.position_m[j] + boost[j] * i as f64 / 8_192.0
+                }),
+                ..*p
+            })
+            .collect();
+        let mut cfg = retarded_config();
+        cfg.delay_policy = SpatialDelayPolicy::RetardedSincUniformFlow {
+            source_bandwidth_hz: 256.0,
+            receiver_bandwidth_hz: 1_024.0,
+            medium_velocity_m_per_s: boost,
+        };
+        let boosted = render_single(
+            cfg,
+            &signal,
+            SourcePositionTrack::PerFrame(&boosted_source),
+            ListenerPoseTrack::PerFrame(&boosted_receiver),
+            None,
+        )
+        .unwrap();
+        assert_eq!(boosted.samples(), original.samples());
+        assert_eq!(
+            boosted.diagnostics().maximum_delay_frames,
+            original.diagnostics().maximum_delay_frames
+        );
+    }
+
+    #[test]
+    fn uniform_flow_admission_uses_medium_relative_mach_and_bandwidth() {
+        let signal = [0.0; 64];
+        let mut cfg = retarded_config();
+        let moving: Vec<[f64; 3]> = (0..signal.len())
+            .map(|i| [0.0, 0.0, 192.0 * i as f64 / 8_192.0])
+            .collect();
+        let listener = ListenerPoseTrack::Static(listener_at([0.0, 0.0, 1.0]));
+        for wind in [-128.0, -32.0, 256.0] {
+            cfg.delay_policy = SpatialDelayPolicy::RetardedSincUniformFlow {
+                source_bandwidth_hz: 256.0,
+                receiver_bandwidth_hz: 1_024.0,
+                medium_velocity_m_per_s: [0.0, 0.0, wind],
+            };
+            // -128: source is supersonic relative to air. -32: the admitted
+            // receiver band cannot cover compression. +256: listener is sonic.
+            assert!(
+                render_single(
+                    cfg,
+                    &signal,
+                    SourcePositionTrack::PerFrame(&moving),
+                    listener,
+                    None
+                )
+                .is_err()
+            );
+        }
+        cfg.delay_policy = SpatialDelayPolicy::RetardedSincUniformFlow {
+            source_bandwidth_hz: 256.0,
+            receiver_bandwidth_hz: 1_024.0,
+            medium_velocity_m_per_s: [f64::NAN, 0.0, 0.0],
+        };
+        with_cx(false, |cx| {
+            assert!(OfflineSpatializer::try_new(cfg, cx).is_err());
+        });
     }
 
     #[test]
