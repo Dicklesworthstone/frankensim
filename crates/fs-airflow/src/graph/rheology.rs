@@ -27,6 +27,8 @@ use fs_sparse::precond::Precond;
 
 use super::{FixedPressure, GraphError, Sum, checkpoint, finite, periodic_checkpoint};
 
+/// Original-law self-heating of an explicit recirculating thermal inventory.
+pub mod thermal;
 pub mod transient;
 
 /// Original physical pipe and its oriented pressure ports.
