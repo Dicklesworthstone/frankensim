@@ -169,10 +169,12 @@ pub enum DuctError {
         /// Measured shear number.
         shear_number: f64,
     },
-    /// The low-`ka` radiation fit is invalid at this frequency.
+    /// The radiation load of the refusing model is invalid at this frequency.
     RadiationKaTooLarge {
         /// Measured `ka` at the radiating mouth.
         ka: f64,
+        /// The ceiling of the model that refused: [`MAX_RADIATION_KA`] for the unflanged low-`ka` fit, [`FLANGED_MAX_KA`] for the flanged load.
+        ceiling: f64,
     },
     /// A tabulated load was queried outside its frequency support.
     OutOfTable {
@@ -231,10 +233,9 @@ impl core::fmt::Display for DuctError {
                 "FS-DUCT-TOO-NARROW: shear number {shear_number:.2} below the wide-tube floor \
                  {MIN_SHEAR_NUMBER}"
             ),
-            DuctError::RadiationKaTooLarge { ka } => write!(
+            DuctError::RadiationKaTooLarge { ka, ceiling } => write!(
                 f,
-                "FS-DUCT-RADIATION-KA: ka = {ka:.3} beyond the low-ka fit ceiling \
-                 {MAX_RADIATION_KA}"
+                "FS-DUCT-RADIATION-KA: ka = {ka:.3} beyond the ceiling {ceiling} of the radiation load that refused"
             ),
             DuctError::OutOfTable {
                 omega,
@@ -1621,7 +1622,7 @@ fn termination_impedance_from_state(
         )),
         Termination::UnflangedOpen => {
             if ka > MAX_RADIATION_KA {
-                return Err(DuctError::RadiationKaTooLarge { ka });
+                return Err(DuctError::RadiationKaTooLarge { ka, ceiling: MAX_RADIATION_KA });
             }
             // Mass-like reactance is NEGATIVE imaginary under
             // e^{-i omega t} (the fs-bem pinned convention).
@@ -2978,6 +2979,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("FS-DUCT-RADIATION-KA"));
+        // D3: the refusal names the unflanged ceiling (1) and carries it.
+        assert!(matches!(err, DuctError::RadiationKaTooLarge { ceiling, .. } if ceiling == MAX_RADIATION_KA), "{err:?}");
+        assert!(err.to_string().contains("ceiling 1 "), "{err}");
         assert!(matches!(
             input_impedance(
                 &Duct { segments: vec![] },

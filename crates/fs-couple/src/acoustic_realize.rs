@@ -5950,6 +5950,7 @@ fn refuse_open_nyquist(
     if ka_nyquist > MAX_RADIATION_KA {
         return Err(AcousticRealizeError::Duct(DuctError::RadiationKaTooLarge {
             ka: ka_nyquist,
+            ceiling: MAX_RADIATION_KA,
         }));
     }
     Ok(())

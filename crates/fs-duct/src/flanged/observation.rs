@@ -80,7 +80,7 @@ impl FlangedModalObserver {
         let wavenumber_per_m = omega / exterior.sound_speed_m_s();
         let ka = wavenumber_per_m * radius_m;
         if !(ka <= FLANGED_MAX_KA) {
-            return Err(DuctError::RadiationKaTooLarge { ka }.into());
+            return Err(DuctError::RadiationKaTooLarge { ka, ceiling: FLANGED_MAX_KA }.into());
         }
         let volume_impedance = exterior.characteristic_impedance_pa_s_m()
             / (core::f64::consts::PI * radius_m * radius_m);

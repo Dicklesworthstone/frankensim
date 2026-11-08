@@ -377,7 +377,7 @@ fn flanged_modal_impedance_from_state(
     }
     let ka = omega / exterior.sound_speed_m_s() * radius;
     if !(ka <= FLANGED_MAX_KA) {
-        return Err(DuctError::RadiationKaTooLarge { ka });
+        return Err(DuctError::RadiationKaTooLarge { ka, ceiling: FLANGED_MAX_KA });
     }
     let z0 = exterior.density_kg_m3() * exterior.sound_speed_m_s()
         / (core::f64::consts::PI * radius * radius);
@@ -509,11 +509,11 @@ pub(crate) fn flanged_pipe_impedance_from_states(
     }
     let ka = omega / exterior.sound_speed_m_s() * radius;
     if !(ka <= FLANGED_MAX_KA) {
-        return Err(DuctError::RadiationKaTooLarge { ka });
+        return Err(DuctError::RadiationKaTooLarge { ka, ceiling: FLANGED_MAX_KA });
     }
     let internal_ka = omega / state.sound_speed_m_s() * radius;
     if !(internal_ka <= FLANGED_MAX_KA) {
-        return Err(DuctError::RadiationKaTooLarge { ka: internal_ka });
+        return Err(DuctError::RadiationKaTooLarge { ka: internal_ka, ceiling: FLANGED_MAX_KA });
     }
     let key = (
         radius.to_bits(),

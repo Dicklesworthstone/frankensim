@@ -188,7 +188,7 @@ fn flanged_refusals_fire_by_name() {
         let past =
             flanged_pipe_impedance(&gas, RADIUS, omega_of(&gas, FLANGED_MAX_KA + 1.0), modes);
         assert!(
-            matches!(past, Err(DuctError::RadiationKaTooLarge { ka }) if (ka - (FLANGED_MAX_KA + 1.0)).abs() < 1.0e-9),
+            matches!(past, Err(DuctError::RadiationKaTooLarge { ka, .. }) if (ka - (FLANGED_MAX_KA + 1.0)).abs() < 1.0e-9),
             "cap + 1 must refuse and name its ka: {past:?}"
         );
     }
@@ -204,6 +204,20 @@ fn flanged_refusals_fire_by_name() {
             flanged_pipe_impedance(&gas, radius, omega, FLANGED_MODES),
             Err(DuctError::BadParameter { .. })
         ));
+    }
+}
+
+/// D3 (MB 13958): the refusal names the ceiling of the model that refused. The flanged load prints and carries `FLANGED_MAX_KA`,
+/// not the unflanged `MAX_RADIATION_KA` (1) that the shared message used to print for it.
+#[test]
+fn flanged_refusal_names_the_flanged_ceiling_not_the_unflanged_one() {
+    let gas = air();
+    for modes in [FLANGED_MODES, FLANGED_MAX_MODES] {
+        let error = flanged_pipe_impedance(&gas, RADIUS, omega_of(&gas, FLANGED_MAX_KA + 0.5), modes).unwrap_err();
+        assert!(matches!(error, DuctError::RadiationKaTooLarge { ceiling, .. } if ceiling == FLANGED_MAX_KA), "{error:?}");
+        let text = error.to_string();
+        assert!(text.contains(&format!("ceiling {FLANGED_MAX_KA} ")), "{text}");
+        assert!(FLANGED_MAX_KA > crate::MAX_RADIATION_KA && !text.contains(&format!("ceiling {} ", crate::MAX_RADIATION_KA)), "{text}");
     }
 }
 
