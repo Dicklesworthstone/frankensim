@@ -819,6 +819,27 @@ potential, with caller-supplied source position and G M. Rocket environments
 reuse this owner. `UniformGravity` binds the existing acceleration to an explicit
 potential datum. Neither infers Earth, a radius, softening or a rotating frame.
 
+`gravity::UniformSphereGravity` adds an exact finite, uniform-density spherical
+source with explicit center, radius and G M. Outside the source it reuses the
+original central field by the shell theorem. Inside, acceleration is linear in
+distance from the center and potential is quadratic; the center has finite
+potential, zero acceleration and a finite isotropic gravity gradient. The point
+sample's analytic acceleration gradient supplies the same potential's Hessian
+to original deforming-solid quadrature and Newton tangents. At the declared
+density discontinuity the force and potential are continuous, while the tangent
+is explicitly the exterior one-sided value; no unique surface Hessian is claimed.
+
+Direct potential increments retain interior and surface-crossing work without
+subtracting two large absolute binding potentials. Existing superposition and
+native adaptive rigid motion consume the same field interfaces. Queries perform
+constant work without allocation. The rigid adapter samples the original target
+mass at its COM and supplies no finite-target gravity-gradient torque; distributed
+targets use their existing material quadrature. The spherical source is prescribed
+and stationary, with no source recoil, deformation or inferred material profile.
+`tests/gravity_sphere.rs` checks shell-theorem recovery, interior force/potential/
+tangent consistency and Poisson trace, surface behavior, retained work and native
+harmonic motion through the source center.
+
 `gravity::QuadrupoleSourceGravity` exposes a native extended source's original
 mass, full inertia and COM pose through the same potential/force correction and
 its analytic spatial derivative. A declared inertia-compatible source radius

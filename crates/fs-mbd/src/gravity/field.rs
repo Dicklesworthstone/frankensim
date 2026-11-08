@@ -11,6 +11,8 @@ use fs_ga::Mat3;
 
 mod source;
 pub use source::{QuadrupoleSourceExtent, QuadrupoleSourceGravity};
+mod sphere;
+pub use sphere::UniformSphereGravity;
 
 /// A conservative point sample in one declared inertial coordinate frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
