@@ -5596,6 +5596,24 @@ ledger together only after finite-response checks. G0/G1 tests cover atomic
 overflow refusal and retry, explicit zero viscosity, and stress/storage/heat/
 work parity between Mandel and tensor-shear histories.
 
+`TensorPronyHistory::advance_linearized` retains exact matrix-free forward and
+reverse derivatives of the original anisotropic Maxwell/Kelvin ramp. Both
+endpoints' tensor-shear strains, every original six-coordinate branch memory and
+independent log relaxation times participate; endpoint/mean stress, recoverable
+storage, work and independently integrated heat are differentiated. Original
+tensor factors and their directions remain fixed, including rank-deficient
+channels. A shared primal transaction preserves ordinary results; immutable
+tensors are shared by the linear-size tape, and Jacobian/transpose actions use
+caller buffers with atomic cancellation/refusal and no allocations or
+branch-count-squared matrices. Complete-history gradients require memory
+propagation and accumulation of endpoint-strain/log-time cotangents. Nonzero
+Kelvin viscosity requires positive duration for the full endpoint-gradient map;
+pure Maxwell/elastic zero-time jumps retain their exact limit. No factor,
+source, temperature or surrounding coupled-solver derivative is claimed. Six
+focused checks cover tensor-shear duality and actual-history finite differences,
+original-primal equality, independent heat integrals and weak/stiff limits,
+differentiated energy balance, and transactional refusals.
+
 `TensorProny::step_with_mean` exposes that same Mandel update's endpoint
 stress, exact interval-mean stress, signed step work and independently integrated
 step heat through `TensorPronyMandelStep`. The increments are returned before

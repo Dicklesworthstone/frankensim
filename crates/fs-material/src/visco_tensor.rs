@@ -16,6 +16,12 @@
 //! no measured-material, temperature-shift or fractional-lowering claim.
 use crate::{Tangent6, Voigt};
 use fs_math::det;
+use std::sync::Arc;
+
+/// Exact forward and reverse derivatives of the original tensor history.
+pub mod sensitivity;
+pub use sensitivity::{TensorPronyStepDerivative, TensorPronyStepDirection,
+    TensorPronyStepLinearization, TensorPronyStrainPullback};
 
 mod projection;
 pub use projection::{ProjectedPronyBranch, ProjectedTensorProny, ProjectedTensorTemperatureDerivative,
@@ -210,7 +216,7 @@ impl TensorProny {
     /// Virgin zero-strain, relaxed history. No state can be rebound to another law.
     pub fn history(&self) -> TensorPronyHistory {
         TensorPronyHistory {
-            model: self.clone(),
+            model: Arc::new(self.clone()),
             strain: [0.0; 6],
             stress: [0.0; 6],
             q: vec![[0.0; 6]; self.branches().len()],
@@ -324,7 +330,7 @@ pub struct TensorPronyStep {
 /// Private branch coordinates prevent shape/model mismatches and manual damage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorPronyHistory {
-    model: TensorProny, strain: Voigt, stress: Voigt, q: Vec<Voigt>,
+    model: Arc<TensorProny>, strain: Voigt, stress: Voigt, q: Vec<Voigt>,
     stored: f64, work: f64, heat: f64,
 }
 impl TensorPronyHistory {
@@ -347,7 +353,17 @@ impl TensorPronyHistory {
     /// changes; positive-duration ramps include its stress and dashpot heat.
     /// Cancellation/invalid input/overflow publishes no partial state.
     pub fn advance(&mut self, strain: Voigt, dt_s: f64,
-        mut cancelled: impl FnMut() -> bool) -> Result<TensorPronyStep> {
+        cancelled: impl FnMut() -> bool) -> Result<TensorPronyStep> {
+        self.advance_with_ramps(strain, dt_s, cancelled,
+            |r, _| crate::visco::PronyRamp::new(r))
+    }
+
+    // Both paths use this same primal transaction. The derivative path records
+    // the original branch coordinates while supplying the same ramp coefficients.
+    fn advance_with_ramps(&mut self, strain: Voigt, dt_s: f64,
+        mut cancelled: impl FnMut() -> bool,
+        mut prepare: impl FnMut(f64, &Voigt) -> crate::visco::PronyRamp,
+    ) -> Result<TensorPronyStep> {
         poll(&mut cancelled)?;
         let next_strain = mandel(&strain);
         if !dt_s.is_finite() || dt_s < 0.0 {
@@ -374,7 +390,7 @@ impl TensorPronyHistory {
             poll(&mut cancelled)?;
             let gram_rows = branch.resolved_gram_rows(factor);
             let d = apply(&gram_rows, &delta);
-            let ramp = crate::visco::PronyRamp::new(dt_s / branch.tau_s);
+            let ramp = prepare(dt_s / branch.tau_s, q);
             let mut mean_q = [0.0;6];
             for i in 0..6 {
                 let (next, mean, loss) = ramp.apply(q[i], d[i]);
