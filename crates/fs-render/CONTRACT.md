@@ -1256,6 +1256,13 @@ differentiable lift). Pure Rust throughout.
   placement remain explicit; no radiance eta factor, extra absorption or
   stochastic event probability is applied. Native scalar rendering consumes
   the final intensity source; it does not inherit the chain's Stokes history.
+  Source chains retain two positive, independent coherency factors internally,
+  applying precomputed native Jones responses without interference between
+  populations. This preserves finite-extinction leakage and weak Brewster
+  populations through later analyzers even when intermediate binary64 Stokes
+  I/Q round to equality. Public Stokes and calibrated power remain the original
+  interfaces. Exact authored cardinal axes avoid a trigonometric leakage floor;
+  arbitrary near-null field cancellation retains ordinary binary64 limits.
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear

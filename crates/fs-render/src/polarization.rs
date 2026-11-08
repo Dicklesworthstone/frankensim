@@ -11,6 +11,9 @@
 #[cfg(feature = "tracer")]
 pub mod dielectric;
 
+#[cfg(feature = "photometry")]
+mod source_coherency;
+
 /// A physical (possibly partially polarized) incoherent light state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stokes {
@@ -270,7 +273,8 @@ mod tests {
 pub mod photometry {
     //! Polarization optics connected to calibrated fixture spectra and lumens.
     //!
-    //! A chain retains the full Stokes state in each existing 380--780 nm bin.
+    //! A chain retains positive coherency factors in each existing 380--780 nm
+    //! bin and exposes their Stokes state. Independent populations never interfere.
     //! Only its final intensity is projected into a native `PhotometricSource`,
     //! so crossed polarizers extinguish light instead of independently halving it.
     //! The original source spectrum/flux remains the normalization reference.
@@ -288,18 +292,18 @@ pub mod photometry {
     use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricIor};
     use crate::photometry::source::{BIN_WIDTH_NM, PhotometricSource, SPECTRAL_BINS, SourceError, wavelength_nm};
     use crate::polarization::dielectric::spectral_fresnel_dielectric_polarized_borrowed;
+    use crate::polarization::source_coherency::{JonesResponse, SourceCoherency};
     use crate::polarization::{Mueller, Stokes};
+    use fs_math::c64::C64;
 
     /// Precomputed passive optics at the existing photometric quadrature bins.
     /// Construction is restricted to physical optical elements, not arbitrary
     /// caller-authored Mueller matrices. No per-ray matrix work is added.
     #[derive(Clone, Debug)]
     pub struct SpectralOptics {
+        responses: [JonesResponse; SPECTRAL_BINS],
+        #[cfg(test)]
         matrices: [Mueller; SPECTRAL_BINS],
-        // Native Fresnel/coherent-film matrices are diagonal Jones in their
-        // declared s/p frame. Their U/V block retains a weak channel that a
-        // generic Mueller intensity subtraction can round to exact darkness.
-        diagonal_jones: bool,
     }
 
     impl SpectralOptics {
@@ -315,8 +319,15 @@ pub mod photometry {
                 .any(|t| !t.is_finite() || !(0.0..=1.0).contains(t)) {
                 return Err(SourceError::InvalidFilter);
             }
-            let (s, c) = fs_math::det::sin_cos(2.0 * angle_rad.rem_euclid(PI));
+            let responses = core::array::from_fn(|bin| {
+                let (p, t) = (parallel[bin], perpendicular[bin]);
+                if p == t { JonesResponse::neutral(p) } else {
+                    JonesResponse::principal(angle_rad, [C64::from_re(p.sqrt()), C64::from_re(t.sqrt())])
+                }
+            });
+            #[cfg(test)]
             let matrices = core::array::from_fn(|bin| {
+                let (s, c) = fs_math::det::sin_cos(2.0 * angle_rad.rem_euclid(PI));
                 let (p, t) = (parallel[bin], perpendicular[bin]);
                 if p == t {
                     return Mueller(Mueller::IDENTITY.0.map(|row| row.map(|value| value * p)));
@@ -331,7 +342,7 @@ pub mod photometry {
                     [0.0, 0.0, 0.0, g],
                 ])
             });
-            Ok(Self { matrices, diagonal_jones: false })
+            Ok(Self { responses, #[cfg(test)] matrices })
         }
 
         /// Ideal achromatic polarizer. Unpolarized light loses half its power.
@@ -355,8 +366,13 @@ pub mod photometry {
             }
             // Reduce before doubling to avoid overflow for finite authored angles.
             let angle = angle_rad.rem_euclid(PI);
+            let responses = phase_rad.map(|phase| {
+                let (s, c) = fs_math::det::sin_cos(phase.rem_euclid(TAU));
+                JonesResponse::principal(angle, [C64::ONE, C64::new(c, s)])
+            });
+            #[cfg(test)]
             let matrices = phase_rad.map(|phase| Mueller::linear_retarder(angle, phase.rem_euclid(TAU)));
-            Ok(Self { matrices, diagonal_jones: false })
+            Ok(Self { responses, #[cfg(test)] matrices })
         }
 
         /// Phase-only, normal-incidence waveplate using two native spectral index
@@ -416,7 +432,7 @@ pub mod photometry {
                     DielectricEvent::Transmission => f.transmission,
                 };
             }
-            Ok(Self { matrices, diagonal_jones: true })
+            Ok(Self::from_diagonal_mueller(matrices))
         }
 
         /// Reflected power from the original metal optics, including any authored
@@ -439,14 +455,14 @@ pub mod photometry {
                 *matrix = optics.fresnel_mueller(wavelength, eta, incident_cosine)
                     .map_err(|_| SourceError::InvalidFilter)?;
             }
-            Ok(Self { matrices, diagonal_jones: true })
+            Ok(Self::from_diagonal_mueller(matrices))
         }
 
         /// Reflected power from an original ordered spectral stack on a metal.
         /// The borrowed layers are incident-side first and replace any coating
         /// already attached to `substrate`, matching the native stack owner.
         /// Full spectral data and s/p phase are evaluated only during construction;
-        /// the resulting optic owns fixed-size matrices and borrows no layer data.
+        /// the resulting optic owns fixed-size responses and borrows no layer data.
         /// Frames and outgoing placement follow `Self::conductor_reflection`.
         pub fn conductor_stack_reflection(
             incident_cosine: f64,
@@ -462,7 +478,7 @@ pub mod photometry {
                 *matrix = stack.fresnel_mueller(substrate, wavelength, eta, incident_cosine)
                     .map_err(|_| SourceError::InvalidFilter)?;
             }
-            Ok(Self { matrices, diagonal_jones: true })
+            Ok(Self::from_diagonal_mueller(matrices))
         }
 
         /// One coherent multilayer reflection/transmission channel between the
@@ -496,7 +512,11 @@ pub mod photometry {
                     DielectricEvent::Transmission => response.transmission,
                 };
             }
-            Ok(Self { matrices, diagonal_jones: true })
+            Ok(Self::from_diagonal_mueller(matrices))
+        }
+
+        fn from_diagonal_mueller(matrices: [Mueller; SPECTRAL_BINS]) -> Self {
+            Self { responses: matrices.map(JonesResponse::from_diagonal_mueller), #[cfg(test)] matrices }
         }
     }
 
@@ -506,6 +526,7 @@ pub mod photometry {
         reference: PhotometricSource,
         intensity: PhotometricSource,
         relative: [Stokes; SPECTRAL_BINS],
+        coherency: [SourceCoherency; SPECTRAL_BINS],
     }
 
     impl PolarizedSource {
@@ -513,7 +534,8 @@ pub mod photometry {
         #[must_use]
         pub fn unpolarized(source: PhotometricSource) -> Self {
             Self { intensity: source.clone(), reference: source,
-                relative: [Stokes::unpolarized(1.0); SPECTRAL_BINS] }
+                relative: [Stokes::unpolarized(1.0); SPECTRAL_BINS],
+                coherency: [SourceCoherency::UNPOLARIZED; SPECTRAL_BINS] }
         }
 
         /// Set normalized per-bin Stokes states. I must be exactly one so authored
@@ -526,25 +548,29 @@ pub mod photometry {
                 || Stokes::try_new(s.i, s.q, s.u, s.v).is_none()) {
                 return Err(SourceError::InvalidSpectrum);
             }
-            Ok(Self { intensity: source.clone(), reference: source, relative: normalized })
+            Ok(Self { intensity: source.clone(), reference: source, relative: normalized,
+                coherency: normalized.map(SourceCoherency::from_stokes) })
         }
 
         /// Apply the next optic without discarding Q/U/V or restoring lost flux.
         /// Uses bounded fixed-size work; failures leave the original unchanged.
         pub fn through(&self, optic: &SpectralOptics) -> Result<Self, SourceError> {
             let mut relative = self.relative;
+            let mut coherency = self.coherency;
             for (bin, state) in relative.iter_mut().enumerate() {
-                let transmitted = if optic.diagonal_jones {
-                    optic.matrices[bin].apply_diagonal_jones(*state)
-                } else {
-                    optic.matrices[bin].apply(*state)
-                };
+                coherency[bin] = coherency[bin].through(optic.responses[bin]);
+                let transmitted = coherency[bin].stokes();
                 *state = passive_roundoff(transmitted, state.i)?;
+                if transmitted.i > state.i {
+                    // Keep the retained factors consistent with a roundoff-only
+                    // passivity correction, without discarding their weak mode.
+                    coherency[bin].scale_power(state.i / transmitted.i);
+                }
             }
             // Project absolute surviving power only once relative to the ORIGINAL
             // spectrum. Normalizing Stokes after each element would erase extinction.
             let intensity = self.reference.filtered(relative.map(|s| s.i))?;
-            Ok(Self { reference: self.reference.clone(), intensity, relative })
+            Ok(Self { reference: self.reference.clone(), intensity, relative, coherency })
         }
 
         /// Per-bin Stokes power relative to the original source's spectral power.
@@ -727,6 +753,66 @@ pub mod photometry {
         }
 
         #[test]
+        fn crossed_finite_extinction_retains_minor_incoherent_population() {
+            for leakage in [1e-20, 1e-80, 1e-200] {
+                let first = SpectralOptics::linear_diattenuator(0.0,
+                    [1.0; SPECTRAL_BINS], [leakage; SPECTRAL_BINS]).unwrap();
+                let crossed = SpectralOptics::linear_diattenuator(PI / 2.0,
+                    [1.0; SPECTRAL_BINS], [leakage; SPECTRAL_BINS]).unwrap();
+                let input = source().with_unpolarized_optics().through(&first).unwrap();
+                // Public binary64 Stokes cannot represent this minor population.
+                // Its positive coherency factor must survive subsequent optics.
+                assert_eq!(input.relative_stokes()[0].i, input.relative_stokes()[0].q);
+                let neutral = SpectralOptics::neutral([0.3; SPECTRAL_BINS]).unwrap();
+                let retarder = SpectralOptics::linear_retarder(0.0, [1.7; SPECTRAL_BINS]).unwrap();
+                let output = input.through(&neutral).unwrap().through(&retarder).unwrap()
+                    .through(&crossed).unwrap();
+                for state in output.relative_stokes() {
+                    assert!((state.i / (0.3 * leakage) - 1.0).abs() < 1e-14);
+                    assert!((state.q / state.i).abs() < 1e-14);
+                    assert_eq!(state.u, 0.0);
+                    assert_eq!(state.v, 0.0);
+                }
+                assert!((output.intensity_source().flux_lm() / (300.0 * leakage) - 1.0)
+                    .abs() < 1e-13);
+                let direction = Vec3::new(0.0, 0.0, 1.0);
+                assert!((output.intensity_source().intensity_cd(direction).unwrap()
+                    / (300.0 * leakage / (4.0 * PI)) - 1.0).abs() < 1e-13);
+            }
+        }
+
+        #[test]
+        fn source_coherency_agrees_with_mueller_for_mixed_and_circular_light() {
+            let optics = [
+                SpectralOptics::linear_diattenuator(0.37,
+                    [0.8; SPECTRAL_BINS], [0.23; SPECTRAL_BINS]).unwrap(),
+                SpectralOptics::linear_retarder(-0.2, [1.4; SPECTRAL_BINS]).unwrap(),
+                SpectralOptics::conductor_reflection(0.45,
+                    CauchyIor::try_constant(1.0).unwrap(), &metal()).unwrap(),
+                SpectralOptics::linear_diattenuator(-0.91,
+                    [0.17; SPECTRAL_BINS], [0.71; SPECTRAL_BINS]).unwrap(),
+            ];
+            for (q, u, v) in [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0),
+                (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+                (0.0, 0.0, -1.0), (0.2, -0.4, 0.5)] {
+                let mut expected = [Stokes::try_new(1.0, q, u, v).unwrap(); SPECTRAL_BINS];
+                let mut output = PolarizedSource::try_new(source(), expected).unwrap();
+                for optic in &optics {
+                    output = output.through(optic).unwrap();
+                    for (bin, state) in expected.iter_mut().enumerate() {
+                        *state = optic.matrices[bin].apply(*state);
+                        let actual = output.relative_stokes()[bin];
+                        for (a, b) in [actual.i, actual.q, actual.u, actual.v]
+                            .into_iter().zip([state.i, state.q, state.u, state.v]) {
+                            assert!((a - b).abs() < 2e-13);
+                        }
+                        assert!(actual.degree() <= 1.0 + 16.0 * f64::EPSILON);
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn neutral_filter_matches_native_spectral_calibration() {
             let transmission = core::array::from_fn(|bin| (bin + 1) as f64 / SPECTRAL_BINS as f64);
             let original = source();
@@ -826,6 +912,11 @@ pub mod photometry {
                 }
                 assert!((output.intensity_source().flux_lm() / (1000.0 * expected) - 1.0)
                     .abs() < 2e-6);
+                let analyzer = SpectralOptics::linear_polarizer(PI / 2.0).unwrap();
+                let mixed = source().with_unpolarized_optics().through(&optic).unwrap()
+                    .through(&analyzer).unwrap();
+                assert!((mixed.intensity_source().flux_lm() / (500.0 * expected) - 1.0)
+                    .abs() < 2e-6);
                 // Reusing the same original source must not normalize this
                 // very weak surviving signal back to the source's old flux.
                 let twice = output.through(&optic).unwrap();
@@ -863,6 +954,11 @@ pub mod photometry {
                     assert_eq!(state.q, -state.i);
                 }
                 assert!((output.intensity_source().flux_lm() / (1000.0 * expected) - 1.0)
+                    .abs() < 2e-6);
+                let analyzer = SpectralOptics::linear_polarizer(PI / 2.0).unwrap();
+                let mixed = source().with_unpolarized_optics().through(&optic).unwrap()
+                    .through(&analyzer).unwrap();
+                assert!((mixed.intensity_source().flux_lm() / (500.0 * expected) - 1.0)
                     .abs() < 2e-6);
             }
         }
