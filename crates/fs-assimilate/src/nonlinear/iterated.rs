@@ -31,23 +31,17 @@ const MAX_ITERATIONS: usize = 256;
 const MAX_EVALUATIONS: usize = 65_536;
 const ARMIJO: f64 = 1.0e-4;
 
-/// A fixed set of scalar readings with explicitly independent Gaussian noise.
-/// Rows and model outputs use declaration order; independence is a caller
-/// assumption. Shared calibration must be represented in the state or handled
-/// by the correlated-noise APIs, never silently discarded here.
+// Checked row metadata shared by the explicitly distinct noise models below.
 #[derive(Debug, Clone, PartialEq)]
-pub struct IndependentMeasurements {
+struct MeasurementRows {
     readings: Vec<f64>,
     variances: Vec<f64>,
     instruments: Vec<String>,
     model_id: String,
 }
 
-impl IndependentMeasurements {
-    /// Admit finite readings, strictly positive variances, and unique instrument
-    /// identities. `model_id` identifies the caller's pure prediction/Jacobian
-    /// implementation; it does not authenticate arbitrary callback code.
-    pub fn new(
+impl MeasurementRows {
+    fn new(
         readings: Vec<f64>,
         variances: Vec<f64>,
         instruments: Vec<String>,
@@ -91,11 +85,36 @@ impl IndependentMeasurements {
             model_id,
         })
     }
+}
+
+/// A fixed set of scalar readings with explicitly independent Gaussian noise.
+/// Rows and model outputs use declaration order; independence is a caller
+/// assumption. Shared calibration must be represented in the state or handled
+/// by [`CorrelatedMeasurements`], never silently discarded here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndependentMeasurements {
+    rows: MeasurementRows,
+}
+
+impl IndependentMeasurements {
+    /// Admit finite readings, strictly positive variances, and unique instrument
+    /// identities. `model_id` identifies the caller's pure prediction/Jacobian
+    /// implementation; it does not authenticate arbitrary callback code.
+    pub fn new(
+        readings: Vec<f64>,
+        variances: Vec<f64>,
+        instruments: Vec<String>,
+        model_id: impl Into<String>,
+    ) -> Result<Self, AssimError> {
+        Ok(Self {
+            rows: MeasurementRows::new(readings, variances, instruments, model_id)?,
+        })
+    }
 
     /// Number of observed scalars, also the required model/Jacobian row count.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.readings.len()
+        self.rows.readings.len()
     }
     /// Admitted batches are never empty.
     #[must_use]
@@ -105,8 +124,101 @@ impl IndependentMeasurements {
     /// Caller-declared model identity retained in the result identity.
     #[must_use]
     pub fn model_id(&self) -> &str {
-        &self.model_id
+        &self.rows.model_id
     }
+}
+
+/// A fixed nonlinear measurement batch with a declared full Gaussian noise
+/// covariance. Covariance rows, readings and model outputs share declaration
+/// order. Shared reference/calibration errors remain in the joint likelihood.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrelatedMeasurements {
+    rows: MeasurementRows,
+    covariance: Vec<Vec<f64>>,
+    cholesky: Vec<Vec<f64>>,
+}
+
+impl CorrelatedMeasurements {
+    /// Admit the complete covariance through the same interval-PSD and strict
+    /// Cholesky gates used by the existing correlated linear update. The factor
+    /// is prepared once and reused for every residual and Jacobian evaluation.
+    /// Singular/unresolved covariance refuses; no jitter or diagonal surrogate
+    /// is substituted. The declared covariance is a model assumption.
+    pub fn new(
+        readings: Vec<f64>,
+        covariance: Vec<Vec<f64>>,
+        instruments: Vec<String>,
+        model_id: impl Into<String>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, AssimError> {
+        let count = readings.len();
+        if covariance.len() != count {
+            return Err(AssimError::ObservationCovarianceDimensionMismatch {
+                observations: count,
+                rows: covariance.len(),
+            });
+        }
+        let mut variances = Vec::with_capacity(count.min(MAX_ROWS));
+        if count > MAX_ROWS {
+            return Err(AssimError::ObservationCountLimit {
+                count,
+                max: MAX_ROWS,
+            });
+        }
+        for (index, row) in covariance.iter().enumerate() {
+            if row.len() != count {
+                return Err(AssimError::ObservationCovarianceRowDimensionMismatch {
+                    row: index,
+                    expected: count,
+                    actual: row.len(),
+                });
+            }
+            variances.push(row[index]);
+        }
+        let rows = MeasurementRows::new(readings, variances, instruments, model_id)?;
+        let (_, cholesky) =
+            crate::robust::checked_covariance_factor(&covariance, &rows.variances, cx)?;
+        Ok(Self {
+            rows,
+            covariance,
+            cholesky,
+        })
+    }
+
+    /// Number of observed scalars and required prediction/Jacobian rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.readings.len()
+    }
+    /// Admitted batches are never empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+    /// Caller-declared model identity.
+    #[must_use]
+    pub fn model_id(&self) -> &str {
+        &self.rows.model_id
+    }
+    /// Full covariance in measurement declaration order.
+    #[must_use]
+    pub fn covariance(&self) -> &[Vec<f64>] {
+        &self.covariance
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Noise<'a> {
+    Independent,
+    Correlated {
+        covariance: &'a [Vec<f64>],
+        cholesky: &'a [Vec<f64>],
+    },
+}
+
+struct MeasurementModel<'a> {
+    rows: &'a MeasurementRows,
+    noise: Noise<'a>,
 }
 
 /// One model evaluation. The caller may use analytic derivatives, `fs-ad`, or
@@ -256,6 +368,61 @@ pub fn assimilate_iterated<F>(
     prior: &Belief,
     measurements: &IndependentMeasurements,
     settings: IteratedSettings,
+    model: F,
+    cx: &Cx<'_>,
+) -> Result<IteratedAssimilation, AssimError>
+where
+    F: FnMut(&[f64], &Cx<'_>) -> Result<ModelEvaluation, AssimError>,
+{
+    assimilate_model(
+        prior,
+        MeasurementModel {
+            rows: &measurements.rows,
+            noise: Noise::Independent,
+        },
+        settings,
+        model,
+        cx,
+    )
+}
+
+/// Fit one nonlinear batch using its full, fixed Gaussian noise covariance.
+///
+/// Every evaluation whitens both residuals and Jacobian rows through the same
+/// admitted factor, so the objective is `0.5 z'z + 0.5 (y-h)' R^-1 (y-h)`.
+/// The original prior and all stopping/cancellation semantics of
+/// [`assimilate_iterated`] are retained. Row permutations with matching model
+/// and covariance permutations describe the same statistical problem, but
+/// Cholesky rounding and receipt identities need not be bit-identical.
+pub fn assimilate_correlated_iterated<F>(
+    prior: &Belief,
+    measurements: &CorrelatedMeasurements,
+    settings: IteratedSettings,
+    model: F,
+    cx: &Cx<'_>,
+) -> Result<IteratedAssimilation, AssimError>
+where
+    F: FnMut(&[f64], &Cx<'_>) -> Result<ModelEvaluation, AssimError>,
+{
+    assimilate_model(
+        prior,
+        MeasurementModel {
+            rows: &measurements.rows,
+            noise: Noise::Correlated {
+                covariance: &measurements.covariance,
+                cholesky: &measurements.cholesky,
+            },
+        },
+        settings,
+        model,
+        cx,
+    )
+}
+
+fn assimilate_model<F>(
+    prior: &Belief,
+    measurements: MeasurementModel<'_>,
+    settings: IteratedSettings,
     mut model: F,
     cx: &Cx<'_>,
 ) -> Result<IteratedAssimilation, AssimError>
@@ -264,8 +431,9 @@ where
 {
     settings.validate()?;
     let n = prior.dim();
-    let m = measurements.len();
+    let m = measurements.rows.readings.len();
     let (nu, mu, ev) = (n as u128, m as u128, settings.max_model_evaluations as u128);
+    let correlated = matches!(measurements.noise, Noise::Correlated { .. });
     // Charge each reused factor kernel's conservative envelope to this ONE
     // accountant before calling it. Its own local admission must not reissue
     // the workflow's remaining cost/poll allowance at every nonlinear iterate.
@@ -277,16 +445,19 @@ where
         + (settings.max_iterations as u128 + 1) * sequence_work(n, m)?;
     let work = ev * (8 * mu * nu * nu + 64 * mu * nu + 64 * nu + 256)
         + (settings.max_iterations as u128 + 2) * (32 * mu * nu + 64 * nu + 256)
-        + kernels;
+        + kernels
+        + u128::from(correlated) * ev * (8 * mu * mu * (nu + 1) + 32 * mu + 128);
     let bytes = ev * (32 * mu * nu + 32 * mu + 32 * nu + 64)
         + 32 * nu * nu
         + 4096
+        + u128::from(correlated) * (8 * mu * mu + 128)
         + measurements
+            .rows
             .instruments
             .iter()
             .map(|s| s.len() as u128 + 8)
             .sum::<u128>()
-        + measurements.model_id.len() as u128;
+        + measurements.rows.model_id.len() as u128;
     let mut progress = WorkProgress::new(cx, WorkPlan::checked(0, 0, 0, work, 0, 0, bytes)?)?;
     progress.checkpoint("iterated nonlinear admission")?;
     progress.scalar("nonlinear prior factor allowance", construction)?;
@@ -308,19 +479,43 @@ where
     }
     progress.scalar("nonlinear standard prior allowance", construction)?;
     let standard = FactorBelief::diagonal(vec![0.0; n], &vec![1.0; n], cx)?;
-    let mut hash = DomainHasher::new("org.frankensim.fs-assimilate.iterated-nonlinear.v1");
+    let (domain, receipt_prefix) = if correlated {
+        (
+            "org.frankensim.fs-assimilate.iterated-correlated.v1",
+            "iterated-correlated:v1:",
+        )
+    } else {
+        (
+            "org.frankensim.fs-assimilate.iterated-nonlinear.v1",
+            "iterated-nonlinear:v1:",
+        )
+    };
+    let mut hash = DomainHasher::new(domain);
     hash_belief(&mut hash, prior, &mut progress)?;
-    hash_bytes(&mut hash, measurements.model_id.as_bytes(), &mut progress)?;
+    hash_bytes(
+        &mut hash,
+        measurements.rows.model_id.as_bytes(),
+        &mut progress,
+    )?;
     hash_u64(&mut hash, m as u64, &mut progress)?;
     for ((&reading, &variance), instrument) in measurements
+        .rows
         .readings
         .iter()
-        .zip(&measurements.variances)
-        .zip(&measurements.instruments)
+        .zip(&measurements.rows.variances)
+        .zip(&measurements.rows.instruments)
     {
         hash_f64(&mut hash, reading, &mut progress)?;
         hash_f64(&mut hash, variance, &mut progress)?;
         hash_bytes(&mut hash, instrument.as_bytes(), &mut progress)?;
+    }
+    if let Noise::Correlated { covariance, .. } = measurements.noise {
+        hash_bytes(&mut hash, b"fixed-noise:strict-cholesky-v1", &mut progress)?;
+        for row in covariance {
+            for &value in row {
+                hash_f64(&mut hash, value, &mut progress)?;
+            }
+        }
     }
     for count in [
         settings.max_iterations,
@@ -338,7 +533,7 @@ where
         prior,
         &root,
         &z,
-        measurements,
+        &measurements,
         &mut model,
         cx,
         &mut progress,
@@ -354,7 +549,7 @@ where
         if gradient_norm <= settings.gradient_tolerance {
             // Recompute the covariance at the accepted Jacobian with the
             // ORIGINAL standard prior, then transport with the existing root owner.
-            let local = affine_posterior(&standard, &z, &point, measurements, cx, &mut progress)?;
+            let local = affine_posterior(&standard, &z, &point, &measurements, cx, &mut progress)?;
             progress.scalar("nonlinear covariance publication allowance", publication)?;
             let zero_noise = FactorBelief::diagonal(vec![0.0; n], &vec![0.0; n], cx)?;
             let transform = LinearDynamics::new(
@@ -377,7 +572,7 @@ where
         if evaluations >= settings.max_model_evaluations {
             break IteratedOutcome::EvaluationLimit;
         }
-        let proposal = affine_posterior(&standard, &z, &point, measurements, cx, &mut progress)?;
+        let proposal = affine_posterior(&standard, &z, &point, &measurements, cx, &mut progress)?;
         let direction = proposal
             .mean()
             .iter()
@@ -409,7 +604,7 @@ where
                 prior,
                 &root,
                 &trial,
-                measurements,
+                &measurements,
                 &mut model,
                 cx,
                 &mut progress,
@@ -455,7 +650,7 @@ where
         trace,
         evaluations,
         rejected,
-        receipt_id: format!("iterated-nonlinear:v1:{}", hash.finalize()),
+        receipt_id: format!("{receipt_prefix}{}", hash.finalize()),
     })
 }
 
@@ -464,7 +659,7 @@ fn evaluate<F>(
     prior: &Belief,
     root: &[Vec<f64>],
     z: &[f64],
-    measurements: &IndependentMeasurements,
+    measurements: &MeasurementModel<'_>,
     model: &mut F,
     cx: &Cx<'_>,
     progress: &mut WorkProgress<'_, '_>,
@@ -499,14 +694,12 @@ where
         return Ok(None);
     };
     hash_u64(hash, 1, progress)?;
-    if predictions.len() != measurements.len()
-        || jacobian.len() != measurements.len()
+    if predictions.len() != measurements.rows.readings.len()
+        || jacobian.len() != measurements.rows.readings.len()
         || jacobian.iter().any(|row| row.len() != n)
     {
         return Err(invalid("nonlinear prediction/Jacobian shape"));
     }
-    let mut gradient = z.to_vec();
-    let mut objective = 0.5 * dot(z, z, progress)?;
     let mut residual = Vec::with_capacity(predictions.len());
     let mut transformed = Vec::with_capacity(predictions.len());
     for (i, (&prediction, row)) in predictions.iter().zip(&jacobian).enumerate() {
@@ -518,12 +711,10 @@ where
             }
             hash_f64(hash, entry, progress)?;
         }
-        let sigma = measurements.variances[i].sqrt();
         let r = finite(
-            (measurements.readings[i] - prediction) / sigma,
-            "nonlinear standardized residual",
+            measurements.rows.readings[i] - prediction,
+            "nonlinear measurement residual",
         )?;
-        objective = finite(objective + 0.5 * r * r, "nonlinear objective")?;
         let mut j = vec![0.0; n];
         for column in 0..n {
             for k in 0..=column {
@@ -533,12 +724,19 @@ where
                 )?;
                 progress.scalar("nonlinear Jacobian transform", 2)?;
             }
-            j[column] = finite(j[column] / sigma, "nonlinear scaled Jacobian")?;
-            gradient[column] = finite(gradient[column] - j[column] * r, "nonlinear gradient")?;
-            progress.scalar("nonlinear gradient", 3)?;
         }
         residual.push(r);
         transformed.push(j);
+    }
+    whiten(measurements, &mut residual, &mut transformed, progress)?;
+    let mut gradient = z.to_vec();
+    let mut objective = 0.5 * dot(z, z, progress)?;
+    for (&r, row) in residual.iter().zip(&transformed) {
+        objective = finite(objective + 0.5 * r * r, "nonlinear objective")?;
+        for (component, &entry) in row.iter().enumerate() {
+            gradient[component] = finite(gradient[component] - entry * r, "nonlinear gradient")?;
+            progress.scalar("nonlinear gradient", 2)?;
+        }
     }
     Ok(Some(Point {
         state,
@@ -549,15 +747,67 @@ where
     }))
 }
 
+fn whiten(
+    measurements: &MeasurementModel<'_>,
+    residual: &mut [f64],
+    jacobian: &mut [Vec<f64>],
+    progress: &mut WorkProgress<'_, '_>,
+) -> Result<(), AssimError> {
+    match measurements.noise {
+        Noise::Independent => {
+            for (i, row) in jacobian.iter_mut().enumerate() {
+                let sigma = measurements.rows.variances[i].sqrt();
+                residual[i] = finite(residual[i] / sigma, "nonlinear standardized residual")?;
+                for value in row.iter_mut() {
+                    *value = finite(*value / sigma, "nonlinear scaled Jacobian")?;
+                    progress.scalar("nonlinear noise scaling", 1)?;
+                }
+            }
+        }
+        Noise::Correlated { cholesky, .. } => {
+            for (i, factor_row) in cholesky.iter().enumerate() {
+                progress.checkpoint("nonlinear correlated whitening")?;
+                let (previous_rows, current) = jacobian.split_at_mut(i);
+                let current = &mut current[0];
+                for (previous, &coefficient) in factor_row[..i].iter().enumerate() {
+                    residual[i] = finite(
+                        (-coefficient).mul_add(residual[previous], residual[i]),
+                        "nonlinear correlated residual",
+                    )?;
+                    for (entry, &prior_entry) in current.iter_mut().zip(&previous_rows[previous]) {
+                        *entry = finite(
+                            (-coefficient).mul_add(prior_entry, *entry),
+                            "nonlinear correlated Jacobian",
+                        )?;
+                    }
+                    progress.scalar(
+                        "nonlinear correlated whitening",
+                        (current.len() + 1) as u128,
+                    )?;
+                }
+                residual[i] = finite(residual[i] / factor_row[i], "nonlinear correlated residual")?;
+                for entry in current.iter_mut() {
+                    *entry = finite(*entry / factor_row[i], "nonlinear correlated Jacobian")?;
+                }
+                progress.scalar(
+                    "nonlinear correlated whitening",
+                    (current.len() + 1) as u128,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn affine_posterior(
     standard: &FactorBelief,
     z: &[f64],
     point: &Point,
-    measurements: &IndependentMeasurements,
+    measurements: &MeasurementModel<'_>,
     cx: &Cx<'_>,
     progress: &mut WorkProgress<'_, '_>,
 ) -> Result<FactorBelief, AssimError> {
-    let mut observations = Vec::with_capacity(measurements.len());
+    let mut observations = Vec::with_capacity(measurements.rows.readings.len());
     for (i, row) in point.jacobian.iter().enumerate() {
         progress.checkpoint("nonlinear affine row")?;
         // A zero Jacobian adds a constant likelihood term, already in the
@@ -573,7 +823,7 @@ fn affine_posterior(
             row.clone(),
             value,
             1.0,
-            measurements.instruments[i].clone(),
+            measurements.rows.instruments[i].clone(),
         )?);
     }
     if observations.is_empty() {

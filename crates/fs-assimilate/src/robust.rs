@@ -284,64 +284,17 @@ impl ObservationBatch {
             }
         }
 
-        let available: Vec<&Observation> = records
+        let variances: Vec<f64> = records
             .iter()
             .filter_map(|record| match &record.state {
-                ObservationState::Available(observation) => Some(observation),
+                ObservationState::Available(observation) => Some(observation.noise_var()),
                 ObservationState::Missing { .. }
                 | ObservationState::Censored { .. }
                 | ObservationState::Saturated { .. }
                 | ObservationState::Delayed { .. } => None,
             })
             .collect();
-        if available.len() > MAX_CORRELATED_OBSERVATIONS {
-            return Err(AssimError::ObservationCountLimit {
-                count: available.len(),
-                max: MAX_CORRELATED_OBSERVATIONS,
-            });
-        }
-        validate_covariance_shape(&covariance, available.len())?;
-        let mut diagonal = true;
-        for (row_index, row) in covariance.iter().enumerate() {
-            for (column_index, value) in row.iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(AssimError::NonFiniteObservationCovariance {
-                        row: row_index,
-                        column: column_index,
-                    });
-                }
-                if row_index != column_index && canonical_f64_bits(*value) != 0 {
-                    diagonal = false;
-                }
-            }
-            if canonical_f64_bits(row[row_index])
-                != canonical_f64_bits(available[row_index].noise_var())
-            {
-                return Err(AssimError::ObservationCovarianceNoiseMismatch { index: row_index });
-            }
-        }
-        for row in 0..covariance.len() {
-            for (column, column_row) in covariance.iter().enumerate().skip(row + 1) {
-                if canonical_f64_bits(covariance[row][column])
-                    != canonical_f64_bits(column_row[row])
-                {
-                    return Err(AssimError::NonSymmetricObservationCovariance { row, column });
-                }
-            }
-        }
-        if !covariance.is_empty() {
-            match Belief::new(vec![0.0; covariance.len()], covariance.clone(), cx) {
-                Ok(_) => {}
-                Err(AssimError::CovarianceNotPositiveSemidefinite) => {
-                    return Err(AssimError::ObservationCovarianceNotPositiveSemidefinite);
-                }
-                Err(AssimError::CovarianceCertificationUnresolved) => {
-                    return Err(AssimError::ObservationCovarianceCertificationUnresolved);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let cholesky = strict_cholesky(&covariance, cx)?;
+        let (diagonal, cholesky) = checked_covariance_factor(&covariance, &variances, cx)?;
         Ok(Self {
             records,
             covariance,
@@ -629,6 +582,65 @@ pub fn assimilate_observation_batch(
     cx.checkpoint()
         .map_err(|_| robust_cancelled("robust publication", 1, 2))?;
     Ok(result)
+}
+
+/// Admit a bounded observation covariance and retain its strict lower factor.
+///
+/// `variances` supplies the already-checked scalar noise authority in declaration
+/// order. The validation order and errors are shared by linear and nonlinear
+/// callers: row count, shape, finite entries and diagonal agreement, exact
+/// symmetry, PSD certification, then strict Cholesky. Empty noise blocks are
+/// allowed for robust batches containing only unavailable records.
+pub(crate) fn checked_covariance_factor(
+    covariance: &[Vec<f64>],
+    variances: &[f64],
+    cx: &Cx<'_>,
+) -> Result<(bool, Vec<Vec<f64>>), AssimError> {
+    if variances.len() > MAX_CORRELATED_OBSERVATIONS {
+        return Err(AssimError::ObservationCountLimit {
+            count: variances.len(),
+            max: MAX_CORRELATED_OBSERVATIONS,
+        });
+    }
+    validate_covariance_shape(covariance, variances.len())?;
+    let mut diagonal = true;
+    for (row_index, row) in covariance.iter().enumerate() {
+        for (column_index, value) in row.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(AssimError::NonFiniteObservationCovariance {
+                    row: row_index,
+                    column: column_index,
+                });
+            }
+            if row_index != column_index && canonical_f64_bits(*value) != 0 {
+                diagonal = false;
+            }
+        }
+        if canonical_f64_bits(row[row_index]) != canonical_f64_bits(variances[row_index]) {
+            return Err(AssimError::ObservationCovarianceNoiseMismatch { index: row_index });
+        }
+    }
+    for row in 0..covariance.len() {
+        for (column, column_row) in covariance.iter().enumerate().skip(row + 1) {
+            if canonical_f64_bits(covariance[row][column]) != canonical_f64_bits(column_row[row]) {
+                return Err(AssimError::NonSymmetricObservationCovariance { row, column });
+            }
+        }
+    }
+    if !covariance.is_empty() {
+        match Belief::new(vec![0.0; covariance.len()], covariance.to_vec(), cx) {
+            Ok(_) => {}
+            Err(AssimError::CovarianceNotPositiveSemidefinite) => {
+                return Err(AssimError::ObservationCovarianceNotPositiveSemidefinite);
+            }
+            Err(AssimError::CovarianceCertificationUnresolved) => {
+                return Err(AssimError::ObservationCovarianceCertificationUnresolved);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let cholesky = strict_cholesky(covariance, cx)?;
+    Ok((diagonal, cholesky))
 }
 
 fn validate_covariance_shape(

@@ -109,6 +109,12 @@ linear-Gaussian core of weak-constraint assimilation.
   explicit `OutsideDomain` trial refusal. Analytic, AD, and adjoint Jacobians
   are accepted through the same callback; their correctness remains the
   model owner's responsibility.
+- `nonlinear::iterated::CorrelatedMeasurements` — the same bounded, uniquely
+  identified nonlinear rows with a fixed full Gaussian observation covariance.
+  Construction reuses robust linear assimilation's exact-symmetry,
+  interval-PSD, and strict-Cholesky admission. The noise factor is prepared
+  once; singular or unresolved covariance refuses without diagonalization or
+  jitter. A model row may have zero local sensitivity.
 - `nonlinear::iterated::assimilate_iterated` — prior-whitened, damped
   Gauss–Newton estimation using the existing UD observation and square-root
   prediction kernels. Every proposal starts from the original prior, so
@@ -117,6 +123,11 @@ linear-Gaussian core of weak-constraint assimilation.
   `IteratedOutcome::Stationary` publishes a local Gaussian approximation;
   iteration/evaluation limits and stalled searches retain the last accepted
   state, objective trace, and content receipt, with no posterior.
+- `nonlinear::iterated::assimilate_correlated_iterated` — the same damped
+  estimator with joint correlated likelihood. Both the residual vector and
+  every Jacobian column are solved through the retained noise factor on every
+  model evaluation. Shared calibration covariance therefore participates in
+  the proposal, actual objective, gradient, and final local covariance.
 - `assimilate_colored(&Belief, &[Observation], regime_param, lo, hi, &Cx) ->
   AssimilatedPosterior { belief, color, misfit_before, misfit_after }` — a
   read-only, regime-tagged **estimated candidate**. Access is through getters.
@@ -374,6 +385,11 @@ linear-Gaussian core of weak-constraint assimilation.
   `iterated-nonlinear:v1:<64 lowercase hex>` binds the prior, ordered batch,
   numerical settings, every evaluated state and returned model/Jacobian
   (including rejected trials), stopping outcome, accepted trace, and posterior.
+  For correlated batches, `R=C C^T` replaces the scalar division by a triangular
+  solve: the measurement objective is `0.5 ||C^-1(y-h(m+Lz))||^2`, and the
+  transformed Jacobian is `C^-1 H L`. The same original `R` and prior are used
+  throughout. `iterated-correlated:v1:<64 lowercase hex>` additionally binds
+  the full declared covariance and whitening policy in a separate domain.
 - The candidate's `Color::Estimated.estimator` is
   `assimilation-candidate:v4:<64 lowercase hex>`. Its BLAKE3 input uses typed
   length framing and binds the full prior, canonical observation multiset
@@ -476,6 +492,9 @@ purity or prove that two callbacks sharing an identity are equivalent.
 Iterated batches likewise retain declaration order for model and Jacobian rows.
 Their replay guarantee requires the same deterministic callback and execution
 manifest; there is no cross-toolchain or measurement-permutation bit guarantee.
+For correlated batches, permuting readings requires the same covariance
+row/column and model-output/Jacobian-row permutation. This preserves the
+statistical problem, without a bitwise Cholesky or receipt equivalence claim.
 
 ## Cancellation behavior
 
@@ -566,7 +585,13 @@ independent nonlinear objective solution; line-search domain handling;
 correlated and singular prior behavior; explicit numerical-limit outcomes;
 model-shape/Jacobian refusals; deterministic replay; and cancellation before
 and after model evaluation. `examples/nonlinear_calibration.rs` fits a cooling
-rate and shared thermometer bias from a synthetic observation batch.
+rate and shared thermometer bias from a synthetic observation batch, then
+marginalizes that same uncertain bias into a correlated observation model.
+
+`tests/iterated_correlated.rs`: correlated affine reduction to the established
+linear update; diagonal-noise agreement; common-mode uncertainty retention;
+measurement/covariance permutation; nonlinear estimation; constant-reference
+channels; covariance refusal; and atomic cancellation/stopping boundaries.
 
 `tests/factor.rs` (bead `sj31i.37`, G0/G1/G2/G3/G4/G5): hand-computed one- and
 two-component goldens; dense-Joseph oracle differential across deterministic
