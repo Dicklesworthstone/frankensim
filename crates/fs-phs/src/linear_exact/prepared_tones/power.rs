@@ -19,6 +19,7 @@ pub(in crate::linear_exact) struct TonePower {
     stride: usize,
     rate: f64,
     root_rate: f64,
+    inverse_root_rate: Contraction,
     scales: Vec<f64>,
     source_scales: Vec<f64>,
     work: Observation,
@@ -74,6 +75,16 @@ impl TonePower {
         if !finite(&a) || !rate.is_finite() {
             return Err(refuse("continuous-tone physical generator/rate is nonfinite").into());
         }
+        // Retain the division remainder once, during preparation. Warm effort
+        // projections then carry both words through the unchanged rate map.
+        let root_rate = det::sqrt(rate);
+        let reciprocal = 1.0 / root_rate;
+        let mut inverse_root_rate = Contraction::default();
+        inverse_root_rate.product(1.0, reciprocal)
+            .and_then(|()| inverse_root_rate.product(
+                1.0, (-reciprocal).mul_add(root_rate, 1.0) / root_rate,
+            ))
+            .ok_or_else(|| refuse("continuous-tone observation scale overflows"))?;
         let mut output = vec![0.0; m * n];
         for p in 0..m {
             for i in 0..n {
@@ -138,12 +149,19 @@ impl TonePower {
             sources,
             stride,
             rate,
-            root_rate: det::sqrt(rate),
+            root_rate,
+            inverse_root_rate,
             scales,
             source_scales: source_scales.to_vec(),
             work,
             heat,
         })
+    }
+
+    /// Leading and remainder planes for the largest original observation.
+    /// This is evaluation scratch, not another physical or propagation state.
+    pub(in crate::linear_exact) fn coordinate_len(&self) -> usize {
+        2 * (self.n + self.n.max(self.m) + self.sources)
     }
 
     /// Uses the original physical effort and force imbalance before any
@@ -219,9 +237,82 @@ impl TonePower {
         if observation.left.is_empty() {
             return Ok(0.0);
         }
+        let Some(right) = observation.right.as_deref() else {
+            return self.evaluate_heat(observation, effort, derivative, input, coordinates);
+        };
+        if source_input.unwrap_or(input).iter().all(|value| *value == 0.0) {
+            return Ok(0.0);
+        }
         let l = observation.rows;
         let d = observation.dimension;
-        let z = &mut coordinates[..d];
+        let coordinates = coordinates.get_mut(..2 * d)
+            .ok_or_else(|| refuse("continuous-tone retained power scratch extent"))?;
+        let (high, low) = coordinates.split_at_mut(d);
+        let refused = || refuse("continuous-tone physical power contraction overflows");
+        for i in 0..l {
+            let projection = Contraction::dot(
+                &observation.map[i * self.n..(i + 1) * self.n], effort,
+            ).ok_or_else(refused)?;
+            let mut value = Contraction::default();
+            value.add_product(projection, self.inverse_root_rate).ok_or_else(refused)?;
+            (high[i], low[i]) = value.components().ok_or_else(refused)?;
+        }
+        high[l..l + self.n].copy_from_slice(derivative);
+        low[l..l + self.n].fill(0.0);
+        for i in 0..self.sources {
+            let mut value = Contraction::default();
+            value.product(self.source_scales[i], input[i]).ok_or_else(refused)?;
+            (high[l + self.n + i], low[l + self.n + i]) =
+                value.components().ok_or_else(refused)?;
+        }
+        if !finite(high) || !finite(low) {
+            return Err(refuse("continuous-tone power coordinates overflow"));
+        }
+        let mut integral = Contraction::default();
+        for (i, row) in observation.left.chunks_exact(d).enumerate() {
+            let mut value = Contraction::default();
+            for (j, &a) in right[i * d..(i + 1) * d].iter().enumerate() {
+                if a == 0.0 { continue; }
+                let (leading, tail) = if let Some(source) = source_input.filter(|_| j >= l + self.n) {
+                    let index = j - l - self.n;
+                    let mut coordinate = Contraction::default();
+                    coordinate.product(self.source_scales[index], source[index])
+                        .ok_or_else(refused)?;
+                    coordinate.components().ok_or_else(refused)?
+                } else {
+                    (high[j], low[j])
+                };
+                value.product(a, leading).ok_or_else(refused)?;
+                if tail != 0.0 { value.product_remainder(a, tail).ok_or_else(refused)?; }
+            }
+            if value.components().ok_or_else(refused)? != (0.0, 0.0) {
+                let mut left = Contraction::default();
+                for ((&a, &x), &tail) in row.iter().zip(high.iter()).zip(low.iter()) {
+                    if a == 0.0 { continue; }
+                    left.product(a, x).ok_or_else(refused)?;
+                    if tail != 0.0 { left.product_remainder(a, tail).ok_or_else(refused)?; }
+                }
+                integral.add_product(left, value).ok_or_else(refused)?;
+            }
+        }
+        integral.value().ok_or_else(|| refuse("continuous-tone physical power integral overflow"))
+    }
+
+    // Positive heat has no cancellation between its squared factors. Preserve
+    // its original scalar evaluation and tiny-loss range; only signed work
+    // needs retained conjugate factors through the final cancellation.
+    fn evaluate_heat(
+        &self,
+        observation: &Observation,
+        effort: &[f64],
+        derivative: &[f64],
+        input: &[f64],
+        coordinates: &mut [f64],
+    ) -> Result<f64, PhsError> {
+        let l = observation.rows;
+        let d = observation.dimension;
+        let z = coordinates.get_mut(..d)
+            .ok_or_else(|| refuse("continuous-tone heat scratch extent"))?;
         for i in 0..l {
             let mut value = Sum::default();
             for j in 0..self.n {
@@ -237,28 +328,13 @@ impl TonePower {
             return Err(refuse("continuous-tone power coordinates overflow"));
         }
         let mut integral = Sum::default();
-        for (i, row) in observation.left.chunks_exact(d).enumerate() {
-            let mut left = Sum::default();
+        for row in observation.left.chunks_exact(d) {
+            let mut value = Sum::default();
             for (&a, &x) in row.iter().zip(z.iter()) {
-                left.add(a * x);
+                value.add(a * x);
             }
-            let left = left.value();
-            if let Some(right) = &observation.right {
-                let mut value = Sum::default();
-                for (j, (&a, &x)) in right[i * d..(i + 1) * d].iter().zip(z.iter()).enumerate() {
-                    let x = if j >= l + self.n {
-                        source_input.map_or(x, |source| {
-                            self.source_scales[j - l - self.n] * source[j - l - self.n]
-                        })
-                    } else {
-                        x
-                    };
-                    value.add(a * x);
-                }
-                integral.add(left * value.value());
-            } else {
-                integral.add(left * left);
-            }
+            let value = value.value();
+            integral.add(value * value);
         }
         let value = integral.value();
         if !value.is_finite() {
@@ -418,7 +494,7 @@ mod tests {
             let mut input = vec![0.0; 2 * m];
             for (p, value) in cosine.into_iter().enumerate() { input[2 * p] = value; }
             let mut derivative = [f64::NAN];
-            let mut coordinates = vec![0.0; 1 + m.max(1) + 2 * m];
+            let mut coordinates = vec![0.0; power.coordinate_len()];
             let mut heat = [0.0];
             power.evaluate_into(
                 &system, &[effort], &input, &mut derivative, &mut coordinates, &mut heat,

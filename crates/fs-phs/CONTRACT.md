@@ -1662,6 +1662,14 @@ Continuous-source interface work likewise uses the original paired power
 integral. Opposing ports therefore retain small signed net work even beneath a
 large common port output; heat remains independently integrated.
 
+Continuous signed work retains the low words of the original effort-to-port
+projection and both conjugate power factors through their final contraction.
+The prepared owner reuses leading/remainder scratch; it neither propagates a
+second trajectory nor reconstructs work from storage and heat. Positive heat
+keeps its independently integrated sum-of-squares evaluation and original
+tiny-loss range. Constant and affine source regressions cover steady loss and
+regeneration hidden beneath opposing large port outputs.
+
 `multirate::MultiratePair` advances both complete physical states on independently
 declared clocks of 1 through 16 native steps per common window. Its held interface
 inputs satisfy `u_left = -average(y_right)` and `u_right = average(y_left)` using
@@ -1685,6 +1693,17 @@ most 32 selected ports on either side. Field coordinates must already be dual
 with respect to physical power, including integration measures. This API does
 not construct a mortar, certify spatial approximation error, or supply moving
 geometry/parameter work. Coefficients are held over a complete window.
+
+The physical forward and transpose maps contract native two-word port integrals
+before individual outputs are rounded, and accumulate those mapped integrals
+over the complete common window. This preserves small differential motion
+beneath a large common output in the actual transmitted force or flow, as well
+as in its work. Exact held, continuous-source and nonlinear discrete-gradient
+clocks use the same sparse transfer; no extra trajectory propagation or dense
+map assembly is introduced. Public per-port average observations retain their
+ordinary floating-point representation. The differential-motion regression
+checks both map directions, mixed native methods and unequal clocks against an
+independent two-coordinate midpoint solution.
 
 Mapped-interface regressions independently solve two unequal, oppositely
 oriented pistons sharing one compressible chamber, verify the transposed owner

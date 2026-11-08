@@ -33,6 +33,10 @@ fn bad(what: &'static str) -> PhsError {
 }
 
 impl<'a> ContinuousClock<'a> {
+    pub(super) fn port_integrals(&self) -> &[crate::interconnection::accumulation::Sum] {
+        self.source.port_integrals()
+    }
+
     fn new(
         system: &'a PortHamiltonian,
         substeps: usize,

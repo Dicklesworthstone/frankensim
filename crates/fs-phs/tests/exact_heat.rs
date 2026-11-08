@@ -1,6 +1,7 @@
 //! G1/G3: positive, independently integrated physical heat at very small motion.
 use fs_phs::linear_exact::{
-    LinearPropagator, LinearSplitBudget, PreparedCommonFlowZoh, PreparedExactZoh,
+    DenseExponentialBudget, LinearPropagator, LinearSplitBudget, PreparedCommonFlowZoh,
+    PreparedExactTones, PreparedExactZoh,
     integrated_resistance_loss, split_quadratic, step_render, step_split,
 };
 use fs_phs::{
@@ -13,6 +14,88 @@ fn budget(n: usize) -> LinearSplitBudget {
     LinearSplitBudget {
         max_modes: n,
         max_omega_dt: 0.04,
+    }
+}
+
+#[test]
+fn continuous_source_work_survives_opposing_rounded_port_outputs() {
+    let large = 2.0_f64.powi(54);
+    let initial = [large, 1.0];
+    let dense = DenseExponentialBudget {
+        max_dimension: 64,
+        max_dense_bytes: 16 * 1024 * 1024,
+        max_multiply_terms: u64::MAX,
+    };
+    for (resistance, force, work, heat, endpoint) in [
+        (1.0, 1.0, 0.25, 0.25, 1.0),
+        (0.0, -1.0, -0.21875, 0.0, 0.75),
+    ] {
+        let system = PortHamiltonian::new(
+            2, 2, vec![0.0; 4], vec![0.0, 0.0, 0.0, resistance],
+            vec![1.0, 1.0, 1.0, 0.0],
+            Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap()),
+        ).unwrap();
+        for affine in [false, true] {
+            let mut flow = if affine {
+                PreparedExactTones::new_affine(&system, &[0.0], 0.25, budget(2), dense)
+            } else {
+                PreparedExactTones::new(&system, &[0.0], 0.25, budget(2), dense)
+            }.unwrap();
+            let cosine = [force, -force];
+            let sine = [0.0; 2];
+            let mut next = [0.0; 2];
+            let mut output = [0.0; 2];
+            let record = if affine {
+                flow.step_affine_into(&initial, &cosine, &sine, &cosine, &sine,
+                    &mut next, &mut output)
+            } else {
+                flow.step_into(&initial, &cosine, &sine, &mut next, &mut output)
+            }.unwrap();
+            // The represented mean outputs cannot expose the second state's
+            // work. Its physical force is nevertheless exactly +1 or -1.
+            assert_eq!(output[0], output[1]);
+            assert!((record.supplied - work).abs() < 2e-12,
+                "continuous work {} versus {work}", record.supplied);
+            assert!((record.dissipated - heat).abs() < 2e-12);
+            assert!((record.delta_h + heat - work).abs() < 2e-12);
+            assert_eq!(next[0], large);
+            assert!((next[1] - endpoint).abs() < 2e-12);
+        }
+    }
+}
+
+#[test]
+fn continuous_positive_heat_preserves_its_small_loss_range() {
+    let dense = DenseExponentialBudget {
+        max_dimension: 64,
+        max_dense_bytes: 16 * 1024 * 1024,
+        max_multiply_terms: u64::MAX,
+    };
+    for resistance in [1e-200, 1e-300] {
+        let system = PortHamiltonian::new(
+            1, 1, vec![0.0], vec![resistance], vec![1.0],
+            Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+        ).unwrap();
+        for affine in [false, true] {
+            let mut flow = if affine {
+                PreparedExactTones::new_affine(&system, &[0.0], 0.25, budget(1), dense)
+            } else {
+                PreparedExactTones::new(&system, &[0.0], 0.25, budget(1), dense)
+            }.unwrap();
+            let mut next = [0.0];
+            let mut output = [0.0];
+            let record = if affine {
+                flow.step_affine_into(&[1.0], &[0.0], &[0.0], &[0.0], &[0.0],
+                    &mut next, &mut output)
+            } else {
+                flow.step_into(&[1.0], &[0.0], &[0.0], &mut next, &mut output)
+            }.unwrap();
+            // At this rate the state change rounds away, while the original
+            // resistance still dissipates a representable positive amount.
+            assert_eq!(next, [1.0]);
+            assert_eq!(record.supplied, 0.0);
+            relative(record.dissipated, 0.25 * resistance, 2e-12);
+        }
     }
 }
 

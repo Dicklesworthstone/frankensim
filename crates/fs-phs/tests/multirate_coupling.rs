@@ -69,6 +69,66 @@ fn free_mass(mass: f64) -> PortHamiltonian {
         Box::new(QuadraticStorage::new(vec![1.0/mass],1).unwrap())).unwrap()
 }
 
+fn common_motion_system() -> PortHamiltonian {
+    PortHamiltonian::new(
+        2, 2, vec![0.0; 4], vec![0.0; 4], vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap()),
+    ).unwrap()
+}
+
+#[test]
+fn mapped_connections_transmit_differential_motion_before_port_rounding() {
+    // y=[L+a,L], M=[1,-1]. The physical small system is a'=-b, b'=a;
+    // its held-interface solve is midpoint, independent of the unused L.
+    // Subtracting the two public rounded outputs instead disconnects b and
+    // creates energy in a. Exercise both sparse map directions and clocks.
+    let (large, a, b, h) = (2.0_f64.powi(54), 1.0, -1.0, 0.25);
+    let denominator = 1.0 + h*h/4.0;
+    let a_mean = (a-h*b/2.0)/denominator;
+    let b_mean = (b+h*a/2.0)/denominator;
+    let expected = [a-h*b_mean, b+h*a_mean];
+    let work = -h*a_mean*b_mean;
+    let (common, inertia) = (common_motion_system(), free_mass(1.0));
+    let nonlinear = |substeps| Clock { substeps, maximum_contact_step_s: None,
+        method: IntegrationMethod::DiscreteGradient {
+            maximum_rate_rad_s: 1.0, maximum_rate_dt: 0.5,
+        } };
+    for reverse in [false, true] {
+        let transfer = if reverse {
+            PowerTransfer { left_ports: vec![0], right_ports: vec![0,1],
+                right_from_left: vec![-1.0,1.0], left_input_scales: vec![3.0] }
+        } else {
+            PowerTransfer { left_ports: vec![0,1], right_ports: vec![0],
+                right_from_left: vec![1.0,-1.0], left_input_scales: vec![2.0,0.5] }
+        };
+        for (nl,nr) in [(1,1),(2,8),(8,3)] {
+            for (cl,cr) in [(exact(nl),exact(nr)),(nonlinear(nl),exact(nr)),
+                (exact(nl),nonlinear(nr)),(nonlinear(nl),nonlinear(nr))]
+            {
+                let (left,right) = if reverse { (&inertia,&common) } else { (&common,&inertia) };
+                let mut pair = MultiratePair::new_mapped(left,right,&transfer,h,cl,cr,
+                    SolveConfig::default()).unwrap();
+                let result = if reverse {
+                    pair.step(&[b],&[large,a],&[0.0],&[0.0,0.0])
+                } else {
+                    pair.step(&[large,a],&[b],&[0.0,0.0],&[0.0])
+                }.unwrap();
+                let (common,inertia,exchanged) = if reverse {
+                    (&result.right,&result.left,result.exchange_work_j[1])
+                } else { (&result.left,&result.right,result.exchange_work_j[0]) };
+                assert_eq!(common.state[0],large);
+                assert_eq!(common.average_output[0],common.average_output[1]);
+                close(common.state[1],expected[0],3e-13);
+                close(inertia.state[0],expected[1],3e-13);
+                close(exchanged,work,3e-13);
+                close(result.exchange_work_j.iter().sum(),0.0,3e-13);
+                close(result.balance_residual_j,0.0,3e-13);
+                assert_eq!(result.external_work_j,[0.0,0.0]);
+            }
+        }
+    }
+}
+
 #[test]
 fn native_work_survives_opposing_rounded_ports_on_every_local_clock() {
     // Both public port velocities round to `large`, but the first also has

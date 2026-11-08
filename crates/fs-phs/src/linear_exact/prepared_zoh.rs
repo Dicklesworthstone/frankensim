@@ -2,6 +2,7 @@
 use super::{DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
     finite, positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow, refuse, split_quadratic};
 use crate::{PhsError, PortHamiltonian, PreparedStepRecord, StepRecord, storage_energy_change};
+use crate::interconnection::accumulation::Sum;
 
 /// Conservative numerical energy scale, invariant under adding a constant to H.
 /// This coordinate-dependent norm is not itself thermodynamic stored energy.
@@ -30,12 +31,14 @@ struct Scratch {
     augmented: Vec<f64>, balanced: Vec<f64>, endpoint: Vec<f64>, integrals: Vec<f64>,
     midpoint: Vec<f64>, effort: Vec<f64>, output: Vec<f64>,
     heat_state: Vec<f64>,
+    port_integrals: Vec<Sum>,
 }
 impl Scratch {
     fn new(n: usize, m: usize) -> Self {
         Self { augmented: vec![0.0; n+m+1], balanced: vec![0.0; n], endpoint: vec![0.0; n],
             integrals: vec![0.0; m], midpoint: vec![0.0; n], effort: vec![0.0; n],
-            output: vec![0.0; m], heat_state: vec![0.0; 2*n] }
+            output: vec![0.0; m], heat_state: vec![0.0; 2*n],
+            port_integrals: vec![Sum::default(); m] }
     }
 }
 
@@ -117,6 +120,9 @@ impl<'a> PreparedExactZoh<'a> {
     pub fn system(&self) -> &PortHamiltonian { self.system.get() }
     /// Prepared held-input duration [s]. It never changes during a warm step.
     pub fn duration(&self) -> f64 { self.duration }
+
+    /// Internal transfer view, consumed only after a successful native step.
+    pub(crate) fn port_integrals(&self) -> &[Sum] { &self.scratch.port_integrals }
 
     /// Same-window held-input relation `y_bar[p] = free + beta*input[p]`.
     ///
@@ -224,12 +230,13 @@ fn evaluate_step_with_work_inputs<const K: usize>(
             return Err(refuse("prepared ZOH initial energy/output is nonfinite"));
         }
         scratch.endpoint.copy_from_slice(initial);
+        scratch.port_integrals.fill(Sum::default());
         return Ok((PreparedStepRecord { delta_h: 0.0, dissipated: 0.0, supplied: 0.0,
             newton_iters: 0, solver_residual: 0.0, solver_certificate: None }, [0.0; K]));
     };
     let (supplied, observed_work) = flow.evaluate_port_work_observed_into(initial, input,
         work_inputs, &mut scratch.augmented, &mut scratch.balanced,
-        &mut scratch.endpoint, &mut scratch.integrals)?;
+        &mut scratch.endpoint, &mut scratch.integrals, Some(&mut scratch.port_integrals))?;
     for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
     let dissipated = heat.ok_or_else(||refuse("prepared positive heat is missing"))?
         .evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,

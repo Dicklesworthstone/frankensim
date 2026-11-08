@@ -17,6 +17,7 @@ use crate::{
     storage_energy_change,
 };
 use fs_math::det;
+use crate::interconnection::accumulation::Sum as PortIntegral;
 use power::{Sum, TonePower};
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ struct Scratch {
     balanced: Vec<f64>,
     endpoint: Vec<f64>,
     integrals: Vec<f64>,
+    port_integrals: Vec<PortIntegral>,
     output: Vec<f64>,
     effort: Vec<f64>,
     midpoint: Vec<f64>,
@@ -275,11 +277,12 @@ impl<'a> PreparedExactTones<'a> {
             balanced: vec![0.0; n],
             endpoint: vec![0.0; n],
             integrals: vec![0.0; m],
+            port_integrals: vec![PortIntegral::default(); m],
             output: vec![0.0; m],
             effort: vec![0.0; n],
             midpoint: vec![0.0; n],
             derivative: vec![0.0; n],
-            coordinates: vec![0.0; n + n.max(m) + sources],
+            coordinates: vec![0.0; power.coordinate_len()],
             heat: vec![0.0; channels.len() + 1],
             work_input: vec![0.0; sources],
             port_work: vec![0.0; m],
@@ -313,6 +316,10 @@ impl<'a> PreparedExactTones<'a> {
     /// Prepared interval duration [s].
     pub fn duration(&self) -> f64 {
         self.duration
+    }
+    /// Internal transfer view, consumed only after a successful native step.
+    pub(crate) fn port_integrals(&self) -> &[PortIntegral] {
+        &self.scratch.port_integrals
     }
     /// Number of original physical state coordinates.
     pub fn state_dim(&self) -> usize {
@@ -642,13 +649,14 @@ impl<'a> PreparedExactTones<'a> {
                 &mut scratch.input,
             )?;
         }
-        self.flow.evaluate_into(
+        self.flow.evaluate_port_integrals_into(
             initial,
             &scratch.input,
             &mut scratch.augmented,
             &mut scratch.balanced,
             &mut scratch.endpoint,
             &mut scratch.integrals,
+            &mut scratch.port_integrals,
         )?;
         for (out, &integral) in scratch.output.iter_mut().zip(&scratch.integrals) {
             *out = integral / self.duration;

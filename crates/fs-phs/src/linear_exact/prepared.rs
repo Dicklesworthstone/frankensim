@@ -706,8 +706,23 @@ impl PreparedQuadraticFlow {
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64],
     ) -> Result<(), PhsError> {
-        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, false,
+        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, false, None,
             |_, _| Ok(())).map(|_| ())
+    }
+
+    /// Retain the native linear port integrals for a physical transfer before
+    /// individual public observations are rounded. Rotating source coordinates
+    /// are allowed; this does not identify their coefficients with held work.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_port_integrals_into(
+        &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
+        endpoint: &mut [f64], integrals: &mut [f64], retained: &mut [Sum],
+    ) -> Result<(), PhsError> {
+        if self.integrals.iter().any(|form| !matches!(form, CachedIntegral::Linear(_))) {
+            return Err(refuse("retained port integrals require linear observations"));
+        }
+        self.evaluate_impl(state, input, z, balanced, endpoint, integrals, false,
+            Some(retained), |_, _| Ok(())).map(|_| ())
     }
 
     /// Held physical-port observations retain their integrated low words
@@ -718,7 +733,7 @@ impl PreparedQuadraticFlow {
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64],
     ) -> Result<f64, PhsError> {
-        self.evaluate_port_work_observed_into(state, input, [], z, balanced, endpoint, integrals)
+        self.evaluate_port_work_observed_into(state, input, [], z, balanced, endpoint, integrals, None)
             .map(|(work, _)| work)
     }
 
@@ -729,6 +744,7 @@ impl PreparedQuadraticFlow {
     pub(super) fn evaluate_port_work_observed_into<const K: usize>(
         &self, state: &[f64], input: &[f64], work_inputs: [&[f64]; K],
         z: &mut [f64], balanced: &mut [f64], endpoint: &mut [f64], integrals: &mut [f64],
+        retained: Option<&mut [Sum]>,
     ) -> Result<(f64, [f64; K]), PhsError> {
         if self.rotating_sources || self.integrals.len() != self.m
             || self.integrals.iter().any(|form| !matches!(form, CachedIntegral::Linear(_)))
@@ -739,7 +755,7 @@ impl PreparedQuadraticFlow {
             return Err(refuse("held work observations require complete finite inputs"));
         }
         let mut observed = [Sum::default(); K];
-        let supplied = self.evaluate_impl(state, input, z, balanced, endpoint, integrals, true,
+        let supplied = self.evaluate_impl(state, input, z, balanced, endpoint, integrals, true, retained,
             |port, integral| {
                 for (work, values) in observed.iter_mut().zip(work_inputs) {
                     work.add_scaled(integral, values[port])
@@ -759,11 +775,13 @@ impl PreparedQuadraticFlow {
     fn evaluate_impl(
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64], physical_work: bool,
+        mut retained: Option<&mut [Sum]>,
         mut observe: impl FnMut(usize, Sum) -> Result<(), PhsError>,
     ) -> Result<f64, PhsError> {
         if state.len() != self.n || input.len() != self.m || !finite(state) || !finite(input)
             || z.len() != self.d || balanced.len() != self.n || endpoint.len() != self.n
             || integrals.len() != self.integrals.len()
+            || retained.as_ref().is_some_and(|values| values.len() != self.integrals.len())
         {
             return Err(refuse("prepared quadratic state/input/scratch layout or finiteness"));
         }
@@ -792,7 +810,7 @@ impl PreparedQuadraticFlow {
             *out = match form {
                 CachedIntegral::Dense { matrix, affine: true } => affine_integral(matrix, z),
                 CachedIntegral::Dense { matrix, affine: false } => quadratic(matrix, z),
-                CachedIntegral::Linear(row) if physical_work => {
+                CachedIntegral::Linear(row) if physical_work || retained.is_some() => {
                     // z[last]=1: the off-diagonal half-row occurs twice;
                     // its final diagonal contributes only once.
                     let last = self.d - 1;
@@ -802,8 +820,13 @@ impl PreparedQuadraticFlow {
                     integral.add_scaled(half, 1.0)
                         .and_then(|()| integral.product(row[last], 1.0))
                         .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?;
-                    work.add_scaled(integral, input[p])
-                        .ok_or_else(|| refuse("prepared supplied work is unrepresentable"))?;
+                    if physical_work {
+                        work.add_scaled(integral, input[p])
+                            .ok_or_else(|| refuse("prepared supplied work is unrepresentable"))?;
+                    }
+                    if let Some(values) = retained.as_deref_mut() {
+                        values[p] = integral;
+                    }
                     observe(p, integral)?;
                     integral.value()
                         .ok_or_else(|| refuse("prepared port integral is unrepresentable"))?

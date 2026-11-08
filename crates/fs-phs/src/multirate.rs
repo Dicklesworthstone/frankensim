@@ -7,6 +7,7 @@
 //! as well as local clocks: subcycling alone cannot remove interface phase error.
 use crate::linear_exact::{LinearSplitBudget, PreparedExactZoh, energetic_scale};
 use crate::{PhsError, PortHamiltonian, PreparedStepError, StepWorkspace, storage_energy_change};
+use crate::interconnection::accumulation::Sum as PortIntegral;
 use fs_la::factor::{Lu, lu};
 
 mod continuous;
@@ -241,12 +242,29 @@ struct LocalStep {
     result: SubsystemStep,
     external_work_j: f64,
     exchange_work_j: f64,
+    mapped_output: Vec<f64>,
+}
+
+// Apply the original sparse physical transfer before rounding individual port
+// observations. Accumulate its native time integrals over the whole window;
+// this retains differential motion hidden beneath a large common port output.
+fn accumulate_mapped_integrals(
+    rows: &[Vec<(usize, f64)>], ports: &[PortIntegral], totals: &mut [PortIntegral],
+) -> Result<(), MultirateError> {
+    for (row, total) in rows.iter().zip(totals) {
+        for &(port, coefficient) in row {
+            total.add_scaled(ports[port], coefficient)
+                .ok_or(MultirateError::Invalid("unrepresentable mapped native port integral"))?;
+        }
+    }
+    Ok(())
 }
 
 struct LocalClock<'a> {
     system: &'a PortHamiltonian,
     clock: Clock,
     dt: f64,
+    window: f64,
     evolution: Evolution<'a>,
     continuous: Option<ContinuousClock<'a>>,
     side: &'static str,
@@ -277,7 +295,7 @@ impl<'a> LocalClock<'a> {
                     .map_err(|error| MultirateError::Subsystem { side, error })?)
             }
         };
-        Ok(Self { system, clock, dt, evolution, continuous:None, side })
+        Ok(Self { system, clock, dt, window, evolution, continuous:None, side })
     }
 
     fn valid_input(&self, external: SourceInput<'_>) -> bool {
@@ -286,6 +304,7 @@ impl<'a> LocalClock<'a> {
     }
 
     fn evolve(&mut self, initial: &[f64], external: SourceInput<'_>, exchange: &[f64],
+        mapping: &[Vec<(usize, f64)>],
         cancelled: &mut impl FnMut() -> bool) -> Result<LocalStep, MultirateError> {
         check(cancelled)?;
         let sys = self.system;
@@ -298,6 +317,10 @@ impl<'a> LocalClock<'a> {
         let mut y = vec![0.0;sys.m];
         let mut input = vec![0.0;sys.m];
         let mut output = vec![Sum::default(); sys.m];
+        let mut mapped = vec![PortIntegral::default(); mapping.len()];
+        let mut discrete_integrals = if matches!(&self.evolution, Evolution::Gonzalez(_)) {
+            vec![PortIntegral::default(); sys.m]
+        } else { Vec::new() };
         let (mut change, mut heat, mut work) = (Sum::default(),Sum::default(),Sum::default());
         let (mut external_work,mut exchange_work) = (Sum::default(),Sum::default());
         for step in 0..self.clock.substeps {
@@ -311,6 +334,7 @@ impl<'a> LocalClock<'a> {
                         let (record, [source_work, interface_work]) = flow.step_with_work_inputs_into(
                             &state,&input,[source,exchange],&mut next,&mut y)
                             .map_err(|error| MultirateError::Subsystem { side: self.side, error })?;
+                        accumulate_mapped_integrals(mapping,flow.port_integrals(),&mut mapped)?;
                         (record, source_work, interface_work)
                     }
                     Evolution::Gonzalez(workspace) => {
@@ -319,6 +343,17 @@ impl<'a> LocalClock<'a> {
                             .map_err(|e| native(self.side,e))?;
                         let effort = workspace.last_step_discrete_effort()
                             .ok_or(MultirateError::Invalid("native discrete effort is unavailable"))?;
+                        for (port, integral) in discrete_integrals.iter_mut().enumerate() {
+                            let mut output = PortIntegral::default();
+                            for (i, &value) in effort.iter().enumerate() {
+                                output.product(sys.g[i*sys.m+port],value)
+                                    .ok_or(MultirateError::Invalid("unrepresentable discrete port output"))?;
+                            }
+                            *integral = PortIntegral::default();
+                            integral.add_scaled(output,self.dt)
+                                .ok_or(MultirateError::Invalid("unrepresentable discrete port integral"))?;
+                        }
+                        accumulate_mapped_integrals(mapping,&discrete_integrals,&mut mapped)?;
                         let work = |values: &[f64]| crate::port_work_from_effort(
                             sys.n,sys.m,&sys.g,effort,values,self.dt,0.0)
                             .map_err(|error| MultirateError::Subsystem { side: self.side, error });
@@ -326,9 +361,12 @@ impl<'a> LocalClock<'a> {
                     }
                 }
             } else {
-                self.continuous.as_mut().expect("continuous source admitted above")
+                let continuous = self.continuous.as_mut().expect("continuous source admitted above");
+                let result = continuous
                     .step(&state,external,exchange,step,&mut next,&mut y)
-                    .map_err(|error| MultirateError::Subsystem {side:self.side,error})?
+                    .map_err(|error| MultirateError::Subsystem {side:self.side,error})?;
+                accumulate_mapped_integrals(mapping,continuous.port_integrals(),&mut mapped)?;
+                result
             };
             // Keep the native work contraction, including its retained low
             // words. Even each local interval's rounded mean outputs can lose
@@ -344,13 +382,19 @@ impl<'a> LocalClock<'a> {
             average_output: output.into_iter().map(Sum::value).collect(),
             stored_change_j: change.value(), dissipated_j: heat.value(), supplied_j: work.value(),
             substeps: self.clock.substeps };
+        let mapped_output = mapped.into_iter().map(|integral| {
+            integral.value().map(|value| value/self.window)
+                .filter(|value| value.is_finite())
+                .ok_or(MultirateError::Invalid("unrepresentable mapped window-average output"))
+        }).collect::<Result<Vec<_>,_>>()?;
         if !finite(&result.state) || !finite(&result.average_output) || !finite(&[
             result.stored_before_j,result.stored_after_j,result.stored_change_j,
             result.dissipated_j,result.supplied_j,external_work.value(),exchange_work.value()]) {
             return Err(MultirateError::Invalid("nonfinite original subsystem trajectory"));
         }
         check(cancelled)?;
-        Ok(LocalStep {result,external_work_j:external_work.value(),exchange_work_j:exchange_work.value()})
+        Ok(LocalStep {result,external_work_j:external_work.value(),exchange_work_j:exchange_work.value(),
+            mapped_output})
     }
 }
 
@@ -482,24 +526,19 @@ impl<'a> MultiratePair<'a> {
         for (col, &port) in self.transfer.left_ports.iter().enumerate() {
             ul[port] = self.transfer.left_input_scales[col] * z[col];
         }
-        let l=self.left.evolve(xl,external_l,&ul,cancelled)?;
+        let l=self.left.evolve(xl,external_l,&ul,&self.forward,cancelled)?;
         let mut ur=vec![0.0;self.right.system.m];
         for (row, &port) in self.transfer.right_ports.iter().enumerate() {
-            ur[port] = sum(self.forward[row]
-                .iter()
-                .map(|&(left, coefficient)| coefficient * l.result.average_output[left]));
+            ur[port] = l.mapped_output[row];
         }
-        let r=self.right.evolve(xr,external_r,&ur,cancelled)?;
+        let r=self.right.evolve(xr,external_r,&ur,&self.transpose,cancelled)?;
         let external_work_j=[l.external_work_j,r.external_work_j];
         let exchange_work_j=[l.exchange_work_j,r.exchange_work_j];
         let (left,right)=(l.result,r.result);
         let mut residual = vec![0.0; nl];
         let mut scale = 1.0_f64;
         for col in 0..nl {
-            let reaction = sum(self.transpose[col]
-                .iter()
-                .map(|&(port, coefficient)| coefficient * right.average_output[port]))
-                / self.transfer.left_input_scales[col];
+            let reaction = r.mapped_output[col] / self.transfer.left_input_scales[col];
             residual[col] = z[col] + reaction;
             scale = scale.max(z[col].abs()).max(reaction.abs());
         }

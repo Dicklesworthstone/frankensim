@@ -318,6 +318,10 @@ impl PreparedNonlinearZoh {
         } else {
             Power::Held(PositiveHeat::new(&system, &split, dt, &system.r)?)
         };
+        let heat_coordinate_len = match &power {
+            Power::Held(_) => heat_dimension,
+            Power::Tones(power) => power.coordinate_len(),
+        };
         let mut forward = vec![0.0; n * n];
         let mut inverse = vec![0.0; n * n];
         for i in 0..n {
@@ -351,7 +355,7 @@ impl PreparedNonlinearZoh {
                 output: vec![0.0; m],
                 effort: vec![0.0; n],
                 derivative: vec![0.0; n],
-                heat_coordinates: vec![0.0; heat_dimension],
+                heat_coordinates: vec![0.0; heat_coordinate_len],
                 heat: vec![0.0; 1 + tones.map_or(0, |t| t.channels.len())],
                 lu: LuWorkspace::new(n).map_err(|_| refuse("nonlinear LU capacity"))?,
                 evaluation: Evaluation {

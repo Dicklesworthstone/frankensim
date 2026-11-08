@@ -1,5 +1,5 @@
 //! G0/G1/G3/G4: source work uses the complete original physical trajectory.
-use super::{close, distance, exact, free_mass, inertias, nonlinear, pair, piston_transfer};
+use super::{close, common_motion_system, distance, exact, free_mass, inertias, nonlinear, pair, piston_transfer};
 use fs_phs::linear_exact::DenseExponentialBudget;
 use fs_phs::multirate::{
     ContinuousSourcePlan, MultirateError, MultiratePair, SolveConfig, SourceInput,
@@ -15,6 +15,39 @@ fn plan(frequencies: &[f64], affine: bool) -> ContinuousSourcePlan<'_> {
             max_dense_bytes: 128 * 1024 * 1024,
             max_multiply_terms: 20_000_000_000,
         },
+    }
+}
+
+#[test]
+fn continuous_native_transfer_keeps_small_differential_motion_and_work() {
+    let (left,right) = (common_motion_system(),free_mass(1.0));
+    let (large,h) = (2.0_f64.powi(54),0.25);
+    let a_mean = (1.0+h/2.0)/(1.0+h*h/4.0);
+    let b_mean = (-1.0+h/2.0)/(1.0+h*h/4.0);
+    let transfer = fs_phs::multirate::PowerTransfer {
+        left_ports: vec![0,1], right_ports: vec![0],
+        right_from_left: vec![1.0,-1.0], left_input_scales: vec![1.0,1.0],
+    };
+    for affine in [false,true] {
+        for (nl,nr) in [(1,1),(2,8),(8,3)] {
+            let mut coupling = MultiratePair::new_mapped(&left,&right,&transfer,h,
+                exact(nl),exact(nr),SolveConfig::default()).unwrap()
+                .with_continuous_sources(Some(plan(&[3.0],affine)),Some(plan(&[3.0],affine)))
+                .unwrap();
+            let zeros = |values| if affine { SourceInput::AffineTones {
+                cosine_start:values,sine_start:values,cosine_end:values,sine_end:values,
+            } } else { SourceInput::Tones { cosine:values,sine:values } };
+            let r = coupling.step_sources(&[large,1.0],&[-1.0],
+                zeros(&[0.0;2]),zeros(&[0.0])).unwrap();
+            assert_eq!(r.left.state[0],large);
+            assert_eq!(r.left.average_output[0],r.left.average_output[1]);
+            close(r.left.state[1],1.0-h*b_mean,3e-13);
+            close(r.right.state[0],-1.0+h*a_mean,3e-13);
+            close(r.exchange_work_j[0],-h*a_mean*b_mean,3e-13);
+            close(r.exchange_work_j.iter().sum(),0.0,3e-13);
+            close(r.balance_residual_j,0.0,3e-13);
+            assert_eq!(r.external_work_j,[0.0,0.0]);
+        }
     }
 }
 

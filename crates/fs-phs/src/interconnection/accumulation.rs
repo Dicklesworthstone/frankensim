@@ -73,6 +73,43 @@ impl Sum {
         self.product(source.low, coefficient)
     }
 
+    /// Retain both factors through a bilinear physical work contraction. A
+    /// rounded factor can erase all net work after opposing ports cancel.
+    pub(crate) fn add_product(&mut self, left: Self, right: Self) -> Option<()> {
+        let (left_high, left_low) = left.components()?;
+        let (right_high, right_low) = right.components()?;
+        self.product(left_high, right_high)?;
+        if right_low != 0.0 { self.product_remainder(left_high, right_low)?; }
+        if left_low != 0.0 {
+            self.product_remainder(left_low, right_high)?;
+            if right_low != 0.0 { self.product_remainder(left_low, right_low)?; }
+        }
+        Some(())
+    }
+
+    /// A retained tail may round below f64's range even when the leading
+    /// physical product is representable. Accept that compensation rounding,
+    /// as for `product`'s FMA remainder, while still refusing nonfinite terms.
+    /// The leading physical term must separately pass `product`.
+    pub(crate) fn product_remainder(&mut self, a: f64, b: f64) -> Option<()> {
+        let product = a * b;
+        if !product.is_finite() { return None; }
+        self.add(product)?;
+        self.add(a.mul_add(b, -product))
+    }
+
+    /// Store a retained contraction in reusable leading/remainder buffers.
+    /// Renormalization keeps both words; it does not round to one observable.
+    pub(crate) fn components(self) -> Option<(f64, f64)> {
+        let high = self.high + self.low;
+        let low = if self.high.abs() >= self.low.abs() {
+            (self.high - high) + self.low
+        } else {
+            (self.low - high) + self.high
+        };
+        (high.is_finite() && low.is_finite()).then_some((high, low))
+    }
+
     /// Carry both original contraction words through a half-scaled physical
     /// work term without first rounding the contraction or its product.
     pub(crate) fn add_half_scaled(&mut self, source: Self, coefficient: f64) -> Option<()> {
@@ -138,6 +175,60 @@ mod tests {
         let mut zero = Sum::default();
         zero.add_scaled(source, 0.0).unwrap();
         assert_eq!(zero.value().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn bilinear_work_keeps_both_conjugate_factor_remainders() {
+        let large = 2.0_f64.powi(54);
+        let effort = Sum::dot(&[large, 1.0], &[1.0, 1.0]).unwrap();
+        for sign in [-1.0, 1.0] {
+            let flow = Sum::dot(&[1.0, 1.0 / large], &[sign, sign]).unwrap();
+            let mut work = Sum::default();
+            work.add_product(effort, flow).unwrap();
+            work.product(-large, sign).unwrap();
+            // (L+1)*(1+1/L)-L = 2+1/L. Rounding either conjugate
+            // factor before their product incorrectly leaves only one unit.
+            assert_eq!(work.value().unwrap(), 2.0 * sign);
+        }
+    }
+
+    #[test]
+    fn bilinear_work_keeps_finite_and_subnormal_leading_products() {
+        for exponent in [-500, -537] {
+            let leading = 2.0_f64.powi(exponent);
+            let remainder = 2.0_f64.powi(exponent - 53);
+            let factor = Sum::dot(&[leading, remainder], &[1.0, 1.0]).unwrap();
+            let mut work = Sum::default();
+            work.add_product(factor, factor).unwrap();
+            let square = leading * leading;
+            let expected = if exponent == -500 {
+                // Two retained cross terms add one ulp; their remainder
+                // product lies below the subnormal range and rounds away.
+                f64::from_bits(square.to_bits() + 1)
+            } else {
+                f64::from_bits(1)
+            };
+            assert_eq!(work.value().unwrap(), expected);
+        }
+        for (a, b) in [(2.0_f64.powi(-538), 2.0_f64.powi(-538)), (f64::MAX, 2.0)] {
+            let a = Sum::dot(&[a], &[1.0]).unwrap();
+            let b = Sum::dot(&[b], &[1.0]).unwrap();
+            assert!(Sum::default().add_product(a, b).is_none());
+        }
+    }
+
+    #[test]
+    fn bilinear_work_preserves_a_subnormal_tail_restored_by_its_conjugate() {
+        let tiny = f64::from_bits(1);
+        let large = 2.0_f64.powi(1023);
+        let effort = Sum::dot(&[1e-300, tiny], &[1.0, 1.0]).unwrap();
+        for sign in [-1.0, 1.0] {
+            let flow = Sum::dot(&[large], &[sign]).unwrap();
+            let mut work = Sum::default();
+            work.add_product(effort, flow).unwrap();
+            work.product(-1e-300, sign * large).unwrap();
+            assert_eq!(work.value().unwrap(), sign * 2.0_f64.powi(-51));
+        }
     }
 
     #[test]
