@@ -3068,3 +3068,10 @@ Regressions cover an independently derived finite-capacity plateau operating
 point and eight-way power balance, changing regulated/current-limited/foldback
 demand on one continuing state, reverse power into chemical storage, and
 transactional unsupported-demand/exhaustion/cancellation recovery.
+
+
+## Finite battery/converter motor drive
+
+`circuit::converter::battery_fed::motor` closes the converter output against the original reciprocal `DcMotor` voltage port in one nine-state discrete-gradient solve, retaining battery chemical/polarization/bus storage, converter flux/input/output capacitors, motor flux and both absolute momenta. Native inputs are zero source currents plus authored rotor/stator torques. Signed armature current supports motoring and regeneration without efficiency clipping; optional regulated auxiliary demand shares the accepted output voltage.
+
+`BatteryMotorStep` carries one actual native nine-state receipt, physical `BatteryFedInterval` constituent accounts, separate magnetic/rotor/stator storage and two shaft works, and ten physical heat owners (the prior eight electrical channels, winding copper and bearing friction). Independent battery/lead/converter/winding/mechanical/full balances gate publication; failed support, energy or cancellation checks publish none of the nine states. Commands retain stored state. The frozen averaged converter and linear commutated motor laws claim no PWM, magnetic saturation, controller or automatic shaft support. Work and heat use native discrete-effort quadrature; closure alone does not certify continuous-time accuracy. Regressions include an independent SI ODE reference with second-order state refinement, finite-inertia regeneration and atomic retry.

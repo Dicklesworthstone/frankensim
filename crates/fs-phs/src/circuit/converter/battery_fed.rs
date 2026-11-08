@@ -25,6 +25,9 @@ use crate::{
 };
 use fs_math::{dd::Dd, det};
 
+/// The same finite electrical source driving a reciprocal DC motor/generator.
+pub mod motor;
+
 fn sum(values: impl IntoIterator<Item = f64>) -> f64 {
     values
         .into_iter()
@@ -33,6 +36,157 @@ fn sum(values: impl IntoIterator<Item = f64>) -> f64 {
 }
 fn product(a: f64, b: f64, c: f64) -> f64 {
     (Dd::from_f64(a) * Dd::from_f64(b) * Dd::from_f64(c)).to_f64()
+}
+
+fn admit_balances(
+    controls: PowerLoadControls,
+    balances: &[(f64, f64)],
+    what: &'static str,
+) -> Result<(), PhsError> {
+    if balances.iter().any(|&(residual, scale)| {
+        let allowance =
+            controls.absolute_energy_tolerance_j + controls.relative_energy_tolerance * scale;
+        !scale.is_finite()
+            || !allowance.is_finite()
+            || !residual.is_finite()
+            || residual.abs() > allowance
+    }) {
+        return Err(invalid(what));
+    }
+    Ok(())
+}
+
+/// Physical accounts of the six electrical states on one accepted interval.
+/// This may be part of a larger monolithic solve: it carries no independent
+/// solver receipt or convergence claim for a separately stepped subsystem.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BatteryFedInterval {
+    pub battery: BatteryInterval,
+    pub converter_storage_change_j: f64,
+    pub converter_terminal_work_j: [f64; 2],
+    pub converter_conduction: ConductionHeat,
+    pub lead_current_a: f64,
+    pub lead_heat_j: f64,
+    /// Signed work entering the six-state electrical subsystem at its output.
+    /// A connected motor makes this an internal drive exchange, not a new
+    /// external energy source for the complete electromechanical assembly.
+    pub external_work_j: f64,
+    pub load: PowerLoadPoint,
+    pub load_work_j: f64,
+    pub curtailed_load_energy_j: f64,
+    pub discrete_bus_voltage_v: [f64; 3],
+}
+
+impl BatteryFedInterval {
+    /// Converter five channels, battery series/polarization, then physical lead.
+    pub fn heat_joules(&self) -> [f64; 8] {
+        let c = self.converter_conduction.joules;
+        [
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+            c[4],
+            self.battery.series_heat_j,
+            self.battery.polarization_heat_j,
+            self.lead_heat_j,
+        ]
+    }
+    pub fn storage_change_j(&self) -> f64 {
+        sum([
+            self.battery.storage_change_j(),
+            self.converter_storage_change_j,
+        ])
+    }
+    pub fn balance_residual_j(&self) -> f64 {
+        sum(self.heat_joules().into_iter().chain([
+            self.battery.storage_change_j(),
+            self.converter_storage_change_j,
+            -self.external_work_j,
+            self.load_work_j,
+        ]))
+    }
+    fn scales(&self) -> [f64; 4] {
+        let b = self.battery;
+        [
+            sum([
+                b.chemical_energy_change_j.abs(),
+                b.polarization_energy_change_j.abs(),
+                b.bus_energy_change_j.abs(),
+                b.terminal_work_j.abs(),
+                b.heat_j(),
+            ]),
+            sum([
+                self.converter_storage_change_j.abs(),
+                sum(self.converter_conduction.joules),
+                self.converter_terminal_work_j[0].abs(),
+                self.converter_terminal_work_j[1].abs(),
+            ]),
+            sum([
+                b.terminal_work_j.abs(),
+                self.converter_terminal_work_j[0].abs(),
+                self.lead_heat_j,
+            ]),
+            sum([self.external_work_j.abs(), self.load_work_j]),
+        ]
+    }
+    fn admit(&self, controls: PowerLoadControls) -> Result<(), PhsError> {
+        let heat = sum(self.heat_joules());
+        let [source_scale, converter_scale, lead_scale, external_scale] = self.scales();
+        let values = [
+            self.converter_storage_change_j,
+            self.converter_terminal_work_j[0],
+            self.converter_terminal_work_j[1],
+            self.lead_current_a,
+            self.lead_heat_j,
+            self.external_work_j,
+            self.load_work_j,
+            self.curtailed_load_energy_j,
+            heat,
+            self.storage_change_j(),
+        ];
+        if values
+            .iter()
+            .chain(&self.heat_joules())
+            .chain(&self.discrete_bus_voltage_v)
+            .any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "battery-converter interval power is unrepresentable",
+            ));
+        }
+        admit_balances(
+            controls,
+            &[
+                (self.battery.balance_residual_j(), source_scale),
+                (
+                    sum([
+                        self.converter_storage_change_j,
+                        sum(self.converter_conduction.joules),
+                        -self.converter_terminal_work_j[0],
+                        -self.converter_terminal_work_j[1],
+                    ]),
+                    converter_scale,
+                ),
+                (
+                    sum([
+                        -self.battery.terminal_work_j,
+                        -self.converter_terminal_work_j[0],
+                        -self.lead_heat_j,
+                    ]),
+                    lead_scale,
+                ),
+                (
+                    self.balance_residual_j(),
+                    source_scale
+                        .max(converter_scale)
+                        .max(external_scale)
+                        .max(heat),
+                ),
+            ],
+            "battery, lead, converter and exported load work do not close",
+        )
+    }
 }
 
 /// Complete native solve, with independent accounts at each physical boundary.
@@ -59,29 +213,47 @@ pub struct BatteryFedStep {
 }
 
 impl BatteryFedStep {
+    /// Physical subaccount, without relabeling this solve's certificate as a
+    /// certificate for a subsystem of another assembled trajectory.
+    pub fn interval(&self) -> BatteryFedInterval {
+        BatteryFedInterval {
+            battery: self.battery,
+            converter_storage_change_j: self.converter_storage_change_j,
+            converter_terminal_work_j: self.converter_terminal_work_j,
+            converter_conduction: self.converter_conduction,
+            lead_current_a: self.lead_current_a,
+            lead_heat_j: self.lead_heat_j,
+            external_work_j: self.external_work_j,
+            load: self.load,
+            load_work_j: self.load_work_j,
+            curtailed_load_energy_j: self.curtailed_load_energy_j,
+            discrete_bus_voltage_v: self.discrete_bus_voltage_v,
+        }
+    }
+    fn from_interval(native: PreparedStepRecord, interval: BatteryFedInterval) -> Self {
+        Self {
+            native,
+            battery: interval.battery,
+            converter_storage_change_j: interval.converter_storage_change_j,
+            converter_terminal_work_j: interval.converter_terminal_work_j,
+            converter_conduction: interval.converter_conduction,
+            lead_current_a: interval.lead_current_a,
+            lead_heat_j: interval.lead_heat_j,
+            external_work_j: interval.external_work_j,
+            load: interval.load,
+            load_work_j: interval.load_work_j,
+            curtailed_load_energy_j: interval.curtailed_load_energy_j,
+            discrete_bus_voltage_v: interval.discrete_bus_voltage_v,
+        }
+    }
     /// Eight independent positive heat owners: the converter's original five
     /// channels, battery series resistance, battery polarization, then the lead.
     pub fn heat_joules(&self) -> [f64; 8] {
-        let c = self.converter_conduction.joules;
-        [
-            c[0],
-            c[1],
-            c[2],
-            c[3],
-            c[4],
-            self.battery.series_heat_j,
-            self.battery.polarization_heat_j,
-            self.lead_heat_j,
-        ]
+        self.interval().heat_joules()
     }
 
     pub fn balance_residual_j(&self) -> f64 {
-        sum(self.heat_joules().into_iter().chain([
-            self.battery.storage_change_j(),
-            self.converter_storage_change_j,
-            -self.external_work_j,
-            self.load_work_j,
-        ]))
+        self.interval().balance_residual_j()
     }
 }
 
@@ -182,6 +354,70 @@ impl BatteryFedBuckBoost {
             ));
         }
         Ok(state)
+    }
+
+    // Shared by the original six-state solve and larger monolithic drives.
+    // Efforts are the accepted native discrete-gradient prefix, not a sampled
+    // voltage command or an independently propagated component trajectory.
+    fn account_interval(
+        &self,
+        initial: &[f64; 6],
+        next: &[f64; 6],
+        effort: &[f64; 6],
+        output_current_a: f64,
+        load: Option<RegulatedPowerLoad>,
+        duration_s: f64,
+    ) -> Result<BatteryFedInterval, PhsError> {
+        let p = self.parameters();
+        load_point(load, initial[5] / p.bus_capacitance_f[1])?;
+        load_point(load, next[5] / p.bus_capacitance_f[1])?;
+        let point = load_point(load, effort[5])?;
+        let lead_current_a = ((Dd::from_f64(effort[2]) - Dd::from_f64(effort[4]))
+            / Dd::from_f64(self.lead_resistance_ohm))
+        .to_f64();
+        let battery = self.battery.interval(
+            &[initial[0], initial[1], initial[2]],
+            &[next[0], next[1], next[2]],
+            -lead_current_a,
+            duration_s,
+        )?;
+        let converter_storage_change_j = storage_energy_change(
+            self.converter.system().storage(),
+            &initial[3..],
+            &next[3..],
+            &mut [0.0; 3],
+            &mut [0.0; 3],
+        );
+        let joules = self.converter.effective_resistance_ohm.map(|r| {
+            (Dd::from_f64(r)
+                * Dd::from_f64(effort[3])
+                * Dd::from_f64(effort[3])
+                * Dd::from_f64(duration_s))
+            .to_f64()
+        });
+        let lead_heat_j = (Dd::from_f64(self.lead_resistance_ohm)
+            * Dd::from_f64(lead_current_a)
+            * Dd::from_f64(lead_current_a)
+            * Dd::from_f64(duration_s))
+        .to_f64();
+        let external_work_j = product(duration_s, effort[5], output_current_a);
+        let load_work_j = duration_s * point.delivered_power_w;
+        Ok(BatteryFedInterval {
+            battery,
+            converter_storage_change_j,
+            converter_terminal_work_j: [
+                product(duration_s, effort[4], lead_current_a),
+                sum([external_work_j, -load_work_j]),
+            ],
+            converter_conduction: ConductionHeat { joules },
+            lead_current_a,
+            lead_heat_j,
+            external_work_j,
+            load: point,
+            load_work_j,
+            curtailed_load_energy_j: duration_s * point.curtailed_power_w,
+            discrete_bus_voltage_v: [effort[2], effort[4], effort[5]],
+        })
     }
 
     pub fn prepare_controlled(
@@ -302,141 +538,39 @@ impl PreparedBatteryFedBuckBoost {
             .workspace
             .last_step_discrete_effort()
             .ok_or_else(|| invalid("battery-fed converter requires accepted native efforts"))?;
-        load_point(load, candidate[5] / p.bus_capacitance_f[1])?;
-        let point = load_point(load, e[5])?;
-        let lead_current_a = ((Dd::from_f64(e[2]) - Dd::from_f64(e[4]))
-            / Dd::from_f64(self.model.lead_resistance_ohm))
-        .to_f64();
-        let battery = self.model.battery.interval(
-            &[initial[0], initial[1], initial[2]],
-            &[candidate[0], candidate[1], candidate[2]],
-            -lead_current_a,
+        let effort = core::array::from_fn(|i| e[i]);
+        let interval = self.model.account_interval(
+            initial,
+            &candidate,
+            &effort,
+            output_current_a,
+            load,
             dt,
         )?;
-        let converter_storage_change_j = storage_energy_change(
-            self.model.converter.system().storage(),
-            &initial[3..],
-            &candidate[3..],
-            &mut [0.0; 3],
-            &mut [0.0; 3],
-        );
-        let joules = self.model.converter.effective_resistance_ohm.map(|r| {
-            (Dd::from_f64(r) * Dd::from_f64(e[3]) * Dd::from_f64(e[3]) * Dd::from_f64(dt)).to_f64()
-        });
-        let lead_heat_j = (Dd::from_f64(self.model.lead_resistance_ohm)
-            * Dd::from_f64(lead_current_a)
-            * Dd::from_f64(lead_current_a)
-            * Dd::from_f64(dt))
-        .to_f64();
-        let external_work_j = product(dt, e[5], output_current_a);
-        let load_work_j = dt * point.delivered_power_w;
-        let converter_terminal_work_j = [
-            product(dt, e[4], lead_current_a),
-            sum([external_work_j, -load_work_j]),
-        ];
-        let step = BatteryFedStep {
-            native,
-            battery,
-            converter_storage_change_j,
-            converter_terminal_work_j,
-            converter_conduction: ConductionHeat { joules },
-            lead_current_a,
-            lead_heat_j,
-            external_work_j,
-            load: point,
-            load_work_j,
-            curtailed_load_energy_j: dt * point.curtailed_power_w,
-            discrete_bus_voltage_v: [e[2], e[4], e[5]],
-        };
-        let heat = sum(step.heat_joules());
-        let change = sum([battery.storage_change_j(), converter_storage_change_j]);
-        let source_scale = sum([
-            battery.chemical_energy_change_j.abs(),
-            battery.polarization_energy_change_j.abs(),
-            battery.bus_energy_change_j.abs(),
-            battery.terminal_work_j.abs(),
-            battery.heat_j(),
-        ]);
-        let converter_scale = sum([
-            converter_storage_change_j.abs(),
-            sum(joules),
-            converter_terminal_work_j[0].abs(),
-            converter_terminal_work_j[1].abs(),
-        ]);
-        let lead_scale = sum([
-            battery.terminal_work_j.abs(),
-            converter_terminal_work_j[0].abs(),
-            lead_heat_j,
-        ]);
-        let external_scale = sum([external_work_j.abs(), load_work_j]);
-        let balances = [
-            (battery.balance_residual_j(), source_scale),
-            (
-                sum([
-                    converter_storage_change_j,
-                    sum(joules),
-                    -converter_terminal_work_j[0],
-                    -converter_terminal_work_j[1],
-                ]),
-                converter_scale,
-            ),
-            (
-                sum([
-                    -battery.terminal_work_j,
-                    -converter_terminal_work_j[0],
-                    -lead_heat_j,
-                ]),
-                lead_scale,
-            ),
-            (
-                sum([change, -native.delta_h]),
-                source_scale.max(converter_scale),
-            ),
-            (sum([heat, -native.dissipated]), heat),
-            (
-                sum([native.supplied, -external_work_j, load_work_j]),
-                external_scale,
-            ),
-            (
-                step.balance_residual_j(),
-                source_scale
-                    .max(converter_scale)
-                    .max(external_scale)
-                    .max(heat),
-            ),
-        ];
-        let values = [
-            converter_storage_change_j,
-            converter_terminal_work_j[0],
-            converter_terminal_work_j[1],
-            lead_current_a,
-            lead_heat_j,
-            external_work_j,
-            load_work_j,
-            step.curtailed_load_energy_j,
-            heat,
-            change,
-        ];
-        if values
-            .iter()
-            .chain(&step.heat_joules())
-            .chain(&step.discrete_bus_voltage_v)
-            .any(|v| !v.is_finite())
-            || balances.iter().any(|&(residual, scale)| {
-                let allowance = self.controls.absolute_energy_tolerance_j
-                    + self.controls.relative_energy_tolerance * scale;
-                !scale.is_finite()
-                    || !allowance.is_finite()
-                    || !residual.is_finite()
-                    || residual.abs() > allowance
-            })
-        {
-            return Err(
-                invalid("battery, lead, converter and exported load work do not close").into(),
-            );
-        }
+        interval.admit(self.controls)?;
+        let heat = sum(interval.heat_joules());
+        let [source_scale, converter_scale, _, external_scale] = interval.scales();
+        admit_balances(
+            self.controls,
+            &[
+                (
+                    sum([interval.storage_change_j(), -native.delta_h]),
+                    source_scale.max(converter_scale),
+                ),
+                (sum([heat, -native.dissipated]), heat),
+                (
+                    sum([
+                        native.supplied,
+                        -interval.external_work_j,
+                        interval.load_work_j,
+                    ]),
+                    external_scale,
+                ),
+            ],
+            "battery-converter component accounts disagree with the native solve",
+        )?;
         poll(&mut cancelled)?;
         *next = candidate;
-        Ok(step)
+        Ok(BatteryFedStep::from_interval(native, interval))
     }
 }
