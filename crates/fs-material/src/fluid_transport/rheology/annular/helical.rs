@@ -367,7 +367,7 @@ impl LaminarCarreauAnnulus {
                 return Err(state_error("helical Carreau Newton budget exhausted"));
             }
             let mut accepted = None;
-            let mut damping = 1.0;
+            let mut damping: f64 = 1.0;
             for attempt in 0..=controls.maximum_backtracks {
                 check()?;
                 let candidate = [

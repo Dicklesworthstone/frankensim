@@ -229,14 +229,22 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
         energy: f64,
     ) -> Result<ImplicitConductionState, DepositionError> {
         match self.original {
-            OriginalConduction::EquilibriumPhase(law) => law.conduction_state_at_enthalpy(energy),
-            OriginalConduction::Isobaric(law) => law.state_at_specific_enthalpy(energy),
-            OriginalConduction::ExpandingIsobaric(law) => law.state_at_specific_enthalpy(energy),
-            OriginalConduction::Isochoric(law) => law.state_at_specific_internal_energy(energy),
-            OriginalConduction::FixedVolume(law) => law.conduction_state_at_specific_storage(energy),
-            OriginalConduction::HeatStorage(law) => law.state_at_specific_storage(energy),
+            OriginalConduction::EquilibriumPhase(law) => {
+                law.conduction_state_at_enthalpy(energy).ok()
+            }
+            OriginalConduction::Isobaric(law) => law.state_at_specific_enthalpy(energy).ok(),
+            OriginalConduction::ExpandingIsobaric(law) => {
+                law.state_at_specific_enthalpy(energy).ok()
+            }
+            OriginalConduction::Isochoric(law) => {
+                law.state_at_specific_internal_energy(energy).ok()
+            }
+            OriginalConduction::FixedVolume(law) => {
+                law.conduction_state_at_specific_storage(energy).ok()
+            }
+            OriginalConduction::HeatStorage(law) => law.state_at_specific_storage(energy).ok(),
         }
-        .map_err(|_| DepositionError::MaterialDomain)
+        .ok_or(DepositionError::MaterialDomain)
     }
 }
 
