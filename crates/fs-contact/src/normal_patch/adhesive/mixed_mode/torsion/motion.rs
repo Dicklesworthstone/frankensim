@@ -16,6 +16,9 @@
 //! frictional slip, irreversible loss or heat. Held projection, fixed material,
 //! small deformation and temporal refinement remain physical assumptions.
 
+/// Original-source temperature continuation at held approach and twist.
+pub mod temperature;
+
 use super::{
     JkrTorsionalResponse, SourceJkrMixedMode,
     path::{JkrTorsionalPath, JkrTorsionalPathError},

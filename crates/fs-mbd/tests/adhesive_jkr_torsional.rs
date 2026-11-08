@@ -3,6 +3,8 @@
 mod common;
 #[path = "adhesive_jkr_torsional/geometry.rs"]
 mod geometry;
+#[path = "adhesive_jkr_torsional/temperature.rs"]
+mod temperature;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{

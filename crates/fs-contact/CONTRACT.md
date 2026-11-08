@@ -4083,3 +4083,32 @@ motion against an independent point-force RK4 reference, check time reversal,
 full mixed-unit kinetic work and impulse moments, exercise hidden intrastep
 twist-boundary excursions and inertial ambiguity, and verify bounded refusal
 and projection continuity without changing the original source history.
+
+### Original-source temperature continuation of torsional motion
+
+JkrTorsionalMotion::continue_at_temperature admits a sealed original normal
+held-indentation refresh and its complete mixed-mode successor at the exact
+accepted approach and twist. Independent bulk and interface temperatures,
+selected source claims, geometry and every original applicability envelope are
+retained. A pure-normal refresh alone cannot establish attached torsional
+contact: the successor is evaluated under its own original I/III source and
+must pass strict attachment and both effort limits. An unsupported original
+claim, foreign source/control, lost attached state or exhausted work allowance
+returns no successor.
+
+The immutable continuation preserves both rates, complete native mobility,
+numerical policy, clock and step count. It replaces only the authenticated
+source and cached original response. The signed normal elastic, torsional
+elastic and surface-energy changes jointly supply parameter work, including
+temperature-driven area relaxation. Pure-normal refresh work is never
+substituted for this loaded contact's storage change. No mechanical impulse,
+time increment, dissipation, heat or entropy law is inferred; this endpoint
+split does not establish stability along an unspecified temperature path.
+
+The accepted old endpoint is reused. One canonical normal-witness query and
+one original successor torsional query share the existing motion allowance;
+the continuation itself allocates nothing. Four regressions in
+tests/adhesive_torsion_equilibrium/temperature.rs exercise live-history transfer,
+independent full-potential work, independently prescribed temperatures and
+pinned claims, exact no-op/reversible cycles, torsional stability and effort
+refusals, original claim-domain loss, cancellation and query limits.

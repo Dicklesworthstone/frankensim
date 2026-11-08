@@ -8504,3 +8504,31 @@ world-rotation covariance, stale geometry and atomic unrepresented-mode and
 cancellation refusal with retry. Geometry regressions exercise repeated actual
 pose evolution with retained twist and clock, energy conservation, cancellation
 and retry, and refusal of transverse finite rotation despite loose audit gates.
+
+### Source temperature continuation of native normal/torsional adhesion
+
+`PreparedRigidJkrTorsionalPair::continue_at_temperature` authenticates the
+original held-indentation thermal refresh against the retained I/III source
+and actual native history. The same original source re-equilibrates the disk at
+unchanged approach and elastic twist. Signed parameter work includes normal
+elastic, torsional elastic and surface storage changes at that relaxed area;
+the refresh's pure-normal work cannot replace the twisted-contact work.
+
+The immutable proposal retains both body poses and momenta, mass properties,
+full mixed-unit mobility, original frame, markers, normal datum, coordinates,
+rates, clock, steps, budgets and all pending geometry travel exactly. Only the
+authenticated source and cached constitutive endpoint change. Native geometry
+and source chronology must already match: normal travel requires compatible
+axial geometry before a stale held-pose state can accept a temperature update.
+An accepted pending twist path is retained through the update and remains
+available to the original axial geometry owner afterward.
+
+The source and native signed-work gates both apply before returning the new
+pair and retained token. Source or applicability mismatch, invalid successor,
+stale native data and cancellation publish no state. Temperature can supply or
+remove stored mechanical energy without an impulse or fictitious friction heat.
+This endpoint continuation supplies no caloric equation, thermal expansion,
+continuous thermal-path stability, time increment, slip or reattachment.
+Focused native regressions cover unequal bulk/interface temperatures, warming
+and cooling work, changed subsequent recoil, no-op chronology, actual geometry
+handoff, retained pending attitude drift and atomic refusal with exact retry.

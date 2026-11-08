@@ -14,6 +14,8 @@
 
 /// Compatible axial pose drift retaining the original source chronology.
 pub mod geometry;
+/// Authenticated source temperature changes at unchanged native state.
+pub mod temperature;
 
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_contact::normal_patch::adhesive::mixed_mode::{
@@ -168,6 +170,7 @@ pub enum RigidJkrTorsionalError {
     GeometryMismatch { residual_m: f64 },
     UnsupportedShear { velocity_m_s: Vec3 },
     UnsupportedRolling { angular_velocity_rad_s: Vec3 },
+    ParameterWorkBalance { residual_j: f64, tolerance_j: f64 },
     Audit(Box<RigidJkrTorsionalAudit>),
 }
 impl From<JkrTorsionalMotionError> for RigidJkrTorsionalError {

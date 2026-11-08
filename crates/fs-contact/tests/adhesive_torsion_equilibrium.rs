@@ -3,6 +3,8 @@
 mod common;
 #[path = "adhesive_torsion_equilibrium/motion.rs"]
 mod motion;
+#[path = "adhesive_torsion_equilibrium/temperature.rs"]
+mod temperature;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::mixed_mode::torsion::path::JkrTorsionalPathError;
