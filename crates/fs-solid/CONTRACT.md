@@ -5678,6 +5678,22 @@ cancellation, budget and late-jump rollback.
   finite differences on heterogeneous triangles/distorted quads, plane stress/
   strain and Standard/B-bar, plus force/displacement homogeneity, mixed nonzero
   support lifting, cluster refusal and cancellation.
+- `stability::sensitivity::aggregate` (bead tfz.15): conservative smooth KS
+  total gradients through complete lowest-positive-mode packets. Interior
+  repeated/crossing modes are admitted; a relative boundary gap <=1e-6 and
+  missing requested positive modes refuse. The physical eigenvalues remain
+  unchanged. One normalized native checked-CG adjoint sums the full material
+  and prestress-redistribution pullbacks across the packet, including the
+  Standard/B-bar transpose and original prescribed columns. Finite negative
+  KS values are valid smoothing bias, not negative physical eigenvalues.
+  Active interior clusters refuse sharpness that amplifies the native
+  residual/roundoff resolution indicator above 1e-6 in log-weight ratios;
+  this admission policy is not an eigenvalue forward-error certificate.
+  Original eigenpair and adjoint residual gates, cancellation and fixed-load
+  sizing scope remain. G1/G3 `tests/buckling_aggregate_sensitivity.rs` checks
+  analytic repeated-column traces, independently re-solved total gradients,
+  mixed/prescribed supports, near-incompressible B-bar, force-unit scaling,
+  packet boundary/shortfall and excessive-sharpness refusal, and cancellation.
 - `continuation` (bead tfz.15): `PathResidual` (generic equilibrium
   residual R(u,λ) = R_int − λF_ext; `HyperProblem` implements it for
   homogeneous clamps + ramped dead tractions), `advance` — Keller
@@ -6732,10 +6748,10 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
   the scenario consumer; kind/physics validation ships here).
 - Production-scale pencil solves (shift-invert/sparse factorizations
   beyond the fixture-gated dense reduction), LOBPCG preconditioning hooks,
-  complete-cluster total spectral gradients and higher-dimensional/nonlinear
-  buckling sensitivities. The fixed-load P1/Q1 element-modulus equilibrium
-  adjoint is supplied by `stability::sensitivity`; wiring those derivatives
-  into a dedicated sizing optimizer remains consumer work.
+  and higher-dimensional/nonlinear buckling sensitivities. Fixed-load P1/Q1
+  element-modulus total gradients are supplied by `stability::sensitivity`,
+  including its complete-packet `aggregate` owner. The dedicated `fs-topopt`
+  sizing consumer uses these native equilibrium derivatives.
 - Plate/shell buckling references (needs bending elements — the
   shells bead); the 2D canonical here is the strut.
 - Kirchhoff--Love/bending-continuum claims,

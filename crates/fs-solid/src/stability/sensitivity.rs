@@ -19,6 +19,9 @@ use crate::mesh2::{quad_points, shapes_at};
 use fs_solver::checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg};
 use fs_solver::op::CsrOp;
 
+/// Smooth total sensitivities through complete, possibly repeated mode packets.
+pub mod aggregate;
+
 /// Accepted modes and their total derivatives with respect to the original
 /// element Young's-modulus multipliers. Fields cannot be replaced by unrelated
 /// modes, gradients or scale vectors after analysis.
