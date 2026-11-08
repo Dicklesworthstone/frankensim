@@ -127,6 +127,11 @@ path = "examples/donnan_swelling.rs"
 required-features = ["continuum"]
 
 [[example]]
+name = "nonideal_donnan_swelling"
+path = "examples/nonideal_donnan_swelling.rs"
+required-features = ["continuum"]
+
+[[example]]
 name = "shock_box"
 path = "examples/shock_box.rs"
 required-features = ["experimental-compressible"]

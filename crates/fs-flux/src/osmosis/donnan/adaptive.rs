@@ -28,7 +28,8 @@ pub struct DonnanAdvanceControls {
     /// water and charge allowances and relative charge accuracy are distributed
     /// over the window at 1% of corresponding temporal tolerances. Charge
     /// accuracy retains the original charge-scale definition; it is not a
-    /// separate certificate of each ion's relative partition accuracy.
+    /// separate certificate of each ion's relative partition accuracy. The
+    /// prepared nonideal owner's electrochemical accuracy remains independent.
     pub step: DonnanStepControls,
 }
 impl Default for DonnanAdvanceControls {
@@ -142,6 +143,7 @@ impl DonnanAdvanceWorkspace {
                     a.temperature_k().to_bits() == b.temperature_k().to_bits()
                         && a.solvent_molar_volume_m3_mol().to_bits()
                             == b.solvent_molar_volume_m3_mol().to_bits()
+                        && a.nonideal_model() == b.nonideal_model()
                 })
     }
 }
@@ -253,8 +255,9 @@ fn retryable(error: &DonnanWaterError) -> bool {
 
 impl DonnanOsmoticPair {
     /// Prepare optional snapshots under a separate byte budget. The workspace
-    /// may be reused with the same state shape and ideal solvent model; physical
-    /// coefficients, geometry, ions and fixed charges remain owned by the pair.
+    /// may be reused with the same state shape and original solution model;
+    /// physical coefficients, geometry, ions and fixed charges remain owned by
+    /// the pair. No ideal/nonideal or virial-model substitution is permitted.
     pub fn adaptive_workspace(
         &self,
         maximum_workspace_bytes: usize,

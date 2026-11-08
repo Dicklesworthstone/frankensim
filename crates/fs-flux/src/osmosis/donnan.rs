@@ -4,8 +4,10 @@
 //! every species total and both fixed charge amounts. Water responds to the
 //! FULL ionic plus explicitly trapped osmotic pressure and the original
 //! mechanical pressure/volume laws. There are no independent ionic reflection
-//! coefficients or unbalanced ionic leaks. This is an ideal dilute fast-ion
-//! limit, not transient Nernst--Planck transport or a nonideal electrolyte law.
+//! coefficients or unbalanced ionic leaks. Ideal dilute and activity-consistent
+//! virial equilibria share the same fast-ion water formulation. The nonideal
+//! closure retains the original solution model and its concentration support;
+//! neither closure supplies transient ionic kinetics or double-layer storage.
 //!
 //! Each step is backward Euler with a safeguarded scalar water solve. Root
 //! tolerances control the accepted balance/transfer, not temporal truncation
@@ -19,19 +21,26 @@ pub mod adaptive;
 pub use adaptive::{DonnanAdvanceControls, DonnanAdvanceReport, DonnanAdvanceWorkspace};
 
 use super::{OsmoticCompartment, OsmoticNetworkError};
+use fs_material::osmosis::donnan::nonideal::VirialDonnan;
 use fs_material::osmosis::donnan::{
     DonnanControls, DonnanError, DonnanProblem, DonnanReport, IdealDonnan, MAX_DONNAN_SPECIES,
 };
-use fs_material::osmosis::{HydraulicPermeance, OsmosisError};
+use fs_material::osmosis::{AqueousSolution, HydraulicPermeance, OsmosisError};
 
 /// Original water/ion admission or a failed conservation check.
 #[derive(Debug)]
 pub enum DonnanWaterError {
     Network(OsmoticNetworkError),
     Ions(DonnanError),
-    InventoryBalance { species: usize, residual_mol: f64 },
+    InventoryBalance {
+        species: usize,
+        residual_mol: f64,
+    },
     /// Temporal accuracy needs a step below the caller's admitted minimum.
-    TemporalAccuracy { step_s: f64, scaled_error: f64 },
+    TemporalAccuracy {
+        step_s: f64,
+        scaled_error: f64,
+    },
 }
 impl core::fmt::Display for DonnanWaterError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -69,7 +78,8 @@ pub struct DonnanStepControls {
     pub relative_water_tolerance: f64,
     /// Includes bracketing, interpolation, bisection and accepted re-evaluation.
     pub maximum_root_evaluations: usize,
-    /// Bounded charge solve performed at each candidate water transfer.
+    /// Bounded ion-equilibrium solve at each candidate water transfer. A
+    /// nonideal owner also retains its explicitly prepared activity accuracy.
     pub ion_equilibrium: DonnanControls,
 }
 impl Default for DonnanStepControls {
@@ -102,10 +112,9 @@ pub struct DonnanStepReport {
     pub water_root_residual_m3: f64,
     /// All attempted water-residual evaluations, including refused candidates.
     pub root_evaluations: usize,
-    /// Charge-residual evaluations from completed ion equilibria. Refused ion
-    /// trials do not return a partial count; each is separately bounded by
-    /// `ion_equilibrium.maximum_iterations`, with at most `root_evaluations`
-    /// total inner solve attempts.
+    /// Ion-equilibrium iterations reported by completed solves. Refused ion
+    /// trials do not return a partial count; each is separately bounded by the
+    /// original material controls, with at most `root_evaluations` inner solves.
     pub ion_root_evaluations: usize,
 }
 
@@ -113,7 +122,7 @@ pub struct DonnanStepReport {
 pub struct DonnanOsmoticPair {
     compartments: [OsmoticCompartment; 2],
     candidates: [OsmoticCompartment; 2],
-    ions: IdealDonnan,
+    ions: DonnanIonModel,
     fixed_charge_mol: [f64; 2],
     trapped_particles_mol: [f64; 2],
     membrane_area_m2: f64,
@@ -124,6 +133,47 @@ pub struct DonnanOsmoticPair {
     equilibrium: DonnanReport,
     workspace_bytes: usize,
     time_s: f64,
+}
+
+/// The original ion law and its prepared scratch stay attached to the pair.
+#[derive(Clone, Debug)]
+enum DonnanIonModel {
+    Ideal(IdealDonnan),
+    Virial(VirialDonnan),
+}
+impl DonnanIonModel {
+    fn valences(&self) -> &[i32] {
+        match self {
+            Self::Ideal(ions) => ions.valences(),
+            Self::Virial(ions) => ions.valences(),
+        }
+    }
+    fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Ideal(ions) => ions.heap_bytes(),
+            Self::Virial(ions) => ions.heap_bytes(),
+        }
+    }
+    fn admits_solution(&self, solution: &AqueousSolution) -> bool {
+        match self {
+            Self::Ideal(_) => solution.is_ideal(),
+            Self::Virial(ions) => solution.nonideal_model() == Some(ions.model()),
+        }
+    }
+    fn equilibrate_into(
+        &mut self,
+        problem: DonnanProblem<'_>,
+        controls: DonnanControls,
+        left: &mut [f64],
+        right: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<DonnanReport> {
+        match self {
+            Self::Ideal(ions) => ions.equilibrate_into(problem, controls, left, right, cancelled),
+            Self::Virial(ions) => ions.equilibrate_into(problem, controls, left, right, cancelled),
+        }
+        .map_err(Into::into)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -141,13 +191,63 @@ struct Work {
 }
 
 impl DonnanOsmoticPair {
-    /// Prepare a closed pair and canonicalize the initial mobile ion partition
-    /// at its supplied volumes. Input species totals are retained exactly as
-    /// the conserved basis; no additional ions or solvent are supplied.
-    /// Initial fast ionic relaxation has no simulated duration or heat report.
+    /// Prepare a closed ideal pair and canonicalize its initial mobile ion
+    /// partition at the supplied volumes. Input species totals are retained
+    /// exactly as the conserved basis; no additional ions or solvent are
+    /// supplied. Initial fast ionic relaxation has no duration or heat report.
     pub fn new(
-        mut compartments: [OsmoticCompartment; 2],
+        compartments: [OsmoticCompartment; 2],
         ions: IdealDonnan,
+        fixed_charge_mol: [f64; 2],
+        trapped_particles_mol: [f64; 2],
+        membrane_area_m2: f64,
+        hydraulic: HydraulicPermeance,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self> {
+        Self::prepare(
+            compartments,
+            DonnanIonModel::Ideal(ions),
+            fixed_charge_mol,
+            trapped_particles_mol,
+            membrane_area_m2,
+            hydraulic,
+            maximum_workspace_bytes,
+        )
+    }
+
+    /// Prepare a finite nonideal pair whose mobile ions and water use the SAME
+    /// original virial free energy. Both compartments must carry the model
+    /// used to prepare `ions`, including its species order and support limits.
+    /// Input ion totals and both fixed charges remain conserved; the initial
+    /// partition is canonicalized without advancing time or supplying ions.
+    ///
+    /// The nonideal owner's electrochemical accuracy remains an independent
+    /// algebraic requirement during both `step` and adaptive `advance`.
+    /// Explicitly trapped particles are independent ideal osmoles; they are
+    /// neither mobile model species nor an inferred count of fixed charges.
+    pub fn new_nonideal(
+        compartments: [OsmoticCompartment; 2],
+        ions: VirialDonnan,
+        fixed_charge_mol: [f64; 2],
+        trapped_particles_mol: [f64; 2],
+        membrane_area_m2: f64,
+        hydraulic: HydraulicPermeance,
+        maximum_workspace_bytes: usize,
+    ) -> Result<Self> {
+        Self::prepare(
+            compartments,
+            DonnanIonModel::Virial(ions),
+            fixed_charge_mol,
+            trapped_particles_mol,
+            membrane_area_m2,
+            hydraulic,
+            maximum_workspace_bytes,
+        )
+    }
+
+    fn prepare(
+        mut compartments: [OsmoticCompartment; 2],
+        mut ions: DonnanIonModel,
         fixed_charge_mol: [f64; 2],
         trapped_particles_mol: [f64; 2],
         membrane_area_m2: f64,
@@ -167,7 +267,7 @@ impl DonnanOsmoticPair {
         if !positive(membrane_area_m2)
             || compartments.iter().any(|cell| {
                 let s = cell.solution();
-                !s.is_ideal()
+                !ions.admits_solution(s)
                     || s.solute_moles().len() != count
                     || s.temperature_k().to_bits() != reference.temperature_k().to_bits()
                     || s.solvent_molar_volume_m3_mol().to_bits()
@@ -175,7 +275,7 @@ impl DonnanOsmoticPair {
             })
         {
             return Err(invalid(
-                "Donnan water transport requires common ideal ionic layout, solvent, temperature and positive area",
+                "Donnan water transport requires the original common solution model, ionic layout, solvent, temperature and positive area",
             ));
         }
         let workspace_bytes = core::mem::size_of::<Self>()
@@ -319,8 +419,12 @@ impl DonnanOsmoticPair {
             water - mobility * equilibrium.solvent_driving_pressure_pa([pressure_drop, 0.0])?,
             "nonfinite Donnan water residual",
         )?;
-        let mechanical_stiffness = self.compartments[0].pressure.tangent_pa_per_m3(volumes[0])?
-            + self.compartments[1].pressure.tangent_pa_per_m3(volumes[1])?;
+        let mechanical_stiffness = self.compartments[0]
+            .pressure
+            .tangent_pa_per_m3(volumes[0])?
+            + self.compartments[1]
+                .pressure
+                .tangent_pa_per_m3(volumes[1])?;
         let derivative = equilibrium
             .osmotic_pressure_drop_slope_pa_per_m3
             .and_then(|slope| {
@@ -358,7 +462,7 @@ impl DonnanOsmoticPair {
         let estimate = initial.derivative.map_or(initial.residual.abs(), |slope| {
             initial.residual.abs() / slope
         });
-        // The equilibrated ideal free energy makes this residual monotone.
+        // The equilibrated convex free energy makes this residual monotone.
         // Keep an admissible Newton predictor instead of truncating an exact
         // linear-pressure root; start conservatively only outside the domain.
         let mut distance = if estimate < available {
@@ -531,10 +635,8 @@ impl DonnanOsmoticPair {
                 });
             }
         }
-        let pressure_work = super::mechanics::pressure_work_into_solution_j(
-            &self.compartments,
-            trial.volumes,
-        )?;
+        let pressure_work =
+            super::mechanics::pressure_work_into_solution_j(&self.compartments, trial.volumes)?;
         let report = DonnanStepReport {
             interval_s: [self.time_s, end],
             solvent_transfer_m3: trial.water,
@@ -587,3 +689,7 @@ mod tests;
 #[cfg(test)]
 #[path = "donnan/adaptive_tests.rs"]
 mod adaptive_tests;
+
+#[cfg(test)]
+#[path = "donnan/nonideal_tests.rs"]
+mod nonideal_tests;

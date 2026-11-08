@@ -5872,7 +5872,7 @@ and reports adaptive work and balances through the physical transient.
 
 ## Finite Donnan swelling and mechanical water exchange
 
-`osmosis::donnan::DonnanOsmoticPair` couples the shared finite-bath ideal ionic
+`osmosis::donnan::DonnanOsmoticPair` couples an original finite-bath ionic
 partition to finite water motion and the original compartment pressure/volume
 laws. Preparation canonicalizes mobile ions at the supplied volumes while
 retaining each species' total. Fixed charge and independent trapped osmotic
@@ -5882,8 +5882,8 @@ reflection factors or an infinite salt bath. Compartment solution getters hold
 mobile ions only; the Donnan report holds full osmotic pressure including traps.
 
 One step uses backward Euler. Analytical nonnegative ionic stiffness augments
-the actual mechanical tangent at each trial in a safeguarded Newton solve; the ideal equilibrated
-free energy makes the scalar residual monotone. Bounded bracketing handles
+the actual mechanical tangent at each trial in a safeguarded Newton solve.
+The original convex equilibrated free energy makes the scalar residual monotone. Bounded bracketing handles
 volume applicability and stiff roots, and a narrow sign-changing bracket may
 control transfer-position error while retaining the actual balance residual.
 All mutable storage is prepared once. Every ion total, water, both fixed charges,
@@ -5892,9 +5892,10 @@ inner/outer work or cancellation publishes neither inventories nor diagnostics.
 The ionic work diagnostic counts completed equilibria; refused trials remain
 bounded by the explicit outer and inner controls.
 
-This is the ideal fast-ion limit, not transient ionic permeability,
-Nernst--Planck transport, double-layer storage, imposed voltage/current or a
-nonideal electrolyte closure. Incompatible nonideal inventories are refused.
+Both constructors represent fast-ion limits, not transient ionic permeability,
+Nernst--Planck transport, double-layer storage or imposed voltage/current.
+The ideal constructor refuses nonideal inventories; `new_nonideal` requires
+both compartments to retain the original shared virial model.
 Root tolerances do not control first-order temporal error. Mechanical work is
 the exact original pressure primitive for linear or nonlinear chamber laws,
 not a thermal closure.
@@ -5906,6 +5907,54 @@ Focused regressions cover linear and nonlinear analytical solutions,
 counterion-only limits, multivalent charge conservation, stiff hydraulics,
 orientation, energy decay, volume depletion, workspace limits and atomic retry.
 
+
+### Activity-consistent finite-bath Donnan swelling
+
+`DonnanOsmoticPair::new_nonideal` retains a prepared
+`fs_material::osmosis::donnan::VirialDonnan` and the same original
+`VirialSolutionModel` in both accepted solution owners. Ion partition obeys
+`ln(cL/cR)+B*(cL-cR)+z*psi=0`, every species total, and both fixed charge
+constraints. Water responds to the pressure from that SAME original free
+energy. Concentration references cancel from the ionic difference. Trapped
+particles remain explicit, ideal, noninteracting osmoles; fixed charge does
+not infer a particle count or a second osmotic contribution.
+
+The material owner uses a prepared native LU workspace and a diagonally scaled
+exact constrained Hessian, preserving representable trace and exact absent
+inventories without a concentration floor. When the ideal partition exceeds
+the original concentration caps, a bounded charge-feasible seed starts the
+original equilibrium solve. Caps remain applicability boundaries; a capped
+state never replaces the original electrochemical equations. Individual
+chemical-potential and charge tolerances, all residual evaluations, original
+support, representability and cancellation remain explicit acceptance gates.
+
+Analytic ionic redistribution under solvent transfer supplies the relaxed
+osmotic stiffness. It is evaluated as positive original-Hessian quadratic
+forms, avoiding cancellation of large direct and relaxation terms. The shared
+water solve uses it alongside the original nonlinear mechanical tangent.
+The existing exact material work, conservative adaptive half-step endpoint,
+window rollback and bounded work remain active. Adaptive workspace admission
+also compares original thermodynamic models, preventing snapshot reuse from
+silently substituting a different solution law. Successful repeated material
+and water solves allocate no memory after preparation.
+
+Material regressions cover independent monovalent roots, original activity
+and pressure formulas, multivalent cross interactions, finite-volume
+sensitivity, trace-ion unit scaling, exact counterion-only limits, supported
+roots outside the ideal initial guess, and atomic refusal/retry. Flux
+regressions cover zero-interaction recovery, independent nonideal swelling
+against Simo--Taylor mechanics, total-potential decrease, common-gauge
+invariance, late cancellation and incompatible-model rejection.
+The `nonideal_donnan_swelling` example combines finite charged baths, retained
+dry volume, adaptive water motion and nonlinear bulk resistance, with an
+independent scalar equilibrium and energy account.
+
+These regression sources were added; native execution was blocked by shared
+storage/memory exhaustion in the implementation environment. The physical
+model is isothermal, single-phase and within the original convex virial
+support, with negligible solute partial volumes. It does not supply a universal
+electrolyte calibration, binding/association, double-layer storage, transient
+ionic permeability, heat transport or spatial poroelasticity.
 
 ### Adaptive finite-bath Donnan advancement
 
