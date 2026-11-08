@@ -8744,3 +8744,44 @@ density, reference normalization and exact angular velocity. Those full Cargo
 regressions were added but not executed because the uncached dependency build
 exceeded the available storage; the probes do not replace transport or the
 Stokes solver.
+
+### Prescribed integral flow with material SGS
+
+The `MaterialFluxSystem` entries
+`solve_navier_stokes_mixed_rheology_sgs_flow_control`,
+`bdf1_navier_stokes_mixed_rheology_sgs_flow_control` and
+`bdf2_navier_stokes_mixed_rheology_sgs_variable_step_flow_control` resolve
+the pressure required by authored integral port flows while molecular rheology,
+Smagorinsky/WALE/Vreman stress and convection converge together. The existing
+native constrained Picard owner prepares one effective constitutive field per
+candidate and uses it for all pressure responses. Pressure offsets relax with
+the complete field. Final acceptance checks actual port flows and both
+independently reassembled, pressure-inclusive nonlinear equation residuals.
+
+Targets are signed outward volume rates per out-of-plane depth [m^2/s];
+physical depth converts them to m^3/s. Each disjoint port uses original
+traction edges and leaves its resolved velocity profile unknown. One uniform
+normal pressure increment is added to its original stress shape, retaining
+tangential traction and the selected open-boundary policy. Every controlled
+connected component retains an uncontrolled traction datum. Required pressure
+offsets, source force and boundary loads use the original material density and
+coherent SI conversions.
+
+The steady entry has no artificial inertia or timestep. BDF1 and equal or
+unequal-interval BDF2 retain the original physical histories, interval admission
+and mass operator; constitutive stress and convection are evaluated at the
+returned endpoint. Accepted material samples, physical reactions, molecular
+heating and separate modeled SGS transfer retain their original owners without
+a reporting-time source query. Refusal leaves both histories unchanged and
+returns no partial pressure/flow result. These entries retain the existing
+Estimated planar SGS applicability limits.
+
+The three groups in `tests/incompressible_sgs/flow_control.rs` exercise all
+three models against an affine physical-pressure solution for steady, BDF1,
+equal and unequal BDF2 with natural and dissipative backflow; they check integral
+units on a nonunit-height port, pressure-inclusive reactions and separate
+heating. Additional cases check increased required channel pressure at fixed
+flow, physical density scaling, the exact zero-model limit against the original
+material BDF2 control owner, and temporal, source, datum and nonlinear refusals.
+Source parsing and bounded review passed; native compilation and execution
+remain pending in the constrained environment.

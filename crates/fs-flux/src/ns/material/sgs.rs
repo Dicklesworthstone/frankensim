@@ -4,16 +4,21 @@
 //! symmetric strain; Smagorinsky/WALE/Vreman add only modeled stress. The
 //! source's physical molecular heating is never relabeled as turbulent heat.
 
+use super::mixed::physical_control;
 use super::rheology::RheologyField;
 use super::{
     MaterialFluxError, MaterialFluxRheologyPoint, MaterialFluxSystem, MaterialNavierStokesBoundary,
-    MaterialNavierStokesRheologyStep, with_kinematic_boundaries,
+    MaterialNavierStokesRheologyStep, MaterialStokesFlowControlSolution, with_kinematic_boundaries,
 };
-use crate::ns::boundary::{NavierStokesControls, StokesBoundaryError};
+use crate::ns::boundary::{NavierStokesControls, StokesBoundaryError, StokesFlowControlSolution};
 use crate::ns::sgs::{PlanarSgs, PlanarSgsError, PlanarSgsField, SgsModel};
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use std::cell::RefCell;
+
+#[path = "sgs/flow_control.rs"]
+mod flow_control;
+use flow_control::SgsPortControl;
 
 /// Explicit algebraic model and isotropic filter length for each native cell.
 /// No width, model coefficient, material parameter or wall correction is inferred.
@@ -99,8 +104,10 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             None,
             None,
             controls,
+            None,
             resolve,
         )
+        .map(|controlled| controlled.flow)
     }
 
     /// BDF1 with source molecular rheology and SGS converged at the new endpoint.
@@ -180,8 +187,10 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             older_velocity,
             Some(timestep_s),
             controls,
+            None,
             resolve,
         )
+        .map(|controlled| controlled.flow)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -194,8 +203,9 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         older_velocity: Option<(&[f64], f64)>,
         timestep_s: Option<f64>,
         controls: NavierStokesControls,
+        port_control: Option<SgsPortControl<'_>>,
         resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
-    ) -> Result<MaterialSgsStep<G>, MaterialSgsError> {
+    ) -> Result<MaterialStokesFlowControlSolution<MaterialSgsStep<G>>, MaterialSgsError> {
         let count = self.system.mesh.tris.len();
         let density = self.transport.density_kg_m3();
         // Setup-only storage for the existing authored model. Its frozen
@@ -241,7 +251,30 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             };
             with_kinematic_boundaries(density, boundaries, |native| {
                 let source_is_valid = || field.is_valid() && subgrid_error.borrow().is_none();
-                if let Some(dt) = timestep_s {
+                let uncontrolled = |flow| StokesFlowControlSolution {
+                    flow,
+                    pressure_offsets_m2_s2: Vec::new(),
+                    outward_volume_rates_m2_s: Vec::new(),
+                    maximum_flow_residual_m2_s: 0.0,
+                };
+                if let Some(control) = port_control {
+                    self.system
+                        .solve_navier_stokes_mixed_prepared_flow_control_checked(
+                            self.params,
+                            &prepare,
+                            &|_, _, value| value,
+                            &force,
+                            native,
+                            initial_velocity,
+                            older_velocity,
+                            timestep_s,
+                            controls,
+                            control.ports,
+                            control.targets,
+                            control.absolute_tolerance_m2_s,
+                            &source_is_valid,
+                        )
+                } else if let Some(dt) = timestep_s {
                     self.system
                         .bdf2_navier_stokes_mixed_prepared_rheology_variable_step_checked(
                             self.params,
@@ -255,6 +288,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                             controls,
                             &source_is_valid,
                         )
+                        .map(uncontrolled)
                 } else {
                     self.system
                         .solve_navier_stokes_mixed_prepared_rheology_checked(
@@ -267,6 +301,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                             controls,
                             &source_is_valid,
                         )
+                        .map(uncontrolled)
                 }
             })
             .map_err(MaterialFluxError::Boundary)
@@ -279,7 +314,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         }
         let (endpoint, samples) = resolved?;
         let sgs = closure
-            .field_with_molecular(&endpoint.solution.field.x[..self.system.n_u], &|cell| {
+            .field_with_molecular(&endpoint.flow.solution.field.x[..self.system.n_u], &|cell| {
                 samples[cell].transport().kinematic_viscosity_m2_s()
             })?;
         let modeled_transfer_w_per_m = density * sgs.integrated_dissipation_m4_s3;
@@ -292,11 +327,18 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         {
             return Err(MaterialFluxError::Invalid("unrepresentable physical SGS transfer").into());
         }
-        let flow = self.material_navier_stokes_rheology_step(endpoint, samples)?;
-        Ok(MaterialSgsStep {
-            flow,
-            sgs,
-            modeled_transfer_w_per_m,
+        let controlled = physical_control(endpoint, density, |endpoint| {
+            self.material_navier_stokes_rheology_step(endpoint, samples)
+        })?;
+        Ok(MaterialStokesFlowControlSolution {
+            flow: MaterialSgsStep {
+                flow: controlled.flow,
+                sgs,
+                modeled_transfer_w_per_m,
+            },
+            pressure_offsets_pa: controlled.pressure_offsets_pa,
+            outward_volume_rates_m2_s: controlled.outward_volume_rates_m2_s,
+            maximum_flow_residual_m2_s: controlled.maximum_flow_residual_m2_s,
         })
     }
 }

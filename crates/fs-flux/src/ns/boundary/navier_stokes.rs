@@ -264,7 +264,36 @@ impl<'m> FluxSystem<'m> {
         controls: NavierStokesControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<NavierStokesStep, StokesBoundaryError> {
-        self.solve_navier_stokes_mixed_endpoint(
+        self.solve_navier_stokes_mixed_prepared_rheology_with_flow_control(
+            params,
+            prepare,
+            law,
+            force,
+            boundaries,
+            initial_velocity,
+            controls,
+            source_is_valid,
+            None,
+        )
+        .map(|controlled| controlled.flow)
+    }
+
+    // The same steady preparation and residual owner serves prescribed
+    // pressure and unknown pressures constrained by integral port flows.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_navier_stokes_mixed_prepared_rheology_with_flow_control(
+        &self,
+        params: FluxParams,
+        prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        controls: NavierStokesControls,
+        source_is_valid: &dyn Fn() -> bool,
+        flow_control: Option<FlowControl<'_>>,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
+        self.solve_navier_stokes_mixed_endpoint_with_flow_control(
             params,
             boundaries,
             initial_velocity,
@@ -290,7 +319,63 @@ impl<'m> FluxSystem<'m> {
                 )
             },
             source_is_valid,
+            flow_control,
         )
+    }
+
+    // Gradient-dependent material/SGS closures need one prepared response for
+    // every pressure response of a Picard iterate. Reuse the existing native
+    // constraint owner; do not freeze a separately solved turbulent field.
+    #[cfg(feature = "experimental-sgs")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn solve_navier_stokes_mixed_prepared_flow_control_checked(
+        &self,
+        params: FluxParams,
+        prepare: &dyn Fn(&[f64]) -> Result<Vec<f64>, StokesBoundaryError>,
+        law: &dyn Fn(usize, [f64; 2], f64) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[NavierStokesBoundary<'_>],
+        initial_velocity: &[f64],
+        older_history: Option<(&[f64], f64)>,
+        timestep_s: Option<f64>,
+        controls: NavierStokesControls,
+        ports: &[&[usize]],
+        outward_volume_rates_m2_s: &[f64],
+        absolute_tolerance_m2_s: f64,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<StokesFlowControlSolution<NavierStokesStep>, StokesBoundaryError> {
+        let control = Some(FlowControl {
+            ports,
+            targets: outward_volume_rates_m2_s,
+            absolute_tolerance_m2_s,
+        });
+        if let Some(dt) = timestep_s {
+            self.bdf2_navier_stokes_mixed_prepared_rheology_with_flow_control(
+                params,
+                prepare,
+                law,
+                force,
+                boundaries,
+                initial_velocity,
+                older_history,
+                dt,
+                controls,
+                source_is_valid,
+                control,
+            )
+        } else {
+            self.solve_navier_stokes_mixed_prepared_rheology_with_flow_control(
+                params,
+                prepare,
+                law,
+                force,
+                boundaries,
+                initial_velocity,
+                controls,
+                source_is_valid,
+                control,
+            )
+        }
     }
 
     /// Assemble one BDF1 Oseen operator with an explicitly frozen advecting
