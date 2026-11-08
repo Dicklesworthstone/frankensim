@@ -26,6 +26,8 @@ use fs_math::{dd::Dd, det};
 const LIGHT_M_S: f64 = 299_792_458.0;
 
 mod asphere;
+mod coating;
+pub use coating::{LensCoating, LensCoatingLayer};
 
 /// A rotationally symmetric surface, ordered from sensor to scene.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -159,6 +161,8 @@ impl LensSurface {
     /// films are collapsed onto this face and do not displace the ray.
     ///
     /// Compact Cauchy coatings restrict the prescription to 380--780 nm.
+    /// [`SequentialLens::with_spectral_coating`] can replace this coating with
+    /// original Sellmeier, tabulated or absorbing films at the lens level.
     /// Nonzero film thickness requires steady generation: timed queries refuse
     /// because coherent coating group delay is not part of this lens model.
     #[must_use]
@@ -167,7 +171,8 @@ impl LensSurface {
         self
     }
 
-    /// Borrow the complete authored coating, including its source identity.
+    /// Borrow this surface's compact coating, including its source identity.
+    /// A lens-level spectral coating takes precedence during tracing.
     pub const fn coating(&self) -> Option<&DielectricCoating> {
         self.optical_surface.coating()
     }
@@ -373,8 +378,12 @@ struct TracedLensBeam {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SequentialLens {
     surfaces: Arc<[LensSurface]>,
+    spectral_coatings: Option<Arc<[Option<LensCoating>]>>,
     sensor_medium: Option<DielectricGlass>,
     reference_wavelength_nm: f64,
+    // Immutable bulk-only support allows replacing a visible compact coating
+    // without accidentally retaining its old restriction in the new lens.
+    bulk_wavelength_bounds_nm: (f64, f64),
     wavelength_bounds_nm: (f64, f64),
 }
 
@@ -433,6 +442,7 @@ impl SequentialLens {
                 .extinction_per_m(reference_wavelength_nm)
                 .map_err(|_| CameraError::InvalidSequentialLens)?;
         }
+        let bulk_wavelength_bounds_nm = band;
         if surfaces.iter().any(|surface| surface.coating().is_some()) {
             band = (
                 band.0.max(crate::spectral::LAMBDA_MIN),
@@ -444,10 +454,68 @@ impl SequentialLens {
         }
         Ok(Self {
             surfaces: Arc::from(surfaces),
+            spectral_coatings: None,
             sensor_medium,
             reference_wavelength_nm,
+            bulk_wavelength_bounds_nm,
             wavelength_bounds_nm: band,
         })
+    }
+
+    /// Attach original spectral films in sensor-to-scene order to one face.
+    /// The immutable coating data are shared when a lens is cloned. This
+    /// coating replaces any compact coating authored on the selected surface;
+    /// it is not an additional interface or a second attenuation multiplier.
+    /// The complete effective film/bulk support is recomputed, so replacing a
+    /// compact coating can restore nonvisible wavelengths of the bulk laws.
+    ///
+    /// The face index and the reference wavelength must be admitted. Nonzero
+    /// films require steady tracing; timed rays refuse before aperture clipping
+    /// because coherent group residence delay is not part of this model.
+    pub fn with_spectral_coating(
+        mut self,
+        surface_index: usize,
+        coating: LensCoating,
+    ) -> Result<Self, CameraError> {
+        if surface_index >= self.surfaces.len() {
+            return Err(CameraError::InvalidSequentialLens);
+        }
+        let mut band = self.bulk_wavelength_bounds_nm;
+        for (index, surface) in self.surfaces.iter().enumerate() {
+            let spectral = if index == surface_index {
+                Some(&coating)
+            } else {
+                self.spectral_coating(index)
+            };
+            let support = match spectral {
+                Some(coating) => coating.wavelength_bounds_nm(),
+                None if surface.coating().is_some() => {
+                    (crate::spectral::LAMBDA_MIN, crate::spectral::LAMBDA_MAX)
+                }
+                None => continue,
+            };
+            band = (band.0.max(support.0), band.1.min(support.1));
+        }
+        if self.reference_wavelength_nm < band.0 || self.reference_wavelength_nm > band.1 {
+            return Err(CameraError::InvalidSequentialLens);
+        }
+        let surface_count = self.surfaces.len();
+        let coatings = self
+            .spectral_coatings
+            .get_or_insert_with(|| vec![None; surface_count].into());
+        Arc::make_mut(coatings)[surface_index] = Some(coating);
+        self.wavelength_bounds_nm = band;
+        Ok(self)
+    }
+
+    /// Borrow the full spectral coating that takes precedence over the
+    /// surface's compact coating, if one was attached to this face.
+    #[must_use]
+    pub fn spectral_coating(&self, surface_index: usize) -> Option<&LensCoating> {
+        self.spectral_coatings
+            .as_ref()?
+            .get(surface_index)?
+            .as_ref()
     }
 
     pub fn surfaces(&self) -> &[LensSurface] {
@@ -563,14 +631,19 @@ impl SequentialLens {
         // geometric bulk ray is unchanged. Do not report bulk-only transit as
         // the delay of a coated detector, including for a later clipped ray.
         if timed
-            && self.surfaces().iter().any(|surface| {
-                surface.coating().is_some_and(|coating| {
-                    coating
-                        .periodic()
-                        .unit_cell()
-                        .iter()
-                        .any(|layer| layer.thickness_m() != 0.0)
-                })
+            && self.surfaces().iter().enumerate().any(|(index, surface)| {
+                self.spectral_coating(index).map_or_else(
+                    || {
+                        surface.coating().is_some_and(|coating| {
+                            coating
+                                .periodic()
+                                .unit_cell()
+                                .iter()
+                                .any(|layer| layer.thickness_m() != 0.0)
+                        })
+                    },
+                    LensCoating::is_active,
+                )
             })
         {
             return Err(CameraError::SequentialLensOutsideModel);
@@ -634,13 +707,18 @@ impl SequentialLens {
             if cosine == 0.0 {
                 return Ok(None);
             }
-            let response = surface
-                .optical_surface
-                .interface(wavelength_nm, false)
-                .and_then(|interface| {
-                    interface.fresnel_polarized(cosine, indices[i], indices[i + 1])
-                })
-                .map_err(|_| CameraError::SequentialLensOutsideModel)?;
+            let response = match self.spectral_coating(i) {
+                Some(coating) => {
+                    coating.fresnel_polarized(wavelength_nm, cosine, indices[i], indices[i + 1])
+                }
+                None => surface
+                    .optical_surface
+                    .interface(wavelength_nm, false)
+                    .and_then(|interface| {
+                        interface.fresnel_polarized(cosine, indices[i], indices[i + 1])
+                    })
+                    .map_err(|_| CameraError::SequentialLensOutsideModel),
+            }?;
             if response.scalar.total_internal_reflection {
                 return Ok(None);
             }

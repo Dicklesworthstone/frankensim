@@ -10175,11 +10175,14 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
             }.content_identity().as_bytes());
         }
         hasher.update(&(lens.surfaces().len() as u64).to_le_bytes());
-        for surface in lens.surfaces() {
+        for (surface_index, surface) in lens.surfaces().iter().enumerate() {
             update_continuity_f64s(hasher, [
                 surface.vertex_z_m(), surface.curvature_per_m(), surface.clear_radius_m(),
             ]);
-            if let Some(coating) = surface.coating() {
+            if let Some(coating) = lens.spectral_coating(surface_index) {
+                hasher.update(b"native-sequential-spectral-coating.v1");
+                hasher.update(coating.content_identity().as_bytes());
+            } else if let Some(coating) = surface.coating() {
                 hasher.update(b"native-sequential-coating.v1");
                 hasher.update(coating.content_identity().as_bytes());
             }

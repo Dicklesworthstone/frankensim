@@ -101,3 +101,96 @@ fn lens_coating_changes_cannot_reuse_progressive_camera_accumulation() {
         assert_ne!(reference_identity, identity(&variant));
     }
 }
+
+#[test]
+fn full_spectral_lens_continuity_binds_only_the_effective_ordered_films() {
+    use crate::camera::{LensCoating, LensCoatingLayer};
+    use crate::conductor::{
+        CauchyCoatingLayer, CoherentDielectricCoating, CoherentPeriodicCoating,
+        ConductorDataStatus, ConductorSource,
+    };
+    use crate::dielectric::{DielectricCoating, SellmeierIor};
+
+    let source = |byte| {
+        ConductorSource::try_new(ContentHash([byte; 32]), ConductorDataStatus::Representative)
+            .unwrap()
+    };
+    let coating = |thickness, resonance, source_byte, minimum, reversed| {
+        let first = CoherentDielectricCoating::try_new(
+            SellmeierIor::try_new_in_band(
+                [0.7, 0.0, 0.0],
+                [resonance, 0.0, 0.0],
+                (minimum, 1800.0),
+            )
+            .unwrap(),
+            thickness,
+            source(source_byte),
+        )
+        .unwrap();
+        let second = CoherentDielectricCoating::try_new(
+            CauchyIor::try_constant(1.8).unwrap(),
+            80e-9,
+            source(3),
+        )
+        .unwrap();
+        let mut layers: [LensCoatingLayer; 2] = [first.into(), second.into()];
+        if reversed {
+            layers.reverse();
+        }
+        LensCoating::try_new(&layers).unwrap()
+    };
+    let bare = camera(0.0, [0.0; 7], false);
+    let with_coating = |surface_index, coating| {
+        bare.clone()
+            .with_sequential_lens(
+                bare.sequential_lens()
+                    .unwrap()
+                    .clone()
+                    .with_spectral_coating(surface_index, coating)
+                    .unwrap(),
+            )
+            .unwrap()
+    };
+    let films = coating(100e-9, 0.02, 1, 400.0, false);
+    let reference = with_coating(0, films.clone());
+    let expected = identity(&reference);
+    assert_ne!(expected, identity(&bare));
+    assert_eq!(expected, identity(&reference.clone()));
+    assert_eq!(bare.focus_distance_m(), reference.focus_distance_m());
+    for variant in [
+        with_coating(1, films.clone()),
+        with_coating(0, coating(110e-9, 0.02, 1, 400.0, false)),
+        with_coating(0, coating(100e-9, 0.03, 1, 400.0, false)),
+        with_coating(0, coating(100e-9, 0.02, 2, 400.0, false)),
+        with_coating(0, coating(100e-9, 0.02, 1, 450.0, false)),
+        with_coating(0, coating(100e-9, 0.02, 1, 400.0, true)),
+    ] {
+        assert_ne!(expected, identity(&variant));
+    }
+    // Replaced compact films have no physical effect and must not invalidate
+    // an otherwise identical effective prescription's progressive binding.
+    for (thickness, source_byte) in [(50e-9, 4), (200e-9, 5)] {
+        let compact = DielectricCoating::try_new(
+            CoherentPeriodicCoating::try_new(
+                &[CauchyCoatingLayer::try_new(
+                    CauchyIor::try_constant(1.3).unwrap(),
+                    0.04,
+                    thickness,
+                )
+                .unwrap()],
+                1,
+                source(source_byte),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut surfaces = bare.sequential_lens().unwrap().surfaces().to_vec();
+        surfaces[0] = surfaces[0].with_coating(compact);
+        let lens = SequentialLens::try_new(550.0, &surfaces)
+            .unwrap()
+            .with_spectral_coating(0, films.clone())
+            .unwrap();
+        let overridden = bare.clone().with_sequential_lens(lens).unwrap();
+        assert_eq!(expected, identity(&overridden));
+    }
+}

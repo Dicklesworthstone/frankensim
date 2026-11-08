@@ -4671,10 +4671,26 @@ the locally parallel films are collapsed onto the surface. Compact Cauchy
 coatings retain their 380--780 nm source support, including zero-thickness
 stacks. Active films refuse timed generation because coherent residence delay
 is not modeled; zero-thickness films preserve the original bulk timing.
-Every authored coating enters camera continuity, including its source identity.
+Each effective coating enters camera continuity, including its source identity.
 Focused regressions cover quarter-wave anti-reflection transmission, unchanged
 geometric refraction, bulk Beer loss, asymmetric absorbing stacks, polarization
 correlation, source-band admission and the explicit timing boundary.
+
+`LensCoating` owns immutable shared original transparent and absorbing films;
+`SequentialLens::with_spectral_coating` attaches up to 64 ordered layers to a
+face without changing `LensSurface`'s compact value contract. Sellmeier and
+tabulated phase laws and tabulated complex-index films retain their exact
+source data, authority and support, including nonvisible bands. The effective
+coating replaces that face's compact coating. The prescription reintersects
+all effective film and bulk domains; replacing the last visible-only film can
+restore the original bulk law's broader support. Rays allocate no coating
+data and use the native borrowed mixed-stack evaluator for coherent loss and
+signed s/p transmission. Only effective coating identities enter camera
+continuity. Active effective films refuse timed transport before clipping;
+zero-thickness replacements retain their source domain and bulk transit.
+Focused regressions cover nonvisible mixed-film transport against the original
+owner, near-infrared quarter-wave cancellation, replacement domains, and
+effective-only timing and continuity.
 
 `LensSurface::try_new_aspheric` retains the original vertex curvature, a
 dimensionless conic constant and seven SI even-polynomial coefficients A4

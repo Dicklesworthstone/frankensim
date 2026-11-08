@@ -50,7 +50,8 @@ pub use diffraction::{DispersiveThinLens, ThinLensElement};
 mod sequential;
 #[cfg(feature = "tracer")]
 pub use sequential::{
-    LensSurface, SequentialCameraBeam, SequentialCameraRay, SequentialLens, SequentialLensRay,
+    LensCoating, LensCoatingLayer, LensSurface, SequentialCameraBeam, SequentialCameraRay,
+    SequentialLens, SequentialLensRay,
 };
 
 const PI: f64 = core::f64::consts::PI;
