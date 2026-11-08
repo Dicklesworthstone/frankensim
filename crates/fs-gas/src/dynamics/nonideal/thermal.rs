@@ -226,6 +226,33 @@ struct RealGasCaloric<'a> {
     hint: Option<f64>,
 }
 
+impl RealGasCaloric<'_> {
+    fn specific_caloric(&self, temperature: f64) -> Result<(f64, f64), WallExchangeError> {
+        if !self.gas.domain.admits_density(self.density)
+            || !self.gas.domain.admits_temperature(temperature)
+        {
+            return Err(
+                RealGasFlowError::Invalid("wall trial outside original real-gas domain").into(),
+            );
+        }
+        let reference = self.gas.reference_state();
+        // One finite increment checks both original EOS/caloric endpoints and
+        // supplies complete Cv. Transport and the PT root inventory belong to
+        // the unconditional accepted-state decode in local/shared prepare().
+        let caloric = self
+            .gas
+            .model()
+            .specific_internal_energy_change_and_cv_between_densities(
+                reference.density_kg_m3(),
+                reference.temperature_k(),
+                self.density,
+                temperature,
+            )
+            .map_err(RealGasFlowError::from)?;
+        Ok((caloric.internal_energy_change_j_kg(), caloric.final_cv_j_kg_k()))
+    }
+}
+
 impl WallGasCaloric for RealGasCaloric<'_> {
     fn domain(&self) -> CaloricDomain {
         let energy = self.gas.domain().energy;
@@ -245,58 +272,130 @@ impl WallGasCaloric for RealGasCaloric<'_> {
         mut cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<WallGasState, WallExchangeError> {
         poll(&mut cancelled)?;
+        let state = Conserved { density: self.density, momentum, energy };
+        if !state.finite() || !self.gas.domain.admits_density(self.density) {
+            return Err(RealGasFlowError::Invalid(
+                "conserved density outside real-gas domain or nonfinite state",
+            ).into());
+        }
+        // Match RealGas::resolve's specific total/kinetic subtraction. The
+        // source-relative caloric query never subtracts formation energies.
+        let velocity = momentum / self.density;
+        let specific_total = energy / self.density;
+        let kinetic = (0.5 * velocity) * velocity;
+        let relative_energy = specific_total - kinetic;
+        if !velocity.is_finite() || !relative_energy.is_finite() {
+            return Err(RealGasFlowError::Invalid(
+                "unrepresentable real-gas specific energy",
+            ).into());
+        }
         if let Some(temperature) = self.hint.filter(|&t| self.gas.domain.admits_temperature(t)) {
             let (thermal, _) = self.caloric(temperature)?;
-            let kinetic = 0.5 * momentum * (momentum / self.density);
-            if energy == thermal + kinetic {
+            let kinetic_density = 0.5 * momentum * velocity;
+            if energy == thermal + kinetic_density {
+                poll(&mut cancelled)?;
                 return Ok(WallGasState {
                     density: self.density,
-                    velocity: momentum / self.density,
+                    velocity,
                     temperature,
                 });
             }
         }
-        let state = self.gas.decode(
-            Conserved {
-                density: self.density,
-                momentum,
-                energy,
-            },
-            &mut cancelled,
-        )?;
+        let reference = self.gas.reference_state();
+        let energy_controls = self.gas.domain.energy;
+        // Preserve the same bounded reference-density subtraction-roundoff
+        // shortcut as RealGas::resolve. Conserved energy is never altered.
+        let roundoff = (8.0 * f64::EPSILON * specific_total.abs()
+            + 8.0 * f64::EPSILON * kinetic.abs())
+            .min(energy_controls.energy_tolerance_j_kg);
+        if self.density.to_bits() == reference.density_kg_m3().to_bits()
+            && relative_energy.abs() <= roundoff
+        {
+            poll(&mut cancelled)?;
+            return Ok(WallGasState {
+                density: self.density, velocity, temperature: reference.temperature_k(),
+            });
+        }
+        // The original increment inversion does not absorb nonzero relative
+        // energy merely because it is smaller than the absolute allowance.
+        let tolerance = if relative_energy == 0.0 {
+            energy_controls.energy_tolerance_j_kg
+        } else {
+            energy_controls.energy_tolerance_j_kg.min(0.5 * relative_energy.abs())
+        };
+        // Solve a one-kilogram caloric balance: the numerical Delta u and Cv
+        // values are joules and J/K for that unit mass. A zero equation scale
+        // keeps the original absolute J/kg tolerance; WallControl's required
+        // positive relative allowance contributes exactly zero. No rho*u/rho
+        // round trip or invented physical conductance enters this inversion.
+        let control = WallControl {
+            absolute_energy_tolerance_j: tolerance,
+            maximum_iterations: energy_controls.maximum_iterations,
+            ..WallControl::default()
+        };
+        control.validate()?;
+        let (minimum, maximum) = if self.density != reference.density_kg_m3() {
+            (energy_controls.minimum_temperature_k, energy_controls.maximum_temperature_k)
+        } else if relative_energy > 0.0 {
+            (reference.temperature_k(), energy_controls.maximum_temperature_k)
+        } else {
+            (energy_controls.minimum_temperature_k, reference.temperature_k())
+        };
+        let initial = self.hint.filter(|&t| self.gas.domain.admits_temperature(t))
+            .unwrap_or(reference.temperature_k());
+        let sample = |temperature| -> Result<_, WallExchangeError> {
+            let (internal, cv) = self.specific_caloric(temperature)?;
+            let residual = internal - relative_energy;
+            if !residual.is_finite() || !positive(cv) {
+                return Err(RealGasFlowError::Invalid(
+                    "unrepresentable original real-gas caloric inversion",
+                ).into());
+            }
+            Ok((residual, Some(cv), 0.0))
+        };
+        // Preserve the original caloric inversion's endpoint acceptance. The
+        // shared scalar owner otherwise takes strictly interior Newton steps,
+        // which cannot reach a boundary at sub-ULP energy tolerances. Cache
+        // these samples so an interior solve does not evaluate either twice.
+        poll(&mut cancelled)?;
+        let lower = sample(minimum)?;
+        poll(&mut cancelled)?;
+        let upper = sample(maximum)?;
+        let temperature = if lower.0.abs() <= tolerance {
+            minimum
+        } else if upper.0.abs() <= tolerance {
+            maximum
+        } else {
+            crate::multicomponent::wall_exchange::solve_scalar(
+                minimum,
+                maximum,
+                initial,
+                control,
+                |temperature, mut checkpoint| {
+                    poll(&mut checkpoint)?;
+                    if temperature == minimum {
+                        Ok(lower)
+                    } else if temperature == maximum {
+                        Ok(upper)
+                    } else {
+                        sample(temperature)
+                    }
+                },
+                &mut cancelled,
+            )?.0
+        };
+        poll(&mut cancelled)?;
         Ok(WallGasState {
-            density: state.density,
-            velocity: state.velocity,
-            temperature: state.temperature,
+            density: self.density,
+            velocity,
+            temperature,
         })
     }
 
     fn caloric(&self, temperature: f64) -> Result<(f64, f64), WallExchangeError> {
-        if !self.gas.domain.admits_density(self.density)
-            || !self.gas.domain.admits_temperature(temperature)
-        {
-            return Err(
-                RealGasFlowError::Invalid("wall trial outside original real-gas domain").into(),
-            );
-        }
-        let reference = self.gas.reference_state();
-        // One original finite energy increment already resolves the endpoint
-        // Cv and checks both EOS/caloric states. Speculative heat trials need
-        // neither a PT cubic inventory nor dilute-gas transport. prepare()
-        // still decodes every accepted candidate before publishing any state,
-        // admitting its complete source axes, transport and density branch.
-        let caloric = self
-            .gas
-            .model()
-            .specific_internal_energy_change_and_cv_between_densities(
-                reference.density_kg_m3(),
-                reference.temperature_k(),
-                self.density,
-                temperature,
-            )
-            .map_err(RealGasFlowError::from)?;
-        let energy = self.density * caloric.internal_energy_change_j_kg();
-        let capacity = self.density * caloric.final_cv_j_kg_k();
+        let (internal, cv) = self.specific_caloric(temperature)?;
+        let energy = self.density * internal;
+        let capacity = self.density * cv;
         if !energy.is_finite() || !positive(capacity) {
             return Err(
                 RealGasFlowError::Invalid("unrepresentable original real-gas calorics").into(),

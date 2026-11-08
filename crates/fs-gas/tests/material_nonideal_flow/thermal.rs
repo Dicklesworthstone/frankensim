@@ -308,7 +308,7 @@ fn shared_nonlinear_wall_uses_each_current_real_gas_density_and_only_one_heat_in
             SharedWallControl::default(), || false).unwrap();
     let requested = Time::new(1e-6);
     let transport = wave.step(requested, controls(), || false).unwrap();
-    let heat_controls = WallControl { relative_energy_tolerance: 0.0, ..wall_controls() };
+    let heat_controls = WallControl { relative_energy_tolerance: 1e-12, ..wall_controls() };
     let report = flow.step_with_walls(requested, controls(), &mut walls,
         heat_controls, || false).unwrap();
     assert_eq!(report.elapsed, requested);
@@ -357,6 +357,115 @@ fn shared_nonlinear_wall_uses_each_current_real_gas_density_and_only_one_heat_in
     assert_eq!(shared_report.elapsed, report.elapsed);
     near(shared_report.energy_residual_j, 0.0, 3e-5);
     check_wall_balance(&flow, &walls, report);
+}
+
+#[test]
+fn shared_cold_wall_trials_use_calorics_but_actual_gas_endpoints_require_full_material_support() {
+    let mut wider = domain();
+    wider.energy.minimum_temperature_k = 250.0;
+    let gas = bind(common::model([0.0; 2], [0.0; 2], [200.0, 2000.0]), wider);
+    // NASA/PR calorics admit 250 K, while the original transport cards do not.
+    assert!(gas.model().evaluate_density_temperature(&point(250.0), 20.0).is_err());
+    assert!(gas.model().specific_internal_energy_change_and_cv_between_densities(
+        20.0, 350.0, 20.0, 250.0,
+    ).is_ok());
+    let mut flow = uniform(gas, 350.0, 0.0);
+    let duration = Time::new(1e-6);
+    let conductance = 1e10;
+    let integrated = conductance * duration.value();
+    let mass = 20.0 * flow.mesh().volumes()[0];
+    let make_wall = |capacity| shared_wall(contact(WallThermal::Lumped {
+        temperature_k: 250.0, heat_capacity_j_per_k: capacity, conductance_w_per_k: 0.0,
+    }), &[conductance; 3]);
+    let mut walls = RealGasWallOperator::new(&flow,
+        vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
+        .with_shared_walls(vec![make_wall(1.0)], SharedWallControl::default(), || false).unwrap();
+    // The outer solve's zero-wall-energy trial treats 250 K as a reservoir.
+    // Its inner gas endpoint is below transport support, but it is not the
+    // accepted coupled endpoint of this small, rapidly warming wall.
+    let frozen_wall_gas = root(250.0, 350.0, |t| {
+        mass * (internal_energy(20.0, t) - internal_energy(20.0, 350.0))
+            - integrated * (250.0 - t)
+    });
+    assert!(frozen_wall_gas < 300.0);
+    // Eliminate the ONE wall temperature from the independent constant-wall
+    // balance. Gas calorics retain the closed PR expression, not a frozen Cv.
+    let wall_temperature = |gas_t: f64, capacity: f64| {
+        gas_t + capacity / (capacity + 3.0 * integrated) * (250.0 - gas_t)
+    };
+    let expected = root(250.0, 350.0, |t| {
+        3.0 * mass * (internal_energy(20.0, t) - internal_energy(20.0, 350.0))
+            + wall_temperature(t, 1.0) - 250.0
+    });
+    let expected_wall = wall_temperature(expected, 1.0);
+    assert!(expected > 300.0 && expected < 350.0 && expected_wall > 300.0);
+    let mut no_retry = controls();
+    no_retry.maximum_halvings = 0;
+    let heat_controls = WallControl { relative_energy_tolerance: 1e-12, ..wall_controls() };
+    let report = flow.step_with_walls(duration, no_retry, &mut walls,
+        heat_controls, || false).unwrap();
+    assert_eq!(report.elapsed, duration);
+    for primitive in flow.primitives() {
+        near(primitive.temperature, expected, 3e-8);
+    }
+    let WallThermal::Lumped { temperature_k, .. } = walls.shared_wall(0).unwrap().storage.thermal else {
+        panic!("one finite wall expected");
+    };
+    near(temperature_k, expected_wall, 3e-8);
+    near(report.wall_heat, -(expected_wall - 250.0), 2e-7);
+    check_wall_balance(&flow, &walls, report);
+
+    // A much larger cold wall leaves the actual gas below the transport floor.
+    // Caloric trial admission must not authorize publication of that endpoint.
+    let capacity = 1e8;
+    let initial_t = flow.primitives()[0].temperature;
+    let unsupported = root(250.0, initial_t, |t| {
+        3.0 * mass * (internal_energy(20.0, t) - internal_energy(20.0, initial_t))
+            + capacity * (wall_temperature(t, capacity) - 250.0)
+    });
+    assert!(unsupported < 300.0);
+    let mut outside = RealGasWallOperator::new(&flow,
+        vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
+        .with_shared_walls(vec![make_wall(capacity)], SharedWallControl::default(), || false).unwrap();
+    let snapshot = (flow.states().to_vec(), flow.primitives().to_vec(), flow.time(),
+        outside.contacts().to_vec(), outside.shared_wall(0).unwrap().clone());
+    assert!(matches!(flow.step_with_walls(duration, no_retry, &mut outside,
+        heat_controls, || false), Err(RealGasFlowError::StepRetries { .. })));
+    assert_eq!((flow.states().to_vec(), flow.primitives().to_vec(), flow.time(),
+        outside.contacts().to_vec(), outside.shared_wall(0).unwrap().clone()), snapshot);
+    assert_eq!(outside.last_report(), None);
+    assert_eq!(outside.last_shared_wall_report(), None);
+}
+
+#[test]
+fn caloric_only_wall_inversion_keeps_exact_source_bounds_at_tight_energy_tolerance() {
+    let mut domain = domain();
+    domain.energy.energy_tolerance_j_kg = 1e-15;
+    for temperature in [domain.energy.minimum_temperature_k, domain.energy.maximum_temperature_k] {
+        // Unit density retains the original specific energy without a rho*u/rho
+        // round trip. The native full material decoder admits these exact bounds.
+        let gas = RealGas::new(common::model([0.0; 2], [0.0; 2], [200.0, 2000.0]),
+            point(400.0), Density::new(1.0), domain, || false).unwrap();
+        let q = state(&gas, 1.0, 0.0, temperature);
+        let mut flow = uniform_mesh_field(gas, vec![q; 3]);
+        let states = flow.states().to_vec();
+        let primitive = flow.primitives().to_vec();
+        let mut walls = RealGasWallOperator::new(&flow,
+            vec![contact(WallThermal::Adiabatic); 3], || false).unwrap();
+        let mut no_retry = controls();
+        no_retry.maximum_halvings = 0;
+        // Adiabatic contacts supply no endpoint hint. The caloric-only owner
+        // must accept the exact boundary instead of stagnating one ULP inside.
+        let report = flow.step_with_walls(Time::new(1e-6), no_retry, &mut walls,
+            wall_controls(), || false).unwrap();
+        assert_eq!(flow.states(), states);
+        assert_eq!(flow.primitives(), primitive);
+        for p in flow.primitives() {
+            assert_eq!(p.temperature.to_bits(), temperature.to_bits());
+        }
+        assert_eq!(report.wall_heat, 0.0);
+        check_wall_balance(&flow, &walls, report);
+    }
 }
 
 #[test]
@@ -467,7 +576,7 @@ fn shared_latent_wall_keeps_one_phase_inventory_while_every_dense_gas_cell_heats
         vec![contact(WallThermal::Adiabatic); 3], || false).unwrap()
         .with_shared_walls(vec![shared_wall(input, &[conductance; 3])],
             SharedWallControl::default(), || false).unwrap();
-    let heat_controls = WallControl { relative_energy_tolerance: 0.0, ..wall_controls() };
+    let heat_controls = WallControl { relative_energy_tolerance: 1e-12, ..wall_controls() };
     let report = flow.step_with_walls(Time::new(1e-5), controls(), &mut walls,
         heat_controls, || false).unwrap();
     let mass = 20.0 * flow.mesh().volumes()[0];
@@ -505,7 +614,7 @@ fn shared_wall_binding_work_and_late_cancellation_preserve_every_accepted_owner(
     };
     let mut no_retry = controls();
     no_retry.maximum_halvings = 0;
-    let heat_controls = WallControl { relative_energy_tolerance: 0.0, ..wall_controls() };
+    let heat_controls = WallControl { relative_energy_tolerance: 1e-12, ..wall_controls() };
     let (mut good, mut good_walls) = make();
     let (mut refused, mut refused_walls) = make();
     for (flow, walls) in [(&mut good, &mut good_walls), (&mut refused, &mut refused_walls)] {

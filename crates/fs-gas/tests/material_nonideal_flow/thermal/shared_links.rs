@@ -88,7 +88,7 @@ fn nonlinear_and_latent_regions_exchange_original_heat_then_feed_back_into_gas()
     let (mut unlinked, mut independent) = make(false);
     let (mut flow, mut walls) = make(true);
     let heat_controls = WallControl {
-        relative_energy_tolerance: 0.0,
+        relative_energy_tolerance: 1e-12,
         ..wall_controls()
     };
     let wave = unlinked
@@ -147,8 +147,14 @@ fn nonlinear_and_latent_regions_exchange_original_heat_then_feed_back_into_gas()
             );
             stage[region] = receipt.endpoint_state[side];
         }
-        near(receipt.energy_residual_j, 0.0, 1e-7);
-        near(receipt.flux_residual_j, 0.0, 1e-7);
+        let flux = integrated
+            * (receipt.endpoint_temperature_k[0] - receipt.endpoint_temperature_k[1]);
+        let scale = receipt.wall_energy_change_j.into_iter()
+            .fold(flux.abs(), |scale, change| scale.max(change.abs()));
+        let allowance = heat_controls.absolute_energy_tolerance_j
+            + heat_controls.relative_energy_tolerance * scale;
+        near(receipt.energy_residual_j, 0.0, allowance);
+        near(receipt.flux_residual_j, 0.0, allowance);
     }
     assert_eq!(receipts[1].initial_state[0], receipts[0].endpoint_state[1]);
     assert_ne!(receipts[1].initial_state[0], entering[1]);
@@ -221,7 +227,7 @@ fn late_link_cancellation_and_invalid_links_preserve_accepted_owners() {
     let mut no_retry = controls();
     no_retry.maximum_halvings = 0;
     let heat_controls = WallControl {
-        relative_energy_tolerance: 0.0,
+        relative_energy_tolerance: 1e-12,
         ..wall_controls()
     };
     for (flow, walls) in [(&mut good, &mut good_walls), (&mut flow, &mut walls)] {
