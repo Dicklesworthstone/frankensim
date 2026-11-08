@@ -715,7 +715,6 @@ pub struct ConductionSolver<'m> {
     last_system: Option<AssembledSystem>,
     stop_reason: Option<StopReason>,
     final_threshold: f64,
-    anchoring_checked: bool,
 }
 
 /// What one [`ConductionSolver::step`] did.
@@ -744,7 +743,7 @@ impl<'m> ConductionSolver<'m> {
     /// # Errors
     /// [`ConductionError::Config`] for an inadmissible configuration;
     /// [`ConductionError::SingularPureNeumann`] when neither a Dirichlet
-    /// nor a Robin row exists. At the first step the assembled operator also
+    /// nor a Robin row exists. At every step the assembled operator also
     /// checks that EVERY thermal component has a reservoir; finite contacts
     /// may supply its path to another body's Dirichlet or Robin boundary.
     /// [`ConductionError::FieldLength`] for a mis-sized initial guess.
@@ -830,7 +829,6 @@ impl<'m> ConductionSolver<'m> {
             last_system: None,
             stop_reason: None,
             final_threshold: f64::NAN,
-            anchoring_checked: false,
         })
     }
 
@@ -878,7 +876,6 @@ impl<'m> ConductionSolver<'m> {
         self.state = state;
         self.last_system = None;
         self.stop_reason = None;
-        self.anchoring_checked = false;
         Ok(provenance)
     }
 
@@ -902,13 +899,16 @@ impl<'m> ConductionSolver<'m> {
             self.interfaces,
             self.element_materials,
         ) {
-            Ok(system) => Ok(Ok(norm2(&residual(&system, &self.dofs, &full)))),
+            Ok(system) => {
+                require_anchored_components(cx, self.problem, &self.dofs, &system.operator)?;
+                Ok(Ok(norm2(&residual(&system, &self.dofs, &full))))
+            }
             Err(span @ ConductionError::OutsideTemperatureSpan { .. }) => Ok(Err(span)),
             Err(other) => Err(other),
         }
     }
 
-    fn evaluate(&mut self, cx: &Cx<'_>) -> Result<Evaluated, ConductionError> {
+    fn evaluate(&self, cx: &Cx<'_>) -> Result<Evaluated, ConductionError> {
         cx.checkpoint().map_err(|_| ConductionError::Cancelled {
             stage: "nonlinear-iteration",
             at: self.state.iteration,
@@ -925,10 +925,9 @@ impl<'m> ConductionSolver<'m> {
             self.interfaces,
             self.element_materials,
         )?;
-        if !self.anchoring_checked {
-            require_anchored_components(cx, self.problem, &self.dofs, &system.operator)?;
-            self.anchoring_checked = true;
-        }
+        // Positive constitutive values can still round to zero after geometric
+        // weighting. Recheck the represented graph at every current iterate.
+        require_anchored_components(cx, self.problem, &self.dofs, &system.operator)?;
         let (a_ff, _) = reduce_matrix_and_lift(&system.operator, &self.dofs);
         let r = residual(&system, &self.dofs, &full);
         let rnorm = norm2(&r);

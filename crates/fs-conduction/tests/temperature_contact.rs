@@ -85,6 +85,67 @@ fn source() -> ScalarField { ScalarField::Nodal(vec![0.,0.,0.,0.,30.,30.,30.,30.
 fn near(a: f64,b: f64,tolerance: f64) { assert!((a-b).abs()<=tolerance,"{a} versus {b}"); }
 
 #[test]
+fn newton_rechecks_contact_connectivity_when_positive_resistance_loses_its_conductance() {
+    use fs_conduction::interface::temperature::steady::newton::SteadyContactNewtonConfig;
+    context(&CancelGate::new_clock_free(), |cx| {
+        let original = mesh();
+        let positions = original.positions().iter().map(|p| p.map(|v| v * 1e-10)).collect();
+        let mesh = ConductionMesh::new(original.complex().clone(), positions).unwrap();
+        let bc = ThermalBoundaryBuilder::new(&mesh)
+            .region("bath", |face| face.centroid[2] < 0.0,
+                fs_conduction::ThermalBc::dirichlet(300.0).unwrap()).unwrap()
+            .adiabatic_remainder().finish().unwrap();
+        let original_card = card(false);
+        let mut claim = original_card.claims().claims_ordered().next().unwrap().1.clone();
+        claim.value = PropertyValue::Curve {
+            abscissa: "T".into(), abscissa_dims: fs_conduction::TEMPERATURE_DIMS,
+            knots: vec![(280.0, 1e308), (310.0, 1e308), (350.0, 1.0), (380.0, 1.0)],
+            dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+        };
+        claim.provenance.source = "manufactured finite-resistance representation limit, not measured data".into();
+        let mut claims = ClaimSet::new();
+        claims.insert_claim(claim).unwrap();
+        let card = InterfaceSystemCard::assemble(original_card.surface_a().clone(),
+            original_card.surface_b().clone(), original_card.context().clone(), claims, vec![]).unwrap();
+        let set = contacts(cx, &mesh, &bc, &card);
+        let material = ConductivityModel::isotropic_declared(1e-10).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let initial = vec![300.0, 300.0, 300.0, 300.0, 420.0, 420.0, 420.0, 420.0];
+        let current = set.evaluate(cx, &bc, &initial).unwrap();
+        let cooled = set.evaluate(cx, &bc, &[300.0; 8]).unwrap();
+        let assemble = |state: &fs_conduction::interface::temperature::TemperatureContactEvaluation, temperature: &[f64]| {
+            fs_conduction::assemble_operator_with_interfaces(cx, &mesh, &bc,
+                &material, &source, temperature, state.frozen_interfaces()).unwrap().operator
+        };
+        let connected = assemble(&current, &initial);
+        let disconnected = assemble(&cooled, &[300.0; 8]);
+        let crosses = |matrix: &fs_sparse::Csr| (0..4).any(|row| {
+            let (columns, values) = matrix.row(row);
+            columns.iter().zip(values).any(|(&column, &value)| column >= 4 && value != 0.0)
+        });
+        assert!(crosses(&connected));
+        assert!(!crosses(&disconnected));
+        assert!(cooled.states()[0].resistance.value_m2_k_per_w().is_finite());
+
+        // At the initial mean of 360 K, R=1 and dR/dT=0. The linear
+        // Newton step cools the free body to 300 K, where R remains positive
+        // but every area/R entry rounds to zero. A cached initial check would
+        // accept the resulting zero residual on this now-floating body.
+        let mut config = SteadyContactNewtonConfig::default();
+        config.newton.absolute_tolerance = 1e-28;
+        config.newton.forcing_minimum = 1e-12;
+        config.newton.forcing_maximum = 1e-10;
+        config.newton.linear_restart = 8;
+        config.residual_tolerance_w = 1e-28;
+        config.energy_tolerance_w = 1e-28;
+        let error = set.solve_steady_newton(cx, ConductionProblem {
+            mesh: &mesh, boundary: &bc, material: &material, source: &source, element_materials: None,
+        }, &initial, config).unwrap_err();
+        assert!(matches!(error, ConductionError::SingularPureNeumann));
+    });
+}
+
+#[test]
 fn local_source_queries_keep_both_traces_pressure_and_one_pinned_claim() {
     context(&CancelGate::new_clock_free(),|cx| {
         let mesh=mesh();let bc=boundary(&mesh);let card=card(false);
