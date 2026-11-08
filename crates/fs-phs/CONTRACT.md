@@ -2994,3 +2994,52 @@ coverage checks analytical source integrals, crossed-knot work/tangents,
 discharge sag and regenerative charging, component energy and coulomb balance,
 second-order convergence against an independently exponentiated constant-OCV RC
 transient, and transactional source-bound/cancellation refusals.
+
+`BatterySource::prepare_controlled` now supplies the native reusable three-state
+step and a `BatteryStep` with independent `BatteryInterval` accounts. The same
+`BatterySource::interval` serves an accepted monolithic composition: chemical
+work integrates crossed OCV segments, both capacitor changes use their original
+charges, and series/polarization heat uses the actual component discrete effort.
+Instantaneous midpoint OCV is not substituted for this effort. Terminal work,
+stored-energy change, positive branch heat and the unresolved numerical balance
+are separate values; no residual becomes heat. Refusal and cancellation leave
+the caller's accepted state untouched. This is a frozen-parameter interval;
+thermal owners may refresh resistance while retaining OCV and capacitance.
+
+## Finite battery, converter and regulated electrical demand
+
+`circuit::converter::battery_fed` joins the original battery and averaged
+buck/boost stage through positive physical lead resistance. The six retained
+states are `[q_chemical, q_polarization, q_battery_bus, lambda_converter,
+q_converter_input, q_converter_output]`. Since both buses accept current and
+return voltage, their connection is `I_lead=(V_battery-V_input)/R_lead`, stamped
+through the existing positive port-conductance owner. A unit skew port map
+between these two voltage outputs would describe a different component.
+Zero lead resistance requires a common-voltage constraint and is not inferred.
+
+The prepared owner holds additive battery-bus and converter-input source
+currents at zero. Its external electrical boundary is the converter output:
+a held signed current may draw power or supply regeneration, and optional
+`RegulatedPowerLoad` reuses the existing current-limit/voltage-foldback law.
+Load current and all battery/converter states participate in the same native
+implicit solve. The original battery discrete gradient and analytic endpoint
+derivative survive composition, including crossed source knots. A change of
+load or output-current command does not reset any charge or flux. Modulation,
+OCV, capacitances and physical resistances are frozen during preparation.
+
+`BatteryFedStep` independently closes battery storage/work, lead exchange/loss,
+converter storage/terminal work and the full external boundary. Its eight heat
+channels are the converter's five existing conduction channels, battery series,
+battery polarization and lead heat, in that order. Exported load work is not
+deposited in any of them. Each balance uses its own actual-transfer scale and
+the supplied `PowerLoadControls` allowances; untouched large stored energy
+cannot enlarge the allowance. Preparation allocates fixed six-state scratch;
+warm steps allocate nothing and publish no output on refusal or cancellation.
+
+This remains the existing averaged synchronous power stage with discrete
+quadrature, not a PWM/device/protection model. A converged negative-incremental
+load root does not establish stability, uniqueness or temporal accuracy.
+Regressions cover an independently derived finite-capacity plateau operating
+point and eight-way power balance, changing regulated/current-limited/foldback
+demand on one continuing state, reverse power into chemical storage, and
+transactional unsupported-demand/exhaustion/cancellation recovery.

@@ -306,6 +306,75 @@ fn bounded_charge_and_cancellation_refuse_transactionally() {
 }
 
 #[test]
+fn prepared_battery_reports_actual_crossed_knot_work_and_branch_heat() {
+    for (soc, bus_v, terminal_current) in [(0.55, 1.0, -0.4), (0.45, 5.0, 0.4)] {
+        let source = source(1.0, &[(0.0, 3.0), (0.5, 3.0), (1.0, 5.0)]);
+        let curve = source.curve().clone();
+        let initial = source.state(soc, 0.0, bus_v).unwrap();
+        let mut prepared = source
+            .prepare_controlled(
+                SolveBudget {
+                    relative: 1e-13,
+                    absolute: 1e-14,
+                    max_iterations: 40,
+                },
+                8,
+                || false,
+            )
+            .unwrap();
+        let dt = 0.02;
+        let mut next = [77.0; 3];
+        let step = prepared
+            .step_controlled(&initial, terminal_current, dt, &mut next, || false)
+            .unwrap();
+        let battery = step.battery;
+        assert!((initial[0] - 0.5) * (next[0] - 0.5) < 0.0);
+        let chemical = curve.energy_change_j(initial[0], next[0]).unwrap();
+        close(
+            battery.discrete_ocv_v,
+            chemical / (next[0] - initial[0]),
+            2e-14,
+        );
+        let midpoint_ocv = curve.voltage_v(f64::midpoint(initial[0], next[0])).unwrap();
+        assert!((battery.discrete_ocv_v - midpoint_ocv).abs() > 1e-3);
+        let vp = f64::midpoint(initial[1], next[1]) / parameters().polarization_capacitance_f;
+        let vb = f64::midpoint(initial[2], next[2]) / parameters().bus_capacitance_f;
+        let current = (battery.discrete_ocv_v - vp - vb) / parameters().series_resistance_ohm;
+        close(
+            battery.series_heat_j,
+            dt * parameters().series_resistance_ohm * current * current,
+            2e-13,
+        );
+        close(
+            battery.polarization_heat_j,
+            dt * vp * vp / parameters().polarization_resistance_ohm,
+            2e-13,
+        );
+        close(battery.terminal_work_j, dt * terminal_current * vb, 2e-14);
+        close(battery.storage_change_j(), step.native.delta_h, 2e-13);
+        close(battery.heat_j(), step.native.dissipated, 2e-13);
+        close(battery.balance_residual_j(), 0.0, 2e-12);
+        close(
+            (next[0] - initial[0]) + (next[2] - initial[2]),
+            dt * terminal_current,
+            2e-13,
+        );
+        let accepted = next;
+        next = [77.0; 3];
+        assert!(matches!(
+            prepared.step_controlled(&initial, terminal_current, dt, &mut next, || true),
+            Err(PreparedStepError::Cancelled)
+        ));
+        assert_eq!(next, [77.0; 3]);
+        let retry = prepared
+            .step_controlled(&initial, terminal_current, dt, &mut next, || false)
+            .unwrap();
+        assert_eq!(next, accepted);
+        assert_eq!(retry, step);
+    }
+}
+
+#[test]
 fn native_battery_motor_connection_drives_and_regenerates_with_full_power_balance() {
     let motor_parameters = DcMotorParameters {
         inductance_h: 0.05,

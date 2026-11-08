@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::{
     ConstitutiveDiscreteGradient, ContinuousStorageTangent, PhsError, PortHamiltonian,
-    ResistanceWitness, Storage,
+    PreparedStepError, PreparedStepRecord, ResistanceWitness, SolveBudget, StepWorkspace, Storage,
 };
 use fs_math::{dd::Dd, det};
 
@@ -369,6 +369,65 @@ pub struct BatteryObservation {
     pub polarization_heat_w: f64,
 }
 
+/// Original component work over one discrete-gradient interval. These are the
+/// native time quadrature's signed work and nonnegative branch heats, not exact
+/// continuous RMS integrals. The chemical effort integrates every crossed OCV
+/// segment; evaluating instantaneous OCV at the midpoint is not equivalent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BatteryInterval {
+    pub chemical_energy_change_j: f64,
+    pub polarization_energy_change_j: f64,
+    pub bus_energy_change_j: f64,
+    /// Positive work enters the battery's physical bus terminal.
+    pub terminal_work_j: f64,
+    pub series_heat_j: f64,
+    pub polarization_heat_j: f64,
+    pub discrete_ocv_v: f64,
+    pub discrete_polarization_voltage_v: f64,
+    pub discrete_terminal_voltage_v: f64,
+    /// Positive discharges chemical storage; negative charges it.
+    pub discrete_cell_current_a: f64,
+}
+
+fn sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    values
+        .into_iter()
+        .fold(Dd::ZERO, |s, v| s + Dd::from_f64(v))
+        .to_f64()
+}
+
+impl BatteryInterval {
+    pub fn storage_change_j(&self) -> f64 {
+        sum([
+            self.chemical_energy_change_j,
+            self.polarization_energy_change_j,
+            self.bus_energy_change_j,
+        ])
+    }
+    pub fn heat_j(&self) -> f64 {
+        sum([self.series_heat_j, self.polarization_heat_j])
+    }
+    /// Independent component balance; a diagnostic of the accepted numerical
+    /// solve, not a correction to storage, source work or either heat channel.
+    pub fn balance_residual_j(&self) -> f64 {
+        sum([
+            self.chemical_energy_change_j,
+            self.polarization_energy_change_j,
+            self.bus_energy_change_j,
+            self.series_heat_j,
+            self.polarization_heat_j,
+            -self.terminal_work_j,
+        ])
+    }
+}
+
+/// Accepted original three-state solve and its independent physical accounts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BatteryStep {
+    pub native: PreparedStepRecord,
+    pub battery: BatteryInterval,
+}
+
 /// A finite source with one native current-input/voltage-output bus port.
 /// Consume with `into_system` for reciprocal connection to a motor or converter,
 /// or reuse `StepWorkspace` for prescribed external current histories.
@@ -437,6 +496,11 @@ impl BatterySource {
         self.parameters
     }
 
+    // Cold composite preparation retains the same immutable constitutive law.
+    pub(crate) fn share_system(&mut self) -> PortHamiltonian {
+        self.system.share_storage()
+    }
+
     /// Initialize retained charge without assuming a precharged or empty bus.
     pub fn state(&self, soc: f64, polarization_v: f64, bus_v: f64) -> Result<[f64; 3], PhsError> {
         let state = [
@@ -483,5 +547,158 @@ impl BatterySource {
             series_heat_w: series_heat,
             polarization_heat_w: polarization_heat,
         })
+    }
+
+    /// Account for this source's part of an accepted native interval. This
+    /// also serves monolithic electrical compositions without another solve.
+    /// Every effort is the original componentwise discrete gradient, including
+    /// crossed OCV knots. The supplied terminal current is its discrete current
+    /// entering this battery (held for standalone stepping, solved for a wire).
+    /// Arbitrary endpoint pairs are not thereby certified as a trajectory:
+    /// `balance_residual_j` exposes their physical equation defect.
+    pub fn interval(
+        &self,
+        initial: &[f64; 3],
+        next: &[f64; 3],
+        terminal_current_a: f64,
+        duration_s: f64,
+    ) -> Result<BatteryInterval, PhsError> {
+        if !duration_s.is_finite()
+            || duration_s <= 0.0
+            || !terminal_current_a.is_finite()
+            || !self.system.hamiltonian(initial).is_finite()
+            || !self.system.hamiltonian(next).is_finite()
+        {
+            return Err(invalid(
+                "battery interval requires finite supported states, current and positive duration",
+            ));
+        }
+        let p = self.parameters;
+        let ocv = self.curve.mean_voltage(initial[0], next[0])?;
+        let vp = f64::midpoint(initial[1], next[1]) / p.polarization_capacitance_f;
+        let vb = f64::midpoint(initial[2], next[2]) / p.bus_capacitance_f;
+        let current = ((Dd::from_f64(ocv) - Dd::from_f64(vp) - Dd::from_f64(vb))
+            / Dd::from_f64(p.series_resistance_ohm))
+        .to_f64();
+        let capacitor_change = |index: usize, capacitance: f64| {
+            let a = Dd::from_f64(initial[index]);
+            let b = Dd::from_f64(next[index]);
+            ((b - a) * (a * Dd::from_f64(0.5) + b * Dd::from_f64(0.5)) / Dd::from_f64(capacitance))
+                .to_f64()
+        };
+        let dt = Dd::from_f64(duration_s);
+        let interval = BatteryInterval {
+            chemical_energy_change_j: self.curve.energy_change_j(initial[0], next[0])?,
+            polarization_energy_change_j: capacitor_change(1, p.polarization_capacitance_f),
+            bus_energy_change_j: capacitor_change(2, p.bus_capacitance_f),
+            terminal_work_j: (dt * Dd::from_f64(vb) * Dd::from_f64(terminal_current_a)).to_f64(),
+            series_heat_j: (Dd::from_f64(p.series_resistance_ohm)
+                * Dd::from_f64(current)
+                * Dd::from_f64(current)
+                * dt)
+                .to_f64(),
+            polarization_heat_j: (Dd::from_f64(vp) / Dd::from_f64(p.polarization_resistance_ohm)
+                * Dd::from_f64(vp)
+                * dt)
+                .to_f64(),
+            discrete_ocv_v: ocv,
+            discrete_polarization_voltage_v: vp,
+            discrete_terminal_voltage_v: vb,
+            discrete_cell_current_a: current,
+        };
+        if ![
+            interval.chemical_energy_change_j,
+            interval.polarization_energy_change_j,
+            interval.bus_energy_change_j,
+            interval.terminal_work_j,
+            interval.series_heat_j,
+            interval.polarization_heat_j,
+            ocv,
+            vp,
+            vb,
+            current,
+            interval.storage_change_j(),
+            interval.heat_j(),
+            interval.balance_residual_j(),
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+        {
+            return Err(invalid("battery interval work or heat is unrepresentable"));
+        }
+        Ok(interval)
+    }
+
+    /// Prepare the existing three-state solver once. No new integration rule
+    /// or allocation is introduced during a successful warm step.
+    pub fn prepare_controlled(
+        self,
+        solve: SolveBudget,
+        backtracking_halvings: u8,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedBatterySource, PreparedStepError> {
+        if cancelled() {
+            return Err(PreparedStepError::Cancelled);
+        }
+        let mut workspace = StepWorkspace::new(&self.system)?;
+        workspace.set_solve_budget(solve)?;
+        workspace.set_backtracking_limit(backtracking_halvings)?;
+        if cancelled() {
+            return Err(PreparedStepError::Cancelled);
+        }
+        Ok(PreparedBatterySource {
+            model: self,
+            workspace,
+        })
+    }
+}
+
+/// Reusable native solve scratch; all accepted chemical and capacitor charges
+/// remain in caller-owned state. A refused/cancelled call publishes no state.
+pub struct PreparedBatterySource {
+    model: BatterySource,
+    workspace: StepWorkspace,
+}
+
+impl PreparedBatterySource {
+    pub fn system(&self) -> &PortHamiltonian {
+        self.model.system()
+    }
+    pub fn parameters(&self) -> BatteryParameters {
+        self.model.parameters()
+    }
+    pub fn curve(&self) -> &BatteryOcvCurve {
+        self.model.curve()
+    }
+
+    pub fn step_controlled(
+        &mut self,
+        initial: &[f64; 3],
+        terminal_current_a: f64,
+        duration_s: f64,
+        next: &mut [f64; 3],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<BatteryStep, PreparedStepError> {
+        if cancelled() {
+            return Err(PreparedStepError::Cancelled);
+        }
+        let (mut candidate, mut voltage) = ([0.0; 3], [0.0]);
+        let native = self.workspace.step_into_controlled(
+            &self.model.system,
+            initial,
+            &[terminal_current_a],
+            duration_s,
+            &mut candidate,
+            &mut voltage,
+            &mut cancelled,
+        )?;
+        let battery = self
+            .model
+            .interval(initial, &candidate, terminal_current_a, duration_s)?;
+        if cancelled() {
+            return Err(PreparedStepError::Cancelled);
+        }
+        *next = candidate;
+        Ok(BatteryStep { native, battery })
     }
 }

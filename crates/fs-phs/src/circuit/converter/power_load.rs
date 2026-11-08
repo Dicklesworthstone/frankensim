@@ -257,7 +257,10 @@ impl AveragedBuckBoost {
     }
 }
 
-fn load_point(load: Option<RegulatedPowerLoad>, voltage: f64) -> Result<PowerLoadPoint, PhsError> {
+pub(super) fn load_point(
+    load: Option<RegulatedPowerLoad>,
+    voltage: f64,
+) -> Result<PowerLoadPoint, PhsError> {
     if !voltage.is_finite() {
         return Err(invalid("power-load effort is not finite"));
     }

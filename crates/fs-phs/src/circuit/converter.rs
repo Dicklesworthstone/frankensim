@@ -27,6 +27,8 @@ use crate::{PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, Qu
 
 /// Finite charge and voltage response of capacitor-backed source/load terminals.
 pub mod capacitor_terminals;
+/// Finite SOC/OCV battery supply through physical leads and regulated demand.
+pub mod battery_fed;
 /// Nonlinear regulated-power bus loads with current limits and voltage foldback.
 pub mod power_load;
 /// Explicit complementary gate intervals on these SAME storage coordinates.
