@@ -9787,6 +9787,52 @@ Additional regressions cover terminal velocity and rigid heat, tiny high-Q
 loss, impulse history, nonclassical/negative viscosity refusal, cancellation
 and arithmetic rollback, and zero-C conservative bit equivalence.
 
+### Updating complete-spectrum stiffness and viscosity without restarting motion
+
+`DampedSpectralSolid::replace_parameters` installs new original-coordinate
+K/C and a newly admitted complete eigenbasis on the owner's EXISTING mass,
+free-DOF map, coordinate origin and fixed clock. No replacement assembly,
+mass, geometry or constraint map is accepted. The new basis must satisfy the
+original generalized-eigenpair, mass-norm and reconstruction checks. Physical
+displacement and velocity remain bitwise unchanged and are reprojected through
+the retained M into every new mode, including reordered/signed modes, rotated
+repeated eigenspaces and transitions between true rigid and elastic modes.
+
+The zero-duration event independently contracts signed
+`W_parameter = u^T (K_after-K_before) u / 2` from the operator difference,
+retaining product roundoff. A large unchanged storage inventory cannot erase
+the reported exchange. Positive work is supplied by the parameter owner;
+negative work is returned to it. The explicit `maximum_parameter_work_j`
+limits the absolute magnitude of this physical exchange. It is separate from
+the original numerical residual allowance. Changing C alone adds no work or
+instantaneous heat. Original-coordinate before/after storage and cumulative
+energy must still pass the existing joule gate before publication.
+
+The original initial-energy datum, kinetic-energy bits, accepted step count,
+clock, applied force/impulse work, viscous heat and all their compensation
+survive. Parameter work has its own compensated cumulative account and
+`cumulative_parameter_work_j()` accessor. Subsequent intervals and impulses
+audit `W_force + W_parameter - Q_viscous - (H-H_initial)`. In particular,
+switching C to zero retains past heat while using the conservative interval
+arithmetic. Neither old loss nor signed parameter work is recast as the other.
+
+The update admits `128*n^2+4096*n` simultaneous bytes for the live owner and
+candidate, and `6*n^3+80*n^2+8192*n+512*sum(s_i)` preparation product terms.
+Only a completely prepared and audited candidate replaces the live state;
+budget, work, operator, reconstruction or cancellation refusal preserves it.
+The operation represents caller-timed piecewise constant reconfiguration on
+a fixed physical reference space. It does not model moving geometry/supports,
+mass transport, equilibrium shifts, continuous coefficient evolution or
+constitutive memory. Harmonic and multi-tone source owners retain immutable
+underlying-solid views, preventing their prepared source kernels from being
+invalidated through this API.
+
+`tests/solid_spectral_update.rs` supplies analytical regressions for a coupled
+consistent mass with degenerate rotations and signed/permuted modes, rigid
+release and restiffening, zero-amplitude and damping-only work, prior heat
+through zero-C affine motion and impulses, independent small parameter work
+beside large unchanged storage, and refused/cancelled candidate continuity.
+
 ### Continuous harmonic forcing across the complete damped spectrum
 
 `dynamics::spectral::HarmonicDampedSpectralSolid` propagates a prescribed

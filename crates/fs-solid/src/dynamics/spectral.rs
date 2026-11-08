@@ -15,7 +15,7 @@ use super::{
 };
 use crate::linear3::TetElasticAssembly;
 use fs_exec::Cx;
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 use fs_sparse::Csr;
 
 /// Exact cubic forces and continuous displacement moments for moving supports.
@@ -23,6 +23,7 @@ pub mod polynomial;
 mod damping;
 pub use damping::{
     DampedSpectralSolid, HarmonicDampedSpectralSolid, MultiToneDampedSpectralSolid,
+    SpectralParameterUpdate,
 };
 mod sustained;
 
@@ -180,6 +181,11 @@ impl Oscillator {
     }
 }
 
+enum SpectralMass<'a> {
+    Assembly(&'a Csr),
+    Retained(&'a [f64]),
+}
+
 /// Full-coordinate conservative solid with every supplied basis column kept.
 /// The basis is approximate only within its explicitly admitted residuals.
 /// Original K/M energy checks remain active on every accepted interval.
@@ -204,6 +210,8 @@ pub struct CompleteSpectralSolid {
     initial_energy_j: f64,
     cumulative_work_j: f64,
     work_correction_j: f64,
+    cumulative_parameter_work_j: f64,
+    parameter_work_correction_j: f64,
 }
 
 /// Unpublished native impulse response for a surrounding full-coordinate
@@ -236,8 +244,35 @@ impl CompleteSpectralSolid {
         controls: CompleteSpectralSolidControls,
         cx: &Cx<'_>,
     ) -> Result<Self> {
+        Self::prepare_with_operators(
+            &assembly.stiffness,
+            SpectralMass::Assembly(&assembly.mass),
+            &assembly.free_dofs,
+            eigenvalues_rad2_s2,
+            basis_columns,
+            dt_s,
+            initial_displacement_m,
+            initial_velocity_mps,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_with_operators(
+        stiffness_n_per_m: &Csr,
+        mass_source: SpectralMass<'_>,
+        free_dof_map: &[usize],
+        eigenvalues_rad2_s2: &[f64],
+        basis_columns: &[f64],
+        dt_s: f64,
+        initial_displacement_m: &[f64],
+        initial_velocity_mps: &[f64],
+        controls: CompleteSpectralSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
         poll(cx)?;
-        let n = assembly.free_dofs.len();
+        let n = free_dof_map.len();
         let square = n.checked_mul(n).ok_or_else(|| invalid("shape overflow"))?;
         let good_relative = |x: f64| x.is_finite() && (0.0..1.0).contains(&x);
         if n == 0
@@ -278,7 +313,7 @@ impl CompleteSpectralSolid {
         )?;
         for i in 0..n {
             poll(cx)?;
-            if (i > 0 && assembly.free_dofs[i - 1] >= assembly.free_dofs[i])
+            if (i > 0 && free_dof_map[i - 1] >= free_dof_map[i])
                 || !eigenvalues_rad2_s2[i].is_finite()
                 || eigenvalues_rad2_s2[i] < 0.0
                 || !initial_displacement_m[i].is_finite()
@@ -293,8 +328,22 @@ impl CompleteSpectralSolid {
             }
         }
         let tolerance = controls.maximum_relative_operator_error;
-        let stiffness = symmetric(&assembly.stiffness, n, tolerance, cx)?;
-        let mass = symmetric(&assembly.mass, n, tolerance, cx)?;
+        let stiffness = symmetric(stiffness_n_per_m, n, tolerance, cx)?;
+        let mass = match mass_source {
+            SpectralMass::Assembly(matrix) => symmetric(matrix, n, tolerance, cx)?,
+            SpectralMass::Retained(matrix) => {
+                if matrix.len() != square {
+                    return Err(invalid("retained original mass shape mismatch"));
+                }
+                let mut retained = zeros(square)?;
+                for i in 0..n {
+                    poll(cx)?;
+                    retained[i * n..(i + 1) * n]
+                        .copy_from_slice(&matrix[i * n..(i + 1) * n]);
+                }
+                retained
+            }
+        };
         let mut basis = zeros(square)?;
         for i in 0..n {
             poll(cx)?;
@@ -369,7 +418,7 @@ impl CompleteSpectralSolid {
         free_dofs
             .try_reserve_exact(n)
             .map_err(|_| invalid("free map allocation refused"))?;
-        free_dofs.extend_from_slice(&assembly.free_dofs);
+        free_dofs.extend_from_slice(free_dof_map);
         poll(cx)?;
         Ok(Self {
             stiffness,
@@ -390,6 +439,8 @@ impl CompleteSpectralSolid {
             initial_energy_j: stored_j + kinetic_j,
             cumulative_work_j: 0.0,
             work_correction_j: 0.0,
+            cumulative_parameter_work_j: 0.0,
+            parameter_work_correction_j: 0.0,
         })
     }
 
@@ -416,6 +467,31 @@ impl CompleteSpectralSolid {
     }
     pub fn cumulative_work_j(&self) -> f64 {
         self.cumulative_work_j
+    }
+    /// Signed stiffness-reconfiguration work, separate from force/impulse work
+    /// and viscous heat. The original initial-energy datum remains fixed.
+    pub fn cumulative_parameter_work_j(&self) -> f64 {
+        self.cumulative_parameter_work_j
+    }
+
+    fn cumulative_balance_error(
+        &self,
+        work_j: f64,
+        heat_j: f64,
+        stored_j: f64,
+        kinetic_j: f64,
+    ) -> f64 {
+        if self.cumulative_parameter_work_j == 0.0 {
+            // Keep the established arithmetic for unchanged-parameter runs.
+            work_j - heat_j - (stored_j + kinetic_j - self.initial_energy_j)
+        } else {
+            (Dd::from_f64(work_j) + Dd::from_f64(self.cumulative_parameter_work_j)
+                - Dd::from_f64(heat_j)
+                - Dd::from_f64(stored_j)
+                - Dd::from_f64(kinetic_j)
+                + Dd::from_f64(self.initial_energy_j))
+            .to_f64()
+        }
     }
 
     /// Apply an instantaneous impulse in the original `free_dofs()` order.
@@ -523,6 +599,7 @@ impl CompleteSpectralSolid {
                 stored_j: self.stored_j,
                 kinetic_before_j: self.kinetic_j,
                 initial_energy_j: self.initial_energy_j,
+                cumulative_parameter_work_j: self.cumulative_parameter_work_j,
                 cumulative_work_j: self.cumulative_work_j,
                 work_correction_j: self.work_correction_j,
                 cumulative_dissipated_j,
@@ -565,6 +642,16 @@ impl CompleteSpectralSolid {
         &mut self,
         force_start_n: &[f64],
         force_end_n: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ExactLinearSolidStep> {
+        self.advance_affine_with_dissipation(force_start_n, force_end_n, 0.0, cx)
+    }
+
+    fn advance_affine_with_dissipation(
+        &mut self,
+        force_start_n: &[f64],
+        force_end_n: &[f64],
+        cumulative_dissipated_j: f64,
         cx: &Cx<'_>,
     ) -> Result<ExactLinearSolidStep> {
         poll(cx)?;
@@ -612,12 +699,14 @@ impl CompleteSpectralSolid {
                     .mul_add(du, increment[i] * (displacement[i] - mean_displacement[i])),
             );
         }
-        self.accept_force_path(
+        self.accept_force_path_with_dissipation(
             q,
             v,
             displacement,
             velocity,
             supplied_work_j,
+            0.0,
+            cumulative_dissipated_j,
             step,
             time_s,
             cx,
@@ -696,8 +785,12 @@ impl CompleteSpectralSolid {
             dissipated_j,
             cumulative_dissipated_j,
             balance_error_j: supplied_work_j - dissipated_j - change,
-            cumulative_balance_error_j: cumulative_work_j - cumulative_dissipated_j
-                - (stored_after_j + kinetic_after_j - self.initial_energy_j),
+            cumulative_balance_error_j: self.cumulative_balance_error(
+                cumulative_work_j,
+                cumulative_dissipated_j,
+                stored_after_j,
+                kinetic_after_j,
+            ),
         };
         for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
             if !defect_j.is_finite() || defect_j.abs() > self.controls.maximum_work_error_j {

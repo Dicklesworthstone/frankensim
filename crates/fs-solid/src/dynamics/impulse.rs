@@ -106,6 +106,7 @@ pub(super) struct History {
     pub stored_j: f64,
     pub kinetic_before_j: f64,
     pub initial_energy_j: f64,
+    pub cumulative_parameter_work_j: f64,
     pub cumulative_work_j: f64,
     pub work_correction_j: f64,
     pub cumulative_dissipated_j: f64,
@@ -182,9 +183,19 @@ pub(super) fn audit(
         dissipated_j: 0.0,
         cumulative_dissipated_j: history.cumulative_dissipated_j,
         balance_error_j,
-        cumulative_balance_error_j: cumulative_work_j
-            - ((history.stored_j + kinetic_after_j) - history.initial_energy_j)
-            - history.cumulative_dissipated_j,
+        cumulative_balance_error_j: if history.cumulative_parameter_work_j == 0.0 {
+            cumulative_work_j
+                - ((history.stored_j + kinetic_after_j) - history.initial_energy_j)
+                - history.cumulative_dissipated_j
+        } else {
+            (Dd::from_f64(cumulative_work_j)
+                + Dd::from_f64(history.cumulative_parameter_work_j)
+                - Dd::from_f64(history.cumulative_dissipated_j)
+                - Dd::from_f64(history.stored_j)
+                - Dd::from_f64(kinetic_after_j)
+                + Dd::from_f64(history.initial_energy_j))
+            .to_f64()
+        },
     };
     for defect_j in [energy.balance_error_j, energy.cumulative_balance_error_j] {
         if !defect_j.is_finite() || defect_j.abs() > history.maximum_work_error_j {
@@ -259,6 +270,7 @@ impl ExactLinearSolid {
                 stored_j: self.stored_energy_j(),
                 kinetic_before_j: self.kinetic_energy_j(),
                 initial_energy_j: self.initial_energy_j,
+                cumulative_parameter_work_j: 0.0,
                 cumulative_work_j: self.cumulative_work_j,
                 work_correction_j: self.work_correction_j,
                 cumulative_dissipated_j: self.cumulative_dissipated_j,

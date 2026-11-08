@@ -14,6 +14,8 @@ mod harmonic;
 pub use harmonic::HarmonicDampedSpectralSolid;
 mod tones;
 pub use tones::MultiToneDampedSpectralSolid;
+mod update;
+pub use update::SpectralParameterUpdate;
 
 /// Every original elastic and rigid coordinate, with physical viscous damping.
 ///
@@ -73,7 +75,7 @@ impl DampedSpectralSolid {
             96 * nn * nn + 2048 * nn,
             controls.maximum_preparation_bytes as u128,
         )?;
-        let mut preparation_terms = 6 * nn * nn * nn + 64 * nn * nn + 8192 * nn;
+        let preparation_terms = 6 * nn * nn * nn + 64 * nn * nn + 8192 * nn;
         bound(preparation_terms, controls.maximum_preparation_multiply_terms as u128)?;
         let solid = CompleteSpectralSolid::prepare_with_basis(
             assembly,
@@ -85,6 +87,18 @@ impl DampedSpectralSolid {
             controls,
             cx,
         )?;
+        Self::prepare_viscosity(solid, viscosity_kg_per_s, preparation_terms, cx)
+    }
+
+    fn prepare_viscosity(
+        solid: CompleteSpectralSolid,
+        viscosity_kg_per_s: &Csr,
+        mut preparation_terms: u128,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        let n = solid.free_dofs.len();
+        let controls = solid.controls;
+        let dt_s = solid.dt_s;
         let viscosity = symmetric(
             viscosity_kg_per_s,
             n,
@@ -152,7 +166,7 @@ impl DampedSpectralSolid {
                 .map_err(|_| invalid("damped coefficient allocation refused"))?;
             for i in 0..n {
                 poll(cx)?;
-                let omega = eigenvalues_rad2_s2[i].sqrt();
+                let omega = solid.oscillators[i].lambda.sqrt();
                 let angle = omega * dt_s;
                 let drag = rates[i] * dt_s;
                 if !angle.is_finite() || !drag.is_finite() {
@@ -206,6 +220,11 @@ impl DampedSpectralSolid {
     pub fn cumulative_work_j(&self) -> f64 {
         self.solid.cumulative_work_j()
     }
+    /// Signed stiffness-reconfiguration work, distinct from supplied force
+    /// work and physical viscosity loss.
+    pub fn cumulative_parameter_work_j(&self) -> f64 {
+        self.solid.cumulative_parameter_work_j()
+    }
     pub fn cumulative_dissipated_j(&self) -> f64 {
         self.cumulative_dissipated_j
     }
@@ -256,7 +275,12 @@ impl DampedSpectralSolid {
     ) -> Result<ExactLinearSolidStep> {
         poll(cx)?;
         let Some(transitions) = &self.transitions else {
-            return self.solid.advance_affine(force_start_n, force_end_n, cx);
+            return self.solid.advance_affine_with_dissipation(
+                force_start_n,
+                force_end_n,
+                self.cumulative_dissipated_j,
+                cx,
+            );
         };
         let n = self.free_dofs().len();
         if force_start_n.len() != n
