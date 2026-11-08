@@ -10,7 +10,10 @@ use crate::multicomponent::wall_exchange::{
 use fs_qty::Time;
 
 mod shared;
-pub use shared::{SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport};
+pub use shared::{
+    SharedWall, SharedWallControl, SharedWallGas, SharedWallLink, SharedWallLinkReport,
+    SharedWallPort, SharedWallReport,
+};
 
 /// One cell's contact and optional original finite-wall caloric law.
 ///

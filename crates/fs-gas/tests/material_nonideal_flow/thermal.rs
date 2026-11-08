@@ -15,6 +15,9 @@ use fs_thermal::enthalpy::{
 
 const R: f64 = 8.314_462_618_153_24;
 
+#[path = "thermal/shared_links.rs"]
+mod shared_links;
+
 fn wall_controls() -> WallControl {
     WallControl {
         absolute_energy_tolerance_j: 1e-7,

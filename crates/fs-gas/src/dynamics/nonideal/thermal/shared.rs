@@ -8,9 +8,14 @@ pub use crate::multicomponent::wall_exchange::shared::{
 };
 use std::cell::Cell;
 
+mod conduction;
+use conduction::WallLinks;
+pub use conduction::{SharedWallLink, SharedWallLinkReport};
+
 pub(super) struct SharedWalls<'law> {
     groups: Vec<Group<'law>>,
     controls: SharedWallControl,
+    links: Option<WallLinks>,
     candidate_report: Option<SharedWallReport>,
     last_report: Option<SharedWallReport>,
 }
@@ -31,8 +36,9 @@ impl<'law> RealGasWallOperator<'law> {
     /// Bind before the first accepted wall interval. The outer flow owner
     /// publishes gas, wall, reports and clock only after all candidate cells
     /// pass complete source, transport and acoustic admission. This is a
-    /// uniform-wall reduction with authored conductances, not a spatial wall
-    /// conduction model or an inferred dense-gas heat-transfer correlation.
+    /// uniform reduction within each wall region, with authored conductances.
+    /// Distinct regions can exchange heat through `with_shared_wall_links`;
+    /// no spatial PDE or dense-gas heat-transfer correlation is inferred.
     pub fn with_shared_walls(
         mut self,
         walls: Vec<SharedWall<'law>>,
@@ -45,14 +51,21 @@ impl<'law> RealGasWallOperator<'law> {
             || walls.is_empty()
             || controls.maximum_source_evaluations == 0
         {
-            return Err(RealGasFlowError::Invalid("shared real-gas wall binding state or work budget"));
+            return Err(RealGasFlowError::Invalid(
+                "shared real-gas wall binding state or work budget",
+            ));
         }
         let mut used = allocated(self.contacts.len(), false)?;
         let mut groups = Vec::new();
-        groups.try_reserve_exact(walls.len()).map_err(|_| crate::dynamics::Error::Allocation)?;
+        groups
+            .try_reserve_exact(walls.len())
+            .map_err(|_| crate::dynamics::Error::Allocation)?;
         for mut wall in walls {
             poll(&mut cancelled)?;
-            let mut contact = WallContact { drag: WallDrag::None, thermal: wall.storage.thermal };
+            let mut contact = WallContact {
+                drag: WallDrag::None,
+                thermal: wall.storage.thermal,
+            };
             contact.validate()?;
             let temperature = match &wall.storage.heat_storage {
                 Some(source) => {
@@ -61,19 +74,37 @@ impl<'law> RealGasWallOperator<'law> {
                 }
                 None => match contact.thermal {
                     WallThermal::Lumped { temperature_k, .. } => temperature_k,
-                    _ => return Err(RealGasFlowError::Invalid("shared real-gas wall needs finite storage")),
+                    _ => {
+                        return Err(RealGasFlowError::Invalid(
+                            "shared real-gas wall needs finite storage",
+                        ));
+                    }
                 },
             };
             let conductance = match contact.thermal {
-                WallThermal::Lumped { conductance_w_per_k, .. }
-                | WallThermal::Caloric { conductance_w_per_k, .. } => conductance_w_per_k,
-                _ => return Err(RealGasFlowError::Invalid("shared real-gas wall needs finite storage")),
+                WallThermal::Lumped {
+                    conductance_w_per_k,
+                    ..
+                }
+                | WallThermal::Caloric {
+                    conductance_w_per_k,
+                    ..
+                } => conductance_w_per_k,
+                _ => {
+                    return Err(RealGasFlowError::Invalid(
+                        "shared real-gas wall needs finite storage",
+                    ));
+                }
             };
             if conductance != 0.0 || wall.ports.is_empty() {
-                return Err(RealGasFlowError::Invalid("shared real-gas wall films belong to nonempty ports"));
+                return Err(RealGasFlowError::Invalid(
+                    "shared real-gas wall films belong to nonempty ports",
+                ));
             }
             if !self.gas.domain.admits_temperature(temperature) {
-                return Err(RealGasFlowError::Invalid("shared wall outside original real-gas temperature interval"));
+                return Err(RealGasFlowError::Invalid(
+                    "shared wall outside original real-gas temperature interval",
+                ));
             }
             wall.storage.thermal = contact.thermal;
             let mut volumes = allocated(wall.ports.len(), 0.0)?;
@@ -89,7 +120,9 @@ impl<'law> RealGasWallOperator<'law> {
                     || !port.conductance_w_per_k.is_finite()
                     || port.conductance_w_per_k < 0.0
                 {
-                    return Err(RealGasFlowError::Invalid("shared real-gas wall duplicate, overlapping source or conductance"));
+                    return Err(RealGasFlowError::Invalid(
+                        "shared real-gas wall duplicate, overlapping source or conductance",
+                    ));
                 }
                 used[cell] = true;
                 volumes[i] = self.mesh.volumes()[cell];
@@ -97,7 +130,11 @@ impl<'law> RealGasWallOperator<'law> {
             groups.push(Group::new(wall, volumes)?);
         }
         self.shared = Some(SharedWalls {
-            groups, controls, candidate_report: None, last_report: None,
+            groups,
+            controls,
+            links: None,
+            candidate_report: None,
+            last_report: None,
         });
         poll(&mut cancelled)?;
         Ok(self)
@@ -105,7 +142,11 @@ impl<'law> RealGasWallOperator<'law> {
 
     /// Accepted single wall inventory, source and its unchanged physical ports.
     pub fn shared_wall(&self, index: usize) -> Option<&SharedWall<'law>> {
-        self.shared.as_ref()?.groups.get(index).map(|group| &group.accepted)
+        self.shared
+            .as_ref()?
+            .groups
+            .get(index)
+            .map(|group| &group.accepted)
     }
 
     /// Last accepted shared storage/contact equations and actual bounded work.
@@ -133,7 +174,8 @@ impl SharedWalls<'_> {
     ) -> Result<WallCellReport, RealGasFlowError> {
         controls.validate()?;
         let work = Work {
-            used: Cell::new(0), contacts: Cell::new(0),
+            used: Cell::new(0),
+            contacts: Cell::new(0),
             limit: self.controls.maximum_source_evaluations,
         };
         let mut total = HeatSum::default();
@@ -146,24 +188,46 @@ impl SharedWalls<'_> {
                 group.initial[i] = [state.momentum, state.energy];
             }
             let original = |location, temperature| RealGasCaloric {
-                gas, density: states[cell(location)].density, hint: Some(temperature),
+                gas,
+                density: states[cell(location)].density,
+                hint: Some(temperature),
             };
             let initial = group.accepted.storage.thermal;
             let report = group.solve(&original, duration, controls, &work, initial, cancelled)?;
             maximum_wall = maximum_wall.max(report.energy_residual_j.abs());
-            iterations = iterations.checked_add(report.iterations)
-                .ok_or(RealGasFlowError::Invalid("shared real-gas wall iteration count overflow"))?;
+            iterations =
+                iterations
+                    .checked_add(report.iterations)
+                    .ok_or(RealGasFlowError::Invalid(
+                        "shared real-gas wall iteration count overflow",
+                    ))?;
             total.add(report)?;
             for (i, port) in group.accepted.ports.iter().enumerate() {
                 poll(cancelled)?;
                 let index = cell(port.gas);
-                let candidate = Conserved { energy: group.energies[i], ..states[index] };
+                let candidate = Conserved {
+                    energy: group.energies[i],
+                    ..states[index]
+                };
                 // The scalar heat owner can reuse a temperature hint. Complete
                 // material/transport/acoustic admission is unconditional here.
                 work.charge()?;
                 primitives[index] = gas.decode(candidate, cancelled)?;
                 states[index] = candidate;
             }
+        }
+        if let Some(links) = &mut self.links {
+            conduction::prepare(
+                &mut self.groups,
+                links,
+                duration,
+                controls,
+                &work,
+                &mut total,
+                &mut maximum_wall,
+                &mut iterations,
+                cancelled,
+            )?;
         }
         poll(cancelled)?;
         let report = total.report(duration);
@@ -177,8 +241,11 @@ impl SharedWalls<'_> {
             contact_solves: work.contacts.get(),
         });
         Ok(WallCellReport {
-            elapsed: duration, wall_impulse_ns: 0.0, mechanical_work_to_gas_j: 0.0,
-            drag_heating_j: 0.0, heat_to_gas_j: report.heat_to_gas_j,
+            elapsed: duration,
+            wall_impulse_ns: 0.0,
+            mechanical_work_to_gas_j: 0.0,
+            drag_heating_j: 0.0,
+            heat_to_gas_j: report.heat_to_gas_j,
             wall_energy_change_j: report.wall_storage_change_j,
             external_heat_to_gas_j: 0.0,
             energy_residual_j: report.source_storage_residual_j,
@@ -192,5 +259,8 @@ impl SharedWalls<'_> {
             group.accepted.storage.thermal = group.candidate;
         }
         self.last_report = self.candidate_report;
+        if let Some(links) = &mut self.links {
+            links.accepted.clone_from(&links.candidate);
+        }
     }
 }
