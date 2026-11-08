@@ -9,6 +9,10 @@
 mod current;
 pub use current::CurrentPlanarCaloricBoundary;
 
+#[path = "boundary/radial.rs"]
+mod radial;
+pub use radial::{IntegratedRadialCaloricBoundary, RadialCaloricBoundaryGeometry};
+
 use super::CaloricConductionLayer;
 use crate::thermal::conduction::{
     LayerConductionConfig, ReservoirLayerGeometry, ReservoirLayerResponse,

@@ -21998,3 +21998,11 @@ Focused native and thermal recovery tests retain independent manufactured flow,
 potential, entropy, tangent, objectivity, dwell/reload and source checks. These
 are bounded authored constitutive models; measured calibration, tertiary damage,
 rupture, and service-life qualification remain separate claims.
+
+## Original caloric radial boundary conduction
+
+`IntegratedRadialCaloricBoundary` binds the original caloric material layer to an explicitly cylindrical or spherical reservoir/ambient face. `RadialCaloricBoundaryGeometry` retains physical face/trace radii, complete cylinder length where applicable, and the supplied circumferential or solid-angle fraction. Its exact geometric multiplier is `C = 1/integral(dr/A(r))`; the native distance is the resistance coordinate `A_face/C`, never physical thickness or cell inventory. Both the actual face area and multiplier scale with the declared angular fraction, with no inferred lateral spreading.
+
+The original material surface solve integrates the same k(T), evaluates the actual material-face temperature, and chains the same endpoint derivative through original Cp/Cv storage. The areal film becomes total resistance `R''/A_face` exactly once. The native chain/graph retains the original reference volume, mass, heat, bath entropy and accepted time. Geometry-pinned admission rejects altered native measures, and density-driven planar thickness tangents remain unsupported. The model assumes positive radial traces, source-free quasi-steady legs, fixed geometry/source context and insulated cylinder ends. It supplies no extra thermal inventory, moving-boundary work or phase-front discretization.
+
+Regression definitions cover independent thick-shell logarithmic/inverse-radius fluxes (distinguishable from a planar-thickness approximation), both radial faces, angular fractions, original Cp/Cv derivatives, a supported material surface with an out-of-chart bath, and native implicit heat/entropy evolution using independently computed physical shell mass.

@@ -9,7 +9,10 @@
 /// Source-integrated material surfaces and their original reservoir/ambient film.
 #[path = "conduction/boundary.rs"]
 pub mod boundary;
-pub use boundary::{CurrentPlanarCaloricBoundary, IntegratedCaloricBoundary};
+pub use boundary::{
+    CurrentPlanarCaloricBoundary, IntegratedCaloricBoundary, IntegratedRadialCaloricBoundary,
+    RadialCaloricBoundaryGeometry,
+};
 
 /// Explicit current planar configurations on the original integrated links.
 #[path = "conduction/current.rs"]
