@@ -37,3 +37,8 @@ window_factor_gib	2
 window_budget_gib	64
 # MODE CERTIFICATE: maximum_relative_halfwidth 1e-7, as on the E4 cards; origin's default certificate refuses this bar's 9-window plan in window 8 of 9 (7782.2 to 8891.1 Hz), the mode at 8867.313 Hz carrying a relative half-width of 1.16e-8 (FS-MODAL-HALFWIDTH-EXCEEDED). At 1e-7 the widest certificate of the band's 15 modes is 5.1e-5 Hz, on the mode at 8867.313 Hz, that mode itself. It sets no sound.
 maximum_relative_halfwidth	1e-7
+# RECEIVER: the broadband observer (e6313e19d): one delay and an order-16 rational fit of the boundary-element transfer from each bar mode to the receiver, checked on held-out frequencies against a 5 % budget. It hears the bar during the mallet's contact and with its travel time; the narrow-band law it replaces passed the contact force as a pulse.
+observer	broadband
+observer_fit_order	16
+observer_held_out_budget	0.05
+observer_rigid_rows	on

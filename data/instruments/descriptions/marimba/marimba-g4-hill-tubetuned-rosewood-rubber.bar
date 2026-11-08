@@ -35,3 +35,8 @@ tube_radius_m	0.026987499999999998
 tube_air_length_m	0.201041
 tube_gap_m	0.0174625
 tube_modes	4
+# RECEIVER: the broadband observer (e6313e19d): one delay and an order-16 rational fit of the boundary-element transfer from each bar mode to the receiver, checked on held-out frequencies against a 5 % budget. It hears the bar during the mallet's contact and with its travel time; the narrow-band law it replaces passed the contact force as a pulse.
+observer	broadband
+observer_fit_order	16
+observer_held_out_budget	0.05
+observer_rigid_rows	on
