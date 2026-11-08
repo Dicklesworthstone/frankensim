@@ -20,6 +20,9 @@ pub mod dmt_modal;
 /// Original normal snap release and explicitly declared finite-cell heat.
 pub mod snap;
 
+/// Native adhesive rolling/torsion, explicit loss conversion and finite-cell heat.
+pub mod moment;
+
 use super::FrictionHeatRoute;
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,

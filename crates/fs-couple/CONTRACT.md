@@ -6865,3 +6865,66 @@ cancellation rollback with exact retry, mismatched observers, and receiver
 history refinement against separately integrated retarded states. Execution
 is pending: the implementation session's executor became unavailable before
 compilation or test completion. These cases are not claimed as passing evidence.
+
+## Native adhesive rolling and torsion with finite-cell heat
+
+`friction_heat::adhesive::moment::AdhesiveMomentHeat` advances the original
+source-bound rigid rolling or bonded-torsion history and its actual finite
+caloric receivers together. It accepts sealed native memory, including an
+already loaded elastic spring. Internally it calls the original wrench-driven
+mechanical preparation once; public diagnostic reports cannot supply heat or
+successor histories. The source, native A/B pairing, frame and held geometry
+retain their original mechanical checks. The real attached JKR area remains
+conducting at zero or tensile normal resultant.
+
+An explicit `AdhesiveMomentHeatPartition` supplies the physically justified
+caloric fraction of irreversible moment loss. There is no default, including
+no assumption that all adhesive hysteresis becomes heat. A nonzero remainder
+requires a named noncaloric destination and persists in the accepted cumulative
+loss account. The ledger begins when this coupling is bound; it does not infer
+past loss from angle or relabel pre-existing spring storage. Applied COM-force
+and body-torque work, recoverable bond storage, generated heat and retained
+noncaloric loss remain independently visible. Reversible unloading releases
+storage into native motion without generating heat.
+
+The existing frozen-loss finite network solves one massless interface
+temperature and the original cells' enthalpy increments. This uses original
+areas, centre-to-face distances, optional contact resistances and endpoint
+conductivities. The original direct link is suppressed only in the residual,
+so conduction cannot be counted twice. Signed A/B heat follows the finite
+transport solution and may be negative on a hot body. It is not the declared
+caloric fraction divided arbitrarily between bodies. Other sources, latent
+caloric capacity, reservoir exchange and optional caloric entropy audit keep
+their original owners; the supplied callback must not reinsert mechanical
+loss. The reported entropy production only includes the caloric fraction and
+transport; no entropy model is invented for the noncaloric remainder.
+
+The paired caloric curves must identify the original ordered source materials
+and be the exact laws registered on the original receiving cells. Native
+reaction markers, thermal face centre and ordered A-to-B normal must coincide.
+Cell identity, mass, geometry, material, body assignment and fixed contact area
+remain pinned. Changing topology, source, native geometry, or the caloric laws
+cannot silently rebind the accepted history. Finite material-domain exhaustion,
+failed source/transport solves and cancellation publish no owner. Private
+candidates and the atomic `apply` path publish both native bodies, history,
+cumulative loss and finite temperatures only after independent stage gates.
+Unrelated native bodies remain unchanged.
+
+The combined audit is Delta K + Delta U_bond + Delta H + noncaloric loss minus
+actual applied body work minus other thermal supply. Separate mechanical,
+thermal and partition residual magnitudes are also gated, so errors cannot
+cancel between stages. The native exact monotone constitutive work and its
+midpoint inertia discretization are unchanged. Thermal transport is backward
+Euler at frozen mechanical coefficients, fixed area and held poses. This is
+an explicitly split approximation: no temperature dependence, no-slip reaction,
+normal motion, moving footprint, history rotation or normal/twist mixed-mode
+evolution is inferred. Those require their original physical owners and
+timestep/spatial refinement when coupled.
+
+`tests/adhesive_moment_heat.rs` covers both source laws under tensile attachment:
+driven yielding with zero/partial/full caloric conversion, independent finite
+two-cell heat solutions with signed conduction and other supply, retained
+noncaloric loss over subsequent steps, elastic storage and unloading, original
+preload adoption, source/area/caloric mismatch, finite-domain refusal, final
+thermal-trial cancellation and an identical retry. Its thresholds and caloric
+data are manufactured discrete-physics tests, not material calibration claims.
