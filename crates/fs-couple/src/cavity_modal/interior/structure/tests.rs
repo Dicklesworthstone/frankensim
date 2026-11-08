@@ -10,6 +10,8 @@ use fs_sparse::Coo;
 
 #[path = "poles_tests.rs"]
 mod poles_tests;
+#[path = "relaxation/integration_tests.rs"]
+mod relaxation_tests;
 #[path = "resonance_tests.rs"]
 mod resonance_tests;
 

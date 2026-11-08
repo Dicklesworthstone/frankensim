@@ -27,6 +27,8 @@
 
 /// Free complex modes of the complete original structural/acoustic pencil.
 pub mod poles;
+/// Complete forced response with original material and wall relaxation histories.
+pub mod relaxation;
 /// Analytic full-field frequency response and original-receiver resonance surveys.
 pub mod resonance;
 mod response;

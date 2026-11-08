@@ -6773,6 +6773,59 @@ also authored; the missing frankenscipy/fsci-special manifest prevents their
 Cargo compilation in this environment. Native evidence is not a claim that
 the complete adapter or workspace has compiled.
 
+### Complete driven cavity response with original relaxation memory
+
+`StructuralInterior::prepare_relaxation_response` binds original complete
+M/C/K/B and explicit Maxwell channels through `LinearMechanicalSystem` and
+`HarmonicModel`. The canonical state retains every [u,psi], momentum and
+viscous-strain coordinate, including constant potential and dark memory.
+Original M/K must be symmetric and K relaxed; native passive storage/resistance
+admission applies without coefficient repair. Structural-only branches are
+material channels; potential-only branches supply `k*tau/(1+s*tau)*b*b^T`
+admittance; mixed channels retain the caller's declared law. The complete driven
+solution includes off-resonance background as well as resonance.
+
+Native assembly is reused across frequencies. One full LU per positive rad/s
+frequency serves coherent original force/inward-flow drives and analytic
+frequency tangents. Peak phasors use exp(-i*omega*t); velocity and pressure come
+from the power-conjugate outputs. Separate componentwise checks enforce original
+mechanical, kinematic and branch-history equations, including differentiated
+equations and both supplied source slopes. Pressure's tangent includes the
+derivative of -i*omega*psi. No initial-history forcing, mass lumping, modal
+truncation, sampled damping, finite-difference solve or extra solver is introduced.
+
+Responses retain original structural/fluid cycle-mean storage, each arm's
+`|sigma|^2/(4*k)` storage and `|sigma|^2/(2*k*tau)` heat, structural viscous heat,
+memoryless-wall heat, source work and signed reciprocal interface work. Each arm
+separately reports work drawn from structure and acoustic field, including mixed
+channels. Compensated contractions retain coherent cancellation. Aggregate arm
+totals are subaccount sums; structural, acoustic, memory and total power residuals
+remain separately observable. No heat is manufactured from a deficit.
+
+Prepared `driven_resonance` and `survey_resonances` reuse the shared analytic
+search for actual original pressure, displacement or velocity receivers. Local
+queries can return selected squared-amplitude half-height crossings and observed
+bandwidth Q, distinct from pole-decay Q. Surveys resolve the supplied grid and
+do not establish a complete spectrum. Spatial/material validity and mesh/order
+convergence remain caller obligations.
+
+For n coordinates, b branches and d=2*n+b, the native complete-state cap remains.
+Separate adapter ceilings admit `8*(32*d^2+16*n^2+8*b*n+64*d+64*n+32*b)` payload
+bytes and work score `1024*d^3+128*n^2+128*b*n` before physical construction;
+native harmonic ceilings separately admit preparation, factors and derivative
+queries. Borrowed arrays, earlier results and allocator metadata are excluded.
+Cancellation, true singularity, invalid sources, original-row failure or capacity
+refusal returns no partial response and leaves preparation reusable.
+
+Ten native tests pass with actual shared owners and unchanged production
+recovery: six new cases cover the full five-coordinate P1 cubic response and
+accounts, both source slopes, causal wall admittance, actual peak/bandwidth,
+nonuniform mutual-memory/gyroscopic fields, and zero-memory/refusal/cancellation/
+replay; four shared contraction cases also pass. One complete FE/Cx integration
+test is authored but unexecuted because the missing frankenscipy/fsci-special
+manifest blocks Cargo loading. This native evidence does not establish complete
+outer-adapter compilation or broader MR56 qualification.
+
 ### Exact full-field cavity evolution with original relaxation memory
 
 `StructuralInterior::prepare_relaxation_exact_time` passes the complete original

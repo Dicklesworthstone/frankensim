@@ -342,7 +342,11 @@ impl PreparedStructuralInteriorRelaxationModes<'_, '_, '_, '_> {
 // bounded; only the final published value is rescaled. Storage and heat are
 // calculated independently, so a very fast branch cannot lose its heat through
 // an underflowed stored-energy intermediate.
-fn stress_square_over(stress: C64, a: f64, b: f64) -> Result<f64, &'static str> {
+pub(in crate::cavity_modal::interior::structure) fn stress_square_over(
+    stress: C64,
+    a: f64,
+    b: f64,
+) -> Result<f64, &'static str> {
     if !stress.re.is_finite()
         || !stress.im.is_finite()
         || !a.is_finite()
