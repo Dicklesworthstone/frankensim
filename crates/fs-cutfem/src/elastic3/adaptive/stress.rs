@@ -13,7 +13,9 @@ impl AdaptiveElasticity3 {
         self.admit_affine_material_domain(u, &[], checkpoint)
     }
 
-    /// Admit the complete coefficient unit ball on the retained bulk points.
+    /// Admit the complete coefficient unit ball throughout each active Q1 cell.
+    /// Eight corner checks bound the complete reconstructed polynomial, including
+    /// the fictitious extension of cut cells; see the native admission owner.
     /// Reconstruct only the current cell's 24 physical coefficients using the
     /// SAME row owner as `physical_displacements`; no expanded nodal fields or
     /// stress samples are allocated. The native owner checks finite inputs and

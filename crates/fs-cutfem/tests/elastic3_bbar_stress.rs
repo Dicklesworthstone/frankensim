@@ -472,3 +472,79 @@ fn nearly_incompressible_embedded_extension_preserves_affine_motion_and_traction
     assert!(adaptive.physical_nodes().len() > adaptive.nodes().len());
     check_embedded_extension!(adaptive, youngs, poisson);
 }
+
+#[test]
+fn complete_q1_material_domain_detects_corner_strain_missed_by_bulk_samples() {
+    // u_x = a*x*y is represented exactly by Q1. epsilon_xx = a*y reaches
+    // 0.101 at y=1, although all interior Gauss points stay below 0.1. The
+    // B-bar projection is also inside the ceiling: actual strain must still gate.
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        let op = cartesian(1, 0.1, formulation);
+        let field = |a: f64| {
+            op.nodes()
+                .iter()
+                .flat_map(|p| [a * p[0] * p[1], 0.0, 0.0])
+                .collect::<Vec<_>>()
+        };
+        let excessive = field(0.101);
+        op.bulk_stress(&excessive, 100_000, poll).unwrap();
+        assert!(op.admit_material_domain(&excessive, poll).is_err());
+        op.admit_material_domain(&field(0.099), poll).unwrap();
+
+        // Each listed endpoint is admissible; the combined coefficient unit
+        // ball reaches 0.04 + sqrt(2)*0.045 at the corner and must refuse.
+        let offset = field(0.04);
+        let direction = field(0.045);
+        op.admit_affine_material_domain(&offset, &[&direction], poll)
+            .unwrap();
+        op.affine_bulk_stress(&offset, &[&direction, &direction], 100_000, poll)
+            .unwrap();
+        assert!(
+            op.admit_affine_material_domain(&offset, &[&direction, &direction], poll)
+                .is_err()
+        );
+        let direction = field(0.075);
+        op.admit_load_space_material_domain(&[&direction], poll)
+            .unwrap();
+        assert!(
+            op.admit_load_space_material_domain(&[&direction, &direction], poll)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn adaptive_q1_material_domain_bounds_the_hanging_field_between_bulk_points() {
+    let op = adaptive();
+    assert!(op.physical_nodes().len() > op.nodes().len());
+    let field = |a: f64| {
+        op.nodes()
+            .iter()
+            .flat_map(|p| [a * p[0] * p[1], 0.0, 0.0])
+            .collect::<Vec<_>>()
+    };
+    let excessive = field(0.101);
+    op.bulk_stress(&excessive, 100_000, poll).unwrap();
+    assert!(op.admit_material_domain(&excessive, poll).is_err());
+    op.admit_material_domain(&field(0.099), poll).unwrap();
+    let offset = field(0.04);
+    let direction = field(0.045);
+    op.affine_bulk_stress(&offset, &[&direction, &direction], 300_000, poll)
+        .unwrap();
+    assert!(
+        op.admit_affine_material_domain(&offset, &[&direction, &direction], poll)
+            .is_err()
+    );
+    op.admit_affine_material_domain(&offset, &[&direction], poll)
+        .unwrap();
+    let direction = field(0.075);
+    assert!(
+        op.admit_load_space_material_domain(&[&direction, &direction], poll)
+            .is_err()
+    );
+    op.admit_load_space_material_domain(&[&direction], poll)
+        .unwrap();
+}

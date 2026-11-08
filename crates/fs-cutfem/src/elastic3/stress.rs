@@ -390,7 +390,7 @@ impl CutElasticity3 {
     }
 
     /// Admit every field `offset + sum_j a[j] * basis[j]`, `||a||_2 <= 1`,
-    /// against the retained source strain ceilings at original bulk points.
+    /// against the retained source strain ceilings throughout each active Q1 cell.
     /// Shapes, finite coefficients and scales are checked even for legacy laws;
     /// no ceiling is invented for a law without a retained source domain.
     /// B-bar checks both the actual displacement strain and its projected strain.
@@ -398,9 +398,16 @@ impl CutElasticity3 {
     /// This streams cell-local fields with constant auxiliary storage and no
     /// heap allocation. It shares the stable component support calculation with
     /// `affine_bulk_stress`, but neither evaluates nor stores constitutive stress.
-    /// Cancellation is polled while checking inputs, at cells and points, within
+    /// Every Q1 strain component is multiaffine in the three cell coordinates.
+    /// Its coefficient-ball support `abs(offset) + norm(basis)` is separately
+    /// convex, so checking the eight vertices covers the whole cell in real
+    /// arithmetic. B-bar's constant dilatation projection preserves this property.
+    /// The check includes the fictitious extension of cut cells and may therefore
+    /// conservatively refuse a field whose physical subdomain stays admissible.
+    /// Cancellation is polled while checking inputs, at cells and vertices, within
     /// each basis family and before publication. Operator state is unchanged.
-    /// The pointwise floating-point admission is not a continuum certificate.
+    /// This floating-point discrete-field bound is not an interval enclosure or
+    /// a continuum-error certificate.
     pub fn admit_affine_material_domain(
         &self,
         offset: &[f64],
@@ -457,8 +464,19 @@ impl CutElasticity3 {
                 continue;
             }
             let local_offset = offset.map_or([0.0; 24], |field| local(cell, field));
-            for &(position, _) in cell.rules.bulk() {
+            let (lo, hi) = (cell.bounds.lo(), cell.bounds.hi());
+            // Integration nodes alone miss material-domain exits near edges and
+            // corners. Multi-affinity reduces the complete Q1-cell bound to these
+            // eight vertices, independently of cut-rule size or quadrature depth.
+            for corner in 0..8 {
                 poll(&mut checkpoint)?;
+                let position = std::array::from_fn(|axis| {
+                    if (corner >> axis) & 1 == 0 {
+                        lo[axis]
+                    } else {
+                        hi[axis]
+                    }
+                });
                 let (_, gradients) = q1(cell.bounds, position);
                 admit_affine_material_strain(
                     cell,

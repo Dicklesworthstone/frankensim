@@ -266,16 +266,22 @@ same hanging-node map and strong-clamp masking for the entire family.
 `admit_material_domain`, `admit_affine_material_domain` and
 `admit_load_space_material_domain` expose that same source-strain admission
 independently of stress output. They check shape, finite coefficients and scales
-before any legacy/source distinction, then stream only source-bound cells and
-retained points with constant auxiliary storage and no heap allocation. The
+before any legacy/source distinction, then stream the eight corners of each
+source-bound cell with constant auxiliary storage and no heap allocation. Q1
+strain components, including B-bar's projected strains, are multiaffine in the
+cell coordinates. Their coefficient-ball support `abs(offset) + norm(basis)`
+is convex in each coordinate separately, so its maximum lies at a vertex.
+The bound covers the complete discrete Q1 field, including the fictitious
+extension of cut cells; that extension can make refusal conservative. The
 zero-offset load-space method uses an implicit local zero rather than allocating
 an all-zero displacement vector. Adaptive fields reconstruct one cell at a time through the
 identical scalar row owner used by full physical displacement export. This lets
 compliance, response and optimization consumers enforce native validity without
 allocating point-by-field stress arrays or performing constitutive stress work.
 The whole-ball check retains bounded cancellation and leaves operator state
-unchanged on success, refusal or cancellation; it certifies neither unsampled
-strain extrema nor a continuum material domain.
+unchanged on success, refusal or cancellation. Arithmetic remains numerical,
+not an interval enclosure or a continuum-error certificate. Stress observation
+methods still return values only at their retained integration points.
 
 Output point allowances are checked before allocating the stress array. State,
 cotangents and arithmetic must be finite, and observation/pullback work polls
