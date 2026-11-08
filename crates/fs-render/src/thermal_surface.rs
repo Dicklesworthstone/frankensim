@@ -31,6 +31,7 @@
 mod entropy;
 
 mod planck;
+mod planck_band;
 pub(crate) use planck::{
     planck_radiance_difference_w_m2_sr_nm, planck_radiance_temperature_derivative_w_m2_sr_nm_k,
     planck_radiance_temperature_secant_w_m2_sr_nm_k, planck_radiative_exchange_w_and_w_k,
@@ -49,6 +50,9 @@ pub use observables::{
 
 /// Original thermal spectra observed from moving inertial vacuum frames.
 pub mod doppler;
+
+/// Source-consistent finite-band exchange between diffuse thermal surfaces.
+pub mod diffuse_exchange;
 
 mod coating_emission;
 pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingThermalEmission};
@@ -85,11 +89,9 @@ pub mod heating;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_math::det;
 
-const PLANCK_J_S: f64 = 6.626_070_15e-34;
-const LIGHT_M_S: f64 = 299_792_458.0;
-const BOLTZMANN_J_K: f64 = 1.380_649e-23;
-const C1_NM: f64 = 2.0 * PLANCK_J_S * LIGHT_M_S * LIGHT_M_S * 1.0e36;
-const C2_NM_K: f64 = PLANCK_J_S * LIGHT_M_S / BOLTZMANN_J_K * 1.0e9;
+#[cfg(test)]
+use planck_band::PLANCK_J_S;
+use planck_band::{BOLTZMANN_J_K, C1_NM, C2_NM_K, LIGHT_M_S};
 const SIGMA_W_M2_K4: f64 = 5.670_374_419e-8;
 
 /// A gray/diffuse equilibrium model with a retained physical-source identity.

@@ -1,3 +1,36 @@
+## Spectral diffuse cooling on the native enthalpy timeline
+
+`thermal_surface::diffuse_exchange::DiffuseExchangeResponse` integrates the
+original piecewise-linear spectral emissivity against the shared stable SI
+Planck difference. Positive four-point quadrature in log wavelength splits at
+every source knot; the diffuse hemisphere factor is analytic. Prepared grids
+are shared across state-dependent emissivity refreshes. Evaluation allocates
+nothing and preserves heating/cooling reversal and the equilibrium tangent.
+
+`heating::diffuse_exchange::NativeDiffuseExchange` resolves the SAME native
+temperature/enthalpy-dependent law for applied heat and its accepted renderer
+surface. The existing thermal observer owner advances storage, conduction,
+convection and events and applies each accepted-start radiation rate once.
+Explicit budgets bound source work, spectral work and retained quadrature.
+The frozen-emissivity secant supplies the native step restriction; state-law
+and temporal accuracy still require independent time refinement.
+
+Unknown wavelengths are never filled with guessed emissivity. Integrated Wien
+and Rayleigh--Jeans majorants, capped by complete blackbody power, bound omitted
+exchange using the hotter body/bath. Area-safe logarithmic evaluation uses the
+same SI constants and outward floating-point padding. This is an analytic model
+bound, not a formal interval or material-uncertainty certificate. Each source
+may require an absolute omitted-watt allowance; partial-band heat remains
+explicitly labeled when no allowance is requested. The bound adds no heat and
+does not include wavelength-quadrature or temporal error.
+
+Three tests of the exact production tail helper passed against independent
+Planck integration, physical scaling and numerical extremes, linked to the
+actual pinned fs-math implementation. Three response and four native integration
+regressions cover spectral refinement, thermal balance, latent spectral changes,
+coverage refusal and ambient events. These integration tests remain unexecuted
+because the checkout lacks required constellation siblings; formatting passed.
+
 ## Nonuniform incandescent emission and physical exposure
 
 `ThermalVisibleEmission::observe` combines original diffuse thermal surfaces

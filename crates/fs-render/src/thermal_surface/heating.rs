@@ -48,6 +48,8 @@ use state::SurfaceFeedbackState;
 pub use state::{StatefulSurfaceIlluminationSource, SurfaceIncidence};
 
 pub mod diffuse_feedback;
+/// Finite-band diffuse radiative cooling/heating from the same native state law.
+pub mod diffuse_exchange;
 mod diffuse_state;
 pub use diffuse_state::StatefulDiffuseSurfaceIlluminationSource;
 use diffuse_state::SurfaceDiffuseFeedbackState;

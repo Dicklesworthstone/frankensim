@@ -58,6 +58,8 @@ mod luminescence;
 
 mod coating_emission;
 mod coating_exchange;
+#[path = "optical_heating/diffuse_exchange.rs"]
+mod diffuse_exchange;
 
 #[path = "optical_heating/coating_state.rs"]
 mod coating_state;
