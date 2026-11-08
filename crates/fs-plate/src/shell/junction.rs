@@ -20,10 +20,11 @@
 //! $K_r = T^T K T$, $M_r = T^T M T$, preserving exact symmetry, positive-semidefinite
 //! energy, and zero net virtual interface power $P_m + P_s = 0$.
 
-use super::stiffened::BeamSection;
 use super::stiffened::timoshenko::{
-    BeamKind, assemble_beam_chain, assemble_prestressed_beam_chain,
+    BeamKind, assemble_beam_chain, assemble_beam_chain_with_reference_density,
+    assemble_prestressed_beam_chain, assemble_prestressed_beam_chain_with_reference_density,
 };
+use super::stiffened::{BeamMass, BeamSection};
 use super::{ShellMesh, ShellModel, dot, sub};
 use crate::PlateError;
 use fs_math::{dd::Dd, det};
@@ -2661,7 +2662,39 @@ pub fn tie_beams_to_shells(
     budget: TieBudget,
     cancelled: impl FnMut() -> bool,
 ) -> Result<BeamTiedShellModel, PlateError> {
-    tie_beams_to_shells_impl(tied, components, beams, None, budget, cancelled)
+    tie_beams_to_shells_impl(tied, components, beams, None, None, budget, cancelled)
+}
+
+/// Tie beam chains carrying their original P1 reference densities [kg/m³].
+/// `reference_density_kg_m3[b][e]` contains the two endpoint values of segment
+/// `e` on beam `b`, in that beam's node order. Every beam and segment must be
+/// covered. Density jumps at shared nodes remain separate physical fields.
+///
+/// The complete consistent beam inertia, including independent section
+/// rotations, follows the SAME mortar and eccentric rigid-arm congruence as
+/// stiffness. Shell inertia, supports and existing ties remain unchanged.
+/// This is an original inventory, not current density resampled on fixed
+/// geometry. Cross-section density remains uniform; the original beam/tie
+/// discretization limits of [`tie_beams_to_shells`] still apply.
+/// # Errors
+/// Original tie refusals, incomplete coverage or nonpositive/nonfinite density.
+pub fn tie_beams_to_shells_with_reference_density(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    reference_density_kg_m3: &[&[[f64; 2]]],
+    budget: TieBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    tie_beams_to_shells_impl(
+        tied,
+        components,
+        beams,
+        None,
+        Some(reference_density_kg_m3),
+        budget,
+        cancelled,
+    )
 }
 
 /// Attach the original beam chains with their signed, equilibrated segment
@@ -2695,6 +2728,33 @@ pub fn tie_prestressed_beams_to_shells(
         components,
         beams,
         Some(axial_forces_n),
+        None,
+        budget,
+        cancelled,
+    )
+}
+
+/// The same graded beam-to-shell inertia with the original signed equilibrated
+/// segment forces. Prestress affects only the tangent, never the density field
+/// or its mortar transfer. Both fields cover every beam and original segment.
+/// See [`tie_prestressed_beams_to_shells`] for the prestress applicability limits.
+/// # Errors
+/// The combined graded-density and prestressed beam-tie refusals.
+pub fn tie_prestressed_beams_to_shells_with_reference_density(
+    tied: &TiedShellModel,
+    components: &[ShellComponent<'_>],
+    beams: &[BeamOnShell<'_>],
+    reference_density_kg_m3: &[&[[f64; 2]]],
+    axial_forces_n: &[&[f64]],
+    budget: TieBudget,
+    cancelled: impl FnMut() -> bool,
+) -> Result<BeamTiedShellModel, PlateError> {
+    tie_beams_to_shells_impl(
+        tied,
+        components,
+        beams,
+        Some(axial_forces_n),
+        Some(reference_density_kg_m3),
         budget,
         cancelled,
     )
@@ -2705,11 +2765,27 @@ fn tie_beams_to_shells_impl(
     components: &[ShellComponent<'_>],
     beams: &[BeamOnShell<'_>],
     axial_forces_n: Option<&[&[f64]]>,
+    reference_density: Option<&[&[[f64; 2]]]>,
     budget: TieBudget,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<BeamTiedShellModel, PlateError> {
     if cancelled() {
         return Err(PlateError::Cancelled);
+    }
+    if let Some(density) = reference_density {
+        if density.len() != beams.len()
+            || density.iter().zip(beams).any(|(field, beam)| {
+                field.len() != beam.beam_nodes_m.len().saturating_sub(1)
+                    || field
+                        .iter()
+                        .flatten()
+                        .any(|rho| !rho.is_finite() || *rho <= 0.0)
+            })
+        {
+            return Err(PlateError::BadConstraint {
+                what: "beam ties require positive endpoint reference densities for every segment",
+            });
+        }
     }
     if let Some(forces) = axial_forces_n {
         if forces.len() != beams.len()
@@ -2874,16 +2950,35 @@ fn tie_beams_to_shells_impl(
                 rows.push(acc.into_iter().filter(|&(_, w)| w != 0.0).collect());
             }
         }
-        let (k_b, m_b) = if let Some(forces) = axial_forces_n {
-            assemble_prestressed_beam_chain(
+        let (k_b, m_b) = match (axial_forces_n, reference_density) {
+            (Some(forces), Some(density)) => {
+                assemble_prestressed_beam_chain_with_reference_density(
+                    beam.beam_nodes_m,
+                    beam.section_z,
+                    beam.section,
+                    beam.kind,
+                    density[beam_index],
+                    forces[beam_index],
+                )?
+            }
+            (None, Some(density)) => assemble_beam_chain_with_reference_density(
+                beam.beam_nodes_m,
+                beam.section_z,
+                beam.section,
+                beam.kind,
+                density[beam_index],
+                BeamMass::Consistent,
+            )?,
+            (Some(forces), None) => assemble_prestressed_beam_chain(
                 beam.beam_nodes_m,
                 beam.section_z,
                 beam.section,
                 beam.kind,
                 forces[beam_index],
-            )?
-        } else {
-            assemble_beam_chain(beam.beam_nodes_m, beam.section_z, beam.section, beam.kind)?
+            )?,
+            (None, None) => {
+                assemble_beam_chain(beam.beam_nodes_m, beam.section_z, beam.section, beam.kind)?
+            }
         };
         accumulate_congruence(&k_b, &rows, &mut k_coo, &mut cancelled)?;
         accumulate_congruence(&m_b, &rows, &mut m_coo, &mut cancelled)?;

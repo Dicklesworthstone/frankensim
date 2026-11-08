@@ -22,10 +22,61 @@ pub(super) fn local_mass(
     phi: [f64; 2],
     mass: BeamMass,
 ) -> Result<[f64; 144], PlateError> {
+    local_mass_impl(s, l, phi, mass, None)
+}
+
+pub(super) fn validate_reference_density(density: [f64; 2]) -> Result<(), PlateError> {
+    if density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0) {
+        return Err(bad(
+            "beam reference density must be finite and positive at both endpoints",
+        ));
+    }
+    Ok(())
+}
+
+/// P1 original density on the same prismatic geometry and kinetic fields.
+/// A uniform field delegates to the scalar owner, preserving its arithmetic.
+pub(super) fn local_mass_with_reference_density(
+    s: BeamSection,
+    l: f64,
+    phi: [f64; 2],
+    mass: BeamMass,
+    reference_density_kg_m3: [f64; 2],
+) -> Result<[f64; 144], PlateError> {
+    validate_reference_density(reference_density_kg_m3)?;
+    if reference_density_kg_m3[0] == reference_density_kg_m3[1] {
+        return local_mass(
+            BeamSection {
+                density_kg_m3: reference_density_kg_m3[0],
+                ..s
+            },
+            l,
+            phi,
+            mass,
+        );
+    }
+    local_mass_impl(s, l, phi, mass, Some(reference_density_kg_m3))
+}
+
+fn local_mass_impl(
+    s: BeamSection,
+    l: f64,
+    phi: [f64; 2],
+    mass: BeamMass,
+    reference_density: Option<[f64; 2]>,
+) -> Result<[f64; 144], PlateError> {
     let mut m = [0.0; 144];
     if mass == BeamMass::Lumped {
         // Preserve the arithmetic of the original bonded ShellBeam pencil.
         let half = s.density_kg_m3 * l / 2.0;
+        // Integral rho*N_i dx preserves both total inventory and its first
+        // axial moment. Equal endpoint halves would lose the density centroid.
+        let partition = reference_density.map_or([half; 2], |rho| {
+            [
+                l * (rho[0] / 3.0 + rho[1] / 6.0),
+                l * (rho[0] / 6.0 + rho[1] / 3.0),
+            ]
+        });
         for node in 0..2 {
             for (dof, inertia) in [
                 s.area_m2,
@@ -39,7 +90,7 @@ pub(super) fn local_mass(
             .enumerate()
             {
                 let i = 6 * node + dof;
-                m[12 * i + i] = half * inertia;
+                m[12 * i + i] = partition[node] * inertia;
             }
         }
     } else {
@@ -49,13 +100,25 @@ pub(super) fn local_mass(
         // Axial translation and torsion have linear fields. Torsional inertia is
         // the polar area moment Iy+Iz, never the Saint-Venant stiffness constant J.
         for (a, b, inertia) in [(0, 6, s.area_m2), (3, 9, s.iy_m4 + s.iz_m4)] {
-            let off = s.density_kg_m3 * l * inertia / 6.0;
-            m[12 * a + a] = 2.0 * off;
-            m[12 * b + b] = 2.0 * off;
+            let (left, off, right) = if let Some(rho) = reference_density {
+                // Exact P1-density/P1-velocity Gram entries, without replacing
+                // the density by its mean or forming an overflowing sum first.
+                (
+                    l * inertia * (rho[0] / 4.0 + rho[1] / 12.0),
+                    l * inertia * (rho[0] / 12.0 + rho[1] / 12.0),
+                    l * inertia * (rho[0] / 12.0 + rho[1] / 4.0),
+                )
+            } else {
+                let off = s.density_kg_m3 * l * inertia / 6.0;
+                (2.0 * off, off, 2.0 * off)
+            };
+            m[12 * a + a] = left;
+            m[12 * b + b] = right;
             m[12 * a + b] = off;
             m[12 * b + a] = off;
         }
-        // Four Gauss points integrate the degree-six kinetic polynomial exactly.
+        // Four Gauss points integrate the degree-six velocity products, or
+        // degree seven with P1 density, without any additional quadrature.
         const GAUSS: [(f64, f64); 4] = [
             (0.06943184420297371, 0.17392742256872693),
             (0.33000947820757187, 0.32607257743127307),
@@ -68,6 +131,8 @@ pub(super) fn local_mass(
         ] {
             let r = 1.0 / (1.0 + p);
             for (t, weight) in GAUSS {
+                let rho = reference_density
+                    .map_or(s.density_kg_m3, |rho| (1.0 - t) * rho[0] + t * rho[1]);
                 // Exact static Timoshenko fields: V=GA_s(v'-theta) is constant,
                 // EI theta''=-V. Cubic v and quadratic theta interpolate the four
                 // endpoint DOFs; at phi=0, theta=v' and v is cubic Hermite.
@@ -82,7 +147,7 @@ pub(super) fn local_mass(
                 let h = [-a, 1.0 - t - 0.5 * l * a, a, t - 0.5 * l * a];
                 for i in 0..4 {
                     for j in i..4 {
-                        let value = s.density_kg_m3
+                        let value = rho
                             * l
                             * weight
                             * (s.area_m2 * n[i] * n[j] + inertia * h[i] * h[j])

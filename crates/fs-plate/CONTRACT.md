@@ -884,6 +884,42 @@ spatial rigid motion with eccentric bonds, the shear-rigid limit, the
 continuum Timoshenko spectrum, bonded/tied congruence, and the unchanged
 legacy piano golden.
 
+### Graded reference density in three-dimensional beams and shell ties
+
+The `timoshenko::*_with_reference_density` segment and chain entry points
+retain two original densities [kg/m³] per segment, in its node order. Density
+is P1 along the original prismatic member and uniform across each section.
+Each segment owns both endpoint values; shared-node material jumps are not
+averaged. The field replaces the section's scalar density in axial, torsional,
+both transverse and both section-rotation kinetic terms. Geometry, elastic
+coefficients and shear areas retain their original owners and admission.
+
+Consistent axial and torsional blocks use exact P1-density/P1-velocity moments.
+The existing four positive Gauss points integrate the complete degree-seven
+graded Timoshenko kinetic polynomial without extra quadrature. Section rotation
+remains independent of centerline slope; the zero-shear-compliance limit retains
+the Rayleigh/Euler--Bernoulli field. Polar torsional inertia still uses `Iy+Iz`,
+never the Saint-Venant stiffness constant. Explicit lumping integrates each
+`rho*N_i` partition, preserving total inventory and its first axial moment.
+Uniform fields delegate to the scalar kernel with the supplied density and
+preserve its arithmetic, including the original default and legacy paths.
+
+`junction::tie_beams_to_shells_with_reference_density` transfers this complete
+mass through the original nonmatching mortar and signed eccentric rigid-arm
+map. Every beam and segment needs an explicit field. Its prestressed companion
+and the corresponding chain/segment functions retain the independently supplied
+axial forces in stiffness only. Shell inertia, existing supports and shell ties
+are unchanged. The returned matrices retain the original inventory; resampling
+temperature-dependent current density on frozen geometry is not mass transfer.
+
+`tests/beam_reference_density.rs` checks independently integrated full spatial
+mass moments, reversed members, static-polynomial kinetic energy in every
+velocity field, finite shear and Rayleigh limits, positive lumped partitions,
+uniform-path bits, discontinuous native chain assembly, and off-node shell-tie
+mass/centroid/rotary work with prestress. The model remains a small-motion,
+prismatic centered beam; this field does not introduce transverse eccentric
+density, graded elastic coefficients, warping inertia or moving-frame transport.
+
 ### Signed axial prestress in beams and shell ties
 
 `timoshenko::{prestressed_segment_matrices, assemble_prestressed_beam_chain}`

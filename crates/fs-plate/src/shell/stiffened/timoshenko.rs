@@ -64,7 +64,41 @@ pub fn segment_matrices_with_mass(
     kind: BeamKind,
     mass: BeamMass,
 ) -> Result<([f64; 144], [f64; 144]), PlateError> {
-    segment_matrices_with_axial_force(p0_m, p1_m, section_z, section, kind, mass, 0.0)
+    segment_matrices_with_axial_force(p0_m, p1_m, section_z, section, kind, mass, 0.0, None)
+}
+
+/// Segment matrices with P1 original density [kg/m³], ordered from `p0_m` to
+/// `p1_m`. This replaces the section's scalar density in every translational
+/// and rotary kinetic term. Its geometry, elastic coefficients and shear
+/// areas are unchanged; density remains uniform across each cross-section.
+///
+/// Consistent inertia exactly retains the density/velocity correlation using
+/// the original four Gauss points. Explicit lumping preserves total mass and
+/// the first axial mass moment. Uniform density uses the scalar arithmetic.
+/// These are reference inventories: a thermal or deformation update cannot
+/// replace them without a separate matter/momentum-transfer model.
+///
+/// # Errors
+/// The refusals of [`segment_matrices`], or nonpositive/nonfinite endpoint density.
+pub fn segment_matrices_with_reference_density(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_density_kg_m3: [f64; 2],
+    mass: BeamMass,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    segment_matrices_with_axial_force(
+        p0_m,
+        p1_m,
+        section_z,
+        section,
+        kind,
+        mass,
+        0.0,
+        Some(reference_density_kg_m3),
+    )
 }
 
 /// Tangent stiffness and consistent inertia about a straight, axially loaded segment.
@@ -100,6 +134,34 @@ pub fn prestressed_segment_matrices(
         kind,
         BeamMass::Consistent,
         axial_force_n,
+        None,
+    )
+}
+
+/// The original prestressed tangent with independently retained P1 reference
+/// density. See [`prestressed_segment_matrices`] for the force convention and
+/// [`segment_matrices_with_reference_density`] for the inventory convention.
+/// Prestress changes no mass entry; this entry uses consistent inertia.
+/// # Errors
+/// The combined section, geometry, density, force and arithmetic refusals.
+pub fn prestressed_segment_matrices_with_reference_density(
+    p0_m: [f64; 3],
+    p1_m: [f64; 3],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_density_kg_m3: [f64; 2],
+    axial_force_n: f64,
+) -> Result<([f64; 144], [f64; 144]), PlateError> {
+    segment_matrices_with_axial_force(
+        p0_m,
+        p1_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        axial_force_n,
+        Some(reference_density_kg_m3),
     )
 }
 
@@ -112,8 +174,12 @@ fn segment_matrices_with_axial_force(
     kind: BeamKind,
     mass: BeamMass,
     axial_force_n: f64,
+    reference_density: Option<[f64; 2]>,
 ) -> Result<([f64; 144], [f64; 144]), PlateError> {
     section.validate()?;
+    if let Some(density) = reference_density {
+        inertia::validate_reference_density(density)?;
+    }
     if !axial_force_n.is_finite() {
         return Err(bad("beam axial force must be finite, positive in tension"));
     }
@@ -140,7 +206,7 @@ fn segment_matrices_with_axial_force(
     let projection = dot(hint, x);
     let z = unit(std::array::from_fn(|i| hint[i] - projection * x[i]))?;
     let axes = [x, cross(z, x), z];
-    let (mut k, m) = local_matrices(section, kind, length, mass)?;
+    let (mut k, m) = local_matrices(section, kind, length, mass, reference_density)?;
     if axial_force_n != 0.0 {
         add_initial_stress(&mut k, section, kind, length, axial_force_n)?;
     }
@@ -227,6 +293,7 @@ fn local_matrices(
     kind: BeamKind,
     l: f64,
     mass: BeamMass,
+    reference_density: Option<[f64; 2]>,
 ) -> Result<([f64; 144], [f64; 144]), PlateError> {
     let mut k = [0.0; 144];
     for (a, b, coefficient) in [
@@ -267,7 +334,13 @@ fn local_matrices(
             }
         }
     }
-    Ok((k, inertia::local_mass(s, l, phi_bending, mass)?))
+    let m = match reference_density {
+        Some(density) => {
+            inertia::local_mass_with_reference_density(s, l, phi_bending, mass, density)?
+        }
+        None => inertia::local_mass(s, l, phi_bending, mass)?,
+    };
+    Ok((k, m))
 }
 
 /// Stiffness and inertia of a chain of segments through `nodes_m` (6 DOF per node, global axes, no
@@ -294,7 +367,33 @@ pub fn assemble_beam_chain_with_mass(
     kind: BeamKind,
     mass: BeamMass,
 ) -> Result<(Csr, Csr), PlateError> {
-    assemble_beam_chain_impl(nodes_m, section_z, section, kind, mass, None)
+    assemble_beam_chain_impl(nodes_m, section_z, section, kind, mass, None, None)
+}
+
+/// Assemble P1 original density independently on every segment of the chain.
+/// `reference_density_kg_m3[e]` follows `nodes_m[e]` to `nodes_m[e+1]`.
+/// Adjacent segments may disagree at a shared node: a material-density jump
+/// is never averaged across the interface. All axial, bending and torsional
+/// inertia enters the same native sparse assembly and global coordinate map.
+/// # Errors
+/// The original chain refusals, incomplete segment coverage or invalid density.
+pub fn assemble_beam_chain_with_reference_density(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_density_kg_m3: &[[f64; 2]],
+    mass: BeamMass,
+) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_impl(
+        nodes_m,
+        section_z,
+        section,
+        kind,
+        mass,
+        None,
+        Some(reference_density_kg_m3),
+    )
 }
 
 /// Assemble the original beam chain with a signed equilibrated axial force [N]
@@ -323,6 +422,31 @@ pub fn assemble_prestressed_beam_chain(
         kind,
         BeamMass::Consistent,
         Some(axial_forces_n),
+        None,
+    )
+}
+
+/// The same graded reference inventory with signed equilibrated forces on the
+/// original segments. Force and density fields must both cover the complete
+/// chain; force changes stiffness only. Consistent mass is used throughout.
+/// # Errors
+/// The combined refusals of the graded and prestressed chain entry points.
+pub fn assemble_prestressed_beam_chain_with_reference_density(
+    nodes_m: &[[f64; 3]],
+    section_z: [f64; 3],
+    section: BeamSection,
+    kind: BeamKind,
+    reference_density_kg_m3: &[[f64; 2]],
+    axial_forces_n: &[f64],
+) -> Result<(Csr, Csr), PlateError> {
+    assemble_beam_chain_impl(
+        nodes_m,
+        section_z,
+        section,
+        kind,
+        BeamMass::Consistent,
+        Some(axial_forces_n),
+        Some(reference_density_kg_m3),
     )
 }
 
@@ -333,9 +457,20 @@ fn assemble_beam_chain_impl(
     kind: BeamKind,
     mass: BeamMass,
     axial_forces_n: Option<&[f64]>,
+    reference_density: Option<&[[f64; 2]]>,
 ) -> Result<(Csr, Csr), PlateError> {
     if nodes_m.len() < 2 {
         return Err(bad("a beam chain needs at least two nodes"));
+    }
+    if let Some(density) = reference_density {
+        if density.len() != nodes_m.len() - 1 {
+            return Err(bad(
+                "beam chain needs endpoint reference densities for every segment",
+            ));
+        }
+        for &endpoints in density {
+            inertia::validate_reference_density(endpoints)?;
+        }
     }
     if let Some(forces) = axial_forces_n {
         if forces.len() != nodes_m.len() - 1 || forces.iter().any(|f| !f.is_finite()) {
@@ -354,6 +489,7 @@ fn assemble_beam_chain_impl(
             kind,
             mass,
             axial_forces_n.map_or(0.0, |forces| forces[e]),
+            reference_density.map(|density| density[e]),
         )?;
         for i in 0..12 {
             for j in 0..12 {
