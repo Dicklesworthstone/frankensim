@@ -35,16 +35,25 @@ fn explicit_limited_pulse_stays_bounded_and_reduces_diffusion_in_both_directions
             .clone()
             .with_reconstruction(ring_plan(&initial))
             .unwrap();
+        let centered = donor
+            .clone()
+            .with_reconstruction(ring_plan(&initial).with_limiter(AxialLimiter::MonotonizedCentral))
+            .unwrap();
         let (low, low_flow, _) = initial
             .advance_observed(&donor, target, donor_config, || Ok(()))
             .unwrap();
         let (high, high_flow, audit) = initial
             .advance_observed(&limited, target, limited_config, || Ok(()))
             .unwrap();
+        let (central, central_flow, central_audit) = initial
+            .advance_observed(&centered, target, limited_config, || Ok(()))
+            .unwrap();
         near(low_flow.audit().maximum_courant, dt * decay, 1e-14);
         near(high_flow.audit().maximum_courant, dt * decay, 1e-14);
+        near(central_flow.audit().maximum_courant, dt * decay, 1e-14);
         let mut low_error = 0.0;
         let mut high_error = 0.0;
+        let mut central_error = 0.0;
         for i in 0..n {
             let origin = if rate > 0.0 {
                 (i + n - 3) % n
@@ -54,18 +63,29 @@ fn explicit_limited_pulse_stays_bounded_and_reduces_diffusion_in_both_directions
             let exact = initial_h[origin];
             let a = low.cells()[&CellId(i as u64)].specific_h_j_kg;
             let b = high.cells()[&CellId(i as u64)].specific_h_j_kg;
+            let c = central.cells()[&CellId(i as u64)].specific_h_j_kg;
             assert!((-1e-12..=100.0 + 1e-12).contains(&b));
+            assert!((-1e-12..=100.0 + 1e-12).contains(&c));
             low_error += (a - exact).abs() / n as f64;
             high_error += (b - exact).abs() / n as f64;
+            central_error += (c - exact).abs() / n as f64;
         }
         assert!(
             high_error < 0.9 * low_error,
             "limited={high_error}, donor={low_error}"
         );
+        assert!(
+            central_error < 0.95 * high_error,
+            "MC={central_error}, minmod={high_error}"
+        );
         near(high.energy_j(), initial.energy_j(), 1e-11);
         near(audit.stored_energy_change_j, 0.0, 1e-11);
         assert_eq!(audit.external_heat_j, 0.0);
         assert_eq!(high_flow.audit().external_enthalpy_j, 0.0);
+        near(central.energy_j(), initial.energy_j(), 1e-11);
+        near(central_audit.stored_energy_change_j, 0.0, 1e-11);
+        assert_eq!(central_audit.external_heat_j, 0.0);
+        assert_eq!(central_flow.audit().external_enthalpy_j, 0.0);
         assert_eq!(initial.time_s(), 0.0);
         assert_eq!(limited.audit(), Default::default());
     }

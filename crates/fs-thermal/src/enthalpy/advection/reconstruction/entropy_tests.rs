@@ -110,9 +110,15 @@ impl ThermalLaw for QuadraticLaw {
     }
 }
 
-fn check_tangent(state: &DepositionSimulation<'_>, slope: impl Fn(f64) -> f64) {
+fn check_tangent(
+    state: &DepositionSimulation<'_>,
+    slope: impl Fn(f64) -> f64,
+    limiter: AxialLimiter,
+) {
     let flow = ring_flow(3, 1.0);
-    let plan = ring_plan(state).with_thermal_entropy_limit();
+    let plan = ring_plan(state)
+        .with_limiter(limiter)
+        .with_thermal_entropy_limit();
     let calorics = |id| -> Result<(f64, f64), DepositionError> {
         Ok((
             state.temperature_k(id)?,
@@ -167,11 +173,14 @@ fn entropy_bound_tangent_uses_original_nonlinear_caloric_derivatives() {
         datum: 0.0,
         hole: false,
     };
-    check_tangent(&ring(&law, &[-50.0, 50.0, 150.0]), |_| 1.0);
-    check_tangent(
-        &source_ring(&QuadraticLaw, &[2000.0, 6000.0, 10000.0]),
-        |h| 0.5 / h.sqrt(),
-    );
+    for limiter in [AxialLimiter::Minmod, AxialLimiter::MonotonizedCentral] {
+        check_tangent(&ring(&law, &[-50.0, 50.0, 150.0]), |_| 1.0, limiter);
+        check_tangent(
+            &source_ring(&QuadraticLaw, &[2000.0, 6000.0, 10000.0]),
+            |h| 0.5 / h.sqrt(),
+            limiter,
+        );
+    }
 }
 
 struct Plateau;

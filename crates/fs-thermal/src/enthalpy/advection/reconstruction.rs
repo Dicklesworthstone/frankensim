@@ -1,6 +1,7 @@
 //! Limited axial enthalpy reconstruction on the original thermal transport.
 //!
-//! A cell's two one-sided axial derivatives are limited by minmod. The actual
+//! A cell's axial derivative uses minmod by default, or an explicitly selected
+//! nonuniform monotonized-central limiter. The actual
 //! signed flow selects its upstream cell and the corresponding face trace.
 //! Distances are measured along the authored centreline, including bends:
 //! `d_left=(L_previous+L_cell)/2`, `d_right=(L_cell+L_next)/2`.
@@ -35,8 +36,11 @@ use std::collections::BTreeMap;
 
 #[path = "reconstruction/entropy.rs"]
 mod entropy;
+#[path = "reconstruction/limiter.rs"]
+mod limiter;
 #[path = "reconstruction/observer.rs"]
 mod observer;
+pub use limiter::AxialLimiter;
 pub use observer::ReconstructedAdvected;
 
 /// Original endpoint temperature and dT/dh, supplied by the native implicit
@@ -73,10 +77,10 @@ struct BoundCell {
 
 struct FaceIncrement {
     value: f64,
-    // Derivatives of the correction in carried-enthalpy coordinates. Ordinary
-    // minmod uses donor/neighbor; the entropy bound uses donor/receiver.
+    // Derivatives of the correction in carried-enthalpy coordinates. Centered
+    // reconstruction uses both neighbors; the entropy bound uses donor/receiver.
     // Each column's own carrier slope converts this to stored mixture h.
-    partials: Option<[(CellId, f64); 2]>,
+    partials: Option<[(CellId, f64); 3]>,
     // Set by the original entropy query only for unequal-temperature faces.
     // Entropy-neutral latent traces retain their original flux arithmetic.
     guard_power_roundoff: bool,
@@ -93,6 +97,7 @@ pub struct LimitedEnthalpyReconstruction {
     stencils: BTreeMap<CellId, PreparedStencil>,
     cells: BTreeMap<CellId, BoundCell>,
     thermal_entropy_limit: bool,
+    limiter: AxialLimiter,
 }
 
 impl LimitedEnthalpyReconstruction {
@@ -112,6 +117,7 @@ impl LimitedEnthalpyReconstruction {
             stencils: BTreeMap::new(),
             cells: BTreeMap::new(),
             thermal_entropy_limit: false,
+            limiter: AxialLimiter::Minmod,
         };
         for stencil in stencils {
             checkpoint()?;
@@ -192,6 +198,24 @@ impl LimitedEnthalpyReconstruction {
         self.stencils.is_empty()
     }
 
+    /// Select the slope limiter on the same explicit and implicit face fluxes.
+    ///
+    /// `MonotonizedCentral` reduces spatial smearing while bounding both traces
+    /// by actual neighboring values, including on nonuniform axial cells. It
+    /// keeps the existing half-Courant allowance, paired energy transfer and
+    /// optional original-caloric entropy bound. The implicit owner receives the
+    /// active three-cell tangent; limiter switches remain nonsmooth. Selection
+    /// adds no time integrator, material law, or spatial convergence guarantee.
+    pub fn with_limiter(mut self, limiter: AxialLimiter) -> Self {
+        self.limiter = limiter;
+        self
+    }
+
+    /// Selected spatial limiter; minmod is the unchanged default.
+    pub fn limiter(&self) -> AxialLimiter {
+        self.limiter
+    }
+
     /// Whether an original axial stencil requires this undirected connection.
     ///
     /// A live flow owner can retain these genuine geometric connections at
@@ -209,7 +233,7 @@ impl LimitedEnthalpyReconstruction {
 
     /// Limit each reconstructed bulk face by its original thermal entropy.
     ///
-    /// The existing minmod trace is retained whenever its directed face
+    /// The selected bounded trace is retained whenever its directed face
     /// production is nonnegative within finite-increment roundoff. Otherwise
     /// only its conservative face correction is reduced toward the original
     /// donor flux. Source entropy differences, actual temperatures and analytic
@@ -358,9 +382,13 @@ impl LimitedEnthalpyReconstruction {
         let right = finite(flow.carried_h(next)? - centre)?;
         // Limit physical derivatives times the SAME half-width. Fractions lie
         // in [0,1], avoiding overflow from dividing a finite jump by tiny length.
-        let limited_left = left * stencil.left_fraction;
-        let limited_right = right * stencil.right_fraction;
-        let slope_half = minmod(limited_left, limited_right);
+        let (slope_half, derivatives) = limiter::half_slope(
+            self.limiter,
+            left,
+            right,
+            stencil.left_fraction,
+            stencil.right_fraction,
+        );
         let direction = if down == stencil.next {
             1.0
         } else if down == stencil.previous {
@@ -386,17 +414,22 @@ impl LimitedEnthalpyReconstruction {
         if !positive(law.temperature_k(face_h)?) {
             return Err(DepositionError::MaterialDomain);
         }
-        // At equal nonzero slopes choose the left active derivative. At a
-        // sign switch the zero branch above supplies a generalized derivative.
-        // Minmod is piecewise linear, not classically differentiable there.
-        let (neighbor, partial) = if limited_left.abs() <= limited_right.abs() {
-            (stencil.previous, -direction * stencil.left_fraction)
+        // Each limiter selects one deterministic active derivative at a tie.
+        // Preserve the default minmod column order as well as its arithmetic.
+        // Limiter branch switches are not classically differentiable.
+        let partials = if self.limiter == AxialLimiter::Minmod && derivatives[0] == 0.0 {
+            [
+                (stencil.next, direction * derivatives[2]),
+                (up, direction * derivatives[1]),
+                (stencil.previous, 0.0),
+            ]
         } else {
-            (stencil.next, direction * stencil.right_fraction)
+            let cells = [stencil.previous, up, stencil.next];
+            core::array::from_fn(|i| (cells[i], direction * derivatives[i]))
         };
         Ok(FaceIncrement {
             value: increment,
-            partials: Some([(neighbor, partial), (up, -partial)]),
+            partials: Some(partials),
             guard_power_roundoff: false,
         })
     }
@@ -511,10 +544,15 @@ impl Advected<()> {
         let mut tangent = Vec::new();
         let mut entropy_correction = Sum::default();
         if differentiate {
+            let entries_per_face = if reconstruction.limiter == AxialLimiter::Minmod {
+                4
+            } else {
+                6
+            };
             let capacity = self
                 .flows
                 .len()
-                .checked_mul(4)
+                .checked_mul(entries_per_face)
                 .ok_or(DepositionError::Budget("axial enthalpy tangent"))?;
             tangent
                 .try_reserve(capacity)
@@ -624,14 +662,6 @@ fn length(geometry: CellGeometry) -> Result<f64, DepositionError> {
         return Err(invalid("axial reconstruction length is unrepresentable"));
     }
     Ok(result)
-}
-
-fn minmod(left: f64, right: f64) -> f64 {
-    if (left > 0.0 && right > 0.0) || (left < 0.0 && right < 0.0) {
-        left.abs().min(right.abs()).copysign(left)
-    } else {
-        0.0
-    }
 }
 
 #[cfg(test)]

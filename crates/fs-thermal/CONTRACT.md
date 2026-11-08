@@ -2954,7 +2954,7 @@ experimental accuracy certificates.
 to `ReconstructedAdvected<O>`, an observer of the existing explicit thermal
 timeline. `with_optional_reconstruction(None)` and empty plans delegate exactly
 to the original upwind flux, timestep and audit paths. Nonempty plans use the
-same actual centreline distances, signed donor selection, minmod face trace and
+same actual centreline distances, signed donor selection, bounded face trace and
 optional bulk thermal entropy face limiter as the native implicit residual.
 Only the original advective transfer suffix is replaced; inner-observer paired
 heat, sources, interval sources, conductance overrides, source transitions,
@@ -2977,6 +2977,25 @@ budget to its existing combined conduction/advection restriction:
 observer bound and `b=max_cell(outgoing_mass_rate/cell_mass)`. The physical
 `maximum_courant` diagnostic remains `dt*b`, without doubling its units or value.
 Event and transition clipping still happens after this combined restriction.
+
+The default limiter remains `AxialLimiter::Minmod`.
+`LimitedEnthalpyReconstruction::with_limiter(AxialLimiter::MonotonizedCentral)`
+selects a less dissipative centered trace on the same explicit and implicit
+transport owners. It differentiates the quadratic through the actual three
+cell centers and bounds the half-cell increment by both neighbor jumps; the
+uniform-grid limit is the standard monotonized-central limiter. Bounding the
+face increment directly preserves both trace intervals on strongly nonuniform
+grids, where simply doubling the minmod physical slope would not suffice.
+Both geometric fractions underflowing to zero retains the donor trace.
+The active three-cell derivative uses fixed-size storage, with no additional
+per-face allocation or new thermal state. Default minmod retains its original
+tangent column order and reservation. The optional original-caloric entropy
+bound still shortens this same correction, and the combined stability allowance
+above is unchanged. Kernel regressions cover nonuniform affine fields, trace
+bounds, active derivatives, extreme scales, and conservative signed SSPRK2 pulse
+translation; native trajectory and entropy-tangent regressions also exercise
+the selection. These numerical checks do not certify arbitrary coupled
+nonlinear solves or experimental accuracy.
 
 The immutable plan/flow topology, both-neighbor, junction and external-gradient
 admissions run once at construction. Original active-cell, geometry and pinned
@@ -3002,7 +3021,7 @@ upwind selections, liquid/bulk limits, caloric refusal and late rollback.
 `ImplicitConductionGraph::with_implicit_advection_reconstruction` binds the
 existing `LimitedEnthalpyReconstruction` to the same nonlinear conduction and
 enthalpy residual. Every trial evaluates the actual endpoint face enthalpy and
-its active-minmod tangent together. The original upwind/component-reference
+its active-limiter tangent together. The original upwind/component-reference
 derivative remains compiled once; sparse face corrections retain equal opposite
 heat accounts and the original cell-mass conversion to joule coordinates.
 No finite-difference Jacobian, dense matrix, separate energy store or frozen

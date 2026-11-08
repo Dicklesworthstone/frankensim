@@ -96,7 +96,7 @@ pub(super) fn limit_face(
         // derivative because the native upwind tangent remains authoritative.
         let a = face_derivative(donor_gap, slope_a, tb / (ta - tb))?;
         let b = face_derivative(receiver_gap, slope_b, ta / (ta - tb))?;
-        Some([(up, finite(a - 1.0)?), (down, b)])
+        Some([(up, finite(a - 1.0)?), (down, b), (up, 0.0)])
     } else {
         None
     };
