@@ -16,3 +16,15 @@ scalar	loss-factor-radial-high	alkadri2018-wavy-plates	loss_factor_radial_printe
 uncertainty	loss-factor-radial-high	unstated	-	-	-	-
 validity	loss-factor-radial-high	frequency	80	500	Hz
 validity	loss-factor-radial-high	source_moisture_condition_known	0	0	1
+scalar	loss-factor-longitudinal-plate-c	alkadri2018-wavy-plates	loss_factor_longitudinal_plate_c	0.0138	1	constant
+uncertainty	loss-factor-longitudinal-plate-c	unstated	-	-	-	-
+validity	loss-factor-longitudinal-plate-c	frequency	150	750	Hz
+validity	loss-factor-longitudinal-plate-c	source_moisture_condition_known	0	0	1
+scalar	loss-factor-longitudinal-plate-c-printed-sigma	alkadri2018-wavy-plates	loss_factor_longitudinal_plate_c_printed_sigma	0.0022	1	constant
+uncertainty	loss-factor-longitudinal-plate-c-printed-sigma	unstated	-	-	-	-
+validity	loss-factor-longitudinal-plate-c-printed-sigma	frequency	150	750	Hz
+validity	loss-factor-longitudinal-plate-c-printed-sigma	source_moisture_condition_known	0	0	1
+scalar	loss-factor-radial-plate-c	alkadri2018-wavy-plates	loss_factor_radial_plate_c	0.0240	1	constant
+uncertainty	loss-factor-radial-plate-c	unstated	-	-	-	-
+validity	loss-factor-radial-plate-c	frequency	80	500	Hz
+validity	loss-factor-radial-plate-c	source_moisture_condition_known	0	0	1

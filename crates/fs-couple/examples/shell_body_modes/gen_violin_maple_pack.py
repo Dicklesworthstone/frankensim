@@ -3,14 +3,16 @@
 Stiffness (one tree, 626 kg/m3 at about 12 percent moisture, 20 C / 65 percent RH): E_L = the static bending modulus, E_R = the mean of the static radial tension and compression moduli,
 nu_LR = the mean Poisson ratio, G_LT and G_RT = the ULTRASONIC shear moduli (1 MHz: NOT audio band; no audio-band source was found, declared in the pack text). G_LR = the AUDIO-BAND in-plane
 shear modulus of Laemmlein's 30 violin-back maple plates (maple-sycamore-lammlein2020-plates; plate modes near 0.7 kHz), replacing the ultrasonic value (orchestrator ruling, mail 6065).
-Loss: eta_L and eta_LR are Laemmlein's violin-back maple plates; eta_R, eta_LT and eta_RT are UNKNOWN for maple and are set equal to eta_LR as a declared surrogate (mail 5280 of the
+Loss: eta_L and eta_LR are Laemmlein's violin-back maple plates. eta_R is the MEASURED radial loss of Alkadri et al. (2018)'s violin-back plate C (maple-sycamore-wavy-loss-alkadri2018,
+loss_factor_radial_plate_c), the one plate of the twelve whose printed longitudinal loss holds Laemmlein's eta_L inside its printed sigma (orchestrator ruling, mail 13541; asserted below),
+in place of the eta_LR surrogate. eta_LT and eta_RT are UNKNOWN for maple and are set equal to eta_LR as a declared surrogate (mail 5280 of the
 orchestrator: T and RT/LT shear loss are unknown in every open source). The nine Kelvin-Voigt viscosities the shell owner consumes are V = D^(1/2) Q D^(1/2) / omega_ref with
 omega_ref = 2 pi 200 rad/s, exactly as in the guitar packs (gen_wood_packs.py); they do not enter the frequencies. The pack states omega_ref as
 constant_loss_reference_omega, so the shell reduction reads each loss factor at every mode's own frequency (fs_couple::shear_shell::constant_loss), and the
 packs of the wood-loss lane replace these numbers.
 
 usage: python3 -I gen_violin_maple_pack.py REPO_ROOT OUT_ROOT [shear=ultrasonic|shear=fpl] [inplane=laemmlein]
-Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates}/properties.tsv and writes
+Reads REPO_ROOT/data/matdb/seed-v1/{maple-sycamore-sonderegger2013,maple-sycamore-loss-lammlein2020,maple-sycamore-lammlein2020-plates,maple-sycamore-wavy-loss-alkadri2018}/properties.tsv and writes
 OUT_ROOT/violin-maple-sycamore-sonderegger2013-shell/{manifest.tsv,properties.tsv}.
 shear=ultrasonic writes the earlier pack (G_LR ultrasonic as well, the scalars of 4f9abefe1) under the name ...-shell-ultrasonicshear.
 inplane=laemmlein (the audio-band pack, registered as violin-maple-sycamore-sonderegger2013-shell-laemmlein; the violin, viola and cello maple parts use it) takes the density, E_L, E_R and G_LR all from Laemmlein's plates (audio band, one consistent source) with G_LT, G_RT and
@@ -70,7 +72,14 @@ elif not ULTRASONIC_SHEAR:
 vals = dict(density=density, young_modulus_1=E_L, young_modulus_2=E_R, poisson_ratio_12=so["nu_lr"], shear_modulus_12=g_lr * 1e6, shear_modulus_13=g_lt * 1e6,
             shear_modulus_23=g_rt * 1e6)
 eta = dict(L=la["loss_factor_longitudinal"], LR=la["loss_factor_shear_lr"])
-eta.update(R=eta["LR"], LT=eta["LR"], RT=eta["LR"])
+# eta_R: Alkadri's plate C, chosen by the pack's own eta_L. Alkadri measured tan delta_L and tan delta_R on the same twelve violin-back plates (Table 1);
+# plate C (L 13.8 (2.2), R 24.0 (0.6) x 1e-3) is the only plate whose printed L mean +/- sigma holds Laemmlein's eta_L (every other plate's mean + sigma
+# lies below it, at most 12.1e-3: plate J). Neither the range midpoint nor an R/L ratio carried onto eta_L is used.
+ak = scalars("maple-sycamore-wavy-loss-alkadri2018")
+ak_l, ak_l_sigma = ak["loss_factor_longitudinal_plate_c"], ak["loss_factor_longitudinal_plate_c_printed_sigma"]
+assert abs(eta["L"] - ak_l) <= ak_l_sigma, "plate C's printed L loss no longer holds eta_L: the selection rule must be revisited"
+assert ak["loss_factor_radial_printed_range_low"] <= ak["loss_factor_radial_plate_c"] <= ak["loss_factor_radial_printed_range_high"]
+eta.update(R=ak["loss_factor_radial_plate_c"], LT=eta["LR"], RT=eta["LR"])
 print("density %.1f kg/m3, E_L %.4g Pa, E_R %.4g Pa, nu_LR %.3f, G_LR %.4g, G_LT %.4g, G_RT %.4g Pa" % (
     vals["density"], E_L, E_R, vals["poisson_ratio_12"], vals["shear_modulus_12"], vals["shear_modulus_13"], vals["shear_modulus_23"]))
 print("eta", eta)
@@ -110,11 +119,16 @@ OBS = [
      "Ultrasonic moduli are not audio-band. Laemmlein's audio-band plates give G_LR 1580 MPa against Sonderegger's ultrasonic 1680, and E_L 12500 / E_R 1550 MPa against Sonderegger's static "
      "10900 / 1175 (inplane=laemmlein). Neither source is the il Cannone's wood. A violin-grade (curly, resonance) maple of the committed Spycher pack has E_L about 9700 to 10000 MPa and "
      "E_R about 1650 to 1700 MPa dynamically. " + AXES),
-    ("laemmlein-maple-loss", "Sycamore maple violin-back wood, 30 quarter-sawn plates 95 x 60 x 2.6 mm, unvarnished",
+    ("laemmlein-maple-loss", "Sycamore maple violin-back wood: 30 quarter-sawn plates 95 x 60 x 2.6 mm, unvarnished (Laemmlein), and violin-back plate C of 12 mostly wavy sycamore plates, "
+     "120 x 12 x 2 mm radial strips (Alkadri)",
      "Laemmlein et al. (2020) Holzforschung 74:765-776 as committed in the pack maple-sycamore-loss-lammlein2020: loss_factor_longitudinal %.4f and loss_factor_shear_lr %.4f; eta_L = %.4f, eta_LR = %.4f; "
-     "eta_R, eta_LT and eta_RT are UNKNOWN for maple and set equal to eta_LR" % (la["loss_factor_longitudinal"], la["loss_factor_shear_lr"], eta["L"], eta["LR"]),
-     "SURROGATE for three of the five directional loss factors. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the pack "
-     "states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own frequency. They do not enter any frequency."),
+     "Alkadri et al. (2018) IAWA J 39:63-86 as committed in the pack maple-sycamore-wavy-loss-alkadri2018: loss_factor_radial_plate_c %.4f (Table 1, tan delta_R of plate C, n 4, free-free "
+     "bending at 80-500 Hz); eta_R = %.4f, taken from the one plate whose printed tan delta_L %.4f +/- %.4f holds Laemmlein's eta_L; eta_LT and eta_RT are UNKNOWN for maple and set equal to "
+     "eta_LR" % (la["loss_factor_longitudinal"], la["loss_factor_shear_lr"], eta["L"], eta["LR"], ak["loss_factor_radial_plate_c"], eta["R"], ak_l, ak_l_sigma),
+     "SURROGATE for two of the five directional loss factors (eta_LT and eta_RT). eta_R and eta_L come from different specimen sets matched by eta_L, not from one specimen; Alkadri's text "
+     "(HAL PDF p.16) prints 0.022-0.026 radial, which disagrees with its Table 1, and the pack follows the table. The nine viscosities are Kelvin-Voigt values V = eta x stiffness / omega_ref "
+     "with omega_ref = 2 pi 200 rad/s (1256.64 rad/s); the pack states omega_ref as constant_loss_reference_omega, and the shell reduction applies each loss factor at every mode's own "
+     "frequency. They do not enter any frequency."),
 ]
 
 
@@ -139,8 +153,8 @@ for row in (("scalar", k, "laemmlein-maple-loss", k, fmt(OMEGA_REF), "rad/s", "c
     lines.append("\t".join(row))
 open(OUT + "/" + PACK + "/properties.tsv", "w", encoding="utf-8").write("\n".join(lines) + "\n")
 man = ["frankensim.matdb-manifest.v1", "pack_id\t" + PACK,
-       "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013, maple-sycamore-lammlein2020-plates and maple-sycamore-loss-lammlein2020 (whose own terms apply to the Laemmlein values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted)",
-       "citation\tSonderegger W., Martienssen A., Nitsche C., Ozyhar T., Kaliske M., Niemz P. (2013), Eur J Wood Prod 71:91-99, doi:10.1007/s00107-012-0641-8; Laemmlein S.L., Van Damme B., Mannes D., Schwarze F.W.M.R., Burgert I. (2020), Holzforschung 74(8):765-776, doi:10.1515/hf-2019-0182; derived by the pack author",
+       "redistribution\tpermitted\tNumerical measurement values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced; derived by the pack author from the committed packs maple-sycamore-sonderegger2013, maple-sycamore-lammlein2020-plates, maple-sycamore-loss-lammlein2020 and maple-sycamore-wavy-loss-alkadri2018 (whose own terms apply to the Laemmlein values: publisher copyright on the article, ETH Research Collection copy In Copyright - Non-Commercial Use Permitted; and to the Alkadri value: HAL author file under the HAL deposit authorisation only, no Creative Commons licence, publisher copyright on the article)",
+       "citation\tSonderegger W., Martienssen A., Nitsche C., Ozyhar T., Kaliske M., Niemz P. (2013), Eur J Wood Prod 71:91-99, doi:10.1007/s00107-012-0641-8; Laemmlein S.L., Van Damme B., Mannes D., Schwarze F.W.M.R., Burgert I. (2020), Holzforschung 74(8):765-776, doi:10.1515/hf-2019-0182; Alkadri A., Carlier C., Wahyudi I., Gril J., Langbour P., Bremaud I. (2018), IAWA Journal 39(1):63-86, doi:10.1163/22941932-20170185, Table 1; derived by the pack author",
        "license\tPublished-Scientific-Facts-Attribution-Retained", "source\tprimary\tproperties.tsv\tmaterial-tsv-v1"]
 open(OUT + "/" + PACK + "/manifest.tsv", "w", encoding="utf-8").write("\n".join(man) + "\n")
 print("wrote", OUT + "/" + PACK)
