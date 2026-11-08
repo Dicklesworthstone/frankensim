@@ -24,6 +24,22 @@ pub struct BulkStressPoint3 {
     pub stress: [f64; 6],
 }
 
+/// Strain, stress and elastic storage at one retained physical bulk point.
+/// Both strains use tensor shear in `[xx, yy, zz, xy, yz, zx]` order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BulkStrainStressPoint3 {
+    /// Stress, material scaling and the original integration point/weight.
+    pub response: BulkStressPoint3,
+    /// Actual displacement strain `sym(grad(u))`, before B-bar projection.
+    pub strain: [f64; 6],
+    /// Strain used by the constitutive law. Equals `strain` for displacement
+    /// elements; B-bar replaces only its trace by the physical cell average.
+    pub constitutive_strain: [f64; 6],
+    /// `sigma : constitutive_strain / 2`, per reference volume. Excludes
+    /// ghost/Nitsche stabilization and boundary work; includes current scaling.
+    pub energy_density: f64,
+}
+
 /// One affine displacement family, sampled on the SAME retained bulk points.
 /// For coefficients with Euclidean norm at most one, the reference stress is
 /// `baseline[p].reference_stress + sum_j a[j]*basis_reference_stresses[j][p]`.
@@ -79,38 +95,30 @@ fn admit_displacement(
 }
 
 fn stress_basis(cell: &Cell3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
-    let projected = cell.kinematics.is_projected();
     let mut basis = std::array::from_fn(|i| {
-        if projected && i < 3 {
+        if i < 3 {
             [0.0; 6]
         } else {
             cell.basis_stress(gradients[i / 3], i / 3, i % 3)
         }
     });
-    if projected {
-        // The primal map uses u_a-u_0, so these columns are its exact algebraic
-        // derivative at the reference corner. Summing absolute nodal values
-        // would amplify roundoff from a rigid translation by the bulk modulus.
-        for component in 0..3 {
-            for k in 0..6 {
-                basis[component][k] = -(1..8)
-                    .map(|corner| basis[3 * corner + component][k])
-                    .sum::<f64>();
-            }
+    // Every formulation differentiates u_a-u_0. Retain its exact algebraic
+    // transpose too, so rigid translation cannot create constitutive stress
+    // or a spurious material-domain exit through cancellation of large terms.
+    for component in 0..3 {
+        for k in 0..6 {
+            basis[component][k] = -(1..8)
+                .map(|corner| basis[3 * corner + component][k])
+                .sum::<f64>();
         }
     }
     basis
 }
 
-fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24], projected: bool) -> [f64; 6] {
+fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24]) -> [f64; 6] {
     let mut value = [0.0; 6];
-    let start = if projected { 3 } else { 0 };
-    for i in start..24 {
-        let displacement = if projected {
-            local[i] - local[i % 3]
-        } else {
-            local[i]
-        };
+    for i in 3..24 {
+        let displacement = local[i] - local[i % 3];
         for k in 0..6 {
             value[k] += basis[i][k] * displacement;
         }
@@ -119,23 +127,14 @@ fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24], projected: bool
 }
 
 fn stress(cell: &Cell3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
-    apply_stress_basis(
-        &stress_basis(cell, gradients),
-        local,
-        cell.kinematics.is_projected(),
-    )
+    apply_stress_basis(&stress_basis(cell, gradients), local)
 }
 
-fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24], relative: bool) -> [f64; 6] {
+pub(super) fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
     let mut gradient = [[0.0; 3]; 3];
-    let start = usize::from(relative);
-    for a in start..8 {
+    for a in 1..8 {
         for c in 0..3 {
-            let displacement = if relative {
-                local[3 * a + c] - local[c]
-            } else {
-                local[3 * a + c]
-            };
+            let displacement = local[3 * a + c] - local[c];
             for d in 0..3 {
                 gradient[c][d] += displacement * gradients[a][d];
             }
@@ -162,20 +161,25 @@ fn admit_material_strain(
     let Some(source) = cell.material.source_state() else {
         return Ok(());
     };
-    let strain = mandel_strain(gradients, local, cell.kinematics.is_projected());
+    let strain = mandel_strain(gradients, local);
+    let projected = cell.project_mandel_strain(strain, local);
+    admit_strains(source.maximum_absolute_mandel_strain(), &strain, &projected)
+}
+
+fn admit_strains(
+    ceiling: f64,
+    strain: &[f64; 6],
+    projected: &[f64; 6],
+) -> Result<(), ElasticityError3> {
     if strain
         .iter()
-        .any(|v| !v.is_finite() || v.abs() > source.maximum_absolute_mandel_strain())
+        .any(|v| !v.is_finite() || v.abs() > ceiling)
     {
         return Err(ElasticityError3::Invalid(
             "bulk strain exceeds retained material domain",
         ));
     }
-    if cell.kinematics.is_projected()
-        && cell
-            .projected_mandel_strain(gradients, local)
-            .iter()
-            .any(|v| !v.is_finite() || v.abs() > source.maximum_absolute_mandel_strain())
+    if projected.iter().any(|v| !v.is_finite() || v.abs() > ceiling)
     {
         return Err(ElasticityError3::Invalid(
             "projected bulk strain exceeds retained material domain",
@@ -200,7 +204,7 @@ fn admit_affine_material_strain(
     let projected = cell.kinematics.is_projected();
     let family_count = if projected { 2 } else { 1 };
     let baseline = [
-        mandel_strain(gradients, offset, projected),
+        mandel_strain(gradients, offset),
         if projected {
             cell.projected_mandel_strain(gradients, offset)
         } else {
@@ -212,7 +216,7 @@ fn admit_affine_material_strain(
     for local in basis {
         poll(checkpoint)?;
         let strains = [
-            mandel_strain(gradients, &local, projected),
+            mandel_strain(gradients, &local),
             if projected {
                 cell.projected_mandel_strain(gradients, &local)
             } else {
@@ -539,6 +543,101 @@ impl CutElasticity3 {
         Ok(points)
     }
 
+    /// Recover actual strain, constitutive strain, stress and elastic storage
+    /// together, on the original physical bulk quadrature. Tensor shear is
+    /// retained explicitly; B-bar's assumed strain is never mislabeled as the
+    /// displacement strain. Both obey the retained source-material domain.
+    ///
+    /// Only the returned point array is allocated. `max_points` admits that
+    /// array before evaluation. Input, cell, point and publication boundaries
+    /// poll cancellation. These are numerical samples, not bounds between
+    /// quadrature points or a finite-strain constitutive model.
+    pub fn bulk_strain_stress(
+        &self,
+        u: &[f64],
+        max_points: usize,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<BulkStrainStressPoint3>, ElasticityError3> {
+        self.bulk_strain_stress_mapped(
+            u,
+            self.n(),
+            max_points,
+            |cell, field| self.stress_local(cell, field),
+            checkpoint,
+        )
+    }
+
+    // Adaptive observations reconstruct only the current cell, rather than
+    // expanding a second global displacement vector just to recover strains.
+    pub(super) fn bulk_strain_stress_mapped(
+        &self,
+        u: &[f64],
+        n: usize,
+        max_points: usize,
+        mut local: impl FnMut(&Cell3, &[f64]) -> [f64; 24],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<BulkStrainStressPoint3>, ElasticityError3> {
+        self.admit_stress_state(None, &mut checkpoint)?;
+        admit_displacement(u, n, &mut checkpoint)?;
+        let count = self.stress_point_count(&mut checkpoint)?;
+        if count > max_points {
+            return Err(ElasticityError3::Invalid(
+                "bulk strain/stress point allowance exhausted",
+            ));
+        }
+        let mut points = Vec::with_capacity(count);
+        for (id, cell) in self.cells.iter().enumerate() {
+            poll(&mut checkpoint)?;
+            let local = local(cell, u);
+            for &(position, weight) in cell.rules.bulk() {
+                poll(&mut checkpoint)?;
+                let (_, gradients) = q1(cell.bounds, position);
+                let strain = mandel_strain(&gradients, &local);
+                let constitutive = cell.project_mandel_strain(strain, &local);
+                if let Some(source) = cell.material.source_state() {
+                    admit_strains(
+                        source.maximum_absolute_mandel_strain(),
+                        &strain,
+                        &constitutive,
+                    )?;
+                }
+                let strain = fs_material::tensor::from_mandel(&strain);
+                let constitutive_strain = fs_material::tensor::from_mandel(&constitutive);
+                let reference_stress = stress(cell, &gradients, &local);
+                let stress = reference_stress.map(|s| self.scales[id] * s);
+                let energy_density =
+                    0.5 * fs_material::tensor::contract(&constitutive_strain, &stress);
+                if !strain
+                    .iter()
+                    .chain(&constitutive_strain)
+                    .chain(&reference_stress)
+                    .chain(&stress)
+                    .all(|v| v.is_finite())
+                    || !energy_density.is_finite()
+                    || energy_density < 0.0
+                {
+                    return Err(ElasticityError3::Invalid(
+                        "unrepresentable bulk strain/stress response",
+                    ));
+                }
+                points.push(BulkStrainStressPoint3 {
+                    response: BulkStressPoint3 {
+                        cell: id,
+                        position,
+                        weight,
+                        reference_stress,
+                        stress,
+                    },
+                    strain,
+                    constitutive_strain,
+                    energy_density,
+                });
+            }
+        }
+        poll(&mut checkpoint)?;
+        Ok(points)
+    }
+
     /// Sample one affine field family in a single retained-quadrature traversal.
     /// `max_point_fields` bounds `point_count * (basis.len()+1)` before any
     /// output or local-family allocation. Baseline metadata and every direction
@@ -589,8 +688,7 @@ impl CutElasticity3 {
                     &mut checkpoint,
                 )?;
                 let constitutive = stress_basis(cell, &gradients);
-                let projected = cell.kinematics.is_projected();
-                let reference_stress = apply_stress_basis(&constitutive, &local_offset, projected);
+                let reference_stress = apply_stress_basis(&constitutive, &local_offset);
                 let stress = reference_stress.map(|s| self.scales[id] * s);
                 if !reference_stress
                     .iter()
@@ -602,7 +700,7 @@ impl CutElasticity3 {
                 for (column, local) in result.basis_reference_stresses.iter_mut().zip(&local_basis)
                 {
                     poll(&mut checkpoint)?;
-                    let direction = apply_stress_basis(&constitutive, local, projected);
+                    let direction = apply_stress_basis(&constitutive, local);
                     if direction.iter().any(|s| !s.is_finite()) {
                         return Err(ElasticityError3::Invalid("affine bulk stress overflow"));
                     }
@@ -688,8 +786,7 @@ impl CutElasticity3 {
                 let constitutive = stress_basis(cell, &gradients);
                 if let Some(local) = &local {
                     admit_material_strain(cell, &gradients, local)?;
-                    let value =
-                        apply_stress_basis(&constitutive, local, cell.kinematics.is_projected());
+                    let value = apply_stress_basis(&constitutive, local);
                     scales[id] += d.iter().zip(value).map(|(a, b)| a * b).sum::<f64>();
                 }
                 for i in 0..24 {

@@ -157,6 +157,54 @@ fn affine_cut_stress_uses_original_tensor_weights_and_current_density() {
 }
 
 #[test]
+fn strain_stress_observation_retains_tensor_shear_storage_and_hanging_fields() {
+    let mut op = cart();
+    let scales: Vec<_> = (0..op.cells()).map(|i| 0.5 + 0.03 * i as f64).collect();
+    op.set_scales(&scales).unwrap();
+    let u = affine(op.nodes());
+    let stress = op.bulk_stress(&u, 10_000, poll).unwrap();
+    let points = op.bulk_strain_stress(&u, stress.len(), poll).unwrap();
+    // Tensor shear is half the engineering shear, including negative shear.
+    let expected = [0.2, 0.1, 0.4, -0.05, 0.0, 0.25];
+    for (point, stress) in points.iter().zip(&stress) {
+        assert_eq!(&point.response, stress);
+        for (actual, expected) in point.strain.iter().zip(expected) {
+            close(*actual, expected, 3e-14);
+        }
+        assert_eq!(point.strain, point.constitutive_strain);
+        // Independent sigma:epsilon/2, including both symmetric shear terms.
+        close(point.energy_density, scales[stress.cell] * 2.34, 3e-14);
+    }
+    assert!(op.bulk_strain_stress(&u, points.len() - 1, poll).is_err());
+    assert!(op.bulk_strain_stress(&u[..u.len() - 1], 10_000, poll).is_err());
+    assert!(matches!(
+        op.bulk_strain_stress(&u, 10_000, || ControlFlow::Break(())),
+        Err(ElasticityError3::Cancelled)
+    ));
+    let mut bad = u.clone();
+    bad[0] = f64::NAN;
+    assert!(op.bulk_strain_stress(&bad, 10_000, poll).is_err());
+
+    let adaptive = adaptive();
+    let u = affine(adaptive.nodes());
+    let stresses = adaptive.bulk_stress(&u, 10_000, poll).unwrap();
+    let points = adaptive.bulk_strain_stress(&u, stresses.len(), poll).unwrap();
+    for (point, stress) in points.iter().zip(stresses) {
+        assert_eq!(point.response, stress);
+        for (actual, expected) in point.strain.iter().zip(expected) {
+            close(*actual, expected, 3e-14);
+        }
+        assert_eq!(point.strain, point.constitutive_strain);
+        close(point.energy_density, 2.34, 3e-14);
+    }
+    assert!(adaptive.bulk_strain_stress(&u, points.len() - 1, poll).is_err());
+    assert!(matches!(
+        adaptive.bulk_strain_stress(&u, 10_000, || ControlFlow::Break(())),
+        Err(ElasticityError3::Cancelled)
+    ));
+}
+
+#[test]
 fn hydrostatic_and_rigid_rotation_have_zero_deviatoric_stress() {
     let op = cart();
     let hydro: Vec<_> = op.nodes().iter().flat_map(|p| p.map(|v| 0.2 * v)).collect();

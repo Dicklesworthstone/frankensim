@@ -1,6 +1,8 @@
 //! Stress observations through the original conforming hanging-node map.
 use super::*;
-use crate::elastic3::stress::{AffineBulkStress3, BulkStressPoint3, BulkStressPullback3};
+use crate::elastic3::stress::{
+    AffineBulkStress3, BulkStrainStressPoint3, BulkStressPoint3, BulkStressPullback3,
+};
 
 impl AdaptiveElasticity3 {
     /// Check one physical field against the original source-material domain,
@@ -71,6 +73,28 @@ impl AdaptiveElasticity3 {
         }
         let full = self.physical_displacements(u)?;
         self.raw.bulk_stress(&full, max_points, checkpoint)
+    }
+
+    /// Observe actual and constitutive tensor strain, stress and storage on
+    /// original bulk points through the exact hanging-node reconstruction.
+    /// Only one cell's physical coefficients are reconstructed at a time;
+    /// no expanded global field is allocated. The native observation owner
+    /// enforces source strain limits, output allowance and cancellation.
+    pub fn bulk_strain_stress(
+        &self,
+        u: &[f64],
+        max_points: usize,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<BulkStrainStressPoint3>, ElasticityError3> {
+        self.raw.bulk_strain_stress_mapped(
+            u,
+            self.n(),
+            max_points,
+            |cell, field| {
+                std::array::from_fn(|i| self.physical_coefficient(field, cell.nodes[i / 3], i % 3))
+            },
+            checkpoint,
+        )
     }
 
     /// Apply the same conforming reconstruction to the baseline and every

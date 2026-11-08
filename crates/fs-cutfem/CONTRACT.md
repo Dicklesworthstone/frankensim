@@ -250,6 +250,31 @@ stress. An equilibrium derivative additionally needs the solve adjoint and
 by both backgrounds. Adaptive observations use the original hanging-node map
 and its transpose; there is no nodal stress recovery, remeshing or new assembly.
 
+### Three-dimensional strain, stress and elastic storage
+
+`CutElasticity3::bulk_strain_stress` and the adaptive counterpart return
+`BulkStrainStressPoint3` on the retained physical bulk quadrature. Each sample
+contains the original stress response, actual displacement strain,
+constitutive strain and elastic storage per reference volume. Strains use
+tensor shear in `[xx, yy, zz, xy, yz, zx]` order. For B-bar the actual strain
+retains local dilatation; only the constitutive strain uses the same
+physical-cell mean dilatation as the operator. Storage is one half of their
+work-conjugate stress/constitutive-strain contraction, including both shear
+entries and current material scaling. It excludes stabilization and boundary
+work. Both strain families obey the retained source-material domain.
+
+Every Cartesian stress/strain observation and its stress transpose removes
+a common nodal translation before differentiation. Adaptive strain recovery
+reconstructs only the current cell through the original hanging-node map and
+strong-clamp mask; no global displacement copy or new assembly is required.
+The point allowance precedes output allocation, with finite-data admission
+and cancellation at input, cell, point and publication boundaries.
+
+The `stress3` and `elastic3_bbar_stress` regressions check affine tensor shear,
+material scaling, hanging fields, distinction of actual/assumed B-bar strain,
+and integrated constitutive storage. These are small-strain numerical samples;
+they do not bound unsampled extrema or certify continuum error.
+
 `affine_bulk_stress` samples one offset field and a family of uncertain
 directions on those same points. It shares native Mandel-strain extraction and
 constitutive action with ordinary stress observations, and stores reference

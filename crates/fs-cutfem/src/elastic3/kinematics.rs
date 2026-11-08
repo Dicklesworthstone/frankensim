@@ -139,23 +139,14 @@ impl Cell3 {
         gradients: &[[f64; 3]; 8],
         local: &[f64; 24],
     ) -> [f64; 6] {
-        let mut gradient = [[0.0; 3]; 3];
-        for a in 1..8 {
-            for c in 0..3 {
-                let relative = local[3 * a + c] - local[c];
-                for d in 0..3 {
-                    gradient[c][d] += relative * gradients[a][d];
-                }
-            }
-        }
-        let mut strain = [
-            gradient[0][0],
-            gradient[1][1],
-            gradient[2][2],
-            core::f64::consts::FRAC_1_SQRT_2 * (gradient[0][1] + gradient[1][0]),
-            core::f64::consts::FRAC_1_SQRT_2 * (gradient[1][2] + gradient[2][1]),
-            core::f64::consts::FRAC_1_SQRT_2 * (gradient[2][0] + gradient[0][2]),
-        ];
+        self.project_mandel_strain(super::stress::mandel_strain(gradients, local), local)
+    }
+
+    pub(super) fn project_mandel_strain(
+        &self,
+        mut strain: [f64; 6],
+        local: &[f64; 24],
+    ) -> [f64; 6] {
         if let CellKinematics3::BBar { mean_gradients, .. } = self.kinematics {
             let mut mean_divergence = 0.0;
             for a in 1..8 {

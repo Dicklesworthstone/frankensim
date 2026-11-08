@@ -179,6 +179,27 @@ fn bilinear_displacement_retains_local_deviator_and_cell_average_pressure() {
     op.apply(&u, &mut ku);
     close(dot(&u, &ku), work, 2e-12);
 
+    let observed = op.bulk_strain_stress(&u, points.len(), poll).unwrap();
+    let mut storage = 0.0;
+    for (point, stress) in observed.iter().zip(&points) {
+        assert_eq!(&point.response, stress);
+        let [x, y, _] = stress.position;
+        let strain = [amplitude * y, 0.0, 0.0, 0.5 * amplitude * x, 0.0, 0.0];
+        let correction = amplitude * (0.5 - y) / 3.0;
+        for k in 0..6 {
+            close(point.strain[k], strain[k], 2e-12);
+            close(
+                point.constitutive_strain[k],
+                strain[k] + if k < 3 { correction } else { 0.0 },
+                2e-12,
+            );
+        }
+        storage += stress.weight * point.energy_density;
+    }
+    close(2.0 * storage, work, 2e-12);
+    let beyond_domain: Vec<_> = u.iter().map(|value| 100.0 * value).collect();
+    assert!(op.bulk_strain_stress(&beyond_domain, points.len(), poll).is_err());
+
     // Translations are admissible on this observation operator because it has
     // no strong zero clamp that would change the translated nodal field.
     let mut checkpoint = |_| poll();
@@ -227,6 +248,69 @@ fn bilinear_displacement_retains_local_deviator_and_cell_average_pressure() {
     movable.admit_material_domain(&rigid, poll).unwrap();
     for point in movable.bulk_stress(&rigid, 1000, poll).unwrap() {
         assert_eq!(point.stress, [0.0; 6]);
+    }
+}
+
+#[test]
+fn all_strain_and_stress_observations_remove_common_translation() {
+    for formulation in [
+        ElasticityFormulation3::Displacement,
+        ElasticityFormulation3::BBar,
+    ] {
+        let mut checkpoint = |_| poll();
+        let mut control = QuadratureControl3::new(
+            QuadratureOptions3 {
+                depth: 0,
+                ..Default::default()
+            },
+            &mut checkpoint,
+        )
+        .unwrap();
+        let state = ElasticAcousticState::from_bulk_and_shear(
+            1000.0, 12.0, 3.0, ContentHash([74; 32]), 0.1,
+        )
+        .unwrap();
+        let op = CutElasticity3::build_with_material_field_and_embedded_dirichlet(
+            domain(),
+            [1; 3],
+            &HalfSpace,
+            ElasticMaterialField3::Uniform(&state),
+            &|_| false,
+            &|_, _| true,
+            ElasticityOptions3 { formulation, ..options() },
+            Default::default(),
+            Default::default(),
+            &mut control,
+        )
+        .unwrap();
+        let u: Vec<_> = op
+            .nodes()
+            .iter()
+            .flat_map(|&[x, y, _]| [x * y / 32.0, 0.0, 0.0])
+            .collect();
+        let shift = [2.0_f64.powi(40), -2.0_f64.powi(39), 2.0_f64.powi(38)];
+        let shifted: Vec<_> = u.iter().enumerate().map(|(i, u)| u + shift[i % 3]).collect();
+        // Dyadic nodal differences survive the shift exactly. Removing it
+        // before differentiation therefore preserves every response bit.
+        assert_eq!(
+            op.bulk_strain_stress(&u, 1000, poll).unwrap(),
+            op.bulk_strain_stress(&shifted, 1000, poll).unwrap()
+        );
+        assert_eq!(
+            op.bulk_stress(&u, 1000, poll).unwrap(),
+            op.bulk_stress(&shifted, 1000, poll).unwrap()
+        );
+        op.admit_material_domain(&shifted, poll).unwrap();
+        let rigid: Vec<_> = (0..op.n())
+            .map(|i| [2.0_f64.powi(80), -2.0_f64.powi(79), 2.0_f64.powi(78)][i % 3])
+            .collect();
+        op.admit_material_domain(&rigid, poll).unwrap();
+        for point in op.bulk_strain_stress(&rigid, 1000, poll).unwrap() {
+            assert_eq!(point.strain, [0.0; 6]);
+            assert_eq!(point.constitutive_strain, [0.0; 6]);
+            assert_eq!(point.response.stress, [0.0; 6]);
+            assert_eq!(point.energy_density, 0.0);
+        }
     }
 }
 
