@@ -23,6 +23,7 @@ use super::{
 };
 use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
 use fs_exec::CancelGate;
+use fs_math::{dd::Dd, det};
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::rolling_loss::viscoelastic::DeformingSphereSurface;
 use fs_tribo::rolling_loss::viscoelastic::path::{ExponentialPathError, ExponentialRatePath};
@@ -107,9 +108,8 @@ pub struct RigidRollingControls {
     pub maximum_bodies: usize,
     /// At most one million constitutive substeps; exhaustion refuses before mutation.
     pub maximum_substeps: usize,
-    /// User time-resolution ceiling [s]. Anisotropic midpoint evolution also
-    /// applies a monotone-decay bound from the original mobility/material law.
-    /// Isotropic rolling uses the exact material-owned exponential path.
+    /// User time-resolution ceiling [s]. Each held-geometry substep integrates
+    /// both rolling eigenmodes exactly, with no damping-stiffness step limit.
     pub maximum_step_s: f64,
     pub geometry_tolerance_m: f64,
     pub velocity_tolerance_m_s: f64,
@@ -218,14 +218,13 @@ impl std::error::Error for RigidRollingError {}
 ///
 /// The original Hertz owner verifies patch load/area/radius/material agreement.
 /// Native impulse work is exactly the exported physical heat, up to the
-/// independently checked arithmetic gates. Isotropic constrained mobility uses
-/// the original material owner's exact exponential path, including its signed
-/// moment impulse and squared-rate heat integral. Anisotropic response uses
-/// midpoint evolution with automatic substeps enforcing `c lambda_max h <= 1`.
-/// No numerical damping is deposited in either path.
+/// independently checked arithmetic gates. The two orthogonal modes of the
+/// original constrained mobility use exact material-owned exponential paths,
+/// including signed moment impulses and squared-rate heat integrals. Static
+/// traction and unsupported normal/spin motion are checked over each complete
+/// path, including interior extrema. No numerical damping is deposited.
 /// Viscous arrest is asymptotic; zero speed stays zero without a cutoff or snap.
-/// Isotropic decay is exact at frozen geometry; anisotropic decay is second
-/// order under timestep refinement.
+/// Both isotropic and anisotropic decay are exact at frozen geometry.
 /// Only the bound pair is staged and audited, so unrelated kinetic energy
 /// cannot hide its energy change. Every other original body stays untouched.
 ///
@@ -333,32 +332,25 @@ pub fn apply_rigid_rolling(
     )?;
     let capacity =
         finite(contact.static_friction.static_coefficient()? * contact.patch.normal_load_n())?;
-    let (mobility, reaction, rolling_mobility) =
-        response(&next, &pair_properties, pair_binding, axes)?;
+    let ContactResponse {
+        mobility,
+        reaction,
+        rolling_mobility,
+        unresolved_mobility,
+    } = response(&next, &pair_properties, pair_binding, axes, normal)?;
     let c = finite((card.rolling_time_s() * radius) * contact.patch.normal_load_n())?;
     if c < 0.0 || (c == 0.0 && card.rolling_time_s() > 0.0 && loaded) {
         return Err(invalid("unrepresentable material rolling damping"));
     }
-    let largest = finite(
-        0.5 * rolling_mobility[0][0]
-            + 0.5 * rolling_mobility[1][1]
-            + (0.5 * (rolling_mobility[0][0] - rolling_mobility[1][1]))
-                .hypot(rolling_mobility[0][1]),
-    )?;
     let active = c > 0.0 && norm(q_before) > 0.0;
-    let decay_rate = if active { finite(c * largest)? } else { 0.0 };
-    // Exact equality is deliberate: a nearby anisotropic response must not be
-    // rounded into an isotropic physical model. K=kappa*I preserves every
-    // rolling direction, so the original scalar exponential owner applies.
-    let exponential =
-        active && rolling_mobility[0][1] == 0.0 && rolling_mobility[0][0] == rolling_mobility[1][1];
-    let limit = if decay_rate > 0.0 && !exponential {
-        controls.maximum_step_s.min(decay_rate.recip())
+    let modes = if active {
+        let (values, basis) = rolling_modes(rolling_mobility)?;
+        Some((basis, [finite(c * values[0])?, finite(c * values[1])?]))
     } else {
-        controls.maximum_step_s
+        None
     };
     let required = if active {
-        (dt_s / limit).ceil().max(1.0)
+        (dt_s / controls.maximum_step_s).ceil().max(1.0)
     } else {
         1.0
     };
@@ -373,21 +365,6 @@ pub fn apply_rigid_rolling(
     if !h.is_finite() || h <= 0.0 {
         return Err(invalid("unrepresentable rolling substep duration"));
     }
-    let half_damping = if active && !exponential {
-        0.5 * h * c
-    } else {
-        0.0
-    };
-    let midpoint_matrix = [
-        [
-            1.0 + half_damping * rolling_mobility[0][0],
-            half_damping * rolling_mobility[0][1],
-        ],
-        [
-            half_damping * rolling_mobility[1][0],
-            1.0 + half_damping * rolling_mobility[1][1],
-        ],
-    ];
     let before = next;
     let (energy_before, linear_before, angular_before) = totals(&before, &pair_properties, gate)?;
     let mut next_history = history.clone();
@@ -408,13 +385,16 @@ pub fn apply_rigid_rolling(
         poll(gate)?;
         let old_points = points(&next, &pair_properties, pair_binding)?;
         let q = tangent(relative_spin(old_points), axes);
-        let (step, moment, moment_impulse, predicted_endpoint) = if exponential {
-            let path =
-                ExponentialRatePath::new(norm(q), 0.0, decay_rate, h, || gate.is_requested())?;
-            let native = contact.law.advance_exponential_sphere_path(
+        let (step, moment_impulse, predicted_endpoint) = if let Some((basis, decay)) = modes {
+            let modal_rate = [dot2(basis[0], q), dot2(basis[1], q)];
+            let paths = [
+                ExponentialRatePath::new(modal_rate[0], 0.0, decay[0], h, || gate.is_requested())?,
+                ExponentialRatePath::new(modal_rate[1], 0.0, decay[1], h, || gate.is_requested())?,
+            ];
+            let native = contact.law.advance_orthogonal_exponential_sphere_paths(
                 contact.patch,
                 contact.interface,
-                &path,
+                &paths,
                 0.0,
                 contact.temperature_k,
                 contact.excitation_frequency_hz,
@@ -422,37 +402,50 @@ pub fn apply_rigid_rolling(
                 &next_history.state,
                 || gate.is_requested(),
             )?;
-            // The reaction has the same decaying scalar factor throughout the
-            // path. Its initial value is its exact maximum; the impulse uses
-            // the signed rate integral, while heat uses the squared-rate one.
-            let moment = along(q, native.response_before.rolling_moment_nm);
-            let impulse = along(q, native.rolling_moment_impulse_nms);
-            let endpoint = along(q, path.endpoint_rate());
-            (native.rolling, moment, impulse, endpoint)
+            let modal_moment = [-c * modal_rate[0], -c * modal_rate[1]];
+            let force = [
+                mul(reaction, basis[0].map(|v| v * modal_moment[0])),
+                mul(reaction, basis[1].map(|v| v * modal_moment[1])),
+            ];
+            let demand = decaying_norm_max(force, decay, h)?;
+            if demand > capacity {
+                return Err(RigidRollingError::StaticTraction {
+                    required_n: demand,
+                    capacity_n: capacity,
+                });
+            }
+            maximum_force = maximum_force.max(demand);
+            // Shear stays constrained. The omitted normal and spin coordinates
+            // must also remain admissible between endpoints; two distinct
+            // eigenmodes can otherwise cancel only at the accepted endpoint.
+            let point = relative_point(old_points);
+            let mut unsupported = [0.0; 2];
+            for (i, initial) in [point.dot(normal), relative_spin(old_points).dot(normal)]
+                .into_iter()
+                .enumerate()
+            {
+                let rates = [
+                    finite(dot2(unresolved_mobility[i], basis[0]) * modal_moment[0])?,
+                    finite(dot2(unresolved_mobility[i], basis[1]) * modal_moment[1])?,
+                ];
+                unsupported[i] = integrated_rate_max(initial, rates, decay, h, gate)?;
+            }
+            maximum_point_speed =
+                maximum_point_speed.max(norm(tangent(point, axes)).hypot(unsupported[0]));
+            maximum_spin = maximum_spin.max(unsupported[1]);
+            let impulse = combine(native.rolling_moment_impulse_nms, basis);
+            let endpoint = combine(paths.map(|path| path.endpoint_rate()), basis);
+            (native.rolling, impulse, endpoint)
         } else {
-            let q_mid = solve_spd(midpoint_matrix, q)?;
             let step = contact.law.advance(
                 contact.patch,
                 contact.interface,
-                kinematics(norm(q_mid), h)?,
+                kinematics(norm(q), h)?,
                 contact.work,
                 &next_history.state,
             )?;
-            let moment = along(q_mid, step.wrench.rolling_moment_nm);
-            let impulse = moment.map(|v| h * v);
-            let change = mul(rolling_mobility, impulse);
-            let endpoint = [q[0] + change[0], q[1] + change[1]];
-            (step, moment, impulse, endpoint)
+            (step, [0.0; 2], q)
         };
-        let force = mul(reaction, moment);
-        let demand = norm(force);
-        if !demand.is_finite() || demand > capacity {
-            return Err(RigidRollingError::StaticTraction {
-                required_n: demand,
-                capacity_n: capacity,
-            });
-        }
-        maximum_force = maximum_force.max(demand);
         let impulse = world(mul(reaction, moment_impulse), axes);
         let couple = world(moment_impulse, axes);
         for (body, arm, sign) in [
@@ -488,8 +481,8 @@ pub fn apply_rigid_rolling(
                 "rolling recoil induced unresolved slip, separation or relative spin",
             ));
         }
-        // The material approximation is checked at actual endpoints as well as
-        // the actual midpoint constitutive state, including zero-loss cases.
+        // Check the material approximation at the actual momentum endpoint as
+        // well as the complete analytic path, including zero-loss cases.
         let response = card.response(
             contact.patch,
             contact.interface,
@@ -688,6 +681,215 @@ fn mul(m: [[f64; 2]; 2], v: [f64; 2]) -> [f64; 2] {
         m[1][0] * v[0] + m[1][1] * v[1],
     ]
 }
+fn dot2(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0].mul_add(b[0], a[1] * b[1])
+}
+fn combine(v: [f64; 2], basis: [[f64; 2]; 2]) -> [f64; 2] {
+    [
+        basis[0][0].mul_add(v[0], basis[1][0] * v[1]),
+        basis[0][1].mul_add(v[0], basis[1][1] * v[1]),
+    ]
+}
+
+/// One scaled Jacobi rotation, with no eigenvalue-gap division or tolerance
+/// that would discard a small cross term. The positive Cholesky determinant
+/// retains the smaller eigenvalue without subtracting two large eigenvalues.
+fn rolling_modes(m: [[f64; 2]; 2]) -> Result<([f64; 2], [[f64; 2]; 2]), RigidRollingError> {
+    if m[0][1] == 0.0 {
+        return Ok(([m[0][0], m[1][1]], [[1.0, 0.0], [0.0, 1.0]]));
+    }
+    let scale = m[0][0].max(m[1][1]);
+    let (a, b, d) = (m[0][0] / scale, m[0][1] / scale, m[1][1] / scale);
+    if b == 0.0 {
+        return Err(invalid("unrepresentable rolling eigenvector"));
+    }
+    let delta = 0.5 * a - 0.5 * d;
+    let t = b / (delta.abs() + delta.hypot(b));
+    let cosine = (1.0 + t * t).sqrt().recip();
+    let sine = t * cosine;
+    let (high, first) = if delta >= 0.0 {
+        (a + b * t, [cosine, sine])
+    } else {
+        (d + b * t, [sine, cosine])
+    };
+    let cholesky = b / a.sqrt();
+    let low = finite(m[0][0] * ((d - cholesky * cholesky) / high))?;
+    let high = finite(scale * high)?;
+    if low <= 0.0 || high <= 0.0 {
+        return Err(invalid("unresolved positive rolling eigenvalues"));
+    }
+    Ok(([high, low], [first, [-first[1], first[0]]]))
+}
+
+/// Maximum norm of two decaying vectors over the whole held interval.
+/// With x=exp(-(a-b)t), stationary squared norms are the positive roots of
+/// a*|u|²*x² + (a+b)*(u.v)*x + b*|v|². Scaling and double-double products
+/// retain nearly cancelling force directions; repeated rates need no roots.
+fn decaying_norm_max(
+    mut vectors: [[f64; 2]; 2],
+    mut decay: [f64; 2],
+    duration: f64,
+) -> Result<f64, RigidRollingError> {
+    if decay[0] < decay[1] {
+        decay.swap(0, 1);
+        vectors.swap(0, 1);
+    }
+    let at = |t: f64| -> Result<f64, RigidRollingError> {
+        let relative_exponent = (decay[0] - decay[1]) * t;
+        if relative_exponent <= 0.5 {
+            // Separate exponentials can round to the same value although
+            // releasing their cancellation produces a resolved physical force.
+            let shift = Dd::from_f64(det::expm1(-relative_exponent));
+            let slow = Dd::from_f64(det::exp(-decay[1] * t));
+            let components = [0, 1].map(|i| {
+                ((Dd::from_f64(vectors[0][i])
+                    + Dd::from_f64(vectors[1][i])
+                    + Dd::from_f64(vectors[0][i]) * shift)
+                    * slow)
+                    .to_f64()
+            });
+            return finite(norm(components));
+        }
+        let factors = decay.map(|rate| det::exp(-rate * t));
+        finite(norm(combine(factors, vectors)))
+    };
+    let mut maximum = at(0.0)?.max(at(duration)?);
+    if decay[0] == decay[1] {
+        return Ok(maximum);
+    }
+    let scale = finite(norm(vectors[0]).max(norm(vectors[1])))?;
+    if scale == 0.0 {
+        return Ok(0.0);
+    }
+    let [u, v] = vectors.map(|row| row.map(|x| x / scale));
+    let dot = |x: [f64; 2], y: [f64; 2]| {
+        Dd::from_f64(x[0]) * Dd::from_f64(y[0]) + Dd::from_f64(x[1]) * Dd::from_f64(y[1])
+    };
+    let one = Dd::from_f64(1.0);
+    let zero = Dd::from_f64(0.0);
+    let ratio = Dd::from_f64(decay[1]) / Dd::from_f64(decay[0]);
+    let a = dot(u, u);
+    let uv = dot(u, v);
+    let b = uv * (one + ratio);
+    let c = dot(v, v) * ratio;
+    if b.to_f64() >= 0.0 {
+        return Ok(maximum);
+    }
+    let roots = if a.to_f64() == 0.0 {
+        [-c / b, zero]
+    } else {
+        // The Gram identity avoids subtracting O(1) terms to recover the
+        // squared rate gap for almost collinear, almost equally decaying forces.
+        let cross =
+            Dd::from_f64(u[0]) * Dd::from_f64(v[1]) - Dd::from_f64(u[1]) * Dd::from_f64(v[0]);
+        let gap = (Dd::from_f64(decay[0]) - Dd::from_f64(decay[1])) / Dd::from_f64(decay[0]);
+        let discriminant = gap * gap * uv * uv - ratio * cross * cross * Dd::from_f64(4.0);
+        if discriminant.to_f64() <= 0.0 {
+            return Ok(maximum);
+        }
+        let numerator = (-b + discriminant.sqrt()) * Dd::from_f64(0.5);
+        [numerator / a, c / numerator]
+    };
+    for root in roots {
+        if zero.lt(root) && root.lt(one) {
+            let offset = (root - one).to_f64();
+            let logarithm = if offset.abs() <= 0.0625 {
+                log1p_near_zero(offset)
+            } else {
+                det::ln(root.to_f64())
+            };
+            let t = -logarithm / (decay[0] - decay[1]);
+            if t > 0.0 && t < duration {
+                maximum = maximum.max(at(t)?);
+            }
+        }
+    }
+    Ok(maximum)
+}
+
+// ln(1+x)=2 atanh(x/(2+x)); eight terms suffice on |x|<=1/16.
+// Preserve the small increment instead of rounding 1+x to one first.
+fn log1p_near_zero(x: f64) -> f64 {
+    if x.abs() <= f64::EPSILON {
+        return x;
+    }
+    let s = x / (2.0 + x);
+    let square = s * s;
+    let mut term = s;
+    let mut sum = s;
+    for k in 1..8 {
+        term *= square;
+        sum += term / (2 * k + 1) as f64;
+    }
+    2.0 * sum
+}
+
+/// An omitted scalar velocity is an initial value plus two integrated
+/// exponentials. Its derivative has at most one interior zero. This checks
+/// normal separation and relative spin without sampling or damping substeps.
+fn integrated_rate_max(
+    initial: f64,
+    mut rates: [f64; 2],
+    mut decay: [f64; 2],
+    duration: f64,
+    gate: &CancelGate,
+) -> Result<f64, RigidRollingError> {
+    if decay[0] < decay[1] {
+        decay.swap(0, 1);
+        rates.swap(0, 1);
+    }
+    let at = |t| -> Result<f64, RigidRollingError> {
+        poll(gate)?;
+        let change = if decay[1] > 0.0 {
+            // Integrate the pair before rounding: independently rounded path
+            // integrals can erase a small released cancellation completely.
+            let p0 = Dd::from_f64(rates[0]) / Dd::from_f64(decay[0]);
+            let p1 = Dd::from_f64(rates[1]) / Dd::from_f64(decay[1]);
+            finite(p0.to_f64())?;
+            finite(p1.to_f64())?;
+            let slow_release = Dd::from_f64(-det::expm1(-decay[1] * t));
+            let slow_remaining = Dd::from_f64(det::exp(-decay[1] * t));
+            let relative_release = Dd::from_f64(-det::expm1(-(decay[0] - decay[1]) * t));
+            (p0 + p1) * slow_release + p0 * slow_remaining * relative_release
+        } else if decay[0] == 0.0 {
+            (Dd::from_f64(rates[0]) + Dd::from_f64(rates[1])) * Dd::from_f64(t)
+        } else {
+            let path =
+                ExponentialRatePath::new(rates[0], 0.0, decay[0], t, || gate.is_requested())?;
+            if decay[0] * t <= 0.5 {
+                // integral(q)-q(0)*t = -decay*integrated_displacement.
+                (Dd::from_f64(rates[0]) + Dd::from_f64(rates[1])) * Dd::from_f64(t)
+                    - Dd::from_f64(decay[0]) * Dd::from_f64(path.integrated_displacement())
+            } else {
+                Dd::from_f64(path.rate_integral()) + Dd::from_f64(rates[1]) * Dd::from_f64(t)
+            }
+        };
+        let value = Dd::from_f64(initial) + change;
+        Ok(finite(value.to_f64())?.abs())
+    };
+    let mut maximum = initial.abs().max(at(duration)?);
+    if decay[0] != decay[1]
+        && rates[0] != 0.0
+        && rates[1] != 0.0
+        && rates[0].is_sign_positive() != rates[1].is_sign_positive()
+    {
+        let (a, b) = (rates[0].abs(), rates[1].abs());
+        let offset = (a - b) / b;
+        let ratio = a / b;
+        let logarithm = if offset.abs() <= 0.0625 {
+            log1p_near_zero(offset)
+        } else if ratio.is_finite() && ratio > 0.0 {
+            det::ln(ratio)
+        } else {
+            det::ln(a) - det::ln(b)
+        };
+        let t = logarithm / (decay[0] - decay[1]);
+        if t > 0.0 && t < duration {
+            maximum = maximum.max(at(t)?);
+        }
+    }
+    Ok(maximum)
+}
 fn finite(v: f64) -> Result<f64, RigidRollingError> {
     if v.is_finite() {
         Ok(v)
@@ -723,31 +925,42 @@ fn solve_spd(m: [[f64; 2]; 2], rhs: [f64; 2]) -> Result<[f64; 2], RigidRollingEr
 /// Build J M^-1 J^T from the original two bodies, then eliminate the two
 /// workless shear reactions. Projected Gram rows avoid subtracting nearly
 /// equal positive inertias when forming the Schur complement.
+struct ContactResponse {
+    mobility: [[f64; 4]; 4],
+    reaction: [[f64; 2]; 2],
+    rolling_mobility: [[f64; 2]; 2],
+    /// Normal point velocity and relative normal-axis spin per rolling impulse.
+    unresolved_mobility: [[f64; 2]; 2],
+}
+
 fn response(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     binding: RigidContactBinding,
     axes: [Vec3; 2],
-) -> Result<([[f64; 4]; 4], [[f64; 2]; 2], [[f64; 2]; 2]), RigidRollingError> {
-    let mut factor = [[0.0; 12]; 4];
+    normal: Vec3,
+) -> Result<ContactResponse, RigidRollingError> {
+    let mut factor = [[0.0; 12]; 6];
     for (slot, body, arm, sign) in [
         (0, binding.body_a, binding.arm_a_body, 1.0),
         (1, binding.body_b, binding.arm_b_body, -1.0),
     ] {
         let inverse_mass_root = properties[body].mass().sqrt().recip();
         let orientation = bodies[body].pose().orientation();
-        for axis in 0..2 {
-            let direction = orientation.rotate_world_to_body(axes[axis]);
-            let translation = components(axes[axis].scale(sign * inverse_mass_root));
+        for (axis, world_direction) in [axes[0], axes[1], normal].into_iter().enumerate() {
+            let direction = orientation.rotate_world_to_body(world_direction);
+            let translation = components(world_direction.scale(sign * inverse_mass_root));
             let force_rotation = components(
                 properties[body].angular_mobility_factor(arm.cross(direction).scale(sign)),
             );
             let moment_rotation =
                 components(properties[body].angular_mobility_factor(direction.scale(sign)));
+            let force_row = if axis == 2 { 4 } else { axis };
+            let moment_row = if axis == 2 { 5 } else { axis + 2 };
             for j in 0..3 {
-                factor[axis][6 * slot + j] = translation[j];
-                factor[axis][6 * slot + 3 + j] = force_rotation[j];
-                factor[axis + 2][6 * slot + 3 + j] = moment_rotation[j];
+                factor[force_row][6 * slot + j] = translation[j];
+                factor[force_row][6 * slot + 3 + j] = force_rotation[j];
+                factor[moment_row][6 * slot + 3 + j] = moment_rotation[j];
             }
         }
     }
@@ -783,5 +996,55 @@ fn response(
         [off, dot(&projected[1], &projected[1])?],
     ];
     solve_spd(rolling, [0.0; 2])?;
-    Ok((mobility, reaction, rolling))
+    let unresolved_mobility = [
+        [
+            dot(&factor[4], &projected[0])?,
+            dot(&factor[4], &projected[1])?,
+        ],
+        [
+            dot(&factor[5], &projected[0])?,
+            dot(&factor[5], &projected[1])?,
+        ],
+    ];
+    Ok(ContactResponse {
+        mobility,
+        reaction,
+        rolling_mobility: rolling,
+        unresolved_mobility,
+    })
+}
+
+#[cfg(test)]
+mod continuous_path_tests {
+    use super::*;
+
+    #[test]
+    fn cancelling_decay_modes_reveal_interior_unsupported_motion() {
+        // Integral(2 exp(-2t)-exp(-t)) = exp(-t)-exp(-2t).
+        // Its initial and long-time limits vanish, but it reaches 1/4 at ln 2.
+        let maximum =
+            integrated_rate_max(0.0, [2.0, -1.0], [2.0, 1.0], 20.0, &CancelGate::new()).unwrap();
+        assert!((maximum - 0.25).abs() < 2e-15);
+        let force = decaying_norm_max([[1.0, -2.0], [-1.0, 2.0]], [2.0, 1.0], 20.0).unwrap();
+        assert!((force - 5.0_f64.sqrt() / 4.0).abs() < 2e-15);
+        let slow = 2.0_f64.next_down();
+        let nearly_repeated =
+            decaying_norm_max([[1e16, 0.0], [-1e16, 0.0]], [2.0, slow], 20.0).unwrap();
+        // The relative-rate gap is one ULP, but its released cancellation is
+        // macroscopically resolvable. The first-order peak has O(epsilon)
+        // relative error here, below the stated floating comparison tolerance.
+        let expected = 1e16 * ((2.0 - slow) / 2.0) * (-1.0_f64).exp();
+        assert!((nearly_repeated - expected).abs() < 2e-15);
+        let omitted =
+            integrated_rate_max(0.0, [2.0, -slow], [2.0, slow], 20.0, &CancelGate::new()).unwrap();
+        let expected = ((2.0 - slow) / 2.0) * (-1.0_f64).exp();
+        assert!((omitted - expected).abs() < 2e-31);
+        assert_eq!(
+            integrated_rate_max(0.0, [2.0, -2.0], [2.0; 2], 20.0, &CancelGate::new()).unwrap(),
+            0.0
+        );
+        let zero_mode =
+            integrated_rate_max(0.0, [1.0, -1.0], [1e-20, 0.0], 1.0, &CancelGate::new()).unwrap();
+        assert!((zero_mode - 0.5e-20).abs() < 1e-35);
+    }
 }

@@ -3987,23 +3987,27 @@ frequency and the quasistatic small parameters. The actual sphere arm must equal
 its radius along the contact normal, and both contact points must coincide
 within the explicit geometry gate. A loaded contact requires zero initial and
 final point slip/separation and relative normal-axis spin within the dimensional
-gates. The native static capacity bounds the required traction at initial,
-midpoint and endpoint states. An infeasible reaction refuses instead of forcing
+gates. The native static capacity bounds the required traction throughout each
+held interval, including interior extrema. An infeasible reaction refuses instead of forcing
 rolling or substituting an independently saturated friction component.
 
-The material coefficient remains owned by the original card. When the native
-constrained response is exactly isotropic (`K = kappa I`), its rolling direction
-is held and the original material-owned exponential path advances both tangent
-components exactly. The signed rate integral supplies the couple impulse; the
-squared-rate integral supplies physical heat. Static traction decays with the
-same scalar factor, so its initial value bounds the complete path. No damping
-stiffness substeps or timestep-dependent decay remain in this case. A nearby
-anisotropic matrix is never rounded into an isotropic one.
-For anisotropic response each analytic two-axis midpoint solve uses its native
-moment and native heat. The user sets the time-resolution ceiling in both
-paths; only midpoint evolution also applies the derived limit
-`c * lambda_max * h <= 1` to keep every rolling eigenmode's decay factor
-nonnegative. Work is bounded by an explicit substep cap. Viscous arrest remains
+The material coefficient remains owned by the original card. A bounded scaled
+two-dimensional rotation resolves the native symmetric constrained response;
+the two orthogonal rates each decay exactly with their original eigenvalue.
+No eigenvalue-gap division or near-isotropic cutoff changes the physical model.
+The original material owner integrates both components in one receipt: signed
+rate integrals supply the couple impulse, while squared-rate integrals supply
+physical heat and one cumulative-state/checkpoint update. The full vector speed
+must satisfy the original source applicability gates.
+
+Anisotropic reaction components can cancel initially and peak later. Their
+squared-norm derivative reduces to a quadratic in the relative exponential,
+so both endpoints and every interior stationary traction are checked. Native
+normal/spin mobility also determines the continuous omitted-coordinate paths;
+their possible interior extremum is checked before publication. These are
+floating-point analytic evaluations, not interval-certified bounds.
+The user retains the time-resolution ceiling and explicit substep work cap,
+but damping stiffness introduces no extra steps. Viscous arrest remains
 asymptotic; zero rate, zero viscosity and zero load give exact zero loss without
 snapping or a velocity regularizer. Only the sphere generates bulk heat. The
 report exports that heat and its original body index without creating a thermal
@@ -4034,21 +4038,19 @@ owner still advances poses and normal contact. It does not solve contact
 discovery, lift-off, externally driven no-slip constraints, simultaneous
 microslip/spin, multiple patches, or arbitrary-speed viscoelastic rolling. A
 second shear reaction cannot be superposed on this same phase. Frozen-geometry
-decay is exact for isotropic response and second order otherwise; this does not
-certify a complete trajectory. The isotropic native regression compares both
-body momenta and material heat to independent constrained mechanics at a decay
-step above the midpoint sign-reversal threshold, with a one-step work budget,
-and checks continuation across split caller intervals.
+decay is exact for isotropic and anisotropic response; this does not certify a
+complete trajectory. Native regressions compare both body momenta and material
+heat to independent constrained mechanics above the midpoint sign-reversal
+threshold with a one-step work budget, and across split caller intervals.
 G1/G3/G4 groups in `tests/rolling_friction.rs` use independently eliminated
-principal-direction mechanics for both-body recoil, a three-rung exponential
-motion/heat refinement ladder, nonreversing decay, exact zero limits, world and
+principal-direction mechanics for both-body recoil, three interval partitions,
+nearly repeated eigenvalues, zero components, nonreversing decay, exact zero limits, world and
 surface-order covariance, source/traction/mode refusal, and loaded checkpoint,
 late audit, cancellation and exact retry.
-A seventh group requires exact isolated-pair recoil, heat and history despite
-an energetic untouched body and nondefault contact indices.
-All seven groups pass in the focused native original-source build. The independent
-8/16/32-step ladders require error-reduction factors in `[3.95, 4.05]` for both
-motion and heat. This is separate from a full Cargo/DSR workspace gate.
+The tests also require isolated-pair recoil, heat and history despite an energetic
+untouched body and nondefault contact indices, and reject a physical two-body
+case whose interior traction exceeds capacity although both endpoints fit.
+These focused original-source checks are separate from a full Cargo/DSR gate.
 
 ## Material-derived supported sphere rolling
 

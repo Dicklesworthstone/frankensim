@@ -172,6 +172,30 @@ pub struct ViscoelasticSpherePathStep {
     pub spin_rate_rad_s: f64,
 }
 
+/// Two orthogonal rolling components on the same held physical interval.
+/// The original material owns their combined heat and one checkpoint. The
+/// scalar wrench in `rolling` opposes the endpoint vector's magnitude; its
+/// direction and the two signed impulses remain in the caller's orthonormal
+/// tangent basis. Neither component may have an external drive.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViscoelasticSphereOrthogonalPathStep {
+    pub paths: [ExponentialRatePath; 2],
+    pub rolling: RollingLossStep,
+    pub rolling_moment_impulse_nms: [f64; 2],
+    pub response_before: ViscoelasticSphereResponse,
+    pub response_after: ViscoelasticSphereResponse,
+    pub temperature_k: f64,
+    pub excitation_frequency_hz: f64,
+    pub spin_rate_rad_s: f64,
+}
+
+struct IntegratedSpherePath {
+    rolling: RollingLossStep,
+    coefficient: f64,
+    before: ViscoelasticSphereResponse,
+    after: ViscoelasticSphereResponse,
+}
+
 impl RollingLossLaw {
     /// Integrate the original viscoelastic sphere law along an angular path.
     ///
@@ -198,7 +222,109 @@ impl RollingLossLaw {
         state: &RollingLossState,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ViscoelasticSpherePathStep, ExponentialPathError> {
+        let integrated = self.integrate_sphere_paths(
+            patch,
+            interface,
+            core::slice::from_ref(path),
+            [path.initial_rate, path.endpoint_rate],
+            spin_rate_rad_s,
+            temperature_k,
+            excitation_frequency_hz,
+            ownership,
+            state,
+            &mut cancelled,
+        )?;
+        let rolling_moment_impulse_nms = product(&[-integrated.coefficient, path.rate_integral])?;
         poll(&mut cancelled)?;
+        Ok(ViscoelasticSpherePathStep {
+            path: *path,
+            rolling: integrated.rolling,
+            rolling_moment_impulse_nms,
+            response_before: integrated.before,
+            response_after: integrated.after,
+            temperature_k,
+            excitation_frequency_hz,
+            spin_rate_rad_s,
+        })
+    }
+
+    /// Integrate the original isotropic sphere law in two orthogonal directions.
+    ///
+    /// Each supplied path has zero drive and the same duration. Consequently
+    /// the full vector speed decreases monotonically, even when the two decay
+    /// rates differ. The original source gates use that full speed, not two
+    /// smaller component speeds. Orthogonality makes physical heat the sum of
+    /// the original squared-rate integrals; signed impulses stay separate.
+    /// The original owner advances the cumulative heat and checkpoint once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_orthogonal_exponential_sphere_paths(
+        &self,
+        patch: &RollingPatchReceipt,
+        interface: &InterfaceSystemRef,
+        paths: &[ExponentialRatePath; 2],
+        spin_rate_rad_s: f64,
+        temperature_k: f64,
+        excitation_frequency_hz: f64,
+        ownership: &RollingWorkOwnership,
+        state: &RollingLossState,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ViscoelasticSphereOrthogonalPathStep, ExponentialPathError> {
+        poll(&mut cancelled)?;
+        if paths.iter().any(|p| p.drive_rate_per_s != 0.0)
+            || paths[0].duration_s != paths[1].duration_s
+        {
+            return Err(invalid(
+                "orthogonal rolling paths need one duration and zero drive",
+            ));
+        }
+        let speed = [
+            number(paths[0].initial_rate.hypot(paths[1].initial_rate))?,
+            number(paths[0].endpoint_rate.hypot(paths[1].endpoint_rate))?,
+        ];
+        let integrated = self.integrate_sphere_paths(
+            patch,
+            interface,
+            paths,
+            speed,
+            spin_rate_rad_s,
+            temperature_k,
+            excitation_frequency_hz,
+            ownership,
+            state,
+            &mut cancelled,
+        )?;
+        let rolling_moment_impulse_nms = [
+            product(&[-integrated.coefficient, paths[0].rate_integral])?,
+            product(&[-integrated.coefficient, paths[1].rate_integral])?,
+        ];
+        poll(&mut cancelled)?;
+        Ok(ViscoelasticSphereOrthogonalPathStep {
+            paths: *paths,
+            rolling: integrated.rolling,
+            rolling_moment_impulse_nms,
+            response_before: integrated.before,
+            response_after: integrated.after,
+            temperature_k,
+            excitation_frequency_hz,
+            spin_rate_rad_s,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn integrate_sphere_paths(
+        &self,
+        patch: &RollingPatchReceipt,
+        interface: &InterfaceSystemRef,
+        paths: &[ExponentialRatePath],
+        speed: [f64; 2],
+        spin_rate_rad_s: f64,
+        temperature_k: f64,
+        excitation_frequency_hz: f64,
+        ownership: &RollingWorkOwnership,
+        state: &RollingLossState,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<IntegratedSpherePath, ExponentialPathError> {
+        poll(cancelled)?;
         let Self::ViscoelasticSphere(card) = self else {
             return Err(invalid(
                 "exponential path requires original viscoelastic sphere law",
@@ -210,6 +336,7 @@ impl RollingLossLaw {
         ownership.validate_for(patch.patch_id(), self.required_channel())?;
         state.validate()?;
         let radius = card.parameters().radius_m;
+        let duration_s = paths[0].duration_s;
         let kinematics = |omega| {
             RollingKinematics::new(
                 checked_mul(radius, omega, "path_contour_speed_mps")?,
@@ -217,12 +344,12 @@ impl RollingLossLaw {
                 spin_rate_rad_s,
                 temperature_k,
                 excitation_frequency_hz,
-                path.duration_s,
+                duration_s,
             )
         };
-        let response_before = card.response(patch, interface, kinematics(path.initial_rate)?)?;
-        poll(&mut cancelled)?;
-        let response_after = card.response(patch, interface, kinematics(path.endpoint_rate)?)?;
+        let response_before = card.response(patch, interface, kinematics(speed[0])?)?;
+        poll(cancelled)?;
+        let response_after = card.response(patch, interface, kinematics(speed[1])?)?;
         let coefficient = checked_mul(
             checked_mul(
                 card.rolling_time_s(),
@@ -235,8 +362,14 @@ impl RollingLossLaw {
         if coefficient == 0.0 && card.rolling_time_s() > 0.0 && patch.normal_load_n() > 0.0 {
             return Err(invalid("unrepresentable original path rolling damping"));
         }
-        let rolling_moment_impulse_nms = product(&[-coefficient, path.rate_integral])?;
-        let heat = product(&[coefficient, path.rate_squared_integral])?;
+        let mut heat = 0.0;
+        for path in paths {
+            heat = checked_add(
+                heat,
+                product(&[coefficient, path.rate_squared_integral])?,
+                "orthogonal_path_heat_j",
+            )?;
+        }
         if heat < 0.0 {
             return Err(invalid("nonpassive original rolling path heat"));
         }
@@ -255,10 +388,10 @@ impl RollingLossLaw {
             ownership: ownership.clone(),
             state: next_state.clone(),
         };
-        let average_power = if path.duration_s == 0.0 {
+        let average_power = if duration_s == 0.0 {
             0.0
         } else {
-            number(-heat / path.duration_s)?
+            number(-heat / duration_s)?
         };
         let rolling = RollingLossStep {
             state: if response_before.rolling_moment_nm == 0.0
@@ -296,16 +429,12 @@ impl RollingLossLaw {
             interface_authority: interface.provenance().authority(),
             card_authority: self.authority(),
         };
-        poll(&mut cancelled)?;
-        Ok(ViscoelasticSpherePathStep {
-            path: *path,
+        poll(cancelled)?;
+        Ok(IntegratedSpherePath {
             rolling,
-            rolling_moment_impulse_nms,
-            response_before,
-            response_after,
-            temperature_k,
-            excitation_frequency_hz,
-            spin_rate_rad_s,
+            coefficient,
+            before: response_before,
+            after: response_after,
         })
     }
 }

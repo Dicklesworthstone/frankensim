@@ -214,7 +214,6 @@ fn advance(
 fn reference(
     f: &Fixture,
     duration: f64,
-    steps: Option<usize>,
     initial: [f64; 2],
 ) -> ([RigidBodyState; 2], f64, [f64; 2]) {
     let sphere_inertia = f.properties[0].principal_inertia_body().x;
@@ -241,12 +240,7 @@ fn reference(
         let b = R / sphere_inertia - D / plane_inertias[i];
         kappa[i] = 1.0 / sphere_inertia + 1.0 / plane_inertias[i] - b * b / a;
         let rate = damping * kappa[i];
-        let ratio = if let Some(n) = steps {
-            let alpha = 0.5 * duration * rate / n as f64;
-            ((1.0 - alpha) / (1.0 + alpha)).powi(n as i32)
-        } else {
-            (-duration * rate).exp()
-        };
+        let ratio = (-duration * rate).exp();
         let final_rate = initial[i] * ratio;
         let impulse = (final_rate - initial[i]) / kappa[i];
         couple = couple.add(directions[i].scale(impulse));
@@ -333,7 +327,7 @@ fn both_axes_slow_the_sphere_and_recoil_the_finite_support_with_original_heat() 
     let mut bodies = f.bodies;
     let mut history = RigidRollingHistory::new();
     let report = advance(&f, &mut bodies, &mut history, 0.2, controls(0.2));
-    let (expected, heat, eigenvalues) = reference(&f, 0.2, Some(1), INITIAL_RATE);
+    let (expected, heat, eigenvalues) = reference(&f, 0.2, INITIAL_RATE);
     assert_eq!(report.substeps, 1);
     assert!(report.rolling_mobility[0][1].abs() > 1.0);
     for i in 0..2 {
@@ -457,51 +451,42 @@ fn unrelated_large_energy_cannot_hide_pair_work_or_change_original_body_indices(
 }
 
 #[test]
-fn anisotropic_two_axis_decay_converges_to_independent_matrix_exponential() {
+fn anisotropic_two_axis_decay_is_exact_across_user_step_partitions() {
     let f = fixture(TAU, INITIAL_RATE, 0.001);
-    let (exact, exact_heat, _) = reference(&f, 2.0, None, INITIAL_RATE);
-    let mut errors = Vec::new();
-    for n in [8, 16, 32] {
+    let (exact, exact_heat, _) = reference(&f, 2.0, INITIAL_RATE);
+    for n in [1, 8, 32] {
         let mut bodies = f.bodies;
         let mut history = RigidRollingHistory::new();
         let report = advance(&f, &mut bodies, &mut history, 2.0, controls(2.0 / n as f64));
         assert_eq!(report.substeps, n);
-        let (discrete, discrete_heat, _) = reference(&f, 2.0, Some(n), INITIAL_RATE);
         for i in 0..2 {
             close_vec(
                 bodies[i].linear_momentum_world(),
-                discrete[i].linear_momentum_world(),
+                exact[i].linear_momentum_world(),
                 2e-16,
             );
             close_vec(
                 bodies[i].angular_momentum_body(),
-                discrete[i].angular_momentum_body(),
+                exact[i].angular_momentum_body(),
                 2e-17,
             );
         }
-        close(report.dissipated_heat_j, discrete_heat, 2e-18);
-        let momentum_error = norm(
-            bodies[0]
-                .linear_momentum_world()
-                .sub(exact[0].linear_momentum_world()),
-        );
-        let heat_error = (report.dissipated_heat_j - exact_heat).abs();
-        assert!(momentum_error > 1e-10 && heat_error > 1e-12);
-        errors.push((momentum_error, heat_error));
-    }
-    for pair in errors.windows(2) {
-        assert!((3.95..4.05).contains(&(pair[0].0 / pair[1].0)));
-        assert!((3.95..4.05).contains(&(pair[0].1 / pair[1].1)));
+        close(report.dissipated_heat_j, exact_heat, 2e-18);
+        close(report.kinetic_energy_change_j, -exact_heat, 2e-18);
+        close(history.state().cumulative_heat_j(), exact_heat, 2e-18);
+        assert_eq!(history.state().accepted_steps(), n as u64);
     }
 }
 
 #[test]
-fn automatic_substeps_prevent_reversal_and_exact_zero_limits_do_not_snap() {
+fn strong_anisotropic_decay_needs_one_step_and_exact_zero_limits_do_not_snap() {
     let f = fixture(TAU, INITIAL_RATE, 0.001);
     let mut bodies = f.bodies;
     let mut history = RigidRollingHistory::new();
-    let report = advance(&f, &mut bodies, &mut history, 20.0, controls(20.0));
-    assert!(report.substeps > 2);
+    let mut bounded = controls(20.0);
+    bounded.maximum_substeps = 1;
+    let report = advance(&f, &mut bodies, &mut history, 20.0, bounded);
+    assert_eq!(report.substeps, 1);
     let q = f.bodies[1].pose().orientation();
     let final_rate = q.rotate_world_to_body(Vec3::new(
         report.rolling_rate_after_rad_s[0],
@@ -510,7 +495,7 @@ fn automatic_substeps_prevent_reversal_and_exact_zero_limits_do_not_snap() {
     ));
     assert!(final_rate.x > 0.0 && final_rate.x < INITIAL_RATE[0]);
     assert!(final_rate.y < 0.0 && final_rate.y > INITIAL_RATE[1]);
-    let (expected, heat, _) = reference(&f, 20.0, Some(report.substeps), INITIAL_RATE);
+    let (expected, heat, _) = reference(&f, 20.0, INITIAL_RATE);
     close_vec(
         bodies[0].linear_momentum_world(),
         expected[0].linear_momentum_world(),
@@ -539,8 +524,7 @@ fn automatic_substeps_prevent_reversal_and_exact_zero_limits_do_not_snap() {
 #[test]
 fn isotropic_two_axis_rolling_has_exact_decay_and_heat_with_one_material_step() {
     let mut f = fixture(TAU, INITIAL_RATE, 0.001);
-    f.properties[1] =
-        MassProperties::new(7.0, Vec3::ZERO, Vec3::new(0.13, 0.13, 0.18)).unwrap();
+    f.properties[1] = MassProperties::new(7.0, Vec3::ZERO, Vec3::new(0.13, 0.13, 0.18)).unwrap();
     let omega = Vec3::new(INITIAL_RATE[0], INITIAL_RATE[1], 0.0);
     f.bodies[0] = RigidBodyState::new(
         f.bodies[0].pose(),
@@ -555,7 +539,7 @@ fn isotropic_two_axis_rolling_has_exact_decay_and_heat_with_one_material_step() 
     )
     .unwrap();
     let duration = 20.0;
-    let (expected, heat, kappa) = reference(&f, duration, None, INITIAL_RATE);
+    let (expected, heat, kappa) = reference(&f, duration, INITIAL_RATE);
     let damping = TAU * f.patch.normal_load_n() * R;
     assert!(duration * damping * kappa[0] > 2.0);
     let mut bounded = controls(duration);
@@ -567,8 +551,16 @@ fn isotropic_two_axis_rolling_has_exact_decay_and_heat_with_one_material_step() 
     assert_eq!(report.rolling_mobility[0][1], 0.0);
     assert_eq!(report.rolling_mobility[0][0], report.rolling_mobility[1][1]);
     for i in 0..2 {
-        close_vec(bodies[i].linear_momentum_world(), expected[i].linear_momentum_world(), 2e-16);
-        close_vec(bodies[i].angular_momentum_body(), expected[i].angular_momentum_body(), 2e-17);
+        close_vec(
+            bodies[i].linear_momentum_world(),
+            expected[i].linear_momentum_world(),
+            2e-16,
+        );
+        close_vec(
+            bodies[i].angular_momentum_body(),
+            expected[i].angular_momentum_body(),
+            2e-17,
+        );
         let expected_rate = INITIAL_RATE[i] * (-duration * damping * kappa[i]).exp();
         close(report.rolling_rate_after_rad_s[i], expected_rate, 2e-17);
         assert!(report.rolling_rate_after_rad_s[i] * INITIAL_RATE[i] > 0.0);
@@ -590,11 +582,148 @@ fn isotropic_two_axis_rolling_has_exact_decay_and_heat_with_one_material_step() 
     advance(&f, &mut split, &mut split_history, 0.4 * duration, bounded);
     let tail = advance(&f, &mut split, &mut split_history, 0.6 * duration, bounded);
     for i in 0..2 {
-        close_vec(split[i].linear_momentum_world(), bodies[i].linear_momentum_world(), 2e-16);
-        close_vec(split[i].angular_momentum_body(), bodies[i].angular_momentum_body(), 2e-17);
-        close(tail.rolling_rate_after_rad_s[i], report.rolling_rate_after_rad_s[i], 2e-17);
+        close_vec(
+            split[i].linear_momentum_world(),
+            bodies[i].linear_momentum_world(),
+            2e-16,
+        );
+        close_vec(
+            split[i].angular_momentum_body(),
+            bodies[i].angular_momentum_body(),
+            2e-17,
+        );
+        close(
+            tail.rolling_rate_after_rad_s[i],
+            report.rolling_rate_after_rad_s[i],
+            2e-17,
+        );
     }
     close(split_history.state().cumulative_heat_j(), heat, 2e-18);
+}
+
+#[test]
+fn near_repeated_rolling_modes_and_a_zero_principal_component_remain_continuous() {
+    for separation in [0.0, 1e-12, 1e-8] {
+        for rates in [INITIAL_RATE, [0.03, 0.0]] {
+            let mut f = fixture(TAU, rates, 0.001);
+            f.properties[1] = MassProperties::new(
+                7.0,
+                Vec3::ZERO,
+                Vec3::new(0.13, 0.13 * (1.0 + separation), 0.18),
+            )
+            .unwrap();
+            let (expected, heat, _) = reference(&f, 20.0, rates);
+            let mut bodies = f.bodies;
+            let mut history = RigidRollingHistory::new();
+            let mut bounded = controls(20.0);
+            bounded.maximum_substeps = 1;
+            let report = advance(&f, &mut bodies, &mut history, 20.0, bounded);
+            for i in 0..2 {
+                close_vec(
+                    bodies[i].linear_momentum_world(),
+                    expected[i].linear_momentum_world(),
+                    2e-16,
+                );
+                close_vec(
+                    bodies[i].angular_momentum_body(),
+                    expected[i].angular_momentum_body(),
+                    2e-17,
+                );
+            }
+            close(report.dissipated_heat_j, heat, 2e-18);
+            close(report.total_energy_residual_j, 0.0, 2e-18);
+            assert_eq!(report.substeps, 1);
+        }
+    }
+}
+
+#[test]
+fn anisotropic_rolling_checks_the_interior_static_traction_peak_and_rolls_back() {
+    let mut f = fixture(TAU, [0.02, -0.02], 0.001);
+    let mass = f.properties[0].mass();
+    // Original tangent inverse inertias A=diag(100,40) and
+    // B=[[300,100],[100,180]] make R*A-D*B rank one. Initial traction
+    // cancels for omega=(0.02,-0.02), but unequal decay rates break that
+    // cancellation inside the interval. Both endpoint tractions are small.
+    f.properties[0] = MassProperties::new(mass, Vec3::ZERO, Vec3::new(0.01, 0.025, 0.03)).unwrap();
+    let spread = 60.0_f64.hypot(100.0);
+    f.properties[1] = MassProperties::from_principal_frame(
+        7.0,
+        Vec3::ZERO,
+        Vec3::new((240.0 + spread).recip(), (240.0 - spread).recip(), 0.01),
+        UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), 0.5 * 200.0_f64.atan2(120.0))
+            .unwrap(),
+    )
+    .unwrap();
+    let omega = Vec3::new(0.02, -0.02, 0.0);
+    f.bodies[0] = RigidBodyState::new(
+        f.bodies[0].pose(),
+        z_cross(omega).scale(-mass * R),
+        f.properties[0]
+            .angular_momentum_body_checked(omega)
+            .unwrap(),
+    )
+    .unwrap();
+    f.bodies[1] = RigidBodyState::new(
+        Pose::new(Vec3::new(0.0, 0.0, -D), UnitQuaternion::IDENTITY).unwrap(),
+        Vec3::ZERO,
+        Vec3::ZERO,
+    )
+    .unwrap();
+    // Independent two-body force elimination gives a scalar traction
+    // proportional to exp(-slow*t)-exp(-fast*t); its maximum is analytic.
+    let inverse_mass = mass.recip() + 1.0 / 7.0;
+    let determinant = (inverse_mass + 0.85) * (inverse_mass + 1.75) - 0.25 * 0.25;
+    let reaction_norm =
+        (5.0 * (inverse_mass + 1.5) / determinant).hypot(5.0 * (inverse_mass + 0.6) / determinant);
+    let cross = 100.0 - 25.0 * (2.0 * inverse_mass + 2.1) / determinant;
+    let gap = 90.0_f64.hypot(cross);
+    let coefficient = TAU * f.patch.normal_load_n() * R;
+    let slow = coefficient * (210.0 + cross - gap);
+    let fast = coefficient * (210.0 + cross + gap);
+    let peak_time = (fast / slow).ln() / (fast - slow);
+    let peak = coefficient
+        * reaction_norm
+        * (180.0 * 0.02 / (2.0 * gap))
+        * ((-slow * peak_time).exp() - (-fast * peak_time).exp());
+    assert!(peak_time > 0.0 && peak_time < 2.0);
+    let mut bodies = f.bodies;
+    let mut history = RigidRollingHistory::new();
+    let mut bounded = controls(2.0);
+    bounded.maximum_substeps = 1;
+    let accepted = advance(&f, &mut bodies, &mut history, 2.0, bounded);
+    close(accepted.maximum_static_force_n, peak, 2e-16);
+    let capacity = 2e-4;
+    assert!(peak > capacity);
+    assert!(
+        coefficient
+            * reaction_norm
+            * (accepted.rolling_rate_after_rad_s[0] + accepted.rolling_rate_after_rad_s[1]).abs()
+            < capacity
+    );
+    let weak = FrictionLaw::Coulomb {
+        static_mu: capacity / f.patch.normal_load_n(),
+        kinetic_mu: 0.0,
+    };
+    bodies = f.bodies;
+    history = RigidRollingHistory::new();
+    let refused = apply_rigid_rolling(
+        &mut bodies,
+        &f.properties,
+        &mut history,
+        RigidRollingContact {
+            static_friction: &weak,
+            ..f.contact()
+        },
+        2.0,
+        bounded,
+        &CancelGate::new(),
+    );
+    assert!(
+        matches!(refused, Err(RigidRollingError::StaticTraction { required_n, .. }) if (required_n - peak).abs() < 2e-16)
+    );
+    assert_eq!(bodies, f.bodies);
+    assert_eq!(history, RigidRollingHistory::new());
 }
 
 fn compose(q: UnitQuaternion, r: UnitQuaternion) -> UnitQuaternion {

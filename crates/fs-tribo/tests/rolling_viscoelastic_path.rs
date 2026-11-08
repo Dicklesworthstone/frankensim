@@ -602,3 +602,189 @@ fn source_limits_zero_loss_cancellation_and_failed_retry_are_transactional() {
     );
     assert!(ExponentialRatePath::new(f64::MAX, 0.0, 0.0, 1.0, || false).is_err());
 }
+
+#[test]
+fn orthogonal_paths_retain_component_impulses_total_physical_heat_and_one_checkpoint() {
+    let (law, patch) = fixture(2e-4, 2e-4);
+    let rates = [0.8, -0.3];
+    let decay = [1.7, 0.2];
+    let paths = [
+        path(rates[0], 0.0, decay[0], 0.9),
+        path(rates[1], 0.0, decay[1], 0.9),
+    ];
+    let run = |paths: &[ExponentialRatePath; 2], state: &RollingLossState| {
+        law.advance_orthogonal_exponential_sphere_paths(
+            &patch,
+            &interface(),
+            paths,
+            0.0,
+            300.0,
+            10.0,
+            &work("orthogonal"),
+            state,
+            || false,
+        )
+    };
+    let all = run(&paths, &RollingLossState::zero()).unwrap();
+    let coefficient = 2e-4 * patch.normal_load_n() * 0.02;
+    let mut reference_heat = 0.0;
+    for i in 0..2 {
+        let reference = quadrature(rates[i], 0.0, decay[i], 0.9, 4096);
+        close(
+            all.rolling_moment_impulse_nms[i],
+            -coefficient * reference[0],
+            1e-12,
+            1e-20,
+        );
+        reference_heat += coefficient * reference[1];
+    }
+    close(
+        all.rolling.dissipation.total_heat_j,
+        reference_heat,
+        1e-12,
+        1e-20,
+    );
+    close(
+        all.rolling.generalized_work.work_into_interface_j,
+        reference_heat,
+        1e-12,
+        1e-20,
+    );
+    close(
+        all.rolling.wrench.rolling_moment_nm,
+        -coefficient * paths[0].endpoint_rate().hypot(paths[1].endpoint_rate()),
+        2e-14,
+        1e-20,
+    );
+    assert_eq!(all.rolling.next_state.accepted_steps(), 1);
+    assert_eq!(
+        law.restore_checkpoint(
+            &patch,
+            &interface(),
+            &work("orthogonal"),
+            &all.rolling.checkpoint
+        )
+        .unwrap(),
+        all.rolling.next_state
+    );
+    let first_paths = [
+        path(rates[0], 0.0, decay[0], 0.35),
+        path(rates[1], 0.0, decay[1], 0.35),
+    ];
+    let first = run(&first_paths, &RollingLossState::zero()).unwrap();
+    let second_paths = [
+        path(first_paths[0].endpoint_rate(), 0.0, decay[0], 0.55),
+        path(first_paths[1].endpoint_rate(), 0.0, decay[1], 0.55),
+    ];
+    let second = run(&second_paths, &first.rolling.next_state).unwrap();
+    for i in 0..2 {
+        close(
+            all.rolling_moment_impulse_nms[i],
+            first.rolling_moment_impulse_nms[i] + second.rolling_moment_impulse_nms[i],
+            2e-14,
+            1e-20,
+        );
+    }
+    close(
+        second.rolling.next_state.cumulative_heat_j(),
+        all.rolling.next_state.cumulative_heat_j(),
+        2e-14,
+        1e-20,
+    );
+    assert_eq!(second.rolling.next_state.accepted_steps(), 2);
+}
+
+#[test]
+fn orthogonal_paths_gate_full_speed_and_preserve_zero_equal_rate_and_cancel_limits() {
+    let (law, patch) = fixture(2e-4, 2e-4);
+    let run = |paths: [ExponentialRatePath; 2]| {
+        law.advance_orthogonal_exponential_sphere_paths(
+            &patch,
+            &interface(),
+            &paths,
+            0.0,
+            300.0,
+            10.0,
+            &work("orthogonal"),
+            &RollingLossState::zero(),
+            || false,
+        )
+    };
+    let scalar_path = path(1.0, 0.0, 2.0, 0.7);
+    let scalar = law
+        .advance_exponential_sphere_path(
+            &patch,
+            &interface(),
+            &scalar_path,
+            0.0,
+            300.0,
+            10.0,
+            &work("orthogonal"),
+            &RollingLossState::zero(),
+            || false,
+        )
+        .unwrap();
+    let axis = run([scalar_path, path(0.0, 0.0, 3.0, 0.7)]).unwrap();
+    assert_eq!(axis.rolling, scalar.rolling);
+    assert_eq!(
+        axis.rolling_moment_impulse_nms[0],
+        scalar.rolling_moment_impulse_nms
+    );
+    assert_eq!(axis.rolling_moment_impulse_nms[1], 0.0);
+    let rotated = run([path(0.6, 0.0, 2.0, 0.7), path(-0.8, 0.0, 2.0, 0.7)]).unwrap();
+    close(
+        rotated.rolling.dissipation.total_heat_j,
+        scalar.rolling.dissipation.total_heat_j,
+        2e-14,
+        1e-20,
+    );
+    close(
+        rotated.rolling_moment_impulse_nms[0],
+        0.6 * scalar.rolling_moment_impulse_nms,
+        2e-14,
+        1e-20,
+    );
+    close(
+        rotated.rolling_moment_impulse_nms[1],
+        -0.8 * scalar.rolling_moment_impulse_nms,
+        2e-14,
+        1e-20,
+    );
+    assert!(run([path(2.0, 0.0, 2.0, 0.7), path(0.0, 0.0, 2.0, 0.7)]).is_ok());
+    // Each component is individually admissible, but their full vector speed
+    // exceeds the original material passage-time limit.
+    assert!(matches!(
+        run([path(2.0, 0.0, 2.0, 0.7); 2]),
+        Err(ExponentialPathError::Constitutive(_))
+    ));
+    assert!(matches!(
+        run([scalar_path, path(0.0, 0.1, 2.0, 0.7)]),
+        Err(ExponentialPathError::Invalid(_))
+    ));
+    assert!(matches!(
+        run([scalar_path, path(0.0, 0.0, 2.0, 0.8)]),
+        Err(ExponentialPathError::Invalid(_))
+    ));
+    let zero = run([path(0.0, 0.0, 2.0, 0.7); 2]).unwrap();
+    assert_eq!(zero.rolling.dissipation.total_heat_j, 0.0);
+    let state = RollingLossState::zero();
+    let mut polls = 0;
+    assert_eq!(
+        law.advance_orthogonal_exponential_sphere_paths(
+            &patch,
+            &interface(),
+            &[scalar_path; 2],
+            0.0,
+            300.0,
+            10.0,
+            &work("orthogonal"),
+            &state,
+            || {
+                polls += 1;
+                polls == 4
+            },
+        ),
+        Err(ExponentialPathError::Cancelled)
+    );
+    assert_eq!(state, RollingLossState::zero());
+}

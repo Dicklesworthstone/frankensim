@@ -1979,6 +1979,16 @@ explicitly the endpoint wrench. A mean rate cannot replace squared-rate work,
 and an RMS rate cannot replace signed impulse. Both monotone rate endpoints
 must meet the original source, patch, temperature, frequency and speed gates.
 
+`advance_orthogonal_exponential_sphere_paths` integrates two orthogonal,
+undriven rolling components over one common duration. Their decay rates may
+differ. The original source gates use the full vector speed, which decreases
+monotonically; individually valid components cannot bypass that speed limit.
+The same original constitutive owner sums their squared-rate heat integrals,
+retains separate signed impulses, and advances one state/checkpoint. Equal
+rates are invariant under orthogonal coordinate changes, and a zero component
+retains the original scalar result. Driven or unequal-duration vector paths
+refuse rather than inherit an unsupported speed-envelope assumption.
+
 The caller owns the held geometry, original normal load, angular axis and
 mechanical trajectory. This path utility adds no material calibration, normal
 work, thermal storage or contact event detection. Seven G1/G3 groups in
@@ -1986,6 +1996,9 @@ work, thermal storage or contact event detection. Seven G1/G3 groups in
 refined time integrals, weak/strong decay, signed reversal, split continuation,
 zero loss and original source/cancellation refusals. A reversal with zero net
 impulse retains its positive original bulk heat.
+Two further G1/G3/G4 groups check independent component quadrature, combined
+heat and one checkpoint, split continuation, equal/zero rates and components,
+full-vector source admission, and transactional cancellation.
 
 ## Full tensor retained shear layers
 
