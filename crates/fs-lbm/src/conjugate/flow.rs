@@ -35,6 +35,8 @@ pub use density_transport::{
     AdvectedMaterial, MaterialAdvectionControls, MaterialAdvectionInput, MaterialAdvectionReport,
     MaterialAdvectionStep, MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport,
     MaterialMomentumStep, MaterialVolumeSource,
+    MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
+    MaterialSpeciesStep,
 };
 mod material_momentum;
 pub use material_momentum::{

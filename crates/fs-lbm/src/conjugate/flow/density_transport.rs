@@ -7,6 +7,12 @@ use super::{
 use crate::conjugate::krylov::bicgstab_ilu0;
 use fs_sparse::{Coo, Csr};
 
+mod species;
+pub use species::{
+    MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
+    MaterialSpeciesStep,
+};
+
 mod momentum;
 pub use momentum::{
     MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport, MaterialMomentumStep,

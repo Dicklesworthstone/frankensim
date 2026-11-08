@@ -762,3 +762,39 @@ Each step transports heat at the accepted force-corrected velocity, previews the
 The declared relative-density-departure envelope admits cell endpoints/source previews, authored reservoir/fixed-temperature wall data and actual candidate fluid traces at reservoirs and external/internal walls. Reservoir receipts retain the extrema of their reconstructed incoming/outgoing population pairs, including outflow/backflow. Finite-solid bulk temperatures remain governed by the thermal model, not the fluid density law. A refusal or cancellation publishes none of the flow, force, thermal history, wall state, time or receipts. Three explicitly budgeted force fields and the existing native/scalar/solid scratch are reused without per-step adapter allocation; no iterative heat re-solve is needed.
 
 Focused checks execute five actual coupled-owner cases: analytic uniformly heated boxes on both native lattices with reference density distinct from population density; thermal reversal with zero net buoyancy impulse; a conducting-wall open channel with measured two-way feedback and independent fluid-plus-solid thermal closure; final-poll/domain refusal with bitwise exact retry; and fluid-boundary domain enforcement despite admissible mixed cells. Two direct law tests cover signs, temperature-datum shifts, anomalous expansion, zero-expansion background preservation and explicit domain refusal. The numerical-owner tests use extracted production cores and real native/math/sparse kernels, excluding only execution-context wrappers. Full Cargo/public-context integration and the planned developing-channel Nusselt/refinement reference remain unverified by these tests.
+
+## Constituent mass on accepted material transfers
+
+`MaterialAdvectionStep::advect_species` transports 1..=128 fixed-order
+constituent inventories on the retained native three-dimensional material
+advection routes. Per-cell constituent **mass** is authoritative; its initial
+partition is checked against the accepted step's original mass and its endpoint
+partition against that same step's represented endpoint mass. Incoming boundary
+planes and local sources have separately authored mass fractions selected by
+each retained route's actual origin. Extraction and backflow use their original
+donor/origin rules. No second density solve, inferred partial volume, or
+composition-dependent EOS is introduced.
+
+Each species reuses the original row-scaled mass-times-specific-quantity donor
+matrix and the existing BiCGStab recurrence. One native ILU(0) factor is reused
+across species, with only one scalar solve workspace live at a time. The caller
+bounds component work and payload storage. Per connected component, fraction
+amplitude scaling keeps an entirely trace species representable in the native
+Krylov norm; absent species retain the original exact zero-RHS path. This does
+not promise arbitrary relative accuracy for a tiny local tail of a bulk species.
+
+Paired accepted transfers determine endpoint constituent masses. Independent
+readback substitutes those actual masses into the unscaled extensive donor
+equations, checks each species' global boundary/source balance, and audits the
+initial, endpoint and route partitions against the accepted carrier. Each
+species has its own absolute mass-defect budget, including trace species;
+partition errors have a separate declared kilogram allowance. Pure-material
+derived fractions can differ from one by admitted carrier/constituent roundoff.
+There is no clipping, seeded trace or composition renormalization. Negative or
+nonrepresentable inventories/transfers and exceeded budgets return no candidate.
+Cancellation, including after completed components, leaves all caller data and
+the accepted carrier step unchanged.
+
+This is the native first-order implicit donor advection scope. Species diffusion,
+reactions, mixing heat, thermodynamic composition feedback and a higher-order
+advection scheme remain with their respective future/material owners.

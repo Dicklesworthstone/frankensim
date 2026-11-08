@@ -169,6 +169,8 @@ pub use flow::{
     MaterialMomentumAdvance, MaterialMomentumAdvanceControls, MaterialMomentumAdvanceInput,
     MaterialMomentumControls, MaterialMomentumInput, MaterialMomentumReport, MaterialMomentumStep,
     MaterialMomentumViscosityInput, MaterialViscosityControls, MaterialViscosityReport,
+    MAX_MATERIAL_SPECIES, MaterialSpeciesControls, MaterialSpeciesInput, MaterialSpeciesReport,
+    MaterialSpeciesStep,
     MaterialVolumeSource, PhaseResistanceMomentumControls, PhaseResistanceMomentumInput,
     PiecewiseThermalVolumeControls, ProjectionReport, ReservoirPressure,
     ResistiveDensityProjection, ResistiveMaterialDensityMomentumStep,

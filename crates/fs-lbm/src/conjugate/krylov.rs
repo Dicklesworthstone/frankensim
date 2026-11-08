@@ -8,7 +8,7 @@
 
 use fs_exec::CancelGate;
 use fs_sparse::Csr;
-use fs_sparse::precond::{Precond, ilu0};
+use fs_sparse::precond::{Ilu0, Precond, ilu0};
 
 use super::{ChtError, poll};
 
@@ -57,6 +57,25 @@ pub(crate) fn bicgstab_ilu0(
     max_iterations: usize,
     gate: &CancelGate,
 ) -> Result<KrylovOutcome, ChtError> {
+    bicgstab_ilu0_prepared(system, a, b, x, tolerance, max_iterations, gate, || {
+        ilu0(a).map_err(|e| ChtError::PreconditionerBreakdown { system, row: e.row })
+    })
+}
+
+/// The same native iteration with an owned or borrowed original ILU(0) factor.
+/// The constructor is called only after the original zero-RHS early return.
+/// A borrowed factor must belong to this exact, unchanged matrix.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn bicgstab_ilu0_prepared<P: std::borrow::Borrow<Ilu0>>(
+    system: &'static str,
+    a: &Csr,
+    b: &[f64],
+    x: &mut [f64],
+    tolerance: f64,
+    max_iterations: usize,
+    gate: &CancelGate,
+    factor: impl FnOnce() -> Result<P, ChtError>,
+) -> Result<KrylovOutcome, ChtError> {
     let n = b.len();
     debug_assert_eq!(a.nrows(), n);
     let b_norm = norm(b);
@@ -67,7 +86,8 @@ pub(crate) fn bicgstab_ilu0(
             relative_residual: 0.0,
         });
     }
-    let m = ilu0(a).map_err(|e| ChtError::PreconditionerBreakdown { system, row: e.row })?;
+    let factor = factor()?;
+    let m = factor.borrow();
     let mut r = vec![0.0f64; n];
     residual(a, b, x, &mut r);
     let mut rel = norm(&r) / b_norm;
