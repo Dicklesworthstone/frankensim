@@ -151,9 +151,20 @@ fn relaxed_electrical_source_closes_native_heat_with_original_variable_heat_capa
         near(sample.conductor.material().query().axes()["T"],
             result.thermal().temperature_k(DESTINATIONS[i].cell).unwrap());
     }
+    // Narrowing the thermal owner's work budget must retain adaptive policy.
+    // Reconstructing fixed weight one would resurrect the oscillation above.
+    let adaptive = conductivity_controls().with_adaptive_relaxation(1.0, 1e-4).unwrap();
+    let accelerated = run(config(), adaptive).unwrap();
+    near(accelerated.circuit().charges_c()[0], 10.0 - 0.2 * current);
+    near(accelerated.report().deposited_joule_j, qa + qb);
+    for destination in DESTINATIONS {
+        near(accelerated.thermal().temperature_k(destination.cell).unwrap(),
+            result.thermal().temperature_k(destination.cell).unwrap());
+    }
     let mut exhausted = config();
     exhausted.maximum_circuit_trials = 1;
     assert!(matches!(run(exhausted, iteration), Err(CircuitEnthalpyError::CircuitBudget)));
+    assert!(matches!(run(exhausted, adaptive), Err(CircuitEnthalpyError::CircuitBudget)));
     assert_eq!(electrical.charges_c(), &[10.0]);
     assert_eq!(thermal.time_s(), 0.0);
 }

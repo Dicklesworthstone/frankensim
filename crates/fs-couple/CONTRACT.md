@@ -1314,7 +1314,15 @@ is exhausted. Original actual-field resistance and constitutive-power gates
 remain mandatory; native Joule heat is counted once. Source-domain failures,
 nonconvergence and cancellation remain transactional. This can resolve passive
 laws with oscillating Picard iterates but supplies no general convergence
-guarantee or automatic relaxation choice. Focused circuit regressions use
+guarantee. `with_adaptive_relaxation(initial, minimum)` additionally selects
+bounded vector Aitken weights through the shared `fs-ports` owner, using all
+original bulk and contact electrical coordinate residuals. Only convex source
+queries are proposed. Original source support, finite native-trial budgets and
+all physical acceptance checks remain authoritative. The finite-enthalpy owner
+preserves this policy when narrowing each trial's remaining electrical budget.
+Adaptive weights add no electrical solve or source query of their own;
+constant laws still finish in one trial. This is an iteration accelerator,
+not a stability, uniqueness or time-error certificate. Focused circuit regressions use
 strictly monotone terminal laws with independent quadratic midpoint solutions;
 the coupled regression deposits their original Joule heat once in a finite
 body with source-dependent heat capacity and checks the original enthalpy.

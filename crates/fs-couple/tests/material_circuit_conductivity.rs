@@ -392,10 +392,49 @@ fn source_coordinate_relaxation_closes_a_passive_law_that_picard_cannot_resolve(
 }
 
 #[test]
+fn adaptive_relaxation_resolves_passive_resistance_without_a_tuned_weight() {
+    let source = card_with_conductivity(
+        vec![(0.0, 10.0), (1.0, 0.1), (16.0, 0.1)], true, 8.0, 16.0,
+    );
+    let bounded = ConductivitySolve { maximum_iterations: 48, ..solve() };
+    // Same monotone resistor and independent RC midpoint quadratic as above.
+    let current = 40.0 / (21.8 + (21.8_f64.powi(2) - 4.0 * 0.99 * 20.0).sqrt());
+    for sign in [-1.0, 1.0] {
+        let circuit = circuit(&source, sign * 2.0);
+        let original = circuit.clone();
+        assert!(matches!(circuit.conductivity_candidate(&bindings(&source), &[], DT,
+            controls(), bounded, || false),
+            Err(MaterialCircuitError::ConductivityConvergence { iterations: 48, .. })));
+        for initial in [1.0, 0.5, 0.1] {
+            let iteration = bounded.with_adaptive_relaxation(initial, 1e-4).unwrap();
+            assert_eq!(iteration.minimum_relaxation(), Some(1e-4));
+            let mut polls = 0;
+            let candidate = circuit.conductivity_candidate(&bindings(&source), &[], DT,
+                controls(), iteration, || { polls += 1; false }).unwrap();
+            let report = candidate.step();
+            near(report.evaluated[0].point.current_a, sign * current, 2e-11);
+            near(candidate.circuit().charges_c()[0], sign * (1.0 - DT * current), 2e-11);
+            near(report.electrical.heat_j, DT * current * (2.0 - 0.1 * current), 2e-11);
+            near(report.electrical.stored_after_j + report.electrical.heat_j, 1.0, 2e-11);
+            assert!(report.iterations < bounded.maximum_iterations);
+            assert!(report.evaluated[0].power_defect_w.abs() <= controls().power_tolerance_w);
+            let mut count = 0;
+            assert!(matches!(circuit.conductivity_candidate(&bindings(&source), &[], DT,
+                controls(), iteration, || { count += 1; count == polls }),
+                Err(MaterialCircuitError::Cancelled)));
+        }
+        assert_eq!(circuit, original);
+    }
+}
+
+#[test]
 fn explicit_relaxation_preserves_unit_weight_and_constant_law_arithmetic() {
     for weight in [0.0, -0.5, 1.01, f64::NAN, f64::INFINITY] {
         assert!(solve().with_relaxation(weight).is_err());
+        assert!(solve().with_adaptive_relaxation(weight, 1e-4).is_err());
+        assert!(solve().with_adaptive_relaxation(1.0, weight).is_err());
     }
+    assert!(solve().with_adaptive_relaxation(0.1, 0.2).is_err());
     for slope in [0.0, 0.2] {
         let source = card(slope, false, 8.0, 16.0);
         let circuit = circuit(&source, 2.0);
@@ -414,6 +453,12 @@ fn explicit_relaxation_preserves_unit_weight_and_constant_law_arithmetic() {
             assert_eq!(relaxed.step().electrical.heat_j, native.step().electrical.heat_j);
             assert_eq!(relaxed.step().iterations, 1);
             assert_eq!(relaxed.step().source_evaluations, 1);
+            let adaptive = circuit.conductivity_candidate(&bindings(&source), &[], DT,
+                controls(), solve().with_adaptive_relaxation(0.5, 1e-4).unwrap(), || false).unwrap();
+            assert_eq!(adaptive.circuit(), native.circuit());
+            assert_eq!(adaptive.step().electrical.heat_j, native.step().electrical.heat_j);
+            assert_eq!(adaptive.step().iterations, 1);
+            assert_eq!(adaptive.step().source_evaluations, 1);
         }
     }
 }

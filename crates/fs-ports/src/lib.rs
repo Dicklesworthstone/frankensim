@@ -5849,6 +5849,9 @@ impl EnergyAudit {
     }
 }
 
+mod relaxation;
+pub use relaxation::{AitkenRelaxationError, BoundedAitkenRelaxation};
+
 /// Scalar Aitken (Δ²) dynamic relaxation for the strongly-coupled interface
 /// fixed point.
 #[derive(Debug, Clone)]

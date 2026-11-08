@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::material_circuit::conductivity::{
-    ConductivityIteration, ConductivitySolve, ConductorResponse, MaterialConductivityCandidate,
+    ConductivityIteration, ConductorResponse, MaterialConductivityCandidate,
     MaterialConductivityStep,
 };
 use crate::material_circuit::conductivity::contact::ContactResponse;
@@ -325,10 +325,7 @@ fn coupled_with_contacts_candidate<'m, S, E>(
         |state, remaining| {
             let resolved = resolve(state).map_err(CircuitEnthalpyError::Source)?;
             let coefficients = resolved.bulk;
-            let bounded = ConductivitySolve {
-                maximum_iterations: conductivity.maximum_iterations.min(remaining),
-                ..conductivity
-            };
+            let bounded = iteration.bounded(remaining)?;
             let circuit = input
                 .circuit
                 .conductivity_with_contact_response_candidate(
@@ -339,12 +336,12 @@ fn coupled_with_contacts_candidate<'m, S, E>(
                     input.ports,
                     target_s - thermal.time_s(),
                     controls.circuit,
-                    bounded.with_relaxation(iteration.relaxation())?,
+                    bounded,
                     || (*cancel.borrow_mut())(),
                 )
                 .map_err(|error| match error {
                     MaterialCircuitError::ConductivityConvergence { .. }
-                        if bounded.maximum_iterations < conductivity.maximum_iterations =>
+                        if bounded.controls().maximum_iterations < conductivity.maximum_iterations =>
                     {
                         CircuitEnthalpyError::CircuitBudget
                     }

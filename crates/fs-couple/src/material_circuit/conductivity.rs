@@ -93,7 +93,29 @@ impl ConductivitySolve {
         self,
         weight: f64,
     ) -> Result<ConductivityIteration, MaterialCircuitError> {
-        let iteration = ConductivityIteration { solve: self, weight };
+        let iteration = ConductivityIteration { solve: self, weight, adaptive_minimum: None };
+        iteration.validate()?;
+        Ok(iteration)
+    }
+
+    /// Adapt a convex relaxation weight from all bulk/contact source-coordinate
+    /// residuals. Require 0 < minimum_weight <= initial_weight <= 1.
+    ///
+    /// Independent coordinate scaling keeps volts, amperes and field/current
+    /// densities out of raw dot products. Only source coordinates are relaxed;
+    /// the original domains and final resistance/power checks still apply.
+    /// This can resolve oscillating passive laws without a hand-tuned fixed
+    /// weight, but supplies no convergence or physical-branch guarantee.
+    pub fn with_adaptive_relaxation(
+        self,
+        initial_weight: f64,
+        minimum_weight: f64,
+    ) -> Result<ConductivityIteration, MaterialCircuitError> {
+        let iteration = ConductivityIteration {
+            solve: self,
+            weight: initial_weight,
+            adaptive_minimum: Some(minimum_weight),
+        };
         iteration.validate()?;
         Ok(iteration)
     }
@@ -125,11 +147,12 @@ impl ConductivitySolve {
 pub struct ConductivityIteration {
     solve: ConductivitySolve,
     weight: f64,
+    adaptive_minimum: Option<f64>,
 }
 
 impl From<ConductivitySolve> for ConductivityIteration {
     fn from(solve: ConductivitySolve) -> Self {
-        Self { solve, weight: 1.0 }
+        Self { solve, weight: 1.0, adaptive_minimum: None }
     }
 }
 
@@ -137,13 +160,33 @@ impl ConductivityIteration {
     /// Original native-trial budget and physical resistance tolerances.
     pub const fn controls(self) -> ConductivitySolve { self.solve }
 
-    /// Fraction of the solved operating-coordinate update used for the next query.
+    /// Fixed fraction, or the initial fraction for adaptive relaxation.
     pub const fn relaxation(self) -> f64 { self.weight }
+
+    /// Lower bound for adaptive source-coordinate updates, if enabled.
+    pub const fn minimum_relaxation(self) -> Option<f64> { self.adaptive_minimum }
+
+    /// Narrow native work without discarding the authored relaxation policy.
+    pub(crate) fn bounded(self, maximum_iterations: usize) -> Result<Self, MaterialCircuitError> {
+        let bounded = Self {
+            solve: ConductivitySolve {
+                maximum_iterations: self.solve.maximum_iterations.min(maximum_iterations),
+                ..self.solve
+            },
+            ..self
+        };
+        bounded.validate()?;
+        Ok(bounded)
+    }
 
     pub(crate) fn validate(self) -> Result<(), MaterialCircuitError> {
         self.solve.validate()?;
         if !self.weight.is_finite() || self.weight <= 0.0 || self.weight > 1.0 {
             return Err(invalid("conductivity relaxation must be finite in (0,1]"));
+        }
+        if self.adaptive_minimum.is_some_and(|minimum|
+            !minimum.is_finite() || minimum <= 0.0 || minimum > self.weight) {
+            return Err(invalid("adaptive conductivity minimum must be finite in (0,initial]"));
         }
         Ok(())
     }
@@ -475,6 +518,13 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
     let mut maximum_resistance_defect = 0.0_f64;
     let mut maximum_power_defect = 0.0_f64;
     let mut source_evaluations = 0;
+    let mut acceleration = match iteration.adaptive_minimum {
+        Some(minimum) => Some(fs_ports::BoundedAitkenRelaxation::new(
+            iteration.weight, minimum, 1.0,
+        ).map_err(|_| invalid("invalid adaptive conductivity weights"))?),
+        None => None,
+    };
+    let mut coordinates = Vec::new();
     for iterations in 1..=solve.maximum_iterations {
         poll(&mut cancelled)?;
         let candidate = native(applied, applied_contacts, &mut cancelled)?;
@@ -560,13 +610,38 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
         // No unused source queries after the final allowed native trial. The
         // accepted endpoint above always passed actual-field residual gates.
         if iterations == solve.maximum_iterations { break; }
-        if iteration.weight < 1.0 {
+        let weight = if let Some(acceleration) = &mut acceleration {
+            coordinates.clear();
+            for ((heat, sample), binding) in candidate.resistor_heats().iter()
+                .zip(&evaluated).zip(&bindings) {
+                let before = heat.material.conductor.material().query_point();
+                let after = sample.conductor.material().query_point();
+                for axis in binding.axes {
+                    let value = |point: &[(String, f64)]| point.iter()
+                        .find(|(name, _)| name == axis.name).expect("admitted source axis").1;
+                    coordinates.push((value(before), value(after)));
+                }
+            }
+            for ((heat, sample), binding) in candidate.contact_heats().iter()
+                .zip(&evaluated_contacts).zip(&contact_bindings) {
+                let before = heat.contact.source().resolved().query_point();
+                let after = sample.contact.source().resolved().query_point();
+                for axis in binding.axes {
+                    let value = |point: &[(String, f64)]| point.iter()
+                        .find(|(name, _)| name == axis.name).expect("admitted contact axis").1;
+                    coordinates.push((value(before), value(after)));
+                }
+            }
+            acceleration.next_weight(&coordinates)
+                .map_err(|_| invalid("adaptive conductivity coordinate history changed"))?
+        } else { iteration.weight };
+        if weight < 1.0 {
             for ((((next, original), heat), sample), binding) in next.iter_mut().zip(&seeds)
                 .zip(candidate.resistor_heats()).zip(&evaluated).zip(&bindings) {
                 if !binding.axes.is_empty() {
                     poll(&mut cancelled)?;
                     next.conductor = relax(&original.conductor, binding,
-                        &heat.material.conductor, &sample.conductor, iteration.weight)?;
+                        &heat.material.conductor, &sample.conductor, weight)?;
                     source_evaluations += 1;
                 }
             }
@@ -575,7 +650,7 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
                 if !binding.axes.is_empty() {
                     poll(&mut cancelled)?;
                     *next = contact::relax(original, binding, &heat.contact,
-                        &sample.contact, iteration.weight)?;
+                        &sample.contact, weight)?;
                     source_evaluations += 1;
                 }
             }
@@ -602,7 +677,9 @@ impl MaterialCircuit {
     /// claims. Only original material responses supply resistance. Passing
     /// `solve.with_relaxation(weight)?` queries intermediate electrical source
     /// coordinates between trials; it never blends resistances or native states.
-    /// Plain controls retain the original unrelaxed iteration.
+    /// Adaptive relaxation chooses a bounded weight from all normalized bulk
+    /// and contact coordinate residuals. Plain controls retain the original
+    /// unrelaxed iteration.
     ///
     /// Acceptance requires every resistance residual to meet `solve` AND every
     /// constitutive power residual to meet `controls.power_tolerance_w`. Native

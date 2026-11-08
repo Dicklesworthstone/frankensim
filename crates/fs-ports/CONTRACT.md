@@ -75,3 +75,24 @@ uniform-flow geometric conservation, off-origin angular flux and rigid-motion
 power, orientation reversal, stationary-chart parity and invalid/rebound
 inputs. These are local transport identities, not a whole-system stability
 or physical-validation claim.
+
+## Bounded vector relaxation
+
+`BoundedAitkenRelaxation` chooses a convex iteration weight from a fixed-order
+vector of finite applied/solved coordinates. Finite bounds satisfy
+`0 < minimum <= initial <= maximum <= 1`. Each coordinate uses its running
+maximum magnitude; both previous and current residuals are represented in that
+same metric. Mixed physical units therefore do not enter raw dot products.
+A common residual scale prevents squared tiny defects from underflowing.
+
+Invalid controls, nonfinite coordinates and a changed coordinate count refuse;
+a failed update preserves the full relaxation history. Zero coordinates and an
+empty vector are admitted. Stagnant or unrepresentable secant ratios retain the
+previous bounded weight. Candidate-local work and storage are O(n); the physical
+caller owns its work/cancellation budget, source domains, physical residual
+checks and publication. This is acceleration, not a stability, convergence,
+uniqueness or passivity certificate. Original scalar relaxation is unchanged.
+
+Five G0/G1/G3 unit regressions cover the exact oscillating affine map, a passive
+resistor's independent operating point, independent unit/polarity changes,
+zero/stagnant/extreme coordinates, and atomic invalid-input refusal.
