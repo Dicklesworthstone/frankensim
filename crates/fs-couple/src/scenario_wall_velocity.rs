@@ -14,6 +14,7 @@ use fs_lbm::lattice3::{Grid3, GridError3, Lattice3};
 use fs_lbm::material::{MaterialLbmError, MaterialScaling};
 use fs_material::fluid_transport::FluidTransport;
 use fs_scenario::frame::{FrameKinematics, FrameKinematicsError, PreparedFrameKinematics};
+use fs_scenario::signal::DEFAULT_MAXIMUM_CYCLES_PER_STEP;
 use std::ops::ControlFlow;
 
 /// Refused physical wall-velocity sampling; no fluid step has begun.
@@ -36,10 +37,24 @@ pub enum FrameWallVelocityError {
         /// Admitted scenario speed in lattice units.
         maximum: f64,
     },
+    /// The selected frame source cannot be resolved by the fixed lattice step.
+    /// Rebuild the material scaling and grid with a smaller physical timestep.
+    FrequencyResolution {
+        /// Caller-selected physical sample time [s].
+        time_s: f64,
+        /// Frozen physical duration of one native lattice step [s].
+        timestep_s: f64,
+    },
 }
 
 impl core::fmt::Display for FrameWallVelocityError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Self::FrequencyResolution { time_s, timestep_s } = self {
+            return write!(
+                f,
+                "wall frame source at {time_s} s is unresolved by the fixed lattice timestep {timestep_s} s; rebuild material scaling and the grid with a smaller timestep"
+            );
+        }
         write!(f, "scenario wall velocity refused: {self:?}")
     }
 }
@@ -56,6 +71,9 @@ pub enum FrameWallStepError<E> {
 
 impl<E: core::fmt::Debug> core::fmt::Display for FrameWallStepError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Self::Velocity(error) = self {
+            return write!(f, "scenario-driven wall step refused: {error}");
+        }
         write!(f, "scenario-driven wall step refused: {self:?}")
     }
 }
@@ -153,6 +171,28 @@ impl<'a, 'frame, 'material, F: FluidTransport + ?Sized>
         Ok(frame)
     }
 
+    fn admit_step_frequency(
+        &self,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), FrameWallVelocityError> {
+        poll(checkpoint)?;
+        let timestep_s = self.scaling.timestep_s();
+        if !self
+            .frame
+            .admits_sampled_step(
+                time_s,
+                timestep_s,
+                DEFAULT_MAXIMUM_CYCLES_PER_STEP,
+                checkpoint,
+            )
+            .map_err(FrameWallVelocityError::Frame)?
+        {
+            return Err(FrameWallVelocityError::FrequencyResolution { time_s, timestep_s });
+        }
+        Ok(())
+    }
+
     /// Sample the held drive and perform one original serial lattice step.
     ///
     /// Populations and step count publish only after the native moving-wall
@@ -160,6 +200,9 @@ impl<'a, 'frame, 'material, F: FluidTransport + ?Sized>
     /// units, including wall impulse and mechanical work. This prescribes
     /// surface motion on fixed topology; normal/swept geometry still refuses.
     /// Choose the sample time explicitly (for example the interval midpoint).
+    /// Unresolved native chirps in the prepared frame path refuse before scratch
+    /// sampling. Use a smaller material-scaling timestep to resolve the source;
+    /// the fluid timestep and transport scaling remain frozen during the step.
     pub fn step_serial<L: Lattice3<Q>, const Q: usize>(
         &self,
         grid: &mut Grid3<L, Q>,
@@ -169,14 +212,17 @@ impl<'a, 'frame, 'material, F: FluidTransport + ?Sized>
         time_s: f64,
         collisions: Option<&[L::Collision]>,
     ) -> Result<MovingWallMomentum3, FrameWallStepError<L::Error>> {
-        self.sample_velocities(time_s, probe, scratch, &mut || {
+        let mut checkpoint = || {
             if cx.checkpoint().is_err() {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
-        })
-        .map_err(FrameWallStepError::Velocity)?;
+        };
+        self.admit_step_frequency(time_s, &mut checkpoint)
+            .map_err(FrameWallStepError::Velocity)?;
+        self.sample_velocities(time_s, probe, scratch, &mut checkpoint)
+            .map_err(FrameWallStepError::Velocity)?;
         grid.step_serial_with_moving_wall_momentum(cx, probe, scratch, collisions)
             .map_err(FrameWallStepError::Native)
     }
@@ -192,14 +238,17 @@ impl<'a, 'frame, 'material, F: FluidTransport + ?Sized>
         time_s: f64,
         collisions: Option<&[L::Collision]>,
     ) -> Result<MovingWallMomentum3, FrameWallStepError<L::Error>> {
-        self.sample_velocities(time_s, probe, scratch, &mut || {
+        let mut checkpoint = || {
             if gate.is_requested() {
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
-        })
-        .map_err(FrameWallStepError::Velocity)?;
+        };
+        self.admit_step_frequency(time_s, &mut checkpoint)
+            .map_err(FrameWallStepError::Velocity)?;
+        self.sample_velocities(time_s, probe, scratch, &mut checkpoint)
+            .map_err(FrameWallStepError::Velocity)?;
         grid.step_pooled_with_moving_wall_momentum(pool, gate, probe, scratch, collisions)
             .map_err(FrameWallStepError::Native)
     }

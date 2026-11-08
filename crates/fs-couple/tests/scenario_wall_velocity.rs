@@ -3,7 +3,7 @@
 use fs_couple::scenario_wall_velocity::{
     FrameWallStepError, FrameWallVelocity3, FrameWallVelocityError,
 };
-use fs_exec::{CancelGate, Cx};
+use fs_exec::{CancelGate, Cx, TilePool};
 use fs_ga::Vec3;
 use fs_lbm::d3q19::CollisionModel3;
 use fs_lbm::d3q27::{CollisionConfig27, CollisionModel27, D3q27, Equilibrium27};
@@ -12,7 +12,7 @@ use fs_lbm::material::plan_scaling_from_material;
 use fs_material::fluid_transport::FluidTransportState;
 use fs_qty::{Dims, QtyAny};
 use fs_scenario::frame::FrameKinematicsBudget;
-use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, TimeSignal, WORLD};
+use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, LinearChirp, TimeSignal, WORLD};
 use std::ops::ControlFlow;
 
 const LENGTH: Dims = Dims([1, 0, 0, 0, 0, 0]);
@@ -56,6 +56,24 @@ fn translation(direction: [f64; 3], distance: f64) -> FrameMotion {
             from: QtyAny::new(0.0, LENGTH),
             to: QtyAny::new(distance, LENGTH),
         },
+    }
+}
+
+fn chirped_translation(frequency_hz: f64) -> FrameMotion {
+    FrameMotion::Translating {
+        direction: [1.0, 0.0, 0.0],
+        displacement: TimeSignal::Chirp(
+            LinearChirp::new(
+                0.0,
+                1.0,
+                frequency_hz,
+                frequency_hz,
+                0.0,
+                QtyAny::new(0.0, LENGTH),
+                QtyAny::new(1e-5, LENGTH),
+            )
+            .unwrap(),
+        ),
     }
 }
 
@@ -254,5 +272,128 @@ fn cancelled_sampling_and_wrong_scratch_length_never_touch_the_grid() {
         );
         assert_eq!(flow.populations(), before);
         assert_eq!(flow.completed_steps(), 0);
+    });
+}
+
+#[test]
+fn unresolved_wall_cycles_refuse_before_scratch_and_finer_scaling_resolves_them() {
+    let material = fluid();
+    let dt = 0.001;
+    let scaling = plan_scaling_from_material(&material, 0.02, dt, 1.0).unwrap();
+    let frames = frames(chirped_translation(1.0 / dt));
+    let prepared = frames
+        .prepare_kinematics(FrameId(1), budget(), &mut || ControlFlow::Continue(()))
+        .unwrap();
+    let drive = FrameWallVelocity3::try_new(&prepared, &scaling, [0.0; 3]).unwrap();
+    let mut flow = grid::<D3q27, 27>(q27(scaling.flow().tau));
+    let before = flow.populations().to_vec();
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 7391);
+    with_cx(|cx| {
+        let probe = flow
+            .wall_momentum_probe(cx, [0.0; 3], |link| link.exterior_faces[4])
+            .unwrap();
+        let mut scratch = vec![[0.0; 3]; probe.measured_links()];
+        // The analytic displacement moves, yet whole-cycle samples look still.
+        for time in [0.0, dt, 2.0 * dt] {
+            drive
+                .sample_velocities(
+                    time,
+                    &probe,
+                    &mut scratch,
+                    &mut || ControlFlow::Continue(()),
+                )
+                .unwrap();
+            assert!(scratch.iter().flatten().all(|v| v.abs() < 1e-14));
+        }
+        scratch.fill([77.0, 88.0, 99.0]);
+        for pooled in [false, true] {
+            let result = if pooled {
+                drive.step_pooled(&mut flow, &pool, &gate, &probe, &mut scratch, dt, None)
+            } else {
+                drive.step_serial(&mut flow, cx, &probe, &mut scratch, dt, None)
+            };
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("smaller timestep"));
+            assert!(matches!(error,
+                FrameWallStepError::Velocity(FrameWallVelocityError::FrequencyResolution {
+                    time_s, timestep_s,
+                }) if time_s == dt && timestep_s == dt
+            ));
+            assert!(scratch.iter().all(|v| *v == [77.0, 88.0, 99.0]));
+            assert_eq!(flow.populations(), before);
+            assert_eq!(flow.completed_steps(), 0);
+        }
+
+        let fine = plan_scaling_from_material(&material, 0.02, dt / 32.0, 1.0).unwrap();
+        let fine_drive = FrameWallVelocity3::try_new(&prepared, &fine, [0.0; 3]).unwrap();
+        let mut serial = grid::<D3q27, 27>(q27(fine.flow().tau));
+        let mut parallel = grid::<D3q27, 27>(q27(fine.flow().tau));
+        let sample_time = fine.timestep_s() * 0.5;
+        let accepted = fine_drive
+            .step_serial(&mut serial, cx, &probe, &mut scratch, sample_time, None)
+            .unwrap();
+        let expected = fine
+            .velocity_lattice(
+                -1e-5 * std::f64::consts::TAU / dt
+                    * (std::f64::consts::TAU * sample_time / dt).sin(),
+            )
+            .unwrap();
+        assert!(expected.abs() > 1e-6);
+        assert!(
+            scratch
+                .iter()
+                .all(|v| (v[0] - expected).abs() < 1e-14 && v[1] == 0.0 && v[2] == 0.0)
+        );
+        let pooled = fine_drive
+            .step_pooled(
+                &mut parallel,
+                &pool,
+                &gate,
+                &probe,
+                &mut scratch,
+                sample_time,
+                None,
+            )
+            .unwrap();
+        assert_eq!(pooled, accepted);
+        assert_eq!(parallel.populations(), serial.populations());
+        assert_eq!(serial.completed_steps(), 1);
+        assert_eq!(parallel.completed_steps(), 1);
+    });
+}
+
+#[test]
+fn unrelated_oscillating_frame_does_not_restrict_the_selected_wall_drive() {
+    let material = fluid();
+    let scaling = plan_scaling_from_material(&material, 0.02, 0.001, 1.0).unwrap();
+    let mut frames = frames(translation([1.0, 0.0, 0.0], 0.2));
+    frames.add(Frame {
+        id: FrameId(2),
+        parent: WORLD,
+        name: "unselected-fast-drive".into(),
+        motion: chirped_translation(1000.0),
+    });
+    let prepared = frames
+        .prepare_kinematics(FrameId(1), budget(), &mut || ControlFlow::Continue(()))
+        .unwrap();
+    let drive = FrameWallVelocity3::try_new(&prepared, &scaling, [0.0; 3]).unwrap();
+    let mut flow = grid::<D3q19, 19>(CollisionModel3::Bgk {
+        tau: scaling.flow().tau,
+    });
+    with_cx(|cx| {
+        let probe = flow
+            .wall_momentum_probe(cx, [0.0; 3], |link| link.exterior_faces[4])
+            .unwrap();
+        let mut scratch = vec![[0.0; 3]; probe.measured_links()];
+        drive
+            .step_serial(&mut flow, cx, &probe, &mut scratch, 0.5, None)
+            .unwrap();
+        assert_eq!(flow.completed_steps(), 1);
+        assert!(
+            scratch
+                .iter()
+                .all(|v| *v == [scaling.velocity_lattice(0.2).unwrap(), 0.0, 0.0])
+        );
     });
 }

@@ -564,6 +564,72 @@ impl PreparedFrameKinematics<'_> {
         self.frame
     }
 
+    /// Admit the selected path's chirped drives for one fixed physical step.
+    ///
+    /// The sample may be anywhere in the step. Each chirp bounds frequency on
+    /// `sample_time_s ± step_duration_s` while charging only one duration.
+    /// Only this prepared frame's ancestor chain is visited; unrelated frame
+    /// rows cannot restrict the step. No history is cloned or revalidated, and
+    /// cancellation is polled before admission and once per selected frame.
+    ///
+    /// A chirped tilt divides the cycle allowance by `max(1, |amplitude_rad|)`
+    /// to also bound that rotation's angular travel. Translation retains the
+    /// source-cycle limit; geometric travel and wall-speed admission belong
+    /// to the physical consumer. Fixed/steady rotations and non-chirp histories
+    /// retain their existing scheduling contracts. Independent source checks
+    /// are not a band-limit or temporal-error certificate for composed frame
+    /// motion: composition can introduce additional harmonics and travel.
+    ///
+    /// # Errors
+    /// Invalid sample time, nonpositive/nonfinite duration, an allowance outside
+    /// `(0, 0.5)`, cancellation, or the original chirp owner's refusal.
+    pub fn admits_sampled_step(
+        &self,
+        sample_time_s: f64,
+        step_duration_s: f64,
+        maximum_cycles_per_step: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<bool, FrameKinematicsError> {
+        poll(checkpoint)?;
+        if !sample_time_s.is_finite()
+            || !step_duration_s.is_finite()
+            || step_duration_s <= 0.0
+            || !maximum_cycles_per_step.is_finite()
+            || maximum_cycles_per_step <= 0.0
+            || maximum_cycles_per_step >= 0.5
+        {
+            return Err(ScenarioError::Evaluate {
+                what: "frame source resolution needs finite time, positive duration and an allowance in (0, 0.5) cycles".into(),
+            }.into());
+        }
+        for (_, motion) in &self.path {
+            poll(checkpoint)?;
+            let (signal, tilt) = match motion {
+                PreparedMotion::Tilt { angle, .. } => (angle.source, true),
+                PreparedMotion::Translating { displacement, .. } => (displacement.source, false),
+                _ => continue,
+            };
+            let TimeSignal::Chirp(chirp) = signal else {
+                continue;
+            };
+            let scale = if tilt {
+                chirp.amplitude().value.abs().max(1.0)
+            } else {
+                1.0
+            };
+            if !chirp.admits_sampled_step_with_scale(
+                sample_time_s,
+                step_duration_s,
+                maximum_cycles_per_step,
+                scale,
+            )? {
+                return Ok(false);
+            }
+        }
+        poll(checkpoint)?;
+        Ok(true)
+    }
+
     /// Sample pose, frame-origin velocity/acceleration and angular
     /// velocity/acceleration once at `time_s`.
     ///

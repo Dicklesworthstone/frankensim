@@ -16,7 +16,8 @@ use fs_exec::CancelGate;
 use fs_lbm::d3q19::{BoundaryForcingError3, BoundaryGrid3, BoundarySpec3, Face3};
 use fs_lbm::material::MaterialScaling;
 use fs_material::fluid_transport::FluidTransport;
-use fs_scenario::{BoundaryCondition, FrameTree};
+use fs_scenario::signal::DEFAULT_MAXIMUM_CYCLES_PER_STEP;
+use fs_scenario::{BcValue, BoundaryCondition, FrameTree, TimeSignal};
 use std::ops::ControlFlow;
 
 /// One explicit scenario-region binding on an already configured open face.
@@ -49,10 +50,31 @@ pub enum ScenarioBoundaryError {
     Pressure(ScenarioPressureError),
     /// Original native boundary admission or final cancellation refusal.
     Boundary(BoundaryForcingError3),
+    /// The fixed material timestep cannot resolve a selected pressure source.
+    /// Rebuild the material scaling and grid with a smaller physical timestep.
+    FrequencyResolution {
+        /// Face carrying the unresolved pressure history.
+        face: Face3,
+        /// Caller-selected physical sample time [s].
+        time_s: f64,
+        /// Frozen physical duration of one native lattice step [s].
+        timestep_s: f64,
+    },
 }
 
 impl core::fmt::Display for ScenarioBoundaryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Self::FrequencyResolution {
+            face,
+            time_s,
+            timestep_s,
+        } = self
+        {
+            return write!(
+                f,
+                "pressure source on {face:?} at {time_s} s is unresolved by the fixed lattice timestep {timestep_s} s; rebuild material scaling and the grid with a smaller timestep"
+            );
+        }
         write!(f, "scenario open-boundary transaction refused: {self:?}")
     }
 }
@@ -110,6 +132,40 @@ fn gate_checkpoint(gate: &CancelGate) -> ControlFlow<()> {
     }
 }
 
+fn admit_step_frequencies(
+    boundaries: [Option<ScenarioBoundary3<'_>>; 6],
+    time_s: f64,
+    timestep_s: f64,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+) -> Result<(), ScenarioBoundaryError> {
+    for (face, boundary) in Face3::ALL.into_iter().zip(boundaries) {
+        let Some(ScenarioBoundary3::Pressure(input)) = boundary else {
+            continue;
+        };
+        let Some(BcValue::Signal(TimeSignal::Chirp(chirp))) = &input.boundary.value else {
+            continue;
+        };
+        if checkpoint().is_break() {
+            return Err(ScenarioBoundaryError::Pressure(
+                ScenarioPressureError::Cancelled,
+            ));
+        }
+        let admitted = chirp
+            .admits_sampled_step(time_s, timestep_s, DEFAULT_MAXIMUM_CYCLES_PER_STEP)
+            .map_err(|error| {
+                ScenarioBoundaryError::Pressure(ScenarioPressureError::Scenario(error))
+            })?;
+        if !admitted {
+            return Err(ScenarioBoundaryError::FrequencyResolution {
+                face,
+                time_s,
+                timestep_s,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn prepare_open_faces3<F: FluidTransport + ?Sized>(
     before: BoundarySpec3,
     boundaries: [Option<ScenarioBoundary3<'_>>; 6],
@@ -162,8 +218,8 @@ fn prepare_open_faces3<F: FluidTransport + ?Sized>(
 /// The same mixed transaction on the shared native D3Q19/D3Q27 owner.
 pub mod lattice3 {
     use super::{
-        BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError, gate_checkpoint,
-        prepare_open_faces3,
+        BoundarySample3, ScenarioBoundary3, ScenarioBoundaryError, admit_step_frequencies,
+        gate_checkpoint, prepare_open_faces3,
     };
     use fs_exec::{CancelGate, Cx, KernelRunner};
     use fs_lbm::d3q19::OpenBoundaryMomentumTransport3;
@@ -196,7 +252,16 @@ pub mod lattice3 {
 
     impl<E: core::fmt::Debug> core::fmt::Display for Error<E> {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            write!(f, "scenario lattice open-boundary transaction refused: {self:?}")
+            if let Self::Scenario(error) = self {
+                return write!(
+                    f,
+                    "scenario lattice open-boundary transaction refused: {error}"
+                );
+            }
+            write!(
+                f,
+                "scenario lattice open-boundary transaction refused: {self:?}"
+            )
         }
     }
 
@@ -246,6 +311,9 @@ pub mod lattice3 {
     /// Targets, populations and completed-step count publish only after the
     /// original collision, streaming and reservoir measurement all succeed.
     /// The returned samples therefore describe the accepted physical step.
+    /// Native pressure chirps must fit the source cycle limit over any interval
+    /// containing the selected sample. An unresolved source requires a smaller
+    /// material-scaling timestep; this operation never changes lattice scaling.
     #[allow(clippy::too_many_arguments)]
     pub fn step_serial<L, F, const Q: usize>(
         grid: &mut OpenBoundaryGrid3<L, Q>,
@@ -261,19 +329,22 @@ pub mod lattice3 {
         L: EquilibriumLattice3<Q>,
         F: FluidTransport + ?Sized,
     {
+        let mut checkpoint = || {
+            if cx.checkpoint().is_err() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        admit_step_frequencies(boundaries, time_s, scaling.timestep_s(), &mut checkpoint)
+            .map_err(Error::Scenario)?;
         let prepared = prepare_open_faces3(
             grid.boundaries(),
             boundaries,
             frames,
             time_s,
             scaling,
-            &mut || {
-                if cx.checkpoint().is_err() {
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
-                }
-            },
+            &mut checkpoint,
             |_| false,
             |face| grid.pressure_profile(face).is_some(),
         )
@@ -306,13 +377,16 @@ pub mod lattice3 {
         F: FluidTransport + ?Sized,
         P: KernelRunner,
     {
+        let mut checkpoint = || gate_checkpoint(gate);
+        admit_step_frequencies(boundaries, time_s, scaling.timestep_s(), &mut checkpoint)
+            .map_err(Error::Scenario)?;
         let prepared = prepare_open_faces3(
             grid.boundaries(),
             boundaries,
             frames,
             time_s,
             scaling,
-            &mut || gate_checkpoint(gate),
+            &mut checkpoint,
             |_| false,
             |face| grid.pressure_profile(face).is_some(),
         )

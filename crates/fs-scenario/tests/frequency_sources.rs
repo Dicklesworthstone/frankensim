@@ -1,14 +1,167 @@
 //! G0/G3 integration of authored physical frequencies into scenario histories.
 
 use fs_qty::{Dims, QtyAny};
+use fs_scenario::frame::{FrameKinematicsBudget, FrameKinematicsError};
 use fs_scenario::ir::{parse_ir, write_ir};
 use fs_scenario::{
-    BcKind, BcValue, BoundaryCondition, Compat, Environment, LinearChirp, Physics, Scenario,
-    ScenarioError, TimeSignal,
+    BcKind, BcValue, BoundaryCondition, Compat, DEFAULT_MAXIMUM_CYCLES_PER_STEP, Environment,
+    Frame, FrameId, FrameMotion, FrameTree, LinearChirp, Physics, Scenario, ScenarioError,
+    TimeSignal, WORLD,
 };
+use std::ops::ControlFlow;
 
 const PRESSURE: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const MASS_FLOW: Dims = Dims([0, 1, -1, 0, 0, 0]);
+
+fn chirped_frame(id: u32, parent: FrameId, hz: f64, amplitude: f64, tilt: bool) -> Frame {
+    let dims = if tilt {
+        Dims::NONE
+    } else {
+        Dims([1, 0, 0, 0, 0, 0])
+    };
+    let signal = TimeSignal::Chirp(
+        LinearChirp::new(
+            0.0,
+            1.0,
+            hz,
+            hz,
+            0.0,
+            QtyAny::new(0.0, dims),
+            QtyAny::new(amplitude, dims),
+        )
+        .unwrap(),
+    );
+    Frame {
+        id: FrameId(id),
+        name: format!("frequency-frame-{id}"),
+        parent,
+        motion: if tilt {
+            FrameMotion::Tilt {
+                axis: [0.0, 0.0, 1.0],
+                center: Default::default(),
+                angle: signal,
+            }
+        } else {
+            FrameMotion::Translating {
+                direction: [1.0, 0.0, 0.0],
+                displacement: signal,
+            }
+        },
+    }
+}
+
+#[test]
+fn prepared_source_resolution_visits_only_the_selected_ancestor_chain() {
+    let mut tree = FrameTree::new();
+    tree.add(chirped_frame(1, WORLD, 1.0, 0.001, false));
+    tree.add(chirped_frame(2, WORLD, 1000.0, 0.001, false));
+    tree.add(chirped_frame(3, FrameId(2), 1.0, 0.001, false));
+    let mut checkpoint = || ControlFlow::Continue(());
+    let slow = tree
+        .prepare_kinematics(
+            FrameId(1),
+            FrameKinematicsBudget::default(),
+            &mut checkpoint,
+        )
+        .unwrap();
+    assert!(
+        slow.admits_sampled_step(
+            0.25,
+            0.001,
+            DEFAULT_MAXIMUM_CYCLES_PER_STEP,
+            &mut checkpoint
+        )
+        .unwrap()
+    );
+    let fast_parent = tree
+        .prepare_kinematics(
+            FrameId(3),
+            FrameKinematicsBudget::default(),
+            &mut checkpoint,
+        )
+        .unwrap();
+    assert!(
+        !fast_parent
+            .admits_sampled_step(
+                0.25,
+                0.001,
+                DEFAULT_MAXIMUM_CYCLES_PER_STEP,
+                &mut checkpoint
+            )
+            .unwrap()
+    );
+    assert!(
+        fast_parent
+            .admits_sampled_step(
+                0.25,
+                0.001 / 32.0,
+                DEFAULT_MAXIMUM_CYCLES_PER_STEP,
+                &mut checkpoint
+            )
+            .unwrap()
+    );
+}
+
+#[test]
+fn prepared_tilt_resolution_bounds_angular_travel_and_preserves_cancellation() {
+    let mut tree = FrameTree::new();
+    tree.add(chirped_frame(1, WORLD, 1.0, -8.0, true));
+    tree.add(chirped_frame(2, WORLD, 1.0, 0.1, true));
+    let mut checkpoint = || ControlFlow::Continue(());
+    let large = tree
+        .prepare_kinematics(
+            FrameId(1),
+            FrameKinematicsBudget::default(),
+            &mut checkpoint,
+        )
+        .unwrap();
+    let small = tree
+        .prepare_kinematics(
+            FrameId(2),
+            FrameKinematicsBudget::default(),
+            &mut checkpoint,
+        )
+        .unwrap();
+    assert!(
+        small
+            .admits_sampled_step(0.25, 0.01, DEFAULT_MAXIMUM_CYCLES_PER_STEP, &mut checkpoint)
+            .unwrap()
+    );
+    assert!(
+        !large
+            .admits_sampled_step(0.25, 0.01, DEFAULT_MAXIMUM_CYCLES_PER_STEP, &mut checkpoint)
+            .unwrap()
+    );
+    assert!(
+        large
+            .admits_sampled_step(
+                0.25,
+                0.001,
+                DEFAULT_MAXIMUM_CYCLES_PER_STEP,
+                &mut checkpoint
+            )
+            .unwrap()
+    );
+    let mut polls = 0;
+    let cancelled =
+        small.admits_sampled_step(0.25, 0.001, DEFAULT_MAXIMUM_CYCLES_PER_STEP, &mut || {
+            polls += 1;
+            if polls == 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+    assert!(matches!(cancelled, Err(FrameKinematicsError::Cancelled)));
+    let world = tree
+        .prepare_kinematics(WORLD, FrameKinematicsBudget::default(), &mut checkpoint)
+        .unwrap();
+    assert!(
+        world
+            .admits_sampled_step(0.25, 0.01, 0.0, &mut checkpoint)
+            .is_err()
+    );
+}
 
 fn source(dims: Dims) -> LinearChirp {
     LinearChirp::new(

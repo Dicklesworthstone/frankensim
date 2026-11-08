@@ -168,6 +168,83 @@ impl LinearChirp {
             .max(self.instantaneous_frequency_hz(end)?))
     }
 
+    /// Admit one fixed-duration step containing a caller-selected sample time.
+    ///
+    /// The frequency envelope covers `[sample_time_s-step_duration_s,
+    /// sample_time_s+step_duration_s]`, so the sample may be an endpoint,
+    /// midpoint or any other point in the actual step. The peak frequency is
+    /// multiplied by ONE step duration, not the envelope's double duration.
+    /// Overflowing envelope endpoints safely select the continuing endpoint
+    /// tones. No sample time, physical timestep or sweep phase is changed, and
+    /// crossing a sweep join does not by itself refuse a fixed held step.
+    ///
+    /// Zero amplitude and locally DC sources impose no frequency cap. This
+    /// allocation-free, constant-work check admits source resolution only;
+    /// it supplies neither a band-limit certificate nor a solver-error bound.
+    ///
+    /// # Errors
+    /// [`ScenarioError::Evaluate`] for nonfinite sample time, nonpositive or
+    /// nonfinite duration, or a cycle allowance outside `(0, 0.5)`.
+    pub fn admits_sampled_step(
+        &self,
+        sample_time_s: f64,
+        step_duration_s: f64,
+        maximum_cycles_per_step: f64,
+    ) -> Result<bool, ScenarioError> {
+        self.admits_sampled_step_with_scale(
+            sample_time_s,
+            step_duration_s,
+            maximum_cycles_per_step,
+            1.0,
+        )
+    }
+
+    // Prepared tilts additionally constrain angular travel. Keep their scaled
+    // admission here so a locally constant source still admits if the scaled
+    // positive allowance would underflow. `scale` is finite and at least one.
+    pub(crate) fn admits_sampled_step_with_scale(
+        &self,
+        sample_time_s: f64,
+        step_duration_s: f64,
+        maximum_cycles_per_step: f64,
+        scale: f64,
+    ) -> Result<bool, ScenarioError> {
+        if !sample_time_s.is_finite() || !step_duration_s.is_finite() || step_duration_s <= 0.0 {
+            return Err(invalid(
+                "sampled chirp resolution needs a finite time and positive finite duration",
+            ));
+        }
+        if !maximum_cycles_per_step.is_finite()
+            || maximum_cycles_per_step <= 0.0
+            || maximum_cycles_per_step >= 0.5
+        {
+            return Err(invalid(
+                "chirp step allowance must be finite and in (0, 0.5) cycles",
+            ));
+        }
+        debug_assert!(scale.is_finite() && scale >= 1.0);
+        if self.amplitude.value == 0.0 {
+            return Ok(true);
+        }
+        let at = if self.frequency_end_hz > self.frequency_start_hz {
+            (sample_time_s + step_duration_s).next_up()
+        } else {
+            (sample_time_s - step_duration_s).next_down()
+        };
+        let frequency = self.resolution_frequency_upper(at);
+        if frequency == 0.0 {
+            return Ok(true);
+        }
+        let allowance = if scale == 1.0 {
+            maximum_cycles_per_step
+        } else {
+            (maximum_cycles_per_step / scale).next_down()
+        };
+        // Duration is already an exact supplied f64, not an endpoint
+        // subtraction. Expanding it first would turn f64::MAX into infinity.
+        Ok(allowance > 0.0 && (step_duration_s * frequency).next_up() <= allowance)
+    }
+
     /// Limit a forward step on the original physical clock to resolve this source.
     ///
     /// For nonzero amplitude, the returned interval satisfies `duration * maximum_frequency <=
@@ -489,6 +566,70 @@ mod tests {
             end
         );
         end
+    }
+
+    #[test]
+    fn g1_fixed_sample_admission_bounds_the_local_envelope_for_one_duration() {
+        let allowance = DEFAULT_MAXIMUM_CYCLES_PER_STEP;
+        let tone = chirp(0.0, 1.0, 1.0, 1.0, 0.0);
+        // One duration is .04 cycles; the envelope's double duration is .08.
+        assert!(tone.admits_sampled_step(0.5, 0.04, allowance).unwrap());
+        assert!(!tone.admits_sampled_step(0.5, 1.0, allowance).unwrap());
+        let wide = chirp(0.0, 1e6, 0.0, 1e6, 0.0);
+        assert!(wide.admits_sampled_step(1.0, 0.01, allowance).unwrap());
+        assert!(wide.admits_sampled_step(0.0, 0.1, allowance).unwrap());
+        for source in [
+            chirp(0.0, 2.0, 0.0, 2.0, 0.0),
+            chirp(0.0, 2.0, 2.0, 0.0, 0.0),
+        ] {
+            // f(sample)=1 Hz would admit .1 s under .105 cycles. The full
+            // endpoint/midpoint envelope reaches 1.1 Hz and must refuse.
+            assert!(!source.admits_sampled_step(1.0, 0.1, 0.105).unwrap());
+            assert!(source.admits_sampled_step(1.0, 0.01, allowance).unwrap());
+        }
+    }
+
+    #[test]
+    fn g0_fixed_sample_admission_validates_constants_and_wide_envelopes() {
+        let allowance = DEFAULT_MAXIMUM_CYCLES_PER_STEP;
+        let dc = chirp(0.0, 1.0, 0.0, 0.0, 0.31);
+        let zero = LinearChirp::new(
+            0.0,
+            1.0,
+            f64::MAX,
+            0.0,
+            0.0,
+            QtyAny::dimensionless(7.0),
+            QtyAny::dimensionless(0.0),
+        )
+        .unwrap();
+        for source in [&dc, &zero] {
+            assert!(
+                source
+                    .admits_sampled_step(f64::MAX, f64::MAX, allowance)
+                    .unwrap()
+            );
+            for bad in [0.0, -0.1, 0.5, f64::NAN, f64::INFINITY] {
+                assert!(source.admits_sampled_step(0.0, 0.1, bad).is_err());
+            }
+            for (time, duration) in [
+                (f64::NAN, 0.1),
+                (0.0, 0.0),
+                (0.0, -0.1),
+                (0.0, f64::INFINITY),
+            ] {
+                assert!(
+                    source
+                        .admits_sampled_step(time, duration, allowance)
+                        .is_err()
+                );
+            }
+        }
+        let slow = chirp(0.0, 1.0, f64::from_bits(1), f64::from_bits(1), 0.0);
+        assert!(
+            slow.admits_sampled_step(f64::MAX, f64::MAX, allowance)
+                .unwrap()
+        );
     }
 
     #[test]

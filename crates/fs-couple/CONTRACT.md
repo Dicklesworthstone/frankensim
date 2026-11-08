@@ -1586,6 +1586,22 @@ collision, force correction and reservoir transport. G0/G3 tests in
 density after steps, gauge/absolute equivalence, histories, profile precedence,
 transactional refusal and cancellation. No new dependency or solver is added.
 
+The native `scenario_open_boundary::lattice3` serial/pooled step APIs admit
+selected pressure chirps against the frozen `MaterialScaling::timestep_s()`
+before preparing boundary targets. `FrameWallVelocity3` performs the same
+admission on its prepared ancestor path before writing velocity scratch or
+entering the moving-wall operator. The source-owned check covers any interval
+of that duration containing the caller's endpoint/midpoint sample, using the
+local `sample_time +/- duration` frequency envelope and the default 1/16-cycle
+allowance. Chirped tilts also bound individual angular travel; unrelated frame
+rows do not constrain the selected wall drive. Typed `FrequencyResolution`
+refusals retain the physical sample time/timestep and require explicitly finer
+material scaling and a rebuilt grid. Pressure targets, populations, accepted
+step counts and wall scratch remain intact on this refusal. Point sampling and
+explicit rebinding keep their existing caller-owned integration semantics.
+Regressions cover falsely constant pressure, falsely stationary walls, serial
+and pooled atomic refusal, and a resolved rebuilt clock with analytic velocity.
+
 The feature-gated `scenario_pressure::compressible` adapter also resolves
 native chirp pressure and temperature histories before requesting an Euler
 reservoir interval. Both selected ends constrain the shared physical clock to

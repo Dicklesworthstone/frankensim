@@ -19,7 +19,9 @@ use fs_scenario::payload::{
     OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta, QuantityContract,
     ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
 };
-use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameTree, Physics, TimeSignal, WORLD};
+use fs_scenario::{
+    BcKind, BcValue, BoundaryCondition, FrameTree, LinearChirp, Physics, TimeSignal, WORLD,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
@@ -452,6 +454,137 @@ fn changing_scenario_histories_advance_both_lattices_and_execution_paths() {
             equilibrium: Equilibrium27::Factorized,
         },
         maximum_mach: 0.2,
+    });
+}
+
+#[test]
+fn unresolved_pressure_cycles_refuse_before_publication_and_finer_scaling_resolves_them() {
+    let material = fluid();
+    let dt = 0.001;
+    let scaling = plan_scaling_from_material(&material, 0.02, dt, 1.0).unwrap();
+    let inlet = velocity([0.0, 0.0, 0.4]);
+    let mut outlet = pressure(0.0);
+    outlet.value = Some(BcValue::Signal(TimeSignal::Chirp(
+        LinearChirp::new(
+            0.0,
+            1.0,
+            1.0 / dt,
+            1.0 / dt,
+            0.0,
+            QtyAny::new(100.0, PRESSURE),
+            QtyAny::new(100.0, PRESSURE),
+        )
+        .unwrap(),
+    )));
+    let frames = FrameTree::new();
+    let gate = CancelGate::new_clock_free();
+    let pool = TilePool::for_host(2, 0xB0A0);
+    with_cx(&gate, |cx| {
+        let mut flow = generic_grid(cx, scaling.flow().tau, 0.2);
+        flow.step_serial(cx, None, [0.0; 3]).unwrap();
+        let targets = flow.boundaries();
+        let populations = flow.populations().to_vec();
+        let force = flow.force_density();
+        // Point sampling at this clock aliases every complete cycle to its peak.
+        for time in [0.0, dt, 2.0 * dt] {
+            let sample = fs_couple::scenario_pressure::sample_pressure3(
+                PressureBoundary3 {
+                    boundary: &outlet,
+                    reference: PressureReference::Gauge,
+                },
+                &frames,
+                time,
+                &scaling,
+                &mut || std::ops::ControlFlow::Continue(()),
+            )
+            .unwrap();
+            near(sample.supplied_pa, 200.0);
+        }
+        for pooled in [false, true] {
+            let result = if pooled {
+                lattice3::step_pooled(
+                    &mut flow,
+                    controls(&inlet, &outlet),
+                    &frames,
+                    dt,
+                    &scaling,
+                    &pool,
+                    &gate,
+                    None,
+                    [0.0; 3],
+                )
+            } else {
+                lattice3::step_serial(
+                    &mut flow,
+                    controls(&inlet, &outlet),
+                    &frames,
+                    dt,
+                    &scaling,
+                    cx,
+                    None,
+                    [0.0; 3],
+                )
+            };
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("smaller timestep"));
+            assert!(matches!(error,
+                lattice3::Error::Scenario(ScenarioBoundaryError::FrequencyResolution {
+                    face: Face3::ZMax, time_s, timestep_s,
+                }) if time_s == dt && timestep_s == dt
+            ));
+            assert_eq!(flow.boundaries(), targets);
+            assert_eq!(flow.populations(), populations);
+            assert_eq!(flow.force_density(), force);
+            assert_eq!(flow.completed_steps(), 1);
+        }
+        // Explicit point rebinding still has no implied integration interval.
+        lattice3::rebind_open_faces3(
+            &mut flow,
+            controls(&inlet, &outlet),
+            &frames,
+            dt,
+            &scaling,
+            &gate,
+        )
+        .unwrap();
+        assert_eq!(flow.populations(), populations);
+        assert_eq!(flow.completed_steps(), 1);
+
+        let fine = plan_scaling_from_material(&material, 0.02, dt / 32.0, 1.0).unwrap();
+        let mut serial = generic_grid(cx, fine.flow().tau, 0.2);
+        let mut parallel = generic_grid(cx, fine.flow().tau, 0.2);
+        let sample_time = fine.timestep_s() * 0.5;
+        let accepted = lattice3::step_serial(
+            &mut serial,
+            controls(&inlet, &outlet),
+            &frames,
+            sample_time,
+            &fine,
+            cx,
+            None,
+            [0.0; 3],
+        )
+        .unwrap();
+        let pooled = lattice3::step_pooled(
+            &mut parallel,
+            controls(&inlet, &outlet),
+            &frames,
+            sample_time,
+            &fine,
+            &pool,
+            &gate,
+            None,
+            [0.0; 3],
+        )
+        .unwrap();
+        assert_eq!(pooled, accepted);
+        assert_eq!(parallel.populations(), serial.populations());
+        assert_eq!(serial.completed_steps(), 1);
+        assert_eq!(parallel.completed_steps(), 1);
+        let Some(BoundarySample3::Pressure(sample)) = accepted.samples[5] else {
+            panic!("missing pressure");
+        };
+        assert!(sample.supplied_pa < 200.0);
     });
 }
 

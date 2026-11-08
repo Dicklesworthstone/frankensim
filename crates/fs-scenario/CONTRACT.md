@@ -235,6 +235,16 @@ flagships.
   frequency subdivision. Returned endpoints are fixed points when admitted
   again; unrepresentable positive advances refuse. This is source-resolution
   control, not antialias filtering or a solution-error/bandwidth certificate.
+  `LinearChirp::admits_sampled_step` admits a fixed physical duration without
+  changing its scaling or sample time. It bounds frequency over the outward
+  envelope `sample_time +/- duration`, then charges only one duration, so an
+  endpoint, midpoint or other within-step sample shares the same safe rule.
+  The local envelope preserves early low-frequency sweep segments and permits
+  crossing joins when the source is resolved. The prepared-frame counterpart
+  visits only its retained ancestor chain, polls cancellation, and scales each
+  chirped tilt's allowance by `1/max(1, abs(amplitude_rad))` to bound individual
+  angular travel. Both successful paths allocate nothing; composed motion and
+  solver error retain their separate accuracy requirements.
   Solid, compressible-pressure and moving-heat event owners retain those knots.
   Moving-heat travel limits use the full interval's maximum frequency, including
   continuing tails; polynomial-only power and design-control paths refuse
