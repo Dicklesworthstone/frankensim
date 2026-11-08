@@ -301,6 +301,72 @@ constant-Jacobian DC-to-AC decoupling. This supports
 `frankensim-irp-v5-instrument-realism-pexfp.175`; it does not claim that bead's
 graph/time-domain threshold acceptance.
 
+## Conservative backbone continuation
+
+`continue_backbone_branch` continues a conservative periodic family without
+introducing a physical continuation parameter. The two complete physical
+seeds each declare a positive first-harmonic peak in any original state
+coordinate. Both are corrected against every original balance equation,
+the shared full-waveform phase condition and that amplitude constraint.
+Seed convergence metadata is not trusted. Before the second correction,
+all harmonics of every state are coherently phase-rotated together.
+
+Later points replace the amplitude row with a normalized Parseval
+pseudo-arclength plane. Frequency and every Fourier coefficient are jointly
+corrected, so frequency or selected amplitude may turn along the family.
+The metric uses the original independent state, equation and angular-frequency
+scales. Static or nodal first states, dense nonsingular equation mixing and
+explicit conservative coupling remain present. No balance row, loss term,
+coupling or memory coordinate is removed.
+
+With nc real Fourier coefficients, the corrector has nc+1 unknowns and nc+2
+rows: the original nc balance equations plus phase and amplitude/arclength.
+The conservation-dependent equation is retained. The original fs-la
+Householder QR solves this rectangular system after finite, unit-norm column
+equilibration. No normal equations, pseudoinverse or diagonal jitter are
+introduced. Every iteration, including an already residual-zero seed, checks
+QR pivots and the authored maximum estimated 1-norm condition of its
+equilibrated triangular R factor. The bounded five-iteration Hager/Higham
+screen is a numerical estimate, not a rank or conditioning certificate.
+Extra unresolved neutral directions refuse instead of selecting an
+arbitrary family silently.
+
+Original AFT, exact island coefficient tangents, full-waveform phase and
+physical scaling remain shared owners. Declared tangent refusal cannot
+become finite differences. Undeclared coefficient tangents and the frequency
+column use centered normalized probes. Backtracking evaluates the full
+original augmented residual. Each accepted point passes an independent
+finer-grid retained-balance and sampling-defect check; physical HB diagnostics
+remain separate from dimensionless phase and amplitude/arclength errors.
+
+`BackboneContinuationBudget` bounds unknowns (also capped at 2048), retained
+points, Newton iterations, step retries, complete residual evaluations and
+numerical payload before source work. Payload includes simultaneous AFT/FFT
+workspaces, optional analytic tangents, dense QR work and every retained
+coefficient row/header and residual trace. Source callbacks are immutable and
+must be deterministic. Cancellation is polled around sampled residual/tangent
+passes, between columns, around QR and between steps; each native sampled or
+dense factorization call remains a bounded noninterruptible unit. Success
+contains exactly steps+2 points; refusals publish no partial branch.
+
+The six new integration tests verify independent energy-period quadrature and
+every velocity harmonic under original-state/row rescaling, mixed phases,
+exact/probed tangents and reciprocal two-mass coupling. A 14-point
+softening-hardening family crosses a genuine frequency projection turn. Its
+order-21 maximum relative energy-period frequency discrepancy is 1.108e-9;
+order 15 failed the unchanged physical oracle despite converged retained
+balance. Additional-neutral-direction seeds, physical damping, resource
+limits, cancellation and authored tangent refusal are covered. All 39 focused
+native tests pass, including the original backbone, autonomous tangent,
+autonomous continuation and full orbit unit suites. This compiles complete
+fs-orbit with actual numerical owners; it is not a full Cargo workspace gate.
+
+Harmonic order stays fixed. Retained-balance acceptance alone does not resolve
+omitted harmonics or prove continuous-time accuracy. This entry does not
+classify stability, primitive period, branch identity, bifurcations, hybrid
+cycles or separatrices. The original source owns its physical bandwidth and
+constitutive validity domain.
+
 ## Autonomous cycle continuation
 
 `AutonomousScales` separately conditions original states, balance rows,

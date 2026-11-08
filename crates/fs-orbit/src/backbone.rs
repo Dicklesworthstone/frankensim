@@ -1,8 +1,15 @@
-//! Conservative backbone amplitudes in any original physical state coordinate.
+//! Conservative backbone charts in the complete original physical state.
 //!
-//! The existing backbone owner anchors its first coordinate. A permutation of
-//! the full problem supplies any other coordinate without reducing the system,
-//! changing its equations, or adding a second Newton or refinement algorithm.
+//! Fixed-amplitude entries permute the full problem into the existing solver's
+//! first-coordinate chart without changing its equations or refinement owner.
+//! Family continuation retains the conservation-dependent balance row and
+//! uses a rectangular phase/arclength corrector over all states and frequency.
+
+mod continuation;
+pub use continuation::{
+    BackboneBranch, BackboneContinuationBudget, BackboneContinuationError,
+    BackboneContinuationPoint, continue_backbone_branch,
+};
 
 use core::cell::RefCell;
 

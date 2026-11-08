@@ -54,6 +54,8 @@ pub use scaling::{HbScales, ScaledHbOrbit, solve_hb_scaled_seeded};
 
 mod backbone;
 pub use backbone::{
+    BackboneBranch, BackboneContinuationBudget, BackboneContinuationError,
+    BackboneContinuationPoint, continue_backbone_branch,
     solve_hb_backbone_coordinate_adaptive_scaled_seeded,
     solve_hb_backbone_coordinate_scaled_seeded,
 };
