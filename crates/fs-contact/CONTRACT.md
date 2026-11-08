@@ -3980,3 +3980,34 @@ geometry/source/calibration and unsupported limits refuse without mutation.
 G0/G1/G3 tests independently add unequal bulk compliances, retain tensile-area
 resistance (one-quarter zero-load stiffness at force pull-off), reconstruct work,
 exercise reversal and reject foreign history and excessive mode-III release.
+
+## Relaxed-area axisymmetric adhesive torsion
+
+`SourceJkrMixedMode::evaluate_torsion_displacement_controlled` extends the
+existing conservative Griffith owner to prescribed normal approach and twist.
+The original two shear moduli give `1/G_bar=1/G_a+1/G_b`. Radius stationarity of
+normal elastic storage plus `8 G_bar a^3 phi^2/3 - pi W a^2` gives
+`E*(delta-a^2/R)^2 + 8 G_bar a^2 phi^2 = 2 pi W a`. The response reports the
+actual relaxed area, signed normal force, applied torque, separate reversible
+energy terms, I/III release, equilibrium residual and reciprocal condensed
+normal/twist stiffness. Positive torque enters storage; the receiver's resisting
+couple has the opposite sign. Original material, geometry, small-scale-yielding
+and authority checks remain effective. Existing shear envelopes bound the rim
+displacement/radius and mean absolute circumferential traction.
+
+The larger radial local minimum ends at a radial fold for negative approach.
+At positive approach the zero-opening edge `a=sqrt(R delta)` binds first and
+is explicitly distinguished from detachment. Zero approach has no finite ideal
+fold. Bounded monotone solves retain distances near folds and solve the original
+quartic near zero approach, where the ideal twist limit diverges. Unresolved
+arithmetic refuses. No post-fold landing, closed-crack continuation, partial
+slip, mixed-mode toughness fit, irreversible loss or heat is inferred.
+
+`AdhesiveTractionProfile::jkr_torsion_equilibrium` consumes this original
+equilibrium to construct the changed normal pressure and resisting torsional
+traction. Existing exact sector first moments and solid P1 projection retain
+the torque and affine work without inventing tangential resultant force.
+Focused regressions exercise unequal-modulus intensity oracles, pure-normal
+reduction, area shrinkage, coupled energy derivatives, reciprocal tangent,
+twist work including normal/surface relaxation, both physical boundaries,
+near-zero conditioning and original applicability refusals.

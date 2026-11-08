@@ -145,6 +145,12 @@ impl AdhesiveTractionProfile {
         if !angle_rad.is_finite() || !(0.0..=TAU).contains(&angle_rad) {
             return Err(AdhesiveTractionError::Invalid("polar angle in [0,2pi]"));
         }
+        if radius_m == self.contact_radius_m()
+            && (self.torsional_moment_n_m() != 0.0
+                || self.tangential_force_n().iter().any(|&q| q != 0.0))
+        {
+            return Err(AdhesiveTractionError::SingularEdge);
+        }
         let normal = self.pressure_pa(radius_m)?;
         let mut tangential = [0.0; 2];
         if radius_m < self.contact_radius_m() && self.tangential_force_n().iter().any(|&q| q != 0.0)

@@ -1,6 +1,7 @@
 //! Full-stick shear distribution and work on the original peeled JKR disk.
 use super::*;
 use core::f64::consts::TAU;
+use fs_contact::normal_patch::adhesive::mixed_mode::torsion::JkrTorsionalLimitKind;
 use fs_contact::normal_patch::adhesive::torsion::{JkrTorsionControls, SourceJkrTorsionContact};
 use fs_contact::normal_patch::traction::sectors::{
     PolarTransferBudget, RadialMomentBudget, SectorTractionError,
@@ -513,4 +514,121 @@ fn torsion_vector_grid_recovers_source_couple_and_affine_rotation_work() {
         .unwrap();
     close(coarse_power, power, power.abs(), 3e-13);
     assert_eq!(error, 0.0);
+}
+
+#[test]
+fn torsion_equilibrium_field_uses_reduced_area_and_remaining_normal_opening() {
+    let source = mixed_jkr();
+    let normal = source.normal_source();
+    let elastic = normal.normal_state().elastic();
+    let e = elastic.reduced_modulus_pa();
+    let g = [elastic.surface_a_state(), elastic.surface_b_state()]
+        .map(|s| s.elastic_state().shear_modulus_pa());
+    let gbar = 1.0 / (1.0 / g[0] + 1.0 / g[1]);
+    let delta = 1e-6;
+    let limit = source.torsional_displacement_limit(delta).unwrap().unwrap();
+    let original = AdhesiveTractionProfile::jkr_attached(normal, delta).unwrap();
+    for phi in [0.6 * limit.twist_angle_rad, -0.6 * limit.twist_angle_rad] {
+        let response = source
+            .evaluate_torsion_displacement_controlled(delta, phi)
+            .unwrap();
+        let profile =
+            AdhesiveTractionProfile::jkr_torsion_equilibrium(&source, delta, phi).unwrap();
+        let a = response.contact_radius_m;
+        assert!(a < original.contact_radius_m());
+        assert_eq!(profile.contact_radius_m(), a);
+        assert_eq!(profile.model_identity(), response.model_identity());
+        assert_eq!(
+            profile.normal_state_identity(),
+            normal.normal_state().identity()
+        );
+        assert_eq!(profile.authority(), InputAuthority::SyntheticFixture);
+        let opening = a * a / normal.effective_radius_m() - delta;
+        let peak = 2.0 * e * a / (PI * normal.effective_radius_m());
+        let tensile = e * opening / (PI * a);
+        let moment = -(16.0 / 3.0) * gbar * a.powi(3) * phi;
+        let force = 2.0 * e * a * (delta - a * a / (3.0 * normal.effective_radius_m()));
+        close(profile.torsional_moment_n_m(), moment, moment.abs(), 5e-14);
+        close(profile.normal_force_n(), force, peak * PI * a * a, 5e-14);
+        let pure_tension =
+            (2.0 * e * normal.normal_state().adhesion_energy_j_per_m2() / (PI * a)).sqrt();
+        assert!(tensile < pure_tension);
+        for fraction in [0.0_f64, 0.3, 0.8, 0.99] {
+            let root = (1.0 - fraction * fraction).sqrt();
+            let azimuthal = -4.0 * gbar * phi * fraction / (PI * root);
+            let angle = 0.7_f64;
+            let actual = profile.traction_polar_pa(fraction * a, angle).unwrap();
+            close(actual[0], -azimuthal * angle.sin(), azimuthal.abs(), 4e-13);
+            close(actual[1], azimuthal * angle.cos(), azimuthal.abs(), 4e-13);
+            close(
+                actual[2],
+                peak * root - tensile / root,
+                peak + tensile / root,
+                4e-13,
+            );
+        }
+        let cell = profile
+            .vector_sector(0.0, a, 0.0, TAU, exact(), &CancelGate::new())
+            .unwrap();
+        assert_eq!(cell.tangential_force_n, [0.0; 2]);
+        close(cell.wrench().0[2], force, peak * PI * a * a, 5e-14);
+        close(cell.wrench().1[2], moment, moment.abs(), 5e-14);
+        let omega = 1.7;
+        let (power, error) = cell
+            .affine_power([0.0, 0.0, 0.2], [[0.0, -omega], [omega, 0.0], [0.0; 2]])
+            .unwrap();
+        let expected = 0.2 * force + omega * moment;
+        close(
+            power,
+            expected,
+            (0.2 * force).abs() + (omega * moment).abs(),
+            5e-14,
+        );
+        assert_eq!(error, 0.0);
+    }
+}
+
+#[test]
+fn torsion_equilibrium_opening_edge_has_hertz_pressure_and_singular_twisting_traction() {
+    let source = mixed_jkr();
+    let normal = source.normal_source();
+    let e = normal.normal_state().elastic().reduced_modulus_pa();
+    for delta in [1e-6_f64, 6e-6] {
+        let limit = source.torsional_displacement_limit(delta).unwrap().unwrap();
+        assert_eq!(limit.kind, JkrTorsionalLimitKind::OpeningEdge);
+        let a = (normal.effective_radius_m() * delta).sqrt();
+        close(limit.contact_radius_m, a, a, 5e-14);
+        let profile =
+            AdhesiveTractionProfile::jkr_torsion_equilibrium(&source, delta, limit.twist_angle_rad)
+                .unwrap();
+        let edge = profile.contact_radius_m();
+        assert_eq!(profile.pressure_pa(edge).unwrap(), 0.0);
+        assert_eq!(
+            profile.traction_polar_pa(edge, 0.0),
+            Err(AdhesiveTractionError::SingularEdge)
+        );
+        let peak = 2.0 * e * a / (PI * normal.effective_radius_m());
+        close(
+            profile.pressure_pa(0.6 * a).unwrap(),
+            0.8 * peak,
+            peak,
+            5e-14,
+        );
+        let ring = profile.annulus(0.0, edge).unwrap();
+        assert_eq!(ring.adhesive_force_n, 0.0);
+        close(
+            ring.normal_force_n,
+            (4.0 / 3.0) * e * a.powi(3) / normal.effective_radius_m(),
+            ring.hertz_force_n,
+            5e-14,
+        );
+        assert!(
+            AdhesiveTractionProfile::jkr_torsion_equilibrium(
+                &source,
+                delta,
+                limit.twist_angle_rad.next_up()
+            )
+            .is_err()
+        );
+    }
 }

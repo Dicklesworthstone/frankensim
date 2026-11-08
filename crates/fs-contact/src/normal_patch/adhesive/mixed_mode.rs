@@ -30,6 +30,9 @@ pub mod motion;
 /// Work-consistent coupled discrete forces and whole-path source admission.
 pub mod path;
 
+/// Axisymmetric mode-I/III equilibrium with an evolving torsional contact area.
+pub mod torsion;
+
 use super::{JkrError, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};

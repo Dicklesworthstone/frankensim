@@ -18,6 +18,7 @@ use super::{
     NormalLawSource,
     adhesive::{
         JkrError, SourceJkrSphereContact,
+        mixed_mode::torsion::{JkrTorsionalError, JkrTorsionalLimitKind},
         mixed_mode::{JkrMixedModeError, JkrMixedModeResponse, SourceJkrMixedMode},
         torsion::{SourceJkrTorsionContact, SourceJkrTorsionError},
     },
@@ -43,13 +44,15 @@ pub enum AdhesiveTractionError {
     MixedMode(JkrMixedModeError),
     /// The original bonded torsion source rejected the elastic path.
     Torsion(SourceJkrTorsionError),
+    /// The original normal/twist equilibrium rejected its radius or physical domain.
+    TorsionalEquilibrium(JkrTorsionalError),
     /// The original finite-zone source rejected the requested branch or state.
     Maugis(MaugisContinuationError),
     /// An equilibrium belongs to another original material/geometry owner.
     SourceMismatch,
     /// Invalid radii, partition, tolerance, or unrepresentable spatial data.
     Invalid(&'static str),
-    /// Ideal JKR pressure is unbounded exactly at the attached contact edge.
+    /// Selected JKR tension or full-stick shear is unbounded at the contact edge.
     SingularEdge,
     /// The ring forces do not recover the original force within the given gate.
     ForceBalance {
@@ -288,6 +291,59 @@ impl AdhesiveTractionProfile {
         Ok(profile)
     }
 
+    /// Full-stick twisting traction on the original source's relaxed JKR area.
+    /// Normal approach and twist are prescribed together; the mode-independent
+    /// Griffith owner equilibrates their shared radius before any field is built.
+    /// Positive receiver-minus-counterpart twist gives a negative resisting
+    /// moment about the profile's right-handed normal.
+    ///
+    /// The normal field uses only the remaining normal opening. Substituting
+    /// total work of adhesion in the pure-normal JKR pressure would spend the
+    /// mode-III energy release again. Both this pressure and the singular
+    /// azimuthal traction use the existing analytic sector and P1 transfers.
+    /// This is a fresh reversible equilibrium, with no local slip, plastic
+    /// twist history, or post-instability continuation inferred.
+    pub fn jkr_torsion_equilibrium(
+        source: &SourceJkrMixedMode,
+        indentation_m: f64,
+        twist_angle_rad: f64,
+    ) -> Result<Self, AdhesiveTractionError> {
+        let response = source
+            .evaluate_torsion_displacement_controlled(indentation_m, twist_angle_rad)
+            .map_err(AdhesiveTractionError::TorsionalEquilibrium)?;
+        let normal = source.normal_source();
+        let a = response.contact_radius_m;
+        let e = normal.normal_state().elastic().reduced_modulus_pa();
+        let hertz_depth = a * (a / normal.effective_radius_m());
+        let hertz_peak_pa = finite((2.0 / PI) * e * (a / normal.effective_radius_m()))?;
+        // The declared opening-edge boundary has exactly zero mode-I stress
+        // intensity; do not recreate a tiny signed opening by squaring sqrt(R*d).
+        let tensile_pa = if response.boundary == Some(JkrTorsionalLimitKind::OpeningEdge) {
+            0.0
+        } else {
+            finite((e / PI) * ((hertz_depth - response.indentation_m) / a))?
+        };
+        if tensile_pa < 0.0 {
+            return Err(AdhesiveTractionError::Invalid(
+                "torsional equilibrium has no tensile edge opening",
+            ));
+        }
+        Ok(Self {
+            model_identity: response.model_identity(),
+            normal_state_identity: response.normal_state_identity(),
+            authority: response.authority,
+            contact_radius_m: a,
+            interaction_radius_m: a,
+            normal_force_n: response.normal_force_n,
+            tangential_force_n: [0.0; 2],
+            torsional_moment_n_m: finite(-response.torsional_moment_n_m)?,
+            distribution: Distribution::Jkr {
+                hertz_peak_pa,
+                tensile_pa,
+            },
+        })
+    }
+
     /// Retain an original immutable Maugis equilibrium. Noncontact attraction
     /// loads a finite disk but has zero solid area; detached states load nothing.
     /// At a contact fold pressure remains finite even though a tangent is absent.
@@ -385,6 +441,12 @@ impl AdhesiveTractionProfile {
                 hertz_peak_pa,
                 tensile_pa,
             } => {
+                // At the explicit zero-opening limit only Hertz pressure
+                // remains, and its edge value is zero. Shear singularities
+                // are independently checked by the vector query.
+                if tensile_pa == 0.0 {
+                    return finite(hertz_peak_pa * root);
+                }
                 if radius_m == a {
                     return Err(AdhesiveTractionError::SingularEdge);
                 }

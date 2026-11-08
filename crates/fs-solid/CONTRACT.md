@@ -12099,6 +12099,15 @@ declared inward normal. Projection gates compare the actual represented nodal
 moment with this original nonzero couple. No force-normalized application
 point, plastic-history field or additional mechanical solver is introduced.
 
+`AdhesiveTractionProfile::jkr_torsion_equilibrium` supplies this same native P1
+path with the original source's changing JKR area under prescribed approach
+and twist. Normal pressure and resisting torque use that single evaluated
+radius and its remaining normal opening, so peeling changes normal load and
+twisting couple together. The torsional-peeling regression compares actual
+native displacements, represented nodal work and independently reconstructed
+spatial work against separately assembled analytic nodal forces at both source
+endpoints. It retains the original source admission and prescribed-field scope.
+
 The native transient owner retains the selected vector endpoint atomically,
 including receiver refusal and supported-node motion. Its independent spatial
 work reconstructs all three affine displacement components from the original
