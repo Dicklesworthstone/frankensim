@@ -249,3 +249,157 @@ fn g3_bounded_histories_coincidence_and_invalid_events_refuse_explicitly() {
         );
     }
 }
+
+#[test]
+fn g1_uniform_detector_clock_resolves_longitudinal_and_transverse_doppler() {
+    let detector = |velocity| {
+        UniformVacuumWorldline::try_new(
+            Dd::ZERO,
+            dd(10.0),
+            [3.0 * C, 0.0, 0.0],
+            velocity,
+            [dd(8.0), dd(12.0)],
+        )
+        .unwrap()
+    };
+    for (beta, ratio) in [(-0.6, 2.0), (0.6, 0.5)] {
+        let proper = dd(10.0) + dd(0.8);
+        let event = detector([beta * C, 0.0, 0.0])
+            .reception_at_proper_time(proper, 1e-6)
+            .unwrap();
+        close(event.coordinate_time_s().to_f64(), 1.0, 3e-15);
+        close(event.position_m()[0].to_f64(), (3.0 + beta) * C, 3e-15);
+        let ray = source([0.0; 3]).observe(event, 1e-6).unwrap();
+        close(ray.emission_proper_time_s().to_f64(), -2.0 - beta, 3e-15);
+        close(ray.proper_time_rate(), ratio, 3e-15);
+        assert_eq!(ray.reception_proper_time_s(), Some(proper));
+        assert_eq!(
+            ray.reception_clock_residual_s(),
+            event.proper_clock_residual_s()
+        );
+    }
+    let transverse = detector([0.0, 0.6 * C, 0.0])
+        .reception_at_proper_time(dd(10.0), 1e-6)
+        .unwrap();
+    let ray = source([0.0; 3]).observe(transverse, 1e-6).unwrap();
+    // A transverse moving receiver sees gamma, whereas the transverse moving
+    // source law uses inverse gamma. The two endpoint clocks must not be swapped.
+    close(ray.proper_time_rate(), 1.25, 3e-15);
+    close(ray.doppler().receiver_direction()[1], -0.6, 3e-15);
+
+    let common = [0.6 * C, 0.0, 0.0];
+    let event = detector(common)
+        .reception_at_proper_time(dd(10.8), 1e-6)
+        .unwrap();
+    assert_eq!(
+        source(common)
+            .observe(event, 1e-6)
+            .unwrap()
+            .proper_time_rate(),
+        1.0
+    );
+}
+
+#[test]
+fn g1_detector_proper_clock_derivative_is_the_lorentz_frequency_ratio() {
+    let emitter = source([0.3 * C, -0.2 * C, 0.1 * C]);
+    let detector = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        dd(12.0),
+        [3.0 * C, C, -0.2 * C],
+        [-0.1 * C, 0.25 * C, 0.1 * C],
+        [dd(11.0), dd(14.0)],
+    )
+    .unwrap();
+    let at = |tau| {
+        emitter
+            .observe(detector.reception_at_proper_time(tau, 1e-6).unwrap(), 1e-6)
+            .unwrap()
+    };
+    let center = dd(12.6);
+    let h = dd(1e-5);
+    let derivative = (at(center + h).emission_proper_time_s()
+        - at(center - h).emission_proper_time_s())
+        / (dd(2.0) * h);
+    close(derivative.to_f64(), at(center).proper_time_rate(), 1e-9);
+}
+
+#[test]
+fn g3_detector_geometry_keeps_dd_displacements_and_rechecks_clock_loss() {
+    let make = |coordinate_epoch, velocity| {
+        UniformVacuumWorldline::try_new(
+            coordinate_epoch,
+            Dd::ZERO,
+            [1e20, 0.0, 0.0],
+            velocity,
+            [Dd::ZERO, dd(1.0)],
+        )
+        .unwrap()
+    };
+    let detector = make(Dd::ZERO, [1.0, 0.0, 0.0]);
+    let reception = detector.reception_at_proper_time(dd(0.25), 1e-6).unwrap();
+    close((reception.position_m()[0] - dd(1e20)).to_f64(), 0.25, 3e-15);
+    let ray = make(Dd::ZERO, [0.0; 3]).observe(reception, 1e-6).unwrap();
+    close(ray.range_m(), 0.25, 3e-15);
+
+    let unresolved_epoch = dd(2.0_f64.powi(100)) + dd(2.0_f64.powi(45));
+    let unresolved = make(unresolved_epoch, [0.0; 3]);
+    assert!(matches!(
+        unresolved.reception_at_proper_time(dd(0.001), 1e-6),
+        Err(RetardedVacuumError::ClockResolution { .. })
+    ));
+    let loose = unresolved.reception_at_proper_time(dd(0.001), 1e9).unwrap();
+    assert!(loose.proper_clock_residual_s() > 0.0);
+    assert!(matches!(
+        source([0.0; 3]).observe(loose, 1e-6),
+        Err(RetardedVacuumError::ClockResolution { .. })
+    ));
+}
+
+#[test]
+fn g3_uniform_receiver_support_and_clock_admission_are_explicit() {
+    let detector = UniformVacuumWorldline::try_new(
+        dd(5.0),
+        dd(10.0),
+        [C, 0.0, 0.0],
+        [0.0; 3],
+        [dd(9.0), dd(11.0)],
+    )
+    .unwrap();
+    for (proper, coordinate) in [(9.0, 4.0), (11.0, 6.0)] {
+        assert_eq!(
+            detector
+                .reception_at_proper_time(dd(proper), 0.0)
+                .unwrap()
+                .coordinate_time_s(),
+            dd(coordinate)
+        );
+    }
+    for proper in [8.99, 11.01] {
+        assert_eq!(
+            detector.reception_at_proper_time(dd(proper), 1e-6),
+            Err(RetardedVacuumError::OutsideHistory)
+        );
+    }
+    for proper in [f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            detector.reception_at_proper_time(dd(proper), 1e-6),
+            Err(RetardedVacuumError::InvalidClock)
+        );
+    }
+    for tolerance in [-1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            detector.reception_at_proper_time(dd(10.0), tolerance),
+            Err(RetardedVacuumError::InvalidTolerance)
+        );
+    }
+    let authored = receiver(dd(5.0), [C, 0.0, 0.0], [0.0; 3]);
+    assert_eq!(authored.proper_time_s(), None);
+    assert_eq!(
+        source([0.0; 3])
+            .observe(authored, 0.0)
+            .unwrap()
+            .reception_proper_time_s(),
+        None
+    );
+}

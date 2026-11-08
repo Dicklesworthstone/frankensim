@@ -1,8 +1,8 @@
 //! Inertial material worldlines intersected with a receiver's past light cone.
 //!
 //! Positions, coordinate clocks and velocities share one inertial world frame.
-//! The source clock is proper time along its material worldline; it is not the
-//! world coordinate clock. DD clock pairs retain short flight times at large
+//! Source and detector clocks are proper time along their material worldlines;
+//! they are not the world coordinate clock. DD pairs retain short flights at large
 //! epochs. The published emission event is checked against `|x_o-x_s|=c(t_o-t_s)`
 //! before its source history can be sampled. This is the retarded-event geometry
 //! used in, for example, Fitzpatrick's relativistic moving-source derivation:
@@ -35,7 +35,7 @@ pub enum RetardedVacuumError {
     InvalidTolerance,
     /// The sole light-cone intersection has zero flight time and no ray.
     Coincident,
-    /// The unique past emission lies outside the authored proper-time history.
+    /// The requested reception or past emission is outside its authored history.
     OutsideHistory,
     Residual {
         residual_m: f64,
@@ -67,8 +67,10 @@ impl From<DopplerError> for RetardedVacuumError {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VacuumReception {
     coordinate_time_s: Dd,
-    position_m: [f64; 3],
+    position_m: [Dd; 3],
     frame: FrameVelocity,
+    proper_time_s: Option<Dd>,
+    proper_clock_residual_s: Dd,
 }
 
 impl VacuumReception {
@@ -80,13 +82,55 @@ impl VacuumReception {
         position(position_m)?;
         Ok(Self {
             coordinate_time_s: clock(coordinate_time_s)?,
-            position_m,
+            position_m: position_m.map(Dd::from_f64),
             frame: FrameVelocity::try_new(velocity_m_s)?,
+            proper_time_s: None,
+            proper_clock_residual_s: Dd::ZERO,
         })
+    }
+
+    pub const fn coordinate_time_s(&self) -> Dd {
+        self.coordinate_time_s
+    }
+
+    /// DD positions preserve receiver displacements from large world origins.
+    pub const fn position_m(&self) -> [Dd; 3] {
+        self.position_m
+    }
+
+    /// The receiver's own clock when sampled from an admitted worldline.
+    /// A manually authored event has no inferred proper-clock epoch.
+    pub const fn proper_time_s(&self) -> Option<Dd> {
+        self.proper_time_s
+    }
+
+    /// Accumulated clock-inversion/representation loss in receiver proper seconds.
+    pub fn proper_clock_residual_s(&self) -> f64 {
+        self.proper_clock_residual_s.to_f64()
+    }
+
+    fn admitted(self, max_residual_m: f64) -> Result<Self, RetardedVacuumError> {
+        if !max_residual_m.is_finite() || max_residual_m < 0.0 {
+            return Err(RetardedVacuumError::InvalidTolerance);
+        }
+        if self.proper_clock_residual_s == Dd::ZERO {
+            return Ok(self);
+        }
+        let error_m = checked(
+            Dd::from_f64(VACUUM_LIGHT_SPEED_M_S)
+                * (self.proper_clock_residual_s / self.frame.inverse_gamma),
+        )?;
+        if Dd::from_f64(max_residual_m).lt(error_m) {
+            return Err(RetardedVacuumError::ClockResolution {
+                equivalent_distance_error_m: error_m.to_f64(),
+                tolerance_m: max_residual_m,
+            });
+        }
+        Ok(self)
     }
 }
 
-/// An affine source trajectory with an explicitly bounded material history.
+/// An affine source or detector trajectory with bounded material-clock history.
 /// The paired reference clocks identify the SAME event on this worldline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UniformVacuumWorldline {
@@ -126,6 +170,58 @@ impl UniformVacuumWorldline {
         self.proper_history_s
     }
 
+    /// Sample this trajectory as a detector on its own proper clock.
+    ///
+    /// This inverts `d(tau) = dt / gamma` using the same admitted velocity as
+    /// the Lorentz transform. World position, coordinate time and velocity
+    /// therefore describe one event, rather than independently supplied tracks.
+    /// Closed history, DD clock-loss admission and fixed work apply to receivers
+    /// just as to sources. The returned event also works with piecewise sources.
+    pub fn reception_at_proper_time(
+        &self,
+        proper_time_s: Dd,
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
+        if !max_residual_m.is_finite() || max_residual_m < 0.0 {
+            return Err(RetardedVacuumError::InvalidTolerance);
+        }
+        let proper_time_s = clock(proper_time_s)?;
+        if proper_time_s.lt(self.proper_history_s[0]) || self.proper_history_s[1].lt(proper_time_s)
+        {
+            return Err(RetardedVacuumError::OutsideHistory);
+        }
+        let elapsed = checked(proper_time_s - self.reference_proper_time_s)?;
+        let coordinate_time_s = checked(
+            self.reference_coordinate_time_s + checked(elapsed / self.frame.inverse_gamma)?,
+        )?;
+        self.reception_event(coordinate_time_s, proper_time_s, max_residual_m)
+    }
+
+    /// Also used for exact trajectory knots, whose coordinate event is authored.
+    fn reception_event(
+        &self,
+        coordinate_time_s: Dd,
+        proper_time_s: Dd,
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
+        let coordinate_offset = checked(coordinate_time_s - self.reference_coordinate_time_s)?;
+        let proper_offset = checked(proper_time_s - self.reference_proper_time_s)?;
+        let proper_clock_residual_s = checked(
+            checked((self.frame.inverse_gamma * coordinate_offset - proper_offset).abs())?
+                + checked((self.reference_proper_time_s + proper_offset - proper_time_s).abs())?,
+        )?;
+        VacuumReception {
+            coordinate_time_s,
+            position_m: finite_vector(core::array::from_fn(|i| {
+                self.reference_position_m[i] + self.velocity_m_s[i] * coordinate_offset
+            }))?,
+            frame: self.frame,
+            proper_time_s: Some(proper_time_s),
+            proper_clock_residual_s,
+        }
+        .admitted(max_residual_m)
+    }
+
     /// Unique positive-flight-time null ray, with fixed work and no allocation.
     ///
     /// Let q=x_o-x_s(t_o), beta=v_s/c and ell=c(t_o-t_s). The null equation is
@@ -143,13 +239,10 @@ impl UniformVacuumWorldline {
         receiver: VacuumReception,
         max_residual_m: f64,
     ) -> Result<RetardedVacuumRay, RetardedVacuumError> {
-        if !max_residual_m.is_finite() || max_residual_m < 0.0 {
-            return Err(RetardedVacuumError::InvalidTolerance);
-        }
+        let receiver = receiver.admitted(max_residual_m)?;
         let offset = checked(receiver.coordinate_time_s - self.reference_coordinate_time_s)?;
         let q = finite_vector(core::array::from_fn(|i| {
-            (Dd::from_f64(receiver.position_m[i]) - self.reference_position_m[i])
-                - self.velocity_m_s[i] * offset
+            (receiver.position_m[i] - self.reference_position_m[i]) - self.velocity_m_s[i] * offset
         }))?;
         let scale = q.iter().fold(0.0_f64, |a, x| a.max(x.hi.abs()));
         if scale == 0.0 {
@@ -204,7 +297,7 @@ impl UniformVacuumWorldline {
             self.reference_position_m[i] + self.velocity_m_s[i] * source_offset
         }))?;
         let displacement = finite_vector(core::array::from_fn(|i| {
-            Dd::from_f64(receiver.position_m[i]) - emission_position_m[i]
+            receiver.position_m[i] - emission_position_m[i]
         }))?;
         let range = norm(displacement)?;
         let flight_time_s = checked(receiver.coordinate_time_s - emission_time_s)?;
@@ -236,6 +329,8 @@ impl UniformVacuumWorldline {
             emission_proper_time_s,
             emission_position_m,
             reception_time_s: receiver.coordinate_time_s,
+            reception_proper_time_s: receiver.proper_time_s,
+            reception_clock_residual_s: receiver.proper_clock_residual_s(),
             flight_time_s,
             range_m: range.to_f64(),
             light_cone_residual_m: residual.to_f64(),
@@ -254,6 +349,8 @@ pub struct RetardedVacuumRay {
     emission_proper_time_s: Dd,
     emission_position_m: [Dd; 3],
     reception_time_s: Dd,
+    reception_proper_time_s: Option<Dd>,
+    reception_clock_residual_s: f64,
     flight_time_s: Dd,
     range_m: f64,
     light_cone_residual_m: f64,
@@ -280,6 +377,16 @@ impl RetardedVacuumRay {
 
     pub const fn reception_coordinate_time_s(&self) -> Dd {
         self.reception_time_s
+    }
+
+    /// Detector proper time, when the reception came from a worldline query.
+    pub const fn reception_proper_time_s(&self) -> Option<Dd> {
+        self.reception_proper_time_s
+    }
+
+    /// Receiver proper-clock loss, separate from the source-clock residual.
+    pub const fn reception_clock_residual_s(&self) -> f64 {
+        self.reception_clock_residual_s
     }
 
     pub const fn flight_time_s(&self) -> Dd {

@@ -82,6 +82,40 @@ impl<'source> RetardedThermalSurface<'source> {
         Self::observe_ray(ray, at_proper_time)
     }
 
+    /// Sample a uniformly moving detector on its own clock, then resolve the
+    /// source emission. Receiver-history or clock failures precede any source
+    /// callback. Collected-electron rates remain per receiver proper second;
+    /// exposure integration must not multiply them by another Doppler factor.
+    pub fn observe_at_receiver_proper_time(
+        motion: &UniformVacuumWorldline,
+        receiver_motion: &UniformVacuumWorldline,
+        receiver_proper_time_s: Dd,
+        max_residual_m: f64,
+        at_proper_time: impl FnOnce(Dd) -> Result<ThermalEmissionState<'source>, ThermalSurfaceError>,
+    ) -> Result<Self, RetardedThermalError> {
+        let receiver = receiver_motion
+            .reception_at_proper_time(receiver_proper_time_s, max_residual_m)
+            .map_err(RetardedThermalError::Geometry)?;
+        Self::observe(motion, receiver, max_residual_m, at_proper_time)
+    }
+
+    /// Observe finite source and detector histories using the detector's
+    /// accumulated proper clock, including both histories' velocity changes.
+    /// Mixed uniform/piecewise pairs can pass `reception_at_proper_time` into
+    /// `observe` or `observe_piecewise` directly.
+    pub fn observe_piecewise_at_receiver_proper_time(
+        motion: &PiecewiseVacuumWorldline,
+        receiver_motion: &PiecewiseVacuumWorldline,
+        receiver_proper_time_s: Dd,
+        max_residual_m: f64,
+        at_proper_time: impl FnOnce(Dd) -> Result<ThermalEmissionState<'source>, ThermalSurfaceError>,
+    ) -> Result<Self, RetardedThermalError> {
+        let receiver = receiver_motion
+            .reception_at_proper_time(receiver_proper_time_s, max_residual_m)
+            .map_err(RetardedThermalError::Geometry)?;
+        Self::observe_piecewise(motion, receiver, max_residual_m, at_proper_time)
+    }
+
     fn observe_ray(
         ray: RetardedVacuumRay,
         at_proper_time: impl FnOnce(Dd) -> Result<ThermalEmissionState<'source>, ThermalSurfaceError>,

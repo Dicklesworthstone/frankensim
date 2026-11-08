@@ -204,3 +204,146 @@ fn g3_invalid_and_superluminal_segments_refuse_before_observation() {
         );
     }
 }
+
+#[test]
+fn g1_detector_clock_inversion_preserves_preceding_segment_time_dilation() {
+    let detector = PiecewiseVacuumWorldline::try_new(
+        &[knot(0.0, 3.0), knot(2.0, 1.8), knot(4.0, 1.8)],
+        dd(10.0),
+        2,
+    )
+    .unwrap();
+    let source = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        Dd::ZERO,
+        [0.0; 3],
+        [0.0; 3],
+        [dd(-10.0), dd(10.0)],
+    )
+    .unwrap();
+    for (proper, coordinate, emitted, ratio) in [(10.8, 1.0, -1.4, 2.0), (12.6, 3.0, 1.2, 1.0)] {
+        let event = detector.reception_at_proper_time(dd(proper), 1e-6).unwrap();
+        close(event.coordinate_time_s().to_f64(), coordinate, 3e-15);
+        assert_eq!(event.proper_time_s(), Some(dd(proper)));
+        let ray = source.observe(event, 1e-6).unwrap();
+        close(ray.emission_proper_time_s().to_f64(), emitted, 3e-15);
+        close(ray.proper_time_rate(), ratio, 3e-15);
+        let h = dd(1e-5);
+        let emitted_at = |tau| {
+            source
+                .observe(detector.reception_at_proper_time(tau, 1e-6).unwrap(), 1e-6)
+                .unwrap()
+                .emission_proper_time_s()
+        };
+        let derivative = (emitted_at(dd(proper) + h) - emitted_at(dd(proper) - h)) / (dd(2.0) * h);
+        close(derivative.to_f64(), ratio, 1e-9);
+    }
+}
+
+#[test]
+fn g3_receiver_knots_use_outgoing_velocity_and_finite_clock_support() {
+    let detector = PiecewiseVacuumWorldline::try_new(
+        &[knot(0.0, 3.0), knot(2.0, 2.0), knot(4.0, 3.0)],
+        dd(7.0),
+        2,
+    )
+    .unwrap();
+    let source = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        Dd::ZERO,
+        [0.0; 3],
+        [0.0; 3],
+        [dd(-10.0), dd(10.0)],
+    )
+    .unwrap();
+    for (index, time, ratio) in [
+        (0, 0.0, 3.0_f64.sqrt()),
+        (1, 2.0, 1.0 / 3.0_f64.sqrt()),
+        (2, 4.0, 1.0 / 3.0_f64.sqrt()),
+    ] {
+        let proper = detector.proper_knot_time(index).unwrap();
+        let event = detector.reception_at_proper_time(proper, 1e-6).unwrap();
+        assert_eq!(event.coordinate_time_s(), dd(time));
+        close(
+            source.observe(event, 1e-6).unwrap().proper_time_rate(),
+            ratio,
+            3e-15,
+        );
+    }
+    let support = detector.proper_history_s();
+    for proper in [support[0] - dd(0.01), support[1] + dd(0.01)] {
+        assert_eq!(
+            detector.reception_at_proper_time(proper, 1e-6),
+            Err(RetardedVacuumError::OutsideHistory)
+        );
+    }
+    for tolerance in [-1.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            detector.reception_at_proper_time(support[0], tolerance),
+            Err(RetardedVacuumError::InvalidTolerance)
+        );
+    }
+    assert_eq!(
+        detector.reception_at_proper_time(dd(f64::NAN), 1e-6),
+        Err(RetardedVacuumError::InvalidClock)
+    );
+    let epoch = dd(2.0_f64.powi(100)) + dd(2.0_f64.powi(45));
+    let unresolved = PiecewiseVacuumWorldline::try_new(
+        &[knot(0.0, 3.0), knot(2.0, 2.0), knot(4.0, 3.0)],
+        epoch,
+        2,
+    )
+    .unwrap();
+    assert!(matches!(
+        unresolved.reception_at_proper_time(unresolved.proper_history_s()[1], 1e-6),
+        Err(RetardedVacuumError::ClockResolution { .. })
+    ));
+}
+
+#[test]
+fn g3_receiver_subdivision_preserves_uniform_events_and_common_motion_shift() {
+    let knots: Vec<_> = (0..=64)
+        .map(|i| knot(f64::from(i) / 16.0, 3.0 + f64::from(i) / 32.0))
+        .collect();
+    let detector = PiecewiseVacuumWorldline::try_new(&knots, dd(7.0), 64).unwrap();
+    let velocity = [0.5 * C, 0.0, 0.0];
+    let uniform = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        dd(7.0),
+        [3.0 * C, 0.0, 0.0],
+        velocity,
+        detector.proper_history_s(),
+    )
+    .unwrap();
+    let source = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        Dd::ZERO,
+        [0.0; 3],
+        velocity,
+        [dd(-20.0), dd(20.0)],
+    )
+    .unwrap();
+    for proper in [7.2, 8.3, 10.2] {
+        let actual = detector.reception_at_proper_time(dd(proper), 1e-6).unwrap();
+        let expected = uniform.reception_at_proper_time(dd(proper), 1e-6).unwrap();
+        close(
+            actual.coordinate_time_s().to_f64(),
+            expected.coordinate_time_s().to_f64(),
+            3e-15,
+        );
+        close(
+            actual.position_m()[0].to_f64(),
+            expected.position_m()[0].to_f64(),
+            3e-15,
+        );
+        let ray = source.observe(actual, 1e-6).unwrap();
+        let uniform_ray = source.observe(expected, 1e-6).unwrap();
+        close(
+            ray.emission_proper_time_s().to_f64(),
+            uniform_ray.emission_proper_time_s().to_f64(),
+            3e-15,
+        );
+        assert_eq!(ray.proper_time_rate(), 1.0);
+        assert_eq!(ray.reception_proper_time_s(), Some(dd(proper)));
+    }
+}

@@ -231,3 +231,125 @@ fn g1_piecewise_motion_samples_accumulated_proper_history_and_original_qe() {
     );
     assert_eq!(calls, 1);
 }
+
+#[test]
+fn g1_moving_detector_proper_clock_drives_retarded_thermal_photon_rate() {
+    let detector_motion = UniformVacuumWorldline::try_new(
+        Dd::ZERO,
+        dd(10.0),
+        [3.0 * C, 0.0, 0.0],
+        [-0.6 * C, 0.0, 0.0],
+        [dd(10.0), dd(11.0)],
+    )
+    .unwrap();
+    let proper = dd(10.0) + dd(0.8);
+    let mut calls = 0;
+    let event = RetardedThermalSurface::observe_at_receiver_proper_time(
+        &motion(0.0, [-10.0, 10.0]),
+        &detector_motion,
+        proper,
+        1e-6,
+        |emitted| {
+            calls += 1;
+            close(emitted.to_f64(), -1.4);
+            Ok(ThermalEmissionState {
+                surface: gray(4000.0 + 500.0 * emitted.to_f64()).into(),
+                outward_normal: [1.0, 0.0, 0.0],
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(event.ray().reception_proper_time_s(), Some(proper));
+    close(event.ray().reception_coordinate_time_s().to_f64(), 1.0);
+    close(event.observed().source().temperature_k(), 3300.0);
+    let sensor = QuantumEfficiencySensor::try_new(vec![(500.0, [1.0]), (700.0, [1.0])]).unwrap();
+    let detector = event.with_sensor(&sensor).unwrap();
+    assert_eq!(detector.ray().reception_proper_time_s(), Some(proper));
+    let sample = detector.sample(0.5).unwrap();
+    close(sample.source_wavelength_nm, 1200.0);
+    let lambda = 600e-9_f64;
+    let h = 6.626_070_15e-34;
+    let k = 1.380_649e-23;
+    let expected_radiance =
+        0.7 * 2.0 * h * C * C / (lambda.powi(5) * (h * C / (lambda * k * 6600.0)).exp_m1()) * 1e-9;
+    close(sample.spectral_radiance_w_m2_sr_nm, expected_radiance);
+    // No additional coordinate/proper-clock factor belongs in this count rate.
+    close(
+        sample.electron_rate_per_m2_sr[0],
+        expected_radiance * 200.0 * lambda / (h * C),
+    );
+}
+
+#[test]
+fn g3_piecewise_detector_clock_and_history_use_the_original_thermal_qe_route() {
+    use crate::spectral::doppler::retarded::VacuumTrajectoryKnot;
+
+    let knots = |values: &[(f64, f64)]| -> Vec<VacuumTrajectoryKnot> {
+        values
+            .iter()
+            .map(|&(time, x)| VacuumTrajectoryKnot {
+                coordinate_time_s: dd(time),
+                position_m: [x * C, 0.0, 0.0],
+            })
+            .collect()
+    };
+    let source =
+        PiecewiseVacuumWorldline::try_new(&knots(&[(-10.0, 0.0), (10.0, 0.0)]), dd(-10.0), 1)
+            .unwrap();
+    let receiver = PiecewiseVacuumWorldline::try_new(
+        &knots(&[(0.0, 3.0), (2.0, 1.8), (4.0, 1.8)]),
+        dd(10.0),
+        2,
+    )
+    .unwrap();
+    let mut calls = 0;
+    let event = RetardedThermalSurface::observe_piecewise_at_receiver_proper_time(
+        &source,
+        &receiver,
+        dd(12.6),
+        1e-6,
+        |emitted| {
+            calls += 1;
+            close(emitted.to_f64(), 1.2);
+            Ok(ThermalEmissionState {
+                surface: gray(4000.0 + 500.0 * emitted.to_f64()).into(),
+                outward_normal: [1.0, 0.0, 0.0],
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    close(event.ray().reception_coordinate_time_s().to_f64(), 3.0);
+    assert_eq!(event.ray().reception_proper_time_s(), Some(dd(12.6)));
+    close(event.observed().source().temperature_k(), 4600.0);
+    let sensor = QuantumEfficiencySensor::try_new(vec![(500.0, [0.5]), (700.0, [0.5])]).unwrap();
+    let sample = event.with_sensor(&sensor).unwrap().sample(0.5).unwrap();
+    let original = gray(4600.0).radiance_w_m2_sr_nm(600.0).unwrap();
+    close(sample.spectral_radiance_w_m2_sr_nm, original);
+    close(
+        sample.electron_rate_per_m2_sr[0],
+        original * 100.0 * 600e-9 / (6.626_070_15e-34 * C),
+    );
+
+    let result = RetardedThermalSurface::observe_piecewise_at_receiver_proper_time(
+        &source,
+        &receiver,
+        dd(14.0),
+        1e-6,
+        |_| {
+            calls += 1;
+            Ok(ThermalEmissionState {
+                surface: gray(4600.0).into(),
+                outward_normal: [1.0, 0.0, 0.0],
+            })
+        },
+    );
+    assert_eq!(
+        result,
+        Err(RetardedThermalError::Geometry(
+            RetardedVacuumError::OutsideHistory
+        ))
+    );
+    assert_eq!(calls, 1);
+}

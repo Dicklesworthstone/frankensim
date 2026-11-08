@@ -9497,6 +9497,41 @@ G1/G3 controls cover changing gamma, reversal, knot semantics, finite support,
 uniform subdivision, DD clock limits and proper-history-to-electron-rate
 integration. The existing geometry, visibility and material no-claims remain.
 
+Both worldline owners also provide `reception_at_proper_time`: a detector can
+sample on its own clock without independently authoring coordinate time,
+position and velocity. Uniform motion inverts the admitted `d(tau)=dt/gamma`;
+piecewise motion locates the accumulated proper-time interval by binary search,
+then inverts only that interval's rate. Earlier time-dilation increments are
+retained. Receiver queries use the same outgoing/interior and incoming/final
+knot convention, explicit closed history and allocation-free evaluation as
+source queries. Repeated knots at an unresolved proper epoch cannot choose
+between distinct velocities and are refused.
+
+Receiver geometry now retains DD positions through the original light-cone
+solver, preserving small detector displacements about large world origins.
+Clock inversion is checked by reconstructing the proper interval from the
+published coordinate event. Prefix and epoch losses remain subject to the
+absolute distance tolerance after conversion by the receiver's inverse gamma.
+An observation rechecks this receiver residual at its own tolerance, so an
+event prepared with a loose allowance cannot bypass a stricter observation.
+`VacuumReception` and `RetardedVacuumRay` retain the receiver proper clock and
+its separate residual. Manually authored reception events retain `None` for
+proper time; no detector epoch is invented.
+
+`RetardedThermalSurface::observe_at_receiver_proper_time` and
+`observe_piecewise_at_receiver_proper_time` feed these events through the
+original retarded thermal and QE owners. Receiver admission precedes the
+single source-history callback. The resulting collected-electron rate is per
+receiver proper second; no second Doppler or coordinate-clock factor applies
+when integrating exposure on that clock. Mixed uniform/piecewise endpoint
+pairs can compose `reception_at_proper_time` with either existing observe
+method. G1/G3 controls compare independent longitudinal/transverse laws and
+finite differences of emitted proper time against the Lorentz frequency
+ratio, and cover common motion, changing detector gamma, knot/history
+semantics, uniform subdivision, DD receiver geometry, clock refusal and
+proper-time thermal-to-electron-rate integration. These APIs supply detector
+events, not exposure quadrature, apparent-area geometry or smooth acceleration.
+
 
 ## Coupled resonant photon recycling on the native excitation timeline
 

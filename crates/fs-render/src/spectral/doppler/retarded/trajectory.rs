@@ -1,4 +1,4 @@
-//! Continuous piecewise-inertial source motion on a finite authored history.
+//! Continuous piecewise-inertial source or receiver motion on a finite history.
 //!
 //! Positions interpolate linearly in world coordinate time. Each segment's
 //! material proper time advances by `dt * sqrt(1-v²/c²)`, accumulated in DD;
@@ -141,6 +141,78 @@ impl PiecewiseVacuumWorldline {
         self.proper_history_s
     }
 
+    /// Locate a moving detector event on its accumulated proper clock.
+    ///
+    /// A binary search selects the proper-time interval before inverting that
+    /// interval's own clock rate. All preceding time-dilation increments remain
+    /// intact. Interior knots use the outgoing velocity and the last endpoint
+    /// the incoming velocity, just as source observations do. Queries allocate
+    /// nothing, never extrapolate and retain DD receiver positions.
+    pub fn reception_at_proper_time(
+        &self,
+        proper_time_s: Dd,
+        max_residual_m: f64,
+    ) -> Result<VacuumReception, RetardedVacuumError> {
+        if !max_residual_m.is_finite() || max_residual_m < 0.0 {
+            return Err(RetardedVacuumError::InvalidTolerance);
+        }
+        let proper_time_s = clock(proper_time_s)?;
+        if proper_time_s.lt(self.proper_history_s[0]) || self.proper_history_s[1].lt(proper_time_s)
+        {
+            return Err(RetardedVacuumError::OutsideHistory);
+        }
+        let count = self.segments.len();
+        let mut lower = 0;
+        let mut upper = count;
+        while upper - lower > 1 {
+            let middle = lower + (upper - lower) / 2;
+            if proper_time_s.lt(self.proper_knot_time(middle)?) {
+                upper = middle;
+            } else {
+                lower = middle;
+            }
+        }
+        let start = self.proper_knot_time(lower)?;
+        if !start.lt(self.proper_knot_time(lower + 1)?)
+            || (proper_time_s == start && lower > 0 && self.proper_knot_time(lower - 1)? == start)
+        {
+            // A collapsed receiver epoch cannot choose between distinct knot
+            // velocities, even if a permissive distance tolerance was supplied.
+            return Err(RetardedVacuumError::NumericalRange);
+        }
+        let exact_knot = if proper_time_s == start {
+            Some(lower)
+        } else if proper_time_s == self.proper_history_s[1] {
+            Some(count)
+        } else {
+            None
+        };
+        let offset = if let Some(knot) = exact_knot {
+            self.proper_knot_offset(knot)
+        } else {
+            checked(proper_time_s - self.proper_history_s[0])?
+        };
+        let segment = &self.segments[lower];
+        let mut receiver = if let Some(knot) = exact_knot {
+            segment
+                .motion
+                .reception_event(self.knot(knot).0, offset, max_residual_m)?
+        } else {
+            segment
+                .motion
+                .reception_at_proper_time(offset, max_residual_m)?
+        };
+        let epoch_loss = checked(
+            checked(((proper_time_s - self.proper_history_s[0]) - offset).abs())?
+                + checked((self.proper_history_s[0] + offset - proper_time_s).abs())?,
+        )?;
+        receiver.proper_clock_residual_s = checked(
+            receiver.proper_clock_residual_s + segment.prefix_clock_residual_s + epoch_loss,
+        )?;
+        receiver.proper_time_s = Some(proper_time_s);
+        receiver.admitted(max_residual_m)
+    }
+
     /// Select the unique causal segment, then use the original analytic solve.
     ///
     /// At a fixed reception position, `t + |x_receiver-x_source(t)|/c`
@@ -153,9 +225,7 @@ impl PiecewiseVacuumWorldline {
         receiver: VacuumReception,
         max_residual_m: f64,
     ) -> Result<RetardedVacuumRay, RetardedVacuumError> {
-        if !max_residual_m.is_finite() || max_residual_m < 0.0 {
-            return Err(RetardedVacuumError::InvalidTolerance);
-        }
+        let receiver = receiver.admitted(max_residual_m)?;
         let count = self.segments.len();
         let first = self.knot_residual(0, receiver)?;
         let last = self.knot_residual(count, receiver)?;
@@ -197,6 +267,18 @@ impl PiecewiseVacuumWorldline {
         }
     }
 
+    fn proper_knot_offset(&self, index: usize) -> Dd {
+        if index == self.segments.len() {
+            self.segments[index - 1].motion.proper_history_s[1]
+        } else {
+            self.segments[index].motion.reference_proper_time_s
+        }
+    }
+
+    fn proper_knot_time(&self, index: usize) -> Result<Dd, RetardedVacuumError> {
+        checked(self.proper_history_s[0] + self.proper_knot_offset(index))
+    }
+
     fn knot_residual(
         &self,
         index: usize,
@@ -204,7 +286,7 @@ impl PiecewiseVacuumWorldline {
     ) -> Result<Dd, RetardedVacuumError> {
         let (time, location) = self.knot(index);
         let displacement = finite_vector(core::array::from_fn(|i| {
-            Dd::from_f64(receiver.position_m[i]) - location[i]
+            receiver.position_m[i] - location[i]
         }))?;
         checked(
             norm(displacement)?
