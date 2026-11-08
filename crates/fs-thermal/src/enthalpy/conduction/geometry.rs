@@ -1,15 +1,20 @@
 //! Current transport measures on the original finite-cell heat owner.
 //!
 //! Geometry is supplied by an independently solved mechanical configuration.
-//! The existing series-resistance law still describes normal half-cell paths;
-//! these metrics do not turn a two-point graph into a general Fourier operator
-//! on nonorthogonal distorted tetrahedra. The geometric owner must justify that
-//! reduction, including current contact footprints and exposed-area coverage.
+//! The existing series-resistance law still describes resolved material paths.
+//! Planar distances are physical normal lengths. An explicitly radial material
+//! owner may lower its retained physical coordinates to A_face*integral(ds/A),
+//! an exact resistance-equivalent distance that is NEVER a cell volume/length
+//! measure. These metrics do not turn a two-point graph into a general Fourier
+//! operator on nonorthogonal distorted tetrahedra. The geometric owner must
+//! justify its reduction, current footprints and exposed-area coverage.
 //! The reference cell geometry, inventory and material source never change.
 
 use super::*;
 
-/// Both normal half-cell paths and their common CURRENT conducting area.
+/// Both CURRENT material resistance coordinates and their common flux area.
+/// Planar paths use physical normal half-distances. An explicit radial owner
+/// uses A_contact*integral(ds/A), retaining its physical coordinates separately.
 /// Endpoint order is the original link's ordered `(a, b)` pair.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurrentConductiveLink {
@@ -17,7 +22,8 @@ pub struct CurrentConductiveLink {
     pub half_distances_m: [f64; 2],
 }
 
-/// One CURRENT exposed or reservoir footprint and its normal bulk path.
+/// One CURRENT boundary footprint and its material resistance coordinate.
+/// An explicit radial owner supplies A_face*integral(ds/A), not radial thickness.
 /// Surface resistance retains its original areal units and material meaning.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CurrentConductiveBoundary {
@@ -68,10 +74,11 @@ impl CurrentConductionGeometry {
         checkpoint()
     }
 
-    /// Largest relative difference of ANY original area or normal distance.
+    /// Largest relative difference of ANY supplied area or resistance distance.
     /// Opposing geometric changes cannot cancel. The denominator is the larger
     /// positive endpoint measure, so this comparison has no dimensional floor.
-    /// This bounds a coupling iterate change, not geometric discretization error.
+    /// This bounds a heat-metric iterate change, not physical-coordinate or
+    /// geometric discretization error; the geometric owner retains those.
     pub fn relative_difference(
         &self,
         other: &Self,
@@ -122,7 +129,7 @@ impl<'a> ConductionObserver<'a> {
     ///
     /// The original observer still owns every conductivity and resistance law.
     /// Its original cell, mass, caloric material, link, bath and reference-area
-    /// identities are rechecked. Only areas and normal transport distances used
+    /// identities are rechecked. Only areas and transport resistance distances used
     /// by that SAME series law change. Source conductivity refreshes at every
     /// native heat substep; current geometry is held for this proposed interval.
     ///
@@ -161,7 +168,7 @@ impl<'a> ConductionObserver<'a> {
         self.current_geometry.as_ref()
     }
 
-    // Normal transport measures before any separately owned planar-density
+    // Transport resistance measures before any separately owned planar-density
     // response. Current mechanical metrics and planar layers are exclusive.
     pub(super) fn link_metrics(&self, binding: &BoundLink) -> CurrentConductiveLink {
         self.current_geometry.as_ref().map_or(

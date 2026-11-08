@@ -8,6 +8,7 @@ use super::IntegratedCaloricBoundary;
 use crate::thermal::conduction::{
     LayerConductionConfig, ReservoirLayerGeometry, ReservoirLayerResponse,
 };
+use fs_thermal::enthalpy::conduction::CurrentConductiveBoundary;
 use fs_thermal::enthalpy::conduction::implicit::boundary::{
     ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState,
 };
@@ -153,6 +154,21 @@ impl RadialCaloricBoundaryGeometry {
     pub const fn area_fraction(self) -> f64 {
         self.area_fraction
     }
+
+    fn same_radial_path(self, reference: Self) -> bool {
+        matches!(
+            (self.coordinates, reference.coordinates),
+            (
+                RadialCoordinates::Cylindrical { .. },
+                RadialCoordinates::Cylindrical { .. }
+            ) | (
+                RadialCoordinates::Spherical { .. },
+                RadialCoordinates::Spherical { .. }
+            )
+        ) && self.area_fraction == reference.area_fraction
+            && (self.surface_radius_m() < self.trace_radius_m())
+                == (reference.surface_radius_m() < reference.trace_radius_m())
+    }
 }
 
 /// A source-integrated radial material face and its one original areal film.
@@ -223,6 +239,117 @@ impl<'l, 'a, 'm> IntegratedRadialCaloricBoundary<'l, 'a, 'm> {
 impl ImplicitBoundaryLaw for IntegratedRadialCaloricBoundary<'_, '_, '_> {
     fn caloric_law(&self) -> &dyn ThermalLaw {
         self.prepared.caloric_law()
+    }
+
+    fn state_at_specific_enthalpy(
+        &self,
+        specific_energy_j_kg: f64,
+        bath_temperature_k: f64,
+        geometry: ImplicitBoundaryGeometry,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitBoundaryState, DepositionError> {
+        self.prepared.state_at_specific_enthalpy(
+            specific_energy_j_kg,
+            bath_temperature_k,
+            geometry,
+            checkpoint,
+        )
+    }
+}
+
+/// One explicitly selected current radial configuration on the original face.
+///
+/// The original radial family, inner/outer material side and angular fraction
+/// remain fixed. New physical radii and cylinder length must be supplied; no
+/// mechanical extent is inferred from the native resistance coordinates.
+/// The original source, reference coverage, mass and areal film retain their
+/// own owners. Both the current radial multiplier and R''/A_current are prepared
+/// once. Source-compatible mechanics and its work require independent closure.
+pub struct CurrentRadialCaloricBoundary<'r, 'l, 'a, 'm> {
+    reference: &'r IntegratedRadialCaloricBoundary<'l, 'a, 'm>,
+    prepared: IntegratedRadialCaloricBoundary<'l, 'a, 'm>,
+}
+
+impl<'l, 'a, 'm> IntegratedRadialCaloricBoundary<'l, 'a, 'm> {
+    /// Rebind explicitly supplied radial coordinates without changing the
+    /// original boundary. The native observer must receive current_geometry()
+    /// on the SAME original reservoir or exposed-ambient channel.
+    ///
+    /// Preparation is constant work with no material-table copies or source
+    /// queries. The native implicit attachment still probes original source
+    /// admission at its actual cell/bath state. Every thermal trial holds this
+    /// configuration fixed; a density-driven thickness tangent is not inferred.
+    pub fn with_current_radial_geometry<'r>(
+        &'r self,
+        current: RadialCaloricBoundaryGeometry,
+    ) -> Result<CurrentRadialCaloricBoundary<'r, 'l, 'a, 'm>, DepositionError> {
+        if !current.same_radial_path(self.geometry) {
+            return Err(DepositionError::InvalidInput(
+                "current radial boundary requires its original family, material side and angular fraction",
+            ));
+        }
+        let prepared = Self::new(
+            self.prepared.layer,
+            current,
+            self.prepared.geometry.surface_resistance_m2_k_w,
+            self.prepared.config,
+        )?;
+        Ok(CurrentRadialCaloricBoundary {
+            reference: self,
+            prepared,
+        })
+    }
+}
+
+impl CurrentRadialCaloricBoundary<'_, '_, '_, '_> {
+    #[must_use]
+    pub const fn reference_geometry(&self) -> RadialCaloricBoundaryGeometry {
+        self.reference.geometry
+    }
+
+    /// Actual physical coordinates and explicitly retained angular footprint.
+    #[must_use]
+    pub const fn geometry(&self) -> RadialCaloricBoundaryGeometry {
+        self.prepared.geometry
+    }
+
+    /// Exact current area and resistance-equivalent distance for the observer.
+    /// These measures never replace the reference cell volume or mass.
+    #[must_use]
+    pub fn current_geometry(&self) -> CurrentConductiveBoundary {
+        let geometry = self.prepared.native_geometry();
+        CurrentConductiveBoundary {
+            area_m2: geometry.area_m2,
+            half_distance_m: geometry.half_distance_m,
+        }
+    }
+
+    #[must_use]
+    pub const fn native_geometry(&self) -> ImplicitBoundaryGeometry {
+        self.prepared.native_geometry()
+    }
+
+    pub fn response_at_specific_energy(
+        &self,
+        specific_energy_j_kg: f64,
+        bath_temperature_k: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ReservoirLayerResponse, DepositionError> {
+        self.prepared.response_at_specific_energy(
+            specific_energy_j_kg,
+            bath_temperature_k,
+            checkpoint,
+        )
+    }
+}
+
+impl ImplicitBoundaryLaw for CurrentRadialCaloricBoundary<'_, '_, '_, '_> {
+    fn caloric_law(&self) -> &dyn ThermalLaw {
+        self.prepared.caloric_law()
+    }
+
+    fn supports_current_geometry(&self) -> bool {
+        true
     }
 
     fn state_at_specific_enthalpy(

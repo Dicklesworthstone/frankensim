@@ -141,6 +141,16 @@ impl LayerGeometry {
         }
     }
 
+    /// Explicit complete axial length for cylindrical geometry. It is absent
+    /// for planar paths and spheres; do not infer it from an equivalent distance.
+    #[must_use]
+    pub const fn cylinder_length_m(self) -> Option<f64> {
+        match self.coordinates {
+            Coordinates::Cylindrical { length_m, .. } => Some(length_m),
+            Coordinates::Planar | Coordinates::Spherical { .. } => None,
+        }
+    }
+
     /// Bind the original k(T) laws and area-specific interface resistance to the
     /// shared nonlinear flux owner. Successful construction allocates nothing.
     pub fn conduction<'a>(

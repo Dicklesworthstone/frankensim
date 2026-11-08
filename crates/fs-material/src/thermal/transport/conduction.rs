@@ -10,14 +10,14 @@
 #[path = "conduction/boundary.rs"]
 pub mod boundary;
 pub use boundary::{
-    CurrentPlanarCaloricBoundary, IntegratedCaloricBoundary, IntegratedRadialCaloricBoundary,
-    RadialCaloricBoundaryGeometry,
+    CurrentPlanarCaloricBoundary, CurrentRadialCaloricBoundary, IntegratedCaloricBoundary,
+    IntegratedRadialCaloricBoundary, RadialCaloricBoundaryGeometry,
 };
 
-/// Explicit current planar configurations on the original integrated links.
+/// Explicit current planar and radial configurations on original integrated links.
 #[path = "conduction/current.rs"]
 mod current;
-pub use current::CurrentPlanarCaloricLink;
+pub use current::{CurrentPlanarCaloricLink, CurrentRadialCaloricLink};
 
 /// Exact fixed-bath exchange on the retained native caloric storage coordinate.
 #[path = "conduction/exchange.rs"]
