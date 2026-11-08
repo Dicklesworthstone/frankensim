@@ -66,6 +66,15 @@ Layer L5 (LUMEN). Safe Rust; the scoped streamline and contour paths consume L0
   cube. This includes domain-cut regions; an extracted open isosurface alone
   does not cap their boundary or provide that volume. The result is a
   binary64 geometric measurement, not a continuum-error certificate.
+- `Grid3::sublevel_components` and `sublevel_components_with_control` label
+  the strict-sublevel support using exactly the native six-tetrahedra edge
+  graph. Level-equal nodes are excluded; IDs follow first x-fastest node
+  order and identify this snapshot only. Union by rank/path compression uses
+  one node-sized label/parent array and one temporary byte per node, without
+  storing edges. The original node admission bounds work and allocation;
+  an explicit positive component limit and per-node/cube cancellation
+  reject without returning partial labels. This is connectivity of the
+  finite-resolution PL field, not inferred physical or temporal topology.
 - `ScalarField3` / `ScalarFieldSemantics` / `ScalarLayout3` — a versioned,
   dependency-free scalar-field artifact codec with explicit quantity, domain
   unit, value unit, node-vs-cell centering, x-fastest dimensions, origin, and

@@ -42,7 +42,7 @@ pub use field_registry::{
     ExportFormat, FIELD_REGISTRY, FieldDescriptor, FieldKind, find_field_by_name,
     validate_output_request,
 };
-pub use isosurface::{Grid3, Grid3Error, IsoMesh3, IsoSurfaceError, Vec3};
+pub use isosurface::{Grid3, Grid3Error, IsoMesh3, IsoSurfaceError, SublevelComponents3, Vec3};
 pub use scalar_field::{
     SCALAR_FIELD3_ARTIFACT_KIND, SCALAR_FIELD3_SCHEMA_VERSION, ScalarField3, ScalarField3Error,
     ScalarFieldSemantics, ScalarLayout3,

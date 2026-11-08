@@ -1710,6 +1710,89 @@ fn sublevel_volume_preserves_thin_layers_with_repeated_nodal_values() {
 }
 
 #[test]
+fn sublevel_components_follow_native_tetrahedra_for_every_cube_mask() {
+    // With corners 0 and 7 excluded, native tet edges form this six-node ring.
+    // Either body-diagonal corner connects every other occupied cube corner.
+    let ring = [1usize, 3, 2, 6, 4, 5];
+    for mask in 0u16..256 {
+        let values = (0..8)
+            .map(|node| if mask & (1 << node) != 0 { -1.0 } else { 0.0 })
+            .collect();
+        let grid = Grid3::from_values([2; 3], [0.0; 3], [1.0; 3], 8, values).unwrap();
+        let labels = grid.sublevel_components(0.0, 8).unwrap();
+        let expected = if mask == 0 {
+            0
+        } else if mask & 0x81 != 0 || mask == 0x7e {
+            1
+        } else {
+            (0..6)
+                .filter(|&i| mask & (1 << ring[i]) != 0 && mask & (1 << ring[(i + 5) % 6]) == 0)
+                .count()
+        };
+        assert_eq!(labels.component_count(), expected, "mask {mask:#04x}");
+        assert_eq!(labels.node_count(), 8);
+        let mut first_nodes = vec![usize::MAX; expected];
+        for node in 0..8 {
+            let label = labels.component_of_node(node);
+            assert_eq!(label.is_some(), mask & (1 << node) != 0);
+            if let Some(label) = label {
+                first_nodes[label] = first_nodes[label].min(node);
+            }
+        }
+        assert!(first_nodes.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(labels.component_of_node(8), None);
+        assert_eq!(labels, grid.sublevel_components(0.0, 8).unwrap());
+    }
+}
+
+#[test]
+fn sublevel_components_bound_disjoint_supports_and_poll_cancellation() {
+    let grid = Grid3::from_fn([7, 3, 3], [0.0; 3], [6.0, 2.0, 2.0], 63, |p| {
+        if p[1] == 1.0 && p[2] == 1.0 && [1.0, 3.0, 5.0].contains(&p[0]) {
+            -1.0
+        } else {
+            0.0
+        }
+    })
+    .unwrap();
+    let labels = grid.sublevel_components(0.0, 3).unwrap();
+    assert_eq!(labels.component_count(), 3);
+    for (label, x) in [1, 3, 5].into_iter().enumerate() {
+        assert_eq!(labels.component_of_node(4 * 7 + x), Some(label));
+    }
+    assert_eq!(
+        grid.sublevel_components(0.0, 2),
+        Err(IsoSurfaceError::ComponentBudgetExceeded { limit: 2 })
+    );
+    assert_eq!(
+        grid.sublevel_components(0.0, 0),
+        Err(IsoSurfaceError::ZeroComponentLimit)
+    );
+    assert!(matches!(
+        grid.sublevel_components(f64::INFINITY, 3),
+        Err(IsoSurfaceError::NonFiniteIso { .. })
+    ));
+
+    let mut total_polls = 0;
+    grid.sublevel_components_with_control(0.0, 3, || {
+        total_polls += 1;
+        true
+    })
+    .unwrap();
+    for stop in [1, 20, total_polls / 2, total_polls] {
+        let mut polls = 0;
+        assert_eq!(
+            grid.sublevel_components_with_control(0.0, 3, || {
+                polls += 1;
+                polls < stop
+            }),
+            Err(IsoSurfaceError::Cancelled)
+        );
+        assert_eq!(polls, stop);
+    }
+}
+
+#[test]
 fn sublevel_volume_agrees_with_the_original_closed_mesh_and_cancels() {
     let grid = Grid3::from_fn([13, 11, 9], [-1.0; 3], [1.0; 3], 1287, |p| {
         p[0] * p[0] + p[1] * p[1] + p[2] * p[2] - 0.4

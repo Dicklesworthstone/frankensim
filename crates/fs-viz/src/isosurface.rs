@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 
+mod components;
+pub use components::SublevelComponents3;
+
 /// A 3-D point or vector.
 pub type Vec3 = [f64; 3];
 
@@ -110,6 +113,20 @@ pub enum IsoSurfaceError {
         /// Caller-provided maximum triangle count.
         limit: usize,
     },
+    /// At least one support component must be admitted.
+    ZeroComponentLimit,
+    /// Labeling found more disjoint supports than admitted.
+    ComponentBudgetExceeded {
+        /// Caller-provided maximum component count.
+        limit: usize,
+    },
+    /// Bounded component storage could not be reserved.
+    ComponentAllocationFailed {
+        /// Original grid node count.
+        nodes: usize,
+    },
+    /// A temporary component label is not representable by usize.
+    ComponentIndexOverflow,
     /// The indexed vertex count cannot be represented by `u32` triangles.
     VertexIndexOverflow,
     /// Interpolation or orientation produced non-finite geometry.
@@ -127,6 +144,19 @@ impl core::fmt::Display for IsoSurfaceError {
             Self::ZeroTriangleLimit => write!(f, "isosurface triangle limit must be positive"),
             Self::TriangleBudgetExceeded { limit } => {
                 write!(f, "isosurface exceeded the explicit {limit}-triangle limit")
+            }
+            Self::ZeroComponentLimit => write!(f, "sublevel component limit must be positive"),
+            Self::ComponentBudgetExceeded { limit } => {
+                write!(f, "sublevel exceeded the explicit {limit}-component limit")
+            }
+            Self::ComponentAllocationFailed { nodes } => {
+                write!(
+                    f,
+                    "sublevel could not reserve component labels for {nodes} nodes"
+                )
+            }
+            Self::ComponentIndexOverflow => {
+                write!(f, "sublevel component labels exceed usize indexing")
             }
             Self::VertexIndexOverflow => write!(f, "isosurface vertex count exceeds u32 indexing"),
             Self::NonFiniteGeometry => {
