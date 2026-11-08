@@ -220,6 +220,40 @@ impl FreezingWaterState {
     pub fn bulk_density_kg_m3(self) -> f64 {
         1.0 / self.specific_volume_m3_kg()
     }
+    /// Original isobaric specific-volume tangent `dv/dh` [m3/J].
+    ///
+    /// Sensible phases use their source Gibbs derivative `(dv/dT)_p / Cp`.
+    /// Fusion uses `(v_liquid - v_ice) / L`, including both exact endpoints,
+    /// matching this chart's inclusive plateau convention. The other one-sided
+    /// sensible tangents differ at those corners. Melting contraction and
+    /// liquid water's negative expansion below its density maximum retain
+    /// their signs; no volume response is inferred from `dT/dh` alone.
+    ///
+    /// The state already owns its admitted source domain and fixed pressure.
+    /// This allocation-free query performs no enthalpy inversion or source
+    /// reevaluation. A nonrepresentable tangent refuses rather than becoming
+    /// zero; geometric consumers retain responsibility for conserving mass.
+    pub fn specific_volume_enthalpy_derivative_m3_j(self) -> Result<f64, FreezingWaterError> {
+        let (volume_change, enthalpy_change) = match self.point {
+            Point::Ice(source) => (
+                source.volume_temperature_derivative().value(),
+                source.cp().value(),
+            ),
+            Point::Liquid(source) => (source.dv_dt_at_pressure().value(), source.cp().value()),
+            Point::Melting { .. } => (
+                self.chart.melting.liquid.specific_volume().value()
+                    - self.chart.melting.ice.specific_volume().value(),
+                self.chart.melting.latent_enthalpy_j_kg(),
+            ),
+        };
+        let tangent = volume_change / enthalpy_change;
+        if !tangent.is_finite() || (volume_change != 0.0 && tangent == 0.0) {
+            return Err(FreezingWaterError::Unrepresentable(
+                "specific-volume enthalpy tangent",
+            ));
+        }
+        Ok(tangent)
+    }
     pub const fn liquid_mass_fraction(self) -> f64 {
         match self.point {
             Point::Ice(_) => 0.0,

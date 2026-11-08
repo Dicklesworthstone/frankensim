@@ -7,12 +7,14 @@
 //! evaluates the selected phase conductivity every actual thermal substep.
 //! Surface reservoirs include the boundary half-cell resistance.
 //!
-//! This is a one-dimensional conduction model on fixed REFERENCE geometry.
-//! Pressure is externally maintained, and the reported free phase volumes and
-//! p*Delta V do not move that geometry. Convection, mechanical compatibility,
-//! nucleation, supercooling, phase-front kinetics and a deforming free surface
-//! require additional models. Spatial and timestep refinement remain separate
-//! from the numerical energy gates.
+//! By default conduction uses fixed reference geometry. Explicitly selecting
+//! `with_material_density_layers` instead evolves each normal half-distance
+//! from its conserved mass and original density, at fixed footprint area.
+//! Reference coordinates remain material labels in either case. Pressure is
+//! externally maintained; the original enthalpy owner includes p*Delta V once.
+//! This one-dimensional expansion model supplies no lateral strain, confinement
+//! stress, convection, nucleation, supercooling or phase-front kinetics. Spatial
+//! and timestep refinement remain separate from the numerical energy gates.
 
 use super::thermal::FreezingWaterThermalLaw;
 use super::transport::{
@@ -28,7 +30,7 @@ use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionLaw, ImplicitConductionReport, ImplicitConductionWorkspace,
 };
 use fs_thermal::enthalpy::conduction::{
-    ConductionObserver, ConductiveLink, ConductiveReservoir, ConductivityLaw,
+    ConductionObserver, ConductiveLink, ConductiveReservoir, ConductivityLaw, PlanarDensityLayer,
 };
 use fs_thermal::enthalpy::entropy::EntropyAudit;
 use fs_thermal::enthalpy::{
@@ -127,7 +129,8 @@ pub struct FreezingSlabCell {
     pub material: FreezingWaterState,
 }
 
-/// Current inventory. These free volumes are not the frozen transport geometry.
+/// Current inventory. Free volumes also set normal transport lengths when
+/// material-density layers are selected; reference coordinates remain fixed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreezingSlabInventory {
     pub mass_kg: f64,
@@ -374,6 +377,47 @@ impl<'a> FreezingSlab<'a> {
     pub fn time_s(&self) -> f64 {
         self.thermal.time_s()
     }
+
+    /// Select normal expansion/contraction at the original fixed face area.
+    /// Each conduction half-distance is `mass / (2 * area * rho(h))`, including
+    /// sensible expansion and the density change at isothermal freezing/melting.
+    /// Explicit, implicit and adaptive advances retain this same selection.
+    /// Implicit trials use the original signed specific-volume tangent.
+    ///
+    /// Attach while the source density still agrees with the initial reference
+    /// geometry. The native layer owner checks mass, face coverage and source
+    /// support. Mass, reference coordinates, material identity and reservoir
+    /// areas remain unchanged. Pressure stays externally maintained; the usual
+    /// enthalpy and U+pV audits account its work without another heat source.
+    /// No moving mesh, lateral deformation or confinement mechanics is inferred.
+    /// Failure or cancellation leaves this slab unchanged.
+    pub fn with_material_density_layers(
+        &self,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, FreezingSlabError> {
+        checkpoint()?;
+        let mut layers = Vec::with_capacity(self.thermal.cells().len());
+        for &cell_id in self.thermal.cells().keys() {
+            checkpoint()?;
+            layers.push(PlanarDensityLayer {
+                cell_id,
+                footprint_area_m2: self.geometry.area_m2,
+            });
+        }
+        let conduction = self.conduction.clone().with_material_density_layers(
+            &self.thermal,
+            &layers,
+            &mut checkpoint,
+        )?;
+        checkpoint()?;
+        Ok(Self {
+            thermal: self.thermal.clone(),
+            conduction,
+            caloric: self.caloric,
+            transport: self.transport,
+            geometry: self.geometry,
+        })
+    }
     pub fn mass_kg(&self) -> f64 {
         self.thermal.mass_kg()
     }
@@ -485,7 +529,7 @@ impl<'a> FreezingSlab<'a> {
     /// The reusable workspace has O(cells) storage and a pivoted tridiagonal
     /// linear solve. Maximum timestep and refinement remain caller choices:
     /// implicit stepping removes the explicit diffusion CFL restriction, not
-    /// time-discretization error or the fixed-reference-geometry assumptions.
+    /// time-discretization error or the selected planar-geometry assumptions.
     /// Failure can change numerical scratch only; this physical slab is intact.
     pub fn advance_implicit_to(
         &self,

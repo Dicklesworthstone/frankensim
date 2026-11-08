@@ -93,6 +93,83 @@ fn original_sources_meet_on_pressure_dependent_fusion_with_explicit_matching_def
 }
 
 #[test]
+fn volume_enthalpy_tangent_retains_native_ice_and_anomalous_water_expansion() {
+    let c = chart();
+    for t in [250.0, 270.0, 273.3, 275.0, 276.0, 280.0, 300.0] {
+        let state = at_t(&c, t);
+        let tangent = state.specific_volume_enthalpy_derivative_m3_j().unwrap();
+        // Differentiate the original source states in T, not the numerical
+        // h-to-T inverse used by the implicit consumer.
+        let lower = at_t(&c, t - 0.002);
+        let upper = at_t(&c, t + 0.002);
+        let numerical = (upper.specific_volume_m3_kg() - lower.specific_volume_m3_kg())
+            / (upper.specific_enthalpy_j_kg() - lower.specific_enthalpy_j_kg());
+        near(tangent / numerical, 1.0, 2e-6);
+        if (273.3..=276.0).contains(&t) {
+            assert!(tangent < 0.0, "cold liquid contracts when heated at {t} K");
+        } else {
+            assert!(tangent > 0.0, "the source expands when heated at {t} K");
+        }
+    }
+}
+
+#[test]
+fn latent_volume_tangent_accounts_for_contraction_at_fixed_mass_and_plateau_corners() {
+    let c = chart();
+    let pair = c.melting();
+    let expected = (pair.liquid().specific_volume().value() - pair.ice().specific_volume().value())
+        / pair.latent_enthalpy_j_kg();
+    assert!(expected < 0.0);
+    for x in [0.0, 0.125, 0.5, 0.875, 1.0] {
+        let state = c.state_at_liquid_fraction(x, || false).unwrap();
+        assert_eq!(state.temperature_k(), pair.temperature().value());
+        assert_eq!(
+            state.specific_volume_enthalpy_derivative_m3_j().unwrap(),
+            expected
+        );
+        let inverse = c
+            .state_at_specific_enthalpy(state.specific_enthalpy_j_kg(), || false)
+            .unwrap()
+            .into_state();
+        assert_eq!(
+            inverse.specific_volume_enthalpy_derivative_m3_j().unwrap(),
+            expected
+        );
+    }
+    let initial = c.state_at_liquid_fraction(0.25, || false).unwrap();
+    let melted = c.state_at_liquid_fraction(0.75, || false).unwrap();
+    let mass = 0.2;
+    let heat = mass * (melted.specific_enthalpy_j_kg() - initial.specific_enthalpy_j_kg());
+    let volume_change = mass * (melted.specific_volume_m3_kg() - initial.specific_volume_m3_kg());
+    near(expected * heat, volume_change, 1e-19);
+    assert!(heat > 0.0 && volume_change < 0.0);
+    for state in [initial, melted] {
+        near(
+            mass * state.specific_volume_m3_kg() * state.bulk_density_kg_m3(),
+            mass,
+            1e-16,
+        );
+    }
+    // The exact fusion endpoints select the plateau-side tangent. The
+    // adjacent sensible states retain their own different Gibbs derivatives.
+    let ice_side = c
+        .state_at_specific_enthalpy(pair.ice().specific_enthalpy().value() - 1.0, || false)
+        .unwrap()
+        .into_state();
+    let liquid_side = c
+        .state_at_specific_enthalpy(pair.liquid().specific_enthalpy().value() + 1.0, || false)
+        .unwrap()
+        .into_state();
+    assert!(ice_side.specific_volume_enthalpy_derivative_m3_j().unwrap() > 0.0);
+    assert_ne!(
+        liquid_side
+            .specific_volume_enthalpy_derivative_m3_j()
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
 fn freezing_thawing_retains_mass_physical_phase_volumes_and_independent_energy() {
     let c = chart();
     let (warm, cold) = (at_t(&c, 293.15), at_t(&c, 253.15));

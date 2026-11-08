@@ -353,6 +353,21 @@ impl ImplicitConductionLaw for FreezingWaterImplicitLaw<'_> {
     fn enthalpy_bounds_j_kg(&self) -> [f64; 2] {
         self.caloric.chart().enthalpy_bounds_j_kg()
     }
+    fn specific_volume_derivative_at_specific_enthalpy(
+        &self,
+        specific_h_j_kg: f64,
+    ) -> Result<Option<f64>, DepositionError> {
+        self.caloric
+            .chart()
+            .state_at_specific_enthalpy(specific_h_j_kg, || false)
+            .and_then(|solution| {
+                solution
+                    .into_state()
+                    .specific_volume_enthalpy_derivative_m3_j()
+            })
+            .map(Some)
+            .map_err(|_| DepositionError::MaterialDomain)
+    }
     fn state_at_specific_enthalpy(
         &self,
         specific_h_j_kg: f64,

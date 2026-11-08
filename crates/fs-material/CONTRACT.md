@@ -21809,3 +21809,42 @@ original temperature and density fixed, preserves the exact vacuum limit and
 the original 200--1100 nm domain, and introduces no EOS or absorption model.
 Native phase and group wavelength differences verify the added curvature;
 the release's original uncertainty and applicability limits remain unchanged.
+
+### Freezing-water signed volume response and density-dependent slab layers
+
+`FreezingWaterState::specific_volume_enthalpy_derivative_m3_j` returns the
+original isobaric dv/dh in m³/J. Sensible ice and liquid use the retained source
+Gibbs derivative (dv/dT)/Cp. Fusion uses (v_liquid-v_ice)/L, including both exact
+latent endpoints under the existing inclusive plateau convention. Melting
+contraction and liquid water's negative expansion below its density maximum
+retain their signs even when dT/dh is zero. The state query allocates nothing,
+performs no inverse or source reevaluation, and refuses nonrepresentable
+tangents. The original implicit conductivity binding supplies this signed
+tangent to the shared nonlinear geometry owner.
+
+`FreezingSlab::with_material_density_layers` opts the existing explicit,
+implicit and adaptive slab paths into their original material-density layer
+geometry. Each cell keeps its original mass and fixed footprint area; current
+specific volume determines its normal conductive half-distances. The original
+reference coordinates remain inventory labels. Binding requires the native
+initial mass/density/reference-volume admission and must occur while those
+quantities agree. Accepted continuation retains the selected geometry, and
+refusal or cancellation leaves the original slab unchanged.
+
+Conductivity, caloric enthalpy, source domains, imposed pressure, fixed face
+areas and contact resistances retain their original owners. The independent
+H and U+pV accounts use the actual signed material volume change. This is
+declared normal layer expansion at fixed footprint, not lateral mechanics,
+confinement stress, advection or an additional pressure law.
+
+Eight complete native freezing-core tests passed, including source-derived
+sensible signs, latent contraction and endpoint tangents. The two new native
+slab regressions also passed: explicit geometry refresh/cancellation and an
+independent two-cell series-mixture backward-Euler phase-volume quadratic,
+including fixed-geometry discrimination, energy closure and continuation.
+All 32 freezing test bodies compiled in the bounded integration build; only
+the two slab regressions ran in that build. It used complete fs-thermal source
+at cdb00fe5f4eb2db4eeb21ab9a0cae934747916b7 with native linear/nonlinear numerical
+modules and nightly-2026-08-31, excluding only unrelated runtime wrappers.
+No thermal solver or material algorithm was substituted. Full workspace Cargo
+validation remains unrun.

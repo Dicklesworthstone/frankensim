@@ -7,6 +7,8 @@ use fs_thermochem::water::ice::IceMeltingSolve;
 use fs_thermochem::water::ice::bounds::IceIhHeatCapacityBoundSolve;
 use fs_thermochem::water::if97::bounds::If97HeatCapacityBoundSolve;
 
+mod density;
+
 fn laws() -> (FreezingWaterThermalLaw, FreezingWaterConductivity) {
     let chart = FreezingWater::new(
         Pressure::new(101_325.0),

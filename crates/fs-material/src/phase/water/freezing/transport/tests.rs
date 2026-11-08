@@ -348,6 +348,17 @@ fn implicit_binding_retains_original_objects_domain_and_fused_source_state() {
             direct.conductivity_enthalpy_derivative_kg_w_m_k_j()
         );
         assert_eq!(fused.temperature_k, caloric.temperature_k(h).unwrap());
+        assert_eq!(
+            binding
+                .specific_volume_derivative_at_specific_enthalpy(h)
+                .unwrap(),
+            Some(
+                direct
+                    .material_state()
+                    .specific_volume_enthalpy_derivative_m3_j()
+                    .unwrap()
+            ),
+        );
     }
     for h in [
         f64::NAN,
@@ -358,6 +369,10 @@ fn implicit_binding_retains_original_objects_domain_and_fused_source_state() {
             binding.state_at_specific_enthalpy(h),
             Err(DepositionError::MaterialDomain)
         ));
+        assert_eq!(
+            binding.specific_volume_derivative_at_specific_enthalpy(h),
+            Err(DepositionError::MaterialDomain),
+        );
     }
     let other = FreezingWaterConductivity::new(
         super::tests::chart(NORMAL_PRESSURE_PA, 243.15, 313.15),
