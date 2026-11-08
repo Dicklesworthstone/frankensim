@@ -1877,6 +1877,26 @@ warm steps, and atomic/budget/cancellation refusals. Existing positive-heat,
 owned exact-flow, stiff-energy and common-flow regressions protect the shared
 numerical owners; full-workspace qualification is not asserted.
 
+### Original per-port continuous work and borrowed heat channels
+
+`new_with_resistance_channels_controlled` retains an immutable borrow of the
+original physical owner while preparing its declared positive loss channels.
+`step_accounted_into` and its controlled variant additionally return each
+original port's signed work on the complete coupled trajectory. The original
+paired power factors integrate each selected source against the full response,
+including startup and cross-frequency transfers; no work is inferred from
+average products or from a remainder of the total energy account.
+
+Signed port work must close the independently integrated total supply within
+an allowance scaled by uncancelled work. Opposing source/recovery ports remain
+observable when net supply vanishes. Reusable source packing and work buffers
+are included in explicit capacity admission; warm accounting allocates no
+memory. State, average outputs, heat channels and per-port work publish together
+after all checks and the final cancellation point. Three G1/G3 regression
+definitions cover independent scalar flow/power integrals, zero-net-supply
+exchange, and late cancellation followed by retry. Native execution of these
+new regressions remains to be completed.
+
 ### Affine envelopes on continuous tone sources
 
 The `PreparedExactTones::new_affine`/`new_owned_affine` family opts into

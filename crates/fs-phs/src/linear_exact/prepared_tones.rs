@@ -1,4 +1,6 @@
 //! Continuous sources through the original complete quadratic pHS owner.
+#[cfg(test)]
+mod accounting_tests;
 mod affine;
 mod observer;
 pub(super) mod power;
@@ -31,6 +33,8 @@ struct Scratch {
     derivative: Vec<f64>,
     coordinates: Vec<f64>,
     heat: Vec<f64>,
+    work_input: Vec<f64>,
+    port_work: Vec<f64>,
 }
 
 /// Complete original quadratic dynamics under simultaneous continuous tones.
@@ -168,6 +172,31 @@ impl<'a> PreparedExactTones<'a> {
         .map_err(uncancelled)
     }
 
+    /// Borrow the original system and retain its separately declared positive
+    /// resistance channels. Preparation checks cancellation between bounded
+    /// kernels; no reconstructed system or copied storage owner is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_resistance_channels_controlled(
+        system: &'a PortHamiltonian,
+        frequencies: &[f64],
+        duration: f64,
+        split_budget: LinearSplitBudget,
+        dense_budget: DenseExponentialBudget,
+        channels: &[ResistanceWitness],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            System::Borrowed(system),
+            frequencies,
+            duration,
+            split_budget,
+            dense_budget,
+            channels,
+            &mut cancelled,
+            false,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn prepare(
         owner: System<'a>,
@@ -252,6 +281,8 @@ impl<'a> PreparedExactTones<'a> {
             derivative: vec![0.0; n],
             coordinates: vec![0.0; n + n.max(m) + sources],
             heat: vec![0.0; channels.len() + 1],
+            work_input: vec![0.0; sources],
+            port_work: vec![0.0; m],
         };
         let phase = unique
             .iter()
@@ -361,6 +392,107 @@ impl<'a> PreparedExactTones<'a> {
         next.copy_from_slice(&self.scratch.endpoint);
         average_output.copy_from_slice(&self.scratch.output);
         channel_heat.copy_from_slice(&self.scratch.heat[1..]);
+        Ok(record)
+    }
+
+    /// Advance continuous tones and independently integrate each physical
+    /// port's signed work on the SAME trajectory, plus all resistance channels.
+    /// Work includes startup and cross-frequency terms; it is not pressure
+    /// average times flow average, nor a remainder of the energy balance.
+    /// Caller buffers publish together only after every account is accepted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_accounted_into(
+        &mut self,
+        initial: &[f64],
+        cosine: &[f64],
+        sine: &[f64],
+        next: &mut [f64],
+        average_output: &mut [f64],
+        channel_heat: &mut [f64],
+        port_work: &mut [f64],
+    ) -> Result<PreparedStepRecord, PhsError> {
+        self.step_accounted_into_controlled(
+            initial,
+            cosine,
+            sine,
+            next,
+            average_output,
+            channel_heat,
+            port_work,
+            || false,
+        )
+        .map_err(uncancelled)
+    }
+
+    /// Same allocation-free step with checks before, between physical port
+    /// accounts, and immediately before publication. Private scratch is reusable
+    /// after refusal; all caller output buffers remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_accounted_into_controlled(
+        &mut self,
+        initial: &[f64],
+        cosine: &[f64],
+        sine: &[f64],
+        next: &mut [f64],
+        average_output: &mut [f64],
+        channel_heat: &mut [f64],
+        port_work: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        if cancelled() {
+            return Err(PreparedStepError::Cancelled);
+        }
+        self.check_outputs(next, average_output)?;
+        if channel_heat.len() != self.resistance_channel_count()
+            || port_work.len() != self.port_dim()
+        {
+            return Err(refuse("continuous-tone heat/work output extent").into());
+        }
+        let record = self.evaluate(initial, cosine, sine, None)?;
+        // evaluate() uses gradient scratch while checking storage. Restore the
+        // actual initial effort required by the original source-work integral.
+        self.system
+            .get()
+            .storage
+            .gradient(initial, &mut self.scratch.effort);
+        self.scratch.work_input.fill(0.0);
+        let width = 2 * self.unique.len();
+        let mut supplied = Sum::default();
+        let mut magnitude = Sum::default();
+        for port in 0..self.port_dim() {
+            if cancelled() {
+                return Err(PreparedStepError::Cancelled);
+            }
+            let range = port * width..(port + 1) * width;
+            self.scratch.work_input[range.clone()]
+                .copy_from_slice(&self.scratch.input[range.clone()]);
+            let work = self.power.source_work_into(
+                &self.scratch.effort,
+                &self.scratch.derivative,
+                &self.scratch.input,
+                &self.scratch.work_input,
+                &mut self.scratch.coordinates,
+            )?;
+            self.scratch.work_input[range].fill(0.0);
+            self.scratch.port_work[port] = work;
+            supplied.add(work);
+            magnitude.add(work.abs());
+        }
+        let total = supplied.value();
+        let scale = magnitude.value() + record.supplied.abs();
+        if !finite(&self.scratch.port_work)
+            || !finite(&[total, scale])
+            || (total - record.supplied).abs() > 1e-12 * scale
+        {
+            return Err(refuse("continuous-tone original port work does not close supply").into());
+        }
+        if cancelled() {
+            return Err(PreparedStepError::Cancelled);
+        }
+        next.copy_from_slice(&self.scratch.endpoint);
+        average_output.copy_from_slice(&self.scratch.output);
+        channel_heat.copy_from_slice(&self.scratch.heat[1..]);
+        port_work.copy_from_slice(&self.scratch.port_work);
         Ok(record)
     }
 
@@ -620,8 +752,10 @@ fn admit(
     // their own 32-term/48-doubling admission. Scores are not wall-clock claims.
     let (f, d, c) = (flow as u128, power as u128, channels.len() as u128);
     let bytes = 8 * (f * f * (2 * m as u128 + 25) + d * d * (c + 80) + (n * n) as u128 * c)
-        + 128 * (n + m + source + frequencies.len()) as u128;
-    let work = 224 * f * f * f * (m as u128).max(1) + 2048 * d * d * d * (c + 2);
+        + 128 * (n + m + source + frequencies.len()) as u128
+        + 8 * (source + m) as u128;
+    let work =
+        224 * f * f * f * (m as u128).max(1) + 2048 * d * d * d * (c + 2) + 8 * m as u128 * d * d;
     if bytes > budget.max_dense_bytes as u128 || work > budget.max_multiply_terms as u128 {
         return Err(refuse(
             "complete continuous-tone channels exceed explicit byte/work budget",
