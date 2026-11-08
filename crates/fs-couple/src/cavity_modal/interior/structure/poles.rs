@@ -13,7 +13,12 @@
 use super::{StructuralInterior, StructuralInteriorError, poll, response};
 use fs_exec::Cx;
 use fs_math::{c64::C64, dd::Dd};
-use fs_modal::quadratic_modes::{PreparedQuadraticModes, QuadraticModeError};
+use fs_modal::quadratic_modes::{
+    PreparedQuadraticModes, QuadraticMode, QuadraticModeError, QuadraticResponseError,
+};
+
+/// Original physical parameter derivatives of a coupled simple mode.
+pub mod parameter;
 
 /// Shared accuracy, original-coordinate, payload and arithmetic limits.
 pub use fs_modal::quadratic_modes::PoleOptions;
@@ -101,6 +106,8 @@ pub enum StructuralInteriorPoleError {
     Physical(StructuralInteriorError),
     /// Shared quadratic mode admission, resource, convergence or cancellation.
     Mode(QuadraticModeError),
+    /// Shared original-parameter factor, normalization or tangent refusal.
+    Sensitivity(QuadraticResponseError),
 }
 
 impl core::fmt::Display for StructuralInteriorPoleError {
@@ -108,6 +115,7 @@ impl core::fmt::Display for StructuralInteriorPoleError {
         match self {
             Self::Physical(error) => error.fmt(f),
             Self::Mode(error) => error.fmt(f),
+            Self::Sensitivity(error) => error.fmt(f),
         }
     }
 }
@@ -120,6 +128,11 @@ impl From<StructuralInteriorError> for StructuralInteriorPoleError {
 impl From<QuadraticModeError> for StructuralInteriorPoleError {
     fn from(error: QuadraticModeError) -> Self {
         Self::Mode(error)
+    }
+}
+impl From<QuadraticResponseError> for StructuralInteriorPoleError {
+    fn from(error: QuadraticResponseError) -> Self {
+        Self::Sensitivity(error)
     }
 }
 impl From<response::ResponseError> for StructuralInteriorPoleError {
@@ -220,6 +233,24 @@ impl PreparedStructuralInteriorModes<'_, '_, '_, '_> {
         pressure_potential_seed_pa_s: &[C64],
         cx: &Cx<'_>,
     ) -> Result<StructuralInteriorPole, StructuralInteriorPoleError> {
+        let mode = self.refine_original(
+            laplace_seed_per_s,
+            structural_displacement_seed,
+            pressure_potential_seed_pa_s,
+            cx,
+        )?;
+        self.observe(mode, cx)
+    }
+
+    // Share the genuine native eigenpair with parameter preparation; never
+    // reconstruct an eigensolver input from a public observation receipt.
+    fn refine_original(
+        &self,
+        laplace_seed_per_s: C64,
+        structural_displacement_seed: &[C64],
+        pressure_potential_seed_pa_s: &[C64],
+        cx: &Cx<'_>,
+    ) -> Result<QuadraticMode, StructuralInteriorPoleError> {
         poll(cx)?;
         let ns = self.model.structural_dofs;
         let na = self.model.pressure_dofs();
@@ -232,9 +263,19 @@ impl PreparedStructuralInteriorModes<'_, '_, '_, '_> {
         let mut seed = Vec::with_capacity(ns + na);
         seed.extend_from_slice(structural_displacement_seed);
         seed.extend_from_slice(pressure_potential_seed_pa_s);
-        let mut mode = self
+        Ok(self
             .modes
-            .refine(laplace_seed_per_s, &seed, || cx.checkpoint().is_err())?;
+            .refine(laplace_seed_per_s, &seed, || cx.checkpoint().is_err())?)
+    }
+
+    fn observe(
+        &self,
+        mut mode: QuadraticMode,
+        cx: &Cx<'_>,
+    ) -> Result<StructuralInteriorPole, StructuralInteriorPoleError> {
+        poll(cx)?;
+        let ns = self.model.structural_dofs;
+        let na = self.model.pressure_dofs();
         let potential = mode.displacement.split_off(ns);
         let pressure = mode.velocity.split_off(ns);
         let mut cancelled = || cx.checkpoint().is_err();

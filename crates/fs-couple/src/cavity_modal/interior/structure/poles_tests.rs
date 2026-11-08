@@ -1,6 +1,10 @@
 //! Free-mode checks against analytic original-coordinate models and the
 //! independent existing time propagator. No forced peak is used as a pole oracle.
 
+use super::super::poles::parameter::{
+    PoleResponseOptions, PoleSensitivityOptions, StructuralInteriorPoleDerivative,
+    StructuralInteriorPoleDirection,
+};
 use super::super::poles::{PoleOptions, StructuralInteriorPole, StructuralInteriorPoleError};
 use super::super::time::StructuralInteriorTimeLimits;
 use super::*;
@@ -14,6 +18,24 @@ fn options() -> PoleOptions {
         max_dimension: 32,
         max_dense_bytes: 16 * 1024 * 1024,
         max_work: 100_000_000,
+    }
+}
+
+fn sensitivity_options() -> PoleSensitivityOptions {
+    PoleSensitivityOptions {
+        numerical: PoleResponseOptions {
+            spectral_scale: 4.0,
+            pole_residual_tolerance: 3e-12,
+            pole_step_tolerance: 3e-12,
+            linear_residual_tolerance: 3e-11,
+            max_dimension: 32,
+            max_vectors: 8,
+            max_dense_bytes: 16 * 1024 * 1024,
+            max_work: 100_000_000,
+        },
+        max_observations: 0,
+        max_physical_bytes: 16 * 1024 * 1024,
+        max_physical_work: 100_000_000,
     }
 }
 
@@ -422,5 +444,455 @@ fn original_spatial_wall_loss_survives_refinement_and_budget_or_seed_refusal() {
             .unwrap();
         assert_eq!(pole.laplace_pole_per_s, after_cancel.laplace_pole_per_s);
         assert_eq!(pole.pressure_pa, after_cancel.pressure_pa);
+    });
+}
+
+fn parameter_rows(
+    model: &StructuralInterior<'_, '_, '_>,
+    mode: &StructuralInteriorPole,
+    direction: StructuralInteriorPoleDirection<'_>,
+    derivative: &StructuralInteriorPoleDerivative,
+) {
+    let ns = model.structural_dofs;
+    let na = model.pressure_dofs();
+    let n = ns + na;
+    let q: Vec<_> = mode
+        .structural_displacement
+        .iter()
+        .chain(&mode.pressure_potential_pa_s)
+        .copied()
+        .collect();
+    let dq: Vec<_> = derivative
+        .structural_displacement_derivative
+        .iter()
+        .chain(&derivative.pressure_potential_derivative_pa_s)
+        .copied()
+        .collect();
+    let dv: Vec<_> = derivative
+        .structural_velocity_derivative
+        .iter()
+        .chain(&derivative.pressure_derivative_pa)
+        .copied()
+        .collect();
+    let s = mode.laplace_pole_per_s;
+    let ds = derivative.laplace_pole_derivative_per_s;
+    let mut normalization = C64::ZERO;
+    for i in 0..n {
+        close(dv[i], ds * q[i] + s * dq[i], 2e-10);
+        let mut residual = C64::ZERO;
+        for j in 0..n {
+            let (m, c, k) = (
+                model.mass[i * n + j],
+                model.damping[i * n + j],
+                model.stiffness[i * n + j],
+            );
+            let (dm, dc, dk) = if i < ns && j < ns {
+                (
+                    direction.structural_mass[i * ns + j],
+                    direction.structural_damping[i * ns + j],
+                    direction.structural_stiffness[i * ns + j],
+                )
+            } else if i >= ns && j >= ns {
+                let a = (i - ns) * na + j - ns;
+                (
+                    direction.acoustic_mass[a],
+                    direction.wall_damping[a],
+                    direction.acoustic_stiffness[a],
+                )
+            } else if i < ns {
+                (0.0, -direction.coupling[(j - ns) * ns + i], 0.0)
+            } else {
+                (0.0, direction.coupling[(i - ns) * ns + j], 0.0)
+            };
+            let operator = (s * s).scale(m) + s.scale(c) + C64::from_re(k);
+            let frequency = s.scale(2.0 * m) + C64::from_re(c);
+            let parameter = (s * s).scale(dm) + s.scale(dc) + C64::from_re(dk);
+            residual = residual + operator * dq[j] + (frequency * ds + parameter) * q[j];
+            normalization = normalization
+                + (q[i].conj() * dq[j]).scale(2.0 * m)
+                + (q[i].conj() * q[j]).scale(dm);
+        }
+        assert!(
+            residual.abs() < 5e-9,
+            "differentiated original row {i}: {residual:?}"
+        );
+    }
+    assert!(normalization.re.abs() < 3e-10);
+    for i in 0..ns {
+        let expected = (0..na).fold(C64::ZERO, |sum, a| {
+            sum + derivative.pressure_derivative_pa[a].scale(model.coupling[a * ns + i])
+                + mode.pressure_pa[a].scale(direction.coupling[a * ns + i])
+        });
+        close(derivative.fluid_force_derivative[i], expected, 2e-10);
+    }
+    for a in 0..na {
+        let expected = (0..ns).fold(C64::ZERO, |sum, i| {
+            sum + derivative.structural_velocity_derivative[i].scale(model.coupling[a * ns + i])
+                + mode.structural_velocity[i].scale(direction.coupling[a * ns + i])
+        });
+        close(
+            derivative.displaced_flow_derivative_m3_s[a],
+            expected,
+            2e-10,
+        );
+    }
+    assert!(derivative.linear_residual < 3e-11);
+    assert!(derivative.polynomial_relative_residual < 3e-11);
+    assert!(derivative.normalization_relative_residual < 3e-11);
+}
+
+#[test]
+fn affine_cavity_parameter_gradients_keep_mass_normalization_and_reciprocal_interface_terms() {
+    let (complex, points) = single_tet();
+    let medium = Medium {
+        density_kg_m3: 1.2,
+        sound_speed_m_s: 3.0,
+    };
+    let geometry = HelmholtzFe::new(&complex, &points, 1, medium).unwrap();
+    let interior = uniform(&geometry, medium);
+    let (m, c, k, volume) = (2.0_f64, 0.4_f64, 3.0_f64, 1.0 / 6.0);
+    let bulk = medium.density_kg_m3 * medium.sound_speed_m_s.powi(2);
+    let mass = dense(&[m], 1);
+    let stiffness = dense(&[k], 1);
+    let damping = dense(&[c], 1);
+    let expected = C64::new(
+        -c / (2.0 * m),
+        -((k + 9.0 * volume * bulk) / m - (c / (2.0 * m)).powi(2)).sqrt(),
+    );
+    with_cx(|cx| {
+        let model = StructuralInterior::new(
+            &interior,
+            StructuralMatrices {
+                mass: &mass,
+                stiffness: &stiffness,
+                damping: Some(&damping),
+            },
+            &[dilation(&geometry)],
+            &[],
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let modes = model.prepare_resonance_modes(options(), cx).unwrap();
+        let seed = C64::from_re(-3.0 * bulk) / expected;
+        let prepared = modes
+            .refine_with_sensitivities(
+                expected.scale(1.04),
+                &[C64::ONE],
+                &[seed; 4],
+                sensitivity_options(),
+                cx,
+            )
+            .unwrap();
+        let mode = prepared.mode();
+        close(mode.laplace_pole_per_s, expected, 5e-12);
+        let acoustic_mass: Vec<_> = (0..4)
+            .flat_map(|i| (0..4).map(move |j| (i, j)))
+            .map(|(i, j)| interior.mass().get(i, j))
+            .collect();
+        let acoustic_stiffness: Vec<_> = (0..4)
+            .flat_map(|i| (0..4).map(move |j| (i, j)))
+            .map(|(i, j)| interior.stiffness().get(i, j))
+            .collect();
+        let d_compliance: Vec<_> = acoustic_mass.iter().map(|&x| -x / bulk).collect();
+        let zero = StructuralInteriorPoleDirection {
+            structural_mass: &[0.0],
+            structural_damping: &[0.0],
+            structural_stiffness: &[0.0],
+            acoustic_mass: &[0.0; 16],
+            acoustic_stiffness: &[0.0; 16],
+            wall_damping: &[0.0; 16],
+            coupling: &[0.0; 4],
+        };
+        let directions = [
+            StructuralInteriorPoleDirection {
+                structural_mass: &[1.0],
+                ..zero
+            },
+            StructuralInteriorPoleDirection {
+                structural_damping: &[1.0],
+                ..zero
+            },
+            StructuralInteriorPoleDirection {
+                structural_stiffness: &[1.0],
+                ..zero
+            },
+            StructuralInteriorPoleDirection {
+                acoustic_mass: &d_compliance,
+                ..zero
+            },
+            StructuralInteriorPoleDirection {
+                coupling: model.coupling(),
+                ..zero
+            },
+            StructuralInteriorPoleDirection {
+                structural_mass: &[m],
+                structural_damping: &[c],
+                structural_stiffness: &[k],
+                acoustic_mass: &acoustic_mass,
+                acoustic_stiffness: &acoustic_stiffness,
+                coupling: model.coupling(),
+                ..zero
+            },
+            zero,
+        ];
+        let derivatives = prepared.parameter_derivatives(&directions, cx).unwrap();
+        let denominator = expected.scale(2.0 * m) + C64::from_re(c);
+        let expected_derivatives = [
+            -(expected * expected) / denominator,
+            -expected / denominator,
+            -C64::ONE / denominator,
+            C64::from_re(-9.0 * volume) / denominator,
+            C64::from_re(-18.0 * volume * bulk) / denominator,
+            C64::ZERO,
+            C64::ZERO,
+        ];
+        for (index, ((direction, derivative), expected_ds)) in directions
+            .iter()
+            .zip(&derivatives)
+            .zip(expected_derivatives)
+            .enumerate()
+        {
+            close(derivative.laplace_pole_derivative_per_s, expected_ds, 2e-10);
+            assert_eq!(
+                derivative.amplitude_decay_rate_derivative_per_s,
+                -derivative.laplace_pole_derivative_per_s.re
+            );
+            parameter_rows(&model, mode, *direction, derivative);
+            let u = mode.structural_displacement[0];
+            let du = derivative.structural_displacement_derivative[0];
+            for a in 0..4 {
+                let ratio_slope =
+                    (derivative.pressure_derivative_pa[a] * u - mode.pressure_pa[a] * du) / (u * u);
+                let expected_ratio = if index == 3 {
+                    -3.0
+                } else if index == 4 {
+                    -3.0 * bulk
+                } else {
+                    0.0
+                };
+                close(ratio_slope, C64::from_re(expected_ratio), 3e-9);
+            }
+            let phase = prepared.phase_reference_coordinate();
+            let fixed = if phase == 0 {
+                derivative.structural_displacement_derivative[0]
+            } else {
+                derivative.pressure_potential_derivative_pa_s[phase - 1]
+            };
+            assert_eq!(fixed.im, 0.0);
+        }
+        // Scaling all original coefficients leaves s unchanged but changes
+        // the physical unit-mass shape. dB additionally changes force and flow.
+        let scale = &derivatives[5];
+        close(
+            scale.structural_displacement_derivative[0],
+            mode.structural_displacement[0].scale(-0.5),
+            2e-10,
+        );
+        close(
+            scale.fluid_force_derivative[0],
+            mode.fluid_force[0].scale(0.5),
+            2e-10,
+        );
+        for a in 0..4 {
+            close(
+                scale.pressure_derivative_pa[a],
+                mode.pressure_pa[a].scale(-0.5),
+                2e-10,
+            );
+            close(
+                scale.displaced_flow_derivative_m3_s[a],
+                mode.displaced_flow_m3_s[a].scale(0.5),
+                2e-10,
+            );
+        }
+        assert_eq!(derivatives[6].laplace_pole_derivative_per_s, C64::ZERO);
+
+        // An independently rebuilt bulk-modulus pair approaches the analytic
+        // slope; the derivative implementation itself performs no differencing.
+        let mut previous_error = f64::INFINITY;
+        for relative_step in [1e-2, 1e-3] {
+            let mut pair = Vec::new();
+            for sign in [-1.0, 1.0] {
+                let changed = Medium {
+                    density_kg_m3: medium.density_kg_m3,
+                    sound_speed_m_s: (bulk * (1.0 + sign * relative_step) / medium.density_kg_m3)
+                        .sqrt(),
+                };
+                let fluid = uniform(&geometry, changed);
+                let perturbed = StructuralInterior::new(
+                    &fluid,
+                    StructuralMatrices {
+                        mass: &mass,
+                        stiffness: &stiffness,
+                        damping: Some(&damping),
+                    },
+                    &[dilation(&geometry)],
+                    &[],
+                    controls(),
+                    cx,
+                )
+                .unwrap();
+                pair.push(
+                    perturbed
+                        .prepare_resonance_modes(options(), cx)
+                        .unwrap()
+                        .refine(
+                            expected,
+                            &mode.structural_displacement,
+                            &mode.pressure_potential_pa_s,
+                            cx,
+                        )
+                        .unwrap()
+                        .laplace_pole_per_s,
+                );
+            }
+            let fd = (pair[1] - pair[0]).scale(1.0 / (2.0 * bulk * relative_step));
+            let error = (fd - derivatives[3].laplace_pole_derivative_per_s).abs();
+            assert!(error < previous_error * 0.03);
+            previous_error = error;
+        }
+        assert!(previous_error < 1e-7);
+
+        let bad = StructuralInteriorPoleDirection {
+            coupling: &[0.0; 3],
+            ..zero
+        };
+        assert!(prepared.parameter_derivatives(&[bad], cx).is_err());
+        assert!(prepared.parameter_derivatives(&[], cx).is_err());
+        assert!(prepared.parameter_derivatives(&[zero; 9], cx).is_err());
+        let mut nonsymmetric = [0.0; 16];
+        nonsymmetric[1] = 1.0;
+        assert!(
+            prepared
+                .parameter_derivatives(
+                    &[StructuralInteriorPoleDirection {
+                        acoustic_mass: &nonsymmetric,
+                        ..zero
+                    }],
+                    cx
+                )
+                .is_err()
+        );
+        for limited in [
+            PoleSensitivityOptions {
+                max_physical_bytes: 0,
+                ..sensitivity_options()
+            },
+            PoleSensitivityOptions {
+                max_physical_work: 0,
+                ..sensitivity_options()
+            },
+        ] {
+            assert!(
+                modes
+                    .refine_with_sensitivities(expected, &[C64::ONE], &[seed; 4], limited, cx)
+                    .is_err()
+            );
+        }
+        let gate = CancelGate::new();
+        let pool = ArenaPool::new(ArenaConfig::default());
+        pool.scope(|arena| {
+            let cancelled = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 81,
+                    kernel_id: 19,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            gate.request();
+            assert!(
+                prepared
+                    .parameter_derivatives(&directions, &cancelled)
+                    .is_err()
+            );
+            assert!(
+                modes
+                    .refine_with_sensitivities(
+                        expected,
+                        &[C64::ONE],
+                        &[seed; 4],
+                        sensitivity_options(),
+                        &cancelled
+                    )
+                    .is_err()
+            );
+        });
+        assert_eq!(
+            prepared.parameter_derivatives(&directions, cx).unwrap(),
+            derivatives
+        );
+    });
+}
+
+#[test]
+fn original_gyroscopic_direction_has_the_analytic_split_frequency_tangent() {
+    let (complex, points) = single_tet();
+    let medium = Medium {
+        density_kg_m3: 1.2,
+        sound_speed_m_s: 3.0,
+    };
+    let geometry = HelmholtzFe::new(&complex, &points, 1, medium).unwrap();
+    let interior = uniform(&geometry, medium);
+    let (m, k, g) = (2.0_f64, 18.0_f64, 1.3_f64);
+    let mass = dense(&[m, 0.0, 0.0, m], 2);
+    let stiffness = dense(&[k, 0.0, 0.0, k], 2);
+    let damping = dense(&[0.0, g, -g, 0.0], 2);
+    with_cx(|cx| {
+        let model = StructuralInterior::new(
+            &interior,
+            StructuralMatrices {
+                mass: &mass,
+                stiffness: &stiffness,
+                damping: Some(&damping),
+            },
+            &[Vec::new(), Vec::new()],
+            &[],
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let modes = model.prepare_resonance_modes(options(), cx).unwrap();
+        let direction = StructuralInteriorPoleDirection {
+            structural_mass: &[0.0; 4],
+            structural_stiffness: &[0.0; 4],
+            structural_damping: &[0.0, 1.0, -1.0, 0.0],
+            acoustic_mass: &[0.0; 16],
+            acoustic_stiffness: &[0.0; 16],
+            wall_damping: &[0.0; 16],
+            coupling: &[0.0; 8],
+        };
+        for sign in [-1.0, 1.0] {
+            let discriminant = (g * g + 4.0 * m * k).sqrt();
+            let omega = (discriminant + sign * g) / (2.0 * m);
+            let prepared = modes
+                .refine_with_sensitivities(
+                    C64::new(0.0, -omega),
+                    &[C64::ONE, C64::new(0.0, sign)],
+                    &[C64::ZERO; 4],
+                    sensitivity_options(),
+                    cx,
+                )
+                .unwrap();
+            let derivative = prepared
+                .parameter_derivatives(&[direction], cx)
+                .unwrap()
+                .remove(0);
+            close(
+                derivative.laplace_pole_derivative_per_s,
+                C64::new(0.0, -(g / discriminant + sign) / (2.0 * m)),
+                3e-11,
+            );
+            for &shape in &derivative.structural_displacement_derivative {
+                close(shape, C64::ZERO, 3e-11);
+            }
+            parameter_rows(&model, prepared.mode(), direction, &derivative);
+            assert_eq!(prepared.mode().structural_dissipation_w, 0.0);
+        }
     });
 }

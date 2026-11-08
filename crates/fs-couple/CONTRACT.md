@@ -6257,6 +6257,43 @@ These full-FE tests are authored but unexecuted in this lane while the complete
 `fs-couple` dependency closure is unavailable. Their definitions alone do not
 qualify MR56 or establish performance.
 
+`PreparedStructuralInteriorModes::refine_with_sensitivities` refines one genuine
+native coupled mode and prepares the shared quadratic sensitivity factor.
+`PreparedStructuralInteriorSensitivities::parameter_derivatives` reuses that
+factor for a complete nonempty batch of caller-declared physical directions.
+Each direction supplies full signed derivatives of original structural
+mass/damping/stiffness, acoustic mass/stiffness, symmetric wall damping and
+pressure-row/structural-column coupling. One dB assembles both opposite
+interface blocks; structural gyroscopic and nonproportional terms remain.
+Constitutive and geometry derivatives, including trace/normal/measure changes,
+must be supplied explicitly.
+
+Results retain original-mass normalization and one fixed original phase
+coordinate. They include complex ds, signed decay, all original field tangents,
+dp=ds*psi+s*dpsi, dF=dB^T*p+B^T*dp and dQ=dB*v+B*dv. Both interface
+product-rule terms accumulate together before rounding. Original-polynomial
+and normalization residuals accompany each result. A simple real pole retains
+its complex ds without inventing a derivative of abs(Im(s)) at zero. Repeated
+or unresolved poles and invalid/over-budget/cancelled directions refuse;
+no additional eigensolve, finite-difference query or damping floor is introduced.
+
+For n=ns+na and k=options.numerical.max_vectors, the adapter reserves
+24*k*n*n+128*(k+1)*n+512*(k+1) physical bytes and work score
+128*(k+1)*n*n+256*(k+1)*n for assembly, the retained baseline and batch output
+before passing the remaining physical ceilings to the shared owner. Native
+numerical-factor ceilings remain separate. Caller directions, original
+model/source preparation and earlier batches are excluded. A refused batch
+leaves the prepared baseline reusable.
+
+Seven original quadratic-sensitivity tests and an independent full five-DOF
+P1 tetrahedral cavity fixture pass in a native lane using the actual shared
+numerical owners. The cavity oracle checks structural mass/damping/stiffness,
+gas bulk modulus, coupling strength, common coefficient scaling and zero
+directions, including the complete pressure derivative. The new Cx-bound
+adapter and its two full-FE integration regressions are authored but unexecuted
+while the complete dependency graph is unavailable; these numerical checks do
+not establish whole-adapter compilation or close the broader MR56 qualification.
+
 ### Adaptive physical time for retained porous gas/wall compression
 
 `ThermalPorousGasSystem::advance_adaptive` resolves a complete physical stroke
