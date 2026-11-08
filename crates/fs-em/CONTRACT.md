@@ -7138,3 +7138,30 @@ heat once. Four focused tests in
 `tests/spatial_induction/harmonic/exposure.rs` cover independent analytic and
 space/time quadrature references, tiny intervals at a field zero, phase and
 interval composition, original-source identity, budgets and cancellation.
+
+## Analytic bulk electromagnetic dispersion and propagation delay
+
+With `plane-wave`, `DielectricResponse::bulk_dispersion` retains the original
+material snapshot and computes the complex bulk wave number, its first and
+second angular-frequency derivatives, group slowness and GVD. Original Debye
+and Lorentz poles and independently sourced Ohmic leakage supply analytic
+derivatives; the material owner's permittivity value and native outgoing
+Maxwell root remain authoritative. Scaled frequency derivatives and compensated
+pole sums avoid dimensional frequency squares and preserve opposing slopes.
+Preparation has bounded pole work and no allocation or frequency differencing.
+
+`BulkWaveDispersion::propagation` reuses the native angular-spectrum complex
+exponential and double-double phase reduction for exact carrier transmission,
+with the same branch's phase delay, group delay, group-delay dispersion and
+log-amplitude derivatives. Nondispersive laws recover exactly zero GVD.
+Negative or superluminal inverse phase slopes are retained; they are not
+signal-front or energy velocities in strongly absorbing/anomalous regions.
+The API describes homogeneous bulk propagation at fixed material conditions,
+not oblique modal derivatives, interface residence times, a broadband pulse
+approximation or a higher-order dispersion bound. Unsupported original laws
+refuse rather than treating one monochromatic sample as a constant law.
+
+`tests/plane_wave_dispersion.rs` checks independent frequency differences of
+the native interface solve, geometric invariance of bulk Debye dispersion,
+single counting of leakage, resonant/anomalous/evanescent limits, native
+six-component beam-field propagation and source/domain refusals.

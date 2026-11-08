@@ -49,6 +49,9 @@ pub mod uniaxial;
 /// Coherent vector diffraction of sampled beams through the original films.
 pub mod angular_spectrum;
 
+/// Analytic frequency derivatives and propagation delays of original bulk laws.
+pub mod dispersion;
+
 /// Original spectral metal/dielectric optics with explicit same-state permeability.
 pub mod optical;
 pub use optical::{
