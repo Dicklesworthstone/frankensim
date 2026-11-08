@@ -5543,6 +5543,45 @@ participating-gas spectral transport, an evolving wall source, streams,
 spatial transport or empirical mechanism validation. Time-error estimates are
 local. Finite original-source bodies remain the separate owner below.
 
+## Finite original-mixture gas thermal partners
+
+`chemistry::heat::gas::FiniteGasHeatBody` borrows one original
+`FrozenIdealGasMixtureModelV1`, fixed molar amount, initial temperature and
+independently admitted temperature interval. `GasHeatConstraint` chooses rigid
+volume or held pressure for this partner, independently of the reacting gas.
+Both prepared reactors expose `advance_with_finite_gas_body`; the original
+reactor and continued partner endpoints publish together. Partner composition
+is frozen, no species cross the interface, and declared conductance/optional
+gray epsilon*A have the same explicit geometry convention as the held bath.
+
+The original NASA-mixture delta-u/delta-h and Cp/Cv enter the existing
+backward-Euler/SDIRK2 stages. Source formation references cancel before
+arithmetic. One bounded, cancellable monotone caloric root eliminates partner
+temperature with the analytic nonlinear heat feedback; the original adaptive
+integrator retains cumulative heat, trial rejection and total entropy admission.
+Partner-temperature error is included in full/half comparisons. Caloric roots
+must resolve both the existing Joule tolerance and a share of the existing
+relative-temperature allowance, so a small finite inventory cannot disappear
+inside a larger reactor's energy budget. No per-trial allocation is introduced.
+
+Rigid partner storage satisfies delta-U=-Qgas. Held-pressure storage satisfies
+delta-H=-Qgas and separately retains delta-U and outward pressure work. Work
+uses n*R*delta-T, avoiding subtraction of rounded endpoint pV. Original
+Cv/T or Cp/T entropy differences retain the partner's actual temperature path.
+Reports include heat, H/U changes, work, entropy and heat residual; original
+amount, mass and source identity remain unchanged. Source positivity and
+caloric continuity are admitted across the complete partner interval. The gas
+temperature may lie outside that interval while the actual partner remains
+inside it; source exhaustion refuses before publishing either endpoint.
+
+Focused regressions cover all four mechanical-constraint combinations,
+reacting/frozen two-body closed forms, nonlinear source Cp and radiation,
+analytic feedback, large energy/entropy reference shifts, independent source
+domains, tiny-inventory accuracy, cancellation/replay and zero-coupling parity.
+This is a homogeneous ideal-gas thermal partner, with frozen composition and
+fixed declared coupling geometry. It implies no reacting second mechanism,
+mass exchange, spectral opacity or empirical heat-transfer validation.
+
 ## Finite material bodies in adaptive reacting parcels
 
 With the `material` feature, `chemistry::heat::material::FiniteHeatBody`

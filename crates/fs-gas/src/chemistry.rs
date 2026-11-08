@@ -338,6 +338,8 @@ pub enum IsochoricKineticsError {
     Invalid(&'static str),
     /// Original source or constitutive kinetics refusal.
     Chemistry(KineticsErrorV1),
+    /// Original frozen-mixture source refused a finite gas thermal partner.
+    FiniteGas(fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1),
     /// The shared first-order propagator refused its resources or arithmetic.
     FirstOrder(fs_la::decay::DecayError),
     /// Original finite-body caloric source or pressure-work refusal.
@@ -381,6 +383,11 @@ impl From<KineticsErrorV1> for IsochoricKineticsError {
             KineticsErrorV1::Cancelled => Self::Cancelled,
             other => Self::Chemistry(other),
         }
+    }
+}
+impl From<fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1> for IsochoricKineticsError {
+    fn from(error: fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1) -> Self {
+        Self::FiniteGas(error)
     }
 }
 impl From<fs_la::decay::DecayError> for IsochoricKineticsError {
@@ -745,11 +752,13 @@ fn advance_prepared_constraint<'a>(
                     fine_state.heat_density_j_m3,
                     volume.value(),
                     controls,
+                    &mut cancelled,
                 )?);
                 exchange.admit_heat(
                     fine_state.heat_density_j_m3,
                     volume.value(),
-                    controls.energy_tolerance_j,
+                    controls,
+                    &mut cancelled,
                 )?;
             }
             // The two-half-step endpoint has estimated local error
@@ -766,6 +775,8 @@ fn advance_prepared_constraint<'a>(
                         accepted.heat_density_j_m3,
                         fine_state.heat_density_j_m3,
                         volume.value(),
+                        controls,
+                        &mut cancelled,
                     )
                 })?;
             if !error.is_finite()
@@ -866,7 +877,13 @@ fn advance_prepared_constraint<'a>(
         .difference(initial.entropy_increment_density_j_m3_k)
         * volume.value();
     balance.entropy_transfer_j_k = heat_exchange.map_or(Ok(0.0), |exchange| {
-        exchange.entropy_transfer(Sum::default(), accepted.heat_density_j_m3, volume.value())
+        exchange.entropy_transfer(
+            Sum::default(),
+            accepted.heat_density_j_m3,
+            volume.value(),
+            controls,
+            &mut cancelled,
+        )
     })?;
     balance.entropy_production_j_k = balance.entropy_change_j_k - balance.entropy_transfer_j_k;
     balance.nonlinear_iterations = reactor.stats.nonlinear_iterations;

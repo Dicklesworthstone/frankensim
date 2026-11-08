@@ -13,6 +13,9 @@ use fs_qty::Area;
 // W m^-2 K^-4, rounded from the post-2019 defining SI constants.
 const STEFAN_BOLTZMANN: f64 = 5.670_374_419e-8;
 
+/// Finite original NASA-mixture storage with independent pressure/volume constraint.
+pub mod gas;
+
 /// Original-source finite caloric bodies, including sharp latent plateaus.
 #[cfg(feature = "material")]
 pub mod material;
@@ -28,10 +31,11 @@ pub struct HeatBath {
     effective_radiating_area: Area,
 }
 
-/// Shared thermal constraint; both forms enter the same implicit gas stages.
+/// Shared thermal partners entering the same implicit gas stages.
 #[derive(Clone, Copy)]
 pub(super) enum HeatExchange<'a> {
     Bath(&'a HeatBath),
+    Gas(&'a gas::FiniteGasHeatBody<'a>),
     #[cfg(feature = "material")]
     Body(material::FiniteHeatBody<'a>),
 }
@@ -42,6 +46,7 @@ impl HeatExchange<'_> {
     fn conductance(self) -> f64 {
         match self {
             Self::Bath(bath) => bath.conductance.value(),
+            Self::Gas(body) => body.conductance().value(),
             #[cfg(feature = "material")]
             Self::Body(body) => body.conductance().value(),
         }
@@ -53,9 +58,14 @@ impl HeatExchange<'_> {
         temperature: f64,
         heat: Sum,
         volume: f64,
+        controls: IsochoricKineticsSolve,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, IsochoricKineticsError> {
         match self {
             Self::Bath(bath) => bath.increment_density(step, temperature, volume),
+            Self::Gas(body) => {
+                body.increment_density(step, temperature, heat, volume, controls, cancelled)
+            }
             #[cfg(feature = "material")]
             Self::Body(body) => body.increment_density(step, temperature, heat, volume),
         }
@@ -66,10 +76,15 @@ impl HeatExchange<'_> {
         initial: Sum,
         final_heat: Sum,
         volume: f64,
+        controls: IsochoricKineticsSolve,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, IsochoricKineticsError> {
         match self {
             Self::Bath(bath) => {
                 Ok(final_heat.difference(initial) * volume / bath.temperature.value())
+            }
+            Self::Gas(body) => {
+                body.entropy_transfer(initial, final_heat, volume, controls, cancelled)
             }
             #[cfg(feature = "material")]
             Self::Body(body) => body.entropy_transfer(initial, final_heat, volume),
@@ -83,9 +98,11 @@ impl HeatExchange<'_> {
         fine: Sum,
         volume: f64,
         controls: IsochoricKineticsSolve,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, IsochoricKineticsError> {
         match self {
             Self::Bath(_) => Ok(0.0),
+            Self::Gas(body) => body.additional_error(base, full, fine, volume, controls, cancelled),
             #[cfg(feature = "material")]
             Self::Body(body) => body.additional_error(base, full, fine, volume, controls),
         }
@@ -95,12 +112,14 @@ impl HeatExchange<'_> {
         self,
         heat: Sum,
         volume: f64,
-        tolerance: f64,
+        controls: IsochoricKineticsSolve,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), IsochoricKineticsError> {
         match self {
             Self::Bath(_) => Ok(()),
+            Self::Gas(body) => body.admit_heat(heat.value() * volume, controls, cancelled),
             #[cfg(feature = "material")]
-            Self::Body(body) => body.admit_heat(heat.value() * volume, tolerance),
+            Self::Body(body) => body.admit_heat(heat.value() * volume, controls.energy_tolerance_j),
         }
     }
 }
@@ -252,6 +271,7 @@ impl<'a> HeatStage<'a> {
         let (capacity, temperature) = exchange.map_or((0.0, 0.0), |exchange| {
             let temperature = match exchange {
                 HeatExchange::Bath(bath) => bath.temperature.value(),
+                HeatExchange::Gas(_) => 0.0,
                 #[cfg(feature = "material")]
                 HeatExchange::Body(_) => 0.0,
             };
@@ -260,6 +280,9 @@ impl<'a> HeatStage<'a> {
         let radiation_capacity = match exchange {
             Some(HeatExchange::Bath(bath)) if bath.effective_radiating_area.value() != 0.0 => {
                 bath.radiation_capacity_density(diagonal_step, volume)
+            }
+            Some(HeatExchange::Gas(body)) if body.effective_radiating_area().value() != 0.0 => {
+                body.radiation_capacity_density(diagonal_step, volume)
             }
             #[cfg(feature = "material")]
             Some(HeatExchange::Body(body)) if body.effective_radiating_area().value() != 0.0 => {
@@ -294,6 +317,17 @@ impl<'a> HeatStage<'a> {
         controls: IsochoricKineticsSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Sum, f64), IsochoricKineticsError> {
+        if let Some(HeatExchange::Gas(body)) = self.exchange {
+            return body.stage_heat(
+                self.fixed,
+                self.volume,
+                self.capacity_density_j_m3_k,
+                self.radiation_capacity_density_j_m3_k4,
+                temperature,
+                controls,
+                cancelled,
+            );
+        }
         #[cfg(feature = "material")]
         if let Some(HeatExchange::Body(body)) = self.exchange {
             if self.radiation_capacity_density_j_m3_k4 != 0.0 {
@@ -344,6 +378,17 @@ impl<'a> HeatStage<'a> {
         controls: IsochoricKineticsSolve,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(f64, f64), IsochoricKineticsError> {
+        if let Some(HeatExchange::Gas(body)) = self.exchange {
+            return body.stage_temperature_interval(
+                self.fixed,
+                self.volume,
+                self.capacity_density_j_m3_k,
+                self.radiation_capacity_density_j_m3_k4,
+                [lower, upper],
+                controls,
+                cancelled,
+            );
+        }
         #[cfg(feature = "material")]
         if let Some(HeatExchange::Body(body)) = self.exchange {
             if self.radiation_capacity_density_j_m3_k4 != 0.0 {

@@ -1,6 +1,8 @@
 use super::*;
 use crate::chemistry::isobaric::IsobaricReactor;
 
+#[path = "heat/gas.rs"]
+mod finite_gas;
 #[path = "heat/radiation.rs"]
 mod radiation;
 

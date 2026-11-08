@@ -639,7 +639,7 @@ impl Reactor {
             heat,
             cancelled,
         )?;
-        self.stage_entropy(stage, base_state, heat_exchange, step)?;
+        self.stage_entropy(stage, base_state, heat_exchange, step, cancelled)?;
         // Every successful implicit_stage exit has evaluated reaction rates
         // at exactly the returned state. Reserve this sole extra vector once.
         for (forcing, rate) in stage_forcing.iter_mut().zip(self.state.rates()) {
@@ -654,6 +654,8 @@ impl Reactor {
                 stage.temperature.value(),
                 stage.heat_density_j_m3,
                 self.volume,
+                self.controls,
+                cancelled,
             )
         })?;
         let heat = HeatStage::implicit(
@@ -672,7 +674,7 @@ impl Reactor {
             heat,
             cancelled,
         )?;
-        self.stage_entropy(endpoint, base_state, heat_exchange, step)?;
+        self.stage_entropy(endpoint, base_state, heat_exchange, step, cancelled)?;
         Ok(endpoint)
     }
 
@@ -682,6 +684,7 @@ impl Reactor {
         base: ReactorState,
         heat_exchange: Option<HeatExchange<'_>>,
         step: f64,
+        cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), IsochoricKineticsError> {
         let change = stage
             .entropy_increment_density_j_m3_k
@@ -693,6 +696,8 @@ impl Reactor {
                     base.heat_density_j_m3,
                     stage.heat_density_j_m3,
                     self.volume,
+                    self.controls,
+                    cancelled,
                 )
             })?;
         if !production.is_finite() || production < -self.controls.entropy_tolerance_j_k {
