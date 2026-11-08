@@ -7,7 +7,12 @@ fn tensor_pack(c33: f64, time: f64, limit: f64, missing: &str, upper: f64) -> No
 }
 
 fn tensor_pack_with_elasticity(
-    c33: f64, time: f64, limit: f64, missing: &str, upper: f64, elasticity: TensorElasticity,
+    c33: f64,
+    time: f64,
+    limit: f64,
+    missing: &str,
+    upper: f64,
+    elasticity: TensorElasticity,
 ) -> NormalizedPack {
     let mut values = vec![
         ("density", 900.0, Density::DIMS),
@@ -36,7 +41,9 @@ fn tensor_pack_with_elasticity(
                 values.push(("bulk_modulus", 4e9 / (3.0 * (1.0 - 2.0 * 0.3)), Pressure::DIMS));
             }
         }
-        TensorElasticity::Orthotropic => unreachable!("isotropic body fixture"),
+        TensorElasticity::Orthotropic | TensorElasticity::Mandel21 { .. } => {
+            unreachable!("isotropic body fixture")
+        }
     }
     let raw = format!(
         "manufactured tensor-body fixture; T=[280,320] K; omega=[0,{upper:.17e}] rad/s\n{}",
@@ -128,7 +135,7 @@ fn g1_independent_equilibrium_pairs_reach_native_tensor_body_feedback_and_pressu
             let mut ready = tensor_spec().compile_with_body(
                 cx, gate, Some(Profile::parse(profile.as_bytes()).unwrap()), |name| {
                     Ok(if name == "tensor-blade.fsmatpk" {
-                        tensor_pack_with_elasticity(3e8, 0.001, 0.02, "", 100000.0, elasticity)
+                        tensor_pack_with_elasticity(3e8, 0.001, 0.02, "", 100000.0, elasticity.clone())
                     } else {
                         pack(name, 1.0, None)
                     })

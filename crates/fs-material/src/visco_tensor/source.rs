@@ -7,6 +7,7 @@
 //! consuming structural owner and must act on the complete hereditary law.
 
 use super::{TensorProny, TensorPronyBranch};
+use crate::OrthotropicElastic;
 use crate::state_point::{
     IsotropicElasticParameters, MaterialPropertySelection, MaterialStatePointError,
     ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
@@ -14,7 +15,6 @@ use crate::state_point::{
     ResolvedMaterialStatePoint, ScalarAdmissibility as Admit,
     ScalarPropertyRequirement as Requirement, resolve_material_state_point,
 };
-use crate::{IsotropicElastic, OrthotropicElastic};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
@@ -26,7 +26,7 @@ pub use kelvin::{ResolvedKelvinViscosity, TensorKelvinViscosityProperties};
 /// Explicit equilibrium elastic source data, before any spatial rotation.
 /// Independent isotropic pairs affect the equilibrium tensor only; every
 /// Maxwell branch still requires its complete original tensor and time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TensorElasticity {
     /// `young_modulus` and `poisson_ratio`.
     Isotropic,
@@ -36,10 +36,19 @@ pub enum TensorElasticity {
     IsotropicYoungShear,
     /// Independent `bulk_modulus` and `shear_modulus`.
     IsotropicBulkShear,
+    /// All 21 independent entries of the equilibrium stiffness in the original
+    /// material axes, in Mandel order (11,22,33,sqrt(2)12,sqrt(2)23,sqrt(2)31).
+    /// Normal/shear and shear/shear couplings remain physical source data.
+    /// The complete matrix must be positive definite; no material symmetry,
+    /// omitted zero, engineering-shear conversion or regularization is inferred.
+    Mandel21 {
+        /// Upper triangle in row order: C11,C12,...,C16,C22,...,C66, all in Pa.
+        stiffness_upper: [String; 21],
+    },
 }
 
 impl TensorElasticity {
-    fn isotropic_parameters(self) -> Result<Option<IsotropicElasticParameters>> {
+    fn isotropic_parameters(&self) -> Result<Option<IsotropicElasticParameters>> {
         let modulus = |name| Requirement::try_new(name, Pressure::DIMS, Admit::StrictlyPositive);
         Ok(Some(match self {
             Self::Isotropic => IsotropicElasticParameters::YoungPoisson {
@@ -58,7 +67,7 @@ impl TensorElasticity {
                 bulk_modulus: modulus("bulk_modulus")?,
                 shear_modulus: modulus("shear_modulus")?,
             },
-            Self::Orthotropic => return Ok(None),
+            Self::Orthotropic | Self::Mandel21 { .. } => return Ok(None),
         }))
     }
 }
@@ -367,6 +376,10 @@ impl TensorPronyProperties {
             for requirement in parameters.requirements() {
                 add(requirement.name(), requirement.dims(), requirement.admissibility())?;
             }
+        } else if let TensorElasticity::Mandel21 { stiffness_upper } = &self.elasticity {
+            for key in stiffness_upper {
+                add(key, Pressure::DIMS, Admit::Finite)?;
+            }
         } else {
             for key in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES {
                 add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
@@ -437,10 +450,12 @@ impl TensorPronyProperties {
             let moduli = ResolvedIsotropicElasticModuli::try_from_resolved(
                 state.clone(), &parameters,
             )?;
-            IsotropicElastic::new(moduli.young_modulus_pa(), moduli.poisson_ratio(), strain_limit)
-                .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
-                .stiffness()
+            moduli.stiffness_mandel_pa()
+        } else if let TensorElasticity::Mandel21 { stiffness_upper } = &self.elasticity {
+            symmetric_mandel(stiffness_upper, value)
         } else {
+            // Principal orthotropy has no normal/shear or shear/shear cross
+            // terms, so this tangent has the same entries in Mandel order.
             OrthotropicElastic::new(
                 ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES.map(value),
                 ORTHOTROPIC_POISSON_RATIO_PROPERTIES.map(value),
@@ -470,11 +485,26 @@ impl TensorPronyProperties {
                     .map_err(|e| TensorSourceError::Invalid(e.to_string()))?,
             );
         }
-        TensorProny::from_tensor_shear(equilibrium, branches, strain_limit)
+        TensorProny::new_mandel(equilibrium, branches, strain_limit)
             .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
             .with_band(band)
             .map_err(|e| TensorSourceError::Invalid(e.to_string()))
     }
+}
+
+/// The explicit source ordering shared by equilibrium and thermal derivatives.
+fn symmetric_mandel(keys: &[String; 21], value: impl Fn(&str) -> f64) -> crate::Tangent6 {
+    let mut matrix = [[0.0; 6]; 6];
+    let mut entry = 0;
+    for row in 0..6 {
+        for column in row..6 {
+            let coefficient = value(&keys[entry]);
+            matrix[row][column] = coefficient;
+            matrix[column][row] = coefficient;
+            entry += 1;
+        }
+    }
+    matrix
 }
 
 #[cfg(test)]

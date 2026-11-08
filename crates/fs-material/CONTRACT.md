@@ -11002,7 +11002,12 @@ native consumers, not this material adapter.
 
 `visco_tensor::source::TensorPronyProperties` binds the original resolved
 material state to a complete 3D Maxwell law. Equilibrium stiffness comes from
-the canonical isotropic or full orthotropic elastic properties. Each source
+explicit isotropic parameter pairs, full orthotropic properties, or
+`TensorElasticity::Mandel21` with caller-selected keys for all 21 independent
+Mandel stiffness entries. The last family retains signed normal/shear and
+shear/shear couplings in the original material axes; every zero is explicit.
+It admits the complete positive-definite equilibrium tensor through the native
+constitutive owner, without fitting an orthotropic or isotropic substitute. Each source
 branch names all 21 symmetric upper-triangle Mandel entries and its relaxation
 time; zero entries remain explicit data. A positive small-strain limit is also
 a selected source claim. Shared names resolve once, incompatible quantity roles
@@ -11016,7 +11021,10 @@ coefficients offered as equilibrium springs, invalid complete elasticity,
 nonpositive times or strain limits, and more than 64 source branches refuse.
 This binding does not condense plane stress, invent a full tensor from in-plane
 coefficients, evolve temperature/moisture, or establish measured-material
-authority. Five focused source tests cover full coefficients, shear convention,
+authority. Full-equilibrium source regressions exercise coupled stress relaxation,
+independently computed storage and heat, joint frame rotation, and affine thermal
+free energy/entropy through the existing native history and projection owners.
+Five original focused source tests cover full coefficients, shear convention,
 orthotropy, shared names, source bands and refusals; native execution of these
 new tests remains unverified in the resource-constrained authoring environment.
 
@@ -12759,7 +12767,15 @@ scaling D=sqrt(E_reference) and fixed-size Cholesky solves. Isotropic interval
 admission uses exact volumetric/deviatoric compliance eigenvalue bounds,
 including auxetic sources. Orthotropic admission uses a sufficient scaled
 Gershgorin bound over every temperature; it can refuse a valid non-dominant
-path. Positive endpoint tensors alone do not establish interior stability.
+path. For these inverse-compliance paths, positive endpoint tensors alone do not
+establish interior stability.
+Full `Mandel21` equilibrium sources instead admit an independent affine slope
+for each original stiffness coefficient, including normal/shear couplings that
+change without a common modulus scale. The existing source-path checks visit all
+original knots. SPD endpoint tensors then establish SPD throughout their affine
+interval by convexity; no diagonal-dominance restriction is imposed on this
+direct stiffness family. The same Mandel rotation carries the complete derivative
+into the native projected free energy, entropy and internal-energy response.
 Each of the 21 coefficients of every symmetric Maxwell branch may have an independent
 affine slope, including signed cross terms. Positive piecewise-linear
 relaxation times remain supported. Reference density and strain validity

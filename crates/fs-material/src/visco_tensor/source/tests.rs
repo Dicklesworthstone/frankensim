@@ -1,5 +1,6 @@
 //! G0/G3: complete material-card data, source domains and original tensor laws.
 mod kelvin;
+mod mandel;
 use super::*;
 use crate::state_point::{MaterialPropertySelection, resolve_material_state_point};
 use fs_evidence::ValidityDomain;
@@ -152,9 +153,11 @@ fn full_source_mandel_matrix_preserves_shear_cross_terms_and_relaxation() {
     assert!(history.advance([0.03; 6], 0.01, || false).is_err());
 }
 
-fn isotropic_pair_fixture(elasticity: TensorElasticity) -> (TensorPronyProperties, Vec<PropertyClaim>) {
+fn isotropic_pair_fixture(
+    elasticity: TensorElasticity,
+) -> (TensorPronyProperties, Vec<PropertyClaim>) {
     let (mut properties, mut claims) = fixture();
-    properties.elasticity = elasticity;
+    properties.elasticity = elasticity.clone();
     match elasticity {
         TensorElasticity::Isotropic => {}
         TensorElasticity::IsotropicYoungShear => {
@@ -166,7 +169,9 @@ fn isotropic_pair_fixture(elasticity: TensorElasticity) -> (TensorPronyPropertie
             claims.push(scalar("bulk_modulus", Pressure::DIMS, 8e9));
             claims.push(scalar("shear_modulus", Pressure::DIMS, 4.8e9));
         }
-        TensorElasticity::Orthotropic => unreachable!("isotropic fixture"),
+        TensorElasticity::Orthotropic | TensorElasticity::Mandel21 { .. } => {
+            unreachable!("isotropic fixture")
+        }
     }
     (properties, claims)
 }
@@ -185,7 +190,7 @@ fn independent_equilibrium_pairs_preserve_complete_tensor_histories_and_source_r
         TensorElasticity::IsotropicYoungShear,
         TensorElasticity::IsotropicBulkShear,
     ] {
-        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity.clone());
         claims.push(scalar("density", Density::DIMS, 900.0));
         let restricted = if elasticity == TensorElasticity::Isotropic {
             "poisson_ratio"
@@ -268,7 +273,7 @@ fn independent_tensor_equilibrium_rechecks_pair_stability_and_requires_original_
         (TensorElasticity::IsotropicBulkShear, "bulk_modulus", -1.0),
         (TensorElasticity::IsotropicBulkShear, "shear_modulus", 0.0),
     ] {
-        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity.clone());
         let claim = claims.iter_mut().find(|c| c.key.name() == name).unwrap();
         claim.value = PropertyValue::Scalar { value, dims: Pressure::DIMS };
         // Even a caller's finite-only bundle cannot bypass constitutive stability.
@@ -276,7 +281,7 @@ fn independent_tensor_equilibrium_rechecks_pair_stability_and_requires_original_
         assert!(properties.bind(&state).is_err(), "accepted {elasticity:?}: {name}={value}");
     }
     for elasticity in [TensorElasticity::IsotropicYoungShear, TensorElasticity::IsotropicBulkShear] {
-        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity.clone());
         claims.retain(|c| c.key.name() != "shear_modulus");
         assert!(resolve(&properties, claims, false).is_err());
         let (properties, mut claims) = isotropic_pair_fixture(elasticity);

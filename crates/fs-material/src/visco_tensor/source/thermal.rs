@@ -203,7 +203,10 @@ pub struct TensorThermalLaw {
 impl TensorThermalLaw {
     /// Admit independent affine K(T)/G(T), E(T) with fixed isotropic nu,
     /// independent affine E(T)/G(T), E(T)/nu(T), or independently affine
-    /// orthotropic E/G/major Poisson ratios. Isotropic compliance uses exact
+    /// orthotropic E/G/major Poisson ratios, or all 21 independently affine
+    /// Mandel equilibrium coefficients. Affine full tensors need no common
+    /// scale: positive endpoint tensors imply positivity throughout the interval.
+    /// Isotropic compliance uses exact
     /// eigenvalue interval bounds, including auxetic sources. Orthotropic paths
     /// require a positive scaled diagonal-dominance bound over the whole interval;
     /// this sufficient proof can refuse valid non-dominant sources. Existing
@@ -335,7 +338,7 @@ impl TensorThermalLaw {
         let mut compliance = None;
         let mut equilibrium_pa_k2 = [[0.0; 6]; 6];
         let mut equilibrium_bounds = None;
-        let equilibrium_pa_k = match source.properties.elasticity {
+        let equilibrium_pa_k = match &source.properties.elasticity {
             TensorElasticity::Isotropic | TensorElasticity::Orthotropic
                 if nonlinear_equilibrium && affine_equilibrium_scale(source, &slopes).is_err() =>
             {
@@ -429,6 +432,9 @@ impl TensorThermalLaw {
                         }
                     })
                 })
+            }
+            TensorElasticity::Mandel21 { stiffness_upper } => {
+                symmetric_mandel(stiffness_upper, |name| slopes[name])
             }
             _ => {
                 let ratio = affine_equilibrium_scale(source, &slopes)?;
@@ -617,7 +623,7 @@ fn affine_equilibrium_scale(
 ) -> Result<f64> {
     let invalid = |s: &str| TensorSourceError::Invalid(s.into());
     let fixed = |name: &str| slopes.get(name).is_some_and(|s| *s == 0.0);
-    let moduli: Vec<&str> = match source.properties.elasticity {
+    let moduli: Vec<&str> = match &source.properties.elasticity {
         TensorElasticity::Isotropic => {
             if !fixed("poisson_ratio") {
                 return Err(invalid(
@@ -627,8 +633,8 @@ fn affine_equilibrium_scale(
             vec!["young_modulus"]
         }
         TensorElasticity::IsotropicYoungShear => vec!["young_modulus", "shear_modulus"],
-        TensorElasticity::IsotropicBulkShear => {
-            unreachable!("bulk/shear handled directly")
+        TensorElasticity::IsotropicBulkShear | TensorElasticity::Mandel21 { .. } => {
+            unreachable!("affine stiffness coefficients handled directly")
         }
         TensorElasticity::Orthotropic => {
             if ORTHOTROPIC_POISSON_RATIO_PROPERTIES
