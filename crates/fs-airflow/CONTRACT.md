@@ -5108,6 +5108,56 @@ knot crossings with independent datums, dense and regional source retention,
 latent exhaustion below absolute-h resolution, signed source-entropy seam
 admission, finite source support, zero transfer and cancellation.
 
+## Continuous co-current water/steam exchange across phase boundaries
+
+`conjugate::caloric::exchanger::co_current_water::CoCurrentWaterHeatExchanger`
+accepts an original Gibbs `WaterState`, its finite positive mass rate, an
+original-Cp `ExchangerStream`, and prescribed total UA. Water may start and
+finish in different sensible or latent branches. Desuperheating, condensation
+and subcooling, or feedwater heating, boiling and superheating, all use the
+same original enthalpy coordinate and source domain.
+
+For normalized cumulative conductance x from zero to one, the steady
+co-current equations are `m_dot_water dh_water/dx = -UA*(T_water-T_sensible)`
+and the equal opposite sensible-stream equation. These are exactly the
+existing conservative two-body thermal equations under the declared map
+`m_aux=m_dot*tau`, `t_aux=x*tau`, with `tau=1 s`. The auxiliary time and mass
+are numerical coordinates; they do not prescribe exchanger inventory,
+physical transit time, axial mixing or stored energy. Native unit auxiliary
+geometry supplies topology only. All external boundary heat is zero and the
+only active link has the caller's total UA.
+
+The original heterogeneous `DepositionSimulation` and native adaptive SSPRK2
+owner execute every stage. Both original material `ThermalLaw` implementations
+resolve their own T(h), with the actual water plateau and original Cp knots.
+The pairwise step limit additionally uses the SUM of the two original global
+inverse-enthalpy slopes, preserving passive co-current progress through every
+Euler stage. Native coarse/fine enthalpy and optional temperature norms,
+datum-independent relative accuracy, minimum progress and shared trial/stage
+limits remain explicit. The accepted conservative fine trajectory is used;
+no extrapolated state, separate quadrature or new energy integrator is added.
+These are local numerical error estimates. Phase corners require refinement;
+the report does not promote them into a certified global heat error.
+
+Original water `advance_heat` independently audits stable source and represented
+endpoint changes in h and u+p*v. The original sensible endpoint audit checks
+the same reciprocal heat. Original raw water entropy, its local fixed-pressure
+thermal seam, and the sensible Cp/T integral retain separate signed reports.
+Endpoint inverse/rounding allowances are explicit, and the caller's raw-source
+entropy allowance is not replaced by a seam correction. Every gate and final
+cancellation checkpoint precedes result publication.
+
+Source-domain exhaustion, unrepresentable nonzero heat, passive-gap crossing
+and exhausted work refuse. This owner currently admits the continuous original
+Gibbs chart; dense/regional extensions require their own continuous-path
+admission. It models co-current plug flow with prescribed UA and fixed
+composition/pressure on each side. Counterflow, pressure loss, wall inventory
+and boiling/condensation correlations are separate capabilities. The existing
+plateau exchanger remains the exact native fast path for wholly isothermal
+water exchange. Focused regressions compare that plateau solution, independently
+integrated full-path UA duties, accuracy refinement, mass-rate/UA scaling,
+independent Cp datums, source limits, zero exchange and cancellation.
+
 ## Prescribed mass-flow convection on native conducting surfaces
 
 `implicit::PrescribedMassFlowConvection` borrows an original prepared gas or

@@ -328,7 +328,7 @@ impl WaterPhaseHeatExchanger {
 }
 
 impl WaterPhaseExchangerConfig {
-    fn validate(self) -> Result<(), WaterPhaseExchangerError> {
+    pub(super) fn validate(self) -> Result<(), WaterPhaseExchangerError> {
         positive(self.absolute_heat_tolerance_w, "absolute heat tolerance")?;
         nonnegative(self.relative_heat_tolerance, "relative heat tolerance")?;
         nonnegative(

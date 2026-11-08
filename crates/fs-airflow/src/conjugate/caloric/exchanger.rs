@@ -29,6 +29,7 @@ use fs_math::{dd::Dd, det};
 mod response;
 pub use response::{ExchangerInletResponse, ExchangerResponseConfig};
 
+pub mod co_current_water;
 pub mod phase;
 
 #[cfg(test)]
