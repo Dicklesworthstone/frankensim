@@ -4,7 +4,39 @@
 //! its static contribution therefore adds to the instantaneous permittivity.
 //! <https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_theory.05.36.html>
 
-use super::{RelaxingTensorPiezoelectric, Result, det, invalid, scalar, transient::MemoryResponse};
+use super::{
+    DirectedDebyePole, RelaxingTensorPiezoelectric, Result, det, invalid, scalar,
+    transient::MemoryResponse,
+};
+
+// Static field recovery and transient initialization share the same represented
+// pole coordinate. Recover its energy from that actual coordinate, exactly as
+// memory_response does, so transferring a relaxed state cannot change inventory.
+pub(super) fn pole_equilibrium(
+    pole: &DirectedDebyePole,
+    electric_field_v_m: [f64; 3],
+) -> Result<(f64, f64)> {
+    let along = scalar(
+        pole.direction
+            .iter()
+            .zip(electric_field_v_m)
+            .fold(0.0_f64, |sum, (&n, e)| n.mul_add(e, sum)),
+    )?;
+    // Scale before squaring: E² may overflow although p and its energy fit.
+    let root = det::sqrt(pole.permittivity_increment_f_m);
+    let normalized = scalar(root * along)?;
+    let polarization = scalar(root * normalized)?;
+    let represented = scalar(polarization / root)?;
+    let energy = scalar((0.5 * represented) * represented)?;
+    if along != 0.0
+        && (normalized == 0.0 || polarization == 0.0 || represented == 0.0 || energy == 0.0)
+    {
+        return Err(invalid(
+            "piezoelectric equilibrium polarization or storage underflows",
+        ));
+    }
+    Ok((polarization, energy))
+}
 
 impl RelaxingTensorPiezoelectric {
     /// Additional equilibrium polarization and memory storage at held field.
@@ -27,23 +59,7 @@ impl RelaxingTensorPiezoelectric {
         }
         let mut response = MemoryResponse::default();
         for pole in self.dielectric.iter() {
-            let along = scalar(
-                pole.direction
-                    .iter()
-                    .zip(electric_field_v_m)
-                    .fold(0.0_f64, |sum, (&n, e)| n.mul_add(e, sum)),
-            )?;
-            // Scale before squaring, as in harmonic memory recovery. Forming
-            // E² first would overflow for representable weak-pole energies.
-            let root = det::sqrt(pole.permittivity_increment_f_m);
-            let normalized = scalar(root * along)?;
-            let energy = scalar((0.5 * normalized) * normalized)?;
-            let polarization = scalar(root * normalized)?;
-            if along != 0.0 && (normalized == 0.0 || energy == 0.0 || polarization == 0.0) {
-                return Err(invalid(
-                    "piezoelectric equilibrium polarization or storage underflows",
-                ));
-            }
+            let (polarization, energy) = pole_equilibrium(pole, electric_field_v_m)?;
             response.dielectric_memory_energy_j_m3 =
                 scalar(response.dielectric_memory_energy_j_m3 + energy)?;
             for (value, &direction) in response.polarization_c_m2.iter_mut().zip(&pole.direction) {

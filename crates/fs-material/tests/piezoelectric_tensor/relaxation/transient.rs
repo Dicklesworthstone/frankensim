@@ -302,3 +302,171 @@ fn g0_refused_midpoint_candidates_preserve_memory_and_require_the_original_broad
     );
     assert_eq!(memory, snapshot);
 }
+
+#[test]
+fn g1_g3_equilibrium_memory_and_static_response_share_the_actual_native_inventory() {
+    let direction = [0.6, 0.8, 0.0];
+    let field = [1200.0, -700.0, 300.0];
+    let (card, mechanical, dielectric) = fixture(diagonal_branch(), direction, |_| {});
+    for count in [0, 1, 2] {
+        let material = RelaxingTensorPiezoelectric::resolve(
+            base_law(&card),
+            &card,
+            vec![mechanical.clone()],
+            vec![dielectric.clone(); count],
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let memory = material.equilibrium_memory(field).unwrap();
+        assert_eq!(memory.model_identity(), material.identity());
+        assert_eq!(memory.internal_variables(), material.internal_variables());
+        assert_eq!(memory.internal_variables(), 6 + count);
+        assert_eq!(memory.mechanical_memory_sqrt_pa(), &[[0.0; 6]]);
+        for &polarization in memory.polarization_c_m2() {
+            near(
+                polarization,
+                PERMITTIVITY_INCREMENT_F_M * 160.0,
+                1e-20,
+                3e-13,
+            );
+        }
+        // This is an exact inventory transfer, including the represented pole
+        // energy, not agreement of independently rounded analytic formulas.
+        let response = material.memory_response(&memory).unwrap();
+        assert_eq!(response, material.equilibrium_response(field).unwrap());
+        assert_eq!(response.additional_stress_mandel_pa, [0.0; 6]);
+        assert_eq!(response.mechanical_memory_energy_j_m3, 0.0);
+        near(
+            response.memory_energy_j_m3,
+            0.5 * count as f64 * PERMITTIVITY_INCREMENT_F_M * 160.0 * 160.0,
+            1e-20,
+            3e-13,
+        );
+        assert_eq!(
+            material.equilibrium_memory([0.0; 3]).unwrap(),
+            material.zero_memory().unwrap()
+        );
+
+        let q = rotation([1.0 / 3.0_f64.sqrt(); 3], 0.73);
+        let moved = material.rotated(ContentHash([84; 32]), q).unwrap();
+        let moved_memory = moved.equilibrium_memory(apply(&q, &field)).unwrap();
+        let moved_response = moved.memory_response(&moved_memory).unwrap();
+        for (actual, expected) in moved_response
+            .polarization_c_m2
+            .iter()
+            .zip(apply(&q, &response.polarization_c_m2))
+        {
+            near(*actual, expected, 1e-20, 3e-12);
+        }
+        near(
+            moved_response.memory_energy_j_m3,
+            response.memory_energy_j_m3,
+            1e-20,
+            3e-12,
+        );
+        assert!(material.memory_response(&moved_memory).is_err());
+        assert!(moved.memory_response(&memory).is_err());
+    }
+}
+
+#[test]
+fn g1_relaxed_polarization_survives_a_hold_then_discharges_with_physical_heat() {
+    let (card, mechanical, dielectric) = fixture(diagonal_branch(), [0.0, 0.0, 1.0], |_| {});
+    let material = bound(&card, &mechanical, &dielectric);
+    let field = [0.0, 0.0, 2000.0];
+    let initial = material.equilibrium_memory(field).unwrap();
+    let polarization = PERMITTIVITY_INCREMENT_F_M * field[2];
+    let energy = 0.5 * polarization * field[2];
+    for ratio in [1e-6, 0.4, 4.0] {
+        let dt = ratio * DIELECTRIC_TIME_S;
+        let mut memory = initial.clone();
+        for _ in 0..8 {
+            let history = material.history_correction(&memory, dt, field).unwrap();
+            assert_eq!(history.mechanical_rhs_stress_mandel_pa, [0.0; 6]);
+            for increment in history.polarization_history_increment_c_m2 {
+                near(increment, 0.0, 3e-13 * polarization, 0.0);
+            }
+            let (next, step) = material
+                .midpoint_candidate(&memory, dt, [0.0; 6], field)
+                .unwrap()
+                .into_parts();
+            near(next.polarization_c_m2()[0], polarization, 0.0, 3e-13);
+            near(step.memory_energy_after_j_m3, energy, 0.0, 3e-13);
+            assert_eq!(step.mechanical_heat_j_m3, 0.0);
+            // The original kernel reports its actual represented-state
+            // friction, including roundoff; equilibrium does not zero heat.
+            assert!(step.dielectric_heat_j_m3 >= 0.0);
+            assert!(step.dielectric_heat_j_m3 <= 1e-24 * energy);
+            near(step.energy_residual_j_m3, 0.0, 3e-13 * energy, 0.0);
+            memory = next;
+        }
+    }
+    let dt = 0.4 * DIELECTRIC_TIME_S;
+    let decay = (2.0 * DIELECTRIC_TIME_S - dt) / (2.0 * DIELECTRIC_TIME_S + dt);
+    let (next, step) = material
+        .midpoint_candidate(&initial, dt, [0.0; 6], [0.0; 3])
+        .unwrap()
+        .into_parts();
+    near(
+        next.polarization_c_m2()[0],
+        decay * polarization,
+        0.0,
+        3e-13,
+    );
+    near(
+        step.memory_energy_after_j_m3,
+        decay * decay * energy,
+        0.0,
+        3e-13,
+    );
+    near(
+        step.dielectric_heat_j_m3,
+        (1.0 - decay * decay) * energy,
+        0.0,
+        3e-13,
+    );
+    assert_eq!(step.dielectric_work_j_m3, 0.0);
+    near(step.energy_residual_j_m3, 0.0, 3e-13 * energy, 0.0);
+}
+
+#[test]
+fn g0_g1_equilibrium_memory_requires_broadband_sources_and_representable_storage() {
+    let (card, mechanical, dielectric) = fixture(diagonal_branch(), [0.0, 0.0, 1.0], |_| {});
+    let material = bound(&card, &mechanical, &dielectric);
+    // E² overflows here, but the physical pole state and its storage fit.
+    let large_field = [0.0, 0.0, 1e155];
+    let memory = material.equilibrium_memory(large_field).unwrap();
+    let response = material.memory_response(&memory).unwrap();
+    assert_eq!(
+        response,
+        material.equilibrium_response(large_field).unwrap()
+    );
+    near(
+        response.memory_energy_j_m3,
+        (0.5 * PERMITTIVITY_INCREMENT_F_M * large_field[2]) * large_field[2],
+        0.0,
+        3e-13,
+    );
+    for field in [
+        [f64::NAN, 0.0, 0.0],
+        [0.0, f64::INFINITY, 0.0],
+        [0.0, 0.0, 1e308],
+        [0.0, 0.0, 1e-200],
+    ] {
+        assert!(material.equilibrium_memory(field).is_err());
+    }
+    for lower in [0.0, 10.0] {
+        let (card, mechanical, dielectric) = fixture(diagonal_branch(), [0.0, 0.0, 1.0], |claim| {
+            if claim.key.name() == "piezo_polarization_tau" {
+                claim.validity = claim.validity.clone().with("omega", lower, 1000.0);
+            }
+        });
+        let limited = bound(&card, &mechanical, &dielectric);
+        assert_eq!(limited.frequency_band_rad_s(), [lower, 1000.0]);
+        assert_eq!(
+            limited.equilibrium_response([0.0, 0.0, 2000.0]).is_ok(),
+            lower == 0.0
+        );
+        assert!(limited.equilibrium_memory([0.0, 0.0, 2000.0]).is_err());
+    }
+}

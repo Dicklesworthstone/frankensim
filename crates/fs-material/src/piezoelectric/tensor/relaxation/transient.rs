@@ -263,6 +263,43 @@ impl RelaxingTensorPiezoelectric {
         })
     }
 
+    /// Fully relaxed memory at a held electric field. Every Maxwell stress is
+    /// zero; each original Debye pole retains p=delta_epsilon*(n.E). No strain
+    /// history or source/frame transformation is inferred.
+    ///
+    /// This declares equilibrium before the start of the transient, not a
+    /// finite-time charging ramp. The field owner must first solve its initial
+    /// electrostatics with the relaxed permittivity and retain this memory's
+    /// physical polarization charge and storage. Merely replacing zero memory
+    /// under an instantaneous-dielectric field would change those inventories.
+    ///
+    /// Unlike equilibrium_response, construction requires the complete
+    /// unrestricted transient source band. internal_variables gives the scalar
+    /// allocation count before construction. Subsequent updates use the same
+    /// passive midpoint owner and its actual represented-state heat/residual.
+    pub fn equilibrium_memory(&self, electric_field_v_m: [f64; 3]) -> Result<PiezoelectricMemory> {
+        self.admit_transient()?;
+        if electric_field_v_m.iter().any(|value| !value.is_finite()) {
+            return Err(invalid(
+                "piezoelectric equilibrium requires finite electric field",
+            ));
+        }
+        let mut dielectric = Vec::with_capacity(self.dielectric.len());
+        for pole in self.dielectric.iter() {
+            let (polarization, _) = super::equilibrium::pole_equilibrium(pole, electric_field_v_m)?;
+            dielectric.push(polarization);
+        }
+        let memory = PiezoelectricMemory {
+            model_identity: self.identity(),
+            mechanical: vec![[0.0; 6]; self.mechanical.branches().len()],
+            dielectric,
+        };
+        // Individual finite pole states do not by themselves guarantee finite
+        // summed storage/polarization. Validate the actual retained inventory.
+        self.memory_response(&memory)?;
+        Ok(memory)
+    }
+
     /// Allocation-free physical response of an accepted memory.
     pub fn memory_response(&self, memory: &PiezoelectricMemory) -> Result<MemoryResponse> {
         self.admit_memory(memory)?;
