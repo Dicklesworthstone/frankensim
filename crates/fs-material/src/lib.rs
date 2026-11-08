@@ -128,6 +128,8 @@ pub mod thermo_optic;
 pub mod silica_refraction;
 /// Original IAPWS ordinary-water phase/group indices and state derivatives.
 pub mod water_refraction;
+/// Complete sourced 25 degree Celsius liquid-water extinction spectrum.
+pub mod water_absorption;
 /// Source-bound reciprocal Seebeck and Peltier cross-domain transport.
 pub mod thermoelectric;
 /// Shared species thermodynamics, acoustic medium and source-backed gas transport.
