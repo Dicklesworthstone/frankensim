@@ -167,6 +167,39 @@ refinement. The focused `solid_enthalpy` regression advances cold/warm/hot
 source states through both endpoint conventions and checks clock/source refusal
 without altering accepted thermal or mechanical state.
 
+
+## Source-bound stator and cage heating on native induction machines
+
+`circuit_enthalpy::motor::induction::InductionThermalNetwork` binds the original
+seven-state squirrel-cage machine to distinct finite stator and rotor material
+cells. Each proposed caloric endpoint resolves both pinned conductor sources
+and returns their actual temperature/phase-dependent resistances to the native
+flux equations. The same accepted four fluxes, relative angle and two shaft
+momenta restart every trial. One native workspace is reused across all thermal
+probes; only its checked winding-resistance source rows change.
+
+An explicit positive winding conversion maps the whole-cell conductor
+resistance into the power-invariant stator or referred rotor basis. It does not
+alter receiving volume or multiply the already converted copper heat. Native
+stator copper, rotor copper and bearing losses enter their declared finite
+receivers exactly once. Signed electrical/shaft work and original magnetic and
+kinetic storage close the combined balance; torque and heat are never fitted
+from that residual. Existing material Fourier links and thermal boundaries
+participate in the shared enthalpy endpoint solve.
+
+Source identity, path geometry, winding conversions, receiver correspondence
+and clocks remain pinned. Source/domain, event, budget, energy and cancellation
+refusals publish neither machine nor caloric history. Inductances, inertias,
+pole pairs and bearing drag are fixed, so resistance feedback introduces no
+magnetic parameter work. Endpoint thermal coefficients make this generally
+first order. Saturation, skin effects, resolved bar networks, finite power
+converters and experimental calibration are outside this reduced adapter.
+
+`tests/induction_motor_enthalpy.rs` compares both winding temperatures and native
+currents with an independent coupled two-coil/caloric solution, including
+conduction and cooling; it exercises generating electrical return, finite shaft
+work, bearing heat and complete rollback/retry. These authored regressions do
+not establish the full induction-motor flagship or measured-machine accuracy.
 ## Complete heat assemblies on current and voltage motors
 
 Current- and finite-inductance voltage-driven material motors accept

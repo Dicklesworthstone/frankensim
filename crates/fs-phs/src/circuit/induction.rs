@@ -277,6 +277,51 @@ impl PreparedInductionMotor {
         self.model.operating_point(state)
     }
 
+    /// Rebind stator and referred rotor resistance without rebuilding magnetic
+    /// storage, shaft coupling or prepared Newton scratch. Values are held for
+    /// each subsequent step. Zero resistance and transitions to/from zero are
+    /// supported; the native workspace refreshes its operator pattern per step.
+    ///
+    /// Only dissipation changes, so this does not introduce magnetic parameter
+    /// work. A thermal owner must resolve the original material at its proposed
+    /// temperature and jointly accept state and heat. This method owns no
+    /// temperature law or physical history. Admission uses the same original
+    /// source-square check as construction, allocates nothing, and leaves both
+    /// resistances unchanged on refusal.
+    pub fn set_winding_resistances(&mut self, resistance_ohm: [f64; 2]) -> Result<(), PhsError> {
+        if resistance_ohm.iter().any(|r| !r.is_finite() || *r < 0.0) {
+            return Err(invalid(
+                "induction winding resistances must be finite nonnegative",
+            ));
+        }
+        let system = &mut self.model.system;
+        let witness = system
+            .resistance_witness
+            .as_mut()
+            .ok_or_else(|| invalid("induction physical resistance witness is unavailable"))?;
+        if system.r.len() != 49 || witness.matrix.len() != 49 || witness.root.len() != 49 {
+            return Err(invalid(
+                "induction original resistance structure is incomplete",
+            ));
+        }
+        let mut resistance = [0.0; 49];
+        let mut root = [0.0; 49];
+        resistance.copy_from_slice(&system.r);
+        root.copy_from_slice(&witness.root);
+        for i in 0..4 {
+            let value = resistance_ohm[i / 2];
+            resistance[i * 7 + i] = value;
+            root[i * 7 + i] = det::sqrt(value);
+        }
+        crate::linear_exact::positive_heat::check_resistance_root(&resistance, &root, 7)?;
+        system.r.copy_from_slice(&resistance);
+        witness.matrix.copy_from_slice(&resistance);
+        witness.root.copy_from_slice(&root);
+        self.model.parameters.stator_resistance_ohm = resistance_ohm[0];
+        self.model.parameters.rotor_resistance_ohm = resistance_ohm[1];
+        Ok(())
+    }
+
     /// Hold `[v_s_alpha,v_s_beta,tau_r,tau_s]` over the nonnegative duration.
     /// Outputs are work-conjugate discrete stator currents and absolute shaft
     /// speeds. Rotor heat uses the retained discrete rotor current, including

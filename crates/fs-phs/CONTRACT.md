@@ -38,6 +38,15 @@ slip-power relations, second-order rotating-state convergence, original energy
 and torque, analytic tangents, lossless energy/momentum, decoupled RL dynamics,
 finite DC bus reciprocity, and atomic cancellation/retry.
 
+
+`PreparedInductionMotor::set_winding_resistances` rebinds only stator and
+referred rotor dissipation and the matching checked source-square witness.
+It preserves the original magnetic/kinetic storage, mechanical coupling and
+allocated Newton scratch, including transitions to and from exact zero loss.
+The native workspace refreshes operator dependencies before every step.
+Invalid replacements preserve both old coefficients. Source-bound thermal
+coupling can therefore reuse one native workspace throughout its endpoint
+trials; it remains responsible for the material law and joint heat admission.
 This is a numerical reduced induction-machine lane with sinusoidal balanced
 windings and constant referred inductances/resistances. It does not resolve
 slot/bar harmonics, cage-bar skin effect, saturation/hysteresis, temperature

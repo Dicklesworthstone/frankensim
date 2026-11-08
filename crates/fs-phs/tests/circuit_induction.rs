@@ -585,3 +585,66 @@ fn invalid_sources_and_late_cancellation_publish_nothing_and_retry() {
         .unwrap();
     assert_eq!((next, outputs), expected);
 }
+
+#[test]
+fn resistance_feedback_reuses_original_storage_and_matches_fresh_native_systems() {
+    let p = InductionMotorParameters {
+        bearing_drag_nm_s_per_rad: 0.03,
+        ..parameters()
+    };
+    let model = InductionMotor::new(p).unwrap();
+    let state = model
+        .state([2.0, -0.7], [-0.8, 1.2], 0.3, [5.0, -1.0])
+        .unwrap();
+    let stored = model.system().hamiltonian(&state);
+    let original_point = model.operating_point(&state).unwrap();
+    let mut warm = model.prepare_controlled(budget(), 8, || false).unwrap();
+    let inputs = [4.0, -2.0, 0.2, -0.1];
+    for resistance in [[0.8, 0.5], [0.0, 0.0], [1.7, 0.2], [0.0, 2.3], [0.6, 0.0]] {
+        warm.set_winding_resistances(resistance).unwrap();
+        assert_eq!(warm.system().hamiltonian(&state), stored);
+        let point = warm.operating_point(&state).unwrap();
+        assert_eq!(
+            point.stator_current_alpha_beta_a,
+            original_point.stator_current_alpha_beta_a
+        );
+        assert_eq!(point.rotor_current_dq_a, original_point.rotor_current_dq_a);
+        assert_eq!(
+            point.electromagnetic_torque_nm,
+            original_point.electromagnetic_torque_nm
+        );
+        let current_parameters = InductionMotorParameters {
+            stator_resistance_ohm: resistance[0],
+            rotor_resistance_ohm: resistance[1],
+            ..p
+        };
+        assert_eq!(warm.parameters(), current_parameters);
+        let mut fresh = InductionMotor::new(current_parameters)
+            .unwrap()
+            .prepare_controlled(budget(), 8, || false)
+            .unwrap();
+        let (mut actual, mut outputs) = ([0.0; 7], [0.0; 4]);
+        let (mut expected, mut expected_outputs) = ([0.0; 7], [0.0; 4]);
+        let report = warm
+            .step_controlled(&state, &inputs, 0.003, &mut actual, &mut outputs, || false)
+            .unwrap();
+        let expected_report = fresh
+            .step_controlled(
+                &state,
+                &inputs,
+                0.003,
+                &mut expected,
+                &mut expected_outputs,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(outputs, expected_outputs);
+        assert_eq!(report, expected_report);
+        assert!(report.bearing_heat_j > 0.0);
+        for invalid in [[-1.0, 0.1], [0.1, f64::NAN], [f64::INFINITY, 0.1]] {
+            assert!(warm.set_winding_resistances(invalid).is_err());
+            assert_eq!(warm.parameters(), current_parameters);
+        }
+    }
+}

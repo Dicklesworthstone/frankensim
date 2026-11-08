@@ -23,6 +23,8 @@
 
 /// Finite winding-current and magnetic storage on the same material/enthalpy residual.
 pub mod voltage;
+/// Original squirrel-cage flux dynamics with separate stator/rotor thermal feedback.
+pub mod induction;
 /// Complete source-owned contact, radiation, layer and coolant heat transfer.
 pub mod heat;
 
@@ -596,10 +598,10 @@ impl MotorThermalNetwork<'_> {
 }
 
 
-// The two drive approximations share exactly-once receiver aggregation, including
-// an explicitly homogenized winding/bridge cell. No residual supplies this heat.
-fn receiver_powers<E: From<MotorThermalError>>(
-    receivers: [(CellId, f64); 2],
+// Native motor drivers share exactly-once receiver aggregation, including an
+// explicitly shared loss receiver. No residual supplies this heat.
+fn receiver_powers<E: From<MotorThermalError>, const N: usize>(
+    receivers: [(CellId, f64); N],
     duration: f64,
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<BTreeMap<CellId, f64>, CircuitEnthalpyError<E>> {
