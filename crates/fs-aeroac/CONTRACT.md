@@ -1665,21 +1665,28 @@ Exactly coincident source sums, the coincident baseline and pair contractions
 use double-double arithmetic. The separate `j0-1` and `cos(a x)-1` decrements
 preserve subwavelength opposed-source radiation without subtracting rounded
 order-one powers. This is not a certified relative enclosure at every null;
-negative or nonfinite numerical power refuses. Preparation takes O(N^2) work
-and stores O(N + G^2) data for G distinct positions. Immutable evaluation is
-allocation-free O(N G + G^2) without trigonometry or angular quadrature.
+negative or nonfinite numerical power refuses. For P direct/image paths and G
+distinct positions, preparation takes O(P^2) work and stores O(P + G^2) data.
+Immutable evaluation is allocation-free O(P G + G^2) without trigonometry or
+angular quadrature.
 Explicit source-coherence factors add powers between factors and preserve
 interference within each factor; they use peak spectral-line units, not PSD/Hz.
 Source/pair/factor work bounds and cancellation precede result publication.
 
 The `from_observer` adapter preserves the original source geometry and any
 already admitted set of one to three perpendicular infinite ideal rigid or
-pressure-release planes. Mean flow is tangent to every plane. The complete
+pressure-release planes, or an ideal pi/m wedge. Mean flow is tangent to every
+plane, hence parallel to the edge for a wedge. The complete
 signed image group remains coherent within each original physical source and
 each statistical factor. For reflection R, the total energy flux transforms
-as `J(Rx)=R J(x)`, so whole-image power divided by `2^m` is power into the
-physical fluid sector. The original observer owns geometry and tangency
-admission; no new boundary approximation or source feedback is introduced.
+as `J(Rx)=R J(x)`, so whole-image power divided by the group order is power into
+the physical fluid sector: `2^n` for n perpendicular planes and `2m` for a
+pi/m wedge. The wedge adapter reuses the original observer's `WedgeImages`
+affine maps and signs, including translated planes with different anchors.
+The same admission allows m in 2..=128; mixed rigid/release walls require even
+m, while equal wall conditions admit every supported order. The original
+observer owns geometry and tangency admission; no new boundary approximation
+or source feedback is introduced.
 Source/pair/factor budgets include every image path before allocation, and
 the cancellable adapter publishes only complete groups. Input vectors still
 name only physical sources. The boundary scope also survives an empty source
@@ -1698,7 +1705,10 @@ source-owner binding, resource admission and cancellation.
 formulas, original near-field energy flux integrated over physical hemispheres
 and right-angle sectors at two radii, the stationary image-array limit including
 three planes, original-source coherence, full image budgets and cancellation.
-
+`tests/convected_power_wedges.rs` adds independent single-source chord sums,
+physical 60-degree and 45-degree sector flux at two radii, stationary signed
+image-array parity, rotated/translated wall anchors, complete 2m path budgets
+through m=128, cancellation and original-source statistical coherence.
 ## Measured force coherence through the original line-dipole observer
 
 `curle2d::PreparedDipoleObserver::evaluate_welch_bin` propagates a joint

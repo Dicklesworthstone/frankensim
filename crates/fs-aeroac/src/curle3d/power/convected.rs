@@ -18,11 +18,12 @@
 //! 3.28–3.30: <https://pure.tue.nl/ws/portalfiles/portal/149260007/20200511_Z.Wang.pdf>.
 //! No extra source force, entropy, or mean-flow energy extraction is inferred.
 //!
-//! For the original observer's perpendicular ideal planes, U is tangent to
-//! every wall. Reflection R with parity s therefore gives p(Rx)=s p(x),
+//! For the original observer's perpendicular ideal planes or pi/m wedge,
+//! U is tangent to every wall. Reflection R with parity s gives p(Rx)=s p(x),
 //! u(Rx)=s R u(x), E(Rx)=E(x), and J(Rx)=R J(x). The energy flux through each
 //! reflected sector of an enclosing sphere is equal, and wall flux vanishes.
-//! Whole-image power divided by 2^m is thus power into the physical domain.
+//! Whole-image power divided by the group order (2^planes or 2m for a wedge)
+//! is thus power into the physical domain.
 
 use super::{
     CompactRadiatedPower, ComplexDd, PositionGroup, RadiatedPowerBudget, RadiatedPowerModeBudget,
@@ -30,6 +31,7 @@ use super::{
 };
 use crate::AeroacError;
 use crate::curle3d::array::convected::PreparedConvectedMonopoleObserver;
+use crate::curle3d::array::wedge::WedgeImages;
 use crate::curle3d::statistics::{finite, invalid, nonfinite};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, dd::Dd, det, special::spherical_bessel_moments};
@@ -38,7 +40,7 @@ use fs_math::{c64::C64, dd::Dd, det, special::spherical_bessel_moments};
 pub const CONVECTED_MONOPOLE_POWER_SCOPE: &str = "Cycle-average total outward quadratic acoustic perturbation-energy transport <p u> + U <E> of fixed prescribed compact volume sources injecting at the uniform mean velocity; homogeneous subsonic lossless free space, with coherent interference; no extra source force/entropy, nonuniform flow, absorption, scattering, source feedback, finite-source validation or measured-SPL qualification.";
 
 /// Authority of power into an existing observer's ideal reflecting domain.
-pub const CONVECTED_MONOPOLE_IDEAL_BOUNDARY_POWER_SCOPE: &str = "Cycle-average total outward quadratic acoustic perturbation-energy transport <p u> + U <E> of fixed prescribed compact volume sources injecting at the uniform mean velocity into the original homogeneous subsonic lossless domain of one to three perpendicular infinite ideal rigid or pressure-release planes; mean flow is tangent to every plane and each physical source retains coherent images. No extra source force/entropy, nonuniform flow, wall layers, finite impedance, general diffraction, absorption, source feedback, finite-source validation or measured-SPL qualification.";
+pub const CONVECTED_MONOPOLE_IDEAL_BOUNDARY_POWER_SCOPE: &str = "Cycle-average total outward quadratic acoustic perturbation-energy transport <p u> + U <E> of fixed prescribed compact volume sources injecting at the uniform mean velocity into the original homogeneous subsonic lossless domain of one to three perpendicular infinite ideal rigid or pressure-release planes, or an admitted ideal pi/m wedge; mean flow is tangent to every plane and each physical source retains the complete coherent image group. No extra source force/entropy, nonuniform flow, wall layers, finite impedance, general diffraction, absorption, source feedback, finite-source validation or measured-SPL qualification.";
 
 #[derive(Clone, Copy, Debug)]
 struct ConvectedPair {
@@ -55,9 +57,10 @@ struct ConvectedImage {
 
 /// Analytic radiated power of coherent fixed volume sources in uniform flow.
 ///
-/// Preparation caches the exact scalar/vector spherical moments in O(N²)
-/// work. Evaluation is allocation-free O(N²) with no angular quadrature or
-/// trigonometry. Exactly coincident positions share a field sum; all source
+/// For P direct/image paths, preparation caches the exact scalar/vector
+/// spherical moments in O(P²) work. Evaluation is allocation-free O(P²),
+/// without angular quadrature or trigonometry. Exactly coincident positions
+/// share a field sum; all source
 /// phases remain in the original common clock. A cancellation-preserving
 /// coincident baseline plus pair decrements retains weak oppositely driven
 /// sources even when their separation is far below a wavelength.
@@ -129,8 +132,8 @@ impl PreparedConvectedMonopolePower {
 
     /// Preserve an observer's material, actual flow, frequency and source
     /// positions. Its receiver position never enters total power. Original
-    /// perpendicular ideal planes retain their complete coherent image group;
-    /// power is integrated only over the physical fluid sector. Geometry,
+    /// perpendicular ideal planes or pi/m wedges retain their complete coherent
+    /// image group; power is integrated only over the physical fluid sector. Geometry,
     /// strict source half-spaces and tangent flow were admitted by that owner.
     /// Budgets count EVERY direct/image path and its square, while later
     /// amplitude vectors still contain only the original physical sources.
@@ -168,9 +171,20 @@ impl PreparedConvectedMonopolePower {
                 &mut cancelled,
             );
         }
-        // The immutable observer admits exactly one to three perpendicular
-        // planes, with the SAME uniform flow tangent to every plane.
-        let image_group_size = 1usize << planes.len();
+        // Retain the original observer's geometry owner. A two-wall pi/m
+        // wedge has 2m paths, not the four paths of perpendicular planes.
+        // The shared visitor also retains translated affine reflections and
+        // the even-order restriction for mixed rigid/release wedge walls.
+        let wedge = match observer.reflection_wedge_order() {
+            Some(order) => Some(WedgeImages::new(
+                planes.try_into().map_err(|_| {
+                    invalid("convected wedge power requires the original two planes")
+                })?,
+                order,
+            )?),
+            None => None,
+        };
+        let image_group_size = wedge.map_or(1usize << planes.len(), WedgeImages::path_count);
         let paths = observer
             .source_count()
             .checked_mul(image_group_size)
@@ -190,22 +204,41 @@ impl PreparedConvectedMonopolePower {
             let position = observer
                 .source_position_m(source)
                 .ok_or_else(|| invalid("convected power source index is unavailable"))?;
-            for mask in 0..image_group_size {
-                poll(&mut cancelled)?;
-                let mut image = ConvectedImage {
-                    source,
-                    position_m: position,
-                    sign: 1.0,
-                };
-                for (index, plane) in planes.iter().enumerate() {
-                    if mask & (1 << index) != 0 {
-                        // Same DD reflection as the admitted observer and the
-                        // stationary power owner; no new geometry is inferred.
-                        image.position_m = plane.reflected_position(image.position_m)?;
-                        image.sign *= plane.boundary().sign();
+            if let Some(wedge) = wedge {
+                // As in the convected field owner, H^-1 enumerates the entire
+                // source group and chi(H^-1)=chi(H). Preserve the direct point
+                // exactly and use the SAME affine map for every other image.
+                wedge.visit_inverse(|index, image, sign| {
+                    poll(&mut cancelled)?;
+                    images.push(ConvectedImage {
+                        source,
+                        position_m: if index == 0 {
+                            position
+                        } else {
+                            image.position(position)?
+                        },
+                        sign,
+                    });
+                    Ok(())
+                })?;
+            } else {
+                for mask in 0..image_group_size {
+                    poll(&mut cancelled)?;
+                    let mut image = ConvectedImage {
+                        source,
+                        position_m: position,
+                        sign: 1.0,
+                    };
+                    for (index, plane) in planes.iter().enumerate() {
+                        if mask & (1 << index) != 0 {
+                            // Same DD reflection as the admitted observer and the
+                            // stationary power owner; no new geometry is inferred.
+                            image.position_m = plane.reflected_position(image.position_m)?;
+                            image.sign *= plane.boundary().sign();
+                        }
                     }
+                    images.push(image);
                 }
-                images.push(image);
             }
         }
         let mut prepared = Self::prepare(
