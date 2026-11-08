@@ -16,6 +16,10 @@ use fs_couple::cavitation::{
 use fs_couple::pcm_wav::observation::moving::{
     CompactSourceHistory, MovingCompactRenderer, MovingPressureBudget, MovingPressureConfig,
 };
+use fs_flux::cavitation::inception::{
+    EquilibriumBranch, EquilibriumControls, InceptionError, blake_threshold,
+    equilibrium_at_pressure,
+};
 use fs_flux::cavitation::{
     BubbleCluster, BubbleClusterLimits, BubbleClusterNumerics, BubbleGas, BubbleLimits,
     BubbleNumerics, BubblePressureSample, BubbleState, ClusterBubble, KellerMiksisLimits,
@@ -141,7 +145,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step.acoustic.pressure_pa,
         );
     }
-    cluster_noise(&water)
+    cluster_noise(&water)?;
+    nucleus_inception(&water)
 }
 
 // Each original member supplies its own joint nonlinear source history.
@@ -272,5 +277,83 @@ fn cluster_noise(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::er
         "receiver at x=-0.03 m: 32 coherent pressure samples at 500 kHz; peak |p'|={peak:.6e} Pa",
     );
     println!("Per-bubble retardation; frozen liquid; passive compact observation");
+    Ok(())
+}
+
+// Select an explicitly isothermal gas response for the static pressure
+// continuation. The dynamic growth below uses that SAME prescribed gas law;
+// this example does not solve heat diffusion or gas exchange with the liquid.
+fn nucleus_inception(water: &SaturatedWaterCavitation) -> Result<(), Box<dyn std::error::Error>> {
+    let liquid = water.state();
+    let reference_radius = 50e-6;
+    let model = RayleighPlessetBubble::try_new(
+        liquid,
+        BubbleGas::equilibrium(liquid, reference_radius, 4000.0, 1.0)?,
+        BubbleLimits {
+            minimum_radius_m: 0.1 * reference_radius,
+            maximum_radius_m: 10.0 * reference_radius,
+            maximum_wall_mach_number: 0.01,
+            maximum_vapor_density_ratio: 0.01,
+        },
+    )?;
+    let threshold = blake_threshold(&model)?;
+    let controls = EquilibriumControls {
+        relative_radius_tolerance: 1e-10,
+        absolute_radius_tolerance_m: 1e-15,
+        absolute_pressure_tolerance_pa: 1e-8,
+        maximum_iterations: 128,
+    };
+    // Between the fold and saturation there are two static equilibria for
+    // this same nucleus. Surface tension and retained gas set their stability.
+    let pressure =
+        0.5 * (threshold.critical_absolute_pressure_pa + liquid.saturation_pressure_pa());
+    println!("Static nucleus inception with one retained isothermal gas inventory");
+    println!(
+        "Blake threshold: p={:.6} Pa, radius={:.6} um",
+        threshold.critical_absolute_pressure_pa,
+        threshold.critical_radius_m * 1e6,
+    );
+    for branch in [EquilibriumBranch::Stable, EquilibriumBranch::Unstable] {
+        let equilibrium = equilibrium_at_pressure(&model, pressure, branch, &controls)?;
+        println!(
+            "{branch:?} equilibrium below saturation: p={pressure:.6} Pa, radius={:.6} um, restoring pressure={:.6} Pa",
+            equilibrium.response.radius_m * 1e6,
+            equilibrium.response.restoring_pressure_pa,
+        );
+    }
+
+    let growth_pressure = threshold.critical_absolute_pressure_pa - 100.0;
+    match equilibrium_at_pressure(
+        &model,
+        growth_pressure,
+        EquilibriumBranch::Stable,
+        &controls,
+    ) {
+        Err(InceptionError::EquilibriumOutsideDomain { .. }) => {}
+        Err(error) => return Err(error.into()),
+        Ok(_) => {
+            return Err("below-threshold nucleus unexpectedly has a static equilibrium".into());
+        }
+    }
+    let mut state = BubbleState::try_new(0.0, threshold.critical_radius_m, 0.0)?;
+    model.advance(
+        &mut state,
+        20e-6,
+        &BubbleNumerics {
+            relative_tolerance: 1e-9,
+            radius_absolute_tolerance_m: 1e-14,
+            velocity_absolute_tolerance_m_s: 1e-9,
+            initial_step_s: 1e-8,
+            minimum_step_s: 1e-12,
+            maximum_step_s: 1e-7,
+            maximum_attempts: 10_000,
+        },
+        &|_| growth_pressure,
+    )?;
+    println!(
+        "After 20 us at p={growth_pressure:.6} Pa: radius={:.6} um, outward wall speed={:.6e} m/s",
+        state.radius_m() * 1e6,
+        state.wall_velocity_m_s(),
+    );
     Ok(())
 }

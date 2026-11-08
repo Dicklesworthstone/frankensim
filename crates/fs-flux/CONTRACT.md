@@ -4757,14 +4757,21 @@ return errors without pressure floors, radius clamps or state mutation.
 
 This is static mechanical inception under an explicitly selected polytropic
 thermal limit, following Brennen, Cavitation and Bubble Dynamics,
-[section 2.6, equations 2.41--2.46](https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm).
+[section 2.5, equations 2.41--2.46](https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm).
 It supplies neither homogeneous nucleation nor a frequency-dependent acoustic
 threshold, gas diffusion or evolving thermal equilibrium. The nine regression
 cases include independent isothermal closed forms, stable/unstable native
 response, below-threshold growth, restricted native windows, work/cancellation
-bounds, numerical refinement and coordinated physical scaling. Their execution
-remains pending because the implementation session's executor became unavailable;
-they are not reported as passing validation.
+bounds, numerical refinement and coordinated physical scaling. All nine passed
+within a 54-test native cavitation run using the original numerical modules and
+material coefficient definitions through focused dependency facades. This does
+not replace full Cargo workspace or DSR validation.
+
+The material-water cavitation example uses this API to obtain both equilibria
+below saturation, then crosses the Blake threshold and advances the original
+RP model with the same retained gas inventory. Its isothermal gas exponent is
+explicitly prescribed; no thermal transfer is inferred. The complete example
+executable has not yet been exercised against the full dependency stack.
 
 The numerical owner uses a two-component Dormand--Prince 5(4) pair, fixed stack
 storage and endpoint-derivative reuse. Radius and velocity have separate SI

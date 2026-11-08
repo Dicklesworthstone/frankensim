@@ -12,12 +12,12 @@
 //! slow pressure change). This is not a frequency-dependent acoustic threshold,
 //! homogeneous nucleation model, or gas-diffusion/thermal-equilibrium model.
 //!
-//! Reference: C. E. Brennen, *Cavitation and Bubble Dynamics*, §2.6,
+//! Reference: C. E. Brennen, *Cavitation and Bubble Dynamics*, §2.5,
 //! equations 2.41–2.46, <https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm>.
 
 use super::{
-    BubbleState, CavitationError, SphericalBubbleModel, finite, nonnegative,
-    poll, positive, validate_state,
+    BubbleState, CavitationError, SphericalBubbleModel, finite, nonnegative, poll, positive,
+    validate_state,
 };
 
 /// Pressure that supports an existing nucleus at rest, using its original gas.
@@ -167,21 +167,15 @@ fn analytic_blake_threshold(
     // Log coordinates avoid forming a potentially overflowing inventory R0^m.
     let log_reference_radius = gas.reference_radius_m().ln();
     let log_radius = log_reference_radius
-        + (exponent.ln() + gas.reference_pressure_pa().ln()
-            + log_reference_radius
+        + (exponent.ln() + gas.reference_pressure_pa().ln() + log_reference_radius
             - std::f64::consts::LN_2
             - sigma.ln())
             / (exponent - 1.0);
     let critical_radius = log_radius.exp();
     if !positive(critical_radius) {
-        return Err(
-            CavitationError::NonFiniteDerived("Blake critical radius").into(),
-        );
+        return Err(CavitationError::NonFiniteDerived("Blake critical radius").into());
     }
-    let capillary = finite(
-        2.0 * (sigma / critical_radius),
-        "Blake capillary pressure",
-    )?;
+    let capillary = finite(2.0 * (sigma / critical_radius), "Blake capillary pressure")?;
     let gas_pressure = capillary / exponent;
     if !positive(gas_pressure) {
         return Err(CavitationError::NonFiniteDerived("Blake gas pressure").into());
@@ -189,8 +183,7 @@ fn analytic_blake_threshold(
     Ok(BlakeThreshold {
         critical_radius_m: critical_radius,
         critical_absolute_pressure_pa: finite(
-            model.liquid().saturation_pressure_pa()
-                - capillary * (1.0 - 1.0 / exponent),
+            model.liquid().saturation_pressure_pa() - capillary * (1.0 - 1.0 / exponent),
             "Blake critical pressure",
         )?,
         gas_partial_pressure_pa: gas_pressure,
@@ -206,13 +199,7 @@ pub fn equilibrium_at_pressure(
     branch: EquilibriumBranch,
     controls: &EquilibriumControls,
 ) -> Result<BubbleEquilibrium, InceptionError> {
-    equilibrium_at_pressure_controlled(
-        model,
-        absolute_pressure_pa,
-        branch,
-        controls,
-        &mut || false,
-    )
+    equilibrium_at_pressure_controlled(model, absolute_pressure_pa, branch, controls, &mut || false)
 }
 
 /// Cancellable branch solve with deterministic bounded work and no mutation.
@@ -232,10 +219,7 @@ pub fn equilibrium_at_pressure_controlled(
         || controls.maximum_iterations == 0
     {
         return Err(
-            CavitationError::InvalidInput(
-                "static equilibrium controls or pressure",
-            )
-            .into(),
+            CavitationError::InvalidInput("static equilibrium controls or pressure").into(),
         );
     }
     let limits = model.limits();
@@ -269,8 +253,7 @@ pub fn equilibrium_at_pressure_controlled(
 
     let left_response = static_response(model, left)?;
     let right_response = static_response(model, right)?;
-    let at_fold = absolute_pressure_pa
-        == threshold.critical_absolute_pressure_pa
+    let at_fold = absolute_pressure_pa == threshold.critical_absolute_pressure_pa
         && critical_radius >= left
         && critical_radius <= right;
     let (minimum_pressure, maximum_pressure) = match branch {
@@ -287,8 +270,7 @@ pub fn equilibrium_at_pressure_controlled(
     // The analytic fold has its own residual check below because its pressure
     // and the evaluated static curve can differ by floating-point roundoff.
     if !at_fold
-        && (absolute_pressure_pa < minimum_pressure
-            || absolute_pressure_pa > maximum_pressure)
+        && (absolute_pressure_pa < minimum_pressure || absolute_pressure_pa > maximum_pressure)
     {
         return Err(unavailable);
     }
@@ -297,13 +279,9 @@ pub fn equilibrium_at_pressure_controlled(
             EquilibriumBranch::Stable => right_response,
             EquilibriumBranch::Unstable => left_response,
         })
-    } else if absolute_pressure_pa
-        == left_response.equilibrium_absolute_pressure_pa
-    {
+    } else if absolute_pressure_pa == left_response.equilibrium_absolute_pressure_pa {
         Some(left_response)
-    } else if absolute_pressure_pa
-        == right_response.equilibrium_absolute_pressure_pa
-    {
+    } else if absolute_pressure_pa == right_response.equilibrium_absolute_pressure_pa {
         Some(right_response)
     } else {
         None
@@ -334,8 +312,7 @@ pub fn equilibrium_at_pressure_controlled(
             "equilibrium pressure residual",
         )?;
         let radius_tolerance = finite(
-            controls.absolute_radius_tolerance_m
-                + controls.relative_radius_tolerance * radius,
+            controls.absolute_radius_tolerance_m + controls.relative_radius_tolerance * radius,
             "equilibrium radius tolerance",
         )?;
         if 0.5 * (right - left) <= radius_tolerance

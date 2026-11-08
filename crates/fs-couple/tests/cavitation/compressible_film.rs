@@ -126,7 +126,10 @@ fn sealed_source_heating_raises_pressure_and_cooling_recovers_compressed_mass() 
 
 #[test]
 fn source_heating_with_changed_stiffness_retains_original_compressed_inventory() {
-    for basis in [LiquidViscosityBasis::Dynamic, LiquidViscosityBasis::Kinematic] {
+    for basis in [
+        LiquidViscosityBasis::Dynamic,
+        LiquidViscosityBasis::Kinematic,
+    ] {
         let source = source(basis, false, 0);
         let cold = source.resolve(300.0);
         let hot = cold.at_query_point(&source.card, &point(400.0)).unwrap();
@@ -136,14 +139,26 @@ fn source_heating_with_changed_stiffness_retains_original_compressed_inventory()
         let original = sealed(&cold)
             .with_isothermal_bulk_modulus("pressure", old_bulk)
             .unwrap();
-        let state = original.initialize_with_pressure(&[0.0], &[1.0], &[pressure]).unwrap();
-        let mass = 1000.0 * ((pressure - AMBIENT_PA) / old_bulk).exp()
-            * AREA_M2 * INITIAL_GAP_M;
-        let next = original.advance_with_temperature_source_and_bulk_modulus(
-            &hot, &state, &[0.0], &[0.0], 0.1, new_bulk, || false,
-        ).unwrap();
-        near(next.step.state.pressure_pa()[0], AMBIENT_PA + new_bulk
-            * ((1000.0_f64 / 800.0).ln() + (pressure - AMBIENT_PA) / old_bulk));
+        let state = original
+            .initialize_with_pressure(&[0.0], &[1.0], &[pressure])
+            .unwrap();
+        let mass = 1000.0 * ((pressure - AMBIENT_PA) / old_bulk).exp() * AREA_M2 * INITIAL_GAP_M;
+        let next = original
+            .advance_with_temperature_source_and_bulk_modulus(
+                &hot,
+                &state,
+                &[0.0],
+                &[0.0],
+                0.1,
+                new_bulk,
+                || false,
+            )
+            .unwrap();
+        near(
+            next.step.state.pressure_pa()[0],
+            AMBIENT_PA
+                + new_bulk * ((1000.0_f64 / 800.0).ln() + (pressure - AMBIENT_PA) / old_bulk),
+        );
         near(next.step.report.liquid_mass_before_kg, mass);
         near(next.step.report.liquid_mass_after_kg, mass);
         assert_eq!(next.step.state.liquid_fraction(), &[1.0]);
@@ -152,14 +167,27 @@ fn source_heating_with_changed_stiffness_retains_original_compressed_inventory()
         assert_eq!(next.film.material(), hot.state());
         assert!(std::ptr::eq(next.film.source(), &hot));
         assert_eq!(next.film.pressure_axis(), "pressure");
-        let cooled = next.film.advance_with_temperature_source_and_bulk_modulus(
-            &cold, &next.step.state, &[0.0], &[0.0], 0.1, old_bulk, || false,
-        ).unwrap();
+        let cooled = next
+            .film
+            .advance_with_temperature_source_and_bulk_modulus(
+                &cold,
+                &next.step.state,
+                &[0.0],
+                &[0.0],
+                0.1,
+                old_bulk,
+                || false,
+            )
+            .unwrap();
         near(cooled.step.state.pressure_pa()[0], pressure);
         near(cooled.step.report.liquid_mass_after_kg, mass);
         assert_eq!(cooled.film.film().bulk_modulus_pa(), old_bulk);
         assert!(std::ptr::eq(cooled.film.source(), &cold));
-        assert!(original.advance(&next.step.state, &[0.0], &[0.0], 0.1, || false).is_err());
+        assert!(
+            original
+                .advance(&next.step.state, &[0.0], &[0.0], 0.1, || false)
+                .is_err()
+        );
         assert_eq!(original.film().bulk_modulus_pa(), old_bulk);
         assert_eq!(original.material(), cold.state());
     }
@@ -192,7 +220,13 @@ fn sourced_viscosity_and_endpoint_modulus_control_drained_expansion_with_retaine
         let dt = 1.0;
         let next = original
             .advance_with_temperature_source_and_bulk_modulus(
-                &hot, &state, &[0.0], &[0.0], dt, endpoint_bulk, || false,
+                &hot,
+                &state,
+                &[0.0],
+                &[0.0],
+                dt,
+                endpoint_bulk,
+                || false,
             )
             .unwrap();
         let volume = AREA_M2 * INITIAL_GAP_M;
@@ -299,14 +333,34 @@ fn source_pressure_reference_and_original_lineage_are_required_before_mass_trans
                 .advance_with_temperature_source(candidate, &state, &[0.0], &[0.0], 0.01, || false,)
                 .is_err()
         );
-        assert!(original.advance_with_temperature_source_and_bulk_modulus(
-            candidate, &state, &[0.0], &[0.0], 0.01, 4e7, || false,
-        ).is_err());
+        assert!(
+            original
+                .advance_with_temperature_source_and_bulk_modulus(
+                    candidate,
+                    &state,
+                    &[0.0],
+                    &[0.0],
+                    0.01,
+                    4e7,
+                    || false,
+                )
+                .is_err()
+        );
     }
     for bulk in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-        assert!(original.advance_with_temperature_source_and_bulk_modulus(
-            &cold, &state, &[0.0], &[0.0], 0.01, bulk, || false,
-        ).is_err());
+        assert!(
+            original
+                .advance_with_temperature_source_and_bulk_modulus(
+                    &cold,
+                    &state,
+                    &[0.0],
+                    &[0.0],
+                    0.01,
+                    bulk,
+                    || false,
+                )
+                .is_err()
+        );
     }
     let hot = cold.at_query_point(&source.card, &point(400.0)).unwrap();
     // The source reference-density cap passes, but rho at rupture is lower.
@@ -342,9 +396,19 @@ fn source_pressure_reference_and_original_lineage_are_required_before_mass_trans
     let dilute_state = dilute_only.initialize(&[0.0], &[0.2]).unwrap();
     // The reference density remains admissible while the new rupture density
     // can violate the explicitly declared negligible-vapor-mass approximation.
-    assert!(dilute_only.advance_with_temperature_source_and_bulk_modulus(
-        &cold, &dilute_state, &[0.0], &[0.0], 0.01, 5e4, || false,
-    ).is_err());
+    assert!(
+        dilute_only
+            .advance_with_temperature_source_and_bulk_modulus(
+                &cold,
+                &dilute_state,
+                &[0.0],
+                &[0.0],
+                0.01,
+                5e4,
+                || false,
+            )
+            .is_err()
+    );
     assert!(
         dilute_only
             .advance_with_temperature_source(&hot, &dilute_state, &[0.0], &[0.0], 0.01, || false,)
@@ -380,10 +444,18 @@ fn constant_source_matches_native_bits_and_late_cancellation_preserves_the_compl
         .unwrap();
     let mut polls = 0;
     let next = original
-        .advance_with_temperature_source_and_bulk_modulus(&hot, &state, &[-INITIAL_GAP_M], &[0.0], 0.01, 1e8, || {
-            polls += 1;
-            false
-        })
+        .advance_with_temperature_source_and_bulk_modulus(
+            &hot,
+            &state,
+            &[-INITIAL_GAP_M],
+            &[0.0],
+            0.01,
+            1e8,
+            || {
+                polls += 1;
+                false
+            },
+        )
         .unwrap();
     assert_eq!(next.step, expected);
     assert!(std::ptr::eq(next.film.source(), &hot));
@@ -392,10 +464,18 @@ fn constant_source_matches_native_bits_and_late_cancellation_preserves_the_compl
     let mut calls = 0;
     assert!(
         original
-            .advance_with_temperature_source_and_bulk_modulus(&hot, &state, &[-INITIAL_GAP_M], &[0.0], 0.01, 1e8, || {
-                calls += 1;
-                calls == polls
-            },)
+            .advance_with_temperature_source_and_bulk_modulus(
+                &hot,
+                &state,
+                &[-INITIAL_GAP_M],
+                &[0.0],
+                0.01,
+                1e8,
+                || {
+                    calls += 1;
+                    calls == polls
+                },
+            )
             .is_err()
     );
     assert_eq!(calls, polls);

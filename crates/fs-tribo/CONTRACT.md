@@ -1652,8 +1652,12 @@ accepted owner and state untouched. This prescribed endpoint split supplies no
 caloric, latent-heat or compressive-work claim. Focused test cases cover sealed
 compressed-mass preservation, repeated rupture/reformation, independently
 integrated Barus reservoir transport, and owner/refusal/cancellation behavior.
-Their execution is pending; the implementation session's validation environment
-exhausted its storage and disconnected before compilation completed.
+All 13 native compressible-film cases, including the four new modulus cases,
+passed with the original film operators, inventory solver and deterministic
+math compiled in a focused dependency facade. Only unrelated Carreau module
+alternatives were excluded; executed numerical functions and test bodies were
+unchanged. The five material source-card coupling tests and the full Cargo
+workspace remain unrun.
 
 ## Error model
 

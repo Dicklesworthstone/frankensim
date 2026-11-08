@@ -14,9 +14,7 @@
 //! <https://media.library.caltech.edu/CaltechBOOK:1995.001/chap3.htm>.
 
 use fs_aeroac::AeroacError;
-use fs_aeroac::curle3d::moving::{
-    CompactSourceStrength, TimedCompactSource, UniformSourceMotion,
-};
+use fs_aeroac::curle3d::moving::{CompactSourceStrength, TimedCompactSource, UniformSourceMotion};
 use fs_aeroac::monopole::{CompactMonopoleObserver, MonopoleLimits, MonopoleSample};
 use fs_flux::cavitation::{
     BubbleCluster, BubbleClusterError, BubbleClusterNumerics, BubbleClusterObservation,
@@ -45,10 +43,16 @@ impl core::fmt::Display for MaterialBubbleClusterError {
             Self::Dynamics(error) => write!(f, "bubble cluster dynamics: {error}"),
             Self::Acoustic(error) => write!(f, "bubble cluster acoustics: {error}"),
             Self::MaterialMismatch => {
-                write!(f, "bubble cluster must retain the original complete liquid state")
+                write!(
+                    f,
+                    "bubble cluster must retain the original complete liquid state"
+                )
             }
             Self::ObserverMismatch => {
-                write!(f, "bubble cluster observer material or source geometry changed")
+                write!(
+                    f,
+                    "bubble cluster observer material or source geometry changed"
+                )
             }
         }
     }
@@ -125,10 +129,7 @@ pub struct MaterialBubbleCluster<'a, F: CavitationProperties + ?Sized> {
 impl<'a, F: CavitationProperties + ?Sized> MaterialBubbleCluster<'a, F> {
     /// Bind an already admitted cluster without rebuilding any gas inventory,
     /// member equation, radius, velocity or common physical clock.
-    pub fn new(
-        source: &'a F,
-        cluster: BubbleCluster,
-    ) -> Result<Self, MaterialBubbleClusterError> {
+    pub fn new(source: &'a F, cluster: BubbleCluster) -> Result<Self, MaterialBubbleClusterError> {
         if source.cavitation_state()? != cluster.material() {
             return Err(MaterialBubbleClusterError::MaterialMismatch);
         }
@@ -147,14 +148,11 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubbleCluster<'a, F> {
 
     /// Caller-declared native source bandwidth, including nonlinear harmonics.
     pub fn source_bandwidth_hz(&self) -> f64 {
-        self.cluster.limits().maximum_source_angular_frequency_rad_s
-            / core::f64::consts::TAU
+        self.cluster.limits().maximum_source_angular_frequency_rad_s / core::f64::consts::TAU
     }
 
     /// Exact restrained centers, in the same order as every exported history.
-    pub fn source_motions(
-        &self,
-    ) -> Result<Vec<UniformSourceMotion>, MaterialBubbleClusterError> {
+    pub fn source_motions(&self) -> Result<Vec<UniformSourceMotion>, MaterialBubbleClusterError> {
         self.cluster
             .members()
             .iter()
@@ -190,12 +188,8 @@ impl<'a, F: CavitationProperties + ?Sized> MaterialBubbleCluster<'a, F> {
             let distance = (receiver_m[0] - center[0])
                 .hypot(receiver_m[1] - center[1])
                 .hypot(receiver_m[2] - center[2]);
-            let path = CompactMonopoleObserver::new(
-                medium,
-                distance,
-                self.source_bandwidth_hz(),
-                limits,
-            )?;
+            let path =
+                CompactMonopoleObserver::new(medium, distance, self.source_bandwidth_hz(), limits)?;
             path.sample(
                 self.cluster.time_s(),
                 member.bubble.limits().maximum_radius_m,

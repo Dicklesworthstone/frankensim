@@ -623,7 +623,14 @@ fn g1_endpoint_modulus_preserves_old_compression_instead_of_reinterpreting_it() 
             };
             let next = film
                 .advance_with_liquid_and_bulk_modulus(
-                    &old, &[0.0], &[0.0], 0.01, endpoint, &[0.02], new_bulk, || false,
+                    &old,
+                    &[0.0],
+                    &[0.0],
+                    0.01,
+                    endpoint,
+                    &[0.02],
+                    new_bulk,
+                    || false,
                 )
                 .unwrap();
             let expected = endpoint.ambient_pressure_pa
@@ -636,8 +643,15 @@ fn g1_endpoint_modulus_preserves_old_compression_instead_of_reinterpreting_it() 
             assert_eq!(next.step.channel_mass_flow_kg_s, vec![0.0]);
             assert_eq!(next.film.bulk_modulus_pa(), new_bulk);
             // Pressure is not a portable mass representation across moduli.
-            assert!(next.film.advance(&old, &[0.0], &[0.0], 0.01, || false).is_err());
-            assert!(film.advance(&next.step.state, &[0.0], &[0.0], 0.01, || false).is_err());
+            assert!(
+                next.film
+                    .advance(&old, &[0.0], &[0.0], 0.01, || false)
+                    .is_err()
+            );
+            assert!(
+                film.advance(&next.step.state, &[0.0], &[0.0], 0.01, || false)
+                    .is_err()
+            );
         }
     }
     assert_eq!(old, original);
@@ -654,7 +668,14 @@ fn g3_modulus_cycle_can_rupture_and_reform_the_same_sealed_inventory() {
         let bulk = if cycle % 2 == 0 { 4e6 } else { 1e6 };
         let next = film
             .advance_with_liquid_and_bulk_modulus(
-                &state, &[0.0], &[0.0], 0.01, film.liquid(), &[0.01], bulk, || false,
+                &state,
+                &[0.0],
+                &[0.0],
+                0.01,
+                film.liquid(),
+                &[0.01],
+                bulk,
+                || false,
             )
             .unwrap();
         approx(next.step.report.liquid_mass_before_kg, mass, 2e-12);
@@ -662,7 +683,11 @@ fn g3_modulus_cycle_can_rupture_and_reform_the_same_sealed_inventory() {
         if cycle % 2 == 0 {
             let rho_c = 1000.0 * ((2000.0 - 100_000.0) / bulk).exp();
             assert_eq!(next.step.state.pressure_pa(), &[2000.0]);
-            approx(next.step.state.liquid_fraction()[0], mass / (rho_c * 1e-6), 2e-12);
+            approx(
+                next.step.state.liquid_fraction()[0],
+                mass / (rho_c * 1e-6),
+                2e-12,
+            );
         } else {
             assert_eq!(next.step.state.liquid_fraction(), &[1.0]);
             approx(next.step.state.pressure_pa()[0], 50_000.0, 2e-10);
@@ -676,13 +701,22 @@ fn g3_modulus_cycle_can_rupture_and_reform_the_same_sealed_inventory() {
 fn g1_changed_modulus_drives_endpoint_reservoir_mass_flux_from_the_new_law() {
     let alpha = 1e-6;
     let supplies = [
-        Some(CavitationReservoir { pressure_pa: 350_000.0, liquid_fraction: 1.0 }),
-        Some(CavitationReservoir { pressure_pa: 50_000.0, liquid_fraction: 1.0 }),
+        Some(CavitationReservoir {
+            pressure_pa: 350_000.0,
+            liquid_fraction: 1.0,
+        }),
+        Some(CavitationReservoir {
+            pressure_pa: 50_000.0,
+            liquid_fraction: 1.0,
+        }),
     ];
     let film = CompressibleCavitatingFilm::new(
-        super::reservoirs::supplied_film(alpha).with_reservoirs(&supplies).unwrap(),
+        super::reservoirs::supplied_film(alpha)
+            .with_reservoirs(&supplies)
+            .unwrap(),
         2e6,
-    ).unwrap();
+    )
+    .unwrap();
     let old = film.initial_state(&[0.0]).unwrap();
     let endpoint = CavitationLiquid {
         density_kg_m3: 960.0,
@@ -693,32 +727,52 @@ fn g1_changed_modulus_drives_endpoint_reservoir_mass_flux_from_the_new_law() {
     let bulk = 5e5;
     let mu = [0.02, 0.03];
     let dt = 0.02;
-    let next = film.advance_with_liquid_and_bulk_modulus(
-        &old, &[0.0], &[0.0; 2], dt, endpoint, &mu, bulk, || false,
-    ).unwrap();
+    let next = film
+        .advance_with_liquid_and_bulk_modulus(
+            &old,
+            &[0.0],
+            &[0.0; 2],
+            dt,
+            endpoint,
+            &mu,
+            bulk,
+            || false,
+        )
+        .unwrap();
     // Independent density law and numerical rho/mu quadrature; no native
     // pressure primitive or Newton iterates enter this reference balance.
     let mut low = endpoint.cavitation_pressure_pa;
     let mut high = 800_000.0;
     for _ in 0..100 {
         let p = 0.5 * (low + high);
-        let stored = endpoint.density_kg_m3
-            * ((p - endpoint.ambient_pressure_pa) / bulk).exp() * 1e-6;
+        let stored =
+            endpoint.density_kg_m3 * ((p - endpoint.ambient_pressure_pa) / bulk).exp() * 1e-6;
         let out = material_mass_flow(p, 350_000.0, bulk, alpha, endpoint, mu[0])
             + material_mass_flow(p, 50_000.0, bulk, alpha, endpoint, mu[1]);
-        if stored + dt * out > 0.001 { high = p; } else { low = p; }
+        if stored + dt * out > 0.001 {
+            high = p;
+        } else {
+            low = p;
+        }
     }
     let expected_pressure = 0.5 * (low + high);
     approx(next.step.state.pressure_pa()[0], expected_pressure, 2e-9);
     for k in 0..2 {
         let expected = material_mass_flow(
-            expected_pressure, supplies[k].unwrap().pressure_pa,
-            bulk, alpha, endpoint, mu[k],
+            expected_pressure,
+            supplies[k].unwrap().pressure_pa,
+            bulk,
+            alpha,
+            endpoint,
+            mu[k],
         );
         approx(next.step.channel_mass_flow_kg_s[k], expected, 2e-9);
     }
     assert!(next.step.report.mass_residual_kg.abs() < 1e-14);
-    assert_eq!(next.film.reservoir_conditions().collect::<Vec<_>>(), supplies);
+    assert_eq!(
+        next.film.reservoir_conditions().collect::<Vec<_>>(),
+        supplies
+    );
 }
 
 #[test]
@@ -726,23 +780,56 @@ fn g3_g4_modulus_continuation_is_exact_when_unchanged_and_atomic_when_refused() 
     let film = model(false, 2e9, 1e-7);
     let old = film.initial_state(&[0.0]).unwrap();
     let original = old.clone();
-    let advance = |bulk| film.advance_with_liquid_and_bulk_modulus(
-        &old, &[0.0001], &[2e-6], 0.01, film.liquid(), &[0.01], bulk, || false,
-    );
-    let native = film.advance(&old, &[0.0001], &[2e-6], 0.01, || false).unwrap();
+    let advance = |bulk| {
+        film.advance_with_liquid_and_bulk_modulus(
+            &old,
+            &[0.0001],
+            &[2e-6],
+            0.01,
+            film.liquid(),
+            &[0.01],
+            bulk,
+            || false,
+        )
+    };
+    let native = film
+        .advance(&old, &[0.0001], &[2e-6], 0.01, || false)
+        .unwrap();
     assert_eq!(advance(film.bulk_modulus_pa()).unwrap().step, native);
     for bulk in [0.0, -1.0, f64::INFINITY, f64::NAN] {
         assert!(advance(bulk).is_err());
     }
     let mut polls = 0;
     film.advance_with_liquid_and_bulk_modulus(
-        &old, &[0.0001], &[2e-6], 0.01, film.liquid(), &[0.02], 1e9,
-        || { polls += 1; false },
-    ).unwrap();
+        &old,
+        &[0.0001],
+        &[2e-6],
+        0.01,
+        film.liquid(),
+        &[0.02],
+        1e9,
+        || {
+            polls += 1;
+            false
+        },
+    )
+    .unwrap();
     let mut actual = 0;
-    assert!(film.advance_with_liquid_and_bulk_modulus(
-        &old, &[0.0001], &[2e-6], 0.01, film.liquid(), &[0.02], 1e9,
-        || { actual += 1; actual == polls },
-    ).is_err());
+    assert!(
+        film.advance_with_liquid_and_bulk_modulus(
+            &old,
+            &[0.0001],
+            &[2e-6],
+            0.01,
+            film.liquid(),
+            &[0.02],
+            1e9,
+            || {
+                actual += 1;
+                actual == polls
+            },
+        )
+        .is_err()
+    );
     assert_eq!(old, original);
 }

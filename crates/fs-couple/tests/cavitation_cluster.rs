@@ -2,9 +2,7 @@
 
 use fs_aeroac::curle3d::moving::{MovingCompactLimits, MovingCompactObserver};
 use fs_aeroac::monopole::MonopoleLimits;
-use fs_couple::cavitation::cluster::{
-    MaterialBubbleCluster, MaterialBubbleClusterError,
-};
+use fs_couple::cavitation::cluster::{MaterialBubbleCluster, MaterialBubbleClusterError};
 use fs_couple::pcm_wav::observation::moving::{
     CompactSourceHistory, MovingCompactRenderer, MovingPressureBudget, MovingPressureConfig,
 };
@@ -105,16 +103,24 @@ fn sources_retain_the_joint_accelerations_centers_and_original_material() {
     for (index, bubble) in joint.bubbles.iter().enumerate() {
         let member = owner.cluster().members()[index];
         let isolated = member.bubble.observe(&bubble.state, AMBIENT).unwrap();
-        assert_ne!(bubble.wall_acceleration_m_s2, isolated.wall_acceleration_m_s2);
+        assert_ne!(
+            bubble.wall_acceleration_m_s2,
+            isolated.wall_acceleration_m_s2
+        );
         assert_eq!(sources[index].source_time_s, joint.time_s);
-        assert_eq!(sources[index].strength.volume_flow_m3_s, bubble.volume_rate_m3_s);
+        assert_eq!(
+            sources[index].strength.volume_flow_m3_s,
+            bubble.volume_rate_m3_s
+        );
         assert_eq!(
             sources[index].strength.volume_flow_rate_m3_s2,
             bubble.volume_acceleration_m3_s2,
         );
         let radius = bubble.state.radius_m();
         let velocity = bubble.state.wall_velocity_m_s();
-        let independent = 4.0 * core::f64::consts::PI * radius
+        let independent = 4.0
+            * core::f64::consts::PI
+            * radius
             * (radius * bubble.wall_acceleration_m_s2 + 2.0 * velocity * velocity);
         assert!(
             (sources[index].strength.volume_flow_rate_m3_s2 - independent).abs()
@@ -128,8 +134,7 @@ fn sources_retain_the_joint_accelerations_centers_and_original_material() {
     assert_eq!(owner.cluster().states(), before.as_slice());
 
     // Equal acoustic rho/c does not excuse a different viscous radial equation.
-    let other = CavitationState::try_new(300.0, 1000.0, 0.002, 0.072, 2000.0, 1500.0)
-        .unwrap();
+    let other = CavitationState::try_new(300.0, 1000.0, 0.002, 0.072, 2000.0, 1500.0).unwrap();
     assert!(matches!(
         MaterialBubbleCluster::new(&other, native(source)),
         Err(MaterialBubbleClusterError::MaterialMismatch),
@@ -166,7 +171,9 @@ fn dropping_native_proposal_preserves_all_states_and_commit_replays_direct_advan
 fn observed_step_preserves_native_dynamics_and_separate_retarded_paths() {
     let source = liquid();
     let mut owner = MaterialBubbleCluster::new(&source, native(source)).unwrap();
-    let observer = owner.monopole_observer(RECEIVER, observer_limits()).unwrap();
+    let observer = owner
+        .monopole_observer(RECEIVER, observer_limits())
+        .unwrap();
     assert_eq!(observer.receiver_position_m(), RECEIVER);
     let expected = native(source)
         .advance(20e-6, &numerics(), &|_| AMBIENT)
@@ -181,14 +188,20 @@ fn observed_step_preserves_native_dynamics_and_separate_retarded_paths() {
         let expected_pressure = source.liquid_density_kg_m3()
             * expected.observation.bubbles[index].volume_acceleration_m3_s2
             / (4.0 * core::f64::consts::PI * distance);
-        assert!((sample.pressure_pa - expected_pressure).abs()
-            < 2e-14 * expected_pressure.abs() + 1e-16);
+        assert!(
+            (sample.pressure_pa - expected_pressure).abs()
+                < 2e-14 * expected_pressure.abs() + 1e-16
+        );
         assert_eq!(sample.source_time_s, 20e-6);
-        assert!((sample.arrival_time_s
-            - (20e-6 + distance / source.liquid_sound_speed_m_s())).abs()
-            < 2e-19);
+        assert!(
+            (sample.arrival_time_s - (20e-6 + distance / source.liquid_sound_speed_m_s())).abs()
+                < 2e-19
+        );
     }
-    assert_ne!(step.acoustic[0].arrival_time_s, step.acoustic[1].arrival_time_s);
+    assert_ne!(
+        step.acoustic[0].arrival_time_s,
+        step.acoustic[1].arrival_time_s
+    );
 }
 
 #[test]
@@ -206,42 +219,32 @@ fn observer_refusal_and_final_cancellation_roll_back_all_members_then_retry_exac
         )
         .unwrap();
     assert!(matches!(
-        owner.advance_observed(
-            20e-6, &numerics(), &|_| AMBIENT, &strict, &mut || false,
-        ),
+        owner.advance_observed(20e-6, &numerics(), &|_| AMBIENT, &strict, &mut || false,),
         Err(MaterialBubbleClusterError::Acoustic(_)),
     ));
     assert_eq!(owner.cluster().time_s(), 0.0);
     assert_eq!(owner.cluster().states(), before.as_slice());
 
-    let observer = owner.monopole_observer(RECEIVER, observer_limits()).unwrap();
+    let observer = owner
+        .monopole_observer(RECEIVER, observer_limits())
+        .unwrap();
     let mut reference = MaterialBubbleCluster::new(&source, native(source)).unwrap();
     let mut polls = 0;
     let expected = reference
-        .advance_observed(
-            20e-6,
-            &numerics(),
-            &|_| AMBIENT,
-            &observer,
-            &mut || {
-                polls += 1;
-                false
-            },
-        )
+        .advance_observed(20e-6, &numerics(), &|_| AMBIENT, &observer, &mut || {
+            polls += 1;
+            false
+        })
         .unwrap();
     let mut cancelled_polls = 0;
     assert!(matches!(
-        owner.advance_observed(
-            20e-6,
-            &numerics(),
-            &|_| AMBIENT,
-            &observer,
-            &mut || {
-                cancelled_polls += 1;
-                cancelled_polls == polls
-            },
-        ),
-        Err(MaterialBubbleClusterError::Dynamics(BubbleClusterError::Cancelled)),
+        owner.advance_observed(20e-6, &numerics(), &|_| AMBIENT, &observer, &mut || {
+            cancelled_polls += 1;
+            cancelled_polls == polls
+        },),
+        Err(MaterialBubbleClusterError::Dynamics(
+            BubbleClusterError::Cancelled
+        )),
     ));
     assert_eq!(cancelled_polls, polls);
     assert_eq!(owner.cluster().time_s(), 0.0);
@@ -256,9 +259,19 @@ fn observer_refusal_and_final_cancellation_roll_back_all_members_then_retry_exac
 fn geometry_and_medium_mismatch_refuse_before_evaluating_the_drive() {
     let source = liquid();
     let owner = MaterialBubbleCluster::new(&source, native(source)).unwrap();
-    assert!(owner.monopole_observer([0.0; 3], observer_limits()).is_err());
-    assert!(owner.monopole_observer([0.0009, 0.0, 0.0], observer_limits()).is_err());
-    let observer = owner.monopole_observer(RECEIVER, observer_limits()).unwrap();
+    assert!(
+        owner
+            .monopole_observer([0.0; 3], observer_limits())
+            .is_err()
+    );
+    assert!(
+        owner
+            .monopole_observer([0.0009, 0.0, 0.0], observer_limits())
+            .is_err()
+    );
+    let observer = owner
+        .monopole_observer(RECEIVER, observer_limits())
+        .unwrap();
 
     let mut members = owner.cluster().members().to_vec();
     members.swap(0, 1);
@@ -284,10 +297,8 @@ fn geometry_and_medium_mismatch_refuse_before_evaluating_the_drive() {
     ));
     assert_eq!(other.cluster().time_s(), 0.0);
 
-    let other_source = CavitationState::try_new(
-        300.0, 990.0, 0.001, 0.072, 2000.0, 1500.0,
-    )
-    .unwrap();
+    let other_source =
+        CavitationState::try_new(300.0, 990.0, 0.001, 0.072, 2000.0, 1500.0).unwrap();
     let mut other = MaterialBubbleCluster::new(&other_source, native(other_source)).unwrap();
     assert!(matches!(
         other.advance_observed(
@@ -384,11 +395,7 @@ fn coherent_microphone_history_converges_to_independently_advanced_retarded_sour
         for (member, cluster) in retarded_clusters.iter_mut().enumerate() {
             let distance = 0.03 + member as f64 * SEPARATION;
             let step = cluster
-                .advance(
-                    receiver_time - distance / 1500.0,
-                    &numerics(),
-                    &|_| AMBIENT,
-                )
+                .advance(receiver_time - distance / 1500.0, &numerics(), &|_| AMBIENT)
                 .unwrap();
             pressure += 1000.0 * step.observation.bubbles[member].volume_acceleration_m3_s2
                 / (4.0 * core::f64::consts::PI * distance);
@@ -398,12 +405,17 @@ fn coherent_microphone_history_converges_to_independently_advanced_retarded_sour
     let scale = oracle.iter().copied().map(f64::abs).fold(0.0, f64::max);
     assert!(scale > 0.0);
     let error = |samples: &[f64]| {
-        samples.iter().zip(&oracle)
+        samples
+            .iter()
+            .zip(&oracle)
             .map(|(sample, expected)| (sample - expected).abs())
             .fold(0.0, f64::max)
     };
     let coarse_error = error(&coarse);
     let fine_error = error(&fine);
-    assert!(fine_error < 0.4 * coarse_error, "{fine_error} vs {coarse_error}");
+    assert!(
+        fine_error < 0.4 * coarse_error,
+        "{fine_error} vs {coarse_error}"
+    );
     assert!(fine_error < 1e-3 * scale, "{fine_error} at scale {scale}");
 }

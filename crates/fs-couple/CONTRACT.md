@@ -6862,9 +6862,12 @@ The acoustic source relation is Brennen, Cavitation and Bubble Dynamics,
 Six regression tests cover the joint source and material identity, native
 proposal rollback, independent per-path pressure and delay, late acoustic and
 cancellation rollback with exact retry, mismatched observers, and receiver
-history refinement against separately integrated retarded states. Execution
-is pending: the implementation session's executor became unavailable before
-compilation or test completion. These cases are not claimed as passing evidence.
+history refinement against separately integrated retarded states. All six
+cases passed with the original cluster solver, material coefficient definitions,
+LU, math, monopole propagation and uniform-history renderer compiled through
+focused dependency facades. The same run passed all 54 native cavitation tests.
+This is module-scoped validation; the full Cargo workspace and IF97 example
+executable were not exercised.
 
 ## Native adhesive rolling and torsion with finite-cell heat
 

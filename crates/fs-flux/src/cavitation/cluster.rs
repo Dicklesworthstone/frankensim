@@ -175,7 +175,12 @@ impl BubbleClusterProposal<'_> {
     /// Accept all member states and their common clock together. This performs
     /// no allocation, callback, numerical solve or fallible physical operation.
     pub fn commit(self) -> BubbleClusterStep {
-        for (state, current) in self.owner.states.iter_mut().zip(&self.step.observation.bubbles) {
+        for (state, current) in self
+            .owner
+            .states
+            .iter_mut()
+            .zip(&self.step.observation.bubbles)
+        {
             *state = current.state;
         }
         self.owner.time_s = self.step.observation.time_s;
@@ -475,10 +480,7 @@ impl BubbleCluster {
             rhs_evaluations: result.rhs_evaluations,
             maximum_normalized_local_error: result.maximum_normalized_local_error,
         };
-        Ok(BubbleClusterProposal {
-            owner: self,
-            step,
-        })
+        Ok(BubbleClusterProposal { owner: self, step })
     }
 
     fn values(&self) -> [f64; DIMENSION] {
