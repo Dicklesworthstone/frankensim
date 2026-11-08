@@ -589,6 +589,13 @@ where claimed below.
   mode, using cancellation-free small-relaxation series; it is never an energy
   residual. Drive and prescribed-bath work use the matching integrated rates.
   Momentum increments preserve weak transverse loss beside a dominant spin.
+  Strongly attenuated components instead use the directly propagated modal
+  endpoint, retaining representable decay tails and small driven equilibria
+  after `expm1(-lambda*h)` rounds to minus one. Homogeneous retention is
+  prepared in four factors, so coefficient underflow does not itself erase a
+  finite scaled tail. The axial analytic decay and time-partition tests cover
+  relaxation numbers through 700; they do not widen the full-tensor spectral
+  admission or the separate attitude-accuracy claim.
   Original PSD admission, numerical spectral residual/orthogonality checks and
   stage impulse/work checks refuse unresolved inputs without changing the
   authored tensor. Zero damping preserves native zero-drag arithmetic.

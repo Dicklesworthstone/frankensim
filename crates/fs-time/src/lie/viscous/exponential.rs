@@ -20,6 +20,10 @@ pub(super) struct ExponentialRelaxation {
 #[derive(Debug, Clone, Copy, Default)]
 pub(in crate::lie) struct Response {
     pub(in crate::lie) decay_change: f64,
+    // Keep the homogeneous endpoint separately: expm1(-x) rounds to -1
+    // long before exp(-x) vanishes. Four factors also retain a finite tail
+    // when the coefficient itself underflows beside a large initial state.
+    retention_quarter: f64,
     pub(in crate::lie) response: f64,
     pub(in crate::lie) integrated_response: f64,
     // Two squares integrate each mode's heat, avoiding cancellation between
@@ -136,10 +140,31 @@ impl ExponentialRelaxation {
             let deviation = dd(r.heat_deviation[0]) * slip[i] + dd(r.heat_deviation[1]) * source[i];
             heat = heat + mean * mean + deviation * deviation;
         }
-        // Apply only the increment: reconstructing the whole momentum would
-        // destroy resolved small losses beside a much larger undamped spin.
+        // The increment form preserves weak losses beside a large unchanged
+        // spin. It cannot resolve an almost complete decay: expm1(-x) may
+        // equal -1, and old + increment would spuriously publish rest. Use the
+        // directly propagated modal endpoint only in components where that
+        // subtraction loses more than eight bits. Both forms solve the same
+        // frozen linear system; neither projects or clips the momentum.
         let actual = apply(self.momentum_modes, increment)?;
-        let after = add(momentum, actual);
+        let mut after = add(momentum, actual);
+        let needs_endpoint = core::array::from_fn::<_, 3, _>(|i| {
+            momentum[i].to_f64() != 0.0
+                && after[i].to_f64().abs() < momentum[i].to_f64().abs() / 256.0
+        });
+        if needs_endpoint.into_iter().any(|needed| needed) {
+            let endpoint = core::array::from_fn(|i| {
+                let r = self.response[i];
+                let retained = r.retain(slip[i]) + dd(r.response) * source[i];
+                bath_modes.map_or(retained, |bath| retained + bath[i])
+            });
+            let direct = apply(self.momentum_modes, endpoint)?;
+            for i in 0..3 {
+                if needs_endpoint[i] {
+                    after[i] = direct[i];
+                }
+            }
+        }
         for component in after {
             compensated::checked(component, "exponential viscous momentum")?;
         }
@@ -200,6 +225,7 @@ impl Response {
     pub(in crate::lie) fn prepare(rate: f64, h: f64) -> Result<Self, LieStepError> {
         if rate == 0.0 {
             return Ok(Self {
+                retention_quarter: 1.0,
                 response: h,
                 integrated_response: 0.5 * h * h,
                 ..Self::default()
@@ -239,6 +265,7 @@ impl Response {
         };
         let response = Self {
             decay_change,
+            retention_quarter: det::exp(-0.25 * x),
             response: h * f,
             integrated_response: h * (h * v),
             heat_mean: [root_x * f, root_x * (h * v)],
@@ -246,6 +273,7 @@ impl Response {
         };
         for coefficient in [
             response.decay_change,
+            response.retention_quarter,
             response.response,
             response.integrated_response,
             response.heat_mean[0],
@@ -256,6 +284,11 @@ impl Response {
             scalar(coefficient, "resolved exponential viscous coefficient")?;
         }
         Ok(response)
+    }
+
+    fn retain(self, value: Dd) -> Dd {
+        let factor = dd(self.retention_quarter);
+        (((value * factor) * factor) * factor) * factor
     }
 }
 

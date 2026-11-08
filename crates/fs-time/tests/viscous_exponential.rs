@@ -61,6 +61,76 @@ fn stiff_axial_relaxation_keeps_the_exponential_decay_and_physical_heat() {
 }
 
 #[test]
+fn stiff_axial_decay_retains_resolved_tails_and_time_partition() {
+    // G1/G3: each stage used to evaluate L + expm1(-lambda*h)*L.
+    // Above lambda*h ~= 37, that expression publishes zero even though the
+    // exact angular momentum and a continuation from it remain representable.
+    let inertia =
+        InertiaTensor3::from_principal(Vec3::new(2.0, 2.0, 2.0), So3::identity()).unwrap();
+    let duration = 0.1;
+    for relaxation in [20.0_f64, 80.0, 200.0, 700.0] {
+        let damping = diagonal(0.0, 0.0, 2.0 * relaxation / duration);
+        let whole = inertia
+            .viscous_exponential_stepper(damping, duration)
+            .unwrap();
+        let part = inertia
+            .viscous_exponential_stepper(damping, duration / 8.0)
+            .unwrap();
+        for sign in [-1.0, 1.0] {
+            let initial = Vec3::new(0.0, 0.0, sign * 6.0);
+            let result = whole
+                .step(So3::identity(), initial, HeldTorque::Body(Vec3::default()))
+                .unwrap();
+            let expected = sign * 6.0 * (-relaxation).exp();
+            close(
+                result.momentum_after_body.z,
+                expected,
+                expected.abs() * 3e-13,
+            );
+            close(
+                result.dissipated_energy_j,
+                9.0 * -(-2.0 * relaxation).exp_m1(),
+                8e-14,
+            );
+            close(result.work_energy_residual_j, 0.0, 8e-14);
+            let mut momentum = initial;
+            let mut attitude = So3::identity();
+            for _ in 0..8 {
+                let split = part
+                    .step(attitude, momentum, HeldTorque::Body(Vec3::default()))
+                    .unwrap();
+                momentum = split.momentum_after_body;
+                attitude = split.rotation_after;
+            }
+            close(momentum.z, expected, expected.abs() * 2e-12);
+        }
+    }
+}
+
+#[test]
+fn stiff_axial_drive_preserves_a_small_physical_terminal_velocity() {
+    let inertia =
+        InertiaTensor3::from_principal(Vec3::new(2.0, 2.0, 2.0), So3::identity()).unwrap();
+    let duration: f64 = 0.1;
+    let damping: f64 = 4000.0;
+    let drive: f64 = 1e-50;
+    let initial: f64 = 6.0;
+    let result = inertia
+        .viscous_exponential_stepper(diagonal(0.0, 0.0, damping), duration)
+        .unwrap()
+        .step(
+            So3::identity(),
+            Vec3::new(0.0, 0.0, initial),
+            HeldTorque::Body(Vec3::new(0.0, 0.0, drive)),
+        )
+        .unwrap();
+    let terminal = 2.0 * drive / damping;
+    let exact = terminal + (initial - terminal) * (-duration * damping / 2.0).exp();
+    close(result.momentum_after_body.z, exact, exact.abs() * 2e-13);
+    close(result.work_energy_residual_j, 0.0, 8e-14);
+}
+
+#[test]
 fn stiff_driven_rotating_bath_integrates_source_work_and_slip_heat() {
     let inertia =
         InertiaTensor3::from_principal(Vec3::new(2.0, 2.0, 2.0), So3::identity()).unwrap();
