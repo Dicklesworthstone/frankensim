@@ -28,6 +28,9 @@ pub use tangent::{
     solve_forced_harmonic_balance_analytic_scaled_seeded,
 };
 
+mod sensitivity;
+pub use sensitivity::{PhsForcedSensitivityError, PreparedPhsForcedSensitivity};
+
 /// Physical port harmonics evaluated through the original nonlinear storage.
 pub mod spectrum;
 

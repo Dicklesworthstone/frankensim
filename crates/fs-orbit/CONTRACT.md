@@ -803,3 +803,32 @@ is scoped numerical verification, not a full Cargo/workspace gate. The phase
 comparison allows eight machine epsilons for independent full-angle argument
 rounding. Payload-refusal tests now straddle the actual reduced allocations,
 retaining their admission-before-callback checks without restoring old tables.
+
+## Forced waveform parameter derivatives
+
+`sensitivity::PreparedForcedSensitivity` differentiates every original DC and
+complex Fourier coefficient of a fixed-order forced HB solution. It reuses the
+exact real AFT coefficient Jacobian, the existing physical row/column scales and
+one fs-la LU factor across physical parameter directions: `R_X X_p = -R_p`.
+Complete residual declarations may include original source, frequency-port and
+clock changes; the island-only entry requires a fixed clock/port and projects
+complete source partials using the original centered AFT owner. Both independent
+grids are reassessed, including the rounded published derivative in the original
+physical linearized equations. No finite-difference tangent, coefficient clipping,
+mode decoupling or regularization is introduced. Unavailable/incomplete source
+tangents, stale base equations, singular or overly ill-conditioned factors,
+inconsistent directions, exhausted budgets and cancellation explicitly refuse.
+
+Returned coefficients are physical derivatives per parameter unit at fixed phase,
+with the same half-amplitude convention as HbOrbit. The authored parameter scale
+conditions arithmetic and absolute residual acceptance only. The cached source
+must remain unchanged across directions. The condition number is an estimate,
+not a certified upper bound; sampling agreement and fixed-order differentiation
+supply no infinite-tail, existence, branch-uniqueness or stability guarantee.
+Refine harmonic order and confirm time-domain behavior independently.
+
+`tests/forced_sensitivity.rs` compares coupled nonlinear/relaxation force and
+material derivatives with separately solved parameter perturbations, and checks
+3/7/11/15-harmonic convergence against independently integrated continuous-time
+variational RK4. It also covers complete phased frequency-port/clock derivatives,
+physical unit changes, repeated-factor source-call counts and named refusals.

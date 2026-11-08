@@ -39,6 +39,9 @@ pub mod autonomous;
 /// Driven sideband response about a complete periodic operating waveform.
 pub mod sideband;
 
+/// Exact derivatives of complete forced harmonic-balance waveforms.
+pub mod sensitivity;
+
 mod adaptive;
 pub use adaptive::{
     AdaptiveHbOrbit, HbRefinementBudget, HbRefinementCheck, solve_hb_adaptive,

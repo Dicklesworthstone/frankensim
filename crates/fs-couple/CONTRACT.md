@@ -7267,3 +7267,24 @@ physical refusal or cancellation leaves the caller's entire channel block and
 frame count unchanged, permitting retry. BEM refusals retain their original
 `TransferError` in `RenderError::BemObservation`. Channel identities and patterns
 remain available beside WAV bytes. Original producer accuracy remains unresolved.
+
+## Forced nonlinear waveform parameter directions
+
+`phs_orbit::PreparedPhsForcedSensitivity` prepares the complete original pHS
+continuous tangent through the shared fs-orbit forced-sensitivity owner. Native
+storage Hessians are discovered as in HB; an explicit complete authored Hessian
+may also be supplied. One factor is reused across all physical port Fourier
+partials and original storage-effort partials. The existing physical field owner
+applies `G du/dp` or `(J-R) partial(gradient H)/partial p`, preserving nonlinear
+modal coupling, damping and every explicit material-memory coordinate. Inputs
+retain real DC and complex half-amplitudes, and unresolved nonzero forcing
+bandwidth or inconsistent clocks refuse before direction evaluation.
+
+These derivatives hold the clock and structure matrices fixed. A complete
+source/port/clock residual declaration can use the shared prepared entry. All
+coefficients are derivatives per physical parameter unit at fixed phase; they
+are not finite-probe responses, peak-amplitude derivatives or stability evidence.
+The same source must remain unchanged, and harmonic order needs independent
+refinement. Tests cover phased multiharmonic force/stiffness mechanics and a
+nonlinear original storage with an explicit relaxing strain, including its
+material derivative, native/declared Hessian agreement and bandwidth refusals.
