@@ -1,5 +1,26 @@
 # fs-material — CONTRACT
 
+## Progressive ductile plane stress
+
+`plastic::finite::ductile::plane_stress` solves all three transverse Piola
+tractions with positive thickness and the complete original progressive/Perzyna
+return. Fixed accepted history, temperature and physical interval survive every
+local retry. A normalized pivoted 3-by-3 solve produces the unsymmetrized Schur
+tangent; physical traction is normalized by current integrity so attenuation
+cannot conceal an unequilibrated root. All local work uses fixed-size storage.
+
+The original candidate retains separate reference-volume storage, physical
+plastic dissipation, released damage storage and signed endpoint-work defect.
+The method admits a regular local transverse equilibrium with explicit
+iteration/domain refusals. It does not certify branch stability, uniqueness,
+necking, shell bending or fracture topology.
+
+G1/G3 cases in `plastic_finite_ductile_plane_stress` cover independent biaxial
+softening/thickness/heat/negative slope, intact native parity, unloading, all
+condensed tangent components with moving onset/transverse shear/compression,
+held rate relaxation and transactional failures. Synthetic coefficients are
+numerical checks, without measured-alloy qualification.
+
 ## Rate-dependent progressive finite ductility
 
 `FiniteDuctileJ2::with_overstress` explicitly selects the original fixed-temperature

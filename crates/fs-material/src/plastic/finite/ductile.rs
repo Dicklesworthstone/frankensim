@@ -42,6 +42,9 @@ use fs_math::det;
 /// Original finite constitutive card, reference-work calibration and initiation.
 pub mod source;
 
+/// Traction-free sheet reduction with the complete progressive damage tangent.
+pub mod plane_stress;
+
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 /// Immutable native finite material, original initiation law and reference width.
