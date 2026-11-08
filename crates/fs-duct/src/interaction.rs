@@ -27,7 +27,6 @@
 //! and the hole mouth flows use the coupled solution. The first-hole shunt's port reflection keeps its independent
 //! chimney; the orifice ports of `open_hole_orifice N` sit on the COUPLED network ([`port_admittance`]).
 
-use fs_la::eigen_complex::lu_complex;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_math::det;
@@ -327,10 +326,17 @@ fn assemble_bore(chain: &PreparedChain, holes: &[PreparedOpenHole], maximum_cond
 /// [`Coupling::admittance`]) and the junction pressures `p = G Yj dp` (`G` the junction block of the inverse nodal matrix,
 /// matched inlet and every opening stamped), `Y = Yj - Yj G Yj` on the first `orifices` rows and columns. With no mutual
 /// coupling `Yj` is diagonal and this is the independent network's `Y`.
+/// Numerically, with the bare matched bore `B`, the loaded matrix
+/// `A = B + E Yj E^T` and the junction selector `E`, evaluate the equivalent
+/// `Y = Yj E^T A^-1 B E`. This avoids subtracting the two divergent chimney
+/// admittances in `Yj - Yj G Yj` near an otherwise admissible chimney pole.
 ///
 /// # Errors
-/// A half-wave run between two openings (singular `I + S`) has no nodal matrix and returns [`DuctError::Singular`]; the
-/// caller falls back to the independent network for that frequency. `orifices` outside `1..=holes.len()` refuses.
+/// A singular component admittance retains all bore and mouth currents until
+/// the matched inlet and complete coupled radiation load have been applied.
+/// Only an unresolved complete system returns [`DuctError::Singular`]; no
+/// independent-radiation substitution is made. `orifices` outside
+/// `1..=holes.len()` refuses.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn port_admittance(
     chain: &PreparedChain,
@@ -347,52 +353,55 @@ pub(crate) fn port_admittance(
     if orifices == 0 || orifices > holes.len() {
         return Err(bad("coupled orifice terminals need between one and all open holes"));
     }
-    let Bore { mut ytot, nodes, keep_waves, .. } = assemble_bore(chain, holes, maximum_condition)?;
-    if keep_waves {
-        return Err(DuctError::Singular);
-    }
-    ytot[0] = ytot[0] + C64::from_re(1.0 / chain.reference_impedance);
+    let Bore { mut ytot, nodes, keep_waves, wave_edges, .. } = assemble_bore(chain, holes, maximum_condition)?;
     let mut all: Vec<CoupledPort> = ports.to_vec();
     all.extend(bell);
     let q = all.len();
-    let coupling = couple_with_limit(&all, exterior, omega, interaction, maximum_condition)?;
-    let yj = &coupling.admittance;
-    for i in 0..q {
-        for j in 0..q {
-            let at = (i + 1) * nodes + j + 1;
-            ytot[at] = ytot[at] + yj[i * q + j];
-        }
-    }
-    let lu = lu_complex(&ytot, nodes).map_err(|_| DuctError::Singular)?;
-    // G: the junction block of the inverse nodal matrix, one unit junction current at a time.
-    let mut g = vec![C64::ZERO; q * q];
-    for j in 0..q {
-        let mut column = vec![C64::ZERO; nodes];
-        column[j + 1] = C64::ONE;
-        lu.solve(&mut column);
-        for i in 0..q {
-            g[i * q + j] = column[i + 1];
-        }
-    }
-    // gy = G Yj; Y[i][j] = Yj[i][j] - sum_k Yj[i][k] gy[k][j] on the orifice rows and columns.
-    let mut gy = vec![C64::ZERO; q * q];
-    for k in 0..q {
-        for j in 0..q {
-            gy[k * q + j] = (0..q).fold(C64::ZERO, |sum, l| sum + g[k * q + l] * yj[l * q + j]);
-        }
-    }
-    let mut port = vec![C64::ZERO; orifices * orifices];
-    for i in 0..orifices {
-        for j in 0..orifices {
-            let through = (0..q).fold(C64::ZERO, |sum, k| sum + yj[i * q + k] * gy[k * q + j]);
-            let entry = yj[i * q + j] - through;
-            if !finite(entry) {
-                return Err(DuctError::Singular);
+    let reduced = if keep_waves {
+        Err(DuctError::Singular)
+    } else {
+        (|| {
+            ytot[0] = ytot[0] + C64::from_re(1.0 / chain.reference_impedance);
+            let bare_bore = ytot.clone();
+            let coupling = couple_with_limit(&all, exterior, omega, interaction, maximum_condition)?;
+            let yj = &coupling.admittance;
+            for i in 0..q {
+                for j in 0..q {
+                    let at = (i + 1) * nodes + j + 1;
+                    ytot[at] = ytot[at] + yj[i * q + j];
+                }
             }
-            port[i * orifices + j] = entry;
-        }
+            let (inverse, _) = crate::network::inverse_with_limit(&ytot, nodes, maximum_condition)?;
+            // E^T A^-1 B E, formed from the bare matched bore rather than
+            // by subtracting the nearly equal matrices I and G Yj.
+            let mut junction_response = vec![C64::ZERO; q * orifices];
+            for i in 0..q {
+                for j in 0..orifices {
+                    junction_response[i * orifices + j] = (0..nodes).fold(C64::ZERO,
+                        |sum, k| sum + inverse[(i + 1) * nodes + k] * bare_bore[k * nodes + j + 1]);
+                }
+            }
+            let mut port = vec![C64::ZERO; orifices * orifices];
+            for i in 0..orifices {
+                for j in 0..orifices {
+                    let entry = (0..q).fold(C64::ZERO,
+                        |sum, k| sum + yj[i * q + k] * junction_response[k * orifices + j]);
+                    if !finite(entry) {
+                        return Err(DuctError::Singular);
+                    }
+                    port[i * orifices + j] = entry;
+                }
+            }
+            Ok(port)
+        })()
+    };
+    match reduced {
+        Ok(port) => Ok(port),
+        Err(DuctError::Singular) => retained::port_admittance(
+            nodes, &wave_edges, &all, exterior, omega, interaction,
+            maximum_condition, chain.reference_impedance, orifices),
+        Err(error) => Err(error),
     }
-    Ok(port)
 }
 
 /// The refusal of a coupled solve whose input resistance is negative: a passive one-port has a nonnegative one.

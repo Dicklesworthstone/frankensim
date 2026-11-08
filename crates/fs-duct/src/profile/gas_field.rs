@@ -773,7 +773,7 @@ impl GasFieldDuct {
     /// Under `open_hole_interaction` the mouth and chimney flows in the returned holes are the coupled
     /// ones, and so is `Y`: every other opening stays linear and all of them radiate into the one exterior with their
     /// mutual impedance (`interaction::port_admittance`; with no mutual coupling it is the independent network's `Y`).
-    /// A half-wave run between two holes has no nodal matrix and keeps the independent network at that frequency.
+    /// At half-wave bore or isolated chimney resonances, the complete pressure/current equations retain that coupling.
     /// (The `N = 1` first-hole shunt does not use `Y`: it takes the independent network's port reflection from the
     /// open-hole flows, unchanged.)
     ///
@@ -827,17 +827,10 @@ impl GasFieldDuct {
                 }
                 // A frequency whose coupled solve was active (bead frankensim-1xe5t) takes the independent network for its orifice ports too.
                 let ports_interaction = if solved.independent_fallback { OpenHoleInteraction::independent() } else { interaction };
-                match crate::interaction::port_admittance(
+                crate::interaction::port_admittance(
                     &chain, &holes, &coupled_ports, bell, &coupled_exterior, omega, ports_interaction,
                     ComposeOptions::default().maximum_condition, ports.min(holes.len()),
-                ) {
-                    Ok(y) => y,
-                    // A half-wave run between two holes has no nodal matrix: that frequency keeps the independent network.
-                    Err(DuctError::Singular) => {
-                        open_hole_port_admittance(&chain, &holes, ports, load, ComposeOptions::default())?
-                    }
-                    Err(error) => return Err(error),
-                }
+                )?
             } else {
                 Vec::new()
             };

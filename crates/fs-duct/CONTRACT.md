@@ -469,6 +469,14 @@ It inherits the native caps of 32 retained mouths (including an open bell) and
 800 total unknowns. Genuine nonunique or over-bound complete systems still
 refuse, without damping or impedance perturbation.
 
+The nonlinear orifice-port admittance uses those same retained equations when
+either component chart or the loaded nodal solve refuses. Its matched inlet
+remains loaded; a unit orifice pressure drop drives
+`p_junction-(A Z+B) U_mouth=dp`, and `Y=-U_chimney/dp` retains every other
+linear opening and the bell. Half-wave bore runs and joint chimney poles no
+longer replace this perturbation network with independent radiation. A genuinely
+singular complete orifice network still refuses.
+
 A frequency where the coupled solve returns a NEGATIVE input resistance (a passive one-port has a nonnegative one) no longer refuses the
 card: that frequency solves the SAME bore with the mutual impedance switched off (`OpenHoleInteraction::independent()`, `epsilon` infinite:
 each opening keeps its own flanged self radiation), marks its response `CompositionMode::ScatteringIndependentHoles`, and takes the

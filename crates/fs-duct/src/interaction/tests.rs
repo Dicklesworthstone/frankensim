@@ -573,6 +573,8 @@ fn a_genuine_undamped_mouth_flow_mode_still_refuses() {
     };
     assert!(matches!(solve(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), 1.0e8),
         Err(DuctError::Singular)));
+    assert!(matches!(port_admittance(&chain, &holes, &ports, None, &gas, omega, interaction(2.0), 1.0e8, 2),
+        Err(DuctError::Singular)), "a matched inlet cannot fix the circulating dark mode");
 }
 
 #[test]
@@ -596,4 +598,146 @@ fn the_ordinary_loaded_nodal_system_must_respect_the_callers_condition_bound() {
     let admitted = solve(&chain, &[hole], &[port], None, &gas, TAU * 700.0, interaction(2.0), 1.0e8).unwrap();
     assert!(close(admitted.input_impedance, C64::from_re(101.0 * reference), 2.0e-12));
     assert!(admitted.condition > bound && admitted.condition < 1.0e8);
+}
+
+#[test]
+fn coupled_orifices_keep_mutual_radiation_at_exact_bore_resonances() {
+    // Integer half-wave runs impose p_i=s_i*p_in, s_i=+/-1. With a
+    // matched inlet, KCL gives p_in=-R*s^T*U, so the ORIGINAL mouth
+    // equations reduce to (Zrad+R*s*s^T)*U=-dp. The two-by-two inverse
+    // below is an analytic oracle, independent of the nodal/retained solve.
+    let gas = air();
+    let wavelength = 0.4;
+    let omega = TAU * gas.sound_speed / wavelength;
+    let reference = 1.0e5;
+    let loads = [C64::new(0.7, -0.2), C64::new(0.4, -0.1), C64::new(0.9, -0.3)]
+        .map(|z| z.scale(reference));
+    let through = TwoPort::through(reference).unwrap();
+    let signed = |phase: f64| TwoPort::new(
+        [C64::ZERO, C64::from_re(phase), C64::from_re(phase), C64::ZERO], reference).unwrap();
+    for middle_phase in [-1.0, 1.0] {
+        for end_phase in [-1.0, 1.0] {
+            let middle_length = wavelength * if middle_phase < 0.0 { 0.5 } else { 1.0 };
+            let end_length = wavelength * if end_phase < 0.0 { 0.5 } else { 1.0 };
+            let positions = [0.2, 0.2 + middle_length, 0.2 + middle_length + end_length];
+            let ports = [zero_chimney_port(positions[0], 0.002, loads[0]),
+                zero_chimney_port(positions[1], 0.002, loads[1])];
+            let holes = [prepared_coupled_hole(1, ports[0], reference),
+                prepared_coupled_hole(3, ports[1], reference)];
+            let chain = PreparedChain {
+                blocks: vec![signed(-1.0), through, signed(middle_phase), through, signed(end_phase)],
+                reference_impedance: reference,
+                min_shear_number: f64::INFINITY,
+            };
+            assert!(assemble_bore(&chain, &holes, 1.0e10).unwrap().keep_waves);
+            let mutual = |i: usize, j: usize| mutual_radiation_impedance(
+                &gas, omega, positions[j] - positions[i], interaction(2.0)).unwrap();
+            for radiating_bell in [false, true] {
+                let bell = radiating_bell.then(|| CoupledPort::open_end(positions[2], loads[2]));
+                let mut a = loads[0] + C64::from_re(reference);
+                let mut b = mutual(0, 1) + C64::from_re(reference * middle_phase);
+                let mut d = loads[1] + C64::from_re(reference);
+                if radiating_bell {
+                    // The bell is linear (dp_bell=0). Eliminate its physical
+                    // mouth current from the three-by-three analytic system.
+                    let v0 = mutual(0, 2) + C64::from_re(reference * middle_phase * end_phase);
+                    let v1 = mutual(1, 2) + C64::from_re(reference * end_phase);
+                    let bell_diagonal = loads[2] + C64::from_re(reference);
+                    a = a - v0 * v0 / bell_diagonal;
+                    b = b - v0 * v1 / bell_diagonal;
+                    d = d - v1 * v1 / bell_diagonal;
+                }
+                let determinant = a * d - b * b;
+                let expected = [d / determinant, -b / determinant, -b / determinant, a / determinant];
+                let observed = port_admittance(&chain, &holes, &ports, bell, &gas,
+                    omega, interaction(2.0), 1.0e10, 2).unwrap();
+                for (actual, expected) in observed.iter().zip(expected) {
+                    assert!(close(*actual, expected, 2.0e-11), "{actual:?} vs {expected:?}");
+                }
+                assert!(close(observed[1], observed[2], 2.0e-12), "reciprocity");
+                // Asking for one nonlinear hole still retains every linear
+                // opening and its mutual radiation in that hole's response.
+                let first = port_admittance(&chain, &holes, &ports, bell, &gas,
+                    omega, interaction(2.0), 1.0e10, 1).unwrap();
+                assert!(close(first[0], expected[0], 2.0e-11));
+                let independent = port_admittance(&chain, &holes, &ports, bell, &gas,
+                    omega, OpenHoleInteraction::independent(), 1.0e10, 2).unwrap();
+                assert!((observed[0] - independent[0]).abs() > 1.0e-5 * observed[0].abs(),
+                    "fixture must distinguish the former independent fallback");
+                // Every complex orifice drive delivers nonnegative power
+                // into the matched inlet and passive mouth loads.
+                for drive in [[C64::ONE, C64::ONE], [C64::ONE, -C64::ONE],
+                    [C64::ONE, C64::new(0.0, 1.0)]] {
+                    let power = (0..2).map(|i| {
+                        let inward = (0..2).fold(C64::ZERO, |sum, j| sum + observed[i * 2 + j] * drive[j]);
+                        0.5 * (drive[i].re * inward.re + drive[i].im * inward.im)
+                    }).sum::<f64>();
+                    assert!(power > 0.0, "{power}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn coupled_orifices_survive_joint_chimney_poles_without_changing_the_load() {
+    // The individual chimney chart M=A*Z+B loses its differential mode,
+    // while the real bore resistance between mouths uniquely fixes it.
+    // With K=[[r,r],[r,r+rb]], the matched inlet/bore equations give
+    // p=-K*U. Thus (M+K*N)*w=-dp and U=N*w, N=C*Z+D.
+    let gas = air();
+    let omega = TAU * 700.0;
+    let positions = [0.15, 0.20];
+    let z = mutual_radiation_impedance(&gas, omega, 0.05, interaction(2.0)).unwrap();
+    let reference = z.abs();
+    let r = 1.7 * reference; // Matched source plus the inlet bore resistance.
+    let rb = 0.9 * reference;
+    let through = TwoPort::through(reference).unwrap();
+    let chain = PreparedChain {
+        blocks: vec![series_resistance(0.7 * reference, reference), through,
+            series_resistance(rb, reference), through, series_resistance(0.4 * reference, reference)],
+        reference_impedance: reference,
+        min_shear_number: f64::INFINITY,
+    };
+    for cosine in [1.0_f64, 0.5] {
+        let sine = (1.0 - cosine * cosine).sqrt();
+        let characteristic = 1.3 * reference;
+        let c = C64::new(0.0, -sine / characteristic);
+        for relative_resistance in [1.0e-3, 1.0e-7, 1.0e-11, 0.0] {
+            let epsilon = relative_resistance * reference;
+            let ports = positions.map(|position_m| CoupledPort {
+                position_m,
+                radius_m: 0.002,
+                chimney: [C64::from_re(cosine), C64::new(0.0, -characteristic * sine), c, C64::from_re(cosine)],
+                self_radiation: z + C64::new(epsilon, characteristic * sine / cosine),
+            });
+            let holes = [prepared_coupled_hole(1, ports[0], reference),
+                prepared_coupled_hole(3, ports[1], reference)];
+            let bound = 1.0e6;
+            assert!(!assemble_bore(&chain, &holes, bound).unwrap().keep_waves,
+                "this fixture must exercise the joint chimney chart, not bore poles");
+            if relative_resistance <= 1.0e-7 {
+                assert!(couple_with_limit(&ports, &gas, omega, interaction(2.0), bound).is_err());
+            }
+            let m0 = (z + C64::from_re(epsilon)).scale(cosine);
+            let m1 = z.scale(cosine);
+            let n1 = c * z;
+            let n0 = n1 + C64::from_re(1.0 / cosine) + c.scale(epsilon);
+            let h00 = m0 + (n0 + n1).scale(r);
+            let h01 = m1 + (n0 + n1).scale(r);
+            let h10 = m1 + n0.scale(r) + n1.scale(r + rb);
+            let h11 = m0 + n1.scale(r) + n0.scale(r + rb);
+            let determinant = h00 * h11 - h01 * h10;
+            let expected = [(n0 * h11 - n1 * h10) / determinant,
+                (n1 * h00 - n0 * h01) / determinant,
+                (n1 * h11 - n0 * h10) / determinant,
+                (n0 * h00 - n1 * h01) / determinant];
+            let observed = port_admittance(&chain, &holes, &ports, None, &gas,
+                omega, interaction(2.0), bound, 2).unwrap();
+            for (actual, expected) in observed.iter().zip(expected) {
+                assert!(close(*actual, expected, 2.0e-10), "eps={epsilon}, {actual:?} vs {expected:?}");
+            }
+            assert!(close(observed[1], observed[2], 2.0e-10));
+        }
+    }
 }
