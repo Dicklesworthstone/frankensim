@@ -8332,6 +8332,34 @@ inferred. The existing constant-area, impermeable-end, frozen-composition and
 homogeneous real-gas branch restrictions remain. Chemistry, distributed body
 forcing and phase flash are not composed by these entry points.
 
+### Distributed body-force work coupled to piston motion
+
+`RealGasEuler1d::step_with_piston_and_body_force` composes authored acceleration
+or force density with the original finite-piston pressure/inertia solve.
+`step_with_piston_sources` additionally admits the existing suspension and wall
+operator in the same transaction. Ordering is body half, optional wall half,
+native pressure/inertia evolution, wall half, body half. The first source
+endpoint is prepared once per attempted duration and reused by every
+midpoint-speed proposal; the second kick uses transported density and actual
+moved volume. Original mechanical kicks preserve internal energy and record
+signed extensive impulse/work in `gas.source_change`; authored acceleration
+does not infer a gravitational potential inventory.
+
+Pressure-only mechanical admission remains independent. Complete gas, piston,
+wall and spring balances include body work, reservoir heat, sliding drive and
+damping exactly once. Both force endpoints retain Mach admission, and the final
+state must satisfy full-interval relative-face CFL. Source refusal shortens the
+whole interval without demoting MUSCL. Rejection/cancellation publishes no gas,
+cache, mesh, clock, piston or wall state. Zero forcing follows the existing
+entry without source allocation. Existing constant-area, impermeable-end,
+frozen-composition and original caloric/phase restrictions remain;
+backward-Euler wall heat keeps first-order composition accuracy.
+
+Focused tests add independent acceleration/force-density impulse and kinetic
+work oracles, same-step pressure feedback, finite wall/suspension balances,
+late source refusal/retry and zero-force parity. These added tests have not
+been executed in the current resource-limited environment.
+
 ## Physical-time thermal forcing during reacting compression
 
 `material::compression::thermal::schedule` adds immutable `HeatBathSchedule`

@@ -1,6 +1,7 @@
 //! Original wall sources surrounding the same pressure/inertia transaction.
 
 use super::*;
+use crate::body_force::ForceChange;
 use crate::dynamics::nonideal::RealGasWallReport;
 
 impl RealGasEuler1d {
@@ -55,6 +56,7 @@ impl RealGasEuler1d {
             None,
             controls,
             Some((walls, wall_controls)),
+            None,
             cancelled,
         )
         .map(|step| step.piston)
@@ -90,6 +92,7 @@ impl RealGasEuler1d {
             Some(spring),
             controls,
             Some((walls, wall_controls)),
+            None,
             cancelled,
         )
     }
@@ -100,56 +103,75 @@ pub(super) fn finish(
     step: &mut SuspendedPistonStep,
     before: Totals,
     after: Totals,
-    stages: [RealGasWallReport; 2],
+    stages: Option<[RealGasWallReport; 2]>,
+    body: ForceChange,
     piston: Piston,
     load: PistonLoad,
     area: f64,
     controls: PistonControl,
-) -> Result<RealGasWallReport, PistonError> {
+) -> Result<Option<RealGasWallReport>, PistonError> {
     let report = &mut step.piston;
-    let mut thermal = stages[0];
-    thermal.elapsed = report.gas.elapsed;
-    for (total, second) in [
-        (&mut thermal.wall_impulse_ns, stages[1].wall_impulse_ns),
-        (&mut thermal.heat_to_gas_j, stages[1].heat_to_gas_j),
-        (
-            &mut thermal.wall_storage_change_j,
-            stages[1].wall_storage_change_j,
-        ),
-        (
-            &mut thermal.external_heat_to_gas_j,
-            stages[1].external_heat_to_gas_j,
-        ),
-        (
-            &mut thermal.mechanical_work_to_gas_j,
-            stages[1].mechanical_work_to_gas_j,
-        ),
-        (&mut thermal.drag_heating_j, stages[1].drag_heating_j),
-        (
-            &mut thermal.source_storage_residual_j,
-            stages[1].source_storage_residual_j,
-        ),
-    ] {
-        *total += second;
-        if !total.is_finite() {
-            return Err(PistonError::Invalid(
-                "thermal piston source account overflow",
-            ));
+    let mut thermal = if let Some(stages) = stages {
+        let mut thermal = stages[0];
+        thermal.elapsed = report.gas.elapsed;
+        for (total, second) in [
+            (&mut thermal.wall_impulse_ns, stages[1].wall_impulse_ns),
+            (&mut thermal.heat_to_gas_j, stages[1].heat_to_gas_j),
+            (
+                &mut thermal.wall_storage_change_j,
+                stages[1].wall_storage_change_j,
+            ),
+            (
+                &mut thermal.external_heat_to_gas_j,
+                stages[1].external_heat_to_gas_j,
+            ),
+            (
+                &mut thermal.mechanical_work_to_gas_j,
+                stages[1].mechanical_work_to_gas_j,
+            ),
+            (&mut thermal.drag_heating_j, stages[1].drag_heating_j),
+            (
+                &mut thermal.source_storage_residual_j,
+                stages[1].source_storage_residual_j,
+            ),
+        ] {
+            *total += second;
+            if !total.is_finite() {
+                return Err(PistonError::Invalid(
+                    "thermal piston source account overflow",
+                ));
+            }
         }
-    }
-    thermal.maximum_thermal_residual_j = thermal
-        .maximum_thermal_residual_j
-        .max(stages[1].maximum_thermal_residual_j);
-    thermal.maximum_iterations = thermal.maximum_iterations.max(stages[1].maximum_iterations);
+        thermal.maximum_thermal_residual_j = thermal
+            .maximum_thermal_residual_j
+            .max(stages[1].maximum_thermal_residual_j);
+        thermal.maximum_iterations = thermal.maximum_iterations.max(stages[1].maximum_iterations);
+        Some(thermal)
+    } else {
+        None
+    };
+    let (wall_impulse, heat, wall_storage, external_heat, wall_work) =
+        thermal
+            .as_ref()
+            .map_or((0.0, 0.0, 0.0, 0.0, 0.0), |report| {
+                (
+                    report.wall_impulse_ns,
+                    report.heat_to_gas_j,
+                    report.wall_storage_change_j,
+                    report.external_heat_to_gas_j,
+                    report.mechanical_work_to_gas_j,
+                )
+            });
     report.gas.before = before;
     report.gas.after = after;
-    report.gas.wall_momentum_impulse = -thermal.wall_impulse_ns;
-    report.gas.wall_heat = thermal.heat_to_gas_j;
-    report.gas.wall_work = thermal.mechanical_work_to_gas_j;
+    report.gas.wall_momentum_impulse = -wall_impulse;
+    report.gas.wall_heat = heat;
+    report.gas.wall_work = wall_work;
+    report.gas.source_change = body;
     let source = [
         0.0,
-        -thermal.wall_impulse_ns,
-        sum([thermal.heat_to_gas_j, thermal.mechanical_work_to_gas_j]),
+        sum([-wall_impulse, body.impulse]),
+        sum([heat, wall_work, body.work]),
     ];
     report.gas.conservation_residual = Totals::from_array(core::array::from_fn(|i| {
         sum([
@@ -159,22 +181,26 @@ pub(super) fn finish(
             -source[i],
         ])
     }));
-    thermal.gas_wall_storage_residual_j = sum([
-        after.energy,
-        -before.energy,
-        -report.gas.boundary_change.energy,
-        thermal.wall_storage_change_j,
-        -thermal.external_heat_to_gas_j,
-        -thermal.mechanical_work_to_gas_j,
-    ]);
+    if let Some(thermal) = &mut thermal {
+        thermal.gas_wall_storage_residual_j = sum([
+            after.energy,
+            -before.energy,
+            -report.gas.boundary_change.energy,
+            wall_storage,
+            -external_heat,
+            -wall_work,
+            -body.work,
+        ]);
+    }
     report.combined_momentum_residual_n_s = sum([
         after.momentum,
         -before.momentum,
         piston.mass_kg() * (report.velocity_m_s[1] - report.velocity_m_s[0]),
         report.fixed_wall_impulse_n_s,
-        thermal.wall_impulse_ns,
+        wall_impulse,
         -report.gas.elapsed.value() * (load.external_force_n - area * load.exterior_pressure_pa),
         -step.suspension_impulse_n_s,
+        -body.impulse,
     ]);
     report.total_energy_residual_j = sum([
         after.energy,
@@ -182,9 +208,10 @@ pub(super) fn finish(
         report.kinetic_energy_change_j,
         report.exterior_pressure_work_j,
         -report.external_force_work_j,
-        thermal.wall_storage_change_j,
-        -thermal.external_heat_to_gas_j,
-        -thermal.mechanical_work_to_gas_j,
+        wall_storage,
+        -external_heat,
+        -wall_work,
+        -body.work,
     ]);
     step.total_energy_residual_j = sum([
         after.energy,
@@ -194,9 +221,10 @@ pub(super) fn finish(
         step.damping_energy_j,
         report.exterior_pressure_work_j,
         -step.applied_force_work_j,
-        thermal.wall_storage_change_j,
-        -thermal.external_heat_to_gas_j,
-        -thermal.mechanical_work_to_gas_j,
+        wall_storage,
+        -external_heat,
+        -wall_work,
+        -body.work,
     ]);
     if report
         .gas
@@ -204,13 +232,15 @@ pub(super) fn finish(
         .array()
         .iter()
         .any(|value| !value.is_finite())
-        || !thermal.gas_wall_storage_residual_j.is_finite()
+        || thermal
+            .as_ref()
+            .is_some_and(|report| !report.gas_wall_storage_residual_j.is_finite())
         || !report.combined_momentum_residual_n_s.is_finite()
         || !report.total_energy_residual_j.is_finite()
         || !step.total_energy_residual_j.is_finite()
     {
         return Err(PistonError::Invalid(
-            "thermal piston complete balance overflow",
+            "sourced piston complete balance overflow",
         ));
     }
     if !report.admitted(controls)

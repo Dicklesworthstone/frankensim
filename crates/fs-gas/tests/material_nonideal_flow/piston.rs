@@ -5,6 +5,9 @@ use fs_gas::dynamics::nonideal::RealGasWallControl;
 use fs_gas::dynamics::piston::{Piston, PistonControl, PistonError, PistonLoad, PistonSuspension};
 use fs_gas::material::nonideal_shock::RealGasShockControl;
 
+#[path = "piston/forcing.rs"]
+mod forcing;
+
 fn mechanical_controls() -> PistonControl {
     PistonControl {
         midpoint_velocity_bracket_m_s: [-20.0, 20.0],

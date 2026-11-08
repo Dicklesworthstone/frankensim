@@ -8,6 +8,7 @@ use crate::dynamics::piston::{
     PistonSuspension, SuspendedPistonStep, mechanical_report, solve, suspension, validate,
 };
 
+mod sources;
 mod thermal;
 
 impl RealGasEuler1d {
@@ -52,6 +53,7 @@ impl RealGasEuler1d {
             None,
             controls,
             None,
+            None,
             cancelled,
         )
         .map(|step| step.piston)
@@ -83,6 +85,7 @@ impl RealGasEuler1d {
             Some(spring),
             controls,
             None,
+            None,
             cancelled,
         )
     }
@@ -97,6 +100,7 @@ impl RealGasEuler1d {
         spring: Option<PistonSuspension>,
         controls: PistonControl,
         mut walls: Option<(&mut RealGasWallOperator<'_>, WallControl)>,
+        force: Option<(BodyForce<'_>, ForceControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep, PistonError> {
         poll(&mut cancelled)?;
@@ -105,6 +109,14 @@ impl RealGasEuler1d {
             walls.validate_binding(self)?;
             wall_controls.validate().map_err(RealGasFlowError::from)?;
         }
+        let force = if let Some((source, force_controls)) = force {
+            force_controls.admit::<RealGasFlowError>()?;
+            source
+                .admit::<RealGasFlowError>(self.states.len(), &mut cancelled)?
+                .then_some((source, force_controls))
+        } else {
+            None
+        };
         let impermeable = |boundary| {
             matches!(
                 boundary,
@@ -136,7 +148,7 @@ impl RealGasEuler1d {
         if self.moving.is_none() {
             self.moving = Some(MovingWorkspace::new(&self.mesh)?);
         }
-        if walls.is_some() && self.force_work.is_none() {
+        if (walls.is_some() || force.is_some()) && self.force_work.is_none() {
             self.force_work = Some(forcing::Workspace::new(end)?);
         }
         let moving = self
@@ -186,7 +198,8 @@ impl RealGasEuler1d {
             };
             let mut wave_failure = false;
             let result = (|| {
-                let first = if let Some((walls, wall_controls)) = &mut walls {
+                let mut body_exchange = Accumulator::default();
+                if walls.is_some() || force.is_some() {
                     let source = self
                         .force_work
                         .as_mut()
@@ -196,6 +209,28 @@ impl RealGasEuler1d {
                         source.states[i] = state;
                         source.primitive[i] = self.primitive[i];
                     }
+                    if let Some((body, force_controls)) = force {
+                        for (i, state) in source.states.iter_mut().enumerate() {
+                            (*state, source.primitive[i]) = forcing::update(
+                                &self.gas,
+                                *state,
+                                source.primitive[i],
+                                body,
+                                force_controls,
+                                i,
+                                0.5 * dt,
+                                self.mesh.volumes()[i],
+                                &mut body_exchange,
+                                &mut cancelled,
+                            )?;
+                        }
+                    }
+                }
+                let first = if let Some((walls, wall_controls)) = &mut walls {
+                    let source = self
+                        .force_work
+                        .as_mut()
+                        .expect("prepared gas source buffers");
                     Some(walls.prepare_piston_first(
                         &mut source.states,
                         &mut source.primitive,
@@ -206,7 +241,7 @@ impl RealGasEuler1d {
                 } else {
                     None
                 };
-                let (states, primitives, transport_before) = if first.is_some() {
+                let (states, primitives, transport_before) = if first.is_some() || force.is_some() {
                     let source = self
                         .force_work
                         .as_ref()
@@ -259,24 +294,42 @@ impl RealGasEuler1d {
                     )
                 })?;
                 let mut step = suspension::finish(spring, report, load, dt, controls)?;
-                let thermal = if let (Some((walls, wall_controls)), Some(first)) =
-                    (&mut walls, first)
-                {
-                    let second = walls.prepare_piston_second(
+                let second = if let (Some((walls, wall_controls)), Some(_)) = (&mut walls, first) {
+                    Some(walls.prepare_piston_second(
                         &mut self.work.candidate,
                         &mut self.work.candidate_primitive,
                         &moving.mesh,
                         Time::new(0.5 * dt),
                         *wall_controls,
                         &mut cancelled,
-                    )?;
+                    )?)
+                } else {
+                    None
+                };
+                if let Some((body, force_controls)) = force {
+                    for (i, state) in self.work.candidate.iter_mut().enumerate() {
+                        (*state, self.work.candidate_primitive[i]) = forcing::update(
+                            &self.gas,
+                            *state,
+                            self.work.candidate_primitive[i],
+                            body,
+                            force_controls,
+                            i,
+                            0.5 * dt,
+                            moving.mesh.volumes()[i],
+                            &mut body_exchange,
+                            &mut cancelled,
+                        )?;
+                    }
+                }
+                let thermal = if first.is_some() || force.is_some() {
                     for (i, p) in self.work.candidate_primitive.iter().enumerate() {
                         poll(&mut cancelled)?;
                         let rate =
                             moving.relative_signal_rate(&moving.mesh, i, p.velocity, p.sound_speed);
                         if !positive(rate) {
                             return Err(PistonError::Invalid(
-                                "thermal piston endpoint CFL overflow",
+                                "sourced piston endpoint CFL overflow",
                             ));
                         }
                         cfl_gate(rate * dt, gas_controls.cfl)?;
@@ -284,16 +337,17 @@ impl RealGasEuler1d {
                     }
                     let after =
                         totals(&self.work.candidate, moving.mesh.volumes(), &mut cancelled)?;
-                    Some(thermal::finish(
+                    thermal::finish(
                         &mut step,
                         before,
                         after,
-                        [first, second],
+                        first.zip(second).map(|(a, b)| [a, b]),
+                        body_exchange.finish(),
                         *piston,
                         load,
                         area,
                         controls,
-                    )?)
+                    )?
                 } else {
                     None
                 };
@@ -322,7 +376,7 @@ impl RealGasEuler1d {
                     return Err(PistonError::Gas(Error::Allocation));
                 }
                 Err(error) => {
-                    // A refused heat half or endpoint CFL needs a shorter
+                    // A refused source half or endpoint CFL needs a shorter
                     // complete interval, not a less accurate pressure field.
                     if wave_failure {
                         first_order_retry = true;
