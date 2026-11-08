@@ -9909,6 +9909,42 @@ the visible band. Seven lean/common regressions are typechecked by the targeted
 native volumes-enabled metadata build; five additional physical-camera
 regressions have parser and independent source review but have not run.
 
+### Correlated spectral camera illumination
+
+`render_absorbing_camera_with_background` and
+`render_luminescence_camera_with_background` evaluate caller-owned incident
+spectra once at every actual admitted camera ray, including its sampled pupil
+origin and direction. The callback receives the original wavelengths and
+execution context, and returns finite nonnegative spectral radiance plus the
+nonnegative endpoint distance in metres. Positive infinity denotes distant
+illumination; zero is the native zero-path case. Native counted transport clips
+absorption and emission at finite endpoints before composing that ray's
+foreground and transmitted background.
+
+The resulting typed radiance images average E + T*B over the original sample
+stream, preserving illumination/opacity covariance that independently filtered
+background and transmission images lose. Thermal/absorption radiance remains
+W/(m² sr nm); luminescence remains integrated W/(m² sr). Their visible observation
+methods reuse the shared XYZ owner with explicit nm quadrature or unit bin
+weights respectively, without a second attenuation factor. Field identities
+describe the accepted medium; callback-owned illumination is independent.
+
+One private statically dispatched sampler preserves original kernel IDs, draw
+order, camera refusals, cancellation and whole-image cell work. Full-statistics
+images retain their original accumulation. Radiance-only outputs use compensated
+online means and skip unused averaged opacity, transmission and logarithmic
+survival calculations. Native per-ray log depth still preserves bright opaque
+backgrounds. There is no additional grid traversal or intermediate spectral
+image. Callback work is caller-owned and bounded in invocation count by the
+admitted camera samples. Every composed ray must be representable; any callback,
+transport or cancellation refusal returns no partial image.
+
+Five regressions cover a defocused half-pupil covariance counterexample,
+finite/zero endpoint clipping, callback and budget refusals, constant-background
+parity, integrated-bin units and direct visible projection. They have pinned
+parser and independent source/physics review; the tracer dependency closure
+has not been compiled or executed in this environment.
+
 ### Continuous scalar-field transfer preintegration
 
 `volumes::preintegrated` adds bounded source/extinction integration for linear

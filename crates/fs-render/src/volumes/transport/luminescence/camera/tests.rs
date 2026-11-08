@@ -522,3 +522,123 @@ fn g0_direct_xyz_projection_does_not_require_representable_spectral_composites()
         }
     });
 }
+
+#[test]
+fn g1_uniform_per_ray_background_matches_native_luminescence_image_composition() {
+    with_cx(|cx, _| {
+        let density = [1.0; 2];
+        let medium = grid(
+            cx,
+            &density,
+            [1, 1, 2],
+            [-2.0, -2.0, 0.0],
+            [4.0, 4.0, 0.5],
+            MassAbsorptionSpectrum::table(&[
+                (380.0, 0.25),
+                (500.0, 0.25),
+                (650.0, 1.5),
+                (780.0, 1.5),
+            ])
+            .unwrap(),
+        );
+        let field = LuminescenceGrid::try_new(
+            cx,
+            &medium,
+            SOURCE,
+            [500.0, 650.0],
+            &[
+                (0, [8.0 * FOUR_PI, 16.0 * FOUR_PI]),
+                (1, [24.0 * FOUR_PI, 8.0 * FOUR_PI]),
+            ],
+            2,
+        )
+        .unwrap();
+        let view = camera(-1.0, 0.5, 0.1, 2.0, 0.25);
+        let sampling = settings([2, 1], 64);
+        let background = [2.0, 5.0];
+        let mut calls = 0;
+        let observed = render_luminescence_camera_with_background(
+            cx,
+            &field,
+            &view,
+            sampling,
+            |callback_cx, _, _, wavelengths| {
+                callback_cx.checkpoint().unwrap();
+                assert_eq!(wavelengths, &[500.0, 650.0]);
+                calls += 1;
+                Ok(VolumeCameraBackground {
+                    radiance: background,
+                    distance_m: f64::INFINITY,
+                })
+            },
+        )
+        .unwrap();
+        let original = render_luminescence_camera(cx, &field, &view, sampling).unwrap();
+        assert_eq!(calls, 2 * sampling.samples_per_pixel);
+        assert_eq!(observed.resolution(), original.resolution());
+        assert_eq!(observed.wavelengths_nm(), original.wavelengths_nm());
+        assert_eq!(observed.source_identity(), original.source_identity());
+        assert_eq!(observed.field_identity(), original.field_identity());
+        for (index, pixel) in original.pixels().iter().enumerate() {
+            let expected = pixel.composite(background).unwrap();
+            for lane in 0..2 {
+                close(observed.radiance_w_m2_sr()[index][lane], expected[lane]);
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_finite_background_excludes_nonthermal_sources_beyond_its_endpoint() {
+    with_cx(|cx, _| {
+        let density = [0.0; 2];
+        let medium = grid(
+            cx,
+            &density,
+            [1, 1, 2],
+            [-0.5, -0.5, 0.0],
+            [1.0; 3],
+            MassAbsorptionSpectrum::constant(0.0).unwrap(),
+        );
+        let field = LuminescenceGrid::try_new(
+            cx,
+            &medium,
+            SOURCE,
+            [500.0, 650.0],
+            &[
+                (0, [2.0 * FOUR_PI, 3.0 * FOUR_PI]),
+                (1, [7.0 * FOUR_PI, 11.0 * FOUR_PI]),
+            ],
+            2,
+        )
+        .unwrap();
+        let observed = render_luminescence_camera_with_background(
+            cx,
+            &field,
+            &camera(-1.0, 0.0, 0.1, 2.0, 0.0),
+            LuminescenceCameraSettings {
+                max_cell_visits: 1,
+                ..settings([1, 1], 1)
+            },
+            |_, _, _, _| {
+                Ok(VolumeCameraBackground {
+                    radiance: [3.0, 5.0],
+                    distance_m: 1.5,
+                })
+            },
+        )
+        .unwrap();
+        // Half a metre of the near cell adds integrated radiance [1, 1.5].
+        // The far cell contributes nothing and consumes no traversal visit.
+        close(observed.radiance_w_m2_sr()[0][0], 4.0);
+        close(observed.radiance_w_m2_sr()[0][1], 6.5);
+        let xyz = observed.approximate_xyz(cx).unwrap()[0];
+        let cmf: [fn(f64) -> f64; 3] = [cie_x, cie_y, cie_z];
+        for channel in 0..3 {
+            close(
+                xyz[channel],
+                (4.0 * cmf[channel](500.0) + 6.5 * cmf[channel](650.0)) / y_integral(),
+            );
+        }
+    });
+}

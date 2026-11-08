@@ -662,3 +662,276 @@ fn g0_projected_bright_background_survives_underflowed_camera_transmission() {
         }
     });
 }
+
+#[test]
+fn g1_background_transport_keeps_pupil_opacity_illumination_correlation() {
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [0.0, -2.0, 2.0], [2.0, 4.0, 0.5]),
+            MassAbsorptionSpectrum::constant(1000.0).unwrap(),
+            None,
+            budget(),
+        )
+        .unwrap();
+        let view = camera(0.0, 4.0, 1e-10, 1.0);
+        let sampling = settings([1, 1], 1024);
+        let mut calls = 0;
+        let mut illuminated = 0;
+        let mut maximum_pupil_x = 0.0_f64;
+        let observed = render_absorbing_camera_with_background(
+            cx,
+            &medium,
+            &view,
+            [550.0],
+            sampling,
+            |_, origin, direction, wavelengths| {
+                assert_eq!(wavelengths, &[550.0]);
+                calls += 1;
+                maximum_pupil_x = maximum_pupil_x.max(origin.x.abs());
+                // The bright source is confined to rays crossing the entire
+                // absorbing half-pupil. Complementary clear rays see black.
+                let near_x = origin.x + direction.x * (2.0 - origin.z) / direction.z;
+                let far_x = origin.x + direction.x * (2.5 - origin.z) / direction.z;
+                let bright = near_x >= 0.0 && far_x >= 0.0;
+                illuminated += u32::from(bright);
+                Ok(VolumeCameraBackground {
+                    radiance: [if bright { 64.0 } else { 0.0 }],
+                    distance_m: f64::INFINITY,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, sampling.samples_per_pixel);
+        assert!(
+            maximum_pupil_x > 0.5,
+            "callback must receive actual pupil origins"
+        );
+        assert!(illuminated > 0 && illuminated < calls);
+        // Every illuminated ray traverses at least 0.5 m at alpha=1000/m.
+        let radiance = observed.radiance_w_m2_sr_nm()[0][0];
+        assert!(radiance >= 0.0 && radiance <= 64.0 * (-500.0_f64).exp() * (1.0 + 1e-10));
+
+        let separated = render_absorbing_camera(cx, &medium, &view, [550.0], sampling).unwrap();
+        let mean_background = 64.0 * f64::from(illuminated) / f64::from(calls);
+        let incorrectly_decorrelated =
+            separated.pixels()[0].composite([mean_background]).unwrap()[0];
+        assert!(incorrectly_decorrelated > 1.0);
+        assert_eq!(observed.resolution(), sampling.resolution);
+        assert_eq!(observed.wavelengths_nm(), &[550.0]);
+        assert_eq!(observed.field_identity(), medium.content_identity());
+    });
+}
+
+#[test]
+fn g1_finite_camera_background_clips_native_cells_and_keeps_endpoint_refusals() {
+    with_cx(|cx, _| {
+        let density = [1.0; 2];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1, 1, 2], &density, [-0.5, -0.5, 0.0], [1.0; 3]),
+            MassAbsorptionSpectrum::constant(2.0).unwrap(),
+            None,
+            budget(),
+        )
+        .unwrap();
+        let view = camera(-1.0, 0.0, 0.1, 0.0);
+        let sampling = VolumeCameraSettings {
+            max_cell_visits: 1,
+            ..settings([1, 1], 1)
+        };
+        let observed = render_absorbing_camera_with_background(
+            cx,
+            &medium,
+            &view,
+            [500.0, 650.0],
+            sampling,
+            |_, _, _, _| {
+                Ok(VolumeCameraBackground {
+                    radiance: [3.0, 5.0],
+                    distance_m: 1.5,
+                })
+            },
+        )
+        .unwrap();
+        for lane in 0..2 {
+            close(
+                observed.radiance_w_m2_sr_nm()[0][lane],
+                [3.0, 5.0][lane] * (-1.0_f64).exp(),
+            );
+        }
+        let xyz = observed.approximate_xyz(cx, [10.0, 40.0]).unwrap()[0];
+        let cmf: [fn(f64) -> f64; 3] = [cie_x, cie_y, cie_z];
+        for channel in 0..3 {
+            close(
+                xyz[channel],
+                (-1.0_f64).exp()
+                    * (3.0 * 10.0 * cmf[channel](500.0) + 5.0 * 40.0 * cmf[channel](650.0))
+                    / y_integral(),
+            );
+        }
+        // A source at the ray origin consumes no cell visits. Native zero
+        // distance is retained rather than rejected by the camera adapter.
+        let zero = render_absorbing_camera_with_background(
+            cx,
+            &medium,
+            &view,
+            [500.0, 650.0],
+            VolumeCameraSettings {
+                max_cell_visits: 0,
+                ..sampling
+            },
+            |_, _, _, _| {
+                Ok(VolumeCameraBackground {
+                    radiance: [3.0, 5.0],
+                    distance_m: 0.0,
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(zero.radiance_w_m2_sr_nm(), &[[3.0, 5.0]]);
+        assert_eq!(
+            render_absorbing_camera_with_background(
+                cx,
+                &medium,
+                &view,
+                [550.0],
+                sampling,
+                |_, _, _, _| Ok(VolumeCameraBackground {
+                    radiance: [3.0],
+                    distance_m: f64::INFINITY
+                }),
+            ),
+            Err(VolumeCameraError::Transport(VolumeTransportError::Budget)),
+        );
+        for distance_m in [-1.0, f64::NAN, f64::NEG_INFINITY] {
+            assert_eq!(
+                render_absorbing_camera_with_background(
+                    cx,
+                    &medium,
+                    &view,
+                    [550.0],
+                    sampling,
+                    |_, _, _, _| Ok(VolumeCameraBackground {
+                        radiance: [3.0],
+                        distance_m
+                    }),
+                ),
+                Err(VolumeCameraError::Transport(VolumeTransportError::Ray)),
+            );
+        }
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                render_absorbing_camera_with_background(
+                    cx,
+                    &medium,
+                    &view,
+                    [550.0],
+                    sampling,
+                    |_, _, _, _| Ok(VolumeCameraBackground {
+                        radiance: [invalid],
+                        distance_m: 0.0
+                    }),
+                ),
+                Err(VolumeCameraError::Image(
+                    DvrError::InvalidBackgroundRadiance
+                )),
+            );
+        }
+        assert_eq!(
+            render_absorbing_camera_with_background(
+                cx,
+                &medium,
+                &view,
+                [550.0],
+                sampling,
+                |_, _, _, _| Err(VolumeCameraError::Transport(VolumeTransportError::Sample)),
+            ),
+            Err(VolumeCameraError::Transport(VolumeTransportError::Sample)),
+        );
+    });
+}
+
+#[test]
+fn g0_background_queries_obey_image_admission_and_mid_callback_cancellation() {
+    with_cx(|cx, gate| {
+        let density = [1.0];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [-0.5, -0.5, 0.0], [1.0; 3]),
+            MassAbsorptionSpectrum::constant(1.0).unwrap(),
+            None,
+            budget(),
+        )
+        .unwrap();
+        let view = camera(-1.0, 0.0, 0.1, 0.0);
+        let mut calls = 0;
+        assert_eq!(
+            render_absorbing_camera_with_background(
+                cx,
+                &medium,
+                &view,
+                [550.0],
+                VolumeCameraSettings {
+                    max_samples: 0,
+                    ..settings([1, 1], 1)
+                },
+                |_, _, _, _| {
+                    calls += 1;
+                    Ok(VolumeCameraBackground {
+                        radiance: [1.0],
+                        distance_m: f64::INFINITY,
+                    })
+                },
+            ),
+            Err(VolumeCameraError::Image(DvrError::SampleBudgetExceeded {
+                requested: 1,
+                limit: 0
+            })),
+        );
+        assert_eq!(calls, 0);
+        assert_eq!(
+            render_absorbing_camera_with_background(
+                cx,
+                &medium,
+                &view,
+                [550.0],
+                settings([1, 1], 8),
+                |callback_cx, _, _, _| {
+                    callback_cx.checkpoint().unwrap();
+                    calls += 1;
+                    gate.request();
+                    Ok(VolumeCameraBackground {
+                        radiance: [1.0],
+                        distance_m: f64::INFINITY,
+                    })
+                },
+            ),
+            Err(VolumeCameraError::Transport(
+                VolumeTransportError::Cancelled
+            )),
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(
+            render_absorbing_camera_with_background(
+                cx,
+                &medium,
+                &view,
+                [550.0],
+                settings([1, 1], 1),
+                |_, _, _, _| {
+                    calls += 1;
+                    Ok(VolumeCameraBackground {
+                        radiance: [1.0],
+                        distance_m: 0.0,
+                    })
+                },
+            ),
+            Err(VolumeCameraError::Transport(
+                VolumeTransportError::Cancelled
+            )),
+        );
+        assert_eq!(calls, 1);
+    });
+}

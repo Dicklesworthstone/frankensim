@@ -3,13 +3,19 @@
 //! Pixel and pupil samples average radiance and transmission independently at
 //! each original spectral node, using the native absorption/emission integral.
 
-use super::super::camera::{CameraSample, approximate_xyz, composite, render_camera};
+use super::super::camera::{
+    CameraSample, approximate_xyz, composite, render_camera, render_camera_radiance,
+};
 use super::super::checkpoint;
 use super::LuminescenceGrid;
 use crate::camera::PhysicalCamera;
 use crate::volumes::DvrError;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
+use fs_geom::{Point3, Vec3};
+
+/// Per-ray illumination packet shared by physical volume cameras.
+pub use super::super::camera::VolumeCameraBackground;
 
 /// Original camera, image-admission and physical-transport refusals.
 pub use super::super::camera::VolumeCameraError as LuminescenceCameraError;
@@ -206,6 +212,73 @@ impl<const M: usize> LuminescenceCameraImage<M> {
     }
 }
 
+/// Observed bin-integrated radiance after per-ray background transport.
+///
+/// Original source bins retain their declared nodes and integrated units.
+/// Filtering averages each ray's foreground plus its own transmitted
+/// illumination, preserving pixel/pupil correlations with opacity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LuminescenceCameraRadianceImage<const M: usize> {
+    resolution: [usize; 2],
+    wavelengths_nm: [f64; M],
+    source_identity: ContentHash,
+    field_identity: ContentHash,
+    radiance: Vec<[f64; M]>,
+}
+
+impl<const M: usize> LuminescenceCameraRadianceImage<M> {
+    /// Width and height; row-major pixels start with the top image row.
+    #[must_use]
+    pub const fn resolution(&self) -> [usize; 2] {
+        self.resolution
+    }
+
+    /// Original discrete spectral-node/bin wavelengths in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelengths_nm(&self) -> &[f64; M] {
+        &self.wavelengths_nm
+    }
+
+    /// Original photophysical source and condition identity.
+    #[must_use]
+    pub const fn source_identity(&self) -> ContentHash {
+        self.source_identity
+    }
+
+    /// Accepted absorption/emission field identity, independent of the
+    /// callback-owned illumination source.
+    #[must_use]
+    pub const fn field_identity(&self) -> ContentHash {
+        self.field_identity
+    }
+
+    /// Observed row-major bin-integrated radiance in W/(m² sr), without a
+    /// wavelength-width factor, exposure or display transformation.
+    #[must_use]
+    pub fn radiance_w_m2_sr(&self) -> &[[f64; M]] {
+        &self.radiance
+    }
+
+    /// Approximate relative XYZ of the already observed bin-integrated
+    /// radiance. No wavelength width or second opacity factor is applied.
+    ///
+    /// The renderer's analytic CIE fits represent each bin at its declared
+    /// node, with its ordinary relative normalization. Unknown within-bin
+    /// spectra are not reconstructed, and these are not calibrated luminance
+    /// values. Nodes outside 380–780 nm refuse visible projection while
+    /// retaining the original spectral image. Cancellation/refusal publishes
+    /// no partial result.
+    pub fn approximate_xyz(&self, cx: &Cx<'_>) -> Result<Vec<[f64; 3]>, LuminescenceCameraError> {
+        approximate_xyz(
+            cx,
+            &self.wavelengths_nm,
+            &[1.0; M],
+            self.radiance.len(),
+            |pixel, lane| (self.radiance[pixel][lane], 1.0, 0.0, 0.0),
+        )
+    }
+}
+
 /// Render accepted nonthermal cell powers through a pinhole or ideal thin lens.
 ///
 /// The field and camera geometry are in metres. Every ray uses the same exact
@@ -257,6 +330,70 @@ pub fn render_luminescence_camera<const M: usize>(
         source_identity: field.source_identity(),
         field_identity: field.content_identity(),
         pixels,
+    })
+}
+
+/// Render correlated illumination through original luminescence and opacity.
+///
+/// Once per actual image sample, the callback receives the world-space ray
+/// origin, unit direction, original wavelength nodes and cancellable Cx. It
+/// supplies bin-integrated W/(m² sr) at that ray's endpoint, plus a nonnegative
+/// distance in metres or positive infinity for a distant background. Native
+/// cell transport stops at that endpoint, and emitted plus transmitted
+/// radiance is composed before pixel/pupil filtering. No spectral width or RGB
+/// interpretation is inferred.
+///
+/// This shares the original luminescence camera's exact raster/pupil stream
+/// and work limits. The callback owns its illumination evaluation; the grid
+/// is traversed once per sample. Each composed ray must be representable.
+/// Cancellation, callback failure and native refusals publish no partial
+/// image. Aperture/exposure gain, scattering, refraction and thermal sources
+/// remain outside this nonthermal, normalized-radiance observation.
+pub fn render_luminescence_camera_with_background<const M: usize>(
+    cx: &Cx<'_>,
+    field: &LuminescenceGrid<'_, '_, M>,
+    camera: &PhysicalCamera,
+    settings: LuminescenceCameraSettings,
+    mut background: impl FnMut(
+        &Cx<'_>,
+        Point3,
+        Vec3,
+        &[f64; M],
+    ) -> Result<VolumeCameraBackground<M>, LuminescenceCameraError>,
+) -> Result<LuminescenceCameraRadianceImage<M>, LuminescenceCameraError> {
+    let radiance = render_camera_radiance(
+        cx,
+        camera,
+        settings,
+        0x6c75_6d63,
+        |origin, direction, remaining_cells| {
+            let background = background(cx, origin, direction, field.wavelengths_nm())?;
+            let sample = field.transport_counted(
+                cx,
+                origin,
+                direction,
+                background.distance_m,
+                remaining_cells,
+            )?;
+            Ok(CameraSample {
+                emission: composite(
+                    &sample.transport.emitted_radiance_w_m2_sr,
+                    &sample.transport.transmittance,
+                    &sample.optical_depth,
+                    background.radiance,
+                )?,
+                transmittance: sample.transport.transmittance,
+                optical_depth: sample.optical_depth,
+                cell_visits: sample.cell_visits,
+            })
+        },
+    )?;
+    Ok(LuminescenceCameraRadianceImage {
+        resolution: settings.resolution,
+        wavelengths_nm: *field.wavelengths_nm(),
+        source_identity: field.source_identity(),
+        field_identity: field.content_identity(),
+        radiance,
     })
 }
 

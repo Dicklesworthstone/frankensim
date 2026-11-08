@@ -55,6 +55,23 @@ impl core::fmt::Display for VolumeCameraError {
 }
 impl core::error::Error for VolumeCameraError {}
 
+/// Incident radiance at the endpoint of one actual camera ray.
+///
+/// The selected render function defines the lane units: W/(m² sr nm) for
+/// absorption/thermal cameras, or already integrated W/(m² sr) for luminescence
+/// cameras. Values must be finite and nonnegative at the supplied wavelengths;
+/// no RGB reconstruction or wavelength width is inferred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeCameraBackground<const M: usize> {
+    /// Unattenuated endpoint radiance in the render function's spectral units.
+    pub radiance: [f64; M],
+    /// Distance along the camera's unit ray in metres. The native transport
+    /// admits nonnegative distances, including zero, and positive infinity
+    /// for a distant background. Cells beyond a finite endpoint contribute
+    /// neither absorption nor emission.
+    pub distance_m: f64,
+}
+
 /// Spectral radiance and opacity averaged over a physical pixel/pupil footprint.
 /// Arrays retain the parent image's original wavelength order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -238,6 +255,70 @@ impl<const M: usize> AbsorbingCameraImage<M> {
     }
 }
 
+/// Observed spectral-density radiance after per-ray background transport.
+///
+/// Pixel and pupil filtering averages E + T*B with the background B belonging
+/// to each actual ray. This retains opacity/illumination correlation that
+/// cannot be recovered by composing independently filtered images.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AbsorbingCameraRadianceImage<const M: usize> {
+    resolution: [usize; 2],
+    wavelengths_nm: [f64; M],
+    field_identity: ContentHash,
+    radiance: Vec<[f64; M]>,
+}
+
+impl<const M: usize> AbsorbingCameraRadianceImage<M> {
+    /// Width and height; row-major pixels start with the top image row.
+    #[must_use]
+    pub const fn resolution(&self) -> [usize; 2] {
+        self.resolution
+    }
+
+    /// Original queried wavelengths in vacuum nanometres.
+    #[must_use]
+    pub const fn wavelengths_nm(&self) -> &[f64; M] {
+        &self.wavelengths_nm
+    }
+
+    /// Accepted absorption/thermal field identity, independent of the
+    /// callback-owned illumination source.
+    #[must_use]
+    pub const fn field_identity(&self) -> ContentHash {
+        self.field_identity
+    }
+
+    /// Observed row-major radiance in W/(m² sr nm), without exposure or display
+    /// transformation. Foreground emission and transmitted illumination have
+    /// already been combined at each sampled ray.
+    #[must_use]
+    pub fn radiance_w_m2_sr_nm(&self) -> &[[f64; M]] {
+        &self.radiance
+    }
+
+    /// Approximate relative XYZ of the already observed radiance, using
+    /// explicit nonnegative wavelength-quadrature weights in nm.
+    ///
+    /// This uses the renderer's analytic visible CIE fits and normalization;
+    /// it does not apply opacity again or infer missing spectral coverage.
+    /// The caller owns quadrature accuracy, and the result is not calibrated
+    /// luminance. UV/IR nodes retain their spectral image but refuse this
+    /// 380–780 nm projection. Cancellation/refusal returns no partial image.
+    pub fn approximate_xyz(
+        &self,
+        cx: &Cx<'_>,
+        quadrature_weights_nm: [f64; M],
+    ) -> Result<Vec<[f64; 3]>, VolumeCameraError> {
+        approximate_xyz(
+            cx,
+            &self.wavelengths_nm,
+            &quadrature_weights_nm,
+            self.radiance.len(),
+            |pixel, lane| (self.radiance[pixel][lane], 1.0, 0.0, 0.0),
+        )
+    }
+}
+
 /// Observe an accepted spectral absorber and its original thermal sources
 /// through a pinhole or ideal thin lens.
 ///
@@ -268,17 +349,7 @@ pub fn render_absorbing_camera<const M: usize>(
     settings: VolumeCameraSettings,
 ) -> Result<AbsorbingCameraImage<M>, VolumeCameraError> {
     checkpoint(cx)?;
-    if M == 0 {
-        return Err(VolumeTransportError::Sample.into());
-    }
-    let (minimum, maximum) = medium.wavelength_bounds_nm();
-    if wavelengths_nm
-        .iter()
-        .any(|wavelength| !wavelength.is_finite() || !(minimum..=maximum).contains(wavelength))
-        || wavelengths_nm.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(VolumeTransportError::Wavelength.into());
-    }
+    validate_camera_wavelengths(medium, &wavelengths_nm)?;
     let pixels = render_camera(
         cx,
         camera,
@@ -315,8 +386,94 @@ pub fn render_absorbing_camera<const M: usize>(
     })
 }
 
-// Internal samples are in their caller's radiance units. Public wrappers keep
-// spectral densities separate from powers already integrated over source bins.
+/// Render correlated spectral illumination through native absorption and
+/// thermal emission, composing each ray before pixel/pupil filtering.
+///
+/// The background callback receives the actual world-space ray origin, unit
+/// direction, and original wavelength nodes, once per admitted image sample.
+/// It supplies unattenuated endpoint radiance in W/(m² sr nm) and its distance
+/// in metres. A finite distance clips native volume transport at that source;
+/// positive infinity describes distant illumination. The callback can reuse
+/// its own cancellable lighting or geometry owner through the supplied Cx.
+///
+/// The original thermal camera's raster/pupil stream, per-ray cell limits and
+/// whole-image work limits remain binding. Background lookup does not consume
+/// another camera sample, and no grid is traversed twice. Each composed ray
+/// must be representable; cancellation, callback failure, or any native refusal
+/// returns no partial image. These remain normalized radiance averages, with
+/// no aperture gain, exposure, RGB calibration, scattering or refraction added.
+pub fn render_absorbing_camera_with_background<const M: usize>(
+    cx: &Cx<'_>,
+    medium: &AbsorbingGrid<'_>,
+    camera: &PhysicalCamera,
+    wavelengths_nm: [f64; M],
+    settings: VolumeCameraSettings,
+    mut background: impl FnMut(
+        &Cx<'_>,
+        Point3,
+        Vec3,
+        &[f64; M],
+    ) -> Result<VolumeCameraBackground<M>, VolumeCameraError>,
+) -> Result<AbsorbingCameraRadianceImage<M>, VolumeCameraError> {
+    checkpoint(cx)?;
+    validate_camera_wavelengths(medium, &wavelengths_nm)?;
+    let radiance = render_camera_radiance(
+        cx,
+        camera,
+        settings,
+        0x6162_7363,
+        |origin, direction, remaining_cells| {
+            let background = background(cx, origin, direction, &wavelengths_nm)?;
+            let sample = medium.transport_counted(
+                cx,
+                origin,
+                direction,
+                background.distance_m,
+                &wavelengths_nm,
+                u32::try_from(remaining_cells).unwrap_or(u32::MAX),
+            )?;
+            Ok(CameraSample {
+                emission: composite(
+                    &sample.transport.emission_w_m2_sr_nm,
+                    &sample.transport.transmittance,
+                    &sample.optical_depth,
+                    background.radiance,
+                )?,
+                transmittance: sample.transport.transmittance,
+                optical_depth: sample.optical_depth,
+                cell_visits: sample.cell_visits,
+            })
+        },
+    )?;
+    Ok(AbsorbingCameraRadianceImage {
+        resolution: settings.resolution,
+        wavelengths_nm,
+        field_identity: medium.content_identity(),
+        radiance,
+    })
+}
+
+fn validate_camera_wavelengths<const M: usize>(
+    medium: &AbsorbingGrid<'_>,
+    wavelengths_nm: &[f64; M],
+) -> Result<(), VolumeCameraError> {
+    if M == 0 {
+        return Err(VolumeTransportError::Sample.into());
+    }
+    let (minimum, maximum) = medium.wavelength_bounds_nm();
+    if wavelengths_nm
+        .iter()
+        .any(|wavelength| !wavelength.is_finite() || !(minimum..=maximum).contains(wavelength))
+        || wavelengths_nm.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(VolumeTransportError::Wavelength.into());
+    }
+    Ok(())
+}
+
+// Internal samples are in their caller's radiance units. The emission slot
+// carries either native foreground emission or already composed observed
+// radiance; each public wrapper retains its own physical meaning and units.
 pub(super) struct CameraSample<const M: usize> {
     pub(super) emission: [f64; M],
     pub(super) transmittance: [f64; M],
@@ -403,8 +560,65 @@ pub(super) fn render_camera<const M: usize, P>(
     camera: &PhysicalCamera,
     settings: VolumeCameraSettings,
     kernel: u32,
-    mut trace: impl FnMut(Point3, Vec3, u64) -> Result<CameraSample<M>, VolumeCameraError>,
+    trace: impl FnMut(Point3, Vec3, u64) -> Result<CameraSample<M>, VolumeCameraError>,
     finish: impl Fn(CameraPixel<M>) -> P,
+) -> Result<Vec<P>, VolumeCameraError> {
+    render_camera_samples(
+        cx,
+        camera,
+        settings,
+        kernel,
+        trace,
+        SpectralAverage::<M>::default,
+        |average, sample, count| average.add(sample, count),
+        |average, count| Ok(finish(average.finish(count)?)),
+    )
+}
+
+// Observed-radiance outputs need no filtered opacity, survival or log depth.
+// Native per-ray depth was already used when composing the incident spectrum.
+pub(super) fn render_camera_radiance<const M: usize>(
+    cx: &Cx<'_>,
+    camera: &PhysicalCamera,
+    settings: VolumeCameraSettings,
+    kernel: u32,
+    trace: impl FnMut(Point3, Vec3, u64) -> Result<CameraSample<M>, VolumeCameraError>,
+) -> Result<Vec<[f64; M]>, VolumeCameraError> {
+    render_camera_samples(
+        cx,
+        camera,
+        settings,
+        kernel,
+        trace,
+        || [Compensated::default(); M],
+        |average, sample, count| {
+            for (mean, radiance) in average.iter_mut().zip(sample.emission) {
+                mean.update_mean(radiance, count);
+            }
+        },
+        |average, _| {
+            let radiance = average.map(|mean| mean.value);
+            if radiance
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+            {
+                return Err(VolumeTransportError::Unrepresentable.into());
+            }
+            Ok(radiance)
+        },
+    )
+}
+
+// Both observers use this exact raster/pupil draw order and cell-work owner.
+fn render_camera_samples<const M: usize, A, P>(
+    cx: &Cx<'_>,
+    camera: &PhysicalCamera,
+    settings: VolumeCameraSettings,
+    kernel: u32,
+    mut trace: impl FnMut(Point3, Vec3, u64) -> Result<CameraSample<M>, VolumeCameraError>,
+    new_average: impl Fn() -> A,
+    accumulate: impl Fn(&mut A, CameraSample<M>, u32),
+    finish: impl Fn(A, u32) -> Result<P, VolumeCameraError>,
 ) -> Result<Vec<P>, VolumeCameraError> {
     checkpoint(cx)?;
     let [width, height] = settings.resolution;
@@ -458,7 +672,7 @@ pub(super) fn render_camera<const M: usize, P>(
                 tile: u32::try_from(pixel).map_err(|_| DvrError::PixelIdentityOverflow)?,
             }
             .stream();
-            let mut average = SpectralAverage::default();
+            let mut average = new_average();
             for sample in 0..settings.samples_per_pixel {
                 checkpoint(cx)?;
                 let (jx, jy, lens) = if settings.samples_per_pixel == 1 {
@@ -475,9 +689,9 @@ pub(super) fn render_camera<const M: usize, P>(
                 let primary = camera.generate_ray_from_tangent_offsets(cx, x_tan, y_tan, lens)?;
                 let transported = trace(primary.origin, primary.dir, remaining_cells)?;
                 remaining_cells -= u64::from(transported.cell_visits);
-                average.add(transported, sample + 1);
+                accumulate(&mut average, transported, sample + 1);
             }
-            image.push(finish(average.finish(settings.samples_per_pixel)?));
+            image.push(finish(average, settings.samples_per_pixel)?);
         }
     }
     checkpoint(cx)?;
