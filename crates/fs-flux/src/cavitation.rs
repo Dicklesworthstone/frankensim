@@ -27,6 +27,9 @@ mod cluster;
 /// Original polytropic gas inventory expressed in volume coordinates.
 #[path = "cavitation/gas_volume.rs"]
 pub mod gas_volume;
+/// Static stability and pressure continuation of the original gas inventory.
+#[path = "cavitation/inception.rs"]
+pub mod inception;
 #[path = "cavitation/keller_miksis.rs"]
 mod keller_miksis;
 #[path = "cavitation/population.rs"]

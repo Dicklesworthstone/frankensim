@@ -4733,6 +4733,34 @@ for fractional-radius response. Nonpositive restoring stiffness refuses a
 stable harmonic response. Frequency-domain consumers reuse these coefficients
 rather than reconstructing another bubble law.
 
+
+`cavitation::inception` evaluates the original gas inventory's static curve
+`p_eq(R) = p_v + p_g(R) - 2 sigma/R`, its restoring slope and the Blake
+fold for positive gas, positive surface tension and `3 kappa > 1`.
+The same operations apply to the native RP and Keller--Miksis models because
+their static balances agree. A pressure below saturation alone does not imply
+loss of a gas nucleus's stable equilibrium. Changing imposed pressure never
+reconstructs gas inventory with a fresh equilibrium constructor.
+
+Stable and unstable pressure continuation use a bounded, cancellable bisection
+of the retained law, requiring both the radius bracket and pressure residual
+targets. The admitted branch is intersected with the original radius window;
+a usable root can therefore remain available even when the analytic fold is
+outside that window. The public threshold query still refuses an out-of-domain
+critical radius. Missing roots, nonfinite derived values and unmet tolerances
+return errors without pressure floors, radius clamps or state mutation.
+
+This is static mechanical inception under an explicitly selected polytropic
+thermal limit, following Brennen, Cavitation and Bubble Dynamics,
+[section 2.6, equations 2.41--2.46](https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm).
+It supplies neither homogeneous nucleation nor a frequency-dependent acoustic
+threshold, gas diffusion or evolving thermal equilibrium. The nine regression
+cases include independent isothermal closed forms, stable/unstable native
+response, below-threshold growth, restricted native windows, work/cancellation
+bounds, numerical refinement and coordinated physical scaling. Their execution
+remains pending because the implementation session's executor became unavailable;
+they are not reported as passing validation.
+
 The numerical owner uses a two-component Dormand--Prince 5(4) pair, fixed stack
 storage and endpoint-derivative reuse. Radius and velocity have separate SI
 absolute tolerances; maximum step, minimum step and trial-attempt count are
