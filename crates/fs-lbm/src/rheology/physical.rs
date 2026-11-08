@@ -48,6 +48,20 @@ pub enum PhysicalRheology {
         /// Positive dimensionless flow index.
         n: f64,
     },
+    /// Carreau–Yasuda viscosity with an independently calibrated transition
+    /// exponent, using the same model as [`Rheology::CarreauYasuda`].
+    CarreauYasuda {
+        /// Positive zero-shear viscosity, [Pa s] or [m²/s].
+        viscosity_zero: f64,
+        /// Positive infinite-shear viscosity in the same basis.
+        viscosity_infinite: f64,
+        /// Nonnegative physical relaxation time [s].
+        relaxation_time_s: f64,
+        /// Positive dimensionless flow index.
+        n: f64,
+        /// Positive dimensionless transition exponent; unchanged by scaling.
+        a: f64,
+    },
     /// Regularized Herschel–Bulkley; n=1 gives Bingham–Papanastasiou.
     HerschelBulkley {
         /// Positive consistency, [Pa s^n] or [m² s^(n-2)].
@@ -228,6 +242,30 @@ impl PhysicalRheology {
                     n,
                 }
             }
+            Self::CarreauYasuda {
+                viscosity_zero,
+                viscosity_infinite,
+                relaxation_time_s,
+                n,
+                a,
+            } => {
+                Rheology::CarreauYasuda {
+                    nu0: viscosity_zero,
+                    nu_inf: viscosity_infinite,
+                    lambda: relaxation_time_s,
+                    n,
+                    a,
+                }
+                .check_parameters()
+                .map_err(PhysicalRheologyError::Invalid)?;
+                Rheology::CarreauYasuda {
+                    nu0: viscosity(viscosity_zero)?,
+                    nu_inf: viscosity(viscosity_infinite)?,
+                    lambda: time(relaxation_time_s, dt)?,
+                    n,
+                    a,
+                }
+            }
             Self::HerschelBulkley {
                 consistency,
                 n,
@@ -339,7 +377,7 @@ fn checked(value: f64, name: &'static str) -> Result<f64, PhysicalRheologyError>
 mod tests {
     use super::*;
 
-    fn models() -> [PhysicalRheology; 4] {
+    fn models() -> [PhysicalRheology; 5] {
         [
             PhysicalRheology::Newtonian { viscosity: 0.08 },
             PhysicalRheology::PowerLaw {
@@ -359,6 +397,13 @@ mod tests {
                 yield_stress: 0.2,
                 regularization_time_s: 0.6,
                 minimum_shear_rate_per_s: 0.003,
+            },
+            PhysicalRheology::CarreauYasuda {
+                viscosity_zero: 0.4,
+                viscosity_infinite: 0.02,
+                relaxation_time_s: 0.03,
+                n: 0.4,
+                a: 0.7,
             },
         ]
     }
@@ -399,6 +444,17 @@ mod tests {
                 } else {
                     yield_stress * (-fs_math::det::expm1(-regularization_time_s * rate)) / rate
                 }
+            }
+            PhysicalRheology::CarreauYasuda {
+                viscosity_zero,
+                viscosity_infinite,
+                relaxation_time_s,
+                n,
+                a,
+            } => {
+                viscosity_infinite
+                    + (viscosity_zero - viscosity_infinite)
+                        * (1.0 + (relaxation_time_s * rate).powf(a)).powf((n - 1.0) / a)
             }
         }
     }
@@ -469,6 +525,13 @@ mod tests {
                 yield_stress: 0.2 / density,
                 regularization_time_s: 0.6,
                 minimum_shear_rate_per_s: 0.003,
+            },
+            PhysicalRheology::CarreauYasuda {
+                viscosity_zero: 0.4 / density,
+                viscosity_infinite: 0.02 / density,
+                relaxation_time_s: 0.03,
+                n: 0.4,
+                a: 0.7,
             },
         ];
         for (dynamic, kinematic) in models().into_iter().zip(kinematic) {
@@ -592,8 +655,8 @@ mod tests {
                 .unwrap()
                 .lattice_law()
         });
-        let field2 = super::super::RheologyField::new([2, 2], &laws).unwrap();
-        let field3 = super::super::RheologyField::new([1, 1, 4], &laws).unwrap();
+        let field2 = super::super::RheologyField::new([1, 5], &laws).unwrap();
+        let field3 = super::super::RheologyField::new([1, 1, 5], &laws).unwrap();
         for (i, law) in laws.iter().enumerate() {
             assert_eq!(field2.law(i).unwrap().viscosity(0.01), law.viscosity(0.01));
             assert_eq!(field3.law(i).unwrap().viscosity(0.01), law.viscosity(0.01));

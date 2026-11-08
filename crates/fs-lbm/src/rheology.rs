@@ -69,6 +69,25 @@ pub enum Rheology {
         /// Flow index.
         n: f64,
     },
+    /// Carreau–Yasuda:
+    /// `nu = nu_inf + (nu0-nu_inf) [1 + (lambda*gamma)^a]^((n-1)/a)`.
+    ///
+    /// The positive transition exponent `a` controls the width of the
+    /// Newtonian-to-power-law crossover independently of `n`; `a=2` is
+    /// exactly [`Self::Carreau`]. This generalized Newtonian law has no
+    /// elastic memory or normal-stress response.
+    CarreauYasuda {
+        /// Positive zero-shear kinematic viscosity in lattice units.
+        nu0: f64,
+        /// Positive infinite-shear kinematic viscosity in lattice units.
+        nu_inf: f64,
+        /// Nonnegative relaxation time in lattice units.
+        lambda: f64,
+        /// Positive flow index; below one thins for `nu0 > nu_inf`.
+        n: f64,
+        /// Positive dimensionless Yasuda transition exponent.
+        a: f64,
+    },
     /// Regularized Herschel–Bulkley yield-stress fluid:
     /// `nu = k max(gamma, gamma_min)^(n-1)
     ///       + Y (1 - exp(-m gamma)) / gamma`.
@@ -162,6 +181,22 @@ impl Rheology {
                     return Err("thickening Carreau law requires nu0 >= nu_inf to stay positive");
                 }
             }
+            Rheology::CarreauYasuda {
+                nu0,
+                nu_inf,
+                lambda,
+                n,
+                a,
+            } => {
+                positive(a, "Yasuda transition exponent must be positive and finite")?;
+                Self::Carreau {
+                    nu0,
+                    nu_inf,
+                    lambda,
+                    n,
+                }
+                .check_parameters()?;
+            }
             Rheology::HerschelBulkley {
                 k,
                 n,
@@ -214,8 +249,13 @@ impl Rheology {
                 }
                 let x = lambda * gdot;
                 let x2 = x * x;
+                if !x2.is_finite() {
+                    // Preserve a finite constitutive response even when the
+                    // squared reduced rate cannot be represented.
+                    return carreau_yasuda(gdot, nu0, nu_inf, lambda, n, 2.0);
+                }
                 let shape = fs_math::det::pow(x.mul_add(x, 1.0), (n - 1.0) / 2.0);
-                let fraction = if x2.is_finite() { x2 / (1.0 + x2) } else { 1.0 };
+                let fraction = x2 / (1.0 + x2);
                 let nu = if n < 1.0 {
                     // Positive interpolation avoids cancellation between two
                     // nearly equal large viscosities near zero strain.
@@ -224,6 +264,26 @@ impl Rheology {
                     nu_inf + (nu0 - nu_inf) * shape
                 };
                 (nu, (nu0 - nu_inf) * shape * (n - 1.0) * fraction)
+            }
+            Rheology::CarreauYasuda {
+                nu0,
+                nu_inf,
+                lambda,
+                n,
+                a,
+            } => {
+                if a == 2.0 {
+                    // Preserve the existing Carreau fast path and its bits.
+                    Self::Carreau {
+                        nu0,
+                        nu_inf,
+                        lambda,
+                        n,
+                    }
+                    .viscosity_and_slope(gdot)
+                } else {
+                    carreau_yasuda(gdot, nu0, nu_inf, lambda, n, a)
+                }
             }
             Rheology::HerschelBulkley {
                 k,
@@ -271,6 +331,13 @@ impl Rheology {
                 lambda,
                 n,
             } if lambda == 0.0 || n == 1.0 || nu0 == nu_inf => Some(nu0),
+            Self::CarreauYasuda {
+                nu0,
+                nu_inf,
+                lambda,
+                n,
+                ..
+            } if lambda == 0.0 || n == 1.0 || nu0 == nu_inf => Some(nu0),
             Self::HerschelBulkley {
                 k,
                 n,
@@ -287,6 +354,52 @@ impl Rheology {
             constant_tau: constant.map(|nu| 0.5 + nu / CS2),
         }
     }
+}
+
+// Evaluate the shape and analytic scaled derivative together: the nonlinear
+// stress solver needs no finite differences, neighbors or scratch allocation.
+// Logarithmic softplus avoids overflowing (lambda*gamma)^a and preserves
+// broad transitions even when lambda*gamma itself over/underflows.
+fn carreau_yasuda(rate: f64, nu0: f64, nu_inf: f64, lambda: f64, n: f64, a: f64) -> (f64, f64) {
+    if rate == 0.0 || lambda == 0.0 || n == 1.0 || nu0 == nu_inf {
+        return (nu0, 0.0);
+    }
+    let x = lambda * rate;
+    let log_x = if x.is_normal() {
+        fs_math::det::ln(x)
+    } else {
+        fs_math::det::ln(lambda) + fs_math::det::ln(rate)
+    };
+    let z = a * log_x;
+    let tail = fs_math::det::exp(-z.abs());
+    let correction = if tail < 1e-4 {
+        tail * (1.0 + tail * (-0.5 + tail * (1.0 / 3.0 - tail * 0.25)))
+    } else {
+        fs_math::det::ln(1.0 + tail)
+    };
+    let (softened, fraction) = if log_x >= 0.0 {
+        (log_x + correction / a, 1.0 / (1.0 + tail))
+    } else {
+        (correction / a, tail / (1.0 + tail))
+    };
+    let log_shape = (n - 1.0) * softened;
+    let shape = fs_math::det::exp(log_shape);
+    let delta = nu0 - nu_inf;
+    let excess = if shape.is_normal() {
+        delta * shape
+    } else {
+        // A large plateau can restore a normal contribution after the shape
+        // alone has underflowed. Combine magnitudes before that rounding.
+        delta.signum() * fs_math::det::exp(fs_math::det::ln(delta.abs()) + log_shape)
+    };
+    // Use expm1 only near the zero-shear plateau. A thickening shape can
+    // overflow while its scaled excess remains representable.
+    let nu = if log_shape.abs() < core::f64::consts::LN_2 {
+        nu0 + delta * fs_math::det::expm1(log_shape)
+    } else {
+        nu_inf + excess
+    };
+    (nu, excess * ((n - 1.0) * fraction))
 }
 
 // Yield contribution and gamma*dnu/dgamma. expm1 preserves the zero-rate
@@ -794,9 +907,8 @@ fn update_tau_prepared<'a>(
         let law = law_at(i);
         let mm = grid.moments(i);
         let force = std::array::from_fn(|d| grid.g[d].mul_add(mm.rho, grid.fext[i][d]));
-        let [numerator, dilation] = strain_components2(
-            &grid.f[i], mm.rho, mm.u, force, central_bulk_tau,
-        );
+        let [numerator, dilation] =
+            strain_components2(&grid.f[i], mm.rho, mm.u, force, central_bulk_tau);
         let local = law.solve_with_fixed_strain(numerator, dilation, grid.tau[i]);
         grid.tau[i] = local.tau;
         stats.floored += u32::from(local.floored);
@@ -895,7 +1007,7 @@ mod tests {
         equilibrium,
     };
 
-    fn mixed_laws() -> [Rheology; 4] {
+    fn mixed_laws() -> [Rheology; 5] {
         [
             Rheology::Newtonian { nu: 0.06 },
             Rheology::PowerLaw { k: 0.02, n: 0.7 },
@@ -911,6 +1023,13 @@ mod tests {
                 yield_stress_over_density: 0.0002,
                 regularization_time: 100.0,
                 minimum_shear_rate: 1e-8,
+            },
+            Rheology::CarreauYasuda {
+                nu0: 0.2,
+                nu_inf: 0.01,
+                lambda: 100.0,
+                n: 0.5,
+                a: 0.7,
             },
         ]
     }
@@ -1053,7 +1172,7 @@ mod tests {
     #[test]
     fn spatial_d2q9_laws_recover_forced_mixed_strain_and_preserve_uniform_bits() {
         let mixed = mixed_laws();
-        let laws = [mixed[0], mixed[1], mixed[2], mixed[3], mixed[0], mixed[0]];
+        let laws = [mixed[0], mixed[1], mixed[4], mixed[3], mixed[0], mixed[0]];
         let field = RheologyField::new([3, 2], &laws).unwrap();
         for collision in [
             CollisionModel2::Bgk,
@@ -1149,7 +1268,7 @@ mod tests {
         let mut expected = grid.tau.clone();
         let mut max_rate = 0.0_f64;
         for i in 4..12 {
-            laws[i] = mixed[i % 4];
+            laws[i] = mixed[i % mixed.len()];
             let rho = 0.6 + 0.05 * i as f64;
             let u = [0.03, -0.02, 0.01];
             let force = [0.001, -0.0007, 0.0003];
@@ -1393,8 +1512,13 @@ mod tests {
         }
         // An overflowing warm-start trial can have a finite limiting root.
         let asymptotic = Rheology::Carreau {
-            nu0: 0.9, nu_inf: 0.6, lambda: 1.0, n: 0.5,
-        }.try_prepare().unwrap();
+            nu0: 0.9,
+            nu_inf: 0.6,
+            lambda: 1.0,
+            n: 0.5,
+        }
+        .try_prepare()
+        .unwrap();
         let recovered = asymptotic.try_solve(0.9 * f64::MAX, TAU_FLOOR).unwrap();
         assert_eq!(recovered.tau, 0.5 + 0.6 / CS2);
         assert!(recovered.shear_rate.is_finite());
