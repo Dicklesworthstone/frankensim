@@ -80,6 +80,49 @@ pub struct PlaneStressResponse {
     pub iterations: usize,
 }
 
+/// Native stable branch and its transverse kinematics at HELD material state.
+///
+/// Temperature, natural reference, coefficients and internal history are fixed.
+/// This derivative does not include their independent evolution. In particular,
+/// a frozen inelastic incremental potential does not supply an instantaneous
+/// physical material-history rate or a heat-production law.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaneStressKinematicResponse {
+    /// Original finite-compliance response; no exact-volume constraint is added.
+    pub response: PlaneStressResponse,
+    /// d[F02,F12,F22]/d[F00,F01,F10,F11] = -Att^-1 Ata.
+    /// Retained from the same solves that form the condensed material tangent.
+    pub transverse_deformation_tangent: [[f64; 4]; 3],
+}
+
+impl PlaneStressKinematicResponse {
+    /// Full row-major Fdot on this branch for an in-plane gradient rate [1/s].
+    /// This is an isothermal, held-history directional rate, not a complete
+    /// rate for a thermally evolving or relaxing specimen.
+    pub fn deformation_gradient_rate(
+        &self,
+        in_plane_rate: [f64; 4],
+    ) -> Result<[f64; 9], MaterialError> {
+        if in_plane_rate.iter().any(|value| !value.is_finite()) {
+            return Err(state_error("finite in-plane deformation rate required"));
+        }
+        let mut rate = [0.0; 9];
+        for (i, index) in IN_PLANE.into_iter().enumerate() {
+            rate[index] = in_plane_rate[i];
+        }
+        for (i, index) in TRANSVERSE.into_iter().enumerate() {
+            rate[index] = self.transverse_deformation_tangent[i]
+                .iter()
+                .zip(in_plane_rate)
+                .fold(0.0, |sum, (coefficient, value)| coefficient.mul_add(value, sum));
+        }
+        if rate.iter().any(|value| !value.is_finite()) {
+            return Err(state_error("unrepresentable relaxed deformation rate"));
+        }
+        Ok(rate)
+    }
+}
+
 fn state_error(what: &str) -> MaterialError {
     MaterialError::State {
         what: format!("hyperelastic plane stress: {what}"),
@@ -268,6 +311,20 @@ pub fn plane_stress_with_seed<L: FiniteStrainPotential + ?Sized>(
     plane_stress_response_from(state, tangent)
 }
 
+/// Original transverse solve and the kinematic derivative of its stable branch.
+/// The optional seed has the same meaning as [`plane_stress_state_with_seed`].
+/// Temperature, reference mapping and internal history are held fixed.
+pub fn plane_stress_with_kinematics<L: FiniteStrainPotential + ?Sized>(
+    material: &L,
+    in_plane: &[f64; 4],
+    initial_transverse: Option<[f64; 3]>,
+    settings: PlaneStressSettings,
+) -> Result<PlaneStressKinematicResponse, MaterialError> {
+    let state = generic_state(material, in_plane, initial_transverse, settings)?;
+    let tangent = material.consistent_tangent(&state.deformation_gradient)?;
+    plane_stress_kinematic_response_from(state, tangent)
+}
+
 impl Hyperelastic {
     /// Relax all three transverse tractions using bounded, residual-decreasing
     /// Newton steps, without forming the full 9×9 constitutive Hessian.
@@ -313,6 +370,18 @@ impl Hyperelastic {
         let state = self.plane_stress_state(in_plane, settings)?;
         let tangent = self.tangent(&state.deformation_gradient)?;
         plane_stress_response_from(state, tangent)
+    }
+
+    /// Native finite-compliance branch and its isothermal deformation derivative.
+    /// Reuses the optimized transverse solve and the original exact Hessian.
+    pub fn plane_stress_with_kinematics(
+        &self,
+        in_plane: &[f64; 4],
+        settings: PlaneStressSettings,
+    ) -> Result<PlaneStressKinematicResponse, MaterialError> {
+        let state = self.plane_stress_state(in_plane, settings)?;
+        let tangent = self.tangent(&state.deformation_gradient)?;
+        plane_stress_kinematic_response_from(state, tangent)
     }
 }
 
@@ -526,10 +595,21 @@ pub(crate) fn plane_stress_response_from(
     state: PlaneStressState,
     a: [[f64; 9]; 9],
 ) -> Result<PlaneStressResponse, MaterialError> {
+    Ok(plane_stress_kinematic_response_from(state, a)?.response)
+}
+
+fn plane_stress_kinematic_response_from(
+    state: PlaneStressState,
+    a: [[f64; 9]; 9],
+) -> Result<PlaneStressKinematicResponse, MaterialError> {
     let block = PositiveBlock::new(TRANSVERSE.map(|i| TRANSVERSE.map(|j| a[i][j])))?;
     let mut tangent = [[0.0; 4]; 4];
+    let mut transverse_deformation_tangent = [[0.0; 4]; 3];
     for (j, &col) in IN_PLANE.iter().enumerate() {
         let extension = block.solve(TRANSVERSE.map(|k| a[k][col]))?;
+        for i in 0..3 {
+            transverse_deformation_tangent[i][j] = -extension[i];
+        }
         for (i, &row) in IN_PLANE.iter().enumerate() {
             tangent[i][j] = a[row][col]
                 - (0..3)
@@ -540,12 +620,15 @@ pub(crate) fn plane_stress_response_from(
     if tangent.iter().flatten().any(|v| !v.is_finite()) {
         return Err(state_error("unrepresentable condensed tangent"));
     }
-    Ok(PlaneStressResponse {
-        deformation_gradient: state.deformation_gradient,
-        energy_density_pa: state.energy_density_pa,
-        piola: state.piola,
-        tangent,
-        relative_transverse_residual: state.relative_transverse_residual,
-        iterations: state.iterations,
+    Ok(PlaneStressKinematicResponse {
+        response: PlaneStressResponse {
+            deformation_gradient: state.deformation_gradient,
+            energy_density_pa: state.energy_density_pa,
+            piola: state.piola,
+            tangent,
+            relative_transverse_residual: state.relative_transverse_residual,
+            iterations: state.iterations,
+        },
+        transverse_deformation_tangent,
     })
 }

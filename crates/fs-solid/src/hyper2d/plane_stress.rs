@@ -28,6 +28,9 @@ use std::collections::BTreeMap;
 #[cfg(test)]
 mod dynamics_tests;
 
+mod motion;
+pub use motion::PlaneMaterialPointMotion;
+
 fn invalid(what: impl Into<String>) -> SolidError {
     SolidError::InvalidInput { what: what.into() }
 }

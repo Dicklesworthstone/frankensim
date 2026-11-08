@@ -434,3 +434,254 @@ fn g0_incompressible_thickness_domain_and_cancellation_remain_enforced() {
         ));
     });
 }
+
+fn motion_affine_field(mesh: &Mesh2, gradient: [f64; 4], translation: [f64; 2]) -> Vec<f64> {
+    mesh.nodes
+        .iter()
+        .flat_map(|[x, y]| {
+            [
+                translation[0] + gradient[0] * x + gradient[1] * y,
+                translation[1] + gradient[2] * x + gradient[3] * y,
+            ]
+        })
+        .collect()
+}
+
+fn motion_product(a: &[f64; 9], b: &[f64; 9]) -> [f64; 9] {
+    core::array::from_fn(|ij| {
+        (0..3).map(|k| a[3 * (ij / 3) + k] * b[3 * k + ij % 3]).sum()
+    })
+}
+
+#[test]
+fn g1_held_plane_motion_has_physical_relaxed_thickness_rate() {
+    with_cx(|cx, _| {
+        let (mu, lambda, axial): (f64, f64, f64) = (2.0, 40.0, 1.3);
+        // True uniaxial NH path: both lateral stresses vanish, with
+        // mu*(t²-1)+lambda*ln(axial*t²)=0. Differentiate this scalar equation.
+        let mut lo = 1.0 / axial.sqrt();
+        let mut hi = 1.0;
+        for _ in 0..70 {
+            let t = 0.5 * (lo + hi);
+            if mu * (t * t - 1.0) + lambda * (axial * t * t).ln() > 0.0 {
+                hi = t;
+            } else {
+                lo = t;
+            }
+        }
+        let lateral = 0.5 * (lo + hi);
+        let axial_rate = 0.23;
+        let lateral_rate =
+            -lambda * lateral * axial_rate / (2.0 * axial * (mu * lateral * lateral + lambda));
+        let nominal = mu * (axial - lateral * lateral / axial);
+        let law = nh(mu, lambda);
+        for mesh in [
+            Mesh2::triangles(2.0, 1.0, 2, 2),
+            Mesh2::quads(2.0, 1.0, 2, 2),
+        ] {
+            let p = problem(&mesh, &law);
+            let u = motion_affine_field(&mesh, [axial - 1.0, 0.0, 0.0, lateral - 1.0], [0.0; 2]);
+            let v = motion_affine_field(&mesh, [axial_rate, 0.0, 0.0, lateral_rate], [0.0; 2]);
+            let fields = p
+                .plane_stress_held_material_motion(&u, &v, PlaneStressSettings::default(), cx)
+                .unwrap();
+            close(fields.iter().map(|f| f.reference_area_m2).sum(), 2.0, 1e-12);
+            for field in &fields {
+                assert!(field.deformation_gradient_rate_per_s[8] < -0.01);
+                let stretch = [axial, lateral, lateral];
+                let rates = [axial_rate, lateral_rate, lateral_rate];
+                for i in 0..3 {
+                    for j in 0..3 {
+                        close(
+                            field.deformation_gradient_rate_per_s[3 * i + j],
+                            if i == j { rates[i] } else { 0.0 },
+                            2e-10,
+                        );
+                        close(
+                            field.green_lagrange_strain_rate_per_s[3 * i + j],
+                            if i == j { stretch[i] * rates[i] } else { 0.0 },
+                            2e-10,
+                        );
+                        close(
+                            field.spatial_strain_rate_per_s[3 * i + j],
+                            if i == j { rates[i] / stretch[i] } else { 0.0 },
+                            2e-10,
+                        );
+                    }
+                }
+                close(
+                    field.jacobian_rate_per_s,
+                    lateral * lateral * axial_rate + 2.0 * axial * lateral * lateral_rate,
+                    2e-10,
+                );
+                close(field.reference_stress_power_density_w_m3, nominal * axial_rate, 2e-9);
+                close(
+                    field.reference_stress_power_density_w_m3,
+                    field.jacobian * field.spatial_stress_power_density_w_m3,
+                    2e-12,
+                );
+            }
+            // The same in-plane motion under plane strain has no thickness rate.
+            for field in p.plane_strain_held_material_motion(&u, &v, cx).unwrap() {
+                assert_eq!(field.deformation_gradient[8], 1.0);
+                assert_eq!(field.deformation_gradient_rate_per_s[8], 0.0);
+                assert_eq!(field.spatial_strain_rate_per_s[8], 0.0);
+                close(
+                    field.reference_stress_power_density_w_m3,
+                    field.jacobian * field.spatial_stress_power_density_w_m3,
+                    2e-12,
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_held_planar_rates_are_objective_under_moving_rigid_frames() {
+    with_cx(|cx, _| {
+        let law = nh(2.0, 3.0);
+        let angle = 0.63_f64;
+        let (s, c) = angle.sin_cos();
+        let q = [c, -s, 0.0, s, c, 0.0, 0.0, 0.0, 1.0];
+        let qt = [c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0];
+        let spin = [0.0, -0.7, 0.0, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let f = [1.15, 0.12, 0.0, -0.03, 0.91, 0.0, 0.0, 0.0, 1.0];
+        let rate = [0.08, 0.05, 0.0, -0.02, 0.04, 0.0, 0.0, 0.0, 0.0];
+        let rotated_f = motion_product(&q, &f);
+        let rotated_material_rate = motion_product(&q, &rate);
+        let rigid_rate = motion_product(&spin, &rotated_f);
+        let rotated_rate: [f64; 9] =
+            core::array::from_fn(|i| rotated_material_rate[i] + rigid_rate[i]);
+        let in_plane = |a: &[f64; 9]| [a[0], a[1], a[3], a[4]];
+        let displacement = |mesh: &Mesh2, a: &[f64; 9], translation| {
+            motion_affine_field(mesh, [a[0] - 1.0, a[1], a[3], a[4] - 1.0], translation)
+        };
+        for mesh in [Mesh2::triangles(1.0, 1.0, 1, 1), Mesh2::quads(1.0, 1.0, 1, 1)] {
+            let p = problem(&mesh, &law);
+            for relaxed in [false, true] {
+                let observe = |u: &[f64], v: &[f64]| {
+                    if relaxed {
+                        p.plane_stress_held_material_motion(u, v, PlaneStressSettings::default(), cx)
+                    } else {
+                        p.plane_strain_held_material_motion(u, v, cx)
+                    }
+                    .unwrap()
+                };
+                let base = observe(
+                    &displacement(&mesh, &f, [0.0; 2]),
+                    &motion_affine_field(&mesh, in_plane(&rate), [0.0; 2]),
+                );
+                let rotated = observe(
+                    &displacement(&mesh, &rotated_f, [3.0, -7.0]),
+                    &motion_affine_field(&mesh, in_plane(&rotated_rate), [13.0, -17.0]),
+                );
+                for (before, after) in base.iter().zip(rotated) {
+                    let expected_d = motion_product(
+                        &motion_product(&q, &before.spatial_strain_rate_per_s),
+                        &qt,
+                    );
+                    for ij in 0..9 {
+                        close(
+                            after.green_lagrange_strain_rate_per_s[ij],
+                            before.green_lagrange_strain_rate_per_s[ij],
+                            3e-10,
+                        );
+                        close(after.spatial_strain_rate_per_s[ij], expected_d[ij], 3e-10);
+                    }
+                    close(after.jacobian_rate_per_s, before.jacobian_rate_per_s, 3e-10);
+                    close(
+                        after.reference_stress_power_density_w_m3,
+                        before.reference_stress_power_density_w_m3,
+                        3e-10,
+                    );
+                }
+                for rigid in observe(
+                    &displacement(&mesh, &rotated_f, [3.0, -7.0]),
+                    &motion_affine_field(&mesh, in_plane(&rigid_rate), [13.0, -17.0]),
+                ) {
+                    for value in rigid.spatial_strain_rate_per_s
+                        .iter().chain(&rigid.green_lagrange_strain_rate_per_s) {
+                        close(*value, 0.0, 3e-10);
+                    }
+                    close(rigid.reference_stress_power_density_w_m3, 0.0, 3e-10);
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_anisotropic_plane_motion_retains_relaxed_transverse_shear_rate() {
+    with_cx(|cx, _| {
+        let law = Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 1.0,
+                k1: 1.8,
+                k2: 1.1,
+                dispersion: 0.05,
+                fibres: vec![[0.8, 0.0, 0.6]],
+                invariants: FibreInvariants::Full,
+                volumetric: Volumetric::Quadratic { kappa: 20.0 },
+            },
+            4.0,
+        ).unwrap();
+        let local = PlaneStressSettings::default();
+        for mesh in [Mesh2::triangles(1.0, 0.7, 1, 1), Mesh2::quads(1.0, 0.7, 1, 1)] {
+            let p = problem(&mesh, &law);
+            let u = motion_affine_field(&mesh, [0.14, 0.03, -0.01, 0.08], [0.0; 2]);
+            let v = motion_affine_field(&mesh, [0.11, -0.02, 0.03, -0.04], [0.0; 2]);
+            let fields = p.plane_stress_held_material_motion(&u, &v, local, cx).unwrap();
+            let step = 2e-6;
+            let plus: Vec<_> = u.iter().zip(&v).map(|(u, v)| u + step * v).collect();
+            let minus: Vec<_> = u.iter().zip(&v).map(|(u, v)| u - step * v).collect();
+            let plus = p.plane_stress_states(&plus, local, cx).unwrap();
+            let minus = p.plane_stress_states(&minus, local, cx).unwrap();
+            assert!(fields.iter().any(|field| {
+                field.deformation_gradient_rate_per_s[2].abs()
+                    + field.deformation_gradient_rate_per_s[5].abs() > 1e-8
+            }));
+            for ((field, plus), minus) in fields.iter().zip(plus).zip(minus) {
+                for ij in 0..9 {
+                    close(
+                        field.deformation_gradient_rate_per_s[ij],
+                        (plus.deformation_gradient[ij] - minus.deformation_gradient[ij]) / (2.0 * step),
+                        3e-6,
+                    );
+                }
+                close(
+                    field.reference_stress_power_density_w_m3,
+                    field.jacobian * field.spatial_stress_power_density_w_m3,
+                    2e-11,
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_held_plane_motion_preserves_tiny_rates_and_refuses_invalid_motion() {
+    with_cx(|cx, gate| {
+        let law = nh(2.0, 3.0);
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let p = problem(&mesh, &law);
+        let u = vec![0.0; 2 * mesh.nodes.len()];
+        let tiny = 1e-30;
+        let v = motion_affine_field(&mesh, [tiny, 0.0, 0.0, 0.0], [0.0; 2]);
+        let local = PlaneStressSettings::default();
+        let fields = p.plane_stress_held_material_motion(&u, &v, local, cx).unwrap();
+        for field in fields {
+            assert!((field.deformation_gradient_rate_per_s[0] / tiny - 1.0).abs() < 1e-13);
+            assert!((field.deformation_gradient_rate_per_s[8] / tiny + 3.0 / 7.0).abs() < 1e-13);
+        }
+        assert!(p.plane_stress_held_material_motion(&u, &v[..v.len() - 1], local, cx).is_err());
+        assert!(p.plane_strain_held_material_motion(&u, &[f64::NAN; 8], cx).is_err());
+        let inverted = motion_affine_field(&mesh, [-2.0, 0.0, 0.0, 0.0], [0.0; 2]);
+        assert!(p.plane_stress_held_material_motion(&inverted, &v, local, cx).is_err());
+        assert!(p.plane_strain_held_material_motion(&inverted, &v, cx).is_err());
+        gate.request();
+        assert!(matches!(
+            p.plane_stress_held_material_motion(&u, &v, local, cx),
+            Err(SolidError::Cancelled)
+        ));
+    });
+}
