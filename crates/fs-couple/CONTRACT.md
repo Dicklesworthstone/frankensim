@@ -6509,3 +6509,28 @@ R(T) feedback, shared receivers and atomic refusal/retry.
 All ten drive-loss integrals deposit once. Finite coolant exchange remains internal to the combined caloric inventory; prescribed cooling remains signed external heat. Existing closed-radiation balance admission excludes its numerical net from external supply. Unowned graph resistors, electrical contacts, unsupported sources, numerical-budget refusals and cancellation publish no drive or caloric history. Fixed-storage, fixed-bearing and endpoint-resistance accuracy limitations remain unchanged.
 
 `tests/converter_enthalpy/battery/motor/heat.rs` checks an independent eleven-cell caloric solution across continued drive steps, native-correlation coolant feedback into all nine resistances and solved motor current, separate reservoir heat, exact bare-network parity, and late typed-refusal/cancellation atomicity. The coolant provider is a manufactured fixture using the existing correlation owner and the same finite-link seam as downstream source-resolved airflow assemblies; it does not establish empirical motor or coolant validity.
+
+## Tongue contact on the typed reed of the DG-valve file
+
+The DG-valve file's typed reed (`reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN`, one structural mode of the
+`ModalAperture`) takes an optional `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE` row directly after its
+`contraction` row (before `constriction_noise`), the row the reed-performance file already reads in the same place. The
+five numbers and their refusals are the reed-performance file's: a nonpositive area, effective area, force or release time;
+an area above the reed blade area, which is the cantilever-tip factor's own domain; a negative release start; and, on the
+DG route only, a release that starts after the last observed control tick. `render::schedule::reed::TongueContactInput`
+admits the numbers once for both routes. The row is a lumped contact force with borrowed numbers on the oboe pages (no oboe
+tongue area, force or contact time is printed); it is not a model of the tongue's own mechanics, and the lay's onset opening,
+which the reed-performance `reed` row carries and the DG `contact` row does not, is not part of this change.
+
+`TongueContactInput::force_series` compiles the closing-force history for both routes, so they cannot drift: the tongue
+holds the reed against the blowing pressure's push (its net closing load is constant) until RELEASE_START, then lets go
+linearly over RELEASE. The reed-performance file maps the series to `SetReedClosingForce` controls on its lumped reed, as
+before (a test builds the controls of the F4 tongue card with the loop as it stood before the series was shared and compares
+them sample for sample and bit for bit); the DG file gives the reed's one mode a force projection of -1.0 on blade 0, so a
+closing force of F newtons is the positive force F on that port, and feeds the series to it as force events through the shared
+source force scheduler (`LoadedDgPerformance::with_reed_closing_force`; a test compares those events with the series on the
+same numbers). Only a card that states the row gives the reed's mode a force projection: without the row the projection stays
+zero, no force schedule exists and the render is the unchanged one (the tests check the projection, the absence of events and
+the absence of a force port, and a render of a card without the row was compared byte for byte, against the binary built
+before this change, on one host before landing). The attachment is refused on a plate or solid source and after the first
+accepted sample.

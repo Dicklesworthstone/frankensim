@@ -378,3 +378,187 @@ fn the_live_pages_three_rows_render_inside_the_bounds_with_closed_work_and_flow_
     let end = reed.modal_states()[0];
     assert!(end.displacement_m != 0.0 && end.displacement_m.abs() < 1e-3, "{end:?}");
 }
+
+// The oboe pages' tongue: a 2 mm x 5.6 mm strip (1.12e-5 m^2), the reed's own face k H / P_c = 6.979e-5 m^2 as the effective
+// area, 0.2 N, held until 10 ms and let go over 5 ms. The 25 ms card below runs past the release.
+const TONGUE: &str = "tongue_contact 1.12e-5 6.979e-5 0.2 0.01 0.005";
+
+fn long(text: String) -> String {
+    let text = text
+        .replace("audio 96000 96000 512 20", "audio 96000 96000 2400 20")
+        .replace("events\t2\nevent\t0e0\t1e-3\tpressure-pa\t5e0\nevent\t4e-3\t1e-3\tpressure-pa\t0e0",
+            "events\t1\nevent\t0e0\t2e-2\tpressure-pa\t7.4e3");
+    assert!(text.contains("pressure-pa\t7.4e3"), "the gesture suffix was not replaced");
+    text
+}
+
+/// The refusal of a card by any owner, as text.
+fn refused_by_anyone(text: &str) -> String {
+    match MaterialModalDgValvePerformance::from_bytes_with_sources(
+        text.as_bytes(), 37, &CancelGate::new_clock_free(), None,
+        |_| Ok(pack(900.0, false)),
+    ) {
+        Err(error) => format!("{error:?}"),
+        Ok(_) => panic!("a refused tongue row was accepted"),
+    }
+}
+
+/// The reed's displacement [m] after its first `n` samples (one block of `n`).
+fn displacement_after(text: &str, n: usize) -> f64 {
+    let mut renderer = super::build(text, n).into_renderer();
+    let mut out = vec![0.0; n];
+    renderer.block(&mut out).unwrap();
+    let LoadedAperture::Modal(reed) = renderer.system().aperture() else {
+        panic!("a typed reed is a modal aperture");
+    };
+    reed.modal_states()[0].displacement_m
+}
+
+#[test]
+fn the_tongue_row_opens_one_force_port_on_the_reed_and_its_absence_opens_none() {
+    let plain = super::build(&long(card(REED)), 37);
+    assert!(plain.reed_record().unwrap().tongue_contact().is_none());
+    assert_eq!(valve(&plain).spec().modes[0].force_projection, [0.0, 0.0]);
+    let source = super::build(&long(with_row(TONGUE)), 37);
+    assert!(source.reed_record().unwrap().tongue_contact().is_some());
+    assert_eq!(valve(&source).spec().modes[0].force_projection, [-1.0, 0.0]);
+    // The row changes nothing of the mode itself.
+    let (a, b) = (valve(&plain).spec().modes[0], valve(&source).spec().modes[0]);
+    assert_eq!(
+        (a.mass_kg.to_bits(), a.stiffness_n_m.to_bits(), a.damping_n_s_m.to_bits(), a.pressure_area_m2.to_bits(),
+            a.gap_projection.to_bits()),
+        (b.mass_kg.to_bits(), b.stiffness_n_m.to_bits(), b.damping_n_s_m.to_bits(), b.pressure_area_m2.to_bits(),
+            b.gap_projection.to_bits()),
+    );
+    let (_, without) = render(plain);
+    assert!(without.applied_plate_force_controls(0).is_empty());
+    let (_, with) = render(source);
+    let events = with.applied_plate_force_controls(0);
+    assert!(events.len() > 2 && events.windows(2).all(|w| w[0].sample < w[1].sample));
+    assert!(events.iter().all(|e| e.port == 0 && e.force_n >= 0.0), "a closing force is positive newtons on the port");
+    assert_eq!(events[0].sample, 0);
+    // The tongue starts holding at least its own pull (modal factor < 1 times 0.2 N, plus the pressure it must carry)
+    // and lets go completely by the end of the release, 15 ms = 1440 mechanical samples.
+    assert!(events[0].force_n > 0.1, "{:?}", events[0]);
+    let last = events.last().unwrap();
+    assert!(last.force_n == 0.0 && last.sample >= 1439, "{last:?}");
+    assert!(with.plate_force_ports(0).is_empty());
+}
+
+#[test]
+fn the_tongue_presses_the_reed_closed_until_it_lets_go_and_the_callbacks_cannot_change_it() {
+    let control = long(card(REED));
+    let held = long(with_row(TONGUE));
+    // 8 mechanical samples (83 us) into the note the control's reed has barely felt the blowing pressure (about 2 mN); the
+    // tongue's opening load is about 0.44 N (its 0.2 N times the modal factor, plus the pressure it must carry until 10 ms),
+    // which has already pushed the reed toward its lay.
+    let open = displacement_after(&control, 8);
+    let pressed = displacement_after(&held, 8);
+    assert!(pressed < open - 2e-5, "tongue {pressed} m, control {open} m");
+    let (plain, _) = render(super::build(&control, 64));
+    let (tongued, rendered) = render(super::build(&held, 64));
+    assert!(tongued.iter().all(|p| p.is_finite()) && tongued.iter().any(|p| p.abs() > 1e-15));
+    assert_ne!(bits(&plain), bits(&tongued));
+    for block in [1, 512] {
+        assert_eq!(bits(&render(super::build(&held, block)).0), bits(&tongued), "block {block}");
+    }
+    let LoadedAperture::Modal(reed) = rendered.system().aperture() else {
+        panic!("a typed reed is a modal aperture");
+    };
+    let end = reed.modal_states()[0];
+    assert!(end.displacement_m.abs() < 1e-3, "{end:?}");
+}
+
+#[test]
+fn a_tongue_row_is_refused_for_its_own_reason_and_only_after_the_contraction() {
+    let positive = "a typed reed's tongue_contact needs a positive area, effective area, force and release time";
+    for (row, expected) in [
+        ("tongue_contact 0 6.979e-5 0.2 0.01 0.005", positive),
+        ("tongue_contact 1.12e-5 -6.979e-5 0.2 0.01 0.005", positive),
+        ("tongue_contact 1.12e-5 6.979e-5 0 0.01 0.005", positive),
+        ("tongue_contact 1.12e-5 6.979e-5 0.2 0.01 0", positive),
+        ("tongue_contact 1.12e-4 6.979e-5 0.2 0.01 0.005", "tongue_contact area exceeds the vibrating reed blade area"),
+        ("tongue_contact 1.12e-5 6.979e-5 0.2 -0.01 0.005", "tongue_contact requires a nonnegative release_start_s"),
+        ("tongue_contact 1.12e-5 6.979e-5 0.2 0.01", "missing field"),
+        ("tongue_contact", "missing field"),
+        ("tongue_contact 1.12e-5 6.979e-5 0.2 0.01 0.005 1", "unexpected extra field"),
+        ("tongue_contact nan 6.979e-5 0.2 0.01 0.005", "physical scalars must be finite"),
+    ] {
+        assert_eq!(refused(&long(with_row(row))).1, expected, "{row}");
+    }
+    // A release after the last observed control tick is the performance's refusal, not the card grammar's.
+    let late = refused_by_anyone(&long(with_row("tongue_contact 1.12e-5 6.979e-5 0.2 0.05 0.005")));
+    assert!(late.contains("tongue_contact release starts after the last observed control tick"), "{late}");
+    // The row follows the contraction and precedes the noise: reversed, repeated or before the reed is not the grammar.
+    let other = "unexpected record kind or order";
+    assert_eq!(refused(&long(with_row(&format!("{TONGUE}\ncontraction 0.611")))).1, other);
+    assert_eq!(refused(&long(with_row(&format!("{TONGUE}\n{STAPLE}")))).1, other);
+    assert_eq!(refused(&long(with_row(&format!("{TONGUE}\n{TONGUE}")))).1, other);
+    assert_eq!(refused(&long(with_row(&format!("constriction_noise 7 0.00087\n{TONGUE}")))).1, other);
+    assert_eq!(refused(&long(card(&format!("{TONGUE}\n{REED}")))).1, other);
+    let all = long(with_row(&format!("{STAPLE}\ncontraction 0.611\n{TONGUE}\nconstriction_noise 7 0.00087")));
+    let source = super::build(&all, 37);
+    let record = source.reed_record().unwrap();
+    assert_eq!(record.staple_recovery(), Some((0.8, 4e-6)));
+    assert_eq!(record.contraction(), Some(0.611));
+    assert!(record.tongue_contact().is_some());
+    assert_eq!(source.constriction_noise().unwrap().seed, 7);
+}
+
+#[test]
+fn the_tongue_with_the_live_pages_other_rows_stays_inside_the_bounds_with_closed_balances() {
+    let text = long(with_row(&format!("{STAPLE}\ncontraction 0.611\n{TONGUE}\nconstriction_noise 7 0.00087")));
+    let (pressure, rendered) = render(super::build(&text, 64));
+    assert_eq!(pressure.len(), 2400);
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    let frame = &rendered.last_frame().expect("an accepted frame").aperture;
+    let flows = frame.jet_flow_m3_s.abs() + frame.swept_flow_m3_s.abs() + frame.bore_flow_m3_s.abs();
+    assert!(frame.flow_residual_m3_s.abs() <= 1e-9 * flows.max(1e-30), "{frame:?}");
+    let LoadedAperture::Modal(reed) = rendered.system().aperture() else {
+        panic!("a typed reed is a modal aperture");
+    };
+    let end = reed.modal_states()[0];
+    assert!(end.displacement_m != 0.0 && end.displacement_m.abs() < 1e-3, "{end:?}");
+    // The same card without the tongue is another note.
+    let plain = long(with_row(&format!("{STAPLE}\ncontraction 0.611\nconstriction_noise 7 0.00087")));
+    assert_ne!(bits(&render(super::build(&plain, 64)).0), bits(&pressure));
+}
+
+#[test]
+fn a_tongue_is_a_typed_reed_force_and_a_plate_source_refuses_it() {
+    use crate::render::schedule::reed::TongueContactInput;
+    let tongue = TongueContactInput::new(1.12e-5, 6.979e-5, 0.2, 0.001, 0.005).unwrap();
+    let plate = super::build(&super::input(), 37).into_renderer();
+    match plate.with_reed_closing_force(&tongue, 6.979e-5) {
+        Err(error) => assert!(format!("{error:?}").contains("a tongue is a typed-reed force"), "{error:?}"),
+        Ok(_) => panic!("a plate source accepted a tongue"),
+    }
+}
+
+#[test]
+fn the_dg_tongue_force_events_are_the_shared_series_on_the_same_numbers() {
+    use crate::render::schedule::reed::TongueContactInput;
+    use fs_scenario::gesture::GestureSchedule;
+    // The long card's own gesture suffix: 48 kHz control ticks, one 20 ms ramp to 7.4 kPa on the track `mouth`.
+    let schedule = GestureSchedule::from_canonical_bytes(
+        "frankensim-gesture-schedule-v1\ncontrol_rate_hz\t48000\ntracks\t1\ntrack\tmouth\tblowing-pressure\n\
+         initial\tpressure-pa\t0e0\nevents\t1\nevent\t0e0\t2e-2\tpressure-pa\t7.4e3\n"
+            .as_bytes(),
+    )
+    .expect("the long card's gesture suffix");
+    let source = super::build(&long(with_row(TONGUE)), 37);
+    let record = source.reed_record().unwrap();
+    let face = record.pressure_area_m2();
+    let tongue: TongueContactInput = *record.tongue_contact().unwrap();
+    // 2400 audio samples at 96 kHz against 48 kHz control ticks: the last observed tick is (2400 - 1) / 2 = 1199.
+    let series = tongue.force_series(&schedule, "mouth", face, 1199).unwrap();
+    assert!(series.len() > 2 && series.last().unwrap().1 == 0.0);
+    let (_, rendered) = render(source);
+    let events = rendered.applied_plate_force_controls(0);
+    assert_eq!(events.len(), series.len());
+    for (event, (tick, force_n)) in events.iter().zip(&series) {
+        assert_eq!(event.sample, tick * 2, "two audio samples per control tick");
+        assert_eq!(event.port, 0);
+        assert_eq!(event.force_n.to_bits(), force_n.to_bits());
+    }
+}

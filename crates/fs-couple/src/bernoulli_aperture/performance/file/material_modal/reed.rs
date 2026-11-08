@@ -15,14 +15,22 @@
 //! staple pressure recovery (the blade is driven by the drop across the opening, the bore input raised by C_P (1/2) rho
 //! (q / S_c)^2). An optional `contraction C_C` row after that gives the jet's vena
 //! contracta (the flow width becomes C_c times the physical width, `ModalAperture::set_jet_contraction`),
-//! as the reed-performance file's row of that name does; absent, nothing changes bit for bit. The row replaces `solid` or `loss`/`blades` and every plate record; it
-//! carries no mesh, section, material memory, traction, closure or force port.
+//! as the reed-performance file's row of that name does; absent, nothing changes bit for bit. An optional
+//! `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE` row after those gives the tongue's closing force on
+//! the reed: the same five numbers, the same cantilever-tip modal factor and the same force history as the
+//! reed-performance row of that name (`render::schedule::reed::TongueContactInput` admits and compiles it for both
+//! routes). It gives the reed's one mode a force projection of -1.0 on blade 0 (positive newtons close the reed, as the
+//! reed-performance route's closing force does), so the closing force enters as the positive force series of
+//! `TongueContactInput` through the shared source force scheduler; absent, the projection stays zero and nothing
+//! changes bit for bit. The row replaces `solid` or `loss`/`blades` and every plate record; it
+//! carries no mesh, section, material memory, traction or closure, and no force port except that tongue.
 
 use super::{PlateValveInputError, Reader, bad};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::modal::{ApertureMode, ModalAperture, ModalApertureSpec};
 use crate::bernoulli_aperture::paired::{BladePropagator, BladeState, PairedApertureLimits};
 use crate::bernoulli_aperture::viscous::StapleRecovery;
+use crate::render::schedule::reed::TongueContactInput;
 use fs_dcontact::Obstacle;
 
 /// Longest source token, in bytes; the token names the sourcing rows, it is not prose.
@@ -40,6 +48,7 @@ pub struct ReedRecord {
     source: String,
     staple: Option<(f64, f64)>,
     contraction: Option<f64>,
+    tongue: Option<TongueContactInput>,
 }
 
 /// The host quantities the DG file supplies to every valve it builds.
@@ -70,6 +79,8 @@ impl ReedRecord {
     pub const fn staple_recovery(&self) -> Option<(f64, f64)> { self.staple }
     /// The jet's vena contracta C_c in (0, 1] from the optional `contraction` row, if the card states one.
     pub const fn contraction(&self) -> Option<f64> { self.contraction }
+    /// The tongue's closing force from the optional `tongue_contact` row, if the card states one.
+    pub(crate) const fn tongue_contact(&self) -> Option<&TongueContactInput> { self.tongue.as_ref() }
     /// Effective pressure area A = (k / P_c) H [m^2], associated as the live reed's own
     /// `reed_bore::reed_pressure_face` associates it, so both routes carry the same bits.
     pub fn pressure_area_m2(&self) -> f64 { (self.stiffness_n_m / self.closing_pressure_pa) * self.rest_opening_m }
@@ -92,7 +103,9 @@ impl ReedRecord {
                     damping_n_s_m: self.damping_n_s_m(),
                     pressure_area_m2: self.pressure_area_m2(),
                     gap_projection: 1.0,
-                    force_projection: [0.0, 0.0],
+                    // Only a stated tongue gives the reed a force port: a closing force of F newtons is the force +F on the
+                    // port, whose projection on the opening coordinate is -1.0.
+                    force_projection: if self.tongue.is_some() { [-1.0, 0.0] } else { [0.0, 0.0] },
                 }],
                 density_kg_m3: host.density_kg_m3,
                 impedance_pa_s_m3: host.impedance_pa_s_m3,
@@ -169,9 +182,30 @@ pub(super) fn read(rows: &mut Reader<'_>, rest_opening: f64) -> Result<ReedRecor
         }
         Some(coefficient)
     } else { None };
+    // An optional `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE` row after those, as the
+    // reed-performance file places it: the tongue's closing force on the reed (see `TongueContactInput`). Absent, the reed
+    // has no force port and nothing changes bit for bit.
+    let tongue = if rows.lines.clone().next().and_then(|line|
+        line.split_ascii_whitespace().next()) == Some("tongue_contact")
+    {
+        let mut row = rows.row("tongue_contact")?;
+        let at = row.line;
+        let area_m2 = row.scalar()?;
+        let effective_area_m2 = row.scalar()?;
+        let force_n = row.scalar()?;
+        let release_start_s = row.scalar()?;
+        let release_s = row.scalar()?;
+        row.finish()?;
+        if !(area_m2 > 0.0 && effective_area_m2 > 0.0 && force_n > 0.0 && release_s > 0.0) {
+            return Err(bad(at,
+                "a typed reed's tongue_contact needs a positive area, effective area, force and release time"));
+        }
+        Some(TongueContactInput::new(area_m2, effective_area_m2, force_n, release_start_s, release_s)
+            .map_err(|what| bad(at, what))?)
+    } else { None };
     let record = ReedRecord {
         rest_opening_m, width_m, closing_pressure_pa, mass_kg, stiffness_n_m, damping_ratio,
-        source: source.to_string(), staple, contraction,
+        source: source.to_string(), staple, contraction, tongue,
     };
     let area = record.pressure_area_m2();
     let damping = record.damping_n_s_m();

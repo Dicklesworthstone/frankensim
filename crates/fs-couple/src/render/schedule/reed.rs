@@ -758,20 +758,8 @@ impl ReedPerformance {
             if reed.mass_kg <= 0.0 {
                 return Err(bad(r.line, "tongue_contact requires a massive reed"));
             }
-            if release_start_s < 0.0 {
-                return Err(bad(
-                    r.line,
-                    "tongue_contact requires a nonnegative release_start_s",
-                ));
-            }
-            let modal_factor = cantilever_tip_modal_factor(area_m2, effective_area_m2)
-                .ok_or_else(|| bad(r.line, "tongue_contact area exceeds the vibrating reed blade area"))?;
-            Some(TongueContactInput {
-                modal_factor,
-                force_n,
-                release_start_s,
-                release_s,
-            })
+            Some(TongueContactInput::new(area_m2, effective_area_m2, force_n, release_start_s, release_s)
+                .map_err(|what| bad(r.line, what))?)
         } else {
             None
         };
@@ -1607,8 +1595,10 @@ impl<'a> Row<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct TongueContactInput {
+/// The five numbers of a `tongue_contact` row, admitted once for every route that carries the row (the
+/// reed-performance file here and the typed reed of the DG-valve file).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TongueContactInput {
     modal_factor: f64,
     force_n: f64,
     release_start_s: f64,
@@ -1616,31 +1606,49 @@ struct TongueContactInput {
 }
 
 impl TongueContactInput {
-    fn append_controls(
+    /// Admit `AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE`: the caller has already checked that each of the
+    /// area, effective area, force and release is finite and positive.
+    pub(crate) fn new(
+        area_m2: f64,
+        effective_area_m2: f64,
+        force_n: f64,
+        release_start_s: f64,
+        release_s: f64,
+    ) -> Result<Self, &'static str> {
+        if release_start_s < 0.0 {
+            return Err("tongue_contact requires a nonnegative release_start_s");
+        }
+        let modal_factor = cantilever_tip_modal_factor(area_m2, effective_area_m2)
+            .ok_or("tongue_contact area exceeds the vibrating reed blade area")?;
+        Ok(Self { modal_factor, force_n, release_start_s, release_s })
+    }
+
+    /// Time [s] at which the tongue starts to let go.
+    pub(crate) const fn release_start_s(&self) -> f64 { self.release_start_s }
+
+    /// The tongue's closing force [N] on the reed's one coordinate at every control tick `0..=last_tick` where it
+    /// changes, as `(tick, force_n)`: the tongue holds the reed against the blowing pressure's push (its net closing
+    /// load is constant) until the release starts, then lets go linearly over the release time. `face` is the reed's
+    /// pressure face k H / P_c [m^2]; the blowing pressure is the schedule's own track.
+    pub(crate) fn force_series(
         &self,
-        controls: &mut Vec<ScheduledControl>,
         schedule: &GestureSchedule,
         track_id: &str,
-        reed: BeatingReed,
-        audio_rate_hz: u32,
+        face: f64,
         last_tick: u64,
-    ) -> Result<(), ReedPerformanceError> {
+    ) -> Result<Vec<(u64, f64)>, fs_scenario::gesture::GestureError> {
         let control_rate_hz = schedule.control_rate_hz;
-        let face = crate::reed_bore::reed_pressure_face(reed);
         let release_tick = ((self.release_start_s * f64::from(control_rate_hz)).round() as u64)
             .min(last_tick);
-        let release_pressure_pa = schedule
-            .sample(track_id, release_tick)
-            .map_err(|e| ReedPerformanceError::Schedule(GestureCompileError::Gesture(e)))?;
+        let release_pressure_pa = schedule.sample(track_id, release_tick)?;
         let pre_release_close_n = self.modal_factor * self.force_n;
         let held_downward_n = pre_release_close_n + face * release_pressure_pa;
         let mut previous = None;
+        let mut series = Vec::new();
         for tick in 0..=last_tick {
             let t = tick as f64 / f64::from(control_rate_hz);
             let force_n = if t <= self.release_start_s {
-                let p_m = schedule
-                    .sample(track_id, tick)
-                    .map_err(|e| ReedPerformanceError::Schedule(GestureCompileError::Gesture(e)))?;
+                let p_m = schedule.sample(track_id, tick)?;
                 (held_downward_n - face * p_m).max(0.0)
             } else {
                 let elapsed = t - self.release_start_s;
@@ -1652,17 +1660,37 @@ impl TongueContactInput {
             };
             let bits = force_n.to_bits();
             if previous != Some(bits) {
-                let sample = (u128::from(tick) * u128::from(audio_rate_hz))
-                    .div_ceil(u128::from(control_rate_hz)) as u64;
-                controls
-                    .try_reserve(1)
-                    .map_err(|_| bad(0, "cannot allocate tongue_contact controls"))?;
-                controls.push(ScheduledControl {
-                    sample,
-                    delta: ControlDelta::SetReedClosingForce { voice: 0, force_n },
-                });
+                series.push((tick, force_n));
                 previous = Some(bits);
             }
+        }
+        Ok(series)
+    }
+
+    fn append_controls(
+        &self,
+        controls: &mut Vec<ScheduledControl>,
+        schedule: &GestureSchedule,
+        track_id: &str,
+        reed: BeatingReed,
+        audio_rate_hz: u32,
+        last_tick: u64,
+    ) -> Result<(), ReedPerformanceError> {
+        let control_rate_hz = schedule.control_rate_hz;
+        let face = crate::reed_bore::reed_pressure_face(reed);
+        let series = self
+            .force_series(schedule, track_id, face, last_tick)
+            .map_err(|e| ReedPerformanceError::Schedule(GestureCompileError::Gesture(e)))?;
+        for (tick, force_n) in series {
+            let sample = (u128::from(tick) * u128::from(audio_rate_hz))
+                .div_ceil(u128::from(control_rate_hz)) as u64;
+            controls
+                .try_reserve(1)
+                .map_err(|_| bad(0, "cannot allocate tongue_contact controls"))?;
+            controls.push(ScheduledControl {
+                sample,
+                delta: ControlDelta::SetReedClosingForce { voice: 0, force_n },
+            });
         }
         Ok(())
     }

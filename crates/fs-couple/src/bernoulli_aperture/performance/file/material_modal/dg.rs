@@ -40,10 +40,12 @@
 //!
 //! Or `reed HEIGHT WIDTH CLOSING_PA MASS STIFFNESS ZETA SOURCE_TOKEN` replaces `loss`/`blades` and every
 //! plate record with ONE typed, sourced lumped reed (the six numbers of a reed-performance `reed` row), so a
-//! DG bore plays the reed a modal-bore page plays. See `reed`; it has no mesh, material, closure or force
+//! DG bore plays the reed a modal-bore page plays. See `reed`; it has no mesh, material, closure or plate force
 //! port, requires `slit_length none` and HEIGHT equal to the `valve` REST_GAP. An optional `staple_recovery C_P S_C_M2`
 //! row directly after it gives the double reed's staple pressure recovery, an optional `contraction C_C` row after
-//! that gives the reed jet's vena contracta, and an optional `constriction_noise SEED
+//! that gives the reed jet's vena contracta, an optional `tongue_contact AREA EFFECTIVE_AREA FORCE RELEASE_START RELEASE`
+//! row after that gives the tongue's closing force on the reed (the reed's only force port), and an optional
+//! `constriction_noise SEED
 //! DUCT_RADIUS_M` row after those adds Oldham and Ukpoho's duct-constriction noise as a seeded series pressure.
 
 use super::{
@@ -446,6 +448,14 @@ impl MaterialModalDgValvePerformance {
         ).map_err(PlateValveInputError::Gesture)?;
         if let Some(card) = constriction_noise {
             renderer = renderer.with_constriction_noise(card).map_err(PlateValveInputError::Gesture)?;
+        }
+        // The typed reed's optional tongue: its closing force history, compiled against this performance's own
+        // blowing-pressure track, on the reed's force port (which only a card stating the row opens).
+        if let Some(record) = &reed {
+            if let Some(tongue) = record.tongue_contact() {
+                renderer = renderer.with_reed_closing_force(tongue, record.pressure_area_m2())
+                    .map_err(PlateValveInputError::Gesture)?;
+            }
         }
         if let Some(propagation) = observer_gas {
             renderer = renderer.with_observer_gas(&propagation, gate)
