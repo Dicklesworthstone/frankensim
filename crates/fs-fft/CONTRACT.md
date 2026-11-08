@@ -389,6 +389,52 @@ the residual and can bias the fitted poles. Work remains
 O(E C (N K² + K³)), storage O(N K + K² + C K); no new throughput or
 mid-factorization cancellation claim is made.
 
+### Linear frequency drift and crossing chirps
+
+`harmonic::ChirpedToneFitPlan` jointly fits DC and constant peak phasors at
+supplied linear instantaneous-frequency trajectories. Each `ChirpedTone`
+declares the frequency at the first and last samples in hertz. For duration
+`T=(N-1)*dt`, its phase in cycles is `f_start*t+(f_end-f_start)*t²/(2*T)`.
+Phasors use `exp(-i phase)` and refer to the first sample. Tone order is
+retained, including crossing trajectories and shared endpoint frequencies;
+duplicate trajectories and numerically unresolved designs refuse.
+
+Both endpoints must be positive and strictly sub-Nyquist. Linearity then
+admits the full instantaneous-frequency path, without claiming a bandlimit
+or anti-alias filtering. Endpoint coordinates avoid an underflowed Hz/s drift
+rate or an overflowed time squared. The integrated phase is evaluated as a
+DD convex combination of endpoints times the original DD sample clock, then
+reduced in cycles before deterministic trigonometry. Zero drift calls the
+original stationary phase owner and preserves its design and fit bits.
+All plans share the existing `FitDesign` QR, conditioning, physical scaling
+and allocation-free `fit_into` owner.
+
+`refine_chirped_tones` and `refine_chirped_tones_channels` infer both endpoint
+frequencies locally inside explicitly supplied disjoint search rectangles.
+They extend the original bounded refinement owner, retaining the complete
+variable-projection Jacobian and the independent projected-sensitivity
+identifiability gate. Coordinates are endpoint frequency times duration;
+relative channel amplitudes remain in their common physical units. Constant
+channels retain DC without inventing frequency information. No normal
+equations, FFT-bin rounding, resampling or piecewise stationary fits are used.
+Both untruncated endpoint corrections must meet the frequency tolerance.
+Quarter-cycle steps, backtracking, rejected-attempt accounting, active-bound
+refusal, rank gates and complete storage admission stay shared with the
+stationary/damped solver. Work is O(E C (N K² + K³)); numeric storage is
+O(N K + K² + C K).
+
+`tests/chirped_tones.rs` checks independent quadratic-phase records, crossing
+trajectories, multi-sensor nodal components, frame/unit changes, record-origin
+phase, stationary bit parity, representable endpoint laws with underflowed
+Hz/s rates, omitted energy and typed rank/domain/work refusals. In-module
+checks exercise a billion-sample phase clock without allocating its record,
+and compare the full profiled Jacobian with independent refits at nonzero
+residual. These are numerical checks, not measurement-uncertainty coverage.
+This local linear-law owner does not discover tones, infer arbitrary tracks
+or envelopes, extrapolate a chirp, or reinterpret changing frequencies as
+stationary modal poles. It supplies a primitive for chirp analysis; it does
+not establish an Euler-disc mechanism or close its terminal-asymptotic bead.
+
 ### Local fundamental-frequency refinement
 
 `harmonic::refine_harmonic_frequency` refines an independently supplied pitch

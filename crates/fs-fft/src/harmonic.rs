@@ -16,9 +16,11 @@
 //! frequencies, fitting ringdowns and double decay through the same QR owner.
 //! [`refine_damped_tone_poles`] jointly refines locally seeded frequencies and
 //! amplitude decay rates without treating a ringdown as stationary harmonics.
+//! [`ChirpedToneFitPlan`] and [`refine_chirped_tones`] retain linear frequency
+//! drift, including independently moving and crossing tone trajectories.
 //!
-//! The returned peak phasor is `a_h + i b_h` for `exp(-i w_h t)`, referenced
-//! to the first sample. For an undamped bin-centered real sinusoid, it is
+//! The returned peak phasor is `a_h + i b_h` for `exp(-i phase_h(t))`, with
+//! phase zero at the first sample. For an undamped bin-centered real sinusoid, it is
 //! twice the conjugate of the positive-frequency normalized DFT coefficient.
 
 use crate::C64;
@@ -28,6 +30,14 @@ use fs_math::{dd::Dd, det};
 #[path = "harmonic/damped.rs"]
 mod damped;
 pub use damped::{DampedToneFitPlan, DampedTonePole};
+
+#[path = "harmonic/chirp.rs"]
+mod chirp;
+pub use chirp::{
+    ChirpedTone, ChirpedToneBounds, ChirpedToneChannelsFit, ChirpedToneCorrection, ChirpedToneFit,
+    ChirpedToneFitPlan, ChirpedToneRefinementBudget, ChirpedToneRefinementError,
+    refine_chirped_tones, refine_chirped_tones_channels,
+};
 
 #[path = "harmonic/poles.rs"]
 mod poles;
@@ -136,6 +146,10 @@ fn invalid(what: &'static str) -> HarmonicFitError {
 // This avoids full DD trigonometry, new allocations, or a drifting recurrence.
 fn sample_sin_cos(frequency_hz: f64, timestep_s: f64, index: usize) -> (f64, f64) {
     let cycles = Dd::from_f64(frequency_hz) * Dd::from_f64(timestep_s) * Dd::from_f64(index as f64);
+    sin_cos_cycles(cycles)
+}
+
+fn sin_cos_cycles(cycles: Dd) -> (f64, f64) {
     let fraction = cycles - Dd::from_f64(cycles.hi.round());
     let angle = fraction * crate::harmonic_window::TAU_DD;
     let (sine, cosine) = det::sin_cos(angle.hi);
@@ -150,7 +164,9 @@ fn sample_sin_cos(frequency_hz: f64, timestep_s: f64, index: usize) -> (f64, f64
 pub struct HarmonicFit {
     /// Fitted constant term, not the arithmetic mean of a partial-period record.
     pub dc: f64,
-    /// Peak `exp(-i omega t)` phasors in the plan's tone or harmonic order.
+    /// Peak `exp(-i phase(t))` phasors in the plan's tone or harmonic order.
+    /// Each phase starts at zero at the first sample; a chirp follows its
+    /// supplied or inferred instantaneous-frequency law throughout the record.
     /// For a damped plan, amplitudes are referenced to the first sample,
     /// before applying each pole's exponential decay envelope.
     pub phasors: Vec<C64>,
@@ -421,6 +437,33 @@ impl FitDesign {
         extra_workspace_bytes: usize,
         budget: HarmonicFitBudget,
     ) -> Result<Self, HarmonicFitError> {
+        Self::with_basis(
+            sample_count,
+            timestep_s,
+            tones,
+            &frequency_hz,
+            |j, k| {
+                let (s, c) = sample_sin_cos(frequency_hz(k), timestep_s, j);
+                let amplitude = envelope(j, k);
+                (s * amplitude, c * amplitude)
+            },
+            extra_workspace_bytes,
+            budget,
+        )
+    }
+
+    // Every sampled basis retains the same QR, conditioning and amplitude
+    // owner. Chirps supply their maximum instantaneous frequency and their
+    // integrated phase; stationary and damped plans keep their original bits.
+    fn with_basis(
+        sample_count: usize,
+        timestep_s: f64,
+        tones: usize,
+        maximum_frequency_hz: impl Fn(usize) -> f64,
+        sine_cosine: impl Fn(usize, usize) -> (f64, f64),
+        extra_workspace_bytes: usize,
+        budget: HarmonicFitBudget,
+    ) -> Result<Self, HarmonicFitError> {
         if !timestep_s.is_finite() || timestep_s <= 0.0 {
             return Err(invalid("timestep must be positive and finite"));
         }
@@ -441,7 +484,7 @@ impl FitDesign {
             return Err(invalid("sample count exceeds the exact integer clock"));
         }
         for k in 0..tones {
-            let cycles = frequency_hz(k) * timestep_s;
+            let cycles = maximum_frequency_hz(k) * timestep_s;
             if !(cycles > 0.0 && cycles < 0.5) {
                 return Err(invalid(
                     "tone frequencies must be positive and strictly below Nyquist",
@@ -468,10 +511,9 @@ impl FitDesign {
         for (j, row) in design.chunks_exact_mut(columns).enumerate() {
             row[0] = 1.0;
             for k in 0..tones {
-                let (s, c) = sample_sin_cos(frequency_hz(k), timestep_s, j);
-                let amplitude = envelope(j, k);
-                row[2 * k + 1] = c * amplitude;
-                row[2 * k + 2] = s * amplitude;
+                let (s, c) = sine_cosine(j, k);
+                row[2 * k + 1] = c;
+                row[2 * k + 2] = s;
             }
         }
         let factor = qr(&design, sample_count, columns);
