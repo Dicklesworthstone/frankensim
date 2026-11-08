@@ -1,4 +1,6 @@
 //! G1/G3: independently integrated cube mode and time-domain AC agreement.
+#[path = "harmonic/loads.rs"]
+mod loads;
 use super::*;
 use fs_em::spatial::vector_potential::induction::harmonic::SpatialHarmonicInductionControls;
 use fs_math::c64::C64;

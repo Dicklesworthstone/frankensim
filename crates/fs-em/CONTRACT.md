@@ -6930,3 +6930,31 @@ second-order transient-to-phasor agreement, phase and DC-gauge invariance,
 resource/skin/material admission and cancellation. A separate dense reference
 checks the nonsymmetric motion operator, its actual transpose, and the complex
 Jacobi inverse.
+
+### Mean and twice-frequency induction forces on mechanical receivers
+
+`SpatialHarmonicInductionResponse::lorentz_loads` retains the complete
+conduction-current force from one AC carrier: mean `Re(J cross conj(B))/2`
+and peak complex twice-frequency coefficient `(J cross B)/2`. The original
+tetrahedral P1 integrator supplies consistent nodal loads, receiving-frame
+wrenches and arbitrary P1 virtual power for all three real coefficient fields.
+Its original local-reference torque reduction and compensated scatter remain
+authoritative. A zero cycle-mean force does not erase oscillating vibration
+forcing.
+
+The accepted response owns the original geometry, current, flux and volume
+sources. Body selections are bounded and canonicalized; repeated or foreign
+cells refuse. Cancellation publishes no partial transfer. The mean coefficient
+paired with the original steady velocity equals the selected cells' mechanical
+power; another receiving velocity supplies virtual work, not coupled feedback.
+
+This is fixed-geometry, one-way AC conduction-current forcing. It does not add
+DC/AC cross terms, impressed winding-current force, magnetization, interface
+traction or magnetostriction, and must not be combined with an overlapping
+enclosing-stress load on the same body. Mechanical motion changing the field
+requires a coupled evolution.
+
+Focused G1/G3 regressions independently integrate instantaneous `J(t) cross B(t)`
+with degree-two tetrahedral quadrature and check nodal force, torque, nonrigid
+virtual work, zero-mean oscillation, quadratic amplitude and doubled phase,
+receiving frames, canonical selections and cancellation.

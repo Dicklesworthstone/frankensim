@@ -18,6 +18,9 @@
 //! Solver" (the MQS reduction omits displacement and wave-propagation terms):
 //! <https://ansyshelp.ansys.com/public/Views/Secured/Electronics/v261/en/Subsystems/Maxwell/Content/Maxwell/ACMagnetic_APhiSolver.htm>.
 
+/// Consistent mean and twice-frequency mechanical loads on original bodies.
+pub mod loads;
+
 use super::super::super::{cross, norm, sub};
 use super::*;
 use fs_math::c64::C64;
