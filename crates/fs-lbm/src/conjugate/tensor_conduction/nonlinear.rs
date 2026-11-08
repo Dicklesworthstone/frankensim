@@ -11,7 +11,7 @@ use fs_sparse::Coo;
 
 use super::{
     ChtError, ConductivityTensor, EnergyConfig, Prepared, PseudoStep, SolidMaterial,
-    TensorConductionSolution, ThermalFace, ThermalSetup, VoxelDomain, audit_endpoint_with_storage,
+    TensorConductionSolution, ThermalFace, ThermalSetup, VoxelDomain, audit_endpoint_with_contacts,
     bicgstab_ilu0, finite, finite_positive, invalid, poll, prepare_geometry, residual_norms,
     scale_rows, validate_sensible_storage,
 };
@@ -30,6 +30,7 @@ pub use caloric::{
     advance_caloric_tensor_conduction_sdirk2,
 };
 use coordinate::{CellCoordinate, KelvinCoordinate};
+use super::contact::{ContactHeat, PreparedSources, joint_heat};
 use local::{KirchhoffCell, KirchhoffRecovery};
 pub use material::{RotatedSolidConductivity, TensorConductivityLaw};
 pub use sdirk::{TensorNonlinearSdirk2Step, advance_nonlinear_tensor_conduction_sdirk2};
@@ -94,9 +95,11 @@ pub struct TensorNonlinearSolution {
 ///
 /// The caller supplies one positive cell-temperature seed. Prescribed cells
 /// take their authored temperature; perfect interfaces start at the two-cell
-/// mean, finite-contact traces at their respective cell temperatures, and
-/// prescribed boundary traces at the authored Kelvin value. The complete
-/// initial cell-to-face intervals must be supported by the original laws.
+/// mean, fixed-resistance contact traces at their respective cell temperatures,
+/// and prescribed boundary traces at the authored Kelvin value. Source contacts
+/// start from their original declared surface-temperature query, so their bulk
+/// centres need not lie in the interface source box. Every initial cell-to-face
+/// interval must still be supported by the original conductivity law.
 ///
 /// Newton corrections use original endpoint tensors, including all mixed
 /// conductivity components, without an extra K'(T) term. Local cell increments
@@ -107,9 +110,17 @@ pub struct TensorNonlinearSolution {
 /// physical ledger. Both source support and positive Kelvin values hold at
 /// the returned endpoint. All inputs remain unchanged on any outcome.
 ///
-/// The supported geometry, fixed/contact/film/flux/sink/source scope is the
-/// same as frozen tensor conduction. Source-backed contact laws, advection,
-/// eddy additions and compact components retain their existing owners.
+/// SourceFaceContact binds its original positive R(T_surface_A,T_surface_B)
+/// directly to the two physical traces. Every trial retains the selected source,
+/// fixed external conditions and A/B surface order. Its full analytic resistance
+/// chain rule enters the SAME sparse Newton system; no outer frozen-R iteration
+/// or extra contact heat is introduced. Curve/source-cell corners use original
+/// one-sided primal tangents and confer no unique-adjoint claim. Physical
+/// source receipts and surface heat are returned with the solution.
+/// TensorNonlinearConfig owns all iteration limits; scalar SourceContactControls
+/// do not govern this direct Newton path. Other geometry, fixed/film/flux/sink
+/// scope matches frozen tensor conduction. Advection, eddy additions and compact
+/// components retain their existing owners.
 ///
 /// # Errors
 /// Invalid ownership, unsupported source intervals, nonphysical/unrepresentable
@@ -149,6 +160,8 @@ struct Endpoint {
     // None for Kelvin, avoiding duplicate cell storage in all existing paths.
     coordinates: Option<Vec<CoordinateValue>>,
     trace: Vec<f64>,
+    // Source-order heat and full two-trace derivatives from this SAME trial.
+    source_contact_heat: Vec<ContactHeat>,
     cell_residual: Vec<f64>,
     trace_residual: Vec<f64>,
     merit: f64,
@@ -285,6 +298,7 @@ fn solve_coordinate<C: CellCoordinate>(
                 .ok_or_else(|| invalid("nonlinear tensor cell geometry is unrepresentable"))?,
         );
     }
+    let sources = PreparedSources::new(domain, setup, gate)?;
     let data = prepare_geometry(
         domain,
         solids,
@@ -292,10 +306,12 @@ fn solve_coordinate<C: CellCoordinate>(
         &point,
         &config.linear,
         coordinate.reference_temperatures(),
+        Some(&sources),
         gate,
     )?;
     drop(point);
-    let trace = initial_trace(domain, &data, &temperature, gate)?;
+    let mut trace = initial_trace(domain, &data, &temperature, gate)?;
+    sources.seed_traces(&data, &mut trace, gate)?;
     drop(temperature);
     let mut endpoint = evaluate(
         domain,
@@ -303,6 +319,7 @@ fn solve_coordinate<C: CellCoordinate>(
         laws,
         &geometry,
         &data,
+        &sources,
         coordinate,
         carried_power_w,
         values,
@@ -380,6 +397,7 @@ fn solve_coordinate<C: CellCoordinate>(
                 laws,
                 &geometry,
                 &data,
+                &sources,
                 coordinate,
                 carried_power_w,
                 values,
@@ -475,6 +493,7 @@ fn evaluate<C: CellCoordinate>(
     laws: &[&dyn TensorConductivityLaw],
     geometry: &[KirchhoffCell],
     data: &Prepared,
+    sources: &PreparedSources<'_>,
     coordinate: &C,
     carried_power_w: Option<&[f64]>,
     values: Vec<f64>,
@@ -564,15 +583,17 @@ fn evaluate<C: CellCoordinate>(
         heat.push(actual.outward_w);
         arithmetic.push(actual.arithmetic_w);
     }
+    let (source_contact_heat, source_contact_states) =
+        sources.evaluate(data, &trace, &heat, gate)?;
     for (index, joint) in data.joints.iter().enumerate() {
         if index.is_multiple_of(4096) {
             poll(gate)?;
         }
         let a = data.face_ids[joint.cell][joint.face];
         let b = data.face_ids[joint.neighbor][joint.face ^ 1];
-        let q = joint.conductance * (trace[a] - trace[b]);
-        trace_residual[a] += q;
-        trace_residual[b] -= q;
+        let response = joint_heat(joint, [trace[a], trace[b]], &source_contact_heat)?;
+        trace_residual[a] += response.heat_w;
+        trace_residual[b] -= response.heat_w;
     }
     let mut merit = 0.0_f64;
     for &value in cell_residual.iter().chain(&trace_residual) {
@@ -583,12 +604,14 @@ fn evaluate<C: CellCoordinate>(
         }
         merit = merit.max(value.abs());
     }
-    let solution = audit_endpoint_with_storage(
+    let mut solution = audit_endpoint_with_contacts(
         domain,
         setup,
         data,
         |cell, temperature| coordinate.storage_rate(cell,
             coordinates.as_ref().map_or(temperature, |values| values[cell].value)),
+        |joint, temperatures| joint_heat(joint, temperatures, &source_contact_heat)
+            .map(|response| (response.heat_w, response.arithmetic_w)),
         carried_power_w,
         temperature,
         faces,
@@ -596,10 +619,12 @@ fn evaluate<C: CellCoordinate>(
         arithmetic,
         gate,
     )?;
+    solution.source_contact_states = source_contact_states;
     Ok(Endpoint {
         solution,
         coordinates,
         trace,
+        source_contact_heat,
         cell_residual,
         trace_residual,
         merit,
@@ -684,11 +709,14 @@ fn linearize<C: CellCoordinate>(
         }
         let a = data.face_ids[joint.cell][joint.face];
         let b = data.face_ids[joint.neighbor][joint.face ^ 1];
-        let g = joint.conductance;
-        coo.push(a, a, g);
-        coo.push(a, b, -g);
-        coo.push(b, b, g);
-        coo.push(b, a, -g);
+        let response = joint_heat(
+            joint, [endpoint.trace[a], endpoint.trace[b]], &endpoint.source_contact_heat,
+        )?;
+        let [da, db] = response.derivative_w_k;
+        coo.push(a, a, da);
+        coo.push(a, b, db);
+        coo.push(b, b, -db);
+        coo.push(b, a, -da);
     }
     for (id, known) in data.known.iter().enumerate() {
         if id.is_multiple_of(4096) {

@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use fs_exec::CancelGate;
-use fs_matdb::{InterfaceSystemCard, QueryPoint};
+use fs_matdb::{InterfaceSystemCard, InterpolationPolicy, PreparedSurfaceResponse, PropertyValue,
+    QueryPoint};
 use fs_material::state_point::{MaterialPropertySelection, ResolvedInterfaceStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, is_fixed_external_coordinate,
     resolve_interface_state_point};
@@ -26,6 +27,15 @@ pub struct SourceFaceContact {
     card: Arc<InterfaceSystemCard>,
     axes: [String; 2],
     reference: ResolvedInterfaceStatePoint,
+}
+
+/// Analytic response of the SAME selected contact payload, prepared once per
+/// native tensor solve. Source selection, applicability and values stay with
+/// SourceFaceContact; this only retains its original primal Newton tangent.
+pub(crate) enum SourceContactTangent<'a> {
+    Constant,
+    Curve { side: usize, knots: &'a [(f64, f64)] },
+    Surface { response: PreparedSurfaceResponse, sides: [Option<usize>; 2] },
 }
 
 impl SourceFaceContact {
@@ -78,6 +88,102 @@ impl SourceFaceContact {
     #[must_use]
     pub const fn reference(&self) -> &ResolvedInterfaceStatePoint { &self.reference }
 
+    pub(crate) fn reference_resistance(&self) -> Result<f64, ChtError> {
+        resistance(&self.reference)
+    }
+
+    /// The caller's original, supported surface state is a Newton seed. Bulk
+    /// cell temperatures need not lie inside an interface source's domain.
+    pub(crate) fn reference_surfaces(&self) -> Result<[f64; 2], ChtError> {
+        let mut temperatures = [0.0; 2];
+        for (side, axis) in self.axes.iter().enumerate() {
+            temperatures[side] = self.reference.state_coordinate(axis)
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| invalid("contact source lost its original surface temperature"))?;
+        }
+        Ok(temperatures)
+    }
+
+    pub(crate) fn prepare_temperature_tangent(&self) -> Result<SourceContactTangent<'_>, ChtError> {
+        let property = self.reference.property(RP)
+            .ok_or_else(|| invalid("contact source omitted its resistance"))?;
+        let selected = property.answer().receipt.selected;
+        let claim = self.card.claims().claim(selected)
+            .ok_or_else(|| invalid("contact source lost its exact selected claim"))?;
+        match (&claim.value, &claim.interpolation) {
+            (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) =>
+                Ok(SourceContactTangent::Constant),
+            (PropertyValue::Curve { abscissa, knots, .. }, InterpolationPolicy::LinearInside) => {
+                if let Some(side) = self.axes.iter().position(|axis| axis == abscissa) {
+                    if knots.len() < 2 {
+                        return Err(invalid("contact curve needs an original interval for a Newton tangent"));
+                    }
+                    Ok(SourceContactTangent::Curve { side, knots })
+                } else {
+                    Ok(SourceContactTangent::Constant)
+                }
+            }
+            (PropertyValue::Surface2D { axes, .. }, InterpolationPolicy::LinearInside) => {
+                let sides = axes.each_ref().map(|axis| self.axes.iter().position(|owned| owned == axis));
+                if sides == [None; 2] {
+                    return Ok(SourceContactTangent::Constant);
+                }
+                let response = claim.value.prepare_surface_response()
+                    .map_err(|error| invalid(&format!("original contact surface tangent refused: {error}")))?;
+                Ok(SourceContactTangent::Surface { response, sides })
+            }
+            _ => Err(invalid(
+                "tensor contact needs a constant scalar, original linear curve or original linear surface",
+            )),
+        }
+    }
+
+    /// One pinned physical source query and its original two-surface partials.
+    /// Curve corners use the right interval (left at the upper endpoint);
+    /// surface corners use the canonical original containing source cell.
+    /// These are primal generalized Newton tangents, not unique adjoints.
+    pub(crate) fn at_with_temperature_tangent(
+        &self, surfaces: [f64; 2], tangent: &SourceContactTangent<'_>,
+    ) -> Result<(f64, [f64; 2], ResolvedInterfaceStatePoint), ChtError> {
+        let source = self.at(surfaces)?;
+        let value = resistance(&source)?;
+        let mut partials = [0.0; 2];
+        match tangent {
+            SourceContactTangent::Constant => {}
+            SourceContactTangent::Curve { side, knots } => {
+                let t = surfaces[*side];
+                if t < knots[0].0 || t > knots[knots.len() - 1].0 {
+                    return Err(invalid("contact tangent cannot extrapolate its original curve"));
+                }
+                let upper = knots.partition_point(|knot| knot.0 <= t).min(knots.len() - 1);
+                let a = knots[upper - 1];
+                let b = knots[upper];
+                partials[*side] = (b.1 - a.1) / (b.0 - a.0);
+            }
+            SourceContactTangent::Surface { response, sides } => {
+                let mut point = [0.0; 2];
+                for (coordinate, axis) in point.iter_mut().zip(response.axes()) {
+                    *coordinate = source.state_coordinate(axis)
+                        .ok_or_else(|| invalid("contact tangent lost an original source coordinate"))?;
+                }
+                let differential = response.evaluate(point)
+                    .map_err(|error| invalid(&format!("original contact source-cell tangent refused: {error}")))?;
+                if differential.value != value {
+                    return Err(invalid("contact tangent differs from its original pinned source value"));
+                }
+                for (coordinate, side) in sides.iter().enumerate() {
+                    if let Some(side) = side {
+                        partials[*side] += differential.gradient[coordinate];
+                    }
+                }
+            }
+        }
+        if partials.iter().any(|partial| !partial.is_finite()) {
+            return Err(invalid("original contact temperature derivative is unrepresentable"));
+        }
+        Ok((value, partials, source))
+    }
+
     fn at(&self, surfaces: [f64; 2]) -> Result<ResolvedInterfaceStatePoint, ChtError> {
         let mut point = self.reference.query();
         for (axis, temperature) in self.axes.iter().zip(surfaces) {
@@ -92,7 +198,9 @@ impl SourceFaceContact {
     }
 }
 
-/// Numerical controls for the shared nonlinear source-contact endpoint.
+/// Controls for the scalar energy owner's outer fixed-resistance iterations.
+/// Native tensor Newton solves use TensorNonlinearConfig and its shared work
+/// budgets instead; they evaluate the original contact inside each spatial trial.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SourceContactControls {
     /// Maximum complete fixed-resistance thermal solves per endpoint.
@@ -110,7 +218,8 @@ impl Default for SourceContactControls {
 }
 
 /// Physical source query at the returned cell field and its integrated surfaces.
-/// Applied/source differences are retained and bounded by the requested controls.
+/// Scalar outer iterations bound applied/source differences with their controls.
+/// Direct tensor Newton applies the exact source value and audits physical heat.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceContactState {
     /// Original A/B cell order; it is never replaced by a sorted source order.
@@ -121,11 +230,13 @@ pub struct SourceContactState {
     pub heat_rate_first_to_second_w: f64,
     /// Fresh source resistance at the reported surface temperatures, m² K/W.
     pub resistance_m2_k_w: f64,
-    /// Resistance used by the returned fixed-resistance thermal solve, m² K/W.
+    /// Resistance applied at the returned physical endpoint, m² K/W.
+    /// Direct tensor Newton uses the exact freshly evaluated source resistance.
     pub applied_resistance_m2_k_w: f64,
     /// Symmetric relative applied/source resistance discrepancy.
     pub resistance_relative_residual: f64,
-    /// Signed (T_surface_A - T_surface_B) - R_source*q, K.
+    /// Signed (T_surface_A - T_surface_B) - R_source*q, K,
+    /// where q is actual first-to-second heat flux in W/m².
     pub contact_temperature_residual_k: f64,
     /// Exact original source, selected claim and physical surface query receipt.
     pub source: ResolvedInterfaceStatePoint,

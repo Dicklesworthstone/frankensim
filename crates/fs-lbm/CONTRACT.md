@@ -615,3 +615,39 @@ its original endpoint trapezoid. No open boundary, interior-solid filter,
 backscatter-energy model, complete compressible LES closure, turbulent-wall
 function, shock qualification or DNS claim is added. Native integration tests
 are authored but require execution in a complete build environment.
+
+## Original source contacts in nonlinear tensor conduction
+
+The native nonlinear tensor owner consumes the existing ordered
+SourceFaceContact assignments directly. This applies to steady conduction,
+sensible backward Euler and SDIRK2, and both original-caloric time drivers.
+Every finite source contact retains two physical face temperatures. The
+original declared interface query seeds these traces; unequal bulk cell
+temperatures may lie outside the interface source's temperature box, while
+their conductivity intervals must remain supported by their original laws.
+
+Every physical Newton trial refreshes the same selected original resistance
+claim at those actual A/B surface temperatures. Card identity, surface order,
+pressure, separation, finish, medium and other supplied conditions remain
+with the existing source owner. Supported tangent payloads are a declared
+constant scalar, an original linear curve, or original affine surface cells.
+The analytical chain rule for q = A*(Ta-Tb)/R includes both resistance
+temperature derivatives. Source corners use original one-sided primal
+tangents and do not establish a unique adjoint derivative.
+
+The two trace equations receive exact opposite contact heat and derivative
+rows. Cell increments still condense locally into the existing sparse face
+system; the contact adds no storage, external source, boundary heat or outer
+fixed-resistance thermal solve. Numerical source responses and derivatives
+are cached per trial, and source derivative preparation occurs once per
+spatial solve. Original source receipts and actual bulk face heat are returned
+in TensorConductionSolution.source_contact_states, with independent local
+interface, contact and global energy checks.
+
+TensorNonlinearConfig owns Newton, Krylov and rejected-trial work budgets,
+shared across SDIRK2 stages. Scalar SourceContactControls govern only the
+separate scalar outer iteration. Duplicate or overlapping contact owners,
+unsupported original source states, failed convergence and cancellation
+return no partial endpoint or interval. Frozen tensor entries continue to
+require fixed contacts; existing fixed-resistance and perfect-interface
+arithmetic retain their original paths.

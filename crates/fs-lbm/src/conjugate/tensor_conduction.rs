@@ -13,13 +13,14 @@
 use std::collections::BTreeMap;
 use fs_exec::CancelGate;
 use fs_sparse::Coo;
-use super::energy::{PseudoStep, heat_residual_ratio};
+use super::energy::{PseudoStep, SourceContactState, heat_residual_ratio};
 use super::krylov::{bicgstab_ilu0, residual_norms};
 use super::{
     ChtError, EnergyBalance, EnergyConfig, SolidMaterial, ThermalFace, ThermalSetup,
     Voxel, VoxelDomain, finite, finite_positive, poll, scale_rows,
 };
 
+mod contact;
 mod local;
 mod nonlinear;
 mod sdirk;
@@ -100,6 +101,9 @@ pub struct TensorConductionSolution {
     pub face_temperature_k: Vec<[f64; 6]>,
     /// Conductive heat leaving each cell face, W, including thermostat faces.
     pub outward_heat_w: Vec<[f64; 6]>,
+    /// Original source-contact receipts and actual surface heat, in authored
+    /// A/B order. Empty for fixed-resistance or perfect contacts.
+    pub source_contact_states: Vec<SourceContactState>,
     /// Solver, conservation and heat-transfer evidence.
     pub report: TensorConductionReport,
 }
@@ -158,6 +162,7 @@ struct Joint {
     neighbor: usize,
     face: usize,
     conductance: f64,
+    source: Option<contact::SourceJoint>,
 }
 
 struct Prepared {
@@ -218,6 +223,7 @@ fn prepare(
         tensors,
         config,
         step.map(|s| s.previous),
+        None,
         gate,
     )
 }
@@ -225,7 +231,7 @@ fn prepare(
 /// Geometry admission only needs the original positive temperature reference
 /// and knowledge that physical storage anchors every cell. Its energy
 /// coordinate and storage tangent stay with the selected transient owner.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn prepare_geometry(
     domain: &VoxelDomain,
     solids: &[SolidMaterial],
@@ -233,6 +239,7 @@ fn prepare_geometry(
     tensors: &[ConductivityTensor],
     config: &EnergyConfig,
     storage_reference_k: Option<&[f64]>,
+    sources: Option<&contact::PreparedSources<'_>>,
     gate: &CancelGate,
 ) -> Result<Prepared, ChtError> {
     poll(gate)?;
@@ -243,12 +250,12 @@ fn prepare_geometry(
     if tensors.len() != cells {
         return Err(invalid("needs exactly one prepared conductivity tensor per cell"));
     }
-    if !setup.source_face_contacts.is_empty()
+    if (!setup.source_face_contacts.is_empty() && sources.is_none())
         || !setup.eddy_conductivity_w_m_k.is_empty()
         || !setup.compact_components.is_empty()
         || !setup.compact_heat_storage.is_empty()
     {
-        return Err(invalid("tensor conduction does not own source contacts, eddy additions or compact components"));
+        return Err(invalid("source contacts require the nonlinear tensor owner; eddy additions and compact components are unsupported"));
     }
     if !setup.power_w.is_empty() && setup.power_w.len() != cells {
         return Err(invalid("power needs zero entries or one entry per cell"));
@@ -340,6 +347,18 @@ fn prepare_geometry(
         }
     }
     let explicit = super::energy::face_contact::prepare_conduction(domain, setup, gate)?;
+    if let Some(sources) = sources {
+        for (index, (a, b)) in sources.cell_pairs().enumerate() {
+            if index.is_multiple_of(256) { poll(gate)?; }
+            let pair_owned = match (domain.voxel_at(a), domain.voxel_at(b)) {
+                (Voxel::Solid(a), Voxel::Solid(b)) => pairs.contains_key(&(a.min(b), a.max(b))),
+                _ => false,
+            };
+            if explicit.contains_key(&(a, b)) || pair_owned {
+                return Err(invalid("a source contact cannot also have a fixed face or material-pair owner"));
+            }
+        }
+    }
     let mut face_ids = vec![[usize::MAX; 6]; cells];
     let mut known = Vec::new();
     let mut joints = Vec::new();
@@ -354,18 +373,24 @@ fn prepare_geometry(
             } else { None };
             known.push(prescribed);
             if let Some(n) = domain.neighbor(c, f) {
-                let resistance = explicit.get(&(c.min(n), c.max(n))).copied().or_else(|| {
-                    match (domain.voxel_at(c), domain.voxel_at(n)) {
-                        (Voxel::Solid(a), Voxel::Solid(b)) => pairs.get(&(a.min(b), a.max(b))).copied(),
-                        _ => None,
-                    }
+                let source = sources.and_then(|sources| sources.face(c, n));
+                let resistance = source.map(|(_, resistance)| resistance).or_else(|| {
+                    explicit.get(&(c.min(n), c.max(n))).copied().or_else(|| {
+                        match (domain.voxel_at(c), domain.voxel_at(n)) {
+                            (Voxel::Solid(a), Voxel::Solid(b)) => pairs.get(&(a.min(b), a.max(b))).copied(),
+                            _ => None,
+                        }
+                    })
                 }).unwrap_or(0.0);
                 if resistance > 0.0 {
                     let conductance = domain.face_area(c, f / 2) / resistance;
                     finite_positive("thermal.tensor_conduction.contact_conductance", conductance)?;
                     face_ids[n][f ^ 1] = known.len();
                     known.push(None);
-                    joints.push(Joint { cell: c, neighbor: n, face: f, conductance });
+                    joints.push(Joint {
+                        cell: c, neighbor: n, face: f, conductance,
+                        source: source.map(|(owner, _)| owner),
+                    });
                 } else {
                     face_ids[n][f ^ 1] = face_ids[c][f];
                 }
@@ -609,12 +634,41 @@ struct StorageRate {
     arithmetic_w: f64,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn audit_endpoint_with_storage(
     domain: &VoxelDomain,
     setup: &ThermalSetup,
     data: &Prepared,
     storage: impl Fn(usize, f64) -> Result<StorageRate, ChtError>,
+    carried_power_w: Option<&[f64]>,
+    temperature: Vec<f64>,
+    face_temperature_k: Vec<[f64; 6]>,
+    outward_heat_w: Vec<[f64; 6]>,
+    arithmetic: Vec<[f64; 6]>,
+    gate: &CancelGate,
+) -> Result<TensorConductionSolution, ChtError> {
+    audit_endpoint_with_contacts(
+        domain, setup, data, storage,
+        |joint, [a, b]| {
+            if joint.source.is_some() {
+                return Err(invalid("source contact audit requires its original physical response"));
+            }
+            Ok((joint.conductance * (a - b), joint.conductance * (a.abs() + b.abs())))
+        },
+        carried_power_w, temperature, face_temperature_k, outward_heat_w, arithmetic, gate,
+    )
+}
+
+/// One physical heat audit for fixed contacts and cached ORIGINAL source laws.
+/// The contact closure supplies constitutive heat and its arithmetic scale;
+/// actual bulk face heat is checked independently against that same jump law.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn audit_endpoint_with_contacts(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    data: &Prepared,
+    storage: impl Fn(usize, f64) -> Result<StorageRate, ChtError>,
+    contact: impl Fn(&Joint, [f64; 2]) -> Result<(f64, f64), ChtError>,
     carried_power_w: Option<&[f64]>,
     temperature: Vec<f64>,
     face_temperature_k: Vec<[f64; 6]>,
@@ -704,11 +758,11 @@ fn audit_endpoint_with_storage(
         let a = joint.cell; let b = joint.neighbor; let f = joint.face;
         let ta = face_temperature_k[a][f];
         let tb = face_temperature_k[b][f ^ 1];
-        let jump_heat = joint.conductance * (ta - tb);
+        let (jump_heat, contact_arithmetic) = contact(joint, [ta, tb])?;
         let q = outward_heat_w[a][f];
         maximum = maximum.max(heat_residual_ratio(
             q - jump_heat, q.abs() + jump_heat.abs(),
-            arithmetic[a][f] + joint.conductance * (ta.abs() + tb.abs()), 0,
+            arithmetic[a][f] + contact_arithmetic, 0,
         )?);
     }
     scale += fixed.abs();
@@ -724,6 +778,7 @@ fn audit_endpoint_with_storage(
     };
     Ok(TensorConductionSolution {
         temperature, face_temperature_k, outward_heat_w,
+        source_contact_states: Vec::new(),
         report: TensorConductionReport {
             unknowns: 0, nonzeros: 0, iterations: 0, relative_residual: 0.0,
             max_heat_residual: maximum, solid_to_fluid_heat_w: solid_fluid, balance,

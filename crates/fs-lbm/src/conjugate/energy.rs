@@ -38,6 +38,7 @@ pub(super) mod face_contact;
 pub use face_contact::FaceContactResistance;
 mod source_contact;
 pub use source_contact::{SourceContactControls, SourceContactState, SourceFaceContact};
+pub(crate) use source_contact::SourceContactTangent;
 mod scheme;
 pub use scheme::ConvectionScheme;
 
