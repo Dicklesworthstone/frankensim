@@ -1856,6 +1856,31 @@ profile bit parity, discontinuous-density rigid inertia across three mesh
 levels, equal-mass redistribution and density scaling of the actual spectrum,
 attached inertia, and invalid-profile/numeric refusals.
 
+### Spatial axial prestress in tapered round shafts
+
+`shell::stiffened::beam::{round_element_with_axial_force,
+assemble_prestressed_round_beam}` add the signed conservative initial-stress
+potential `1/2 * integral(N(x) * w'(x)^2 dx)` to the original graded Rayleigh
+element. Force is in newtons, positive in tension; independent linear endpoint
+pairs preserve distributed force variation and jumps at original interfaces.
+Three Gauss points integrate the geometric polynomial through degree five.
+Original tapered elasticity, translational/rotary mass and attached-body maps
+are retained. Zero force preserves the unloaded element bits.
+
+`RoundBeamPencil` exposes the full sparse physical-coordinate tangent and mass
+with two coordinates `[w, theta]` per node. Existing support, modal and stability
+owners consume this pencil. Compression-induced negative eigenvalues are never
+clipped, and a rigid rotation is not falsely projected out under direction-fixed
+dead axial loads. This bounded cold owner requires an already equilibrated,
+straight, slender reference and caller-supplied supports/balancing loads; it
+does not infer thermal stress, solve prestress equilibrium, introduce shear or
+follower-load physics, or claim finite-rotation/post-buckling dynamics.
+
+Focused G0/G1/G2/G3 tests cover independent signed polynomial work, interface
+refinement and inertia parity, the original unloaded pin-supported spectrum,
+three-rung loaded Rayleigh frequencies and Euler buckling, signed stability
+on both sides of the critical load, and incomplete/nonfinite/overflow refusals.
+
 ### Retained plastic bending and quasistatic springback
 
 `plastic::PlasticBendingPlate<L>` integrates an existing `SmallStrainLaw` through

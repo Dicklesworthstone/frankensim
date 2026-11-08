@@ -1,8 +1,14 @@
 //! Cold planar flexure of a tapered round beam. Extends the Hermite-beam owner.
 //! Consistent Rayleigh inertia retains both transverse motion and section rotation.
-//! The pivot fixes translation, not angle; its exact rigid rotation is separated
-//! before the existing generalized eigensolve. No authored elastic frequencies.
+//! The unloaded single-pin owner separates its exact rigid rotation before the
+//! existing eigensolve. The prestressed pencil retains all physical coordinates
+//! and support-dependent stability. No authored elastic frequencies.
 use super::{PlateError, bad};
+
+mod prestress;
+pub use prestress::{
+    RoundBeamPencil, assemble_prestressed_round_beam, round_element_with_axial_force,
+};
 
 /// Circular section at an axial station; radius is linear between stations.
 #[derive(Debug, Clone, Copy)]
