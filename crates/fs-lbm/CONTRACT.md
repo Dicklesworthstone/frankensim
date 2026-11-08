@@ -147,3 +147,30 @@ all six gravity directions, zero-gravity equality, pressure-datum invariance,
 actual reflected-link traction and torque with decreasing compressibility,
 mass retention and transactional refusal. The declared density, source-domain,
 geometry and cancellation bounds remain with the original owners.
+
+## Original-law shear-free Carreau film base
+
+`film::carreau::CarreauFilm` resolves a positive prescribed flux per width at
+fixed temperature under tangential gravity. It owns the original thermal
+Carreau-Yasuda law, source-rate ceiling and accepted `CarreauSlitProfile`.
+The lower half of a symmetric stationary-wall slit of gap `2h` supplies the
+shear-free film exactly: `tau(y)=rho*g_t*(h-y)`. Native constitutive inversion,
+positive quadrature, temperature shifting, source support and viscous heat
+remain authoritative. No fitted effective viscosity enters the profile.
+
+A bounded thickness solve brackets against the original zero-shear Nusselt
+thickness and supported wall stress. Safeguarded Newton uses the exact
+`dq/dh=h*gamma_wall` sensitivity and admits both flux residual and relative
+thickness correction. Requested and accepted flux remain distinct. Point
+samples retain apparent and differential viscosities at the same local shear;
+`mu_t*u''=-rho*g_t` supplies curvature. Surface shear is zero, wall speed is
+zero, and original heat per wall area equals gravitational work within the
+native quadrature tolerance. Density and surface tension are explicit actual
+SI inputs, not inferred from a constitutive curve or fabricated material card.
+
+This fully developed, isothermal, planar base does not itself claim stability,
+entry-region accuracy, thermal feedback or a generalized turbulent threshold.
+All support/work failures and cancellation refuse without a partial film.
+Focused regressions compare the exact constant-source Nusselt limit at shifted
+temperature, an independently integrated nonlinear profile, gravity/heat balance,
+source limits and cancellation.
