@@ -3,8 +3,8 @@
 //! admission remain in the existing isoparametric owners.
 use super::super::{
     QuadraticThermalStrainField, TetAssemblyBudget, TetElasticError, TetMaterialField,
-    TetStaticSolveConfig, add_nodal_forces_to_thermal_load, hash_usize, relative_mandel_force,
-    relative_mandel_strain, validate_rigid_mode_constraints,
+    TetStaticSolveConfig, TetThermalLoad, add_nodal_forces_to_thermal_load, hash_usize,
+    relative_mandel_force, relative_mandel_strain, validate_rigid_mode_constraints,
 };
 use super::{
     Point, StrainProjection, assemble_with_formulation, mandel_b, thermal_load_with_formulation,
@@ -101,8 +101,9 @@ impl QuadraticElementThermalResponse {
 
 /// Accepted thermal equilibrium and its physical response, published atomically.
 ///
-/// Fixed displacement components are zero. Internal force integrates the actual
-/// stress. The nodal force balance subtracts applied dead nodal loads, giving the
+/// Fixed components retain their explicitly prescribed values, or default to
+/// zero. Internal force integrates actual stress. The nodal force balance
+/// subtracts applied dead nodal loads, giving the
 /// support force ON the solid at fixed DOFs and the remaining equilibrium residual
 /// at free DOFs. Residual entries are retained, not overwritten with zero.
 /// Identity binds thermal and mechanical loads, actual material coefficients,
@@ -150,7 +151,7 @@ impl QuadraticThermalResponse {
 
     /// Internal force minus applied dead nodal force [N]. At fixed DOFs this
     /// is the support reaction ON the solid; at free DOFs it is the unmodified
-    /// equilibrium residual. Prescribed displacement components remain zero.
+    /// equilibrium residual, including nonzero prescribed support motion.
     #[must_use]
     pub fn nodal_force_balance_n(&self) -> &[[f64; 3]] {
         &self.nodal_force_balance_n
@@ -169,7 +170,7 @@ impl QuadraticThermalResponse {
     }
 
     /// Independently recomputed norm(f_thermal + f_external - K u) divided
-    /// by the norm of the complete reduced load.
+    /// by the norm of the complete reduced load after Dirichlet lifting.
     #[must_use]
     pub const fn true_relative_residual(&self) -> f64 {
         self.true_relative_residual
@@ -182,13 +183,13 @@ impl QuadraticThermalResponse {
     }
 
     /// Original thermal-load and geometry/support/quadrature identity.
-    /// This excludes any separately supplied dead nodal forces.
+    /// This excludes separately supplied dead forces and support displacements.
     #[must_use]
     pub const fn thermal_load_identity(&self) -> ContentHash {
         self.thermal_load_identity
     }
 
-    /// Complete load identity, including dead nodal forces when supplied.
+    /// Complete load identity, including supplied dead forces and support motion.
     #[must_use]
     pub const fn load_identity(&self) -> ContentHash {
         self.load_identity
@@ -208,6 +209,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
     materials: TetMaterialField<'_>,
     thermal: QuadraticThermalStrainField<'_>,
     nodal_forces_n: Option<&[(usize, f64)]>,
+    prescribed: Option<(&[(usize, f64)], f64)>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
     stiffness_rule: &[(R, f64)],
@@ -224,6 +226,7 @@ pub(in crate::linear3) fn solve<const N: usize, const D: usize, R: Copy>(
         materials,
         thermal,
         nodal_forces_n,
+        prescribed,
         fixed_dofs,
         budget,
         Formulation::Standard,
@@ -244,6 +247,7 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
     materials: TetMaterialField<'_>,
     thermal: QuadraticThermalStrainField<'_>,
     nodal_forces_n: Option<&[(usize, f64)]>,
+    prescribed: Option<(&[(usize, f64)], f64)>,
     fixed_dofs: &[usize],
     budget: TetAssemblyBudget,
     formulation: Formulation,
@@ -286,10 +290,28 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
         cx,
     )?;
     let thermal_load_identity = load.identity;
-    let load = match nodal_forces_n {
+    let mut load = match nodal_forces_n {
         Some(forces) => add_nodal_forces_to_thermal_load(load, nodes_m.len(), forces, cx)?,
         None => load,
     };
+    let mut displacement_m = vec![[0.0; 3]; nodes_m.len()];
+    if let Some((prescribed_m, maximum)) = prescribed {
+        admit_prescribed_displacement(&mut load, &mut displacement_m, prescribed_m, maximum, cx)?;
+        if !load.free_dofs.is_empty() && prescribed_m.iter().any(|(_, value)| *value != 0.0) {
+            lift_prescribed_displacement::<N, D, R>(
+                nodes_m,
+                elements,
+                materials,
+                thermal,
+                formulation,
+                stiffness_rule,
+                &evaluate,
+                &displacement_m,
+                &mut load,
+                cx,
+            )?;
+        }
+    }
     let (reduced, iterations, true_relative_residual) = if load.free_dofs.is_empty() {
         // A fully restrained thermal body has no linear solve, but still has
         // physical stress, stored energy and nonzero support forces.
@@ -339,7 +361,6 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
         }
         (solved.x, solved.report.iters, relative)
     };
-    let mut displacement_m = vec![[0.0; 3]; nodes_m.len()];
     for (index, (&dof, &value)) in load.free_dofs.iter().zip(&reduced).enumerate() {
         if index % 256 == 0 {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
@@ -518,6 +539,141 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
     })
 }
 
+fn admit_prescribed_displacement(
+    load: &mut TetThermalLoad,
+    displacement_m: &mut [[f64; 3]],
+    prescribed_m: &[(usize, f64)],
+    maximum: f64,
+    cx: &Cx<'_>,
+) -> Result<(), TetElasticError> {
+    let invalid = |what| TetElasticError::InvalidStaticSolveConfig { what };
+    if !maximum.is_finite() || maximum <= 0.0 {
+        return Err(invalid(
+            "maximum prescribed displacement must be finite and positive",
+        ));
+    }
+    let full_dofs = load.full_equivalent_force_n.len();
+    if prescribed_m.len() > full_dofs - load.free_dofs.len() {
+        return Err(invalid("prescribed entries exceed the fixed-DOF count"));
+    }
+    let mut previous = None;
+    let mut identity = DomainHasher::new("org.frankensim.fs-solid.quadratic-prescribed-load.v1");
+    identity.update(load.identity.as_bytes());
+    identity.update(&maximum.to_bits().to_le_bytes());
+    hash_usize(&mut identity, prescribed_m.len())?;
+    for &(dof, value) in prescribed_m {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        if dof >= full_dofs {
+            return Err(TetElasticError::FixedDofOutOfRange { dof, full_dofs });
+        }
+        if previous.is_some_and(|last| dof <= last) {
+            return Err(invalid(
+                "prescribed DOFs must be strictly increasing and unique",
+            ));
+        }
+        if load.free_dofs.binary_search(&dof).is_ok() {
+            return Err(invalid(
+                "prescribed displacement DOF is not a declared fixed component",
+            ));
+        }
+        if !value.is_finite() || value.abs() > maximum {
+            return Err(invalid(
+                "prescribed displacement is nonfinite or exceeds its metre bound",
+            ));
+        }
+        displacement_m[dof / 3][dof % 3] = value;
+        previous = Some(dof);
+        hash_usize(&mut identity, dof)?;
+        identity.update(&value.to_bits().to_le_bytes());
+    }
+    load.identity = identity.finalize();
+    Ok(())
+}
+
+// Apply -K_fc g without assembling an additional element or global matrix.
+// The same local C(T), quadrature and assumed-strain columns as K enter the
+// contraction. Only the reduced solve RHS is lifted; physical loads retain
+// their original support-reaction meaning in the response below.
+#[allow(clippy::too_many_arguments)]
+fn lift_prescribed_displacement<const N: usize, const D: usize, R: Copy>(
+    nodes_m: &[[f64; 3]],
+    elements: &[[usize; N]],
+    materials: TetMaterialField<'_>,
+    thermal: QuadraticThermalStrainField<'_>,
+    formulation: Formulation,
+    stiffness_rule: &[(R, f64)],
+    evaluate: &impl Fn([[f64; 3]; N], R, usize, usize) -> Result<Point<N>, TetElasticError>,
+    displacement_m: &[[f64; 3]],
+    load: &mut TetThermalLoad,
+    cx: &Cx<'_>,
+) -> Result<(), TetElasticError> {
+    let mut reduced_of = vec![None; load.full_equivalent_force_n.len()];
+    for (row, &dof) in load.free_dofs.iter().enumerate() {
+        if row % 256 == 0 {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        }
+        reduced_of[dof] = Some(row);
+    }
+    for (element, connectivity) in elements.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+        if connectivity
+            .iter()
+            .all(|&node| displacement_m[node] == [0.0; 3])
+        {
+            continue;
+        }
+        let nodes = connectivity.map(|node| nodes_m[node]);
+        let reference_material = materials.at(element);
+        let projection =
+            StrainProjection::prepare(nodes, element, formulation, stiffness_rule, evaluate, cx)?;
+        let mut local_force = [0.0; D];
+        for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
+            cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
+            let compatible_point;
+            let p = if let Some(prepared) = projection.point(point) {
+                prepared
+            } else {
+                compatible_point = evaluate(nodes, reference, element, point)?;
+                &compatible_point
+            };
+            let material = thermal.material_at(reference_material, element, point)?;
+            let b = projection.columns::<D>(p);
+            let strain = relative_mandel_strain(
+                N,
+                |d| core::array::from_fn(|i| b[i][d]),
+                |d| displacement_m[connectivity[d / 3]][d % 3],
+            );
+            let stress = core::array::from_fn(|i| {
+                (0..6).fold(0.0, |sum, j| {
+                    material.stiffness_mandel_pa[i][j].mul_add(strain[j], sum)
+                })
+            });
+            let force = relative_mandel_force(&b, &stress, weight * p.determinant);
+            for d in 0..D {
+                local_force[d] += force[d];
+            }
+        }
+        for (d, &force) in local_force.iter().enumerate() {
+            if !force.is_finite() {
+                return Err(TetElasticError::NonFiniteThermalLoad {
+                    element,
+                    local_dof: Some(d),
+                });
+            }
+            if let Some(row) = reduced_of[3 * connectivity[d / 3] + d % 3] {
+                load.reduced_force_n[row] -= force;
+                if !load.reduced_force_n[row].is_finite() {
+                    return Err(TetElasticError::NonFiniteThermalLoad {
+                        element,
+                        local_dof: Some(d),
+                    });
+                }
+            }
+        }
+    }
+    cx.checkpoint().map_err(|_| TetElasticError::Cancelled)
+}
+
 // Initial-stress vibration uses the same admitted quadrature response.
 pub(in crate::linear3) mod prestress;
 
@@ -552,7 +708,7 @@ fn elastic_strain_at<const N: usize, const D: usize>(
     displacement_m: &[[f64; 3]],
     free_strain_mandel: &[f64; 6],
     maximum_absolute_mandel_strain: f64,
-) -> Result<[f64; 6], TetElasticError>{
+) -> Result<[f64; 6], TetElasticError> {
     debug_assert_eq!(D, 3 * N);
     let total = relative_mandel_strain(
         N,

@@ -6522,6 +6522,21 @@ its source-bound thermal/dead-load equilibrium and returns that immutable respon
 with the existing `TetElasticAssembly` vibration pencil. An independently supplied
 stress array or stale solution cannot enter this API.
 
+TET10, HEX8 (Standard/B-bar), HEX20 and HEX27 also expose
+`solve_thermal_response_with_prescribed_dofs` and
+`solve_thermal_tangent_with_prescribed_dofs`. Sorted, unique full xyz prescriptions
+specify absolute support displacement in metres on already-fixed components;
+omitted components stay zero. The shared owner solves
+`K_ff u_f = f_f + f_thermal,f - K_fc g` with a matrix-free lift using the original
+quadrature, local `C(T)` and strain projection. Recovery uses the complete motion,
+retaining physical internal-minus-applied reactions, elastic storage and signed
+initial-stress stiffness. Static support motion leaves homogeneous incremental
+vibration constraints and reference mass unchanged. Existing residual, strain,
+source and geometry checks remain active. `tests/quadratic_thermal_prescribed.rs`
+checks support/thermal superposition across all element families, pointwise
+material variation, reactions, prestress work, warped anisotropic B-bar response
+and invalid support declarations.
+
 The correction is
 `K_g[(a,i),(b,j)] = delta_ij integral grad(N_a)^T sigma_0 grad(N_b) dV`.
 The same isoparametric map and stiffness quadrature evaluate the actual

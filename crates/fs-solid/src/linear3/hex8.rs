@@ -26,7 +26,8 @@
 //! The returned ordinary stiffness/mass pencil feeds the existing spectral
 //! and linear-dynamics owners. Thermal or dead-load equilibrium also feeds the
 //! shared signed initial-stress tangent, retaining the same strain formulation
-//! and reference mass. Supports are homogeneous displacement DOFs.
+//! and reference mass. Supports default to zero displacement; explicit static
+//! prescriptions retain homogeneous incremental vibration supports.
 //! Geometry admission samples corners, centre and integration points; this
 //! does not certify global injectivity of a warped brick. No finite-strain,
 //! general shear-locking or continuum-convergence claim is made.
@@ -60,7 +61,7 @@ pub struct Hex8ElasticProblem<'a> {
     pub materials: TetMaterialField<'a>,
     /// Standard compatible strain or three-dimensional volumetric B-bar.
     pub formulation: Formulation,
-    /// Homogeneous supported displacement DOFs, in full node-major xyz order.
+    /// Supported node-major xyz DOFs; zero unless explicitly prescribed in a solve.
     pub fixed_dofs: &'a [usize],
     /// Existing work/geometry envelope; maximum_tetrahedra bounds brick count.
     pub budget: TetAssemblyBudget,

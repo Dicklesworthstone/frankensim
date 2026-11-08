@@ -58,7 +58,7 @@ pub struct QuadraticTetProblem<'a> {
     pub elements: &'a [[usize; 10]],
     /// One resolved tensor per element, or one uniform tensor.
     pub materials: TetMaterialField<'a>,
-    /// Homogeneous fixed node-major xyz displacement DOFs.
+    /// Supported node-major xyz DOFs; zero unless explicitly prescribed in a solve.
     pub fixed_dofs: &'a [usize],
     /// Caller-owned mesh, free-DOF and Jacobian quality limits.
     pub budget: TetAssemblyBudget,
@@ -562,6 +562,7 @@ impl QuadraticTetProblem<'_> {
         self.solve_thermal_response_impl(
             thermal_strains.into(),
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -588,6 +589,36 @@ impl QuadraticTetProblem<'_> {
         self.solve_thermal_response_impl(
             thermal_strains.into(),
             Some(nodal_forces_n),
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Solve with absolute support displacements [m] and dead nodal forces [N].
+    /// Prescriptions are sorted unique full xyz DOFs already in `fixed_dofs`;
+    /// omitted supports stay at zero. Exact Dirichlet lifting uses the same
+    /// quadrature and local C(T) as stiffness. Stress, energy and reactions use
+    /// the full displacement, including imposed support motion. The residual
+    /// is normalized by the lifted free-force RHS; strain limits remain active.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_response_with_prescribed_dofs<'t>(
+        &self,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
+        nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)],
+        maximum_prescribed_displacement_m: f64,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticThermalResponse, TetElasticError> {
+        self.solve_thermal_response_impl(
+            thermal_strains.into(),
+            Some(nodal_forces_n),
+            Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -615,6 +646,7 @@ impl QuadraticTetProblem<'_> {
         self.solve_thermal_tangent_impl(
             thermal_strains.into(),
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -640,6 +672,7 @@ impl QuadraticTetProblem<'_> {
         self.solve_thermal_tangent_impl(
             thermal_strains.into(),
             Some(nodal_forces_n),
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -647,10 +680,40 @@ impl QuadraticTetProblem<'_> {
         )
     }
 
+    /// Initial-stress pencil about thermal/dead-load equilibrium with the same
+    /// prescribed supports as `solve_thermal_response_with_prescribed_dofs`.
+    /// The static support motion generates physical prestress; incremental
+    /// vibration supports remain homogeneous about that accepted equilibrium.
+    /// Reference mass and signed geometric stiffness keep their original owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_prescribed_dofs<'t>(
+        &self,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
+        nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)],
+        maximum_prescribed_displacement_m: f64,
+        config: super::TetStaticSolveConfig,
+        mesh_frame: fs_blake3::ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<super::QuadraticPrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains.into(),
+            Some(nodal_forces_n),
+            Some((prescribed_m, maximum_prescribed_displacement_m)),
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn solve_thermal_tangent_impl(
         &self,
         thermal_strains: QuadraticThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
+        prescribed: Option<(&[(usize, f64)], f64)>,
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
         maximum_absolute_mandel_strain: f64,
@@ -659,6 +722,7 @@ impl QuadraticTetProblem<'_> {
         let response = self.solve_thermal_response_impl(
             thermal_strains,
             nodal_forces_n,
+            prescribed,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -694,10 +758,12 @@ impl QuadraticTetProblem<'_> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn solve_thermal_response_impl(
         &self,
         thermal_strains: QuadraticThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
+        prescribed: Option<(&[(usize, f64)], f64)>,
         config: super::TetStaticSolveConfig,
         mesh_frame: fs_blake3::ContentHash,
         maximum_absolute_mandel_strain: f64,
@@ -710,6 +776,7 @@ impl QuadraticTetProblem<'_> {
             self.materials,
             thermal_strains,
             nodal_forces_n,
+            prescribed,
             self.fixed_dofs,
             self.budget,
             &duffy_quadrature(self.quadrature.stiffness_points_per_dir),

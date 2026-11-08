@@ -86,6 +86,7 @@ impl Hex8ElasticProblem<'_> {
         self.solve_thermal_response_impl(
             thermal_strains.into(),
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -108,6 +109,36 @@ impl Hex8ElasticProblem<'_> {
         self.solve_thermal_response_impl(
             thermal_strains.into(),
             Some(nodal_forces_n),
+            None,
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    /// Solve with absolute support displacements [m] and dead nodal forces [N].
+    /// Prescriptions are sorted unique full xyz DOFs already in `fixed_dofs`;
+    /// omitted supports stay at zero. Exact Dirichlet lifting retains the same
+    /// compatible or B-bar columns and local material as stiffness. Recovery
+    /// uses the full motion and reports physical reactions; the solve residual
+    /// is normalized by the lifted RHS. Both strain admissions remain active.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_response_with_prescribed_dofs<'t>(
+        &self,
+        thermal_strains: impl Into<QuadraticThermalStrainField<'t>>,
+        nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)],
+        maximum_prescribed_displacement_m: f64,
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8ThermalResponse, TetElasticError> {
+        self.solve_thermal_response_impl(
+            thermal_strains.into(),
+            Some(nodal_forces_n),
+            Some((prescribed_m, maximum_prescribed_displacement_m)),
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -139,6 +170,7 @@ impl Hex8ElasticProblem<'_> {
         self.solve_thermal_tangent_impl(
             thermal_strains,
             None,
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -164,6 +196,7 @@ impl Hex8ElasticProblem<'_> {
         self.solve_thermal_tangent_impl(
             thermal_strains,
             Some(nodal_forces_n),
+            None,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -171,10 +204,40 @@ impl Hex8ElasticProblem<'_> {
         )
     }
 
+    /// Initial-stress pencil about thermal/dead-load equilibrium with the same
+    /// prescribed supports as `solve_thermal_response_with_prescribed_dofs`.
+    /// Static support motion generates physical prestress; vibration supports
+    /// remain homogeneous about that equilibrium. The original reference mass
+    /// and signed compatible or B-bar geometric correction remain unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_thermal_tangent_with_prescribed_dofs(
+        &self,
+        thermal_strains: TetThermalStrainField<'_>,
+        nodal_forces_n: &[(usize, f64)],
+        prescribed_m: &[(usize, f64)],
+        maximum_prescribed_displacement_m: f64,
+        config: TetStaticSolveConfig,
+        mesh_frame: ContentHash,
+        maximum_absolute_mandel_strain: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Hex8PrestressedAssembly, TetElasticError> {
+        self.solve_thermal_tangent_impl(
+            thermal_strains,
+            Some(nodal_forces_n),
+            Some((prescribed_m, maximum_prescribed_displacement_m)),
+            config,
+            mesh_frame,
+            maximum_absolute_mandel_strain,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn solve_thermal_tangent_impl(
         &self,
         thermal_strains: TetThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
+        prescribed: Option<(&[(usize, f64)], f64)>,
         config: TetStaticSolveConfig,
         mesh_frame: ContentHash,
         maximum_absolute_mandel_strain: f64,
@@ -183,6 +246,7 @@ impl Hex8ElasticProblem<'_> {
         let response = self.solve_thermal_response_impl(
             thermal_strains.into(),
             nodal_forces_n,
+            prescribed,
             config,
             mesh_frame,
             maximum_absolute_mandel_strain,
@@ -203,10 +267,12 @@ impl Hex8ElasticProblem<'_> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn solve_thermal_response_impl(
         &self,
         thermal_strains: QuadraticThermalStrainField<'_>,
         nodal_forces_n: Option<&[(usize, f64)]>,
+        prescribed: Option<(&[(usize, f64)], f64)>,
         config: TetStaticSolveConfig,
         mesh_frame: ContentHash,
         maximum_absolute_mandel_strain: f64,
@@ -222,6 +288,7 @@ impl Hex8ElasticProblem<'_> {
             self.materials,
             thermal_strains,
             nodal_forces_n,
+            prescribed,
             self.fixed_dofs,
             self.budget,
             self.formulation,
