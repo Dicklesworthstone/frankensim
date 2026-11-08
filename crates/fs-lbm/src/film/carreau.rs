@@ -1,4 +1,7 @@
-//! Fully developed shear-free film of the original thermal Carreau-Yasuda law.
+//! Fully developed films of the original thermal Carreau-Yasuda law.
+//!
+//! [`CarreauShearedFilm`] resolves signed surface traction at fixed thickness;
+//! [`CarreauFilm`] below resolves a shear-free film at prescribed positive flux.
 //!
 //! Momentum fixes tau(y)=rho*g_t*(h-y). A symmetric, stationary-wall slit
 //! of gap 2h and pressure gradient rho*g_t has exactly this lower-half flow.
@@ -12,6 +15,9 @@ use fs_material::fluid_transport::rheology::ThermalCarreauYasuda;
 use fs_material::fluid_transport::rheology::slit::{
     CarreauSlitControls, CarreauSlitProfile, LaminarCarreauSlit,
 };
+
+mod sheared;
+pub use sheared::{CarreauShearedFilm, CarreauShearedFilmSpec};
 
 /// Actual SI forcing and liquid density/capillarity; viscosity belongs to the law.
 #[derive(Clone, Copy, Debug, PartialEq)]

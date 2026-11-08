@@ -1,10 +1,12 @@
-//! No-slip planar Couette--Poiseuille flow of the original thermal Carreau law.
+//! Planar Couette--Poiseuille flow of the original thermal Carreau law.
 //!
 //! Momentum fixes `tau(y) = c + delta_p*(h/2-y)/L`. The ONE stress offset c
 //! enforces the relative wall speed through the canonical constitutive inverse.
 //! Sliding and pressure therefore share a velocity profile, wall tractions and
 //! heat. A frozen apparent viscosity, or a sum of separately solved nonlinear
 //! Couette and Poiseuille profiles, would give a different physical problem.
+//! A prescribed upper traction instead fixes c directly; the same canonical
+//! inverse and positive moments then determine the upper speed and heat.
 //!
 //! This is an instantaneous, fully developed, incompressible planar reduction.
 //! Width must be large enough that side walls can be neglected. Temperature is
@@ -67,7 +69,8 @@ pub struct LaminarCarreauSlit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CarreauSlitFlow {
     pub pressure_drop_pa: f64,
-    /// Original no-slip data, in lower/upper order [m/s].
+    /// Original no-slip data, in lower/upper order [m/s]. For an upper-traction
+    /// profile the upper speed is the constitutively resolved equivalent datum.
     pub requested_wall_velocities_m_s: [f64; 2],
     /// Same mean translation, with the solved relative speed. This explicit
     /// constitutive residual is never silently substituted into requested work.
@@ -219,6 +222,52 @@ impl LaminarCarreauSlit {
         controls: CarreauSlitControls,
     ) -> Result<CarreauSlitProfile, MaterialError> {
         self.profile_with_check(pressure_drop_pa, wall_velocities_m_s, controls, || Ok(()))
+    }
+
+    /// Resolve signed pressure, lower-wall velocity and upper traction [Pa].
+    /// The outward upper traction is `mu*u'(h)`, so it fixes the stress offset
+    /// `c = upper_traction + delta_p*h/(2L)` without a wall-speed root solve.
+    /// The upper speed is an output: pressure and traction act on one original
+    /// nonlinear profile, including counterflow and either sign of port work.
+    ///
+    /// The flow report retains equivalent wall velocities and the actually
+    /// represented upper traction. Its pressure conductance still means fixed
+    /// wall velocities; consumers imposing traction must include the wall-speed
+    /// response. Unrepresentable traction cancellation and source/work limits
+    /// refuse instead of silently changing the imposed boundary condition.
+    pub fn profile_at_pressure_and_upper_traction(
+        &self,
+        pressure_drop_pa: f64,
+        lower_wall_velocity_m_s: f64,
+        upper_traction_pa: f64,
+        controls: CarreauSlitControls,
+    ) -> Result<CarreauSlitProfile, MaterialError> {
+        self.profile_with_upper_traction_check(
+            pressure_drop_pa,
+            lower_wall_velocity_m_s,
+            upper_traction_pa,
+            controls,
+            || Ok(()),
+        )
+    }
+
+    /// Same mixed boundary condition, with bounded checks during the original
+    /// constitutive inversion and quadrature. No partial profile is published.
+    pub fn profile_with_upper_traction_check(
+        &self,
+        pressure_drop_pa: f64,
+        lower_wall_velocity_m_s: f64,
+        upper_traction_pa: f64,
+        controls: CarreauSlitControls,
+        check: impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauSlitProfile, MaterialError> {
+        self.profile_for_boundary(
+            pressure_drop_pa,
+            [lower_wall_velocity_m_s; 2],
+            Some(upper_traction_pa),
+            controls,
+            check,
+        )
     }
 
     /// Resolve the signed pressure needed for prescribed net volume flow and
@@ -409,10 +458,76 @@ impl LaminarCarreauSlit {
         pressure_drop_pa: f64,
         wall_velocities_m_s: [f64; 2],
         controls: CarreauSlitControls,
+        check: impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauSlitProfile, MaterialError> {
+        self.profile_for_boundary(pressure_drop_pa, wall_velocities_m_s, None, controls, check)
+    }
+
+    fn profile_for_boundary(
+        &self,
+        pressure_drop_pa: f64,
+        mut wall_velocities_m_s: [f64; 2],
+        upper_traction_pa: Option<f64>,
+        controls: CarreauSlitControls,
         mut check: impl FnMut() -> Result<(), MaterialError>,
     ) -> Result<CarreauSlitProfile, MaterialError> {
         controls.admit()?;
         check()?;
+        if !pressure_drop_pa.is_finite() || !wall_velocities_m_s.iter().all(|v| v.is_finite()) {
+            return Err(parameters(
+                "Carreau slit pressure or wall velocities are nonfinite",
+            ));
+        }
+        let half_stress = if pressure_drop_pa == 0.0 {
+            0.0
+        } else {
+            product_ratio(&[pressure_drop_pa.abs(), self.gap_m], &[2.0, self.length_m])?
+                .copysign(pressure_drop_pa)
+        };
+        let prescribed = if let Some(traction) = upper_traction_pa {
+            if !traction.is_finite() {
+                return Err(parameters("Carreau slit upper traction is nonfinite"));
+            }
+            let offset = traction + half_stress;
+            let represented = offset - half_stress;
+            if !offset.is_finite()
+                || (represented - traction).abs()
+                    > controls.local.relative_constitutive_tolerance * traction.abs()
+            {
+                return Err(state_error(
+                    "Carreau slit upper traction is unrepresentable",
+                ));
+            }
+            let (rate, change) = if half_stress == 0.0 || self.prepared.constant() {
+                let local = self
+                    .prepared
+                    .inverse(offset.abs(), self.prepared.ceiling, controls.local)?
+                    .0;
+                (local.rate, 0.0)
+            } else {
+                let (rate, _, change) = self.relative_rate(
+                    offset.abs(),
+                    half_stress.abs(),
+                    controls.local,
+                    &mut check,
+                )?;
+                (rate, change)
+            };
+            let relative = (self.gap_m * rate).copysign(offset);
+            let upper = wall_velocities_m_s[0] + relative;
+            if !relative.is_finite()
+                || !upper.is_finite()
+                || (rate != 0.0 && (relative == 0.0 || upper == wall_velocities_m_s[0]))
+            {
+                return Err(state_error(
+                    "Carreau slit traction-driven wall speed is unrepresentable",
+                ));
+            }
+            wall_velocities_m_s[1] = upper;
+            Some((offset, rate, 0, change))
+        } else {
+            None
+        };
         let [lower, upper] = wall_velocities_m_s;
         let relative = upper - lower;
         let mean = if lower.abs() <= upper.abs() {
@@ -428,12 +543,6 @@ impl LaminarCarreauSlit {
                 "Carreau slit pressure or wall velocities are nonfinite",
             ));
         }
-        let half_stress = if pressure_drop_pa == 0.0 {
-            0.0
-        } else {
-            product_ratio(&[pressure_drop_pa.abs(), self.gap_m], &[2.0, self.length_m])?
-                .copysign(pressure_drop_pa)
-        };
         let target_rate = relative.abs() / self.gap_m;
         if !target_rate.is_finite()
             || relative != 0.0 && target_rate == 0.0
@@ -444,22 +553,25 @@ impl LaminarCarreauSlit {
                 "Carreau slit forcing exceeds its supported rate/stress envelope",
             ));
         }
-        let uniform = self.prepared.sample_rate(target_rate)?;
-        let (offset, actual_rate, iterations, offset_change) =
-            if half_stress == 0.0 || self.prepared.constant() {
-                (uniform.stress().copysign(relative), target_rate, 0, 0.0)
-            } else if relative == 0.0 {
-                (0.0, 0.0, 0, 0.0)
-            } else {
-                let (c, rate, iterations, change) = self.solve_offset(
-                    half_stress.abs(),
-                    target_rate,
-                    uniform.stress(),
-                    controls,
-                    &mut check,
-                )?;
-                (c.copysign(relative), rate, iterations, change)
-            };
+        let uniform = self
+            .prepared
+            .sample_rate(prescribed.map_or(target_rate, |p| p.1))?;
+        let (offset, actual_rate, iterations, offset_change) = if let Some(boundary) = prescribed {
+            boundary
+        } else if half_stress == 0.0 || self.prepared.constant() {
+            (uniform.stress().copysign(relative), target_rate, 0, 0.0)
+        } else if relative == 0.0 {
+            (0.0, 0.0, 0, 0.0)
+        } else {
+            let (c, rate, iterations, change) = self.solve_offset(
+                half_stress.abs(),
+                target_rate,
+                uniform.stress(),
+                controls,
+                &mut check,
+            )?;
+            (c.copysign(relative), rate, iterations, change)
+        };
         // Both actual wall states are admitted, including on exact Newtonian
         // and pure-Couette branches; their shear may exceed the mean rate.
         for stress in [offset + half_stress, offset - half_stress] {
