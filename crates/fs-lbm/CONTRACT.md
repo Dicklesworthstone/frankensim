@@ -671,3 +671,55 @@ Forcing is sampled at actual native stage times. The callback is deterministic a
 Rejected state and heat never enter retained physical records. Final stored energy is independently recomputed from initial/final original energies and fixed reference masses. Signed net accepted heat is compensated independently of the displayed source and outflow totals; closure subtracts the compensated storage and net-heat accounts before rounding away either correction. Both net whole-window closure and the sum of absolute accepted native closures must meet the single configured joule allowance. Any late error or cancellation discards the private accepted prefix and leaves caller inputs unchanged.
 
 Five tests of the actual production embedded-error and heat-account arithmetic passed under the pinned Rust compiler. Five added native integration definitions cover diffusion refinement, latent energy and datum shifts, transition left limits and thermostat changes, bounded attempts and minimum dt, and fatal source/mask/cancellation outcomes. These integration definitions and public exports were parsed; full native integration execution was unavailable in the dependency-constrained workspace.
+
+### Native open 3D local SGS momentum and heat
+
+`lattice3::open_boundaries::sgs` prepares Smagorinsky, WALE or Vreman
+on the original D3Q19/D3Q27 reservoir geometry. The accepted, force-centered
+velocity field uses the native full gradient: quadratic one-sided velocity
+reservoir slopes (linear when the second donor is solid), the pressure
+reservoir's zero-normal-gradient donor convention, and unchanged interior,
+periodic and stationary-wall stencils. Open faces are never interpreted as
+impermeable halfway walls. Shared local SGS admission and collision-family,
+bulk/higher-mode preservation are retained. The original molecular collision
+or a fresh explicit per-cell molecular field is the baseline on each call;
+previously augmented collisions must not be reused as molecular transport.
+
+`OpenSgsWorkspace3` retains the actual prepared eddy viscosity rather than
+recovering it by subtracting rounded collision viscosities. Its explicit
+numerical payload budget covers five f64 values and one native collision per
+cell, with actual Vec capacities checked. Serial and pooled native momentum
+steps consume these prepared collisions without adding persistent closure
+state. Preparation performs no adapter-owned allocation.
+
+`step_serial_with_thermal_sgs` couples that same local eddy viscosity to the
+original native open-flow/D3Q7 heat/finite-wall transaction. Its explicit
+positive turbulent Prandtl number gives alpha_t = nu_t/Pr_t. Since the actual
+D3Q7 scalar sound-speed squared is 1/4, it adds 4*alpha_t to each supplied
+molecular thermal tau. The caller supplies a fresh complete molecular thermal
+tau field. A separate nonnegative finite alpha_t/alpha_molecular maximum is
+an admission limit, never clipping. Nonfinite or underflowed positive modeled
+transport refuses; ordinary finite floating-point addition may round a tiny
+positive contribution back to the molecular tau. Exact zero SGS preserves
+both molecular collision and thermal-tau bits. The coupled workspace adds
+one f64 per cell to the momentum workspace.
+
+The existing native owner retains reservoir reversal, scalar-population heat
+exchange, symmetric source kicks, advective history, finite-wall storage and
+wall conduction. All coefficient admissions precede staging, and its final
+heat balance and cancellation gates precede joint publication. A refusal may
+change scratch only: accepted momentum/thermal populations, finite walls,
+receipts and step counters remain unchanged. Modeled mechanical transfer
+remains diagnostic, with no invented viscous-heating source. This is passive
+fixed-reference-capacity low-Mach temperature transport with frozen incoming
+coefficients, not compressible enthalpy, a dynamic exterior test filter,
+nonreflecting-outlet physics or a qualified turbulent-jet result.
+
+Four native regression groups cover D3Q19 TRT and D3Q27 cumulant/full-gradient
+reservoir preparation for all three models; exact zero-model joint trajectories
+with sources and conducting finite walls; active native composition and an
+independently measured fluid/solid heat inventory; and warmed-state budget,
+ratio, late thermal, cancellation and retry behavior including positive
+sub-ulp modeled transport. These regressions are authored and parsed/formatted;
+the native integration suite was not compiled or executed in the constrained
+implementation workspace.

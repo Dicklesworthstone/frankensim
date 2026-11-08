@@ -151,6 +151,27 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         workspace: &mut SgsWorkspace3<L::Collision>,
         forces: Option<&[[f64; 3]]>,
         mut wall_velocity: impl FnMut(usize, usize, bool) -> [f64; 3],
+        checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
+    ) -> Result<SgsReport, SgsStepError<L::Error>> {
+        self.prepare_sgs_with_gradient(
+            config, molecular, workspace, forces,
+            |cell, velocity| self.velocity_gradient_with_walls(cell, velocity, &mut wall_velocity),
+            |_, _| {}, checkpoint,
+        )
+    }
+
+    // Native geometry owners supply their actual derivative and can retain
+    // the original nu_t for another transported quantity. Never infer it by
+    // subtracting two rounded collision viscosities after augmentation.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::lattice3) fn prepare_sgs_with_gradient(
+        &self,
+        config: SgsConfig,
+        molecular: Option<&[L::Collision]>,
+        workspace: &mut SgsWorkspace3<L::Collision>,
+        forces: Option<&[[f64; 3]]>,
+        mut gradient: impl FnMut(usize, &[[f64; 3]]) -> [[f64; 3]; 3],
+        mut observe_eddy: impl FnMut(usize, f64),
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<SgsReport, SgsStepError<L::Error>> {
         checkpoint()?;
@@ -189,13 +210,13 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
             let nu = L::molecular_viscosity(original)
                 .map_err(|source| GridError3::Collision { cell, source })?;
             if self.solid[cell] {
+                observe_eddy(cell, 0.0);
                 continue;
             }
             if !(nu.is_finite() && nu > 0.0) {
                 return Err(SgsError::InvalidMolecularViscosity { cell }.into());
             }
-            let gradient =
-                self.velocity_gradient_with_walls(cell, &workspace.velocity, &mut wall_velocity);
+            let gradient = gradient(cell, &workspace.velocity);
             let eddy = eddy_viscosity(config.model, config.filter_width_lu, gradient)?;
             let ratio = eddy / nu;
             if !ratio.is_finite() || ratio > config.maximum_eddy_to_molecular {
@@ -213,6 +234,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
                 workspace.collisions[cell] = L::with_shear_relaxation(original, tau)
                     .map_err(|source| GridError3::Collision { cell, source })?;
             }
+            observe_eddy(cell, eddy);
             let mut strain2 = 0.0;
             let dilation_third = (gradient[0][0] + gradient[1][1] + gradient[2][2]) / 3.0;
             for i in 0..3 {

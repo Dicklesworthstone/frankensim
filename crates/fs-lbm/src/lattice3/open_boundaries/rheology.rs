@@ -17,7 +17,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     // replacing ONLY the derivative normal to an actual open face. Otherwise
     // nonzero inlet velocity would be mistaken for wall shear. Pressure faces
     // inherit this owner's zero-normal-velocity-gradient donor condition.
-    fn rheology_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
+    pub(super) fn rheology_gradient(&self, cell: usize, velocity: &[[f64; 3]]) -> [[f64; 3]; 3] {
         let mut gradient = self.grid.velocity_gradient(cell, velocity);
         let Some((face, first)) = self.plan.locate(cell) else {
             return gradient;

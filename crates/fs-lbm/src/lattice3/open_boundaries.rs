@@ -30,6 +30,8 @@ mod pressure;
 mod rheology;
 /// Conservative D3Q7 heat transport on the same native open-grid transaction.
 pub mod thermal;
+/// Explicit local turbulent momentum and heat on original reservoir geometry.
+pub mod sgs;
 
 use pressure::PressureProfile3;
 
@@ -699,4 +701,3 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> TileKernel for OpenStream<'_, '_
         ControlFlow::Continue(FirstError(outcome.err()))
     }
 }
-
