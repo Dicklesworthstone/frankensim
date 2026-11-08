@@ -18,9 +18,11 @@
 //!
 //! Geometry admission samples the corners, centre and integration points;
 //! positive sampled Jacobians do not prove global injectivity of a warped hex.
-//! No finite-strain, general shear-locking, limit-point, contact or dynamics
-//! claim is made. The full deviatoric quadrature is retained; no one-point
-//! stiffness or artificial hourglass penalty is introduced.
+//! The [`dynamics`] child adds physical-time backward-Euler motion through
+//! this same material-history and Newton owner. No finite-strain, general
+//! shear-locking, limit-point or contact claim is made. The full deviatoric
+//! quadrature is retained; no one-point stiffness or artificial hourglass
+//! penalty is introduced.
 
 use super::increment::{self, IncrementControls, IncrementOperator};
 use super::{
@@ -34,6 +36,9 @@ use fs_feec::highorder::quad1d::gauss_legendre;
 use fs_material::{SmallStrainLaw, Voigt};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeSet;
+
+/// Consistent-reference-mass motion with the original eight point histories.
+pub mod dynamics;
 
 /// Allocation and geometry bounds checked before quadrature preparation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -461,6 +466,7 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
         elements: &[Element],
         states: &[L::State],
         u: &[f64],
+        inertia: Option<&dyn increment::IncrementInertia>,
         cx: &Cx<'_>,
     ) -> Result<Csr, SmallStrainTetError> {
         let mut coo = Coo::new(u.len(), u.len());
@@ -505,6 +511,9 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
                 }
             }
         }
+        if let Some(inertia) = inertia {
+            inertia.add_tangent(&mut coo, cx)?;
+        }
         let matrix = coo.assemble();
         if (0..matrix.nrows()).any(|row| matrix.row(row).1.iter().any(|value| !value.is_finite())) {
             return Err(invalid("nonfinite assembled hex tangent"));
@@ -535,7 +544,7 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
     ) -> Result<Csr, SmallStrainTetError> {
         let elements = self.prepare(cx)?;
         self.check(displacement_m, states)?;
-        self.tangent(&elements, states, displacement_m, cx)
+        self.tangent(&elements, states, displacement_m, None, cx)
     }
 
     /// Follow the absolute load path from virgin constitutive histories.
@@ -564,14 +573,25 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<SmallStrainHexSolution<L::State>, SmallStrainTetError> {
         let elements = self.prepare(cx)?;
+        self.solve_prepared(&elements, initial, None, cx)
+    }
+
+    fn solve_prepared(
+        &self,
+        elements: &[Element],
+        initial: Option<(&[f64], &[L::State])>,
+        inertia: Option<&dyn increment::IncrementInertia>,
+        cx: &Cx<'_>,
+    ) -> Result<SmallStrainHexSolution<L::State>, SmallStrainTetError> {
         if let Some((u, states)) = initial {
             self.check(u, states)?;
         }
         let operator = HexOperator {
             problem: self,
-            elements: &elements,
+            elements,
+            inertia,
         };
-        let accepted = increment::solve(
+        let accepted = increment::solve_with_inertia(
             &operator,
             IncrementControls {
                 dofs: 3 * self.nodes_m.len(),
@@ -581,7 +601,7 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
                 settings: self.settings,
             },
             initial,
-            None,
+            inertia,
             cx,
         )?;
         let mut quadrature_strain = Vec::with_capacity(8 * elements.len());
@@ -614,6 +634,7 @@ impl<L: SmallStrainLaw> SmallStrainHexProblem<'_, L> {
 struct HexOperator<'p, 'm, L: SmallStrainLaw> {
     problem: &'p SmallStrainHexProblem<'m, L>,
     elements: &'p [Element],
+    inertia: Option<&'p dyn increment::IncrementInertia>,
 }
 
 impl<L: SmallStrainLaw> IncrementOperator for HexOperator<'_, '_, L> {
@@ -642,7 +663,8 @@ impl<L: SmallStrainLaw> IncrementOperator for HexOperator<'_, '_, L> {
         u: &[f64],
         cx: &Cx<'_>,
     ) -> Result<Csr, SmallStrainTetError> {
-        self.problem.tangent(self.elements, states, u, cx)
+        self.problem
+            .tangent(self.elements, states, u, self.inertia, cx)
     }
 
     fn tangent_symmetric(&self) -> bool {

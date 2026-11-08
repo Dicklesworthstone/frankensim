@@ -8019,6 +8019,44 @@ Explicit node/element/point/free-DOF/matrix-entry/load-step budgets and sampled 
 Focused verification covers cyclic axial response and permanent set, complete distorted-element nonproportional Chaboche tangent and force equilibrium, distinct point histories, heterogeneous yielding, actual-time overstress, refused-step retry, and geometry/domain/budget admission. The nearly incompressible axially constrained Lamé-cylinder displacement error falls from 98.3257% (standard 2x8x1) to 1.86313% (B-bar 2x8x1) and 0.500276% (B-bar 4x16x1) under the original physical force gate. This is small-strain volumetric-locking mitigation, not a general stable mixed pressure element, global injectivity certificate, finite-strain model, general shear-locking fix or plastic-limit convergence claim.
 
 
+
+### Consistent inertia for generic inelastic Hex8 motion
+
+`SmallStrainHexProblem::advance_backward_euler` and
+`advance_backward_euler_with_corner_density` continue the same Standard or
+B-bar solid with accepted displacement, velocity and eight native constitutive
+histories per cell. Both use `plastic3::increment` and the existing
+`BackwardEulerInertia`: the momentum residual, physical force scale and
+support reactions include consistent mass, while the original material tangent
+receives the same mass divided by the squared physical interval. Every Newton
+proposal borrows the same old histories, and endpoint stresses are evaluated
+before their single converged commit.
+
+A separate three-point Gauss rule per coordinate integrates the original
+trilinear shapes, warped reference geometry and either constant cell density
+or a trilinear eight-corner profile. B-bar projection does not change reference
+inventory. Positive corner profiles remain local to their original cells.
+Combined material/mass admission requires at most 768 tangent entries per cell
+before shared-node assembly; the 27 mass points add no material histories.
+Prepared constitutive geometry is reused for the motion solve.
+
+The returned `BackwardEulerHexStep` includes the original solid solution,
+endpoint velocity and `InertialEnergy`. Inertial work equals kinetic change
+plus the nonnegative backward-Euler kinetic defect, including moving-support
+work and free/support mass coupling. The defect is numerical loss, never
+plastic heat. This generic material trait exposes neither a duration nor an
+energy account: a caller selecting a timed law must bind it to the same
+physical interval and retain its original reference inventory. Material energy
+and reciprocal caloric closure stay with their existing owners. This remains
+a first-order, small-strain motion method without a finite-deformation,
+contact, mass-transfer or temporal-accuracy certification claim.
+
+Authored regressions in `tests/plastic_hex_dynamics.rs` exercise independent
+force-driven shear, unloading and permanent set for rate-independent J2 and
+timed overstress laws; exact warped-brick graded-inventory translation and
+fully prescribed support work; and refused-step retry, density, endpoint and
+combined matrix-budget admission. Their presence is not an executed-test claim.
+
 ## Exact-branch Chaboche fibers and structural source receipts
 
 `FiberLaw::chaboche_branches` and `FiberMaterial::chaboche_branches` admit one through eight native axial Chaboche branches. One branch retains the existing variant; a bounded typed dispatcher selects the actual two-through-eight branch law and matching history. Response/commit allocate no heap storage and do not execute padded inactive branches. Enum storage is bounded by its largest variant; this is not a branch-proportional memory claim. Native return, tangent, tensor-compatible lateral flow and source coefficients are unchanged.
