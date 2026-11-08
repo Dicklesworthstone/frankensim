@@ -203,8 +203,8 @@ fn reactive_spring_frequency_terms_cancel_before_range_recovery() {
     let pencil = FrequencyPencil {
         n: 1,
         layout: MatrixLayout::Diagonal,
-        scaled_frequency: 0.5,
-        time_exponent: 0,
+        scaled_frequency: 2.0_f64.powi(-502),
+        time_exponent: 501,
         coordinate_exponents: &[0],
         scaled_mass: &[3.0],
         scaled_damping: &[0.0],
@@ -233,9 +233,10 @@ fn reactive_spring_frequency_terms_cancel_before_range_recovery() {
             )
             .unwrap(),
     );
-    // -iw Z is constant stiffness; neither derivative has a load contribution.
-    close(first[0], state[0].scale(3.0));
-    close(second[0], state[0].scale(6.0));
+    // Physical w=.5 and the load-admitted clock is 2^501. The spring
+    // contributes zero; the weak inertial first action must remain nonzero.
+    assert_eq!(first[0], state[0].scale(3.0 * 2.0_f64.powi(-501)));
+    assert_eq!(second[0], state[0].scale(6.0));
 }
 
 #[test]

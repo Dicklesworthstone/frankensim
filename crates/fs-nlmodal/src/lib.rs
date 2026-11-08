@@ -51,6 +51,7 @@ pub use membrane::{VkSampledPlateParams, von_karman_sampled_plate_with_membrane}
 
 pub mod backbone;
 pub mod longitudinal;
+pub mod parameter;
 pub mod preload;
 pub mod sav;
 pub use backbone::{
@@ -59,6 +60,7 @@ pub use backbone::{
     duffing_backbone_directional_derivative, duffing_backbone_exact,
     duffing_kinematic_spectrum_exact, duffing_spectrum_exact,
 };
+pub use parameter::{SosModalParameterDirection, StressChannelParameterDirection};
 pub use preload::PreloadedModalStorage;
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the

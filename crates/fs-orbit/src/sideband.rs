@@ -459,6 +459,13 @@ impl PreparedSidebandResponse<'_> {
         self.carrier
     }
 
+    /// Original positive physical equation scales used by this factor and its
+    /// residual checks. Constitutive-source adapters use the same normalization
+    /// when accounting for independently projected forcing errors.
+    pub fn equation_scales(&self) -> &[f64] {
+        &self.scales.equations
+    }
+
     /// Solve complete original-equation forcing phasors. Index `(k+N)*d+j`
     /// addresses state/equation j at carrier+k*omega. Unlisted sidebands are
     /// zero by definition, not an implicit truncation of a supplied input.

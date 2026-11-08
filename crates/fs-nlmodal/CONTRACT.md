@@ -292,6 +292,19 @@ the crash cascade with structurally exact energy accounting.
   source reduction and channel-by-channel invariance admission. G1/G3 tests
   compare an independently differentiated energy-period integral and verify
   linear, pure-quartic, separatrix, homogeneity and unit-scaling limits.
+- `SosModalStorage::gradient_parameter_derivative` differentiates the complete
+  original effort at fixed mass-normalized modal state for a supplied direction
+  in the original angular frequencies and every stress channel's coefficient
+  and coupling matrix. It retains signed/off-diagonal coupling and the cubic
+  derivative of a channel whose baseline coefficient is zero. The exact
+  channel chain rule uses two matrix-vector passes and constant scratch; no
+  perturbed model or finite-difference step is formed. This is the direct
+  material term, distinct from the state Hessian action; periodic response and
+  physical output derivatives need both. Source/direction admission and finite
+  arithmetic remain mandatory, and a changing modal basis or mass normalization
+  needs an additional coordinate chain rule. Tests compare independently
+  perturbed original gradients, verify the cubic small-amplitude and exact
+  linear limits, and refuse incomplete, asymmetric or nonfinite directions.
 - `duffing_spectrum_exact` / `DuffingSpectrum` retain an explicit count of odd
   cosine harmonics of that same conservative orbit. The Jacobi `cn` (hardening)
   and `cd` (softening) nome series retain physical amplitudes and the alternating

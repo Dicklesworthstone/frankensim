@@ -4929,6 +4929,39 @@ but unexecuted without the complete constellation dependency closure. Targeted
 formatting and API review passed; neither full integration nor continuum,
 branch-selection, Floquet or forward-error qualification is inferred.
 
+## Storage-parameter sensitivity of an original forced periodic response
+
+`PreparedPhsPortSidebands::forced_storage_parameter_tangent` and its factored
+counterpart reuse the same zero-carrier periodic factor for
+`D*x_p=(J-R)*partial_p grad H`, with fixed original J/R/G, physical
+coordinates, drive clock and authored phasors. The complete caller-supplied
+storage derivative retains every nonlinear and material-memory coordinate.
+SOS sources expose `SosModalStorage::gradient_parameter_derivative` for exact
+original frequency, stress-coefficient and symmetric coupling directions.
+
+The shared independently refined FFT observer first resolves the material
+forcing, then observes `G^T*(Hxx*x_p+partial_p grad H)`. The direct material
+output term and both signed Fourier coefficients remain. Measured forcing
+grid change and omitted forcing use the original equation scales and share
+the native omitted-equation allowance with the solved response. This is
+finite-grid evidence, not an infinite-tail or forward-error bound. Both
+observations share work, payload and Hessian caps and one parameter-action cap.
+
+Feedback sources refuse because their direct material-input chain rule is
+not supplied. Changes in R/J/G, drive coefficients or the coordinate chart
+need additional derivatives. Singular, unresolved, source-refused or cancelled
+operations publish no partial tangent and leave the factor reusable. There
+is no perturbed model, finite-difference solve, regularization or branch switch.
+
+Five focused regressions cover the exact cubic-parameter response at a linear
+baseline, including the third harmonic and direct force output; converging
+independently solved nonlinear material perturbations; original Maxwell-memory
+response; unresolved source harmonics, budgets, cancellation and retry; and
+feedback refusal. The native source lane compiles the new parameter adapter
+and original FFT, pHS and periodic solver owners, without executor substitutes.
+This does not establish the complete workspace dependency build or continuum
+and branch-stability qualification.
+
 ## Independent MITC material spectra in the shared memory runtime
 
 `ModalShellRelaxation::from_mitc_shell` carries arbitrary passive per-facet

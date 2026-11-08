@@ -32,11 +32,22 @@ pub use prepared::{
     AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsBaseStabilityControls,
     PhsBaseStabilityError, PhsBaseStabilityLevel, PhsBaseStabilityReport, PhsBaseTransientControls,
     PhsBaseTransientError, PhsBaseTransientLevel, PhsBaseTransientReport,
-    PhsForcedFrequencyTangent, PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck,
-    PhsPortResonanceRequest, PhsPortResonanceResponse, PhsPortSidebandCarrierDerivativeResponse,
-    PhsPortSidebandSource, PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
+    PhsForcedFrequencyTangent, PhsForcedStorageParameterTangent, PhsPortAdaptiveResonanceRequest,
+    PhsPortResonanceRefinementCheck, PhsPortResonanceRequest, PhsPortResonanceResponse,
+    PhsPortSidebandCarrierDerivativeResponse, PhsPortSidebandSource, PhsStorageParameterControls,
+    PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
     solve_forced_feedback_port_sideband_response_analytic,
 };
+
+/// Complete derivative of the ORIGINAL storage effort with respect to one
+/// caller-declared real parameter, at fixed physical state. Write every entry
+/// of `partial_p grad H(x,p)` in original effort units per parameter unit.
+/// Include all nonlinear and explicit material-memory terms. This is distinct
+/// from the Hessian action, which differentiates the state. The callback must
+/// describe the same immutable source, be deterministic/read-only, and refuse
+/// unsupported states or unrepresentable arithmetic. No differencing fallback
+/// is supplied for refusal, incomplete writes or nonfinite outputs.
+pub type PhsStorageParameterAction<'a> = dyn Fn(&[f64], &mut [f64]) -> bool + 'a;
 
 /// Independent state-response and physical-output accuracy/resource limits.
 /// Work and action caps apply to each operation, not cumulatively across a
@@ -79,7 +90,8 @@ pub struct PhsPortSidebandControls {
 
 /// Independent finite-grid output evidence in the observed envelope's units:
 /// original physical port units, or those units per angular frequency for a
-/// carrier-derivative observation.
+/// carrier-derivative observation, or original equation units per parameter
+/// for a storage-parameter forcing projection.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhsPortSidebandCheck {
     pub samples: usize,
@@ -539,6 +551,27 @@ pub(super) struct ObservationBudget {
     pub(super) retained_bytes: u128,
 }
 
+// The same synthesis/projection/refinement owner observes a constitutive
+// parameter derivative and the full effort response. No second FFT observer
+// or finite-grid error policy is introduced for parameter sensitivities.
+#[derive(Clone, Copy)]
+pub(super) enum EffortObservation<'a> {
+    State,
+    Parameter(&'a PhsStorageParameterAction<'a>),
+    StateAndParameter(&'a PhsStorageParameterAction<'a>),
+}
+impl<'a> EffortObservation<'a> {
+    fn state(self) -> bool {
+        !matches!(self, Self::Parameter(_))
+    }
+    fn parameter(self) -> Option<&'a PhsStorageParameterAction<'a>> {
+        match self {
+            Self::State => None,
+            Self::Parameter(action) | Self::StateAndParameter(action) => Some(action),
+        }
+    }
+}
+
 fn observe(
     problem: &PhsOrbitProblem<'_>,
     orbit: &HbOrbit,
@@ -581,7 +614,12 @@ pub(super) fn observe_with_budget(
         envelope_tolerances,
         problem.system.port_dim(),
         0,
-        &|effort, output| problem.system.output_from_effort_into(effort, output).is_ok(),
+        &|effort, output| {
+            problem
+                .system
+                .output_from_effort_into(effort, output)
+                .is_ok()
+        },
         budget,
         cancelled,
     )
@@ -603,9 +641,40 @@ pub(super) fn observe_mapped_with_budget(
     budget: &mut ObservationBudget,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
+    observe_effort_with_budget(
+        problem,
+        orbit,
+        response,
+        c,
+        envelope_tolerances,
+        output_count,
+        extra_work_per_sample,
+        map_effort,
+        EffortObservation::State,
+        budget,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn observe_effort_with_budget(
+    problem: &PhsOrbitProblem<'_>,
+    orbit: &HbOrbit,
+    response: &[C64],
+    c: &PhsPortSidebandControls,
+    envelope_tolerances: &[f64],
+    output_count: usize,
+    extra_work_per_sample: u128,
+    map_effort: &impl Fn(&[f64], &mut [f64]) -> bool,
+    effort_observation: EffortObservation<'_>,
+    budget: &mut ObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
     if output_count == 0
         || envelope_tolerances.len() != output_count
-        || envelope_tolerances.iter().any(|x| !x.is_finite() || *x <= 0.0)
+        || envelope_tolerances
+            .iter()
+            .any(|x| !x.is_finite() || *x <= 0.0)
     {
         return Err(PhsPortSidebandError::Invalid(
             "complete positive mapped-output tolerances required",
@@ -619,14 +688,22 @@ pub(super) fn observe_mapped_with_budget(
     let mut consecutive = 0;
     loop {
         poll(cancelled)?;
-        admit_storage_with_retained(n, m, c, samples, budget.retained_bytes)?;
-        budget.actions =
-            budget
-                .actions
-                .checked_add(2 * samples)
-                .ok_or(PhsPortSidebandError::Budget(
-                    "physical output Hessian-action count overflow",
-                ))?;
+        let parameter_scratch = if effort_observation.parameter().is_some() {
+            8 * n as u128
+        } else {
+            0
+        };
+        admit_storage_with_retained(n, m, c, samples, budget.retained_bytes + parameter_scratch)?;
+        budget.actions = budget
+            .actions
+            .checked_add(if effort_observation.state() {
+                2 * samples
+            } else {
+                0
+            })
+            .ok_or(PhsPortSidebandError::Budget(
+                "physical output Hessian-action count overflow",
+            ))?;
         if budget.actions > c.max_hessian_actions {
             return Err(PhsPortSidebandError::Budget(
                 "physical output Hessian-action cap exhausted",
@@ -646,7 +723,16 @@ pub(super) fn observe_mapped_with_budget(
         }
         let shift = core::f64::consts::TAU * (trace.len() % 3) as f64 / (3.0 * samples as f64);
         let (coefficients, omitted) = project(
-            problem, orbit, response, c, m, map_effort, samples, shift, cancelled,
+            problem,
+            orbit,
+            response,
+            c,
+            m,
+            map_effort,
+            effort_observation,
+            samples,
+            shift,
+            cancelled,
         )?;
         let change = previous.as_ref().map(|old| {
             let mut norms = vec![0.0; m];
@@ -688,16 +774,25 @@ fn project(
     c: &PhsPortSidebandControls,
     output_count: usize,
     map_effort: &impl Fn(&[f64], &mut [f64]) -> bool,
+    effort_observation: EffortObservation<'_>,
     samples: usize,
     shift: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<C64>, Vec<f64>)> {
-    let (n, m, h) = (problem.system.state_dim(), output_count, c.sideband.harmonics);
+    let (n, m, h) = (
+        problem.system.state_dim(),
+        output_count,
+        c.sideband.harmonics,
+    );
     let fft = Fft::new(samples);
     let mut data = vec![FftComplex::default(); samples];
     let mut scratch = data.clone();
     let mut states = vec![0.0; n * samples];
-    let mut envelopes = vec![C64::ZERO; n * samples];
+    let mut envelopes = if effort_observation.state() {
+        vec![C64::ZERO; n * samples]
+    } else {
+        Vec::new()
+    };
     let mut outputs = vec![C64::ZERO; m * samples];
     for (coordinate, row) in orbit.coeffs.iter().enumerate() {
         poll(cancelled)?;
@@ -717,6 +812,9 @@ fn project(
                 return Err(PhsPortSidebandError::SourceRefused);
             }
             states[j * n + coordinate] = z.re;
+        }
+        if !effort_observation.state() {
+            continue;
         }
         poll(cancelled)?;
         data.fill(FftComplex::default());
@@ -741,17 +839,47 @@ fn project(
     }
     let mut direction = vec![0.0; n];
     let mut effort = vec![0.0; n];
+    let mut parameter_effort = if effort_observation.parameter().is_some() {
+        vec![0.0; n]
+    } else {
+        Vec::new()
+    };
     let mut flows = vec![0.0; m];
     for j in 0..samples {
         for imaginary in [false, true] {
+            if imaginary && !effort_observation.state() {
+                continue;
+            }
             poll(cancelled)?;
-            for (v, z) in direction.iter_mut().zip(&envelopes[j * n..(j + 1) * n]) {
-                *v = if imaginary { z.im } else { z.re };
+            if effort_observation.state() {
+                for (v, z) in direction.iter_mut().zip(&envelopes[j * n..(j + 1) * n]) {
+                    *v = if imaginary { z.im } else { z.re };
+                }
+                if !problem.tangent.apply_hessian(
+                    &states[j * n..(j + 1) * n],
+                    &direction,
+                    &mut effort,
+                ) {
+                    return Err(PhsPortSidebandError::SourceRefused);
+                }
+            } else {
+                effort.fill(0.0);
+            }
+            if !imaginary {
+                if let Some(action) = effort_observation.parameter() {
+                    parameter_effort.fill(f64::NAN);
+                    if !action(&states[j * n..(j + 1) * n], &mut parameter_effort)
+                        || parameter_effort.iter().any(|value| !value.is_finite())
+                    {
+                        return Err(PhsPortSidebandError::SourceRefused);
+                    }
+                    for (value, direct) in effort.iter_mut().zip(&parameter_effort) {
+                        *value += direct;
+                    }
+                }
             }
             flows.fill(f64::NAN);
-            if !problem
-                .tangent
-                .apply_hessian(&states[j * n..(j + 1) * n], &direction, &mut effort)
+            if effort.iter().any(|value| !value.is_finite())
                 || !map_effort(&effort, &mut flows)
                 || flows.iter().any(|x| !x.is_finite())
             {
