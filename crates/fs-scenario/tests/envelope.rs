@@ -542,29 +542,21 @@ fn a_limit_must_carry_the_reason_the_excluded_region_is_unreachable() {
 }
 
 #[test]
-fn an_axis_in_two_couplings_is_refused_and_the_refusal_names_the_missing_machinery() {
+fn independent_metadata_on_a_limited_axis_keeps_the_original_corners() {
     let mut envelope = reference_cooling_envelope();
+    let original = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .expect("valid");
     envelope.couplings.push(AxisCoupling {
         a: "total-power".to_string(),
         b: "fan-state".to_string(),
         relation: CouplingRelation::DeclaredIndependent,
     });
-    let findings = envelope.validate();
-    assert!(
-        codes(&findings).contains(&"envelope-coupling-axis-shared"),
-        "got {:?}",
-        codes(&findings)
-    );
-    let shared = findings
-        .iter()
-        .find(|finding| finding.code == "envelope-coupling-axis-shared")
-        .expect("present");
-    assert!(
-        shared.fix.contains("general polytope vertex enumeration"),
-        "the refusal names exactly what is not implemented, so a reader can tell a limitation \
-         from a bug: {}",
-        shared.fix
-    );
+    assert!(envelope.validate().is_empty());
+    let shared = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .expect("valid");
+    assert_eq!(shared, original);
 }
 
 #[test]
@@ -572,6 +564,456 @@ fn a_coupling_naming_an_undeclared_axis_is_refused() {
     let mut envelope = coupled_pair(975.0);
     envelope.couplings[0].b = "altitude".to_string();
     assert!(codes(&envelope.validate()).contains(&"envelope-coupling-axis-missing"));
+}
+
+// G0/G3: joint halfspace intersections, rather than a product of pairwise clips.
+fn unit_envelope() -> OperatingEnvelope {
+    OperatingEnvelope {
+        name: "shared-thermal-limits".to_string(),
+        axes: ["x", "y", "z"]
+            .into_iter()
+            .map(|name| {
+                EnvelopeAxis::continuous(
+                    name,
+                    QtyAny::dimensionless(0.0),
+                    QtyAny::dimensionless(1.0),
+                )
+            })
+            .collect(),
+        couplings: vec![
+            unit_limit("x", "y", 1.0, 1.0, 1.5),
+            unit_limit("y", "z", 1.0, 1.0, 1.5),
+        ],
+    }
+}
+
+fn unit_limit(a: &str, b: &str, a_coeff: f64, b_coeff: f64, bound: f64) -> AxisCoupling {
+    AxisCoupling {
+        a: a.to_string(),
+        b: b.to_string(),
+        relation: CouplingRelation::CoOccurrenceLimit {
+            a_coeff: QtyAny::dimensionless(a_coeff),
+            b_coeff: QtyAny::dimensionless(b_coeff),
+            bound: QtyAny::dimensionless(bound),
+            rationale: "declared joint operating limit".to_string(),
+        },
+    }
+}
+
+fn xyz(corners: &[EnvelopePoint]) -> Vec<[f64; 3]> {
+    corners
+        .iter()
+        .map(|point| {
+            ["x", "y", "z"].map(|axis| point.continuous(axis).expect("continuous coordinate").value)
+        })
+        .collect()
+}
+
+#[test]
+fn shared_axis_limits_find_all_eleven_hand_worked_vertices() {
+    // At y=0, x and z independently span [0,1]. At y=1 they span [0,1/2].
+    // Three more vertices occur at y=1/2 where either or both upper faces meet
+    // the two diagonal planes. Pairwise clipping cannot construct this set.
+    let envelope = unit_envelope();
+    let result = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .expect("bounded joint region");
+    assert_eq!(
+        xyz(&result.corners),
+        vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.5, 1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.5],
+            [0.5, 1.0, 0.0],
+            [0.5, 1.0, 0.5],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.5, 0.0],
+            [1.0, 0.5, 1.0],
+        ]
+    );
+    for point in &result.corners {
+        envelope
+            .admits(point)
+            .expect("every returned corner is admitted");
+    }
+    assert!(
+        result
+            .rationale
+            .iter()
+            .any(|row| row.contains("56 active sets"))
+    );
+    assert!(
+        result
+            .caveats
+            .iter()
+            .any(|row| row.code == "envelope-corners-numerical")
+    );
+}
+
+#[test]
+fn two_limits_on_the_same_pair_clip_both_ends_of_the_box() {
+    let mut envelope = unit_envelope();
+    envelope.axes.truncate(2);
+    envelope.couplings = vec![
+        unit_limit("x", "y", 1.0, 1.0, 1.5),
+        unit_limit("x", "y", -1.0, -1.0, -0.5),
+    ];
+    let result = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .expect("strip through box");
+    let points: Vec<_> = result
+        .corners
+        .iter()
+        .map(|point| {
+            (
+                point.continuous("x").unwrap().value,
+                point.continuous("y").unwrap().value,
+            )
+        })
+        .collect();
+    assert_eq!(
+        points,
+        vec![
+            (0.0, 0.5),
+            (0.0, 1.0),
+            (0.5, 0.0),
+            (0.5, 1.0),
+            (1.0, 0.0),
+            (1.0, 0.5)
+        ]
+    );
+}
+
+#[test]
+fn duplicate_scaled_and_redundant_limits_do_not_add_vertices() {
+    let mut envelope = unit_envelope();
+    let original = envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap();
+    envelope.couplings.push(envelope.couplings[0].clone());
+    envelope.couplings.push(unit_limit("y", "x", 2.0, 2.0, 3.0));
+    let duplicate = envelope
+        .enumerate_corners_with_candidate_limit(DEFAULT_ENVELOPE_BUDGET, 56)
+        .unwrap();
+    assert_eq!(
+        original.corners, duplicate.corners,
+        "exact normalized duplicates consume no extra active sets"
+    );
+    envelope.couplings.push(unit_limit("x", "y", 1.0, 1.0, 4.0));
+    assert_eq!(
+        original.corners,
+        envelope
+            .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+            .unwrap()
+            .corners
+    );
+}
+
+#[test]
+fn shared_limit_order_names_and_units_leave_corner_provenance_stable() {
+    let mut envelope = unit_envelope();
+    let original = envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap();
+    envelope.couplings.reverse();
+    for limit in &mut envelope.couplings {
+        std::mem::swap(&mut limit.a, &mut limit.b);
+        if let CouplingRelation::CoOccurrenceLimit {
+            a_coeff, b_coeff, ..
+        } = &mut limit.relation
+        {
+            std::mem::swap(a_coeff, b_coeff);
+        }
+    }
+    assert_eq!(
+        original.corners,
+        envelope
+            .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+            .unwrap()
+            .corners
+    );
+    let scales = [8.0, 4.0, 0.5];
+    let offsets = [-4.0, 10.0, 0.0];
+    for (i, axis) in envelope.axes.iter_mut().enumerate() {
+        axis.domain = AxisDomain::Continuous {
+            low: QtyAny::dimensionless(offsets[i]),
+            high: QtyAny::dimensionless(offsets[i] + scales[i]),
+        };
+    }
+    envelope.couplings = vec![
+        unit_limit("x", "y", 0.125, 0.25, 3.5),
+        unit_limit("y", "z", 0.25, 2.0, 4.0),
+    ];
+    let transformed = envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap();
+    let normalized: Vec<_> = xyz(&transformed.corners)
+        .into_iter()
+        .map(|point| std::array::from_fn(|i| (point[i] - offsets[i]) / scales[i]))
+        .collect();
+    assert_eq!(normalized, xyz(&original.corners));
+    assert_eq!(
+        transformed,
+        envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap()
+    );
+}
+
+#[test]
+fn rounded_boundary_vertices_remain_admissible_as_operating_points() {
+    let mut envelope = unit_envelope();
+    envelope.couplings = vec![
+        unit_limit("x", "y", 1.0, 1.0, 1.0 / 3.0),
+        unit_limit("y", "z", 1.0, 1.0, 2.0 / 3.0),
+    ];
+    let result = envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap();
+    assert_eq!(result.corners.len(), 6);
+    for point in &result.corners {
+        envelope
+            .admits(point)
+            .expect("roundoff does not invalidate a published boundary point");
+    }
+}
+
+#[test]
+fn shared_components_cross_discrete_states_and_keep_unknown_caveats() {
+    let mut envelope = unit_envelope();
+    envelope.axes.push(EnvelopeAxis::discrete(
+        "fan",
+        vec![
+            DiscreteState::nominal("running"),
+            DiscreteState::failed("failed"),
+        ],
+    ));
+    envelope.couplings.insert(
+        0,
+        AxisCoupling {
+            a: "y".to_string(),
+            b: "fan".to_string(),
+            relation: CouplingRelation::Unknown {
+                rationale: "failure co-occurrence unmeasured".to_string(),
+            },
+        },
+    );
+    let result = envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap();
+    assert_eq!(result.corners.len(), 22);
+    assert_eq!(
+        result
+            .caveats
+            .iter()
+            .filter(|row| row.code == "envelope-coupling-unknown")
+            .count(),
+        1
+    );
+    for pair in result.corners.chunks_exact(2) {
+        assert_eq!(pair[0].discrete("fan"), Some("running"));
+        assert_eq!(pair[1].discrete("fan"), Some("failed"));
+    }
+}
+
+#[test]
+fn individually_nonempty_limits_with_empty_intersection_are_refused() {
+    let mut envelope = unit_envelope();
+    envelope.axes.truncate(2);
+    envelope.couplings = vec![
+        unit_limit("x", "y", 1.0, 1.0, 0.25),
+        unit_limit("x", "y", -1.0, -1.0, -0.75),
+    ];
+    assert!(
+        envelope.validate().is_empty(),
+        "each halfspace individually meets the box"
+    );
+    let findings = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-limits-empty"]);
+}
+
+#[test]
+fn unresolved_conditioning_and_nonfinite_or_zero_rows_refuse() {
+    let mut envelope = unit_envelope();
+    envelope.axes.truncate(2);
+    envelope.couplings = vec![
+        unit_limit("x", "y", 1.0, 1.0, 1.0),
+        unit_limit("x", "y", 1.0, 1.0 + 1e-12, 1.0),
+    ];
+    let findings = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-corner-numerical"]);
+    envelope.couplings[1] = unit_limit("x", "y", 0.0, 0.0, 1.0);
+    assert!(codes(&envelope.validate()).contains(&"envelope-limit-degenerate"));
+    envelope.couplings[1] = unit_limit("x", "y", f64::NAN, 1.0, 1.0);
+    assert!(codes(&envelope.validate()).contains(&"envelope-limit-nonfinite"));
+}
+
+#[test]
+fn shared_envelope_work_output_and_axis_limits_refuse_separately() {
+    let envelope = unit_envelope();
+    let findings = envelope
+        .enumerate_corners_with_candidate_limit(DEFAULT_ENVELOPE_BUDGET, 55)
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-candidate-overflow"]);
+    assert_eq!(
+        envelope
+            .enumerate_corners_with_candidate_limit(DEFAULT_ENVELOPE_BUDGET, 56)
+            .unwrap()
+            .corners
+            .len(),
+        11
+    );
+    let findings = envelope
+        .enumerate_corners(EnvelopeBudget {
+            max_corners: 10,
+            ..DEFAULT_ENVELOPE_BUDGET
+        })
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-corner-overflow"]);
+    let findings = envelope
+        .enumerate_corners(EnvelopeBudget {
+            max_axes: 2,
+            ..DEFAULT_ENVELOPE_BUDGET
+        })
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-axes-overflow"]);
+    assert!(
+        coupled_pair(975.0)
+            .enumerate_corners_with_candidate_limit(DEFAULT_ENVELOPE_BUDGET, 0)
+            .is_ok(),
+        "the original analytic pair does not consume numerical active-set work"
+    );
+}
+
+#[test]
+fn candidate_allowance_is_shared_across_disconnected_limited_components() {
+    let mut envelope = unit_envelope();
+    let mut second = unit_envelope();
+    for axis in &mut second.axes {
+        axis.name.push_str("-second");
+    }
+    for limit in &mut second.couplings {
+        limit.a.push_str("-second");
+        limit.b.push_str("-second");
+    }
+    envelope.axes.extend(second.axes);
+    envelope.couplings.extend(second.couplings);
+    let findings = envelope
+        .enumerate_corners_with_candidate_limit(DEFAULT_ENVELOPE_BUDGET, 111)
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-candidate-overflow"]);
+    assert_eq!(
+        envelope
+            .enumerate_corners_with_candidate_limit(DEFAULT_ENVELOPE_BUDGET, 112)
+            .unwrap()
+            .corners
+            .len(),
+        121
+    );
+}
+
+#[test]
+fn large_canceling_offsets_do_not_relax_declared_membership() {
+    let mut envelope = unit_envelope();
+    envelope.axes.truncate(2);
+    for axis in &mut envelope.axes {
+        axis.domain = AxisDomain::Continuous {
+            low: QtyAny::dimensionless(1e15),
+            high: QtyAny::dimensionless(1e15 + 10.0),
+        };
+    }
+    envelope.couplings = vec![unit_limit("x", "y", 1.0, -1.0, 0.0)];
+    let point = EnvelopePoint {
+        coordinates: vec![
+            (
+                "x".to_string(),
+                AxisPoint::Continuous(QtyAny::dimensionless(1e15 + 1.0)),
+            ),
+            (
+                "y".to_string(),
+                AxisPoint::Continuous(QtyAny::dimensionless(1e15)),
+            ),
+        ],
+    };
+    assert_eq!(
+        codes(&envelope.admits(&point).unwrap_err()),
+        vec!["envelope-point-limit-violated"],
+        "a large origin is not permission to admit a unit beyond the declared limit"
+    );
+}
+
+fn translated_difference_envelope(bound: f64) -> OperatingEnvelope {
+    let mut envelope = unit_envelope();
+    envelope.axes.truncate(2);
+    for axis in &mut envelope.axes {
+        axis.domain = AxisDomain::Continuous {
+            low: QtyAny::dimensionless(1e15),
+            high: QtyAny::dimensionless(1e15 + 10.0),
+        };
+    }
+    envelope.couplings = vec![
+        unit_limit("x", "y", 1.0, -1.0, bound),
+        unit_limit("x", "y", 1.0, 1.0, 2e15 + 100.0),
+    ];
+    envelope
+}
+
+#[test]
+fn small_bound_at_large_origins_cannot_silently_lose_two_vertices() {
+    // The real shifted box has five vertices: t_x-t_y <= 0.001 clips one
+    // corner. Subtracting the two 1e15 origins in ordinary f64 used to erase
+    // 0.01, silently replacing this region by a three-vertex triangle.
+    // DD retains the bound, but the two new physical vertices cannot be
+    // represented at this origin. Refusal is required, not an inward subset.
+    let findings = translated_difference_envelope(0.01)
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-corner-numerical"]);
+    assert!(findings[0].what.contains("round-trip"));
+}
+
+#[test]
+fn representable_vertices_at_large_origins_still_enumerate() {
+    let envelope = translated_difference_envelope(0.25);
+    let result = envelope.enumerate_corners(DEFAULT_ENVELOPE_BUDGET).unwrap();
+    let pairs: Vec<_> = result
+        .corners
+        .iter()
+        .map(|point| {
+            (
+                point.continuous("x").unwrap().value - 1e15,
+                point.continuous("y").unwrap().value - 1e15,
+            )
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            (0.0, 0.0),
+            (0.0, 10.0),
+            (0.25, 0.0),
+            (10.0, 9.75),
+            (10.0, 10.0)
+        ]
+    );
+    for point in &result.corners {
+        envelope.admits(point).unwrap();
+    }
+}
+
+#[test]
+fn normalized_vertex_that_rounds_outside_the_physical_limit_refuses_publication() {
+    let mut envelope = unit_envelope();
+    envelope.axes.truncate(2);
+    envelope.couplings = vec![
+        unit_limit("x", "y", 3.0, 7.0, 0.1),
+        unit_limit("x", "y", 1.0, 1.0, 3.0),
+    ];
+    // At y=0, normalized LU solves (3/7)*x = 0.1/7. Its rounded x is
+    // just outside the original 3*x <= 0.1. Earlier feasible vertices must
+    // not be returned as if they were a complete admissible corner set.
+    let normalized_x = (0.1_f64 / 7.0) / (3.0 / 7.0);
+    assert!(3.0 * normalized_x > 0.1);
+    let findings = envelope
+        .enumerate_corners(DEFAULT_ENVELOPE_BUDGET)
+        .unwrap_err();
+    assert_eq!(codes(&findings), vec!["envelope-corner-numerical"]);
+    assert!(findings[0].what.contains("physical units"));
 }
 
 // ---------------------------------------------------------------------------

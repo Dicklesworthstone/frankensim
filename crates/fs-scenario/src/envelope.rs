@@ -43,6 +43,8 @@
 use core::cmp::Ordering;
 use core::fmt;
 
+use fs_la::{LuWorkspace, LuWorkspaceError};
+use fs_math::dd::Dd;
 use fs_qty::{Dims, QtyAny};
 
 use crate::scenario::{Combination, LoadCase, Violation};
@@ -63,15 +65,24 @@ const TIME_DIMS: Dims = Dims([0, 0, 1, 0, 0, 0]);
 /// unsafe direction.
 pub const EDGE_SPAN_TOLERANCE: f64 = 1e-12;
 
+/// Maximum active constraint sets tried by the default shared-axis enumerator.
+///
+/// This bounds numerical work independently of the number of retained corners.
+/// Call [`OperatingEnvelope::enumerate_corners_with_candidate_limit`] to choose
+/// a different limit. Independent axes and single-limit pairs keep their
+/// existing analytic enumeration and do not consume this allowance.
+pub const DEFAULT_ENVELOPE_CANDIDATE_LIMIT: usize = 262_144;
+
 /// Relative tolerance on the sum of declared duty fractions.
 pub const DUTY_FRACTION_TOLERANCE: f64 = 1e-12;
 
 /// Resource admission for the combinatorial products in this module.
 ///
-/// Corner enumeration and case-set crossing are both Cartesian products, so
-/// their size is bounded *before* anything is allocated. An envelope with ten
+/// Independent corner blocks and case-set crossing form Cartesian products,
+/// whose size is bounded before the full product is allocated. An envelope with ten
 /// five-corner blocks describes ten million corners; the refusal names the
-/// count so the author can see what they asked for.
+/// count so the author can see what they asked for. Shared-axis components
+/// additionally have a separate active-set work allowance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnvelopeBudget {
     /// Maximum enumerated corners.
@@ -227,8 +238,8 @@ pub enum CouplingRelation {
     /// `a_coeff * a + b_coeff * b <= bound`.
     ///
     /// Coefficients carry dimensions, so `a_coeff * a`, `b_coeff * b` and
-    /// `bound` must all share one dimension; the check is exact and there is
-    /// no normalisation step to go stale when an axis range changes.
+    /// `bound` must all share one dimension. Point admission evaluates the
+    /// declared closed inequality without a numerical slack allowance.
     CoOccurrenceLimit {
         /// Coefficient on the first axis.
         a_coeff: QtyAny,
@@ -274,7 +285,7 @@ pub struct OperatingEnvelope {
     pub name: String,
     /// Declared axes.
     pub axes: Vec<EnvelopeAxis>,
-    /// Declared pairwise couplings. An axis may appear in at most one.
+    /// Declared pairwise couplings. Shared axes intersect all declared limits.
     pub couplings: Vec<AxisCoupling>,
 }
 
@@ -340,10 +351,15 @@ impl OperatingEnvelope {
     /// Validate the declaration.
     ///
     /// Returns every finding, each with a fix hint, in a deterministic order.
-    /// An empty vector means the envelope may be enumerated.
+    /// An empty vector establishes declaration validity; enumeration separately
+    /// checks joint feasibility, numerical resolution and caller budgets.
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Vec<Violation> {
+        self.validate_with_axis_limit(DEFAULT_ENVELOPE_BUDGET.max_axes)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn validate_with_axis_limit(&self, max_axes: usize) -> Vec<Violation> {
         let mut findings = Vec::new();
 
         if self.name.trim().is_empty() {
@@ -365,14 +381,14 @@ impl OperatingEnvelope {
             });
         }
 
-        if self.axes.len() > DEFAULT_ENVELOPE_BUDGET.max_axes {
+        if self.axes.len() > max_axes {
             findings.push(Violation {
                 code: "envelope-axes-overflow",
                 what: format!(
                     "envelope `{}` declares {} axes, above the admitted maximum of {}",
                     self.name,
                     self.axes.len(),
-                    DEFAULT_ENVELOPE_BUDGET.max_axes
+                    max_axes
                 ),
                 fix: "split the envelope, or raise max_axes on an explicit EnvelopeBudget"
                     .to_string(),
@@ -403,30 +419,6 @@ impl OperatingEnvelope {
 
         for coupling in &self.couplings {
             findings.extend(self.validate_coupling(coupling));
-        }
-
-        // An axis in two couplings makes the feasible set a general polytope
-        // rather than a product of independent blocks, and this enumerator
-        // only knows how to do the latter exactly.
-        for (index, coupling) in self.couplings.iter().enumerate() {
-            for name in [&coupling.a, &coupling.b] {
-                let earlier = self.couplings[..index]
-                    .iter()
-                    .any(|other| &other.a == name || &other.b == name);
-                if earlier {
-                    findings.push(Violation {
-                        code: "envelope-coupling-axis-shared",
-                        what: format!(
-                            "axis `{name}` appears in more than one coupling; the feasible set is \
-                             then a general polytope, not a product of independent blocks"
-                        ),
-                        fix: "declare at most one coupling per axis. Chained couplings need \
-                              general polytope vertex enumeration, which is not implemented \
-                              (see CONTRACT)"
-                            .to_string(),
-                    });
-                }
-            }
         }
 
         findings
@@ -615,14 +607,6 @@ impl OperatingEnvelope {
         self.axes.iter().find(|axis| axis.name == name)
     }
 
-    /// The coupling that mentions `name`, if any.
-    #[must_use]
-    fn coupling_for(&self, name: &str) -> Option<&AxisCoupling> {
-        self.couplings
-            .iter()
-            .find(|coupling| coupling.a == name || coupling.b == name)
-    }
-
     /// Check that a point lies in the envelope.
     ///
     /// # Errors
@@ -682,7 +666,12 @@ impl OperatingEnvelope {
                         (point.continuous(&coupling.a), point.continuous(&coupling.b))
                 {
                     let lhs = a_coeff.value * a.value + b_coeff.value * b.value;
-                    if lhs > bound.value {
+                    if let Some(admitted) =
+                        limit_contains(a_coeff.value, a.value, b_coeff.value, b.value, bound.value)
+                    {
+                        if admitted {
+                            continue;
+                        }
                         findings.push(Violation {
                             code: "envelope-point-limit-violated",
                             what: format!(
@@ -693,6 +682,12 @@ impl OperatingEnvelope {
                             fix: "move the point inside the declared limit, or revise the limit \
                                   if the point is genuinely reachable"
                                 .to_string(),
+                        });
+                    } else {
+                        findings.push(Violation {
+                            code: "envelope-point-limit-nonfinite",
+                            what: format!("the `{}`/`{}` limit cannot be evaluated finitely at this point", coupling.a, coupling.b),
+                            fix: "rescale the coefficients and bound; nonfinite arithmetic cannot establish membership".to_string(),
                         });
                     }
                 }
@@ -709,7 +704,7 @@ impl OperatingEnvelope {
     /// Enumerate the deterministic worst-case corner set.
     ///
     /// The envelope decomposes into independent blocks — an unpaired
-    /// continuous axis, a coupled continuous pair, or a discrete axis — and
+    /// continuous axis, a connected set of limited axes, or a discrete axis — and
     /// the corner set is the Cartesian product of the blocks' own extreme
     /// points. A coupled pair contributes the vertices of its box clipped by
     /// the declared limit, which is where a coupled envelope stops agreeing
@@ -717,36 +712,138 @@ impl OperatingEnvelope {
     /// vertex (four becomes five) as easily as remove one.
     ///
     /// # Errors
-    /// Returns the validation findings when the envelope is invalid, and a
-    /// single `envelope-corner-overflow` finding when the product exceeds
-    /// `budget.max_corners` — checked before anything is allocated.
-    #[allow(clippy::too_many_lines)]
+    /// Returns declaration, output-budget, candidate-work or numerical findings.
+    /// Shared-axis work uses [`DEFAULT_ENVELOPE_CANDIDATE_LIMIT`]; callers can
+    /// choose a different cap with [`Self::enumerate_corners_with_candidate_limit`].
     pub fn enumerate_corners(&self, budget: EnvelopeBudget) -> Result<CornerSet, Vec<Violation>> {
-        let findings = self.validate();
+        self.enumerate_corners_with_candidate_limit(budget, DEFAULT_ENVELOPE_CANDIDATE_LIMIT)
+    }
+
+    /// Enumerate with an explicit total active-set allowance for shared limits.
+    ///
+    /// A connected n-axis component with m distinct inequalities (including
+    /// its box bounds) tries each of the `m choose n` active sets. The complete
+    /// count is admitted before solving; exact singular sets are not isolated
+    /// vertices. Nonfinite or poorly conditioned solves refuse rather than
+    /// silently discarding a possible extreme point. Returned shared-axis
+    /// vertices are numerical estimates with an explicit caveat, not interval
+    /// certificates. Independent blocks retain their original arithmetic.
+    ///
+    /// # Errors
+    /// Invalid declarations, joint infeasibility, work/output limits, allocation
+    /// failure, or ambiguous numerical solves publish no partial corner set.
+    #[allow(clippy::too_many_lines)]
+    pub fn enumerate_corners_with_candidate_limit(
+        &self,
+        budget: EnvelopeBudget,
+        max_candidates: usize,
+    ) -> Result<CornerSet, Vec<Violation>> {
+        let findings = self.validate_with_axis_limit(budget.max_axes);
         if !findings.is_empty() {
             return Err(findings);
+        }
+
+        // Only explicit inequalities join blocks. An Unknown or independence
+        // declaration must neither hide another limit nor consume either axis.
+        let mut components: Vec<usize> = (0..self.axes.len()).collect();
+        for coupling in &self.couplings {
+            if matches!(
+                coupling.relation,
+                CouplingRelation::CoOccurrenceLimit { .. }
+            ) {
+                let a = self
+                    .axes
+                    .iter()
+                    .position(|axis| axis.name == coupling.a)
+                    .expect("validated axis");
+                let b = self
+                    .axes
+                    .iter()
+                    .position(|axis| axis.name == coupling.b)
+                    .expect("validated axis");
+                let (keep, merge) = (components[a], components[b]);
+                for component in &mut components {
+                    if *component == merge {
+                        *component = keep;
+                    }
+                }
+            }
         }
 
         let mut blocks: Vec<Vec<Vec<(String, AxisPoint)>>> = Vec::new();
         let mut rationale = Vec::new();
         let mut caveats = Vec::new();
         let mut consumed: Vec<&str> = Vec::new();
+        let mut remaining_candidates = max_candidates;
         // Keyed on the exact axis pair, not on a substring of the caveat text:
         // axis names nest (`power` inside `total-power`), so a `contains`
         // check would silently suppress a second pair's caveat.
         let mut caveated: Vec<(&str, &str)> = Vec::new();
 
         for axis in &self.axes {
+            for coupling in &self.couplings {
+                if coupling.a != axis.name && coupling.b != axis.name {
+                    continue;
+                }
+                if let CouplingRelation::Unknown { rationale: why } = &coupling.relation
+                    && !caveated.contains(&(coupling.a.as_str(), coupling.b.as_str()))
+                    && !caveated.contains(&(coupling.b.as_str(), coupling.a.as_str()))
+                {
+                    caveated.push((coupling.a.as_str(), coupling.b.as_str()));
+                    let shares_limit = self.couplings.iter().any(|other| {
+                        matches!(other.relation, CouplingRelation::CoOccurrenceLimit { .. })
+                            && [other.a.as_str(), other.b.as_str()]
+                                .iter()
+                                .any(|name| *name == coupling.a || *name == coupling.b)
+                    });
+                    caveats.push(EnvelopeCaveat {
+                        code: "envelope-coupling-unknown",
+                        what: format!(
+                            "co-occurrence of `{}` and `{}` is declared unknown: {why}",
+                            coupling.a, coupling.b
+                        ),
+                        consequence: if shares_limit {
+                            "this declaration drops no corners; only explicit limits \
+                                      restrict the support, which remains a SUPERSET of the true \
+                                      reachable set. That is conservative for a worst-case claim \
+                                      and inadmissible as the basis for any probability-weighted \
+                                      statement over the pair."
+                        } else {
+                            "no corner was dropped for this pair, so the corner set \
+                             is the independence product — a SUPERSET of the true \
+                             reachable set. That is conservative for a worst-case \
+                             claim and inadmissible as the basis for any \
+                             probability-weighted statement over the pair."
+                        }
+                        .to_string(),
+                    });
+                }
+            }
+        }
+
+        for (axis_index, axis) in self.axes.iter().enumerate() {
             if consumed.contains(&axis.name.as_str()) {
                 continue;
             }
-            match self.coupling_for(&axis.name) {
-                Some(coupling)
-                    if matches!(
+            let component: Vec<&EnvelopeAxis> = self
+                .axes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| components[*index] == components[axis_index])
+                .map(|(_, member)| member)
+                .collect();
+            let limits: Vec<&AxisCoupling> = self
+                .couplings
+                .iter()
+                .filter(|coupling| {
+                    matches!(
                         coupling.relation,
                         CouplingRelation::CoOccurrenceLimit { .. }
-                    ) =>
-                {
+                    ) && component.iter().any(|member| member.name == coupling.a)
+                })
+                .collect();
+            match limits.as_slice() {
+                [coupling] => {
                     let CouplingRelation::CoOccurrenceLimit {
                         a_coeff,
                         b_coeff,
@@ -828,26 +925,7 @@ impl OperatingEnvelope {
                     consumed.push(coupling.a.as_str());
                     consumed.push(coupling.b.as_str());
                 }
-                other => {
-                    if let Some(coupling) = other
-                        && let CouplingRelation::Unknown { rationale: why } = &coupling.relation
-                        && !caveated.contains(&(coupling.a.as_str(), coupling.b.as_str()))
-                    {
-                        caveated.push((coupling.a.as_str(), coupling.b.as_str()));
-                        caveats.push(EnvelopeCaveat {
-                            code: "envelope-coupling-unknown",
-                            what: format!(
-                                "co-occurrence of `{}` and `{}` is declared unknown: {why}",
-                                coupling.a, coupling.b
-                            ),
-                            consequence: "no corner was dropped for this pair, so the corner set \
-                                          is the independence product — a SUPERSET of the true \
-                                          reachable set. That is conservative for a worst-case \
-                                          claim and inadmissible as the basis for any \
-                                          probability-weighted statement over the pair."
-                                .to_string(),
-                        });
-                    }
+                [] => {
                     let block = axis_block(axis);
                     rationale.push(format!(
                         "axis `{}`: {} extreme point(s), uncoupled",
@@ -856,6 +934,62 @@ impl OperatingEnvelope {
                     ));
                     blocks.push(block);
                     consumed.push(axis.name.as_str());
+                }
+                _ => {
+                    let (vertices, tried) = clip_coupled_box(
+                        &component,
+                        &limits,
+                        budget.max_corners,
+                        remaining_candidates,
+                    )
+                    .map_err(|finding| vec![finding])?;
+                    remaining_candidates -= tried;
+                    let names = component
+                        .iter()
+                        .map(|member| member.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" x ");
+                    rationale.push(format!(
+                        "axes `{names}`: {} joint-limit vertices from {tried} active sets; \
+                         {} declared co-occurrence limits intersected",
+                        vertices.len(),
+                        limits.len(),
+                    ));
+                    for coupling in &limits {
+                        if let CouplingRelation::CoOccurrenceLimit { rationale: why, .. } =
+                            &coupling.relation
+                        {
+                            rationale
+                                .push(format!("limit `{}`/`{}`: {why}", coupling.a, coupling.b));
+                        }
+                    }
+                    caveats.push(EnvelopeCaveat {
+                        code: "envelope-corners-numerical",
+                        what: format!("shared-axis vertices on `{names}` use normalized floating-point active-set solves"),
+                        consequence: "finite residual and conditioning checks are numerical admission, \
+                                      not a certified enclosure or a proof of a nonlinear QoI extremum"
+                            .to_string(),
+                    });
+                    let block = vertices
+                        .into_iter()
+                        .map(|values| {
+                            component
+                                .iter()
+                                .zip(values)
+                                .map(|(member, value)| {
+                                    (
+                                        member.name.clone(),
+                                        AxisPoint::Continuous(QtyAny::new(
+                                            value,
+                                            member.dims().expect("limited axis is continuous"),
+                                        )),
+                                    )
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    blocks.push(block);
+                    consumed.extend(component.iter().map(|member| member.name.as_str()));
                 }
             }
         }
@@ -1184,6 +1318,439 @@ fn clamp_to_span(value: f64, lo: f64, hi: f64) -> Option<f64> {
         return None;
     }
     Some(value.clamp(lo, hi))
+}
+
+/// A row of the shared-axis problem in unit-box coordinates. Rows are sorted
+/// canonically and columns follow declared axis order, so reordering the
+/// coupling declarations cannot change pivots.
+#[derive(PartialEq)]
+struct EnvelopeHalfspace {
+    coefficients: Vec<f64>,
+    bound: f64,
+}
+
+fn corner_numerical(what: impl Into<String>) -> Violation {
+    Violation {
+        code: "envelope-corner-numerical",
+        what: what.into(),
+        fix: "rescale or simplify the declared limits; no partial corner set is returned \
+              when a possible vertex cannot be resolved reliably"
+            .to_string(),
+    }
+}
+
+fn candidate_overflow(limit: usize) -> Violation {
+    Violation {
+        code: "envelope-candidate-overflow",
+        what: format!(
+            "shared-axis enumeration exceeds the remaining allowance of {limit} active sets"
+        ),
+        fix: "split independent operating regions or explicitly raise max_candidates; \
+              the complete active-set count is checked before numerical solves"
+            .to_string(),
+    }
+}
+
+fn corner_capacity() -> Violation {
+    Violation {
+        code: "envelope-corner-capacity",
+        what: "corner workspace size overflowed or its allocation failed".to_string(),
+        fix: "use fewer coupled axes or a smaller candidate/output budget".to_string(),
+    }
+}
+
+fn envelope_zeros(count: usize) -> Result<Vec<f64>, Violation> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| corner_capacity())?;
+    values.resize(count, 0.0);
+    Ok(values)
+}
+
+fn coordinate_order(left: &[f64], right: &[f64]) -> Ordering {
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| a.total_cmp(b))
+        .find(|order| *order != Ordering::Equal)
+        .unwrap_or(Ordering::Equal)
+}
+
+/// Finite closed-limit membership, without relaxing the physical declaration.
+/// Numerical vertices that cannot retain this after mapping back to physical
+/// units refuse publication; a small solve residual is not membership proof.
+fn limit_contains(a_coeff: f64, a: f64, b_coeff: f64, b: f64, bound: f64) -> Option<bool> {
+    let first = a_coeff * a;
+    let second = b_coeff * b;
+    let lhs = first + second;
+    if !first.is_finite() || !second.is_finite() || !lhs.is_finite() || !bound.is_finite() {
+        return None;
+    }
+    Some(lhs <= bound)
+}
+
+/// Count combinations without iterating them or overflowing a machine word.
+fn active_set_count(rows: usize, dimension: usize, limit: usize) -> Result<usize, Violation> {
+    let mut count = 1_u128;
+    for i in 0..dimension.min(rows - dimension) {
+        count = count
+            .checked_mul((rows - i) as u128)
+            .ok_or_else(|| candidate_overflow(limit))?
+            / (i + 1) as u128;
+        if count > limit as u128 {
+            return Err(candidate_overflow(limit));
+        }
+    }
+    if count > limit as u128 {
+        return Err(candidate_overflow(limit));
+    }
+    Ok(count as usize)
+}
+
+/// Account for the final rounding of a compensated, dimensionless row value.
+/// A small physical bound must not disappear behind large translated origins.
+fn rounded_envelope_scalar(value: Dd, error: &mut f64) -> Result<f64, Violation> {
+    if !value.hi.is_finite() || !value.lo.is_finite() {
+        return Err(corner_numerical("co-occurrence normalization is nonfinite"));
+    }
+    let rounded = value.to_f64();
+    *error += (value - Dd::from_f64(rounded)).abs().to_f64();
+    if !error.is_finite() || *error > EDGE_SPAN_TOLERANCE {
+        return Err(corner_numerical(
+            "co-occurrence coordinate transformation exceeds the normalized span tolerance",
+        ));
+    }
+    Ok(rounded)
+}
+
+/// Normalize the physical box before doing linear algebra. Each inequality is
+/// scaled by its largest coefficient, never by an arbitrary unit convention.
+/// Overflow/underflow in this change of coordinates is a refusal, not a zero
+/// coefficient that could silently discard a physical constraint.
+fn coupled_halfspaces(
+    axes: &[&EnvelopeAxis],
+    limits: &[&AxisCoupling],
+) -> Result<(Vec<EnvelopeHalfspace>, Vec<(f64, f64)>), Violation> {
+    let n = axes.len();
+    let mut spans = Vec::new();
+    spans.try_reserve_exact(n).map_err(|_| corner_capacity())?;
+    for axis in axes {
+        let AxisDomain::Continuous { low, high } = axis.domain else {
+            unreachable!("validated: limits contain only continuous axes")
+        };
+        let width = high.value - low.value;
+        if !width.is_finite() || width <= 0.0 {
+            return Err(corner_numerical(format!(
+                "axis `{}` has an unrepresentable span",
+                axis.name
+            )));
+        }
+        spans.push((low.value, high.value));
+    }
+    let count = n
+        .checked_mul(2)
+        .and_then(|count| count.checked_add(limits.len()))
+        .ok_or_else(corner_capacity)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(count)
+        .map_err(|_| corner_capacity())?;
+    for column in 0..n {
+        for (coefficient, bound) in [(-1.0, 0.0), (1.0, 1.0)] {
+            let mut coefficients = envelope_zeros(n)?;
+            coefficients[column] = coefficient;
+            rows.push(EnvelopeHalfspace {
+                coefficients,
+                bound,
+            });
+        }
+    }
+    for limit in limits {
+        let CouplingRelation::CoOccurrenceLimit {
+            a_coeff,
+            b_coeff,
+            bound,
+            ..
+        } = limit.relation
+        else {
+            unreachable!("component contains only limits")
+        };
+        let mut coefficients = envelope_zeros(n)?;
+        coefficients[axes
+            .iter()
+            .position(|axis| axis.name == limit.a)
+            .expect("component axis")] = a_coeff.value;
+        coefficients[axes
+            .iter()
+            .position(|axis| axis.name == limit.b)
+            .expect("component axis")] = b_coeff.value;
+        let mut rhs = Dd::from_f64(bound.value);
+        let mut scale = 0.0_f64;
+        let mut magnitude = bound.value.abs();
+        for (&coefficient, &(low, high)) in coefficients.iter().zip(&spans) {
+            let width = Dd::from_f64(high) - Dd::from_f64(low);
+            let offset = Dd::from_f64(coefficient) * Dd::from_f64(low);
+            let transformed = Dd::from_f64(coefficient) * width;
+            rhs = rhs - offset;
+            if !rhs.hi.is_finite()
+                || !rhs.lo.is_finite()
+                || !transformed.hi.is_finite()
+                || !transformed.lo.is_finite()
+                || (coefficient != 0.0 && transformed.hi == 0.0)
+            {
+                return Err(corner_numerical(
+                    "co-occurrence coordinate transformation is not finite and representable",
+                ));
+            }
+            scale = scale.max(transformed.abs().to_f64());
+            magnitude = magnitude
+                .max(offset.abs().to_f64())
+                .max(transformed.abs().to_f64());
+        }
+        // Dd's documented per-operation relative error is at most 2^-103.
+        // A row has only two nonzero terms. Include a conservative aggregate
+        // allowance and a subnormal floor, then charge the f64 row rounding.
+        let mut transform_error =
+            (32.0 * f64::EPSILON * f64::EPSILON * magnitude + f64::from_bits(64)) / scale;
+        for (coefficient, &(low, high)) in coefficients.iter_mut().zip(&spans) {
+            let old = *coefficient;
+            let width = Dd::from_f64(high) - Dd::from_f64(low);
+            *coefficient = rounded_envelope_scalar(
+                Dd::from_f64(old) * width / Dd::from_f64(scale),
+                &mut transform_error,
+            )?;
+            if old != 0.0 && *coefficient == 0.0 {
+                return Err(corner_numerical(
+                    "co-occurrence row scaling underflows a coefficient",
+                ));
+            }
+            if *coefficient == 0.0 {
+                *coefficient = 0.0;
+            } // Canonical positive zero.
+        }
+        let scaled_rhs = rounded_envelope_scalar(rhs / Dd::from_f64(scale), &mut transform_error)?;
+        if (rhs.hi != 0.0 || rhs.lo != 0.0) && scaled_rhs == 0.0 {
+            return Err(corner_numerical(
+                "co-occurrence row scaling cannot represent the bound",
+            ));
+        }
+        // A row separated from the whole unit box by more than the arithmetic
+        // allowance adds no vertex. Retain touching or unresolved rows, and
+        // always keep the original physical check at publication.
+        let maximum = coefficients.iter().map(|value| value.max(0.0)).sum::<f64>();
+        if scaled_rhs - maximum <= transform_error {
+            rows.push(EnvelopeHalfspace {
+                coefficients,
+                bound: if scaled_rhs == 0.0 { 0.0 } else { scaled_rhs },
+            });
+        }
+    }
+    rows.sort_by(|left, right| {
+        coordinate_order(&left.coefficients, &right.coefficients)
+            .then_with(|| left.bound.total_cmp(&right.bound))
+    });
+    rows.dedup();
+    Ok((rows, spans))
+}
+
+/// The active constraints of any vertex of a bounded polytope contain a
+/// full-rank n-row subset. Enumerating those subsets therefore also finds
+/// corners at intersections of several limits, which pairwise clipping misses.
+#[allow(clippy::too_many_lines)]
+fn clip_coupled_box(
+    axes: &[&EnvelopeAxis],
+    limits: &[&AxisCoupling],
+    max_corners: usize,
+    max_candidates: usize,
+) -> Result<(Vec<Vec<f64>>, usize), Violation> {
+    let n = axes.len();
+    let (rows, spans) = coupled_halfspaces(axes, limits)?;
+    let count = active_set_count(rows.len(), n, max_candidates)?;
+    let mut lu = LuWorkspace::new(n).map_err(|_| corner_capacity())?;
+    let mut matrix = envelope_zeros(n.checked_mul(n).ok_or_else(corner_capacity)?)?;
+    let mut rhs = envelope_zeros(n)?;
+    let mut solution = envelope_zeros(n)?;
+    let mut inverse_column = envelope_zeros(n)?;
+    let mut inverse_rows = envelope_zeros(n)?;
+    let mut active: Vec<usize> = (0..n).collect();
+    let mut vertices: Vec<Vec<f64>> = Vec::new();
+    loop {
+        for (i, &row) in active.iter().enumerate() {
+            matrix[i * n..(i + 1) * n].copy_from_slice(&rows[row].coefficients);
+            rhs[i] = rows[row].bound;
+        }
+        match lu.factor(&matrix) {
+            Err(LuWorkspaceError::Singular { .. }) => {}
+            Err(error) => {
+                return Err(corner_numerical(format!(
+                    "active-set factorization refused: {error}"
+                )));
+            }
+            Ok(()) => {
+                lu.solve_factored_into(&rhs, &mut solution)
+                    .map_err(|error| {
+                        corner_numerical(format!("active-set solution refused: {error}"))
+                    })?;
+                // Compute an inverse norm with the same prepared factor, rather
+                // than treating a small residual as a conditioning guarantee.
+                inverse_rows.fill(0.0);
+                for column in 0..n {
+                    rhs.fill(0.0);
+                    rhs[column] = 1.0;
+                    lu.solve_factored_into(&rhs, &mut inverse_column)
+                        .map_err(|error| {
+                            corner_numerical(format!("active-set condition solve refused: {error}"))
+                        })?;
+                    for (sum, value) in inverse_rows.iter_mut().zip(&inverse_column) {
+                        *sum += value.abs();
+                    }
+                }
+                let inverse_norm = inverse_rows.iter().copied().fold(0.0_f64, f64::max);
+                let matrix_norm = matrix
+                    .chunks_exact(n)
+                    .map(|row| row.iter().map(|x| x.abs()).sum::<f64>())
+                    .fold(0.0_f64, f64::max);
+                let condition = matrix_norm * inverse_norm;
+                if !condition.is_finite()
+                    || condition * f64::EPSILON * n as f64 > EDGE_SPAN_TOLERANCE
+                {
+                    return Err(corner_numerical(format!(
+                        "active-set condition estimate {condition} cannot resolve a vertex at the declared span tolerance"
+                    )));
+                }
+                let residual = active
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &row)| {
+                        (matrix[i * n..(i + 1) * n]
+                            .iter()
+                            .zip(&solution)
+                            .fold(0.0, |sum, (a, x)| a.mul_add(*x, sum))
+                            - rows[row].bound)
+                            .abs()
+                    })
+                    .fold(0.0_f64, f64::max);
+                if !residual.is_finite() || residual * inverse_norm > EDGE_SPAN_TOLERANCE {
+                    return Err(corner_numerical(
+                        "active-set residual cannot resolve the vertex inside the axis-span tolerance",
+                    ));
+                }
+                let inside_box = solution.iter_mut().all(|coordinate| {
+                    if let Some(clamped) = clamp_to_span(*coordinate, 0.0, 1.0) {
+                        *coordinate = if clamped == 0.0 { 0.0 } else { clamped };
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let feasible = inside_box
+                    && rows.iter().all(|row| {
+                        let lhs = row
+                            .coefficients
+                            .iter()
+                            .zip(&solution)
+                            .fold(0.0, |sum, (a, x)| a.mul_add(*x, sum));
+                        let scale = row
+                            .coefficients
+                            .iter()
+                            .zip(&solution)
+                            .map(|(a, x)| (a * x).abs())
+                            .sum::<f64>()
+                            + row.bound.abs();
+                        lhs.is_finite() && lhs - row.bound <= 32.0 * f64::EPSILON * scale
+                    });
+                if feasible {
+                    let mut values = envelope_zeros(n)?;
+                    for ((value, &coordinate), &(low, high)) in
+                        values.iter_mut().zip(&solution).zip(&spans)
+                    {
+                        let coordinate = clamp_to_span(coordinate, 0.0, 1.0).ok_or_else(|| {
+                            corner_numerical(
+                                "feasible active-set solution lies outside the normalized box",
+                            )
+                        })?;
+                        *value = if coordinate == 0.0 {
+                            low
+                        } else if coordinate == 1.0 {
+                            high
+                        } else {
+                            (Dd::from_f64(low)
+                                + (Dd::from_f64(high) - Dd::from_f64(low))
+                                    * Dd::from_f64(coordinate))
+                            .to_f64()
+                        };
+                        let restored = (Dd::from_f64(*value) - Dd::from_f64(low))
+                            / (Dd::from_f64(high) - Dd::from_f64(low));
+                        let round_trip_error = (restored - Dd::from_f64(coordinate)).abs();
+                        if !round_trip_error.hi.is_finite()
+                            || !round_trip_error.lo.is_finite()
+                            || round_trip_error.to_f64() > EDGE_SPAN_TOLERANCE
+                        {
+                            return Err(corner_numerical(
+                                "mapping the vertex to physical units loses its normalized round-trip coordinate",
+                            ));
+                        }
+                    }
+                    for limit in limits {
+                        let CouplingRelation::CoOccurrenceLimit {
+                            a_coeff,
+                            b_coeff,
+                            bound,
+                            ..
+                        } = limit.relation
+                        else {
+                            unreachable!("component contains only limits")
+                        };
+                        let a = values[axes
+                            .iter()
+                            .position(|axis| axis.name == limit.a)
+                            .expect("component axis")];
+                        let b = values[axes
+                            .iter()
+                            .position(|axis| axis.name == limit.b)
+                            .expect("component axis")];
+                        if limit_contains(a_coeff.value, a, b_coeff.value, b, bound.value)
+                            != Some(true)
+                        {
+                            return Err(corner_numerical(
+                                "mapping the vertex back to physical units did not preserve finite limit membership",
+                            ));
+                        }
+                    }
+                    if let Err(index) =
+                        vertices.binary_search_by(|other| coordinate_order(other, &values))
+                    {
+                        if vertices.len() >= max_corners {
+                            return Err(Violation {
+                                code: "envelope-corner-overflow",
+                                what: format!("shared-axis component exceeds {max_corners} retained corners"),
+                                fix: "split the envelope or raise max_corners explicitly; no partial corner set is returned".to_string(),
+                            });
+                        }
+                        vertices.try_reserve(1).map_err(|_| corner_capacity())?;
+                        vertices.insert(index, values);
+                    }
+                }
+            }
+        }
+        let Some(next) = (0..n)
+            .rev()
+            .find(|&index| active[index] < rows.len() - n + index)
+        else {
+            break;
+        };
+        active[next] += 1;
+        for index in next + 1..n {
+            active[index] = active[index - 1] + 1;
+        }
+    }
+    if vertices.is_empty() {
+        return Err(Violation {
+            code: "envelope-limits-empty",
+            what: "the co-occurrence limits jointly leave no admissible box vertex".to_string(),
+            fix: "check all limits together; individually nonempty limits may have an empty intersection".to_string(),
+        });
+    }
+    Ok((vertices, count))
 }
 
 /// How a duty cycle's per-point weights are declared.

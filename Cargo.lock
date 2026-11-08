@@ -2731,6 +2731,7 @@ dependencies = [
  "fs-exec",
  "fs-ga",
  "fs-ivl",
+ "fs-la",
  "fs-ledger",
  "fs-math",
  "fs-mesh",

@@ -1320,8 +1320,12 @@ an explicit statement that `a_coeff*a + b_coeff*b <= bound` bounds the
 reachable region. The half-space is CLOSED, so a point exactly on the limit is
 admissible — treating it as strict would silently exclude the worst attainable
 operating point. Coefficients carry dimensions and every term must share one
-dimension with the bound; the check is exact, and there is no normalisation
-step that could go stale when an axis range moves. An empty `rationale` is
+dimension with the bound; the dimensional check is exact. Point admission
+retains the declared closed inequality without a numerical slack allowance;
+nonfinite arithmetic refuses. A numerical vertex that fails this original
+membership check after mapping back to physical units refuses publication.
+Normalization for shared-axis enumeration is rebuilt from the current ranges,
+so changing a range cannot reuse stale normalized coefficients. An empty `rationale` is
 refused: a limit that removes worst-case corners without a stated physical
 reason is an unaudited assumption.
 
@@ -1333,11 +1337,26 @@ the distinction is typed rather than commented.
 
 ### Corner enumeration
 
-The envelope decomposes into independent blocks — an uncoupled axis, a coupled
-continuous pair, or a discrete axis — and the corner set is the Cartesian
-product of the blocks' extreme points. A coupled pair contributes the vertices
-of its box clipped by the limit, found by candidate-and-filter: the box corners
-satisfying the limit, plus the limit line's crossings of the box edges.
+The envelope decomposes into connected components of explicit linear limits,
+uncoupled axes, and discrete axes. The corner set is the Cartesian product of
+these blocks' extreme points. A single-limit pair retains its original
+candidate-and-filter arithmetic: the box corners satisfying the limit, plus
+the limit line's crossings of the box edges.
+
+A component sharing axes across several limits intersects all its halfspaces
+in coordinates normalized by the axis spans. Origin subtraction and transformed
+coefficients use the existing `fs-math` double-double arithmetic; rounding into
+the numerical row is charged against the normalized span tolerance. Published
+physical coordinates must round-trip to the normalized vertex within that
+tolerance, so large origins cannot silently erase small bounds or merge
+unrepresentable extreme points. Canonically sorted rows include
+the box bounds; exact duplicate rows merge. Each n-row active set is solved
+through the existing `fs-la::LuWorkspace`. Exact-zero-pivot sets do not supply
+isolated vertices. Full-rank solutions must pass finite residual and inverse-norm
+conditioning checks, every inequality, and membership after mapping back to
+physical units. Unresolved conditioning refuses the whole result instead of
+silently dropping a possible extreme point. Individually valid limits with an
+empty joint intersection return `envelope-limits-empty`.
 
 Clipping a corner off a rectangle ADDS vertices. The worked reference envelope
 goes from four box corners to five. "The corners of a correlated envelope are
@@ -1346,11 +1365,9 @@ are a subset — the count need not even move in that direction.
 
 ### Invariants (envelope module)
 
-E1. An axis may appear in at most ONE coupling. With a shared axis the feasible
-    set is a general polytope rather than a product of independent blocks, and
-    this enumerator only does the latter exactly. Chained couplings are
-    REFUSED, naming general polytope vertex enumeration as the missing
-    machinery so a reader can tell a limitation from a bug.
+E1. Shared axes intersect ALL explicit limits. Unknown/independence metadata
+    never consumes an axis or hides a later limit. Unknown pairs retain their
+    caveat even when one axis also belongs to a limited component.
 
 E2. The corner LIST is canonical: coordinates in declared axis order, corners
     ordered by continuous value and by declared discrete-state position. A
@@ -1358,8 +1375,16 @@ E2. The corner LIST is canonical: coordinates in declared axis order, corners
     two names in a coupling declaration must not permute the list and silently
     renumber every case in every report while changing nothing physical.
 
-E3. Corner and case products are bounded BEFORE allocation. Exceeding
-    `EnvelopeBudget` is a refusal that names the count, not an out-of-memory.
+E3. Corner and case products are bounded BEFORE allocating the full product.
+    Shared components bound retained vertices by `max_corners` and numerical
+    work separately by a total active-set allowance. The default is 262,144;
+    `enumerate_corners_with_candidate_limit` accepts an explicit alternative.
+    Each component's complete `m choose n` count is admitted before its first
+    solve and charged against the remaining allowance. This cap is independent
+    of `max_cases`, and the existing analytic blocks consume none of it.
+    `max_axes` is honored by enumeration; `validate()` uses its default value.
+    Shared-component workspace allocation failures return a finding rather
+    than publishing a partial corner set.
 
 E4. A vertex landing a rounding step outside a box edge is clamped onto the
     edge (`EDGE_SPAN_TOLERANCE`) rather than dropped. Admitting it keeps a real
@@ -1368,7 +1393,9 @@ E4. A vertex landing a rounding step outside a box edge is clamped onto the
 
 E5. Vertices are merged on EXACT equality after a canonical sort. Vertices
     coincident only to within rounding are NOT merged; the consequence is a
-    duplicated corner case, which is wasteful and never unsound.
+    duplicated corner case, which is wasteful and never unsound. This also
+    applies to shared-axis solves: nearby numerical vertices remain distinct
+    and consume the retained-corner allowance.
 
 E6. Duty-cycle weights are declared ONCE. In `Dwells` weighting the weights are
     durations and the fractions are DERIVED; in `Fractions` weighting they are
@@ -1389,6 +1416,13 @@ E7. Ties in `governing_case` report EVERY attaining case. A report that
   corner set of an uncharacterised pair is a SUPERSET of the reachable set,
   which is conservative for worst-case and inadmissible as the basis for any
   probability-weighted statement.
+
+- Shared-axis vertices are numerical estimates. The result carries
+  `envelope-corners-numerical`: residual and condition tests are not certified
+  enclosure or exact-arithmetic feasibility proofs. Near-singular active sets
+  may refuse even if another numerical method could resolve the region.
+  An arbitrary nonlinear physics QoI need not attain its maximum at a vertex;
+  enumerating support vertices alone does not prove that optimization claim.
 
 - `weighted_aggregate` is a dwell-weighted mean of per-point STEADY results,
   labelled `AggregationBasis::SteadyApproximation`. It equals the true time
