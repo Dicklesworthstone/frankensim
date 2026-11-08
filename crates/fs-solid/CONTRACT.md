@@ -12624,3 +12624,11 @@ specimens. This is a first-order staggered prescribed-temperature update of an
 intact, massless, small-strain axial assembly; combined temperature/load paths
 require refinement. It introduces no adhesive thermal expansion, caloric or
 entropy model, thermal transport, automatic heat deposition, damage or healing.
+
+### Complete finite creep and recovery on the original tetrahedral owner
+
+`FinitePlasticTetSolid` and `FinitePlasticTetMotion` consume the material owner's `FiniteInelasticMaterial` protocol. The original hyper3 geometry, sparse Newton/globalization and consistent reference mass remain the sole mechanical owners. Native/source J2 callers retain their previous state through the blanket adapter; Norton, independently recovering Norton, Perzyna and combined Norton/J2 retain their complete typed histories. Every Newton and line-search trial borrows accepted history. Kinetic elements must share one positive physical interval, exposed by `duration_s()`, and motion requires that interval to equal its explicit timestep. Rejection leaves displacement, velocity, irreversible metric/path and resistance untouched.
+
+The spatial account independently retains stored energy, integrated flow potential, native plastic/viscous and combined-creep heat channels, and signed endpoint quadrature defect. Newton's potential is checked against storage plus flow potential, not physical dissipation. `inelastic_dissipation_j()` sums the original physical channels; numerical endpoint/kinetic losses are excluded. The native sole-Norton convention still uses the plastic-named metric/alpha/heat slots for creep, while combined laws keep plastic and creep accumulations separate. This adds no recovery energy, rupture qualification or P1 locking-accuracy claim.
+
+`tests/hyper_plastic_creep_recovery.rs` authors loaded free-sided recovery/dwell/reload against independent finite Hencky and quadratic kinetic equations, nonvirgin stress-free translation with consistent inertia, simultaneous creep/yielding with separate paths and heat, and clock refusals. Coefficients are manufactured. Native execution of this addition is not claimed; dependency compilation was killed before fs-solid was reached.

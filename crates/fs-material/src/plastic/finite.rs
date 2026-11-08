@@ -34,6 +34,9 @@ pub mod combined;
 pub mod creep;
 /// Progressive ductile attenuation on this original finite return and tangent owner.
 pub mod ductile;
+mod inelastic;
+/// Complete typed finite history and frozen physical interval for spatial solves.
+pub use inelastic::FiniteInelasticMaterial;
 /// Traction-free thickness/shear relaxation of the original finite return map.
 pub mod plane_stress;
 /// Pressure-sensitive finite deformation with retained plastic volume.

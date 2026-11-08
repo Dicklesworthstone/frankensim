@@ -1,4 +1,4 @@
-//! Retained finite-deformation J2 plasticity on the native P1 tetrahedra.
+//! Retained finite-deformation inelasticity on the native P1 tetrahedra.
 //!
 //! Each physical endpoint uses the original hyper3 geometry, assembly, tangent,
 //! Newton and globalization. Every trial sees the SAME accepted plastic metric
@@ -6,9 +6,10 @@
 //! Rejection or cancellation leaves the original solid untouched. Both native
 //! and source-resolved laws remain borrowed, without extracting source data.
 //!
-//! The constitutive model is multiplicative Hencky elasticity with Kirchhoff
-//! J2 yield and energetic isotropic hardening. Its reduced incremental potential
-//! drives Newton. Physical stored energy, plastic dissipation, endpoint work
+//! The native models use multiplicative Hencky elasticity with Kirchhoff J2,
+//! Norton creep, optional primary resistance/recovery and explicit rate flow.
+//! Their reduced incremental potential drives Newton. Physical storage,
+//! inelastic dissipation, integrated flow potential, endpoint work
 //! quadrature error and equilibrium work residual are separate quantities.
 //! Endpoint work is a first-order approximation along a physical increment;
 //! its signed defect need not be positive or invariant under a finite rotation
@@ -28,7 +29,9 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_material::MaterialError;
 use fs_material::hyper::cards::FiniteStrainPotential;
-use fs_material::plastic::finite::{FiniteJ2, FiniteJ2Error, FiniteJ2Material, FiniteJ2State};
+use fs_material::plastic::finite::{
+    FiniteInelasticMaterial, FiniteJ2, FiniteJ2Error, FiniteJ2State,
+};
 
 use super::{
     Element, HyperTetError, HyperTetProblem, HyperTetSettings, HyperTetSolution,
@@ -89,6 +92,33 @@ impl<L> FinitePlasticLawField<'_, L> {
     }
 }
 
+impl<L: FiniteInelasticMaterial> FinitePlasticLawField<'_, L> {
+    fn common_duration_s(
+        &self,
+        elements: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Option<f64>, FinitePlasticTetError> {
+        let mut common = None;
+        for element in 0..elements {
+            if element % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            if let Some(duration) = self.at(element).duration_s() {
+                if !duration.is_finite()
+                    || duration <= 0.0
+                    || common.is_some_and(|old| old != duration)
+                {
+                    return Err(invalid(
+                        "every rate-dependent element must share one finite positive physical duration",
+                    ));
+                }
+                common = Some(duration);
+            }
+        }
+        Ok(common)
+    }
+}
+
 /// Explicit absolute physical-step gates, in addition to native force gates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FinitePlasticStepControls {
@@ -109,8 +139,13 @@ pub struct FinitePlasticTetEnergy {
     pub stored_before_j: f64,
     /// Independently evaluated elastic plus hardening storage after acceptance.
     pub stored_after_j: f64,
-    /// Physical irreversible work, sum(V sigma_y delta_gamma).
+    /// Native plastic/viscous channel. For the native sole-Norton convention
+    /// this is creep heat; combined laws report creep in its separate channel.
     pub plastic_dissipation_j: f64,
+    /// Physical creep heat from the native combined creep/plastic channel.
+    pub creep_dissipation_j: f64,
+    /// Integrated native yield/kinetic potential, distinct from physical heat.
+    pub flow_potential_j: f64,
     /// Reduced incremental potential used by Newton, not physical storage.
     pub incremental_potential_j: f64,
     /// Endpoint dead nodal/body force dotted with the actual displacement change.
@@ -122,9 +157,17 @@ pub struct FinitePlasticTetEnergy {
     /// External endpoint work minus material internal work and, for dynamics,
     /// inertial endpoint work; signed and independently gate checked.
     pub equilibrium_work_residual_j: f64,
-    /// Internal endpoint work minus stored-energy change minus plastic dissipation.
+    /// Internal endpoint work minus storage change minus total inelastic heat.
     /// Signed quadrature defect; never heat or an assumed nonnegative quantity.
     pub endpoint_work_defect_j: f64,
+}
+
+impl FinitePlasticTetEnergy {
+    /// Complete physical heat from the native inelastic mechanisms. Numerical
+    /// endpoint defects and the reduced flow potential are never caloric heat.
+    pub fn inelastic_dissipation_j(&self) -> f64 {
+        self.plastic_dissipation_j + self.creep_dissipation_j
+    }
 }
 
 /// Original mesh, original law binding and complete immutable accepted history.
@@ -133,9 +176,10 @@ pub struct FinitePlasticTetEnergy {
 /// solid after all gates pass; neither histories nor displacement can be edited
 /// independently. Reference geometry is prepared once and shared across steps.
 #[derive(Debug)]
-pub struct FinitePlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct FinitePlasticTetSolid<'a, L: FiniteInelasticMaterial = FiniteJ2> {
     material: FinitePlasticLawField<'a, L>,
-    state: FinitePlasticTetState<'a>,
+    duration_s: Option<f64>,
+    state: FinitePlasticTetState<'a, L::State>,
 }
 
 /// Numerical history shared by fixed-temperature, porous and thermal owners.
@@ -330,7 +374,7 @@ impl<S> FinitePlasticTetState<'_, S> {
 
 /// A fully accepted next solid and its native equilibrium/physical-step evidence.
 #[derive(Debug)]
-pub struct FinitePlasticTetStep<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct FinitePlasticTetStep<'a, L: FiniteInelasticMaterial = FiniteJ2> {
     /// Accepted full next configuration, source binding and material history.
     pub solid: FinitePlasticTetSolid<'a, L>,
     /// Native displacement, support reactions and Newton convergence history.
@@ -398,9 +442,9 @@ impl From<HyperTetError> for FinitePlasticTetError {
     }
 }
 
-struct FrozenPoint<'a> {
-    law: &'a FiniteJ2,
-    accepted: &'a FiniteJ2State,
+struct FrozenPoint<'a, L: FiniteInelasticMaterial = FiniteJ2> {
+    law: &'a L,
+    accepted: &'a L::State,
 }
 
 fn material_error(error: FiniteJ2Error) -> MaterialError {
@@ -409,7 +453,7 @@ fn material_error(error: FiniteJ2Error) -> MaterialError {
     }
 }
 
-impl FiniteStrainPotential for FrozenPoint<'_> {
+impl<L: FiniteInelasticMaterial> FiniteStrainPotential for FrozenPoint<'_, L> {
     fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
         self.law
             .stress_and_potential(deformation, self.accepted)
@@ -460,7 +504,7 @@ fn energy_gate(
     }
 }
 
-impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
+impl<'a, L: FiniteInelasticMaterial> FinitePlasticTetSolid<'a, L> {
     /// Prepare an undeformed, stress-free mesh with virgin native histories.
     ///
     /// # Errors
@@ -475,14 +519,15 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         checkpoint(cx)?;
         material.validate_count(tetrahedra.len())?;
         reference_size(nodes_m.len(), tetrahedra.len(), budget)?;
+        let duration_s = material.common_duration_s(tetrahedra.len(), cx)?;
         let element_states: Vec<_> = (0..tetrahedra.len())
-            .map(|index| material.at(index).finite_j2().initial_state())
+            .map(|index| material.at(index).initial_state())
             .collect();
         let frozen: Vec<_> = element_states
             .iter()
             .enumerate()
             .map(|(index, accepted)| FrozenPoint {
-                law: material.at(index).finite_j2(),
+                law: material.at(index),
                 accepted,
             })
             .collect();
@@ -495,6 +540,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         )?;
         Ok(Self {
             material,
+            duration_s,
             state: FinitePlasticTetState {
                 nodes_m,
                 tetrahedra,
@@ -530,9 +576,14 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
     pub fn element_deformation(&self) -> &[[f64; 9]] {
         &self.state.element_deformation
     }
-    /// Complete accepted plastic metrics and accumulated equivalent flow.
-    pub fn element_states(&self) -> &[FiniteJ2State] {
+    /// Complete native histories, including independent resistance when selected.
+    pub fn element_states(&self) -> &[L::State] {
         &self.state.element_states
+    }
+    /// Shared physical interval for explicit kinetics; `None` for a completely
+    /// rate-independent field. Each accepted call advances this same interval.
+    pub const fn duration_s(&self) -> Option<f64> {
+        self.duration_s
     }
     /// Accepted first Piola stress, row-major, in tetrahedron order.
     pub fn element_first_piola_pa(&self) -> &[[f64; 9]] {
@@ -603,7 +654,6 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             }
             self.material
                 .at(index)
-                .finite_j2()
                 .validate_committed(
                     &self.state.element_deformation[index],
                     state,
@@ -620,7 +670,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             .iter()
             .enumerate()
             .map(|(index, accepted)| FrozenPoint {
-                law: self.material.at(index).finite_j2(),
+                law: self.material.at(index),
                 accepted,
             })
             .collect();
@@ -645,6 +695,8 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             stored_before_j: self.state.stored_energy_j,
             stored_after_j: 0.0,
             plastic_dissipation_j: 0.0,
+            creep_dissipation_j: 0.0,
+            flow_potential_j: 0.0,
             incremental_potential_j: 0.0,
             dead_load_endpoint_work_j: 0.0,
             support_endpoint_work_j: 0.0,
@@ -656,8 +708,8 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
-            let law = self.material.at(index).finite_j2();
-            let f = HyperTetProblem::<FrozenPoint<'_>>::deformation_gradient(element, new_u);
+            let law = self.material.at(index);
+            let f = HyperTetProblem::<FrozenPoint<'_, L>>::deformation_gradient(element, new_u);
             let refused = |source| FinitePlasticTetError::Material {
                 element: index,
                 source,
@@ -680,6 +732,12 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 response.plastic_dissipation_j_m3,
                 energy.plastic_dissipation_j,
             );
+            energy.creep_dissipation_j = element.volume.mul_add(
+                response.creep_dissipation_j_m3,
+                energy.creep_dissipation_j,
+            );
+            energy.flow_potential_j =
+                element.volume.mul_add(response.flow_potential_j_m3, energy.flow_potential_j);
             energy.incremental_potential_j = element.volume.mul_add(
                 response.incremental_potential_j_m3,
                 energy.incremental_potential_j,
@@ -702,15 +760,15 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         energy.equilibrium_work_residual_j = work.residual_j;
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j
             - (energy.stored_after_j - energy.stored_before_j)
-            - energy.plastic_dissipation_j;
+            - energy.inelastic_dissipation_j();
         energy_gate(
             "assembled incremental-potential consistency",
             equilibrium.strain_energy_j - energy.incremental_potential_j,
             controls.equilibrium_work_tolerance_j,
         )?;
         energy_gate(
-            "storage/dissipation potential consistency",
-            energy.incremental_potential_j - energy.stored_after_j - energy.plastic_dissipation_j,
+            "storage/flow-potential consistency",
+            energy.incremental_potential_j - energy.stored_after_j - energy.flow_potential_j,
             controls.equilibrium_work_tolerance_j,
         )?;
         energy_gate(
@@ -727,14 +785,19 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             || energy.stored_after_j < 0.0
             || !energy.plastic_dissipation_j.is_finite()
             || energy.plastic_dissipation_j < 0.0
+            || !energy.creep_dissipation_j.is_finite()
+            || energy.creep_dissipation_j < 0.0
+            || !energy.flow_potential_j.is_finite()
+            || energy.flow_potential_j < 0.0
         {
             return Err(invalid(
-                "finite nonnegative physical storage and plastic dissipation required",
+                "finite nonnegative storage, inelastic heat and flow potential required",
             ));
         }
         checkpoint(cx)?;
         let solid = Self {
             material: self.material,
+            duration_s: self.duration_s,
             state: FinitePlasticTetState {
                 nodes_m: self.state.nodes_m,
                 tetrahedra: self.state.tetrahedra,

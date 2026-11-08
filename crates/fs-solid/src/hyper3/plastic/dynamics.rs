@@ -7,7 +7,7 @@
 //! consistent-mass coupling to prescribed displacement components.
 //!
 //! The original material, geometry and shared inertia owners account for
-//! `external work = stored change + plastic dissipation + signed material
+//! `external work = stored change + inelastic dissipation + signed material
 //! endpoint defect + kinetic change + backward-Euler kinetic loss + residual`.
 //! The nonnegative kinetic loss is numerical, never material heat. Its explicit
 //! budget and the separate signed material-defect budget require physical
@@ -22,7 +22,7 @@
 use std::sync::Arc;
 
 use fs_exec::Cx;
-use fs_material::plastic::finite::{FiniteJ2, FiniteJ2Material};
+use fs_material::plastic::finite::{FiniteInelasticMaterial, FiniteJ2};
 
 use super::super::{HyperTetSettings, HyperTetSolution, inertia_error};
 use super::{
@@ -49,7 +49,7 @@ pub struct FinitePlasticMotionControls {
 
 /// Complete accepted displacement, velocity, material history and original mass.
 #[derive(Debug)]
-pub struct FinitePlasticTetMotion<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct FinitePlasticTetMotion<'a, L: FiniteInelasticMaterial = FiniteJ2> {
     solid: FinitePlasticTetSolid<'a, L>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
@@ -59,7 +59,7 @@ pub struct FinitePlasticTetMotion<'a, L: FiniteJ2Material = FiniteJ2> {
 
 /// A complete proposed interval; the borrowed accepted motion is unchanged.
 #[derive(Debug)]
-pub struct FinitePlasticMotionStep<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct FinitePlasticMotionStep<'a, L: FiniteInelasticMaterial = FiniteJ2> {
     /// Accepted full next displacement, velocity, source binding and history.
     pub motion: FinitePlasticTetMotion<'a, L>,
     /// Native equilibrium evidence, including inertial support reactions.
@@ -75,13 +75,13 @@ pub struct FinitePlasticMotionStep<'a, L: FiniteJ2Material = FiniteJ2> {
 
 /// Instantaneous motion candidate retaining complete plastic constitutive history.
 #[derive(Debug)]
-pub struct FinitePlasticMotionImpulse<'a, L: FiniteJ2Material = FiniteJ2> {
+pub struct FinitePlasticMotionImpulse<'a, L: FiniteInelasticMaterial = FiniteJ2> {
     pub motion: FinitePlasticTetMotion<'a, L>,
     /// Applied and support impulses, actual momentum change and kinetic work.
     pub impulse: SolidImpulseReport,
 }
 
-impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
+impl<'a, L: FiniteInelasticMaterial> FinitePlasticTetMotion<'a, L> {
     /// Bind an admitted static configuration to initial velocity and fixed mass.
     ///
     /// The supplied solid's complete history and original source owners are
@@ -366,6 +366,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
             .map_err(inertia_error)?;
         let solid = FinitePlasticTetSolid {
             material: self.solid.material,
+            duration_s: self.solid.duration_s,
             state: FinitePlasticTetState {
                 nodes_m: state.nodes_m,
                 tetrahedra: state.tetrahedra,
@@ -445,6 +446,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
     /// Force convergence uses physical free-row forces, including inertia;
     /// stiffness times rigid travel cannot hide missing momentum. The accepted
     /// motion is borrowed and no part changes on any error or budget rejection.
+    /// Every rate-dependent material's frozen interval must equal `dt_s`.
     ///
     /// # Errors
     /// Invalid timestep/controls, native solve/material refusal, numerical-loss
@@ -461,6 +463,11 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<FinitePlasticMotionStep<'a, L>, FinitePlasticTetError> {
         checkpoint(cx)?;
+        if self.solid.duration_s.is_some_and(|duration| duration != dt_s) {
+            return Err(invalid(
+                "finite material kinetics and inertia must use the same physical duration",
+            ));
+        }
         if !controls.maximum_numerical_kinetic_loss_j.is_finite()
             || controls.maximum_numerical_kinetic_loss_j < 0.0
         {

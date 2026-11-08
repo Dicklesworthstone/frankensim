@@ -21693,3 +21693,22 @@ responsibilities of their existing consumers.
 The native mechanical return uses actual endpoint stiffness and retains all accepted irreversible histories. The thermal owner corrects accepted free-energy storage by `delta(Psi_T) = e_0:[C(T_1)-C(T_0)]:e_0/2` and transfers reversible heat `sigma_1:I delta(f) - delta(Psi_T) - delta(Ts)`. Physical creep/plastic heat, signed reciprocal heat, entropy storage and numerical dissipation remain separate. The original potential owns the full-span thermal-capacity bound. Free-sided reductions reconstruct accepted transverse strain with its retained temperature's Poisson ratio and share the same resolved source with the tensor audit.
 
 Existing bare source constructors retain their constant-storage requirement. A source prepared for varying elasticity refuses bare `at_temperature` continuation; its `at_thermoelastic_temperature` decomposition is for the complete thermal owner. These laws remain bounded small-strain models. The separate recovering-source families retain their existing fixed-elasticity construction. `tests/creep_thermal_softening.rs` checks analytic thermal cycles, mixed-shear relaxation and tangent, nonvirgin axial/J2 continuation and source refusals. These manufactured cases do not constitute measured material calibration.
+
+## Typed finite inelastic points for spatial continuation
+
+`plastic::finite::FiniteInelasticMaterial` retains the complete associated
+history of native J2, Perzyna, Norton, simultaneous Norton/J2 and independent
+primary-recovery laws. Existing source-admitted `FiniteJ2Material` wrappers keep
+their original native owner through a blanket adapter. The protocol never
+unwraps a kinetic law to a rate-independent inspection backbone. Its optional
+duration is the original physical constitutive interval; spatial owners check
+their common material clock and, with inertia, agreement with the physical step.
+Frozen-history line searches and inspections consume no additional interval.
+
+Stress, analytic tangent, original-volume storage, integrated flow potential
+and physical inelastic heat remain the native response, including the original
+sole-creep field convention. The flow potential is used for variational audits;
+only physical dissipation belongs in a heat account. This seam introduces no
+thermal shift or source calibration. `tests/plastic_finite_inelastic.rs` checks
+generic-consumer relaxation, stress-free recovery and analytic reload, plus
+preserved equilibrium/overstress checks and distinct kinetic heat/potential.

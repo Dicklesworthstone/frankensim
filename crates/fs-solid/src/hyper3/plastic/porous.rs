@@ -480,6 +480,8 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             stored_before_j: self.state.stored_energy_j,
             stored_after_j: 0.0,
             plastic_dissipation_j: 0.0,
+            creep_dissipation_j: 0.0,
+            flow_potential_j: 0.0,
             incremental_potential_j: 0.0,
             dead_load_endpoint_work_j: 0.0,
             support_endpoint_work_j: 0.0,
@@ -525,6 +527,9 @@ impl<'a, L: FinitePorousMaterial> FinitePorousTetSolid<'a, L> {
             jacobians.push(response.jacobian);
             plastic_jacobians.push(response.plastic_jacobian);
         }
+        // This original rate-independent porous law's flow potential is its
+        // physical plastic work; creep and kinetic potentials are not inferred.
+        energy.flow_potential_j = energy.plastic_dissipation_j;
         let work = self.state.endpoint_work(
             &equilibrium,
             force,
