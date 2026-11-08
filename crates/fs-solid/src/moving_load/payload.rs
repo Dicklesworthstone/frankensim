@@ -152,28 +152,59 @@ impl MovingShellModel {
         payloads: &[ShellRigidPayload],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MovingLoadError> {
-        poll(&mut cancelled)?;
-        if payloads.len() > max_load_points || payloads.len() > 4096 {
-            return Err(invalid("attached shell payload point budget exceeded"));
-        }
-        for payload in payloads {
-            poll(&mut cancelled)?;
-            payload.check()?;
-        }
-        let mut model = Self::new_with_mass_formulation(
+        check_payloads(payloads, max_load_points, &mut cancelled)?;
+        let model = Self::new_with_mass_formulation(
             plate,
             mass_formulation,
             max_load_points,
             &mut cancelled,
         )?;
+        model.attach_payloads(payloads, cancelled)
+    }
+
+    /// Combine a graded reference-density shell with permanently attached
+    /// payloads. Each triangle's three values are bulk densities [kg/m³] at
+    /// its original corners; the native P1 density integration owns shell
+    /// mass, while each payload supplies its independent mass and COM inertia.
+    ///
+    /// The original density field is retained without averaging it into a
+    /// uniform material. Shell and payload inertia are assembled before any
+    /// support reduction, so contact, impulses, prescribed pins and Newmark
+    /// all use the same total mass. Rayleigh damping uses only the graded
+    /// bare shell mass; adding payloads does not manufacture material loss.
+    /// No density evolution, mass transfer or finite rotation is inferred.
+    pub fn new_with_payloads_and_reference_density(
+        plate: ShellPlate,
+        reference_density_kg_m3: Vec<[f64; 3]>,
+        mass_formulation: ShellMassFormulation,
+        max_load_points: usize,
+        payloads: &[ShellRigidPayload],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MovingLoadError> {
+        check_payloads(payloads, max_load_points, &mut cancelled)?;
+        let model = Self::new_with_reference_density(
+            plate,
+            reference_density_kg_m3,
+            mass_formulation,
+            max_load_points,
+            &mut cancelled,
+        )?;
+        model.attach_payloads(payloads, cancelled)
+    }
+
+    fn attach_payloads(
+        mut self,
+        payloads: &[ShellRigidPayload],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MovingLoadError> {
         if payloads.is_empty() {
-            return Ok(model);
+            return Ok(self);
         }
-        let n = model.assembly.full_mass.dimension();
-        let mut mass = model.assembly.full_mass.values().to_vec();
+        let n = self.assembly.full_mass.dimension();
+        let mut mass = self.assembly.full_mass.values().to_vec();
         for payload in payloads {
             poll(&mut cancelled)?;
-            let (nodes, _) = model.point(payload.point)?;
+            let (nodes, _) = self.point(payload.point)?;
             let spatial = payload.spatial_inertia()?;
             for i in 0..18 {
                 let row = 6 * nodes[i / 6] + i % 6;
@@ -190,17 +221,33 @@ impl MovingShellModel {
             }
         }
         poll(&mut cancelled)?;
-        model
+        self
             .assembly
-            .replace_mass_preserving_damping(mass, model.plate.budget.max_conditioning_dofs)
+            .replace_mass_preserving_damping(mass, self.plate.budget.max_conditioning_dofs)
             .map_err(MovingLoadError::Spatial)?;
-        model.payloads = payloads.to_vec();
+        self.payloads = payloads.to_vec();
         poll(&mut cancelled)?;
-        Ok(model)
+        Ok(self)
     }
 
     /// Fixed physical payload descriptors in their assembly order.
     pub fn payloads(&self) -> &[ShellRigidPayload] {
         &self.payloads
     }
+}
+
+fn check_payloads(
+    payloads: &[ShellRigidPayload],
+    max_load_points: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), MovingLoadError> {
+    poll(cancelled)?;
+    if payloads.len() > max_load_points || payloads.len() > 4096 {
+        return Err(invalid("attached shell payload point budget exceeded"));
+    }
+    for payload in payloads {
+        poll(cancelled)?;
+        payload.check()?;
+    }
+    Ok(())
 }

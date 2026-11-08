@@ -19,28 +19,44 @@ fn finite_payload_matches_com_energy_and_reference_angular_momentum() {
         ShellMassFormulation::Lumped,
         ShellMassFormulation::ConsistentReference,
     ] {
-        check_payload_inventory(formulation);
+        check_payload_inventory(formulation, None);
     }
 }
 
-fn check_payload_inventory(formulation: ShellMassFormulation) {
+#[test]
+fn graded_shell_payload_retains_density_energy_momentum_and_bare_shell_damping() {
+    let density = [[2.0, 7.0, 12.0], [7.0, 20.0, 12.0]];
+    for formulation in [
+        ShellMassFormulation::Lumped,
+        ShellMassFormulation::ConsistentReference,
+    ] {
+        check_payload_inventory(formulation, Some(&density));
+    }
+}
+
+fn check_payload_inventory(formulation: ShellMassFormulation, density: Option<&[[f64; 3]]>) {
     let mut p = plate();
     p.damping = DampingModel::Rayleigh {
         mass_proportional_per_s: 0.3,
         stiffness_proportional_s: 0.0001,
     };
-    let bare =
-        MovingShellModel::new_with_mass_formulation(p.clone(), formulation, 2, || false).unwrap();
+    let bare = if let Some(density) = density {
+        MovingShellModel::new_with_reference_density(p.clone(), density.to_vec(), formulation, 2, || false)
+    } else {
+        MovingShellModel::new_with_mass_formulation(p.clone(), formulation, 2, || false)
+    }.unwrap();
     let body = payload();
-    let loaded = MovingShellModel::new_with_payloads_and_mass_formulation(
-        p,
-        formulation,
-        2,
-        &[body],
-        || false,
-    )
-    .unwrap();
+    let loaded = if let Some(density) = density {
+        MovingShellModel::new_with_payloads_and_reference_density(
+            p, density.to_vec(), formulation, 2, &[body], || false,
+        )
+    } else {
+        MovingShellModel::new_with_payloads_and_mass_formulation(
+            p, formulation, 2, &[body], || false,
+        )
+    }.unwrap();
     assert_eq!(loaded.payloads(), &[body]);
+    assert_eq!(loaded.reference_density_kg_m3(), density);
     assert_eq!(loaded.assembly().full_stiffness, bare.assembly().full_stiffness);
     assert_eq!(loaded.assembly().full_damping, bare.assembly().full_damping);
     let n = bare.assembly().mass.dimension();
@@ -156,6 +172,15 @@ fn payload_force_drives_the_correct_native_acceleration_and_impulse() {
 
 #[test]
 fn driven_pins_accelerate_payload_mass_and_supply_its_kinetic_energy() {
+    check_driven_payload_mass(None);
+}
+
+#[test]
+fn graded_shell_driven_pins_accelerate_actual_shell_and_payload_mass() {
+    check_driven_payload_mass(Some([2.0, 7.0, 12.0]));
+}
+
+fn check_driven_payload_mass(density: Option<[f64; 3]>) {
     let mut p = plate();
     p.nodes.truncate(3);
     p.triangles.truncate(1);
@@ -163,7 +188,15 @@ fn driven_pins_accelerate_payload_mass_and_supply_its_kinetic_energy() {
     let mut body = payload();
     body.point.offset_m = [0.; 3];
     body.inertia_com_kg_m2 = [[0.; 3]; 3];
-    let model = MovingShellModel::new_with_payloads(p, 1, &[body], || false).unwrap();
+    let shell_mass = 0.5 * p.thickness_m
+        * density.map_or(p.material.density_kg_m3, |rho| rho.into_iter().sum::<f64>() / 3.0);
+    let model = if let Some(density) = density {
+        MovingShellModel::new_with_payloads_and_reference_density(
+            p, vec![density], ShellMassFormulation::ConsistentReference, 1, &[body], || false,
+        )
+    } else {
+        MovingShellModel::new_with_payloads(p, 1, &[body], || false)
+    }.unwrap();
     let zero = vec![0.; model.assembly().mass.dimension()];
     let acceleration = [0.3, -0.1, 0.2];
     let supports = ShellSupportMotion {
@@ -172,8 +205,8 @@ fn driven_pins_accelerate_payload_mass_and_supply_its_kinetic_energy() {
     };
     let mut motion = model.start_driven(&zero, &zero, supports, &[], config(), || false).unwrap();
     let report = motion.advance_driven(config().dt_s, &[], [acceleration; 3], || false).unwrap();
-    // The authored half-square shell weighs 0.25 kg.
-    let total_mass = 0.25 + body.mass_kg;
+    // Exact integral of affine density over the original half-square volume.
+    let total_mass = shell_mass + body.mass_kg;
     for axis in 0..3 {
         near(
             report.support_impulse.linear[axis],
@@ -190,6 +223,32 @@ fn driven_pins_accelerate_payload_mass_and_supply_its_kinetic_energy() {
     for velocity in &motion.state().velocity {
         near(*velocity, 0., 1e-15);
     }
+}
+
+#[test]
+fn graded_payload_constructor_preserves_empty_parity_and_rejects_invalid_inventories() {
+    let density = vec![[2.0, 7.0, 12.0], [7.0, 20.0, 12.0]];
+    let formulation = ShellMassFormulation::ConsistentReference;
+    let bare = MovingShellModel::new_with_reference_density(
+        plate(), density.clone(), formulation, 1, || false,
+    ).unwrap();
+    let empty = MovingShellModel::new_with_payloads_and_reference_density(
+        plate(), density.clone(), formulation, 1, &[], || false,
+    ).unwrap();
+    assert_eq!(bare.assembly(), empty.assembly());
+    assert_eq!(bare.reference_density_kg_m3(), empty.reference_density_kg_m3());
+    assert!(empty.payloads().is_empty());
+    assert!(MovingShellModel::new_with_payloads_and_reference_density(
+        plate(), vec![[2.0, 7.0, 12.0]], formulation, 1, &[payload()], || false,
+    ).is_err());
+    assert!(MovingShellModel::new_with_payloads_and_reference_density(
+        plate(), density.clone(), formulation, 1, &[payload(); 2], || false,
+    ).is_err());
+    let mut invalid_payload = payload();
+    invalid_payload.mass_kg = 0.0;
+    assert!(MovingShellModel::new_with_payloads_and_reference_density(
+        plate(), density, formulation, 1, &[invalid_payload], || false,
+    ).is_err());
 }
 
 #[test]
