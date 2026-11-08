@@ -117,3 +117,73 @@ fn g1_rough_diffuse_white_furnace_and_colored_energy_match_projected_quadrature(
         }
     }
 }
+
+#[test]
+fn g1_kirchhoff_absorptance_closes_directional_and_hemispherical_power() {
+    for r in [0.0, 0.02, 0.4, 1.0] {
+        let surface = RoughDiffuseSurface::try_new(r).unwrap();
+        for rho in [0.0, 0.1, 0.7, 0.99, 1.0] {
+            for mu in [0.0, 1e-12, 0.05, 0.5, 1.0] {
+                let reflection = surface.directional_reflectance(mu, rho).unwrap();
+                let absorption = surface.directional_absorptance(mu, rho).unwrap();
+                assert!((reflection + absorption - 1.0).abs() <= 2.0 * f64::EPSILON);
+                assert!((0.0..=1.0).contains(&absorption));
+                if mu > 0.0 && rho > 0.0 && rho < 1.0 {
+                    // Independent angular BRDF quadrature closes a unit
+                    // isotropic bath when emission follows Kirchhoff's law.
+                    let reflected_bath = integrated_reflectance(surface, mu, rho);
+                    assert!((reflected_bath + absorption - 1.0).abs() < 3e-7);
+                }
+            }
+            let mean = surface.hemispherical_absorptance(rho).unwrap();
+            let angular = integrate(
+                |mu| 2.0 * mu * surface.directional_absorptance(mu, rho).unwrap(),
+                0.0,
+                1.0,
+                64,
+            );
+            assert!((angular - mean).abs() <= 2e-10 * mean.max(f64::MIN_POSITIVE));
+        }
+    }
+}
+
+#[test]
+fn g0_absorptance_retains_weak_loss_and_exact_limits() {
+    let almost_white = f64::from_bits(1.0_f64.to_bits() - 1);
+    let facet_loss = 1.0 - almost_white;
+    for r in [0.0, 1e-18, 0.4, 1.0] {
+        let surface = RoughDiffuseSurface::try_new(r).unwrap();
+        for mu in [0.0, 1e-100, 0.1, 0.7, 1.0] {
+            assert_eq!(surface.directional_absorptance(mu, 0.0).unwrap(), 1.0);
+            assert_eq!(surface.directional_absorptance(mu, 1.0).unwrap(), 0.0);
+            let loss = surface.directional_absorptance(mu, almost_white).unwrap();
+            assert!(loss.is_finite() && loss >= facet_loss);
+            if r == 0.0 {
+                assert_eq!(loss, facet_loss);
+            }
+        }
+        assert_eq!(surface.hemispherical_absorptance(0.0).unwrap(), 1.0);
+        assert_eq!(surface.hemispherical_absorptance(1.0).unwrap(), 0.0);
+        let mean = surface.hemispherical_absorptance(almost_white).unwrap();
+        assert!(mean >= facet_loss);
+        if r >= 0.4 {
+            // The absorbed energy from extra returns is representable even
+            // when subtracting the rounded reflected fraction would lose it.
+            assert!(mean / facet_loss > 1.05);
+        }
+    }
+    for invalid in [-0.1, 1.1, f64::INFINITY, f64::NAN] {
+        assert_eq!(
+            RoughDiffuseSurface::SMOOTH.directional_absorptance(invalid, 0.4),
+            Err(RoughDiffuseError::Direction)
+        );
+        assert_eq!(
+            RoughDiffuseSurface::SMOOTH.directional_absorptance(0.4, invalid),
+            Err(RoughDiffuseError::Albedo)
+        );
+        assert_eq!(
+            RoughDiffuseSurface::SMOOTH.hemispherical_absorptance(invalid),
+            Err(RoughDiffuseError::Albedo)
+        );
+    }
+}

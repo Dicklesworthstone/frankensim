@@ -128,6 +128,47 @@ impl RoughDiffuseSurface {
         Ok(facet_albedo * (1.0 - (1.0 - facet_albedo) * deficit / denominator))
     }
 
+    /// Fraction absorbed from a collimated incident direction. By reciprocal
+    /// Kirchhoff balance this is also directional emissivity for an opaque
+    /// surface in local thermal equilibrium. This law supplies no temperature
+    /// or emission spectrum itself.
+    ///
+    /// Factor the facet absorptance before evaluating the multiple returns:
+    /// subtracting a near-unit reflected fraction would erase weak absorption.
+    /// At zero cosine this returns the grazing limit, not a finite flux from
+    /// an exactly tangent ray.
+    pub fn directional_absorptance(
+        self,
+        cosine: f64,
+        facet_albedo: f64,
+    ) -> Result<f64, RoughDiffuseError> {
+        admit_fraction(cosine, RoughDiffuseError::Direction)?;
+        admit_fraction(facet_albedo, RoughDiffuseError::Albedo)?;
+        let absorption = 1.0 - facet_albedo;
+        if absorption == 0.0 || facet_albedo == 0.0 || self.roughness == 0.0 {
+            return Ok(absorption);
+        }
+        let denominator = absorption + facet_albedo * self.single_scatter_average();
+        let deficit = self.b * angular_deficit(cosine);
+        Ok(absorption * (1.0 + facet_albedo * deficit / denominator))
+    }
+
+    /// Projected-hemisphere mean absorptance, normalized by pi. For the same
+    /// opaque reciprocal surface this is the hemispherical emissivity at the
+    /// original wavelength, so spectral radiant exitance is pi times this
+    /// fraction times the equilibrium blackbody radiance.
+    ///
+    /// The analytic multiple-return sum is (1-rho)/(1-rho+rho*<E_single>).
+    /// It retains weak absorption and has exact smooth, black and white limits.
+    pub fn hemispherical_absorptance(self, facet_albedo: f64) -> Result<f64, RoughDiffuseError> {
+        admit_fraction(facet_albedo, RoughDiffuseError::Albedo)?;
+        let absorption = 1.0 - facet_albedo;
+        if absorption == 0.0 || facet_albedo == 0.0 || self.roughness == 0.0 {
+            return Ok(absorption);
+        }
+        Ok(absorption / (absorption + facet_albedo * self.single_scatter_average()))
+    }
+
     pub(crate) fn eval_admitted(self, mu_i: f64, mu_o: f64, projected_dot: f64, rho: f64) -> f64 {
         if mu_i <= 0.0 || mu_o <= 0.0 || rho == 0.0 {
             return 0.0;
