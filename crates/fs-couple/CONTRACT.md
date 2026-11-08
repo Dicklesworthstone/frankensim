@@ -6974,3 +6974,34 @@ noncaloric loss over subsequent steps, elastic storage and unloading, original
 preload adoption, source/area/caloric mismatch, finite-domain refusal, final
 thermal-trial cancellation and an identical retry. Its thresholds and caloric
 data are manufactured discrete-physics tests, not material calibration claims.
+
+## Shared finite-atmosphere sorption calorics
+
+The moisture caloric owner now composes the original shared-atmosphere slab,
+Cartesian backward-Euler and Cartesian SDIRK2 transports with one complete
+gas-plus-specimens energy account. Each stable specimen ID binds exactly one
+original isosteric-heat source on its own material card and fixed transport
+context. The native common humidity solve still owns all vapor, carrier and
+bound-water inventories; caloric evaluation never repeats or replaces it.
+
+Every physical cell contributes its actual original-to-final integral of
+the differential binding energy on the same original vapor datum. Opposing
+specimen transfers and sealed internal redistribution remain visible even
+when net atmospheric water exchange vanishes. One actual gas energy increment
+enters the closure once, and one aggregate source-segment allowance covers all
+specimens. Results use the native stable-ID order independently of caller or
+source-binding enumeration. Source, identity, cell-budget, energy or
+cancellation refusal publishes no partial transport or caloric endpoint.
+
+Cartesian SDIRK calorics uses the complete final inventory; the first stage is
+a diagnostic and is not charged again. A single-field Cartesian SDIRK entry
+shares the same existing scalar-field caloric closure. Per-specimen reports
+reuse the original per-material storage report, including cell contributions
+and source identities. This is prescribed-temperature, rigid-system thermostat
+duty. It does not infer spatial heat deposition, thermal feedback, hysteresis,
+or consistency between independently authored sorption and caloric laws.
+
+Focused regressions cover unlike specimens exchanging water at zero net vapor
+change, canonical source/participant ordering, loading-dependent Cartesian
+SDIRK storage, one-specimen equivalence, original first-order transport parity,
+and aggregate work/source refusal followed by reuse.

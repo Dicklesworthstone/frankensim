@@ -37,6 +37,12 @@ use fs_thermochem::{
 
 mod layered;
 mod radial;
+mod shared;
+pub use shared::{
+    CartesianSdirk2SorptionEnergyCandidate, SharedCartesianSdirk2SorptionEnergyCandidate,
+    SharedCartesianSorptionEnergyCandidate, SharedSorptionEnergyCandidate,
+    SharedSorptionEnergyStep, SorptionEnergyBinding, SorptionSpecimenEnergy,
+};
 pub use layered::{
     LayeredRadialSdirk2SorptionEnergyCandidate, LayeredRadialSorptionEnergyCandidate,
     LayeredSdirk2SorptionEnergyCandidate, LayeredSorptionEnergyCandidate,

@@ -16,6 +16,8 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 mod layered;
 #[path = "calorics/radial.rs"]
 mod radial;
+#[path = "calorics/shared.rs"]
+mod shared;
 
 fn source(q: [f64; 2]) -> MaterialCard {
     let base = card([0.01; 2], 0.3);
