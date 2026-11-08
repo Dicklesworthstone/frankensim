@@ -435,6 +435,57 @@ or envelopes, extrapolate a chirp, or reinterpret changing frequencies as
 stationary modal poles. It supplies a primitive for chirp analysis; it does
 not establish an Euler-disc mechanism or close its terminal-asymptotic bead.
 
+### Joint amplitude decay and frequency drift
+
+`harmonic::DampedChirpedToneFitPlan` fits DC and initial peak phasors at
+supplied linear frequency trajectories with exponential amplitude decay.
+`DampedChirpedTone` retains the first- and last-sampled frequencies in hertz
+and the nonnegative amplitude decay rate in reciprocal seconds. The basis is
+`exp(-decay*t) * (cos(phase), sin(phase))`, using the original DD endpoint
+phase law over `T=(N-1)*dt` and the original deterministic decay exponential.
+Phasors use `exp(-i phase)` and refer to the first sample before attenuation.
+This shares the original `FitDesign` QR, scaling, conditioning and
+allocation-free transactional `fit_into` owner. Zero decay preserves the
+supplied chirp plan's fit bits; zero drift preserves the supplied damped-tone
+plan's fit bits. Both frequency endpoints remain strictly positive and
+sub-Nyquist. Equal frequency laws with distinct decays remain separate when
+the complete sampled design resolves them; duplicate triples refuse.
+
+`refine_damped_chirped_tones` and `_channels` identify both endpoint
+frequencies AND amplitude decay in one variable-projection solve. The shared
+bounded optimizer admits three nonlinear coordinates per tone, expressed as
+`[f_start*T, f_end*T, decay*T]`. It retains the complete residual-dependent
+Jacobian, independent projected-sensitivity rank and amplitude floors,
+common-unit channel weights, monotone backtracking and rejected-attempt
+accounting. Every untruncated frequency and decay correction must satisfy its
+physical tolerance; active bounds are not convergence. Endpoint corrections
+remain quarter-cycle limited and decay corrections half-e-fold limited.
+All derivative centering removes only fitted basis columns; the actual
+envelope remains `exp(-decay*t) <= 1` and is not centered into a growing
+exponential. Disjoint three-coordinate search boxes retain original tone
+identity, including components distinguished only by decay.
+
+Storage admission covers all three retained parameters, candidate conversions,
+all three derivative columns per tone and both full/projected channel QR
+folds. Joint residual dimensions must support all `3*K` nonlinear coordinates
+after the `1+2*K` linear amplitudes/DC columns. Work remains
+O(E C (N K² + K³)), numeric storage O(N K + K² + C K). No normal equations,
+frequency/decay alternating approximation or new cancellation claim is added.
+
+`tests/damped_chirped_tones.rs` exercises decaying crossing trajectories,
+same-frequency-law double decay, nodal channel rotations and unit scaling,
+record reslicing with phase AND attenuation, exact supplied-law limits,
+endpoint laws at clocks where Hz/s underflows, and typed work/storage/rank/
+domain refusals. An in-module finite-difference test checks all three full
+profiled derivatives against independent refits with substantial omitted
+motion. These are local numerical observations supporting instrument-plan
+§7.1/7.2 and the decay observations needed by `pexfp.279`/`pexfp.280`;
+they do not close those specimen/physics acceptance beads. Nonlinear drift,
+nonexponential envelopes and omitted tones remain model mismatch that can
+bias fitted parameters. This does not discover modes, identify material
+loss, provide uncertainty coverage, remove aliasing or turn changing
+frequencies into stationary modal poles.
+
 ### Local fundamental-frequency refinement
 
 `harmonic::refine_harmonic_frequency` refines an independently supplied pitch

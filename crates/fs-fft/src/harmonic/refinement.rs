@@ -1,7 +1,8 @@
 //! Shared bounded variable projection for stationary tones, poles and chirps.
 
 use super::{
-    C64, ChirpedTone, ChirpedToneBounds, ChirpedToneFitPlan, DampedToneBounds, DampedToneFitPlan,
+    C64, ChirpedTone, ChirpedToneBounds, ChirpedToneFitPlan, DampedChirpedTone,
+    DampedChirpedToneBounds, DampedChirpedToneFitPlan, DampedToneBounds, DampedToneFitPlan,
     DampedTonePole, FitDesign, HarmonicFit, HarmonicFitBudget, HarmonicFitError, ToneFitPlan,
     sample_sin_cos,
 };
@@ -12,6 +13,7 @@ pub(super) enum Domain<'a> {
     Stationary(&'a [f64], &'a [[f64; 2]]),
     Damped(&'a [DampedTonePole], &'a [DampedToneBounds]),
     Chirped(&'a [ChirpedTone], &'a [ChirpedToneBounds]),
+    DampedChirped(&'a [DampedChirpedTone], &'a [DampedChirpedToneBounds]),
 }
 
 impl Domain<'_> {
@@ -20,15 +22,28 @@ impl Domain<'_> {
             Self::Stationary(seeds, _) => seeds.len(),
             Self::Damped(seeds, _) => seeds.len(),
             Self::Chirped(seeds, _) => seeds.len(),
+            Self::DampedChirped(seeds, _) => seeds.len(),
         }
     }
 
-    fn damped(&self) -> bool {
-        matches!(self, Self::Damped(..))
+    fn parameters_per_tone(&self) -> usize {
+        match self {
+            Self::Stationary(..) => 1,
+            Self::Damped(..) | Self::Chirped(..) => 2,
+            Self::DampedChirped(..) => 3,
+        }
     }
 
-    fn paired(&self) -> bool {
+    fn full_jacobian(&self) -> bool {
         !matches!(self, Self::Stationary(..))
+    }
+
+    fn decay_coordinate(&self, coordinate: usize) -> bool {
+        match self {
+            Self::Damped(..) => coordinate % 2 == 1,
+            Self::DampedChirped(..) => coordinate % 3 == 2,
+            _ => false,
+        }
     }
 
     fn bound(&self, coordinate: usize) -> [f64; 2] {
@@ -40,6 +55,14 @@ impl Domain<'_> {
                 bounds[coordinate / 2].start_frequency_hz
             }
             Self::Chirped(_, bounds) => bounds[coordinate / 2].end_frequency_hz,
+            Self::DampedChirped(_, bounds) => {
+                let bound = bounds[coordinate / 3];
+                match coordinate % 3 {
+                    0 => bound.start_frequency_hz,
+                    1 => bound.end_frequency_hz,
+                    _ => bound.decay_rate_per_s,
+                }
+            }
         }
     }
 
@@ -49,6 +72,9 @@ impl Domain<'_> {
             Self::Damped(seeds, _) => Plan::Damped(DampedToneFitPlan::new(n, dt, seeds, budget)?),
             Self::Chirped(seeds, _) => {
                 Plan::Chirped(ChirpedToneFitPlan::new(n, dt, seeds, budget)?)
+            }
+            Self::DampedChirped(seeds, _) => {
+                Plan::DampedChirped(DampedChirpedToneFitPlan::new(n, dt, seeds, budget)?)
             }
         })
     }
@@ -82,12 +108,24 @@ impl Domain<'_> {
                     .collect();
                 Plan::Chirped(ChirpedToneFitPlan::new(n, dt, &tones, budget)?)
             }
+            Self::DampedChirped(..) => {
+                let tones: Vec<_> = parameters
+                    .chunks_exact(3)
+                    .map(|p| DampedChirpedTone {
+                        start_frequency_hz: p[0],
+                        end_frequency_hz: p[1],
+                        decay_rate_per_s: p[2],
+                    })
+                    .collect();
+                Plan::DampedChirped(DampedChirpedToneFitPlan::new(n, dt, &tones, budget)?)
+            }
         })
     }
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct Controls {
+    // Physical frequency and amplitude-decay correction tolerances.
     pub tolerances: [f64; 2],
     pub max_evaluations: usize,
     pub min_reciprocal_condition: f64,
@@ -170,7 +208,7 @@ pub(super) fn refine_channels(
     let n = samples.len();
     let tones = domain.tones();
     let parameters = tones
-        .checked_mul(if domain.paired() { 2 } else { 1 })
+        .checked_mul(domain.parameters_per_tone())
         .ok_or_else(|| invalid("tone parameter count overflows"))?;
     let columns = tones
         .checked_mul(2)
@@ -200,14 +238,17 @@ pub(super) fn refine_channels(
         .into());
     }
     let width = parameters + 1;
-    let rows = if domain.paired() { n } else { n - columns }.max(width);
-    let extra_bytes = refinement_bytes(n, parameters, channels.len(), rows, domain.paired())?;
-    let plan_extra = if domain.paired() {
-        tones.checked_mul(core::mem::size_of::<f64>())
+    let rows = if domain.full_jacobian() {
+        n
     } else {
-        Some(0)
+        n - columns
     }
-    .ok_or_else(|| invalid("paired tone parameter storage size overflows"))?;
+    .max(width);
+    let extra_bytes =
+        refinement_bytes(n, parameters, channels.len(), rows, domain.full_jacobian())?;
+    let plan_extra = (parameters - tones)
+        .checked_mul(core::mem::size_of::<f64>())
+        .ok_or_else(|| invalid("tone parameter storage size overflows"))?;
     let required_bytes = super::fit_workspace_bytes(n, tones)?
         .checked_add(plan_extra)
         .and_then(|v| v.checked_add(extra_bytes))
@@ -246,12 +287,12 @@ pub(super) fn refine_channels(
     let mut workspace = Workspace {
         scratch: vec![0.0; n],
         derivative: vec![0.0; n],
-        residual: vec![0.0; if domain.paired() { n } else { 0 }],
+        residual: vec![0.0; if domain.full_jacobian() { n } else { 0 }],
         augmented: vec![0.0; rows * width],
         folded: vec![0.0; 2 * width * width],
         projected_folded: vec![
             0.0;
-            if domain.paired() {
+            if domain.full_jacobian() {
                 2 * width * width
             } else {
                 0
@@ -273,7 +314,7 @@ pub(super) fn refine_channels(
             .corrections
             .iter()
             .enumerate()
-            .all(|(i, d)| d.abs() <= controls.tolerances[usize::from(domain.paired()) * (i % 2)])
+            .all(|(i, d)| d.abs() <= controls.tolerances[usize::from(domain.decay_coordinate(i))])
         {
             return Ok(Report {
                 parameters: current.parameters,
@@ -289,7 +330,7 @@ pub(super) fn refine_channels(
         // limit the amplitude envelope change to half an e-fold per record.
         let mut fraction = 1.0_f64;
         for (i, d) in current.corrections.iter().enumerate() {
-            let cap = if domain.damped() && i % 2 == 1 {
+            let cap = if domain.decay_coordinate(i) {
                 0.5
             } else {
                 0.25
@@ -343,25 +384,28 @@ pub(super) fn refine_channels(
 
 // Includes both candidates, previous/current small QR, and full-Jacobian
 // residual reconstruction. Using parameter count in the report allowance
-// conservatively covers paired-parameter conversion temporaries before allocation.
+// conservatively covers multi-parameter conversion temporaries before allocation.
 fn refinement_bytes(
     n: usize,
     k: usize,
     channels: usize,
     rows: usize,
-    paired: bool,
+    full_jacobian: bool,
 ) -> Result<usize, Error> {
     let s = k + 1;
     let scalars = n
-        .checked_mul(if paired { 3 } else { 2 })
+        .checked_mul(if full_jacobian { 3 } else { 2 })
         .and_then(|v| rows.checked_mul(s)?.checked_mul(2)?.checked_add(v))
         .and_then(|v| {
             s.checked_mul(s)?
-                .checked_mul(if paired { 12 } else { 6 })?
+                .checked_mul(if full_jacobian { 12 } else { 6 })?
                 .checked_add(v)
         })
         .and_then(|v| s.checked_mul(3)?.checked_add(v))
-        .and_then(|v| k.checked_mul(if paired { 12 } else { 8 })?.checked_add(v))
+        .and_then(|v| {
+            k.checked_mul(if full_jacobian { 12 } else { 8 })?
+                .checked_add(v)
+        })
         .and_then(|v| {
             k.checked_mul(4)?
                 .checked_add(1)?
@@ -391,14 +435,24 @@ enum Plan {
     Stationary(ToneFitPlan),
     Damped(DampedToneFitPlan),
     Chirped(ChirpedToneFitPlan),
+    DampedChirped(DampedChirpedToneFitPlan),
 }
 
 impl Plan {
+    fn parameters_per_tone(&self) -> usize {
+        match self {
+            Self::Stationary(_) => 1,
+            Self::Damped(_) | Self::Chirped(_) => 2,
+            Self::DampedChirped(_) => 3,
+        }
+    }
+
     fn design(&self) -> &FitDesign {
         match self {
             Self::Stationary(plan) => &plan.design,
             Self::Damped(plan) => &plan.design,
             Self::Chirped(plan) => &plan.design,
+            Self::DampedChirped(plan) => &plan.design,
         }
     }
 
@@ -414,6 +468,11 @@ impl Plan {
                 .tones
                 .iter()
                 .flat_map(|p| [p.start_frequency_hz, p.end_frequency_hz])
+                .collect(),
+            Self::DampedChirped(plan) => plan
+                .tones
+                .iter()
+                .flat_map(|p| [p.start_frequency_hz, p.end_frequency_hz, p.decay_rate_per_s])
                 .collect(),
         }
     }
@@ -431,8 +490,8 @@ impl Plan {
         out: &mut [f64],
     ) -> f64 {
         let design = self.design();
-        let paired = !matches!(self, Self::Stationary(_));
-        let tone = if paired { coordinate / 2 } else { coordinate };
+        let full_jacobian = !matches!(self, Self::Stationary(_));
+        let tone = coordinate / self.parameters_per_tone();
         let (frequency, decay) = match self {
             Self::Stationary(plan) => (plan.frequencies_hz[tone], 0.0),
             Self::Damped(plan) => {
@@ -440,10 +499,14 @@ impl Plan {
                 (p.frequency_hz, p.decay_rate_per_s)
             }
             Self::Chirped(plan) => (plan.tones[tone].start_frequency_hz, 0.0),
+            Self::DampedChirped(plan) => {
+                let p = plan.tones[tone];
+                (p.start_frequency_hz, p.decay_rate_per_s)
+            }
         };
         let a = coefficients[2 * tone + 1];
         let b = coefficients[2 * tone + 2];
-        let inverse_intervals = if matches!(self, Self::Chirped(_)) {
+        let inverse_intervals = if matches!(self, Self::Chirped(_) | Self::DampedChirped(_)) {
             Dd::ONE / Dd::from_f64((design.samples - 1) as f64)
         } else {
             Dd::ZERO
@@ -453,18 +516,41 @@ impl Plan {
             // Shifting t by a constant adds only columns already in A. Both
             // P_perp A=0 and A^T r=0 make this the same profiled derivative.
             let time = j as f64 / (design.samples - 1) as f64 - 0.5;
-            let (s, c) = if let Self::Chirped(plan) = self {
-                super::chirp::sample_sin_cos(
+            let (s, c) = match self {
+                Self::Chirped(plan) => super::chirp::sample_sin_cos(
                     plan.tones[tone],
                     design.timestep_s,
                     inverse_intervals,
                     j,
-                )
-            } else {
-                sample_sin_cos(frequency, design.timestep_s, j)
+                ),
+                Self::DampedChirped(plan) => super::damped_chirp::phase_sin_cos(
+                    plan.tones[tone],
+                    design.timestep_s,
+                    inverse_intervals,
+                    j,
+                ),
+                _ => sample_sin_cos(frequency, design.timestep_s, j),
             };
-            if paired {
-                let (dc, ds) = if matches!(self, Self::Chirped(_)) {
+            if full_jacobian {
+                let (dc, ds) = if matches!(self, Self::DampedChirped(_)) {
+                    let envelope = super::damped_chirp::envelope(decay, design.timestep_s, j);
+                    // Center derivative weights only. The removed multiples
+                    // of the actual decaying basis vanish under P_perp and
+                    // A^T*r; the envelope itself stays exp(-decay*t) <= 1.
+                    if coordinate % 3 == 2 {
+                        let time = time * envelope;
+                        (-time * c, -time * s)
+                    } else {
+                        let u = j as f64 / (design.samples - 1) as f64;
+                        let weight = if coordinate % 3 == 0 {
+                            u - 0.5 * u * u - 0.375
+                        } else {
+                            0.5 * u * u - 0.125
+                        };
+                        let time = core::f64::consts::TAU * weight * envelope;
+                        (-time * s, time * c)
+                    }
+                } else if matches!(self, Self::Chirped(_)) {
                     let u = j as f64 / (design.samples - 1) as f64;
                     // Center each integrated-frequency weight by its value at
                     // t=T/2. The removed constant is a fitted basis column.
@@ -498,7 +584,7 @@ impl Plan {
             raw_scale = raw_scale.max(value.abs());
         }
         design.factor.apply_qt(out);
-        if paired {
+        if full_jacobian {
             let columns = 2 * design.tones + 1;
             out[..columns].fill(0.0);
             out[2 * tone + 1] = cos_residual;
@@ -548,9 +634,9 @@ fn evaluate(
     let design = plan.design();
     let tones = design.tones;
     let columns = 2 * tones + 1;
-    let paired = !matches!(plan, Plan::Stationary(_));
-    let parameters = if paired { 2 * tones } else { tones };
-    let offset = if paired { 0 } else { columns };
+    let full_jacobian = !matches!(plan, Plan::Stationary(_));
+    let parameters = plan.parameters_per_tone() * tones;
+    let offset = if full_jacobian { 0 } else { columns };
     let width = parameters + 1;
     let rows = work.augmented.len() / width;
     work.folded.fill(0.0);
@@ -577,7 +663,7 @@ fn evaluate(
             work.augmented[(j + columns - offset) * width + parameters] = weighted;
             residual_squared = weighted.mul_add(weighted, residual_squared);
         }
-        if paired {
+        if full_jacobian {
             work.residual[..columns].fill(0.0);
             work.residual[columns..].copy_from_slice(&work.scratch[columns..]);
             design.factor.apply_q(&mut work.residual);
@@ -601,7 +687,7 @@ fn evaluate(
                 }
                 work.augmented[j * width + parameter] = weighted;
                 channel_scale = channel_scale.max(weighted.abs());
-                if paired && j >= columns {
+                if full_jacobian && j >= columns {
                     projected_scale = projected_scale.max(weighted.abs());
                 }
             }
@@ -613,7 +699,7 @@ fn evaluate(
                     *value *= change;
                 }
             }
-            if paired {
+            if full_jacobian {
                 for row in work.projected_folded[..width * width].chunks_exact_mut(width) {
                     for value in &mut row[..parameters] {
                         *value *= change;
@@ -631,7 +717,7 @@ fn evaluate(
             }
         }
         factor = Some(fold_channel(&work.augmented, rows, width, &mut work.folded));
-        if paired {
+        if full_jacobian {
             // The residual-dependent term can remain nonzero for an absent
             // pole. It must improve the Newton direction without inventing
             // observability: also gate the projected physical sensitivity
@@ -654,7 +740,7 @@ fn evaluate(
     // original globally normalized signal units as well. Unit changes cancel
     // in physical_scale/ratios, so physically weak but resolved records remain
     // admissible. The raw scale also protects cancellation-heavy projections.
-    if paired && projected_scale <= 64.0 * f64::EPSILON * raw_scale.max(1.0) {
+    if full_jacobian && projected_scale <= 64.0 * f64::EPSILON * raw_scale.max(1.0) {
         return Err(unidentifiable(0.0, controls));
     }
     let factor = factor.ok_or_else(|| unidentifiable(0.0, controls))?;
@@ -712,6 +798,99 @@ mod tests {
     fn signal(p: DampedTonePole, a: C64, t: f64) -> f64 {
         let (s, c) = (core::f64::consts::TAU * p.frequency_hz * t).sin_cos();
         (-p.decay_rate_per_s * t).exp() * (a.re * c + a.im * s)
+    }
+
+    #[test]
+    fn full_damped_chirp_jacobian_matches_refits_for_all_three_physical_coordinates() {
+        let (n, dt) = (401, 1.0 / 2048.0);
+        let duration = (n - 1) as f64 * dt;
+        let value = |p: DampedChirpedTone, a: C64, t: f64| {
+            let rate = (p.end_frequency_hz - p.start_frequency_hz) / duration;
+            let phase = core::f64::consts::TAU * (p.start_frequency_hz * t + 0.5 * rate * t * t);
+            let (s, c) = phase.sin_cos();
+            (-p.decay_rate_per_s * t).exp() * (a.re * c + a.im * s)
+        };
+        let truth = DampedChirpedTone {
+            start_frequency_hz: 174.0,
+            end_frequency_hz: 183.5,
+            decay_rate_per_s: 5.3,
+        };
+        let omitted = DampedTonePole {
+            frequency_hz: 177.5,
+            decay_rate_per_s: 0.3,
+        };
+        let samples: Vec<_> = (0..n)
+            .map(|j| {
+                let t = j as f64 * dt;
+                0.8 + value(truth, C64::new(1.0, 0.5), t) + signal(omitted, C64::new(-0.4, 0.2), t)
+            })
+            .collect();
+        let seed = DampedChirpedTone {
+            start_frequency_hz: 173.2,
+            end_frequency_hz: 182.8,
+            decay_rate_per_s: 4.1,
+        };
+        let budget = HarmonicFitBudget {
+            max_workspace_bytes: 1024 * 1024,
+            min_reciprocal_condition: 1e-10,
+        };
+        let plan =
+            Plan::DampedChirped(DampedChirpedToneFitPlan::new(n, dt, &[seed], budget).unwrap());
+        let mut scratch = vec![0.0; n];
+        plan.design()
+            .fit_into(&samples, &mut scratch, &mut [C64::default()])
+            .unwrap();
+        let mut residual = vec![0.0; n];
+        residual[3..].copy_from_slice(&scratch[3..]);
+        plan.design().factor.apply_q(&mut residual);
+        let lo = samples.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = samples.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let center = lo.midpoint(hi);
+        let scale = samples
+            .iter()
+            .map(|x| (x - center).abs())
+            .fold(0.0, f64::max);
+        for coordinate in 0..3 {
+            let mut derivative = vec![0.0; n];
+            plan.derivative(coordinate, &scratch[..3], &residual, &mut derivative);
+            let span: f64 = derivative[..3].iter().map(|x| x * x).sum();
+            let total: f64 = derivative.iter().map(|x| x * x).sum();
+            assert!(
+                span > 1e-4 * total,
+                "the residual-dependent term must be exercised at coordinate {coordinate}"
+            );
+            plan.design().factor.apply_q(&mut derivative);
+            let epsilon = 1e-4;
+            let mut sides = Vec::new();
+            for sign in [-1.0, 1.0] {
+                let mut p = seed;
+                match coordinate {
+                    0 => p.start_frequency_hz += sign * epsilon,
+                    1 => p.end_frequency_hz += sign * epsilon,
+                    _ => p.decay_rate_per_s += sign * epsilon,
+                }
+                let fit = DampedChirpedToneFitPlan::new(n, dt, &[p], budget)
+                    .unwrap()
+                    .fit(&samples)
+                    .unwrap();
+                sides.push(
+                    (0..n)
+                        .map(|j| fit.dc + value(p, fit.phasors[0], j as f64 * dt))
+                        .collect::<Vec<_>>(),
+                );
+            }
+            let (mut error, mut reference) = (0.0, 0.0);
+            for j in 0..n {
+                let fd = (sides[1][j] - sides[0][j]) / (2.0 * epsilon);
+                error += (derivative[j] * scale * duration - fd).powi(2);
+                reference += fd * fd;
+            }
+            assert!(
+                error.sqrt() <= 2e-7 * reference.sqrt(),
+                "coordinate {coordinate}, relative error {}",
+                (error / reference).sqrt()
+            );
+        }
     }
 
     #[test]

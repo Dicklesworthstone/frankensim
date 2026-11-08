@@ -18,6 +18,8 @@
 //! amplitude decay rates without treating a ringdown as stationary harmonics.
 //! [`ChirpedToneFitPlan`] and [`refine_chirped_tones`] retain linear frequency
 //! drift, including independently moving and crossing tone trajectories.
+//! [`DampedChirpedToneFitPlan`] and [`refine_damped_chirped_tones`] identify
+//! exponential amplitude decay and linear frequency drift together.
 //!
 //! The returned peak phasor is `a_h + i b_h` for `exp(-i phase_h(t))`, with
 //! phase zero at the first sample. For an undamped bin-centered real sinusoid, it is
@@ -37,6 +39,15 @@ pub use chirp::{
     ChirpedTone, ChirpedToneBounds, ChirpedToneChannelsFit, ChirpedToneCorrection, ChirpedToneFit,
     ChirpedToneFitPlan, ChirpedToneRefinementBudget, ChirpedToneRefinementError,
     refine_chirped_tones, refine_chirped_tones_channels,
+};
+
+#[path = "harmonic/damped_chirp.rs"]
+mod damped_chirp;
+pub use damped_chirp::{
+    DampedChirpedTone, DampedChirpedToneBounds, DampedChirpedToneChannelsFit,
+    DampedChirpedToneCorrection, DampedChirpedToneFit, DampedChirpedToneFitPlan,
+    DampedChirpedToneRefinementBudget, DampedChirpedToneRefinementError,
+    refine_damped_chirped_tones, refine_damped_chirped_tones_channels,
 };
 
 #[path = "harmonic/poles.rs"]
