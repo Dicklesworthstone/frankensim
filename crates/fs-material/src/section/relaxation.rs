@@ -7,8 +7,9 @@
 //! This is the parallel-arm model used by `visco::GeneralizedMaxwell`
 //! (Roylance, MIT 3.11, "Linear Viscoelasticity", Wiechert model).
 //!
-//! The section is frozen at the resolved material states. Axial creep, thermal
-//! history, interlayer slip and helical winding are not modeled by this binding.
+//! The section is frozen at the resolved material states. The axial channel
+//! retains its own area-integrated Young spectrum in [`axial`]. Thermal history,
+//! interlayer slip and helical winding are not modeled by these bindings.
 
 use super::{ConcentricElasticSection, ConcentricShearSection, MaterialStatePointError, invalid};
 #[cfg(test)]
@@ -20,6 +21,9 @@ use fs_qty::{Pressure, QuantitySpec, Time};
 
 /// Independent transverse-shear relaxation on the same corrected section.
 pub mod transverse;
+
+/// Independent axial relaxation on the same bonded section and Young sources.
+pub mod axial;
 
 /// Cold-path bound on the total declared arms across all layers.
 pub const MAX_SECTION_RELAXATION_BRANCHES: usize = 128;
@@ -292,6 +296,72 @@ mod tests {
     }
     fn near(a: f64, b: f64) {
         assert!((a-b).abs() < 2e-13*a.abs().max(b.abs()).max(1e-30), "{a} != {b}");
+    }
+
+    #[test]
+    fn g1_axial_source_spectrum_uses_area_and_preserves_distinct_times() {
+        let a = material(2e9, &[("core_delta", "core_time", 4e9, 0.001)], Some((0.0, 20000.0)));
+        let b = material(2e9, &[("fast", "fast_time", 0.5e9, 0.003),
+            ("slow", "slow_time", 3e9, 0.02)], Some((0.0, 10000.0)));
+        let elastic = section(a, b);
+        let bindings = [selection(&[("core_delta", "core_time")]),
+            selection(&[("fast", "fast_time"), ("slow", "slow_time")])];
+        let law = elastic.clone().with_prony_axial(&bindings).unwrap();
+        assert_eq!(law.elastic(), &elastic);
+        assert_eq!(law.properties(), &bindings);
+        assert_eq!(law.spectra().len(), 2);
+        assert_eq!(law.omega_band_rad_s(), (0.0, 10000.0));
+        assert_eq!(law.branches().iter().map(|a| a.layer_index).collect::<Vec<_>>(), vec![0, 1, 1]);
+        assert_eq!(law.branches().iter().map(|a| a.relaxation_time_s).collect::<Vec<_>>(),
+            vec![0.001, 0.003, 0.02]);
+        let areas = [core::f64::consts::PI * 0.001_f64.powi(2),
+            core::f64::consts::PI * (0.002_f64.powi(2) - 0.001_f64.powi(2))];
+        let expected = [(areas[0] * 4e9, 0.001), (areas[1] * 0.5e9, 0.003),
+            (areas[1] * 3e9, 0.02)];
+        let integrated = GeneralizedMaxwell::new(elastic.axial_stiffness_n(),
+            law.branches().iter().map(|a| (a.axial_stiffness_n, a.relaxation_time_s)).collect())
+            .unwrap();
+        for omega in [0.0, 5.0, 50.0, 1000.0, 10000.0] {
+            let mut storage = 2e9 * (areas[0] + areas[1]);
+            let mut loss = 0.0;
+            for (rigidity, tau) in expected {
+                let x = omega * tau;
+                storage += rigidity * x * x / (1.0 + x * x);
+                loss += rigidity * x / (1.0 + x * x);
+            }
+            let actual = integrated.modulus(omega);
+            near(actual.0, storage);
+            near(actual.1, loss);
+        }
+    }
+
+    #[test]
+    fn g3_axial_subdivision_and_source_refusals_keep_the_original_law() {
+        let source = material(2e9, &[("delta", "time", 4e9, 0.001)], Some((0.0, 20000.0)));
+        let bind = selection(&[("delta", "time")]);
+        let whole = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
+            outer_radius_m: 0.002, material: source.clone(),
+        }]).unwrap().with_prony_axial(&[bind.clone()]).unwrap();
+        let split = section(source.clone(), source).with_prony_axial(&[bind.clone(), bind.clone()]).unwrap();
+        for omega in [0.0, 10.0, 1000.0, 20000.0] {
+            let response = |s: &axial::ConcentricPronyAxialSection| {
+                GeneralizedMaxwell::new(s.elastic().axial_stiffness_n(), s.branches().iter()
+                    .map(|a| (a.axial_stiffness_n, a.relaxation_time_s)).collect()).unwrap().modulus(omega)
+            };
+            let a = response(&whole);
+            let b = response(&split);
+            near(a.0, b.0);
+            near(a.1, b.1);
+        }
+        let elastic = material(2e9, &[], Some((0.0, 20000.0)));
+        let base = section(elastic.clone(), elastic.clone());
+        assert!(base.clone().with_prony_axial(&[selection(&[]), selection(&[])]).unwrap().branches().is_empty());
+        assert!(base.clone().with_prony_axial(&[selection(&[])]).is_err());
+        assert!(base.with_prony_axial(&[bind.clone(), bind]).is_err());
+        assert!(section(elastic.clone(), material(3e9, &[], Some((0.0, 20000.0))))
+            .with_prony_axial(&[selection(&[]), selection(&[])]).is_err());
+        assert!(section(elastic, material(2e9, &[], None))
+            .with_prony_axial(&[selection(&[]), selection(&[])]).is_err());
     }
 
     #[test]
