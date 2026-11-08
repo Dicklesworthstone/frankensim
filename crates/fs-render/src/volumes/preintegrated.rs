@@ -89,6 +89,8 @@ impl PreintegratedPixel {
     }
 
     /// Dimensionless line integral of the mapped extinction coefficient.
+    /// At binary64 range limits this can round to zero or positive infinity;
+    /// representable source radiance still retains the original optical factors.
     #[must_use]
     pub const fn optical_depth(self) -> f64 {
         self.optical_depth
@@ -141,7 +143,8 @@ pub enum PreintegrationError {
     InvalidSourceTolerance,
     /// Endpoints, their difference, or the nonnegative length are non-finite.
     InvalidSegment,
-    /// A nonzero interval length or optical depth exceeded binary64 range.
+    /// A nonzero interval length exceeded binary64 range, or a varying source
+    /// and extinction require an unrepresentable depth for adaptive integration.
     UnrepresentableOpticalDepth,
     /// Processing another transfer interval would exceed the explicit limit.
     TransferIntervalBudgetExceeded,
@@ -466,19 +469,34 @@ impl RayIntegral {
             return Ok(());
         }
         let mean_extinction = low + 0.5 * (high - low);
-        let mut tau = mean_extinction * length;
-        if tau == 0.0 {
-            // Averaging subnormal coefficients can underflow even when their
-            // product with a long segment has a representable optical depth.
-            tau = det::exp(det::ln(high) + det::ln(length) + det::ln(0.5 * (1.0 + low / high)));
-        }
-        if !tau.is_finite() || tau == 0.0 {
+        // Do not round a subnormal mean before a long segment amplifies it.
+        // In this branch high < 2*MIN_POSITIVE, so high*length cannot overflow.
+        let tau = if mean_extinction < f64::MIN_POSITIVE {
+            (high * length) * (0.5 * (1.0 + low / high))
+        } else {
+            mean_extinction * length
+        };
+        let thin = tau < f64::MIN_POSITIVE;
+        let opaque = tau.is_infinite();
+        let constant_source = front.source_rgb == back.source_rgb;
+        let constant_extinction = front.extinction == back.extinction;
+        if opaque && !constant_source && !constant_extinction {
+            // A ramp starting at zero extinction has a boundary layer whose
+            // source moment scales as 1/sqrt(tau), not 1/tau. Do not replace
+            // the variable-profile quadrature by a false front-source limit.
             return Err(PreintegrationError::UnrepresentableOpticalDepth);
         }
         let alpha = -det::expm1(-tau);
-        let (position, error) = if front.source_rgb == back.source_rgb {
+        let (position, error) = if constant_source || opaque {
             (0.0, 0.0)
-        } else if front.extinction == back.extinction {
+        } else if thin {
+            // Attenuation differs from one by less than MIN_POSITIVE. The
+            // normalized moment of linear sigma is exactly (a+2b)/(3(a+b));
+            // omitted attenuation is far below binary64 relative roundoff.
+            let a = front.extinction / high;
+            let b = back.extinction / high;
+            ((a + 2.0 * b) / (3.0 * (a + b)), 0.0)
+        } else if constant_extinction {
             (constant_extinction_position(tau, alpha), 0.0)
         } else {
             let quantile = SourceQuantile {
@@ -490,13 +508,37 @@ impl RayIntegral {
             };
             integrate_mean(&quantile, 0.0, 1.0, work.settings.source_tolerance, 0, work)?
         };
+        let log_thin_depth = if thin {
+            det::ln(high) + det::ln(length) + det::ln(0.5 * (1.0 + low / high))
+        } else {
+            0.0
+        };
         for channel in 0..3 {
             let source = lerp(
                 front.source_rgb[channel],
                 back.source_rgb[channel],
                 position,
             );
-            self.emission[channel].add(attenuated_product(source, alpha, self.depth.value));
+            let mut contribution = if thin && source > 0.0 {
+                // alpha = tau to binary64 accuracy here. Retain the original
+                // factors: a bright source can survive a rounded-zero depth.
+                det::exp(det::ln(source) + log_thin_depth - self.depth.value)
+            } else {
+                attenuated_product(source, alpha, self.depth.value)
+            };
+            if opaque && !constant_source && back.source_rgb[channel] > 0.0 {
+                // Constant sigma has first moment 1/tau in the opaque limit.
+                // Its back-source contribution can remain finite even when
+                // tau overflows (e.g. a zero front and a very bright back).
+                // The omitted front-source/tau correction is unrepresentable
+                // relative to the retained nonnegative front contribution.
+                contribution += det::exp(
+                    (det::ln(back.source_rgb[channel]) - det::ln(high))
+                        - det::ln(length)
+                        - self.depth.value,
+                );
+            }
+            self.emission[channel].add(contribution);
             let variation = (back.source_rgb[channel] - front.source_rgb[channel]).abs();
             self.error[channel].add(attenuated_product(
                 variation * error,

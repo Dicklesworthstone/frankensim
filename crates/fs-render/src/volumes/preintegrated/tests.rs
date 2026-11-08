@@ -72,6 +72,167 @@ fn g1_homogeneous_and_linear_extinction_slabs_match_beer_lambert() {
 }
 
 #[test]
+fn g1_extreme_constant_profiles_match_cellwise_transport() {
+    use crate::volumes::{AbsorptionImageSettings, VolumeGrid, render_transfer_transport};
+
+    for (sigma, length, source) in [
+        (1e-200, 1e-200, [1e200, 2e200, 0.0]),
+        (1e-300, 1e-20, [1e300, 2e300, 0.0]),
+        (1e308, 4.0, [1.0, 2.0, 0.0]),
+    ] {
+        let tf = transfer(&[(0.0, sigma, source)]);
+        let pixel = preintegrate_transfer_segment(
+            &tf,
+            0.0,
+            0.0,
+            length,
+            PreintegrationSettings {
+                max_quadrature_evaluations: 0,
+                ..settings()
+            },
+        )
+        .unwrap();
+        let grid = VolumeGrid {
+            dims: [1; 3],
+            data: &[0.0],
+            origin: [0.0; 3],
+            cell: [1.0, 1.0, length],
+        };
+        let cellwise = render_transfer_transport(
+            &grid,
+            &tf,
+            AbsorptionImageSettings {
+                resolution: [1; 2],
+                max_pixels: 1,
+                max_grid_cells: 1,
+                max_cell_visits: 1,
+            },
+        )
+        .unwrap()[0];
+        assert_eq!(pixel.source_error_rgb(), [0.0; 3]);
+        for channel in 0..3 {
+            let expected = if length < 1.0 {
+                // Thin Beer--Lambert limit, multiplied in an independent
+                // order so the original positive optical factors survive.
+                (source[channel] * sigma) * length
+            } else {
+                source[channel]
+            };
+            close(pixel.emission_rgb()[channel], expected, 8e-13 * expected);
+            close(cellwise.emission_rgb()[channel], expected, 8e-13 * expected);
+        }
+        assert_eq!(pixel.opacity(), cellwise.opacity());
+        assert_eq!(pixel.transmittance(), cellwise.transmittance());
+        assert_eq!(pixel.optical_depth(), cellwise.optical_depth());
+    }
+}
+
+#[test]
+fn g1_subnormal_extinction_is_scaled_before_its_mean_is_rounded() {
+    for bits in [1, 3, 7] {
+        let sigma = f64::from_bits(bits);
+        let length = 1e300;
+        let tf = transfer(&[(0.0, 0.0, [1.0; 3]), (1.0, sigma, [1.0; 3])]);
+        let pixel = preintegrate_transfer_segment(&tf, 0.0, 1.0, length, settings()).unwrap();
+        // The exact triangular area can be represented after multiplication
+        // by length, even though sigma/2 would round by up to 100 percent.
+        let expected_depth = (sigma * length) / 2.0;
+        close(
+            pixel.optical_depth(),
+            expected_depth,
+            2e-15 * expected_depth,
+        );
+        close(
+            pixel.emission_rgb()[0],
+            expected_depth,
+            2e-15 * expected_depth,
+        );
+    }
+}
+
+#[test]
+fn g1_underflowed_linear_extinction_retains_the_source_moment() {
+    let sigma = 1e-200;
+    let length = 1e-200;
+    let source = 1e200;
+    let request = PreintegrationSettings {
+        max_quadrature_evaluations: 0,
+        ..settings()
+    };
+    for (front, back, moment) in [(0.0, sigma, 1.0 / 3.0), (sigma, 0.0, 1.0 / 6.0)] {
+        let tf = transfer(&[(0.0, front, [0.0; 3]), (1.0, back, [source; 3])]);
+        let pixel = preintegrate_transfer_segment(&tf, 0.0, 1.0, length, request).unwrap();
+        // Integral of u*u or (1-u)*u over [0,1]; attenuation corrections
+        // are smaller than binary64 relative precision by hundreds of orders.
+        let expected = ((source * sigma) * length) * moment;
+        close(pixel.emission_rgb()[0], expected, 8e-13 * expected);
+        assert_eq!(pixel.optical_depth(), 0.0);
+        assert_eq!(pixel.opacity(), 0.0);
+        assert_eq!(pixel.source_error_rgb(), [0.0; 3]);
+
+        let mut split = RayIntegral::default();
+        let mut work = Work::new(request).unwrap();
+        integrate_segment(&tf, 0.0, 0.5, 0.5 * length, &mut work, &mut split).unwrap();
+        integrate_segment(&tf, 0.5, 1.0, 0.5 * length, &mut work, &mut split).unwrap();
+        close(split.finish().emission_rgb()[0], expected, 8e-13 * expected);
+    }
+}
+
+#[test]
+fn g1_overflowed_homogeneous_depth_retains_the_back_source_tail() {
+    let tf = transfer(&[
+        (0.0, 1e308, [0.0, 1.0, 1e-300]),
+        (1.0, 1e308, [1e308, 0.0, 8e307]),
+    ]);
+    let request = PreintegrationSettings {
+        max_quadrature_evaluations: 0,
+        ..settings()
+    };
+    for intervals in [1, 2, 4, 8] {
+        let mut ray = RayIntegral::default();
+        let mut work = Work::new(request).unwrap();
+        for i in 0..intervals {
+            integrate_segment(
+                &tf,
+                f64::from(i) / f64::from(intervals),
+                f64::from(i + 1) / f64::from(intervals),
+                4.0 / f64::from(intervals),
+                &mut work,
+                &mut ray,
+            )
+            .unwrap();
+        }
+        let pixel = ray.finish();
+        // Homogeneous transport has source moment 1/(sigma*length) in
+        // this opaque limit, not zero. The red and blue front sources alone
+        // cannot represent the radiance that escapes the near-front layer.
+        for (actual, expected) in pixel.emission_rgb().into_iter().zip([0.25, 1.0, 0.2]) {
+            close(actual, expected, 8e-13 * expected);
+        }
+        assert_eq!(pixel.optical_depth(), f64::INFINITY);
+        assert_eq!(pixel.opacity(), 1.0);
+        assert_eq!(pixel.transmittance(), 0.0);
+        assert_eq!(pixel.source_error_rgb(), [0.0; 3]);
+        assert_eq!(pixel.composite([1e308; 3]).unwrap(), pixel.emission_rgb());
+    }
+}
+
+#[test]
+fn g0_overflowed_varying_profiles_keep_their_quadrature_admission() {
+    let constant_source = transfer(&[(0.0, 0.0, [3.0; 3]), (1.0, 1e308, [3.0; 3])]);
+    let opaque =
+        preintegrate_transfer_segment(&constant_source, 0.0, 1.0, 4.0, settings()).unwrap();
+    assert_eq!(opaque.emission_rgb(), [3.0; 3]);
+    assert_eq!(opaque.opacity(), 1.0);
+
+    let tf = transfer(&[(0.0, 0.0, [0.0; 3]), (1.0, 1e308, [1e308; 3])]);
+    assert_eq!(
+        preintegrate_transfer_segment(&tf, 0.0, 1.0, 4.0, settings()),
+        Err(PreintegrationError::UnrepresentableOpticalDepth)
+    );
+}
+
+#[test]
 fn g1_thin_layers_and_constant_extinction_source_gradient() {
     for tau in [1e-20, 1e-7, 0.2, 2.0, 1e4] {
         let tf = transfer(&[(0.0, tau, [1.0, 0.0, 4.0]), (1.0, tau, [0.0, 1.0, 4.0])]);
