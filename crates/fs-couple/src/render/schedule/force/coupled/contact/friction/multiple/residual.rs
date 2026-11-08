@@ -160,13 +160,84 @@ impl MultiFrictionModalSystem {
         self.bind_friction_residual_ports(geometry, Some(corrections), compliance, gate)
     }
 
-    fn bind_friction_residual_ports(mut self, geometry: Vec<FrictionGeometry>,
+    /// Bind the same omitted-mode tail at the friction ports beside already bound
+    /// FIXED normal contacts that carry their own residual compliance
+    /// (`with_obstacle_residual_ports_and_corrections`), with the omitted modes'
+    /// contact/port block. A finger stop on a bowed string, for example, deflects
+    /// the bow point through the modes the string does not retain, and the bow
+    /// deflects the stop's closure.
+    ///
+    /// `obstacle_cross` is row-major q x p [m/N]: contact k's closure under a unit
+    /// traction of port j. The producer derives it, `compliance` and the contacts'
+    /// own block from ONE omitted spectrum. With f = [t; -R], the joint matrix
+    /// [[G_pp, G_sp^T], [G_sp, G_ss]] must be symmetric positive semidefinite; it is
+    /// checked here. Closure becomes N^T q - G_ss R + G_sp t and port slip gains
+    /// G_sp^T dR. Both enter the same joint solve, its active-set rescue on the
+    /// condensed stops, and its ledger: the contacts book the cross part
+    /// -R^T G_sp t of the joint storage f^T G f / 2 and -dR^T G_sp dt of its
+    /// declared numerical loss. Moving contacts (normal translation or attachment
+    /// motion) and contact-loaded ports refuse, in either binding order.
+    ///
+    /// # Errors
+    /// As `with_friction_residual_ports_and_corrections`; no bound contacts,
+    /// contacts without their own residual or moving ones, a contact-loaded port,
+    /// a block of the wrong size, or a joint matrix that is not PSD.
+    pub fn with_friction_residual_ports_beside_obstacles(self,
+        geometry: Vec<FrictionGeometry>, corrections: Vec<Vec<ModalAttachment>>,
+        compliance: Vec<f64>, obstacle_cross: Vec<f64>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
+    {
+        let (p, q) = (self.port_count(), self.obstacle_count());
+        let stops = self.obstacles.as_ref()
+            .ok_or_else(|| invalid("a joint stop/port residual needs bound normal contacts"))?;
+        let stop_block = self.obstacle_residual_compliance()
+            .ok_or_else(|| invalid("a joint stop/port residual needs the contacts' own residual compliance"))?;
+        if !stops.fixed_residual() || stop_block.len() != q*q || obstacle_cross.len() != q*p
+            || compliance.len() != p*p {
+            return Err(invalid("a joint stop/port residual needs fixed contacts and one entry per contact and port").into());
+        }
+        // The joint matrix over [ports; contacts], f = [t; -R].
+        let s = p+q;
+        let mut joint = vec![0.0; s*s];
+        for i in 0..s {
+            for j in 0..s {
+                joint[i*s+j] = match (i < p, j < p) {
+                    (true, true) => compliance[i*p+j],
+                    (true, false) => obstacle_cross[(j-p)*p+i],
+                    (false, true) => obstacle_cross[(i-p)*p+j],
+                    (false, false) => stop_block[(i-p)*q+(j-p)],
+                };
+            }
+        }
+        if joint.iter().any(|g| !g.is_finite()) {
+            return Err(invalid("a joint stop/port residual needs finite entries").into());
+        }
+        let largest = (0..s).map(|i| joint[i*s+i]).fold(0.0_f64, f64::max);
+        let (values, _) = fs_la::eigen::jacobi_eigh(&joint, s);
+        if values.iter().any(|&v| !(v >= -1e-12*largest)) {
+            return Err(invalid("a joint stop/port residual compliance must be positive semidefinite").into());
+        }
+        self.bind_ports(geometry, Some(corrections), compliance, Some(obstacle_cross), gate)
+    }
+
+    fn bind_friction_residual_ports(self, geometry: Vec<FrictionGeometry>,
         corrections: Option<Vec<Vec<ModalAttachment>>>, compliance: Vec<f64>, gate: &CancelGate)
         -> Result<Self, ModalFrictionError>
+    {
+        self.bind_ports(geometry, corrections, compliance, None, gate)
+    }
+
+    // With bound contacts, their stop/port block is bound on the ports' new maps
+    // in the same transaction; without contacts it must be absent.
+    fn bind_ports(mut self, geometry: Vec<FrictionGeometry>,
+        corrections: Option<Vec<Vec<ModalAttachment>>>, compliance: Vec<f64>,
+        obstacle_cross: Option<Vec<f64>>, gate: &CancelGate) -> Result<Self, ModalFrictionError>
     {
         poll(Some(gate))?;
         if self.samples_rendered() != 0 || self.friction_residual.is_some() {
             return Err(invalid("friction residual compliance binds once before playback").into());
+        }
+        if self.obstacles.is_some() != obstacle_cross.is_some() {
+            return Err(invalid("friction residual compliance beside normal contacts binds with their joint cross-compliance").into());
         }
         self.admit_friction_residual()?;
         let residual = FrictionResidual::new(compliance, self.port_count())?;
@@ -179,6 +250,9 @@ impl MultiFrictionModalSystem {
         let (points, compliance, endpoint) =
             self.prepare_surface_maps_with_corrections(ports, corrections.as_deref(), gate)?;
         poll(Some(gate))?;
+        if let (Some(stops), Some(cross)) = (self.obstacles.as_mut(), obstacle_cross) {
+            stops.bind_port_cross(&self.core.network, &points, cross, gate)?;
+        }
         self.points = points;
         self.compliance = compliance;
         self.endpoint = endpoint;
@@ -194,11 +268,19 @@ impl MultiFrictionModalSystem {
         self.friction_residual.as_ref().map(FrictionResidual::compliance)
     }
     pub(super) fn admit_friction_residual(&self) -> Result<(), ModalFrictionError> {
-        if self.obstacles.is_some() || self.core.has_nonlinear_potentials()
+        if self.core.has_nonlinear_potentials()
             || self.endpoint_controls.is_some()
             || self.mindlin_contacts.iter().any(Option::is_some)
             || (0..self.port_count()).any(|i| self.interface(i).is_some()) {
-            return Err(invalid("friction residual compliance requires fixed ports without normal contacts, nonlinear storage, Mindlin or dry-interface histories").into());
+            return Err(invalid("friction residual compliance requires fixed ports without nonlinear storage, Mindlin or dry-interface histories").into());
+        }
+        // Normal contacts only as fixed ones carrying their own residual, joined
+        // to the ports by the stop/port block (`with_friction_residual_ports_beside_obstacles`).
+        if let Some(stops) = &self.obstacles {
+            let joined = self.friction_residual.is_none() || stops.has_port_cross();
+            if !stops.fixed_residual() || !joined || self.contact_loads.iter().any(Option::is_some) {
+                return Err(invalid("friction residual compliance beside normal contacts requires fixed contacts with their own residual compliance, their joint cross-compliance, and no contact-loaded port").into());
+            }
         }
         Ok(())
     }

@@ -200,3 +200,56 @@ fn bow_residual_enrichment_converges_to_the_exact_driven_string() {
         previous=error;previous_tail=g[0];
     }
 }
+
+#[test]
+fn a_stop_and_a_bow_share_one_exact_static_green_function() {
+    // MagentaBadger 12160 (a): one point list [stop, bow]. The retained sines through the condensed
+    // bridge plus the joint omitted compliance, stop/bow block included, are the exact static Green
+    // function with the bridge spring, at each point and between them. A rigid stop then leaves the
+    // bow on the exact stopped span; for the taut string that span's own closed form is checked too.
+    let (stop, bow) = (0.25, 0.73);
+    let x = [stop, bow];
+    for (bending, count) in [(0.0, 64), (0.0, 128), (2e-5, 64), (2e-5, 128)] {
+        let card = card(bending, count);
+        let bridge = ResidualBridge { card:&card, station_fraction:BRIDGE, axis:[1.0,0.0],
+            condensed:condense(residual_compliance_m_n(&card,BRIDGE,BRIDGE).unwrap(),BRIDGE_N_M,0.0).unwrap() };
+        let points = x.map(|station| ResidualStop { string:0, station_fraction:station, direction:[1.0,0.0] });
+        let (cross, g) = stop_residual(&[bridge], &points).unwrap();
+        assert_eq!(g[1].to_bits(), g[2].to_bits());
+        let k = bridge.condensed.stiffness_n_m;
+        let r = |a: f64, b: f64| retained_compliance_m_n(&card, a, b);
+        // Each point's retained column is its sine row minus cross times the bridge row; the
+        // condensed spring k joins the bridge row to ground (Sherman-Morrison).
+        let model = |i: usize, j: usize| {
+            let (a, b) = (x[i], x[j]);
+            let own = r(a,b) - cross[i]*r(BRIDGE,b) - cross[j]*r(a,BRIDGE) + cross[i]*cross[j]*r(BRIDGE,BRIDGE);
+            let (u, v) = (r(a,BRIDGE)-cross[i]*r(BRIDGE,BRIDGE), r(b,BRIDGE)-cross[j]*r(BRIDGE,BRIDGE));
+            own - k*u*v/(1.0+k*r(BRIDGE,BRIDGE)) + g[i*2+j]
+        };
+        let green = |a: f64, b: f64| static_green_m_n(&card, a, b);
+        let exact = |i: usize, j: usize| green(x[i],x[j])
+            - BRIDGE_N_M*green(x[i],BRIDGE)*green(BRIDGE,x[j])/(1.0+BRIDGE_N_M*green(BRIDGE,BRIDGE));
+        for i in 0..2 {
+            for j in 0..2 {
+                let (m, e) = (model(i, j), exact(i, j));
+                assert!((m-e).abs() <= 1e-9*e.abs(), "EI {bending} N {count} ({i},{j}): {m:e} vs {e:e}");
+            }
+        }
+        let stopped = |c: &dyn Fn(usize, usize) -> f64| c(1,1) - c(1,0)*c(0,1)/c(0,0);
+        let (m, e) = (stopped(&model), stopped(&exact));
+        assert!((m-e).abs() <= 1e-9*e.abs(), "EI {bending} N {count} stopped: {m:e} vs {e:e}");
+        // Dropping only the stop/bow block leaves the bow far from the stopped span.
+        let open = model(1,1) - (model(1,0)-g[2])*(model(0,1)-g[1])/model(0,0);
+        assert!((open-e).abs() > 1e3*(m-e).abs(), "EI {bending} N {count}: without the block {open:e}, exact {e:e}");
+        if bending == 0.0 {
+            // The taut stopped span [stop, 1] with the same bridge spring, in closed form.
+            let span = (1.0-stop)*SPAN_M;
+            let taut = |a: f64, b: f64| {
+                let (a, b) = ((a.min(b)-stop)*SPAN_M, (a.max(b)-stop)*SPAN_M);
+                a*(span-b)/(A_TENSION_N*span)
+            };
+            let closed = taut(bow,bow) - BRIDGE_N_M*taut(bow,BRIDGE).powi(2)/(1.0+BRIDGE_N_M*taut(BRIDGE,BRIDGE));
+            assert!((m-closed).abs() <= 1e-9*closed, "N {count}: stopped {m:e} vs closed form {closed:e}");
+        }
+    }
+}

@@ -153,9 +153,16 @@ impl MultiBowStringBank {
     /// loss heats the film. Resolved linear fibers retain their original
     /// opposite traction while the same condensed bridge correction loads the
     /// retained body. Only the string's omitted bending modes enter this tail;
-    /// fiber-span and width refinement remain independent. Normal contacts,
+    /// fiber-span and width refinement remain independent. Moving normal contacts,
     /// migrating bows, nonlinear stretching, Mindlin contacts and dry-interface
     /// source histories remain outside this lane.
+    ///
+    /// Beside FIXED string stops bound earlier with the same residual flexibility,
+    /// the bows and stops share one omitted-mode compliance: the stop/bow block
+    /// enters the joint friction/contact solve and its ledger
+    /// (`with_friction_residual_ports_beside_obstacles`). A stop deflects each bow
+    /// point through the omitted modes and each bow deflects the stop's closure.
+    /// Migrating or translating stops, and stop-loaded bows, refuse.
     pub fn with_bow_residual_flexibility(mut self, gate: &CancelGate)
         -> Result<Self, ReciprocalStringError>
     {
@@ -164,14 +171,38 @@ impl MultiBowStringBank {
             return Err(invalid("bow residual flexibility requires condensed bridges and fixed bow maps"));
         }
         let strings = self.source.bank.strings();
-        let points: Vec<_> = self.source.bows.iter().map(|bow| residual::ResidualStop {
+        let bows: Vec<_> = self.source.bows.iter().map(|bow| residual::ResidualStop {
             string: bow.location.string, station_fraction: bow.location.station_fraction,
             direction: residual::directions(&strings[bow.location.string].source).0,
         }).collect();
+        // Fixed stops join the SAME point list. Each entry is computed pairwise,
+        // so the stops' block repeats their bound one bit for bit.
+        let stops = if self.source.stops.is_empty() { Vec::new() } else {
+            if self.stop_stations.is_some() {
+                return Err(invalid("bow residual flexibility beside stops requires fixed stop stations"));
+            }
+            self.residual_stop_points(&self.source.stops).ok_or_else(|| invalid("stop names an unknown string"))?
+        };
+        let (q, p) = (stops.len(), bows.len());
+        let points: Vec<_> = stops.iter().chain(&bows).copied().collect();
         // The omitted-mode algebra is independent of the force law: stop and
         // bow point forces use the SAME Green function and Schur complement.
-        let (projected, compliance) = residual::point_residual(strings, &self.cards,
+        let (mut projected, joint) = residual::point_residual(strings, &self.cards,
             self.source.bank.translational_body_connections(), &points, gate)?;
+        let (compliance, cross) = if q == 0 { (joint, None) } else {
+            let s = q+p;
+            let bound = self.system.obstacle_residual_compliance()
+                .ok_or_else(|| invalid("bow residual flexibility beside stops requires the stops' own residual"))?;
+            if bound.len() != q*q || (0..q).any(|k| (0..q).any(|m| joint[k*s+m].to_bits() != bound[k*q+m].to_bits())) {
+                return Err(invalid("the stops' joint residual block differs from their bound one"));
+            }
+            let mut compliance = Vec::with_capacity(p*p);
+            for i in 0..p { for j in 0..p { compliance.push(joint[(q+i)*s+q+j]); } }
+            let mut cross = Vec::with_capacity(q*p);
+            for k in 0..q { for j in 0..p { cross.push(joint[k*s+q+j]); } }
+            (compliance, Some(cross))
+        };
+        let projected = projected.split_off(q);
         let mut geometry = Vec::with_capacity(points.len());
         let mut corrections = Vec::with_capacity(points.len());
         for (i, correction) in projected.into_iter().enumerate() {
@@ -194,8 +225,11 @@ impl MultiBowStringBank {
             });
             corrections.push(correction.bodies);
         }
-        self.system = self.system.with_friction_residual_ports_and_corrections(geometry, corrections, compliance, gate)
-            .map_err(ReciprocalStringError::Friction)?;
+        self.system = match cross {
+            Some(cross) => self.system
+                .with_friction_residual_ports_beside_obstacles(geometry, corrections, compliance, cross, gate),
+            None => self.system.with_friction_residual_ports_and_corrections(geometry, corrections, compliance, gate),
+        }.map_err(ReciprocalStringError::Friction)?;
         Ok(self)
     }
 

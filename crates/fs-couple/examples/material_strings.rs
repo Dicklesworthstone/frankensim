@@ -369,10 +369,12 @@ impl input::Spec {
             return Err("a torsion-measured row is the open string's measurement; a stop profile changes the twisting span".into());
         }
         if let Some(stops)=&stop_profile { stops.validate_performance(&self,gate)?; }
-        // The friction residual's own admission (a stop is a normal contact) fires only after the
-        // network is prepared; the pairing is known from the two declarations, so refuse it here.
-        if self.bow_residual_flexibility && stop_profile.as_ref().is_some_and(stops::Profile::has_stop_rows) {
-            return Err("friction residual compliance requires fixed ports without normal contacts: bow-residual-flexibility cannot be combined with a stop profile that has stop rows".into());
+        // The bows' omitted modes join FIXED stops only (one joint stop/bow compliance). The
+        // engine refuses moving stops and stop-loaded bows after the network is prepared;
+        // the pairing is known from the declarations, so refuse it here.
+        if self.bow_residual_flexibility && stop_profile.as_ref().is_some_and(|stops| stops.has_stop_rows()
+            && (stops.motion_program().is_some() || stops.station_program().is_some() || !stops.bow_contacts().is_empty())) {
+            return Err("bow-residual-flexibility beside stop rows requires fixed stops: a stop profile with normal motion, station motion or stop-loaded bows is not carried by the joint omitted-mode compliance".into());
         }
         if let Some(radiation) = self.body_radiation {
             radiation.validate(self.rate)?;
@@ -1275,6 +1277,9 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         if ready.spec.bow_residual_flexibility {
             eprintln!("residual_bow_compliance_m_N={:?}; tail_response=quasi-static; tail_step=backward-euler; tail_loss=numerical",
                 bank.system().friction_residual_compliance());
+            if let Some(cross)=bank.system().obstacle_port_residual_compliance() {
+                eprintln!("residual_stop_bow_compliance_m_N={cross:?}; rows=stops; columns=bow_ports");
+            }
         }
     }
     eprintln!("linear_frequency_upper_bound_rad_s={:e}",ready.performance.bank().system().linear_frequency_upper_bound_rad_s());

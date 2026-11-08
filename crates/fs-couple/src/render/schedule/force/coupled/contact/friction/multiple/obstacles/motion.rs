@@ -63,6 +63,10 @@ impl MultiFrictionModalSystem {
         if self.core.has_nonlinear_potentials() && self.obstacles.as_ref().is_some_and(|set| set.has_residual()) {
             return Err(invalid("normal motion does not carry residual compliance beside nonlinear storage").into());
         }
+        if self.friction_residual.is_some() {
+            // The joint stop/port omitted-mode block is bound for fixed stops only.
+            return Err(invalid("normal motion does not carry the friction ports' residual compliance").into());
+        }
         let obstacles = self.obstacles.as_mut()
             .ok_or_else(|| invalid("normal motion requires existing compliant obstacles"))?;
         if obstacles.motion.is_some() {

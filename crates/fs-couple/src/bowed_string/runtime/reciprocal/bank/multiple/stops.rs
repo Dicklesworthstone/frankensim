@@ -159,17 +159,7 @@ impl MultiBowStringBank {
         gate: &CancelGate) -> Result<(Vec<Vec<ModalAttachment>>, Vec<f64>), RenderError>
     {
         let strings = self.source.bank().strings();
-        let mut ports = Vec::with_capacity(stops.len());
-        for stop in stops {
-            let member = strings.get(stop.location.string).ok_or_else(|| error("stop names an unknown string"))?;
-            let unsigned = match stop.side {
-                StringStopSide::Along(direction) => direction.components(),
-                _ => directions(&member.source).0,
-            };
-            let sign = stop.side.sign();
-            ports.push(ResidualStop { string: stop.location.string, station_fraction: stop.location.station_fraction,
-                direction: [sign*unsigned[0], sign*unsigned[1]] });
-        }
+        let ports = self.residual_stop_points(stops).ok_or_else(|| error("stop names an unknown string"))?;
         let (projected, compliance) = point_residual(strings, &self.cards,
             self.source.bank().translational_body_connections(), &ports, gate).map_err(source_error)?;
         let mut corrections = Vec::with_capacity(stops.len());
@@ -188,6 +178,23 @@ impl MultiBowStringBank {
             corrections.push(correction.bodies);
         }
         Ok((corrections, compliance))
+    }
+
+    // Each stop as an omitted-mode point: its station and signed closure
+    // direction. The bows' joint residual (`with_bow_residual_flexibility`)
+    // reads these same points beside fixed stops. None names an unknown string.
+    pub(super) fn residual_stop_points(&self, stops: &[MaterialStringStop]) -> Option<Vec<ResidualStop>> {
+        let strings = self.source.bank().strings();
+        stops.iter().map(|stop| {
+            let member = strings.get(stop.location.string)?;
+            let unsigned = match stop.side {
+                StringStopSide::Along(direction) => direction.components(),
+                _ => directions(&member.source).0,
+            };
+            let sign = stop.side.sign();
+            Some(ResidualStop { string: stop.location.string, station_fraction: stop.location.station_fraction,
+                direction: [sign*unsigned[0], sign*unsigned[1]] })
+        }).collect()
     }
 
     // One source projection for initial and moving stops. Material/gas-loaded

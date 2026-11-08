@@ -318,13 +318,13 @@ fn an_actual_endpoint_pushed_past_a_prediction_inside_the_tolerance_is_a_named_m
     staged[0].restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: pushed/shape,
         velocity_m_sqrt_kg_per_s: 0.0 }]).unwrap();
     // The unchanged final check refuses, and names the miss once.
-    assert!(matches!(set.stage(&staged, dt, None), Err(ModalCouplingError::ContactSolve { .. })));
+    assert!(matches!(set.stage(&staged, &[], dt, None), Err(ModalCouplingError::ContactSolve { .. })));
     assert!(set.take_endpoint_miss());
     assert!(!set.take_endpoint_miss());
     // At the predicted endpoint the same reaction passes, and nothing is named.
     staged[0].restore_states(&[ModalAcousticState { displacement_m_sqrt_kg: 0.0,
         velocity_m_sqrt_kg_per_s: 0.0 }]).unwrap();
-    set.stage(&staged, dt, None).unwrap();
+    set.stage(&staged, &[], dt, None).unwrap();
     assert!(!set.take_endpoint_miss());
 }
 

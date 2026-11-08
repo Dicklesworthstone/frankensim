@@ -61,10 +61,12 @@ pub struct FrictionObstacleFrame {
     /// Total prescribed geometry work: attachment_work - R delta_offset [J].
     pub actuator_work_j: f64,
     /// This contact's share of the omitted modes' static storage, R_i (G R)_i / 2 [J].
-    /// Zero unless a residual compliance is bound.
+    /// Zero unless a residual compliance is bound. Beside a friction-port residual it
+    /// also carries the joint form's cross part with the port tractions t, -R_i (G_sb t)_i.
     pub residual_energy_j: f64,
     /// This contact's share of the declared numerical loss, dR_i (G dR)_i / 2 [J], where dR is
     /// the change of the held reactions over the step. Zero unless a residual compliance is bound.
+    /// Beside a friction-port residual it also carries -dR_i (G_sb dt)_i.
     pub residual_loss_j: f64,
 }
 
@@ -292,7 +294,7 @@ impl MultiFrictionModalSystem {
                 None => blocks.push(Block::Single(i)),
             }
         }
-        set.residual = Some(Residual { compliance, blocks });
+        set.residual = Some(Residual { compliance, blocks, cross: None });
         poll(Some(gate))?;
         Ok(self)
     }
@@ -305,6 +307,14 @@ impl MultiFrictionModalSystem {
     #[must_use]
     pub fn obstacle_residual_compliance(&self) -> Option<&[f64]> {
         self.obstacles.as_ref()?.residual.as_ref().map(|r| r.compliance.as_slice())
+    }
+
+    /// Bound omitted-mode compliance between the obstacles and the friction ports,
+    /// row-major q x p [m/N]: obstacle k's closure under a unit traction of port j.
+    /// Present only when a friction-port residual binds beside these obstacles.
+    #[must_use]
+    pub fn obstacle_port_residual_compliance(&self) -> Option<&[f64]> {
+        self.obstacles.as_ref()?.cross().map(|cross| cross.compliance.as_slice())
     }
 
     /// Obstacle pairs solved together on their net force, in input indices.
@@ -496,6 +506,16 @@ pub(in super::super) struct ObstacleSet {
 struct Residual {
     compliance: Vec<f64>,
     blocks: Vec<Block>,
+    cross: Option<Cross>,
+}
+// The omitted modes' stop/port block, bound with the ports' own residual
+// (`bind_port_cross`): G_sb [m/N], row-major q x p, stop k's closure under a
+// unit traction of port j, already added to nt and, transposed, to tn. Closure
+// is N^T q - G_ss R + G_sb t, so the stops also hold the tractions it is read at.
+struct Cross {
+    compliance: Vec<f64>,
+    staged: Vec<f64>,
+    accepted: Vec<f64>,
 }
 #[derive(Clone, Copy)]
 enum Block { Single(usize), Pair(usize, usize) }
@@ -581,6 +601,80 @@ impl ObstacleSet {
         }
     }
     fn accepted_reactions(&self) -> Vec<f64> { self.accepted.iter().map(|f| f.normal_force_n).collect() }
+    fn cross(&self) -> Option<&Cross> { self.residual.as_ref()?.cross.as_ref() }
+    // Closure gain of contact i through the omitted modes under port tractions
+    // `tractions`: (G_sb t)_i. Zero without the stop/port block.
+    fn cross_gain(&self, i: usize, tractions: &[f64]) -> Result<f64, ModalCouplingError> {
+        match self.cross() {
+            Some(cross) => { let p = self.friction_ports; dot(&cross.compliance[i*p..(i+1)*p], tractions) },
+            None => Ok(0.0),
+        }
+    }
+    // Whether the friction ports' own residual may bind beside these contacts:
+    // each carries its residual compliance and none moves.
+    pub(super) fn fixed_residual(&self) -> bool {
+        self.residual.is_some() && self.motion.is_none() && self.geometry.is_none()
+    }
+    pub(super) fn has_port_cross(&self) -> bool { self.cross().is_some() }
+    // Port `port`'s slip through the omitted modes under the ACCEPTED reactions,
+    // (G_bs R_old)_port. The prediction's free slip subtracts it while tn carries
+    // G_bs R, so the port sees G_bs dR. Zero without the stop/port block.
+    pub(super) fn held_cross_slip(&self, port: usize) -> Result<f64, ModalCouplingError> {
+        let Some(cross) = self.cross() else { return Ok(0.0) };
+        let p = self.friction_ports;
+        self.accepted.iter().enumerate()
+            .try_fold(0.0, |sum, (k, frame)| finite(sum + cross.compliance[k*p+port]*frame.normal_force_n))
+    }
+    // The staged change of that slip at the held reactions, (G_bs (R - R_old))_port.
+    pub(super) fn cross_slip_increment(&self, port: usize) -> Result<f64, ModalCouplingError> {
+        let Some(cross) = self.cross() else { return Ok(0.0) };
+        let p = self.friction_ports;
+        let now = self.reactions.iter().enumerate()
+            .try_fold(0.0, |sum, (k, &reaction)| finite(sum + cross.compliance[k*p+port]*reaction))?;
+        finite(now - self.held_cross_slip(port)?)
+    }
+    // Bind the omitted modes' stop/port block beside the ports' own residual,
+    // after the ports took their condensed maps. tn, tn_end and nt are recomputed
+    // from those maps exactly as at binding; then nt gains G_sb and tn its
+    // transpose. tn_end is not read on the held-displacement line a port
+    // residual selects. Fixed contacts with their own residual only, once.
+    pub(super) fn bind_port_cross(&mut self, network: &CoupledModalSystem, ports: &[Point],
+        compliance: Vec<f64>, gate: &CancelGate) -> Result<(), ModalCouplingError>
+    {
+        let q = self.points.len(); let p = ports.len();
+        if p != self.friction_ports || compliance.len() != q*p || compliance.iter().any(|g| !g.is_finite()) {
+            return Err(invalid("stop/port residual compliance needs one finite entry per stop and port"));
+        }
+        if !self.fixed_residual() || self.has_port_cross() {
+            return Err(invalid("stop/port residual compliance binds once, beside fixed stops with their own residual"));
+        }
+        let (mut nt, mut tn, mut tn_end) = (vec![0.0; q*p], vec![0.0; p*q], vec![0.0; p*q]);
+        for j in 0..q {
+            let response = network_response(network, &self.points[j].column, gate)?;
+            let velocity = network_velocity_response(network, &self.points[j].column, gate)?;
+            for i in 0..p {
+                poll(Some(gate))?;
+                tn[i*q+j] = dot(&ports[i].column, &response)?;
+                tn_end[i*q+j] = finite(dot(&ports[i].column, &velocity)?*network.dt)?;
+            }
+        }
+        for j in 0..p {
+            let response = network_response(network, &ports[j].column, gate)?;
+            for i in 0..q { poll(Some(gate))?; nt[i*p+j] = dot(&self.points[i].column, &response)?; }
+        }
+        for k in 0..q {
+            for j in 0..p {
+                let g = compliance[k*p+j];
+                nt[k*p+j] = finite(nt[k*p+j]+g)?;
+                tn[j*q+k] = finite(tn[j*q+k]+g)?;
+            }
+        }
+        poll(Some(gate))?;
+        self.nt = nt; self.tn = tn; self.tn_end = tn_end;
+        let residual = self.residual.as_mut().ok_or_else(|| invalid("stop/port residual lost its stop residual"))?;
+        residual.cross = Some(Cross { compliance, staged: vec![0.0; p], accepted: vec![0.0; p] });
+        Ok(())
+    }
     // Both contacts of an exactly opposed pair on their net force D = R_i - R_j.
     // h(D) = D - L_i(f_i - a D) + L_j(f_j + a D) rises with slope at least one, so
     // [min(0, -h(0)), max(0, -h(0))] brackets the root, as in the scalar owner.
@@ -697,6 +791,12 @@ impl ObstacleSet {
                 x = finite(x-lag)?;
                 total = finite(total+0.5*accepted[i]*lag)?;
             }
+            if let Some(cross) = self.cross() {
+                // And the accepted tractions' deflection, with the joint form's cross part -R G_sb t.
+                let gain = self.cross_gain(i, &cross.accepted)?;
+                x = finite(x+gain)?;
+                total = finite(total-accepted[i]*gain)?;
+            }
             total = finite(total+point.energy(x)?)?;
         }
         Ok(total)
@@ -736,9 +836,13 @@ impl ObstacleSet {
     {
         // Closure lag through omitted modes, held from the accepted reactions.
         let lags = match &self.residual {
-            Some(_) => {
+            Some(residual) => {
                 let accepted = self.accepted_reactions();
-                (0..self.points.len()).map(|i| self.lag(i, &accepted)).collect::<Result<Vec<_>, _>>()?
+                (0..self.points.len()).map(|i| match &residual.cross {
+                    // The accepted tractions' omitted-mode deflection is held too.
+                    Some(cross) => finite(self.lag(i, &accepted)? - self.cross_gain(i, &cross.accepted)?),
+                    None => self.lag(i, &accepted),
+                }).collect::<Result<Vec<_>, _>>()?
             },
             None => Vec::new(),
         };
@@ -950,8 +1054,10 @@ impl ObstacleSet {
         }
         Ok(())
     }
-    pub(super) fn stage(&mut self, models: &[ModalAcousticTimeModel], dt: f64, gate: Option<&CancelGate>)
-        -> Result<(f64, f64, f64, f64), ModalCouplingError>
+    // `friction` holds the ports' tractions of this same step: with the stop/port
+    // block they deflect each closure through the omitted modes as well.
+    pub(super) fn stage(&mut self, models: &[ModalAcousticTimeModel], friction: &[f64], dt: f64,
+        gate: Option<&CancelGate>) -> Result<(f64, f64, f64, f64), ModalCouplingError>
     {
         let (mut energy, mut loss) = (0.0, 0.0);
         let (mut work, mut absolute_work) = (0.0, 0.0);
@@ -961,12 +1067,33 @@ impl ObstacleSet {
                 .collect::<Result<Vec<_>, _>>()?,
             None => Vec::new(),
         };
+        // And of the held tractions, for the cross part of that loss.
+        let moved = match self.residual.as_mut().and_then(|residual| residual.cross.as_mut()) {
+            Some(cross) => {
+                if friction.len() != cross.staged.len() {
+                    return Err(invalid("staged friction tractions do not match the stop/bow cross compliance"));
+                }
+                cross.staged.copy_from_slice(friction);
+                Some(friction.iter().zip(&cross.accepted).map(|(t, a)| finite(t-a)).collect::<Result<Vec<_>, _>>()?)
+            },
+            None => None,
+        };
         for (i, point) in self.points.iter().enumerate() {
             poll(gate)?;
             let (residual_energy_j, residual_loss_j, lag) = if self.residual.is_some() {
                 let lag = self.lag(i, &self.reactions)?;
                 (finite(0.5*self.reactions[i]*lag)?, finite(0.5*change[i]*self.lag(i, &change)?)?, lag)
             } else { (0.0, 0.0, 0.0) };
+            // This contact's share of the joint form's cross part: -R_i (G_sb t)_i
+            // stored, -dR_i (G_sb dt)_i of declared numerical loss.
+            let (residual_energy_j, residual_loss_j, gain) = match &moved {
+                Some(moved) => {
+                    let gain = self.cross_gain(i, friction)?;
+                    (finite(residual_energy_j-self.reactions[i]*gain)?,
+                        finite(residual_loss_j-change[i]*self.cross_gain(i, moved)?)?, gain)
+                },
+                None => (residual_energy_j, residual_loss_j, 0.0),
+            };
             let (mut x, attachment_work_j) = if let Some(geometry) = &self.geometry {
                 if geometry.moving[i] {
                     let transport = finite(0.5 * finite(geometry.start_transport[i]
@@ -975,6 +1102,7 @@ impl ObstacleSet {
                 } else { (extension(models, &point.column, 0.0)?, 0.0) }
             } else { (extension(models, &point.column, 0.0)?, 0.0) };
             if self.residual.is_some() { x = finite(x-lag)?; }
+            if moved.is_some() { x = finite(x+gain)?; }
             let (support_offset_m, translation_work_j) = if let Some(motion) = &self.motion {
                 x = finite(x-motion.candidate[i])?;
                 let distance = finite(motion.candidate[i]-motion.accepted[i])?;
@@ -988,8 +1116,9 @@ impl ObstacleSet {
             let column = match &self.geometry { Some(g) if g.moving[i] => &g.end_columns[i], _ => &point.column };
             let scale = finite(extension_terms(models, column, 0.0)? + lag.abs()
                 + self.motion.as_ref().map_or(0.0, |motion| motion.candidate[i].abs()))?;
+            let scale = if moved.is_some() { finite(scale+gain.abs())? } else { scale };
             let modal_terms = models.iter().map(|m| m.states().len()).sum::<usize>().min(column.len());
-            let terms = Terms { scale, count: modal_terms + 2 };
+            let terms = Terms { scale, count: modal_terms + 2 + usize::from(moved.is_some()) };
             let (dissipation_j, constitutive_residual_n, force_tolerance_n) = match point.check(self.reactions[i], x, terms, dt, 1.0) {
                 Ok(checked) => checked,
                 Err(error) => {
@@ -1027,6 +1156,7 @@ impl ObstacleSet {
                 .map_or(&point.column, |g| &g.end_columns[i]);
             let mut x = extension(models, column, 0.0)?;
             if self.residual.is_some() { x = finite(x-self.lag(i, &self.reactions)?)?; }
+            if let Some(cross) = self.cross() { x = finite(x+self.cross_gain(i, &cross.staged)?)?; }
             if let Some(motion) = &self.motion { x = finite(x-motion.candidate[i])?; }
             point.check_source(x, dt)?;
         }
@@ -1034,6 +1164,9 @@ impl ObstacleSet {
     }
     pub(super) fn publish(&mut self) {
         self.accepted.copy_from_slice(&self.staged);
+        if let Some(cross) = self.residual.as_mut().and_then(|residual| residual.cross.as_mut()) {
+            cross.accepted.copy_from_slice(&cross.staged);
+        }
         if let Some(motion) = &mut self.motion { motion.accepted.copy_from_slice(&motion.candidate); }
         if let Some(geometry) = &self.geometry {
             for (point, endpoint) in self.points.iter_mut().zip(&geometry.end_columns) {

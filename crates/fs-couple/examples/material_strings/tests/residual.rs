@@ -239,13 +239,72 @@ fn bow_residual_uses_material_geometry_and_reaches_the_original_pcm_writer() {
     });
 }
 
+// MagentaBadger 12160: beside a FIXED stop the bow's omitted modes and the stop's are one joint
+// compliance. Its stop/bow block enters the joint solve, and the ledger books the cross part of
+// the joint form f^T G f / 2, f = [t; -R], at every sample of a stick-slip run with the stop
+// engaging and releasing. The engine refuses any sample whose balance does not close.
 #[test]
-fn bow_residual_requires_the_matching_support_tail_and_refuses_unwired_stops() {
+fn a_fixed_stop_and_the_bow_share_one_omitted_compliance_and_close_the_ledger() {
     scoped(|cx,gate| {
-        let error=stopped(cx,gate,bowed_residual(&bowed())).err().unwrap().to_string();
-        assert!(error.contains("normal contacts"),"{error}");
-        // The pairing is refused from the two declarations, before any network is prepared.
-        assert!(error.contains("stop profile that has stop rows"),"{error}");
+        let mut ready=stopped(cx,gate,bowed_residual(&bowed())).unwrap();
+        let (g_ss,g_sb,g_bb)={
+            let bank=ready.performance.bank();
+            let bridges=residual::residual_bridges(bank.source().bank().strings(),bank.cards()).unwrap();
+            let stop=residual::ResidualStop {string:0,station_fraction:0.43,direction:[1.0,0.0]};
+            let bow=residual::ResidualStop {string:0,station_fraction:0.2,direction:[1.0,0.0]};
+            let (_,joint)=residual::stop_residual(&bridges,&[stop,bow]).unwrap();
+            let system=bank.system();
+            // Every block of the one joint matrix, bit for bit: the stop's own block is still
+            // the stop-only binding's, and the stop/bow block is bound beside it.
+            assert_eq!(system.obstacle_residual_compliance(),Some(&joint[..1]));
+            assert_eq!(system.obstacle_port_residual_compliance(),Some(&joint[1..2]));
+            assert_eq!(system.friction_residual_compliance(),Some(&joint[3..4]));
+            assert!(joint[1]!=0.0 && joint[1].to_bits()==joint[2].to_bits(),"stop/bow block {joint:?}");
+            (joint[0],joint[1],joint[3])
+        };
+        let mut out=vec![0.0;ready.spec.samples as usize];
+        let (mut sticking,mut sliding,mut engaged,mut released)=(0,0,0,0);
+        let mut accepted:Option<(f64,f64)>=None;
+        for sample in 0..out.len() {
+            ready.performance.block(&mut out[sample..sample+1]).unwrap_or_else(|e| panic!("sample {sample}: {e:?}"));
+            let system=ready.performance.bank().system();
+            let frame=system.last_frame().unwrap();
+            let stop=system.last_obstacle_frames().unwrap()[0];
+            let (t,r)=(frame.ports[0].traction_n,stop.normal_force_n);
+            assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j,"sample {sample}: {frame:?}");
+            let close=|got:f64,want:f64,scale:f64,what:&str| assert!((got-want).abs()<=1e-12*scale+1e-300,
+                "sample {sample} {what}: {got:e} against {want:e} (t {t:e}, R {r:e})");
+            let (own,cross)=(0.5*r*(g_ss*r),r*(g_sb*t));
+            close(stop.residual_energy_j,own-cross,own.abs()+cross.abs(),"stop storage with the cross part");
+            close(frame.friction_residual_energy_j,0.5*t*g_bb*t,0.5*t*t*g_bb,"bow storage");
+            if let Some((t0,r0))=accepted {
+                let (dt,dr)=(t-t0,r-r0);
+                let (own,cross)=(0.5*dr*(g_ss*dr),dr*(g_sb*dt));
+                close(stop.residual_loss_j,own-cross,own.abs()+cross.abs(),"stop numerical loss with the cross part");
+                // Only the joint numerical loss is a nonnegative form.
+                let joint=frame.friction_residual_loss_j+stop.residual_loss_j;
+                assert!(joint>=-1e-12*(0.5*dt*dt*g_bb+own.abs()+cross.abs()),"sample {sample}: joint loss {joint:e}");
+            }
+            accepted=Some((t,r));
+            match format!("{:?}",frame.ports[0].regime).as_str() { "Sticking"=>sticking+=1, "Sliding"=>sliding+=1, _=>{} }
+            if r>0.0 && t!=0.0 { engaged+=1; } else if engaged>0 && r==0.0 { released+=1; }
+        }
+        eprintln!("G_ss {g_ss:e} G_sb {g_sb:e} G_bb {g_bb:e}: sticking {sticking}, sliding {sliding}, \
+            engaged under traction {engaged}, released after {released}");
+        assert!(sticking>0 && sliding>0 && engaged>0,"stick-slip with the stop engaged: {sticking} {sliding} {engaged}");
+        assert!(out.iter().any(|p|p.abs()>1e-12));
+    });
+}
+
+#[test]
+fn bow_residual_requires_the_matching_support_tail_and_refuses_moving_stops() {
+    scoped(|cx,gate| {
+        // A stop that translates along its normal is refused from the declarations, before any
+        // network is prepared; the engine also refuses that binding after the joint residual.
+        let moving=format!("{STOP}motion 0.001 0.1 1\nknot 12 0\n");
+        let error=bowed_residual(&bowed()).compile_with_profiles(cx,gate,None,Some(Profile::parse(moving.as_bytes()).unwrap()),
+            |name| Ok(pack(name,7800.0,200_000.0,None))).err().unwrap().to_string();
+        assert!(error.contains("requires fixed stops"),"{error}");
     });
     for record in ["bow-residual-flexibility exact-static-green","residual-flexibility exact-static-green\nbow-residual-flexibility guessed",
         "residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green extra"] {

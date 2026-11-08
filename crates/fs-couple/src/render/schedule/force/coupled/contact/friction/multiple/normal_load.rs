@@ -49,6 +49,9 @@ impl MultiFrictionModalSystem {
             || bindings.len() > self.port_count() {
             return Err(invalid("contact-normal loads require one complete binding before playback").into());
         }
+        if self.friction_residual.is_some() {
+            return Err(invalid("contact-normal loads are not carried by the friction ports' residual compliance").into());
+        }
         let mut mapping = vec![None; self.port_count()];
         for binding in bindings {
             poll(Some(gate))?;

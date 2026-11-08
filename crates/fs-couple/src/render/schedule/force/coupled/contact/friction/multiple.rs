@@ -170,10 +170,14 @@ pub struct MultiFrictionFrame {
     /// separate from bow/surface work and is not counted as contact loss.
     pub obstacle_work_j: f64,
     /// Static storage of modes the network omits, under the obstacles' reactions,
-    /// R G R / 2 [J]. Zero unless an obstacle residual compliance is bound.
+    /// R G R / 2 [J]. Zero unless an obstacle residual compliance is bound. Beside
+    /// a friction residual it includes the joint form's cross part -R G_sb F, so the
+    /// omitted storage is this plus `friction_residual_energy_j`.
     pub obstacle_residual_energy_j: f64,
     /// Declared NUMERICAL loss of that quasi-static residual under step-held
-    /// reactions, dR G dR / 2 >= 0 [J]; not a physical dissipation.
+    /// reactions, dR G dR / 2 >= 0 [J]; not a physical dissipation. Beside a
+    /// friction residual it includes -dR G_sb dF; only the sum with
+    /// `friction_residual_loss_j` is a nonnegative form.
     pub obstacle_residual_loss_j: f64,
     /// Static storage of omitted modes under the friction tractions, F G F / 2 [J].
     pub friction_residual_energy_j: f64,
@@ -1084,6 +1088,10 @@ impl MultiFrictionModalSystem {
             };
             if let Some(residual) = &self.friction_residual {
                 self.free_slip[i] = finite(self.free_slip[i] + residual.old_displacement(i)?)?;
+                // Beside fixed stops, tn carries G_bs R: hold back the accepted reactions' part.
+                if let Some(obstacles) = self.obstacles.as_ref().filter(|stops| stops.has_port_cross()) {
+                    self.free_slip[i] = finite(self.free_slip[i] - obstacles.held_cross_slip(i)?)?;
+                }
             }
         }
         self.tractions.fill(0.0); self.iterations.fill(0);
@@ -1140,7 +1148,7 @@ impl MultiFrictionModalSystem {
         if let Some(obstacles) = &self.obstacles { obstacles.add_forces(&mut self.core.forces, gate)?; }
         self.core.network.stage_inner(&self.core.forces, gate)?;
         let (obstacle_energy, obstacle_loss, obstacle_work, absolute_obstacle_work) = match &mut self.obstacles {
-            Some(obstacles) => obstacles.stage(&self.core.network.candidates, self.core.network.dt, gate)?,
+            Some(obstacles) => obstacles.stage(&self.core.network.candidates, &self.tractions, self.core.network.dt, gate)?,
             None => (0.0, 0.0, 0.0, 0.0),
         };
         let residual_bound = self.obstacles.as_ref().is_some_and(obstacles::ObstacleSet::has_residual);
@@ -1156,6 +1164,9 @@ impl MultiFrictionModalSystem {
             let mut slip = finite(distance-dot(&self.points[i].column, &self.core.network.free_delta)?)?;
             if let Some(residual) = &self.friction_residual {
                 slip = finite(slip - residual.increment(i, &self.tractions)?)?;
+                if let Some(obstacles) = self.obstacles.as_ref().filter(|stops| stops.has_port_cross()) {
+                    slip = finite(slip + obstacles.cross_slip_increment(i)?)?;
+                }
             }
             let mut hair_loss = 0.0;
             if let Some(series) = self.series_drives[i] {
