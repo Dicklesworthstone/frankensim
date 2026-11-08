@@ -1,5 +1,17 @@
 # fs-solid CONTRACT
 
+## Two-sided normal contact on native ductile fragments
+
+`FiniteDuctileFractureMotion::advance_with_face_contact` resolves frictionless dwell or unloaded separation on every non-tied vertex pair of the retained released faces. The existing bounded native normal-complementarity solver probes the original finite backward-Euler owner with equal/opposite nodal loads. All probes borrow the same accepted material histories, consistent mass, velocity, temperature and physical duration; only the original final response matching the solver's force/path receipt can be published.
+
+All participating rows must fit the native solver's maximum of 21 contacts and the caller's stricter budget. Numerical force seeds and natural-map scales neither evolve history nor add compliance. Final forces must be nonnegative with exactly zero tangential force. Every paired initial/final gap must be nonnegative. Loaded pairs must stay matched, active and normally at rest; incoming closing impacts and loaded finite sliding return typed refusals. Both oriented triangle normals must remain in the declared current release-normal cone.
+
+The unchanged native tetrahedral orientation-sweep owner checks the straight nodal chord against element collapse under an explicit work budget. Nonnegative endpoint gaps bound the matching fixed-normal P1 trace over that chord. This does not certify unrelated surface collisions, arbitrary fragment rotation, finite sliding, friction, impact restitution, or exact continuous trajectories.
+
+Actual pair-force work, its signed negative endpoint defect and summed absolute defect are reported separately from physical plastic/damage loss, native material defects and backward-Euler numerical kinetic loss. Original external dead-load work is independently integrated and checked against the native contact-inclusive load receipt. The complete external/support/material/inertia/contact identity is gated. Summed absolute endpoint force couples bound angular-momentum error without cancellation between pairs. Contact defects are never deposited as heat or fresh fracture energy.
+
+Three focused G0/G3 tests in `tests/finite_ductile_fracture/contact.rs` exercise rotated, genuinely failed native specimens under exact equal/opposite contact loading; mass-driven free separation with independent backward-Euler kinetic/work formulas; and transactional loaded-sliding refusal. The transferred history, original mass and separate work accounts remain observable. Pinned rustfmt parsing and bounded static API/algebra review completed; Cargo typechecking and test execution remain unverified because of the workspace storage and dependency-build memory limits.
+
 ## Finite ductile failure to native deformable fragments
 
 `hyper3::plastic::ductile::fracture` releases explicitly selected conforming P1 seams only after both incident original material points have exact finite-support completion, zero retained compressive storage, compatible original reference-band direction, and traction-free current facets. Current Cauchy traction and area-scaled first-Piola traction are admitted independently. A rounded exponential damage value cannot authorize a cut.

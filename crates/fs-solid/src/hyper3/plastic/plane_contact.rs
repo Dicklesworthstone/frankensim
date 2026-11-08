@@ -469,7 +469,7 @@ impl TetPlaneGeometry<'_> {
         Ok(minimum)
     }
 
-    fn path<E>(
+    pub(super) fn path<E>(
         &self,
         after: &[[f64; 3]],
         controls: PlaneContactControls,
@@ -519,7 +519,7 @@ impl TetPlaneGeometry<'_> {
         Ok(windows)
     }
 
-    fn dead_work<E>(
+    pub(super) fn dead_work<E>(
         &self,
         nodal: &[(usize, f64)],
         body: [f64; 3],

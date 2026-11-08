@@ -36,6 +36,8 @@ use crate::inertia::InertialEnergy;
 use crate::loads3::TetLoadGeometry3;
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
+/// Two-sided native backward-Euler closure on these explicitly released traces.
+pub mod contact;
 mod transfer;
 
 /// Independent absolute release gates; none supplies a material calibration.

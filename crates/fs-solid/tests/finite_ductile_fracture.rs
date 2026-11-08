@@ -2,6 +2,9 @@
 //! Synthetic constants exercise mechanics; they do not qualify a real alloy.
 #![deny(unsafe_code)]
 
+#[path = "finite_ductile_fracture/contact.rs"]
+mod contact;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::ductile::evolution::{DuctileJ2Settings, DuctileWorkEvolution};
