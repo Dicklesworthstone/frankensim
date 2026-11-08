@@ -81,7 +81,7 @@ impl QuadrupoleSampleClock {
         Ok(value)
     }
 
-    pub(super) fn validate_last_index(self, last: usize) -> Result<(), AeroacError> {
+    pub(in crate::curle3d) fn validate_last_index(self, last: usize) -> Result<(), AeroacError> {
         let largest = self.epoch_s.abs().max(self.time_at(last)?.abs());
         let spacing = largest.next_up() - largest;
         // Checking one adjacent pair is insufficient: dt below one ULP can
@@ -96,7 +96,7 @@ impl QuadrupoleSampleClock {
         Ok(())
     }
 
-    pub(super) fn admit(self, index: usize, time_s: f64) -> Result<(), AeroacError> {
+    pub(in crate::curle3d) fn admit(self, index: usize, time_s: f64) -> Result<(), AeroacError> {
         let expected = self.time_at(index)?;
         if !time_s.is_finite()
             || (Dd::from_f64(time_s) - Dd::from_f64(expected))

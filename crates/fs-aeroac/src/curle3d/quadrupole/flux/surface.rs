@@ -367,6 +367,55 @@ impl PreparedPermeableSurface3 {
     pub const fn config(&self) -> CompressibleVolumeConfig3 {
         self.config
     }
+    /// Begin one joint spectrum with the CURRENT accepted physical sample.
+    /// The supplied clock must place that sample at index zero. All original
+    /// face Q/F channels share one window/transform; no independent-face power
+    /// approximation or extra source derivative is introduced.
+    ///
+    /// This preserves the stationary inviscid FW-H source scope above. It
+    /// does not add omitted exterior volume stresses, antialias adaptive CFD,
+    /// or validate disturbances crossing the permeable surface as sound.
+    pub fn begin_recording(
+        &self,
+        clock: crate::curle3d::array::recorded::SourceSampleClock,
+        expected_samples: usize,
+        config: fs_fft::welch::WelchConfig,
+        budget: crate::curle3d::array::recorded::CompactSourceRecordingBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<crate::curle3d::array::recorded::CompactSourceWelchStream, crate::AeroacError> {
+        let mut recording = crate::curle3d::array::recorded::CompactSourceWelchStream::new(
+            self.config.acoustic,
+            &self.positions,
+            clock,
+            expected_samples,
+            config,
+            budget,
+            &mut cancelled,
+        )?;
+        self.record_sample(&mut recording, &mut cancelled)?;
+        Ok(recording)
+    }
+
+    /// Record the actual accepted mass/momentum sample on its actual clock.
+    /// A different acoustic reference, geometry/order, repeated timestamp or
+    /// cancellation leaves the previously accepted recording unchanged.
+    pub fn record_sample(
+        &self,
+        recording: &mut crate::curle3d::array::recorded::CompactSourceWelchStream,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), crate::AeroacError> {
+        if recording.acoustic() != self.config.acoustic {
+            return Err(crate::AeroacError::InvalidParameter {
+                what: "permeable surface and source recording acoustic references differ",
+            });
+        }
+        recording.push_sample(
+            &self.positions,
+            self.sample_time_s(),
+            &self.sources,
+            cancelled,
+        )
+    }
     pub const fn control_box(&self) -> PermeableBox3 {
         self.control_box
     }

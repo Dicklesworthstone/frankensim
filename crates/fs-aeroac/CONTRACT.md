@@ -1,3 +1,30 @@
+## Joint recorded volume/force sources from resolved flow
+
+`curle3d::array::recorded` binds original source positions, ordering, physical
+clock and acoustic reference to one streaming Welch factorization. Each source
+retains real `[Q,Fx,Fy,Fz]` in m³/s and N. Cross-source, cross-axis and
+volume/force coherence survive into the existing complete pressure/vector-
+velocity operator before bin-integrated moments and signed intensity are formed.
+Lossless, original molecular and existing ideal-image propagation remain
+available without a second window, conjugation, attenuation or normalization.
+
+`PreparedPermeableSurface3::begin_recording` includes its current accepted
+mass/momentum sample once; `record_sample` appends subsequent original accepted
+samples. A changed reference, source order, geometry or off-clock time refuses
+before acceptance. There is no implicit adaptive-time resampling, missing
+prehistory, per-face power addition, source derivative or additional CFD step.
+The original stationary inviscid FW-H scope remains: exterior volume sources
+may still be needed, and enclosed sources must not be counted a second time.
+
+Geometry is included in the explicit transform memory cap. Accepted sampling
+allocates no adapter buffers; the original segment buffer and spectral factors
+replace retention of the complete source history or dense source covariance.
+Focused regressions cover phased source interference, a pressure null with
+nonzero velocity, exact joint batch/stream agreement, cancellation rollback and
+the existing accepted-CFD versus independent-DFT field comparison. The new
+source and test module pass pinned rustfmt; native tests remain unexecuted after
+a resource-limited real-source build stopped in asupersync before fs-couple.
+
 ## Permeable control-surface sound from accepted compressible flow
 
 `curle3d::quadrupole::flux::surface::PreparedPermeableSurface3` extracts a

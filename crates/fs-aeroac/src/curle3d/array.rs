@@ -40,6 +40,8 @@ use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, det};
 
 mod plane;
+/// Joint physical source recordings bound to their clock, geometry and medium.
+pub mod recorded;
 mod welch;
 pub use plane::{IdealAcousticPlane, IdealPlaneBoundary, PreparedHalfSpaceObserver};
 /// Coherent volume injection into an explicitly uniform subsonic mean flow.

@@ -542,19 +542,56 @@ fn native_accepted_history_reaches_coherent_welch_pressure_and_vector_velocity()
         || false,
     )
     .unwrap();
+    use crate::curle3d::array::recorded::{
+        CompactSourceRecordingBudget, CompactSourceWelchStream, SourceSampleClock,
+    };
     let samples = 8;
     let dt = 1e-6;
+    let clock = SourceSampleClock::new(source.sample_time_s(), dt, 1e-18).unwrap();
+    let recording_config = WelchConfig {
+        segment_samples: samples,
+        hop_samples: samples,
+        window: WelchWindow::Rectangular,
+        detrend: WelchDetrend::None,
+    };
+    let recording_budget = CompactSourceRecordingBudget {
+        maximum_sources: count,
+        welch: WelchBudget {
+            maximum_channels: 4 * count,
+            maximum_samples_per_channel: samples,
+            maximum_transforms: 4 * count,
+            maximum_workspace_bytes: 1 << 20,
+        },
+    };
+    let mut recording = source
+        .begin_recording(clock, samples, recording_config, recording_budget, || false)
+        .unwrap();
+    assert_eq!(recording.accepted_sample_count(), 1);
+    assert!(source.record_sample(&mut recording, || false).is_err());
+    assert_eq!(recording.accepted_sample_count(), 1);
+    let wrong_acoustic = FluidAcousticState::try_new(
+        1.01 * settings.acoustic.density_kg_m3(),
+        settings.acoustic.sound_speed_m_s(),
+    ).unwrap();
+    let mut alien = CompactSourceWelchStream::new(
+        wrong_acoustic, source.source_positions_m(), clock, samples,
+        recording_config, recording_budget, || false,
+    ).unwrap();
+    assert!(source.record_sample(&mut alien, || false).is_err());
+    assert_eq!(alien.accepted_sample_count(), 0);
     let mut history = Vec::new();
     for n in 0..samples {
         if n != 0 {
             flow.step(Time::new(dt), StepControl::default(), || false)
                 .unwrap();
             source.sample_frozen(&flow, || false).unwrap();
+            source.record_sample(&mut recording, || false).unwrap();
         }
         assert_eq!(source.sample_time_s(), flow.time().value());
         assert!((source.sample_time_s() - n as f64 * dt).abs() < 1e-18);
         history.push(source.source_components().to_vec());
     }
+    let recorded = recording.finish().unwrap();
     // This checks the unaltered accepted clock and coherent transform, not
     // a spatial/bandwidth qualification of this deliberately short record.
     let measured = WelchCrossSpectrum::estimate_with(
@@ -562,32 +599,21 @@ fn native_accepted_history_reaches_coherent_welch_pressure_and_vector_velocity()
         samples,
         |channel, sample| history[sample][channel / 4][channel % 4],
         dt,
-        WelchConfig {
-            segment_samples: samples,
-            hop_samples: samples,
-            window: WelchWindow::Rectangular,
-            detrend: WelchDetrend::None,
-        },
-        WelchBudget {
-            maximum_channels: 4 * count,
-            maximum_samples_per_channel: samples,
-            maximum_transforms: 4 * count,
-            maximum_workspace_bytes: 1 << 20,
-        },
+        recording_config,
+        recording_budget.welch,
         || false,
     )
     .unwrap();
-    let observer = PreparedCompactSourceObserver::new(
-        settings.acoustic,
-        measured.frequency_hz(1).unwrap(),
-        [1.1, -0.7, 0.9],
-        source.source_positions_m(),
-        count,
-    )
-    .unwrap();
-    let actual = observer
-        .evaluate_welch_bin(
-            &measured,
+    for bin in 0..=samples / 2 {
+        assert_eq!(
+            recorded.spectrum().factors(bin).unwrap().collect::<Vec<_>>(),
+            measured.factors(bin).unwrap().collect::<Vec<_>>(),
+        );
+    }
+    let observer = recorded.prepare_observer([1.1, -0.7, 0.9], 1, || false).unwrap();
+    let actual = recorded
+        .evaluate_bin(
+            &observer,
             1,
             CoherenceBudget {
                 max_modes: 1,
