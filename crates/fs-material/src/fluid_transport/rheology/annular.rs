@@ -118,6 +118,32 @@ pub struct CarreauAnnularProfile {
     stress_scale: f64,
 }
 
+/// Prescribed signed net flow and axial wall motion resolved by one profile.
+/// Requested flow is retained separately; physical work uses accepted flow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarreauAnnularFlowSolution {
+    profile: CarreauAnnularProfile,
+    requested_volumetric_flow_m3_s: f64,
+    flow_residual_m3_s: f64,
+    flow_iterations: u32,
+}
+
+impl CarreauAnnularFlowSolution {
+    pub const fn profile(&self) -> &CarreauAnnularProfile {
+        &self.profile
+    }
+    pub const fn requested_volumetric_flow_m3_s(&self) -> f64 {
+        self.requested_volumetric_flow_m3_s
+    }
+    /// Accepted minus requested flow after removing common-wall entrainment.
+    /// Large common translation therefore does not mask a hydraulic residual.
+    pub const fn flow_residual_m3_s(&self) -> f64 {
+        self.flow_residual_m3_s
+    }
+    pub const fn flow_iterations(&self) -> u32 {
+        self.flow_iterations
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CarreauAnnularSample {
     pub axial_velocity_m_s: f64,
@@ -257,6 +283,240 @@ impl LaminarCarreauAnnulus {
         self.profile_with_check(pressure_drop_pa, wall_velocities_m_s, controls, || Ok(()))
     }
 
+    /// Resolve the pressure required for signed net flow and both axial wall
+    /// speeds, including blockage and reverse pumping. Every accepted force,
+    /// velocity and heat value belongs to the same original nonlinear profile.
+    ///
+    /// The source wall-stress envelope bounds pressure corrections. A supported
+    /// equal-wall-stress anchor also admits annular cases whose wall motion
+    /// would exceed the inner-wall rate ceiling at zero pressure. Unsupported
+    /// pressure trials only tighten the bracket; material support is never
+    /// extrapolated. Newton corrections use the original positive conductance.
+    /// Constant-viscosity laws use the direct analytical inverse.
+    ///
+    /// The flow residual is relative to max(|Q - area*mean_wall_speed|,
+    /// area*|outer_wall_speed-inner_wall_speed|/2); common translation is removed.
+    /// The pressure-stress correction is relative to max(|pressure_stress|,
+    /// |stress_offset|), retaining a meaningful budget at zero net flow or zero
+    /// pressure. Wall residual and quadrature budgets remain independent.
+    ///
+    /// `maximum_flow_iterations` is in 1..=128 and bounds pressure trials,
+    /// in addition to one source-admitted anchor solve bounded by `controls`.
+    pub fn profile_at_flow_and_walls(
+        &self,
+        volumetric_flow_m3_s: f64,
+        wall_velocities_m_s: [f64; 2],
+        controls: CarreauAnnularControls,
+        relative_flow_tolerance: f64,
+        maximum_flow_iterations: u32,
+    ) -> Result<CarreauAnnularFlowSolution, MaterialError> {
+        self.profile_at_flow_and_walls_with_check(
+            volumetric_flow_m3_s,
+            wall_velocities_m_s,
+            controls,
+            relative_flow_tolerance,
+            maximum_flow_iterations,
+            || Ok(()),
+        )
+    }
+
+    /// Same inverse with caller-owned checks in the source admission, bounded
+    /// wall/pressure corrections, quadrature and before publication. Exhaustion
+    /// or cancellation returns no partial result and leaves the owner unchanged.
+    pub fn profile_at_flow_and_walls_with_check(
+        &self,
+        volumetric_flow_m3_s: f64,
+        wall_velocities_m_s: [f64; 2],
+        controls: CarreauAnnularControls,
+        relative_flow_tolerance: f64,
+        maximum_flow_iterations: u32,
+        mut check: impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauAnnularFlowSolution, MaterialError> {
+        controls.admit()?;
+        check()?;
+        let [inner, outer] = wall_velocities_m_s;
+        let relative = outer - inner;
+        let mean = if inner.abs() <= outer.abs() {
+            0.5_f64.mul_add(relative, inner)
+        } else {
+            (-0.5_f64).mul_add(relative, outer)
+        };
+        if [volumetric_flow_m3_s, inner, outer, relative, mean]
+            .into_iter()
+            .any(|x| !x.is_finite())
+            || !positive(relative_flow_tolerance)
+            || relative_flow_tolerance >= 1.0
+            || !(1..=128).contains(&maximum_flow_iterations)
+        {
+            return Err(parameters(
+                "invalid prescribed Carreau annular flow or inverse controls",
+            ));
+        }
+        let entrained = self.area_m2 * mean;
+        let target = volumetric_flow_m3_s - entrained;
+        let sliding_scale = if relative == 0.0 {
+            0.0
+        } else {
+            product_ratio(&[self.area_m2, relative.abs()], &[2.0])?
+        };
+        let flow_scale = target.abs().max(sliding_scale);
+        if !entrained.is_finite() || !target.is_finite() {
+            return Err(state_error(
+                "prescribed Carreau annular relative flow is unrepresentable",
+            ));
+        }
+        let accepted =
+            |profile: CarreauAnnularProfile, flow_iterations| CarreauAnnularFlowSolution {
+                flow_residual_m3_s: profile.flow.relative_flow_m3_s - target,
+                profile,
+                requested_volumetric_flow_m3_s: volumetric_flow_m3_s,
+                flow_iterations,
+            };
+        let assess = |profile: &CarreauAnnularProfile| -> Result<(f64, f64, bool), MaterialError> {
+            let difference = profile.flow.relative_flow_m3_s - target;
+            if !difference.is_finite() {
+                return Err(state_error(
+                    "Carreau annular inverse residual is unrepresentable",
+                ));
+            }
+            let correction = if difference == 0.0 {
+                0.0
+            } else {
+                // An unrepresentable Newton predictor is not an extrapolated
+                // material state. It falls back to the finite source bracket.
+                product_ratio(
+                    &[difference.abs(), self.gap_m],
+                    &[
+                        2.0,
+                        self.length_m,
+                        profile.flow.pressure_conductance_m3_s_pa,
+                    ],
+                )
+                .unwrap_or(f64::INFINITY)
+                .copysign(difference)
+            };
+            let stress_scale = profile
+                .offset_pa
+                .abs()
+                .max(profile.pressure_stress_pa.abs());
+            let converged = (difference == 0.0
+                || (difference / flow_scale).abs() <= relative_flow_tolerance)
+                && (correction == 0.0
+                    || (correction / stress_scale).abs() <= relative_flow_tolerance);
+            Ok((difference, correction, converged))
+        };
+        if self.prepared.constant() {
+            let conductance = product_ratio(
+                &[
+                    core::f64::consts::PI,
+                    self.mean_radius_m,
+                    self.mean_radius_m,
+                    self.gap_m,
+                    self.gap_m,
+                    self.langevin,
+                ],
+                &[2.0, self.length_m, self.prepared.rest.viscosity],
+            )?;
+            let couette = if relative == 0.0 {
+                0.0
+            } else {
+                product_ratio(&[self.area_m2, self.langevin, relative.abs()], &[2.0])?
+                    .copysign(relative)
+            };
+            let pressure_flow = target - couette;
+            let pressure = if pressure_flow == 0.0 {
+                0.0
+            } else {
+                product_ratio(&[pressure_flow.abs()], &[conductance])?.copysign(pressure_flow)
+            };
+            let profile =
+                self.profile_with_check(pressure, wall_velocities_m_s, controls, &mut check)?;
+            if !assess(&profile)?.2 {
+                return Err(state_error(
+                    "Carreau annular analytical flow inverse cannot resolve its tolerance",
+                ));
+            }
+            check()?;
+            return Ok(accepted(profile, u32::from(pressure != 0.0)));
+        }
+
+        let mut anchor =
+            self.flow_inverse_anchor(wall_velocities_m_s, mean, relative, controls, &mut check)?;
+        let (difference, correction, converged) = assess(&anchor)?;
+        if converged {
+            check()?;
+            return Ok(accepted(anchor, 0));
+        }
+        let ceiling = self.prepared.ceiling.stress();
+        let (mut low, mut high) = (-ceiling, ceiling);
+        if difference < 0.0 {
+            low = anchor.pressure_stress_pa;
+        } else {
+            high = anchor.pressure_stress_pa;
+        }
+        let bounded = |candidate: f64, low: f64, high: f64| {
+            if candidate.is_finite() && candidate > low && candidate < high {
+                candidate
+            } else {
+                0.5 * low + 0.5 * high
+            }
+        };
+        let mut stress = bounded(anchor.pressure_stress_pa - correction, low, high);
+        for iteration in 1..=maximum_flow_iterations {
+            check()?;
+            if stress <= low || stress >= high {
+                return Err(state_error(
+                    "Carreau annular inverse cannot resolve a flow inside its source envelope",
+                ));
+            }
+            let candidate = if self
+                .inverse_pressure_supported(stress, relative, &anchor, controls, &mut check)?
+            {
+                let pressure = if stress == 0.0 {
+                    0.0
+                } else {
+                    product_ratio(&[2.0, self.length_m, stress.abs()], &[self.gap_m])?
+                        .copysign(stress)
+                };
+                let profile =
+                    self.profile_with_check(pressure, wall_velocities_m_s, controls, &mut check)?;
+                let (difference, correction, converged) = assess(&profile)?;
+                if converged {
+                    check()?;
+                    return Ok(accepted(profile, iteration));
+                }
+                if difference < 0.0 {
+                    low = stress;
+                } else {
+                    high = stress;
+                }
+                anchor = profile;
+                stress - correction
+            } else {
+                // At fixed wall speeds the admitted pressure set is an
+                // interval: the two wall stresses vary monotonically in
+                // opposite directions as pressure increases. Keep its known
+                // supported anchor while contracting the unsupported side.
+                if stress > anchor.pressure_stress_pa {
+                    high = stress;
+                } else {
+                    low = stress;
+                }
+                f64::NAN
+            };
+            let next = bounded(candidate, low, high);
+            if next == stress {
+                return Err(state_error(
+                    "Carreau annular inverse lost pressure-stress resolution",
+                ));
+            }
+            stress = next;
+        }
+        Err(state_error(
+            "Carreau annular flow inverse exhausted its iteration budget",
+        ))
+    }
+
     /// Bounded stress solve and positive quadrature with checks before every
     /// capped constitutive inverse and before publication. No allocation or
     /// mutable material history occurs; refusal leaves the owner retryable.
@@ -369,6 +629,139 @@ impl LaminarCarreauAnnulus {
         Err(state_error(
             "Carreau annular no-slip solve exhausted its iteration budget",
         ))
+    }
+
+    // Equal actual wall stresses t give c=t and s=-h*t/(2*Rm). The
+    // cylindrical stress is positive in BOTH boundary stresses. Consequently
+    // this path connects zero relative motion to the largest admissible
+    // positive relative speed; sign reversal gives the negative endpoint.
+    // Unlike a zero-pressure start, it cannot discard wall motion that pressure
+    // can admit by redistributing the inner-cylinder shear.
+    fn flow_inverse_anchor(
+        &self,
+        walls: [f64; 2],
+        mean: f64,
+        relative: f64,
+        controls: CarreauAnnularControls,
+        check: &mut impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<CarreauAnnularProfile, MaterialError> {
+        if relative == 0.0 {
+            return self.profile_with_check(0.0, walls, controls, check);
+        }
+        let target = relative.abs();
+        let mean_rate = target / self.gap_m;
+        if !positive(mean_rate) || mean_rate > self.prepared.ceiling.rate {
+            return Err(state_error(
+                "Carreau annular wall motion exceeds every supported profile",
+            ));
+        }
+        let z = 0.5 * (self.gap_m / self.mean_radius_m);
+        let ceiling = self.prepared.ceiling.stress();
+        let mut limit = ceiling;
+        for _ in 0..8 {
+            if self
+                .wall_stresses(limit, -z * limit)
+                .into_iter()
+                .all(|tau| tau.is_finite() && tau.abs() <= ceiling)
+            {
+                break;
+            }
+            limit = limit.next_down();
+        }
+        if self
+            .wall_stresses(limit, -z * limit)
+            .into_iter()
+            .any(|tau| !tau.is_finite() || tau.abs() > ceiling)
+        {
+            return Err(state_error(
+                "Carreau annular equal-wall stress span is unrepresentable",
+            ));
+        }
+        check()?;
+        let mut stress = self.prepared.sample_rate(mean_rate)?.stress().min(limit);
+        let (mut low, mut high) = (0.0, limit);
+        for iteration in 1..=controls.maximum_wall_stress_iterations {
+            check()?;
+            let mut evaluation = self.evaluate(stress, -z * stress, controls, check)?;
+            let difference = evaluation.relative_speed - target;
+            let derivative = product_ratio(
+                &[
+                    evaluation.derivative,
+                    1.0 - z * (1.0 - 2.0 * evaluation.moments.mean),
+                ],
+                &[],
+            )?;
+            let correction = difference / derivative;
+            let scale = target.max(self.gap_m * evaluation.rate_scale);
+            if scale.is_finite()
+                && (difference == 0.0
+                    || (difference / scale).abs() <= controls.relative_wall_velocity_tolerance)
+                && (correction == 0.0
+                    || (correction / stress).abs() <= controls.relative_wall_velocity_tolerance)
+            {
+                let c = stress.copysign(relative);
+                let s = -z * c;
+                let pressure =
+                    product_ratio(&[2.0, self.length_m, s.abs()], &[self.gap_m])?.copysign(s);
+                evaluation.relative_speed = evaluation.relative_speed.copysign(relative);
+                return self.finish(
+                    pressure, walls, mean, relative, c, s, evaluation, iteration, controls, check,
+                );
+            }
+            if !difference.is_finite() || !scale.is_finite() || difference < 0.0 && stress == limit
+            {
+                return Err(state_error(
+                    "Carreau annular wall motion exceeds every supported profile",
+                ));
+            }
+            if difference < 0.0 {
+                low = stress;
+            } else {
+                high = stress;
+            }
+            let candidate = stress - correction;
+            let next = if candidate.is_finite() && candidate > low && candidate < high {
+                candidate
+            } else {
+                0.5 * low + 0.5 * high
+            };
+            if next == stress || next <= low || next >= high {
+                return Err(state_error(
+                    "Carreau annular source anchor lost stress resolution",
+                ));
+            }
+            stress = next;
+        }
+        Err(state_error(
+            "Carreau annular source anchor exhausted its iteration budget",
+        ))
+    }
+
+    fn inverse_pressure_supported(
+        &self,
+        s: f64,
+        relative: f64,
+        anchor: &CarreauAnnularProfile,
+        controls: CarreauAnnularControls,
+        check: &mut impl FnMut() -> Result<(), MaterialError>,
+    ) -> Result<bool, MaterialError> {
+        let (minimum, maximum) = self.stress_span(s)?;
+        let distance = (s - anchor.pressure_stress_pa).abs();
+        // dc/ds=-(1-2*weighted_mean_area) lies in [-1,1]. These bounds
+        // avoid endpoint quadrature when the previous accepted stress and its
+        // signed wall residual already prove admission. Otherwise evaluate the
+        // original source boundary; no failed forward solve is swallowed.
+        let lower_proven =
+            minimum <= anchor.offset_pa - distance && anchor.flow.wall_velocity_residual_m_s <= 0.0;
+        if !lower_proven && self.evaluate(minimum, s, controls, check)?.relative_speed > relative {
+            return Ok(false);
+        }
+        let upper_proven =
+            maximum >= anchor.offset_pa + distance && anchor.flow.wall_velocity_residual_m_s >= 0.0;
+        if !upper_proven && self.evaluate(maximum, s, controls, check)?.relative_speed < relative {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     // c=(a*tau(a)+b*tau(b))/(2 Rm), s=delta_p*h/(2L). Maximum |tau|
