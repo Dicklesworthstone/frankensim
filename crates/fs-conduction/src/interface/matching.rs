@@ -24,6 +24,7 @@ use fs_sparse::Coo;
 
 use crate::ConductionError;
 use crate::bc::ThermalBoundary;
+use crate::material::ConductivityModel;
 use crate::mesh::ConductionMesh;
 
 mod sensitivity;
@@ -414,6 +415,39 @@ pub enum ResistanceOrigin {
         /// Caller-supplied heat-flow cross-section [m²].
         area_m2: f64,
     },
+    /// A homogeneous tensor reduced under an explicit transport constraint at
+    /// one reference temperature. The original model retains its declarations
+    /// or material-property receipts; geometry and the constraint are inputs.
+    BulkConductivityModel {
+        /// Original conductivity model, including every source receipt.
+        conductivity: Box<ConductivityModel>,
+        /// Temperature at which the tensor was evaluated [K].
+        reference_temperature_k: f64,
+        /// Normalized world-space direction along the slab thickness.
+        normal: [f64; 3],
+        /// Which uniform vector field is constrained to the slab normal.
+        constraint: SlabTransportConstraint,
+        /// Caller-supplied uniform slab thickness [m].
+        length_m: f64,
+        /// Caller-supplied heat-flow cross-section [m²].
+        area_m2: f64,
+    },
+}
+
+/// Boundary assumption for reducing homogeneous anisotropic conduction to a
+/// scalar bulk resistance. These assumptions agree for an isotropic material
+/// or a principal direction, but generally differ for a rotated tensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlabTransportConstraint {
+    /// Uniform temperature gradient along the normal: `R=L/(A nᵀ K n)`.
+    /// The resulting heat flux may have tangential components, which the
+    /// surrounding boundary conditions must permit.
+    NormalTemperatureGradient,
+    /// Uniform heat flux along the normal: `R=(L/A) nᵀ K⁻¹ n`.
+    /// The resulting temperature gradient may have tangential components.
+    /// This is compatible with adiabatic lateral faces and appropriately
+    /// varying end temperatures, not generally with isothermal end faces.
+    NormalHeatFlux,
 }
 
 /// Exact conductivity source and complete, fixed-context face temperatures.
@@ -441,6 +475,83 @@ pub struct ThermalResistanceTerm {
 }
 
 impl ThermalResistanceTerm {
+    /// Reduce a homogeneous conductivity tensor at one reference temperature
+    /// into a series resistance with an explicit transport constraint.
+    ///
+    /// The nonzero world-space normal is normalized and retained. A scaled
+    /// Cholesky solve evaluates the resistivity quadratic form without forming
+    /// an inverse. The model, its original receipts, geometry, temperature and
+    /// constraint remain available in [`ResistanceOrigin::BulkConductivityModel`].
+    /// No uncertainty transform is inferred.
+    ///
+    /// This is the exact uniform-field bulk reduction for the chosen
+    /// constraint. It does not model anisotropic end effects, spreading,
+    /// lateral leakage or contact resistance. In particular, a rotated slab
+    /// with both isothermal end faces and adiabatic sides generally requires
+    /// the spatial conduction solver. A temperature-dependent model is frozen
+    /// at the retained reference temperature, as with [`Self::slab_from_card`].
+    ///
+    /// # Errors
+    /// Refuses invalid geometry, temperature, or normal; propagates source
+    /// temperature-domain refusals; refuses a tensor or resistance that cannot
+    /// retain a finite positive numerical representation.
+    pub fn slab_from_model(
+        name: impl Into<String>,
+        length_m: f64,
+        area_m2: f64,
+        normal: [f64; 3],
+        reference_temperature_k: f64,
+        conductivity: &ConductivityModel,
+        constraint: SlabTransportConstraint,
+    ) -> Result<Self, ConductionError> {
+        let name = name.into();
+        for (label, value) in [
+            ("length", length_m),
+            ("area", area_m2),
+            ("reference temperature", reference_temperature_k),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(interface_error(
+                    &name,
+                    format!("slab {label} {value} must be finite and positive"),
+                    "supply positive SI geometry and absolute temperature",
+                ));
+            }
+        }
+        let normal_scale = normal.iter().fold(0.0f64, |s, v| s.max(v.abs()));
+        if !normal.iter().all(|v| v.is_finite()) || normal_scale == 0.0 {
+            return Err(interface_error(
+                &name,
+                "slab normal must be a finite nonzero direction",
+                "supply the world-space direction along the slab thickness",
+            ));
+        }
+        let scaled = normal.map(|v| v / normal_scale);
+        let norm = scaled[0].hypot(scaled[1]).hypot(scaled[2]);
+        let normal = scaled.map(|v| v / norm);
+        let tensor = conductivity.tensor_at(reference_temperature_k)?;
+        let resistivity = directional_resistivity(tensor, normal, constraint).ok_or_else(|| {
+            interface_error(
+                &name,
+                "tensor reduction did not retain finite positive conductivity/resistivity",
+                "use a numerically resolvable positive-definite conductivity tensor",
+            )
+        })?;
+        Self::new(
+            name,
+            (length_m / area_m2) * resistivity,
+            ResistanceUncertainty::Unstated,
+            ResistanceOrigin::BulkConductivityModel {
+                conductivity: Box::new(conductivity.clone()),
+                reference_temperature_k,
+                normal,
+                constraint,
+                length_m,
+                area_m2,
+            },
+        )
+    }
+
     /// Integrate sourced k(T) for a uniform, steady one-dimensional slab with
     /// fixed face temperatures and no internal generation or lateral losses.
     /// Fourier's law gives `Q = A/L * integral(T_cold..T_hot) k(T) dT`, hence
@@ -797,6 +908,50 @@ impl ThermalResistanceTerm {
     pub const fn origin(&self) -> &ResistanceOrigin {
         &self.origin
     }
+}
+
+// K = D L Lᵀ D, where D contains sqrt(K_ii). Equilibration avoids powers of
+// the conductivity scale in the determinant and the inverse. The existing
+// model admits roundoff-sized asymmetry, so factor its symmetric part.
+fn directional_resistivity(
+    tensor: [[f64; 3]; 3],
+    normal: [f64; 3],
+    constraint: SlabTransportConstraint,
+) -> Option<f64> {
+    let diagonal = std::array::from_fn::<_, 3, _>(|i| tensor[i][i].sqrt());
+    if !diagonal.iter().all(|d| d.is_finite() && *d > 0.0) {
+        return None;
+    }
+    let symmetric_entry = |i: usize, j: usize| {
+        0.5 * (tensor[i][j] / diagonal[i] / diagonal[j]
+            + tensor[j][i] / diagonal[j] / diagonal[i])
+    };
+    let l10 = symmetric_entry(1, 0);
+    let l20 = symmetric_entry(2, 0);
+    let l11 = (-l10).mul_add(l10, 1.0).sqrt();
+    let l21 = (-l20).mul_add(l10, symmetric_entry(2, 1)) / l11;
+    let l22 = (-l20).mul_add(l20, (-l21).mul_add(l21, 1.0)).sqrt();
+    if ![l11, l22].iter().all(|v| v.is_finite() && *v > 0.0) || !l21.is_finite() {
+        return None;
+    }
+    let resistivity = match constraint {
+        SlabTransportConstraint::NormalTemperatureGradient => {
+            let p = std::array::from_fn::<_, 3, _>(|i| diagonal[i] * normal[i]);
+            let z0 = l10.mul_add(p[1], l20.mul_add(p[2], p[0]));
+            let z1 = l11.mul_add(p[1], l21 * p[2]);
+            let z2 = l22 * p[2];
+            let norm = z0.hypot(z1).hypot(z2);
+            (1.0 / norm) / norm
+        }
+        SlabTransportConstraint::NormalHeatFlux => {
+            let y0 = normal[0] / diagonal[0];
+            let y1 = (-l10).mul_add(y0, normal[1] / diagonal[1]) / l11;
+            let y2 = (-l20).mul_add(y0, (-l21).mul_add(y1, normal[2] / diagonal[2]))
+                / l22;
+            y0.mul_add(y0, y1.mul_add(y1, y2 * y2))
+        }
+    };
+    (resistivity.is_finite() && resistivity > 0.0).then_some(resistivity)
 }
 
 /// Conservative uncertainty summary for a series sum.

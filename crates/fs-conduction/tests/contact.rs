@@ -19,8 +19,8 @@ use fs_conduction::solve::{
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     ConductionError, InterfaceFacePair, InterfaceResistance, InterfaceSurface,
-    ResistanceUncertainty, ResistanceValueOrigin, SeriesThermalResistance, ThermalInterfaces,
-    ThermalResistanceTerm,
+    ResistanceUncertainty, ResistanceValueOrigin, SeriesThermalResistance, SlabTransportConstraint,
+    ThermalInterfaces, ThermalResistanceTerm,
 };
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -2006,6 +2006,234 @@ fn a_measured_value_cannot_masquerade_as_the_cards_own_claim() {
                 .is_err(),
             "{bad} must be refused; perfect contact is never an implicit default"
         );
+    }
+}
+
+#[test]
+fn anisotropic_slab_distinguishes_flux_and_gradient_constraints_in_series() {
+    // Rotate diag(100, 1, 5) by 45 degrees. The two exact directional
+    // reductions are R_gradient = 1/50.5 and R_flux = (1/100 + 1)/2.
+    let model = ConductivityModel::constant_tensor([
+        [50.5, 49.5, 0.0],
+        [49.5, 50.5, 0.0],
+        [0.0, 0.0, 5.0],
+    ])
+    .unwrap();
+    let reduce = |normal, constraint| {
+        ThermalResistanceTerm::slab_from_model(
+            "anisotropic bulk",
+            1.0,
+            1.0,
+            normal,
+            300.0,
+            &model,
+            constraint,
+        )
+        .unwrap()
+    };
+    let gradient = reduce(
+        [1.0, 0.0, 0.0],
+        SlabTransportConstraint::NormalTemperatureGradient,
+    );
+    let flux = reduce([1.0, 0.0, 0.0], SlabTransportConstraint::NormalHeatFlux);
+    assert!((gradient.value_k_per_w() - 1.0 / 50.5).abs() < 1e-14);
+    assert!((flux.value_k_per_w() - 0.505).abs() < 1e-13);
+    assert!((flux.value_k_per_w() / gradient.value_k_per_w() - 25.5025).abs() < 1e-11);
+
+    // Normal sign and magnitude do not change a quadratic form. Principal
+    // directions recover the original scalar conductivity in either case.
+    for constraint in [
+        SlabTransportConstraint::NormalHeatFlux,
+        SlabTransportConstraint::NormalTemperatureGradient,
+    ] {
+        assert_eq!(
+            reduce([-1e300, 0.0, 0.0], constraint).value_k_per_w(),
+            reduce([1.0, 0.0, 0.0], constraint).value_k_per_w(),
+        );
+        assert!(
+            (reduce([1.0, 1.0, 0.0], constraint).value_k_per_w() - 0.01).abs() < 1e-13
+        );
+        assert!(
+            (reduce([1.0, -1.0, 0.0], constraint).value_k_per_w() - 1.0).abs() < 1e-13
+        );
+    }
+    let interface = ThermalResistanceTerm::declared(
+        "bondline",
+        0.2,
+        ResistanceUncertainty::Unstated,
+        "analytic contact fixture",
+    )
+    .unwrap();
+    let series = SeriesThermalResistance::new(vec![flux, interface]).unwrap();
+    assert!((series.budget().value_k_per_w - 0.705).abs() < 1e-13);
+    assert_eq!(series.budget().complete_half_width_k_per_w(), None);
+}
+
+#[test]
+fn anisotropic_slab_reductions_match_spatial_fourier_flux_with_their_boundaries() {
+    use fs_conduction::solve::element_heat_flux;
+
+    let (complex, positions) = box_grid([2, 2, 2], [1.0; 3]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let model = ConductivityModel::constant_tensor([
+        [50.5, 49.5, 0.0],
+        [49.5, 50.5, 0.0],
+        [0.0, 0.0, 5.0],
+    ])
+    .unwrap();
+    let source = ScalarField::Uniform(0.0);
+    for (constraint, gradient, expected_flux) in [
+        (
+            SlabTransportConstraint::NormalHeatFlux,
+            [-50.5, 49.5, 0.0],
+            [100.0, 0.0, 0.0],
+        ),
+        (
+            SlabTransportConstraint::NormalTemperatureGradient,
+            [-100.0, 0.0, 0.0],
+            [5050.0, 4950.0, 0.0],
+        ),
+    ] {
+        let exact: Vec<_> = mesh
+            .positions()
+            .iter()
+            .map(|p| 400.0 + gradient[0] * p[0] + gradient[1] * p[1])
+            .collect();
+        let boundary = ThermalBoundaryBuilder::new(&mesh)
+            .region(
+                "prescribed affine traces",
+                |face| {
+                    constraint == SlabTransportConstraint::NormalTemperatureGradient
+                        || on_box_face(face.centroid[0], 0.0)
+                        || on_box_face(face.centroid[0], 1.0)
+                },
+                ThermalBc::Dirichlet {
+                    temperature: ScalarField::Nodal(exact.clone()),
+                },
+            )
+            .unwrap()
+            .adiabatic_remainder()
+            .finish()
+            .unwrap();
+        let solution = with_cx(|cx| {
+            solve(
+                cx,
+                ConductionProblem {
+                    mesh: &mesh,
+                    boundary: &boundary,
+                    material: &model,
+                    source: &source,
+                    element_materials: None,
+                },
+                config(),
+            )
+            .unwrap()
+        });
+        for (&actual, expected) in solution.temperature.iter().zip(&exact) {
+            assert!((actual - expected).abs() < 1e-8);
+        }
+        let term = ThermalResistanceTerm::slab_from_model(
+            "resolved bulk",
+            1.0,
+            1.0,
+            [1.0, 0.0, 0.0],
+            300.0,
+            &model,
+            constraint,
+        )
+        .unwrap();
+        let reduced_heat = -gradient[0] / term.value_k_per_w();
+        assert!((reduced_heat - expected_flux[0]).abs() < 1e-8);
+        for flux in element_heat_flux(&mesh, &model, &solution.temperature).unwrap() {
+            for i in 0..3 {
+                assert!((flux[i] - expected_flux[i]).abs() < 1e-7);
+            }
+        }
+    }
+}
+
+#[test]
+fn anisotropic_slab_preserves_source_model_and_refuses_invalid_state_and_geometry() {
+    use fs_conduction::{ConductivityTable, ResistanceOrigin};
+
+    let (card, _) = bulk_conductivity_card(5.0, 295.0, 305.0);
+    let table = ConductivityTable::from_claims(
+        card.claims(),
+        "thermal-conductivity",
+        &[295.0, 305.0],
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .unwrap();
+    let model = ConductivityModel::isotropic(table);
+    let resolve = |length, area, normal, temperature, constraint| {
+        ThermalResistanceTerm::slab_from_model(
+            "sourced bulk",
+            length,
+            area,
+            normal,
+            temperature,
+            &model,
+            constraint,
+        )
+    };
+    for constraint in [
+        SlabTransportConstraint::NormalHeatFlux,
+        SlabTransportConstraint::NormalTemperatureGradient,
+    ] {
+        let term = resolve(0.02, 0.004, [2.0, 0.0, 0.0], 300.0, constraint).unwrap();
+        assert!((term.value_k_per_w() - 1.0).abs() < 1e-14);
+        assert_eq!(term.uncertainty(), &ResistanceUncertainty::Unstated);
+        match term.origin() {
+            ResistanceOrigin::BulkConductivityModel {
+                conductivity,
+                reference_temperature_k,
+                normal,
+                constraint: retained_constraint,
+                length_m,
+                area_m2,
+            } => {
+                assert_eq!(conductivity.as_ref(), &model);
+                assert_eq!(*reference_temperature_k, 300.0);
+                assert_eq!(*normal, [1.0, 0.0, 0.0]);
+                assert_eq!(*retained_constraint, constraint);
+                assert_eq!((*length_m, *area_m2), (0.02, 0.004));
+                assert!(!conductivity.receipts().is_empty());
+                for receipt in conductivity.receipts() {
+                    card.claims().verify_receipt(receipt).unwrap();
+                }
+            }
+            other => panic!("tensor source was lost: {other:?}"),
+        }
+        assert!(
+            (resolve(0.04, 0.004, [1.0, 0.0, 0.0], 300.0, constraint)
+                .unwrap()
+                .value_k_per_w()
+                - 2.0)
+                .abs()
+                < 1e-14
+        );
+        assert!(
+            (resolve(0.02, 0.008, [1.0, 0.0, 0.0], 300.0, constraint)
+                .unwrap()
+                .value_k_per_w()
+                - 0.5)
+                .abs()
+                < 1e-14
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(resolve(bad, 0.004, [1.0, 0.0, 0.0], 300.0, constraint).is_err());
+            assert!(resolve(0.02, bad, [1.0, 0.0, 0.0], 300.0, constraint).is_err());
+            assert!(resolve(0.02, 0.004, [1.0, 0.0, 0.0], bad, constraint).is_err());
+        }
+        for bad in [[0.0; 3], [f64::NAN, 0.0, 0.0], [0.0, f64::INFINITY, 0.0]] {
+            assert!(resolve(0.02, 0.004, bad, 300.0, constraint).is_err());
+        }
+        for outside in [294.0, 306.0] {
+            assert!(matches!(
+                resolve(0.02, 0.004, [1.0, 0.0, 0.0], outside, constraint),
+                Err(ConductionError::OutsideTemperatureSpan { .. }),
+            ));
+        }
     }
 }
 

@@ -18,7 +18,8 @@ pub use matching::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     InterfaceFacePair, InterfaceFlux, InterfaceResistance, InterfaceSurface,
     ResistanceOrigin, ResistanceUncertainty, ResistanceValueOrigin,
-    SeriesResistanceBudget, SeriesThermalResistance, SlabConductivityQuery, ThermalResistanceTerm,
+    SeriesResistanceBudget, SeriesThermalResistance, SlabConductivityQuery, SlabTransportConstraint,
+    ThermalResistanceTerm,
 };
 pub use nonmatching::{NonmatchingOptions, NonmatchingSurface};
 

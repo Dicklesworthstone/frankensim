@@ -101,7 +101,7 @@ pub use interface::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
     InterfaceFacePair, InterfaceFlux, InterfaceResistance, InterfaceSurface, ResistanceOrigin,
     ResistanceUncertainty, ResistanceValueOrigin, SeriesResistanceBudget, SeriesThermalResistance,
-    SlabConductivityQuery, ThermalInterfaces, ThermalResistanceTerm,
+    SlabConductivityQuery, SlabTransportConstraint, ThermalInterfaces, ThermalResistanceTerm,
 };
 pub use material::{
     CONDUCTIVITY_DIMS, ConductivityModel, ConductivityTable, ElementMaterials, MaterialId,
