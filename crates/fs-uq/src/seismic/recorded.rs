@@ -6,8 +6,8 @@
 //! oscillator; PGA/PSA normalization compares records at one physical intensity.
 
 use super::{
-    FragilityPoint, LinearSdofControls, LinearSdofError, LinearSdofResponse,
-    bilinear_peak_ductility, linear_sdof_response, sdof_coefficients, sdof_peak,
+    FragilityPoint, LinearSdofControls, LinearSdofError, LinearSdofResponse, LinearSdofState,
+    bilinear_peak_ductility, linear_sdof_response_from_state, sdof_coefficients, sdof_peak,
 };
 
 /// Units of the supplied acceleration samples before SI conversion.
@@ -33,10 +33,11 @@ impl AccelerationUnit {
 
 /// Uniformly sampled acceleration in SI units.
 ///
-/// N samples cover N-1 integration intervals. Response starts at rest at the
-/// first sample and covers the supplied duration, including any explicitly
-/// supplied zero-acceleration tail. Ingestion does not certify measurement
-/// processing, usable frequency band, or temporal resolution.
+/// N samples cover N-1 integration intervals. Response covers the supplied
+/// duration, including any explicitly supplied zero-acceleration tail. The
+/// default response starts at rest; the exact linear path also accepts physical
+/// initial motion through [`Self::linear_response_from_state`]. Ingestion does
+/// not certify measurement processing, usable frequency band, or temporal resolution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroundMotionRecord {
     dt_s: f64,
@@ -303,12 +304,42 @@ impl GroundMotionRecord {
         controls: LinearSdofControls,
         cancelled: C,
     ) -> Result<LinearSdofResponse, LinearSdofError> {
+        self.linear_response_from_state(
+            period_s,
+            damping_ratio,
+            LinearSdofState::default(),
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Continue exact linear response from supplied relative displacement and velocity.
+    ///
+    /// Initial motion participates in every peak search. Peak times are relative
+    /// to this record's start, and the original clock and duration are retained.
+    /// Pass [`LinearSdofResponse::final_state`] from a preceding segment to retain
+    /// its vibration. When splitting one trace, adjacent segments share their
+    /// boundary acceleration sample. Free-decay duration requires explicit zero
+    /// samples; no gap, force transition or tail is inferred between records.
+    ///
+    /// # Errors
+    /// Invalid period/damping/initial motion/controls, exhausted work limits,
+    /// cancellation, or an unrepresentable oscillator response.
+    pub fn linear_response_from_state<C: FnMut() -> bool>(
+        &self,
+        period_s: f64,
+        damping_ratio: f64,
+        initial_state: LinearSdofState,
+        controls: LinearSdofControls,
+        cancelled: C,
+    ) -> Result<LinearSdofResponse, LinearSdofError> {
         let omega = angular_frequency_for_period(period_s)?;
-        linear_sdof_response(
+        linear_sdof_response_from_state(
             &self.acceleration_m_s2,
             self.dt_s,
             omega,
             damping_ratio,
+            initial_state,
             controls,
             cancelled,
         )

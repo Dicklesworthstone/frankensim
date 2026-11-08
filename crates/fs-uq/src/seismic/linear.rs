@@ -26,14 +26,26 @@ pub struct LinearSdofControls {
     pub extremum_time_tolerance_s: f64,
 }
 
-/// Response from initial rest over exactly the supplied record duration.
+/// Physical relative motion at a record boundary.
+///
+/// Displacement and velocity are in SI units, with no modal mass normalization.
+/// The zero/default state is rest. State admission occurs at the response call.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinearSdofState {
+    /// Relative displacement [m].
+    pub displacement_m: f64,
+    /// Relative velocity [m/s].
+    pub velocity_m_s: f64,
+}
+
+/// Response over exactly the supplied record duration, with segment-local times.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinearSdofResponse {
     /// Maximum absolute relative displacement [m], including intersample extrema.
     pub peak_displacement_m: f64,
     /// Signed displacement [m] at the selected extremum or record endpoint.
     pub signed_peak_displacement_m: f64,
-    /// Physical time [s] of the selected evaluated peak; ties select the first.
+    /// Time [s] from this segment's start of the selected peak; ties select the first.
     pub peak_time_s: f64,
     /// Largest final velocity-zero bracket width [s].
     pub maximum_extremum_bracket_s: f64,
@@ -46,7 +58,7 @@ pub struct LinearSdofResponse {
     pub peak_velocity_m_s: f64,
     /// Signed relative velocity [m/s] at its selected peak.
     pub signed_peak_velocity_m_s: f64,
-    /// Physical time [s] of the selected velocity peak; ties select the first.
+    /// Time [s] from this segment's start of the velocity peak; ties select the first.
     /// Its analytic localization still has floating-point transition/root error.
     pub peak_velocity_time_s: f64,
     /// Maximum absolute inertial acceleration [m/s²], including intersample
@@ -54,7 +66,7 @@ pub struct LinearSdofResponse {
     pub peak_absolute_acceleration_m_s2: f64,
     /// Signed inertial acceleration [m/s²] at its selected peak.
     pub signed_peak_absolute_acceleration_m_s2: f64,
-    /// Physical time [s] of the selected acceleration peak; ties select the first.
+    /// Time [s] from this segment's start of the acceleration peak; ties select the first.
     pub peak_absolute_acceleration_time_s: f64,
     /// Largest final bracket width [s] for an absolute-acceleration extremum.
     pub maximum_absolute_acceleration_extremum_bracket_s: f64,
@@ -322,6 +334,18 @@ fn homogeneous_zeros(
 }
 
 impl LinearSdofResponse {
+    /// Physical endpoint state for continuing with another supplied segment.
+    ///
+    /// Continuation preserves motion; peak statistics and times belong to each
+    /// segment separately. No forcing interval or decay tail is appended.
+    #[must_use]
+    pub const fn final_state(&self) -> LinearSdofState {
+        LinearSdofState {
+            displacement_m: self.final_displacement_m,
+            velocity_m_s: self.final_velocity_m_s,
+        }
+    }
+
     fn observe(
         &mut self,
         state: ModalAcousticState,
@@ -377,12 +401,48 @@ impl LinearSdofResponse {
 /// # Errors
 /// Refuses invalid inputs, unrepresentable extrema arithmetic, exhausted work
 /// limits, cancellation, or an exact-transition refusal. Returns no partial result.
-#[allow(clippy::cast_precision_loss)]
 pub fn linear_sdof_response<C: FnMut() -> bool>(
     ground_acceleration_m_s2: &[f64],
     dt_s: f64,
     omega_rad_s: f64,
     damping_ratio: f64,
+    controls: LinearSdofControls,
+    cancelled: C,
+) -> Result<LinearSdofResponse, LinearSdofError> {
+    linear_sdof_response_from_state(
+        ground_acceleration_m_s2,
+        dt_s,
+        omega_rad_s,
+        damping_ratio,
+        LinearSdofState::default(),
+        controls,
+        cancelled,
+    )
+}
+
+/// Continue exact piecewise-linear response from supplied physical motion.
+///
+/// Uses the same transitions, continuous extrema and work limits as
+/// [`linear_sdof_response`]. All peak searches include the initial state at
+/// time zero. Peak times are relative to this segment, and empty/single-sample
+/// segments preserve and report the supplied motion without advancing time.
+///
+/// To split a record, share its boundary sample between adjacent segments and
+/// pass [`LinearSdofResponse::final_state`] into the next call. This retains
+/// displacement and velocity without silently resetting the oscillator. Each
+/// call has its own work budget and peak statistics. Explicit zero-acceleration
+/// samples model free decay; no gap or tail is inferred between records.
+///
+/// # Errors
+/// Refuses nonfinite initial motion in addition to the invalid inputs,
+/// unrepresentable arithmetic, work limits and cancellation of the rest API.
+#[allow(clippy::cast_precision_loss)]
+pub fn linear_sdof_response_from_state<C: FnMut() -> bool>(
+    ground_acceleration_m_s2: &[f64],
+    dt_s: f64,
+    omega_rad_s: f64,
+    damping_ratio: f64,
+    initial_state: LinearSdofState,
     controls: LinearSdofControls,
     cancelled: C,
 ) -> Result<LinearSdofResponse, LinearSdofError> {
@@ -411,6 +471,11 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
             "positive finite clock/frequency/tolerance and valid damping/work limits required",
         ));
     }
+    if !initial_state.displacement_m.is_finite() || !initial_state.velocity_m_s.is_finite() {
+        return Err(LinearSdofError::Invalid(
+            "initial displacement and velocity must be finite",
+        ));
+    }
     let stiffness = finite(omega_rad_s * omega_rad_s)?;
     let damping = finite(2.0 * omega_rad_s * damping_ratio)?;
     let intervals = ground_acceleration_m_s2.len().saturating_sub(1);
@@ -424,7 +489,10 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
         }
     }
     let full = LinearForceTransition::try_new(omega_rad_s, damping_ratio, dt_s)?;
-    let mut state = ModalAcousticState::default();
+    let mut state = ModalAcousticState {
+        displacement_m_sqrt_kg: initial_state.displacement_m,
+        velocity_m_sqrt_kg_per_s: initial_state.velocity_m_s,
+    };
     let mut report = LinearSdofResponse {
         peak_displacement_m: 0.0,
         signed_peak_displacement_m: 0.0,
@@ -445,6 +513,7 @@ pub fn linear_sdof_response<C: FnMut() -> bool>(
         intervals,
         transition_evaluations: 0,
     };
+    report.observe(state, 0.0, damping, stiffness)?;
     for (index, samples) in ground_acceleration_m_s2.windows(2).enumerate() {
         work.evaluation()?;
         let (f0, f1) = (-samples[0], -samples[1]);
@@ -559,6 +628,168 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.3e}"
         );
+    }
+
+    #[test]
+    fn initial_velocity_free_decay_resolves_intersample_peaks() {
+        let omega = 4.0_f64;
+        let speed = 3.0_f64;
+        let initial = LinearSdofState {
+            displacement_m: 0.0,
+            velocity_m_s: speed,
+        };
+        for zeta in [0.0_f64, 0.2] {
+            let alpha = zeta * omega;
+            let wd = omega * (1.0 - zeta * zeta).sqrt();
+            let duration = core::f64::consts::PI / wd;
+            let response = linear_sdof_response_from_state(
+                &[0.0, 0.0], duration, omega, zeta, initial, controls(), || false,
+            )
+            .unwrap();
+            // q(t) = V exp(-alpha*t) sin(wd*t)/wd: the sampled
+            // displacements vanish while the displacement peak lies inside.
+            let displacement_time = zeta.acos() / wd;
+            let displacement = speed / omega * (-alpha * displacement_time).exp();
+            close(response.final_displacement_m, 0.0, 2.0e-14);
+            close(response.final_velocity_m_s, -speed * (-alpha * duration).exp(), 2.0e-13);
+            close(response.peak_displacement_m, displacement, 2.0e-13);
+            close(response.signed_peak_displacement_m, displacement, 2.0e-13);
+            close(response.peak_time_s, displacement_time, 2.0e-11);
+            close(response.peak_velocity_m_s, speed, 2.0e-13);
+            // Differentiate the closed-form free response independently:
+            // a/V = exp(-alpha*t)[-2*alpha*cos + (2*alpha^2-omega^2)*sin/wd].
+            let angle = ((omega * omega - 4.0 * alpha * alpha) * wd)
+                .atan2(alpha * (3.0 * omega * omega - 4.0 * alpha * alpha));
+            let acceleration_time = angle / wd;
+            let acceleration = speed * (-alpha * acceleration_time).exp()
+                * (-2.0 * alpha * angle.cos()
+                    + (2.0 * alpha * alpha - omega * omega) * angle.sin() / wd);
+            close(response.peak_absolute_acceleration_m_s2, acceleration.abs(), 2.0e-12);
+            close(response.signed_peak_absolute_acceleration_m_s2, acceleration, 2.0e-12);
+            close(response.peak_absolute_acceleration_time_s, acceleration_time, 2.0e-11);
+            assert_eq!(response.duration_s, duration);
+            assert_eq!(response.intervals, 1);
+            assert_eq!(
+                response,
+                linear_sdof_response_from_state(
+                    &[0.0, 0.0], duration, omega, zeta, initial, controls(), || false,
+                )
+                .unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn critical_and_overdamped_initial_eigenstates_keep_initial_peaks() {
+        let omega = 4.0_f64;
+        let duration = 1.25;
+        for zeta in [1.0_f64, 2.0] {
+            // Select one exact decaying eigenmode, including the repeated root.
+            let rate = -omega / (zeta + (zeta * zeta - 1.0).sqrt());
+            let initial = LinearSdofState {
+                displacement_m: 0.25,
+                velocity_m_s: 0.25 * rate,
+            };
+            let response = linear_sdof_response_from_state(
+                &[0.0, 0.0], duration, omega, zeta, initial, controls(), || false,
+            )
+            .unwrap();
+            let displacement = initial.displacement_m * (rate * duration).exp();
+            close(response.final_displacement_m, displacement, 2.0e-14);
+            close(response.final_velocity_m_s, rate * displacement, 2.0e-13);
+            close(response.peak_displacement_m, initial.displacement_m, 2.0e-14);
+            close(response.signed_peak_velocity_m_s, initial.velocity_m_s, 2.0e-13);
+            close(
+                response.signed_peak_absolute_acceleration_m_s2,
+                rate * rate * initial.displacement_m,
+                2.0e-12,
+            );
+            assert_eq!(response.peak_time_s, 0.0);
+            assert_eq!(response.peak_velocity_time_s, 0.0);
+            assert_eq!(response.peak_absolute_acceleration_time_s, 0.0);
+        }
+    }
+
+    #[test]
+    fn equilibrium_and_zero_duration_segments_observe_initial_state() {
+        let initial = LinearSdofState {
+            displacement_m: 0.25,
+            velocity_m_s: 0.0,
+        };
+        let mut limited = controls();
+        limited.maximum_acceleration_zeros_per_interval = 0;
+        limited.maximum_transition_evaluations = 2;
+        let equilibrium = linear_sdof_response_from_state(
+            &[-4.0, -4.0, -4.0], 0.25, 4.0, 0.3, initial, limited, || false,
+        )
+        .unwrap();
+        assert_eq!(equilibrium.final_state(), initial);
+        assert_eq!(equilibrium.peak_displacement_m, initial.displacement_m);
+        assert_eq!(equilibrium.peak_velocity_m_s, 0.0);
+        assert_eq!(equilibrium.signed_peak_absolute_acceleration_m_s2, -4.0);
+        assert_eq!(equilibrium.peak_time_s, 0.0);
+        assert_eq!(equilibrium.peak_absolute_acceleration_time_s, 0.0);
+        assert_eq!(equilibrium.transition_evaluations, 2);
+        assert_eq!(equilibrium.duration_s, 0.5);
+
+        let moving = LinearSdofState {
+            displacement_m: -0.4,
+            velocity_m_s: 0.7,
+        };
+        for samples in [&[][..], &[9.0][..]] {
+            let response = linear_sdof_response_from_state(
+                samples, 0.2, 3.0, 0.2, moving, controls(), || false,
+            )
+            .unwrap();
+            assert_eq!(response.final_state(), moving);
+            assert_eq!(response.signed_peak_displacement_m, moving.displacement_m);
+            assert_eq!(response.signed_peak_velocity_m_s, moving.velocity_m_s);
+            close(response.signed_peak_absolute_acceleration_m_s2, 2.76, 2.0e-15);
+            assert_eq!(response.peak_time_s, 0.0);
+            assert_eq!(response.peak_velocity_time_s, 0.0);
+            assert_eq!(response.peak_absolute_acceleration_time_s, 0.0);
+            assert_eq!(response.duration_s, 0.0);
+            assert_eq!(response.intervals, 0);
+            assert_eq!(response.transition_evaluations, 0);
+        }
+    }
+
+    #[test]
+    fn initial_state_admission_and_continuation_limits_are_checked() {
+        for initial in [
+            LinearSdofState { displacement_m: f64::NAN, velocity_m_s: 0.0 },
+            LinearSdofState { displacement_m: 0.0, velocity_m_s: f64::INFINITY },
+            LinearSdofState { displacement_m: f64::MAX, velocity_m_s: 0.0 },
+        ] {
+            assert!(matches!(
+                linear_sdof_response_from_state(
+                    &[], 0.25, 4.0, 0.1, initial, controls(), || false,
+                ),
+                Err(LinearSdofError::Invalid(_)),
+            ));
+        }
+        let initial = LinearSdofState { displacement_m: 0.1, velocity_m_s: 2.0 };
+        let samples = [0.0; 5];
+        let mut limited = controls();
+        limited.maximum_transition_evaluations = 1;
+        assert!(matches!(
+            linear_sdof_response_from_state(
+                &samples, 0.25, 4.0, 0.1, initial, limited, || false,
+            ),
+            Err(LinearSdofError::Budget("transition evaluations")),
+        ));
+        let mut polls = 0;
+        assert!(matches!(
+            linear_sdof_response_from_state(
+                &samples, 0.25, 4.0, 0.1, initial, controls(), || {
+                    polls += 1;
+                    polls > 10
+                },
+            ),
+            Err(LinearSdofError::Cancelled),
+        ));
+        assert_eq!(initial, LinearSdofState { displacement_m: 0.1, velocity_m_s: 2.0 });
+        assert_eq!(samples, [0.0; 5]);
     }
 
     #[test]

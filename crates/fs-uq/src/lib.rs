@@ -100,9 +100,10 @@ pub use seismic::{
     AccelerationUnit, BilinearIdaModel, FragilityPoint, GroundMotionRecord,
     GroundMotionRecordError, GroundMotionSampling, IdaIntensity, KanaiTajimi,
     LinearResponseSpectrum, LinearSdofControls, LinearSdofError, LinearSdofResponse,
-    LinearSpectrumPoint, RecordedIda,
+    LinearSdofState, LinearSpectrumPoint, RecordedIda,
     bilinear_peak_ductility, cqc, ida_fragility, ida_fragility_from_records,
-    ida_fragility_with_sampling, linear_sdof_response, sdof_peak, srss,
+    ida_fragility_with_sampling, linear_sdof_response, linear_sdof_response_from_state,
+    sdof_peak, srss,
 };
 
 /// Crate version, re-exported for provenance stamping.

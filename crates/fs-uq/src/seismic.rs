@@ -11,7 +11,10 @@
 
 /// Exact piecewise-linear response with bounded intersample peak localization.
 pub mod linear;
-pub use linear::{LinearSdofControls, LinearSdofError, LinearSdofResponse, linear_sdof_response};
+pub use linear::{
+    LinearSdofControls, LinearSdofError, LinearSdofResponse, LinearSdofState,
+    linear_sdof_response, linear_sdof_response_from_state,
+};
 
 /// Recorded acceleration histories and physically normalized motion suites.
 pub mod recorded;

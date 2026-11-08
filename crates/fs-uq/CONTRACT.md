@@ -121,6 +121,19 @@ full-interval transition is reused throughout the record. N samples cover
 N-1 intervals; no free-decay tail, resampling, filter or ground-motion
 frequency content is invented. Empty/single-sample records have zero motion.
 
+`linear_sdof_response_from_state` and
+`GroundMotionRecord::linear_response_from_state` use this same owner with
+an explicit `LinearSdofState`: relative displacement in metres and velocity
+in metres per second. All three peaks include that initial state at time zero.
+Empty/single-sample segments retain and report the supplied motion without
+advancing time. `LinearSdofResponse::final_state()` carries physical endpoint
+motion into a later segment without resetting the oscillator; splitting a
+single history shares its boundary acceleration sample between segments.
+Times and peak statistics remain local to each call, as do the work limits.
+A caller combines segment peaks with the explicit time offset when needed.
+Free decay requires explicitly supplied zero-acceleration samples; no gap or
+tail is inferred. The rest APIs delegate with the default zero state.
+
 The reported displacement, relative-velocity and absolute-acceleration peaks
 include intersample extrema, each with its own sign and physical time. Under linear
 forcing, oscillator acceleration satisfies the homogeneous second-order
@@ -161,7 +174,11 @@ absolute-acceleration peaks, an analytic ramp without an appended
 tail, invariance under exact linear-record subdivision (including both sides
 of critical damping), independent physical-equation RK4 references with
 separate refinement, deterministic replay, and malformed/budget/cancellation
-refusals. This API makes a same-ISA/toolchain repeatability claim, not a new
+refusals. Initial-state tests independently check free-vibration peaks,
+critical/overdamped eigenmode decay, equilibrium and initial-time maxima,
+zero-duration preservation, finite-state admission, and joined recorded
+segments against one uninterrupted history. This API makes a same-ISA/toolchain
+repeatability claim, not a new
 cross-ISA or experimental seismic-accuracy claim.
 
 ## Invariants

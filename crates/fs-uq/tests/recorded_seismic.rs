@@ -1,7 +1,7 @@
 use fs_uq::seismic::{LinearSdofControls, LinearSdofError};
 use fs_uq::{
     AccelerationUnit, BilinearIdaModel, GroundMotionRecord, GroundMotionRecordError,
-    GroundMotionSampling, IdaIntensity, KanaiTajimi, ida_fragility_from_records,
+    GroundMotionSampling, IdaIntensity, KanaiTajimi, LinearSdofState, ida_fragility_from_records,
     ida_fragility_with_sampling,
 };
 
@@ -454,6 +454,92 @@ fn recorded_continuous_spectra_preserve_si_units_and_linear_interpolation() {
                     < 5e-11
             );
         }
+    }
+}
+
+#[test]
+fn recorded_segments_retain_motion_and_reproduce_continuous_peaks() {
+    let samples = [0.0, 2.0, -1.0, 0.5, 0.0, -2.0, 0.25];
+    let full = record(0.25, samples.to_vec());
+    // Both segments include the same boundary sample; no interval is dropped
+    // or duplicated, and there is no hidden interpolation across a missing gap.
+    let first = record(0.25, samples[..=2].to_vec());
+    let second = record(0.25, samples[2..].to_vec());
+    let initial = LinearSdofState { displacement_m: 0.012, velocity_m_s: -0.035 };
+    let period = core::f64::consts::TAU / 6.0;
+    let peaks = |response: fs_uq::LinearSdofResponse| {
+        [
+            (
+                response.peak_displacement_m,
+                response.signed_peak_displacement_m,
+                response.peak_time_s,
+            ),
+            (
+                response.peak_velocity_m_s,
+                response.signed_peak_velocity_m_s,
+                response.peak_velocity_time_s,
+            ),
+            (
+                response.peak_absolute_acceleration_m_s2,
+                response.signed_peak_absolute_acceleration_m_s2,
+                response.peak_absolute_acceleration_time_s,
+            ),
+        ]
+    };
+    for damping in [0.0, 0.07, 1.0, 3.0] {
+        let uninterrupted = full
+            .linear_response_from_state(period, damping, initial, linear_controls(), || false)
+            .unwrap();
+        let prefix = first
+            .linear_response_from_state(period, damping, initial, linear_controls(), || false)
+            .unwrap();
+        let suffix = second
+            .linear_response_from_state(
+                period, damping, prefix.final_state(), linear_controls(), || false,
+            )
+            .unwrap();
+        assert_eq!(suffix.final_state(), uninterrupted.final_state());
+        assert_eq!(prefix.duration_s, first.duration_s());
+        assert_eq!(suffix.duration_s, second.duration_s());
+        assert_eq!(prefix.duration_s + suffix.duration_s, uninterrupted.duration_s);
+        assert_eq!(prefix.intervals + suffix.intervals, uninterrupted.intervals);
+        assert_eq!(
+            prefix.transition_evaluations + suffix.transition_evaluations,
+            uninterrupted.transition_evaluations,
+        );
+        for ((earlier, later), total) in peaks(prefix).into_iter()
+            .zip(peaks(suffix)).zip(peaks(uninterrupted))
+        {
+            let expected = if later.0 > earlier.0 {
+                (later.0, later.1, prefix.duration_s + later.2)
+            } else {
+                earlier
+            };
+            assert_eq!(total.0, expected.0);
+            assert_eq!(total.1, expected.1);
+            assert!((total.2 - expected.2).abs() < 2.0e-14);
+            assert!((0.0..=suffix.duration_s).contains(&later.2));
+        }
+        assert_eq!(
+            uninterrupted.maximum_extremum_bracket_s,
+            prefix.maximum_extremum_bracket_s.max(suffix.maximum_extremum_bracket_s),
+        );
+        assert_eq!(
+            uninterrupted.peak_absolute_acceleration_localization_allowance_m_s2,
+            prefix.peak_absolute_acceleration_localization_allowance_m_s2
+                .max(suffix.peak_absolute_acceleration_localization_allowance_m_s2),
+        );
+        assert_eq!(
+            suffix,
+            second.linear_response_from_state(
+                period, damping, prefix.final_state(), linear_controls(), || false,
+            ).unwrap(),
+        );
+        let reset = second.linear_response(period, damping, linear_controls(), || false).unwrap();
+        assert!(
+            (reset.final_displacement_m - suffix.final_displacement_m).abs()
+                + (reset.final_velocity_m_s - suffix.final_velocity_m_s).abs() > 1.0e-8,
+        );
     }
 }
 
