@@ -485,7 +485,7 @@ impl PreparedCoherentDiffractionExposure<'_, '_> {
     }
 }
 
-fn admit_sensor(camera: &PhysicalCamera, distance: f64) -> Result<(), CoherentDiffractionError> {
+pub(super) fn admit_sensor(camera: &PhysicalCamera, distance: f64) -> Result<(), CoherentDiffractionError> {
     if !distance.is_finite() || distance <= 0.0 {
         return Err(CoherentDiffractionError::InvalidSensorPlane);
     }

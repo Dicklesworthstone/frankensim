@@ -1000,6 +1000,8 @@ fn g0_g4_spectral_exposure_refuses_invalid_models_and_preflights_work() {
 mod polarization;
 #[path = "coherent_diffraction/exposure_coherency.rs"]
 mod exposure_coherency;
+#[path = "coherent_diffraction/interferometer.rs"]
+mod interferometer;
 
 const RADIUS: f64 = 0.001;
 const LAMBDA_NM: f64 = 550.0;

@@ -4184,6 +4184,32 @@ evaluation. The runnable
 `examples/coherent_pupil.rs` emits a CSV comparison of coherent, partially
 coherent and incoherent illumination with the same pupil and isolated powers.
 
+### Two-arm detection of mutual spatial coherence
+
+`PreparedCoherentDiffraction::observe_interferometer` combines the original
+monochromatic scalar camera field at two sensor coordinates through passive
+arm power fractions and a balanced lossless combiner. Each mean/covariance
+bank propagates separately to both coordinates; its two fields interfere
+before independent bank powers add. Coincident samples cannot duplicate
+source power: the two input fractions must sum to at most one.
+
+The receiver restores the relative physical sensor Fresnel chirp and accepts
+an explicit optical path difference (including its phase index) plus an
+authored interface/combiner phase. The original physical sensor-conjugate,
+medium-wavelength, pupil and paraxial admissions remain. Both output powers,
+arm powers, complex mutual coherence and fringe visibility are returned as
+point densities per tangent-coordinate area. Equal-area unit-magnification
+arm relays are assumed; resolved interferometer optics, finite detector
+integration, polarization and spectral exposure are outside this receiver.
+
+Complex DD fields retain destructive output differences before squaring.
+The lossless output powers sum to the admitted arm powers; unequal arm
+powers and partial spatial coherence reduce fringe visibility. Original
+pupil-wave work is preflighted, returned and allocation-free; cancellation
+leaves the preparation reusable. Focused regressions cover path-length
+fringes, output closure, weak dark ports, partial coherence, complex defocus
+with sensor chirp, and passivity/sensor/work/cancellation admission.
+
 ### Finite-exposure coherent camera pixels
 
 `PhysicalCamera::prepare_coherent_diffraction_exposure` accepts an authored

@@ -28,6 +28,7 @@ pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
+    CoherentDiffractionInterferometer, CoherentInterferometerSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
     CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,

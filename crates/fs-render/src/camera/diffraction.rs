@@ -48,6 +48,7 @@ use circular::{CircularDefocus, jinc};
 pub use coherent::{
     CoherentDiffractionError, CoherentDiffractionExposureLimits,
     CoherentDiffractionExposurePixelLimits, CoherentDiffractionExposureSample,
+    CoherentDiffractionInterferometer, CoherentInterferometerSample,
     CoherentDiffractionLimits, CoherentDiffractionPixel, CoherentDiffractionPixelExposure,
     CoherentDiffractionPixelLimits, CoherentDiffractionPixelPower, CoherentDiffractionSample,
     CoherentDiffractionShutter, CoherentDiffractionTone, CoherentJonesDetector,

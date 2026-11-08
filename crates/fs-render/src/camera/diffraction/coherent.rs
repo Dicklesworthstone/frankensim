@@ -30,8 +30,10 @@ use super::{CameraError, PhysicalCamera, PreparedDiffractionAmplitude};
 use fs_math::{c64::C64, dd::Dd};
 
 mod exposure;
+mod interferometer;
 mod pixel;
 mod polarization;
+pub use interferometer::{CoherentDiffractionInterferometer, CoherentInterferometerSample};
 pub use polarization::{
     PolarizedCoherentDiffractionPixelPower, PolarizedCoherentDiffractionSample,
     PolarizedDiffractionCoherency, PreparedPolarizedCoherentDiffraction,
@@ -126,6 +128,8 @@ pub enum CoherentDiffractionError {
     InvalidFrequency,
     /// Sensor distance must be positive and agree with a declared lens conjugate.
     InvalidSensorPlane,
+    /// Arm weights must be passive and optical path/combiner phase finite.
+    InvalidInterferometer,
     /// Every tone must declare the same ordered covariance-factor identities.
     InconsistentCoherenceFactors,
     /// An ideal Jones analyzer needs a finite, nonzero polarization direction.
@@ -177,6 +181,7 @@ impl From<fs_fft::harmonic_window::WindowError> for CoherentDiffractionError {
 /// relative-error guarantee at a null. Source and camera data are borrowed
 /// immutably, so changing either requires another preparation.
 pub struct PreparedCoherentDiffraction<'camera, 'source> {
+    camera: &'camera PhysicalCamera,
     pupil: PreparedDiffractionAmplitude<'camera>,
     illumination: CoherentPupilIllumination<'source>,
     wavelength_nm: f64,
@@ -229,6 +234,7 @@ impl PhysicalCamera {
         let pupil = PreparedDiffractionAmplitude::new(self, wavelength_nm)?;
         poll(&mut cancelled)?;
         Ok(PreparedCoherentDiffraction {
+            camera: self,
             pupil,
             illumination,
             wavelength_nm,
