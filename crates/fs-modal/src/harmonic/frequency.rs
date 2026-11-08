@@ -5,9 +5,10 @@
 //! The derivative is applied to a vector, never assembled as another dense
 //! operator. The original factor, binary scaling and source coordinates remain.
 
+use super::parameter::PowerSum;
 use super::{
     HarmonicResponse, HarmonicResponseError, MatrixLayout, PreparedHarmonicResponse, finite,
-    invalid, poll, real_inner, scale, scale_complex,
+    invalid, poll, scale, scale_complex,
 };
 use crate::quadratic_fraction;
 use fs_exec::Cx;
@@ -119,7 +120,10 @@ impl PreparedHarmonicResponse {
                 ));
             }
         };
-        let core = self.compact_port_factor.as_ref().map_or(0, |factor| factor.dimension());
+        let core = self
+            .compact_port_factor
+            .as_ref()
+            .map_or(0, |factor| factor.dimension());
         admit(self.n, ports, self.layout, core, controls)?;
         let (solution, force_exponent, relative) = self.solve_force(force, cx)?;
         let response = self.observe(force, &solution, force_exponent, relative, cx)?;
@@ -198,25 +202,25 @@ impl PreparedHarmonicResponse {
             rhs_exponent,
             cx,
         )?;
-        let mut input = 0.0;
-        let mut viscous = 0.0;
+        // Frequency and material-parameter tangents must use the same signed
+        // physical-work owner. Reactive/source-phase terms can individually
+        // overflow even when their total is exactly zero. Contract the original
+        // damping entries before rounding, including their full nullspaces.
+        let mut input = PowerSum::default();
+        let mut viscous = PowerSum::default();
         for i in 0..self.n {
             poll(cx)?;
             let df = force_derivative.map_or(C64::ZERO, |v| v[i]);
-            input += 0.5 * real_inner(df, response.velocity[i])
-                + 0.5 * real_inner(force[i], velocity_derivative[i]);
-            let mut cv = C64::ZERO;
-            let mut cdv = C64::ZERO;
-            let mut cv_error = C64::ZERO;
-            let mut cdv_error = C64::ZERO;
+            input.half_inner(df, response.velocity[i], 1.0)?;
+            input.half_inner(force[i], velocity_derivative[i], 1.0)?;
             for j in self.layout.columns(i, self.n) {
                 let c = self.viscous_entry(i, j);
-                add(&mut cv, &mut cv_error, response.velocity[j].scale(c));
-                add(&mut cdv, &mut cdv_error, velocity_derivative[j].scale(c));
+                viscous.half_inner(velocity_derivative[i], response.velocity[j], c)?;
+                viscous.half_inner(response.velocity[i], velocity_derivative[j], c)?;
             }
-            viscous += 0.5 * real_inner(velocity_derivative[i], cv)
-                + 0.5 * real_inner(response.velocity[i], cdv);
         }
+        let input = input.value()?;
+        let viscous = viscous.value()?;
         let port_load = match (&self.port_load, &response.port_load, impedance_derivative) {
             (Some(load), Some(primal), Some(slope)) => {
                 let mut flow_derivative = vec![C64::ZERO; ports];
@@ -232,7 +236,7 @@ impl PreparedHarmonicResponse {
                     }
                 }
                 let mut effort_derivative = vec![C64::ZERO; ports];
-                let mut power = 0.0;
+                let mut power = PowerSum::default();
                 for a in 0..ports {
                     poll(cx)?;
                     let mut correction = C64::ZERO;
@@ -248,9 +252,10 @@ impl PreparedHarmonicResponse {
                             slope[a * ports + b] * primal.flow[b],
                         );
                     }
-                    power += 0.5 * real_inner(flow_derivative[a], primal.effort[a])
-                        + 0.5 * real_inner(primal.flow[a], effort_derivative[a]);
+                    power.half_inner(flow_derivative[a], primal.effort[a], 1.0)?;
+                    power.half_inner(primal.flow[a], effort_derivative[a], 1.0)?;
                 }
+                let power = power.value()?;
                 if !power.is_finite()
                     || flow_derivative
                         .iter()
@@ -272,7 +277,11 @@ impl PreparedHarmonicResponse {
         let load_power = port_load
             .as_ref()
             .map_or(0.0, |p| p.average_absorbed_power_derivative);
-        let balance = input - viscous - load_power;
+        let mut balance = PowerSum::default();
+        for value in [input, -viscous, -load_power] {
+            balance.add_scalar(value)?;
+        }
+        let balance = balance.value()?;
         if ![input, viscous, balance].into_iter().all(f64::is_finite) {
             return Err(invalid(
                 "frequency derivative of physical power is not representable",
@@ -547,8 +556,7 @@ fn admit(
     } else {
         nn * nn
     };
-    let work = 64 * (structural_entries + nn * pp + pp * pp + kk * kk)
-        + 256 * (nn + pp + kk);
+    let work = 64 * (structural_entries + nn * pp + pp * pp + kk * kk) + 256 * (nn + pp + kk);
     let requested = u64::try_from(work).map_err(|_| invalid("frequency work extent overflow"))?;
     if requested > controls.maximum_work {
         return Err(HarmonicResponseError::WorkBudget {

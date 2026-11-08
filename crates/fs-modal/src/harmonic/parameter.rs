@@ -110,7 +110,7 @@ impl Term {
 // traversal or temporary term array. The bounded number of normalized terms
 // fits in DD's finite fraction range; this is not an exact summation theorem.
 #[derive(Default)]
-struct PowerSum {
+pub(super) struct PowerSum {
     fraction: Dd,
     exponent: i32,
 }
@@ -139,12 +139,21 @@ impl PowerSum {
 
     // c * Re(a^H b)/2. Even c/2 stays inside the factored product so a
     // subnormal physical damping coefficient is not prematurely rounded away.
-    fn half_inner(&mut self, a: C64, b: C64, c: f64) -> Result<(), HarmonicResponseError> {
+    pub(super) fn half_inner(
+        &mut self,
+        a: C64,
+        b: C64,
+        c: f64,
+    ) -> Result<(), HarmonicResponseError> {
         self.add(Term::product([0.5, c, a.re, b.re], 0))?;
         self.add(Term::product([0.5, c, a.im, b.im], 0))
     }
 
-    fn value(self) -> Result<f64, HarmonicResponseError> {
+    pub(super) fn add_scalar(&mut self, value: f64) -> Result<(), HarmonicResponseError> {
+        self.add(Term::product([value, 1.0, 1.0, 1.0], 0))
+    }
+
+    pub(super) fn value(self) -> Result<f64, HarmonicResponseError> {
         scale(self.fraction.to_f64(), self.exponent)
     }
 }
@@ -178,7 +187,9 @@ pub fn harmonic_mean_power_derivative_with_cancel(
     }
     let n = flow.len();
     if effort.len() != n || flow_derivative.len() != n || effort_derivative.len() != n {
-        return Err(invalid("equal original port and derivative lengths required"));
+        return Err(invalid(
+            "equal original port and derivative lengths required",
+        ));
     }
     let mut sum = PowerSum::default();
     for i in 0..n {
@@ -189,7 +200,9 @@ pub fn harmonic_mean_power_derivative_with_cancel(
             .iter()
             .any(|&value| !finite(value))
         {
-            return Err(invalid("finite original port phasors and derivatives required"));
+            return Err(invalid(
+                "finite original port phasors and derivatives required",
+            ));
         }
         sum.half_inner(flow_derivative[i], effort[i], 1.0)?;
         sum.half_inner(flow[i], effort_derivative[i], 1.0)?;
@@ -444,7 +457,7 @@ impl PreparedHarmonicResponse {
             .map_or(0.0, |v| v.average_absorbed_power_derivative);
         let mut balance = PowerSum::default();
         for value in [input, -viscous, -load] {
-            balance.add(Term::product([value, 1.0, 1.0, 1.0], 0))?;
+            balance.add_scalar(value)?;
         }
         let balance = balance.value()?;
         if ![input, viscous, balance].into_iter().all(f64::is_finite) {

@@ -606,6 +606,15 @@ cancellation and deterministic reuse. Compact-path tests cover a 129-mode
 bank under the linear work budget, agreement with the dense pencil, and a
 nonzero DC tangent from tiny off-diagonal source damping.
 
+Frequency tangents use the same binary-normalized double-double physical-work
+contraction as parameter tangents. Source work, full viscous work and boundary
+work retain their signed products until cancellation, before recovering f64
+units. No extra factorization or numerical arrays are required. Focused G1/G3
+regressions retain zero work for a large purely reactive response with a moving
+source phase, and the zero power slope of a finite driven resonance whose
+individual differentiated products exceed f64. This protects representable
+physical totals; it does not certify relative accuracy at arbitrary nulls.
+
 ### `time` (IRP M1.1-W1a; moved from `fs-couple::modal_acoustic_time`)
 
 `ModalAcousticTimeModel` is the generic fixed-rate realization of independent,

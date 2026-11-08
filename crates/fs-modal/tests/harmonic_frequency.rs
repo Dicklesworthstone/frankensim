@@ -59,6 +59,118 @@ fn pair(a: C64, b: C64) -> f64 {
 }
 
 #[test]
+fn large_reactive_frequency_tangents_preserve_zero_physical_work() {
+    // G1/G3: F(w)=A exp(i(w-1)) drives a lossless oscillator. Changing
+    // either its amplitude response or source phase cannot dissipate energy.
+    // Each differentiated source/port work term can overflow before the
+    // opposite signed term cancels, although all published quantities fit.
+    with_cx(&CancelGate::new(), |cx| {
+        let amplitude = 2.0_f64.powi(600);
+        for loaded in [false, true] {
+            let prepared = if loaded {
+                PreparedHarmonicResponse::try_with_port_impedance(
+                    &[1.0],
+                    &[0.0],
+                    &[2.0],
+                    1,
+                    &[1.0],
+                    1,
+                    &[C64::new(0.0, 1.0)],
+                    1.0,
+                    controls(),
+                    ports(),
+                    cx,
+                )
+            } else {
+                PreparedHarmonicResponse::try_new(&[1.0], &[0.0], &[2.0], 1, 1.0, controls(), cx)
+            }
+            .unwrap();
+            // The attached spring has Z(w)=i/w, not a frozen reactance.
+            let impedance_slope = [C64::new(0.0, -1.0)];
+            let response = prepared
+                .solve_with_frequency_derivative(
+                    &[C64::from_re(amplitude)],
+                    Some(&[C64::new(0.0, amplitude)]),
+                    loaded.then_some(impedance_slope.as_slice()),
+                    tangent_controls(),
+                    cx,
+                )
+                .unwrap();
+            let (q, dq, dv) = if loaded {
+                (0.5, C64::new(0.5, 0.5), C64::new(0.5, -1.0))
+            } else {
+                (1.0, C64::new(2.0, 1.0), C64::new(1.0, -3.0))
+            };
+            close(
+                response.response.displacement[0],
+                C64::from_re(q * amplitude),
+                1e-14,
+            );
+            close(
+                response.displacement_derivative[0],
+                dq.scale(amplitude),
+                1e-14,
+            );
+            close(response.velocity_derivative[0], dv.scale(amplitude), 1e-14);
+            assert_eq!(response.average_input_power_derivative, 0.0);
+            assert_eq!(response.average_viscous_power_derivative, 0.0);
+            assert_eq!(response.power_balance_residual_derivative, 0.0);
+            if let Some(port) = response.port_load {
+                assert_eq!(port.average_absorbed_power_derivative, 0.0);
+            }
+        }
+    });
+}
+
+#[test]
+fn finite_resonant_power_keeps_its_stationary_frequency_tangent() {
+    // G1: velocity and dissipated power peak exactly at sqrt(k/m), even
+    // though the displacement peak is shifted by damping. A large force
+    // unit exposes intermediate overflow at a perfectly finite peak.
+    with_cx(&CancelGate::new(), |cx| {
+        let force = 2.0_f64.powi(505);
+        let damping = 2.0_f64.powi(-10);
+        let prepared =
+            PreparedHarmonicResponse::try_new(&[1.0], &[damping], &[1.0], 1, 1.0, controls(), cx)
+                .unwrap();
+        let result = prepared
+            .solve_with_frequency_derivative(
+                &[C64::new(force, force)],
+                None,
+                None,
+                tangent_controls(),
+                cx,
+            )
+            .unwrap();
+        let velocity = force / damping;
+        let slope = 2.0 * velocity / damping;
+        close(
+            result.response.velocity[0],
+            C64::new(velocity, velocity),
+            1e-14,
+        );
+        close(
+            result.velocity_derivative[0],
+            C64::new(-slope, slope),
+            1e-14,
+        );
+        scalar(
+            result.response.average_input_power_w,
+            force * velocity,
+            1e-14,
+        );
+        scalar(
+            result.response.average_viscous_power_w,
+            force * velocity,
+            1e-14,
+        );
+        assert_eq!(result.average_input_power_derivative, 0.0);
+        assert_eq!(result.average_viscous_power_derivative, 0.0);
+        assert_eq!(result.power_balance_residual_derivative, 0.0);
+    });
+}
+
+#[test]
 fn gyroscopic_frequency_tangent_keeps_circular_branch_and_physical_heat() {
     with_cx(&CancelGate::new(), |cx| {
         let (m, k, g, d) = (2.0, 18.0, 4.0_f64, 0.4);
