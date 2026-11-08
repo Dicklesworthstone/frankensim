@@ -1,4 +1,5 @@
-//! Fully implicit BDF1 with a consistent constitutive Jacobian and line search.
+//! Steady and fully implicit BDF1 flow with a consistent constitutive Jacobian
+//! and line search.
 //!
 //! Every accepted endpoint solves the original nonlinear momentum equations.
 //! Damping changes the iteration, never the viscosity law or physical timestep.
@@ -112,6 +113,45 @@ fn weighted_norm(residual: &[f64], scales: &[f64]) -> f64 {
 }
 
 impl FluxSystem<'_> {
+    /// Solve steady generalized-Newtonian flow with bounded damped Newton
+    /// iteration and the same constitutive Jacobian and residual acceptance as
+    /// [`Self::bdf1_rheology_newton_step`]. `initial_velocity` is an immutable
+    /// velocity-moment guess, not a previous physical state or time history.
+    /// No mass term or artificial timestep is added to the steady equations.
+    ///
+    /// Set `convection` to true for steady Navier–Stokes, or false for creeping
+    /// flow. Both cases differentiate the full symmetric viscous stress,
+    /// viscosity-dependent interface weights and boundary loads. The law and
+    /// all fixed external fields must be pure throughout the solve.
+    ///
+    /// # Errors
+    /// Refuses invalid data, incompatible boundary flux, failed Jacobian/linear
+    /// solves, exhausted line searches and unmet nonlinear convergence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn steady_rheology_newton(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        initial_velocity: &[f64],
+        convection: bool,
+        controls: FluxNewtonControls,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        self.rheology_newton_solve_checked(
+            params,
+            law,
+            force,
+            boundary,
+            initial_velocity,
+            convection,
+            0.0,
+            None,
+            controls,
+            &|| true,
+        )
+    }
+
     /// Advance one fully implicit generalized-Newtonian BDF1 step with bounded
     /// damped Newton iteration. Velocity moments are m/s, time seconds, forces
     /// acceleration, pressure kinematic, and density one fixed reference value.
@@ -176,12 +216,42 @@ impl FluxSystem<'_> {
         controls: FluxNewtonControls,
         source_is_valid: &dyn Fn() -> bool,
     ) -> Result<FluxNewtonStep, FluxNewtonError> {
+        if !timestep_s.is_finite() || timestep_s <= 0.0 || !timestep_s.recip().is_finite() {
+            return Err(FluxNewtonError::Invalid(
+                "finite positive timestep with representable reciprocal required",
+            ));
+        }
+        self.rheology_newton_solve_checked(
+            params,
+            law,
+            force,
+            boundary,
+            previous_velocity,
+            true,
+            timestep_s.recip(),
+            Some(previous_velocity),
+            controls,
+            source_is_valid,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn rheology_newton_solve_checked(
+        &self,
+        params: FluxParams,
+        law: &dyn Fn(usize, [f64; 2], f64) -> FluxViscosityTangent,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary: &dyn Fn([f64; 2]) -> [f64; 2],
+        initial_velocity: &[f64],
+        convection: bool,
+        inverse_timestep: f64,
+        previous_velocity: Option<&[f64]>,
+        controls: FluxNewtonControls,
+        source_is_valid: &dyn Fn() -> bool,
+    ) -> Result<FluxNewtonStep, FluxNewtonError> {
         if self.mesh.tris.is_empty()
-            || previous_velocity.len() != self.n_u
-            || previous_velocity.iter().any(|v| !v.is_finite())
-            || !timestep_s.is_finite()
-            || timestep_s <= 0.0
-            || !timestep_s.recip().is_finite()
+            || initial_velocity.len() != self.n_u
+            || initial_velocity.iter().any(|v| !v.is_finite())
             || !params.tol.is_finite()
             || params.tol <= 0.0
             || params.max_iters == 0
@@ -193,7 +263,7 @@ impl FluxSystem<'_> {
             || controls.residual_tolerance <= 0.0
         {
             return Err(FluxNewtonError::Invalid(
-                "finite history, positive timestep/tolerances, nonzero solve budgets and 0..=52 backtracks required",
+                "finite initial velocity, positive tolerances/penalty, nonzero solve budgets and 0..=52 backtracks required",
             ));
         }
         let boundaries: Vec<_> = self
@@ -210,8 +280,7 @@ impl FluxSystem<'_> {
         self.admit_stokes_boundaries(&boundaries)
             .map_err(FluxNewtonError::Boundary)?;
         let mut state = vec![0.0; self.n];
-        state[..self.n_u].copy_from_slice(previous_velocity);
-        let inverse_timestep = timestep_s.recip();
+        state[..self.n_u].copy_from_slice(initial_velocity);
         let mut backtracks = 0;
         let mut last_update = 0.0;
         let mut last_linear_iterations = 0;
@@ -222,9 +291,9 @@ impl FluxSystem<'_> {
                 force,
                 boundary,
                 &state,
-                true,
+                convection,
                 inverse_timestep,
-                Some(previous_velocity),
+                previous_velocity,
             );
             if !source_is_valid() {
                 return Err(FluxNewtonError::Invalid("constitutive source refused"));
@@ -301,6 +370,7 @@ impl FluxSystem<'_> {
                     force,
                     boundary,
                     &candidate,
+                    convection,
                     inverse_timestep,
                     previous_velocity,
                 );
@@ -349,8 +419,9 @@ impl FluxSystem<'_> {
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         boundary: &dyn Fn([f64; 2]) -> [f64; 2],
         state: &[f64],
+        convection: bool,
         inverse_timestep: f64,
-        previous: &[f64],
+        previous: Option<&[f64]>,
     ) -> Result<Trial, FluxLinearizationError> {
         if state.iter().any(|v| !v.is_finite()) {
             return Err(FluxLinearizationError::Invalid("nonfinite Newton trial"));
@@ -377,9 +448,9 @@ impl FluxSystem<'_> {
             &field,
             force,
             boundary,
-            Some(&state[..self.n_u]),
+            convection.then_some(&state[..self.n_u]),
             inverse_timestep,
-            Some(previous),
+            previous,
         );
         if let Some(error) = failure.into_inner() {
             return Err(error);

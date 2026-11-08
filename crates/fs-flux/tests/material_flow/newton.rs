@@ -10,6 +10,70 @@ use fs_material::fluid_transport::rheology::{
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
 
 #[test]
+fn steady_material_couette_retains_physical_viscosity_heat_and_tangents() {
+    let mesh = mesh();
+    let system = FluxSystem::new(&mesh);
+    let initial = vec![0.0; system.n_u];
+    let velocity = |x: [f64; 2]| [2.0 * x[1], 0.0];
+    for density in [2.0, 7.0] {
+        let reference = transport(density, 0.2 * density);
+        let owner = MaterialFluxSystem::new(
+            &system,
+            &reference,
+            MaterialFluxNumerics {
+                linear_tolerance: 1e-12,
+                ..MaterialFluxNumerics::default()
+            },
+        )
+        .unwrap();
+        let result = owner
+            .steady_rheology_newton(
+                &|_| [0.0; 2],
+                &velocity,
+                &initial,
+                false,
+                FluxNewtonControls {
+                    residual_tolerance: 1e-10,
+                    ..FluxNewtonControls::default()
+                },
+                |point, retained| {
+                    assert_eq!(retained, &reference);
+                    let rate = point.shear_rate_per_s;
+                    Ok(MaterialFluxViscosityTangent {
+                        material: transport(density, density * 0.2 * (1.0 + rate * rate)),
+                        derivative_pa_s2: density * 0.4 * rate,
+                    })
+                },
+            )
+            .unwrap();
+        let step = &result.step;
+        let (error, divergence) = system.velocity_error(&step.discrete().x, &velocity);
+        assert!(error < 1e-9 && divergence < 1e-9);
+        near(step.kinetic_energy_j_per_m(), density * 2.0 / 3.0, 1e-8);
+        for (cell, sample) in step.samples().iter().enumerate() {
+            near(sample.point().shear_rate_per_s, 2.0, 1e-8);
+            near(sample.transport().dynamic_viscosity_pa_s(), density, 1e-8);
+            near(
+                result.viscosity_derivatives_pa_s2()[cell],
+                0.8 * density,
+                1e-8,
+            );
+            near(
+                step.viscous_dissipation().cell_heating_w_m3()[cell],
+                4.0 * density,
+                1e-7,
+            );
+        }
+        near(
+            step.viscous_dissipation().total_power_w_per_m(),
+            4.0 * density,
+            1e-7,
+        );
+    }
+    assert!(initial.iter().all(|value| *value == 0.0));
+}
+
+#[test]
 fn source_newton_solves_stiff_viscosity_and_retains_exact_endpoint_heat_and_tangents() {
     let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 4, 4));
     let system = FluxSystem::new(&mesh);

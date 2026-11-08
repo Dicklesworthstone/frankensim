@@ -41,6 +41,45 @@ impl<G> MaterialFluxNewtonStep<G> {
 }
 
 impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
+    /// Solve steady shear-dependent flow using the original material
+    /// viscosities and analytic tangents. `initial_velocity` contains an
+    /// immutable guess in m/s; no time history or mass term is introduced.
+    /// Set `convection` for steady Navier–Stokes, or leave it false for creeping
+    /// flow. Forces are N/m³, and viscosity derivatives are Pa s².
+    ///
+    /// Uses the same source retention, density scaling, bounded line search
+    /// and independently checked nonlinear endpoint as
+    /// [`Self::bdf1_rheology_newton_step`]. The returned heat is the physical
+    /// `mu * gamma²` at the accepted material state. Temperature/composition
+    /// remain fixed constitutive inputs, and source refusals remain terminal.
+    ///
+    /// # Errors
+    /// Preserves original material errors and refuses invalid data,
+    /// incompatible boundary flux or unconverged nonlinear equations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn steady_rheology_newton<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary_velocity: &dyn Fn([f64; 2]) -> [f64; 2],
+        initial_velocity: &[f64],
+        convection: bool,
+        controls: FluxNewtonControls,
+        resolve: impl FnMut(
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+    ) -> Result<MaterialFluxNewtonStep<G>, MaterialFluxError> {
+        self.rheology_newton_solve(
+            force_density,
+            boundary_velocity,
+            initial_velocity,
+            None,
+            convection,
+            controls,
+            resolve,
+        )
+    }
+
     /// Fully implicit BDF1 using original material viscosities and consistent
     /// analytic tangents in the existing sparse damped Newton solver.
     ///
@@ -76,6 +115,31 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         previous_velocity: &[f64],
         timestep_s: f64,
         controls: FluxNewtonControls,
+        resolve: impl FnMut(
+            MaterialFluxRheologyPoint,
+            &FluidTransportState,
+        ) -> Result<MaterialFluxViscosityTangent<G>, MaterialError>,
+    ) -> Result<MaterialFluxNewtonStep<G>, MaterialFluxError> {
+        self.rheology_newton_solve(
+            force_density,
+            boundary_velocity,
+            previous_velocity,
+            Some(timestep_s),
+            true,
+            controls,
+            resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rheology_newton_solve<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundary_velocity: &dyn Fn([f64; 2]) -> [f64; 2],
+        initial_velocity: &[f64],
+        timestep_s: Option<f64>,
+        convection: bool,
+        controls: FluxNewtonControls,
         mut resolve: impl FnMut(
             MaterialFluxRheologyPoint,
             &FluidTransportState,
@@ -107,28 +171,44 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             force_density,
             boundary_velocity,
             |acceleration, velocity| {
-                self.system.bdf1_rheology_newton_step_checked(
-                    self.params,
-                    &|cell, _, rate| {
-                        let nu = field.viscosity(cell, rate);
-                        FluxViscosityTangent {
-                            nu,
-                            // A source refusal only finishes the already-started
-                            // assembly. Its fallback cannot be solved or accepted.
-                            derivative: if field.is_valid() {
-                                derivatives.borrow()[cell] / density
-                            } else {
-                                0.0
-                            },
-                        }
-                    },
-                    acceleration,
-                    velocity,
-                    previous_velocity,
-                    timestep_s,
-                    controls,
-                    &|| field.is_valid(),
-                )
+                let tangent = |cell, _, rate| {
+                    let nu = field.viscosity(cell, rate);
+                    FluxViscosityTangent {
+                        nu,
+                        // A source refusal only finishes the already-started
+                        // assembly. Its fallback cannot be solved or accepted.
+                        derivative: if field.is_valid() {
+                            derivatives.borrow()[cell] / density
+                        } else {
+                            0.0
+                        },
+                    }
+                };
+                if let Some(timestep) = timestep_s {
+                    self.system.bdf1_rheology_newton_step_checked(
+                        self.params,
+                        &tangent,
+                        acceleration,
+                        velocity,
+                        initial_velocity,
+                        timestep,
+                        controls,
+                        &|| field.is_valid(),
+                    )
+                } else {
+                    self.system.rheology_newton_solve_checked(
+                        self.params,
+                        &tangent,
+                        acceleration,
+                        velocity,
+                        initial_velocity,
+                        convection,
+                        0.0,
+                        None,
+                        controls,
+                        &|| field.is_valid(),
+                    )
+                }
             },
         );
         let (step, samples) =

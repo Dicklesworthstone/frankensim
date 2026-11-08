@@ -19,6 +19,106 @@ fn thickening(_: usize, _: [f64; 2], rate: f64) -> FluxViscosityTangent {
 }
 
 #[test]
+fn steady_newton_solves_stiff_viscosity_without_a_transient_mass_term() {
+    let mesh = mesh(4);
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        tol: 1e-11,
+        sigma: 15.0,
+        ..FluxParams::default()
+    };
+    let initial = vec![0.0; system.n_u];
+    let force = |x: [f64; 2]| [100.0 * (x[1] - 0.5), -100.0 * (x[0] - 0.5)];
+    let controls = FluxNewtonControls {
+        maximum_iterations: 30,
+        maximum_backtracks: 16,
+        residual_tolerance: 1e-9,
+    };
+    for convection in [false, true] {
+        let result = system
+            .steady_rheology_newton(
+                params,
+                &thickening,
+                &force,
+                &|_| [0.0; 2],
+                &initial,
+                convection,
+                controls,
+            )
+            .unwrap();
+        assert!(result.iterations < controls.maximum_iterations);
+        assert!(result.backtracks > 0, "the stiff solve requires damping");
+        assert!(result.nonlinear_residual <= controls.residual_tolerance);
+        assert!(system.kinetic_energy(&result.solution.x) > 1e-5);
+        let rates = system.shear_rates(&result.solution.x);
+        // Assemble the original steady equations independently, with no mass
+        // term, time history or large finite timestep standing in for steady.
+        let (operator, rhs) = system.assemble_variable_viscosity(
+            params,
+            &|cell, point| thickening(cell, point, rates[cell]).nu,
+            &force,
+            &|_| [0.0; 2],
+            convection.then_some(&result.solution.x[..system.n_u]),
+        );
+        let mut action = vec![0.0; system.n];
+        operator.spmv(&result.solution.x, &mut action);
+        let defect = action
+            .iter()
+            .zip(&rhs)
+            .fold(0.0_f64, |v, (a, b)| v.hypot(a - b));
+        let load = rhs.iter().fold(0.0_f64, |v, b| v.hypot(*b));
+        assert!(defect / load < 1e-9);
+        let (_, divergence) = system.velocity_error(&result.solution.x, &|_| [0.0; 2]);
+        assert!(divergence < 1e-9);
+    }
+    assert!(initial.iter().all(|value| *value == 0.0));
+}
+
+#[test]
+fn steady_shear_thinning_couette_matches_the_exact_boundary_driven_solution() {
+    let mesh = mesh(3);
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        tol: 1e-12,
+        sigma: 15.0,
+        ..FluxParams::default()
+    };
+    let initial = vec![0.0; system.n_u];
+    let law = |_: usize, _: [f64; 2], rate: f64| {
+        let excess = 0.7 * (1.0 + 9.0 * rate * rate).powf(-0.3);
+        FluxViscosityTangent {
+            nu: 0.1 + excess,
+            derivative: -5.4 * rate * excess / (1.0 + 9.0 * rate * rate),
+        }
+    };
+    let velocity = |x: [f64; 2]| [2.0 * x[1], 0.0];
+    for convection in [false, true] {
+        let result = system
+            .steady_rheology_newton(
+                params,
+                &law,
+                &|_| [0.0; 2],
+                &velocity,
+                &initial,
+                convection,
+                FluxNewtonControls {
+                    residual_tolerance: 1e-10,
+                    ..FluxNewtonControls::default()
+                },
+            )
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&result.solution.x, &velocity);
+        assert!(error < 1e-9 && divergence < 1e-9);
+        for rate in system.shear_rates(&result.solution.x) {
+            assert!((rate - 2.0).abs() < 1e-8);
+        }
+        for pressure in system.pressure(&result.solution.x) {
+            assert!(pressure.abs() < 1e-8);
+        }
+    }
+}
+
+#[test]
 fn damped_newton_solves_stiff_thickening_that_exhausts_picard() {
     let mesh = mesh(4);
     let system = FluxSystem::new(&mesh);
