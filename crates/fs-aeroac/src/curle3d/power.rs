@@ -38,7 +38,9 @@ pub use convected::{
 };
 pub use multipole::{
     CompactMultipolePhasor, MULTIPOLE_IDEAL_BOUNDARY_POWER_SCOPE, MULTIPOLE_MOMENTUM_SCOPE,
-    MULTIPOLE_POWER_SCOPE, PreparedMultipoleRadiatedMomentum, PreparedMultipoleRadiatedPower,
+    MULTIPOLE_POWER_SCOPE, MULTIPOLE_WINDOW_SCOPE, MultipoleRadiationLine,
+    PreparedMultipoleRadiatedEnergy, PreparedMultipoleRadiatedMomentum,
+    PreparedMultipoleRadiatedPower, RadiatedEnergyBudget, WindowedRadiatedEnergy,
 };
 
 /// Authority of the homogeneous, lossless compact-source power integral.

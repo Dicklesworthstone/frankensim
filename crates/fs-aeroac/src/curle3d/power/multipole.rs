@@ -28,6 +28,12 @@ use fs_math::{c64::C64, det, special::SphericalBesselMoments};
 mod momentum;
 pub use momentum::{MULTIPOLE_MOMENTUM_SCOPE, PreparedMultipoleRadiatedMomentum};
 
+mod window;
+pub use window::{
+    MULTIPOLE_WINDOW_SCOPE, MultipoleRadiationLine, PreparedMultipoleRadiatedEnergy,
+    RadiatedEnergyBudget, WindowedRadiatedEnergy,
+};
+
 /// Authority of the lossless complete compact-multipole power integral.
 pub const MULTIPOLE_POWER_SCOPE: &str = "Cycle-average full-sphere power of prescribed compact 3D volume flow [m^3/s], force on fluid [N] and symmetric Lighthill stress moments [N m]; homogeneous stationary lossless free space with all coherent cross terms, but no source-size validation, unresolved turbulence, moving sources, scattering, absorption, mutual loading or measured-SPL qualification.";
 

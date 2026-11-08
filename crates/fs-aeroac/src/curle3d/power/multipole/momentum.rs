@@ -252,14 +252,14 @@ impl PreparedMultipoleRadiatedMomentum {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct FifthMoment {
+pub(super) struct FifthMoment {
     isotropic: Dd,
     directional: Dd,
     j5: Dd,
 }
 
 impl FifthMoment {
-    fn new(x: f64, tensor: TensorPairMoment) -> Result<Self, AeroacError> {
+    pub(super) fn new(x: f64, tensor: TensorPairMoment) -> Result<Self, AeroacError> {
         let (j5, isotropic, directional) = if x <= 4.0 {
             let xd = Dd::from_f64(x);
             let squared = xd * xd;
@@ -300,7 +300,7 @@ fn colocated(source: RadiatingMultipole) -> [Dd; 3] {
     })
 }
 
-fn correction(
+pub(super) fn correction(
     pair: PairMoment,
     tensor: TensorPairMoment,
     fifth: FifthMoment,

@@ -1498,6 +1498,63 @@ explicit source coherence, power/momentum bounds, budgets, cancellation and
 wall-domain refusal. Native execution is still required before claiming
 these Rust tests passed.
 
+## Finite-window real multipole radiation
+
+`power::PreparedMultipoleRadiatedEnergy` binds original
+`PreparedMultipoleRadiatedPower` owners and physical Q/F/stress banks through
+`MultipoleRadiationLine`. Every bank must retain the same original
+`FluidAcousticState`, free-space domain, Cartesian frame and source clock.
+A supplied bank establishes the medium even for darkness; an absent bank
+has no implicit medium. Unknown phases, independence, stochastic covariance
+and PSD/bin normalization are not inferred.
+
+The explicit sphere center defines x = center + R n and retarded sphere time
+tau = t - R/c. In the radiation-zone limit, the original normalized amplitude
+A gives instantaneous outward power
+`P(tau) = 2 <[Re sum_l (-i A_l(n)) exp(-i omega_l tau)]^2>`.
+This is the limiting outward pressure/velocity flux over enclosing spheres,
+not local near-field pressure squared or a finite-radius storage balance.
+Only uniform `HarmonicWindow` intervals are admitted as physical integrals.
+Results retain mean power, energy [J], the directional first energy moment [J],
+and outgoing wave momentum [N s], using the original c.
+
+Both difference- and sum-frequency products survive. Their spatial wave
+vectors are respectively
+`k_a (s_a-center) - k_b (s_b-center)` and
+`k_a (s_a-center) + k_b (s_b-center)`.
+The native angular moments through rank five integrate every Q/F/T cross term;
+`fs_fft::harmonic_window` supplies the real temporal Gram product, including
+short-window sum terms and frequency beats on the authored Hz clock.
+Joint translation of source positions and sphere center preserves the result.
+Moving sources while holding the observing center fixed changes directional
+arrival times and can change a finite window's energy, even for a monopole.
+
+Exactly equal frequencies and positions coalesce physical source terms before
+normalization. A globally coalesced baseline contracts directly with the
+temporal kernel; complex spatial separation corrections stay separate in DD.
+The cache retains conjugate and unconjugated angular products without rounding
+each source-pair result to binary64. These measures preserve weak interference,
+but do not certify relative accuracy at every null. Unrepresentable phases,
+coefficients or output, and negative numerical power, refuse without clamping.
+
+For L supplied banks, P original source terms and F distinct frequencies,
+preparation costs O(L^2 + P^2), retained data are O(L + F^2), and each window
+takes O(F^2) work with no allocation or source/angle traversal. Admission
+checks counts, L^2 + P^2 and a conservative peak workspace bound before
+allocation, including preparation buffers, the frequency-pair cache and
+rank-five scratch. Every path polls cancellation and publishes no partial
+operator or observation.
+
+The seven regression groups in `tests/multipole_window.rs` compare independent
+space/time integration of real Q/F/T fields, short-window monopoles, physical
+off-center arrival times, destructive beats and large source epochs, interval
+additivity and the original cycle-power/momentum limit, weak coalesced sources,
+joint translation, exact budgets, common-medium admission and cancellation.
+Native Rust execution remains required before claiming those tests passed.
+This is prescribed finite-spectrum observation, not source turn-on dynamics,
+a source-work debit, mechanical impulse, mean-flow/attenuating propagation,
+ideal-wall momentum or reciprocal structural loading. MR35/MR56 remain open.
+
 ## Mixed deterministic, real and proper acoustic source ensembles
 
 `observation::PreparedHarmonicEnsemble` combines an optional deterministic
