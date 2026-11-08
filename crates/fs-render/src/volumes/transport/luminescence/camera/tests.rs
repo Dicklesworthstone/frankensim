@@ -1,9 +1,12 @@
 //! Physical slab, spectral shielding, pupil coverage and bounded camera tests.
 
 use super::*;
-use crate::camera::{Aperture, CameraProjection, FocusedDiffraction};
-use crate::volumes::VolumeGrid;
-use crate::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
+use crate::camera::{Aperture, CameraError, CameraProjection, FocusedDiffraction, LensSample};
+use crate::spectral::{cie_x, cie_y, cie_z, y_integral};
+use crate::volumes::{DvrError, VolumeGrid};
+use crate::volumes::transport::{
+    AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum, VolumeTransportError,
+};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey as ExecStreamKey};
 use fs_geom::{Point3, Vec3};
 

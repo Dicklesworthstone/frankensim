@@ -17,6 +17,8 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::{decay, det};
 
+/// Physical-camera images of spectral absorption and native thermal emission.
+pub mod camera;
 mod cells;
 pub(super) use cells::{CellRay, CellRayGeometry, validate_ray};
 pub(crate) use cells::{grid_forward_interval, grid_scattering_optical_depth};
@@ -189,7 +191,8 @@ pub enum VolumeTransportError {
         /// Invalid spectral lane index.
         lane: usize,
     },
-    /// A spectral packet is empty or a random variate is outside [0, 1).
+    /// Invalid spectral sampling, including an empty packet, a negative or
+    /// nonfinite quadrature weight, or a variate outside [0, 1).
     Sample,
     /// Wavelength is nonfinite, nonpositive or outside an admitted source domain.
     Wavelength,
@@ -632,7 +635,7 @@ impl<'a> AbsorbingGrid<'a> {
         wavelengths: &[f64; N],
     ) -> Result<SegmentTransport<N>, VolumeTransportError> {
         Ok(self
-            .integrate_detail::<N, EMIT, false>(
+            .integrate_detail::<N, EMIT, false, false>(
                 cx,
                 origin,
                 direction,
@@ -658,7 +661,7 @@ impl<'a> AbsorbingGrid<'a> {
         wavelengths: &[f64; N],
         max_cells: u32,
     ) -> Result<GridSegmentTransport<N>, VolumeTransportError> {
-        self.integrate_detail::<N, EMIT, true>(
+        self.integrate_detail::<N, EMIT, true, true>(
             cx,
             origin,
             direction,
@@ -668,7 +671,34 @@ impl<'a> AbsorbingGrid<'a> {
         )
     }
 
-    fn integrate_detail<const N: usize, const EMIT: bool, const OBSERVED: bool>(
+    // Camera observation retains the public transport's opaque/underflow limits
+    // while charging actual crossings. Strict observed columns above keep all
+    // their original representability refusals; counting is independent.
+    fn transport_counted<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        distance: f64,
+        wavelengths: &[f64; N],
+        max_cells: u32,
+    ) -> Result<GridSegmentTransport<N>, VolumeTransportError> {
+        self.integrate_detail::<N, true, false, true>(
+            cx,
+            origin,
+            direction,
+            distance,
+            wavelengths,
+            max_cells.min(self.max_steps),
+        )
+    }
+
+    fn integrate_detail<
+        const N: usize,
+        const EMIT: bool,
+        const OBSERVED: bool,
+        const COUNTED: bool,
+    >(
         &self,
         cx: &Cx<'_>,
         origin: Point3,
@@ -710,7 +740,7 @@ impl<'a> AbsorbingGrid<'a> {
         let emit = EMIT && self.has_thermal_emission();
         let mut previous_model = None;
         while let Some(segment) = ray.next(cx)? {
-            if OBSERVED {
+            if COUNTED {
                 cell_visits += 1; // CellRay has already charged this bounded u32 visit.
             }
             let length = segment.length_m;
@@ -805,7 +835,7 @@ impl<'a> AbsorbingGrid<'a> {
             }
             result.transmittance[lane] = det::exp(-optical_depth[lane]);
         }
-        if OBSERVED {
+        if COUNTED {
             checkpoint(cx)?;
         }
         Ok(GridSegmentTransport {

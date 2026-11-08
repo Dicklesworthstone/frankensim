@@ -3243,6 +3243,38 @@ of this new adapter remain unverified because the execution environment became
 unavailable. The exact adapter and parent change received independent source
 review against the existing physical-camera, cell-traversal and spectral APIs.
 
+### Spectral absorption and thermal camera images
+
+`volumes::transport::camera::render_absorbing_camera` connects the original
+absorption grid and its accepted thermal or independently thermalized
+constituent sources to physical pinhole and ideal thin-lens images. Each ray
+uses the same native cell integral, preserving original wavelength support,
+foreground shielding, Kirchhoff emission and original field identity. No
+mean constituent temperature, emissivity, spectrum or RGB absorption is
+invented. Per-node foreground and composed background radiance remain
+W/(m² sr nm), with separate transmission, thin opacity and effective depth.
+Background composition requires a constant background within each averaged
+pixel/pupil footprint. Optional approximate XYZ requires explicitly supplied
+finite nonnegative quadrature weights in nm; the caller owns spectral support,
+resolution and integration accuracy. UV/IR spectral output remains available.
+
+The raster/pupil sampler, stable spectral average, background composition and
+visible projection are shared with luminescence. Its public API, integrated-bin
+radiance units and original random-stream domain/draw order remain intact.
+Actual cell counting is independent of the native integrator's strict observed-
+column policy: camera observations retain the public thin/opaque limits while
+every existing strict numerical refusal remains unchanged. Both cameras retain
+native lens refusals, cancellation, per-ray crossing limits and cumulative
+whole-image work bounds, with no partial image on refusal. They remain
+stationary, non-scattering, index-one observations without surfaces or exposure.
+Six new regressions cover independent SI Planck/Kirchhoff equilibrium,
+constituent temperatures, foreground order, opaque-limit policy, explicit nm
+quadrature and cumulative limits. The existing eight luminescence fixtures are
+retained apart from import updates. All changed sources parsed with the pinned
+formatter and received independent interface/physics review; native tracer
+compilation and execution remain unverified because its dependency closure is
+unavailable in the storage-constrained execution environment.
+
 ### Finite-lifetime luminescence on the native heat clock
 
 `volumes::heating::luminescence::{LuminescenceSource, LuminescentOpticalHeating}`

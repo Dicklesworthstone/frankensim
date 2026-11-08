@@ -3,54 +3,17 @@
 //! Pixel and pupil samples average radiance and transmission independently at
 //! each original spectral node, using the native absorption/emission integral.
 
-use super::{LuminescenceGrid, LuminescenceRaySample, VolumeTransportError, checkpoint};
-use crate::camera::{CameraError, LensSample, PhysicalCamera};
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, cie_x, cie_y, cie_z, y_integral};
-use crate::volumes::DvrError;
+use super::super::camera::{CameraSample, approximate_xyz, composite, render_camera};
+use super::LuminescenceGrid;
+use crate::camera::PhysicalCamera;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
-use fs_math::det;
-use fs_rand::StreamKey;
-
-/// Shared volume-camera sampling and whole-image limits. The luminescence
-/// field retains its independent per-ray traversal limit.
-pub use crate::volumes::opacity::TransferCameraSettings as LuminescenceCameraSettings;
 
 /// Original camera, image-admission and physical-transport refusals.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LuminescenceCameraError {
-    /// Invalid image size, sampling limit, or output allocation.
-    Image(DvrError),
-    /// The camera cannot generate these achromatic geometric rays.
-    Camera(CameraError),
-    /// Native emission/absorption, cancellation, or cell-visit budget refusal.
-    Transport(VolumeTransportError),
-    /// Approximate renderer XYZ is defined only over 380–780 nm. The original
-    /// spectral image remains usable on its source-supported UV/IR nodes.
-    ObserverWavelength { lane: usize },
-}
-
-impl From<DvrError> for LuminescenceCameraError {
-    fn from(error: DvrError) -> Self {
-        Self::Image(error)
-    }
-}
-impl From<CameraError> for LuminescenceCameraError {
-    fn from(error: CameraError) -> Self {
-        Self::Camera(error)
-    }
-}
-impl From<VolumeTransportError> for LuminescenceCameraError {
-    fn from(error: VolumeTransportError) -> Self {
-        Self::Transport(error)
-    }
-}
-impl core::fmt::Display for LuminescenceCameraError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "luminescence camera render refused: {self:?}")
-    }
-}
-impl core::error::Error for LuminescenceCameraError {}
+pub use super::super::camera::VolumeCameraError as LuminescenceCameraError;
+/// Shared volume-camera sampling and whole-image limits. The luminescence
+/// field retains its independent per-ray traversal limit.
+pub use super::super::camera::VolumeCameraSettings as LuminescenceCameraSettings;
 
 /// Nonthermal radiance and opacity averaged over one pixel/pupil footprint.
 /// All arrays retain the parent image's original wavelength order.
@@ -99,22 +62,12 @@ impl<const M: usize> LuminescenceCameraPixel<M> {
         &self,
         background_w_m2_sr: [f64; M],
     ) -> Result<[f64; M], LuminescenceCameraError> {
-        let mut result = self.emission;
-        for lane in 0..M {
-            let background = background_w_m2_sr[lane];
-            if !background.is_finite() || background < 0.0 {
-                return Err(DvrError::InvalidBackgroundRadiance.into());
-            }
-            result[lane] = if self.transmission[lane] < f64::MIN_POSITIVE && background > 0.0 {
-                self.emission[lane] + det::exp(det::ln(background) - self.effective_depth[lane])
-            } else {
-                self.transmission[lane].mul_add(background, self.emission[lane])
-            };
-            if !result[lane].is_finite() {
-                return Err(VolumeTransportError::Unrepresentable.into());
-            }
-        }
-        Ok(result)
+        composite(
+            &self.emission,
+            &self.transmission,
+            &self.effective_depth,
+            background_w_m2_sr,
+        )
     }
 }
 
@@ -178,38 +131,12 @@ impl<const M: usize> LuminescenceCameraImage<M> {
         &self,
         cx: &Cx<'_>,
     ) -> Result<Vec<[f64; 3]>, LuminescenceCameraError> {
-        checkpoint(cx)?;
-        let normalization = 1.0 / y_integral();
-        let mut observer = [[0.0; 3]; M];
-        for (lane, &wavelength) in self.wavelengths_nm.iter().enumerate() {
-            if !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength) {
-                return Err(LuminescenceCameraError::ObserverWavelength { lane });
-            }
-            observer[lane] = [cie_x(wavelength), cie_y(wavelength), cie_z(wavelength)]
-                .map(|value| value * normalization);
-        }
-        let mut image = Vec::new();
-        image.try_reserve_exact(self.pixels.len()).map_err(|_| {
-            DvrError::ImageAllocationRefused {
-                pixels: self.pixels.len(),
-            }
-        })?;
-        for pixel in &self.pixels {
-            checkpoint(cx)?;
-            let mut xyz = [Compensated::default(); 3];
-            for (radiance, weights) in pixel.emission.iter().zip(&observer) {
-                for channel in 0..3 {
-                    xyz[channel].add(radiance * weights[channel]);
-                }
-            }
-            let xyz = xyz.map(|sum| sum.value);
-            if xyz.iter().any(|value| !value.is_finite() || *value < 0.0) {
-                return Err(VolumeTransportError::Unrepresentable.into());
-            }
-            image.push(xyz);
-        }
-        checkpoint(cx)?;
-        Ok(image)
+        approximate_xyz(
+            cx,
+            &self.wavelengths_nm,
+            &[1.0; M],
+            self.pixels.iter().map(|pixel| &pixel.emission),
+        )
     }
 }
 
@@ -236,186 +163,35 @@ pub fn render_luminescence_camera<const M: usize>(
     camera: &PhysicalCamera,
     settings: LuminescenceCameraSettings,
 ) -> Result<LuminescenceCameraImage<M>, LuminescenceCameraError> {
-    checkpoint(cx)?;
-    let [width, height] = settings.resolution;
-    let pixels = width
-        .checked_mul(height)
-        .filter(|_| width > 0 && height > 0)
-        .ok_or(DvrError::InvalidImageSize)?;
-    if settings.samples_per_pixel == 0 {
-        return Err(DvrError::InvalidSamplingBudget.into());
-    }
-    if pixels > settings.max_pixels {
-        return Err(DvrError::PixelBudgetExceeded {
-            requested: pixels,
-            limit: settings.max_pixels,
-        }
-        .into());
-    }
-    let samples = u64::try_from(pixels)
-        .ok()
-        .and_then(|pixels| pixels.checked_mul(u64::from(settings.samples_per_pixel)))
-        .ok_or(DvrError::SampleCountOverflow)?;
-    if samples > settings.max_samples {
-        return Err(DvrError::SampleBudgetExceeded {
-            requested: samples,
-            limit: settings.max_samples,
-        }
-        .into());
-    }
-    if u32::try_from(pixels - 1).is_err() {
-        return Err(DvrError::PixelIdentityOverflow.into());
-    }
-    let half_y = camera.raster_vertical_half_tan();
-    let half_x = half_y * (width as f64 / height as f64);
-    if !half_x.is_finite() {
-        return Err(CameraError::InvalidProjection.into());
-    }
-    let centre_lens = LensSample::try_new(0.5, 0.5)?;
-    camera.generate_ray_from_tangent_offsets(cx, 0.0, 0.0, centre_lens)?;
-    let mut image = Vec::new();
-    image
-        .try_reserve_exact(pixels)
-        .map_err(|_| DvrError::ImageAllocationRefused { pixels })?;
-    let mut remaining_cells = settings.max_cell_visits;
-    for py in 0..height {
-        for px in 0..width {
-            checkpoint(cx)?;
-            let pixel = py * width + px;
-            let mut stream = StreamKey {
-                seed: settings.seed,
-                kernel: 0x6c75_6d63,
-                tile: u32::try_from(pixel).map_err(|_| DvrError::PixelIdentityOverflow)?,
-            }
-            .stream();
-            let mut average = SpectralAverage::default();
-            for sample in 0..settings.samples_per_pixel {
-                checkpoint(cx)?;
-                let (jx, jy, lens) = if settings.samples_per_pixel == 1 {
-                    (0.5, 0.5, centre_lens)
-                } else {
-                    (
-                        stream.next_f64(),
-                        stream.next_f64(),
-                        LensSample::try_new(stream.next_f64(), stream.next_f64())?,
-                    )
-                };
-                let x_tan = (2.0 * (px as f64 + jx) / width as f64 - 1.0) * half_x;
-                let y_tan = (1.0 - 2.0 * (py as f64 + jy) / height as f64) * half_y;
-                let primary = camera.generate_ray_from_tangent_offsets(cx, x_tan, y_tan, lens)?;
-                let transported = field.transport_counted(
-                    cx,
-                    primary.origin,
-                    primary.dir,
-                    f64::INFINITY,
-                    remaining_cells,
-                )?;
-                remaining_cells -= u64::from(transported.cell_visits);
-                average.add(transported, sample + 1);
-            }
-            image.push(average.finish(settings.samples_per_pixel)?);
-        }
-    }
-    checkpoint(cx)?;
+    let pixels = render_camera(
+        cx,
+        camera,
+        settings,
+        0x6c75_6d63,
+        |origin, direction, remaining_cells| {
+            let transported =
+                field.transport_counted(cx, origin, direction, f64::INFINITY, remaining_cells)?;
+            Ok(CameraSample {
+                emission: transported.transport.emitted_radiance_w_m2_sr,
+                transmittance: transported.transport.transmittance,
+                optical_depth: transported.optical_depth,
+                cell_visits: transported.cell_visits,
+            })
+        },
+        |sample| LuminescenceCameraPixel {
+            emission: sample.emission,
+            transmission: sample.transmission,
+            opacity: sample.opacity,
+            effective_depth: sample.effective_depth,
+        },
+    )?;
     Ok(LuminescenceCameraImage {
         resolution: settings.resolution,
         wavelengths_nm: *field.wavelengths_nm(),
         source_identity: field.source_identity(),
         field_identity: field.content_identity(),
-        pixels: image,
+        pixels,
     })
-}
-
-// Online compensated means avoid overflowing sums of finite radiances.
-// Separate opacity and log-sum-exp survival preserve thin layers, partial pupil
-// coverage, and finite bright backgrounds behind opaque columns.
-#[derive(Clone, Copy, Default)]
-struct Compensated {
-    value: f64,
-    correction: f64,
-}
-
-impl Compensated {
-    fn add(&mut self, value: f64) {
-        let corrected = value - self.correction;
-        let next = self.value + corrected;
-        self.correction = (next - self.value) - corrected;
-        self.value = next;
-    }
-
-    fn update_mean(&mut self, sample: f64, count: u32) {
-        self.add((sample - self.value) / f64::from(count));
-    }
-}
-
-struct SpectralAverage<const M: usize> {
-    emission: [Compensated; M],
-    transmission: [Compensated; M],
-    opacity: [Compensated; M],
-    minimum_depth: [f64; M],
-    scaled_transmission: [Compensated; M],
-}
-
-impl<const M: usize> Default for SpectralAverage<M> {
-    fn default() -> Self {
-        Self {
-            emission: [Compensated::default(); M],
-            transmission: [Compensated::default(); M],
-            opacity: [Compensated::default(); M],
-            minimum_depth: [f64::INFINITY; M],
-            scaled_transmission: [Compensated::default(); M],
-        }
-    }
-}
-
-impl<const M: usize> SpectralAverage<M> {
-    fn add(&mut self, sample: LuminescenceRaySample<M>, count: u32) {
-        for lane in 0..M {
-            let depth = sample.optical_depth[lane];
-            self.emission[lane]
-                .update_mean(sample.transport.emitted_radiance_w_m2_sr[lane], count);
-            self.transmission[lane].update_mean(sample.transport.transmittance[lane], count);
-            self.opacity[lane].update_mean(-det::expm1(-depth), count);
-            if depth.is_finite() {
-                if depth < self.minimum_depth[lane] {
-                    let scale = det::exp(depth - self.minimum_depth[lane]);
-                    self.scaled_transmission[lane].value *= scale;
-                    self.scaled_transmission[lane].correction *= scale;
-                    self.minimum_depth[lane] = depth;
-                }
-                self.scaled_transmission[lane].add(det::exp(self.minimum_depth[lane] - depth));
-            }
-        }
-    }
-
-    fn finish(self, count: u32) -> Result<LuminescenceCameraPixel<M>, VolumeTransportError> {
-        let mut pixel = LuminescenceCameraPixel {
-            emission: self.emission.map(|sum| sum.value),
-            transmission: self.transmission.map(|sum| sum.value),
-            opacity: self.opacity.map(|sum| sum.value),
-            effective_depth: [0.0; M],
-        };
-        for lane in 0..M {
-            if !pixel.emission[lane].is_finite()
-                || pixel.emission[lane] < 0.0
-                || !(0.0..=1.0).contains(&pixel.transmission[lane])
-                || !(0.0..=1.0).contains(&pixel.opacity[lane])
-            {
-                return Err(VolumeTransportError::Unrepresentable);
-            }
-            pixel.effective_depth[lane] = if pixel.opacity[lane] <= 0.5 {
-                let transmission = 1.0 - pixel.opacity[lane];
-                -det::ln(transmission)
-                    - ((1.0 - transmission) - pixel.opacity[lane]) / transmission
-            } else if self.scaled_transmission[lane].value > 0.0 {
-                self.minimum_depth[lane]
-                    - det::ln(self.scaled_transmission[lane].value / f64::from(count))
-            } else {
-                f64::INFINITY
-            };
-        }
-        Ok(pixel)
-    }
 }
 
 #[cfg(test)]
