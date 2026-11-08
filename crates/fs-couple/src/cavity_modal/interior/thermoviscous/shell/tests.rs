@@ -209,7 +209,7 @@ fn source(
     .unwrap();
     let interface = resolve_interface_state_point(
         &card,
-        material.query(),
+        &material.query(),
         &requirements,
         MaterialPropertySelection::SingleClaimOnly,
     )

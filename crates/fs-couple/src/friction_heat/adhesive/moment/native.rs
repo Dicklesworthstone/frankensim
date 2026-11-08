@@ -95,7 +95,7 @@ impl<'s> NativeAdhesiveMoment<'s> {
             Self::Torsion { contact, state } => Ok(contact
                 .source
                 .stored_energy_j(&state.source_state())
-                .map_err(RigidAdhesiveTorsionError::from)?),
+                .map_err(RigidAdhesiveTorsionError::Source)?),
         }
     }
     #[allow(clippy::too_many_arguments)]

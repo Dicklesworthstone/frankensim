@@ -148,7 +148,8 @@ pub(in super::super) fn advance(
         }
     }
     let storage = fields.account(samples, candidate.circuit().into(),
-        rebound.parameter_work_j(), dt, (), sources_w, tolerance_j, &cancel).map_err(error)?;
+        rebound.parameter_work_j(), candidate.step().stored_energy_change_j(), dt, (),
+        sources_w, tolerance_j, &cancel).map_err(error)?;
     check(gate)?;
     Ok((Some(candidate), Some(Trial {storage, independent_entropy_j_k, has_independent_sources})))
 }

@@ -237,8 +237,8 @@ pub(super) fn advance<S>(
     let field_storage = match (fields, rebound) {
         (Some(fields), Some(rebound)) => {
             let source = fields.account(samples, candidate.circuit().into(),
-                rebound.parameter_work_j(), dt, bulk.source, &mut reversible_sources,
-                tolerance_j, &cancel).map_err(error)?;
+                rebound.parameter_work_j(), candidate.step().stored_energy_change_j(), dt,
+                bulk.source, &mut reversible_sources, tolerance_j, &cancel).map_err(error)?;
             bulk.source = source.network;
             Some(FrameFieldStorageReport { fields: source.fields,
                 internal_energy_j: source.field_internal_energy_j,
